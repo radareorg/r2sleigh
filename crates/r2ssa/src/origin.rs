@@ -115,6 +115,11 @@ impl BlockOrigins {
             self.origins.clear();
             return;
         }
+        // An unstated operation stands for guarded writes the lift dropped, which may have set any temporary.
+        if matches!(op, R2ILOp::Unimplemented) {
+            self.forget_bytes(CanonicalStorageSpace::Unique, 0, 1 << 64);
+            return;
+        }
         let origin = self.after(op);
         self.forget_memory_write(op);
         let Some(output) = op.output() else {

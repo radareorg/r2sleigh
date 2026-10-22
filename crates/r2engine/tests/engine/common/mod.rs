@@ -457,6 +457,7 @@ pub struct Literal {
     patches: BTreeMap<u64, u8>,
     written: Vec<(u64, Range<u64>)>,
     revision: u64,
+    header: u64,
     container: Container,
 }
 
@@ -476,6 +477,7 @@ impl Literal {
             patches: BTreeMap::new(),
             written: Vec::new(),
             revision: 0,
+            header: 0,
             container: Container {
                 format: Format::Elf,
                 arch: Arch {
@@ -749,6 +751,19 @@ impl Literal {
         self
     }
 
+    /// The same program with `size` zero bytes mapped at address 0, as an ELF header is in a shared object.
+    pub fn with_header(mut self, size: u64) -> Self {
+        self.header = size;
+        self.preceded_by(Section {
+            name: ".header".to_owned(),
+            vaddr: 0,
+            vsize: size,
+            role: SectionRole::Data,
+            loaded: true,
+            ..Section::default()
+        })
+    }
+
     /// The same program with a section listed ahead of its code.
     pub fn preceded_by(mut self, section: Section) -> Self {
         self.container.sections.insert(0, section);
@@ -937,6 +952,10 @@ impl Literal {
 
 impl Source for Literal {
     fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        if vaddr < self.header {
+            let left = usize::try_from(self.header - vaddr).unwrap_or(usize::MAX);
+            return Some(vec![0; max.min(left)]);
+        }
         let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
         let rest = self.code.get(offset..).filter(|rest| !rest.is_empty())?;
         Some(

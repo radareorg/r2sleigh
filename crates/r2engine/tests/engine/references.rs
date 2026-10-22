@@ -306,6 +306,41 @@ fn an_address_the_machine_records_in_a_register_no_operand_names_is_no_reference
     assert_eq!(listed(index.facts()), []);
 }
 
+/// `cpuid; ret`: the specification loads its four result words through a pointer its unmodelled, guarded user operations were to set.
+const CPUID: &[u8] = &[0x0f, 0xa2, 0xc3];
+
+#[test]
+fn an_instruction_the_lift_cannot_state_folds_no_address_for_what_follows_it() {
+    // The words it would read lie in mapped bytes, so only the instruction's own state can refuse them.
+    let literal = Literal::of_code(CPUID, &[("cpuid", BASE, 3)]).with_header(0x10);
+    let index = OpenProgram::of(literal)
+        .references()
+        .expect("the index builds")
+        .value;
+    assert_eq!(listed(index.facts()), []);
+}
+
+/// `mov esi, 4; cpuid; mov [rsi + 4], edx; ret`: `cpuid` writes only eax, ebx, ecx and edx, so rsi still folds.
+const CPUID_THEN_STORE: &[u8] = &[
+    0xbe, 0x04, 0x00, 0x00, 0x00, // mov esi, 4
+    0x0f, 0xa2, // cpuid
+    0x89, 0x56, 0x04, // mov [rsi + 4], edx
+    0xc3,
+];
+
+#[test]
+fn a_register_an_unstated_instruction_does_not_write_still_folds_past_it() {
+    let literal = Literal::of_code(CPUID_THEN_STORE, &[("store", BASE, 11)]).with_header(0x10);
+    let index = OpenProgram::of(literal)
+        .references()
+        .expect("the index builds")
+        .value;
+    assert_eq!(
+        listed(index.facts()),
+        [(BASE + 7, 8, Role::Write { width: 4 }, Basis::Folded)]
+    );
+}
+
 /// `left`: `test edi, edi; je tail; mov eax, 1; ret`; `tail`: `call leaf; ret`; `right`: `jmp tail`; `leaf`: `mov eax, 2; ret`.
 const SHARED: &[u8] = &[
     0x85, 0xff, // 0x1000 test edi, edi
