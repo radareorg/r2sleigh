@@ -18,8 +18,13 @@ a decompiler that guesses confidently is worse than one that says it does not
 know. Silently-wrong is a defect at the highest severity, never a quality nit.
 
 The marker granularity is the function, because that is the granularity the
-renderer annotates at. A function carrying any residual has its unmatched facts
-counted as marked rather than silent.
+renderer annotates at. A function whose `pddj` proof counts a residual has its
+unmatched facts counted as marked rather than silent.
+
+Every function is read from its `pddj` answer alone, by the reader the
+equivalence gate and DecBench share (`tests/equiv/r2s_batch.py`). An answer the
+reader cannot read is a failure of the gate (exit 2), never a marker: a gate
+that scores a function it could not read grades a guess.
 """
 
 from __future__ import annotations
@@ -32,18 +37,23 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "equiv"))
+import r2s_batch  # noqa: E402
+
 PROTOTYPE = re.compile(r"^(?P<ret>[\w \*]+?)\s+(?P<name>[\w.]+)\s*\((?P<args>.*)\);?\s*$")
 
 
-def r2s(binary: Path, commands: str, r2s_bin: str) -> str:
+def r2s(binary: Path, commands: str, r2s_bin: str, merge_stderr: bool = False) -> str:
     """Ask the shell, and let a refusal answer.
 
     A refused function is a fact this harness scores rather than an error, so a
-    non-zero exit is read for its output like any other.
+    non-zero exit is read for its output like any other. `merge_stderr` reads
+    `r2s: <message>` lines where `r2s_batch` does, inside the answer they belong to.
     """
     proc = subprocess.run(
         [r2s_bin, "-q", "-c", commands, str(binary)],
-        capture_output=True, text=True, timeout=1800, check=False,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
+        text=True, timeout=1800, check=False,
     )
     return proc.stdout
 
@@ -57,15 +67,11 @@ class Prototype:
 
 @dataclass
 class Seen:
-    """What `pdd` and `pddj` say of one function."""
+    """What `pddj` says of one function."""
 
     proto: Prototype
-    # The text carries a residual or a refusal: the marker the gate has always read.
+    # The proof counts a residual: a reader was told not to trust the function.
     marked: bool
-    # The premises the rendering assumed (`closed-world`); None where pddj could not be read.
-    premises: tuple[str, ...] | None = ()
-    # The basis pddj states for a parameter, by slot; empty where it states none.
-    basis: dict[int, str] = field(default_factory=dict)
 
 
 def normalize_type(spelling: str) -> str:
@@ -209,96 +215,64 @@ def truth_is_real(truth: dict[int, Prototype]) -> bool:
     return any(name and not RECOVERED_PARAM_NAME.match(name) for name in names)
 
 
-def addresses(binary: Path, r2s_bin: str) -> list[int]:
-    """Every function the engine believes this binary has."""
-    found = []
-    for line in r2s(binary, "afl", r2s_bin).splitlines():
-        head = line.split(None, 1)[0] if line.split() else ""
-        if head.startswith("0x"):
-            try:
-                found.append(int(head, 16))
-            except ValueError:
-                continue
-    return found
+class Unreadable(Exception):
+    """r2s gave an answer the gate cannot read, and scoring past it would grade a guess."""
+
+    def __init__(self, binary: Path, command: str, causes: dict[str, str]) -> None:
+        super().__init__(f"r2s gave no readable `{command}` answer for {len(causes)} function(s) of {binary}")
+        self.binary = binary
+        self.command = command
+        self.causes = causes
 
 
-def answer_of(body: str) -> tuple[str, dict | None]:
-    """Split `pdd; pddj` output into the C text and the JSON line that ends it.
-
-    The JSON spells the word `residual` in its keys, so it must not be read as the marker.
-    """
-    lines = body.rstrip().splitlines()
-    if lines and lines[-1].startswith("{"):
-        try:
-            return "\n".join(lines[:-1]), json.loads(lines[-1])
-        except json.JSONDecodeError:
-            pass
-    return body, None
-
-
-def signatures(binary: Path, r2s_bin: str) -> dict[int, Seen]:
-    """What each function renders as, whether it carries a marker, and what it assumed.
-
-    One command per function rather than one per binary, because a refusal is
-    per function and a batch that stops at the first one would score the rest
-    as missing.
-    """
-    out: dict[int, Seen] = {}
-    for addr in addresses(binary, r2s_bin):
-        body, answer = answer_of(r2s(binary, f"s {addr:#x}; pdd; pddj", r2s_bin))
-        lines = [line for line in body.splitlines() if line.strip()]
-        if not lines:
-            continue
-        proto = parse_prototype(lines[0])
-        if proto:
-            marked = "residual" in body or "r2sleigh refused" in body
-            premises = tuple(answer.get("premises", [])) if answer is not None else None
-            basis = stated_basis(answer) if answer is not None else {}
-            out[addr] = Seen(proto, marked, premises, basis)
-    return out
-
-
-def stated_basis(answer: dict) -> dict[int, str]:
-    """The basis pddj states for each parameter slot, where it states one."""
-    found = {}
-    for variable in answer.get("variables", []):
-        slot = variable.get("location", "")
-        if variable.get("kind") == "param" and slot.startswith("arg:") and "basis" in variable:
-            found[int(slot.removeprefix("arg:"))] = variable["basis"]
-    return found
-
-
-def names(binary: Path, r2s_bin: str) -> dict[int, str]:
-    """What the binary calls each function it believes it has.
+def listing(binary: Path, r2s_bin: str) -> dict[int, str]:
+    """Every function the engine believes this binary has, by address, with the name it gives it.
 
     A recorded fact has to be keyed by something that survives a rebuild, and
     an address does not: the same source compiled on another machine puts the
     same function somewhere else.
     """
-    found = {}
-    for line in r2s(binary, "afl", r2s_bin).splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[0].startswith("0x"):
-            try:
-                found[int(parts[0], 16)] = parts[-1]
-            except ValueError:
-                continue
-    return found
+    try:
+        return {row["addr"]: row["name"] for row in json.loads(r2s(binary, "aflj", r2s_bin))}
+    except (json.JSONDecodeError, TypeError, KeyError) as error:
+        raise Unreadable(binary, "aflj", {"": f"not a list of functions ({error})"}) from error
 
 
-def truth_from_debug_build(binary: Path, r2s_bin: str) -> dict[int, Prototype]:
-    """What every function actually is, read out of the debug build.
+def ask(binary: Path, address: int, r2s_bin: str) -> r2s_batch.Answer:
+    """One function's `pddj`, read by the reader the equivalence gate and DecBench share."""
+    try:
+        body = r2s(binary, f"s {address:#x}; pddj", r2s_bin, merge_stderr=True)
+    except subprocess.TimeoutExpired:
+        return r2s_batch.Answer(address, "crash", cause="harness: r2s ran past its deadline")
+    return r2s_batch.parse_pddj(address, body)
 
-    The debug build's DWARF is the source's own statement about a function, and
-    the engine reads it, so the truth and the recovery come from one tool and
-    differ only in what the binary carries.
+
+def signatures(binary: Path, addresses: list[int], r2s_bin: str) -> dict[int, Seen]:
+    """What each function renders as, and whether its proof counts a residual.
+
+    One process per function rather than one per binary, because a refusal is
+    per function and a batch that stops at the first one would score the rest
+    as missing. A function `pddj` says it refuses has no signature and is
+    absent, so its facts are missing; an answer that cannot be read is not a
+    refusal and raises `Unreadable` for every such function at once.
     """
-    return {addr: seen.proto for addr, seen in signatures(binary, r2s_bin).items()}
-
-
-def recovered_from_stripped(binary: Path, r2s_bin: str) -> dict[int, Seen]:
-    """What the engine recovers, whether it marked the function, and what it assumed."""
-    return signatures(binary, r2s_bin)
+    out: dict[int, Seen] = {}
+    unreadable: dict[str, str] = {}
+    for addr in addresses:
+        answer = ask(binary, addr, r2s_bin)
+        if answer.refusal is not None:
+            continue
+        if not answer.ok:
+            unreadable[f"{addr:#x}"] = answer.cause
+            continue
+        proto = parse_prototype(answer.record["signature"])
+        if proto is None:
+            unreadable[f"{addr:#x}"] = f"signature {answer.record['signature']!r} is no prototype"
+            continue
+        out[addr] = Seen(proto, answer.record["proof"]["residual"] > 0)
+    if unreadable:
+        raise Unreadable(binary, "pddj", unreadable)
+    return out
 
 
 PRESENCE = ("void_to_void", "void_to_value", "value_to_void", "value_to_value")
@@ -314,13 +288,8 @@ class Tally:
     wrong: dict[str, dict[str, dict[str, int]]] = field(default_factory=dict)
     # Return presence, void or value, truth to recovered.
     presence: dict[str, dict[str, int]] = field(
-        default_factory=lambda: {cell: {"total": 0, "silent": 0, "premised": 0} for cell in PRESENCE}
+        default_factory=lambda: {cell: {"total": 0, "silent": 0} for cell in PRESENCE}
     )
-    # Facts of a function whose rendering assumed a premise, and the silent ones among them.
-    premised: dict[str, int] = field(default_factory=lambda: {"claims": 0, "silent": 0})
-    # Marked parameter facts by the basis pddj states for them.
-    marked_basis: dict[str, int] = field(default_factory=dict)
-    marked: int = 0
 
 
 def score(truth: dict[int, Prototype],
@@ -329,19 +298,17 @@ def score(truth: dict[int, Prototype],
           called: dict[int, str] | None = None) -> dict[str, int]:
     """Count every fact as correct, missing, marked wrong or silently wrong.
 
-    The silent keys stay what the baseline records. A claim resting on a premise is scored like
-    any other: the gate is not loosened for it, only counted.
+    The silent keys stay what the baseline records. A claim resting on a premise (a closed-world
+    `void`) is scored like any other: `pddj` states premises per function and no fact's basis, so
+    none is attributed.
     """
     counts = {"correct": 0, "missing": 0, "marked_wrong": 0, "silently_wrong": 0}
     tally = tally if tally is not None else Tally()
 
-    def judge(label: str, role: str, expected: str, actual: str | None, seen: Seen,
-              basis: str | None = None) -> None:
-        premised = bool(seen.premises) and "closed-world" in seen.premises
+    def judge(label: str, role: str, expected: str, actual: str | None, seen: Seen) -> None:
         if actual is None:
             counts["missing"] += 1
             return
-        tally.premised["claims"] += premised
         if actual == expected:
             counts["correct"] += 1
             return
@@ -350,14 +317,7 @@ def score(truth: dict[int, Prototype],
         kind = classify(expected, actual)
         by_kind = tally.wrong.setdefault(how, {}).setdefault(role, {})
         by_kind[kind] = by_kind.get(kind, 0) + 1
-        if seen.marked:
-            tally.marked += 1
-            if role == "parameter":
-                tally.marked_basis[basis or "unstated"] = tally.marked_basis.get(basis or "unstated", 0) + 1
-            else:
-                tally.marked_basis["unstated"] = tally.marked_basis.get("unstated", 0) + 1
-        else:
-            tally.premised["silent"] += premised
+        if not seen.marked:
             # A silent error has to be nameable, or a gate that catches one
             # tells nobody which fact to go and look at.
             tally.silent.append(f"{label}: expected {expected!r}, said {actual!r}")
@@ -373,7 +333,7 @@ def score(truth: dict[int, Prototype],
         presence(tally, expected.ret, actual.ret, seen)
         for index, param in enumerate(expected.params):
             got = actual.params[index] if index < len(actual.params) else None
-            judge(f"{where} parameter {index}", "parameter", param, got, seen, seen.basis.get(index))
+            judge(f"{where} parameter {index}", "parameter", param, got, seen)
     return counts
 
 
@@ -385,7 +345,6 @@ def presence(tally: Tally, expected: str, actual: str, seen: Seen) -> None:
     cell["total"] += 1
     if (expected == "void") != (actual == "void"):
         cell["silent"] += not seen.marked
-        cell["premised"] += bool(seen.premises) and "closed-world" in seen.premises
 
 
 def ordered(tally: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
@@ -407,16 +366,28 @@ def main() -> int:
                         help="record this run's silent errors, after reading them")
     args = parser.parse_args()
 
-    truth = truth_from_debug_build(args.debug_build, args.r2s)
-    if not truth_is_real(truth):
-        print("refusing to score: no parameter in the debug build has a source name, "
-              "so its debug info did not load. r2s reads DWARF the binary itself "
-              "carries, and not a separate .dSYM.",
-              file=sys.stderr)
+    try:
+        called = listing(args.debug_build, args.r2s)
+        truth = {addr: seen.proto for addr, seen in signatures(args.debug_build, sorted(called), args.r2s).items()}
+        if not truth_is_real(truth):
+            print("refusing to score: no parameter in the debug build has a source name, "
+                  "so its debug info did not load. r2s reads DWARF the binary itself "
+                  "carries, and not a separate .dSYM.",
+                  file=sys.stderr)
+            return 2
+        stripped = listing(args.stripped_build, args.r2s)
+        recovered = signatures(args.stripped_build, [addr for addr in sorted(truth) if addr in stripped], args.r2s)
+    except Unreadable as unreadable:
+        causes = sorted(unreadable.causes.items())
+        for where, cause in causes[:10]:
+            print(f"UNREADABLE {unreadable.command}: {unreadable.binary}{' ' + where if where else ''}: {cause}",
+                  file=sys.stderr)
+        if len(causes) > 10:
+            print(f"... and {len(causes) - 10} more", file=sys.stderr)
+        print(f"refusing to score: {unreadable}", file=sys.stderr)
         return 2
-    recovered = recovered_from_stripped(args.stripped_build, args.r2s)
     tally = Tally()
-    buckets = score(truth, recovered, tally, names(args.debug_build, args.r2s))
+    buckets = score(truth, recovered, tally, called)
     silent = tally.silent
 
     asserted = buckets["correct"] + buckets["silently_wrong"]
@@ -430,14 +401,7 @@ def main() -> int:
         "silent": silent,
         "silent_buckets": ordered(tally.wrong.get("silent", {})),
         "marked_buckets": ordered(tally.wrong.get("marked", {})),
-        "marked_by": {
-            "residual": tally.marked,
-            "basis": dict(sorted(tally.marked_basis.items()))
-            if any(seen.basis for seen in recovered.values()) else "unavailable",
-        },
-        "premised": tally.premised,
         "return_presence": tally.presence,
-        "pddj_unreadable": sum(seen.premises is None for seen in recovered.values()),
     }
     print(json.dumps(report, indent=2))
     if args.json:
