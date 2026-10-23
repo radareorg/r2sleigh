@@ -4,6 +4,7 @@
     PYTHONPATH=<decbench> DECBENCH_NO_CACHE=1 <venv>/bin/python type_causes.py collect \
         --run <results tree> --decompilers r2sleigh_native,angr --out rows.jsonl [--project zlib]
     <venv>/bin/python type_causes.py report rows.jsonl [--vs angr]
+    python3 type_causes.py widths rows.jsonl [--dec r2sleigh_native]
 
 `collect` re-runs `TypeMatchMetric` over a checkpointed run (`<run>/checkpoints/*.pkl`) and records, for every
 ground-truth variable of every function, the DWARF type, the variable it was matched to, the stage that matched it
@@ -445,6 +446,83 @@ def report(args) -> None:
             print(f"  {c:55s} {k:6d}")
 
 
+def kind_width(kind: str | None) -> int | None:
+    m = re.fullmatch(r"int(\d+)", kind or "")
+    return int(m.group(1)) if m else None
+
+
+def width_direction(gt: str | None, dec: str | None) -> str:
+    """The decompiled width against the source's: wider, narrower, same, or unknown for a kind with no width."""
+    g, d = kind_width(gt), kind_width(dec)
+    if g is None or d is None:
+        return "unknown"
+    return "wider" if d > g else "narrower" if d < g else "same"
+
+
+def argument_split(rows, dec: str, verdict: str) -> dict:
+    """How one verdict divides between parameters and locals, for one decompiler.
+
+    `variables` counts the variables with the verdict; `direction` (integer width only) says whether the
+    decompiled width is wider or narrower than the source's, over all of them and over those in only-cause
+    functions. `only_cause` and `involved` count functions (not perfect) by whether the verdict's variables in
+    them are all parameters, all locals or both; the first is the report's "only cause" (no other class in the
+    function), the second every function with the verdict.
+    """
+    out = {"variables": {"param": 0, "local": 0}}
+    if verdict == "fp:integer_width":
+        out["direction"] = {
+            scope: {w: dict.fromkeys(("wider", "narrower", "same", "unknown"), 0) for w in ("param", "local")}
+            for scope in ("all", "only_cause")
+        }
+    for scope in ("only_cause", "involved"):
+        out[scope] = {"functions": 0, "params_only": 0, "locals_only": 0, "mixed": 0}
+    for r in rows:
+        if r["dec"] != dec or r["value"] == 1.0:
+            continue
+        hits = [v for v in r["vars"] if v["verdict"] == verdict]
+        if not hits:
+            continue
+        sole = classes_of(r) == {verdict}
+        for v in hits:
+            where = "param" if v["is_arg"] else "local"
+            out["variables"][where] += 1
+            if "direction" in out:
+                way = width_direction(v.get("gt_kind"), v.get("dec_kind"))
+                out["direction"]["all"][where][way] += 1
+                if sole:
+                    out["direction"]["only_cause"][where][way] += 1
+        shape = {bool(v["is_arg"]) for v in hits}
+        key = "mixed" if len(shape) == 2 else "params_only" if shape == {True} else "locals_only"
+        for scope in ["involved"] + (["only_cause"] if sole else []):
+            out[scope]["functions"] += 1
+            out[scope][key] += 1
+    return out
+
+
+def share(n: int, of: int) -> str:
+    return f"{n} ({100 * n / of:.1f}%)" if of else f"{n} (n/a)"
+
+
+def widths(args) -> None:
+    """Parameters against locals for the integer-width and pointer-as-integer verdicts (the D70 M1 table)."""
+    with open(args.rows) as handle:
+        rows = [json.loads(line) for line in handle]
+    for verdict in ("fp:integer_width", "fp:pointer_as_integer"):
+        split = argument_split(rows, args.dec, verdict)
+        v = split["variables"]
+        print(f"== {args.dec} {verdict}: variables {v['param'] + v['local']}: parameters {v['param']}, locals {v['local']}")
+        for scope, by_where in split.get("direction", {}).items():
+            for where, count in by_where.items():
+                print(f"  {scope:10s} {where:5s} decompiled width against source: "
+                      + ", ".join(f"{k} {c}" for k, c in count.items()))
+        for scope, label in (("only_cause", "only cause"), ("involved", "involved")):
+            s = split[scope]
+            n = s["functions"]
+            print(f"  functions {label} {n}: parameters only {share(s['params_only'], n)}, "
+                  f"locals only {share(s['locals_only'], n)}, mixed {share(s['mixed'], n)}")
+            print(f"    parameters in {share(s['params_only'] + s['mixed'], n)}, locals in {share(s['locals_only'] + s['mixed'], n)}")
+
+
 def universe(args) -> None:
     """Which functions angr scored for type_match that r2s did not, and why (from the checkpoints)."""
     import decbench.metrics  # noqa: F401
@@ -499,8 +577,11 @@ def main() -> int:
     r.add_argument("rows")
     u = sub.add_parser("universe")
     u.add_argument("--run", required=True)
+    w = sub.add_parser("widths")
+    w.add_argument("rows")
+    w.add_argument("--dec", default="r2sleigh_native")
     args = p.parse_args()
-    {"collect": collect, "report": report, "universe": universe}[args.cmd](args)
+    {"collect": collect, "report": report, "universe": universe, "widths": widths}[args.cmd](args)
     return 0
 
 
