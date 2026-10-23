@@ -10,6 +10,7 @@ import contextlib
 import io
 import json
 import pathlib
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -320,6 +321,49 @@ class ReadsPddj(unittest.TestCase):
         self.assertEqual(code, 0, err)
         # The anchor's two facts are right; the refused function's one fact is missing.
         self.assertEqual(report["facts"], {"correct": 2, "missing": 1, "marked_wrong": 0, "silently_wrong": 0})
+
+    def test_a_function_the_stripped_build_does_not_list_is_missing_and_never_asked_for(self) -> None:
+        # The fake shell raises on an address it does not list, so asking for 0x1000 would fail the test.
+        extra = fn("uint64_t fcn_3000(void)", addr=0x3000)
+        code, report, err = run_main({0x1000: fn(INT)}, {0x3000: extra})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(report["facts"]["missing"], 1)
+        self.assertEqual(report["functions_recovered"], 1)
+
+    def test_a_listing_that_is_not_json_fails_the_gate(self) -> None:
+        argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(dt, "r2s", return_value="r2s: cannot open\n"),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = dt.main()
+        self.assertEqual((code, out.getvalue()), (2, ""))
+        self.assertIn("UNREADABLE aflj: debug", err.getvalue())
+
+    def test_an_r2s_that_runs_past_its_deadline_fails_the_gate(self) -> None:
+        builds = {pathlib.Path("debug"): {0x1000: fn(INT), ANCHOR_ADDRESS: ANCHOR}}
+        real = shell(builds).kwargs["side_effect"]
+
+        def slow(binary: pathlib.Path, commands: str, r2s_bin: str, **options: object) -> str:
+            if "pddj" in commands:
+                raise subprocess.TimeoutExpired(commands, 1800)
+            return real(binary, commands, r2s_bin, **options)
+
+        argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
+        out, err = io.StringIO(), io.StringIO()
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(dt, "r2s", side_effect=slow),
+            mock.patch.object(dt, "dwarf_functions", return_value={0x1000, ANCHOR_ADDRESS}),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = dt.main()
+        self.assertEqual((code, out.getvalue()), (2, ""))
+        self.assertIn("ran past its deadline", err.getvalue())
 
     def test_the_header_is_the_signature_not_the_first_line_of_the_text(self) -> None:
         # A unit that defines a struct above the function opens `pdd` with the struct.
