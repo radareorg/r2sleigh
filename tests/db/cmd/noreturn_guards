@@ -1,7 +1,8 @@
 # A call to a function declared never to return is the guard's whole body, and the statements the other arm held
 # follow the `if` (tests/fixtures/src/noreturn_guards.c, GCC 13.3.0 -O2): `if (c) { exit(2); } rest` and, for an exit
 # under the arm a test falls to, `if (c) { abort(); } rest`. The callee is declared by the platform's prototype row,
-# never by its name, so the same text must hold on both architectures.
+# never by its name, so both architectures get the same guard. `first_or_die` is only on AArch64: GCC puts its `abort`
+# on x86-64 in a `.cold` function of its own and r2s refuses it there (ROADMAP D75, item 4).
 
 NAME=x86-64 exit under a test
 FILE=tests/fixtures/noreturn_guards_gcc_x64_O2
