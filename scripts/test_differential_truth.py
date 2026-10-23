@@ -43,5 +43,35 @@ class ParsePrototype(unittest.TestCase):
             self.assertEqual(proto.params, [])
 
 
+class TruthIsReal(unittest.TestCase):
+    def test_the_engines_own_placeholder_is_not_a_source_name(self) -> None:
+        recovered = {0x1000: dt.Prototype("uint64_t", ["uint8_t*", "uint64_t"], ["arg0", "arg1"])}
+        self.assertFalse(dt.truth_is_real(recovered))
+
+    def test_a_source_name_makes_the_truth_real(self) -> None:
+        mixed = {
+            0x1000: dt.Prototype("uint64_t", ["uint8_t*"], ["arg0"]),
+            0x2000: dt.Prototype("uint32_t", ["uint8_t*"], ["data"]),
+        }
+        self.assertTrue(dt.truth_is_real(mixed))
+
+    def test_a_debug_build_whose_dwarf_failed_to_load_exits_2(self) -> None:
+        # The debug build renders what the stripped one does: every parameter is `argN`.
+        same = {0x1000: (dt.Prototype("uint64_t", ["uint8_t*"], ["arg0"]), False)}
+        out, err = io.StringIO(), io.StringIO()
+        argv = ["differential_truth.py", "--debug-build", "d", "--stripped-build", "s"]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(dt, "signatures", return_value=same),
+            mock.patch.object(dt, "names", return_value={0x1000: "fcn.1000"}),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = dt.main()
+        self.assertEqual(code, 2, out.getvalue())
+        self.assertIn("refusing to score", err.getvalue())
+        self.assertNotIn("soundness_rate", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

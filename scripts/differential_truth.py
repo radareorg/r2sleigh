@@ -127,11 +127,13 @@ def parse_prototype(line: str) -> Prototype | None:
     return Prototype(normalize_type(match.group("ret")), params, names)
 
 
-# What the engine names a parameter it recovered with no declaration: the
-# register that carries it at its entry version (`RDI_0`, `X0_0`, `W1_0`), a
-# register Sleigh gives no name (`reg_4008_1_0`), or the caller's stack slot
-# (`stack_p8`).
-RECOVERED_PARAM_NAME = re.compile(r"^(?:(?:[A-Z][A-Z0-9]*|reg_[0-9a-f_]+)_\d+|stack_p\d+)$")
+# What the engine names a parameter it recovered with no declaration: `argN`
+# as its own header spells it, the register that carries it at its entry
+# version (`RDI_0`, `X0_0`, `W1_0`), a register Sleigh gives no name
+# (`reg_4008_1_0`), or the caller's stack slot (`stack_p8`).
+RECOVERED_PARAM_NAME = re.compile(
+    r"^(?:arg\d+|(?:(?:[A-Z][A-Z0-9]*|reg_[0-9a-f_]+)_\d+)|stack_p\d+)$"
+)
 
 
 def truth_is_real(truth: dict[int, Prototype]) -> bool:
