@@ -812,6 +812,13 @@ const BOTH_EXIT: &[u8] = &[
     0x85, 0xff, 0x75, 0x0a, 0xbf, 2, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0,
 ];
 
+/// `test edi, edi; je rest; test esi, esi; je rest; mov edi, 1; call exit; rest: xor eax, eax; ret`: the chain
+/// leaves to `rest` on either zero, and the arm it falls to exits.
+const EITHER_ZERO_OR_EXIT: &[u8] = &[
+    0x85, 0xff, 0x74, 0x0e, 0x85, 0xf6, 0x74, 0x0a, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0x31, 0xc0,
+    0xc3,
+];
+
 /// The indent of the first line holding `needle`, and its position among the lines.
 fn line_of(c: &str, needle: &str) -> (usize, usize) {
     let (at, line) = (c.lines().enumerate())
@@ -925,4 +932,32 @@ fn two_arms_that_both_end_in_a_call_that_never_returns_keep_their_else() {
         "{c}"
     );
     assert_eq!(tests_of(&c).len(), 1, "{c}");
+}
+
+#[test]
+fn a_conjunction_whose_arm_exits_is_a_guard_with_the_rest_after_it() {
+    // `if (a == 0 || b == 0) return 0; else exit(1);` is `if (a != 0 && b != 0) exit(1); return 0;`: the chain is
+    // written on the exit's side, with the tests and the connective the machine's other edge needs.
+    let c = c_calling("exit", EITHER_ZERO_OR_EXIT, &[0x0d]);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    let tests = tests_of(&c);
+    assert_eq!(tests.len(), 1, "{c}");
+    assert!(
+        tests[0].contains(" && ")
+            && !tests[0].contains(" || ")
+            && tests[0].matches("!= (uint32_t)0U").count() == 2,
+        "{c}"
+    );
+    assert!(!c.contains("else") && !c.contains("goto"), "{c}");
+    let (guard, exit, rest) = (
+        line_of(&c, "if ("),
+        line_of(&c, "exit(1)"),
+        line_of(&c, "return 0"),
+    );
+    // The `if` closes before the return, which is the merge's own block, one level in.
+    let closes = c.lines().skip(exit.0).position(|line| line.trim() == "}");
+    assert!(
+        guard.0 < exit.0 && closes.is_some_and(|at| exit.0 + at < rest.0) && rest.1 >= guard.1,
+        "{c}"
+    );
 }

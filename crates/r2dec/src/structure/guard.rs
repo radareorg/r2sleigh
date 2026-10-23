@@ -128,7 +128,7 @@ fn ends_in_never_return(stmt: &CStmt, ev: &Evidence<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{CExpr, UnaryOp};
+    use crate::ast::{BinaryOp, CExpr, UnaryOp, test_render_observation_id};
     use crate::structure::certify::{StatementRole, Violation, certify};
     use crate::structure::support::{
         Fixture, at, branch, cfg, cond, cond_branch, exit, expr, never_returns,
@@ -338,6 +338,37 @@ mod tests {
                 .any(|violation| matches!(violation, Violation::EdgeMismatch { block: 0x10, .. })),
             "{wrong}"
         );
+    }
+
+    #[test]
+    fn a_chain_on_the_swapped_arm_is_negated_by_swapping_its_connective() {
+        let atom = |block: u32| {
+            CExpr::observe_one(
+                test_render_observation_id(block),
+                CExpr::int(i64::from(block)),
+            )
+        };
+        let chain = CExpr::binary(BinaryOp::And, atom(0x10), atom(0x20));
+        let mut body = CStmt::Block(vec![at(
+            0x10,
+            CStmt::if_stmt(
+                chain,
+                CStmt::Block(vec![at(0x30, expr())]),
+                Some(CStmt::Block(vec![at(0x40, exit())])),
+            ),
+        )]);
+        assert_eq!(guarded(&mut body, &never_returns), 1);
+        let CStmt::Block(stmts) = &body else {
+            panic!("a block");
+        };
+        let CStmt::Observed { stmt, .. } = &stmts[0] else {
+            panic!("the observed if");
+        };
+        let CStmt::If { cond, .. } = &**stmt else {
+            panic!("an if");
+        };
+        let not = |block| CExpr::unary(UnaryOp::Not, atom(block));
+        assert_eq!(*cond, CExpr::binary(BinaryOp::Or, not(0x10), not(0x20)));
     }
 
     #[test]
