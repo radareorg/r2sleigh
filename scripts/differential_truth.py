@@ -21,6 +21,10 @@ The marker granularity is the function, because that is the granularity the
 renderer annotates at. A function whose `pddj` proof counts a residual has its
 unmatched facts counted as marked rather than silent.
 
+The truth is the functions the debug build's DWARF declares, found by the oracle
+side's own reader (`readelf`): r2s prints a signature for a runtime function
+it has only a symbol for (`_start`), and that is its own guess, not the source.
+
 Every function is read from its `pddj` answer alone, by the reader the
 equivalence gate and DecBench share (`tests/equiv/r2s_batch.py`). An answer the
 reader cannot read is a failure of the gate (exit 2), never a marker: a gate
@@ -30,6 +34,7 @@ that scores a function it could not read grades a guess.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import re
 import subprocess
@@ -39,6 +44,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "equiv"))
 import r2s_batch  # noqa: E402
+from dwarf import Dwarf  # noqa: E402
+from target import X86_64  # noqa: E402
 
 PROTOTYPE = re.compile(r"^(?P<ret>[\w \*]+?)\s+(?P<name>[\w.]+)\s*\((?P<args>.*)\);?\s*$")
 
@@ -238,6 +245,28 @@ def listing(binary: Path, r2s_bin: str) -> dict[int, str]:
         raise Unreadable(binary, "aflj", {"": f"not a list of functions ({error})"}) from error
 
 
+def dwarf_functions(binary: Path, binutils_prefix: str = "") -> set[int]:
+    """The entry address of every function the debug build's DWARF declares: the functions its source defines.
+
+    r2s prints a signature for a runtime function it has only a symbol for (`_start`) as it does for a
+    declared one, so it cannot say which is which. The oracle side's DWARF reader can (`tests/equiv/dwarf.py`,
+    `readelf`), and a function with code in ranges and no entry address is refused rather than left out.
+    """
+    target = dataclasses.replace(X86_64, binutils_prefix=binutils_prefix)
+    try:
+        dwarf = Dwarf.read(binary, target)
+    except (OSError, RuntimeError) as error:
+        raise Unreadable(binary, "readelf", {"": f"{error}; it lists the functions the source defines"}) from error
+    unplaced = {
+        f"die {die.offset:#x}": "a function with code in ranges and no entry address"
+        for die in dwarf.index.values()
+        if die.tag == "DW_TAG_subprogram" and "DW_AT_ranges" in die.attrs and "DW_AT_low_pc" not in die.attrs
+    }
+    if unplaced:
+        raise Unreadable(binary, "readelf", unplaced)
+    return {subprogram.low_pc for subprogram in dwarf.subprograms()}
+
+
 def ask(binary: Path, address: int, r2s_bin: str) -> r2s_batch.Answer:
     """One function's `pddj`, read by the reader the equivalence gate and DecBench share."""
     try:
@@ -359,6 +388,8 @@ def main() -> int:
     parser.add_argument("--stripped-build", type=Path, required=True,
                         help="same source, stripped; what the engine is given")
     parser.add_argument("--r2s", default="target/release/r2s")
+    parser.add_argument("--binutils-prefix", default="",
+                        help="prefix of readelf, which lists the functions DWARF declares (`g` for GNU binutils on macOS)")
     parser.add_argument("--json", type=Path, help="write the report here")
     parser.add_argument("--baseline", type=Path,
                         help="the silent errors already recorded, each with a cause")
@@ -368,7 +399,15 @@ def main() -> int:
 
     try:
         called = listing(args.debug_build, args.r2s)
-        truth = {addr: seen.proto for addr, seen in signatures(args.debug_build, sorted(called), args.r2s).items()}
+        declared = dwarf_functions(args.debug_build, args.binutils_prefix)
+        if not declared:
+            print("refusing to score: the debug build's DWARF declares no function.", file=sys.stderr)
+            return 2
+        if declared - called.keys():
+            raise Unreadable(args.debug_build, "aflj", {
+                f"{addr:#x}": "DWARF declares a function the engine does not list" for addr in sorted(declared - called.keys())
+            })
+        truth = {addr: seen.proto for addr, seen in signatures(args.debug_build, sorted(declared), args.r2s).items()}
         if not truth_is_real(truth):
             print("refusing to score: no parameter in the debug build has a source name, "
                   "so its debug info did not load. r2s reads DWARF the binary itself "
@@ -393,8 +432,10 @@ def main() -> int:
     asserted = buckets["correct"] + buckets["silently_wrong"]
     facts = sum(buckets.values())
     report = {
+        "functions_in_dwarf": len(declared),
         "functions_in_truth": len(truth),
         "functions_recovered": len(recovered),
+        "without_dwarf": sorted(name for addr, name in called.items() if addr not in declared),
         "facts": buckets,
         "recovery_rate": round(buckets["correct"] / facts, 4) if facts else 0.0,
         "soundness_rate": round(1 - buckets["silently_wrong"] / asserted, 4) if asserted else 1.0,

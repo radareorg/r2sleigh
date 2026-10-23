@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
@@ -67,6 +68,7 @@ class TruthIsReal(unittest.TestCase):
             mock.patch.object(sys, "argv", argv),
             mock.patch.object(dt, "signatures", return_value=same),
             mock.patch.object(dt, "listing", return_value={0x1000: "fcn.1000"}),
+            mock.patch.object(dt, "dwarf_functions", return_value={0x1000}),
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(err),
         ):
@@ -80,10 +82,11 @@ def proto(ret: str, params: list[str], names: list[str] | None = None) -> "dt.Pr
     return dt.Prototype(ret, params, names if names is not None else [f"p{i}" for i in range(len(params))])
 
 
-def run_gate(truth: dict, recovered: dict, *extra: str) -> tuple[int, dict, str]:
+def run_gate(truth: dict, recovered: dict, *extra: str, declared: set[int] | None = None) -> tuple[int, dict | None, str]:
     """Exit code, report and stderr of main for a debug build with these prototypes and a stripped one with those.
 
-    A function with a source-named parameter, right in both builds, keeps the truth real.
+    A function with a source-named parameter, right in both builds, keeps the truth real. `declared` is the
+    set of addresses the debug build's DWARF defines; by default every function of the debug build.
     """
     debug, stripped = pathlib.Path("debug"), pathlib.Path("stripped")
     anchor = {0x9000: dt.Seen(proto("int", ["int"], ["count"]), False)}
@@ -100,11 +103,12 @@ def run_gate(truth: dict, recovered: dict, *extra: str) -> tuple[int, dict, str]
             dt, "listing",
             side_effect=lambda binary, _r2s: {a: "sym.f" if a == 0x1000 else f"sym.f{a:x}" for a in seen[binary]},
         ),
+        mock.patch.object(dt, "dwarf_functions", return_value=set(seen[debug]) if declared is None else declared),
         contextlib.redirect_stdout(out),
         contextlib.redirect_stderr(err),
     ):
         code = dt.main()
-    return code, json.loads(out.getvalue()), err.getvalue()
+    return code, json.loads(out.getvalue()) if out.getvalue().strip() else None, err.getvalue()
 
 
 def graded(truth: dict, recovered: dict) -> dict:
@@ -223,6 +227,7 @@ def run_main(debug: dict[int, Fn], stripped: dict[int, Fn], *extra: str, **optio
     with (
         mock.patch.object(sys, "argv", argv),
         shell(builds, **options),
+        mock.patch.object(dt, "dwarf_functions", return_value=set(builds[pathlib.Path("debug")])),
         contextlib.redirect_stdout(out),
         contextlib.redirect_stderr(err),
     ):
@@ -307,6 +312,89 @@ class NoPremiseAttribution(unittest.TestCase):
         self.assertNotIn("premised", report)
         self.assertNotIn("marked_by", report)
         self.assertEqual(report["return_presence"]["value_to_void"], {"total": 1, "silent": 1})
+
+
+class DwarfIsTheTruth(unittest.TestCase):
+    """Only a function the debug build's DWARF declares has a truth; r2s's own rendering of a symbol is not one."""
+
+    STUB = dt.Seen(proto("void", []), False)
+
+    def test_a_runtime_function_without_dwarf_is_no_truth_and_no_presence(self) -> None:
+        truth = {0x1000: dt.Seen(proto("int", []), False), 0x2000: self.STUB}
+        said = {0x1000: dt.Seen(proto("int", []), False), 0x2000: self.STUB}
+        report = run_gate(truth, said, declared={0x1000, 0x9000})[1]
+        self.assertEqual(report["functions_in_dwarf"], 2)
+        self.assertEqual(report["functions_in_truth"], 2)
+        self.assertEqual(report["without_dwarf"], ["sym.f2000"])
+        self.assertEqual(report["return_presence"]["void_to_void"], {"total": 0, "silent": 0})
+        self.assertEqual(report["facts"]["correct"], 3)
+
+    def test_a_runtime_function_the_engine_gets_wrong_is_not_a_silent_error(self) -> None:
+        truth = {0x1000: dt.Seen(proto("int", []), False), 0x2000: dt.Seen(proto("void", []), False)}
+        said = {0x1000: dt.Seen(proto("int", []), False), 0x2000: dt.Seen(proto("size_t", []), False)}
+        code, report, _ = run_gate(truth, said, declared={0x1000, 0x9000})
+        self.assertEqual((code, report["facts"]["silently_wrong"], report["silent"]), (0, 0, []))
+
+    def test_a_function_dwarf_declares_and_the_engine_does_not_list_fails_the_gate(self) -> None:
+        code, report, err = run_gate({0x1000: self.STUB}, {0x1000: self.STUB}, declared={0x1000, 0x9000, 0x5000})
+        self.assertEqual(code, 2)
+        self.assertIn("UNREADABLE aflj", err)
+        self.assertIn("0x5000", err)
+
+    def test_dwarf_that_declares_nothing_fails_the_gate(self) -> None:
+        code, report, err = run_gate({0x1000: self.STUB}, {0x1000: self.STUB}, declared=set())
+        self.assertEqual(code, 2)
+        self.assertIn("declares no function", err)
+
+    def test_no_readelf_fails_the_gate_and_names_it(self) -> None:
+        unreadable = dt.Unreadable(pathlib.Path("debug"), "readelf", {"": "[Errno 2] No such file or directory: 'readelf'"})
+        out, err = io.StringIO(), io.StringIO()
+        argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(dt, "listing", return_value={0x1000: "sym.f"}),
+            mock.patch.object(dt, "dwarf_functions", side_effect=unreadable),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = dt.main()
+        self.assertEqual(code, 2)
+        self.assertIn("UNREADABLE readelf: debug", err.getvalue())
+
+
+class DeclaredFunctions(unittest.TestCase):
+    """`dwarf_functions` asks the oracle side's DWARF reader, with the binutils the caller names."""
+
+    @staticmethod
+    def reading(subprograms: list[int], dies: list[SimpleNamespace] | None = None):
+        dwarf = SimpleNamespace(
+            subprograms=lambda: [SimpleNamespace(low_pc=pc) for pc in subprograms],
+            index=dict(enumerate(dies or [])),
+        )
+        return mock.patch.object(dt.Dwarf, "read", return_value=dwarf)
+
+    def test_every_subprogram_with_code_is_declared_at_its_entry(self) -> None:
+        with self.reading([0x1210, 0x1220]):
+            self.assertEqual(dt.dwarf_functions(pathlib.Path("debug")), {0x1210, 0x1220})
+
+    def test_the_binutils_prefix_reaches_readelf(self) -> None:
+        with self.reading([0x1210]) as read:
+            dt.dwarf_functions(pathlib.Path("debug"), "g")
+        self.assertEqual(read.call_args.args[1].binutils_prefix, "g")
+
+    def test_a_function_with_ranges_and_no_entry_address_is_refused(self) -> None:
+        split = SimpleNamespace(tag="DW_TAG_subprogram", offset=0x2d, attrs={"DW_AT_ranges": "0x10"})
+        with self.reading([0x1210], [split]), self.assertRaises(dt.Unreadable) as raised:
+            dt.dwarf_functions(pathlib.Path("debug"))
+        self.assertEqual(raised.exception.command, "readelf")
+        self.assertIn("die 0x2d", raised.exception.causes)
+
+    def test_readelf_that_is_missing_or_fails_is_unreadable(self) -> None:
+        for error in (FileNotFoundError(2, "No such file or directory", "readelf"), RuntimeError("readelf failed on d")):
+            with self.subTest(error=error), mock.patch.object(dt.Dwarf, "read", side_effect=error):
+                with self.assertRaises(dt.Unreadable) as raised:
+                    dt.dwarf_functions(pathlib.Path("debug"))
+                self.assertEqual(raised.exception.command, "readelf")
 
 
 class Baseline(unittest.TestCase):
