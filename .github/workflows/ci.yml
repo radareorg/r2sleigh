@@ -491,8 +491,10 @@ jobs:
       # Whether a function returns a value at all: static helpers that leave scratch in the
       # result register, results no caller reads, a tail forwarder, an exported function.
       - name: Grade the return of each function against the source
+        if: ${{ !cancelled() }}
         run: |
           set -eu
+          mkdir -p target/source-gold
           gcc -g -O2 -o target/source-gold/returns_debug tests/gold/source_gold/returns.c
           strip -o target/source-gold/returns_stripped target/source-gold/returns_debug
           python3 scripts/differential_truth.py \

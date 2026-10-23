@@ -1,7 +1,5 @@
-/* Return presence for the source-gold gate: does a function return a value at all.
-   The gate builds it with `-g -O2` as the truth and strips the same binary as the input.
-   `noipa` keeps every helper's own signature, so a source `void` is a machine function
-   that returns nothing, and a value no caller reads is still a value the source returns. */
+/* Return presence for the source-gold gate: does a function return a value at all, built `-g -O2` and
+   graded against the same binary stripped. `noipa` keeps each helper's own signature. */
 #include <stdint.h>
 
 #define KEEP __attribute__((noipa))
