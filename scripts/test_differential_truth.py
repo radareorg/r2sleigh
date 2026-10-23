@@ -58,7 +58,7 @@ class TruthIsReal(unittest.TestCase):
 
     def test_a_debug_build_whose_dwarf_failed_to_load_exits_2(self) -> None:
         # The debug build renders what the stripped one does: every parameter is `argN`.
-        same = {0x1000: (dt.Prototype("uint64_t", ["uint8_t*"], ["arg0"]), False)}
+        same = {0x1000: dt.Seen(dt.Prototype("uint64_t", ["uint8_t*"], ["arg0"]), False)}
         out, err = io.StringIO(), io.StringIO()
         argv = ["differential_truth.py", "--debug-build", "d", "--stripped-build", "s"]
         with (
@@ -84,7 +84,7 @@ def graded(truth: dict, recovered: dict) -> dict:
     A function with a source-named parameter, right in both builds, keeps the truth real.
     """
     debug, stripped = pathlib.Path("debug"), pathlib.Path("stripped")
-    anchor = {0x9000: (proto("int", ["int"], ["count"]), False)}
+    anchor = {0x9000: dt.Seen(proto("int", ["int"], ["count"]), False)}
     seen = {debug: {**truth, **anchor}, stripped: {**recovered, **anchor}}
     out = io.StringIO()
     argv = ["differential_truth.py", "--debug-build", str(debug), "--stripped-build", str(stripped)]
@@ -107,7 +107,7 @@ class SilentBuckets(unittest.TestCase):
             truth, got = proto(expected, []), proto(said, [])
         else:
             truth, got = proto("int", [expected]), proto("int", [said])
-        return graded({0x1000: (truth, False)}, {0x1000: (got, marked)})
+        return graded({0x1000: dt.Seen(truth, False)}, {0x1000: dt.Seen(got, marked)})
 
     def test_each_kind_of_difference_has_its_bucket(self) -> None:
         cases = [
@@ -137,6 +137,121 @@ class SilentBuckets(unittest.TestCase):
     def test_the_silent_key_is_spelled_as_it_was(self) -> None:
         report = self.one("int", "size_t")
         self.assertEqual(report["silent"], ["sym.f return: expected 'int', said 'size_t'"])
+
+
+def pddj_line(premises: list[str] | None = None, variables: list[dict] | None = None) -> str:
+    """The last line `pddj` prints; it spells the word `residual` in its keys even where there is none."""
+    answer = {
+        "name": "fcn.00001000", "addr": 4096, "signature": "uint32_t fcn_1000(uint8_t* arg0)",
+        "proof": {"total": 3, "rendered": 3, "residual": 0}, "residuals": [],
+        "variables": variables or [],
+    }
+    if premises:
+        answer["premises"] = premises
+    return json.dumps(answer)
+
+
+def canned(pdd: str, answer: str, afl: str = "0x00001000    1     10 fcn.00001000\n") -> "mock._patch":
+    def run(binary: pathlib.Path, commands: str, r2s_bin: str) -> str:
+        if commands == "afl":
+            return afl
+        # The shell prints the pdd text and then the JSON line, in the order of the commands.
+        return pdd + answer + "\n" if commands.endswith("pdd; pddj") else pdd
+
+    return mock.patch.object(dt, "r2s", side_effect=run)
+
+
+CLEAN = "uint32_t fcn_1000(uint8_t* arg0)\n{\n    /* r2dec proof: no individual construct is marked */\n}\n"
+
+
+class ReadsPddj(unittest.TestCase):
+    """One invocation per function gives the header and the marker as before, and the premises beside them."""
+
+    def read(self, pdd: str, answer: str) -> "dt.Seen":
+        with canned(pdd, answer):
+            return dt.signatures(pathlib.Path("b"), "r2s")[0x1000]
+
+    def test_the_premises_a_rendering_assumed_are_read(self) -> None:
+        seen = self.read(CLEAN, pddj_line(premises=["closed-world"]))
+        self.assertEqual(seen.premises, ("closed-world",))
+        self.assertEqual(seen.proto.ret, "uint32_t")
+
+    def test_the_json_lines_own_keys_are_not_a_residual_marker(self) -> None:
+        seen = self.read(CLEAN, pddj_line())
+        self.assertFalse(seen.marked)
+        self.assertEqual(seen.premises, ())
+
+    def test_a_residual_in_the_text_still_marks(self) -> None:
+        text = CLEAN.replace("}\n", "    return r2sleigh_residual_u32(1);\n}\n")
+        self.assertTrue(self.read(text, pddj_line()).marked)
+
+    def test_an_unreadable_answer_is_not_hidden(self) -> None:
+        seen = self.read(CLEAN, "not json")
+        self.assertIsNone(seen.premises)
+
+    def test_the_basis_pddj_states_for_a_parameter_is_read_by_slot(self) -> None:
+        variables = [{"name": "arg0", "type": "uint8_t*", "kind": "param", "location": "arg:0", "basis": "carrier-width"}]
+        self.assertEqual(self.read(CLEAN, pddj_line(variables=variables)).basis, {0: "carrier-width"})
+        plain = [{"name": "arg0", "type": "uint8_t*", "kind": "param", "location": "arg:0"}]
+        self.assertEqual(self.read(CLEAN, pddj_line(variables=plain)).basis, {})
+
+
+class PremisedClaims(unittest.TestCase):
+    """A claim that rests on a premise stays scored as silent: the gate is not loosened for it."""
+
+    def test_a_closed_world_void_is_counted_and_stays_silent(self) -> None:
+        truth = {0x1000: dt.Seen(proto("int", []), False)}
+        said = {0x1000: dt.Seen(proto("void", []), False, ("closed-world",))}
+        report = graded(truth, said)
+        self.assertEqual(report["facts"]["silently_wrong"], 1)
+        self.assertEqual(report["silent"], ["sym.f return: expected 'int', said 'void'"])
+        self.assertEqual(report["premised"], {"claims": 1, "silent": 1})
+
+    def test_a_claim_with_no_premise_is_not_premised(self) -> None:
+        truth = {0x1000: dt.Seen(proto("int", []), False)}
+        said = {0x1000: dt.Seen(proto("void", []), False)}
+        self.assertEqual(graded(truth, said)["premised"], {"claims": 0, "silent": 0})
+
+
+class ReturnPresence(unittest.TestCase):
+    def test_void_and_value_are_told_apart_in_both_directions(self) -> None:
+        truth = {
+            0x1000: dt.Seen(proto("void", []), False),
+            0x2000: dt.Seen(proto("void", []), False),
+            0x3000: dt.Seen(proto("int", []), False),
+            0x4000: dt.Seen(proto("int", []), False),
+            0x5000: dt.Seen(proto("int", []), False),
+        }
+        said = {
+            0x1000: dt.Seen(proto("void", []), False),
+            0x2000: dt.Seen(proto("size_t", []), True),
+            0x3000: dt.Seen(proto("void", []), False, ("closed-world",)),
+            0x4000: dt.Seen(proto("int", []), False),
+            0x5000: dt.Seen(proto("void", []), True),
+        }
+        presence = graded(truth, said)["return_presence"]
+        self.assertEqual(presence["void_to_void"], {"total": 1, "silent": 0, "premised": 0})
+        self.assertEqual(presence["void_to_value"], {"total": 1, "silent": 0, "premised": 0})
+        self.assertEqual(presence["value_to_void"], {"total": 2, "silent": 1, "premised": 1})
+        self.assertEqual(presence["value_to_value"], {"total": 2, "silent": 0, "premised": 0})
+
+    def test_every_cell_is_present_when_nothing_falls_in_it(self) -> None:
+        presence = graded({}, {})["return_presence"]
+        self.assertEqual(sorted(presence), ["value_to_value", "value_to_void", "void_to_value", "void_to_void"])
+
+
+class MarkedBy(unittest.TestCase):
+    def test_the_report_says_when_pddj_states_no_basis(self) -> None:
+        truth = {0x1000: dt.Seen(proto("int", ["const char*"]), False)}
+        said = {0x1000: dt.Seen(proto("int", ["size_t"]), True)}
+        self.assertEqual(graded(truth, said)["marked_by"], {"residual": 1, "basis": "unavailable"})
+
+    def test_a_stated_basis_groups_the_marked_parameters(self) -> None:
+        truth = {0x1000: dt.Seen(proto("int", ["const char*", "int"]), False)}
+        said = {0x1000: dt.Seen(proto("int", ["size_t", "size_t"]), True, (), {0: "carrier-width"})}
+        marked = graded(truth, said)["marked_by"]
+        self.assertEqual(marked["residual"], 2)
+        self.assertEqual(marked["basis"], {"carrier-width": 1, "unstated": 1})
 
 
 if __name__ == "__main__":
