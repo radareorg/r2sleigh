@@ -647,6 +647,7 @@ mod tests {
         let distinct_return = |block: u64| distinct.contains(&block);
         let evidence = Evidence {
             never_returns: &never_returns,
+            declares_noreturn: true,
             distinct_return: &distinct_return,
         };
         let mut started = BTreeSet::new();
@@ -807,6 +808,7 @@ mod tests {
             Occurrences::new(blocks.clone(), blocks.iter().map(|b| Some(*b)).collect());
         let evidence = Evidence {
             never_returns: &never_returns,
+            declares_noreturn: true,
             distinct_return: &|_| true,
         };
         let arm = |block: u64| block_of(vec![at(block, expr()), copy(1)]);

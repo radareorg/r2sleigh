@@ -3,7 +3,15 @@
 
 use super::condition::{Marks, as_atoms, negated};
 use super::shape::Evidence;
-use crate::ast::{CStmt, RenderObservationId};
+use crate::ast::{CExpr, CStmt};
+
+/// A place the pass has still to visit, borrowed from the tree.
+enum Slot<'a> {
+    /// Where one statement stands: an arm, a loop body.
+    One(&'a mut CStmt),
+    /// Statements in sequence: a block, a case.
+    Many(&'a mut Vec<CStmt>),
+}
 
 /// What the rewrites may use: the evidence, the markers a negated test is written over, and a count.
 struct Guard<'a, 'e> {
@@ -12,92 +20,123 @@ struct Guard<'a, 'e> {
     rewritten: usize,
 }
 
-/// Rewrite every such `if` of `body` and say how many were rewritten. O(statements): each statement
-/// is visited once, and the statements a guard frees join the sequence the `if` sits in.
+/// Rewrite every such `if` of `body` and say how many were rewritten. O(statements) with no recursion:
+/// the places to visit are a stack, and a guard's freed statements join the sequence being rebuilt.
 pub(crate) fn guard(body: &mut CStmt, ev: &Evidence<'_>, marks: &mut dyn Marks) -> usize {
     let mut guard = Guard {
         ev,
         marks,
         rewritten: 0,
     };
-    guard.slot(body);
+    // Each pop visits one place and pushes only places inside it, so the tree's finite height ends it.
+    let mut pending = vec![Slot::One(body)];
+    while let Some(slot) = pending.pop() {
+        match slot {
+            Slot::One(stmt) => guard.one(stmt, &mut pending),
+            Slot::Many(stmts) => guard.many(stmts, &mut pending),
+        }
+    }
     guard.rewritten
 }
 
 impl Guard<'_, '_> {
-    /// A statement where one statement stands (an arm, a loop body): a guard there brings its rest.
-    fn slot(&mut self, stmt: &mut CStmt) {
-        if let CStmt::Block(stmts) = stmt {
-            return self.sequence(stmts);
-        }
-        let mut stmts = vec![std::mem::replace(stmt, CStmt::Empty)];
-        self.sequence(&mut stmts);
-        *stmt = super::tails::one(stmts);
-    }
-
-    /// The statements of a body in order, each rewritten and followed by what it frees.
-    fn sequence(&mut self, stmts: &mut Vec<CStmt>) {
-        for mut stmt in std::mem::take(stmts) {
-            let rest = self.visit(&mut stmt, &[]);
-            stmts.push(stmt);
-            stmts.extend(rest.into_iter().flatten());
-        }
-    }
-
-    /// `stmt`'s parts rewritten; for a guard, the statements it frees. `ids` are the markers of the
-    /// statement the `if` is observed under, which a negated test is written over.
-    fn visit(&mut self, stmt: &mut CStmt, ids: &[RenderObservationId]) -> Option<Vec<CStmt>> {
+    /// A statement where one statement stands: a guard there brings its rest, in a block of its own.
+    fn one<'a>(&mut self, stmt: &'a mut CStmt, pending: &mut Vec<Slot<'a>>) {
         match stmt {
-            CStmt::Observed { ids, stmt } => self.visit(stmt, ids.ids()),
-            CStmt::If {
-                cond,
-                then_body,
-                else_body,
-            } => {
-                // Both arms are rewritten first: a guard inside one can be what makes it end in the call.
-                self.slot(then_body);
-                let arm = else_body.as_mut()?;
-                self.slot(arm);
-                match (
-                    ends_in_never_return(then_body, self.ev),
-                    ends_in_never_return(arm, self.ev),
-                ) {
-                    (true, false) => {
-                        self.rewritten += 1;
-                        Some(statements(*else_body.take()?))
-                    }
-                    // The call is on the else arm: the guard tests the opposite, over the test's own atom.
-                    (false, true) if !ids.is_empty() => {
-                        let test = std::mem::replace(cond, crate::ast::CExpr::IntLit(0));
-                        *cond = negated(as_atoms(test, ids.iter().copied(), self.marks));
-                        self.rewritten += 1;
-                        let rest = std::mem::replace(&mut **then_body, *else_body.take()?);
-                        Some(statements(rest))
-                    }
-                    // Both arms end in such a call, or neither: nothing continues past one.
-                    _ => None,
+            CStmt::Block(stmts) => self.many(stmts, pending),
+            stmt => {
+                let mut stmts = vec![std::mem::replace(stmt, CStmt::Empty)];
+                self.free(&mut stmts);
+                *stmt = super::tails::one(stmts);
+                match stmt {
+                    CStmt::Block(stmts) => stmts.iter_mut().for_each(|stmt| enter(stmt, pending)),
+                    stmt => enter(stmt, pending),
                 }
             }
-            CStmt::Block(stmts) => {
-                self.sequence(stmts);
-                None
+        }
+    }
+
+    /// The statements of a body in order, each followed by what it frees.
+    fn many<'a>(&mut self, stmts: &'a mut Vec<CStmt>, pending: &mut Vec<Slot<'a>>) {
+        self.free(stmts);
+        stmts.iter_mut().for_each(|stmt| enter(stmt, pending));
+    }
+
+    /// `stmts` with the statements each guard frees after it. A freed statement is visited in its turn
+    /// as one of the sequence, so a chain of guards is read in one pass and moved once.
+    fn free(&mut self, stmts: &mut Vec<CStmt>) {
+        let mut todo = std::mem::take(stmts);
+        todo.reverse();
+        stmts.reserve(todo.len());
+        while let Some(mut stmt) = todo.pop() {
+            let freed = self.freed(&mut stmt);
+            stmts.push(stmt);
+            todo.extend(freed.into_iter().flat_map(Vec::into_iter).rev());
+        }
+    }
+
+    /// For a guard, `stmt` rewritten and the statements it frees.
+    fn freed(&mut self, stmt: &mut CStmt) -> Option<Vec<CStmt>> {
+        // The markers of the `if`'s own observation, which a negated test is written over.
+        let (stmt, ids) = match stmt {
+            CStmt::Observed { ids, stmt } => (&mut **stmt, ids.ids()),
+            stmt => (stmt, &[][..]),
+        };
+        let CStmt::If {
+            cond,
+            then_body,
+            else_body,
+        } = stmt
+        else {
+            return None;
+        };
+        let ends = (
+            ends_in_never_return(then_body, self.ev),
+            ends_in_never_return(else_body.as_deref()?, self.ev),
+        );
+        match ends {
+            (true, false) => {
+                self.rewritten += 1;
+                Some(statements(*else_body.take()?))
             }
-            CStmt::For { body, .. } | CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
-                self.slot(body);
-                None
+            // The call is on the else arm: the guard tests the opposite, over the test's own atom.
+            (false, true) if !ids.is_empty() => {
+                let test = std::mem::replace(cond, CExpr::IntLit(0));
+                *cond = negated(as_atoms(test, ids.iter().copied(), self.marks));
+                self.rewritten += 1;
+                let rest = std::mem::replace(&mut **then_body, *else_body.take()?);
+                Some(statements(rest))
             }
-            CStmt::Switch { cases, default, .. } => {
-                for body in cases
-                    .iter_mut()
-                    .map(|case| &mut case.body)
-                    .chain(default.iter_mut())
-                {
-                    self.sequence(body);
-                }
-                None
-            }
+            // Both arms end in such a call, or neither: nothing continues past one.
             _ => None,
         }
+    }
+}
+
+/// The places inside `stmt` to visit: arms, loop bodies, blocks, cases.
+fn enter<'a>(mut stmt: &'a mut CStmt, pending: &mut Vec<Slot<'a>>) {
+    while let CStmt::Observed { stmt: inner, .. } = stmt {
+        stmt = inner;
+    }
+    match stmt {
+        CStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            pending.push(Slot::One(then_body));
+            pending.extend(else_body.as_deref_mut().map(Slot::One));
+        }
+        CStmt::Block(stmts) => pending.push(Slot::Many(stmts)),
+        CStmt::For { body, .. } | CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
+            pending.push(Slot::One(body));
+        }
+        CStmt::Switch { cases, default, .. } => pending.extend(
+            (cases.iter_mut().map(|case| &mut case.body))
+                .chain(default)
+                .map(Slot::Many),
+        ),
+        _ => {}
     }
 }
 
@@ -111,17 +150,24 @@ fn statements(arm: CStmt) -> Vec<CStmt> {
 }
 
 /// Whether the last statement of `stmt` is a call to a callee declared never to return, so that
-/// control cannot leave `stmt` by reaching its end.
-fn ends_in_never_return(stmt: &CStmt, ev: &Evidence<'_>) -> bool {
-    match stmt {
-        CStmt::Observed { stmt, .. } => ends_in_never_return(stmt, ev),
-        CStmt::Block(stmts) => stmts
-            .iter()
-            .rev()
-            .find(|stmt| !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_)))
-            .is_some_and(|last| ends_in_never_return(last, ev)),
-        CStmt::Expr(_) => (ev.never_returns)(stmt),
-        _ => false,
+/// control cannot leave `stmt` by reaching its end. Walks only the nested blocks at the arm's end.
+fn ends_in_never_return(mut stmt: &CStmt, ev: &Evidence<'_>) -> bool {
+    loop {
+        match stmt {
+            CStmt::Observed { stmt: inner, .. } => stmt = inner,
+            CStmt::Block(stmts) => {
+                let last = stmts
+                    .iter()
+                    .rev()
+                    .find(|stmt| !matches!(stmt.unobserved(), CStmt::Empty | CStmt::Comment(_)));
+                match last {
+                    Some(last) => stmt = last,
+                    None => return false,
+                }
+            }
+            CStmt::Expr(_) => return (ev.never_returns)(stmt),
+            _ => return false,
+        }
     }
 }
 
@@ -139,6 +185,7 @@ mod tests {
     fn evidence<'a>(never_returns: &'a dyn Fn(&CStmt) -> bool) -> Evidence<'a> {
         Evidence {
             never_returns,
+            declares_noreturn: true,
             distinct_return: &|_| false,
         }
     }
@@ -727,6 +774,96 @@ mod tests {
             assert_eq!(top(&body).len(), 1);
             assert_eq!(count_elses(&body), 0);
         }
+    }
+
+    /// Runs `check` on a stack that holds a few hundred frames of a walk that recurses to the tree's depth.
+    fn on_a_small_stack(check: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(256 << 10)
+            .spawn(check)
+            .expect("a thread")
+            .join()
+            .expect("the pass finishes without recursing to the depth of the chain");
+    }
+
+    /// Deep enough that a recursion per level cannot fit the small stack, and that a pass moving the tail
+    /// of the chain at each level takes seconds.
+    const DEEP: usize = 10_000;
+
+    /// A statement every level of a chain puts before the next level, and a `return` ends the chain.
+    fn chain_end() -> CStmt {
+        at(0x40, ret())
+    }
+
+    /// `DEEP` pairs of an `if` with no else and the statement it freed, then the `return` the chain ended in.
+    fn flat_chain(stmts: &[CStmt]) -> bool {
+        let (levels, rest) = stmts.as_chunks::<2>();
+        let guard_and_rest = |[guard, freed]: &[CStmt; 2]| {
+            matches!(
+                guard.unobserved(),
+                CStmt::If {
+                    else_body: None,
+                    ..
+                }
+            ) && matches!(freed.unobserved(), CStmt::Expr(_))
+        };
+        levels.len() == DEEP
+            && levels.iter().all(guard_and_rest)
+            && matches!(rest, [last] if matches!(last.unobserved(), CStmt::Return(_)))
+    }
+
+    #[test]
+    fn a_chain_of_guards_nested_in_else_arms_is_freed_flat_without_a_frame_per_level() {
+        on_a_small_stack(|| {
+            let mut next = chain_end();
+            for _ in 0..DEEP {
+                next = branching(
+                    CStmt::Block(vec![at(0x20, exit())]),
+                    vec![at(0x30, expr()), next],
+                );
+            }
+            let mut body = CStmt::Block(vec![next]);
+            assert_eq!(guarded(&mut body, &never_returns), DEEP);
+            // Each level's test, its exit, then the statement it freed, ending in the return.
+            assert!(flat_chain(top(&body)));
+        });
+    }
+
+    #[test]
+    fn a_chain_of_guards_nested_in_then_arms_is_freed_flat_without_a_frame_per_level() {
+        on_a_small_stack(|| {
+            let mut next = chain_end();
+            for _ in 0..DEEP {
+                next = at(
+                    0x10,
+                    CStmt::if_stmt(
+                        cond(),
+                        CStmt::Block(vec![at(0x30, expr()), next]),
+                        Some(CStmt::Block(vec![at(0x20, exit())])),
+                    ),
+                );
+            }
+            let mut body = CStmt::Block(vec![next]);
+            assert_eq!(guarded(&mut body, &never_returns), DEEP);
+            assert!(flat_chain(top(&body)));
+        });
+    }
+
+    #[test]
+    fn a_chain_of_else_ifs_nothing_frees_is_walked_without_a_frame_per_level() {
+        on_a_small_stack(|| {
+            let mut next = at(0x40, expr());
+            for _ in 0..DEEP {
+                next = at(
+                    0x10,
+                    CStmt::if_stmt(cond(), CStmt::Block(vec![at(0x20, expr())]), Some(next)),
+                );
+            }
+            let mut body = CStmt::Block(vec![next]);
+            assert_eq!(guarded(&mut body, &never_returns), 0);
+            // Dropping the chain recurses to its depth, which is the tree's own and not this pass's.
+            std::mem::forget(body);
+        });
     }
 
     /// Random trees of `if`s, `exit`s and plain statements, for what the guard must keep.
