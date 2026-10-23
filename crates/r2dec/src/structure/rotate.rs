@@ -1,8 +1,8 @@
 //! Loop rotation: `for (;;)` written as `while` or `do-while` where the loop is one, with the test's
 //! markers on the loop for the certificate (`doc/adr-structure-dominator-tree.md` §5, 2026-10-22).
 
-use super::condition::Marks;
-use crate::ast::{BinaryOp, CExpr, CStmt, UnaryOp};
+use super::condition::{Marks, as_atoms, negated};
+use crate::ast::{CExpr, CStmt};
 
 /// Write each `for (;;)` of the tree as the loop it is, where it is one; the number written.
 /// O(statements): each loop is read once, from the statements at the top and bottom of its body.
@@ -95,10 +95,7 @@ fn build(body: CStmt, shape: Shape, marks: &mut dyn Marks) -> CStmt {
     else {
         unreachable!("read found an if with both arms");
     };
-    let atom = match marked(&cond) {
-        true => cond,
-        false => CExpr::observe_all(ids.iter().map(|id| marks.copy_of(id)), cond),
-    };
+    let atom = as_atoms(cond, ids.iter(), marks);
     let (stay, test) = match shape.leaves_on_true {
         true => (*else_body, negated(atom)),
         false => (*then_body, atom),
@@ -180,77 +177,11 @@ pub(super) fn continues(stmt: &CStmt) -> bool {
     }
 }
 
-/// The test that holds where `test` does not, over marked atoms: they take the `!` and the
-/// connectives swap. An integer comparison reads as its opposite once certified (`respell_negations`).
-fn negated(test: CExpr) -> CExpr {
-    match test {
-        CExpr::Binary {
-            op: op @ (BinaryOp::And | BinaryOp::Or),
-            left,
-            right,
-        } if marked(&left) || marked(&right) => {
-            let flipped = if op == BinaryOp::And {
-                BinaryOp::Or
-            } else {
-                BinaryOp::And
-            };
-            CExpr::binary(flipped, negated(*left), negated(*right))
-        }
-        CExpr::Unary {
-            op: UnaryOp::Not,
-            operand,
-        } if marked(&operand) => *operand,
-        atom => CExpr::unary(UnaryOp::Not, atom),
-    }
-}
-
-/// Whether a test carries a block's marker somewhere, which the lowering never puts there.
-fn marked(expr: &CExpr) -> bool {
-    let mut pending = vec![expr];
-    while let Some(expr) = pending.pop() {
-        if matches!(expr, CExpr::Observed { .. }) {
-            return true;
-        }
-        pending.extend(expr.children());
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::{RenderObservationId, test_render_observation_id};
-
-    /// Markers whose block is their index; the copy of marker `n` is marker `1000 + n`.
-    struct Fixture;
-
-    impl crate::structure::certify::Placed for Fixture {
-        fn block_of(&self, id: RenderObservationId) -> Option<u64> {
-            Some(u64::from(id.index() % 1000))
-        }
-
-        fn statement_of(&self, id: RenderObservationId) -> Option<RenderObservationId> {
-            Some(id)
-        }
-
-        fn written(&self) -> usize {
-            0
-        }
-
-        fn edge_copy(&self, _id: RenderObservationId) -> bool {
-            false
-        }
-    }
-
-    impl Marks for Fixture {
-        fn block_of(&self, id: RenderObservationId) -> Option<u64> {
-            Some(u64::from(id.index() % 1000))
-        }
-
-        fn copy_of(&mut self, id: RenderObservationId) -> RenderObservationId {
-            test_render_observation_id(1000 + id.index())
-        }
-    }
+    use crate::ast::{BinaryOp, UnaryOp, test_render_observation_id};
+    use crate::structure::support::Fixture;
 
     fn marker(block: u32, stmt: CStmt) -> CStmt {
         CStmt::observe_one(test_render_observation_id(block), stmt)

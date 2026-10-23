@@ -1,82 +1,118 @@
-//! `if (c) { f(); } else { rest }` with `f` declared never to return is `if (c) { f(); } rest`:
-//! `doc/adr-structure-dominator-tree.md`, "the noreturn guard".
+//! `if (c) { f(); } else { rest }` with `f` declared never to return is `if (c) { f(); } rest`, and with
+//! the arms the other way round `if (!c) { f(); } rest`: `doc/adr-structure-dominator-tree.md`, "the noreturn guard".
 
+use super::condition::{Marks, as_atoms, negated};
 use super::shape::Evidence;
-use crate::ast::CStmt;
+use crate::ast::{CStmt, RenderObservationId};
+
+/// What the rewrites may use: the evidence, the markers a negated test is written over, and a count.
+struct Guard<'a, 'e> {
+    ev: &'a Evidence<'e>,
+    marks: &'a mut dyn Marks,
+    rewritten: usize,
+}
+
+/// The statements a guard frees, and whether the walk has visited them already.
+enum Rest {
+    Unvisited(Vec<CStmt>),
+    Visited(Vec<CStmt>),
+}
 
 /// Rewrite every such `if` of `body` and say how many were rewritten. O(statements): each statement
-/// is visited once, and a guard's else statements join the sequence it sits in without a second visit.
-pub(crate) fn guard(body: &mut CStmt, ev: &Evidence<'_>) -> usize {
-    let mut rewritten = 0;
-    slot(body, ev, &mut rewritten);
-    rewritten
+/// is visited once, and the statements a guard frees join the sequence the `if` sits in.
+pub(crate) fn guard(body: &mut CStmt, ev: &Evidence<'_>, marks: &mut dyn Marks) -> usize {
+    let mut guard = Guard {
+        ev,
+        marks,
+        rewritten: 0,
+    };
+    guard.slot(body);
+    guard.rewritten
 }
 
-/// A statement where one statement stands (an arm, a loop body): a guard there brings its rest.
-fn slot(stmt: &mut CStmt, ev: &Evidence<'_>, rewritten: &mut usize) {
-    if let CStmt::Block(stmts) = stmt {
-        return sequence(stmts, ev, rewritten);
+impl Guard<'_, '_> {
+    /// A statement where one statement stands (an arm, a loop body): a guard there brings its rest.
+    fn slot(&mut self, stmt: &mut CStmt) {
+        if let CStmt::Block(stmts) = stmt {
+            return self.sequence(stmts);
+        }
+        let mut stmts = vec![std::mem::replace(stmt, CStmt::Empty)];
+        self.sequence(&mut stmts);
+        *stmt = super::tails::one(stmts);
     }
-    let mut stmts = vec![std::mem::replace(stmt, CStmt::Empty)];
-    sequence(&mut stmts, ev, rewritten);
-    *stmt = super::tails::one(stmts);
-}
 
-/// The statements of a body in order; a guard's rest is visited next, in the same body.
-fn sequence(stmts: &mut Vec<CStmt>, ev: &Evidence<'_>, rewritten: &mut usize) {
-    let mut pending = std::mem::take(stmts).into_iter().rev().collect::<Vec<_>>();
-    while let Some(mut stmt) = pending.pop() {
-        let rest = visit(&mut stmt, ev, rewritten);
-        stmts.push(stmt);
-        if let Some(rest) = rest {
-            *rewritten += 1;
-            pending.extend(rest.into_iter().rev());
+    /// The statements of a body in order; what a guard frees is visited next, in the same body.
+    fn sequence(&mut self, stmts: &mut Vec<CStmt>) {
+        let mut pending = std::mem::take(stmts).into_iter().rev().collect::<Vec<_>>();
+        while let Some(mut stmt) = pending.pop() {
+            let rest = self.visit(&mut stmt, &[]);
+            stmts.push(stmt);
+            match rest {
+                Some(Rest::Unvisited(rest)) => pending.extend(rest.into_iter().rev()),
+                Some(Rest::Visited(rest)) => stmts.extend(rest),
+                None => {}
+            }
+        }
+    }
+
+    /// `stmt`'s parts rewritten; for a guard, the statements it frees. `ids` are the markers of the
+    /// statement the `if` is observed under, which a negated test is written over.
+    fn visit(&mut self, stmt: &mut CStmt, ids: &[RenderObservationId]) -> Option<Rest> {
+        match stmt {
+            CStmt::Observed { ids, stmt } => self.visit(stmt, ids.ids()),
+            CStmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => {
+                // An arm is rewritten first: a guard inside it can be what makes it end in the call.
+                self.slot(then_body);
+                let arm = else_body.as_mut()?;
+                if ends_in_never_return(then_body, self.ev) {
+                    self.rewritten += 1;
+                    let rest = else_body.take()?;
+                    return Some(Rest::Unvisited(statements(*rest)));
+                }
+                self.slot(arm);
+                if ids.is_empty() || !ends_in_never_return(arm, self.ev) {
+                    return None;
+                }
+                // The call is on the else arm: the guard tests the opposite, over the test's own atom.
+                let test = std::mem::replace(cond, crate::ast::CExpr::IntLit(0));
+                *cond = negated(as_atoms(test, ids.iter().copied(), self.marks));
+                let rest = std::mem::replace(&mut **then_body, *else_body.take()?);
+                self.rewritten += 1;
+                Some(Rest::Visited(statements(rest)))
+            }
+            CStmt::Block(stmts) => {
+                self.sequence(stmts);
+                None
+            }
+            CStmt::For { body, .. } | CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
+                self.slot(body);
+                None
+            }
+            CStmt::Switch { cases, default, .. } => {
+                for body in cases
+                    .iter_mut()
+                    .map(|case| &mut case.body)
+                    .chain(default.iter_mut())
+                {
+                    self.sequence(body);
+                }
+                None
+            }
+            _ => None,
         }
     }
 }
 
-/// `stmt`'s parts rewritten; for a guard, its else statements taken out for the body to continue with.
-fn visit(stmt: &mut CStmt, ev: &Evidence<'_>, rewritten: &mut usize) -> Option<Vec<CStmt>> {
-    match stmt {
-        CStmt::Observed { stmt, .. } => visit(stmt, ev, rewritten),
-        CStmt::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            // The arm is rewritten first: a guard inside it can be what makes it end in the call.
-            slot(then_body, ev, rewritten);
-            if else_body.is_some() && ends_in_never_return(then_body, ev) {
-                return match *else_body.take()? {
-                    CStmt::Block(rest) => Some(rest),
-                    CStmt::Empty => Some(Vec::new()),
-                    other => Some(vec![other]),
-                };
-            }
-            if let Some(else_body) = else_body {
-                slot(else_body, ev, rewritten);
-            }
-            None
-        }
-        CStmt::Block(stmts) => {
-            sequence(stmts, ev, rewritten);
-            None
-        }
-        CStmt::For { body, .. } | CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
-            slot(body, ev, rewritten);
-            None
-        }
-        CStmt::Switch { cases, default, .. } => {
-            for body in cases
-                .iter_mut()
-                .map(|case| &mut case.body)
-                .chain(default.iter_mut())
-            {
-                sequence(body, ev, rewritten);
-            }
-            None
-        }
-        _ => None,
+/// The statements of an arm, as the body they join.
+fn statements(arm: CStmt) -> Vec<CStmt> {
+    match arm {
+        CStmt::Block(stmts) => stmts,
+        CStmt::Empty => Vec::new(),
+        other => vec![other],
     }
 }
 
@@ -98,10 +134,10 @@ fn ends_in_never_return(stmt: &CStmt, ev: &Evidence<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ast::CExpr;
-    use crate::structure::certify::{Placed, StatementRole, certify};
+    use crate::ast::{CExpr, UnaryOp};
+    use crate::structure::certify::{StatementRole, Violation, certify};
     use crate::structure::support::{
-        ByBlock, at, branch, cfg, cond, cond_branch, exit, expr, never_returns,
+        Fixture, at, branch, cfg, cond, cond_branch, exit, expr, never_returns,
     };
     use r2ssa::cfg::{BlockTerminator, CFG};
     use r2ssa::domtree::DomTree;
@@ -111,6 +147,10 @@ mod tests {
             never_returns,
             distinct_return: &|_| false,
         }
+    }
+
+    fn guarded(body: &mut CStmt, never_returns: &dyn Fn(&CStmt) -> bool) -> usize {
+        guard(body, &evidence(never_returns), &mut Fixture)
     }
 
     fn ret() -> CStmt {
@@ -138,38 +178,23 @@ mod tests {
         )
     }
 
-    fn certified(body: &CStmt, cfg: &CFG) -> bool {
-        struct Whole;
-        impl Placed for Whole {
-            fn block_of(&self, id: crate::ast::RenderObservationId) -> Option<u64> {
-                ByBlock.block_of(id)
-            }
-            fn statement_of(
-                &self,
-                id: crate::ast::RenderObservationId,
-            ) -> Option<crate::ast::RenderObservationId> {
-                ByBlock.statement_of(id)
-            }
-            fn written(&self) -> usize {
-                0
-            }
-            fn edge_copy(&self, _: crate::ast::RenderObservationId) -> bool {
-                false
-            }
-        }
+    fn certificate(body: &CStmt, cfg: &CFG) -> crate::structure::certify::ControlCertificate {
         certify(
             body,
             cfg,
             &DomTree::compute(cfg),
             0x10,
-            &Whole,
+            &Fixture,
             &|_| None,
             &|stmt| match never_returns(stmt) {
                 true => StatementRole::Ends,
                 false => StatementRole::Plain,
             },
         )
-        .ok()
+    }
+
+    fn certified(body: &CStmt, cfg: &CFG) -> bool {
+        certificate(body, cfg).ok()
     }
 
     /// The tree's leaf statements in the order the text runs them, ignoring the `if`'s braces.
@@ -193,6 +218,21 @@ mod tests {
         }
     }
 
+    fn count_elses(stmt: &CStmt) -> usize {
+        match stmt.unobserved() {
+            CStmt::Block(stmts) => stmts.iter().map(count_elses).sum(),
+            CStmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                count_elses(then_body)
+                    + else_body.as_deref().map_or(0, |body| 1 + count_elses(body))
+            }
+            _ => 0,
+        }
+    }
+
     #[test]
     fn a_then_arm_ending_in_a_call_that_never_returns_frees_the_else_and_still_certifies() {
         let cfg = arms(BlockTerminator::None);
@@ -200,7 +240,7 @@ mod tests {
             CStmt::Block(vec![at(0x20, expr()), at(0x20, exit())]),
             vec![at(0x30, expr()), at(0x40, ret())],
         )]);
-        assert_eq!(guard(&mut body, &evidence(&never_returns)), 1);
+        assert_eq!(guarded(&mut body, &never_returns), 1);
         let CStmt::Block(stmts) = &body else {
             panic!("a block");
         };
@@ -228,26 +268,11 @@ mod tests {
         ])]);
         let (mut before, mut after) = (Vec::new(), Vec::new());
         trace(&body, &mut before);
-        assert_eq!(guard(&mut body, &evidence(&never_returns)), 2);
+        assert_eq!(guarded(&mut body, &never_returns), 2);
         trace(&body, &mut after);
         // The same leaves in the same order; no else arm holds anything now.
         assert_eq!(before, after);
         assert_eq!(count_elses(&body), 0);
-    }
-
-    fn count_elses(stmt: &CStmt) -> usize {
-        match stmt.unobserved() {
-            CStmt::Block(stmts) => stmts.iter().map(count_elses).sum(),
-            CStmt::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                count_elses(then_body)
-                    + else_body.as_deref().map_or(0, |body| 1 + count_elses(body))
-            }
-            _ => 0,
-        }
     }
 
     #[test]
@@ -257,24 +282,99 @@ mod tests {
             vec![at(0x30, expr()), at(0x40, ret())],
         )]);
         let kept = body.clone();
-        assert_eq!(guard(&mut body, &evidence(&|_| false)), 0);
+        assert_eq!(guarded(&mut body, &|_| false), 0);
         assert_eq!(body, kept);
     }
 
     #[test]
-    fn an_else_arm_that_never_returns_is_not_a_guard() {
-        // The then arm returns; the polarity a guard of the other arm needs is not the test's.
-        let mut body = CStmt::Block(vec![at(
+    fn an_else_arm_that_never_returns_is_a_guard_on_the_negated_test_and_the_machine_s_edges_hold()
+    {
+        // 0x10 goes to 0x20 on true and to 0x30, which exits, on false: `if (!c) exit(); <0x20>`.
+        let cfg = cfg(
             0x10,
-            CStmt::if_stmt(
-                cond(),
-                CStmt::Block(vec![at(0x20, ret())]),
-                Some(CStmt::Block(vec![at(0x30, exit())])),
+            &[
+                (0x10, cond_branch(0x20, 0x30)),
+                (0x20, branch(0x40)),
+                (0x30, BlockTerminator::None),
+                (0x40, BlockTerminator::Return),
+            ],
+        );
+        let mut body = CStmt::Block(vec![
+            at(
+                0x10,
+                CStmt::if_stmt(
+                    cond(),
+                    CStmt::Block(vec![at(0x20, expr())]),
+                    Some(CStmt::Block(vec![at(0x30, exit())])),
+                ),
             ),
+            at(0x40, ret()),
+        ]);
+        assert!(certified(&body, &cfg));
+        assert_eq!(guarded(&mut body, &never_returns), 1);
+        assert_eq!(count_elses(&body), 0);
+        let certificate = certificate(&body, &cfg);
+        assert!(certificate.ok(), "{certificate}");
+        // The test is the opposite of the machine's true edge, over an atom of the test's own block.
+        let CStmt::Block(stmts) = &mut body else {
+            panic!("a block");
+        };
+        let CStmt::Observed { stmt, .. } = &mut stmts[0] else {
+            panic!("the observed if");
+        };
+        let CStmt::If { cond, .. } = &mut **stmt else {
+            panic!("an if");
+        };
+        let CExpr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } = &*cond
+        else {
+            panic!("a negation: {cond:?}");
+        };
+        let CExpr::Observed { ids, .. } = &**operand else {
+            panic!("a marked atom: {operand:?}");
+        };
+        assert_eq!(ids.iter().next().map(|id| id.index() % 1000), Some(0x10));
+        // The same arms swapped under the unnegated test are the other branch, which the machine does not run.
+        *cond = CExpr::int(1);
+        let wrong = self::certificate(&CStmt::Block(stmts.clone()), &cfg);
+        assert!(
+            (wrong.violations.iter())
+                .any(|violation| matches!(violation, Violation::EdgeMismatch { block: 0x10, .. })),
+            "{wrong}"
+        );
+    }
+
+    #[test]
+    fn an_if_nothing_observed_has_no_atom_to_negate_and_keeps_its_else() {
+        let mut body = CStmt::Block(vec![CStmt::if_stmt(
+            cond(),
+            CStmt::Block(vec![at(0x20, expr())]),
+            Some(CStmt::Block(vec![at(0x30, exit())])),
         )]);
         let kept = body.clone();
-        assert_eq!(guard(&mut body, &evidence(&never_returns)), 0);
+        assert_eq!(guarded(&mut body, &never_returns), 0);
         assert_eq!(body, kept);
+    }
+
+    #[test]
+    fn two_arms_that_never_return_keep_the_tests_polarity() {
+        let mut body = CStmt::Block(vec![branching(
+            CStmt::Block(vec![at(0x20, exit())]),
+            vec![at(0x30, exit())],
+        )]);
+        assert_eq!(guarded(&mut body, &never_returns), 1);
+        let CStmt::Block(stmts) = &body else {
+            panic!("a block");
+        };
+        let CStmt::Observed { stmt, .. } = &stmts[0] else {
+            panic!("the observed if");
+        };
+        let CStmt::If { cond: test, .. } = &**stmt else {
+            panic!("an if");
+        };
+        assert_eq!(test, &cond());
     }
 
     #[test]
@@ -295,7 +395,7 @@ mod tests {
             at(0x40, ret()),
         ]);
         assert!(certified(&body, &cfg));
-        assert_eq!(guard(&mut body, &evidence(&|_| true)), 1);
+        assert_eq!(guarded(&mut body, &|_| true), 1);
         assert!(!certified(&body, &cfg));
     }
 }

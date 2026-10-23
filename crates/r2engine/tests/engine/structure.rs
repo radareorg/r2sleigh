@@ -890,10 +890,22 @@ fn a_call_through_a_register_keeps_its_else() {
 }
 
 #[test]
-fn an_else_arm_that_never_returns_keeps_its_polarity() {
-    // `if (c == 0) return 7; else exit(1);` as a guard is `if (c != 0) exit(1); return 7;`: a test the
-    // text negates, which the certificate reads from a marked atom and a lowered test has none (ROADMAP D75).
+fn an_else_arm_that_never_returns_is_a_guard_on_the_opposite_test() {
+    // `if (c == 0) return 7; else exit(1);` is `if (c != 0) exit(1); return 7;`: the call is the guard's
+    // body, so the test is the machine's other edge, written once over the test's own atom.
     let c = c_calling("exit", FALLING_CALL, &[0x09]);
-    assert!(c.contains("else"), "{c}");
-    assert_eq!(tests_of(&c).len(), 1, "{c}");
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    assert!(!c.contains("else") && !c.contains("(!"), "{c}");
+    let test = tests_of(&c);
+    assert_eq!(test.len(), 1, "{c}");
+    assert!(test[0].contains("!= (uint32_t)0U"), "{c}");
+    let (guard, exit, rest) = (
+        line_of(&c, "if ("),
+        line_of(&c, "exit(1)"),
+        line_of(&c, "return 7"),
+    );
+    assert!(
+        guard.0 < exit.0 && exit.0 < rest.0 && rest.1 == guard.1,
+        "{c}"
+    );
 }

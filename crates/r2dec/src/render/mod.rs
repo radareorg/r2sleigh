@@ -263,8 +263,8 @@ fn structured(
     let body = stage("loop rotation", body, marks, &certified, |body, marks| {
         crate::structure::rotate::rotate(body, marks) != 0
     });
-    stage("noreturn guards", body, marks, &certified, |body, _| {
-        crate::structure::guard::guard(body, evidence) != 0
+    stage("noreturn guards", body, marks, &certified, |body, marks| {
+        crate::structure::guard::guard(body, evidence, marks) != 0
     })
 }
 

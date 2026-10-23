@@ -575,6 +575,54 @@ pub(crate) trait Marks {
     fn copy_of(&mut self, id: RenderObservationId) -> RenderObservationId;
 }
 
+/// `test` as the writer's atoms: a test with no marker becomes one atom carrying a copy of each of `ids`.
+pub(super) fn as_atoms(
+    test: CExpr,
+    ids: impl IntoIterator<Item = RenderObservationId>,
+    marks: &mut dyn Marks,
+) -> CExpr {
+    match carries_marker(&test) {
+        true => test,
+        false => CExpr::observe_all(ids.into_iter().map(|id| marks.copy_of(id)), test),
+    }
+}
+
+/// The test that holds where `test` does not, over marked atoms: they take the `!` and the
+/// connectives swap. An integer comparison reads as its opposite once certified (`respell_negations`).
+pub(super) fn negated(test: CExpr) -> CExpr {
+    match test {
+        CExpr::Binary {
+            op: op @ (BinaryOp::And | BinaryOp::Or),
+            left,
+            right,
+        } if carries_marker(&left) || carries_marker(&right) => {
+            let flipped = if op == BinaryOp::And {
+                BinaryOp::Or
+            } else {
+                BinaryOp::And
+            };
+            CExpr::binary(flipped, negated(*left), negated(*right))
+        }
+        CExpr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } if carries_marker(&operand) => *operand,
+        atom => CExpr::unary(UnaryOp::Not, atom),
+    }
+}
+
+/// Whether a test carries a block's marker somewhere, which the lowering never puts there.
+fn carries_marker(expr: &CExpr) -> bool {
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        if matches!(expr, CExpr::Observed { .. }) {
+            return true;
+        }
+        pending.extend(expr.children());
+    }
+    false
+}
+
 /// The chains written, and the ones refused with the head and the reason.
 #[derive(Debug, Default)]
 pub(crate) struct Report {

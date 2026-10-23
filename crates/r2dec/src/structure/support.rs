@@ -82,3 +82,34 @@ pub(crate) fn never_returns(stmt: &CStmt) -> bool {
     matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })
         if matches!(&**func, CExpr::External { name, .. } if name == EXIT))
 }
+
+/// Markers whose block is their index; the copy of marker `n` is marker `1000 + n`.
+pub(crate) struct Fixture;
+
+impl Placed for Fixture {
+    fn block_of(&self, id: RenderObservationId) -> Option<u64> {
+        Some(u64::from(id.index() % 1000))
+    }
+
+    fn statement_of(&self, id: RenderObservationId) -> Option<RenderObservationId> {
+        Some(id)
+    }
+
+    fn written(&self) -> usize {
+        0
+    }
+
+    fn edge_copy(&self, _id: RenderObservationId) -> bool {
+        false
+    }
+}
+
+impl super::condition::Marks for Fixture {
+    fn block_of(&self, id: RenderObservationId) -> Option<u64> {
+        Some(u64::from(id.index() % 1000))
+    }
+
+    fn copy_of(&mut self, id: RenderObservationId) -> RenderObservationId {
+        test_render_observation_id(1000 + id.index())
+    }
+}
