@@ -341,8 +341,27 @@ the callee's declaration (r2abi's prototype, or r2engine's walk finding no fall-
 The stage is kept only while the control certificate holds and is reverted whole otherwise (section 5); the checker
 reads the arm's end through the same predicate, so a guard on a call the machine returns from leaves an edge the
 block does not have, which section 3 (ii) refuses (`a_guard_the_machine_does_not_have_fails_the_certificate`).
-O(statements): each statement is visited once, both arms of an `if` before it is judged, and the statements a guard
-frees join the sequence the `if` sits in; the walk recurses to the tree's depth, as the certificate's does.
+O(statements) and no recursion (below): the statements a guard frees join the sequence the `if` sits in, where they
+are visited in their turn.
+
+**Cost and depth.** The stage keeps a stack of the places it has still to visit (an arm, a loop body, a block, a
+case) and rebuilds each sequence once: a statement is taken from the sequence, a guard puts the statements it frees
+back at the front of what is left, and the rest of the chain is read as part of the same sequence. Each pop pushes only
+places inside the one it took, so the tree's height ends it, and each statement is moved twice at most whatever the
+depth of the chain; `ends_in_never_return` reads only the blocks nested at an arm's end. An arm is judged as it was
+written and not after the guards inside it are rewritten, which gives the same answer: the last statement of a
+rewritten sequence is the last statement of the arm its last guard frees, and an `if` ends in no call either way. The
+first build rewrote the arms first, recursed once per level and moved the whole tail of an `else` chain at every
+level (`if (c) { exit } else { S; <next> }` nested): in a debug test thread, 65 ms at 1,000 nested guards, 421 ms at
+2,000, 2.1 s at 4,000 and 18.8 s at 10,000 on a 2 GB stack, and a stack overflow at 10,000 on a 256 KB one (the review
+saw it at 4,000 on a 2 MB test thread). The
+iterative pass takes 1.4, 2.3, 5.0 and 11.8 ms at the same sizes on a 256 KB stack, with the same trees
+(60,000 random trees with observations, bare `if` arms, comments, labels, loops and switches: equal tree and equal
+count against the first build), and the unit tests run chains of 10,000 in both orientations and an `else if` chain
+of 10,000 on that stack. The chain is not what limits a whole function: `r2s` aborts with a stack overflow at about
+4,500 sequential `if (p[i] == k) { exit(n); }` checks on the base and on this branch alike, in the placement writer
+(`control.rs`: `block_region`, `arms`, `edge` and `place` call each other once per nested `if`), which runs before
+this stage (ROADMAP D76).
 
 **The other arm.** `if (c) { rest } else { f(); }` is `if (!c) { f(); } rest`: the call is the guard's body, so the
 test is the machine's other edge. A test the lowering wrote carries no marker, and the certificate reads a negation
@@ -415,7 +434,8 @@ total 117,742 to 117,595 (-147), 80 functions better and 33 worse (by 1 to 4); n
 Release `pdd` with `aa` on Apple M5, instructions retired, base then head, two runs each: 0pack `0x62ecf0` 71.97G and 71.87G
 against 72.09G and 71.91G (+0.11% on the means; the rendering is class A, 21 fewer `else` and 21 fewer lines, 15 gotos
 before and after), pumasim `0x23fdf0` 85.18G and 85.18G against 85.14G and 85.16G (byte-identical); peak footprint 250 to 269
-MB in both. The stage's own cost is one clone of the body (the cost every stage pays) and one walk.
+MB in both. The stage's own cost is one clone of the body (the cost every stage pays) and one walk, and it does not
+run at all where no callee is declared never to return (`Evidence::declares_noreturn`).
 
 ## 2026-10-22: the recoveries together
 
