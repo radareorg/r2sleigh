@@ -127,6 +127,49 @@ def parse_prototype(line: str) -> Prototype | None:
     return Prototype(normalize_type(match.group("ret")), params, names)
 
 
+# Byte widths of the spellings normalize_type leaves, and which are unsigned.
+INTEGER_WIDTH = {
+    "bool": 1, "_Bool": 1, "char": 1, "int8_t": 1, "uint8_t": 1,
+    "short": 2, "int16_t": 2, "uint16_t": 2,
+    "int": 4, "int32_t": 4, "uint32_t": 4, "unsigned": 4, "wint_t": 4,
+    "long": 8, "int64_t": 8, "uint64_t": 8, "size_t": 8, "ssize_t": 8,
+    "intptr_t": 8, "uintptr_t": 8, "ptrdiff_t": 8, "long long": 8,
+}
+UNSIGNED = {"bool", "_Bool", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "unsigned", "size_t", "uintptr_t"}
+QUALIFIERS = re.compile(r"\b(?:const|volatile|restrict)\b")
+
+
+def split_pointer(spelling: str) -> tuple[int, str]:
+    """A type's pointer depth and the name beneath it, qualifiers dropped.
+
+    A function pointer is one level over `(fn)`, whatever its parameter list.
+    """
+    text = QUALIFIERS.sub("", spelling)
+    if "(*" in text:
+        return 1, "(fn)"
+    depth = text.count("*")
+    return depth, " ".join(text.replace("*", " ").split())
+
+
+def classify(expected: str, actual: str) -> str:
+    """Which way a recovered type differs from the source's, so a fix is graded by the bucket it empties."""
+    want_depth, want = split_pointer(expected)
+    got_depth, got = split_pointer(actual)
+    if (want == "void" and not want_depth) != (got == "void" and not got_depth):
+        return "void_vs_value"
+    if want_depth and not got_depth:
+        return "pointer_as_integer"
+    if got_depth and not want_depth:
+        return "integer_as_pointer"
+    if want_depth:
+        return "qualifier" if (want_depth, want) == (got_depth, got) else "pointee"
+    if want in INTEGER_WIDTH and got in INTEGER_WIDTH:
+        if INTEGER_WIDTH[got] != INTEGER_WIDTH[want]:
+            return "width_wider" if INTEGER_WIDTH[got] > INTEGER_WIDTH[want] else "width_narrower"
+        return "sign"
+    return "other"
+
+
 # What the engine names a parameter it recovered with no declaration: `argN`
 # as its own header spells it, the register that carries it at its entry
 # version (`RDI_0`, `X0_0`, `W1_0`), a register Sleigh gives no name
@@ -221,22 +264,31 @@ def recovered_from_stripped(binary: Path, r2s_bin: str) -> dict[int, tuple[Proto
 def score(truth: dict[int, Prototype],
           recovered: dict[int, tuple[Prototype, bool]],
           silent: list[str] | None = None,
-          called: dict[int, str] | None = None) -> dict[str, int]:
+          called: dict[int, str] | None = None,
+          wrong: dict[str, dict[str, dict[str, int]]] | None = None) -> dict[str, int]:
+    """Count every fact; `wrong` gets the buckets of the marked and the silent errors.
+
+    `wrong["silent"]["parameter"]["pointee"]` is how many silently wrong parameters differ in
+    their pointee. The silent keys stay what the baseline records.
+    """
     buckets = {"correct": 0, "missing": 0, "marked_wrong": 0, "silently_wrong": 0}
 
-    def judge(where: str, expected: str, actual: str | None, marked: bool) -> None:
+    def judge(label: str, role: str, expected: str, actual: str | None, marked: bool) -> None:
         if actual is None:
             buckets["missing"] += 1
         elif actual == expected:
             buckets["correct"] += 1
-        elif marked:
-            buckets["marked_wrong"] += 1
         else:
-            buckets["silently_wrong"] += 1
+            how = "marked" if marked else "silent"
+            buckets["marked_wrong" if marked else "silently_wrong"] += 1
+            if wrong is not None:
+                tally = wrong.setdefault(how, {}).setdefault(role, {})
+                kind = classify(expected, actual)
+                tally[kind] = tally.get(kind, 0) + 1
             # A silent error has to be nameable, or a gate that catches one
             # tells nobody which fact to go and look at.
-            if silent is not None:
-                silent.append(f"{where}: expected {expected!r}, said {actual!r}")
+            if not marked and silent is not None:
+                silent.append(f"{label}: expected {expected!r}, said {actual!r}")
 
     for addr, expected in truth.items():
         entry = recovered.get(addr)
@@ -245,11 +297,16 @@ def score(truth: dict[int, Prototype],
             continue
         actual, marked = entry
         where = (called or {}).get(addr) or f"{addr:#x}"
-        judge(f"{where} return", expected.ret, actual.ret, marked)
+        judge(f"{where} return", "return", expected.ret, actual.ret, marked)
         for index, param in enumerate(expected.params):
             got = actual.params[index] if index < len(actual.params) else None
-            judge(f"{where} parameter {index}", param, got, marked)
+            judge(f"{where} parameter {index}", "parameter", param, got, marked)
     return buckets
+
+
+def ordered(tally: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
+    """A tally with its keys sorted, so a report diffs the same on every run."""
+    return {role: dict(sorted(kinds.items())) for role, kinds in sorted(tally.items())}
 
 
 def main() -> int:
@@ -275,7 +332,8 @@ def main() -> int:
         return 2
     recovered = recovered_from_stripped(args.stripped_build, args.r2s)
     silent: list[str] = []
-    buckets = score(truth, recovered, silent, names(args.debug_build, args.r2s))
+    wrong: dict[str, dict[str, dict[str, int]]] = {}
+    buckets = score(truth, recovered, silent, names(args.debug_build, args.r2s), wrong)
 
     asserted = buckets["correct"] + buckets["silently_wrong"]
     facts = sum(buckets.values())
@@ -286,6 +344,8 @@ def main() -> int:
         "recovery_rate": round(buckets["correct"] / facts, 4) if facts else 0.0,
         "soundness_rate": round(1 - buckets["silently_wrong"] / asserted, 4) if asserted else 1.0,
         "silent": silent,
+        "silent_buckets": ordered(wrong.get("silent", {})),
+        "marked_buckets": ordered(wrong.get("marked", {})),
     }
     print(json.dumps(report, indent=2))
     if args.json:
