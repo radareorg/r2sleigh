@@ -384,8 +384,8 @@ PLACEHOLDERS = {"todo", "tbd", "fixme", "xxx"}
 
 def cause_is_stated(cause: object) -> bool:
     """A recorded cause is words about the fact, not a blank or a promise to write one."""
-    words = cause.split() if isinstance(cause, str) else []
-    return bool(words) and words[0].strip(":.-").lower() not in PLACEHOLDERS
+    words = re.findall(r"\w+", cause) if isinstance(cause, str) else []
+    return bool(words) and words[0].lower() not in PLACEHOLDERS
 
 
 def ordered(tally: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:

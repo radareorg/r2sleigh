@@ -508,7 +508,7 @@ class Baseline(unittest.TestCase):
         self.assertIn(f"NO CAUSE: {self.KEY}", err)
 
     def test_a_cause_that_says_nothing_fails_like_no_cause(self) -> None:
-        for why in ("", "   ", "\n", "TODO", "todo", " TODO: look later ", "TBD", None, 5, ["a cause"]):
+        for why in ("", "   ", "\n", "TODO", "todo", " TODO: look later ", "TBD", "- TODO", "(tbd) later", "---", None, 5, ["a cause"]):
             with self.subTest(why=why), tempfile.TemporaryDirectory() as directory:
                 path = self.record(directory, {self.KEY: why})
                 code, _, err = run_gate(self.TRUTH, self.WRONG, "--baseline", str(path))
