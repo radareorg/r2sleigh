@@ -240,7 +240,7 @@ fn blank(stmt: &CStmt) -> bool {
 }
 
 /// `stmts` as one statement.
-fn one(mut stmts: Vec<CStmt>) -> CStmt {
+pub(super) fn one(mut stmts: Vec<CStmt>) -> CStmt {
     match stmts.len() {
         0 => CStmt::Empty,
         1 => stmts.remove(0),
@@ -516,29 +516,14 @@ mod tests {
     use crate::prelude::ResidualCause;
     use crate::structure::certify::{Placed, StatementRole, certify};
     use crate::structure::shape::shape;
-    use crate::structure::support::{at, branch, cfg, cond, cond_branch, expr};
-    use crate::symbol::ExternalKind;
+    use crate::structure::support::{
+        at, branch, cfg, cond, cond_branch, exit, expr, never_returns,
+    };
     use r2ssa::cfg::{BlockTerminator, CFG};
     use r2ssa::domtree::DomTree;
 
-    const EXIT: &str = "exit";
-
     fn ret(value: i64) -> CStmt {
         CStmt::Return(Some(CExpr::IntLit(value)))
-    }
-
-    /// A call to `exit`, which every test here declares never returns.
-    fn exit() -> CStmt {
-        let callee = CExpr::External {
-            name: EXIT.to_owned(),
-            kind: ExternalKind::Function,
-        };
-        CStmt::Expr(CExpr::call(callee, Vec::new()))
-    }
-
-    fn never_returns(stmt: &CStmt) -> bool {
-        matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })
-            if matches!(&**func, CExpr::External { name, .. } if name == EXIT))
     }
 
     /// An edge copy: a statement no block owns.

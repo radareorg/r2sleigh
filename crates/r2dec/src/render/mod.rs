@@ -225,7 +225,7 @@ fn ready_with_carriers(c: CFunction, tags: &tags::Tags) -> crate::codegen::Emiss
 }
 
 /// D1.1: SD's stages over the placed body, each kept only while the control certificate still holds
-/// (ADR §5): condition chains, `shape`, the latch's copies, and loop rotation.
+/// (ADR §5): condition chains, `shape`, the latch's copies, loop rotation, and the noreturn guards.
 fn structured(
     input: &RenderInput<'_>,
     body: Vec<CStmt>,
@@ -260,8 +260,11 @@ fn structured(
     let body = stage("latch copies", body, marks, &certified, |body, marks| {
         crate::structure::latch::hoist(body, marks) != 0
     });
-    stage("loop rotation", body, marks, &certified, |body, marks| {
+    let body = stage("loop rotation", body, marks, &certified, |body, marks| {
         crate::structure::rotate::rotate(body, marks) != 0
+    });
+    stage("noreturn guards", body, marks, &certified, |body, _| {
+        crate::structure::guard::guard(body, evidence) != 0
     })
 }
 
