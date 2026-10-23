@@ -430,6 +430,23 @@ class Baseline(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn(f"NO CAUSE: {self.KEY}", err)
 
+    def test_a_cause_that_says_nothing_fails_like_no_cause(self) -> None:
+        for why in ("", "   ", "\n", "TODO", "todo", " TODO: look later ", "TBD", None, 5, ["a cause"]):
+            with self.subTest(why=why), tempfile.TemporaryDirectory() as directory:
+                path = self.record(directory, {self.KEY: why})
+                code, _, err = run_gate(self.TRUTH, self.WRONG, "--baseline", str(path))
+                self.assertEqual(code, 1)
+                self.assertIn(f"NO CAUSE: {self.KEY}", err)
+
+    def test_accepting_does_not_carry_a_cause_that_says_nothing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.record(directory, {self.KEY: "TODO"})
+            code, _, err = run_gate(self.TRUTH, self.WRONG, "--baseline", str(path), "--accept-baseline")
+            written = json.loads(path.read_text())
+        self.assertEqual(code, 1)
+        self.assertIn(f"NO CAUSE: {self.KEY}", err)
+        self.assertEqual(written["why"], {})
+
     def test_accepting_carries_the_cause_and_drops_the_fixed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = self.record(directory, {self.KEY: "no sign is proven", "gone": "was fixed"})

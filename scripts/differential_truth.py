@@ -376,6 +376,15 @@ def presence(tally: Tally, expected: str, actual: str, seen: Seen) -> None:
         cell["silent"] += not seen.marked
 
 
+PLACEHOLDERS = {"todo", "tbd", "fixme", "xxx"}
+
+
+def cause_is_stated(cause: object) -> bool:
+    """A recorded cause is words about the fact, not a blank or a promise to write one."""
+    words = cause.split() if isinstance(cause, str) else []
+    return bool(words) and words[0].strip(":.-").lower() not in PLACEHOLDERS
+
+
 def ordered(tally: dict[str, dict[str, int]]) -> dict[str, dict[str, int]]:
     """A tally with its keys sorted, so a report diffs the same on every run."""
     return {role: dict(sorted(kinds.items())) for role, kinds in sorted(tally.items())}
@@ -462,7 +471,7 @@ def main() -> int:
         # The recorded cause of a silent error outlives the run that found it,
         # so the explanations for the errors still here are carried forward
         # rather than thrown away with the counts.
-        why = recorded.get("why", {})
+        why = {fact: cause for fact, cause in recorded.get("why", {}).items() if cause_is_stated(cause)}
         args.baseline.write_text(
             json.dumps(
                 {**report, "why": {fact: why[fact] for fact in silent if fact in why}},
@@ -482,7 +491,8 @@ def main() -> int:
     if recorded:
         known = set(recorded.get("silent", []))
         new_silent = [fact for fact in silent if fact not in known]
-        uncaused = sorted(known - set(recorded.get("why", {})))
+        causes = recorded.get("why", {})
+        uncaused = sorted(fact for fact in known if not cause_is_stated(causes.get(fact)))
         fixed = sorted(known - set(silent))
         for fact in fixed:
             print(f"no longer silent: {fact}", file=sys.stderr)
