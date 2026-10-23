@@ -153,26 +153,27 @@ def parse_prototype(line: str) -> Prototype | None:
     return Prototype(normalize_type(match.group("ret")), params, names)
 
 
-# Byte widths of the spellings normalize_type leaves, and which are unsigned.
-INTEGER_WIDTH = {
-    "bool": 1, "_Bool": 1, "char": 1, "int8_t": 1, "uint8_t": 1,
-    "short": 2, "int16_t": 2, "uint16_t": 2,
-    "int": 4, "int32_t": 4, "uint32_t": 4, "unsigned": 4, "wint_t": 4,
-    "long": 8, "int64_t": 8, "uint64_t": 8, "size_t": 8, "ssize_t": 8,
-    "intptr_t": 8, "uintptr_t": 8, "ptrdiff_t": 8, "long long": 8,
+# Byte width and signedness (None where the spelling does not say) of each integer spelling
+# normalize_type leaves; it rewrites `int32_t`, `int64_t`, `uint64_t` and `_Bool`, so they have no row.
+INTEGERS = {
+    "bool": (1, False), "char": (1, None), "int8_t": (1, True), "uint8_t": (1, False),
+    "short": (2, True), "int16_t": (2, True), "uint16_t": (2, False),
+    "int": (4, True), "uint32_t": (4, False), "unsigned": (4, False), "wint_t": (4, None),
+    "long": (8, True), "long long": (8, True), "size_t": (8, False), "ssize_t": (8, True),
+    "intptr_t": (8, True), "uintptr_t": (8, False), "ptrdiff_t": (8, True),
 }
-UNSIGNED = {"bool", "_Bool", "uint8_t", "uint16_t", "uint32_t", "uint64_t", "unsigned", "size_t", "uintptr_t"}
 QUALIFIERS = re.compile(r"\b(?:const|volatile|restrict)\b")
 
 
 def split_pointer(spelling: str) -> tuple[int, str]:
     """A type's pointer depth and the name beneath it, qualifiers dropped.
 
-    A function pointer is one level over `(fn)`, whatever its parameter list.
+    A function pointer is one level over its whole spelling, so two with different
+    parameter lists differ in their pointee.
     """
     text = QUALIFIERS.sub("", spelling)
     if "(*" in text:
-        return 1, "(fn)"
+        return 1, "".join(text.split())
     depth = text.count("*")
     return depth, " ".join(text.replace("*", " ").split())
 
@@ -189,10 +190,12 @@ def classify(expected: str, actual: str) -> str:
         return "integer_as_pointer"
     if want_depth:
         return "qualifier" if (want_depth, want) == (got_depth, got) else "pointee"
-    if want in INTEGER_WIDTH and got in INTEGER_WIDTH:
-        if INTEGER_WIDTH[got] != INTEGER_WIDTH[want]:
-            return "width_wider" if INTEGER_WIDTH[got] > INTEGER_WIDTH[want] else "width_narrower"
-        return "sign"
+    if want in INTEGERS and got in INTEGERS:
+        (want_width, want_signed), (got_width, got_signed) = INTEGERS[want], INTEGERS[got]
+        if got_width != want_width:
+            return "width_wider" if got_width > want_width else "width_narrower"
+        if want_signed is not None and got_signed is not None:
+            return "sign" if want_signed != got_signed else "spelling"
     return "other"
 
 

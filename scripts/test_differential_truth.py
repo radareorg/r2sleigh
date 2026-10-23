@@ -131,7 +131,13 @@ class SilentBuckets(unittest.TestCase):
             ("return", "int", "size_t", "width_wider"),
             ("return", "uint32_t", "uint8_t", "width_narrower"),
             ("parameter", "int8_t", "uint8_t", "sign"),
+            ("parameter", "uint32_t", "int", "sign"),
+            ("parameter", "long", "long long", "spelling"),
+            ("parameter", "size_t", "uintptr_t", "spelling"),
+            ("parameter", "char", "int8_t", "other"),
             ("parameter", "const uint8_t*", "uint8_t*", "qualifier"),
+            ("parameter", "int (*)(int)", "int (* const)(int)", "qualifier"),
+            ("parameter", "int (*)(int, int)", "int (*)(char*)", "pointee"),
             ("parameter", "const uint8_t*", "void*", "pointee"),
             ("parameter", "const uint8_t*", "size_t", "pointer_as_integer"),
             ("parameter", "size_t", "uint8_t*", "integer_as_pointer"),
@@ -144,6 +150,12 @@ class SilentBuckets(unittest.TestCase):
                 report = self.one(expected, said, where)
                 self.assertEqual(report["silent_buckets"], {where: {bucket: 1}})
                 self.assertEqual(report["marked_buckets"], {})
+
+    def test_every_integer_spelling_is_one_normalize_type_leaves(self) -> None:
+        # A spelling normalize_type rewrites never reaches classify, so a table row for it is dead.
+        for spelling in dt.INTEGERS:
+            with self.subTest(spelling=spelling):
+                self.assertEqual(dt.normalize_type(spelling), spelling)
 
     def test_a_marked_error_is_bucketed_apart_and_is_not_silent(self) -> None:
         report = self.one("const uint8_t*", "size_t", "parameter", marked=True)
