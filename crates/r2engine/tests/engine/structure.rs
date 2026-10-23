@@ -819,6 +819,21 @@ const EITHER_ZERO_OR_EXIT: &[u8] = &[
     0xc3,
 ];
 
+/// `test edi, edi; je join; test esi, esi; je ok; mov edi, 1; call exit; ok: mov [rdx], 5; join: mov [rdx + 4], 7;
+/// test ecx, ecx; jne end; mov [rdx + 8], 1; end: xor eax, eax; ret`: each test jumps over the rest, so the exit sits in an else.
+const EMPTY_THEN_ARMS: &[u8] = &[
+    0x85, 0xff, 0x74, 0x14, 0x85, 0xf6, 0x74, 0x0a, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xc7, 0x02,
+    0x05, 0, 0, 0, 0xc7, 0x42, 0x04, 0x07, 0, 0, 0, 0x85, 0xc9, 0x75, 0x07, 0xc7, 0x42, 0x08, 0x01,
+    0, 0, 0, 0x31, 0xc0, 0xc3,
+];
+
+/// `test edi, edi; jne inner; mov [rdx], 3; xor eax, eax; ret; inner: test esi, esi; je ok; mov edi, 1; call exit;
+/// ok: mov [rdx], 5; mov eax, 1; ret`: the exit is under the then arm of a test whose else returns.
+const EXIT_IN_THEN_ARM: &[u8] = &[
+    0x85, 0xff, 0x75, 0x09, 0xc7, 0x02, 0x03, 0, 0, 0, 0x31, 0xc0, 0xc3, 0x85, 0xf6, 0x74, 0x0a,
+    0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xc7, 0x02, 0x05, 0, 0, 0, 0xb8, 0x01, 0, 0, 0, 0xc3,
+];
+
 /// The indent of the first line holding `needle`, and its position among the lines.
 fn line_of(c: &str, needle: &str) -> (usize, usize) {
     let (at, line) = (c.lines().enumerate())
@@ -958,6 +973,54 @@ fn a_conjunction_whose_arm_exits_is_a_guard_with_the_rest_after_it() {
     let closes = c.lines().skip(exit.0).position(|line| line.trim() == "}");
     assert!(
         guard.0 < exit.0 && closes.is_some_and(|at| exit.0 + at < rest.0) && rest.1 >= guard.1,
+        "{c}"
+    );
+}
+
+#[test]
+fn a_test_with_nothing_in_its_then_arm_keeps_its_else_and_the_exit_under_it_is_the_guard() {
+    // `if (a == 0) {} else { if (b == 0) { store } else { exit(1) } }` is no guard at the outer test: an arm with
+    // nothing in it falls to the end of the `if`, it does not leave, so the else is not what follows it.
+    let c = c_calling("exit", EMPTY_THEN_ARMS, &[0x0d]);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    // The two tests with an empty then arm keep their else; the exit's is gone.
+    assert_eq!(c.matches("else").count(), 2, "{c}");
+    let exit = line_of(&c, "exit(1)");
+    let (test, store) = (c.lines().nth(exit.0 - 1), line_of(&c, "5U)"));
+    assert!(
+        test.is_some_and(
+            |test| test.trim_start().starts_with("if ") && test.contains("!= (uint32_t)0U")
+        ),
+        "{c}"
+    );
+    // The store the exit's else held follows the `if` on its own level.
+    assert_eq!((store.0, store.1 + 4), (exit.0 + 2, exit.1), "{c}");
+}
+
+#[test]
+fn an_exit_under_the_then_arm_of_a_test_is_the_guard_inside_that_arm() {
+    // `if (a != 0) { if (b == 0) { store; return 1; } else { exit(1); } } else { store; return 0; }`: neither arm of
+    // the outer test ends in the call, so it keeps its else, and the guard is written in its then arm.
+    let c = c_calling("exit", EXIT_IN_THEN_ARM, &[0x16]);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    assert_eq!(c.matches("else").count(), 1, "{c}");
+    let tests = tests_of(&c);
+    assert_eq!(tests.len(), 2, "{c}");
+    assert!(tests[1].contains("!= (uint32_t)0U"), "{c}");
+    let (outer, exit, store, ret) = (
+        line_of(&c, "if ("),
+        line_of(&c, "exit(1)"),
+        line_of(&c, "5U)"),
+        line_of(&c, "return 1"),
+    );
+    // The exit is two levels in, the store and the return one: after the guard, in the same arm.
+    assert!(
+        outer.0 < exit.0 && exit.0 < store.0 && store.0 < ret.0,
+        "{c}"
+    );
+    assert_eq!(
+        (exit.1, store.1, ret.1),
+        (outer.1 + 8, outer.1 + 4, outer.1 + 4),
         "{c}"
     );
 }
