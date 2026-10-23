@@ -807,6 +807,11 @@ const TWO_GUARDS: &[u8] = &[
     0xc3, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xbf, 2, 0, 0, 0, 0xe8, 0, 0, 0, 0,
 ];
 
+/// `test edi, edi; jne b; mov edi, 2; call exit; b: mov edi, 1; call exit`: control ends on both arms.
+const BOTH_EXIT: &[u8] = &[
+    0x85, 0xff, 0x75, 0x0a, 0xbf, 2, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0,
+];
+
 /// The indent of the first line holding `needle`, and its position among the lines.
 fn line_of(c: &str, needle: &str) -> (usize, usize) {
     let (at, line) = (c.lines().enumerate())
@@ -908,4 +913,16 @@ fn an_else_arm_that_never_returns_is_a_guard_on_the_opposite_test() {
         guard.0 < exit.0 && exit.0 < rest.0 && rest.1 == guard.1,
         "{c}"
     );
+}
+
+#[test]
+fn two_arms_that_both_end_in_a_call_that_never_returns_keep_their_else() {
+    // Nothing continues past either arm, so neither is the guard of the other.
+    let c = c_calling("exit", BOTH_EXIT, &[0x09, 0x13]);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    assert!(
+        c.contains("else") && c.contains("exit(1)") && c.contains("exit(2)"),
+        "{c}"
+    );
+    assert_eq!(tests_of(&c).len(), 1, "{c}");
 }

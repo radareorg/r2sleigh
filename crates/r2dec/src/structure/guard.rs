@@ -12,12 +12,6 @@ struct Guard<'a, 'e> {
     rewritten: usize,
 }
 
-/// The statements a guard frees, and whether the walk has visited them already.
-enum Rest {
-    Unvisited(Vec<CStmt>),
-    Visited(Vec<CStmt>),
-}
-
 /// Rewrite every such `if` of `body` and say how many were rewritten. O(statements): each statement
 /// is visited once, and the statements a guard frees join the sequence the `if` sits in.
 pub(crate) fn guard(body: &mut CStmt, ev: &Evidence<'_>, marks: &mut dyn Marks) -> usize {
@@ -41,23 +35,18 @@ impl Guard<'_, '_> {
         *stmt = super::tails::one(stmts);
     }
 
-    /// The statements of a body in order; what a guard frees is visited next, in the same body.
+    /// The statements of a body in order, each rewritten and followed by what it frees.
     fn sequence(&mut self, stmts: &mut Vec<CStmt>) {
-        let mut pending = std::mem::take(stmts).into_iter().rev().collect::<Vec<_>>();
-        while let Some(mut stmt) = pending.pop() {
+        for mut stmt in std::mem::take(stmts) {
             let rest = self.visit(&mut stmt, &[]);
             stmts.push(stmt);
-            match rest {
-                Some(Rest::Unvisited(rest)) => pending.extend(rest.into_iter().rev()),
-                Some(Rest::Visited(rest)) => stmts.extend(rest),
-                None => {}
-            }
+            stmts.extend(rest.into_iter().flatten());
         }
     }
 
     /// `stmt`'s parts rewritten; for a guard, the statements it frees. `ids` are the markers of the
     /// statement the `if` is observed under, which a negated test is written over.
-    fn visit(&mut self, stmt: &mut CStmt, ids: &[RenderObservationId]) -> Option<Rest> {
+    fn visit(&mut self, stmt: &mut CStmt, ids: &[RenderObservationId]) -> Option<Vec<CStmt>> {
         match stmt {
             CStmt::Observed { ids, stmt } => self.visit(stmt, ids.ids()),
             CStmt::If {
@@ -65,24 +54,29 @@ impl Guard<'_, '_> {
                 then_body,
                 else_body,
             } => {
-                // An arm is rewritten first: a guard inside it can be what makes it end in the call.
+                // Both arms are rewritten first: a guard inside one can be what makes it end in the call.
                 self.slot(then_body);
                 let arm = else_body.as_mut()?;
-                if ends_in_never_return(then_body, self.ev) {
-                    self.rewritten += 1;
-                    let rest = else_body.take()?;
-                    return Some(Rest::Unvisited(statements(*rest)));
-                }
                 self.slot(arm);
-                if ids.is_empty() || !ends_in_never_return(arm, self.ev) {
-                    return None;
+                match (
+                    ends_in_never_return(then_body, self.ev),
+                    ends_in_never_return(arm, self.ev),
+                ) {
+                    (true, false) => {
+                        self.rewritten += 1;
+                        Some(statements(*else_body.take()?))
+                    }
+                    // The call is on the else arm: the guard tests the opposite, over the test's own atom.
+                    (false, true) if !ids.is_empty() => {
+                        let test = std::mem::replace(cond, crate::ast::CExpr::IntLit(0));
+                        *cond = negated(as_atoms(test, ids.iter().copied(), self.marks));
+                        self.rewritten += 1;
+                        let rest = std::mem::replace(&mut **then_body, *else_body.take()?);
+                        Some(statements(rest))
+                    }
+                    // Both arms end in such a call, or neither: nothing continues past one.
+                    _ => None,
                 }
-                // The call is on the else arm: the guard tests the opposite, over the test's own atom.
-                let test = std::mem::replace(cond, crate::ast::CExpr::IntLit(0));
-                *cond = negated(as_atoms(test, ids.iter().copied(), self.marks));
-                let rest = std::mem::replace(&mut **then_body, *else_body.take()?);
-                self.rewritten += 1;
-                Some(Rest::Visited(statements(rest)))
             }
             CStmt::Block(stmts) => {
                 self.sequence(stmts);
@@ -359,27 +353,20 @@ mod tests {
     }
 
     #[test]
-    fn two_arms_that_never_return_keep_the_tests_polarity() {
+    fn two_arms_that_never_return_leave_neither_as_the_guard() {
+        // Control never reaches past either arm, so nothing continues and the `if` stays whole.
         let mut body = CStmt::Block(vec![branching(
             CStmt::Block(vec![at(0x20, exit())]),
-            vec![at(0x30, exit())],
+            vec![at(0x30, expr()), at(0x30, exit())],
         )]);
-        assert_eq!(guarded(&mut body, &never_returns), 1);
-        let CStmt::Block(stmts) = &body else {
-            panic!("a block");
-        };
-        let CStmt::Observed { stmt, .. } = &stmts[0] else {
-            panic!("the observed if");
-        };
-        let CStmt::If { cond: test, .. } = &**stmt else {
-            panic!("an if");
-        };
-        assert_eq!(test, &cond());
+        let kept = body.clone();
+        assert_eq!(guarded(&mut body, &never_returns), 0);
+        assert_eq!(body, kept);
     }
 
     #[test]
     fn a_guard_the_machine_does_not_have_fails_the_certificate() {
-        // 0x20 goes on to 0x40, as the diamond's text says. Evidence that claimed it never returns
+        // 0x20 goes on to 0x40, as the diamond's text says. Evidence that claimed its call never returns
         // would write 0x30 after it, an edge 0x20 does not have, and the stage is reverted whole.
         let cfg = cfg(
             0x10,
@@ -390,12 +377,13 @@ mod tests {
                 (0x40, BlockTerminator::Return),
             ],
         );
+        let call = || CStmt::Expr(CExpr::IntLit(99));
         let mut body = CStmt::Block(vec![
-            branching(CStmt::Block(vec![at(0x20, expr())]), vec![at(0x30, expr())]),
+            branching(CStmt::Block(vec![at(0x20, call())]), vec![at(0x30, expr())]),
             at(0x40, ret()),
         ]);
         assert!(certified(&body, &cfg));
-        assert_eq!(guarded(&mut body, &|_| true), 1);
+        assert_eq!(guarded(&mut body, &|stmt| *stmt == call()), 1);
         assert!(!certified(&body, &cfg));
     }
 }
