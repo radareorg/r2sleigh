@@ -40,6 +40,11 @@ class ParsePrototype(unittest.TestCase):
         self.assertEqual(proto.params, ["const uint8_t*", "size_t"])
         self.assertEqual(proto.names, ["p", "n"])
 
+    def test_a_pointer_to_function_pointer_keeps_its_name(self) -> None:
+        proto = dt.parse_prototype("int g(int (**f)(int), int x);")
+        self.assertIsNotNone(proto)
+        self.assertEqual(proto.names, ["f", "x"])
+
     def test_void_and_nothing_have_no_parameters(self) -> None:
         for line in ("int main(void)", "int main()"):
             proto = dt.parse_prototype(line)
@@ -51,6 +56,11 @@ class TruthIsReal(unittest.TestCase):
     def test_the_engines_own_placeholder_is_not_a_source_name(self) -> None:
         recovered = {0x1000: dt.Prototype("uint64_t", ["uint8_t*", "uint64_t"], ["arg0", "arg1"])}
         self.assertFalse(dt.truth_is_real(recovered))
+
+    def test_names_that_only_start_like_the_placeholder_are_source_names(self) -> None:
+        for name in ("argv", "arg", "args", "arg1_len"):
+            with self.subTest(name=name):
+                self.assertTrue(dt.truth_is_real({0x1000: dt.Prototype("int", ["int"], [name])}))
 
     def test_a_source_name_makes_the_truth_real(self) -> None:
         mixed = {
@@ -162,6 +172,17 @@ class SilentBuckets(unittest.TestCase):
         self.assertEqual(report["silent_buckets"], {})
         self.assertEqual(report["marked_buckets"], {"parameter": {"pointer_as_integer": 1}})
         self.assertEqual(report["facts"]["silently_wrong"], 0)
+
+    def test_buckets_are_listed_in_sorted_order(self) -> None:
+        truth = {0x1000: dt.Seen(proto("int", ["const char*", "int", "size_t"]), False)}
+        said = {0x1000: dt.Seen(proto("int", ["char*", "short", "char*"]), False)}
+        wrong = graded(truth, said)["silent_buckets"]["parameter"]
+        self.assertEqual(list(wrong), sorted(wrong))
+        self.assertEqual(len(wrong), 3)
+
+    def test_a_function_the_stripped_build_lacks_misses_every_fact_it_has(self) -> None:
+        truth = {0x1000: dt.Seen(proto("int", ["int", "int"]), False)}
+        self.assertEqual(graded(truth, {})["facts"]["missing"], 3)
 
     def test_the_silent_key_is_spelled_as_it_was(self) -> None:
         report = self.one("int", "size_t")

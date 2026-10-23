@@ -229,7 +229,7 @@ class Unreadable(Exception):
     """r2s gave an answer the gate cannot read, and scoring past it would grade a guess."""
 
     def __init__(self, binary: Path, command: str, causes: dict[str, str]) -> None:
-        super().__init__(f"r2s gave no readable `{command}` answer for {len(causes)} function(s) of {binary}")
+        super().__init__(f"no readable `{command}` answer for {len(causes)} item(s) of {binary}")
         self.binary = binary
         self.command = command
         self.causes = causes
