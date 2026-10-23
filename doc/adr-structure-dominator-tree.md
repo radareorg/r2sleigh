@@ -138,7 +138,8 @@ text. `break` never crosses a `switch` to reach a loop. `LoopCertificate::condit
 is a rendering choice, not a certificate fact; it stays only for `for_loop`
 until that certificate names its exit edge. The stages run in `render::structured`, each kept only while the
 control certificate still holds: condition chains (on the tree as placed, where every merge is a `goto` and
-every exit is a bare transfer or a block only the chain reaches), `shape`, the latch's copies, loop rotation. The
+every exit is a bare transfer or a block only the chain reaches), `shape`, the latch's copies, loop rotation, the
+noreturn guard. The
 certificate holds each stage to the machine's edges with their labels, so a stage that changes a test's polarity says
 so on a marked atom or is refused (§3).
 
@@ -328,6 +329,94 @@ MB in every build, the six renderings byte-identical. The census goldens (442) a
 for byte at both heads, so nothing was blessed. The equivalence gate on the tip holds all 828 baseline records on x86-64
 (744 equal, 63 residual-trap, 1 slow, 20 unsupported) and on AArch64 (750 equal, 57 residual-trap, 1 slow, 20 unsupported) with none differing.
 
+## 2026-10-23: the noreturn guard
+
+**Invariant.** `if (c) { ...; f(); } else { rest }` where the then arm's last statement is a call to a callee declared never
+to return is `if (c) { ...; f(); } rest`: control cannot leave the arm by its end, so `rest` runs on exactly the paths the
+else arm took, in the same order, and the machine's edges are the same (the then block has none out of the call; the
+`if` without an `else` falls to `rest` on the false edge). Owner: `structure/guard.rs`, the last stage of
+`render::structured` (after loop rotation, so it reads what the counterfactual measured and no earlier stage sees a
+changed tree). Evidence: `Evidence::never_returns`, the predicate the tails and the certificate already read, which is
+the callee's declaration (r2abi's prototype, or r2engine's walk finding no fall-through after the call), never its name.
+The stage is kept only while the control certificate holds and is reverted whole otherwise (section 5); the checker
+reads the arm's end through the same predicate, so a guard on a call the machine returns from leaves an edge the
+block does not have, which section 3 (ii) refuses (`a_guard_the_machine_does_not_have_fails_the_certificate`).
+O(statements): each statement is visited once, both arms of an `if` before it is judged, and the statements a guard
+frees join the sequence the `if` sits in; the walk recurses to the tree's depth, as the certificate's does.
+
+**The other arm.** `if (c) { rest } else { f(); }` is `if (!c) { f(); } rest`: the call is the guard's body, so the
+test is the machine's other edge. A test the lowering wrote carries no marker, and the certificate reads a negation
+only over a marked atom (sections 3 and 5; swapped arms under an unmarked test are an `EdgeMismatch`), so the guard
+writes the test as one atom carrying copies of the `if`'s markers, as rotation does for a loop (`condition::as_atoms`
+and `condition::negated`, which `rotate` now shares), and `respell_negations` writes the opposite comparison once the
+final certificate has read the `!`. It does not apply to an `if` nothing observed (no markers to copy). An arm ending
+in `return`, `break` or `continue` is not a guard here: the counterfactual gained nothing from it over the noreturn guard.
+
+**Both arms, or neither.** The guard needs a continuation: it applies when exactly one arm ends in the call. Where both do
+nothing runs past either, and writing one as the guard writes the other arm's statements as if the function went on
+after it. The first build did not ask and lost the one perfect row it could (bzip2 `mySIGSEGVorSIGBUScatcher`, `if (c == 1)
+{ cleanUpAndFail(3); } else { showFileNames(); cleanUpAndFail(2); }`, GED 0 to 6).
+
+**Why GED rewards it, and why that is not the reason.** Joern's CFG joins a call to the statement after it, so the
+source's `if (p == NULL) exit(1); rest` has the edge `exit -> rest` that the machine does not, and the rendering with
+an `else` lacks it. The text is the same program by the callee's contract; the score is the benchmark reading the
+source's spelling, and a source that wrote the `else` loses (27 of 275 renderings moved worse in the counterfactual).
+The counterfactual's 275 "changed" renderings are the ones that declare a noreturn callee, not the ones with a site:
+its respelling also rewrites the trailing newline, and on the mined set 103 renderings change in text and the build
+changes 107.
+
+**Measured.** Mined set (bzip2, zlib and grep at O2 and O2-noinline, 1,639 functions dumped, 1,595 scored by DecBench's own
+GED, `tests/decbench/mined_set.py`, base `a0d9e34a` against `23728d11`):
+
+| Build | Perfect | Mean GED | Total GED | Better / worse | Gotos | Refused (newly) | Text changed |
+|---|---|---|---|---|---|---|---|
+| base | 261 | 43.99 | 70,163 | | 3,480 in 507 functions | 40 | |
+| the then arm alone (`089bfd50` with the else swap off) | 267 (+7, 1 lost) | 43.93 | 70,063 | 45 / 14 | same | 40 (0) | 107 |
+| then and else arm (`089bfd50`) | 267 (+7, 1 lost) | 43.91 | 70,035 | 50 / 14 | same | 40 (0) | 115 |
+| and the exactly-one-arm rule (`23728d11`) | 268 (+7, 0 lost) | 43.91 | 70,040 | 45 / 13 | same | 40 (0) | 108 |
+
+The else arm adds -28 at `089bfd50` over the then arm alone (11 rows better, 3 worse: zlib `test_dict_inflate` six rows, grep
+`kwsincr` and `update_patterns` two each, bzip2recover `main`; against grep `EGexecute` twice and bzip2 `uncompress`).
+The python respelling of `counterfactual_ged.py` on the base renderings of the same set gives 267 (+7, 1 lost) and 70,071
+(the then-arm build: 70,063, four more sites). 199 sites stand in the base renderings (182 then arms, 17 else arms, counted on
+the text) and none in the head's. The 13 functions that score worse, by 1 to 6 each: `bsGetBit`, `EGexecute` (two rows),
+`compressStream`, `uncompress`, `uncompressStream`, grep `main`, `test_flush` (six rows, zlib's three programs at two
+levels); the one read through its CFGs, `test_flush`, is one edge misaligned, not a defect: 11 nodes and 13 edges before and
+after with one edge moved, against a source of 10 nodes and 14 edges in which only the function's end has no successor, so Joern reads
+each `exit(1)` of the source as going on. The changed renderings by class (a classifier over the text:
+A, the same statement lines in the same order; B, the same lines in another order with only `if` tests differing, which is
+an else arm swapped; C, anything else): 66 A, 34 B and 8 C pairs (24, 16 and 2 functions). The 8 C pairs are
+`test_large_deflate` and zlib's shell test `test_dict_inflate`, read by hand: a large else arm that ends in `exit(1)` is the
+guard and its small then arm follows, the residual sites renumber in text order and no site is added or dropped, and a
+`goto` into the swapped arm keeps its label. The class B diffs read the same way, from an empty then arm
+(`if (x == 119) {} else { fcn_1ac0(); }` is now `if (x != 119) { fcn_1ac0(); }`, bzip2recover `bsClose`) to the nested
+chains of zlib's `test_gzio`.
+
+The census (442 goldens and 24 `stable_temporaries`) moves nowhere: no census binary calls a function that never returns.
+Over bash (1,568 functions), ls-toybox (1,148), pigz (222), 0pack (8,699) and pumasim (15,298), every function `afl` lists, 26,935
+in all, base against head by release `pddj` after one `aa` (sessions sharded six ways): 1,136 renderings change (43, 31, 14,
+841 and 207), none is newly refused, newly rendered or crashed, the gotos (27,108 in 3,921 functions) and the residual sites
+(157,006) are the same in both builds, and 3,035 `else` arms and as many lines are gone. By class: 828 move only braces and
+indentation (the same statement lines in the same order), 308 swap an else arm (the same lines in another order, only the
+`if` tests differing), and none is anything else once the residual site numbers, which follow text order, are set aside.
+Read by hand: the 14 pairs the classifier first left in C before it set the numbers aside (ls-toybox `0x54298` and
+`0x61778`, pigz `0x402c10`, eleven of 0pack's) and the smallest diffs of each binary. 0pack `0x491dee`,
+`if (r == 0) { return x; } else { __throw_system_error(e); }` is `if (r != 0) { __throw_system_error(e); } return x;`;
+0pack `0x47ca92`, the string constructor's `if (p != 0) { ...two writes... } else { __cxa_throw(...); }` is
+`if (p == 0) { __cxa_throw(...); }` and the writes after it; pumasim `0x27dec0`, `if (a <= 0 || b >= c) {} else { fwrite(...);
+exit(1); }` is `if (a > 0 && b < c) { fwrite(...); exit(1); }`, a chain negated over its marked atoms; 0pack `0x6e3990`,
+`if (c != 97) { on_error(this); } else { goto L8; }` is `if (c != 97) { on_error(this); } goto L8;`; bash `0x435f0`, empty
+then arms become guards. No stage was reverted by the certificate over the 1,518 functions of the mined binaries that
+`R2DEC_TRACE_REFUSAL` was run on (bzip2 and grep at both levels, zlib's `example` at O2).
+Held-out set, report only (bash, diffutils, findutils, gzip and libexpat at O2 and O2-noinline, 5,150 functions by `mined_set.py dump`):
+203 renderings change (bash 112, diffutils 35, findutils 26, gzip 28, libexpat 2), 131 only in braces and indentation and 72 an
+else arm swapped, none newly refused, gotos 13,098 and residual sites 33,918 unchanged. DecBench's GED over the 4,759 scored: perfect 1,350 to 1,357 (7 newly, 0 lost), mean 24.74 to 24.71,
+total 117,742 to 117,595 (-147), 80 functions better and 33 worse (by 1 to 4); no rule was chosen by reading it.
+Release `pdd` with `aa` on Apple M5, instructions retired, base then head, two runs each: 0pack `0x62ecf0` 71.97G and 71.87G
+against 72.09G and 71.91G (+0.11% on the means; the rendering is class A, 21 fewer `else` and 21 fewer lines, 15 gotos
+before and after), pumasim `0x23fdf0` 85.18G and 85.18G against 85.14G and 85.16G (byte-identical); peak footprint 250 to 269
+MB in both. The stage's own cost is one clone of the body (the cost every stage pays) and one walk.
+
 ## 2026-10-22: the recoveries together
 
 Two branches landed on one base and stack in this order: condition chains, `while`/`do-while` and the latch's
@@ -336,7 +425,7 @@ declaration read in address order (B5-a). The marker table is one type, `shape::
 `condition::Marks`, so a block's text copied by any stage is an occurrence of that block the certificate reads. In
 `render` the order is: placement (a sole closed exit is written where its edge leaves the loop), condition chains
 (a stage), `shape` (jumps to the next position, joined returns, the skipped-block copy, terminal tails), the
-latch's copies (a stage) and loop rotation (a stage). A stage stands only while the control certificate holds,
+latch's copies (a stage), loop rotation (a stage) and the noreturn guard (a stage). A stage stands only while the control certificate holds,
 `shape`'s copies are certified at the end, and `respell_negations` is the one change after the certificate.
 
 Measured on the mined set (bzip2, zlib and grep at O2 and O2-noinline: 1,570 functions, 1,305 scored in all three
