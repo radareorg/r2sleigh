@@ -71,6 +71,47 @@ def normalize_type(spelling: str) -> str:
     return aliases.get(text, text)
 
 
+def split_top_level(args: str) -> list[str]:
+    """Split a parameter list at the commas outside every bracket.
+
+    `int (*f)(int, int), char *s` is two parameters: the comma inside the
+    function pointer's own list belongs to that parameter.
+    """
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    for index, char in enumerate(args):
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(args[start:index])
+            start = index + 1
+    parts.append(args[start:])
+    return parts
+
+
+FUNCTION_POINTER = re.compile(r"\(\s*\*+\s*(?P<name>\w*)[^)]*\)")
+TRAILING_NAME = re.compile(r"^(?P<type>.*[\s*])(?P<name>\w+)$")
+
+
+def split_declarator(param: str) -> tuple[str, str]:
+    """A parameter's type and its name, where it has one.
+
+    A function pointer carries its name inside the `(*name)`; any other
+    parameter ends in it, so `char *s` is `char *` and `s`.
+    """
+    param = param.strip()
+    pointer = FUNCTION_POINTER.search(param)
+    if pointer:
+        return param[:pointer.start()] + "(*)" + param[pointer.end():], pointer.group("name")
+    named = TRAILING_NAME.match(param)
+    if named:
+        return named.group("type"), named.group("name")
+    return param, ""
+
+
 def parse_prototype(line: str) -> Prototype | None:
     match = PROTOTYPE.match(line.strip())
     if not match:
@@ -79,11 +120,10 @@ def parse_prototype(line: str) -> Prototype | None:
     params: list[str] = []
     names: list[str] = []
     if args and args != "void":
-        for arg in args.split(","):
-            # `char *s` gives its type by dropping the trailing identifier.
-            tokens = arg.strip().rsplit(" ", 1)
-            params.append(normalize_type(tokens[0] if len(tokens) > 1 else arg))
-            names.append(tokens[1].lstrip("*") if len(tokens) > 1 else "")
+        for arg in split_top_level(args):
+            spelling, name = split_declarator(arg)
+            params.append(normalize_type(spelling))
+            names.append(name)
     return Prototype(normalize_type(match.group("ret")), params, names)
 
 
