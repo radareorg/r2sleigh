@@ -11,6 +11,7 @@ import io
 import json
 import pathlib
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -78,25 +79,30 @@ def proto(ret: str, params: list[str], names: list[str] | None = None) -> "dt.Pr
     return dt.Prototype(ret, params, names if names is not None else [f"p{i}" for i in range(len(params))])
 
 
-def graded(truth: dict, recovered: dict) -> dict:
-    """The report main prints for a debug build with these prototypes and a stripped build with those.
+def run_gate(truth: dict, recovered: dict, *extra: str) -> tuple[int, dict, str]:
+    """Exit code, report and stderr of main for a debug build with these prototypes and a stripped one with those.
 
     A function with a source-named parameter, right in both builds, keeps the truth real.
     """
     debug, stripped = pathlib.Path("debug"), pathlib.Path("stripped")
     anchor = {0x9000: dt.Seen(proto("int", ["int"], ["count"]), False)}
     seen = {debug: {**truth, **anchor}, stripped: {**recovered, **anchor}}
-    out = io.StringIO()
-    argv = ["differential_truth.py", "--debug-build", str(debug), "--stripped-build", str(stripped)]
+    out, err = io.StringIO(), io.StringIO()
+    argv = ["differential_truth.py", "--debug-build", str(debug), "--stripped-build", str(stripped), *extra]
     with (
         mock.patch.object(sys, "argv", argv),
         mock.patch.object(dt, "signatures", side_effect=lambda binary, _r2s: seen[binary]),
         mock.patch.object(dt, "names", return_value={0x1000: "sym.f"}),
         contextlib.redirect_stdout(out),
-        contextlib.redirect_stderr(io.StringIO()),
+        contextlib.redirect_stderr(err),
     ):
-        dt.main()
-    return json.loads(out.getvalue())
+        code = dt.main()
+    return code, json.loads(out.getvalue()), err.getvalue()
+
+
+def graded(truth: dict, recovered: dict) -> dict:
+    """The report main prints."""
+    return run_gate(truth, recovered)[1]
 
 
 class SilentBuckets(unittest.TestCase):
@@ -252,6 +258,57 @@ class MarkedBy(unittest.TestCase):
         marked = graded(truth, said)["marked_by"]
         self.assertEqual(marked["residual"], 2)
         self.assertEqual(marked["basis"], {"carrier-width": 1, "unstated": 1})
+
+
+class Baseline(unittest.TestCase):
+    """A recorded silent error is carried with its cause; any other is the failure the gate exists to catch."""
+
+    TRUTH = {0x1000: dt.Seen(proto("int", []), False)}
+    WRONG = {0x1000: dt.Seen(proto("size_t", []), False)}
+    KEY = "sym.f return: expected 'int', said 'size_t'"
+
+    def record(self, directory: str, why: dict | None) -> pathlib.Path:
+        path = pathlib.Path(directory) / "baseline.json"
+        path.write_text(json.dumps({"silent": [self.KEY], "why": why or {}}))
+        return path
+
+    def test_a_recorded_error_with_a_cause_passes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.record(directory, {self.KEY: "no sign is proven"})
+            code, _, _ = run_gate(self.TRUTH, self.WRONG, "--baseline", str(path))
+        self.assertEqual(code, 0)
+
+    def test_a_new_silent_error_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "baseline.json"
+            path.write_text(json.dumps({"silent": [], "why": {}}))
+            code, _, err = run_gate(self.TRUTH, self.WRONG, "--baseline", str(path))
+        self.assertEqual(code, 1)
+        self.assertIn(f"SILENT ERROR: {self.KEY}", err)
+
+    def test_a_recorded_error_with_no_cause_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.record(directory, None)
+            code, _, err = run_gate(self.TRUTH, self.WRONG, "--baseline", str(path))
+        self.assertEqual(code, 1)
+        self.assertIn(f"NO CAUSE: {self.KEY}", err)
+
+    def test_accepting_carries_the_cause_and_drops_the_fixed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.record(directory, {self.KEY: "no sign is proven", "gone": "was fixed"})
+            code, _, _ = run_gate(self.TRUTH, self.WRONG, "--baseline", str(path), "--accept-baseline")
+            written = json.loads(path.read_text())
+        self.assertEqual(code, 0)
+        self.assertEqual(written["why"], {self.KEY: "no sign is proven"})
+
+    def test_accepting_an_error_with_no_cause_says_so(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "baseline.json"
+            code, _, err = run_gate(self.TRUTH, self.WRONG, "--baseline", str(path), "--accept-baseline")
+            written = json.loads(path.read_text())
+        self.assertEqual(code, 1)
+        self.assertIn(f"NO CAUSE: {self.KEY}", err)
+        self.assertEqual(written["silent"], [self.KEY])
 
 
 if __name__ == "__main__":

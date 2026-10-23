@@ -466,7 +466,10 @@ def main() -> int:
             + "\n"
         )
         print(f"baseline accepted: {args.baseline}", file=sys.stderr)
-        return 0
+        uncaused = [fact for fact in silent if fact not in why]
+        for fact in uncaused:
+            print(f"NO CAUSE: {fact}", file=sys.stderr)
+        return 1 if uncaused else 0
 
     # A recorded silent error has a recorded cause; an unrecorded one is the
     # failure this harness exists to catch. Gating on the set rather than on
@@ -474,14 +477,17 @@ def main() -> int:
     if recorded:
         known = set(recorded.get("silent", []))
         new_silent = [fact for fact in silent if fact not in known]
+        uncaused = sorted(known - set(recorded.get("why", {})))
         fixed = sorted(known - set(silent))
         for fact in fixed:
             print(f"no longer silent: {fact}", file=sys.stderr)
         for fact in new_silent:
             print(f"SILENT ERROR: {fact}", file=sys.stderr)
+        for fact in uncaused:
+            print(f"NO CAUSE: {fact}", file=sys.stderr)
         if fixed and not new_silent:
             print("re-record the baseline with --accept-baseline", file=sys.stderr)
-        return 1 if new_silent else 0
+        return 1 if new_silent or uncaused else 0
     # A silent error is the one failure this harness exists to catch.
     return 1 if buckets["silently_wrong"] else 0
 
