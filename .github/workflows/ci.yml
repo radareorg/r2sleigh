@@ -289,6 +289,7 @@ jobs:
           python3 scripts/test_stack_tip.py
           python3 scripts/test_census.py
           python3 scripts/test_diff_r2.py
+          python3 scripts/test_differential_truth.py
           python3 scripts/test_spec_evidence.py
           python3 scripts/test_upstream_drift.py
           python3 scripts/test_mutants_d75.py
@@ -487,12 +488,27 @@ jobs:
             --r2s target/ci/r2s \
             --baseline tests/gold/source_gold_baseline.json \
             --json target/source-gold/report.json
+      # Whether a function returns a value at all: static helpers that leave scratch in the
+      # result register, results no caller reads, a tail forwarder, an exported function.
+      - name: Grade the return of each function against the source
+        run: |
+          set -eu
+          gcc -g -O2 -o target/source-gold/returns_debug tests/gold/source_gold/returns.c
+          strip -o target/source-gold/returns_stripped target/source-gold/returns_debug
+          python3 scripts/differential_truth.py \
+            --debug-build target/source-gold/returns_debug \
+            --stripped-build target/source-gold/returns_stripped \
+            --r2s target/ci/r2s \
+            --baseline tests/gold/source_gold/returns_baseline.json \
+            --json target/source-gold/returns.json
       - name: Archive the source-gold report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: source-gold-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/source-gold/report.json
+          path: |
+            target/source-gold/report.json
+            target/source-gold/returns.json
           if-no-files-found: warn
 
   # ── Equivalence: the harness's own tests ────────────────────────────

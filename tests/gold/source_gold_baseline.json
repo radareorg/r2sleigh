@@ -1,14 +1,14 @@
 {
-  "functions_in_truth": 20,
-  "functions_recovered": 20,
+  "functions_in_truth": 24,
+  "functions_recovered": 23,
   "facts": {
-    "correct": 35,
-    "missing": 0,
-    "marked_wrong": 5,
-    "silently_wrong": 17
+    "correct": 39,
+    "missing": 1,
+    "marked_wrong": 3,
+    "silently_wrong": 15
   },
-  "recovery_rate": 0.614,
-  "soundness_rate": 0.6731,
+  "recovery_rate": 0.6724,
+  "soundness_rate": 0.7222,
   "silent": [
     "sym.fnv1a32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
     "sym.fnv1a64 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
@@ -24,10 +24,59 @@
     "sym.siphash24 parameter 0: expected 'const uint8_t*', said 'size_t'",
     "sym.pearson return: expected 'uint8_t', said 'uint32_t'",
     "sym.pearson parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
-    "sym.combined parameter 0: expected 'const uint8_t*', said 'size_t'",
-    "sym.unaligned_words parameter 0: expected 'const uint8_t*', said 'void*'",
-    "sym.main return: expected 'int', said 'size_t'"
+    "sym.unaligned_words parameter 0: expected 'const uint8_t*', said 'void*'"
   ],
+  "silent_buckets": {
+    "parameter": {
+      "pointee": 2,
+      "pointer_as_integer": 2,
+      "qualifier": 9,
+      "sign": 1
+    },
+    "return": {
+      "width_wider": 1
+    }
+  },
+  "marked_buckets": {
+    "parameter": {
+      "pointer_as_integer": 1
+    },
+    "return": {
+      "void_vs_value": 1,
+      "width_wider": 1
+    }
+  },
+  "marked_by": {
+    "residual": 3,
+    "basis": "unavailable"
+  },
+  "premised": {
+    "claims": 0,
+    "silent": 0
+  },
+  "return_presence": {
+    "void_to_void": {
+      "total": 2,
+      "silent": 0,
+      "premised": 0
+    },
+    "void_to_value": {
+      "total": 1,
+      "silent": 0,
+      "premised": 0
+    },
+    "value_to_void": {
+      "total": 0,
+      "silent": 0,
+      "premised": 0
+    },
+    "value_to_value": {
+      "total": 20,
+      "silent": 0,
+      "premised": 0
+    }
+  },
+  "pddj_unreadable": 0,
   "why": {
     "sym.fnv1a32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
     "sym.fnv1a64 parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
@@ -43,8 +92,6 @@
     "sym.siphash24 parameter 0: expected 'const uint8_t*', said 'size_t'": "no certified memory access is attributed to this parameter (reads through memcpy or a pointer advanced in a loop), so it keeps its carrier width",
     "sym.pearson return: expected 'uint8_t', said 'uint32_t'": "the result is zero-extended into eax, and the carrier width is what the body proves",
     "sym.pearson parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
-    "sym.combined parameter 0: expected 'const uint8_t*', said 'size_t'": "no certified memory access is attributed to this parameter (reads through memcpy or a pointer advanced in a loop), so it keeps its carrier width",
-    "sym.unaligned_words parameter 0: expected 'const uint8_t*', said 'void*'": "the parameter is certified a pointer, but its accesses read several widths, so no one pointee is proven",
-    "sym.main return: expected 'int', said 'size_t'": "xor eax, eax folds to a 64-bit constant before interface recovery, which erases the 32-bit write that would narrow the result"
+    "sym.unaligned_words parameter 0: expected 'const uint8_t*', said 'void*'": "the parameter is certified a pointer, but its accesses read several widths, so no one pointee is proven"
   }
 }
