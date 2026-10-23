@@ -1,14 +1,27 @@
 {
-  "functions_in_truth": 24,
-  "functions_recovered": 23,
+  "functions_in_dwarf": 17,
+  "functions_in_truth": 17,
+  "functions_recovered": 17,
+  "without_dwarf": [
+    "sym.__do_global_dtors_aux",
+    "sym._fini",
+    "sym._init",
+    "sym._start",
+    "sym.deregister_tm_clones",
+    "sym.frame_dummy",
+    "sym.imp.__cxa_finalize",
+    "sym.imp.__stack_chk_fail",
+    "sym.imp.printf",
+    "sym.register_tm_clones"
+  ],
   "facts": {
-    "correct": 39,
-    "missing": 1,
+    "correct": 33,
+    "missing": 0,
     "marked_wrong": 3,
     "silently_wrong": 15
   },
-  "recovery_rate": 0.6724,
-  "soundness_rate": 0.7222,
+  "recovery_rate": 0.6471,
+  "soundness_rate": 0.6875,
   "silent": [
     "sym.fnv1a32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
     "sym.fnv1a64 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
@@ -46,37 +59,24 @@
       "width_wider": 1
     }
   },
-  "marked_by": {
-    "residual": 3,
-    "basis": "unavailable"
-  },
-  "premised": {
-    "claims": 0,
-    "silent": 0
-  },
   "return_presence": {
     "void_to_void": {
-      "total": 2,
-      "silent": 0,
-      "premised": 0
+      "total": 0,
+      "silent": 0
     },
     "void_to_value": {
       "total": 1,
-      "silent": 0,
-      "premised": 0
+      "silent": 0
     },
     "value_to_void": {
       "total": 0,
-      "silent": 0,
-      "premised": 0
+      "silent": 0
     },
     "value_to_value": {
-      "total": 20,
-      "silent": 0,
-      "premised": 0
+      "total": 16,
+      "silent": 0
     }
   },
-  "pddj_unreadable": 0,
   "why": {
     "sym.fnv1a32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
     "sym.fnv1a64 parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",

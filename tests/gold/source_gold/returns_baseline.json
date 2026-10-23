@@ -1,14 +1,26 @@
 {
-  "functions_in_truth": 19,
-  "functions_recovered": 18,
+  "functions_in_dwarf": 12,
+  "functions_in_truth": 12,
+  "functions_recovered": 12,
+  "without_dwarf": [
+    "sym.__do_global_dtors_aux",
+    "sym._fini",
+    "sym._init",
+    "sym._start",
+    "sym.deregister_tm_clones",
+    "sym.frame_dummy",
+    "sym.imp.__cxa_finalize",
+    "sym.imp.__stack_chk_fail",
+    "sym.register_tm_clones"
+  ],
   "facts": {
-    "correct": 8,
-    "missing": 1,
+    "correct": 2,
+    "missing": 0,
     "marked_wrong": 6,
     "silently_wrong": 16
   },
-  "recovery_rate": 0.2581,
-  "soundness_rate": 0.3333,
+  "recovery_rate": 0.0833,
+  "soundness_rate": 0.1111,
   "silent": [
     "sym.main return: expected 'int', said 'uint32_t'",
     "sym.bump parameter 0: expected 'int32_t*', said 'uint32_t*'",
@@ -49,39 +61,26 @@
       "width_wider": 2
     }
   },
-  "marked_by": {
-    "residual": 6,
-    "basis": "unavailable"
-  },
-  "premised": {
-    "claims": 0,
-    "silent": 0
-  },
   "return_presence": {
     "void_to_void": {
-      "total": 4,
-      "silent": 0,
-      "premised": 0
+      "total": 2,
+      "silent": 0
     },
     "void_to_value": {
       "total": 2,
-      "silent": 1,
-      "premised": 0
+      "silent": 1
     },
     "value_to_void": {
       "total": 0,
-      "silent": 0,
-      "premised": 0
+      "silent": 0
     },
     "value_to_value": {
-      "total": 12,
-      "silent": 0,
-      "premised": 0
+      "total": 8,
+      "silent": 0
     }
   },
-  "pddj_unreadable": 0,
   "why": {
-    "sym.main return: expected 'int', said 'uint32_t'": "the result is computed by plain arithmetic: no byte of the body states a sign, so it keeps its unsigned carrier width",
+    "sym.main return: expected 'int', said 'uint32_t'": "main returns `cell`, a load from its stack frame (`mov eax, [rsp+0xc]`): no byte of the body states a sign, so it keeps its unsigned carrier width",
     "sym.bump parameter 0: expected 'int32_t*', said 'uint32_t*'": "the pointee is only added to or stored through: no byte states its sign, and the certified width is unsigned",
     "sym.total_into return: expected 'void', said 'uint32_t'": "the loop total is still in eax when it returns and the engine does not prove that no caller reads it: a source void with scratch in the result register reads as a value (D72's closed-world void is the owner)",
     "sym.total_into parameter 0: expected 'int32_t*', said 'uint32_t*'": "the pointee is only added to or stored through: no byte states its sign, and the certified width is unsigned",
