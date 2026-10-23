@@ -223,8 +223,45 @@ mod tests {
                 count_elses(then_body)
                     + else_body.as_deref().map_or(0, |body| 1 + count_elses(body))
             }
+            CStmt::For { body, .. } | CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => {
+                count_elses(body)
+            }
+            CStmt::Switch { cases, default, .. } => (cases.iter().map(|case| &case.body))
+                .chain(default)
+                .flatten()
+                .map(count_elses)
+                .sum(),
             _ => 0,
         }
+    }
+
+    /// The statements of a block.
+    fn top(stmt: &CStmt) -> &[CStmt] {
+        let CStmt::Block(stmts) = stmt.unobserved() else {
+            panic!("a block: {stmt:?}");
+        };
+        stmts
+    }
+
+    /// The then and else arms of an `if`, looking through the observation around it.
+    fn arms_of(stmt: &CStmt) -> (&CStmt, Option<&CStmt>) {
+        let CStmt::If {
+            then_body,
+            else_body,
+            ..
+        } = stmt.unobserved()
+        else {
+            panic!("an if: {stmt:?}");
+        };
+        (then_body, else_body.as_deref())
+    }
+
+    /// `if (c) { exit } else { a; b }`, a guard that frees two statements.
+    fn a_guard() -> CStmt {
+        branching(
+            CStmt::Block(vec![at(0x20, exit())]),
+            vec![at(0x30, expr()), at(0x40, expr())],
+        )
     }
 
     #[test]
@@ -416,5 +453,453 @@ mod tests {
         assert!(certified(&body, &cfg));
         assert_eq!(guarded(&mut body, &|stmt| *stmt == call()), 1);
         assert!(!certified(&body, &cfg));
+    }
+
+    #[test]
+    fn a_guard_inside_an_arm_that_is_kept_is_rewritten_where_it_stands() {
+        // Neither outer arm ends in the call, so the outer `if` keeps its else; the guards inside are rewritten.
+        let inner = |block: u64| {
+            at(
+                block,
+                CStmt::if_stmt(
+                    cond(),
+                    CStmt::Block(vec![at(block + 1, exit())]),
+                    Some(CStmt::Block(vec![at(block + 2, expr())])),
+                ),
+            )
+        };
+        let mut body = CStmt::Block(vec![at(
+            0x10,
+            CStmt::if_stmt(
+                cond(),
+                CStmt::Block(vec![at(0x20, expr()), inner(0x20)]),
+                Some(CStmt::Block(vec![inner(0x30)])),
+            ),
+        )]);
+        assert_eq!(guarded(&mut body, &never_returns), 2);
+        assert_eq!(count_elses(&body), 1);
+        let (then_body, else_body) = arms_of(&top(&body)[0]);
+        // The rest each guard frees stands after it, inside the arm it was in.
+        assert_eq!(top(then_body).len(), 3);
+        assert_eq!(top(else_body.expect("the else")).len(), 2);
+    }
+
+    #[test]
+    fn an_arm_with_nothing_in_it_does_not_end_in_a_call() {
+        // `if (c) {} else { rest }` is not `if (c) {} rest`: an empty arm falls to the end, it does not leave.
+        for empty in [
+            CStmt::Block(Vec::new()),
+            CStmt::Empty,
+            CStmt::Block(vec![CStmt::Empty, CStmt::Comment("none".into())]),
+        ] {
+            let mut body = CStmt::Block(vec![at(
+                0x10,
+                CStmt::if_stmt(
+                    cond(),
+                    empty,
+                    Some(CStmt::Block(vec![at(0x30, expr()), at(0x40, ret())])),
+                ),
+            )]);
+            let kept = body.clone();
+            assert_eq!(guarded(&mut body, &never_returns), 0);
+            assert_eq!(body, kept);
+        }
+    }
+
+    #[test]
+    fn an_empty_then_arm_beside_an_else_that_exits_is_a_guard_on_the_opposite_test() {
+        // 0x10 goes to 0x40 on true, which is the `if`'s empty arm, and to 0x30, which exits, on false.
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x40, 0x30)),
+                (0x30, BlockTerminator::None),
+                (0x40, BlockTerminator::Return),
+            ],
+        );
+        let mut body = CStmt::Block(vec![
+            at(
+                0x10,
+                CStmt::if_stmt(
+                    cond(),
+                    CStmt::Block(Vec::new()),
+                    Some(CStmt::Block(vec![at(0x30, expr()), at(0x30, exit())])),
+                ),
+            ),
+            at(0x40, ret()),
+        ]);
+        assert!(certified(&body, &cfg));
+        assert_eq!(guarded(&mut body, &never_returns), 1);
+        let (then_body, else_body) = arms_of(&top(&body)[0]);
+        assert_eq!((top(then_body).len(), else_body), (2, None));
+        let certificate = certificate(&body, &cfg);
+        assert!(certificate.ok(), "{certificate}");
+    }
+
+    #[test]
+    fn a_comment_or_an_empty_statement_after_the_call_does_not_hide_it() {
+        for after in [CStmt::Comment("noreturn".into()), CStmt::Empty] {
+            let mut body = CStmt::Block(vec![branching(
+                CStmt::Block(vec![at(0x20, exit()), after]),
+                vec![at(0x30, expr())],
+            )]);
+            assert_eq!(guarded(&mut body, &never_returns), 1);
+            assert_eq!(count_elses(&body), 0);
+        }
+    }
+
+    #[test]
+    fn a_label_after_the_call_is_a_way_into_the_end_of_the_arm_so_the_else_stays() {
+        // A `goto` to the label reaches the arm's end without the call, so control does leave by it.
+        let mut body = CStmt::Block(vec![branching(
+            CStmt::Block(vec![at(0x20, exit()), CStmt::Label("L".into())]),
+            vec![at(0x30, expr())],
+        )]);
+        let kept = body.clone();
+        assert_eq!(guarded(&mut body, &never_returns), 0);
+        assert_eq!(body, kept);
+    }
+
+    #[test]
+    fn an_if_standing_alone_as_an_arm_keeps_the_statements_its_guard_frees() {
+        // `if (c) { x } else if (d) { exit } else { r }`: the else arm is the bare `if`, with no block to free into.
+        let inner = at(
+            0x30,
+            CStmt::if_stmt(
+                cond(),
+                CStmt::Block(vec![at(0x31, exit())]),
+                Some(CStmt::Block(vec![at(0x32, expr())])),
+            ),
+        );
+        let mut body = CStmt::Block(vec![at(
+            0x10,
+            CStmt::if_stmt(cond(), CStmt::Block(vec![at(0x20, expr())]), Some(inner)),
+        )]);
+        assert_eq!(guarded(&mut body, &never_returns), 1);
+        let (_, else_body) = arms_of(&top(&body)[0]);
+        let arm = top(else_body.expect("the else"));
+        // `if (d) { exit }` and the statement it freed, in a block of their own.
+        assert_eq!(arm.len(), 2);
+        assert!(matches!(
+            arm[0].unobserved(),
+            CStmt::If {
+                else_body: None,
+                ..
+            }
+        ));
+        assert!(matches!(arm[1].unobserved(), CStmt::Expr(_)));
+    }
+
+    /// `if (c) { exit } else { a }` with the test `block`'s, its two statements at `block + 1` and `block + 2`.
+    fn guard_at(block: u64) -> CStmt {
+        at(
+            block,
+            CStmt::if_stmt(
+                cond(),
+                CStmt::Block(vec![at(block + 1, exit())]),
+                Some(CStmt::Block(vec![at(block + 2, expr())])),
+            ),
+        )
+    }
+
+    #[test]
+    fn a_guard_under_an_if_standing_alone_as_an_arm_is_rewritten() {
+        // `if (c) { x } else if (d) { guard } else { y }`: the bare `if` is no guard, and its arms are visited.
+        let inner = at(
+            0x30,
+            CStmt::if_stmt(
+                cond(),
+                CStmt::Block(vec![guard_at(0x40)]),
+                Some(CStmt::Block(vec![at(0x50, expr())])),
+            ),
+        );
+        let mut body = CStmt::Block(vec![at(
+            0x10,
+            CStmt::if_stmt(cond(), CStmt::Block(vec![at(0x20, expr())]), Some(inner)),
+        )]);
+        assert_eq!(guarded(&mut body, &never_returns), 1);
+        assert_eq!(count_elses(&body), 2);
+    }
+
+    #[test]
+    fn what_an_if_standing_alone_as_an_arm_frees_is_visited_in_its_turn() {
+        // `if (c) { x } else if (d) { exit } else { y; if (e) { guard } else { z } }`
+        let rest = at(
+            0x50,
+            CStmt::if_stmt(
+                cond(),
+                CStmt::Block(vec![guard_at(0x60)]),
+                Some(CStmt::Block(vec![at(0x70, expr())])),
+            ),
+        );
+        let inner = at(
+            0x30,
+            CStmt::if_stmt(
+                cond(),
+                CStmt::Block(vec![at(0x31, exit())]),
+                Some(CStmt::Block(vec![at(0x32, expr()), rest])),
+            ),
+        );
+        let mut body = CStmt::Block(vec![at(
+            0x10,
+            CStmt::if_stmt(cond(), CStmt::Block(vec![at(0x20, expr())]), Some(inner)),
+        )]);
+        assert_eq!(guarded(&mut body, &never_returns), 2);
+        assert_eq!(count_elses(&body), 2);
+    }
+
+    #[test]
+    fn a_bare_if_as_the_then_arm_with_its_else_exiting_is_swapped_in_its_own_block() {
+        // `if (c) if (d) { x } else { exit } else { y }`: the bare then arm is a guard on the opposite test.
+        let inner = at(
+            0x20,
+            CStmt::if_stmt(
+                cond(),
+                CStmt::Block(vec![at(0x21, expr())]),
+                Some(CStmt::Block(vec![at(0x22, exit())])),
+            ),
+        );
+        let mut body = CStmt::Block(vec![at(
+            0x10,
+            CStmt::if_stmt(cond(), inner, Some(CStmt::Block(vec![at(0x30, expr())]))),
+        )]);
+        assert_eq!(guarded(&mut body, &never_returns), 1);
+        let (then_body, _) = arms_of(&top(&body)[0]);
+        assert_eq!(top(then_body).len(), 2);
+        assert_eq!(count_elses(&body), 1);
+    }
+
+    #[test]
+    fn a_guard_in_a_loop_body_is_rewritten() {
+        let loops: [fn(CStmt) -> CStmt; 3] = [
+            |body| CStmt::while_loop(cond(), body),
+            |body| CStmt::DoWhile {
+                body: Box::new(body),
+                cond: cond(),
+            },
+            |body| CStmt::For {
+                init: None,
+                cond: None,
+                update: None,
+                body: Box::new(body),
+            },
+        ];
+        for make in loops {
+            // A body that is a block, and a body that is the bare `if`.
+            for body in [CStmt::Block(vec![a_guard()]), a_guard()] {
+                let mut tree = CStmt::Block(vec![make(body)]);
+                assert_eq!(guarded(&mut tree, &never_returns), 1, "{tree:?}");
+                assert_eq!(count_elses(&tree), 0, "{tree:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_guard_in_a_case_or_the_default_of_a_switch_is_rewritten() {
+        let case = |body| crate::ast::SwitchCase {
+            value: CExpr::int(1),
+            body,
+        };
+        for (cases, default) in [
+            (vec![case(vec![a_guard()])], None),
+            (Vec::new(), Some(vec![a_guard()])),
+            (vec![case(vec![a_guard()])], Some(vec![a_guard()])),
+        ] {
+            let guards = cases.len() + usize::from(default.is_some());
+            let mut tree = CStmt::Block(vec![CStmt::Switch {
+                expr: cond(),
+                cases,
+                default,
+            }]);
+            assert_eq!(guarded(&mut tree, &never_returns), guards, "{tree:?}");
+            assert_eq!(count_elses(&tree), 0, "{tree:?}");
+        }
+    }
+
+    #[test]
+    fn a_guard_whose_else_is_empty_leaves_no_statement_after_it() {
+        for empty in [CStmt::Block(Vec::new()), CStmt::Empty] {
+            let mut body = CStmt::Block(vec![at(
+                0x10,
+                CStmt::if_stmt(cond(), CStmt::Block(vec![at(0x20, exit())]), Some(empty)),
+            )]);
+            assert_eq!(guarded(&mut body, &never_returns), 1);
+            assert_eq!(top(&body).len(), 1);
+            assert_eq!(count_elses(&body), 0);
+        }
+    }
+
+    /// Random trees of `if`s, `exit`s and plain statements, for what the guard must keep.
+    struct Gen {
+        state: u64,
+        ifs: i64,
+        leaves: i64,
+    }
+
+    impl Gen {
+        fn below(&mut self, n: u64) -> u64 {
+            self.state ^= self.state << 13;
+            self.state ^= self.state >> 7;
+            self.state ^= self.state << 17;
+            self.state % n
+        }
+
+        fn block(&mut self, depth: u32) -> CStmt {
+            let len = self.below(4);
+            CStmt::Block((0..len).map(|_| self.stmt(depth)).collect())
+        }
+
+        /// An arm: empty, a block, or a lone statement.
+        fn arm(&mut self, depth: u32) -> CStmt {
+            match self.below(10) {
+                0 => CStmt::Empty,
+                1 => self.stmt(depth),
+                _ => self.block(depth),
+            }
+        }
+
+        /// `stmt`, observed as a block's statement in seven of eight cases.
+        fn observed(&mut self, stmt: CStmt) -> CStmt {
+            match self.below(8) {
+                0 => stmt,
+                _ => at(0x100 + self.leaves as u64, stmt),
+            }
+        }
+
+        fn nested(&mut self, depth: u32) -> CStmt {
+            let block = self.block(depth - 1);
+            self.observed(block)
+        }
+
+        fn conditional(&mut self, depth: u32) -> CStmt {
+            self.ifs += 1;
+            let test = self.ifs;
+            let then_body = self.arm(depth - 1);
+            let else_body = (self.below(4) != 0).then(|| self.arm(depth - 1));
+            let stmt = CStmt::if_stmt(CExpr::IntLit(test), then_body, else_body);
+            match self.below(8) {
+                0 => stmt,
+                _ => at(0x10 + test as u64, stmt),
+            }
+        }
+
+        fn stmt(&mut self, depth: u32) -> CStmt {
+            let kind = self.below(100);
+            self.leaves += 1;
+            let leaf = self.leaves;
+            match kind {
+                0..=29 => self.observed(CStmt::Expr(CExpr::IntLit(leaf))),
+                30..=44 => self.observed(exit_with(leaf)),
+                45..=47 => CStmt::Return(Some(CExpr::IntLit(leaf))),
+                48..=52 => CStmt::Comment(format!("c{leaf}")),
+                53..=54 => CStmt::Label(format!("L{leaf}")),
+                55..=59 if depth > 0 => self.nested(depth),
+                _ if depth == 0 => self.observed(CStmt::Expr(CExpr::IntLit(leaf))),
+                _ => self.conditional(depth),
+            }
+        }
+    }
+
+    fn exit_with(code: i64) -> CStmt {
+        let callee = CExpr::External {
+            name: "exit".to_owned(),
+            kind: crate::symbol::ExternalKind::Function,
+        };
+        CStmt::Expr(CExpr::call(callee, vec![CExpr::IntLit(code)]))
+    }
+
+    /// A test's value: its number's bit of the assignment, through the `!` and `||`/`&&` a guard writes.
+    fn holds(test: &CExpr, assignment: u32) -> bool {
+        match test.unobserved() {
+            CExpr::IntLit(number) => (assignment >> (number - 1)) & 1 == 1,
+            CExpr::Unary {
+                op: UnaryOp::Not,
+                operand,
+            } => !holds(operand, assignment),
+            CExpr::Binary {
+                op: BinaryOp::And,
+                left,
+                right,
+            } => holds(left, assignment) && holds(right, assignment),
+            CExpr::Binary {
+                op: BinaryOp::Or,
+                left,
+                right,
+            } => holds(left, assignment) || holds(right, assignment),
+            other => panic!("a test: {other:?}"),
+        }
+    }
+
+    /// What running `stmt` does, in order: a statement's number, a call's code negated, a return's
+    /// plus 10,000. False once control has left.
+    fn execute(stmt: &CStmt, assignment: u32, done: &mut Vec<i64>) -> bool {
+        match stmt.unobserved() {
+            CStmt::Block(stmts) => stmts.iter().all(|stmt| execute(stmt, assignment, done)),
+            CStmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => match holds(cond, assignment) {
+                true => execute(then_body, assignment, done),
+                false => (else_body.iter()).all(|arm| execute(arm, assignment, done)),
+            },
+            CStmt::Expr(CExpr::IntLit(number)) => {
+                done.push(*number);
+                true
+            }
+            CStmt::Expr(CExpr::Call { args, .. }) => {
+                let [CExpr::IntLit(code)] = args.as_slice() else {
+                    panic!("a code: {args:?}");
+                };
+                done.push(-code);
+                false
+            }
+            CStmt::Return(Some(CExpr::IntLit(number))) => {
+                done.push(10_000 + number);
+                false
+            }
+            CStmt::Empty | CStmt::Comment(_) | CStmt::Label(_) => true,
+            other => panic!("a statement: {other:?}"),
+        }
+    }
+
+    /// Whether `before` and `after` do the same, in the same order, under every assignment of `ifs` tests.
+    fn run_alike(before: &CStmt, after: &CStmt, ifs: i64) -> Result<(), u32> {
+        for assignment in 0..1u32 << ifs {
+            let (mut then, mut now) = (Vec::new(), Vec::new());
+            execute(before, assignment, &mut then);
+            execute(after, assignment, &mut now);
+            if then != now {
+                return Err(assignment);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn the_guard_runs_every_path_as_before_and_a_second_pass_changes_nothing() {
+        let (mut trees, mut rewrites) = (0, 0);
+        for seed in 1..=1_500u64 {
+            let mut rng = Gen {
+                state: seed.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1,
+                ifs: 0,
+                leaves: 0,
+            };
+            let mut body = CStmt::Block(vec![rng.block(4), rng.block(4)]);
+            if rng.ifs == 0 || rng.ifs > 12 {
+                continue;
+            }
+            let before = body.clone();
+            rewrites += guarded(&mut body, &never_returns);
+            trees += 1;
+            let alike = run_alike(&before, &body, rng.ifs);
+            assert_eq!(alike, Ok(()), "seed {seed}\n{before:#?}\n{body:#?}");
+            let again = guarded(&mut body, &never_returns);
+            assert_eq!(again, 0, "seed {seed}: {body:#?}");
+        }
+        assert!(
+            trees > 800 && rewrites > 400,
+            "{trees} trees, {rewrites} rewrites"
+        );
     }
 }
