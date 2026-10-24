@@ -244,6 +244,7 @@ phase "Certification gate contracts"
 # engine printed; they run no binary.
 run python3 scripts/test_certify_render.py
 run python3 scripts/test_census.py
+run python3 scripts/test_c_types.py
 run python3 scripts/test_differential_truth.py
 
 phase "Equivalence gate"

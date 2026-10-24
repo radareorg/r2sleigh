@@ -66,6 +66,20 @@ class ArgumentSplit(unittest.TestCase):
         self.assertEqual(split["only_cause"]["functions"], 1)
         self.assertEqual(split["variables"], {"param": 0, "local": 1})
 
+    def test_a_kind_with_no_width_has_an_unknown_direction_and_never_the_same_one(self):
+        rows = [row("a", [var(WIDTH, True, "ptr_char", "int8"), var(WIDTH, False, "int4", "float"),
+                          var(WIDTH, False, "struct", "ptr_int"), var(WIDTH, False, "int4", "int4")])]
+        direction = self.split(rows)["direction"]["all"]
+        self.assertEqual(direction["param"], {"wider": 0, "narrower": 0, "same": 0, "unknown": 1})
+        self.assertEqual(direction["local"], {"wider": 0, "narrower": 0, "same": 1, "unknown": 2})
+
+    def test_a_perfect_function_has_no_error_to_count(self):
+        rows = [row("perfect", [var(WIDTH, True)], value=1.0), row("flawed", [var(WIDTH, False)])]
+        split = self.split(rows)
+        self.assertEqual(split["variables"], {"param": 0, "local": 1})
+        self.assertEqual(split["involved"], {"functions": 1, "params_only": 0, "locals_only": 1, "mixed": 0})
+        self.assertEqual(split["direction"]["all"]["param"], {"wider": 0, "narrower": 0, "same": 0, "unknown": 0})
+
     def test_pointer_as_integer_has_no_width_direction(self):
         rows = [row("a", [var("fp:pointer_as_integer", True, "ptr_char", "int8")])]
         split = self.split(rows, "fp:pointer_as_integer")
@@ -85,6 +99,29 @@ class Widths(unittest.TestCase):
         text = out.getvalue()
         self.assertIn("fp:integer_width", text)
         self.assertIn("only cause 3: parameters only 1 (33.3%), locals only 2 (66.7%), mixed 0 (0.0%)", text)
+
+    def test_the_report_gives_both_verdicts_and_the_parameter_and_local_totals(self):
+        rows = [row("params", [var(WIDTH, True, "int4", "int8")]), row("locals", [var(WIDTH, False, "int4", "int1")]),
+                row("mixed", [var(WIDTH, True, "int4", "int4"), var(WIDTH, False, "int2", "int8")]),
+                row("pointers", [var("fp:pointer_as_integer", True, "ptr_char", "int8")])]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rows.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            out = io.StringIO()
+            with redirect_stdout(out):
+                type_causes.widths(type("Args", (), {"rows": str(path), "dec": "r2sleigh_native"})())
+        lines = out.getvalue().splitlines()
+        self.assertEqual(lines[0], "== r2sleigh_native fp:integer_width: variables 4: parameters 2, locals 2")
+        self.assertIn("  all        param decompiled width against source: wider 1, narrower 0, same 1, unknown 0", lines)
+        self.assertIn("  all        local decompiled width against source: wider 1, narrower 1, same 0, unknown 0", lines)
+        self.assertIn("  functions only cause 3: parameters only 1 (33.3%), locals only 1 (33.3%), mixed 1 (33.3%)", lines)
+        self.assertIn("    parameters in 2 (66.7%), locals in 2 (66.7%)", lines)
+        self.assertIn("== r2sleigh_native fp:pointer_as_integer: variables 1: parameters 1, locals 0", lines)
+        self.assertIn("  functions involved 1: parameters only 1 (100.0%), locals only 0 (0.0%), mixed 0 (0.0%)", lines)
+
+    def test_a_share_of_no_function_is_not_a_division(self):
+        self.assertEqual(type_causes.share(0, 0), "0 (n/a)")
+        self.assertEqual(type_causes.share(1, 3), "1 (33.3%)")
 
 
 if __name__ == "__main__":
