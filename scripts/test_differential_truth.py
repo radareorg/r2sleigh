@@ -331,7 +331,8 @@ class Answers(unittest.TestCase):
     def test_a_listing_that_cannot_be_read_is_unreadable(self) -> None:
         for what, stdout in [("not json", "r2s: cannot open\n"), ("no key", '[{"name": "x"}]'), ("not a list", '"abc"'),
                              ("an address that is no number", '[{"addr": "0x10", "name": "x"}]'),
-                             ("a name that is no string", '[{"addr": 16, "name": null}]'), ("empty", "")]:
+                             ("a name that is no string", '[{"addr": 16, "name": null}]'),
+                             ("a name that is a number", '[{"addr": 16, "name": 5}]'), ("empty", "")]:
             with self.subTest(what=what), mock.patch.object(dt, "r2s", return_value=completed(stdout)):
                 with self.assertRaises(dt.Unreadable) as raised:
                     dt.listing(pathlib.Path("b"), "r2s")
@@ -795,6 +796,12 @@ class Placement(unittest.TestCase):
         self.assertEqual(report["ungradable"], {dt.UNLISTED: ["g"]})
         self.assertEqual((report["functions_in_dwarf"], report["functions_in_truth"]), (2, 1))
         self.assertEqual(report["facts"], {"correct": 1, "missing": 0, "marked_wrong": 0, "silently_wrong": 0})
+
+    def test_two_functions_at_an_entry_the_engine_does_not_list_are_named_for_sharing_it(self) -> None:
+        source = Source({0x1000: "int32_t a(void)", 0x2000: "int32_t g(void)"})
+        source.placed.append(source.graph.subprogram(ct.parse_prototype("int32_t alias(void)"), 0x1000))
+        code, report, err = run_main(source, {0x2000: fn(RIGHT, addr=0x2000)}, listed={0x2000})
+        self.assertEqual(report["ungradable"], {dt.SHARED: ["a", "alias"]})
 
     def test_two_functions_at_one_entry_have_no_one_entry(self) -> None:
         source = Source({0x1000: "int32_t a(void)", 0x2000: "int32_t g(void)"})

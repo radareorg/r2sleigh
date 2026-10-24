@@ -227,8 +227,6 @@ def declared(dwarf: Dwarf, sub) -> Declared:
     if not sub.prototyped:
         raise Ungradable(NOT_PROTOTYPED)
     offsets = [sub.return_type] + [param.type_offset for param in sub.parameters]
-    if None in offsets[1:]:
-        raise Ungradable(NOT_STATED)
     try:
         ret, *params = [c_types.decay(c_types.from_dwarf(dwarf, offset)) for offset in offsets]
     except c_types.NotExpressible as error:
@@ -267,7 +265,8 @@ def score(truth: dict[int, Declared],
     tally = tally if tally is not None else Tally()
 
     def judge(label: str, role: str, expected: c_types.CType, actual: c_types.CType | None, seen: Seen | None) -> None:
-        if actual is None or seen is None:
+        """One fact. `actual` is None where the engine says nothing, which includes a function it did not render."""
+        if actual is None:
             counts["missing"] += 1
             return
         if actual == expected:
@@ -343,8 +342,10 @@ def partition(dwarf: Dwarf, placed: list, unplaced: list[Unplaced], called: dict
         except Ungradable as error:
             refused.setdefault(error.reason, []).append(sub.name)
             continue
-        if shared[sub.low_pc] > 1 or sub.low_pc not in called:
-            refused.setdefault(SHARED if shared[sub.low_pc] > 1 else UNLISTED, []).append(sub.name)
+        if shared[sub.low_pc] > 1:
+            refused.setdefault(SHARED, []).append(sub.name)
+        elif sub.low_pc not in called:
+            refused.setdefault(UNLISTED, []).append(sub.name)
         else:
             truth[sub.low_pc] = graded
     return truth, {reason: sorted(names) for reason, names in sorted(refused.items())}
@@ -398,6 +399,7 @@ def grade() -> int:
             print(f"... and {len(causes) - 10} more", file=sys.stderr)
         return refuse(str(unreadable))
     tally = Tally()
+    entries = {sub.low_pc for sub in placed}
     buckets = score(truth, recovered, tally)
     silent = tally.silent
 
@@ -410,7 +412,7 @@ def grade() -> int:
         "functions_in_truth": len(truth),
         "functions_recovered": len(recovered),
         "ungradable": ungradable,
-        "without_dwarf": sorted(name for addr, name in called.items() if addr not in {sub.low_pc for sub in placed}),
+        "without_dwarf": sorted(name for addr, name in called.items() if addr not in entries),
         "facts": buckets,
         "recovery_rate": round(buckets["correct"] / facts, 4),
         "soundness_rate": round(1 - buckets["silently_wrong"] / asserted, 4) if asserted else 1.0,

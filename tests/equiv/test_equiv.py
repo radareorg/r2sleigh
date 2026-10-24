@@ -1027,6 +1027,20 @@ class FunctionSymbolTests(unittest.TestCase):
         # `.dynsym` holds imports at address 0 and no code of the binary.
         self.assertNotIn(0, starts)
 
+    def test_a_data_symbol_is_no_function_start(self):
+        starts = fixture_starts("cold.gcc.O2.syms.txt")
+        for address in (0x4028, 0x38C, 0x3D78):  # `completed.0`, `__abi_tag` and a fini_array entry are OBJECT symbols
+            self.assertNotIn(address, starts)
+
+    def test_a_function_only_the_dynamic_symbol_table_defines_is_no_function_start(self):
+        text = ("Symbol table '.dynsym' contains 2 entries:\n   Num:    Value          Size Type    Bind   Vis      Ndx Name\n"
+                "     1: 0000000000001000     8 FUNC    GLOBAL DEFAULT   14 exported\n\n"
+                "Symbol table '.symtab' contains 2 entries:\n   Num:    Value          Size Type    Bind   Vis      Ndx Name\n"
+                "     1: 0000000000002000     4 FUNC    LOCAL  DEFAULT   14 local\n")
+        done = subprocess.CompletedProcess([], 0, text, "")
+        with unittest.mock.patch.object(subprocess, "run", return_value=done):
+            self.assertEqual(function_symbols(Path("binary")), {0x2000: (["local"], 4)})
+
     def test_gcc_gives_the_cold_part_of_a_split_function_a_symbol_of_its_own(self):
         starts = fixture_starts("cold.gcc.O2.syms.txt")
         self.assertEqual((starts[0x13E0][0], starts[0x1180][0]), (["must_alloc"], ["must_alloc.cold"]))
