@@ -700,6 +700,7 @@ pub(super) fn drop_unreferenced_labels(stmt: &mut CStmt) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::structure::support::call_to as call;
 
     fn id(index: usize) -> RenderObservationId {
         RenderObservationId::from_dense_index(index)
@@ -707,13 +708,6 @@ mod tests {
 
     #[test]
     fn evidence_declares_noreturn_exactly_when_some_call_reads_as_never_returning() {
-        let call = |name: &str| {
-            let callee = CExpr::External {
-                name: name.to_owned(),
-                kind: crate::symbol::ExternalKind::Function,
-            };
-            CStmt::Expr(CExpr::call(callee, Vec::new()))
-        };
         let sets: [&[&str]; 6] = [
             &[],
             &["abort"],
@@ -740,6 +734,38 @@ mod tests {
                     .all(|name| reads(name) == declared.contains(name))
             );
             assert!(!evidence.never_returns(&CStmt::Expr(CExpr::IntLit(1))));
+        }
+    }
+
+    #[test]
+    fn a_callee_never_returns_by_its_declared_name_and_by_no_name_beside_it() {
+        let sets: [&[&str]; 4] = [&["exit"], &["_exit", "abort"], &["longjmp", "exit"], &[]];
+        for declared in sets {
+            let set = declared.iter().map(|name| (*name).to_owned()).collect();
+            let evidence = Evidence::new(&set, &|_| false);
+            // Names built from each declared one: longer, shorter, shifted or recased are other callees.
+            let mut names = vec![String::new(), "main".to_owned()];
+            for name in declared {
+                let (head, tail) = (&name[..name.len() - 1], &name[1..]);
+                names.extend([
+                    format!("{name}_status"),
+                    format!("{name}s"),
+                    format!("_{name}"),
+                    format!("{name}_"),
+                    format!("my{name}"),
+                    name.to_uppercase(),
+                    head.to_owned(),
+                    tail.to_owned(),
+                    (*name).to_owned(),
+                ]);
+            }
+            for name in &names {
+                assert_eq!(
+                    evidence.never_returns(&call(name)),
+                    declared.contains(&name.as_str()),
+                    "{name:?} against {declared:?}"
+                );
+            }
         }
     }
 

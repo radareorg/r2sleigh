@@ -68,13 +68,18 @@ pub(crate) fn cond_branch(true_target: u64, false_target: u64) -> BlockTerminato
 /// The callee every test declares never returns.
 pub(crate) const EXIT: &str = "exit";
 
-/// A call to `exit`.
-pub(crate) fn exit() -> CStmt {
+/// A call to the function `name`.
+pub(crate) fn call_to(name: &str) -> CStmt {
     let callee = CExpr::External {
-        name: EXIT.to_owned(),
+        name: name.to_owned(),
         kind: ExternalKind::Function,
     };
     CStmt::Expr(CExpr::call(callee, Vec::new()))
+}
+
+/// A call to `exit`.
+pub(crate) fn exit() -> CStmt {
+    call_to(EXIT)
 }
 
 /// The callees the tests' evidence declares never to return: `exit`.

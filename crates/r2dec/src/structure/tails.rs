@@ -517,7 +517,7 @@ mod tests {
     use crate::structure::certify::{Placed, StatementRole, certify};
     use crate::structure::shape::shape;
     use crate::structure::support::{
-        at, branch, cfg, cond, cond_branch, declared, exit, expr, never_returns,
+        at, branch, call_to, cfg, cond, cond_branch, declared, exit, expr, never_returns,
     };
     use r2ssa::cfg::{BlockTerminator, CFG};
     use r2ssa::domtree::DomTree;
@@ -797,6 +797,117 @@ mod tests {
         assert_eq!(returns(&body), 2);
     }
 
+    /// `join_returns` over `arms` and the unlabelled block `return 7;` of a merge of distinct
+    /// values: the tree after it, and the tree before.
+    fn joined(arms: CStmt) -> (CStmt, CStmt) {
+        let blocks = (0..0x100u64).collect::<Vec<_>>();
+        let mut occurrences =
+            Occurrences::new(blocks.clone(), blocks.iter().map(|b| Some(*b)).collect());
+        let declared = declared();
+        let evidence = Evidence::new(&declared, &|_| true);
+        let before = block(vec![arms, block(vec![at(0x40, ret(7))])]);
+        let mut body = before.clone();
+        join_returns(&mut occurrences, &evidence, &mut body);
+        (body, before)
+    }
+
+    /// Whether some block writes a `return` right after a call that never returns.
+    fn returns_after_a_call(stmt: &CStmt) -> bool {
+        let writes = |inner: &CStmt| match inner.unobserved() {
+            CStmt::Block(items) => items.windows(2).any(|pair| {
+                never_returns(pair[0].unobserved())
+                    && matches!(pair[1].unobserved(), CStmt::Return(_))
+            }),
+            _ => false,
+        };
+        count(stmt, &writes) > 0
+    }
+
+    #[test]
+    fn the_return_goes_into_the_arms_that_fall_to_it_and_never_after_a_call_that_does_not() {
+        let two = || branching(copy(1), copy(2));
+        // The tree, whether the return is joined into its arms, and how many calls it holds.
+        let cases: [(&str, CStmt, bool, usize); 9] = [
+            ("then arm calls", branching(exit(), copy(1)), false, 1),
+            ("else arm calls", branching(copy(1), exit()), false, 1),
+            ("both arms call", branching(exit(), exit()), false, 2),
+            (
+                "then arm calls, no else",
+                CStmt::if_stmt(cond(), exit(), None),
+                false,
+                1,
+            ),
+            (
+                "block ends in a call",
+                branching(block(vec![copy(1), exit()]), copy(2)),
+                false,
+                1,
+            ),
+            ("two fall, else calls", branching(two(), exit()), true, 1),
+            (
+                "two fall, then calls",
+                branching(exit(), at(0x20, two())),
+                true,
+                1,
+            ),
+            (
+                "one falls, no else",
+                CStmt::if_stmt(cond(), copy(1), None),
+                true,
+                0,
+            ),
+            (
+                "one falls, one nests a call",
+                branching(copy(1), branching(exit(), copy(2))),
+                true,
+                1,
+            ),
+        ];
+        for (arms, text, joins, calls) in cases {
+            let (body, before) = joined(text);
+            let expected = if joins { 2 } else { 1 };
+            assert_eq!((returns(&body), exits(&body)), (expected, calls), "{arms}");
+            assert_eq!(body == before, !joins, "{arms}");
+            assert!(!returns_after_a_call(&body), "{arms}");
+        }
+    }
+
+    #[test]
+    fn the_join_skips_the_arm_that_calls_and_the_certificate_holds() {
+        // 0x20 splits to 0x50 and 0x60, which meet at the return 0x40; 0x30 calls `exit`.
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x20, 0x30)),
+                (0x20, cond_branch(0x50, 0x60)),
+                (0x30, BlockTerminator::Return),
+                (0x50, branch(0x40)),
+                (0x60, branch(0x40)),
+                (0x40, BlockTerminator::Return),
+            ],
+        );
+        let falling = block_of(vec![
+            at(0x20, expr()),
+            at(
+                0x20,
+                branching(
+                    block_of(vec![at(0x50, expr()), copy(1)]),
+                    block_of(vec![at(0x60, expr()), copy(2)]),
+                ),
+            ),
+        ]);
+        let calling = block_of(vec![at(0x30, expr()), at(0x30, exit())]);
+        let body = block(vec![
+            at(0x10, expr()),
+            at(0x10, branching(falling, calling)),
+            block(vec![at(0x40, ret(7))]),
+        ]);
+        let (body, certificate) = shaped(body, &cfg, &[], &[0x40]);
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!((returns(&body), exits(&body)), (2, 1));
+        assert_eq!(certificate.duplicated, vec![0x40]);
+    }
+
     #[test]
     fn a_return_something_still_jumps_to_is_not_copied_away() {
         // `join_returns` alone, on a tree whose label a `goto` still names: the block must stay.
@@ -895,6 +1006,91 @@ mod tests {
         );
         assert!(certificate.ok(), "{certificate}");
         assert_eq!((exits(&body), gotos(&body)), (2, 0));
+    }
+
+    /// `inline_tails` over `before` and the block `L50: return 7;`, which one `goto` names.
+    fn tail_after(before: CStmt) -> CStmt {
+        let blocks = (0..0x100u64).collect::<Vec<_>>();
+        let mut occurrences =
+            Occurrences::new(blocks.clone(), blocks.iter().map(|b| Some(*b)).collect());
+        let declared = declared();
+        let evidence = Evidence::new(&declared, &|_| false);
+        let mut body = block(vec![
+            at(0x10, CStmt::if_stmt(cond(), goto("L50"), None)),
+            before,
+            block(vec![label("L50"), at(0x50, ret(7))]),
+        ]);
+        inline_tails(&mut occurrences, &evidence, &mut body);
+        body
+    }
+
+    #[test]
+    fn a_tail_block_goes_when_the_text_before_it_cannot_complete_into_it_and_stays_when_it_can() {
+        let puts = || at(0x20, call_to("puts"));
+        let nowhere = || branching(exit(), exit());
+        let cases: [(&str, CStmt, usize); 11] = [
+            ("a call that never returns", exit(), 1),
+            ("an observed call", at(0x20, exit()), 1),
+            ("a call last in a block", block(vec![copy(1), exit()]), 1),
+            (
+                "a call before blanks and a comment",
+                block(vec![exit(), CStmt::Empty, CStmt::Comment("x".to_owned())]),
+                1,
+            ),
+            ("both arms of an if", at(0x20, nowhere()), 1),
+            (
+                "an if in a block in an observation",
+                at(0x20, block(vec![nowhere()])),
+                1,
+            ),
+            ("a plain expression", copy(1), 2),
+            ("a call to a function that returns", puts(), 2),
+            (
+                "a call that never returns, then a statement",
+                block(vec![exit(), copy(1)]),
+                2,
+            ),
+            ("a call in one arm of an if", branching(exit(), copy(1)), 2),
+            (
+                "an if with no else",
+                CStmt::if_stmt(cond(), exit(), None),
+                2,
+            ),
+        ];
+        for (before, text, returned) in cases {
+            let body = tail_after(text);
+            assert_eq!(
+                (returns(&body), labels(&body), gotos(&body)),
+                (returned, 0, 0),
+                "after {before}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tail_block_after_a_call_that_never_returns_goes_with_the_certificate_holding() {
+        // 0x10 goes to the return 0x50 or to 0x20, which calls `exit`; 0x50 is written after 0x20.
+        let cfg = cfg(
+            0x10,
+            &[
+                (0x10, cond_branch(0x50, 0x20)),
+                (0x20, BlockTerminator::Return),
+                (0x50, BlockTerminator::Return),
+            ],
+        );
+        let body = block(vec![
+            at(0x10, expr()),
+            at(0x10, CStmt::if_stmt(cond(), goto("L50"), None)),
+            at(0x20, expr()),
+            at(0x20, exit()),
+            block(vec![label("L50"), at(0x50, ret(7))]),
+        ]);
+        let (body, certificate) = shaped(body, &cfg, &[("L50", 0x50)], &[]);
+        assert!(certificate.ok(), "{certificate}");
+        assert_eq!(
+            (returns(&body), exits(&body), gotos(&body), labels(&body)),
+            (1, 1, 0, 0)
+        );
     }
 
     #[test]
