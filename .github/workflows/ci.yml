@@ -504,6 +504,27 @@ jobs:
             --r2s target/ci/r2s \
             --baseline tests/gold/source_gold/returns_baseline.json \
             --json target/source-gold/returns.json
+      # Shapes the gate once refused whole (exit 2): a function split by a cold abort(), a result that is a
+      # function pointer, seven parameters, code the linker dropped. Exit 1 is the engine's silent errors.
+      - name: Read the shapes a real compiler makes
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          mkdir -p target/source-gold
+          for shape in cold odd seven gcsect; do
+            flags="-g -O2"
+            if [ "$shape" = gcsect ]; then flags="$flags -ffunction-sections -Wl,--gc-sections"; fi
+            gcc $flags -o "target/source-gold/${shape}_debug" "tests/gold/source_gold/${shape}.c"
+            strip -o "target/source-gold/${shape}_stripped" "target/source-gold/${shape}_debug"
+            status=0
+            python3 scripts/differential_truth.py \
+              --debug-build "target/source-gold/${shape}_debug" \
+              --stripped-build "target/source-gold/${shape}_stripped" \
+              --r2s target/ci/r2s \
+              --json "target/source-gold/${shape}.json" > /dev/null || status=$?
+            echo "$shape: exit $status"
+            test "$status" -le 1
+          done
       - name: Archive the source-gold report
         if: always()
         uses: actions/upload-artifact@v7
@@ -512,6 +533,10 @@ jobs:
           path: |
             target/source-gold/report.json
             target/source-gold/returns.json
+            target/source-gold/cold.json
+            target/source-gold/odd.json
+            target/source-gold/seven.json
+            target/source-gold/gcsect.json
           if-no-files-found: warn
 
   # ── Equivalence: the harness's own tests ────────────────────────────
