@@ -44,6 +44,7 @@ import json
 import re
 import subprocess
 import sys
+import traceback
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -91,6 +92,8 @@ def listing(binary: Path, r2s_bin: str) -> dict[int, str]:
         rows = json.loads(r2s(binary, "aflj", r2s_bin).stdout)
         if not all(isinstance(row["addr"], int) for row in rows):
             raise TypeError("an address that is no number")
+        if not all(isinstance(row["name"], str) for row in rows):
+            raise TypeError("a name that is no string")
         return {row["addr"]: row["name"] for row in rows}
     except (subprocess.TimeoutExpired, OSError) as error:
         raise Unreadable(binary, "aflj", {"": f"r2s did not answer ({error})"}) from error
@@ -313,6 +316,15 @@ def refuse(message: str) -> int:
 
 
 def main() -> int:
+    """Exit 0 or 1 on a verdict, 2 on anything else: CI accepts 0 and 1, and a Python traceback exits 1."""
+    try:
+        return grade()
+    except Exception:
+        traceback.print_exc()
+        return 2
+
+
+def grade() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--debug-build", type=Path, required=True,
                         help="build that kept its debug info; the ground truth")

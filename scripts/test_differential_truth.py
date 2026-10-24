@@ -318,7 +318,8 @@ class Answers(unittest.TestCase):
 
     def test_a_listing_that_cannot_be_read_is_unreadable(self) -> None:
         for what, stdout in [("not json", "r2s: cannot open\n"), ("no key", '[{"name": "x"}]'), ("not a list", '"abc"'),
-                             ("an address that is no number", '[{"addr": "0x10", "name": "x"}]'), ("empty", "")]:
+                             ("an address that is no number", '[{"addr": "0x10", "name": "x"}]'),
+                             ("a name that is no string", '[{"addr": 16, "name": null}]'), ("empty", "")]:
             with self.subTest(what=what), mock.patch.object(dt, "r2s", return_value=completed(stdout)):
                 with self.assertRaises(dt.Unreadable) as raised:
                     dt.listing(pathlib.Path("b"), "r2s")
@@ -399,6 +400,55 @@ class Answers(unittest.TestCase):
         self.assertEqual([line.split()[3].rstrip(":") for line in lines], [f"0x{addr:x}" for addr in sorted(source)[:10]])
         self.assertIn("... and 3 more", err)
         self.assertIn("no readable `pddj` answer for 13 item(s)", err)
+
+
+class Crashes(unittest.TestCase):
+    """CI accepts exit 0 and 1, and a Python traceback exits 1: every exception that is no verdict is exit 2."""
+
+    def crash(self, source: dict[int, str], stripped: dict[int, Fn], *extra: str, **patched: object):
+        with contextlib.ExitStack() as stack:
+            for name, value in patched.items():
+                stack.enter_context(mock.patch.object(dt, name, **value))
+            return run_main(source, stripped, *extra)
+
+    def test_an_exception_in_the_scoring_is_exit_2_with_the_traceback_on_stderr(self) -> None:
+        code, report, err = self.crash({0x1000: INT}, {0x1000: fn(RIGHT)}, score={"side_effect": RuntimeError("boom")})
+        self.assertEqual((code, report), (2, None))
+        self.assertIn("Traceback (most recent call last)", err)
+        self.assertIn("RuntimeError: boom", err)
+
+    def test_an_r2s_that_lists_a_function_with_no_name_is_unreadable_and_exit_2(self) -> None:
+        stripped = {0x1000: fn(RIGHT)}
+        source = Source({0x1000: INT})
+        debug = {0x1000: Fn(None, {})}  # type: ignore[arg-type]
+        code, report, err = run_main(source, stripped, debug_functions=debug)
+        self.assertEqual((code, report), (2, None))
+        self.assertIn("UNREADABLE aflj: debug: not a list of functions (a name that is no string)", err)
+
+    def test_a_baseline_that_is_no_json_is_exit_2(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            baseline = pathlib.Path(directory) / "baseline.json"
+            baseline.write_text("{ not json")
+            code, report, err = run_main({0x1000: INT}, {0x1000: fn(RIGHT)}, "--baseline", str(baseline))
+        self.assertEqual(code, 2)
+        self.assertIn("JSONDecodeError", err)
+
+    def test_a_header_nested_five_thousand_deep_is_exit_2(self) -> None:
+        deep = fn(RIGHT)
+        deep.record["signature"] = "int32_t " + "(" * 5000 + "*" + ")" * 5000 + " fcn_1000(void)"
+        code, report, err = run_main({0x1000: INT}, {0x1000: deep})
+        self.assertEqual(code, 2)
+        self.assertIn("RecursionError", err)
+
+    def test_a_verdict_is_not_a_crash(self) -> None:
+        self.assertEqual(run_main({0x1000: INT}, {0x1000: fn(RIGHT)})[0], 0)
+        self.assertEqual(run_main({0x1000: INT}, {0x1000: fn(SIZE_T)})[0], 1)
+
+    def test_a_usage_error_keeps_the_exit_code_of_argparse(self) -> None:
+        with mock.patch.object(sys, "argv", ["differential_truth.py"]), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                dt.main()
+        self.assertEqual(raised.exception.code, 2)
 
 
 class TruthIsDwarf(unittest.TestCase):
