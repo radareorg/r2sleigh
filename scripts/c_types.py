@@ -333,7 +333,7 @@ def from_dwarf(dwarf, offset: int | None, depth: int = 0) -> CType:
     """The type at a DIE offset (`None` is `void`), typedefs resolved and `const` and `volatile` kept.
 
     A struct is named by its tag, or by the outermost typedef when it has none. A type the gate cannot state
-    (a complex number, a DIE that is missing) raises `NotExpressible`.
+    (a complex number, a vector, an aggregate with no name, a DIE that is missing) raises `NotExpressible`.
     """
     if depth > 32:
         raise NotExpressible("a type nested more than 32 levels deep")
@@ -372,8 +372,12 @@ def shape_of_dwarf(dwarf, die, alias: str, depth: int) -> CType:
     if die.tag in ("DW_TAG_structure_type", "DW_TAG_class_type", "DW_TAG_union_type"):
         keyword = "union" if die.tag == "DW_TAG_union_type" else "struct"
         tag = die.text("DW_AT_name")
-        return CType(NAMED, name=f"{keyword} {tag}" if tag else alias or f"{keyword} <anonymous>")
+        if not (tag or alias):
+            raise NotExpressible(f"a {keyword} with neither a tag nor a typedef name")
+        return CType(NAMED, name=f"{keyword} {tag}" if tag else alias)
     if die.tag == "DW_TAG_array_type":
+        if die.flag("DW_AT_GNU_vector"):
+            raise NotExpressible("a vector type")
         element = from_dwarf(dwarf, die.ref("DW_AT_type"), depth + 1)
         counts = []
         for child in die.children:

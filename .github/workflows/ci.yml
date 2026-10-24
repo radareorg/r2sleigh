@@ -555,7 +555,7 @@ jobs:
             test_equiv.AnswerStatusTests test_equiv.BatchTests test_equiv.BuildTests \
             test_equiv.ClassifyTests test_equiv.CompilerVerdictTests \
             test_equiv.ContractTests test_equiv.CostTests test_equiv.DwarfTests \
-            test_equiv.PlacementTests test_equiv.RangesTests test_equiv.RatchetTests
+            test_equiv.FunctionSymbolTests test_equiv.PlacementTests test_equiv.RangesTests test_equiv.RatchetTests
 
   # ── Equivalence ratchet ─────────────────────────────────────────────
   #

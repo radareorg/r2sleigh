@@ -21,10 +21,18 @@ The truth is what the debug build's DWARF declares, read by the oracle side's
 own reader (`tests/equiv/dwarf.py`, `readelf`): each function's entry, its
 result and its parameters. r2s never states the truth, because r2s on the
 debug build recovers at most six register parameters and prints its own guess
-for what it cannot read. A type the gate cannot state, or a parameter whose
-position DWARF does not fix, is counted as `unreadable_truth` and graded as
-nothing. A DWARF function the gate cannot place, or the engine does not list,
-is named in the report (`without_entry`, `unlisted`) and graded as nothing.
+for what it cannot read.
+
+A function is graded only if it passes one predicate, `declared`: gcc produced
+the DWARF, which states the signature (`DW_AT_prototyped`), the DIE states it
+for itself (it is no instance of an origin, which is how a clone is described),
+and its result and
+every parameter are void, an integer or a pointer, the one register class the
+gate states (it owns no table for any aggregate, vector, float or wide type).
+The entry must also be the start of a FUNC symbol, one DIE per address, and
+listed by the engine. Every other function is named in `ungradable` under its
+reason and graded as nothing: a refusal costs a missing row, a wrong truth a
+false soundness number. A debug build with no gradable function exits 2.
 
 The marker granularity is the function, because that is the granularity the
 renderer annotates at. A function whose `pddj` lists a residual has its
@@ -52,7 +60,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "equiv"))
 import c_types  # noqa: E402
 import r2s_batch  # noqa: E402
-from dwarf import Dwarf, Unplaced  # noqa: E402
+from dwarf import Dwarf, Unplaced, function_symbols  # noqa: E402
 from target import X86_64  # noqa: E402
 
 
@@ -102,13 +110,17 @@ def listing(binary: Path, r2s_bin: str) -> dict[int, str]:
 
 
 def read_dwarf(binary: Path, binutils_prefix: str) -> tuple[Dwarf, list, list[Unplaced]]:
-    """The binary's DWARF, its functions at their entries, and the ones that have none."""
+    """The binary's DWARF, its functions at their entries, and the ones that have none.
+
+    An entry is placed only where the binary's own symbol table starts a function.
+    """
     target = dataclasses.replace(X86_64, binutils_prefix=binutils_prefix)
     try:
         dwarf = Dwarf.read(binary, target)
+        starts = function_symbols(binary, target)
     except (OSError, RuntimeError) as error:
         raise Unreadable(binary, "readelf", {"": f"{error}; it lists the functions the source defines"}) from error
-    placed, unplaced = dwarf.placed()
+    placed, unplaced = dwarf.placed(starts)
     return dwarf, placed, unplaced
 
 
@@ -171,17 +183,20 @@ def signatures(binary: Path, addresses: list[int], r2s_bin: str) -> dict[int, Se
     return out
 
 
-@dataclass(frozen=True)
-class Slot:
-    """One fact the source states of a function: a type, or why the gate cannot state it."""
+NOT_GCC = "a producer other than GNU C: the truth model is validated on gcc's DWARF only"
+INSTANCE = "an instance of an origin: its parameters are the origin's, not necessarily those at its address"
+NOT_PROTOTYPED = "no DW_AT_prototyped: it states no signature (-g1, C++), or a K&R one whose parameters are promoted"
+NOT_STATED = "a result or parameter whose ABI class the gate does not state"
+SHARED = "it shares its entry address with another function"
+UNLISTED = "the engine does not list it in the debug build"
 
-    expected: c_types.CType | None
-    why: str = ""
 
+class Ungradable(Exception):
+    """A function the gate cannot grade, with the reason it is named under in the report."""
 
-CANNOT_STATE = "a type the gate cannot state"
-NOT_IN_REGISTER = "a parameter not passed in an integer register"
-AFTER_ONE_NOT = "a parameter after one not passed in an integer register, whose position DWARF does not fix"
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass
@@ -189,34 +204,37 @@ class Declared:
     """What the source declares of one function."""
 
     name: str
-    ret: Slot
-    params: list[Slot]
+    ret: c_types.CType
+    params: list[c_types.CType]
+
+
+# `GNU C17 13.3.0 ...`, not `GNU C++17` (no prototyped flag), `GNU AS` or clang (whose formals can outlive the argument).
+GNU_C = re.compile(r"GNU C\d")
 
 
 def declared(dwarf: Dwarf, sub) -> Declared:
-    """A function's result and parameters as its DWARF states them.
+    """A function's result and parameters as its DWARF states them, or `Ungradable` with the first reason.
 
-    A parameter's position among the engine's is fixed only while every parameter before it is passed in an
-    integer register (System V, AAPCS64): the engine lists the other classes where it lists them, which DWARF
-    does not say. Those and every parameter after them are unreadable truth.
+    The positions of the integer registers are fixed only while the result and every parameter are void, an
+    integer or a pointer. The gate states the class of nothing else on any architecture: a struct result over 16
+    bytes takes the first integer register on x86-64 and x8 on AArch64, and a vector, a float, a long double or
+    a complex number is in a register file DWARF does not name.
     """
-    def typed(offset: int | None) -> Slot:
-        try:
-            return Slot(c_types.decay(c_types.from_dwarf(dwarf, offset)))
-        except c_types.NotExpressible as error:
-            return Slot(None, f"{CANNOT_STATE} ({error})")
-
-    ret = typed(sub.return_type)
-    params: list[Slot] = []
-    positioned = True
-    for param in sub.parameters:
-        slot = typed(param.type_offset) if param.type_offset is not None else Slot(None, f"{CANNOT_STATE} (no type)")
-        if slot.expected is not None and not positioned:
-            slot = Slot(None, AFTER_ONE_NOT)
-        elif slot.expected is not None and not c_types.integer_class(slot.expected):
-            slot = Slot(None, NOT_IN_REGISTER)
-        positioned = slot.expected is not None
-        params.append(slot)
+    if not GNU_C.match(sub.producer):
+        raise Ungradable(NOT_GCC)
+    if sub.instance:
+        raise Ungradable(INSTANCE)
+    if not sub.prototyped:
+        raise Ungradable(NOT_PROTOTYPED)
+    offsets = [sub.return_type] + [param.type_offset for param in sub.parameters]
+    if None in offsets[1:]:
+        raise Ungradable(NOT_STATED)
+    try:
+        ret, *params = [c_types.decay(c_types.from_dwarf(dwarf, offset)) for offset in offsets]
+    except c_types.NotExpressible as error:
+        raise Ungradable(NOT_STATED) from error
+    if not (ret.kind == c_types.VOID or c_types.integer_class(ret)) or not all(map(c_types.integer_class, params)):
+        raise Ungradable(NOT_STATED)
     return Declared(sub.name, ret, params)
 
 
@@ -235,8 +253,6 @@ class Tally:
     presence: dict[str, dict[str, int]] = field(
         default_factory=lambda: {cell: {"total": 0, "silent": 0} for cell in PRESENCE}
     )
-    # Facts with no readable truth, by reason.
-    unreadable: Counter = field(default_factory=Counter)
 
 
 def score(truth: dict[int, Declared],
@@ -250,8 +266,8 @@ def score(truth: dict[int, Declared],
     counts = {"correct": 0, "missing": 0, "marked_wrong": 0, "silently_wrong": 0}
     tally = tally if tally is not None else Tally()
 
-    def judge(label: str, role: str, expected: c_types.CType, actual: c_types.CType | None, seen: Seen) -> None:
-        if actual is None:
+    def judge(label: str, role: str, expected: c_types.CType, actual: c_types.CType | None, seen: Seen | None) -> None:
+        if actual is None or seen is None:
             counts["missing"] += 1
             return
         if actual == expected:
@@ -270,19 +286,14 @@ def score(truth: dict[int, Declared],
     for addr, source in truth.items():
         seen = recovered.get(addr)
         facts = [("return", "return", source.ret, seen.proto.ret if seen else None)] + [
-            (f"parameter {index}", "parameter", slot,
+            (f"parameter {index}", "parameter", expected,
              seen.proto.params[index] if seen and index < len(seen.proto.params) else None)
-            for index, slot in enumerate(source.params)
+            for index, expected in enumerate(source.params)
         ]
-        for label, role, slot, actual in facts:
-            if slot.expected is None:
-                tally.unreadable[slot.why] += 1
-            elif seen is None:
-                counts["missing"] += 1
-            else:
-                judge(f"{source.name} {label}", role, slot.expected, actual, seen)
-        if seen is not None and source.ret.expected is not None:
-            presence(tally, source.ret.expected, seen.proto.ret, seen)
+        for label, role, expected, actual in facts:
+            judge(f"{source.name} {label}", role, expected, actual, seen)
+        if seen is not None:
+            presence(tally, source.ret, seen.proto.ret, seen)
     return counts
 
 
@@ -315,6 +326,30 @@ def refuse(message: str) -> int:
     return 2
 
 
+def partition(dwarf: Dwarf, placed: list, unplaced: list[Unplaced], called: dict[int, str]) -> tuple[dict[int, Declared], dict[str, list[str]]]:
+    """The functions the gate grades, by entry, and every other function's name under the one reason it is not.
+
+    A function DWARF cannot place, a DWARF the predicate refuses, two functions at one entry and a function the
+    engine does not list on the debug build are all refused here, so none is graded by omission.
+    """
+    shared = Counter(sub.low_pc for sub in placed)
+    truth: dict[int, Declared] = {}
+    refused: dict[str, list[str]] = {}
+    for gone in unplaced:
+        refused.setdefault(gone.why, []).append(gone.name)
+    for sub in placed:
+        try:
+            graded = declared(dwarf, sub)
+        except Ungradable as error:
+            refused.setdefault(error.reason, []).append(sub.name)
+            continue
+        if shared[sub.low_pc] > 1 or sub.low_pc not in called:
+            refused.setdefault(SHARED if shared[sub.low_pc] > 1 else UNLISTED, []).append(sub.name)
+        else:
+            truth[sub.low_pc] = graded
+    return truth, {reason: sorted(names) for reason, names in sorted(refused.items())}
+
+
 def main() -> int:
     """Exit 0 or 1 on a verdict, 2 on anything else: CI accepts 0 and 1, and a Python traceback exits 1."""
     try:
@@ -343,20 +378,13 @@ def grade() -> int:
     try:
         called = listing(args.debug_build, args.r2s)
         dwarf, placed, unplaced = read_dwarf(args.debug_build, args.binutils_prefix)
-        if not placed and not unplaced:
-            return refuse("the debug build's DWARF declares no function.")
         _, stripped_placed, stripped_unplaced = read_dwarf(args.stripped_build, args.binutils_prefix)
         if stripped_placed or stripped_unplaced:
             return refuse("the stripped build carries DWARF, so the engine would be graded against its own input.")
-        shared = Counter(sub.low_pc for sub in placed)
-        entries = set(shared)
-        unplaced += [Unplaced(sub.name, 0, f"it shares its entry address {sub.low_pc:#x} with another function")
-                     for sub in placed if shared[sub.low_pc] > 1]
-        placed = [sub for sub in placed if shared[sub.low_pc] == 1]
-        graded = [sub for sub in placed if sub.low_pc in called]
-        if not graded:
-            return refuse("no function DWARF declares has one entry the engine lists.")
-        truth = {sub.low_pc: declared(dwarf, sub) for sub in graded}
+        truth, ungradable = partition(dwarf, placed, unplaced, called)
+        if not truth:
+            why = "; ".join(f"{len(names)} {reason}" for reason, names in ungradable.items())
+            return refuse(f"no function of the debug build is gradable ({why or 'its DWARF declares no function'}).")
         stripped = listing(args.stripped_build, args.r2s)
         recovered = signatures(args.stripped_build, [addr for addr in sorted(truth) if addr in stripped], args.r2s)
         if not recovered:
@@ -374,18 +402,21 @@ def grade() -> int:
     silent = tally.silent
 
     asserted = buckets["correct"] + buckets["silently_wrong"]
-    facts = sum(buckets.values())
+    facts = sum(buckets.values())  # a graded function states its result, so a gradable build has a fact
+    # No stripped binary states `const`, so the rate is also given without the errors that only differ in a qualifier.
+    qualifier = sum(kinds.get("qualifier", 0) for kinds in tally.wrong.get("silent", {}).values())
     report = {
         "functions_in_dwarf": len(placed) + len(unplaced),
         "functions_in_truth": len(truth),
         "functions_recovered": len(recovered),
-        "without_entry": sorted(f"{gone.name}: {gone.why}" for gone in unplaced),
-        "unlisted": sorted(sub.name for sub in placed if sub.low_pc not in called),
-        "without_dwarf": sorted(name for addr, name in called.items() if addr not in entries),
+        "ungradable": ungradable,
+        "without_dwarf": sorted(name for addr, name in called.items() if addr not in {sub.low_pc for sub in placed}),
         "facts": buckets,
-        "unreadable_truth": dict(sorted(tally.unreadable.items())),
-        "recovery_rate": round(buckets["correct"] / facts, 4) if facts else 0.0,
+        "recovery_rate": round(buckets["correct"] / facts, 4),
         "soundness_rate": round(1 - buckets["silently_wrong"] / asserted, 4) if asserted else 1.0,
+        "soundness_without_qualifier": (
+            round(1 - (buckets["silently_wrong"] - qualifier) / (asserted - qualifier), 4) if asserted > qualifier else 1.0
+        ),
         "silent": silent,
         "silent_buckets": ordered(tally.wrong.get("silent", {})),
         "marked_buckets": ordered(tally.wrong.get("marked", {})),

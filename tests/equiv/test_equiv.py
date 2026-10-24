@@ -42,7 +42,7 @@ import merge_shards  # noqa: E402
 import link  # noqa: E402
 import run_equiv  # noqa: E402
 import selftest  # noqa: E402
-from dwarf import Die, Dwarf, TOMBSTONES, parse_ranges, parse_readelf  # noqa: E402
+from dwarf import NO_FUNC_START, Die, Dwarf, function_symbols, parse_ranges, parse_readelf  # noqa: E402
 from r2s_batch import contract_problems, parse_pddj, run_batch  # noqa: E402
 from spec import CallSpec, call_spec  # noqa: E402
 from target import AARCH64, X86_64, Target  # noqa: E402
@@ -1003,28 +1003,75 @@ class RangesTests(unittest.TestCase):
         self.assertEqual(parse_ranges(text), {})
 
 
+class AnyAddress:
+    """Every address is the start of a function: the entry rule alone is under test."""
+
+    def __contains__(self, _address: int) -> bool:
+        return True
+
+
+def fixture_starts(name: str) -> dict:
+    """The FUNC symbols of a `readelf --wide --syms` dump kept as a fixture."""
+    done = subprocess.CompletedProcess([], 0, (DWARF_FIXTURES / name).read_text(), "")
+    with unittest.mock.patch.object(subprocess, "run", return_value=done):
+        return function_symbols(Path("binary"))
+
+
+class FunctionSymbolTests(unittest.TestCase):
+    def test_only_func_symbols_of_the_symtab_start_a_function(self):
+        starts = fixture_starts("cold.clang.O2.bbs.syms.txt")
+        # `checked_div` is a FUNC; its fragments `checked_div.__part.1` and `.2` are NOTYPE and so no function start.
+        self.assertEqual(starts[0x11C0], (["checked_div"], 13))
+        self.assertNotIn(0x11CD, starts)
+        self.assertNotIn(0x11D3, starts)
+        # `.dynsym` holds imports at address 0 and no code of the binary.
+        self.assertNotIn(0, starts)
+
+    def test_gcc_gives_the_cold_part_of_a_split_function_a_symbol_of_its_own(self):
+        starts = fixture_starts("cold.gcc.O2.syms.txt")
+        self.assertEqual((starts[0x13E0][0], starts[0x1180][0]), (["must_alloc"], ["must_alloc.cold"]))
+
+
 class PlacementTests(unittest.TestCase):
-    """A function's address is its entry: `DW_AT_entry_pc`, else `DW_AT_low_pc`, else the first range."""
+    """A function's address is its entry, and it is placed only where a FUNC symbol of the binary starts."""
 
     def test_a_split_function_is_placed_at_the_start_of_its_hot_part(self):
         # src/cold.c: `must_alloc` has DW_AT_ranges (hot 0x13e0, cold 0x1180) and no DW_AT_low_pc.
+        starts = fixture_starts("cold.gcc.O2.syms.txt")
         for name in ("cold.gcc.O2.txt", "cold.gcc.O2.dwarf4.txt"):
             with self.subTest(name=name):
-                placed, unplaced = fixture_dwarf(name).placed()
+                placed, unplaced = fixture_dwarf(name).placed(starts)
                 self.assertEqual({sub.name: sub.low_pc for sub in placed},
                                  {"main": 0x11A0, "checked_div": 0x1370, "sum_bytes": 0x13B0, "must_alloc": 0x13E0})
                 self.assertEqual(unplaced, [])
+
+    def test_clang_lists_the_entry_of_a_basic_block_section_function_last_and_no_fragment_is_placed(self):
+        # `clang -O2 -fbasic-block-sections=all` on src/cold.c: the first range of each list is a fragment (NOTYPE
+        # `checked_div.__part.1`) and the entry `checked_div` (FUNC, 0x11c0) is the list's last range.
+        dwarf = fixture_dwarf("cold.clang.O2.bbs.txt")
+        starts = fixture_starts("cold.clang.O2.bbs.syms.txt")
+        self.assertEqual(dwarf.ranges[0x24], (0x11CD,))
+        placed, unplaced = dwarf.placed(starts)
+        self.assertEqual(placed, [])
+        self.assertEqual([(gone.name, gone.why) for gone in unplaced],
+                         [(name, NO_FUNC_START) for name in ("checked_div", "main", "must_alloc", "sum_bytes")])
+
+    def test_the_rnglistx_form_of_a_range_is_read_and_still_needs_a_function_symbol(self):
+        # `DW_AT_ranges : (rnglistx) (index: 0): 0x24` is the offset 0x24 of the list.
+        dwarf = fixture_dwarf("cold.clang.O2.bbs.txt")
+        self.assertEqual(dwarf.index[0x95].attrs["DW_AT_ranges"], "(index: 0): 0x24")
+        placed, _ = dwarf.placed({0x11CD: (["checked_div"], 6)})
+        self.assertEqual([(sub.name, sub.low_pc) for sub in placed], [("checked_div", 0x11CD)])
 
     def test_subprograms_still_lists_the_functions_that_have_a_low_pc(self):
         names = [sub.name for sub in fixture_dwarf("cold.gcc.O2.txt").subprograms()]
         self.assertEqual(names, ["main", "checked_div", "sum_bytes"])
 
-    def test_code_a_linker_discarded_is_named_and_unplaced(self):
+    def test_code_a_linker_discarded_is_unplaced_because_no_function_symbol_starts_at_its_address(self):
         # src/gcsect.c with -ffunction-sections -Wl,--gc-sections: `never_called` keeps DW_AT_low_pc 0.
-        placed, unplaced = fixture_dwarf("gcsect.O2.txt").placed()
+        placed, unplaced = fixture_dwarf("gcsect.O2.txt").placed({0x1060: (["main"], 1), 0x1180: (["used_sum"], 1)})
         self.assertEqual([(sub.name, sub.low_pc) for sub in placed], [("main", 0x1060), ("used_sum", 0x1180)])
-        self.assertEqual([(gone.name, gone.why) for gone in unplaced],
-                         [("never_called", "its code was discarded by the linker (address 0x0)")])
+        self.assertEqual([(gone.name, gone.why) for gone in unplaced], [("never_called", NO_FUNC_START)])
         self.assertEqual(len(fixture_dwarf("gcsect.O2.txt").subprograms()), 3)
 
     def graph(self, *dies: Die, ranges: dict | None = None) -> Dwarf:
@@ -1037,10 +1084,10 @@ class PlacementTests(unittest.TestCase):
     def function(self, offset: int, forms: dict[str, str] | None = None, **attrs: str) -> Die:
         return Die(offset, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": f"f{offset:x}", **attrs}, forms=forms or {})
 
-    def entry_of(self, forms: dict[str, str] | None = None, **attrs: str) -> tuple[int | None, str]:
+    def entry_of(self, forms: dict[str, str] | None = None, starts=None, **attrs: str) -> tuple[int | None, str]:
         dwarf = self.graph(self.function(0x40, forms, **attrs),
                            ranges={0: (0x1000,), 0x2C: (0x13E0,), 0x50: (0x1000, 0x2000), 0x60: ()})
-        placed, unplaced = dwarf.placed()
+        placed, unplaced = dwarf.placed(AnyAddress() if starts is None else starts)
         return (placed[0].low_pc, "") if placed else (None, unplaced[0].why)
 
     def test_the_entry_pc_comes_before_the_low_pc_and_the_ranges(self):
@@ -1071,48 +1118,89 @@ class PlacementTests(unittest.TestCase):
             with self.subTest(ranges=ranges):
                 self.assertEqual(self.entry_of(DW_AT_ranges=ranges), (None, "its DW_AT_ranges list has no one readable first range"))
 
-    def test_an_address_a_linker_discarded_is_no_entry(self):
-        self.assertEqual(TOMBSTONES, {0, 1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF})
+    def test_an_entry_from_any_attribute_is_placed_only_at_the_start_of_a_function_symbol(self):
+        for forms, attrs in (({}, {"DW_AT_low_pc": "0x1180"}),
+                             ({"DW_AT_entry_pc": "addr"}, {"DW_AT_entry_pc": "0x1380", "DW_AT_low_pc": "0x1000"}),
+                             ({}, {"DW_AT_ranges": "0x2c"})):
+            address = {"DW_AT_low_pc": 0x1180, "DW_AT_entry_pc": 0x1380, "DW_AT_ranges": 0x13E0}[next(iter(attrs))]
+            with self.subTest(attrs=attrs):
+                self.assertEqual(self.entry_of(forms, {address: (["f"], 1)}, **attrs), (address, ""))
+                self.assertEqual(self.entry_of(forms, {address + 1: (["f"], 1)}, **attrs), (None, NO_FUNC_START))
+                self.assertEqual(self.entry_of(forms, {}, **attrs), (None, NO_FUNC_START))
+
+    def test_a_list_whose_entry_is_not_its_first_range_is_not_placed_at_the_first_range(self):
+        # The entry 0x2000 is the list's last range; the first, 0x13e0, is a fragment no function symbol starts.
+        self.assertEqual(self.entry_of(starts={0x2000: (["f"], 1)}, DW_AT_ranges="0x2c"), (None, NO_FUNC_START))
+
+    def test_an_address_a_linker_discarded_is_no_function_start(self):
         for address in (0, 1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
             for forms, attrs in (({}, {"DW_AT_low_pc": hex(address)}),
                                  ({"DW_AT_entry_pc": "addr"}, {"DW_AT_entry_pc": hex(address), "DW_AT_low_pc": "0x1000"})):
                 with self.subTest(address=address, attrs=attrs):
-                    self.assertEqual(self.entry_of(forms, **attrs),
-                                     (None, f"its code was discarded by the linker (address {address:#x})"))
+                    self.assertEqual(self.entry_of(forms, {0x1000: (["f"], 1)}, **attrs), (None, NO_FUNC_START))
         dwarf = self.graph(self.function(0x40, DW_AT_ranges="0x2c"), ranges={0x2C: (0,)})
-        self.assertEqual(dwarf.placed()[1][0].why, "its code was discarded by the linker (address 0x0)")
-        self.assertEqual(self.entry_of(DW_AT_low_pc="0x2"), (2, ""))
+        self.assertEqual(dwarf.placed({0x13E0: (["f"], 1)})[1][0].why, NO_FUNC_START)
+
+    def test_an_import_is_no_function_start_so_a_tombstone_at_zero_stays_unplaced(self):
+        # Every dynamic binary's .symtab lists its imports as FUNC symbols of the undefined section, at value 0.
+        starts = fixture_starts("cold.gcc.O2.syms.txt")
+        self.assertEqual(self.entry_of(starts=starts, DW_AT_low_pc="0"), (None, NO_FUNC_START))
 
     def test_a_die_without_code_is_in_neither_list(self):
         declaration = self.function(0x40, DW_AT_declaration="1")
         abstract = self.function(0x50, DW_AT_inline="3")
-        placed, unplaced = self.graph(declaration, abstract).placed()
+        placed, unplaced = self.graph(declaration, abstract).placed(AnyAddress())
         self.assertEqual((placed, unplaced), ([], []))
 
     def test_an_unplaced_function_takes_its_name_from_its_origin(self):
         origin = Die(0x30, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": "real_name"})
         clone = Die(0x40, "DW_TAG_subprogram", 1, attrs={"DW_AT_abstract_origin": "<0x30>", "DW_AT_low_pc": "0"})
-        _, unplaced = self.graph(origin, clone).placed()
+        _, unplaced = self.graph(origin, clone).placed({0x1000: (["real_name"], 1)})
         self.assertEqual([(gone.name, gone.offset) for gone in unplaced], [("real_name", 0x40)])
 
     def test_a_function_with_no_ranges_value_is_not_placed_by_the_list_at_offset_zero(self):
         dwarf = self.graph(Die(0x40, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": "f", "DW_AT_ranges": "zz"}),
                            ranges={0: (0x1000,)})
-        placed, unplaced = dwarf.placed()
+        placed, unplaced = dwarf.placed(AnyAddress())
         self.assertEqual((placed, [gone.why for gone in unplaced]), ([], ["its DW_AT_ranges list has no one readable first range"]))
 
-    def test_an_out_of_line_copy_takes_its_name_and_parameters_from_its_origin(self):
+    def test_an_out_of_line_copy_takes_its_name_from_its_origin_and_is_an_instance(self):
         origin = Die(0x30, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": "real_name", "DW_AT_external": "1"})
         clone = Die(0x40, "DW_TAG_subprogram", 1, attrs={"DW_AT_abstract_origin": "<0x30>", "DW_AT_low_pc": "0x1000"})
-        placed, _ = self.graph(origin, clone).placed()
-        self.assertEqual([(sub.name, sub.low_pc, sub.via_origin, sub.external) for sub in placed],
+        placed, _ = self.graph(origin, clone).placed(AnyAddress())
+        self.assertEqual([(sub.name, sub.low_pc, sub.instance, sub.external) for sub in placed],
                          [("real_name", 0x1000, True, True)])
+
+    def test_a_function_carries_the_producer_of_its_unit(self):
+        gcc, _ = fixture_dwarf("cold.gcc.O2.txt").placed(AnyAddress())
+        self.assertTrue(all(sub.producer.startswith("GNU C17 13.3.0 -mtune=generic") for sub in gcc))
+        # readelf 2.42 cannot read the strx producer of a clang DWARF 5 unit, which is not a producer to trust either.
+        clang, _ = fixture_dwarf("cold.clang.O2.bbs.txt").placed(AnyAddress())
+        self.assertEqual({sub.producer for sub in clang}, {"error"})
+        self.assertEqual(self.graph(self.function(0x40, DW_AT_low_pc="0x1000")).placed(AnyAddress())[0][0].producer, "")
+
+    def test_a_function_that_names_itself_is_no_instance(self):
+        plain = self.function(0x40, DW_AT_low_pc="0x1000")
+        placed, _ = self.graph(plain).placed(AnyAddress())
+        self.assertFalse(placed[0].instance)
+
+    def test_a_declaration_it_realises_makes_a_function_an_instance_as_well(self):
+        declaration = Die(0x30, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": "f", "DW_AT_declaration": "1"})
+        definition = Die(0x40, "DW_TAG_subprogram", 1, attrs={"DW_AT_specification": "<0x30>", "DW_AT_low_pc": "0x1000"})
+        placed, _ = self.graph(declaration, definition).placed(AnyAddress())
+        self.assertEqual([(sub.name, sub.instance) for sub in placed], [("f", True)])
+
+    def test_prototyped_is_the_flag_of_the_function_itself(self):
+        yes = self.function(0x40, DW_AT_low_pc="0x1000", DW_AT_prototyped="1")
+        no = self.function(0x50, DW_AT_low_pc="0x2000")
+        placed, _ = self.graph(yes, no).placed(AnyAddress())
+        self.assertEqual([(sub.low_pc, sub.prototyped) for sub in placed], [(0x1000, True), (0x2000, False)])
 
     def test_the_lists_come_back_in_address_and_name_order(self):
         dies = [self.function(0x40, DW_AT_low_pc="0x3000"), self.function(0x50, DW_AT_low_pc="0x1000"),
                 self.function(0x60, DW_AT_low_pc="0"), self.function(0x70, DW_AT_low_pc="0")]
         dies[2].attrs["DW_AT_name"], dies[3].attrs["DW_AT_name"] = "zeta", "alpha"
-        placed, unplaced = self.graph(*dies).placed()
+        placed, unplaced = self.graph(*dies).placed({0x1000: (["f"], 1), 0x3000: (["f"], 1)})
         self.assertEqual([sub.low_pc for sub in placed], [0x1000, 0x3000])
         self.assertEqual([gone.name for gone in unplaced], ["alpha", "zeta"])
 
@@ -1130,16 +1218,24 @@ class PlacementTests(unittest.TestCase):
         self.assertEqual(die.attrs["DW_AT_entry_pc"], "0x11e3")  # the first of two, with its own form
         self.assertNotIn("DW_AT_external", die.forms)
 
-    def test_the_reader_asks_readelf_for_the_ranges_beside_the_info(self):
+    def test_the_reader_asks_readelf_for_the_ranges_beside_the_info_and_follows_no_link(self):
         completed = subprocess.CompletedProcess([], 0, (DWARF_FIXTURES / "cold.gcc.O2.txt").read_text(), "")
         with unittest.mock.patch.object(subprocess, "run", return_value=completed) as run:
             dwarf = Dwarf.read(Path("some binary"), dataclasses.replace(X86_64, binutils_prefix="g"))
-        self.assertEqual(run.call_args.args[0], ["greadelf", "--wide", "--debug-dump=info", "--debug-dump=Ranges", "some binary"])
+        # A split-DWARF skeleton names a .dwo file; readelf reads it, and its strings wrongly, only where it finds it.
+        self.assertEqual(run.call_args.args[0], ["greadelf", "--wide", "--debug-dump=info", "--debug-dump=Ranges",
+                                                 "--debug-dump=no-follow-links", "some binary"])
         self.assertEqual(dwarf.ranges[0x2C], (0x13E0,))
         failed = subprocess.CompletedProcess([], 1, "", "no such file")
         with unittest.mock.patch.object(subprocess, "run", return_value=failed), self.assertRaises(RuntimeError):
             Dwarf.read(Path("some binary"))
 
+    def test_a_vector_type_is_not_an_array_to_the_type_model(self):
+        vector = Die(0x30, "DW_TAG_array_type", 1, attrs={"DW_AT_GNU_vector": "1", "DW_AT_byte_size": "16"})
+        array = Die(0x40, "DW_TAG_array_type", 1, attrs={"DW_AT_byte_size": "16"})
+        dwarf = Dwarf([], {0x30: vector, 0x40: array})
+        self.assertEqual((dwarf.type(0x30).kind, dwarf.type(0x30).reason), ("unsupported", "vector type"))
+        self.assertEqual(dwarf.type(0x40).kind, "array")
 
 
 @unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")

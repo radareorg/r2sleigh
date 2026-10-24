@@ -16,14 +16,16 @@ does not model is described as ``unsupported`` with the tag that stopped it,
 never guessed.
 
 A function's address is its entry (DWARF 5, section 2.18): ``DW_AT_entry_pc``, else ``DW_AT_low_pc``, else the
-start of the first range of ``DW_AT_ranges``. ``subprograms()`` lists the functions that have a ``DW_AT_low_pc``;
-``placed()`` lists every function with code and names each one it cannot place.
+start of the first range of ``DW_AT_ranges``, and it is accepted only where a FUNC symbol of the binary starts (clang
+lists the entry of a basic-block-sections function last). ``subprograms()`` lists the functions that have a
+``DW_AT_low_pc``; ``placed()`` lists every function with code and names each one it cannot place.
 """
 
 from __future__ import annotations
 
 import re
 import subprocess
+from collections.abc import Container
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -38,8 +40,9 @@ _RANGE_ROW = re.compile(
     r"^\s+(?P<offset>[0-9a-f]{8})\s+(?:(?P<end><End of list>)|(?P<begin>[0-9a-f]{8,16})\s+(?:(?P<base>\(base address\))|[0-9a-f]{8,16}))"
 )
 _RANGE_SECTION = re.compile(r"^Contents of the \.debug_(?:ranges|rnglists) section")
-# What a linker writes over the address of code it discarded: 0, all ones, or lld's 1 in `.debug_ranges`.
-TOMBSTONES = frozenset({0, 1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF})
+# Why a function the DWARF gives an entry is unplaced when the container states no function there: a linker's
+# tombstone (0, all ones), a fragment of a split function, an address in the middle of one.
+NO_FUNC_START = "no FUNC symbol of the binary starts at its entry"
 # `readelf --wide` names the attribute's form first: `(data1) 7`, `(strp) (offset: 0x7a): x`.
 _FORM = re.compile(r"^\([a-z][a-z0-9_]*\)\s*")
 
@@ -208,8 +211,12 @@ class Subprogram:
     return_type: int | None
     parameters: list[Parameter]
     variadic: bool
+    # The `DW_AT_producer` of its unit: the compiler whose DWARF this is.
+    producer: str
     prototyped: bool
-    via_origin: bool
+    # The DIE states itself through another (`DW_AT_abstract_origin`, `DW_AT_specification`): a clone, an
+    # out-of-line copy. Its parameters are the origin's, not necessarily those at its address.
+    instance: bool
 
 
 @dataclass(frozen=True)
@@ -233,7 +240,8 @@ class Dwarf:
     @classmethod
     def read(cls, binary: Path, target: Target = X86_64) -> "Dwarf":
         proc = subprocess.run(
-            [target.tool("readelf"), "--wide", "--debug-dump=info", "--debug-dump=Ranges", str(binary)],
+            [target.tool("readelf"), "--wide", "--debug-dump=info", "--debug-dump=Ranges",
+             "--debug-dump=no-follow-links", str(binary)],
             capture_output=True,
             text=True,
             check=False,
@@ -266,7 +274,6 @@ class Dwarf:
         """Every function with a ``DW_AT_low_pc`` in the binary, in address order."""
         found: list[Subprogram] = []
         for unit in self.units:
-            unit_name = unit.text("DW_AT_name") or ""
             for die in _walk(unit):
                 if die.tag != "DW_TAG_subprogram" or "DW_AT_low_pc" not in die.attrs:
                     continue
@@ -275,31 +282,33 @@ class Dwarf:
                     low_pc = int(low or "", 16)
                 except ValueError:
                     continue
-                found.append(self._subprogram(die, unit_name, low_pc))
+                found.append(self._subprogram(die, unit, low_pc))
         found.sort(key=lambda s: (s.low_pc, s.name))
         return found
 
-    def placed(self) -> tuple[list[Subprogram], list[Unplaced]]:
+    def placed(self, starts: Container[int]) -> tuple[list[Subprogram], list[Unplaced]]:
         """Every function with code at its entry address, and each one with none.
 
-        The function's ``low_pc`` here is its entry. A DIE with neither ``DW_AT_low_pc`` nor ``DW_AT_ranges`` holds
-        no code (a declaration, an abstract instance) and is in neither list. Whatever the DWARF does not state as
-        one address is unplaced with the reason, never guessed: a constant ``DW_AT_entry_pc``, a range list
-        that is empty or unreadable, an address a linker discarded.
+        The function's ``low_pc`` here is its entry, and ``starts`` holds the addresses where the binary's FUNC
+        symbols start. A DIE with neither ``DW_AT_low_pc`` nor ``DW_AT_ranges`` holds no code (a declaration, an
+        abstract instance) and is in neither list. Whatever the DWARF does not state as one address the binary
+        also states as a function is unplaced with the reason, never guessed: a constant ``DW_AT_entry_pc``, a
+        range list that is empty or unreadable, an address that starts no function.
         """
         found: list[Subprogram] = []
         unplaced: list[Unplaced] = []
         for unit in self.units:
-            unit_name = unit.text("DW_AT_name") or ""
             for die in _walk(unit):
                 if die.tag != "DW_TAG_subprogram" or not {"DW_AT_low_pc", "DW_AT_ranges"} & die.attrs.keys():
                     continue
                 entry, why = self._entry(die)
+                if entry is not None and entry not in starts:
+                    entry, why = None, NO_FUNC_START
                 if entry is None:
                     named, _ = self._attr_via_origin(die, "DW_AT_name")
                     unplaced.append(Unplaced(named.text("DW_AT_name") or "", die.offset, why))
                 else:
-                    found.append(self._subprogram(die, unit_name, entry))
+                    found.append(self._subprogram(die, unit, entry))
         found.sort(key=lambda s: (s.low_pc, s.name))
         unplaced.sort(key=lambda u: (u.name, u.offset))
         return found, unplaced
@@ -325,26 +334,24 @@ class Dwarf:
             if len(begins) != 1:
                 return None, "its DW_AT_ranges list has no one readable first range"
             entry = begins[0]
-        if entry in TOMBSTONES:
-            return None, f"its code was discarded by the linker (address {entry:#x})"
         return entry, ""
 
-    def _subprogram(self, die: Die, unit_name: str, low_pc: int) -> Subprogram:
-        named, via_name = self._attr_via_origin(die, "DW_AT_name")
+    def _subprogram(self, die: Die, unit: Die, low_pc: int) -> Subprogram:
+        named, _ = self._attr_via_origin(die, "DW_AT_name")
         typed, _ = self._attr_via_origin(die, "DW_AT_type")
         external_die, _ = self._attr_via_origin(die, "DW_AT_external")
-        proto_die, _ = self._attr_via_origin(die, "DW_AT_prototyped")
         formals = self._formals(die)
         return Subprogram(
             name=named.text("DW_AT_name") or "",
             low_pc=low_pc,
-            unit=unit_name,
+            unit=unit.text("DW_AT_name") or "",
             external=external_die.flag("DW_AT_external"),
             return_type=typed.ref("DW_AT_type"),
             parameters=formals[0],
             variadic=formals[1],
-            prototyped=proto_die.flag("DW_AT_prototyped"),
-            via_origin=via_name,
+            producer=unit.text("DW_AT_producer") or "",
+            prototyped=die.flag("DW_AT_prototyped"),
+            instance=not {"DW_AT_abstract_origin", "DW_AT_specification"}.isdisjoint(die.attrs),
         )
 
     def _formals(self, die: Die) -> tuple[list[Parameter], bool]:
@@ -440,6 +447,8 @@ class Dwarf:
             if die.flag("DW_AT_declaration"):
                 return TypeInfo(kind=kind, size=0, spelling=spelled, reason="incomplete")
             return TypeInfo(kind=kind, size=size, target=base, spelling=spelled)
+        if die.tag == "DW_TAG_array_type" and die.flag("DW_AT_GNU_vector"):
+            return TypeInfo(kind="unsupported", size=size, spelling=spelled, reason="vector type")
         if die.tag == "DW_TAG_array_type":
             count = None
             for child in die.children:
@@ -574,7 +583,7 @@ def _walk(die: Die):
 
 
 def function_symbols(binary: Path, target: Target = X86_64) -> dict[int, tuple[list[str], int]]:
-    """``address -> (names, size)`` of every FUNC symbol in the binary's ``.symtab``."""
+    """``address -> (names, size)`` of every defined FUNC symbol in the binary's ``.symtab``: an import is not one."""
     proc = subprocess.run(
         [target.tool("readelf"), "--wide", "--syms", str(binary)],
         capture_output=True,
@@ -588,7 +597,7 @@ def function_symbols(binary: Path, target: Target = X86_64) -> dict[int, tuple[l
             in_symtab = "'.symtab'" in line
             continue
         fields = line.split()
-        if not in_symtab or len(fields) < 8 or fields[3] != "FUNC":
+        if not in_symtab or len(fields) < 8 or fields[3] != "FUNC" or fields[6] == "UND":
             continue
         try:
             address = int(fields[1], 16)

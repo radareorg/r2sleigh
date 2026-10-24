@@ -27,15 +27,22 @@ sys.path.insert(0, str(HERE.parent / "tests" / "equiv"))
 import c_types as ct  # noqa: E402
 import differential_truth as dt  # noqa: E402
 import dwarf  # noqa: E402
-from test_c_types import Graph  # noqa: E402
+from test_c_types import GCC, Graph  # noqa: E402
 
 DEBUG, STRIPPED = pathlib.Path("debug"), pathlib.Path("stripped")
 
 
-def declare(text: str, entry: int = 0x1000) -> dt.Declared:
+def declare(text: str, entry: int = 0x1000, **states: object) -> dt.Declared:
     """What the source declares of the function this prototype states, read through DWARF."""
     graph = Graph()
-    return dt.declared(graph.dwarf(), graph.subprogram(ct.parse_prototype(text), entry))
+    return dt.declared(graph.dwarf(), graph.subprogram(ct.parse_prototype(text), entry, **states))
+
+
+def ungradable(text: str, **states: object) -> str:
+    """Why the gate cannot grade the function this prototype states, as its DWARF (with `states`) says it."""
+    with unittest.TestCase().assertRaises(dt.Ungradable) as raised:
+        declare(text, **states)
+    return raised.exception.reason
 
 
 def seen(text: str, marked: bool = False) -> dt.Seen:
@@ -49,6 +56,11 @@ class Source:
         self.graph = Graph()
         self.placed = [self.graph.subprogram(ct.parse_prototype(text), addr) for addr, text in protos.items()]
         self.unplaced = unplaced or []
+
+    def state(self, name: str, **states: object) -> "Source":
+        """What DWARF says of the function `name` besides its prototype (`instance`, `prototyped`)."""
+        self.placed = [dataclasses.replace(sub, **states) if sub.name == name else sub for sub in self.placed]
+        return self
 
     def read(self, binary: pathlib.Path, _prefix: str):
         if binary == DEBUG:
@@ -490,38 +502,11 @@ class TruthIsDwarf(unittest.TestCase):
                                    {0x1000: fn("int32_t fcn_1000(int32_t arg0, char* arg1)")})
         self.assertEqual((code, report["facts"]["correct"]), (0, 3))
 
-    def test_a_float_result_is_graded_and_a_float_parameter_is_not(self) -> None:
-        said = fn("uint64_t fcn_1000(uint32_t arg0, uint64_t arg1, uint64_t arg2)")
-        code, report, _ = run_main({0x1000: "double f(int32_t a, float b, int32_t c)"}, {0x1000: said})
-        self.assertEqual(report["silent"], ["f return: expected 'double', said 'uint64_t'",
-                                            "f parameter 0: expected 'int32_t', said 'uint32_t'"])
-        self.assertEqual(report["unreadable_truth"], {dt.AFTER_ONE_NOT: 1, dt.NOT_IN_REGISTER: 1})
-        self.assertEqual(list(report["unreadable_truth"]), [dt.AFTER_ONE_NOT, dt.NOT_IN_REGISTER])
-        self.assertEqual(report["facts"], {"correct": 0, "missing": 0, "marked_wrong": 0, "silently_wrong": 2})
-
-    def test_a_struct_by_value_is_no_register_parameter_and_ends_the_positions(self) -> None:
-        declared = declare("int64_t f(int32_t a, struct pair p, int32_t b, void* c)")
-        self.assertEqual([slot.expected for slot in declared.params],
-                         [ct.integer(4, True), None, None, None])
-        self.assertEqual([slot.why for slot in declared.params[1:]], [dt.NOT_IN_REGISTER, dt.AFTER_ONE_NOT, dt.AFTER_ONE_NOT])
-
-    def test_every_parameter_that_is_an_integer_register_class_is_placed(self) -> None:
-        declared = declare("void f(int8_t a, uint16_t b, int32_t c, uint64_t d, _Bool e, char* f, void (*g)(void), struct s* h)")
-        self.assertTrue(all(slot.expected is not None for slot in declared.params))
-
-    def test_a_type_the_gate_cannot_state_is_unreadable_for_a_result_and_a_parameter(self) -> None:
-        graph = Graph()
-        weird = graph.die("DW_TAG_base_type", name="complex", size=8, encoding="3\t(complex float)")
-        ok = graph.write(ct.integer(4, True))
-        sub = dwarf.Subprogram("f", 0x1000, "t.c", True, weird, [dwarf.Parameter("a", weird), dwarf.Parameter("b", ok),
-                                                                   dwarf.Parameter("c", None)], False, True, False)
-        declared = dt.declared(graph.dwarf(), sub)
-        self.assertIsNone(declared.ret.expected)
-        self.assertTrue(declared.ret.why.startswith(f"{dt.CANNOT_STATE} (base type encoding 3"))
-        self.assertEqual([slot.expected for slot in declared.params], [None, None, None])
-        self.assertEqual([slot.why.split(" (")[0] for slot in declared.params],
-                         [dt.CANNOT_STATE, dt.AFTER_ONE_NOT, dt.CANNOT_STATE])
-        self.assertEqual(declared.params[2].why, f"{dt.CANNOT_STATE} (no type)")
+    def test_every_parameter_and_result_of_a_register_class_is_graded(self) -> None:
+        declared = declare("char* f(int8_t a, uint16_t b, int32_t c, uint64_t d, _Bool e, char* f, void (*g)(void), struct s* h)")
+        self.assertEqual(len(declared.params), 8)
+        self.assertEqual(declared.ret, ct.pointer(ct.integer(1, None)))
+        self.assertEqual(declare("void f(void)").ret, ct.NO_VALUE)
 
     def test_a_qualifier_on_a_whole_parameter_or_result_is_no_part_of_the_type(self) -> None:
         graph = Graph()
@@ -529,36 +514,134 @@ class TruthIsDwarf(unittest.TestCase):
         both = dataclasses.replace(ct.pointer(ct.integer(1, None)), const=True, volatile=True)
         array = ct.CType(ct.ARRAY, target=ct.integer(4, True), count=4)
         declared = dt.declared(graph.dwarf(), graph.subprogram(ct.Prototype("f", const_int, (const_int, both, array)), 0x1000))
-        self.assertEqual(declared.ret.expected, ct.integer(4, True))
-        self.assertEqual([slot.expected for slot in declared.params],
-                         [ct.integer(4, True), ct.pointer(ct.integer(1, None)), ct.pointer(ct.integer(4, True))])
-
-    def test_a_parameter_with_no_type_is_unreadable(self) -> None:
-        graph = Graph()
-        sub = dwarf.Subprogram("f", 0x1000, "t.c", True, None, [dwarf.Parameter("a", None)], False, True, False)
-        declared = dt.declared(graph.dwarf(), sub)
-        self.assertEqual(declared.params[0].why, f"{dt.CANNOT_STATE} (no type)")
-        self.assertEqual(declared.ret.expected, ct.NO_VALUE)
-
-    def test_unreadable_truth_is_counted_by_reason_and_scores_nothing(self) -> None:
-        said = fn("uint64_t fcn_1000(uint64_t arg0, uint64_t arg1)")
-        code, report, _ = run_main({0x1000: "int64_t f(struct pair a, int64_t b)", 0x2000: "int32_t g(void)"},
-                                   {0x1000: said, 0x2000: fn(RIGHT.replace("fcn_1000", "g"), addr=0x2000)})
-        self.assertEqual(report["unreadable_truth"], {dt.AFTER_ONE_NOT: 1, dt.NOT_IN_REGISTER: 1})
-        self.assertEqual(report["facts"], {"correct": 1, "missing": 0, "marked_wrong": 0, "silently_wrong": 1})
-        self.assertEqual(code, 1)
-
-    def test_a_function_the_stripped_build_lacks_has_its_readable_facts_missing_and_its_unreadable_ones_counted(self) -> None:
-        code, report, _ = run_main({0x1000: "int32_t f(int32_t a, double b)", 0x2000: "int32_t g(void)"},
-                                   {0x2000: fn(RIGHT.replace("fcn_1000", "g"), addr=0x2000)})
-        self.assertEqual(report["facts"], {"correct": 1, "missing": 2, "marked_wrong": 0, "silently_wrong": 0})
-        self.assertEqual(report["unreadable_truth"], {dt.NOT_IN_REGISTER: 1})
+        self.assertEqual(declared.ret, ct.integer(4, True))
+        self.assertEqual(declared.params, [ct.integer(4, True), ct.pointer(ct.integer(1, None)), ct.pointer(ct.integer(4, True))])
 
     def test_extra_parameters_beyond_the_source_are_not_a_fact(self) -> None:
         # The source states two parameters; a third the engine adds is graded by no fact (D78 (b)).
         said = fn("int32_t fcn_1000(int32_t arg0, int32_t arg1, int32_t arg2)")
         code, report, _ = run_main({0x1000: "int32_t f(int32_t a, int32_t b)"}, {0x1000: said})
         self.assertEqual((code, report["facts"]["correct"]), (0, 3))
+
+
+class Gradable(unittest.TestCase):
+    """A function is graded only if it passes one predicate; every other is named with its reason (ROADMAP D70)."""
+
+    def test_a_function_that_names_itself_and_states_a_prototype_is_graded(self) -> None:
+        self.assertEqual(declare("int32_t f(int32_t a, char* b)").name, "f")
+
+    def test_a_producer_other_than_gcc_is_not_graded(self) -> None:
+        # clang drops the unused parameter of an internal function in place: `helper(int a, int unused, int c)` takes
+        # (rdi, rsi), keeps its name, and its DWARF lists all three formals. Nothing in the DWARF says so.
+        for producer in ("clang version 18.1.3 (1ubuntu1)", "error", "", "GNU C++17 13.3.0 -g -O2", "GNU AS 2.42",
+                         "Rust 1.80", " GNU C17 13.3.0"):
+            with self.subTest(producer=producer):
+                self.assertEqual(ungradable("int32_t f(int32_t a)", producer=producer), dt.NOT_GCC)
+        for producer in ("GNU C89 4.8.5 -g", "GNU C99 9.4.0 -g -O2", "GNU C11 7.5.0", "GNU C17 13.3.0 -mtune=generic -g -O2",
+                         "GNU C23 14.1.0 -g"):
+            with self.subTest(producer=producer):
+                self.assertEqual(declare("int32_t f(int32_t a)", producer=producer).name, "f")
+
+    def test_a_function_with_no_prototyped_flag_states_no_signature(self) -> None:
+        # gcc -g1 emits no DW_AT_prototyped, no DW_AT_type and no formal parameter: `void f(void)` read from it is a guess.
+        self.assertEqual(ungradable("void f(void)", prototyped=False), dt.NOT_PROTOTYPED)
+        # K&R `int kr(a, b) char a;` has formals and no flag: a caller promotes `a` to int, DWARF says char.
+        self.assertEqual(ungradable("int32_t kr(int32_t a, char* b)", prototyped=False), dt.NOT_PROTOTYPED)
+
+    def test_an_instance_of_an_origin_is_not_graded_though_it_reads_like_the_source(self) -> None:
+        # `scale.constprop.0.isra.0` lists the source's formals in its own order and keeps the removed constant.
+        self.assertEqual(ungradable("int64_t scale(int32_t k, char* p, int64_t n)", instance=True), dt.INSTANCE)
+        self.assertEqual(ungradable("void f(void)", instance=True, prototyped=False), dt.INSTANCE)
+
+    def test_no_aggregate_vector_wide_or_float_type_is_in_the_empty_class_table(self) -> None:
+        graph = Graph()
+        vector = graph.die("DW_TAG_array_type", (graph.child("DW_TAG_subrange_type", upper=3),),
+                           type=graph.write(ct.integer(4, True)), size=16, vector=1)
+        complex_double = graph.die("DW_TAG_base_type", name="complex double", size=16, encoding="3\t(complex float)")
+        ok = graph.write(ct.integer(4, True))
+        results = {
+            "a struct result": ("struct big f(int32_t n, int64_t* p)", None),
+            "a union result": ("union u16 f(int32_t n)", None),
+            "a struct parameter": ("int64_t f(int32_t a, struct pair p, int32_t b)", None),
+            "a union parameter": ("int64_t f(union u16 u)", None),
+            "a long double result": ("long double f(int32_t a)", None),
+            "a long double parameter": ("int64_t f(int32_t a, long double d, int64_t* p)", None),
+            "an int128 result": ("INT128", None),
+            "a double parameter": ("int32_t f(int32_t a, double d, int32_t b)", None),
+            "a float parameter": ("int32_t f(float d)", None),
+            "a double result": ("double f(int32_t a)", None),
+            "a float result": ("float f(void)", None),
+            "a pointer to a struct pair result": ("struct pair* g(void)", "ok"),
+        }
+        for what, (text, expected) in results.items():
+            with self.subTest(what=what):
+                if text == "INT128":
+                    sub = graph.subprogram(ct.Prototype("f", ct.integer(16, True), ()), 0x1000)
+                else:
+                    sub = graph.subprogram(ct.parse_prototype(text), 0x1000)
+                if expected == "ok":
+                    self.assertEqual(dt.declared(graph.dwarf(), sub).name, "g")
+                else:
+                    with self.assertRaises(dt.Ungradable) as raised:
+                        dt.declared(graph.dwarf(), sub)
+                    self.assertEqual(raised.exception.reason, dt.NOT_STATED)
+        for what, result, params in [("a vector parameter", ok, [ok, vector, ok]), ("a vector result", vector, [ok]),
+                                     ("a complex parameter", ok, [complex_double]), ("a complex result", complex_double, []),
+                                     ("a parameter with no type", ok, [None])]:
+            with self.subTest(what=what):
+                sub = dwarf.Subprogram("f", 0x1000, "t.c", True, result, [dwarf.Parameter("p", t) for t in params],
+                                       False, GCC, True, False)
+                with self.assertRaises(dt.Ungradable) as raised:
+                    dt.declared(graph.dwarf(), sub)
+                self.assertEqual(raised.exception.reason, dt.NOT_STATED)
+
+    def test_a_pointer_to_a_type_the_gate_cannot_state_makes_the_function_ungradable(self) -> None:
+        graph = Graph()
+        vector = graph.die("DW_TAG_array_type", (graph.child("DW_TAG_subrange_type", upper=3),),
+                           type=graph.write(ct.integer(4, True)), size=16, vector=1)
+        pointer = graph.die("DW_TAG_pointer_type", type=vector, size=8)
+        sub = dwarf.Subprogram("f", 0x1000, "t.c", True, None, [dwarf.Parameter("p", pointer)], False, GCC, True, False)
+        with self.assertRaises(dt.Ungradable):
+            dt.declared(graph.dwarf(), sub)
+
+    def test_the_first_failing_check_names_the_reason(self) -> None:
+        self.assertEqual(ungradable("struct big f(void)", producer="clang", prototyped=False, instance=True), dt.NOT_GCC)
+        self.assertEqual(ungradable("struct big f(void)", prototyped=False, instance=True), dt.INSTANCE)
+        self.assertEqual(ungradable("struct big f(void)", prototyped=False), dt.NOT_PROTOTYPED)
+        self.assertEqual(ungradable("struct big f(void)"), dt.NOT_STATED)
+
+    def test_a_function_the_gate_cannot_grade_is_counted_by_reason_in_the_report(self) -> None:
+        source = Source({0x1000: "int32_t g(void)", 0x2000: "struct big mk(int32_t n)", 0x3000: "int32_t scale(int32_t k)",
+                         0x4000: "void zed(void)", 0x5000: "int32_t kr(int32_t a)", 0x6000: "double d(double x)"})
+        source.state("scale", instance=True).state("zed", prototyped=False).state("kr", prototyped=False)
+        stripped = {0x1000: fn("int32_t g(void)")}
+        code, report, err = run_main(source, stripped, listed={0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 0x6000})
+        self.assertEqual(code, 0, err)
+        self.assertEqual(report["ungradable"], {dt.INSTANCE: ["scale"], dt.NOT_PROTOTYPED: ["kr", "zed"],
+                                                dt.NOT_STATED: ["d", "mk"]})
+        self.assertEqual(list(report["ungradable"]), sorted(report["ungradable"]))
+        self.assertEqual((report["functions_in_dwarf"], report["functions_in_truth"]), (6, 1))
+        self.assertEqual(report["facts"], {"correct": 1, "missing": 0, "marked_wrong": 0, "silently_wrong": 0})
+
+    def test_the_engine_is_not_graded_on_an_ungradable_function(self) -> None:
+        source = Source({0x1000: "int32_t g(void)", 0x2000: "int64_t scale(int32_t k, char* p)"}).state("scale", instance=True)
+        wrong = fn("uint8_t scale(uint8_t a, uint64_t b)", addr=0x2000)
+        code, report, err = run_main(source, {0x1000: fn("int32_t g(void)"), 0x2000: wrong})
+        self.assertEqual((code, report["silent"], report["facts"]["correct"]), (0, [], 1), err)
+
+    def test_a_debug_build_with_no_gradable_function_fails_the_gate(self) -> None:
+        # `gcc -g1 -O2 cold.c`: every function lacks the prototyped flag. Base refused these builds, and so must this.
+        source = Source({0x1000: "int32_t a(void)", 0x2000: "void b(void)"}).state("a", prototyped=False).state("b", prototyped=False)
+        code, report, err = run_main(source, {0x1000: fn(RIGHT), 0x2000: fn("void fcn_2000(void)", addr=0x2000)})
+        self.assertEqual((code, report), (2, None))
+        self.assertIn("no function of the debug build is gradable (2 " + dt.NOT_PROTOTYPED + ")", err)
+
+    def test_every_function_of_each_reason_is_counted_in_the_refusal(self) -> None:
+        source = Source({0x1000: "int32_t a(void)", 0x2000: "struct s b(void)", 0x3000: "int32_t c(void)"})
+        source.state("a", prototyped=False).state("c", instance=True)
+        code, _, err = run_main(source, {0x1000: fn(RIGHT)})
+        self.assertEqual(code, 2)
+        self.assertIn(f"(1 {dt.NOT_STATED}; 1 {dt.INSTANCE}; 1 {dt.NOT_PROTOTYPED})", err)
 
 
 class Buckets(unittest.TestCase):
@@ -587,7 +670,7 @@ class Buckets(unittest.TestCase):
             ("parameter", "uint64_t", "uint8_t*", "integer_as_pointer"),
             ("return", "void", "uint64_t", "void_vs_value"),
             ("return", "int32_t", "void", "void_vs_value"),
-            ("return", "double", "uint64_t", "other"),
+            ("return", "_Bool", "uint8_t", "other"),
         ]
         for where, expected, said, bucket in cases:
             with self.subTest(where=where, expected=expected, said=said):
@@ -646,20 +729,6 @@ class Rates(unittest.TestCase):
         self.assertEqual(report["facts"], {"correct": 0, "missing": 1, "marked_wrong": 2, "silently_wrong": 0})
         self.assertEqual((report["recovery_rate"], report["soundness_rate"]), (0.0, 1.0))
 
-    def test_a_run_with_no_readable_fact_recovers_nothing_and_asserts_nothing(self) -> None:
-        source = Source({0x1000: "int32_t f(void)"})
-        source.placed[0] = dataclasses.replace(source.placed[0], return_type=source.graph.die(
-            "DW_TAG_base_type", name="c", size=8, encoding="3\t(complex)"))
-        code, report, _ = run_main(source, {0x1000: fn("uint32_t f(void)")})
-        self.assertEqual(report["facts"], {"correct": 0, "missing": 0, "marked_wrong": 0, "silently_wrong": 0})
-        self.assertEqual((code, report["recovery_rate"], report["soundness_rate"]), (0, 0.0, 1.0))
-
-    def test_a_run_with_no_fact_has_no_recovery(self) -> None:
-        report = graded({0x1000: "void f(double a)"}, {0x1000: fn("void fcn_1000(uint64_t a0)")})
-        self.assertEqual(report["facts"], {"correct": 1, "missing": 0, "marked_wrong": 0, "silently_wrong": 0})
-        report = graded({0x1000: "double f(double a)"}, {0x1000: fn("void fcn_1000(uint64_t a0)")})
-        self.assertEqual(report["facts"]["correct"] + report["facts"]["silently_wrong"], 1)
-
 
 class Presence(unittest.TestCase):
     """Does the function return a value at all, truth to recovered, with the silent share."""
@@ -696,15 +765,13 @@ class Presence(unittest.TestCase):
         self.assertNotIn("marked_by", report)
         self.assertEqual(report["return_presence"]["value_to_void"], {"total": 1, "silent": 1})
 
-    def test_a_function_with_an_unreadable_result_has_no_presence(self) -> None:
-        weird = Source({0x1000: "int32_t f(void)"})
-        weird.placed[0] = weird.placed[0].__class__(**{**weird.placed[0].__dict__,
-                                                      "return_type": weird.graph.die("DW_TAG_base_type", name="c", size=8,
-                                                                                     encoding="3\t(complex)")})
-        code, report, _ = run_main(weird, {0x1000: fn("uint32_t f(void)")})
-        self.assertEqual(sum(cell["total"] for cell in report["return_presence"].values()), 0)
-        self.assertEqual(report["facts"]["correct"] + report["facts"]["silently_wrong"], 0)
-        self.assertEqual(list(report["unreadable_truth"].values()), [1])
+    def test_a_function_with_an_ungradable_result_has_no_presence(self) -> None:
+        weird = Source({0x1000: "int32_t f(void)", 0x2000: "int32_t g(void)"})
+        weird.placed[0] = dataclasses.replace(weird.placed[0], return_type=weird.graph.die(
+            "DW_TAG_base_type", name="c", size=8, encoding="3\t(complex)"))
+        code, report, _ = run_main(weird, {0x1000: fn("uint32_t f(void)"), 0x2000: fn("int32_t g(void)", addr=0x2000)})
+        self.assertEqual(sum(cell["total"] for cell in report["return_presence"].values()), 1)
+        self.assertEqual(report["ungradable"], {dt.NOT_STATED: ["f"]})
 
 
 class Placement(unittest.TestCase):
@@ -712,31 +779,29 @@ class Placement(unittest.TestCase):
 
     def test_a_function_with_no_one_entry_is_named_and_not_graded(self) -> None:
         split = dwarf.Unplaced("sym", 0x572, "its DW_AT_ranges list has no one readable first range")
-        gone = dwarf.Unplaced("never_called", 0x600, "its code was discarded by the linker (address 0x0)")
-        code, report, err = run_main({0x1000: INT}, {0x1000: fn(RIGHT)}, unplaced=[split, gone])
+        gone = dwarf.Unplaced("never_called", 0x600, dwarf.NO_FUNC_START)
+        fragment = dwarf.Unplaced("split_hot", 0x700, dwarf.NO_FUNC_START)
+        code, report, err = run_main({0x1000: INT}, {0x1000: fn(RIGHT)}, unplaced=[split, gone, fragment])
         self.assertEqual(code, 0, err)
-        self.assertEqual(report["without_entry"], ["never_called: its code was discarded by the linker (address 0x0)",
-                                                   "sym: its DW_AT_ranges list has no one readable first range"])
-        self.assertEqual((report["functions_in_dwarf"], report["functions_in_truth"]), (3, 1))
+        self.assertEqual(report["ungradable"], {"its DW_AT_ranges list has no one readable first range": ["sym"],
+                                                dwarf.NO_FUNC_START: ["never_called", "split_hot"]})
+        self.assertEqual((report["functions_in_dwarf"], report["functions_in_truth"]), (4, 1))
         self.assertEqual(report["facts"]["correct"], 1)
 
     def test_a_function_the_engine_does_not_list_is_named_and_not_graded(self) -> None:
         code, report, err = run_main({0x1000: INT, 0x2000: "int32_t g(void)"},
                                      {0x1000: fn(RIGHT), 0x2000: fn("uint64_t g(void)", addr=0x2000)}, listed={0x1000})
         self.assertEqual(code, 0, err)
-        self.assertEqual(report["unlisted"], ["g"])
+        self.assertEqual(report["ungradable"], {dt.UNLISTED: ["g"]})
         self.assertEqual((report["functions_in_dwarf"], report["functions_in_truth"]), (2, 1))
         self.assertEqual(report["facts"], {"correct": 1, "missing": 0, "marked_wrong": 0, "silently_wrong": 0})
 
     def test_two_functions_at_one_entry_have_no_one_entry(self) -> None:
-        code, report, err = run_main(Source({0x1000: "int32_t a(void)", 0x2000: "int32_t g(void)"}), {0x2000: fn(RIGHT, addr=0x2000)})
-        self.assertEqual(code, 0, err)
         source = Source({0x1000: "int32_t a(void)", 0x2000: "int32_t g(void)"})
         source.placed.append(source.graph.subprogram(ct.parse_prototype("int32_t alias(void)"), 0x1000))
         code, report, err = run_main(source, {0x2000: fn(RIGHT, addr=0x2000), 0x1000: fn(RIGHT, addr=0x1000)})
         self.assertEqual(code, 0, err)
-        self.assertEqual(report["without_entry"], ["a: it shares its entry address 0x1000 with another function",
-                                                   "alias: it shares its entry address 0x1000 with another function"])
+        self.assertEqual(report["ungradable"], {dt.SHARED: ["a", "alias"]})
         self.assertEqual((report["functions_in_dwarf"], report["functions_in_truth"]), (3, 1))
         self.assertEqual(report["without_dwarf"], [])
 
@@ -748,16 +813,16 @@ class Placement(unittest.TestCase):
     def test_dwarf_that_declares_nothing_fails_the_gate(self) -> None:
         code, report, err = run_main({}, {0x1000: fn(RIGHT)}, debug_functions={0x1000: Fn("sym.f", {})})
         self.assertEqual((code, report), (2, None))
-        self.assertIn("declares no function", err)
+        self.assertIn("no function of the debug build is gradable (its DWARF declares no function)", err)
 
     def test_dwarf_that_places_nothing_the_engine_lists_fails_the_gate(self) -> None:
         code, report, err = run_main({0x1000: INT}, {0x1000: fn(RIGHT)}, listed=set())
         self.assertEqual((code, report), (2, None))
-        self.assertIn("no function DWARF declares has one entry the engine lists", err)
-        gone = dwarf.Unplaced("f", 1, "its code was discarded by the linker (address 0x0)")
+        self.assertIn(f"no function of the debug build is gradable (1 {dt.UNLISTED})", err)
+        gone = dwarf.Unplaced("f", 1, dwarf.NO_FUNC_START)
         code, report, err = run_main({}, {0x1000: fn(RIGHT)}, unplaced=[gone], debug_functions={0x1000: Fn("sym.f", {})})
         self.assertEqual((code, report), (2, None))
-        self.assertIn("no function DWARF declares has one entry", err)
+        self.assertIn(f"no function of the debug build is gradable (1 {dwarf.NO_FUNC_START})", err)
 
     def test_a_stripped_build_that_carries_dwarf_fails_the_gate(self) -> None:
         source = Source({0x1000: INT})
@@ -803,14 +868,36 @@ class Placement(unittest.TestCase):
         self.assertIn("UNREADABLE readelf: debug", err.getvalue())
 
 
+def readelf(info: str, symbols: str):
+    """A stand-in for `subprocess.run` that answers `readelf --debug-dump` with `info` and `readelf --syms` with `symbols`.
+
+    The stripped build named `stripped` has neither.
+    """
+
+    def run(argv, **_):
+        text = "" if argv[-1] == "stripped" else symbols if "--syms" in argv else info
+        return subprocess.CompletedProcess(argv, 0, text, "")
+
+    return run
+
+
+FIXTURES = HERE.parent / "tests" / "equiv" / "testdata" / "dwarf"
+
+
 class ReadingDwarf(unittest.TestCase):
-    """`read_dwarf` asks the oracle side's DWARF reader, with the binutils the caller names."""
+    """`read_dwarf` asks the oracle side's DWARF reader, with the binutils the caller names, and places by the binary's symbols."""
 
     def test_the_binutils_prefix_reaches_readelf_and_the_functions_come_back_placed(self) -> None:
-        reading = mock.Mock(placed=lambda: (["placed"], ["unplaced"]))
-        with mock.patch.object(dt.Dwarf, "read", return_value=reading) as read:
+        reading = mock.Mock(placed=mock.Mock(return_value=(["placed"], ["unplaced"])))
+        symbols = {0x1000: (["f"], 4)}
+        with (
+            mock.patch.object(dt.Dwarf, "read", return_value=reading) as read,
+            mock.patch.object(dt, "function_symbols", return_value=symbols) as listed,
+        ):
             result = dt.read_dwarf(pathlib.Path("debug"), "g")
         self.assertEqual(read.call_args.args[1].binutils_prefix, "g")
+        self.assertEqual(listed.call_args.args[1].binutils_prefix, "g")
+        reading.placed.assert_called_once_with(symbols)
         self.assertEqual(result, (reading, ["placed"], ["unplaced"]))
 
     def test_readelf_that_is_missing_or_fails_is_unreadable(self) -> None:
@@ -820,6 +907,34 @@ class ReadingDwarf(unittest.TestCase):
                     dt.read_dwarf(pathlib.Path("debug"), "")
                 self.assertEqual(raised.exception.command, "readelf")
                 self.assertIn(str(error), raised.exception.causes[""])
+
+    def test_a_function_is_placed_where_a_function_symbol_starts_and_nowhere_else(self) -> None:
+        gcc = (FIXTURES / "cold.gcc.O2.txt").read_text(), (FIXTURES / "cold.gcc.O2.syms.txt").read_text()
+        clang = (FIXTURES / "cold.clang.O2.bbs.txt").read_text(), (FIXTURES / "cold.clang.O2.bbs.syms.txt").read_text()
+        for name, texts, placed, unplaced in [
+            ("gcc lists a split function's hot part first", gcc, ["checked_div", "main", "must_alloc", "sum_bytes"], []),
+            ("clang lists a basic-block-sections entry last", clang, [], ["checked_div", "main", "must_alloc", "sum_bytes"]),
+        ]:
+            with self.subTest(name=name), mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)):
+                _, found, gone = dt.read_dwarf(pathlib.Path("debug"), "")
+            self.assertEqual(sorted(sub.name for sub in found), placed)
+            self.assertEqual(sorted(g.name for g in gone), unplaced)
+
+    def test_the_gate_refuses_a_build_whose_every_function_clang_split_into_sections(self) -> None:
+        texts = (FIXTURES / "cold.clang.O2.bbs.txt").read_text(), (FIXTURES / "cold.clang.O2.bbs.syms.txt").read_text()
+        out, err = io.StringIO(), io.StringIO()
+        argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
+        fragments = {0x11CD: Fn("loc.checked_div.__part.1", {}), 0x11C0: Fn("sym.checked_div", {})}
+        with (
+            mock.patch.object(sys, "argv", argv),
+            shell({DEBUG: fragments, STRIPPED: {}}),
+            mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = dt.main()
+        self.assertEqual((code, out.getvalue()), (2, ""))
+        self.assertIn(f"no function of the debug build is gradable (4 {dwarf.NO_FUNC_START})", err.getvalue())
 
 
 class Causes(unittest.TestCase):
@@ -986,19 +1101,22 @@ class ReportShape(unittest.TestCase):
     def test_the_report_names_what_it_graded(self) -> None:
         code, report, _ = run_main({0x1000: INT}, {0x1000: fn(RIGHT)})
         self.assertEqual(list(report), [
-            "functions_in_dwarf", "functions_in_truth", "functions_recovered", "without_entry", "unlisted", "without_dwarf",
-            "facts", "unreadable_truth", "recovery_rate", "soundness_rate", "silent", "silent_buckets", "marked_buckets",
-            "return_presence"])
+            "functions_in_dwarf", "functions_in_truth", "functions_recovered", "ungradable", "without_dwarf",
+            "facts", "recovery_rate", "soundness_rate", "soundness_without_qualifier", "silent", "silent_buckets",
+            "marked_buckets", "return_presence"])
         self.assertEqual(list(report["return_presence"]), list(dt.PRESENCE))
 
     def test_every_function_dwarf_declares_is_graded_or_named(self) -> None:
         gone = [dwarf.Unplaced("g", 1, "why")]
-        source = Source({0x1000: INT, 0x2000: "int32_t h(void)", 0x3000: "int32_t k(void)"}, gone)
+        source = Source({0x1000: INT, 0x2000: "int32_t h(void)", 0x3000: "int32_t k(void)", 0x4000: "int32_t m(void)"}, gone)
         source.placed.append(source.graph.subprogram(ct.parse_prototype("int32_t alias(void)"), 0x1000))
-        _, report, _ = run_main(source, {0x2000: fn("int32_t h(void)", addr=0x2000)}, listed={0x1000, 0x2000})
-        self.assertEqual(report["functions_in_dwarf"], 5)
-        self.assertEqual(report["functions_in_truth"] + len(report["without_entry"]) + len(report["unlisted"]), 5)
-        self.assertEqual((report["functions_in_truth"], len(report["without_entry"]), report["unlisted"]), (1, 3, ["k"]))
+        source.state("m", instance=True)
+        _, report, _ = run_main(source, {0x2000: fn("int32_t h(void)", addr=0x2000)}, listed={0x1000, 0x2000, 0x4000})
+        named = sum(len(names) for names in report["ungradable"].values())
+        self.assertEqual(report["functions_in_dwarf"], 6)
+        self.assertEqual(report["functions_in_truth"] + named, 6)
+        self.assertEqual(report["functions_in_truth"], 1)
+        self.assertEqual(report["ungradable"], {"why": ["g"], dt.INSTANCE: ["m"], dt.SHARED: ["alias", "f"], dt.UNLISTED: ["k"]})
 
     def test_every_list_in_the_report_is_sorted(self) -> None:
         names = ["zeta", "alpha", "mid"]
@@ -1006,18 +1124,41 @@ class ReportShape(unittest.TestCase):
         debug = {addr: Fn(f"sym.{name}", {}) for addr, name in zip(sorted(source), names)}
         debug[0x9000] = Fn("sym.b", {})
         debug[0x9100] = Fn("sym.a", {})
-        gone = [dwarf.Unplaced("z", 1, "why"), dwarf.Unplaced("a", 2, "why")]
+        gone = [dwarf.Unplaced("z", 1, "why"), dwarf.Unplaced("a", 2, "why"), dwarf.Unplaced("m", 3, "an earlier reason")]
         stripped = {addr: fn(f"uint64_t {name}(void)", addr=addr) for addr, name in zip(source, names)}
         code, report, _ = run_main(source, stripped, debug_functions=debug, unplaced=gone)
         self.assertEqual(report["without_dwarf"], ["sym.a", "sym.b"])
-        self.assertEqual(report["without_entry"], ["a: why", "z: why"])
+        self.assertEqual(report["ungradable"], {"an earlier reason": ["m"], "why": ["a", "z"]})
+        self.assertEqual(list(report["ungradable"]), ["an earlier reason", "why"])
         self.assertEqual(len(report["silent"]), 3)
 
     def test_the_functions_the_engine_does_not_list_are_named_in_order(self) -> None:
         source = {0x1000: "int32_t zeta(void)", 0x1010: "int32_t alpha(void)", 0x1020: "int32_t mid(void)",
                   0x1030: "int32_t zulu(void)", 0x1040: "int32_t able(void)"}
         _, report, _ = run_main(source, {0x1000: fn("int32_t zeta(void)")}, listed={0x1000, 0x1010, 0x1020})
-        self.assertEqual(report["unlisted"], ["able", "zulu"])
+        self.assertEqual(report["ungradable"], {dt.UNLISTED: ["able", "zulu"]})
+
+    def test_soundness_is_reported_beside_the_same_rate_without_the_qualifier_rows(self) -> None:
+        # No stripped binary states `const`: nine of fifteen silent errors in hashes.c are `const uint8_t*` said `uint8_t*`.
+        source = {0x1000: "int32_t f(const uint8_t* a, const uint8_t* b, int32_t c, int32_t d)"}
+        said = fn("int32_t fcn_1000(uint8_t* a0, uint8_t* a1, int32_t a2, uint64_t a3)")
+        report = graded(source, {0x1000: said})
+        self.assertEqual(report["silent_buckets"], {"parameter": {"qualifier": 2, "width_wider": 1}})
+        # correct 2 (return, c), silent 3: asserted 5, and 2 of the 3 are qualifier rows.
+        self.assertEqual(report["soundness_rate"], round(1 - 3 / 5, 4))
+        self.assertEqual(report["soundness_without_qualifier"], round(1 - 1 / 3, 4))
+
+    def test_a_run_whose_every_error_is_a_qualifier_is_perfectly_sound_without_them(self) -> None:
+        report = graded({0x1000: "void f(const uint8_t* a)"}, {0x1000: fn("void fcn_1000(uint8_t* a0)")})
+        self.assertEqual((report["soundness_rate"], report["soundness_without_qualifier"]), (0.5, 1.0))
+        report = graded({0x1000: "void f(const uint8_t* a)"}, {0x1000: fn("void fcn_1000(uint8_t* a0)", residuals=1)})
+        self.assertEqual((report["soundness_rate"], report["soundness_without_qualifier"]), (1.0, 1.0))
+
+    def test_a_marked_qualifier_row_is_in_neither_rate(self) -> None:
+        source = {0x1000: "int32_t f(const uint8_t* a, int32_t b)"}
+        said = fn("uint64_t fcn_1000(uint8_t* a0, int32_t a1)", residuals=1)
+        report = graded(source, {0x1000: said})
+        self.assertEqual((report["soundness_rate"], report["soundness_without_qualifier"]), (1.0, 1.0))
 
 
 if __name__ == "__main__":

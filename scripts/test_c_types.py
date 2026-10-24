@@ -16,10 +16,12 @@ import c_types as ct  # noqa: E402
 import dwarf  # noqa: E402
 
 FIXTURES = HERE.parent / "tests" / "equiv" / "testdata" / "dwarf"
+GCC = "GNU C17 13.3.0 -mtune=generic -march=x86-64 -g -O2"
 
 
 ATTRIBUTES = {"name": "DW_AT_name", "size": "DW_AT_byte_size", "encoding": "DW_AT_encoding", "type": "DW_AT_type",
-              "count": "DW_AT_count", "upper": "DW_AT_upper_bound", "declaration": "DW_AT_declaration"}
+              "count": "DW_AT_count", "upper": "DW_AT_upper_bound", "declaration": "DW_AT_declaration",
+              "vector": "DW_AT_GNU_vector", "signature": "DW_AT_signature"}
 # (name, DW_ATE_ encoding) of each integer, as gcc names it.
 BASE_TYPES = {
     (1, None): ("char", 6), (1, True): ("signed char", 6), (1, False): ("unsigned char", 8),
@@ -84,11 +86,12 @@ class Graph:
             children += (self.child("DW_TAG_unspecified_parameters"),)
         return self.die("DW_TAG_subroutine_type", children, type=self.write(ty.target))
 
-    def subprogram(self, proto: ct.Prototype, entry: int) -> dwarf.Subprogram:
+    def subprogram(self, proto: ct.Prototype, entry: int, **states: object) -> dwarf.Subprogram:
+        """A function as gcc's DWARF states it: prototyped, and its own (`states` overrides `producer`, `prototyped`, `instance`)."""
         return dwarf.Subprogram(
             name=proto.name, low_pc=entry, unit="t.c", external=True, return_type=self.write(proto.ret),
             parameters=[dwarf.Parameter(f"p{index}", self.write(param)) for index, param in enumerate(proto.params)],
-            variadic=proto.variadic, prototyped=True, via_origin=False)
+            variadic=proto.variadic, **{"producer": GCC, "prototyped": True, "instance": False, **states})
 
     def dwarf(self) -> dwarf.Dwarf:
         return dwarf.Dwarf([], self.index)
@@ -552,11 +555,27 @@ class Resolving(unittest.TestCase):
             return graph.die("DW_TAG_typedef", name="point_t", type=graph.die("DW_TAG_structure_type", size=8))
         def tagged(graph):
             return graph.die("DW_TAG_typedef", name="point_t", type=graph.die("DW_TAG_structure_type", name="point", size=8))
-        def bare(graph):
-            return graph.die("DW_TAG_union_type", size=8)
         self.assertEqual(self.read(anonymous), ct.CType(ct.NAMED, name="point_t"))
         self.assertEqual(self.read(tagged), ct.CType(ct.NAMED, name="struct point"))
-        self.assertEqual(self.read(bare), ct.CType(ct.NAMED, name="union <anonymous>"))
+
+    def test_an_aggregate_with_no_name_at_all_is_refused_and_not_spelled_anonymous(self) -> None:
+        # `-fdebug-types-section` leaves a stub with a signature in the unit: two different structs would read equal.
+        for build in (lambda g: g.die("DW_TAG_union_type", size=8),
+                      lambda g: g.die("DW_TAG_structure_type", declaration=1, signature="0x1234"),
+                      lambda g: g.die("DW_TAG_pointer_type", type=g.die("DW_TAG_structure_type", size=8))):
+            with self.assertRaises(ct.NotExpressible) as raised:
+                self.read(build)
+            self.assertIn("neither a tag nor a typedef name", str(raised.exception))
+
+    def test_a_vector_is_no_array_and_is_refused(self) -> None:
+        def vector(graph, flagged):
+            bound = graph.child("DW_TAG_subrange_type", upper=3)
+            return graph.die("DW_TAG_array_type", (bound,), type=graph.write(one("int")), size=16, vector=1 if flagged else None)
+        self.assertEqual(self.read(lambda g: vector(g, False)), one("int [4]"))
+        for build in (lambda g: vector(g, True), lambda g: g.die("DW_TAG_pointer_type", type=vector(g, True))):
+            with self.assertRaises(ct.NotExpressible) as raised:
+                self.read(build)
+            self.assertIn("vector", str(raised.exception))
 
     def test_an_incomplete_struct_and_a_class_are_named(self) -> None:
         self.assertEqual(self.read(lambda g: g.die("DW_TAG_structure_type", name="opaque", declaration=1)),
