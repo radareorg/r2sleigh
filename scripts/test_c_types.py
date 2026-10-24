@@ -17,6 +17,8 @@ import dwarf  # noqa: E402
 
 FIXTURES = HERE.parent / "tests" / "equiv" / "testdata" / "dwarf"
 GCC = "GNU C17 13.3.0 -mtune=generic -march=x86-64 -g -O2"
+# What readelf prints of a DW_FORM_ref_sig8: a DIE of a type unit, which is in no list of this dump.
+SIGNATURE = ": 0x7cbb7a52356be670"
 
 
 ATTRIBUTES = {"name": "DW_AT_name", "size": "DW_AT_byte_size", "encoding": "DW_AT_encoding", "type": "DW_AT_type",
@@ -42,7 +44,7 @@ class Graph:
 
     def die(self, tag: str, children: tuple[dwarf.Die, ...] = (), **attrs: object) -> int:
         offset, self.next = self.next, self.next + 0x10
-        values = {ATTRIBUTES[key]: f"<0x{value:x}>" if key == "type" else str(value)
+        values = {ATTRIBUTES[key]: (SIGNATURE if value == dwarf.UNRESOLVED else f"<0x{value:x}>") if key == "type" else str(value)
                   for key, value in attrs.items() if value is not None}
         node = dwarf.Die(offset, tag, 1, attrs=values, children=list(children))
         self.index[offset] = node
@@ -566,6 +568,19 @@ class Resolving(unittest.TestCase):
             with self.assertRaises(ct.NotExpressible) as raised:
                 self.read(build)
             self.assertIn("neither a tag nor a typedef name", str(raised.exception))
+
+    def test_a_type_in_another_unit_is_refused_and_not_read_as_void(self) -> None:
+        # `-fdebug-types-section`: `DW_AT_type : (ref_sig8) : 0x...` names a DIE of a type unit, which is no void.
+        for build in (lambda g: g.die("DW_TAG_pointer_type", size=8, type=dwarf.UNRESOLVED),
+                      lambda g: g.die("DW_TAG_typedef", name="t", type=dwarf.UNRESOLVED),
+                      lambda g: g.die("DW_TAG_const_type", type=dwarf.UNRESOLVED),
+                      lambda g: g.die("DW_TAG_array_type", type=dwarf.UNRESOLVED),
+                      lambda g: g.die("DW_TAG_subroutine_type", type=dwarf.UNRESOLVED),
+                      lambda g: g.die("DW_TAG_enumeration_type", name="e", size=4, type=dwarf.UNRESOLVED)):
+            with self.assertRaises(ct.NotExpressible) as raised:
+                self.read(build)
+            self.assertIn("another unit", str(raised.exception))
+        self.assertEqual(self.read(lambda g: g.die("DW_TAG_pointer_type", size=8)), one("void*"))
 
     def test_a_vector_is_no_array_and_is_refused(self) -> None:
         def vector(graph, flagged):

@@ -11,6 +11,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, replace
 
+from dwarf import UNRESOLVED  # tests/equiv is on the path of every importer
+
 VOID, INT, BOOL, FLOAT, NAMED, PTR, FUNC, ARRAY = "void", "int", "bool", "float", "named", "ptr", "func", "array"
 
 
@@ -343,7 +345,7 @@ def from_dwarf(dwarf, offset: int | None, depth: int = 0) -> CType:
     while offset is not None:
         die = dwarf.index.get(offset)
         if die is None:
-            raise NotExpressible(f"no DIE at {offset:#x}")
+            raise NotExpressible("a type in another unit" if offset == UNRESOLVED else f"no DIE at {offset:#x}")
         steps += 1
         if steps > 64:
             raise NotExpressible("a chain of more than 64 typedefs and qualifiers")

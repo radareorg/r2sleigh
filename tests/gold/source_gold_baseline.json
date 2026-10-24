@@ -2,8 +2,7 @@
   "functions_in_dwarf": 17,
   "functions_in_truth": 17,
   "functions_recovered": 17,
-  "without_entry": [],
-  "unlisted": [],
+  "ungradable": {},
   "without_dwarf": [
     "sym.__do_global_dtors_aux",
     "sym._fini",
@@ -22,9 +21,9 @@
     "marked_wrong": 3,
     "silently_wrong": 15
   },
-  "unreadable_truth": {},
   "recovery_rate": 0.6471,
   "soundness_rate": 0.6875,
+  "soundness_without_qualifier": 0.8462,
   "silent": [
     "fnv1a32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
     "fnv1a64 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",

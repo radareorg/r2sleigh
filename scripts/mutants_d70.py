@@ -231,7 +231,7 @@ MUTANTS += [
     m("dwarf-nesting-one-short", C, "    if depth > 32:", "    if depth > 29:"),
     m("dwarf-chain-unbounded", C, "        if steps > 64:", "        if steps > 6400:"),
     m("dwarf-chain-one-short", C, "        if steps > 64:", "        if steps > 60:"),
-    m("dwarf-missing-die-is-void", C, '        if die is None:\n            raise NotExpressible(f"no DIE at {offset:#x}")', '        if die is None:\n            return NO_VALUE'),
+    m("dwarf-missing-die-is-void", C, '        if die is None:\n            raise NotExpressible("a type in another unit" if offset == UNRESOLVED else f"no DIE at {offset:#x}")', '        if die is None:\n            return NO_VALUE'),
     m("dwarf-const-lost", C, '            const |= die.tag == "DW_TAG_const_type"\n', ''),
     m("dwarf-volatile-lost", C, '            volatile |= die.tag == "DW_TAG_volatile_type"\n', ''),
     m("dwarf-const-for-volatile", C, '            const |= die.tag == "DW_TAG_const_type"', '            const = True'),
@@ -596,6 +596,9 @@ MUTANTS += [
     m("subprogram-producer-of-the-die", D, "            producer=unit.text(\"DW_AT_producer\") or \"\",", "            producer=die.text(\"DW_AT_producer\") or \"\",", (EQUIV,)),
     m("readelf-ranges-not-asked", D, '"--debug-dump=info", "--debug-dump=Ranges",\n', '"--debug-dump=info",\n', (EQUIV,)),
     m("readelf-links-followed", D, '             "--debug-dump=no-follow-links", str(binary)]', "             str(binary)]", (EQUIV,)),
+    m("ref-unresolved-is-none", D, "return int(found.group(1), 16) if found else UNRESOLVED", "return int(found.group(1), 16) if found else None", (EQUIV,)),
+    m("ref-absent-is-unresolved", D, '        if raw is None:\n            return None\n        found = _REF.search(raw)', '        if raw is None:\n            return UNRESOLVED\n        found = _REF.search(raw)', (EQUIV,)),
+    m("dwarf-unresolved-is-a-missing-die", C, '"a type in another unit" if offset == UNRESOLVED else f"no DIE at {offset:#x}"', 'f"no DIE at {offset:#x}"'),
     m("describe-vector-is-an-array", D, '        if die.tag == "DW_TAG_array_type" and die.flag("DW_AT_GNU_vector"):', "        if False:", (EQUIV,)),
     m("describe-every-array-is-a-vector", D, '        if die.tag == "DW_TAG_array_type" and die.flag("DW_AT_GNU_vector"):', '        if die.tag == "DW_TAG_array_type":', (EQUIV,)),
 ]

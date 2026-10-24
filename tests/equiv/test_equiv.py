@@ -42,7 +42,7 @@ import merge_shards  # noqa: E402
 import link  # noqa: E402
 import run_equiv  # noqa: E402
 import selftest  # noqa: E402
-from dwarf import NO_FUNC_START, Die, Dwarf, function_symbols, parse_ranges, parse_readelf  # noqa: E402
+from dwarf import NO_FUNC_START, UNRESOLVED, Die, Dwarf, function_symbols, parse_ranges, parse_readelf  # noqa: E402
 from r2s_batch import contract_problems, parse_pddj, run_batch  # noqa: E402
 from spec import CallSpec, call_spec  # noqa: E402
 from target import AARCH64, X86_64, Target  # noqa: E402
@@ -1001,6 +1001,32 @@ class RangesTests(unittest.TestCase):
     def test_rows_outside_a_ranges_section_are_not_ranges(self):
         text = "Contents of the .debug_info section:\n    00000000 0000000000001000 0000000000001010\n"
         self.assertEqual(parse_ranges(text), {})
+
+
+class ReferenceTests(unittest.TestCase):
+    """A DIE's reference is a DIE of the dump, nothing, or one the dump cannot name: never void by accident."""
+
+    def test_a_signature_reference_into_a_type_unit_is_unresolved_and_no_attribute_is_none(self):
+        text = ("Contents of the .debug_info section:\n <0><c>: Abbrev Number: 1 (DW_TAG_compile_unit)\n"
+                " <1><2a>: Abbrev Number: 6 (DW_TAG_subprogram)\n"
+                "    <2b>   DW_AT_type        : (ref_sig8) : 0x7cbb7a52356be670\n"
+                "    <2f>   DW_AT_abstract_origin: (ref4) <0x30>\n")
+        _, index = parse_readelf(text)
+        die = index[0x2A]
+        self.assertEqual(die.ref("DW_AT_type"), UNRESOLVED)
+        self.assertEqual(die.ref("DW_AT_abstract_origin"), 0x30)
+        self.assertIsNone(die.ref("DW_AT_sibling"))
+
+    def test_a_function_whose_type_is_in_another_unit_has_no_type_this_dump_can_describe(self):
+        sub = Die(0x40, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": "f", "DW_AT_low_pc": "0x1000", "DW_AT_prototyped": "1",
+                                                      "DW_AT_type": ": 0x7cbb7a52356be670"})
+        param = Die(0x50, "DW_TAG_formal_parameter", 2, attrs={"DW_AT_name": "p", "DW_AT_type": ": 0x44a62e69dcaa1ced"})
+        sub.children.append(param)
+        unit = Die(0x10, "DW_TAG_compile_unit", 0, attrs={"DW_AT_name": "t.c"}, children=[sub])
+        dwarf = Dwarf([unit], {0x10: unit, 0x40: sub, 0x50: param})
+        placed, _ = dwarf.placed(AnyAddress())
+        self.assertEqual((placed[0].return_type, placed[0].parameters[0].type_offset), (UNRESOLVED, UNRESOLVED))
+        self.assertEqual((dwarf.type(UNRESOLVED).kind, dwarf.canonical(UNRESOLVED)), ("unsupported", "unsupported"))
 
 
 class AnyAddress:

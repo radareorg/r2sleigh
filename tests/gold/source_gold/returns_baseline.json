@@ -2,8 +2,7 @@
   "functions_in_dwarf": 12,
   "functions_in_truth": 12,
   "functions_recovered": 12,
-  "without_entry": [],
-  "unlisted": [],
+  "ungradable": {},
   "without_dwarf": [
     "sym.__do_global_dtors_aux",
     "sym._fini",
@@ -21,9 +20,9 @@
     "marked_wrong": 6,
     "silently_wrong": 16
   },
-  "unreadable_truth": {},
   "recovery_rate": 0.0833,
   "soundness_rate": 0.1111,
+  "soundness_without_qualifier": 0.1111,
   "silent": [
     "main return: expected 'int32_t', said 'uint32_t'",
     "bump parameter 0: expected 'int32_t*', said 'uint32_t*'",

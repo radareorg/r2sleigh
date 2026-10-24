@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import functools
 import io
 import json
 import os
@@ -588,6 +589,8 @@ class Gradable(unittest.TestCase):
                     self.assertEqual(raised.exception.reason, dt.NOT_STATED)
         for what, result, params in [("a vector parameter", ok, [ok, vector, ok]), ("a vector result", vector, [ok]),
                                      ("a complex parameter", ok, [complex_double]), ("a complex result", complex_double, []),
+                                     ("a result in a type unit", dwarf.UNRESOLVED, [ok]),
+                                     ("a parameter in a type unit", ok, [dwarf.UNRESOLVED]),
                                      ("a parameter with no type", ok, [None])]:
             with self.subTest(what=what):
                 sub = dwarf.Subprogram("f", 0x1000, "t.c", True, result, [dwarf.Parameter("p", t) for t in params],
@@ -942,6 +945,74 @@ class ReadingDwarf(unittest.TestCase):
             code = dt.main()
         self.assertEqual((code, out.getvalue()), (2, ""))
         self.assertIn(f"no function of the debug build is gradable (4 {dwarf.NO_FUNC_START})", err.getvalue())
+
+
+@functools.cache
+def read_fixture(name: str):
+    """`read_dwarf` over the readelf dumps kept for a build (tests/equiv/testdata/dwarf), debug build and symbols."""
+    texts = (FIXTURES / f"{name}.txt").read_text(), (FIXTURES / f"{name}.syms.txt").read_text()
+    with mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)):
+        return texts, dt.read_dwarf(pathlib.Path("debug"), "")
+
+
+def partition_fixture(name: str):
+    """The names the gate grades and the names it refuses by reason, for a build whose every function the engine lists."""
+    _, (reading, placed, unplaced) = read_fixture(name)
+    truth, refused = dt.partition(reading, placed, unplaced, {sub.low_pc: sub.name for sub in placed})
+    return sorted(declared.name for declared in truth.values()), refused
+
+
+class RealCompilers(unittest.TestCase):
+    """The shapes the third review built, as gcc 13.3 left their DWARF (`tests/gold/source_gold`, the sources)."""
+
+    def test_gcc_g1_keeps_no_signature_and_no_function_of_it_is_graded(self) -> None:
+        graded, refused = partition_fixture("cold.gcc.O2.g1")
+        self.assertEqual((graded, refused), ([], {dt.NOT_PROTOTYPED: ["checked_div", "main", "must_alloc", "sum_bytes"]}))
+        # The gate exits 2 on it, as the base did, and not 1 with `void f(void)` for every function.
+        texts, _ = read_fixture("cold.gcc.O2.g1")
+        out, err = io.StringIO(), io.StringIO()
+        argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
+        functions = {sub.low_pc: Fn(f"sym.{sub.name}", {}) for sub in read_fixture("cold.gcc.O2.g1")[1][1]}
+        with (
+            mock.patch.object(sys, "argv", argv),
+            shell({DEBUG: functions, STRIPPED: {}}),
+            mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = dt.main()
+        self.assertEqual((code, out.getvalue()), (2, ""))
+        self.assertIn("no function of the debug build is gradable (4 " + dt.NOT_PROTOTYPED + ")", err.getvalue())
+
+    def test_gcc_ipa_clones_are_instances_whose_formals_come_in_the_clones_order(self) -> None:
+        # `scale(int k, char *p, long n)` became `scale.constprop.0.isra.0` taking (n, p): the DIE lists n, k, p.
+        _, (_, placed, _) = read_fixture("clones.gcc.O2")
+        order = {sub.name: [param.name for param in sub.parameters] for sub in placed}
+        self.assertEqual(order["scale"], ["n", "k", "p"])
+        self.assertEqual(order["field_b"], ["mul", "unused", "r"])
+        graded, refused = partition_fixture("clones.gcc.O2")
+        self.assertEqual(refused, {dt.INSTANCE: ["field_b", "scale"]})
+        self.assertEqual(graded, ["main", "part_split", "skip_first", "use_field", "use_part", "use_scale"])
+
+    def test_no_aggregate_vector_wide_float_or_k_and_r_function_is_graded_on_either_architecture(self) -> None:
+        # x86-64 passes a result over 16 bytes through the first integer register and aarch64 through x8: the gate
+        # states neither, so `make_big(int n, long *p)` is graded on no architecture.
+        outcomes = {name: partition_fixture(name) for name in ("abi.gcc.O2", "abi.a64.O2")}
+        self.assertEqual(outcomes["abi.gcc.O2"], outcomes["abi.a64.O2"])
+        graded, refused = outcomes["abi.gcc.O2"]
+        self.assertEqual(refused[dt.NOT_STATED], [
+            "cx_mid", "fl_mid", "fl_ret", "ld_mid", "make_big", "make_mixed", "make_small", "small_mid", "sum_big",
+            "un_mid", "vec_mid", "vecf_mid", "wide_mid", "wide_ret"])
+        self.assertEqual(refused[dt.NOT_PROTOTYPED], ["kr"])
+        self.assertEqual(graded, ["arr_mid", "first_c", "first_sc", "first_uc", "fn_mid", "is_set", "main", "pick",
+                                  "pickw", "tail", "va_sum"])
+
+    def test_the_vector_parameters_of_gcc_are_flagged_arrays_and_no_array(self) -> None:
+        _, (reading, placed, _) = read_fixture("abi.gcc.O2")
+        vec = next(sub for sub in placed if sub.name == "vec_mid")
+        with self.assertRaises(ct.NotExpressible) as raised:
+            ct.from_dwarf(reading, vec.parameters[1].type_offset)
+        self.assertIn("vector", str(raised.exception))
 
 
 class Causes(unittest.TestCase):

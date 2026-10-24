@@ -43,6 +43,8 @@ _RANGE_SECTION = re.compile(r"^Contents of the \.debug_(?:ranges|rnglists) secti
 # Why a function the DWARF gives an entry is unplaced when the container states no function there: a linker's
 # tombstone (0, all ones), a fragment of a split function, an address in the middle of one.
 NO_FUNC_START = "no FUNC symbol of the binary starts at its entry"
+# The offset of a reference no DIE of the dump answers: a DW_FORM_ref_sig8 into a type unit. It is no void.
+UNRESOLVED = -1
 # `readelf --wide` names the attribute's form first: `(data1) 7`, `(strp) (offset: 0x7a): x`.
 _FORM = re.compile(r"^\([a-z][a-z0-9_]*\)\s*")
 
@@ -78,11 +80,12 @@ class Die:
         return raw.strip()
 
     def ref(self, name: str) -> int | None:
+        """The offset a reference attribute names, None where there is none, ``UNRESOLVED`` where it names no DIE."""
         raw = self.attrs.get(name)
         if raw is None:
             return None
         found = _REF.search(raw)
-        return int(found.group(1), 16) if found else None
+        return int(found.group(1), 16) if found else UNRESOLVED
 
     def number(self, name: str) -> int | None:
         raw = self.text(name)
