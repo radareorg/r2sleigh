@@ -440,7 +440,7 @@ total 117,742 to 117,595 (-147), 80 functions better and 33 worse (by 1 to 4); n
 Release `pdd` with `aa` on Apple M5, instructions retired, base then head, two runs each: 0pack `0x62ecf0` 71.97G and 71.87G
 against 72.09G and 71.91G (+0.11% on the means; the rendering is class A, 21 fewer `else` and 21 fewer lines, 15 gotos
 before and after), pumasim `0x23fdf0` 85.18G and 85.18G against 85.14G and 85.16G (byte-identical); peak footprint 250 to 269
-MB in both. The stage's own cost is one clone of the body (the cost every stage pays) and one walk, and it does not
+MB in both (the third review measured 115 to 140 MB of run-to-run variation in one build's peak on a bash function, so only the instruction counts carry a claim). The stage's own cost is one clone of the body (the cost every stage pays) and one walk, and it does not
 run at all where no callee is declared never to return (`Evidence::declares_noreturn`).
 
 ## 2026-10-22: the recoveries together
