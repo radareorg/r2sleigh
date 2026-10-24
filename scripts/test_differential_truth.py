@@ -366,6 +366,27 @@ class Answers(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertTrue(err.getvalue().startswith("UNREADABLE aflj: debug: not a list of functions ("), err.getvalue())
 
+    def test_ten_unreadable_functions_are_all_named_and_eleven_leave_one_counted(self) -> None:
+        for count, more in [(10, None), (11, "... and 1 more")]:
+            with self.subTest(count=count):
+                source = {0x1000 + 16 * index: f"int32_t f{index}(void)" for index in range(count)}
+                stripped = {addr: fn(f"int32_t fcn_{addr:x}(void)", addr=addr) for addr in source}
+                for function in stripped.values():
+                    del function.record["proof"]
+                _, _, err = run_main(source, stripped)
+                self.assertEqual(len([line for line in err.splitlines() if line.startswith("UNREADABLE")]), 10)
+                self.assertEqual(more in err.splitlines() if more else "... and" in err, bool(more))
+
+    def test_the_unreadable_functions_are_named_by_address_and_not_by_the_text_of_it(self) -> None:
+        # 0xff0 sorts after 0x1000 as text; the first ten are the first ten by address.
+        source = {0xFD0 + 16 * index: f"int32_t f{index}(void)" for index in range(13)}
+        stripped = {addr: fn(f"int32_t fcn_{addr:x}(void)", addr=addr) for addr in source}
+        for function in stripped.values():
+            del function.record["proof"]
+        _, _, err = run_main(source, stripped)
+        named = [line.split()[3].rstrip(":") for line in err.splitlines() if line.startswith("UNREADABLE")]
+        self.assertEqual(named, [f"0x{addr:x}" for addr in sorted(source)[:10]])
+
     def test_the_first_ten_unreadable_functions_are_named_and_the_rest_counted(self) -> None:
         source = {0x1000 + 16 * index: f"int32_t f{index}(void)" for index in range(13)}
         stripped = {addr: fn(f"int32_t fcn_{addr:x}(void)", addr=addr) for addr in source}
@@ -810,6 +831,18 @@ class Baseline(unittest.TestCase):
                 self.assertEqual(code, 1)
                 self.assertIn(f"NO CAUSE: {self.KEY}", err)
 
+    def test_new_and_fixed_errors_are_named_in_sorted_order(self) -> None:
+        source = {0x1000: "int32_t zeta(void)", 0x1010: "int32_t alpha(void)"}
+        wrong = {0x1000: fn("uint64_t zeta(void)"), 0x1010: fn("uint64_t alpha(void)", addr=0x1010)}
+        gone = ["yankee return: expected 'void', said 'uint64_t'", "bravo return: expected 'void', said 'uint64_t'"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.record(directory, {key: "was real once" for key in gone}, silent=gone)
+            _, _, err = self.run_with(path, source=source, stripped=wrong)
+        names = [line.split(":")[0] for line in err.splitlines() if line.startswith(("SILENT ERROR", "no longer silent"))]
+        self.assertEqual(names, ["no longer silent", "no longer silent", "SILENT ERROR", "SILENT ERROR"])
+        facts = [line.split(": ", 1)[1].split(" ")[0] for line in err.splitlines() if line.startswith(("SILENT ERROR", "no longer silent"))]
+        self.assertEqual(facts, ["bravo", "yankee", "alpha", "zeta"])
+
     def test_a_fixed_error_asks_for_a_re_record_and_does_not_fail(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             code, _, err = self.run_with(self.record(directory, {self.KEY: "no sign is proven"}),
@@ -896,6 +929,7 @@ class Baseline(unittest.TestCase):
             path = pathlib.Path(directory) / "report.json"
             code, report, _ = run_main(self.SOURCE, self.WRONG, "--json", str(path))
             self.assertEqual(json.loads(path.read_text()), report)
+            self.assertEqual(path.read_text(), json.dumps(report, indent=2) + "\n")
 
 
 class ReportShape(unittest.TestCase):
@@ -906,6 +940,15 @@ class ReportShape(unittest.TestCase):
             "facts", "unreadable_truth", "recovery_rate", "soundness_rate", "silent", "silent_buckets", "marked_buckets",
             "return_presence"])
         self.assertEqual(list(report["return_presence"]), list(dt.PRESENCE))
+
+    def test_every_function_dwarf_declares_is_graded_or_named(self) -> None:
+        gone = [dwarf.Unplaced("g", 1, "why")]
+        source = Source({0x1000: INT, 0x2000: "int32_t h(void)", 0x3000: "int32_t k(void)"}, gone)
+        source.placed.append(source.graph.subprogram(ct.parse_prototype("int32_t alias(void)"), 0x1000))
+        _, report, _ = run_main(source, {0x2000: fn("int32_t h(void)", addr=0x2000)}, listed={0x1000, 0x2000})
+        self.assertEqual(report["functions_in_dwarf"], 5)
+        self.assertEqual(report["functions_in_truth"] + len(report["without_entry"]) + len(report["unlisted"]), 5)
+        self.assertEqual((report["functions_in_truth"], len(report["without_entry"]), report["unlisted"]), (1, 3, ["k"]))
 
     def test_every_list_in_the_report_is_sorted(self) -> None:
         names = ["zeta", "alpha", "mid"]

@@ -993,6 +993,11 @@ class RangesTests(unittest.TestCase):
                 "    00000000 0000000000001000 0000000000001020\n    00000000 <End of list>\n")
         self.assertEqual(parse_ranges(text), {0: (0x1000,)})
 
+    def test_a_32_bit_binary_prints_its_addresses_in_eight_digits(self):
+        text = ("Contents of the .debug_ranges section:\n\n    Offset   Begin    End\n"
+                "    00000000 00001000 00001010\n    00000000 <End of list>\n")
+        self.assertEqual(parse_ranges(text), {0: (0x1000,)})
+
     def test_rows_outside_a_ranges_section_are_not_ranges(self):
         text = "Contents of the .debug_info section:\n    00000000 0000000000001000 0000000000001010\n"
         self.assertEqual(parse_ranges(text), {})
@@ -1033,7 +1038,8 @@ class PlacementTests(unittest.TestCase):
         return Die(offset, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": f"f{offset:x}", **attrs}, forms=forms or {})
 
     def entry_of(self, forms: dict[str, str] | None = None, **attrs: str) -> tuple[int | None, str]:
-        dwarf = self.graph(self.function(0x40, forms, **attrs), ranges={0x2C: (0x13E0,), 0x50: (0x1000, 0x2000), 0x60: ()})
+        dwarf = self.graph(self.function(0x40, forms, **attrs),
+                           ranges={0: (0x1000,), 0x2C: (0x13E0,), 0x50: (0x1000, 0x2000), 0x60: ()})
         placed, unplaced = dwarf.placed()
         return (placed[0].low_pc, "") if placed else (None, unplaced[0].why)
 
@@ -1061,7 +1067,7 @@ class PlacementTests(unittest.TestCase):
     def test_the_first_range_is_the_entry_of_a_function_with_ranges_only(self):
         self.assertEqual(self.entry_of(DW_AT_ranges="0x2c"), (0x13E0, ""))
         self.assertEqual(self.entry_of(DW_AT_ranges="(index: 0x3): 0x2c"), (0x13E0, ""))
-        for ranges in ("0x60", "0x99", "zz", "0x50"):
+        for ranges in ("0x60", "0x99", "zz", "0x50", ""):
             with self.subTest(ranges=ranges):
                 self.assertEqual(self.entry_of(DW_AT_ranges=ranges), (None, "its DW_AT_ranges list has no one readable first range"))
 
@@ -1088,6 +1094,19 @@ class PlacementTests(unittest.TestCase):
         clone = Die(0x40, "DW_TAG_subprogram", 1, attrs={"DW_AT_abstract_origin": "<0x30>", "DW_AT_low_pc": "0"})
         _, unplaced = self.graph(origin, clone).placed()
         self.assertEqual([(gone.name, gone.offset) for gone in unplaced], [("real_name", 0x40)])
+
+    def test_a_function_with_no_ranges_value_is_not_placed_by_the_list_at_offset_zero(self):
+        dwarf = self.graph(Die(0x40, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": "f", "DW_AT_ranges": "zz"}),
+                           ranges={0: (0x1000,)})
+        placed, unplaced = dwarf.placed()
+        self.assertEqual((placed, [gone.why for gone in unplaced]), ([], ["its DW_AT_ranges list has no one readable first range"]))
+
+    def test_an_out_of_line_copy_takes_its_name_and_parameters_from_its_origin(self):
+        origin = Die(0x30, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": "real_name", "DW_AT_external": "1"})
+        clone = Die(0x40, "DW_TAG_subprogram", 1, attrs={"DW_AT_abstract_origin": "<0x30>", "DW_AT_low_pc": "0x1000"})
+        placed, _ = self.graph(origin, clone).placed()
+        self.assertEqual([(sub.name, sub.low_pc, sub.via_origin, sub.external) for sub in placed],
+                         [("real_name", 0x1000, True, True)])
 
     def test_the_lists_come_back_in_address_and_name_order(self):
         dies = [self.function(0x40, DW_AT_low_pc="0x3000"), self.function(0x50, DW_AT_low_pc="0x1000"),

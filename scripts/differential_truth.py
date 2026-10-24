@@ -68,7 +68,10 @@ def r2s(binary: Path, commands: str, r2s_bin: str) -> subprocess.CompletedProces
 
 
 class Unreadable(Exception):
-    """r2s or readelf gave an answer the gate cannot read, and scoring past it would grade a guess."""
+    """r2s or readelf gave an answer the gate cannot read, and scoring past it would grade a guess.
+
+    `causes` is in the order the items were read, which is address order for a `pddj`.
+    """
 
     def __init__(self, binary: Path, command: str, causes: dict[str, str]) -> None:
         super().__init__(f"no readable `{command}` answer for {len(causes)} item(s) of {binary}")
@@ -347,7 +350,7 @@ def main() -> int:
         if not recovered:
             return refuse("the engine recovered no function from the stripped build, so every fact would be missing.")
     except Unreadable as unreadable:
-        causes = sorted(unreadable.causes.items())
+        causes = list(unreadable.causes.items())
         for where, cause in causes[:10]:
             print(f"UNREADABLE {unreadable.command}: {unreadable.binary}{' ' + where if where else ''}: {cause}",
                   file=sys.stderr)
