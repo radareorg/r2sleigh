@@ -77,7 +77,12 @@ pub(crate) fn exit() -> CStmt {
     CStmt::Expr(CExpr::call(callee, Vec::new()))
 }
 
-/// Whether a statement is a call to `exit`, which is what the tests' evidence says.
+/// The callees the tests' evidence declares never to return: `exit`.
+pub(crate) fn declared() -> std::collections::BTreeSet<String> {
+    std::collections::BTreeSet::from([EXIT.to_owned()])
+}
+
+/// Whether a statement is a call to `exit`, which is what [`declared`] says.
 pub(crate) fn never_returns(stmt: &CStmt) -> bool {
     matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })
         if matches!(&**func, CExpr::External { name, .. } if name == EXIT))

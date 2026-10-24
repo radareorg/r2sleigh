@@ -180,7 +180,7 @@ pub(super) fn copyable(stmt: &CStmt) -> bool {
 fn plain(stmt: &CStmt, ev: &Evidence<'_>) -> Option<Ended> {
     match stmt {
         _ if !copyable(stmt) => None,
-        CStmt::Expr(_) if (ev.never_returns)(stmt) => Some(Ended::Terminal),
+        CStmt::Expr(_) if ev.never_returns(stmt) => Some(Ended::Terminal),
         CStmt::Expr(_) | CStmt::Empty => Some(Ended::On),
         CStmt::Return(_) => Some(Ended::Terminal),
         _ => None,
@@ -373,7 +373,7 @@ fn completes(stmt: &CStmt, ev: &Evidence<'_>) -> bool {
                     .is_none_or(|else_body| completes(else_body, ev))
         }
         CStmt::Goto(_) | CStmt::Return(_) | CStmt::Break | CStmt::Continue => false,
-        CStmt::Expr(_) => !(ev.never_returns)(stmt),
+        CStmt::Expr(_) => !ev.never_returns(stmt),
         CStmt::For {
             cond: None, body, ..
         } => breaks_out(body),
@@ -468,7 +468,7 @@ fn falling_ends(stmt: &CStmt, ev: &Evidence<'_>) -> Option<usize> {
             Some(then_ends + else_ends)
         }
         CStmt::Goto(_) | CStmt::Return(_) | CStmt::Break | CStmt::Continue => Some(0),
-        CStmt::Expr(_) => Some(usize::from(!(ev.never_returns)(stmt))),
+        CStmt::Expr(_) => Some(usize::from(!ev.never_returns(stmt))),
         CStmt::Empty | CStmt::Comment(_) => Some(1),
         _ => None,
     }
@@ -517,7 +517,7 @@ mod tests {
     use crate::structure::certify::{Placed, StatementRole, certify};
     use crate::structure::shape::shape;
     use crate::structure::support::{
-        at, branch, cfg, cond, cond_branch, exit, expr, never_returns,
+        at, branch, cfg, cond, cond_branch, declared, exit, expr, never_returns,
     };
     use r2ssa::cfg::{BlockTerminator, CFG};
     use r2ssa::domtree::DomTree;
@@ -645,11 +645,8 @@ mod tests {
         let mut occurrences =
             Occurrences::new(blocks.clone(), blocks.iter().map(|b| Some(*b)).collect());
         let distinct_return = |block: u64| distinct.contains(&block);
-        let evidence = Evidence {
-            never_returns: &never_returns,
-            declares_noreturn: true,
-            distinct_return: &distinct_return,
-        };
+        let declared = declared();
+        let evidence = Evidence::new(&declared, &distinct_return);
         let mut started = BTreeSet::new();
         markers(&body, &mut started);
         let body = shape(&mut occurrences, &evidence, body);
@@ -806,11 +803,8 @@ mod tests {
         let blocks = (0..0x100u64).collect::<Vec<_>>();
         let mut occurrences =
             Occurrences::new(blocks.clone(), blocks.iter().map(|b| Some(*b)).collect());
-        let evidence = Evidence {
-            never_returns: &never_returns,
-            declares_noreturn: true,
-            distinct_return: &|_| true,
-        };
+        let declared = declared();
+        let evidence = Evidence::new(&declared, &|_| true);
         let arm = |block: u64| block_of(vec![at(block, expr()), copy(1)]);
         let mut body = block(vec![
             at(0x10, branching(arm(0x20), arm(0x30))),

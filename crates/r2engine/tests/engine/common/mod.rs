@@ -42,6 +42,13 @@ pub const STUB: u64 = BASE + 0x90;
 pub const SLOT: u64 = BASE + 0x98;
 /// Where the program keeps a string, where it has one.
 pub const TEXT: u64 = BASE + 0xa0;
+/// Where a second import's stub is, in the room `TEXT` takes when the program has no string: `JUMP_STUB` bytes
+/// are written there by the test, and the slot is the last eight bytes of the code.
+pub const STUB2: u64 = BASE + 0xa0;
+/// The slot [`STUB2`] reads.
+pub const SLOT2: u64 = BASE + 0xa8;
+/// `jmp qword [rip + 2]`, the linkage stub at [`STUB`] and at [`STUB2`].
+pub const JUMP_STUB: [u8; 6] = [0xff, 0x25, 0x02, 0x00, 0x00, 0x00];
 
 /// Copy `bytes` into `code` at `at`.
 const fn place<const N: usize>(mut code: [u8; 0xb0], at: usize, bytes: [u8; N]) -> [u8; 0xb0] {
@@ -888,7 +895,12 @@ impl Literal {
     }
 
     /// The same program with an import: a linkage stub, and the slot it reads.
-    pub fn importing(mut self, import: &str) -> Self {
+    pub fn importing(self, import: &str) -> Self {
+        self.importing_at(import, STUB, SLOT)
+    }
+
+    /// The same program with an import whose stub is at `stub` and whose slot, which the stub reads, is at `slot`.
+    pub fn importing_at(mut self, import: &str, stub: u64, slot: u64) -> Self {
         let section = |name: &str, vaddr, vsize, is_code| Section {
             name: name.to_owned(),
             vaddr,
@@ -903,16 +915,16 @@ impl Literal {
         };
         // The code before the stub is the program's own; the stub and its slot are the loader's.
         let code = &mut self.container.sections[0];
-        code.vsize = code.vsize.min(STUB - code.vaddr);
+        code.vsize = code.vsize.min(stub - code.vaddr);
         self.container.sections.extend([
-            section(".plt", STUB, 6, true),
-            section(".got", SLOT, 8, false),
+            section(".plt", stub, 6, true),
+            section(".got", slot, 8, false),
         ]);
-        self.container.relocations.push(import_slot(SLOT, import));
+        self.container.relocations.push(import_slot(slot, import));
         // The loader writes the import's address into the slot, as the container states for every relocation.
         self.container
             .loader_writes
-            .push(import_write(SLOT, 8, import));
+            .push(import_write(slot, 8, import));
         self
     }
 

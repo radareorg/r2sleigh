@@ -129,13 +129,34 @@ impl super::condition::Marks for Occurrences {
 
 /// What the rewrites may rely on that the tree does not say.
 pub(crate) struct Evidence<'a> {
-    /// Whether a statement is a call to a callee declared never to return.
-    pub(crate) never_returns: &'a dyn Fn(&CStmt) -> bool,
-    /// Whether any callee is declared never to return; when none is, `never_returns` is false everywhere.
-    pub(crate) declares_noreturn: bool,
+    /// The callees declared never to return, which `never_returns` and `declares_noreturn` both read.
+    never_return: &'a BTreeSet<String>,
     /// Whether the return ending a block hands back a merge whose inputs are pairwise distinct
     /// values (the compiler merged returns of different values into this one).
     pub(crate) distinct_return: &'a dyn Fn(u64) -> bool,
+}
+
+impl<'a> Evidence<'a> {
+    pub(crate) fn new(
+        never_return: &'a BTreeSet<String>,
+        distinct_return: &'a dyn Fn(u64) -> bool,
+    ) -> Self {
+        Self {
+            never_return,
+            distinct_return,
+        }
+    }
+
+    /// Whether a statement is a call to a callee declared never to return.
+    pub(crate) fn never_returns(&self, stmt: &CStmt) -> bool {
+        matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })
+            if matches!(&**func, CExpr::External { name, .. } if self.never_return.contains(name)))
+    }
+
+    /// Whether any callee is declared never to return; when none is, `never_returns` is false everywhere.
+    pub(crate) fn declares_noreturn(&self) -> bool {
+        !self.never_return.is_empty()
+    }
 }
 
 /// The structural rewrites (ADR §5): jumps to the next position go, a skipped block is copied to the
@@ -682,6 +703,44 @@ mod tests {
 
     fn id(index: usize) -> RenderObservationId {
         RenderObservationId::from_dense_index(index)
+    }
+
+    #[test]
+    fn evidence_declares_noreturn_exactly_when_some_call_reads_as_never_returning() {
+        let call = |name: &str| {
+            let callee = CExpr::External {
+                name: name.to_owned(),
+                kind: crate::symbol::ExternalKind::Function,
+            };
+            CStmt::Expr(CExpr::call(callee, Vec::new()))
+        };
+        let sets: [&[&str]; 6] = [
+            &[],
+            &["abort"],
+            &["exit", "abort"],
+            &["abort", "longjmp", "exit"],
+            &["puts"],
+            &["exit", "abort", "longjmp", "_exit"],
+        ];
+        let names = ["exit", "abort", "longjmp", "_exit", "puts", "main"];
+        for declared in sets {
+            let set = declared.iter().map(|name| (*name).to_owned()).collect();
+            let evidence = Evidence::new(&set, &|_| false);
+            let reads = |name: &&str| evidence.never_returns(&call(name));
+            // The flag and the predicate are the one set read twice, so no set makes them disagree.
+            assert_eq!(
+                evidence.declares_noreturn(),
+                names.iter().any(reads),
+                "{declared:?}"
+            );
+            assert_eq!(evidence.declares_noreturn(), !declared.is_empty());
+            assert!(
+                names
+                    .iter()
+                    .all(|name| reads(name) == declared.contains(name))
+            );
+            assert!(!evidence.never_returns(&CStmt::Expr(CExpr::IntLit(1))));
+        }
     }
 
     /// Markers 0 and 1, for blocks 0x10 and 0x20 and their instructions 0x11 and 0x21.

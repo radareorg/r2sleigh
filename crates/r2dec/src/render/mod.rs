@@ -99,18 +99,13 @@ pub fn render(
         .as_ref()
         .map(values::Values::never_returning)
         .unwrap_or_default();
-    let never_returns = |stmt: &CStmt| calls_never_returning(stmt, &never_return);
     let distinct_return =
         |addr: u64| (values.as_ref()).is_some_and(|values| values.returns_distinct_merge(addr));
-    let evidence = Evidence {
-        never_returns: &never_returns,
-        declares_noreturn: !never_return.is_empty(),
-        distinct_return: &distinct_return,
-    };
+    let evidence = Evidence::new(&never_return, &distinct_return);
     let mut occurrences = Occurrences::new(blocks, addresses);
     let mut body = structured(input, body, &labels, &evidence, &mut occurrences);
     let selections = select(&c, &mut body, &|id| occurrences.block_of(id));
-    let role = |stmt: &CStmt| statement_role(stmt, &never_returns, &selections);
+    let role = |stmt: &CStmt| statement_role(stmt, &evidence, &selections);
     certify_control(input, &body, &occurrences, &labels, &role)?;
     crate::structure::condition::respell_negations(&mut body);
     // What remains is linear emission of a certified body, so a stop here keeps what was reached.
@@ -236,7 +231,7 @@ fn structured(
 ) -> CStmt {
     let unselected = std::collections::BTreeSet::new();
     let certified = |stmt: &CStmt, marks: &Occurrences| {
-        let role = |stmt: &CStmt| statement_role(stmt, evidence.never_returns, &unselected);
+        let role = |stmt: &CStmt| statement_role(stmt, evidence, &unselected);
         let certificate = control_certificate(input, stmt, marks, labels, &role);
         match certificate.ok() {
             true => Ok(()),
@@ -265,12 +260,12 @@ fn structured(
         crate::structure::rotate::rotate(body, marks) != 0
     });
     // With no callee declared never to return the guard has no arm to find, and a stage clones the body.
-    if !evidence.declares_noreturn {
-        return body;
+    match evidence.declares_noreturn() {
+        true => stage("noreturn guards", body, marks, &certified, |body, marks| {
+            crate::structure::guard::guard(body, evidence, marks) != 0
+        }),
+        false => body,
     }
-    stage("noreturn guards", body, marks, &certified, |body, marks| {
-        crate::structure::guard::guard(body, evidence, marks) != 0
-    })
 }
 
 /// SD's §3 certificate over a body.
@@ -367,7 +362,7 @@ fn select(
 /// What the certificate reads a statement as: a selection the stage recorded, or one ending control.
 fn statement_role(
     stmt: &CStmt,
-    never_returns: &dyn Fn(&CStmt) -> bool,
+    evidence: &Evidence<'_>,
     selections: &std::collections::BTreeSet<RenderObservationId>,
 ) -> StatementRole {
     match stmt
@@ -376,7 +371,7 @@ fn statement_role(
         .any(|id| selections.contains(id))
     {
         true => StatementRole::Selects,
-        false => (traps(stmt) || never_returns(stmt)).into(),
+        false => (traps(stmt) || evidence.never_returns(stmt)).into(),
     }
 }
 
@@ -411,12 +406,6 @@ fn close_ledger(input: &RenderInput<'_>, values: Option<&values::Values<'_>>) ->
 fn traps(stmt: &CStmt) -> bool {
     matches!(stmt, CStmt::Gap(marker) if marker.kind.ends_control())
         || matches!(stmt, CStmt::Expr(CExpr::Call { func, .. }) if crate::prelude::is_residual_callee(func).is_some())
-}
-
-/// Whether a statement is a call to a callee declared never to return, which ends control there.
-fn calls_never_returning(stmt: &CStmt, never_return: &std::collections::BTreeSet<String>) -> bool {
-    matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })
-        if matches!(&**func, CExpr::External { name, .. } if never_return.contains(name)))
 }
 
 /// The function's result type: what the analysis decided, else the machine word.
