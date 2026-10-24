@@ -142,6 +142,7 @@ def _record(address: int, name: str, code: str, refused: str | None = None) -> d
                        "location": "stack-0x14"}],
         "lines": lines,
         "links": [],
+        "residuals": [],
     }
 
 

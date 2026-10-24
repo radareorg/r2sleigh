@@ -29,6 +29,7 @@ import sys
 import tempfile
 import time
 import unittest
+import unittest.mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -41,7 +42,7 @@ import merge_shards  # noqa: E402
 import link  # noqa: E402
 import run_equiv  # noqa: E402
 import selftest  # noqa: E402
-from dwarf import Dwarf  # noqa: E402
+from dwarf import Die, Dwarf, TOMBSTONES, parse_ranges, parse_readelf  # noqa: E402
 from r2s_batch import contract_problems, parse_pddj, run_batch  # noqa: E402
 from spec import CallSpec, call_spec  # noqa: E402
 from target import AARCH64, X86_64, Target  # noqa: E402
@@ -252,6 +253,27 @@ class ContractTests(unittest.TestCase):
         for bad in ({"name": "a", "type": "int", "kind": "arg", "location": "rdi"},
                     {"name": "a", "kind": "local", "location": "stack-8"}, "a"):
             record["variables"] = [bad]
+            self.assertEqual(len(contract_problems(record)), 1, bad)
+
+    def test_a_count_is_a_number_that_is_not_a_boolean_or_negative(self):
+        record = selftest.synthetic_pddj(selftest.CASES[0], 0x1000, {})
+        for bad in (True, False, -1, 1.5, None, "1"):
+            record["proof"]["residual"] = bad
+            self.assertEqual(contract_problems(record), ["proof.residual is not a count"], bad)
+        record["proof"]["residual"] = 0
+        self.assertEqual(contract_problems(record), [])
+
+    def test_the_residual_list_is_a_field_of_sites_with_causes(self):
+        record = selftest.synthetic_pddj(selftest.CASES[0], 0x1000, {})
+        record["residuals"] = [{"site": 1, "type": "u64", "cause": "gap", "gap": "TermNotSpelled", "line": 3}]
+        self.assertEqual(contract_problems(record), [])
+        del record["residuals"]
+        self.assertEqual(contract_problems(record), ["no `residuals`"])
+        record["residuals"] = {}
+        self.assertEqual(contract_problems(record), ["`residuals` is not list"])
+        for bad in ({"cause": "gap"}, {"site": 1}, {"site": "1", "cause": "gap"}, {"site": True, "cause": "gap"},
+                    {"site": -1, "cause": "gap"}, {"site": 1, "cause": None}, "gap", 7):
+            record["residuals"] = [{"site": 1, "cause": "gap"}, bad]
             self.assertEqual(len(contract_problems(record)), 1, bad)
 
     def test_a_refusal_needs_only_its_identity(self):
@@ -917,6 +939,174 @@ class BuildTests(_BuildCases, unittest.TestCase):
 @unittest.skipUnless(CAN_BUILD_AARCH64, _AARCH64_BUILD)
 class AArch64BuildTests(_BuildCases, unittest.TestCase):
     TARGET = AARCH64
+
+
+DWARF_FIXTURES = HERE / "testdata" / "dwarf"
+
+
+def fixture_dwarf(name: str) -> Dwarf:
+    """A DWARF from the readelf text of a gcc 13.3 build, trimmed to the DIEs a signature needs."""
+    text = (DWARF_FIXTURES / name).read_text()
+    units, index = parse_readelf(text)
+    return Dwarf(units, index, parse_ranges(text))
+
+
+class RangesTests(unittest.TestCase):
+    """The first range of each list in `readelf --debug-dump=Ranges`, in DWARF 5 and DWARF 4."""
+
+    def test_dwarf_5_lists_start_at_their_first_row(self):
+        ranges = fixture_dwarf("cold.gcc.O2.txt").ranges
+        # A base address row holds no range; an empty range is one (GCC lists the entry first, empty).
+        self.assertEqual(ranges[0xC], (0x1380,))
+        self.assertEqual(ranges[0x1C], (0x13B4,))
+        # A split function lists its hot part first, its cold part second.
+        self.assertEqual(ranges[0x2C], (0x13E0,))
+        self.assertEqual(ranges[0x41], (0x1206,))
+        self.assertEqual(ranges[0x54], (0x1370,))
+
+    def test_dwarf_4_lists_repeat_their_offset_on_every_row(self):
+        ranges = fixture_dwarf("cold.gcc.O2.dwarf4.txt").ranges
+        self.assertEqual(ranges, {0x0: (0x1380,), 0x30: (0x13B4,), 0x60: (0x13E0,), 0x90: (0x1206,), 0xD0: (0x1370,)})
+
+    def test_a_list_with_no_range_has_no_entry(self):
+        text = "Contents of the .debug_rnglists section:\n\n    Offset   Begin    End\n" \
+               "    0000000c 0000000000001380 (base address)\n    00000015 <End of list>\n" \
+               "    00000016 <End of list>\n    00000017 0000000000002000 0000000000002010 \n    0000001a <End of list>\n"
+        self.assertEqual(parse_ranges(text), {0x17: (0x2000,)})
+
+    def test_two_sections_that_hold_one_offset_keep_both_answers(self):
+        text = ("Contents of the .debug_ranges section:\n\n    Offset   Begin    End\n"
+                "    00000000 0000000000001000 0000000000001010\n    00000000 <End of list>\n\n"
+                "Contents of the .debug_rnglists section:\n\n    Offset   Begin    End\n"
+                "    00000000 0000000000002000 0000000000002010\n    00000000 <End of list>\n")
+        self.assertEqual(parse_ranges(text), {0: (0x1000, 0x2000)})
+
+    def test_rows_outside_a_ranges_section_are_not_ranges(self):
+        text = "Contents of the .debug_info section:\n    00000000 0000000000001000 0000000000001010\n"
+        self.assertEqual(parse_ranges(text), {})
+
+
+class PlacementTests(unittest.TestCase):
+    """A function's address is its entry: `DW_AT_entry_pc`, else `DW_AT_low_pc`, else the first range."""
+
+    def test_a_split_function_is_placed_at_the_start_of_its_hot_part(self):
+        # src/cold.c: `must_alloc` has DW_AT_ranges (hot 0x13e0, cold 0x1180) and no DW_AT_low_pc.
+        for name in ("cold.gcc.O2.txt", "cold.gcc.O2.dwarf4.txt"):
+            with self.subTest(name=name):
+                placed, unplaced = fixture_dwarf(name).placed()
+                self.assertEqual({sub.name: sub.low_pc for sub in placed},
+                                 {"main": 0x11A0, "checked_div": 0x1370, "sum_bytes": 0x13B0, "must_alloc": 0x13E0})
+                self.assertEqual(unplaced, [])
+
+    def test_subprograms_still_lists_the_functions_that_have_a_low_pc(self):
+        names = [sub.name for sub in fixture_dwarf("cold.gcc.O2.txt").subprograms()]
+        self.assertEqual(names, ["main", "checked_div", "sum_bytes"])
+
+    def test_code_a_linker_discarded_is_named_and_unplaced(self):
+        # src/gcsect.c with -ffunction-sections -Wl,--gc-sections: `never_called` keeps DW_AT_low_pc 0.
+        placed, unplaced = fixture_dwarf("gcsect.O2.txt").placed()
+        self.assertEqual([(sub.name, sub.low_pc) for sub in placed], [("main", 0x1060), ("used_sum", 0x1180)])
+        self.assertEqual([(gone.name, gone.why) for gone in unplaced],
+                         [("never_called", "its code was discarded by the linker (address 0x0)")])
+        self.assertEqual(len(fixture_dwarf("gcsect.O2.txt").subprograms()), 3)
+
+    def graph(self, *dies: Die, ranges: dict | None = None) -> Dwarf:
+        unit = Die(0x10, "DW_TAG_compile_unit", 0, attrs={"DW_AT_name": "t.c"})
+        for die in dies:
+            unit.children.append(die)
+        index = {unit.offset: unit, **{die.offset: die for die in dies}}
+        return Dwarf([unit], index, ranges or {})
+
+    def function(self, offset: int, forms: dict[str, str] | None = None, **attrs: str) -> Die:
+        return Die(offset, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": f"f{offset:x}", **attrs}, forms=forms or {})
+
+    def entry_of(self, forms: dict[str, str] | None = None, **attrs: str) -> tuple[int | None, str]:
+        dwarf = self.graph(self.function(0x40, forms, **attrs), ranges={0x2C: (0x13E0,), 0x50: (0x1000, 0x2000), 0x60: ()})
+        placed, unplaced = dwarf.placed()
+        return (placed[0].low_pc, "") if placed else (None, unplaced[0].why)
+
+    def test_the_entry_pc_comes_before_the_low_pc_and_the_ranges(self):
+        self.assertEqual(self.entry_of(DW_AT_entry_pc="0x1380", DW_AT_low_pc="0x1000"),
+                         (None, "its DW_AT_entry_pc is an offset from a base, not an address"))
+        self.assertEqual(self.entry_of({"DW_AT_entry_pc": "addr"}, DW_AT_entry_pc="0x1380", DW_AT_low_pc="0x1000",
+                                       DW_AT_ranges="0x2c"), (0x1380, ""))
+        self.assertEqual(self.entry_of({"DW_AT_entry_pc": "addrx"}, DW_AT_entry_pc="(index: 0x3): 0x1380", DW_AT_ranges="0x2c"),
+                         (0x1380, ""))
+
+    def test_an_entry_pc_that_is_an_offset_or_not_a_number_is_unplaced(self):
+        for form in ("data1", "data8", "sec_offset"):
+            with self.subTest(form=form):
+                self.assertEqual(self.entry_of({"DW_AT_entry_pc": form}, DW_AT_entry_pc="4", DW_AT_low_pc="0x1000"),
+                                 (None, "its DW_AT_entry_pc is an offset from a base, not an address"))
+        self.assertEqual(self.entry_of({"DW_AT_entry_pc": "addr"}, DW_AT_entry_pc="zz", DW_AT_low_pc="0x1000"),
+                         (None, "its DW_AT_entry_pc is not an address"))
+
+    def test_the_low_pc_is_the_entry_of_a_function_without_an_entry_pc(self):
+        self.assertEqual(self.entry_of(DW_AT_low_pc="0x1180", DW_AT_ranges="0x2c"), (0x1180, ""))
+        self.assertEqual(self.entry_of(DW_AT_low_pc="(index: 0x2): 0x1190"), (0x1190, ""))
+        self.assertEqual(self.entry_of(DW_AT_low_pc="zz"), (None, "its DW_AT_low_pc is not an address"))
+
+    def test_the_first_range_is_the_entry_of_a_function_with_ranges_only(self):
+        self.assertEqual(self.entry_of(DW_AT_ranges="0x2c"), (0x13E0, ""))
+        self.assertEqual(self.entry_of(DW_AT_ranges="(index: 0x3): 0x2c"), (0x13E0, ""))
+        for ranges in ("0x60", "0x99", "zz", "0x50"):
+            with self.subTest(ranges=ranges):
+                self.assertEqual(self.entry_of(DW_AT_ranges=ranges), (None, "its DW_AT_ranges list has no one readable first range"))
+
+    def test_an_address_a_linker_discarded_is_no_entry(self):
+        for address in TOMBSTONES:
+            for forms, attrs in (({}, {"DW_AT_low_pc": hex(address)}),
+                                 ({"DW_AT_entry_pc": "addr"}, {"DW_AT_entry_pc": hex(address), "DW_AT_low_pc": "0x1000"})):
+                with self.subTest(address=address, attrs=attrs):
+                    self.assertEqual(self.entry_of(forms, **attrs),
+                                     (None, f"its code was discarded by the linker (address {address:#x})"))
+        dwarf = self.graph(self.function(0x40, DW_AT_ranges="0x2c"), ranges={0x2C: (0,)})
+        self.assertEqual(dwarf.placed()[1][0].why, "its code was discarded by the linker (address 0x0)")
+        self.assertEqual(self.entry_of(DW_AT_low_pc="0x2"), (2, ""))
+
+    def test_a_die_without_code_is_in_neither_list(self):
+        declaration = self.function(0x40, DW_AT_declaration="1")
+        abstract = self.function(0x50, DW_AT_inline="3")
+        placed, unplaced = self.graph(declaration, abstract).placed()
+        self.assertEqual((placed, unplaced), ([], []))
+
+    def test_an_unplaced_function_takes_its_name_from_its_origin(self):
+        origin = Die(0x30, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": "real_name"})
+        clone = Die(0x40, "DW_TAG_subprogram", 1, attrs={"DW_AT_abstract_origin": "<0x30>", "DW_AT_low_pc": "0"})
+        _, unplaced = self.graph(origin, clone).placed()
+        self.assertEqual([(gone.name, gone.offset) for gone in unplaced], [("real_name", 0x40)])
+
+    def test_the_lists_come_back_in_address_and_name_order(self):
+        dies = [self.function(0x40, DW_AT_low_pc="0x3000"), self.function(0x50, DW_AT_low_pc="0x1000"),
+                self.function(0x60, DW_AT_low_pc="0"), self.function(0x70, DW_AT_low_pc="0")]
+        dies[2].attrs["DW_AT_name"], dies[3].attrs["DW_AT_name"] = "zeta", "alpha"
+        placed, unplaced = self.graph(*dies).placed()
+        self.assertEqual([sub.low_pc for sub in placed], [0x1000, 0x3000])
+        self.assertEqual([gone.name for gone in unplaced], ["alpha", "zeta"])
+
+    def test_readelf_names_the_form_of_an_attribute(self):
+        text = ("Contents of the .debug_info section:\n <0><c>: Abbrev Number: 1 (DW_TAG_compile_unit)\n"
+                " <1><2a>: Abbrev Number: 6 (DW_TAG_subprogram)\n"
+                "    <2b>   DW_AT_name        : (strp) (offset: 0x23): f\n"
+                "    <2f>   DW_AT_entry_pc    : (addr) 0x11e3\n"
+                "    <2f>   DW_AT_decl_line   : (data1) 7\n"
+                "    <2f>   DW_AT_external    : 1\n")
+        _, index = parse_readelf(text)
+        die = index[0x2A]
+        self.assertEqual(die.forms, {"DW_AT_name": "strp", "DW_AT_entry_pc": "addr", "DW_AT_decl_line": "data1"})
+        self.assertEqual(die.attrs["DW_AT_entry_pc"], "0x11e3")
+        self.assertNotIn("DW_AT_external", die.forms)
+
+    def test_the_reader_asks_readelf_for_the_ranges_beside_the_info(self):
+        completed = subprocess.CompletedProcess([], 0, (DWARF_FIXTURES / "cold.gcc.O2.txt").read_text(), "")
+        with unittest.mock.patch.object(subprocess, "run", return_value=completed) as run:
+            dwarf = Dwarf.read(Path("some binary"), dataclasses.replace(X86_64, binutils_prefix="g"))
+        self.assertEqual(run.call_args.args[0], ["greadelf", "--wide", "--debug-dump=info", "--debug-dump=Ranges", "some binary"])
+        self.assertEqual(dwarf.ranges[0x2C], (0x13E0,))
+        failed = subprocess.CompletedProcess([], 1, "", "no such file")
+        with unittest.mock.patch.object(subprocess, "run", return_value=failed), self.assertRaises(RuntimeError):
+            Dwarf.read(Path("some binary"))
+
 
 
 @unittest.skipUnless(CAN_RUN, "runtime equivalence needs x86-64 Linux and gcc")

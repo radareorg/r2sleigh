@@ -14,6 +14,10 @@ library. It reads only the tags a call needs -- subprograms, their formal
 parameters, and the type graph those reach -- and refuses per node: a type it
 does not model is described as ``unsupported`` with the tag that stopped it,
 never guessed.
+
+A function's address is its entry (DWARF 5, section 2.18): ``DW_AT_entry_pc``, else ``DW_AT_low_pc``, else the
+start of the first range of ``DW_AT_ranges``. ``subprograms()`` lists the functions that have a ``DW_AT_low_pc``;
+``placed()`` lists every function with code and names each one it cannot place.
 """
 
 from __future__ import annotations
@@ -29,6 +33,13 @@ _DIE = re.compile(r"^\s*<(\d+)><([0-9a-f]+)>: Abbrev Number: (\d+)(?: \((DW_TAG_
 _ATTR = re.compile(r"^\s*<[0-9a-f]+>\s+(DW_AT_\w+)\s*:\s?(.*)$")
 _REF = re.compile(r"<0x([0-9a-f]+)>")
 _PLUS_UCONST = re.compile(r"DW_OP_plus_uconst: (\d+)")
+# One row of a `--debug-dump=Ranges` table: `<offset> <begin> <end>`, a `(base address)` selection, or the end of a list.
+_RANGE_ROW = re.compile(
+    r"^\s+(?P<offset>[0-9a-f]{8})\s+(?:(?P<end><End of list>)|(?P<begin>[0-9a-f]{8,16})\s+(?:(?P<base>\(base address\))|[0-9a-f]{8,16}))"
+)
+_RANGE_SECTION = re.compile(r"^Contents of the \.debug_(?:ranges|rnglists) section")
+# What a linker writes over the address of code it discarded: 0, all ones, or lld's 1 in `.debug_ranges`.
+TOMBSTONES = frozenset({0, 1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF})
 # `readelf --wide` names the attribute's form first: `(data1) 7`, `(strp) (offset: 0x7a): x`.
 _FORM = re.compile(r"^\([a-z][a-z0-9_]*\)\s*")
 
@@ -50,6 +61,8 @@ class Die:
     tag: str
     depth: int
     attrs: dict[str, str] = field(default_factory=dict)
+    # The form readelf names each attribute's value in (`addr`, `data1`, `sec_offset`), where it names one.
+    forms: dict[str, str] = field(default_factory=dict)
     children: list["Die"] = field(default_factory=list)
 
     def text(self, name: str) -> str | None:
@@ -111,9 +124,46 @@ def parse_readelf(text: str) -> tuple[list[Die], dict[int, Die]]:
             continue
         attr = _ATTR.match(line)
         if attr and current is not None:
-            value = _FORM.sub("", attr.group(2).strip(), count=1)
+            raw = attr.group(2).strip()
+            value = _FORM.sub("", raw, count=1)
+            if attr.group(1) not in current.attrs and value != raw:
+                current.forms[attr.group(1)] = _FORM.match(raw).group(0).strip()[1:-1]
             current.attrs.setdefault(attr.group(1), value)
     return units, index
+
+
+def parse_ranges(text: str) -> dict[int, tuple[int, ...]]:
+    """The first range of the list at each section offset of a ``--debug-dump=Ranges`` dump.
+
+    DWARF 4 prints a list's own offset on every row of it; DWARF 5 prints each row's offset, and a list starts at
+    its first row. A ``(base address)`` row selects a base and holds no range; a list with no range at all has no
+    entry. An empty range (``start == end``) is a range: GCC lists a split function's entry first, empty.
+    An offset two sections hold with different first ranges keeps both, for the caller to refuse.
+    """
+    rows: list[tuple[int, int, str, int]] = []
+    section = 0
+    in_ranges = False
+    for line in text.splitlines():
+        if line.startswith("Contents of"):
+            in_ranges = bool(_RANGE_SECTION.match(line))
+            section += 1
+            continue
+        row = _RANGE_ROW.match(line) if in_ranges else None
+        if row is None:
+            continue
+        kind = "end" if row.group("end") else "base" if row.group("base") else "range"
+        rows.append((section, int(row.group("offset"), 16), kind, int(row.group("begin") or "0", 16)))
+    firsts: dict[int, list[int]] = {}
+    for at, (part, offset, _, _) in enumerate(rows):
+        if at and rows[at - 1][:2] == (part, offset):
+            continue
+        index = at
+        while index < len(rows) and rows[index][2] == "base":
+            index += 1
+        found = firsts.setdefault(offset, [])
+        if index < len(rows) and rows[index][2] == "range" and rows[index][3] not in found:
+            found.append(rows[index][3])
+    return {offset: tuple(begins) for offset, begins in firsts.items() if begins}
 
 
 @dataclass(frozen=True)
@@ -162,18 +212,28 @@ class Subprogram:
     via_origin: bool
 
 
+@dataclass(frozen=True)
+class Unplaced:
+    """A function with code that has no one address in the binary: its name, its DIE and why."""
+
+    name: str
+    offset: int
+    why: str
+
+
 class Dwarf:
     """One binary's DWARF: its functions and the type graph they reach."""
 
-    def __init__(self, units: list[Die], index: dict[int, Die]):
+    def __init__(self, units: list[Die], index: dict[int, Die], ranges: dict[int, tuple[int, ...]] | None = None):
         self.units = units
         self.index = index
+        self.ranges = ranges or {}
         self._types: dict[int | None, TypeInfo] = {}
 
     @classmethod
     def read(cls, binary: Path, target: Target = X86_64) -> "Dwarf":
         proc = subprocess.run(
-            [target.tool("readelf"), "--wide", "--debug-dump=info", str(binary)],
+            [target.tool("readelf"), "--wide", "--debug-dump=info", "--debug-dump=Ranges", str(binary)],
             capture_output=True,
             text=True,
             check=False,
@@ -181,7 +241,7 @@ class Dwarf:
         if proc.returncode != 0:
             raise RuntimeError(f"readelf failed on {binary}: {proc.stderr.strip()}")
         units, index = parse_readelf(proc.stdout)
-        return cls(units, index)
+        return cls(units, index, parse_ranges(proc.stdout))
 
     # ------------------------------------------------------------ functions
 
@@ -203,7 +263,7 @@ class Dwarf:
         return die, False
 
     def subprograms(self) -> list[Subprogram]:
-        """Every function with code in the binary, in address order."""
+        """Every function with a ``DW_AT_low_pc`` in the binary, in address order."""
         found: list[Subprogram] = []
         for unit in self.units:
             unit_name = unit.text("DW_AT_name") or ""
@@ -215,27 +275,77 @@ class Dwarf:
                     low_pc = int(low or "", 16)
                 except ValueError:
                     continue
-                named, via_name = self._attr_via_origin(die, "DW_AT_name")
-                name = named.text("DW_AT_name") or ""
-                typed, _ = self._attr_via_origin(die, "DW_AT_type")
-                external_die, _ = self._attr_via_origin(die, "DW_AT_external")
-                proto_die, _ = self._attr_via_origin(die, "DW_AT_prototyped")
-                formals = self._formals(die)
-                found.append(
-                    Subprogram(
-                        name=name,
-                        low_pc=low_pc,
-                        unit=unit_name,
-                        external=external_die.flag("DW_AT_external"),
-                        return_type=typed.ref("DW_AT_type"),
-                        parameters=formals[0],
-                        variadic=formals[1],
-                        prototyped=proto_die.flag("DW_AT_prototyped"),
-                        via_origin=via_name,
-                    )
-                )
+                found.append(self._subprogram(die, unit_name, low_pc))
         found.sort(key=lambda s: (s.low_pc, s.name))
         return found
+
+    def placed(self) -> tuple[list[Subprogram], list[Unplaced]]:
+        """Every function with code at its entry address, and each one with none.
+
+        The function's ``low_pc`` here is its entry. A DIE with neither ``DW_AT_low_pc`` nor ``DW_AT_ranges`` holds
+        no code (a declaration, an abstract instance) and is in neither list. Whatever the DWARF does not state as
+        one address is unplaced with the reason, never guessed: a constant ``DW_AT_entry_pc``, a range list
+        that is empty or unreadable, an address a linker discarded.
+        """
+        found: list[Subprogram] = []
+        unplaced: list[Unplaced] = []
+        for unit in self.units:
+            unit_name = unit.text("DW_AT_name") or ""
+            for die in _walk(unit):
+                if die.tag != "DW_TAG_subprogram" or not {"DW_AT_low_pc", "DW_AT_ranges"} & die.attrs.keys():
+                    continue
+                entry, why = self._entry(die)
+                if entry is None:
+                    named, _ = self._attr_via_origin(die, "DW_AT_name")
+                    unplaced.append(Unplaced(named.text("DW_AT_name") or "", die.offset, why))
+                else:
+                    found.append(self._subprogram(die, unit_name, entry))
+        found.sort(key=lambda s: (s.low_pc, s.name))
+        unplaced.sort(key=lambda u: (u.name, u.offset))
+        return found, unplaced
+
+    def _entry(self, die: Die) -> tuple[int | None, str]:
+        """``(entry, "")`` for a function with one, else ``(None, why)``."""
+        if "DW_AT_entry_pc" in die.attrs:
+            if not die.forms.get("DW_AT_entry_pc", "").startswith("addr"):
+                return None, "its DW_AT_entry_pc is an offset from a base, not an address"
+            source = "DW_AT_entry_pc"
+        elif "DW_AT_low_pc" in die.attrs:
+            source = "DW_AT_low_pc"
+        else:
+            source = ""
+        if source:
+            try:
+                entry = int(die.text(source) or "", 16)
+            except ValueError:
+                return None, f"its {source} is not an address"
+        else:
+            offset = die.number("DW_AT_ranges")
+            begins = self.ranges.get(offset, ()) if offset is not None else ()
+            if len(begins) != 1:
+                return None, "its DW_AT_ranges list has no one readable first range"
+            entry = begins[0]
+        if entry in TOMBSTONES:
+            return None, f"its code was discarded by the linker (address {entry:#x})"
+        return entry, ""
+
+    def _subprogram(self, die: Die, unit_name: str, low_pc: int) -> Subprogram:
+        named, via_name = self._attr_via_origin(die, "DW_AT_name")
+        typed, _ = self._attr_via_origin(die, "DW_AT_type")
+        external_die, _ = self._attr_via_origin(die, "DW_AT_external")
+        proto_die, _ = self._attr_via_origin(die, "DW_AT_prototyped")
+        formals = self._formals(die)
+        return Subprogram(
+            name=named.text("DW_AT_name") or "",
+            low_pc=low_pc,
+            unit=unit_name,
+            external=external_die.flag("DW_AT_external"),
+            return_type=typed.ref("DW_AT_type"),
+            parameters=formals[0],
+            variadic=formals[1],
+            prototyped=proto_die.flag("DW_AT_prototyped"),
+            via_origin=via_name,
+        )
 
     def _formals(self, die: Die) -> tuple[list[Parameter], bool]:
         """The declared parameters, from the concrete DIE or the one it realises."""
