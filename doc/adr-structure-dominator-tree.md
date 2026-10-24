@@ -338,6 +338,10 @@ else arm took, in the same order, and the machine's edges are the same (the then
 `render::structured` (after loop rotation, so it reads what the counterfactual measured and no earlier stage sees a
 changed tree). Evidence: `Evidence::never_returns`, the predicate the tails and the certificate already read, which is
 the callee's declaration (r2abi's prototype, or r2engine's walk finding no fall-through after the call), never its name.
+`Evidence` holds the set of declared callees once (`Evidence::new`); `never_returns` and `declares_noreturn` (the stage is
+skipped when the set is empty, since a stage clones the body) both read it, so the skip cannot disagree with the predicate.
+`render::structured` ends in the stage as an expression with no early `return`, so a stage added after it runs for every
+function.
 The stage is kept only while the control certificate holds and is reverted whole otherwise (section 5); the checker
 reads the arm's end through the same predicate, so a guard on a call the machine returns from leaves an edge the
 block does not have, which section 3 (ii) refuses (`a_guard_the_machine_does_not_have_fails_the_certificate`).
@@ -348,7 +352,9 @@ are visited in their turn.
 case) and rebuilds each sequence once: a statement is taken from the sequence, a guard puts the statements it frees
 back at the front of what is left, and the rest of the chain is read as part of the same sequence. Each pop pushes only
 places inside the one it took, so the tree's height ends it, and each statement is moved twice at most whatever the
-depth of the chain; `ends_in_never_return` reads only the blocks nested at an arm's end. An arm is judged as it was
+depth of the chain; `ends_in_never_return` reads only the blocks nested at an arm's end: through observations and the last
+statement of each block that is not an `Empty` or a `Comment`, to any depth, and a statement or a label after the call at
+any level (a `goto` enters there) is a way out of the arm by its end. An arm is judged as it was
 written and not after the guards inside it are rewritten, which gives the same answer: the last statement of a
 rewritten sequence is the last statement of the arm its last guard frees, and an `if` ends in no call either way. The
 first build rewrote the arms first, recursed once per level and moved the whole tail of an `else` chain at every

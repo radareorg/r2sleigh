@@ -81,10 +81,10 @@ Closed pipes
 A test that closes the read end of a child's output and expects the child's next write to fail (exit 141 in
 `crates/r2s/tests/commands.rs`) races every other thread of its test binary that spawns. A spawn in flight holds a
 copy of each descriptor the process has open until its exec completes, which takes milliseconds under load, so the
-pipe stays open there and the child's write succeeds: the test saw exit 0 in 159 of 600 trials in a reproduction that
-closed the pipe of a `sh` after its prompt while eight threads spawned `r2s`, and in 0 of 600 when the closing thread
-held the spawn lock from the close to the exit. Every spawn in that binary goes through `started`, which takes
-`SPAWNING`, and the two pipe tests hold it from the close until the child has exited.
+pipe stays open there and the child's write succeeds, so the child exits 0 where the test expects 141. Every spawn in
+that binary goes through `started`, which takes `SPAWNING`, and the two pipe tests hold it from the close until the
+child has exited, so no spawn is in flight while the pipe is closed. The evidence is that mechanism and the failing
+run (exit 0 for 141); no run count shows the fix, because the race did not reproduce in the test binary.
 
 Diagnostics
 -----------
