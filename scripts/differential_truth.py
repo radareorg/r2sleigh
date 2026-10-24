@@ -209,7 +209,7 @@ def declared(dwarf: Dwarf, sub) -> Declared:
             slot = Slot(None, AFTER_ONE_NOT)
         elif slot.expected is not None and not c_types.integer_class(slot.expected):
             slot = Slot(None, NOT_IN_REGISTER)
-        positioned = positioned and slot.expected is not None
+        positioned = slot.expected is not None
         params.append(slot)
     return Declared(sub.name, ret, params)
 
@@ -386,14 +386,9 @@ def main() -> int:
         else {}
     )
 
-    # Re-recording comes first. Checked after the comparison instead, the flag
-    # did nothing at all whenever a baseline already existed, which is every
-    # time anyone would reach for it -- and it said so only by leaving the file
-    # unchanged.
+    # Re-recording comes first: after the comparison the flag did nothing whenever a baseline existed.
     if args.accept_baseline and args.baseline:
-        # The recorded cause of a silent error outlives the run that found it,
-        # so the explanations for the errors still here are carried forward
-        # rather than thrown away with the counts.
+        # A recorded cause outlives the run that found it: the causes of the errors still here carry forward.
         why = {fact: cause for fact, cause in recorded.get("why", {}).items() if cause_is_stated(cause)}
         args.baseline.write_text(
             json.dumps(
@@ -408,27 +403,22 @@ def main() -> int:
             print(f"NO CAUSE: {fact}", file=sys.stderr)
         return 1 if uncaused else 0
 
-    # A recorded silent error has a recorded cause; an unrecorded one is the
-    # failure this harness exists to catch. Gating on the multiset rather than
-    # on zero is what lets a known defect be carried without hiding a new one,
-    # and two functions that share a name keep one entry each.
-    if recorded:
-        known = Counter(recorded.get("silent", []))
-        new_silent = sorted((Counter(silent) - known).elements())
-        causes = recorded.get("why", {})
-        uncaused = sorted(fact for fact in known if not cause_is_stated(causes.get(fact)))
-        fixed = sorted((known - Counter(silent)).elements())
-        for fact in fixed:
-            print(f"no longer silent: {fact}", file=sys.stderr)
-        for fact in new_silent:
-            print(f"SILENT ERROR: {fact}", file=sys.stderr)
-        for fact in uncaused:
-            print(f"NO CAUSE: {fact}", file=sys.stderr)
-        if fixed and not new_silent:
-            print("re-record the baseline with --accept-baseline", file=sys.stderr)
-        return 1 if new_silent or uncaused else 0
-    # A silent error is the one failure this harness exists to catch.
-    return 1 if buckets["silently_wrong"] else 0
+    # A recorded silent error has a recorded cause, an unrecorded one is the failure this harness exists to catch.
+    # The multiset keeps two functions that share a name apart; with no baseline every silent error is new.
+    known = Counter(recorded.get("silent", []))
+    new_silent = sorted((Counter(silent) - known).elements())
+    causes = recorded.get("why", {})
+    uncaused = sorted(fact for fact in known if not cause_is_stated(causes.get(fact)))
+    fixed = sorted((known - Counter(silent)).elements())
+    for fact in fixed:
+        print(f"no longer silent: {fact}", file=sys.stderr)
+    for fact in new_silent:
+        print(f"SILENT ERROR: {fact}", file=sys.stderr)
+    for fact in uncaused:
+        print(f"NO CAUSE: {fact}", file=sys.stderr)
+    if fixed and not new_silent:
+        print("re-record the baseline with --accept-baseline", file=sys.stderr)
+    return 1 if new_silent or uncaused else 0
 
 
 if __name__ == "__main__":

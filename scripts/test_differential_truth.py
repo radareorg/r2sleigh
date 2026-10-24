@@ -7,6 +7,7 @@ Pure Python; every `r2s` answer is canned and every DWARF is written from C prot
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import io
 import json
 import os
@@ -237,6 +238,11 @@ class ReadsPddj(unittest.TestCase):
         self.assertEqual(report["functions_recovered"], 1)
         self.assertEqual(report["functions_in_truth"], 2)
 
+    def test_a_function_the_source_does_not_define_is_not_a_recovered_function(self) -> None:
+        stripped = {0x1000: fn(RIGHT), 0x5000: fn("uint64_t fcn_5000(void)", addr=0x5000)}
+        code, report, err = run_main({0x1000: INT}, stripped)
+        self.assertEqual((code, report["functions_recovered"], report["functions_in_truth"]), (0, 1, 1), err)
+
     def test_the_debug_build_is_never_asked_for_a_rendering(self) -> None:
         # `shell` raises on a pddj of the debug build: the gate passing at all is the check.
         code, _, err = run_main({0x1000: INT}, {0x1000: fn(RIGHT)})
@@ -345,6 +351,21 @@ class Answers(unittest.TestCase):
         self.assertEqual((code, out.getvalue()), (2, ""))
         self.assertIn("ran past its deadline", err.getvalue())
 
+    def test_a_listing_that_cannot_be_read_names_the_binary_without_an_address(self) -> None:
+        source = Source({0x1000: INT})
+        out, err = io.StringIO(), io.StringIO()
+        argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            mock.patch.object(dt, "r2s", return_value=completed("not a list")),
+            mock.patch.object(dt, "read_dwarf", side_effect=source.read),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = dt.main()
+        self.assertEqual(code, 2)
+        self.assertTrue(err.getvalue().startswith("UNREADABLE aflj: debug: not a list of functions ("), err.getvalue())
+
     def test_the_first_ten_unreadable_functions_are_named_and_the_rest_counted(self) -> None:
         source = {0x1000 + 16 * index: f"int32_t f{index}(void)" for index in range(13)}
         stripped = {addr: fn(f"int32_t fcn_{addr:x}(void)", addr=addr) for addr in source}
@@ -404,6 +425,7 @@ class TruthIsDwarf(unittest.TestCase):
         self.assertEqual(report["silent"], ["f return: expected 'double', said 'uint64_t'",
                                             "f parameter 0: expected 'int32_t', said 'uint32_t'"])
         self.assertEqual(report["unreadable_truth"], {dt.AFTER_ONE_NOT: 1, dt.NOT_IN_REGISTER: 1})
+        self.assertEqual(list(report["unreadable_truth"]), [dt.AFTER_ONE_NOT, dt.NOT_IN_REGISTER])
         self.assertEqual(report["facts"], {"correct": 0, "missing": 0, "marked_wrong": 0, "silently_wrong": 2})
 
     def test_a_struct_by_value_is_no_register_parameter_and_ends_the_positions(self) -> None:
@@ -429,6 +451,16 @@ class TruthIsDwarf(unittest.TestCase):
         self.assertEqual([slot.why.split(" (")[0] for slot in declared.params],
                          [dt.CANNOT_STATE, dt.AFTER_ONE_NOT, dt.CANNOT_STATE])
         self.assertEqual(declared.params[2].why, f"{dt.CANNOT_STATE} (no type)")
+
+    def test_a_qualifier_on_a_whole_parameter_or_result_is_no_part_of_the_type(self) -> None:
+        graph = Graph()
+        const_int = dataclasses.replace(ct.integer(4, True), const=True)
+        both = dataclasses.replace(ct.pointer(ct.integer(1, None)), const=True, volatile=True)
+        array = ct.CType(ct.ARRAY, target=ct.integer(4, True), count=4)
+        declared = dt.declared(graph.dwarf(), graph.subprogram(ct.Prototype("f", const_int, (const_int, both, array)), 0x1000))
+        self.assertEqual(declared.ret.expected, ct.integer(4, True))
+        self.assertEqual([slot.expected for slot in declared.params],
+                         [ct.integer(4, True), ct.pointer(ct.integer(1, None)), ct.pointer(ct.integer(4, True))])
 
     def test_a_parameter_with_no_type_is_unreadable(self) -> None:
         graph = Graph()
@@ -542,6 +574,14 @@ class Rates(unittest.TestCase):
         report = graded({0x1000: "int32_t f(int32_t a)", 0x2000: "int32_t g(void)"}, stripped)
         self.assertEqual(report["facts"], {"correct": 0, "missing": 1, "marked_wrong": 2, "silently_wrong": 0})
         self.assertEqual((report["recovery_rate"], report["soundness_rate"]), (0.0, 1.0))
+
+    def test_a_run_with_no_readable_fact_recovers_nothing_and_asserts_nothing(self) -> None:
+        source = Source({0x1000: "int32_t f(void)"})
+        source.placed[0] = dataclasses.replace(source.placed[0], return_type=source.graph.die(
+            "DW_TAG_base_type", name="c", size=8, encoding="3\t(complex)"))
+        code, report, _ = run_main(source, {0x1000: fn("uint32_t f(void)")})
+        self.assertEqual(report["facts"], {"correct": 0, "missing": 0, "marked_wrong": 0, "silently_wrong": 0})
+        self.assertEqual((code, report["recovery_rate"], report["soundness_rate"]), (0, 0.0, 1.0))
 
     def test_a_run_with_no_fact_has_no_recovery(self) -> None:
         report = graded({0x1000: "void f(double a)"}, {0x1000: fn("void fcn_1000(uint64_t a0)")})
@@ -749,6 +789,7 @@ class Baseline(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             code, _, err = self.run_with(self.record(directory, {self.KEY: "no sign is proven"}))
         self.assertEqual(code, 0, err)
+        self.assertEqual(err, "")
 
     def test_a_new_silent_error_fails(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -796,9 +837,10 @@ class Baseline(unittest.TestCase):
 
     def test_a_baseline_that_does_not_exist_gates_on_zero(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            code, _, _ = run_main(self.SOURCE, self.WRONG, "--baseline", str(pathlib.Path(directory) / "none.json"))
+            code, _, err = run_main(self.SOURCE, self.WRONG, "--baseline", str(pathlib.Path(directory) / "none.json"))
             ok = run_main(self.SOURCE, {0x1000: fn(RIGHT)}, "--baseline", str(pathlib.Path(directory) / "none.json"))
-        self.assertEqual((code, ok[0]), (1, 0))
+        self.assertEqual((code, ok[0], ok[2]), (1, 0, ""))
+        self.assertEqual(err, f"SILENT ERROR: {self.KEY}\n")
 
     def test_two_functions_that_share_a_name_keep_one_entry_each(self) -> None:
         twice = {0x1000: "int32_t helper(void)", 0x2000: "int32_t helper(void)"}
@@ -827,7 +869,7 @@ class Baseline(unittest.TestCase):
 
     def test_accepting_carries_the_cause_and_drops_the_fixed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            path = self.record(directory, {self.KEY: "no sign is proven", "gone": "was fixed"})
+            path = self.record(directory, {self.KEY: "no sign is proven", "gone": "this one was fixed"})
             code, _, err = self.run_with(path, "--accept-baseline")
             written = json.loads(path.read_text())
         self.assertEqual(code, 0, err)
@@ -877,6 +919,12 @@ class ReportShape(unittest.TestCase):
         self.assertEqual(report["without_dwarf"], ["sym.a", "sym.b"])
         self.assertEqual(report["without_entry"], ["a: why", "z: why"])
         self.assertEqual(len(report["silent"]), 3)
+
+    def test_the_functions_the_engine_does_not_list_are_named_in_order(self) -> None:
+        source = {0x1000: "int32_t zeta(void)", 0x1010: "int32_t alpha(void)", 0x1020: "int32_t mid(void)",
+                  0x1030: "int32_t zulu(void)", 0x1040: "int32_t able(void)"}
+        _, report, _ = run_main(source, {0x1000: fn("int32_t zeta(void)")}, listed={0x1000, 0x1010, 0x1020})
+        self.assertEqual(report["unlisted"], ["able", "zulu"])
 
 
 if __name__ == "__main__":
