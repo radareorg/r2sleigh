@@ -16,7 +16,7 @@ import sys
 TYPES = "python3 scripts/test_c_types.py"
 GATE = "python3 scripts/test_differential_truth.py"
 EQUIV = ("cd tests/equiv && python3 -m unittest test_equiv.RangesTests test_equiv.PlacementTests "
-         "test_equiv.FunctionSymbolTests test_equiv.ContractTests")
+         "test_equiv.FunctionSymbolTests test_equiv.ReferenceTests test_equiv.ContractTests")
 DECBENCH = "cd tests/decbench && python3 -m unittest test_type_causes"
 
 C = "scripts/c_types.py"
