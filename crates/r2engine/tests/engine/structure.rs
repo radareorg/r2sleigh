@@ -759,3 +759,268 @@ fn a_lane_the_facts_name_on_the_other_arm_refuses_the_function_while_r2ssa_check
         assert!(!c.contains("atan2f("), "{c}");
     }
 }
+
+/// `code` written at `TWO` over a program importing `import`, with the rel32 of each `call` in `calls`
+/// (offsets into `code`, the opcode byte) pointed at the import's stub.
+fn c_calling(import: &str, code: &[u8], calls: &[usize]) -> String {
+    let mut code = code.to_vec();
+    for &at in calls {
+        assert_eq!(code[at], 0xe8, "a call at {at:#x}");
+        let rel = i32::try_from(common::STUB as i64 - (common::TWO + at as u64 + 5) as i64)
+            .expect("near");
+        code[at + 1..at + 5].copy_from_slice(&rel.to_le_bytes());
+    }
+    let mut program = OpenProgram::of(Literal::new().importing(import).running_on(common::GLIBC));
+    program.source_mut().write(common::TWO, &code);
+    (program.rendered(common::TWO))
+        .expect("it renders")
+        .response
+        .output
+        .into_text()
+}
+
+/// `test edi, edi; jne cold; mov eax, 7; ret; cold: mov edi, 1; call <import>`: the arm taken calls out.
+const COLD_CALL: &[u8] = &[
+    0x85, 0xff, 0x75, 0x06, 0xb8, 0x07, 0, 0, 0, 0xc3, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0,
+];
+
+/// `test edi, edi; je rest; mov edi, 1; call <import>; rest: mov eax, 7; ret`: the arm not taken calls out.
+const FALLING_CALL: &[u8] = &[
+    0x85, 0xff, 0x74, 0x0a, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xb8, 0x07, 0, 0, 0, 0xc3,
+];
+
+/// `test edi, edi; jne cold; mov dword [rsi], 7; jmp join; cold: mov edi, 1; call <import>; join: xor eax, eax; ret`
+const JOINED_CALL: &[u8] = &[
+    0x85, 0xff, 0x75, 0x08, 0xc7, 0x06, 0x07, 0, 0, 0, 0xeb, 0x0a, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0,
+    0, 0x31, 0xc0, 0xc3,
+];
+
+/// The same with `call rax` for the call: nothing states that it does not return.
+const JOINED_INDIRECT: &[u8] = &[
+    0x85, 0xff, 0x75, 0x08, 0xc7, 0x06, 0x07, 0, 0, 0, 0xeb, 0x02, 0xff, 0xd0, 0x31, 0xc0, 0xc3,
+];
+
+/// `test edi, edi; jne a; mov [rdx], 5; test esi, esi; jne b; mov eax, 7; ret; a: mov edi, 1; call exit;
+/// b: mov edi, 2; call exit`
+const TWO_GUARDS: &[u8] = &[
+    0x85, 0xff, 0x75, 0x10, 0xc7, 0x02, 0x05, 0, 0, 0, 0x85, 0xf6, 0x75, 0x10, 0xb8, 0x07, 0, 0, 0,
+    0xc3, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xbf, 2, 0, 0, 0, 0xe8, 0, 0, 0, 0,
+];
+
+/// `test edi, edi; jne b; mov edi, 2; call exit; b: mov edi, 1; call exit`: control ends on both arms.
+const BOTH_EXIT: &[u8] = &[
+    0x85, 0xff, 0x75, 0x0a, 0xbf, 2, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0,
+];
+
+/// `test edi, edi; je rest; test esi, esi; je rest; mov edi, 1; call exit; rest: xor eax, eax; ret`: the chain
+/// leaves to `rest` on either zero, and the arm it falls to exits.
+const EITHER_ZERO_OR_EXIT: &[u8] = &[
+    0x85, 0xff, 0x74, 0x0e, 0x85, 0xf6, 0x74, 0x0a, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0x31, 0xc0,
+    0xc3,
+];
+
+/// `test edi, edi; je join; test esi, esi; je ok; mov edi, 1; call exit; ok: mov [rdx], 5; join: mov [rdx + 4], 7;
+/// test ecx, ecx; jne end; mov [rdx + 8], 1; end: xor eax, eax; ret`: each test jumps over the rest, so the exit sits in an else.
+const EMPTY_THEN_ARMS: &[u8] = &[
+    0x85, 0xff, 0x74, 0x14, 0x85, 0xf6, 0x74, 0x0a, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xc7, 0x02,
+    0x05, 0, 0, 0, 0xc7, 0x42, 0x04, 0x07, 0, 0, 0, 0x85, 0xc9, 0x75, 0x07, 0xc7, 0x42, 0x08, 0x01,
+    0, 0, 0, 0x31, 0xc0, 0xc3,
+];
+
+/// `test edi, edi; jne inner; mov [rdx], 3; xor eax, eax; ret; inner: test esi, esi; je ok; mov edi, 1; call exit;
+/// ok: mov [rdx], 5; mov eax, 1; ret`: the exit is under the then arm of a test whose else returns.
+const EXIT_IN_THEN_ARM: &[u8] = &[
+    0x85, 0xff, 0x75, 0x09, 0xc7, 0x02, 0x03, 0, 0, 0, 0x31, 0xc0, 0xc3, 0x85, 0xf6, 0x74, 0x0a,
+    0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xc7, 0x02, 0x05, 0, 0, 0, 0xb8, 0x01, 0, 0, 0, 0xc3,
+];
+
+/// The indent of the first line holding `needle`, and its position among the lines.
+fn line_of(c: &str, needle: &str) -> (usize, usize) {
+    let (at, line) = (c.lines().enumerate())
+        .find(|(_, line)| line.contains(needle))
+        .unwrap_or_else(|| panic!("a line with {needle}: {c}"));
+    (at, line.len() - line.trim_start().len())
+}
+
+#[test]
+fn an_arm_that_ends_in_a_call_declared_never_to_return_is_a_guard_and_the_rest_follows_it() {
+    // `if (c) exit(1); else return 7;` is `if (c) exit(1); return 7;`: the call does not come back.
+    let c = c_calling("exit", COLD_CALL, &[0x0f]);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    assert_eq!(tests_of(&c).len(), 1, "{c}");
+    assert!(!c.contains("else"), "{c}");
+    let (test, exit, rest) = (
+        line_of(&c, "if ("),
+        line_of(&c, "exit(1)"),
+        line_of(&c, "return 7"),
+    );
+    // The call is in the `if`, and the return is after it, on the `if`'s own level.
+    assert!(test.0 < exit.0 && exit.0 < rest.0, "{c}");
+    assert_eq!((exit.1 > test.1, rest.1), (true, test.1), "{c}");
+}
+
+#[test]
+fn what_the_machine_runs_after_the_test_is_written_after_the_guard_in_the_machine_s_order() {
+    // The guard takes the else arm's statements out of the else, never past one another: the store
+    // stays between the two tests, and neither test moves before it.
+    let c = c_calling("exit", TWO_GUARDS, &[0x19, 0x23]);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    assert_eq!(tests_of(&c).len(), 2, "{c}");
+    assert!(!c.contains("else"), "{c}");
+    let at = |needle: &str| line_of(&c, needle).0;
+    let order = [at("exit(1)"), at("5U)"), at("exit(2)"), at("return 7")];
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{c}");
+    let tests: Vec<_> = c
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim_start().starts_with("if "))
+        .collect();
+    assert!(
+        tests[0].0 < order[0] && order[1] < tests[1].0 && tests[1].0 < order[2],
+        "{c}"
+    );
+}
+
+#[test]
+fn a_guard_keeps_the_statements_of_the_arm_it_frees() {
+    // The store is on the arm that does not exit, and it runs before the return after the join.
+    let c = c_calling("exit", JOINED_CALL, &[0x11]);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    assert!(!c.contains("else"), "{c}");
+    let (test, exit, store, ret) = (
+        line_of(&c, "if ("),
+        line_of(&c, "exit(1)"),
+        line_of(&c, "7U)"),
+        line_of(&c, "return 0"),
+    );
+    assert!(
+        test.0 < exit.0 && exit.0 < store.0 && store.0 < ret.0,
+        "{c}"
+    );
+    // The merge after the join is a block of its own, one level in.
+    assert_eq!((store.1, ret.1 > test.1), (test.1, true), "{c}");
+}
+
+#[test]
+fn an_import_the_container_does_not_declare_never_to_return_keeps_its_else() {
+    // The arm ends in `puts`, which comes back and runs `return 0` as the other arm does.
+    let c = c_calling("puts", JOINED_CALL, &[0x11]);
+    assert!(c.contains("puts("), "{c}");
+    assert!(c.contains("else"), "{c}");
+    assert!(!c.contains("noreturn"), "{c}");
+}
+
+#[test]
+fn a_call_through_a_register_keeps_its_else() {
+    let c = c_calling("exit", JOINED_INDIRECT, &[]);
+    assert!(c.contains("else"), "{c}");
+}
+
+#[test]
+fn an_else_arm_that_never_returns_is_a_guard_on_the_opposite_test() {
+    // `if (c == 0) return 7; else exit(1);` is `if (c != 0) exit(1); return 7;`: the call is the guard's
+    // body, so the test is the machine's other edge, written once over the test's own atom.
+    let c = c_calling("exit", FALLING_CALL, &[0x09]);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    assert!(!c.contains("else") && !c.contains("(!"), "{c}");
+    let test = tests_of(&c);
+    assert_eq!(test.len(), 1, "{c}");
+    assert!(test[0].contains("!= (uint32_t)0U"), "{c}");
+    let (guard, exit, rest) = (
+        line_of(&c, "if ("),
+        line_of(&c, "exit(1)"),
+        line_of(&c, "return 7"),
+    );
+    assert!(
+        guard.0 < exit.0 && exit.0 < rest.0 && rest.1 == guard.1,
+        "{c}"
+    );
+}
+
+#[test]
+fn two_arms_that_both_end_in_a_call_that_never_returns_keep_their_else() {
+    // Nothing continues past either arm, so neither is the guard of the other.
+    let c = c_calling("exit", BOTH_EXIT, &[0x09, 0x13]);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    assert!(
+        c.contains("else") && c.contains("exit(1)") && c.contains("exit(2)"),
+        "{c}"
+    );
+    assert_eq!(tests_of(&c).len(), 1, "{c}");
+}
+
+#[test]
+fn a_conjunction_whose_arm_exits_is_a_guard_with_the_rest_after_it() {
+    // `if (a == 0 || b == 0) return 0; else exit(1);` is `if (a != 0 && b != 0) exit(1); return 0;`: the chain is
+    // written on the exit's side, with the tests and the connective the machine's other edge needs.
+    let c = c_calling("exit", EITHER_ZERO_OR_EXIT, &[0x0d]);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    let tests = tests_of(&c);
+    assert_eq!(tests.len(), 1, "{c}");
+    assert!(
+        tests[0].contains(" && ")
+            && !tests[0].contains(" || ")
+            && tests[0].matches("!= (uint32_t)0U").count() == 2,
+        "{c}"
+    );
+    assert!(!c.contains("else") && !c.contains("goto"), "{c}");
+    let (guard, exit, rest) = (
+        line_of(&c, "if ("),
+        line_of(&c, "exit(1)"),
+        line_of(&c, "return 0"),
+    );
+    // The `if` closes before the return, which is the merge's own block, one level in.
+    let closes = c.lines().skip(exit.0).position(|line| line.trim() == "}");
+    assert!(
+        guard.0 < exit.0 && closes.is_some_and(|at| exit.0 + at < rest.0) && rest.1 >= guard.1,
+        "{c}"
+    );
+}
+
+#[test]
+fn a_test_with_nothing_in_its_then_arm_keeps_its_else_and_the_exit_under_it_is_the_guard() {
+    // `if (a == 0) {} else { if (b == 0) { store } else { exit(1) } }` is no guard at the outer test: an arm with
+    // nothing in it falls to the end of the `if`, it does not leave, so the else is not what follows it.
+    let c = c_calling("exit", EMPTY_THEN_ARMS, &[0x0d]);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    // The two tests with an empty then arm keep their else; the exit's is gone.
+    assert_eq!(c.matches("else").count(), 2, "{c}");
+    let exit = line_of(&c, "exit(1)");
+    let (test, store) = (c.lines().nth(exit.0 - 1), line_of(&c, "5U)"));
+    assert!(
+        test.is_some_and(
+            |test| test.trim_start().starts_with("if ") && test.contains("!= (uint32_t)0U")
+        ),
+        "{c}"
+    );
+    // The store the exit's else held follows the `if` on its own level.
+    assert_eq!((store.0, store.1 + 4), (exit.0 + 2, exit.1), "{c}");
+}
+
+#[test]
+fn an_exit_under_the_then_arm_of_a_test_is_the_guard_inside_that_arm() {
+    // `if (a != 0) { if (b == 0) { store; return 1; } else { exit(1); } } else { store; return 0; }`: neither arm of
+    // the outer test ends in the call, so it keeps its else, and the guard is written in its then arm.
+    let c = c_calling("exit", EXIT_IN_THEN_ARM, &[0x16]);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    assert_eq!(c.matches("else").count(), 1, "{c}");
+    let tests = tests_of(&c);
+    assert_eq!(tests.len(), 2, "{c}");
+    assert!(tests[1].contains("!= (uint32_t)0U"), "{c}");
+    let (outer, exit, store, ret) = (
+        line_of(&c, "if ("),
+        line_of(&c, "exit(1)"),
+        line_of(&c, "5U)"),
+        line_of(&c, "return 1"),
+    );
+    // The exit is two levels in, the store and the return one: after the guard, in the same arm.
+    assert!(
+        outer.0 < exit.0 && exit.0 < store.0 && store.0 < ret.0,
+        "{c}"
+    );
+    assert_eq!(
+        (exit.1, store.1, ret.1),
+        (outer.1 + 8, outer.1 + 4, outer.1 + 4),
+        "{c}"
+    );
+}

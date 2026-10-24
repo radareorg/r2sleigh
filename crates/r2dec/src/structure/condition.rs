@@ -575,6 +575,54 @@ pub(crate) trait Marks {
     fn copy_of(&mut self, id: RenderObservationId) -> RenderObservationId;
 }
 
+/// `test` as the writer's atoms: a test with no marker becomes one atom carrying a copy of each of `ids`.
+pub(super) fn as_atoms(
+    test: CExpr,
+    ids: impl IntoIterator<Item = RenderObservationId>,
+    marks: &mut dyn Marks,
+) -> CExpr {
+    match carries_marker(&test) {
+        true => test,
+        false => CExpr::observe_all(ids.into_iter().map(|id| marks.copy_of(id)), test),
+    }
+}
+
+/// The test that holds where `test` does not, over marked atoms: they take the `!` and the
+/// connectives swap. An integer comparison reads as its opposite once certified (`respell_negations`).
+pub(super) fn negated(test: CExpr) -> CExpr {
+    match test {
+        CExpr::Binary {
+            op: op @ (BinaryOp::And | BinaryOp::Or),
+            left,
+            right,
+        } if carries_marker(&left) || carries_marker(&right) => {
+            let flipped = if op == BinaryOp::And {
+                BinaryOp::Or
+            } else {
+                BinaryOp::And
+            };
+            CExpr::binary(flipped, negated(*left), negated(*right))
+        }
+        CExpr::Unary {
+            op: UnaryOp::Not,
+            operand,
+        } if carries_marker(&operand) => *operand,
+        atom => CExpr::unary(UnaryOp::Not, atom),
+    }
+}
+
+/// Whether a test carries a block's marker somewhere, which the lowering never puts there.
+fn carries_marker(expr: &CExpr) -> bool {
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        if matches!(expr, CExpr::Observed { .. }) {
+            return true;
+        }
+        pending.extend(expr.children());
+    }
+    false
+}
+
 /// The chains written, and the ones refused with the head and the reason.
 #[derive(Debug, Default)]
 pub(crate) struct Report {
@@ -1781,5 +1829,89 @@ mod tests {
             panic!("a block arm");
         };
         assert_eq!(test_text(&arm[0], &marks), "([[32]:0x20] && [[48]:0x30])");
+    }
+
+    /// Block `block`'s test as the writer marks it.
+    fn atom(block: u32) -> CExpr {
+        CExpr::observe_one(
+            test_render_observation_id(block),
+            CExpr::int(i64::from(block)),
+        )
+    }
+
+    fn not(expr: CExpr) -> CExpr {
+        CExpr::unary(UnaryOp::Not, expr)
+    }
+
+    #[test]
+    fn the_test_that_holds_where_a_marked_test_does_not_takes_the_bang_and_swaps_the_connectives() {
+        let (and, or) = (BinaryOp::And, BinaryOp::Or);
+        assert_eq!(negated(atom(1)), not(atom(1)));
+        assert_eq!(negated(not(atom(1))), atom(1));
+        assert_eq!(
+            negated(CExpr::binary(and, atom(1), atom(2))),
+            CExpr::binary(or, not(atom(1)), not(atom(2)))
+        );
+        assert_eq!(
+            negated(CExpr::binary(or, atom(1), atom(2))),
+            CExpr::binary(and, not(atom(1)), not(atom(2)))
+        );
+        // A marker anywhere under a connective makes the chain one to swap, whichever side it is on or how deep.
+        let plain = CExpr::int(9);
+        assert_eq!(
+            negated(CExpr::binary(and, atom(1), plain.clone())),
+            CExpr::binary(or, not(atom(1)), not(plain.clone()))
+        );
+        assert_eq!(
+            negated(CExpr::binary(and, plain.clone(), not(atom(1)))),
+            CExpr::binary(or, not(plain.clone()), atom(1))
+        );
+        assert_eq!(
+            negated(CExpr::binary(
+                and,
+                plain.clone(),
+                CExpr::binary(or, plain.clone(), atom(1))
+            )),
+            CExpr::binary(
+                or,
+                not(plain.clone()),
+                CExpr::binary(and, not(plain), not(atom(1)))
+            )
+        );
+    }
+
+    #[test]
+    fn a_connective_over_tests_nothing_marks_is_one_atom_and_is_negated_whole() {
+        let chain = CExpr::binary(BinaryOp::And, CExpr::int(1), CExpr::int(2));
+        assert_eq!(negated(chain.clone()), not(chain));
+    }
+
+    #[test]
+    fn a_test_nothing_marks_becomes_one_atom_carrying_copies_of_the_ifs_markers() {
+        let ids = [0x10, 0x11].map(test_render_observation_id);
+        let mut marks = Fixture { copies: Vec::new() };
+        let atom = as_atoms(CExpr::int(1), ids, &mut marks);
+        let CExpr::Observed {
+            ids: copies, expr, ..
+        } = &atom
+        else {
+            panic!("one atom: {atom:?}");
+        };
+        // Copies, never the markers themselves, which the `if` keeps: each names the block it copies.
+        assert_eq!(
+            copies.iter().collect::<Vec<_>>(),
+            [1000, 1001].map(test_render_observation_id)
+        );
+        assert_eq!(marks.copies, [0x10, 0x11]);
+        assert_eq!(**expr, CExpr::int(1));
+    }
+
+    #[test]
+    fn a_test_that_carries_a_marker_is_already_the_writers_atoms() {
+        let marked = CExpr::binary(BinaryOp::And, atom(1), CExpr::int(2));
+        let ids = [test_render_observation_id(0x10)];
+        let mut marks = Fixture { copies: Vec::new() };
+        assert_eq!(as_atoms(marked.clone(), ids, &mut marks), marked);
+        assert!(marks.copies.is_empty());
     }
 }

@@ -1,0 +1,114 @@
+# A call to a function declared never to return is the guard's whole body, and the statements the other arm held
+# follow the `if` (tests/fixtures/src/noreturn_guards.c, GCC 13.3.0 -O2): `if (c) { exit(2); } rest` and, for an exit
+# under the arm a test falls to, `if (c) { abort(); } rest`. The callee is declared by the platform's prototype row,
+# never by its name, so both architectures get the same guard. `first_or_die` is only on AArch64: GCC puts its `abort`
+# on x86-64 in a `.cold` function of its own and r2s refuses it there (ROADMAP D75, item 4).
+
+NAME=x86-64 exit under a test
+FILE=tests/fixtures/noreturn_guards_gcc_x64_O2
+CMDS=<<EOF
+pdd @ sym.checked_sum
+pdd @ sym.nested
+EOF
+EXPECT=<<EOF
+uint32_t checked_sum(uint32_t* arg0, uint32_t arg1, uint32_t* arg2)
+{
+    __attribute__((noreturn)) void exit(int32_t);
+
+    uint32_t tmp_11aa_0_1;
+
+    /* r2dec proof: no individual construct is marked; 20 source obligations: 13 rendered, 7 elided, 0 refused; 5 statements rendered; 1 callee prototype supplied by the source */
+    {
+        if ((uint8_t)((int32_t)arg1 < (int32_t)0U)) {
+            exit(2);
+        }
+        r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)arg1);
+        tmp_11aa_0_1 = r2sleigh_load_u32((void*)(uint64_t)arg0);
+        return (uint32_t)((uint32_t)tmp_11aa_0_1 + (uint32_t)arg1);
+    }
+}
+
+uint64_t nested(uint64_t arg0, uint32_t* arg1, uint32_t* arg2)
+{
+    __attribute__((noreturn)) void exit(int32_t);
+
+    /* r2dec proof: no individual construct is marked; 31 source obligations: 21 rendered, 10 elided, 0 refused; 7 statements rendered; 1 callee prototype supplied by the source */
+    {
+        if ((uint8_t)((uint64_t)arg0 == (uint64_t)0U)) {
+            r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)3U);
+            return 0;
+        } else {
+            if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
+                exit(3);
+            }
+            r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)r2sleigh_load_u32((void*)(uint64_t)arg1));
+            return 1;
+        }
+    }
+}
+
+EOF
+RUN
+
+NAME=aarch64 exit and abort under a test
+FILE=tests/fixtures/noreturn_guards_gcc_aarch64_O2
+CMDS=<<EOF
+pdd @ sym.checked_sum
+pdd @ sym.first_or_die
+pdd @ sym.nested
+EOF
+EXPECT=<<EOF
+uint32_t checked_sum(uint32_t* arg0, uint32_t arg1, uint32_t* arg2)
+{
+    __attribute__((noreturn)) void exit(int32_t);
+
+    uint32_t tmp_7a8_8_1;
+
+    /* r2dec proof: no individual construct is marked; 15 source obligations: 15 rendered, 0 elided, 0 refused; 5 statements rendered; 1 callee prototype supplied by the source */
+    {
+        if ((uint8_t)((uint32_t)((uint32_t)((uint32_t)31U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)arg1 >> (uint32_t)31U)) & (uint32_t)1U) != (uint32_t)0U)) {
+            exit(2);
+        }
+        r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)arg1);
+        tmp_7a8_8_1 = r2sleigh_load_u32((void*)(uint64_t)arg0);
+        return (uint32_t)((uint32_t)arg1 + (uint32_t)tmp_7a8_8_1);
+    }
+}
+
+uint32_t first_or_die(uint32_t* arg0)
+{
+    __attribute__((noreturn)) void abort(void);
+
+    uint32_t tmp_7c8_8_1;
+
+    /* r2dec proof: no individual construct is marked; 9 source obligations: 9 rendered, 0 elided, 0 refused; 4 statements rendered; 1 callee prototype supplied by the source */
+    {
+        if ((uint8_t)((uint64_t)arg0 == (uint64_t)0U)) {
+            abort();
+        }
+        tmp_7c8_8_1 = r2sleigh_load_u32((void*)(uint64_t)arg0);
+        return (uint32_t)((uint32_t)tmp_7c8_8_1 + (uint32_t)1U);
+    }
+}
+
+uint64_t nested(uint64_t arg0, uint32_t* arg1, uint32_t* arg2)
+{
+    __attribute__((noreturn)) void exit(int32_t);
+
+    /* r2dec proof: no individual construct is marked; 19 source obligations: 19 rendered, 0 elided, 0 refused; 7 statements rendered; 1 callee prototype supplied by the source; the result's second register is open: no call read decides it */
+    {
+        if ((uint8_t)((uint64_t)arg0 == (uint64_t)0U)) {
+            r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)3U);
+            return 0;
+        } else {
+            if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
+                exit(3);
+            }
+            r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)r2sleigh_load_u32((void*)(uint64_t)arg1));
+            return 1;
+        }
+    }
+}
+
+EOF
+RUN

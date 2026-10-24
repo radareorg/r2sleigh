@@ -30,6 +30,7 @@ answer.
 | `abs_func_mapped` | radare2-testbins `elf/abs_func_mapped` | x86-64 executable whose `absfn` is an `STT_FUNC` with an `SHN_ABS` value inside `.text`: a function the container states |
 | `atomics_clang_x86_64_O2g`, `atomics_clang_aarch64_O2g` | `tests/gold/atomics.c` with an empty `main` | Clang 18.1.3 `-O2 -g -no-pie`: C11 atomic read-modify-writes; on AArch64 each function built for ARMv8.1-A, so they are LSE `ldadd`, `ldset`, `ldclr`, `ldeor`, `swp`, `cas` and `stadd`, and on x86-64 `lock` operations, `xchg` and `lock cmpxchg` loops |
 | `loop_exits_gcc_x64_O2` | `src/loop_exits.c` | GCC 13.3.0 `-O2 -g0 -fno-pie -no-pie -nostdlib -nostartfiles -static -fno-asynchronous-unwind-tables -Wl,-e,main`: loops that leave by more than one exit, one of which goes on to a test and two returns of its own, one of which writes and returns |
+| `noreturn_guards_gcc_x64_O2`, `noreturn_guards_gcc_aarch64_O2` | `src/noreturn_guards.c` | GCC 13.3.0 `-O2` (x86-64, and `aarch64-linux-gnu-gcc`), PIE, not stripped: a test whose arm calls `exit` or `abort`, with the work after it on the other arm, and an exit under the then arm of a test whose else returns |
 | `fuzzed_elf9`, `fuzzed_file12` | radare2-testbins `fuzzed/elf9`, `fuzzed/file12` (not executable, so the census skips them) | hostile headers: an `.init_array` and a `__cstring` stating sizes far past the file's end, which once hung on open and read 2 GB |
 
 `src/` holds sources the equivalence gate must not build as programs of their
