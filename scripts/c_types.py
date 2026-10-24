@@ -59,7 +59,14 @@ TYPE_WORDS = {"void", "char", "short", "int", "long", "float", "double", "signed
 QUALIFIER_WORDS = {"const", "volatile", "restrict", "__restrict", "__restrict__"}
 IGNORED_WORDS = {"static", "extern", "inline", "register", "auto", "__inline", "__inline__"}
 TAG_WORDS = {"struct", "union", "enum"}
+KEYWORDS = TYPE_WORDS | QUALIFIER_WORDS | IGNORED_WORDS | TAG_WORDS
+NAME = re.compile(r"[A-Za-z_]\w*")
 TOKEN = re.compile(r"\s*(?:([A-Za-z_]\w*)|(\.\.\.)|(\d+)|([*()\[\],;]))")
+
+
+def is_name(word: str) -> bool:
+    """Is this token an identifier that is no keyword of a declaration?"""
+    return bool(NAME.fullmatch(word)) and word not in KEYWORDS
 
 
 def decay(ty: CType) -> CType:
@@ -115,7 +122,7 @@ class Parser:
 
     def identifier(self) -> str:
         word = self.take()
-        if not re.fullmatch(r"[A-Za-z_]\w*", word) or word in TYPE_WORDS | QUALIFIER_WORDS | TAG_WORDS:
+        if not is_name(word):
             raise ParseError(f"{word!r} is no name")
         return word
 
@@ -137,7 +144,7 @@ class Parser:
                 continue
             elif word in TYPE_WORDS:
                 words.append(word)
-            elif re.fullmatch(r"[A-Za-z_]\w*", word) and not (words or tag or typedef):
+            elif is_name(word) and not (words or tag or typedef):
                 typedef = word
             else:
                 break
@@ -146,8 +153,8 @@ class Parser:
             raise ParseError("no type")
         return replace(base_type(words, tag, typedef), const=const, volatile=volatile)
 
-    def declarator(self, base: CType, named: bool) -> tuple[CType, str]:
-        """`base` declared by the text ahead, and the name it declares ("" for an abstract declarator)."""
+    def declarator(self, base: CType, named: bool) -> CType:
+        """`base` declared by the text ahead; a name in it is read and dropped where `named`, and ends the text where not."""
         while self.peek() == "*":
             self.take()
             const = volatile = False
@@ -156,12 +163,11 @@ class Parser:
                 const |= word == "const"
                 volatile |= word == "volatile"
             base = CType(PTR, target=base, const=const, volatile=volatile)
-        name = ""
         inner: list[str] | None = None
         if self.peek() == "(" and self.peek(1) in ("*", "("):
             inner = self.group()
-        elif named and re.fullmatch(r"[A-Za-z_]\w*", self.peek()) and self.peek() not in TYPE_WORDS | QUALIFIER_WORDS:
-            name = self.take()
+        elif named and is_name(self.peek()):
+            self.take()
         suffixes: list[tuple[str, object]] = []
         while self.peek() in ("[", "("):
             if self.peek() == "[":
@@ -178,11 +184,11 @@ class Parser:
                 params, variadic = detail
                 base = CType(FUNC, target=base, params=params, variadic=variadic)
         if inner is None:
-            return base, name
+            return base
         nested = Parser(inner)
-        base, name = nested.declarator(base, named)
+        base = nested.declarator(base, named)
         nested.finish()
-        return base, name
+        return base
 
     def group(self) -> list[str]:
         """The tokens of a parenthesised declarator, consumed with both parentheses."""
@@ -204,13 +210,14 @@ class Parser:
                     self.take()
                     variadic = True
                 else:
-                    ty, _ = self.declarator(self.specifiers(), named=True)
-                    params.append(ty)
+                    params.append(self.declarator(self.specifiers(), named=True))
                 if self.peek() != ",":
                     break
                 self.take()
         self.expect(")")
-        if params == [NO_VALUE]:
+        if NO_VALUE in params:
+            if len(params) > 1 or variadic:
+                raise ParseError("`void` is a parameter only on its own")
             params = []
         return tuple(decay(param) for param in params), variadic
 
@@ -228,7 +235,7 @@ def base_type(words: list[str], tag: str, typedef: str) -> CType:
     if "void" in words:
         return NO_VALUE
     if "_Bool" in words or "bool" in words:
-        return CType(BOOL, width=1)
+        return CType(BOOL)
     if "float" in words:
         return CType(FLOAT, width=4)
     if "double" in words:
@@ -243,7 +250,7 @@ def base_type(words: list[str], tag: str, typedef: str) -> CType:
 def parse_type(text: str) -> CType:
     """A type name: `const uint8_t*`, `int32_t (*)(int32_t, int32_t)`."""
     parser = Parser(tokenize(text))
-    ty, _ = parser.declarator(parser.specifiers(), named=False)
+    ty = parser.declarator(parser.specifiers(), named=False)
     parser.finish()
     return ty
 
@@ -252,7 +259,7 @@ def parse_prototype(text: str) -> Prototype:
     """r2s's header `ret name(params)`: the result is a type name, so a function pointer is spelled
     `int32_t(*)(int32_t, int32_t) pick(int32_t sel)`, which is no C declaration but is read as one type name and a name."""
     parser = Parser(tokenize(text))
-    ret, _ = parser.declarator(parser.specifiers(), named=False)
+    ret = parser.declarator(parser.specifiers(), named=False)
     name = parser.identifier()
     params, variadic = parser.parameters()
     if parser.peek() == ";":
@@ -391,7 +398,7 @@ def base_of_dwarf(die, size: int) -> CType:
     """DW_ATE_ encodings: boolean 2, float 4, signed 5, signed char 6, unsigned 7, unsigned char 8, UTF 0x10."""
     encoding = die.number("DW_AT_encoding")
     if encoding == 2:
-        return CType(BOOL, width=size)
+        return CType(BOOL)
     if encoding == 4:
         return CType(FLOAT, width=size)
     if encoding in (6, 8) and die.text("DW_AT_name") == "char":

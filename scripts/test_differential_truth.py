@@ -263,6 +263,12 @@ class Answers(unittest.TestCase):
         self.assertEqual(proc.stdout, "['-q', '-c', 'aflj; pdd', 'some binary']\n")
         self.assertEqual(proc.stderr, "noise\n")
 
+    def test_the_shell_is_given_half_an_hour(self) -> None:
+        with mock.patch.object(dt.subprocess, "run", return_value=completed()) as run:
+            dt.r2s(pathlib.Path("b"), "aflj", "r2s")
+        self.assertEqual(run.call_args.kwargs["timeout"], 1800)
+        self.assertEqual(run.call_args.args[0], ["r2s", "-q", "-c", "aflj", "b"])
+
     def test_stderr_noise_does_not_break_a_listing_or_an_answer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             record = fn(RIGHT).record
@@ -779,6 +785,14 @@ class Baseline(unittest.TestCase):
         self.assertIn(f"no longer silent: {other}", err)
         self.assertIn(f"SILENT ERROR: {self.KEY}", err)
         self.assertNotIn("re-record", err)
+
+    def test_a_recorded_fact_with_no_cause_fails_though_it_is_fixed(self) -> None:
+        gone = "gone return: expected 'int32_t', said 'uint64_t'"
+        with tempfile.TemporaryDirectory() as directory:
+            code, _, err = self.run_with(self.record(directory, {self.KEY: "no sign is proven"}, silent=[self.KEY, gone]))
+        self.assertEqual(code, 1)
+        self.assertIn(f"NO CAUSE: {gone}", err)
+        self.assertIn(f"no longer silent: {gone}", err)
 
     def test_a_baseline_that_does_not_exist_gates_on_zero(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

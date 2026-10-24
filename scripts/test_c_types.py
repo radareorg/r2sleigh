@@ -68,7 +68,7 @@ class Graph:
             name, encoding = BASE_TYPES[(ty.width, ty.signed)]
             return self.die("DW_TAG_base_type", name=name, size=ty.width, encoding=f"{encoding}\t(encoding)")
         if ty.kind == ct.BOOL:
-            return self.die("DW_TAG_base_type", name="_Bool", size=ty.width, encoding="2\t(boolean)")
+            return self.die("DW_TAG_base_type", name="_Bool", size=1, encoding="2\t(boolean)")
         if ty.kind == ct.FLOAT:
             return self.die("DW_TAG_base_type", name="double", size=ty.width, encoding="4\t(float)")
         if ty.kind == ct.NAMED:
@@ -129,7 +129,7 @@ class Integers(unittest.TestCase):
         self.assertEqual(len({one("char"), one("signed char"), one("unsigned char")}), 3)
 
     def test_the_other_scalars(self) -> None:
-        self.assertEqual(one("_Bool"), ct.CType(ct.BOOL, width=1))
+        self.assertEqual(one("_Bool"), ct.CType(ct.BOOL))
         self.assertEqual(one("bool"), one("_Bool"))
         self.assertEqual(one("float"), ct.CType(ct.FLOAT, width=4))
         self.assertEqual(one("double"), ct.CType(ct.FLOAT, width=8))
@@ -137,6 +137,7 @@ class Integers(unittest.TestCase):
         self.assertEqual(one("void"), ct.NO_VALUE)
         self.assertEqual(one("struct pair"), ct.CType(ct.NAMED, name="struct pair"))
         self.assertEqual(one("union u"), ct.CType(ct.NAMED, name="union u"))
+        self.assertEqual(one("enum color"), ct.CType(ct.NAMED, name="enum color"))
         self.assertEqual(one("FILE"), ct.CType(ct.NAMED, name="FILE"))
         self.assertNotEqual(one("struct pair"), one("union pair"))
 
@@ -154,10 +155,14 @@ class Qualifiers(unittest.TestCase):
         self.assertNotEqual(one("volatile char*"), one("const char*"))
 
     def test_restrict_and_storage_words_are_no_part_of_the_type(self) -> None:
-        for text in ("char* restrict", "char* __restrict", "static char*", "extern inline char*", "register char*"):
-            with self.subTest(text=text):
-                self.assertEqual(one(text).kind, ct.PTR)
-        self.assertEqual(one("char* restrict"), one("char*"))
+        for word in ("restrict", "__restrict", "__restrict__"):
+            with self.subTest(word=word):
+                self.assertEqual(one(f"char* {word}"), one("char*"))
+                self.assertEqual(one(f"{word} char*"), one("char*"))
+        for word in ("static", "extern", "inline", "register", "auto", "__inline", "__inline__"):
+            with self.subTest(word=word):
+                self.assertEqual(one(f"{word} char*"), one("char*"))
+                self.assertEqual(one(f"char {word} *"), one("char*"))
         self.assertEqual(one("restrict char* restrict"), one("char*"))
 
     def test_a_top_level_qualifier_is_no_part_of_a_parameter_or_a_result(self) -> None:
@@ -206,6 +211,8 @@ class Declarators(unittest.TestCase):
         self.assertEqual((function.kind, function.params), (ct.FUNC, (one("int32_t"),)))
         self.assertEqual(function.target, one("void (*)(int32_t)"))
         self.assertEqual(one("int (**)(int)").target, one("int (*)(int)"))
+        self.assertEqual(one("int ((*)(int))"), one("int (*)(int)"))
+        self.assertEqual(one("int (((*)))(int)"), one("int (*)(int)"))
 
     def test_arrays_and_pointers_to_arrays(self) -> None:
         self.assertEqual(one("int32_t [4]"), ct.CType(ct.ARRAY, target=one("int32_t"), count=4))
@@ -284,6 +291,49 @@ class Prototypes(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ct.ParseError):
                 ct.parse_prototype(text)
 
+    def test_a_close_that_is_none_is_refused(self) -> None:
+        for text in ("int f(int x]", "int f(int x[3)", "int f(int x[3}", "int f(int x)]", "int f(int (*x]))"):
+            with self.subTest(text=text), self.assertRaises(ct.ParseError):
+                ct.parse_prototype(text)
+
+    def test_a_function_is_named_by_a_name_and_no_keyword_or_number(self) -> None:
+        for text in ("int *int(void)", "int *struct(void)", "int *static(void)", "int *char(void)", "int *1(void)",
+                     "int *unsigned(void)", "int *enum(void)", "int *union(void)", "int *restrict(void)",
+                     "int *register(void)"):
+            with self.subTest(text=text), self.assertRaises(ct.ParseError):
+                ct.parse_prototype(text)
+
+    def test_a_tag_is_named_by_a_name_and_no_keyword_or_number(self) -> None:
+        for text in ("struct const", "struct int", "struct struct", "struct 1", "union static", "enum", "struct"):
+            with self.subTest(text=text), self.assertRaises(ct.ParseError):
+                ct.parse_type(text)
+        self.assertEqual(one("struct _x1"), ct.CType(ct.NAMED, name="struct _x1"))
+
+    def test_a_parameter_is_named_by_a_name_and_no_keyword(self) -> None:
+        for text in ("void f(int *char)", "void f(int *struct)", "void f(int *static)", "void f(int *unsigned)",
+                     "void f(int *const x y)", "void f(int *1)", "void f(int x y)"):
+            with self.subTest(text=text), self.assertRaises(ct.ParseError):
+                ct.parse_prototype(text)
+
+    def test_a_group_holds_one_declarator_and_a_named_parameter_group_names_at_most_once(self) -> None:
+        for text in ("void f(int (*x y)(int))", "void f(int (*)(int)))", "void f(int (*x)))"):
+            with self.subTest(text=text), self.assertRaises(ct.ParseError):
+                ct.parse_prototype(text)
+        self.assertEqual(ct.parse_prototype("void f(int (*x)(int))").params, (one("int (*)(int)"),))
+
+    def test_the_result_of_a_header_has_no_name_in_its_own_declarator(self) -> None:
+        for text in ("int (*name)(int) f(void)", "int (*name) f(void)"):
+            with self.subTest(text=text), self.assertRaises(ct.ParseError):
+                ct.parse_prototype(text)
+
+    def test_void_is_a_parameter_only_on_its_own(self) -> None:
+        for text in ("int f(void, int)", "int f(int, void)", "int f(void, void)", "int f(void, ...)"):
+            with self.subTest(text=text), self.assertRaises(ct.ParseError):
+                ct.parse_prototype(text)
+        for text in ("int f(void*)", "int f(void* p, void (*cb)(void))", "int f(void)"):
+            with self.subTest(text=text):
+                ct.parse_prototype(text)
+
     def test_a_type_that_is_not_a_type_is_refused(self) -> None:
         for text in ("", "*", "int (", "int [", "const", "struct", "int int int )"):
             with self.subTest(text=text), self.assertRaises(ct.ParseError):
@@ -332,7 +382,8 @@ class Classify(unittest.TestCase):
             ("int", "size_t", "width_wider"), ("uint32_t", "uint8_t", "width_narrower"),
             ("int8_t", "uint8_t", "sign"), ("uint32_t", "int", "sign"), ("int64_t", "uint64_t", "sign"),
             ("char", "int8_t", "other"), ("char", "uint8_t", "other"), ("uint8_t", "char", "other"),
-            ("const uint8_t*", "uint8_t*", "qualifier"), ("int (*)(int)", "int (* const)(int)", "qualifier"),
+            ("const uint8_t*", "uint8_t*", "qualifier"), ("int (* const *)(int)", "int (**)(int)", "qualifier"),
+            ("const char**", "char**", "qualifier"), ("char* const*", "char**", "qualifier"),
             ("volatile int*", "int*", "qualifier"), ("const char* const*", "const char**", "qualifier"),
             ("int (*)(int, int)", "int (*)(char*)", "pointee"), ("const uint8_t*", "void*", "pointee"),
             ("uint8_t*", "uint16_t*", "pointee"), ("char**", "char*", "pointee"),
@@ -443,7 +494,7 @@ class RoundTrip(unittest.TestCase):
         "_Bool", "float", "double", "long double", "struct pair", "union u", "void*", "char**", "const char*", "char* const",
         "volatile int*", "const volatile int*", "const char* const*", "int32_t [4]", "int32_t [2][3]", "char* [4]",
         "int32_t (*)[4]", "int32_t (*)(int32_t, int32_t)", "void (*)(void)", "int (*)(const char*, ...)",
-        "void (*(*)(int32_t))(int32_t)", "struct pair*", "struct pair (*)(struct pair)", "int (**)(int)",
+        "const void", "const void*", "volatile void*", "void (*(*)(int32_t))(int32_t)", "struct pair*", "struct pair (*)(struct pair)", "int (**)(int)",
     ]
 
     def test_every_type(self) -> None:
@@ -531,22 +582,67 @@ class Resolving(unittest.TestCase):
             with self.subTest(encoding=encoding), self.assertRaises(ct.NotExpressible):
                 self.read(base("x", encoding, 8))
 
-    def test_a_chain_or_a_nest_that_does_not_end_is_refused(self) -> None:
-        graph = Graph()
-        offset = graph.write(one("int"))
-        for _ in range(70):
-            offset = graph.die("DW_TAG_typedef", name="t", type=offset)
-        with self.assertRaises(ct.NotExpressible):
-            ct.from_dwarf(graph.dwarf(), offset)
-        offset = graph.write(one("int"))
-        for _ in range(40):
-            offset = graph.die("DW_TAG_pointer_type", type=offset)
-        with self.assertRaises(ct.NotExpressible):
-            ct.from_dwarf(graph.dwarf(), offset)
-        offset = graph.write(one("int"))
-        for _ in range(30):
-            offset = graph.die("DW_TAG_pointer_type", type=offset)
-        self.assertEqual(ct.from_dwarf(graph.dwarf(), offset).kind, ct.PTR)
+    def test_a_chain_of_sixty_four_dies_is_read_and_one_more_is_refused(self) -> None:
+        for typedefs, readable in [(63, True), (64, False), (70, False)]:
+            with self.subTest(typedefs=typedefs):
+                graph = Graph()
+                offset = graph.write(one("int"))
+                for _ in range(typedefs):
+                    offset = graph.die("DW_TAG_typedef", name="t", type=offset)
+                if readable:
+                    self.assertEqual(ct.from_dwarf(graph.dwarf(), offset), one("int"))
+                else:
+                    with self.assertRaises(ct.NotExpressible):
+                        ct.from_dwarf(graph.dwarf(), offset)
+
+    def test_a_type_nested_thirty_two_levels_is_read_and_one_more_is_refused(self) -> None:
+        for levels, readable in [(30, True), (32, True), (33, False), (40, False)]:
+            with self.subTest(levels=levels):
+                graph = Graph()
+                offset = graph.write(one("int"))
+                for _ in range(levels):
+                    offset = graph.die("DW_TAG_pointer_type", type=offset)
+                if readable:
+                    self.assertEqual(ct.from_dwarf(graph.dwarf(), offset).kind, ct.PTR)
+                else:
+                    with self.assertRaises(ct.NotExpressible):
+                        ct.from_dwarf(graph.dwarf(), offset)
+
+    def test_the_outermost_typedef_names_an_unnamed_struct(self) -> None:
+        def build(graph):
+            anonymous = graph.die("DW_TAG_structure_type", size=8)
+            return graph.die("DW_TAG_typedef", name="outer", type=graph.die("DW_TAG_typedef", name="inner", type=anonymous))
+        self.assertEqual(self.read(build), ct.CType(ct.NAMED, name="outer"))
+
+    def test_a_multidimensional_array_is_an_array_of_arrays_in_the_order_written(self) -> None:
+        def build(graph):
+            rows = graph.child("DW_TAG_subrange_type", upper=1)
+            columns = graph.child("DW_TAG_subrange_type", upper=2)
+            return graph.die("DW_TAG_array_type", (rows, columns), type=graph.write(one("int")))
+        ty = self.read(build)
+        self.assertEqual((ty.kind, ty.count, ty.target.kind, ty.target.count), (ct.ARRAY, 2, ct.ARRAY, 3))
+        self.assertEqual(ty, one("int [2][3]"))
+
+    def test_an_array_without_a_subrange_is_an_array_of_no_count(self) -> None:
+        ty = self.read(lambda g: g.die("DW_TAG_array_type", type=g.write(one("int"))))
+        self.assertEqual((ty.kind, ty.count, ty.target), (ct.ARRAY, None, one("int")))
+
+    def test_a_parameter_of_a_function_type_decays_in_the_dwarf_as_in_the_text(self) -> None:
+        def build(graph):
+            bound = graph.child("DW_TAG_subrange_type", upper=3)
+            array = graph.die("DW_TAG_array_type", (bound,), type=graph.write(one("int")))
+            function = graph.write(one("int (*)(void)"))
+            children = (graph.child("DW_TAG_formal_parameter", type=array),
+                        graph.child("DW_TAG_formal_parameter", type=graph.write(one("const char*")), ))
+            subroutine = graph.die("DW_TAG_subroutine_type", children, type=graph.write(one("void")))
+            return graph.die("DW_TAG_pointer_type", type=subroutine)
+        self.assertEqual(self.read(build), one("void (*)(int*, const char*)"))
+
+    def test_a_boolean_is_a_boolean_whatever_its_size(self) -> None:
+        for size in (1, 4):
+            with self.subTest(size=size):
+                self.assertEqual(self.read(lambda g, size=size: g.die("DW_TAG_base_type", name="_Bool", size=size,
+                                                                        encoding="2\t(boolean)")), one("_Bool"))
 
     def test_an_array_with_a_count_and_one_with_a_bound(self) -> None:
         def counted(graph):

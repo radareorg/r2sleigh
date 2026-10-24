@@ -276,6 +276,11 @@ class ContractTests(unittest.TestCase):
             record["residuals"] = [{"site": 1, "cause": "gap"}, bad]
             self.assertEqual(len(contract_problems(record)), 1, bad)
 
+    def test_the_first_bad_residual_is_the_one_reported(self):
+        record = selftest.synthetic_pddj(selftest.CASES[0], 0x1000, {})
+        record["residuals"] = [{"site": "a", "cause": 1}, {"site": "b", "cause": 2}]
+        self.assertEqual(len(contract_problems(record)), 1)
+
     def test_a_refusal_needs_only_its_identity(self):
         self.assertEqual(
             contract_problems({"name": "f", "addr": 16, "refused": {"reason": "why"}}), []
@@ -981,6 +986,13 @@ class RangesTests(unittest.TestCase):
                 "    00000000 0000000000002000 0000000000002010\n    00000000 <End of list>\n")
         self.assertEqual(parse_ranges(text), {0: (0x1000, 0x2000)})
 
+    def test_two_sections_that_agree_keep_one_answer(self):
+        text = ("Contents of the .debug_ranges section:\n\n    Offset   Begin    End\n"
+                "    00000000 0000000000001000 0000000000001010\n    00000000 <End of list>\n\n"
+                "Contents of the .debug_rnglists section:\n\n    Offset   Begin    End\n"
+                "    00000000 0000000000001000 0000000000001020\n    00000000 <End of list>\n")
+        self.assertEqual(parse_ranges(text), {0: (0x1000,)})
+
     def test_rows_outside_a_ranges_section_are_not_ranges(self):
         text = "Contents of the .debug_info section:\n    00000000 0000000000001000 0000000000001010\n"
         self.assertEqual(parse_ranges(text), {})
@@ -1054,7 +1066,8 @@ class PlacementTests(unittest.TestCase):
                 self.assertEqual(self.entry_of(DW_AT_ranges=ranges), (None, "its DW_AT_ranges list has no one readable first range"))
 
     def test_an_address_a_linker_discarded_is_no_entry(self):
-        for address in TOMBSTONES:
+        self.assertEqual(TOMBSTONES, {0, 1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF})
+        for address in (0, 1, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFF):
             for forms, attrs in (({}, {"DW_AT_low_pc": hex(address)}),
                                  ({"DW_AT_entry_pc": "addr"}, {"DW_AT_entry_pc": hex(address), "DW_AT_low_pc": "0x1000"})):
                 with self.subTest(address=address, attrs=attrs):
@@ -1090,11 +1103,12 @@ class PlacementTests(unittest.TestCase):
                 "    <2b>   DW_AT_name        : (strp) (offset: 0x23): f\n"
                 "    <2f>   DW_AT_entry_pc    : (addr) 0x11e3\n"
                 "    <2f>   DW_AT_decl_line   : (data1) 7\n"
+                "    <2f>   DW_AT_entry_pc    : (data1) 4\n"
                 "    <2f>   DW_AT_external    : 1\n")
         _, index = parse_readelf(text)
         die = index[0x2A]
         self.assertEqual(die.forms, {"DW_AT_name": "strp", "DW_AT_entry_pc": "addr", "DW_AT_decl_line": "data1"})
-        self.assertEqual(die.attrs["DW_AT_entry_pc"], "0x11e3")
+        self.assertEqual(die.attrs["DW_AT_entry_pc"], "0x11e3")  # the first of two, with its own form
         self.assertNotIn("DW_AT_external", die.forms)
 
     def test_the_reader_asks_readelf_for_the_ranges_beside_the_info(self):

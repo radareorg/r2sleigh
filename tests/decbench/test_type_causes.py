@@ -119,6 +119,19 @@ class Widths(unittest.TestCase):
         self.assertIn("== r2sleigh_native fp:pointer_as_integer: variables 1: parameters 1, locals 0", lines)
         self.assertIn("  functions involved 1: parameters only 1 (100.0%), locals only 0 (0.0%), mixed 0 (0.0%)", lines)
 
+    def test_the_report_gives_the_only_cause_before_the_functions_involved(self):
+        rows = [row("sole", [var(WIDTH, True)]), row("shared", [var(WIDTH, True), var("fp:pointer_as_integer", True)])]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "rows.jsonl"
+            path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+            out = io.StringIO()
+            with redirect_stdout(out):
+                type_causes.widths(type("Args", (), {"rows": str(path), "dec": "r2sleigh_native"})())
+        lines = out.getvalue().splitlines()
+        only = lines.index("  functions only cause 1: parameters only 1 (100.0%), locals only 0 (0.0%), mixed 0 (0.0%)")
+        involved = lines.index("  functions involved 2: parameters only 2 (100.0%), locals only 0 (0.0%), mixed 0 (0.0%)")
+        self.assertLess(only, involved)
+
     def test_a_share_of_no_function_is_not_a_division(self):
         self.assertEqual(type_causes.share(0, 0), "0 (n/a)")
         self.assertEqual(type_causes.share(1, 3), "1 (33.3%)")
