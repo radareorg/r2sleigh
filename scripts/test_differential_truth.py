@@ -1232,6 +1232,11 @@ class ReportShape(unittest.TestCase):
         report = graded({0x1000: "void f(const uint8_t* a)"}, {0x1000: fn("void fcn_1000(uint8_t* a0)", residuals=1)})
         self.assertEqual((report["soundness_rate"], report["soundness_without_qualifier"]), (1.0, 1.0))
 
+    def test_a_run_whose_only_asserted_fact_is_a_qualifier_asserts_nothing_without_it(self) -> None:
+        report = graded({0x1000: "const char* f(void)"}, {0x1000: fn("char* fcn_1000(void)")})
+        self.assertEqual((report["facts"]["correct"], report["facts"]["silently_wrong"]), (0, 1))
+        self.assertEqual((report["soundness_rate"], report["soundness_without_qualifier"]), (0.0, 1.0))
+
     def test_a_marked_qualifier_row_is_in_neither_rate(self) -> None:
         source = {0x1000: "int32_t f(const uint8_t* a, int32_t b)"}
         said = fn("uint64_t fcn_1000(uint8_t* a0, int32_t a1)", residuals=1)

@@ -540,9 +540,11 @@ jobs:
           python3 scripts/differential_truth.py \
             --debug-build target/source-gold/g1_debug \
             --stripped-build target/source-gold/g1_stripped \
-            --r2s target/ci/r2s > /dev/null || status=$?
+            --r2s target/ci/r2s > /dev/null 2> target/source-gold/g1.err || status=$?
+          cat target/source-gold/g1.err
           echo "-g1: exit $status"
           test "$status" -eq 2
+          grep -q "no function of the debug build is gradable" target/source-gold/g1.err
       - name: Archive the source-gold report
         if: always()
         uses: actions/upload-artifact@v7
