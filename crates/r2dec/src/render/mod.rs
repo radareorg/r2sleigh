@@ -104,6 +104,7 @@ pub fn render(
         |addr: u64| (values.as_ref()).is_some_and(|values| values.returns_distinct_merge(addr));
     let evidence = Evidence {
         never_returns: &never_returns,
+        declares_noreturn: !never_return.is_empty(),
         distinct_return: &distinct_return,
     };
     let mut occurrences = Occurrences::new(blocks, addresses);
@@ -225,7 +226,7 @@ fn ready_with_carriers(c: CFunction, tags: &tags::Tags) -> crate::codegen::Emiss
 }
 
 /// D1.1: SD's stages over the placed body, each kept only while the control certificate still holds
-/// (ADR §5): condition chains, `shape`, the latch's copies, and loop rotation.
+/// (ADR §5): condition chains, `shape`, the latch's copies, loop rotation, and the noreturn guards.
 fn structured(
     input: &RenderInput<'_>,
     body: Vec<CStmt>,
@@ -260,8 +261,15 @@ fn structured(
     let body = stage("latch copies", body, marks, &certified, |body, marks| {
         crate::structure::latch::hoist(body, marks) != 0
     });
-    stage("loop rotation", body, marks, &certified, |body, marks| {
+    let body = stage("loop rotation", body, marks, &certified, |body, marks| {
         crate::structure::rotate::rotate(body, marks) != 0
+    });
+    // With no callee declared never to return the guard has no arm to find, and a stage clones the body.
+    if !evidence.declares_noreturn {
+        return body;
+    }
+    stage("noreturn guards", body, marks, &certified, |body, marks| {
+        crate::structure::guard::guard(body, evidence, marks) != 0
     })
 }
 

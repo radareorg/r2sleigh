@@ -131,6 +131,8 @@ impl super::condition::Marks for Occurrences {
 pub(crate) struct Evidence<'a> {
     /// Whether a statement is a call to a callee declared never to return.
     pub(crate) never_returns: &'a dyn Fn(&CStmt) -> bool,
+    /// Whether any callee is declared never to return; when none is, `never_returns` is false everywhere.
+    pub(crate) declares_noreturn: bool,
     /// Whether the return ending a block hands back a merge whose inputs are pairwise distinct
     /// values (the compiler merged returns of different values into this one).
     pub(crate) distinct_return: &'a dyn Fn(u64) -> bool,

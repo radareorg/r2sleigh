@@ -13,11 +13,27 @@
 mod common;
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 
 /// A GCC-built x86-64 ELF carried in the tree, not stripped.
 fn fixture() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned/hashes_gcc_x64_O2")
+}
+
+/// Spawns take this in turn, and a test that closes a pipe to meet its writer holds it from the close
+/// to the exit: `doc/testing.md`, "Closed pipes".
+static SPAWNING: Mutex<()> = Mutex::new(());
+
+/// Start `command` with its output piped and its input empty, as `output` would.
+fn started(command: &mut Command) -> Child {
+    let _spawning = SPAWNING.lock().unwrap_or_else(PoisonError::into_inner);
+    (command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped()))
+    .spawn()
+    .expect("the shell runs")
 }
 
 /// One function of that fixture, by address: a small hash loop.
@@ -33,11 +49,13 @@ fn r2s(script: &str) -> Run {
 }
 
 fn on(binary: PathBuf, script: &str) -> Run {
-    let done = Command::new(env!("CARGO_BIN_EXE_r2s"))
-        .args(["-q", "-c", script])
-        .arg(binary)
-        .output()
-        .expect("the shell runs");
+    let done = started(
+        Command::new(env!("CARGO_BIN_EXE_r2s"))
+            .args(["-q", "-c", script])
+            .arg(binary),
+    )
+    .wait_with_output()
+    .expect("the shell is waited for");
     Run {
         out: String::from_utf8_lossy(&done.stdout).into_owned()
             + &String::from_utf8_lossy(&done.stderr),
@@ -892,17 +910,21 @@ fn a_configuration_key_is_read_set_and_refused_by_radare2s_names() {
     );
 
     // `-e` sets a key before the script runs, and a bad one ends the shell.
-    let flagged = Command::new(env!("CARGO_BIN_EXE_r2s"))
-        .args(["-q", "-e", "scr.color=1", "-c", "pd 1 @ 0x401330"])
-        .arg(fixture())
-        .output()
-        .expect("the shell runs");
+    let flagged = started(
+        Command::new(env!("CARGO_BIN_EXE_r2s"))
+            .args(["-q", "-e", "scr.color=1", "-c", "pd 1 @ 0x401330"])
+            .arg(fixture()),
+    )
+    .wait_with_output()
+    .expect("the shell is waited for");
     assert!(String::from_utf8_lossy(&flagged.stdout).contains("\x1b["));
-    let refused = Command::new(env!("CARGO_BIN_EXE_r2s"))
-        .args(["-q", "-e", "asm.byte=1", "-c", "q"])
-        .arg(fixture())
-        .output()
-        .expect("the shell runs");
+    let refused = started(
+        Command::new(env!("CARGO_BIN_EXE_r2s"))
+            .args(["-q", "-e", "asm.byte=1", "-c", "q"])
+            .arg(fixture()),
+    )
+    .wait_with_output()
+    .expect("the shell is waited for");
     assert!(!refused.status.success());
 }
 
@@ -1544,18 +1566,16 @@ fn help_lists_the_verbs_dispatch_runs_and_each_answers_its_own_usage() {
 #[test]
 fn a_closed_pipe_ends_the_shell_quietly() {
     use std::io::Read;
-    use std::process::Stdio;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_r2s"))
-        // Twenty listings, past any pipe's buffer, so a write meets the closed end.
-        .args(["-q", "-c", &["pd 20000"; 20].join(";")])
-        .arg(fixture())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the shell runs");
+    let mut child = started(
+        Command::new(env!("CARGO_BIN_EXE_r2s"))
+            // Twenty listings, past any pipe's buffer, so a write meets the closed end.
+            .args(["-q", "-c", &["pd 20000"; 20].join(";")])
+            .arg(fixture()),
+    );
     let mut first = [0; 64];
     let mut stdout = child.stdout.take().expect("piped");
     stdout.read_exact(&mut first).expect("the listing starts");
+    let _closing = SPAWNING.lock().unwrap_or_else(PoisonError::into_inner);
     drop(stdout);
     let done = child.wait_with_output().expect("the shell is waited for");
     let stderr = String::from_utf8_lossy(&done.stderr);
@@ -1567,14 +1587,15 @@ fn a_closed_pipe_ends_the_shell_quietly() {
 #[test]
 fn a_pipe_closed_between_prompts_ends_the_shell_at_the_prompt() {
     use std::io::{Read, Write};
-    use std::process::Stdio;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_r2s"))
-        .arg(fixture())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("the shell runs");
+    let mut child = {
+        let _spawning = SPAWNING.lock().unwrap_or_else(PoisonError::into_inner);
+        (Command::new(env!("CARGO_BIN_EXE_r2s")).arg(fixture()))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the shell runs")
+    };
     let mut stdout = child.stdout.take().expect("piped");
     let mut seen = Vec::new();
     while !seen.ends_with(b"]> ") {
@@ -1584,6 +1605,7 @@ fn a_pipe_closed_between_prompts_ends_the_shell_at_the_prompt() {
             .expect("the first prompt is printed");
         seen.push(byte[0]);
     }
+    let _closing = SPAWNING.lock().unwrap_or_else(PoisonError::into_inner);
     drop(stdout);
     let mut stdin = child.stdin.take().expect("piped");
     stdin.write_all(b"\n").expect("the shell reads");
