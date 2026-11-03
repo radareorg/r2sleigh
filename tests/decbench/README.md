@@ -9,7 +9,7 @@ least one of the three.
 
 **Valid numbers start at [RESULT-2026-10-17.md](RESULT-2026-10-17.md) and are
 corrected by [RESULT-2026-10-23.md](RESULT-2026-10-23.md): the first scored no bash
-row for any decompiler.** Everything this directory recorded before
+row for any decompiler. [RESULT-2026-10-24.md](RESULT-2026-10-24.md) is the latest r2s run.** Everything this directory recorded before
 2026-09-25 -- `baseline.json`, the tables that used to be here, and the figures
 in the since-deleted planning documents -- was measured
 through the deleted radare2 plugin with `decbench run`, which hands the
