@@ -345,6 +345,11 @@ function.
 The stage is kept only while the control certificate holds and is reverted whole otherwise (section 5); the checker
 reads the arm's end through the same predicate, so a guard on a call the machine returns from leaves an edge the
 block does not have, which section 3 (ii) refuses (`a_guard_the_machine_does_not_have_fails_the_certificate`).
+The certificate reads transfers and the test's polarity, never the order of plain statements (`plain_statement_opens`,
+ROADMAP D80): a guard that wrote what it frees before its test certifies, and kept wrong text in 45 of 134 changed
+functions in the fourth review's mutant run. The order of the freed statements is held by the unit tests in `guard.rs`
+and by the engine test `a_test_with_nothing_in_its_then_arm_keeps_its_else_and_the_exit_under_it_is_the_guard`, whose
+store the mutant writes before the guard's test with the certificate holding (`scripts/mutants_d75.py`).
 O(statements) and no recursion (below): the statements a guard frees join the sequence the `if` sits in, where they
 are visited in their turn.
 
