@@ -335,7 +335,8 @@ def from_dwarf(dwarf, offset: int | None, depth: int = 0) -> CType:
     """The type at a DIE offset (`None` is `void`), typedefs resolved and `const` and `volatile` kept.
 
     A struct is named by its tag, or by the outermost typedef when it has none. A type the gate cannot state
-    (a complex number, a vector, an aggregate with no name, a DIE that is missing) raises `NotExpressible`.
+    (a complex number, a vector, an aggregate with no name, a DIE that is missing) raises `NotExpressible`, and so
+    does a DIE that states itself elsewhere (`DW_AT_signature`, `DW_AT_declaration`).
     """
     if depth > 32:
         raise NotExpressible("a type nested more than 32 levels deep")
@@ -346,6 +347,8 @@ def from_dwarf(dwarf, offset: int | None, depth: int = 0) -> CType:
         die = dwarf.index.get(offset)
         if die is None:
             raise NotExpressible("a type in another unit" if offset == UNRESOLVED else f"no DIE at {offset:#x}")
+        if "DW_AT_signature" in die.attrs or die.flag("DW_AT_declaration"):
+            raise NotExpressible(f"a {die.tag} stated elsewhere (a type unit stub or a declaration)")
         steps += 1
         if steps > 64:
             raise NotExpressible("a chain of more than 64 typedefs and qualifiers")
@@ -363,12 +366,17 @@ def from_dwarf(dwarf, offset: int | None, depth: int = 0) -> CType:
 
 
 def shape_of_dwarf(dwarf, die, alias: str, depth: int) -> CType:
-    size = die.number("DW_AT_byte_size") or 0
+    size = die.number("DW_AT_byte_size")
+    if die.tag in ("DW_TAG_base_type", "DW_TAG_enumeration_type") and size is None:
+        raise NotExpressible(f"a {die.tag} that states no byte size")
     if die.tag == "DW_TAG_base_type":
         return base_of_dwarf(die, size)
     if die.tag == "DW_TAG_enumeration_type":
-        underlying = die.ref("DW_AT_type")
-        return integer(size or 4, from_dwarf(dwarf, underlying, depth + 1).signed if underlying is not None else False)
+        # Only the underlying type states the sign: an enum with none, or one of another size, is no integer.
+        underlying = from_dwarf(dwarf, die.ref("DW_AT_type"), depth + 1)
+        if underlying.signed is None or underlying.width != size:
+            raise NotExpressible("an enum that states no underlying integer of its size")
+        return integer(size, underlying.signed)
     if die.tag in ("DW_TAG_pointer_type", "DW_TAG_reference_type"):
         return pointer(from_dwarf(dwarf, die.ref("DW_AT_type"), depth + 1))
     if die.tag in ("DW_TAG_structure_type", "DW_TAG_class_type", "DW_TAG_union_type"):
@@ -384,6 +392,8 @@ def shape_of_dwarf(dwarf, die, alias: str, depth: int) -> CType:
         counts = []
         for child in die.children:
             if child.tag == "DW_TAG_subrange_type":
+                if any(bound in child.attrs and child.number(bound) is None for bound in ("DW_AT_upper_bound", "DW_AT_count")):
+                    raise NotExpressible("an array bound that is no constant")
                 upper = child.number("DW_AT_upper_bound")
                 counted = child.number("DW_AT_count")
                 counts.append(counted if counted is not None else None if upper is None else upper + 1)

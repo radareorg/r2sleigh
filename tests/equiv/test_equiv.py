@@ -23,6 +23,7 @@ import errno
 import json
 import os
 import shutil
+import signal
 import struct
 import subprocess
 import sys
@@ -42,7 +43,7 @@ import merge_shards  # noqa: E402
 import link  # noqa: E402
 import run_equiv  # noqa: E402
 import selftest  # noqa: E402
-from dwarf import NO_FUNC_START, UNRESOLVED, Die, Dwarf, function_symbols, parse_ranges, parse_readelf  # noqa: E402
+from dwarf import NO_FUNC_START, TYPE_UNIT, UNRESOLVED, Die, Dwarf, function_symbols, parse_ranges, parse_readelf  # noqa: E402
 from r2s_batch import contract_problems, parse_pddj, run_batch  # noqa: E402
 from spec import CallSpec, call_spec  # noqa: E402
 from target import AARCH64, X86_64, Target  # noqa: E402
@@ -1029,6 +1030,122 @@ class ReferenceTests(unittest.TestCase):
         self.assertEqual((dwarf.type(UNRESOLVED).kind, dwarf.canonical(UNRESOLVED)), ("unsupported", "unsupported"))
 
 
+CU = "Contents of the .debug_info section:\n <0><c>: Abbrev Number: 1 (DW_TAG_compile_unit)\n"
+UINT = (" <1><3b>: Abbrev Number: 2 (DW_TAG_base_type)\n    <3c>   DW_AT_byte_size   : (data1) 4\n"
+        "    <3d>   DW_AT_encoding    : (data1) 7\t(unsigned)\n    <3e>   DW_AT_name        : (string) unsigned int\n")
+
+
+class OneGraphTests(unittest.TestCase):
+    """A dump is one graph of DIEs keyed by offset, or the reader refuses it."""
+
+    def test_a_dwarf_4_type_unit_whose_offsets_meet_the_info_is_refused(self):
+        # .debug_types numbers its DIEs from 0 as .debug_info does: its 0x3b replaced the unit's `unsigned int`.
+        text = (CU + UINT + "Contents of the .debug_types section:\n  Signature:     0x3701eddaef7e0427\n"
+                " <0><17>: Abbrev Number: 1 (DW_TAG_type_unit)\n <1><3b>: Abbrev Number: 3 (DW_TAG_base_type)\n"
+                "    <3c>   DW_AT_byte_size   : (data1) 8\n    <3d>   DW_AT_encoding    : (data1) 5\t(signed)\n")
+        with self.assertRaises(RuntimeError) as raised:
+            parse_readelf(text)
+        self.assertIn(TYPE_UNIT, str(raised.exception))
+
+    def test_a_dwarf_5_type_unit_is_refused_though_no_offset_meets(self):
+        text = (CU + UINT + "  Compilation Unit @ offset 0x100:\n   Unit Type:     DW_UT_type (2)\n"
+                " <0><118>: Abbrev Number: 1 (DW_TAG_type_unit)\n")
+        with self.assertRaises(RuntimeError) as raised:
+            parse_readelf(text)
+        self.assertIn(TYPE_UNIT, str(raised.exception))
+
+    def test_two_dies_at_one_offset_are_an_error(self):
+        with self.assertRaises(RuntimeError) as raised:
+            parse_readelf(CU + UINT + " <0><80>: Abbrev Number: 1 (DW_TAG_compile_unit)\n" + UINT)
+        self.assertIn("two DIEs at offset 0x3b", str(raised.exception))
+        self.assertEqual(sorted(parse_readelf(CU + UINT)[1]), [0xC, 0x3B])
+
+    def test_the_type_unit_builds_of_the_gold_sources_are_refused(self):
+        for name in ("odd.gcc.O2.dwarf4.types.txt", "abi.gcc.O2.types.txt"):
+            with self.subTest(name=name), self.assertRaises(RuntimeError) as raised:
+                fixture_dwarf(name)
+            self.assertIn(TYPE_UNIT, str(raised.exception))
+
+    def test_a_split_dwarf_build_whose_dwo_readelf_follows_is_two_dies_at_one_offset(self):
+        # gcc -gsplit-dwarf: the skeleton and the .dwo each start their unit at 0x14 (DWARF 5) or 0xb (DWARF 4).
+        text = ("Contents of the .debug_info section (loaded from odd.split):\n   Unit Type:     DW_UT_skeleton (4)\n"
+                " <0><14>: Abbrev Number: 1 (DW_TAG_skeleton_unit)\n"
+                "    <25>   DW_AT_dwo_name    : (strp) (offset: 0x17): odd.split-odd.dwo\n"
+                "Contents of the .debug_info.dwo section (loaded from /work/src/odd.split-odd.dwo):\n"
+                "   Unit Type:     DW_UT_split_compile (5)\n <0><14>: Abbrev Number: 22 (DW_TAG_compile_unit)\n")
+        with self.assertRaises(RuntimeError) as raised:
+            parse_readelf(text)
+        self.assertIn("two DIEs at offset 0x14", str(raised.exception))
+
+    def test_a_cycle_of_origins_is_an_error_and_not_a_hang(self):
+        first = Die(0x40, "DW_TAG_subprogram", 1, attrs={"DW_AT_low_pc": "0x1000", "DW_AT_abstract_origin": "<0x50>"})
+        second = Die(0x50, "DW_TAG_subprogram", 1, attrs={"DW_AT_abstract_origin": "<0x40>"})
+        unit = Die(0x10, "DW_TAG_compile_unit", 0, attrs={"DW_AT_name": "t.c"}, children=[first, second])
+        dwarf = Dwarf([unit], {0x10: unit, 0x40: first, 0x50: second})
+        previous = signal.signal(signal.SIGALRM, lambda *_: (_ for _ in ()).throw(TimeoutError("the walk hangs")))
+        signal.alarm(5)
+        try:
+            with self.assertRaises(RuntimeError) as raised:
+                dwarf.placed(AnyAddress())
+        finally:
+            signal.alarm(0)
+            signal.signal(signal.SIGALRM, previous)
+        self.assertIn("cycle", str(raised.exception))
+
+    def test_a_number_is_a_constant_form_and_nothing_else(self):
+        text = (CU + " <1><40>: Abbrev Number: 4 (DW_TAG_subrange_type)\n"
+                "    <41>   DW_AT_upper_bound : (exprloc) 3 byte block: 91 68 6 \t(DW_OP_fbreg: -24; DW_OP_deref)\n"
+                "    <45>   DW_AT_count       : (sdata) -1\n    <46>   DW_AT_lower_bound : 7\n"
+                "    <47>   DW_AT_ranges      : (sec_offset) 0x2c\n")
+        die = parse_readelf(text)[1][0x40]
+        self.assertIsNone(die.number("DW_AT_upper_bound"))  # the block's length, 3, was read as the bound
+        self.assertEqual(die.number("DW_AT_count"), -1)
+        self.assertIsNone(die.number("DW_AT_lower_bound"))  # a value whose form readelf does not name
+        self.assertIsNone(die.number("DW_AT_ranges"))
+        self.assertIsNone(die.number("DW_AT_name"))
+
+    def test_a_dwarf_2_member_offset_is_its_one_plus_uconst(self):
+        text = (CU + " <1><40>: Abbrev Number: 5 (DW_TAG_structure_type)\n    <41>   DW_AT_byte_size   : (data1) 16\n"
+                " <2><42>: Abbrev Number: 6 (DW_TAG_member)\n    <43>   DW_AT_name        : (string) b\n"
+                "    <44>   DW_AT_data_member_location: (block1) 2 byte block: 23 8 \t(DW_OP_plus_uconst: 8)\n"
+                " <2><48>: Abbrev Number: 6 (DW_TAG_member)\n    <49>   DW_AT_name        : (string) c\n"
+                "    <4a>   DW_AT_data_member_location: (data1) 12\n")
+        units, index = parse_readelf(text)
+        self.assertEqual([member.offset for member in Dwarf(units, index).members(0x40)], [8, 12])
+        index[0x42].attrs["DW_AT_data_member_location"] = "3 byte block: 23 8 6 \t(DW_OP_plus_uconst: 8; DW_OP_deref)"
+        with self.assertRaises(ValueError):
+            Dwarf(units, index).members(0x40)
+
+    def test_an_integer_states_its_size_and_an_enum_its_underlying_type(self):
+        def die(offset, tag, **attrs):
+            forms = {name: "data1" for name in attrs if name in ("DW_AT_byte_size", "DW_AT_encoding")}
+            return Die(offset, tag, 1, attrs=attrs, forms=forms)
+        long = die(0x30, "DW_TAG_base_type", DW_AT_byte_size="8", DW_AT_encoding="5\t(signed)", DW_AT_name="long int")
+        dies = [long,
+                die(0x40, "DW_TAG_enumeration_type", DW_AT_byte_size="8", DW_AT_type="<0x30>"),
+                die(0x50, "DW_TAG_enumeration_type", DW_AT_signature=": 0x3701eddaef7e0427"),
+                die(0x60, "DW_TAG_enumeration_type", DW_AT_byte_size="4"),
+                die(0x70, "DW_TAG_enumeration_type", DW_AT_type="<0x30>"),
+                die(0x80, "DW_TAG_enumeration_type", DW_AT_byte_size="4", DW_AT_type="<0x30>"),
+                die(0x90, "DW_TAG_enumeration_type", DW_AT_declaration="1", DW_AT_byte_size="8", DW_AT_type="<0x30>"),
+                die(0xA0, "DW_TAG_base_type", DW_AT_encoding="5\t(signed)", DW_AT_name="int"),
+                die(0xB0, "DW_TAG_structure_type", DW_AT_signature=": 0x986483db34619643")]
+        dwarf = Dwarf([], {d.offset: d for d in dies})
+        self.assertEqual((dwarf.type(0x40).kind, dwarf.type(0x40).size, dwarf.type(0x40).signed), ("int", 8, True))
+        for offset in (0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0):
+            with self.subTest(offset=hex(offset)):
+                self.assertEqual(dwarf.type(offset).kind, "unsupported")
+
+    def test_strict_dwarf_2_enums_are_described_as_nothing(self):
+        dwarf = fixture_dwarf("enums.gcc.O2.strict2.txt")
+        e_neg = next(sub for sub in dwarf.subprograms() if sub.name == "e_neg")
+        self.assertEqual([dwarf.type(p.type_offset).kind for p in e_neg.parameters], ["unsupported", "int", "unsupported"])
+        five = fixture_dwarf("enums.gcc.O2.txt")
+        e_neg = next(sub for sub in five.subprograms() if sub.name == "e_neg")
+        self.assertEqual([(five.type(p.type_offset).kind, five.type(p.type_offset).signed) for p in e_neg.parameters],
+                         [("int", True)] * 3)
+
+
 class AnyAddress:
     """Every address is the start of a function: the entry rule alone is under test."""
 
@@ -1122,7 +1239,9 @@ class PlacementTests(unittest.TestCase):
         return Dwarf([unit], index, ranges or {})
 
     def function(self, offset: int, forms: dict[str, str] | None = None, **attrs: str) -> Die:
-        return Die(offset, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": f"f{offset:x}", **attrs}, forms=forms or {})
+        """A subprogram DIE; its `DW_AT_ranges` is a `sec_offset`, as readelf names it, unless `forms` says otherwise."""
+        forms = {**({"DW_AT_ranges": "sec_offset"} if "DW_AT_ranges" in attrs else {}), **(forms or {})}
+        return Die(offset, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": f"f{offset:x}", **attrs}, forms=forms)
 
     def entry_of(self, forms: dict[str, str] | None = None, starts=None, **attrs: str) -> tuple[int | None, str]:
         dwarf = self.graph(self.function(0x40, forms, **attrs),
@@ -1258,13 +1377,14 @@ class PlacementTests(unittest.TestCase):
         self.assertEqual(die.attrs["DW_AT_entry_pc"], "0x11e3")  # the first of two, with its own form
         self.assertNotIn("DW_AT_external", die.forms)
 
-    def test_the_reader_asks_readelf_for_the_ranges_beside_the_info_and_follows_no_link(self):
+    def test_the_reader_asks_readelf_for_the_ranges_beside_the_info(self):
         completed = subprocess.CompletedProcess([], 0, (DWARF_FIXTURES / "cold.gcc.O2.txt").read_text(), "")
         with unittest.mock.patch.object(subprocess, "run", return_value=completed) as run:
             dwarf = Dwarf.read(Path("some binary"), dataclasses.replace(X86_64, binutils_prefix="g"))
-        # A split-DWARF skeleton names a .dwo file; readelf reads it, and its strings wrongly, only where it finds it.
+        # `--debug-dump=no-follow-links` named clang's units `u clang version 18.1.3`: binutils 2.42 then reads
+        # `strx` strings without the unit's offsets base, and every clang function left the equivalence population.
         self.assertEqual(run.call_args.args[0], ["greadelf", "--wide", "--debug-dump=info", "--debug-dump=Ranges",
-                                                 "--debug-dump=no-follow-links", "some binary"])
+                                                 "some binary"])
         self.assertEqual(dwarf.ranges[0x2C], (0x13E0,))
         failed = subprocess.CompletedProcess([], 1, "", "no such file")
         with unittest.mock.patch.object(subprocess, "run", return_value=failed), self.assertRaises(RuntimeError):

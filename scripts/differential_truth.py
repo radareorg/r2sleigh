@@ -117,11 +117,22 @@ def read_dwarf(binary: Path, binutils_prefix: str) -> tuple[Dwarf, list, list[Un
     target = dataclasses.replace(X86_64, binutils_prefix=binutils_prefix)
     try:
         dwarf = Dwarf.read(binary, target)
-        starts = function_symbols(binary, target)
+        placed, unplaced = dwarf.placed(function_symbols(binary, target))
     except (OSError, RuntimeError) as error:
         raise Unreadable(binary, "readelf", {"": f"{error}; it lists the functions the source defines"}) from error
-    placed, unplaced = dwarf.placed(starts)
     return dwarf, placed, unplaced
+
+
+def build_id(binary: Path, binutils_prefix: str) -> str | None:
+    """The GNU build ID the linker wrote, which `strip` keeps; None where the binary has none."""
+    target = dataclasses.replace(X86_64, binutils_prefix=binutils_prefix)
+    try:
+        proc = subprocess.run([target.tool("readelf"), "--wide", "--notes", str(binary)],
+                              capture_output=True, text=True, check=False)
+    except OSError as error:
+        raise Unreadable(binary, "readelf", {"": f"{error}; it states the build ID"}) from error
+    found = re.search(r"Build ID: ([0-9a-f]+)", proc.stdout)
+    return found.group(1) if found else None
 
 
 def ask(binary: Path, address: int, r2s_bin: str) -> r2s_batch.Answer:
@@ -188,6 +199,8 @@ INSTANCE = "an instance of an origin: its parameters are the origin's, not neces
 NOT_PROTOTYPED = "no DW_AT_prototyped: it states no signature (-g1, C++), or a K&R one whose parameters are promoted"
 NOT_STATED = "a result or parameter whose ABI class the gate does not state"
 SHARED = "it shares its entry address with another function"
+# A rate over fewer than one in three of a build's functions does not describe the build (ROADMAP D70).
+GRADED_FLOOR = 3
 UNLISTED = "the engine does not list it in the debug build"
 
 
@@ -382,10 +395,16 @@ def grade() -> int:
         _, stripped_placed, stripped_unplaced = read_dwarf(args.stripped_build, args.binutils_prefix)
         if stripped_placed or stripped_unplaced:
             return refuse("the stripped build carries DWARF, so the engine would be graded against its own input.")
+        ids = build_id(args.debug_build, args.binutils_prefix), build_id(args.stripped_build, args.binutils_prefix)
+        if ids[0] is None or ids[0] != ids[1]:
+            return refuse(f"the builds are not shown to be one program: build ID {ids[0]} against {ids[1]}.")
         truth, ungradable = partition(dwarf, placed, unplaced, called)
+        why = "; ".join(f"{len(names)} {reason}" for reason, names in ungradable.items())
         if not truth:
-            why = "; ".join(f"{len(names)} {reason}" for reason, names in ungradable.items())
             return refuse(f"no function of the debug build is gradable ({why or 'its DWARF declares no function'}).")
+        defined = len(placed) + len(unplaced)
+        if len(truth) * GRADED_FLOOR < defined:
+            return refuse(f"{len(truth)} of {defined} functions are gradable, under one in {GRADED_FLOOR} ({why}).")
         stripped = listing(args.stripped_build, args.r2s)
         recovered = signatures(args.stripped_build, [addr for addr in sorted(truth) if addr in stripped], args.r2s)
         if not recovered:

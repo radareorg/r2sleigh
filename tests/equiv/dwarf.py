@@ -34,7 +34,12 @@ from target import X86_64, Target
 _DIE = re.compile(r"^\s*<(\d+)><([0-9a-f]+)>: Abbrev Number: (\d+)(?: \((DW_TAG_\w+)\))?")
 _ATTR = re.compile(r"^\s*<[0-9a-f]+>\s+(DW_AT_\w+)\s*:\s?(.*)$")
 _REF = re.compile(r"<0x([0-9a-f]+)>")
-_PLUS_UCONST = re.compile(r"DW_OP_plus_uconst: (\d+)")
+# A DWARF 2 member offset: a block holding one `DW_OP_plus_uconst`, after the block's length and bytes.
+_PLUS_UCONST = re.compile(r"\d+ byte block: [0-9a-f ]+\s*\(DW_OP_plus_uconst: (\d+)\)")
+# The forms of a constant. An expression (`exprloc`, a block) or a reference is no number.
+CONSTANT_FORMS = frozenset({"data1", "data2", "data4", "data8", "data16", "sdata", "udata", "implicit_const"})
+# The forms of a section offset: `DW_AT_ranges` is `sec_offset` or `rnglistx`, and `data4` or `data8` before DWARF 4.
+OFFSET_FORMS = frozenset({"sec_offset", "rnglistx", "data4", "data8"})
 # One row of a `--debug-dump=Ranges` table: `<offset> <begin> <end>`, a `(base address)` selection, or the end of a list.
 _RANGE_ROW = re.compile(
     r"^\s+(?P<offset>[0-9a-f]{8})\s+(?:(?P<end><End of list>)|(?P<begin>[0-9a-f]{8,16})\s+(?:(?P<base>\(base address\))|[0-9a-f]{8,16}))"
@@ -45,6 +50,8 @@ _RANGE_SECTION = re.compile(r"^Contents of the \.debug_(?:ranges|rnglists) secti
 NO_FUNC_START = "no FUNC symbol of the binary starts at its entry"
 # The offset of a reference no DIE of the dump answers: a DW_FORM_ref_sig8 into a type unit. It is no void.
 UNRESOLVED = -1
+# DWARF 4 numbers .debug_types from 0 as it does .debug_info, so one offset named two DIEs (ROADMAP D70).
+TYPE_UNIT = "a type unit (-fdebug-types-section): its types are stated in another offset space"
 # `readelf --wide` names the attribute's form first: `(data1) 7`, `(strp) (offset: 0x7a): x`.
 _FORM = re.compile(r"^\([a-z][a-z0-9_]*\)\s*")
 
@@ -87,16 +94,15 @@ class Die:
         found = _REF.search(raw)
         return int(found.group(1), 16) if found else UNRESOLVED
 
-    def number(self, name: str) -> int | None:
+    def number(self, name: str, forms: frozenset[str] = CONSTANT_FORMS) -> int | None:
+        """The value of an attribute readelf names one of ``forms``; None where it is absent or written otherwise."""
         raw = self.text(name)
-        if raw is None:
+        if raw is None or self.forms.get(name) not in forms or not raw.split():
             return None
-        token = raw.split()[0] if raw.split() else ""
         try:
-            return int(token, 0)
+            return int(raw.split()[0], 0)
         except ValueError:
-            found = _PLUS_UCONST.search(raw)
-            return int(found.group(1)) if found else None
+            return None
 
     def flag(self, name: str) -> bool:
         return name in self.attrs and self.attrs[name].strip() not in ("0", "")
@@ -118,6 +124,10 @@ def parse_readelf(text: str) -> tuple[list[Die], dict[int, Die]]:
                 # A null entry closes the sibling chain at this depth.
                 continue
             die = Die(offset=int(header.group(2), 16), tag=tag, depth=depth)
+            if tag == "DW_TAG_type_unit":
+                raise RuntimeError(TYPE_UNIT)
+            if die.offset in index:
+                raise RuntimeError(f"two DIEs at offset {die.offset:#x}")
             index[die.offset] = die
             while stack and stack[-1].depth >= depth:
                 stack.pop()
@@ -243,8 +253,8 @@ class Dwarf:
     @classmethod
     def read(cls, binary: Path, target: Target = X86_64) -> "Dwarf":
         proc = subprocess.run(
-            [target.tool("readelf"), "--wide", "--debug-dump=info", "--debug-dump=Ranges",
-             "--debug-dump=no-follow-links", str(binary)],
+            # No `--debug-dump=no-follow-links`: binutils 2.42 then reads every `strx` string from the wrong table.
+            [target.tool("readelf"), "--wide", "--debug-dump=info", "--debug-dump=Ranges", str(binary)],
             capture_output=True,
             text=True,
             check=False,
@@ -263,14 +273,21 @@ class Dwarf:
                 return self.index[target]
         return None
 
-    def _attr_via_origin(self, die: Die, name: str) -> tuple[Die, bool]:
-        seen = 0
+    def _origins(self, die: Die):
+        """``die`` and each DIE it states itself through, in order; a DIE met twice is a cycle and raises."""
+        seen: set[int] = set()
         node: Die | None = die
-        while node is not None and seen < 8:
-            if name in node.attrs:
-                return node, seen > 0
+        while node is not None:
+            if node.offset in seen:
+                raise RuntimeError(f"a cycle of DW_AT_abstract_origin or DW_AT_specification at {node.offset:#x}")
+            seen.add(node.offset)
+            yield node
             node = self._origin(node)
-            seen += 1
+
+    def _attr_via_origin(self, die: Die, name: str) -> tuple[Die, bool]:
+        for hops, node in enumerate(self._origins(die)):
+            if name in node.attrs:
+                return node, hops > 0
         return die, False
 
     def subprograms(self) -> list[Subprogram]:
@@ -332,7 +349,7 @@ class Dwarf:
             except ValueError:
                 return None, f"its {source} is not an address"
         else:
-            offset = die.number("DW_AT_ranges")
+            offset = die.number("DW_AT_ranges", OFFSET_FORMS)
             begins = self.ranges.get(offset, ()) if offset is not None else ()
             if len(begins) != 1:
                 return None, "its DW_AT_ranges list has no one readable first range"
@@ -358,21 +375,10 @@ class Dwarf:
         )
 
     def _formals(self, die: Die) -> tuple[list[Parameter], bool]:
-        """The declared parameters, from the concrete DIE or the one it realises."""
-        source = die
-        if not any(
-            child.tag in ("DW_TAG_formal_parameter", "DW_TAG_unspecified_parameters")
-            for child in die.children
-        ):
-            origin = self._origin(die)
-            while origin is not None:
-                source = origin
-                if any(
-                    child.tag in ("DW_TAG_formal_parameter", "DW_TAG_unspecified_parameters")
-                    for child in origin.children
-                ):
-                    break
-                origin = self._origin(origin)
+        """The declared parameters, from the concrete DIE or the first one it realises that lists any."""
+        source = next((node for node in self._origins(die) if any(
+            child.tag in ("DW_TAG_formal_parameter", "DW_TAG_unspecified_parameters") for child in node.children
+        )), die)
         parameters: list[Parameter] = []
         variadic = False
         for child in source.children:
@@ -415,7 +421,12 @@ class Dwarf:
         die = self.index.get(base)
         if die is None:
             return TypeInfo(kind="unsupported", reason=f"no DIE at 0x{base:x}", spelling=spelled)
-        size = die.number("DW_AT_byte_size") or 0
+        if "DW_AT_signature" in die.attrs:
+            return TypeInfo(kind="unsupported", spelling=spelled, reason="a type unit stub")
+        stated = die.number("DW_AT_byte_size")
+        size = stated or 0
+        if die.tag in ("DW_TAG_base_type", "DW_TAG_enumeration_type") and stated is None:
+            return TypeInfo(kind="unsupported", spelling=spelled, reason="an integer that states no size")
         if die.tag == "DW_TAG_base_type":
             encoding = die.number("DW_AT_encoding")
             # DW_ATE_boolean 2, float 4, signed 5, signed_char 6, unsigned 7,
@@ -438,9 +449,11 @@ class Dwarf:
                 reason=f"base type encoding {encoding}",
             )
         if die.tag == "DW_TAG_enumeration_type":
-            underlying = self.type(die.ref("DW_AT_type")) if die.ref("DW_AT_type") else None
-            signed = underlying.signed if underlying else False
-            return TypeInfo(kind="int", size=size or 4, signed=signed, spelling=spelled)
+            # Only the underlying type states the sign; an enum of no stated type or another size is nothing.
+            underlying = self.type(die.ref("DW_AT_type")) if die.ref("DW_AT_type") is not None else None
+            if underlying is None or underlying.kind != "int" or underlying.size != size or die.flag("DW_AT_declaration"):
+                return TypeInfo(kind="unsupported", spelling=spelled, reason="an enum that states no underlying integer")
+            return TypeInfo(kind="int", size=size, signed=underlying.signed, spelling=spelled)
         if die.tag in ("DW_TAG_pointer_type", "DW_TAG_reference_type"):
             return TypeInfo(
                 kind="pointer", size=size or 8, target=die.ref("DW_AT_type"), spelling=spelled
@@ -484,11 +497,16 @@ class Dwarf:
         for child in die.children:
             if child.tag != "DW_TAG_member":
                 continue
-            location = child.number("DW_AT_data_member_location") or 0
+            location = child.number("DW_AT_data_member_location")
+            if location is None and "DW_AT_data_member_location" in child.attrs:
+                found = _PLUS_UCONST.fullmatch(child.text("DW_AT_data_member_location") or "")
+                if found is None:
+                    raise ValueError(f"member at {child.offset:#x}: a location that is no offset")
+                location = int(found.group(1))
             out.append(
                 Member(
                     name=child.text("DW_AT_name") or "",
-                    offset=location,
+                    offset=location or 0,
                     type_offset=child.ref("DW_AT_type"),
                     bit_size=child.number("DW_AT_bit_size"),
                 )

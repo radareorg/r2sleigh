@@ -24,6 +24,9 @@ SIGNATURE = ": 0x7cbb7a52356be670"
 ATTRIBUTES = {"name": "DW_AT_name", "size": "DW_AT_byte_size", "encoding": "DW_AT_encoding", "type": "DW_AT_type",
               "count": "DW_AT_count", "upper": "DW_AT_upper_bound", "declaration": "DW_AT_declaration",
               "vector": "DW_AT_GNU_vector", "signature": "DW_AT_signature"}
+# The form readelf names for each attribute the graph writes: a size, a bound or an encoding is a constant.
+FORMS = {"size": "data1", "count": "data1", "upper": "data1", "encoding": "data1", "type": "ref4",
+         "declaration": "flag_present", "signature": "ref_sig8"}
 # (name, DW_ATE_ encoding) of each integer, as gcc names it.
 BASE_TYPES = {
     (1, None): ("char", 6), (1, True): ("signed char", 6), (1, False): ("unsigned char", 8),
@@ -46,7 +49,8 @@ class Graph:
         offset, self.next = self.next, self.next + 0x10
         values = {ATTRIBUTES[key]: (SIGNATURE if value == dwarf.UNRESOLVED else f"<0x{value:x}>") if key == "type" else str(value)
                   for key, value in attrs.items() if value is not None}
-        node = dwarf.Die(offset, tag, 1, attrs=values, children=list(children))
+        forms = {ATTRIBUTES[key]: FORMS[key] for key, value in attrs.items() if value is not None and key in FORMS}
+        node = dwarf.Die(offset, tag, 1, attrs=values, forms=forms, children=list(children))
         self.index[offset] = node
         return offset
 
@@ -479,7 +483,8 @@ class FromDwarf(unittest.TestCase):
         self.assertIn("mul", self.functions)
 
     def test_a_type_the_gate_cannot_state_is_refused(self) -> None:
-        index = {1: dwarf.Die(1, "DW_TAG_base_type", 1, {"DW_AT_byte_size": "8", "DW_AT_encoding": "3\t(complex float)"}),
+        index = {1: dwarf.Die(1, "DW_TAG_base_type", 1, {"DW_AT_byte_size": "8", "DW_AT_encoding": "3\t(complex float)"},
+                              {"DW_AT_byte_size": "data1", "DW_AT_encoding": "data1"}),
                  2: dwarf.Die(2, "DW_TAG_unspecified_type", 1, {})}
         graph = dwarf.Dwarf([], index)
         for offset, message in [(1, "base type encoding 3"), (2, "DW_TAG_unspecified_type"), (99, "no DIE at 0x63")]:
@@ -545,12 +550,71 @@ class Resolving(unittest.TestCase):
             return graph.die("DW_TAG_atomic_type", type=graph.die("DW_TAG_restrict_type", type=pointer))
         self.assertEqual(self.read(build), one("char*"))
 
-    def test_an_enum_is_its_underlying_integer(self) -> None:
+    def test_an_enum_that_states_its_size_and_underlying_type_is_that_integer(self) -> None:
         signed = self.read(lambda g: g.die("DW_TAG_enumeration_type", name="e", size=4, type=g.write(one("int"))))
         unsigned = self.read(lambda g: g.die("DW_TAG_enumeration_type", name="e", size=4, type=g.write(one("unsigned"))))
-        none = self.read(lambda g: g.die("DW_TAG_enumeration_type", name="e", size=1))
-        wide = self.read(lambda g: g.die("DW_TAG_enumeration_type", name="e", type=g.write(one("long"))))
-        self.assertEqual((signed, unsigned, none, wide), (one("int32_t"), one("uint32_t"), one("uint8_t"), one("int32_t")))
+        wide = self.read(lambda g: g.die("DW_TAG_enumeration_type", name="e", size=8, type=g.write(one("long"))))
+        self.assertEqual((signed, unsigned, wide), (one("int32_t"), one("uint32_t"), one("int64_t")))
+
+    def test_a_type_that_states_itself_elsewhere_or_states_no_size_is_refused(self) -> None:
+        # gcc's type-unit stub has only DW_AT_signature, DWARF 2 strict gives an enum no DW_AT_type, `enum e;` is a
+        # declaration: each was read as uint32_t (`size or 4`, unsigned) or as a guess at its size.
+        def enum(**attrs):
+            return lambda g: g.die("DW_TAG_enumeration_type", name="e", **attrs)
+        int_type = lambda g: g.write(one("int"))  # noqa: E731
+        long_type = lambda g: g.write(one("long"))  # noqa: E731
+        stub = enum(signature=SIGNATURE.lstrip(": "))
+        cases = {
+            "an enum stub of a type unit": stub,
+            "an enum with no underlying type": enum(size=4),
+            "an enum with no size": lambda g: g.die("DW_TAG_enumeration_type", name="e", type=long_type(g)),
+            "an enum declared and not defined": enum(declaration=1),
+            "an enum whose size is not its underlying type's": lambda g: g.die("DW_TAG_enumeration_type", name="e", size=4,
+                                                                                  type=long_type(g)),
+            "an enum declared with a size and a type": lambda g: g.die("DW_TAG_enumeration_type", name="e", size=4,
+                                                                         type=int_type(g), declaration=1),
+            "a typedef of an enum stub": lambda g: g.die("DW_TAG_typedef", name="neg_t", type=stub(g)),
+            "a pointer to an enum stub": lambda g: g.die("DW_TAG_pointer_type", size=8, type=stub(g)),
+            "a const enum with no underlying type": lambda g: g.die("DW_TAG_const_type", type=enum(size=8)(g)),
+            "an enum over plain char": lambda g: g.die("DW_TAG_enumeration_type", name="e", size=1, type=g.write(one("char"))),
+            "an enum over a pointer": lambda g: g.die("DW_TAG_enumeration_type", name="e", size=8, type=g.write(one("int*"))),
+            "a base type with no size": lambda g: g.die("DW_TAG_base_type", name="int", encoding="5\t(signed)"),
+            "a boolean with no size": lambda g: g.die("DW_TAG_base_type", name="_Bool", encoding="2\t(boolean)"),
+            "a struct stub of a type unit with a tag": lambda g: g.die("DW_TAG_structure_type", name="s",
+                                                                        signature="0x1234"),
+            "a struct declared and not defined": lambda g: g.die("DW_TAG_structure_type", name="opaque", declaration=1),
+            "a pointer to a struct declared and not defined": lambda g: g.die(
+                "DW_TAG_pointer_type", size=8, type=g.die("DW_TAG_structure_type", name="opaque", declaration=1)),
+            "a typedef that is a stub": lambda g: g.die("DW_TAG_typedef", name="t", signature="0x1234",
+                                                         type=g.write(one("int"))),
+        }
+        for name, build in cases.items():
+            with self.subTest(name), self.assertRaises(ct.NotExpressible):
+                self.read(build)
+
+    def test_a_size_or_a_bound_written_as_an_expression_is_no_number(self) -> None:
+        # `int a[n][n]` bounds its rows by an expression: readelf prints the block's length first, which read as a count.
+        def vla(graph):
+            bound = graph.child("DW_TAG_subrange_type")
+            bound.attrs["DW_AT_upper_bound"] = "3 byte block: 91 68 6 \t(DW_OP_fbreg: -24; DW_OP_deref)"
+            bound.forms["DW_AT_upper_bound"] = "exprloc"
+            return graph.die("DW_TAG_pointer_type", size=8, type=graph.die("DW_TAG_array_type", (bound,),
+                                                                          type=graph.write(one("int"))))
+        with self.assertRaises(ct.NotExpressible):
+            self.read(vla)
+        def counted(graph):
+            bound = graph.child("DW_TAG_subrange_type")
+            bound.attrs["DW_AT_count"] = "2 byte block: 91 68 \t(DW_OP_fbreg: -24)"
+            bound.forms["DW_AT_count"] = "exprloc"
+            return graph.die("DW_TAG_array_type", (bound,), type=graph.write(one("int")))
+        with self.assertRaises(ct.NotExpressible):
+            self.read(counted)
+        def unformed(graph):
+            die = graph.index[graph.write(one("int"))]
+            del die.forms["DW_AT_byte_size"]
+            return die.offset
+        with self.assertRaises(ct.NotExpressible):
+            self.read(unformed)
 
     def test_an_unnamed_struct_takes_its_typedef_name_and_a_tagged_one_its_tag(self) -> None:
         def anonymous(graph):
@@ -563,7 +627,6 @@ class Resolving(unittest.TestCase):
     def test_an_aggregate_with_no_name_at_all_is_refused_and_not_spelled_anonymous(self) -> None:
         # `-fdebug-types-section` leaves a stub with a signature in the unit: two different structs would read equal.
         for build in (lambda g: g.die("DW_TAG_union_type", size=8),
-                      lambda g: g.die("DW_TAG_structure_type", declaration=1, signature="0x1234"),
                       lambda g: g.die("DW_TAG_pointer_type", type=g.die("DW_TAG_structure_type", size=8))):
             with self.assertRaises(ct.NotExpressible) as raised:
                 self.read(build)
@@ -592,9 +655,7 @@ class Resolving(unittest.TestCase):
                 self.read(build)
             self.assertIn("vector", str(raised.exception))
 
-    def test_an_incomplete_struct_and_a_class_are_named(self) -> None:
-        self.assertEqual(self.read(lambda g: g.die("DW_TAG_structure_type", name="opaque", declaration=1)),
-                         ct.CType(ct.NAMED, name="struct opaque"))
+    def test_a_class_is_named(self) -> None:
         self.assertEqual(self.read(lambda g: g.die("DW_TAG_class_type", name="c", size=4)), ct.CType(ct.NAMED, name="struct c"))
 
     def test_a_reference_is_a_pointer(self) -> None:

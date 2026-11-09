@@ -128,7 +128,7 @@ def shell(builds: dict[pathlib.Path, dict[int, Fn]], indent: int | None = None, 
 
 def run_main(source: dict[int, str] | Source, stripped: dict[int, Fn], *extra: str, listed: set[int] | None = None,
              unplaced: list[dwarf.Unplaced] | None = None, debug_functions: dict[int, Fn] | None = None,
-             **options: object) -> tuple[int, dict | None, str]:
+             ids: tuple[str | None, str | None] = ("1f2e", "1f2e"), **options: object) -> tuple[int, dict | None, str]:
     """Exit code, report (None when none was printed) and stderr of main over a fake shell and a written DWARF."""
     source = source if isinstance(source, Source) else Source(source, unplaced)
     debug = debug_functions or {
@@ -140,6 +140,7 @@ def run_main(source: dict[int, str] | Source, stripped: dict[int, Fn], *extra: s
         mock.patch.object(sys, "argv", argv),
         shell({DEBUG: debug, STRIPPED: stripped}, **options),
         mock.patch.object(dt, "read_dwarf", side_effect=source.read),
+        mock.patch.object(dt, "build_id", side_effect=lambda binary, _prefix: dict(zip((DEBUG, STRIPPED), ids))[binary]),
         contextlib.redirect_stdout(out),
         contextlib.redirect_stderr(err),
     ):
@@ -358,6 +359,7 @@ class Answers(unittest.TestCase):
             mock.patch.object(sys, "argv", argv),
             mock.patch.object(dt, "r2s", side_effect=slow),
             mock.patch.object(dt, "read_dwarf", side_effect=source.read),
+            mock.patch.object(dt, "build_id", return_value="6b1d"),
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(err),
         ):
@@ -615,16 +617,17 @@ class Gradable(unittest.TestCase):
 
     def test_a_function_the_gate_cannot_grade_is_counted_by_reason_in_the_report(self) -> None:
         source = Source({0x1000: "int32_t g(void)", 0x2000: "struct big mk(int32_t n)", 0x3000: "int32_t scale(int32_t k)",
-                         0x4000: "void zed(void)", 0x5000: "int32_t kr(int32_t a)", 0x6000: "double d(double x)"})
+                         0x4000: "void zed(void)", 0x5000: "int32_t kr(int32_t a)", 0x6000: "double d(double x)",
+                         0x7000: "void h(void)", 0x8000: "void i(void)"})
         source.state("scale", instance=True).state("zed", prototyped=False).state("kr", prototyped=False)
         stripped = {0x1000: fn("int32_t g(void)")}
-        code, report, err = run_main(source, stripped, listed={0x1000, 0x2000, 0x3000, 0x4000, 0x5000, 0x6000})
+        code, report, err = run_main(source, stripped)
         self.assertEqual(code, 0, err)
         self.assertEqual(report["ungradable"], {dt.INSTANCE: ["scale"], dt.NOT_PROTOTYPED: ["kr", "zed"],
                                                 dt.NOT_STATED: ["d", "mk"]})
         self.assertEqual(list(report["ungradable"]), sorted(report["ungradable"]))
-        self.assertEqual((report["functions_in_dwarf"], report["functions_in_truth"]), (6, 1))
-        self.assertEqual(report["facts"], {"correct": 1, "missing": 0, "marked_wrong": 0, "silently_wrong": 0})
+        self.assertEqual((report["functions_in_dwarf"], report["functions_in_truth"]), (8, 3))
+        self.assertEqual(report["facts"], {"correct": 1, "missing": 2, "marked_wrong": 0, "silently_wrong": 0})
 
     def test_the_engine_is_not_graded_on_an_ungradable_function(self) -> None:
         source = Source({0x1000: "int32_t g(void)", 0x2000: "int64_t scale(int32_t k, char* p)"}).state("scale", instance=True)
@@ -784,11 +787,12 @@ class Placement(unittest.TestCase):
         split = dwarf.Unplaced("sym", 0x572, "its DW_AT_ranges list has no one readable first range")
         gone = dwarf.Unplaced("never_called", 0x600, dwarf.NO_FUNC_START)
         fragment = dwarf.Unplaced("split_hot", 0x700, dwarf.NO_FUNC_START)
-        code, report, err = run_main({0x1000: INT}, {0x1000: fn(RIGHT)}, unplaced=[split, gone, fragment])
+        code, report, err = run_main({0x1000: INT, 0x2000: "void g(void)"}, {0x1000: fn(RIGHT)},
+                                     unplaced=[split, gone, fragment])
         self.assertEqual(code, 0, err)
         self.assertEqual(report["ungradable"], {"its DW_AT_ranges list has no one readable first range": ["sym"],
                                                 dwarf.NO_FUNC_START: ["never_called", "split_hot"]})
-        self.assertEqual((report["functions_in_dwarf"], report["functions_in_truth"]), (4, 1))
+        self.assertEqual((report["functions_in_dwarf"], report["functions_in_truth"]), (5, 2))
         self.assertEqual(report["facts"]["correct"], 1)
 
     def test_a_function_the_engine_does_not_list_is_named_and_not_graded(self) -> None:
@@ -877,6 +881,12 @@ class Placement(unittest.TestCase):
         self.assertIn("UNREADABLE readelf: debug", err.getvalue())
 
 
+# `readelf --wide --notes` of a gcc build: what `strip` keeps of it.
+NOTES = ("Displaying notes found in: .note.gnu.build-id\n  Owner                Data size \tDescription\n"
+         "  GNU                  0x00000014\tNT_GNU_BUILD_ID (unique build ID bitstring)\t"
+         "    Build ID: 6b1d4c0f2a9e7d3b5c8a1f0e2d4b6a8c9e1f3a5b\n")
+
+
 def readelf(info: str, symbols: str):
     """A stand-in for `subprocess.run` that answers `readelf --debug-dump` with `info` and `readelf --syms` with `symbols`.
 
@@ -884,6 +894,8 @@ def readelf(info: str, symbols: str):
     """
 
     def run(argv, **_):
+        if "--notes" in argv:
+            return subprocess.CompletedProcess(argv, 0, NOTES, "")
         text = "" if argv[-1] == "stripped" else symbols if "--syms" in argv else info
         return subprocess.CompletedProcess(argv, 0, text, "")
 
@@ -916,6 +928,17 @@ class ReadingDwarf(unittest.TestCase):
                     dt.read_dwarf(pathlib.Path("debug"), "")
                 self.assertEqual(raised.exception.command, "readelf")
                 self.assertIn(str(error), raised.exception.causes[""])
+
+    def test_a_dwarf_that_cannot_be_placed_is_unreadable(self) -> None:
+        # A cycle of DW_AT_abstract_origin raises while the functions are placed, not while the dump is read.
+        reading = mock.Mock(placed=mock.Mock(side_effect=RuntimeError("a cycle of DW_AT_abstract_origin at 0x40")))
+        with (
+            mock.patch.object(dt.Dwarf, "read", return_value=reading),
+            mock.patch.object(dt, "function_symbols", return_value={}),
+            self.assertRaises(dt.Unreadable) as raised,
+        ):
+            dt.read_dwarf(pathlib.Path("debug"), "")
+        self.assertIn("a cycle", raised.exception.causes[""])
 
     def test_a_function_is_placed_where_a_function_symbol_starts_and_nowhere_else(self) -> None:
         gcc = (FIXTURES / "cold.gcc.O2.txt").read_text(), (FIXTURES / "cold.gcc.O2.syms.txt").read_text()
@@ -1012,6 +1035,105 @@ class RealCompilers(unittest.TestCase):
         with self.assertRaises(ct.NotExpressible) as raised:
             ct.from_dwarf(reading, vec.parameters[1].type_offset)
         self.assertIn("vector", str(raised.exception))
+
+
+    def test_an_enum_is_the_integer_gcc_states_under_it(self) -> None:
+        # enums.c: `enum neg` is int, `enum big` long, `enum pos` and `enum ubig` unsigned int (gcc 13.3, DWARF 5).
+        _, (reading, placed, unplaced) = read_fixture("enums.gcc.O2")
+        truth, refused = dt.partition(reading, placed, unplaced, {sub.low_pc: sub.name for sub in placed})
+        spelled = {graded.name: f"{ct.spell(graded.ret)} ({', '.join(map(ct.spell, graded.params))})"
+                   for graded in truth.values()}
+        self.assertEqual(spelled, ENUM_TRUTH)
+        self.assertEqual(refused, {})
+
+    def test_strict_dwarf_2_states_no_enum_type_and_no_function_with_one_is_graded(self) -> None:
+        # `-gdwarf-2 -gstrict-dwarf` writes no DW_AT_type under an enum: its sign is stated nowhere.
+        graded, refused = partition_fixture("enums.gcc.O2.strict2")
+        self.assertEqual(graded, ["main"])
+        self.assertEqual(refused, {dt.NOT_STATED: sorted(set(ENUM_TRUTH) - {"main"})})
+
+    def test_a_build_with_a_type_unit_is_refused_whole(self) -> None:
+        # DWARF 4 numbers .debug_types from 0, so its DIEs overwrote those of .debug_info: `main` read
+        # `(int32_t, int64_t*)`; DWARF 5 leaves stubs whose enum read uint32_t. Both builds are refused whole.
+        for name in ("odd.gcc.O2.dwarf4.types", "abi.gcc.O2.types"):
+            texts = (FIXTURES / f"{name}.txt").read_text(), (FIXTURES / f"{name}.syms.txt").read_text()
+            out, err = io.StringIO(), io.StringIO()
+            argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
+            with (
+                self.subTest(name=name),
+                mock.patch.object(sys, "argv", argv),
+                shell({DEBUG: {}, STRIPPED: {}}),
+                mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)),
+                contextlib.redirect_stdout(out),
+                contextlib.redirect_stderr(err),
+            ):
+                code = dt.main()
+            self.assertEqual((code, out.getvalue()), (2, ""))
+            self.assertIn(dwarf.TYPE_UNIT, err.getvalue())
+            self.assertNotIn("Traceback", err.getvalue())
+
+
+ENUM_TRUTH = {
+    "e_big": "int64_t (int64_t, int64_t)", "e_neg": "int32_t (int32_t, int32_t, int32_t)",
+    "e_pos": "uint32_t (uint32_t, int64_t)", "e_ptr": "int32_t (uint32_t*)", "e_td": "int32_t (int32_t, int32_t*)",
+    "e_ubig": "uint32_t (uint32_t)", "main": "int32_t (int32_t, char**)",
+}
+
+
+class OneProgram(unittest.TestCase):
+    """The stripped build is graded only when it carries the debug build's build ID: one link, two copies."""
+
+    def test_two_builds_whose_ids_differ_or_are_missing_are_refused(self) -> None:
+        for ids in (("6b1d", "9c2e"), (None, "6b1d"), ("6b1d", None), (None, None)):
+            with self.subTest(ids=ids):
+                code, report, err = run_main({0x1000: INT}, {0x1000: fn(RIGHT)}, ids=ids)
+                self.assertEqual((code, report), (2, None))
+                self.assertIn("not shown to be one program", err)
+
+    def test_one_id_is_graded(self) -> None:
+        self.assertEqual(run_main({0x1000: INT}, {0x1000: fn(RIGHT)}, ids=("6b1d", "6b1d"))[0], 0)
+
+    def test_the_id_is_the_gnu_build_id_note_and_a_build_without_one_has_none(self) -> None:
+        for notes, expected in [(NOTES, "6b1d4c0f2a9e7d3b5c8a1f0e2d4b6a8c9e1f3a5b"), ("", None),
+                                ("Displaying notes found in: .note.ABI-tag\n  GNU  0x10  NT_GNU_ABI_TAG\n", None)]:
+            with self.subTest(expected=expected), mock.patch.object(
+                    dt.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, notes, "")) as run:
+                self.assertEqual(dt.build_id(pathlib.Path("debug"), "g"), expected)
+            self.assertEqual(run.call_args.args[0], ["greadelf", "--wide", "--notes", "debug"])
+        with mock.patch.object(dt.subprocess, "run", side_effect=FileNotFoundError(2, "No such file", "readelf")):
+            with self.assertRaises(dt.Unreadable):
+                dt.build_id(pathlib.Path("debug"), "")
+
+
+class Coverage(unittest.TestCase):
+    """A rate is printed only when the gate grades at least a third of the functions the build defines."""
+
+    @staticmethod
+    def build(graded: int, total: int) -> tuple[Source, dict[int, Fn]]:
+        protos = {0x1000 + 0x10 * index: f"int32_t f{index}(int32_t a)" for index in range(total)}
+        source = Source(protos)
+        for index in range(graded, total):
+            source.state(f"f{index}", instance=True)
+        # Every graded function is wrong and marked: no fact is asserted, and the rate alone would read 1.0.
+        stripped = {addr: fn(f"uint64_t fcn_{addr:x}(uint64_t arg0)", residuals=1, addr=addr) for addr in protos}
+        return source, stripped
+
+    def test_three_graded_of_twenty_is_refused_and_prints_no_rate(self) -> None:
+        code, report, err = run_main(*self.build(3, 20))
+        self.assertEqual((code, report), (2, None))
+        self.assertIn("3 of 20 functions are gradable", err)
+
+    def test_the_floor_is_a_third(self) -> None:
+        for graded, total, code in [(6, 20, 2), (7, 20, 0), (1, 3, 0), (1, 4, 2), (11, 26, 0)]:
+            with self.subTest(graded=graded, total=total):
+                self.assertEqual(run_main(*self.build(graded, total))[0], code)
+
+    def test_a_function_the_gate_cannot_place_counts_toward_the_floor(self) -> None:
+        source, stripped = self.build(1, 1)
+        source.unplaced = [dwarf.Unplaced(f"cold{index}", index, dwarf.NO_FUNC_START) for index in range(3)]
+        code, _, err = run_main(source, stripped)
+        self.assertEqual(code, 2)
+        self.assertIn("1 of 4 functions are gradable", err)
 
 
 class Causes(unittest.TestCase):
@@ -1185,14 +1307,16 @@ class ReportShape(unittest.TestCase):
 
     def test_every_function_dwarf_declares_is_graded_or_named(self) -> None:
         gone = [dwarf.Unplaced("g", 1, "why")]
-        source = Source({0x1000: INT, 0x2000: "int32_t h(void)", 0x3000: "int32_t k(void)", 0x4000: "int32_t m(void)"}, gone)
+        source = Source({0x1000: INT, 0x2000: "int32_t h(void)", 0x3000: "int32_t k(void)", 0x4000: "int32_t m(void)",
+                         0x5000: "void n(void)", 0x6000: "void o(void)"}, gone)
         source.placed.append(source.graph.subprogram(ct.parse_prototype("int32_t alias(void)"), 0x1000))
         source.state("m", instance=True)
-        _, report, _ = run_main(source, {0x2000: fn("int32_t h(void)", addr=0x2000)}, listed={0x1000, 0x2000, 0x4000})
+        _, report, _ = run_main(source, {0x2000: fn("int32_t h(void)", addr=0x2000)},
+                                listed={0x1000, 0x2000, 0x4000, 0x5000, 0x6000})
         named = sum(len(names) for names in report["ungradable"].values())
-        self.assertEqual(report["functions_in_dwarf"], 6)
-        self.assertEqual(report["functions_in_truth"] + named, 6)
-        self.assertEqual(report["functions_in_truth"], 1)
+        self.assertEqual(report["functions_in_dwarf"], 8)
+        self.assertEqual(report["functions_in_truth"] + named, 8)
+        self.assertEqual(report["functions_in_truth"], 3)
         self.assertEqual(report["ungradable"], {"why": ["g"], dt.INSTANCE: ["m"], dt.SHARED: ["alias", "f"], dt.UNLISTED: ["k"]})
 
     def test_every_list_in_the_report_is_sorted(self) -> None:
