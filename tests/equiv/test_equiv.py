@@ -1211,7 +1211,10 @@ class ExecutableSectionTests(unittest.TestCase):
 
     def test_a_table_with_no_executable_section_or_a_failing_readelf_is_unreadable(self):
         for done in (subprocess.CompletedProcess([], 0, "There are no sections in this file.\n", ""),
-                     subprocess.CompletedProcess([], 1, "", "readelf: Error: 'binary': No such file")):
+                     subprocess.CompletedProcess([], 1, "", "readelf: Error: 'binary': No such file"),
+                     # readelf printed the table, then failed on a truncated file: a table it could not finish is no proof.
+                     subprocess.CompletedProcess([], 1, (DWARF_FIXTURES / "gclib.gcc.O2.gc.sections.txt").read_text(),
+                                                 "readelf: Error: Reading 4096 bytes extends past end of file")):
             with self.subTest(done=done), unittest.mock.patch.object(subprocess, "run", return_value=done):
                 with self.assertRaises(RuntimeError):
                     executable_sections(Path("binary"))
