@@ -820,6 +820,13 @@ const COLD_CALL_SIX_ARGUMENTS: &[u8] = &[
     0xc0, 0xe8, 0, 0, 0, 0,
 ];
 
+/// `test edi, edi; jne a; mov eax, 7; ret; a: lea rsi, [fmt]; xor eax, eax; call <err>`: `err(value, fmt)`, the
+/// first argument the register the test read.
+const COLD_CALL_REGISTER_ARGUMENT: &[u8] = &[
+    0x85, 0xff, 0x75, 0x06, 0xb8, 7, 0, 0, 0, 0xc3, 0x48, 0x8d, 0x35, 0x2f, 0, 0, 0, 0x31, 0xc0,
+    0xe8, 0, 0, 0, 0,
+];
+
 /// Where [`COLD_CALL_TWO_ARGUMENTS`]'s `lea` points, in a data section from there to the stub.
 const FORMAT: u64 = common::BASE + 0x60;
 
@@ -961,6 +968,29 @@ fn a_call_with_six_arguments_declared_never_to_return_is_a_guard() {
     let (test, call, rest) = (
         line_of(&c, "if ("),
         line_of(&c, "err(1, "),
+        line_of(&c, "return 7"),
+    );
+    assert!(test.0 < call.0 && call.0 < rest.0, "{c}");
+    assert_eq!((call.1 > test.1, rest.1), (true, test.1), "{c}");
+}
+
+#[test]
+fn a_call_passing_a_register_declared_never_to_return_is_a_guard() {
+    // What the call passes is a value, not a literal; the callee's declaration alone decides.
+    let mut literal = Literal::new().importing("err").with_data_after(FORMAT);
+    literal.write(FORMAT, b"bad\0");
+    let c = c_over(
+        literal,
+        COLD_CALL_REGISTER_ARGUMENT,
+        &[(0x13, common::STUB)],
+    );
+    assert!(
+        !c.contains("r2sleigh refused") && !c.contains("else"),
+        "{c}"
+    );
+    let (test, call, rest) = (
+        line_of(&c, "if ("),
+        line_of(&c, "arg0, \"bad\")"),
         line_of(&c, "return 7"),
     );
     assert!(test.0 < call.0 && call.0 < rest.0, "{c}");

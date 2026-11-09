@@ -82,15 +82,119 @@ pub(crate) fn exit() -> CStmt {
     call_to(EXIT)
 }
 
-/// Calls to `exit` with none to sixteen arguments, past the six and eight registers that pass them: no reader may count them.
+/// One argument of every `CExpr` form; the match has no wildcard, so a new form must join the list.
+fn arguments() -> Vec<CExpr> {
+    let x = CExpr::var(crate::symbol::SymbolTable::new().declare_or_reuse("x"));
+    let boxed = || Box::new(x.clone());
+    let int = crate::ast::CType::Int {
+        bits: 32,
+        signedness: r2types::Signedness::Signed,
+    };
+    let forms = vec![
+        CExpr::observe_one(test_render_observation_id(7), x.clone()),
+        CExpr::IntLit(1),
+        CExpr::UIntLit(1),
+        CExpr::FloatLit(1.0, 64),
+        CExpr::StringLit("s".to_owned()),
+        CExpr::CharLit('c'),
+        x.clone(),
+        CExpr::External {
+            name: "g".to_owned(),
+            kind: ExternalKind::Global,
+        },
+        CExpr::DataObject {
+            address: 0x40,
+            name: "d".to_owned(),
+        },
+        CExpr::Unary {
+            op: crate::ast::UnaryOp::Neg,
+            operand: boxed(),
+        },
+        CExpr::binary(crate::ast::BinaryOp::Add, x.clone(), CExpr::IntLit(1)),
+        CExpr::Ternary {
+            cond: boxed(),
+            then_expr: boxed(),
+            else_expr: boxed(),
+        },
+        CExpr::cast(int.clone(), x.clone()),
+        CExpr::cast(int.clone(), CExpr::IntLit(1)),
+        CExpr::call(
+            CExpr::External {
+                name: "f".to_owned(),
+                kind: ExternalKind::Import,
+            },
+            vec![x.clone()],
+        ),
+        CExpr::Subscript {
+            base: boxed(),
+            index: boxed(),
+        },
+        CExpr::Member {
+            base: boxed(),
+            member: "m".to_owned(),
+        },
+        CExpr::PtrMember {
+            base: boxed(),
+            member: "m".to_owned(),
+        },
+        CExpr::Sizeof(boxed()),
+        CExpr::SizeofType(int),
+        CExpr::AddrOf(boxed()),
+        CExpr::Deref(boxed()),
+        CExpr::Comma(vec![x.clone(), x.clone()]),
+        CExpr::Paren(boxed()),
+    ];
+    for form in &forms {
+        match form {
+            CExpr::Observed { .. }
+            | CExpr::IntLit(_)
+            | CExpr::UIntLit(_)
+            | CExpr::FloatLit(..)
+            | CExpr::StringLit(_)
+            | CExpr::CharLit(_)
+            | CExpr::Var(_)
+            | CExpr::External { .. }
+            | CExpr::DataObject { .. }
+            | CExpr::Unary { .. }
+            | CExpr::Binary { .. }
+            | CExpr::Ternary { .. }
+            | CExpr::Cast { .. }
+            | CExpr::Call { .. }
+            | CExpr::Subscript { .. }
+            | CExpr::Member { .. }
+            | CExpr::PtrMember { .. }
+            | CExpr::Sizeof(_)
+            | CExpr::SizeofType(_)
+            | CExpr::AddrOf(_)
+            | CExpr::Deref(_)
+            | CExpr::Comma(_)
+            | CExpr::Paren(_) => {}
+        }
+    }
+    forms
+}
+
+/// Calls to `exit`: none to sixteen arguments with each form at each position, and every ordered pair of forms.
+/// A reader that reads them, by count, form or order, fails its test.
 pub(crate) fn exit_calls() -> impl Iterator<Item = CStmt> {
-    (0..=16).map(|count| {
+    let forms = arguments();
+    let call = |args: Vec<CExpr>| {
         let callee = CExpr::External {
             name: EXIT.to_owned(),
             kind: ExternalKind::Function,
         };
-        CStmt::Expr(CExpr::call(callee, (0..count).map(CExpr::IntLit).collect()))
-    })
+        CStmt::Expr(CExpr::call(callee, args))
+    };
+    let len = forms.len();
+    let rotated = (0..len).flat_map(move |start| {
+        (0..=16).map(move |count| (0..count).map(|at| (start + at) % len).collect())
+    });
+    let pairs = (0..len).flat_map(move |left| (0..len).map(move |right| vec![left, right]));
+    rotated
+        .chain(pairs)
+        .map(|picked: Vec<usize>| call(picked.into_iter().map(|at| forms[at].clone()).collect()))
+        .collect::<Vec<_>>()
+        .into_iter()
 }
 
 /// The callees the tests' evidence declares never to return: `exit`.

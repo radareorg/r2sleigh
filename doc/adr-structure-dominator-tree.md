@@ -349,6 +349,10 @@ ROADMAP D80): a guard that wrote what it frees before its test certifies, and ke
 functions in the fourth review's mutant run. The order of the freed statements is held by the unit tests in `guard.rs`
 and by the engine test `a_test_with_nothing_in_its_then_arm_keeps_its_else_and_the_exit_under_it_is_the_guard`, whose
 store the mutant writes before the guard's test with the certificate holding (`scripts/mutants_d75.py`).
+The decision reads the callee alone, never what the call passes. `support::exit_calls` builds calls of none to sixteen
+arguments with each `CExpr` form at each position (a match with no wildcard lists the forms, so a new one must join)
+and every ordered pair of forms; the predicate and its five readers run over all of them. `scripts/mutants_d75.py` runs
+each test command on the unmutated tree first and stops if one fails, and a mutant dies only by a test that passed there.
 O(statements) and no recursion (below): the statements a guard frees join the sequence the `if` sits in, where they
 are visited in their turn.
 

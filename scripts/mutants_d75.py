@@ -5,9 +5,10 @@ noreturn guard").
 
   mutants_d75.py [--check] [NAME...]    run (or only --check that every edit applies once) the named mutants, else all
 
-Run from the repository root with the files below unmodified. A mutant dies only when every test command builds and one
-reports a failing test; one that does not build, or a command that fails without a failing test, is WRONG. Exit 1 where
-a mutant is not killed."""
+Run from the repository root with the files below unmodified. Each test command first runs once on the unmutated tree,
+and any failure there stops the script (exit 1). A mutant dies only when every test command builds and a test that
+passed on that baseline fails; one that does not build, or that fails no baseline test, is WRONG. Exit 1 where a
+mutant is not killed."""
 
 import os
 import re
@@ -56,6 +57,41 @@ def name_as(spelled):
     return (SHAPE, LOOKUP, f"if self.never_return.contains({spelled})))")
 
 
+# One pattern per `CExpr` form an argument may take (crates/r2dec/src/ast.rs).
+FORMS = [
+    ("observed", "Observed { .. }"), ("int", "IntLit(_)"), ("uint", "UIntLit(_)"), ("float", "FloatLit(..)"),
+    ("string", "StringLit(_)"), ("char", "CharLit(_)"), ("var", "Var(_)"), ("external", "External { .. }"),
+    ("data", "DataObject { .. }"), ("unary", "Unary { .. }"), ("binary", "Binary { .. }"), ("ternary", "Ternary { .. }"),
+    ("cast", "Cast { .. }"), ("call", "Call { .. }"), ("subscript", "Subscript { .. }"), ("member", "Member { .. }"),
+    ("ptr-member", "PtrMember { .. }"), ("sizeof", "Sizeof(_)"), ("sizeof-type", "SizeofType(_)"),
+    ("addr-of", "AddrOf(_)"), ("deref", "Deref(_)"), ("comma", "Comma(_)"), ("paren", "Paren(_)"),
+]
+E = "crate::ast::CExpr"
+ANY_FORM = "args.iter().any(|a| matches!(a, " + E + "::{}))"
+# Argument shapes a reader may wrongly read: a register, anything not a literal, a cast of a value.
+SHAPES = [
+    ("var", ANY_FORM.format("Var(_)")),
+    ("nonlit", f"args.iter().any(|a| !matches!(a, {E}::IntLit(_) | {E}::UIntLit(_) | {E}::StringLit(_) | {E}::Cast {{ .. }}))"),
+    ("cast-nonlit", f"args.iter().any(|a| matches!(a, {E}::Cast {{ expr, .. }} if !matches!(**expr, {E}::IntLit(_) | {E}::UIntLit(_))))"),
+]
+
+
+def predicate_unless(condition):
+    """The predicate false for a call whose `args` meet `condition`."""
+    return [(SHAPE, PREDICATE, "matches!(stmt, CStmt::Expr(CExpr::Call { func, args, .. })\n            if !("
+             + condition + ") && matches!(")]
+
+
+def reader_unless(reader, condition):
+    """`reader` reading a call whose `args` meet `condition` as returning."""
+    _, path, old, new = next(r for r in READERS if r[0] == reader)
+    ev = "evidence" if path == RENDER else "ev"
+    verdict = f"{ev}.never_returns(stmt) && !matches!(stmt, crate::ast::CStmt::Expr({E}::Call {{ args, .. }}) if {condition})"
+    return [(path, old, new.replace("{call}", verdict))]
+
+
+ROLE = "false => (traps(stmt) || evidence.never_returns(stmt)).into(),"
+
 FREED = "stmts.push(stmt);\n            todo.extend(freed.into_iter().flat_map(Vec::into_iter).rev());"
 
 # (name, edits, tests that run in order). Every mutant must die.
@@ -85,18 +121,54 @@ MUTANTS = [
     # Each reader cut at an argument count.
     (*counted(reader, cut), [R2DEC, ENGINE])
     for reader, *_ in READERS for cut in CUTS
+] + [
+    # The predicate reading an argument's form, or the order `err(value, fmt)` passes them in.
+    (f"predicate-ignores-{form}-arg", predicate_unless(ANY_FORM.format(pattern)), [R2DEC, ENGINE])
+    for form, pattern in FORMS
+] + [
+    ("predicate-ignores-var-then-string",
+     predicate_unless(f"matches!(args.as_slice(), [{E}::Var(_), {E}::StringLit(_), ..])"), [R2DEC, ENGINE]),
+] + [
+    # Each reader reading an argument's shape.
+    (f"{reader}-ignores-{shape}-arg", reader_unless(reader, condition), [R2DEC, ENGINE])
+    for reader, *_ in READERS for shape, condition in SHAPES
+] + [
+    # The role reading whether the stage selected anything, in place of the call.
+    ("role-when-nothing-selected",
+     [(RENDER, ROLE, "false => (traps(stmt) || (selections.is_empty() && evidence.never_returns(stmt))).into(),")],
+     [R2DEC, ENGINE]),
+    ("role-when-anything-selected",
+     [(RENDER, ROLE, "false => (traps(stmt) || !selections.is_empty() || evidence.never_returns(stmt)).into(),")],
+     [R2DEC, ENGINE]),
 ]
 
 
-def failing_test(output):
-    """The first failing test's name, or None when the output reports none."""
-    if "test result: FAILED" not in output:
-        return None
-    found = re.search(r"^---- (\S+) stdout ----$", output, re.M)
-    return found.group(1) if found else "?"
+def outcomes(output):
+    """The tests the output reports passed, and those it reports failed."""
+    passed = set(re.findall(r"^test (\S+) \.\.\. ok$", output, re.M))
+    failed = set(re.findall(r"^test (\S+) \.\.\. FAILED$", output, re.M))
+    return passed, failed
 
 
-def run(name, edits, tests, check):
+def shell(command):
+    """`command` run in a shell: its exit code and its standard output."""
+    done = subprocess.run(command, shell=True, capture_output=True, text=True)
+    return done.returncode, done.stdout
+
+
+def baseline(commands, sh):
+    """The tests each command passes on the unmutated tree; None, with the reason, if any command fails there."""
+    passed = {}
+    for command in commands:
+        code, out = sh(command)
+        ok, failed = outcomes(out)
+        if code or failed:
+            return None, f"`{command}` fails on the unmutated tree (exit {code}, failing {sorted(failed)})"
+        passed[command] = ok
+    return passed, None
+
+
+def run(name, edits, tests, check, passed, sh):
     files = {path for path, _, _ in edits}
     originals = {path: open(path).read() for path in files}
     for path, old, new in edits:
@@ -111,38 +183,40 @@ def run(name, edits, tests, check):
         for path in files:
             open(path, "w").write(text[path])
         for command in tests:
-            if subprocess.run(f"{command} --no-run", shell=True, capture_output=True).returncode:
+            if sh(f"{command} --no-run")[0]:
                 return f"{name}: does not build under `{command}`", False
         for command in tests:
-            done = subprocess.run(command, shell=True, capture_output=True, text=True)
-            if done.returncode == 0:
-                continue
-            test = failing_test(done.stdout)
-            if test is None:
-                return f"{name}: `{command}` exits {done.returncode} with no failing test", False
-            return f"{name}: killed by {test} (`{command}`)", True
+            code, out = sh(command)
+            killers = sorted(outcomes(out)[1] & passed[command])
+            if killers:
+                return f"{name}: killed by {killers[0]} (`{command}`)", True
+            if code:
+                return f"{name}: `{command}` exits {code} with no baseline test failing", False
     finally:
         for path in files:
             open(path, "w").write(originals[path])
     return f"{name}: survived {len(tests)} test commands", False
 
 
-def main():
-    args = sys.argv[1:]
+def main(args, sh=shell):
     check = "--check" in args
     names = [a for a in args if not a.startswith("--")]
-    if not check and subprocess.run(["git", "diff", "--quiet", "--"] + sorted({p for _, e, _ in MUTANTS for p, _, _ in e})).returncode:
-        sys.exit("a file a mutant edits has changes: commit or restore them first")
+    chosen = [m for m in MUTANTS if not names or m[0] in names]
+    passed = {}
+    if not check:
+        if sh("git diff --quiet -- " + " ".join(sorted({p for _, e, _ in MUTANTS for p, _, _ in e})))[0]:
+            return "a file a mutant edits has changes: commit or restore them first"
+        passed, reason = baseline(sorted({c for _, _, tests in chosen for c in tests}), sh)
+        if passed is None:
+            return reason
     bad = 0
-    for name, edits, tests in MUTANTS:
-        if names and name not in names:
-            continue
-        line, ok = run(name, edits, tests, check)
+    for name, edits, tests in chosen:
+        line, ok = run(name, edits, tests, check, passed, sh)
         print(("ok   " if ok else "WRONG"), line, flush=True)
         bad += not ok
-    sys.exit(1 if bad else 0)
+    return 1 if bad else 0
 
 
 if __name__ == "__main__":
     os.chdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-    main()
+    sys.exit(main(sys.argv[1:]))
