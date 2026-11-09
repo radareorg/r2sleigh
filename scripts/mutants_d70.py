@@ -16,7 +16,7 @@ import sys
 TYPES = "python3 scripts/test_c_types.py"
 GATE = "python3 scripts/test_differential_truth.py"
 EQUIV = ("cd tests/equiv && python3 -m unittest test_equiv.RangesTests test_equiv.PlacementTests "
-         "test_equiv.FunctionSymbolTests test_equiv.ReferenceTests test_equiv.ContractTests test_equiv.OneGraphTests")
+         "test_equiv.FunctionSymbolTests test_equiv.ExecutableSectionTests test_equiv.ReferenceTests test_equiv.ContractTests test_equiv.OneGraphTests")
 DECBENCH = "cd tests/decbench && python3 -m unittest test_type_causes"
 
 C = "scripts/c_types.py"
@@ -430,8 +430,8 @@ MUTANTS += [
     m("placed-needs-low-pc", D, "not {\"DW_AT_low_pc\", \"DW_AT_ranges\"} & die.attrs.keys()", "\"DW_AT_low_pc\" not in die.attrs", (EQUIV,)),
     m("placed-needs-ranges", D, "not {\"DW_AT_low_pc\", \"DW_AT_ranges\"} & die.attrs.keys()", "\"DW_AT_ranges\" not in die.attrs", (EQUIV,)),
     m("placed-takes-every-subprogram", D, "if die.tag != \"DW_TAG_subprogram\" or not {\"DW_AT_low_pc\", \"DW_AT_ranges\"} & die.attrs.keys():", "if die.tag != \"DW_TAG_subprogram\":", (EQUIV,)),
-    m("placed-unplaced-nameless", D, "                    named, _ = self._attr_via_origin(die, \"DW_AT_name\")\n                    unplaced.append(Unplaced(named.text(\"DW_AT_name\") or \"\", die.offset, why))", "                    unplaced.append(Unplaced(die.text(\"DW_AT_name\") or \"\", die.offset, why))", (EQUIV,)),
-    m("placed-unplaced-wrong-offset", D, "unplaced.append(Unplaced(named.text(\"DW_AT_name\") or \"\", die.offset, why))", "unplaced.append(Unplaced(named.text(\"DW_AT_name\") or \"\", 0, why))", (EQUIV,)),
+    m("placed-unplaced-nameless", D, "                    named, _ = self._attr_via_origin(die, \"DW_AT_name\")\n                    unplaced.append(Unplaced(named.text(\"DW_AT_name\") or \"\", die.offset, why, has_code))", "                    unplaced.append(Unplaced(die.text(\"DW_AT_name\") or \"\", die.offset, why, has_code))", (EQUIV,)),
+    m("placed-unplaced-wrong-offset", D, "unplaced.append(Unplaced(named.text(\"DW_AT_name\") or \"\", die.offset, why, has_code))", "unplaced.append(Unplaced(named.text(\"DW_AT_name\") or \"\", 0, why, has_code))", (EQUIV,)),
     m("placed-unsorted", D, "        found.sort(key=lambda s: (s.low_pc, s.name))\n        unplaced.sort", "        unplaced.sort", (EQUIV,)),
     m("placed-unplaced-unsorted", D, "        unplaced.sort(key=lambda u: (u.name, u.offset))\n", "", (EQUIV,)),
     m("placed-unplaced-by-offset", D, "        unplaced.sort(key=lambda u: (u.name, u.offset))", "        unplaced.sort(key=lambda u: (u.offset, u.name))", (EQUIV,)),
@@ -583,9 +583,9 @@ MUTANTS += [
     m("listing-name-any", G, '        if not all(isinstance(row["name"], str) for row in rows):\n            raise TypeError("a name that is no string")\n', "", (GATE,)),
     m("listing-name-number-is-fine", G, 'isinstance(row["name"], str)', 'row["name"] is not None', (GATE,)),
     # The entry is where a function symbol starts.
-    m("read-dwarf-symbols-not-asked", G, "dwarf.placed(function_symbols(binary, target))", "dwarf.placed({})", (GATE,)),
+    m("read-dwarf-symbols-not-asked", G, "dwarf.placed(function_symbols(binary, target), ", "dwarf.placed({}, ", (GATE,)),
     m("read-dwarf-symbols-of-the-default-target", G, "function_symbols(binary, target)", "function_symbols(binary)", (GATE,)),
-    m("read-dwarf-placed-without-symbols", G, "dwarf.placed(function_symbols(binary, target))", 'dwarf.placed(type("Any", (), {"__contains__": lambda self, address: True})())', (GATE,)),
+    m("read-dwarf-placed-without-symbols", G, "dwarf.placed(function_symbols(binary, target), ", 'dwarf.placed(type("Any", (), {"__contains__": lambda self, address: True})(), ', (GATE,)),
     m("placed-symbol-not-required", D, "                if entry is not None and entry not in starts:", "                if False:", (EQUIV,)),
     m("placed-symbol-inverted", D, "                if entry is not None and entry not in starts:", "                if entry is not None and entry in starts:", (EQUIV,)),
     m("placed-symbol-checked-for-low-pc-only", D, "                if entry is not None and entry not in starts:", "                if entry is not None and entry not in starts and \"DW_AT_ranges\" not in die.attrs:", (EQUIV,)),
@@ -653,7 +653,22 @@ MUTANTS += [
     m("offset-forms-no-data4", D, 'OFFSET_FORMS = frozenset({"sec_offset", "rnglistx", "data4", "data8"})', 'OFFSET_FORMS = frozenset({"sec_offset", "rnglistx", "data8"})', (EQUIV,)),
     m("member-plus-uconst-search", D, "_PLUS_UCONST.fullmatch(", "_PLUS_UCONST.search(", (EQUIV,)),
     m("build-id-prefix", G, "        if ids[0] is None or ids[0] != ids[1]:", "        if ids[0] is None or ids[1] is None or ids[0][:4] != ids[1][:4]:", (GATE,)),
-    m("floor-counts-unplaced", G, "        defined = len(placed)\n", "        defined = len(placed) + len(unplaced)\n", (GATE,)),
+    # The sixth review: every function with code counts in the floor, and only an entry in no executable section has none.
+    m("floor-placed-only", G, "        defined = len(placed) + sum(gone.code for gone in unplaced)", "        defined = len(placed)", (GATE,)),
+    m("floor-counts-discarded", G, "        defined = len(placed) + sum(gone.code for gone in unplaced)", "        defined = len(placed) + len(unplaced)", (GATE,)),
+    m("floor-sections-not-asked", G, "dwarf.placed(function_symbols(binary, target), executable_sections(binary, target))", "dwarf.placed(function_symbols(binary, target))", (GATE,)),
+    m("unplaced-code-default-false", D, "    code: bool = True", "    code: bool = False", (EQUIV, GATE)),
+    m("placed-no-sections-no-code", D, "has_code = code is None or any(", "has_code = code is not None and any(", (EQUIV, GATE)),
+    m("placed-code-at-a-section-start-only", D, "any(entry in section for section in code)", "any(entry == section.start for section in code)", (EQUIV, GATE)),
+    m("placed-discarded-reason-lost", D, "NO_FUNC_START if has_code else DISCARDED", "NO_FUNC_START", (EQUIV, GATE)),
+    m("placed-unplaced-code-lost", D, "die.offset, why, has_code))", "die.offset, why))", (EQUIV, GATE)),
+    m("placed-unknown-reason-no-code", D, "                has_code = True\n", "                has_code = False\n", (EQUIV, GATE)),
+    m("sections-none-fine", D, '    if not sections:\n        raise RuntimeError(f"readelf lists no executable section of {binary}")\n', "", (EQUIV,)),
+    m("sections-readelf-failure-fine", D, '    if proc.returncode != 0:\n        raise RuntimeError(f"readelf failed on {binary}: {proc.stderr.strip()}")\n    sections = []', "    sections = []", (EQUIV,)),
+    m("sections-one-byte", D, 'range(start, start + int(match["size"], 16))', "range(start, start + 1)", (EQUIV,)),
+    m("sections-end-inclusive", D, 'range(start, start + int(match["size"], 16))', 'range(start, start + int(match["size"], 16) + 1)', (EQUIV,)),
+    m("sections-any-flags", D, '        if "X" in match["flags"]:', "        if True:", (EQUIV,)),
+    m("sections-not-asked-wide", D, '[target.tool("readelf"), "--wide", "--section-headers", str(binary)]', '[target.tool("readelf"), "--section-headers", str(binary)]', (EQUIV,)),
 ]
 
 

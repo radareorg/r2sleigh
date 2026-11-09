@@ -43,7 +43,10 @@ import merge_shards  # noqa: E402
 import link  # noqa: E402
 import run_equiv  # noqa: E402
 import selftest  # noqa: E402
-from dwarf import NO_FUNC_START, TYPE_UNIT, UNRESOLVED, Die, Dwarf, function_symbols, parse_ranges, parse_readelf  # noqa: E402
+from dwarf import (  # noqa: E402
+    DISCARDED, NO_FUNC_START, TYPE_UNIT, UNRESOLVED, Die, Dwarf, executable_sections, function_symbols, parse_ranges,
+    parse_readelf,
+)
 from r2s_batch import contract_problems, parse_pddj, run_batch  # noqa: E402
 from spec import CallSpec, call_spec  # noqa: E402
 from target import AARCH64, X86_64, Target  # noqa: E402
@@ -1184,6 +1187,36 @@ def fixture_starts(name: str) -> dict:
         return function_symbols(Path("binary"))
 
 
+def fixture_sections(name: str) -> list[range]:
+    """The executable sections of a `readelf --wide --section-headers` dump kept as a fixture."""
+    done = subprocess.CompletedProcess([], 0, (DWARF_FIXTURES / name).read_text(), "")
+    with unittest.mock.patch.object(subprocess, "run", return_value=done):
+        return executable_sections(Path("binary"))
+
+
+class ExecutableSectionTests(unittest.TestCase):
+    def test_the_executable_sections_hold_the_code(self):
+        self.assertEqual(fixture_sections("statics.a64.O0.x.sections.txt"),
+                         [range(0x640, 0x658), range(0x660, 0x6D0), range(0x700, 0xB98), range(0xB98, 0xBAC)])
+        # `.note.gnu.build-id NOTE` meets its type with one space; the debug sections are at address 0 and not executable.
+        self.assertEqual(fixture_sections("gclib.gcc.O2.gc.sections.txt")[4], range(0x1060, 0x120B))
+        self.assertEqual(len(fixture_sections("gclib.gcc.O2.gc.sections.txt")), 6)
+
+    def test_readelf_is_asked_for_the_wide_table_with_the_target_prefix(self):
+        # Without --wide a 64-bit row splits over two lines and no row would read.
+        done = subprocess.CompletedProcess([], 0, (DWARF_FIXTURES / "gclib.gcc.O2.gc.sections.txt").read_text(), "")
+        with unittest.mock.patch.object(subprocess, "run", return_value=done) as run:
+            executable_sections(Path("binary"), dataclasses.replace(X86_64, binutils_prefix="g"))
+        self.assertEqual(run.call_args.args[0], ["greadelf", "--wide", "--section-headers", "binary"])
+
+    def test_a_table_with_no_executable_section_or_a_failing_readelf_is_unreadable(self):
+        for done in (subprocess.CompletedProcess([], 0, "There are no sections in this file.\n", ""),
+                     subprocess.CompletedProcess([], 1, "", "readelf: Error: 'binary': No such file")):
+            with self.subTest(done=done), unittest.mock.patch.object(subprocess, "run", return_value=done):
+                with self.assertRaises(RuntimeError):
+                    executable_sections(Path("binary"))
+
+
 class FunctionSymbolTests(unittest.TestCase):
     def test_only_func_symbols_of_the_symtab_start_a_function(self):
         starts = fixture_starts("cold.clang.O2.bbs.syms.txt")
@@ -1331,6 +1364,40 @@ class PlacementTests(unittest.TestCase):
         # Every dynamic binary's .symtab lists its imports as FUNC symbols of the undefined section, at value 0.
         starts = fixture_starts("cold.gcc.O2.syms.txt")
         self.assertEqual(self.entry_of(starts=starts, DW_AT_low_pc="0"), (None, NO_FUNC_START))
+
+    def test_an_entry_in_no_executable_section_is_code_the_linker_discarded_and_has_no_code(self):
+        # statics.a64.O0.x: .init 0x640, .plt 0x660, .text 0x700 to 0xb98, .fini 0xb98 to 0xbac.
+        code = fixture_sections("statics.a64.O0.x.sections.txt")
+        for address, why, has_code in ((0, DISCARDED, False), (0xFFFFFFFFFFFFFFFF, DISCARDED, False),
+                                       (0xFFFFFFFE, DISCARDED, False), (0xBAC, DISCARDED, False), (0x6FF, DISCARDED, False),
+                                       (0x700, NO_FUNC_START, True), (0xB97, NO_FUNC_START, True),
+                                       (0xBAB, NO_FUNC_START, True), (0x640, NO_FUNC_START, True)):
+            with self.subTest(address=address):
+                _, unplaced = self.graph(self.function(0x40, DW_AT_low_pc=hex(address))).placed({}, code)
+                self.assertEqual((unplaced[0].why, unplaced[0].code), (why, has_code))
+        dwarf = self.graph(self.function(0x40, DW_AT_ranges="0x2c"), ranges={0x2C: (0,)})
+        self.assertEqual(dwarf.placed({}, code)[1][0].code, False)
+
+    def test_an_entry_that_starts_a_function_symbol_is_placed_whatever_the_sections_say(self):
+        placed, _ = self.graph(self.function(0x40, DW_AT_low_pc="0x10")).placed({0x10: (["f"], 1)}, [range(0x700, 0xB98)])
+        self.assertEqual([sub.low_pc for sub in placed], [0x10])
+
+    def test_without_the_sections_every_unplaced_function_has_code(self):
+        # No section table is no proof of discarded code: every unplaced function then counts in the floor.
+        for attrs in ({"DW_AT_low_pc": "0"}, {"DW_AT_low_pc": "0x1180"}, {"DW_AT_ranges": "0x60"},
+                      {"DW_AT_entry_pc": "4", "DW_AT_low_pc": "0"}):
+            with self.subTest(attrs=attrs):
+                _, unplaced = self.graph(self.function(0x40, **attrs), ranges={0x60: ()}).placed({})
+                self.assertEqual(unplaced[0].code, True)
+
+    def test_an_entry_the_dwarf_does_not_state_as_one_address_has_code_whatever_the_sections_say(self):
+        code = [range(0x700, 0xB98)]
+        for forms, attrs in (({}, {"DW_AT_ranges": "0x60"}), ({"DW_AT_entry_pc": "data1"}, {"DW_AT_entry_pc": "4", "DW_AT_low_pc": "0"}),
+                             ({}, {"DW_AT_low_pc": "zz"})):
+            with self.subTest(attrs=attrs):
+                _, unplaced = self.graph(self.function(0x40, forms, **attrs), ranges={0x60: ()}).placed({}, code)
+                self.assertNotEqual(unplaced[0].why, DISCARDED)
+                self.assertEqual(unplaced[0].code, True)
 
     def test_a_die_without_code_is_in_neither_list(self):
         declaration = self.function(0x40, DW_AT_declaration="1")

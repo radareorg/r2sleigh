@@ -512,7 +512,7 @@ jobs:
         run: |
           set -eu
           mkdir -p target/source-gold
-          for shape in cold odd seven gcsect gclib clones abi enums krt; do
+          for shape in cold odd seven gcsect gclib clones abi enums krt statics; do
             flags="-g -O2"
             case "$shape" in gcsect|gclib) flags="$flags -ffunction-sections -Wl,--gc-sections" ;; esac
             case "$shape" in abi|krt) flags="$flags -std=gnu17" ;; esac
@@ -526,6 +526,26 @@ jobs:
               --json "target/source-gold/${shape}.json" > /dev/null || status=$?
             echo "$shape: exit $status"
             test "$status" -le 1
+          done
+      # -Wl,-x drops the FUNC symbols of static functions whose code stays in .text: they count in the floor
+      # ungraded, so under a third is gradable. Exit 2 is the answer; exit 0 or 1 grades a sliver of the build.
+      - name: Refuse a build whose static functions lost their symbols
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          mkdir -p target/source-gold
+          for shape in returns statics; do
+            gcc -g -O2 -Wl,-x -o "target/source-gold/${shape}_x" "tests/gold/source_gold/${shape}.c"
+            strip -o "target/source-gold/${shape}_x_stripped" "target/source-gold/${shape}_x"
+            status=0
+            python3 scripts/differential_truth.py \
+              --debug-build "target/source-gold/${shape}_x" \
+              --stripped-build "target/source-gold/${shape}_x_stripped" \
+              --r2s target/ci/r2s > /dev/null 2> "target/source-gold/${shape}_x.err" || status=$?
+            cat "target/source-gold/${shape}_x.err"
+            echo "$shape -Wl,-x: exit $status"
+            test "$status" -eq 2
+            grep -q "functions are gradable, under one in 3" "target/source-gold/${shape}_x.err"
           done
       # gcc -g1 keeps no prototype, type or parameter: the gate has no truth, and a guess that every function is
       # `void f(void)` is what it once graded. Exit 2 is the answer; exit 0, 1 or a crash (also 1) is the bug.

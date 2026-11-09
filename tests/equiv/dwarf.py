@@ -18,14 +18,15 @@ never guessed.
 A function's address is its entry (DWARF 5, section 2.18): ``DW_AT_entry_pc``, else ``DW_AT_low_pc``, else the
 start of the first range of ``DW_AT_ranges``, and it is accepted only where a FUNC symbol of the binary starts (clang
 lists the entry of a basic-block-sections function last). ``subprograms()`` lists the functions that have a
-``DW_AT_low_pc``; ``placed()`` lists every function with code and names each one it cannot place.
+``DW_AT_low_pc``; ``placed()`` lists every function with an address and names each one it cannot place, and whether
+its entry lies in an executable section, which is what makes it code of the binary (ROADMAP D70).
 """
 
 from __future__ import annotations
 
 import re
 import subprocess
-from collections.abc import Container
+from collections.abc import Container, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,10 +45,16 @@ OFFSET_FORMS = frozenset({"sec_offset", "rnglistx", "data4", "data8"})
 _RANGE_ROW = re.compile(
     r"^\s+(?P<offset>[0-9a-f]{8})\s+(?:(?P<end><End of list>)|(?P<begin>[0-9a-f]{8,16})\s+(?:(?P<base>\(base address\))|[0-9a-f]{8,16}))"
 )
+# One row of `readelf --wide --section-headers`: `[Nr] Name Type Address Off Size ES Flg Lk Inf Al`.
+_SECTION = re.compile(
+    r"^\s*\[\s*\d+\]\s+\S+\s+\S+\s+(?P<address>[0-9a-f]+)\s+[0-9a-f]+\s+(?P<size>[0-9a-f]+)\s+[0-9a-f]+\s+(?P<flags>[A-Za-z]+)\s+\d+\s+\d+\s+\d+\s*$",
+    re.MULTILINE,
+)
 _RANGE_SECTION = re.compile(r"^Contents of the \.debug_(?:ranges|rnglists) section")
-# Why a function the DWARF gives an entry is unplaced when the container states no function there: a linker's
-# tombstone (0, all ones), a fragment of a split function, an address in the middle of one.
+# Why a function with code is unplaced: a static whose symbol `ld -x` dropped, a fragment of a split function.
 NO_FUNC_START = "no FUNC symbol of the binary starts at its entry"
+# A linker gives the code it discarded a tombstone (0, all ones), which no executable section holds.
+DISCARDED = "its entry lies in no executable section: the linker discarded its code"
 # The offset of a reference no DIE of the dump answers: a DW_FORM_ref_sig8 into a type unit. It is no void.
 UNRESOLVED = -1
 # DWARF 4 numbers .debug_types from 0 as it does .debug_info, so one offset named two DIEs (ROADMAP D70).
@@ -234,11 +241,13 @@ class Subprogram:
 
 @dataclass(frozen=True)
 class Unplaced:
-    """A function with code that has no one address in the binary: its name, its DIE and why."""
+    """A function with no one address in the binary: its name, its DIE, why, and whether it has code here."""
 
     name: str
     offset: int
     why: str
+    # False only for an entry shown to lie in no executable section: the default counts in the floor.
+    code: bool = True
 
 
 class Dwarf:
@@ -306,14 +315,15 @@ class Dwarf:
         found.sort(key=lambda s: (s.low_pc, s.name))
         return found
 
-    def placed(self, starts: Container[int]) -> tuple[list[Subprogram], list[Unplaced]]:
+    def placed(self, starts: Container[int], code: Sequence[range] | None = None) -> tuple[list[Subprogram], list[Unplaced]]:
         """Every function with code at its entry address, and each one with none.
 
-        The function's ``low_pc`` here is its entry, and ``starts`` holds the addresses where the binary's FUNC
-        symbols start. A DIE with neither ``DW_AT_low_pc`` nor ``DW_AT_ranges`` holds no code (a declaration, an
-        abstract instance) and is in neither list. Whatever the DWARF does not state as one address the binary
-        also states as a function is unplaced with the reason, never guessed: a constant ``DW_AT_entry_pc``, a
-        range list that is empty or unreadable, an address that starts no function.
+        The function's ``low_pc`` here is its entry, ``starts`` holds the addresses where the binary's FUNC
+        symbols start, and ``code`` the executable sections. A DIE with neither ``DW_AT_low_pc`` nor ``DW_AT_ranges``
+        holds no code (a declaration, an abstract instance) and is in neither list. Whatever the DWARF does not
+        state as one address the binary also states as a function is unplaced with the reason, never guessed: a
+        constant ``DW_AT_entry_pc``, a range list that is empty or unreadable, an address that starts no function.
+        Only an entry that ``code`` is given and does not hold is unplaced as having no code.
         """
         found: list[Subprogram] = []
         unplaced: list[Unplaced] = []
@@ -322,11 +332,13 @@ class Dwarf:
                 if die.tag != "DW_TAG_subprogram" or not {"DW_AT_low_pc", "DW_AT_ranges"} & die.attrs.keys():
                     continue
                 entry, why = self._entry(die)
+                has_code = True
                 if entry is not None and entry not in starts:
-                    entry, why = None, NO_FUNC_START
+                    has_code = code is None or any(entry in section for section in code)
+                    entry, why = None, NO_FUNC_START if has_code else DISCARDED
                 if entry is None:
                     named, _ = self._attr_via_origin(die, "DW_AT_name")
-                    unplaced.append(Unplaced(named.text("DW_AT_name") or "", die.offset, why))
+                    unplaced.append(Unplaced(named.text("DW_AT_name") or "", die.offset, why, has_code))
                 else:
                     found.append(self._subprogram(die, unit, entry))
         found.sort(key=lambda s: (s.low_pc, s.name))
@@ -629,6 +641,26 @@ def function_symbols(binary: Path, target: Target = X86_64) -> dict[int, tuple[l
         names.append(fields[7].split("@", 1)[0])
         symbols[address] = (names, max(known, size))
     return symbols
+
+
+def executable_sections(binary: Path, target: Target = X86_64) -> list[range]:
+    """The address ranges of the binary's executable sections; a binary with none is unreadable."""
+    proc = subprocess.run(
+        [target.tool("readelf"), "--wide", "--section-headers", str(binary)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"readelf failed on {binary}: {proc.stderr.strip()}")
+    sections = []
+    for match in _SECTION.finditer(proc.stdout):
+        if "X" in match["flags"]:
+            start = int(match["address"], 16)
+            sections.append(range(start, start + int(match["size"], 16)))
+    if not sections:
+        raise RuntimeError(f"readelf lists no executable section of {binary}")
+    return sections
 
 
 def code_constants(binary: Path, address: int, size: int, limit: int = 32,

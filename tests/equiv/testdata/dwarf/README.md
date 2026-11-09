@@ -18,3 +18,8 @@ name them) are the builds the reader refuses whole.
 `gclib.gcc.O2.gc` (`-g -O2 -ffunction-sections -Wl,--gc-sections`: 12 of 16 functions discarded, their DIEs at low_pc 0)
 and `krt.gcc.O2` (`-g -O2 -std=gnu17`: a K&R definition with a prototype in scope and one with none) are `gclib.c` and
 `krt.c`.
+
+`returns.gcc.O2.x` (`-g -O2 -Wl,-x`) and `statics.a64.O0.x` (gcc 13.3 for AArch64, `-g -O0 -Wl,-x`) are `returns.c` and
+`statics.c`: `ld -x` drops the FUNC symbols of the static functions, whose code stays in `.text`. Each `*.sections.txt`
+is `readelf --wide --section-headers` of its build, rebuilt from the same source and flags with a byte-identical
+`--syms`: the executable sections tell code the linker discarded from code with no symbol.

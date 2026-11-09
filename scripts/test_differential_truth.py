@@ -887,15 +887,17 @@ NOTES = ("Displaying notes found in: .note.gnu.build-id\n  Owner                
          "    Build ID: 6b1d4c0f2a9e7d3b5c8a1f0e2d4b6a8c9e1f3a5b\n")
 
 
-def readelf(info: str, symbols: str):
-    """A stand-in for `subprocess.run` that answers `readelf --debug-dump` with `info` and `readelf --syms` with `symbols`.
+def readelf(info: str, symbols: str, sections: str):
+    """A stand-in for `subprocess.run` answering `readelf --debug-dump`, `--syms` and `--section-headers` with the texts.
 
-    The stripped build named `stripped` has neither.
+    The stripped build named `stripped` keeps its sections and has no DWARF or symbols.
     """
 
     def run(argv, **_):
         if "--notes" in argv:
             return subprocess.CompletedProcess(argv, 0, NOTES, "")
+        if "--section-headers" in argv:
+            return subprocess.CompletedProcess(argv, 0, sections, "")
         text = "" if argv[-1] == "stripped" else symbols if "--syms" in argv else info
         return subprocess.CompletedProcess(argv, 0, text, "")
 
@@ -905,20 +907,27 @@ def readelf(info: str, symbols: str):
 FIXTURES = HERE.parent / "tests" / "equiv" / "testdata" / "dwarf"
 
 
+def fixture_texts(name: str) -> tuple[str, str, str]:
+    """The readelf dumps kept for a build (tests/equiv/testdata/dwarf): its DWARF, symbols and section headers."""
+    return tuple((FIXTURES / f"{name}{suffix}").read_text() for suffix in (".txt", ".syms.txt", ".sections.txt"))
+
+
 class ReadingDwarf(unittest.TestCase):
     """`read_dwarf` asks the oracle side's DWARF reader, with the binutils the caller names, and places by the binary's symbols."""
 
     def test_the_binutils_prefix_reaches_readelf_and_the_functions_come_back_placed(self) -> None:
         reading = mock.Mock(placed=mock.Mock(return_value=(["placed"], ["unplaced"])))
-        symbols = {0x1000: (["f"], 4)}
+        symbols, code = {0x1000: (["f"], 4)}, [range(0x1000, 0x1010)]
         with (
             mock.patch.object(dt.Dwarf, "read", return_value=reading) as read,
             mock.patch.object(dt, "function_symbols", return_value=symbols) as listed,
+            mock.patch.object(dt, "executable_sections", return_value=code) as sections,
         ):
             result = dt.read_dwarf(pathlib.Path("debug"), "g")
         self.assertEqual(read.call_args.args[1].binutils_prefix, "g")
         self.assertEqual(listed.call_args.args[1].binutils_prefix, "g")
-        reading.placed.assert_called_once_with(symbols)
+        self.assertEqual(sections.call_args.args[1].binutils_prefix, "g")
+        reading.placed.assert_called_once_with(symbols, code)
         self.assertEqual(result, (reading, ["placed"], ["unplaced"]))
 
     def test_readelf_that_is_missing_or_fails_is_unreadable(self) -> None:
@@ -935,14 +944,14 @@ class ReadingDwarf(unittest.TestCase):
         with (
             mock.patch.object(dt.Dwarf, "read", return_value=reading),
             mock.patch.object(dt, "function_symbols", return_value={}),
+            mock.patch.object(dt, "executable_sections", return_value=[range(0x1000, 0x1010)]),
             self.assertRaises(dt.Unreadable) as raised,
         ):
             dt.read_dwarf(pathlib.Path("debug"), "")
         self.assertIn("a cycle", raised.exception.causes[""])
 
     def test_a_function_is_placed_where_a_function_symbol_starts_and_nowhere_else(self) -> None:
-        gcc = (FIXTURES / "cold.gcc.O2.txt").read_text(), (FIXTURES / "cold.gcc.O2.syms.txt").read_text()
-        clang = (FIXTURES / "cold.clang.O2.bbs.txt").read_text(), (FIXTURES / "cold.clang.O2.bbs.syms.txt").read_text()
+        gcc, clang = fixture_texts("cold.gcc.O2"), fixture_texts("cold.clang.O2.bbs")
         for name, texts, placed, unplaced in [
             ("gcc lists a split function's hot part first", gcc, ["checked_div", "main", "must_alloc", "sum_bytes"], []),
             ("clang lists a basic-block-sections entry last", clang, [], ["checked_div", "main", "must_alloc", "sum_bytes"]),
@@ -953,7 +962,7 @@ class ReadingDwarf(unittest.TestCase):
             self.assertEqual(sorted(g.name for g in gone), unplaced)
 
     def test_the_gate_refuses_a_build_whose_every_function_clang_split_into_sections(self) -> None:
-        texts = (FIXTURES / "cold.clang.O2.bbs.txt").read_text(), (FIXTURES / "cold.clang.O2.bbs.syms.txt").read_text()
+        texts = fixture_texts("cold.clang.O2.bbs")
         out, err = io.StringIO(), io.StringIO()
         argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
         fragments = {0x11CD: Fn("loc.checked_div.__part.1", {}), 0x11C0: Fn("sym.checked_div", {})}
@@ -972,7 +981,7 @@ class ReadingDwarf(unittest.TestCase):
 @functools.cache
 def read_fixture(name: str):
     """`read_dwarf` over the readelf dumps kept for a build (tests/equiv/testdata/dwarf), debug build and symbols."""
-    texts = (FIXTURES / f"{name}.txt").read_text(), (FIXTURES / f"{name}.syms.txt").read_text()
+    texts = fixture_texts(name)
     with mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)):
         return texts, dt.read_dwarf(pathlib.Path("debug"), "")
 
@@ -1016,7 +1025,7 @@ class RealCompilers(unittest.TestCase):
         # gclib.c: the linker drops 12 of 16 functions, whose DIEs keep a low_pc of 0. All 4 with code are graded.
         graded, refused = partition_fixture("gclib.gcc.O2.gc")
         self.assertEqual(graded, ["main", "used_a", "used_b", "used_c"])
-        self.assertEqual(refused, {dwarf.NO_FUNC_START: sorted(f"unused_{index}" for index in range(12))})
+        self.assertEqual(refused, {dwarf.DISCARDED: sorted(f"unused_{index}" for index in range(12))})
         _, (_, placed, _) = read_fixture("gclib.gcc.O2.gc")
         said = {"main": "int32_t main(int32_t argc, char** argv)", "used_a": "int32_t used_a(int32_t a, int32_t b)",
                 "used_b": "uint32_t used_b(uint32_t a)", "used_c": "int64_t used_c(int64_t* p, int32_t n)"}
@@ -1025,6 +1034,17 @@ class RealCompilers(unittest.TestCase):
         self.assertEqual((code, err), (0, ""))
         report = json.loads(out)
         self.assertEqual((report["functions_in_dwarf"], report["functions_in_truth"], report["facts"]["correct"]), (16, 4, 11))
+
+    def test_static_functions_whose_symbols_ld_x_discarded_count_in_the_floor_and_the_build_is_refused(self) -> None:
+        # returns.c (x86-64 -O2) and statics.c (AArch64 -O0) linked with -Wl,-x: the static functions keep their code
+        # in .text and lose their FUNC symbols, so the gate places only the global ones.
+        for name, graded, total in (("returns.gcc.O2.x", 3, 12), ("statics.a64.O0.x", 3, 15)):
+            with self.subTest(name=name):
+                _, (_, placed, unplaced) = read_fixture(name)
+                self.assertEqual((len(placed), [gone.why for gone in unplaced]), (graded, [dwarf.NO_FUNC_START] * (total - graded)))
+                code, out, err = main_over_fixture(name)
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn(f"{graded} of {total} functions are gradable, under one in 3 ({total - graded} {dwarf.NO_FUNC_START})", err)
 
     def test_a_k_and_r_definition_with_a_prototype_in_scope_is_graded_by_its_own_types(self) -> None:
         # krt.c: gcc states DW_AT_prototyped and `short c` for kr_short, whose callee converts the caller's int to
@@ -1086,7 +1106,7 @@ class RealCompilers(unittest.TestCase):
         # DWARF 4 numbers .debug_types from 0, so its DIEs overwrote those of .debug_info: `main` read
         # `(int32_t, int64_t*)`; DWARF 5 leaves stubs whose enum read uint32_t. Both builds are refused whole.
         for name in ("odd.gcc.O2.dwarf4.types", "abi.gcc.O2.types"):
-            texts = (FIXTURES / f"{name}.txt").read_text(), (FIXTURES / f"{name}.syms.txt").read_text()
+            texts = fixture_texts(name)
             out, err = io.StringIO(), io.StringIO()
             argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
             with (
@@ -1136,7 +1156,7 @@ class OneProgram(unittest.TestCase):
 
 
 class Coverage(unittest.TestCase):
-    """A rate is printed only when the gate grades at least a third of the functions it places in the build."""
+    """A rate is printed only when the gate grades at least a third of the build's functions with code."""
 
     @staticmethod
     def build(graded: int, total: int) -> tuple[Source, dict[int, Fn]]:
@@ -1158,22 +1178,37 @@ class Coverage(unittest.TestCase):
             with self.subTest(graded=graded, total=total):
                 self.assertEqual(run_main(*self.build(graded, total))[0], code)
 
-    def test_a_function_the_gate_cannot_place_is_no_part_of_the_floor(self) -> None:
-        # A DIE the linker discarded has no code here; the gate cannot tell it from one it cannot place, so neither counts.
+    def test_a_function_with_code_the_gate_cannot_place_counts_in_the_floor(self) -> None:
+        # Whatever the reason, even one no code names, an unplaced function has code unless shown discarded.
         for why in (dwarf.NO_FUNC_START, "its DW_AT_entry_pc is an offset from a base, not an address", "a reason no test names"):
             with self.subTest(why=why):
                 source, stripped = self.build(1, 1)
                 source.unplaced = [dwarf.Unplaced(f"gone{index}", index, why) for index in range(9)]
-                code, report, _ = run_main(source, stripped)
-                self.assertEqual((code, report["functions_in_dwarf"], report["functions_in_truth"]), (0, 10, 1))
-                self.assertEqual(report["ungradable"], {why: [f"gone{index}" for index in range(9)]})
+                code, report, err = run_main(source, stripped)
+                self.assertEqual((code, report), (2, None))
+                self.assertIn(f"1 of 10 functions are gradable, under one in 3 (9 {why})", err)
 
-    def test_the_placed_functions_the_gate_refuses_count_whatever_is_unplaced(self) -> None:
+    def test_a_function_whose_code_the_linker_discarded_is_no_part_of_the_floor(self) -> None:
+        source, stripped = self.build(1, 1)
+        source.unplaced = [dwarf.Unplaced(f"gone{index}", index, dwarf.DISCARDED, code=False) for index in range(9)]
+        code, report, err = run_main(source, stripped)
+        self.assertEqual((code, report["functions_in_dwarf"], report["functions_in_truth"]), (0, 10, 1), err)
+        self.assertEqual(report["ungradable"], {dwarf.DISCARDED: [f"gone{index}" for index in range(9)]})
+        # Each function with code counts: 1 graded of 2 passes, 1 of 4 does not.
+        for kept, exit_code in ((1, 0), (3, 2)):
+            with self.subTest(kept=kept):
+                source.unplaced = [dwarf.Unplaced(f"gone{index}", index, dwarf.NO_FUNC_START, code=index < kept)
+                                   for index in range(9)]
+                self.assertEqual(run_main(source, stripped)[0], exit_code)
+
+    def test_the_placed_functions_the_gate_refuses_count_beside_the_unplaced_ones(self) -> None:
         source, stripped = self.build(1, 4)
         source.unplaced = [dwarf.Unplaced(f"gone{index}", index, dwarf.NO_FUNC_START) for index in range(9)]
         code, report, err = run_main(source, stripped)
         self.assertEqual((code, report), (2, None))
-        self.assertIn("1 of 4 functions are gradable", err)
+        self.assertIn("1 of 13 functions are gradable", err)
+        source.unplaced = [dataclasses.replace(gone, code=False) for gone in source.unplaced]
+        self.assertIn("1 of 4 functions are gradable", run_main(source, stripped)[2])
 
 
 class Causes(unittest.TestCase):
