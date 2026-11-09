@@ -521,7 +521,7 @@ class TruthIsDwarf(unittest.TestCase):
         self.assertEqual(declared.params, [ct.integer(4, True), ct.pointer(ct.integer(1, None)), ct.pointer(ct.integer(4, True))])
 
     def test_extra_parameters_beyond_the_source_are_not_a_fact(self) -> None:
-        # The source states two parameters; a third the engine adds is graded by no fact (D78 (b)).
+        # The source states two parameters; a third the engine adds is graded by no fact (D84).
         said = fn("int32_t fcn_1000(int32_t arg0, int32_t arg1, int32_t arg2)")
         code, report, _ = run_main({0x1000: "int32_t f(int32_t a, int32_t b)"}, {0x1000: said})
         self.assertEqual((code, report["facts"]["correct"]), (0, 3))
