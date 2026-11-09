@@ -740,24 +740,17 @@ mod tests {
     /// `name` and every name one insert, delete or substitution of a character of `alphabet` away from it.
     fn single_edits(name: &str, alphabet: &[char]) -> Vec<String> {
         let chars = name.chars().collect::<Vec<_>>();
-        let edited = |edit: &dyn Fn(&mut Vec<char>)| {
-            let mut chars = chars.clone();
-            edit(&mut chars);
-            chars.into_iter().collect::<String>()
+        let spelled = |left: &[char], middle: Option<&char>, right: &[char]| {
+            left.iter().chain(middle).chain(right).collect::<String>()
         };
         let mut names = vec![name.to_owned()];
+        // At each position: insert before it, substitute it, delete it (past the end these repeat other names).
         for at in 0..=chars.len() {
-            names.extend(
-                alphabet
-                    .iter()
-                    .map(|c| edited(&|chars| chars.insert(at, *c))),
-            );
-            if at < chars.len() {
-                names.push(edited(&|chars| {
-                    chars.remove(at);
-                }));
-                names.extend(alphabet.iter().map(|c| edited(&|chars| chars[at] = *c)));
-            }
+            let (left, rest) = chars.split_at(at);
+            let after = rest.get(1..).unwrap_or_default();
+            names.extend(alphabet.iter().map(|c| spelled(left, Some(c), rest)));
+            names.extend(alphabet.iter().map(|c| spelled(left, Some(c), after)));
+            names.push(spelled(left, None, after));
         }
         names
     }
