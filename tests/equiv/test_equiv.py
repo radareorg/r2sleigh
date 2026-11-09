@@ -1077,6 +1077,19 @@ class OneGraphTests(unittest.TestCase):
             parse_readelf(text)
         self.assertIn("two DIEs at offset 0x14", str(raised.exception))
 
+    def test_an_instance_without_formals_takes_those_of_the_first_origin_that_lists_them(self):
+        # An out-of-line copy lists no formals; its abstract origin, a declaration, does (and a second one too).
+        formal = Die(0x58, "DW_TAG_formal_parameter", 2, attrs={"DW_AT_name": "n", "DW_AT_type": "<0x30>"})
+        other = Die(0x68, "DW_TAG_formal_parameter", 2, attrs={"DW_AT_name": "late", "DW_AT_type": "<0x30>"})
+        copy = Die(0x40, "DW_TAG_subprogram", 1, attrs={"DW_AT_low_pc": "0x1000", "DW_AT_abstract_origin": "<0x50>"})
+        origin = Die(0x50, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": "f", "DW_AT_specification": "<0x60>"},
+                     children=[formal])
+        declaration = Die(0x60, "DW_TAG_subprogram", 1, attrs={"DW_AT_name": "f"}, children=[other])
+        unit = Die(0x10, "DW_TAG_compile_unit", 0, attrs={"DW_AT_name": "t.c"}, children=[copy, origin, declaration])
+        dwarf = Dwarf([unit], {d.offset: d for d in (unit, copy, origin, declaration, formal, other)})
+        placed, _ = dwarf.placed(AnyAddress())
+        self.assertEqual([(sub.name, [p.name for p in sub.parameters]) for sub in placed], [("f", ["n"])])
+
     def test_a_cycle_of_origins_is_an_error_and_not_a_hang(self):
         first = Die(0x40, "DW_TAG_subprogram", 1, attrs={"DW_AT_low_pc": "0x1000", "DW_AT_abstract_origin": "<0x50>"})
         second = Die(0x50, "DW_TAG_subprogram", 1, attrs={"DW_AT_abstract_origin": "<0x40>"})
@@ -1096,13 +1109,14 @@ class OneGraphTests(unittest.TestCase):
         text = (CU + " <1><40>: Abbrev Number: 4 (DW_TAG_subrange_type)\n"
                 "    <41>   DW_AT_upper_bound : (exprloc) 3 byte block: 91 68 6 \t(DW_OP_fbreg: -24; DW_OP_deref)\n"
                 "    <45>   DW_AT_count       : (sdata) -1\n    <46>   DW_AT_lower_bound : 7\n"
-                "    <47>   DW_AT_ranges      : (sec_offset) 0x2c\n")
+                "    <47>   DW_AT_ranges      : (sec_offset) 0x2c\n    <48>   DW_AT_byte_size   : (implicit_const) 8\n")
         die = parse_readelf(text)[1][0x40]
         self.assertIsNone(die.number("DW_AT_upper_bound"))  # the block's length, 3, was read as the bound
         self.assertEqual(die.number("DW_AT_count"), -1)
         self.assertIsNone(die.number("DW_AT_lower_bound"))  # a value whose form readelf does not name
         self.assertIsNone(die.number("DW_AT_ranges"))
         self.assertIsNone(die.number("DW_AT_name"))
+        self.assertEqual(die.number("DW_AT_byte_size"), 8)  # gcc writes the size of most types once, in the abbrev
 
     def test_a_dwarf_2_member_offset_is_its_one_plus_uconst(self):
         text = (CU + " <1><40>: Abbrev Number: 5 (DW_TAG_structure_type)\n    <41>   DW_AT_byte_size   : (data1) 16\n"
@@ -1129,10 +1143,12 @@ class OneGraphTests(unittest.TestCase):
                 die(0x80, "DW_TAG_enumeration_type", DW_AT_byte_size="4", DW_AT_type="<0x30>"),
                 die(0x90, "DW_TAG_enumeration_type", DW_AT_declaration="1", DW_AT_byte_size="8", DW_AT_type="<0x30>"),
                 die(0xA0, "DW_TAG_base_type", DW_AT_encoding="5\t(signed)", DW_AT_name="int"),
-                die(0xB0, "DW_TAG_structure_type", DW_AT_signature=": 0x986483db34619643")]
+                die(0xB0, "DW_TAG_structure_type", DW_AT_signature=": 0x986483db34619643"),
+                die(0xC0, "DW_TAG_pointer_type", DW_AT_byte_size="8"),
+                die(0xD0, "DW_TAG_enumeration_type", DW_AT_byte_size="8", DW_AT_type="<0xc0>")]
         dwarf = Dwarf([], {d.offset: d for d in dies})
         self.assertEqual((dwarf.type(0x40).kind, dwarf.type(0x40).size, dwarf.type(0x40).signed), ("int", 8, True))
-        for offset in (0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0):
+        for offset in (0x50, 0x60, 0x70, 0x80, 0x90, 0xA0, 0xB0, 0xD0):
             with self.subTest(offset=hex(offset)):
                 self.assertEqual(dwarf.type(offset).kind, "unsupported")
 

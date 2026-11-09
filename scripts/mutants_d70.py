@@ -626,7 +626,7 @@ MUTANTS += [
     m("origin-attr-own-die-only", D, '            if name in node.attrs:\n                return node, hops > 0', '            if name in node.attrs and not hops:\n                return node, False', (EQUIV, GATE)),
     m("formals-own-die-only", D, "        source = next((node for node in self._origins(die) if any(", "        source = next((node for node in [die] if any(", (EQUIV, GATE)),
     m("member-plus-uconst-ignored", D, "                location = int(found.group(1))", "                location = 2", (EQUIV,)),
-    m("member-expression-is-zero", D, '                if found is None:\n                    raise ValueError(f"member at {child.offset:#x}: a location that is no offset")\n', '                if found is None:\n                    found = re.match("()", "")\n', (EQUIV,)),
+    m("member-expression-is-zero", D, '                if found is None:\n                    raise ValueError(f"member at {child.offset:#x}: a location that is no offset")\n                location = int(found.group(1))', '                location = int(found.group(1)) if found else 0', (EQUIV,)),
     m("describe-signature-fine", D, '        if "DW_AT_signature" in die.attrs:\n            return TypeInfo(kind="unsupported", spelling=spelled, reason="a type unit stub")\n', '', (EQUIV,)),
     m("describe-size-unstated-fine", D, '        if die.tag in ("DW_TAG_base_type", "DW_TAG_enumeration_type") and stated is None:', '        if False:', (EQUIV,)),
     m("describe-enum-sign-default", D, '            return TypeInfo(kind="int", size=size, signed=underlying.signed, spelling=spelled)', '            return TypeInfo(kind="int", size=size, signed=False, spelling=spelled)', (EQUIV,)),
