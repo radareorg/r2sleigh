@@ -645,7 +645,15 @@ MUTANTS += [
     m("floor-half", G, "GRADED_FLOOR = 3", "GRADED_FLOOR = 2", (GATE,)),
     m("floor-quarter", G, "GRADED_FLOOR = 3", "GRADED_FLOOR = 4", (GATE,)),
     m("floor-at-the-floor-refused", G, "        if len(truth) * GRADED_FLOOR < defined:", "        if len(truth) * GRADED_FLOOR <= defined:", (GATE,)),
-    m("floor-counts-placed-only", G, "        defined = len(placed) + len(unplaced)", "        defined = len(placed)", (GATE,)),
+    # The fifth review's survivors: a bound of 256 or more, a DWARF 3 range list, an op around plus_uconst, a build ID prefix.
+    m("number-constant-forms-no-data2", D, '"data1", "data2", "data4"', '"data1", "data4"', (EQUIV,)),
+    m("number-constant-forms-no-data4", D, '"data2", "data4", "data8", "data16"', '"data2", "data8", "data16"', (EQUIV,)),
+    m("number-constant-forms-no-data8", D, '"data4", "data8", "data16"', '"data4", "data16"', (EQUIV,)),
+    m("number-constant-forms-no-udata", D, '"sdata", "udata", "implicit_const"})', '"sdata", "implicit_const"})', (EQUIV,)),
+    m("offset-forms-no-data4", D, 'OFFSET_FORMS = frozenset({"sec_offset", "rnglistx", "data4", "data8"})', 'OFFSET_FORMS = frozenset({"sec_offset", "rnglistx", "data8"})', (EQUIV,)),
+    m("member-plus-uconst-search", D, "_PLUS_UCONST.fullmatch(", "_PLUS_UCONST.search(", (EQUIV,)),
+    m("build-id-prefix", G, "        if ids[0] is None or ids[0] != ids[1]:", "        if ids[0] is None or ids[1] is None or ids[0][:4] != ids[1][:4]:", (GATE,)),
+    m("floor-counts-unplaced", G, "        defined = len(placed)\n", "        defined = len(placed) + len(unplaced)\n", (GATE,)),
 ]
 
 

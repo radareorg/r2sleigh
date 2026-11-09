@@ -1117,6 +1117,10 @@ class OneGraphTests(unittest.TestCase):
         self.assertIsNone(die.number("DW_AT_ranges"))
         self.assertIsNone(die.number("DW_AT_name"))
         self.assertEqual(die.number("DW_AT_byte_size"), 8)  # gcc writes the size of most types once, in the abbrev
+        for form in ("data1", "data2", "data4", "data8", "udata", "sdata"):
+            with self.subTest(form=form):  # an array bound or a struct size of 256 or more is no data1
+                text = CU + f" <1><40>: Abbrev Number: 4 (DW_TAG_subrange_type)\n    <41>   DW_AT_upper_bound : ({form}) 299\n"
+                self.assertEqual(parse_readelf(text)[1][0x40].number("DW_AT_upper_bound"), 299)
 
     def test_a_dwarf_2_member_offset_is_its_one_plus_uconst(self):
         text = (CU + " <1><40>: Abbrev Number: 5 (DW_TAG_structure_type)\n    <41>   DW_AT_byte_size   : (data1) 16\n"
@@ -1126,9 +1130,13 @@ class OneGraphTests(unittest.TestCase):
                 "    <4a>   DW_AT_data_member_location: (data1) 12\n")
         units, index = parse_readelf(text)
         self.assertEqual([member.offset for member in Dwarf(units, index).members(0x40)], [8, 12])
-        index[0x42].attrs["DW_AT_data_member_location"] = "3 byte block: 23 8 6 \t(DW_OP_plus_uconst: 8; DW_OP_deref)"
-        with self.assertRaises(ValueError):
-            Dwarf(units, index).members(0x40)
+        for other in ("3 byte block: 23 8 6 \t(DW_OP_plus_uconst: 8; DW_OP_deref)",
+                      "3 byte block: 23 8 6 \t(DW_OP_plus_uconst: 8) (DW_OP_deref)",
+                      "(DW_OP_lit1) 2 byte block: 23 8 \t(DW_OP_plus_uconst: 8)"):
+            with self.subTest(location=other):  # one op and nothing around it is an offset
+                index[0x42].attrs["DW_AT_data_member_location"] = other
+                with self.assertRaises(ValueError):
+                    Dwarf(units, index).members(0x40)
 
     def test_an_integer_states_its_size_and_an_enum_its_underlying_type(self):
         def die(offset, tag, **attrs):
@@ -1288,6 +1296,9 @@ class PlacementTests(unittest.TestCase):
 
     def test_the_first_range_is_the_entry_of_a_function_with_ranges_only(self):
         self.assertEqual(self.entry_of(DW_AT_ranges="0x2c"), (0x13E0, ""))
+        for form in ("data4", "data8"):  # DWARF 2 and 3 write the offset of a range list as a constant
+            with self.subTest(form=form):
+                self.assertEqual(self.entry_of({"DW_AT_ranges": form}, DW_AT_ranges="0x2c"), (0x13E0, ""))
         self.assertEqual(self.entry_of(DW_AT_ranges="(index: 0x3): 0x2c"), (0x13E0, ""))
         for ranges in ("0x60", "0x99", "zz", "0x50", ""):
             with self.subTest(ranges=ranges):

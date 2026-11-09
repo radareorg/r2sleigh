@@ -14,3 +14,7 @@ same dumps, each with its `.syms.txt`, of `clones.c`, `abi.c` and `cold.c` in `t
 `enums.c`. `odd.gcc.O2.dwarf4.types` (`-gdwarf-4 -fdebug-types-section`: `.debug_types` reuses the offsets of
 `.debug_info`) and `abi.gcc.O2.types` (`-std=gnu17 -gdwarf-5 -fdebug-types-section`: type units and the stubs that
 name them) are the builds the reader refuses whole.
+
+`gclib.gcc.O2.gc` (`-g -O2 -ffunction-sections -Wl,--gc-sections`: 12 of 16 functions discarded, their DIEs at low_pc 0)
+and `krt.gcc.O2` (`-g -O2 -std=gnu17`: a K&R definition with a prototype in scope and one with none) are `gclib.c` and
+`krt.c`.

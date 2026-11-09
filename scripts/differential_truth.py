@@ -196,10 +196,10 @@ def signatures(binary: Path, addresses: list[int], r2s_bin: str) -> dict[int, Se
 
 NOT_GCC = "a producer other than GNU C: the truth model is validated on gcc's DWARF only"
 INSTANCE = "an instance of an origin: its parameters are the origin's, not necessarily those at its address"
-NOT_PROTOTYPED = "no DW_AT_prototyped: it states no signature (-g1, C++), or a K&R one whose parameters are promoted"
+NOT_PROTOTYPED = "no DW_AT_prototyped: it states no signature (-g1, C++), or a K&R one with no prototype in scope"
 NOT_STATED = "a result or parameter whose ABI class the gate does not state"
 SHARED = "it shares its entry address with another function"
-# A rate over fewer than one in three of a build's functions does not describe the build (ROADMAP D70).
+# A rate over fewer than one in three of a build's placed functions does not describe the build (ROADMAP D70).
 GRADED_FLOOR = 3
 UNLISTED = "the engine does not list it in the debug build"
 
@@ -402,7 +402,8 @@ def grade() -> int:
         why = "; ".join(f"{len(names)} {reason}" for reason, names in ungradable.items())
         if not truth:
             return refuse(f"no function of the debug build is gradable ({why or 'its DWARF declares no function'}).")
-        defined = len(placed) + len(unplaced)
+        # A function the gate cannot place may be one the linker discarded, with no code here: only a placed one counts.
+        defined = len(placed)
         if len(truth) * GRADED_FLOOR < defined:
             return refuse(f"{len(truth)} of {defined} functions are gradable, under one in {GRADED_FLOOR} ({why}).")
         stripped = listing(args.stripped_build, args.r2s)

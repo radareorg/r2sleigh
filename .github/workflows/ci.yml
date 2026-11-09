@@ -512,10 +512,10 @@ jobs:
         run: |
           set -eu
           mkdir -p target/source-gold
-          for shape in cold odd seven gcsect clones abi enums; do
+          for shape in cold odd seven gcsect gclib clones abi enums krt; do
             flags="-g -O2"
-            if [ "$shape" = gcsect ]; then flags="$flags -ffunction-sections -Wl,--gc-sections"; fi
-            if [ "$shape" = abi ]; then flags="$flags -std=gnu17"; fi
+            case "$shape" in gcsect|gclib) flags="$flags -ffunction-sections -Wl,--gc-sections" ;; esac
+            case "$shape" in abi|krt) flags="$flags -std=gnu17" ;; esac
             gcc $flags -o "target/source-gold/${shape}_debug" "tests/gold/source_gold/${shape}.c"
             strip -o "target/source-gold/${shape}_stripped" "target/source-gold/${shape}_debug"
             status=0
@@ -578,9 +578,11 @@ jobs:
             target/source-gold/odd.json
             target/source-gold/seven.json
             target/source-gold/gcsect.json
+            target/source-gold/gclib.json
             target/source-gold/clones.json
             target/source-gold/abi.json
             target/source-gold/enums.json
+            target/source-gold/krt.json
           if-no-files-found: warn
 
   # ── Equivalence: the harness's own tests ────────────────────────────

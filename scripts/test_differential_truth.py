@@ -548,7 +548,7 @@ class Gradable(unittest.TestCase):
     def test_a_function_with_no_prototyped_flag_states_no_signature(self) -> None:
         # gcc -g1 emits no DW_AT_prototyped, no DW_AT_type and no formal parameter: `void f(void)` read from it is a guess.
         self.assertEqual(ungradable("void f(void)", prototyped=False), dt.NOT_PROTOTYPED)
-        # K&R `int kr(a, b) char a;` has formals and no flag: a caller promotes `a` to int, DWARF says char.
+        # K&R `int kr(a, b) char a;` with no prototype in scope has formals and no flag: its caller promotes `a` to int.
         self.assertEqual(ungradable("int32_t kr(int32_t a, char* b)", prototyped=False), dt.NOT_PROTOTYPED)
 
     def test_an_instance_of_an_origin_is_not_graded_though_it_reads_like_the_source(self) -> None:
@@ -977,6 +977,23 @@ def read_fixture(name: str):
         return texts, dt.read_dwarf(pathlib.Path("debug"), "")
 
 
+def main_over_fixture(name: str, stripped: dict[int, Fn] | None = None) -> tuple[int, str, str]:
+    """Exit code, stdout and stderr of main over a fixture's debug build, every placed function of it listed."""
+    texts, (_, placed, _) = read_fixture(name)
+    out, err = io.StringIO(), io.StringIO()
+    argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
+    functions = {sub.low_pc: Fn(f"sym.{sub.name}", {}) for sub in placed}
+    with (
+        mock.patch.object(sys, "argv", argv),
+        shell({DEBUG: functions, STRIPPED: stripped or {}}),
+        mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)),
+        contextlib.redirect_stdout(out),
+        contextlib.redirect_stderr(err),
+    ):
+        code = dt.main()
+    return code, out.getvalue(), err.getvalue()
+
+
 def partition_fixture(name: str):
     """The names the gate grades and the names it refuses by reason, for a build whose every function the engine lists."""
     _, (reading, placed, unplaced) = read_fixture(name)
@@ -991,20 +1008,33 @@ class RealCompilers(unittest.TestCase):
         graded, refused = partition_fixture("cold.gcc.O2.g1")
         self.assertEqual((graded, refused), ([], {dt.NOT_PROTOTYPED: ["checked_div", "main", "must_alloc", "sum_bytes"]}))
         # The gate exits 2 on it, as the base did, and not 1 with `void f(void)` for every function.
-        texts, _ = read_fixture("cold.gcc.O2.g1")
-        out, err = io.StringIO(), io.StringIO()
-        argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
-        functions = {sub.low_pc: Fn(f"sym.{sub.name}", {}) for sub in read_fixture("cold.gcc.O2.g1")[1][1]}
-        with (
-            mock.patch.object(sys, "argv", argv),
-            shell({DEBUG: functions, STRIPPED: {}}),
-            mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)),
-            contextlib.redirect_stdout(out),
-            contextlib.redirect_stderr(err),
-        ):
-            code = dt.main()
-        self.assertEqual((code, out.getvalue()), (2, ""))
-        self.assertIn("no function of the debug build is gradable (4 " + dt.NOT_PROTOTYPED + ")", err.getvalue())
+        code, out, err = main_over_fixture("cold.gcc.O2.g1")
+        self.assertEqual((code, out), (2, ""))
+        self.assertIn("no function of the debug build is gradable (4 " + dt.NOT_PROTOTYPED + ")", err)
+
+    def test_gcc_gc_sections_discards_functions_that_are_no_part_of_the_floor(self) -> None:
+        # gclib.c: the linker drops 12 of 16 functions, whose DIEs keep a low_pc of 0. All 4 with code are graded.
+        graded, refused = partition_fixture("gclib.gcc.O2.gc")
+        self.assertEqual(graded, ["main", "used_a", "used_b", "used_c"])
+        self.assertEqual(refused, {dwarf.NO_FUNC_START: sorted(f"unused_{index}" for index in range(12))})
+        _, (_, placed, _) = read_fixture("gclib.gcc.O2.gc")
+        said = {"main": "int32_t main(int32_t argc, char** argv)", "used_a": "int32_t used_a(int32_t a, int32_t b)",
+                "used_b": "uint32_t used_b(uint32_t a)", "used_c": "int64_t used_c(int64_t* p, int32_t n)"}
+        stripped = {sub.low_pc: fn(said[sub.name], addr=sub.low_pc) for sub in placed}
+        code, out, err = main_over_fixture("gclib.gcc.O2.gc", stripped)
+        self.assertEqual((code, err), (0, ""))
+        report = json.loads(out)
+        self.assertEqual((report["functions_in_dwarf"], report["functions_in_truth"], report["facts"]["correct"]), (16, 4, 11))
+
+    def test_a_k_and_r_definition_with_a_prototype_in_scope_is_graded_by_its_own_types(self) -> None:
+        # krt.c: gcc states DW_AT_prototyped and `short c` for kr_short, whose callee converts the caller's int to
+        # short; kr_bare has no prototype in scope, so its caller promotes and DWARF states no flag.
+        _, (reading, placed, unplaced) = read_fixture("krt.gcc.O2")
+        truth, refused = dt.partition(reading, placed, unplaced, {sub.low_pc: sub.name for sub in placed})
+        spelled = {graded.name: f"{ct.spell(graded.ret)} ({', '.join(map(ct.spell, graded.params))})"
+                   for graded in truth.values()}
+        self.assertEqual(spelled, {"kr_short": "int32_t (int32_t, int16_t)", "main": "int32_t (int32_t, char**)"})
+        self.assertEqual(refused, {dt.NOT_PROTOTYPED: ["kr_bare"]})
 
     def test_gcc_ipa_clones_are_instances_whose_formals_come_in_the_clones_order(self) -> None:
         # `scale(int k, char *p, long n)` became `scale.constprop.0.isra.0` taking (n, p): the DIE lists n, k, p.
@@ -1084,7 +1114,7 @@ class OneProgram(unittest.TestCase):
     """The stripped build is graded only when it carries the debug build's build ID: one link, two copies."""
 
     def test_two_builds_whose_ids_differ_or_are_missing_are_refused(self) -> None:
-        for ids in (("6b1d", "9c2e"), (None, "6b1d"), ("6b1d", None), (None, None)):
+        for ids in (("6b1d", "9c2e"), ("6b1d4c0f", "6b1d9e2a"), ("6b1d", "6b1d4c"), (None, "6b1d"), ("6b1d", None), (None, None)):
             with self.subTest(ids=ids):
                 code, report, err = run_main({0x1000: INT}, {0x1000: fn(RIGHT)}, ids=ids)
                 self.assertEqual((code, report), (2, None))
@@ -1106,7 +1136,7 @@ class OneProgram(unittest.TestCase):
 
 
 class Coverage(unittest.TestCase):
-    """A rate is printed only when the gate grades at least a third of the functions the build defines."""
+    """A rate is printed only when the gate grades at least a third of the functions it places in the build."""
 
     @staticmethod
     def build(graded: int, total: int) -> tuple[Source, dict[int, Fn]]:
@@ -1128,11 +1158,21 @@ class Coverage(unittest.TestCase):
             with self.subTest(graded=graded, total=total):
                 self.assertEqual(run_main(*self.build(graded, total))[0], code)
 
-    def test_a_function_the_gate_cannot_place_counts_toward_the_floor(self) -> None:
-        source, stripped = self.build(1, 1)
-        source.unplaced = [dwarf.Unplaced(f"cold{index}", index, dwarf.NO_FUNC_START) for index in range(3)]
-        code, _, err = run_main(source, stripped)
-        self.assertEqual(code, 2)
+    def test_a_function_the_gate_cannot_place_is_no_part_of_the_floor(self) -> None:
+        # A DIE the linker discarded has no code here; the gate cannot tell it from one it cannot place, so neither counts.
+        for why in (dwarf.NO_FUNC_START, "its DW_AT_entry_pc is an offset from a base, not an address", "a reason no test names"):
+            with self.subTest(why=why):
+                source, stripped = self.build(1, 1)
+                source.unplaced = [dwarf.Unplaced(f"gone{index}", index, why) for index in range(9)]
+                code, report, _ = run_main(source, stripped)
+                self.assertEqual((code, report["functions_in_dwarf"], report["functions_in_truth"]), (0, 10, 1))
+                self.assertEqual(report["ungradable"], {why: [f"gone{index}" for index in range(9)]})
+
+    def test_the_placed_functions_the_gate_refuses_count_whatever_is_unplaced(self) -> None:
+        source, stripped = self.build(1, 4)
+        source.unplaced = [dwarf.Unplaced(f"gone{index}", index, dwarf.NO_FUNC_START) for index in range(9)]
+        code, report, err = run_main(source, stripped)
+        self.assertEqual((code, report), (2, None))
         self.assertIn("1 of 4 functions are gradable", err)
 
 
