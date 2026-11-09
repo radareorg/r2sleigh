@@ -85,65 +85,7 @@ pub(crate) fn exit() -> CStmt {
 /// One argument of every `CExpr` form; the match has no wildcard, so a new form must join the list.
 fn arguments() -> Vec<CExpr> {
     let x = CExpr::var(crate::symbol::SymbolTable::new().declare_or_reuse("x"));
-    let boxed = || Box::new(x.clone());
-    let int = crate::ast::CType::Int {
-        bits: 32,
-        signedness: r2types::Signedness::Signed,
-    };
-    let forms = vec![
-        CExpr::observe_one(test_render_observation_id(7), x.clone()),
-        CExpr::IntLit(1),
-        CExpr::UIntLit(1),
-        CExpr::FloatLit(1.0, 64),
-        CExpr::StringLit("s".to_owned()),
-        CExpr::CharLit('c'),
-        x.clone(),
-        CExpr::External {
-            name: "g".to_owned(),
-            kind: ExternalKind::Global,
-        },
-        CExpr::DataObject {
-            address: 0x40,
-            name: "d".to_owned(),
-        },
-        CExpr::Unary {
-            op: crate::ast::UnaryOp::Neg,
-            operand: boxed(),
-        },
-        CExpr::binary(crate::ast::BinaryOp::Add, x.clone(), CExpr::IntLit(1)),
-        CExpr::Ternary {
-            cond: boxed(),
-            then_expr: boxed(),
-            else_expr: boxed(),
-        },
-        CExpr::cast(int.clone(), x.clone()),
-        CExpr::cast(int.clone(), CExpr::IntLit(1)),
-        CExpr::call(
-            CExpr::External {
-                name: "f".to_owned(),
-                kind: ExternalKind::Import,
-            },
-            vec![x.clone()],
-        ),
-        CExpr::Subscript {
-            base: boxed(),
-            index: boxed(),
-        },
-        CExpr::Member {
-            base: boxed(),
-            member: "m".to_owned(),
-        },
-        CExpr::PtrMember {
-            base: boxed(),
-            member: "m".to_owned(),
-        },
-        CExpr::Sizeof(boxed()),
-        CExpr::SizeofType(int),
-        CExpr::AddrOf(boxed()),
-        CExpr::Deref(boxed()),
-        CExpr::Comma(vec![x.clone(), x.clone()]),
-        CExpr::Paren(boxed()),
-    ];
+    let forms = [leaves(&x), composites(&x)].concat();
     for form in &forms {
         match form {
             CExpr::Observed { .. }
@@ -172,6 +114,73 @@ fn arguments() -> Vec<CExpr> {
         }
     }
     forms
+}
+
+/// The forms with no operand: literals, the variable `x` bare and observed, and names the function does not own.
+fn leaves(x: &CExpr) -> Vec<CExpr> {
+    vec![
+        CExpr::observe_one(test_render_observation_id(7), x.clone()),
+        CExpr::IntLit(1),
+        CExpr::UIntLit(1),
+        CExpr::FloatLit(1.0, 64),
+        CExpr::StringLit("s".to_owned()),
+        CExpr::CharLit('c'),
+        x.clone(),
+        CExpr::External {
+            name: "g".to_owned(),
+            kind: ExternalKind::Global,
+        },
+        CExpr::DataObject {
+            address: 0x40,
+            name: "d".to_owned(),
+        },
+    ]
+}
+
+/// The forms over operands, each over `x`, and a cast of a literal beside the cast of `x`.
+fn composites(x: &CExpr) -> Vec<CExpr> {
+    let boxed = || Box::new(x.clone());
+    let int = crate::ast::CType::Int {
+        bits: 32,
+        signedness: r2types::Signedness::Signed,
+    };
+    let callee = CExpr::External {
+        name: "f".to_owned(),
+        kind: ExternalKind::Import,
+    };
+    vec![
+        CExpr::Unary {
+            op: crate::ast::UnaryOp::Neg,
+            operand: boxed(),
+        },
+        CExpr::binary(crate::ast::BinaryOp::Add, x.clone(), CExpr::IntLit(1)),
+        CExpr::Ternary {
+            cond: boxed(),
+            then_expr: boxed(),
+            else_expr: boxed(),
+        },
+        CExpr::cast(int.clone(), x.clone()),
+        CExpr::cast(int.clone(), CExpr::IntLit(1)),
+        CExpr::call(callee, vec![x.clone()]),
+        CExpr::Subscript {
+            base: boxed(),
+            index: boxed(),
+        },
+        CExpr::Member {
+            base: boxed(),
+            member: "m".to_owned(),
+        },
+        CExpr::PtrMember {
+            base: boxed(),
+            member: "m".to_owned(),
+        },
+        CExpr::Sizeof(boxed()),
+        CExpr::SizeofType(int),
+        CExpr::AddrOf(boxed()),
+        CExpr::Deref(boxed()),
+        CExpr::Comma(vec![x.clone(), x.clone()]),
+        CExpr::Paren(boxed()),
+    ]
 }
 
 /// Calls to `exit`: none to sixteen arguments with each form at each position, and every ordered pair of forms.

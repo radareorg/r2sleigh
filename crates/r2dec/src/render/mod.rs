@@ -481,6 +481,7 @@ pub(crate) fn residual_function_for_render_boundary(func_name: &str, reason: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::test_render_observation_id;
     use std::collections::BTreeSet;
 
     fn id(index: usize) -> RenderObservationId {
@@ -536,15 +537,19 @@ mod tests {
         ] {
             let evidence = Evidence::new(set, &|_| false);
             // A selection the call does not carry leaves its role to the declaration.
-            let other = crate::ast::test_render_observation_id(9);
-            for selections in [BTreeSet::new(), BTreeSet::from([other])] {
-                for call in crate::structure::support::exit_calls() {
-                    assert_eq!(
-                        statement_role(&call, &evidence, &selections),
-                        role,
-                        "{call:?} {selections:?}"
-                    );
-                }
+            let selected = [
+                BTreeSet::new(),
+                BTreeSet::from([test_render_observation_id(9)]),
+            ];
+            let calls = crate::structure::support::exit_calls();
+            for (call, selections) in
+                calls.flat_map(|call| selected.iter().map(move |s| (call.clone(), s)))
+            {
+                assert_eq!(
+                    statement_role(&call, &evidence, selections),
+                    role,
+                    "{call:?} {selections:?}"
+                );
             }
         }
     }
