@@ -1,3 +1,4 @@
+#![cfg(test)]
 //! Fixtures for the structure tests: a CFG from terminators, and statements observed as a block's.
 
 use r2ssa::cfg::{BasicBlock, BlockTerminator, CFG};
