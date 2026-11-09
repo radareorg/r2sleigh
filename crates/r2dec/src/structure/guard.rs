@@ -177,7 +177,8 @@ mod tests {
     use crate::ast::{BinaryOp, CExpr, UnaryOp, test_render_observation_id};
     use crate::structure::certify::{StatementRole, Violation, certify};
     use crate::structure::support::{
-        Fixture, at, branch, cfg, cond, cond_branch, declared, exit, expr, never_returns,
+        Fixture, at, branch, cfg, cond, cond_branch, declared, exit, exit_calls, expr,
+        never_returns,
     };
     use r2ssa::cfg::{BlockTerminator, CFG};
     use r2ssa::domtree::DomTree;
@@ -651,8 +652,8 @@ mod tests {
         then_rewrites == 1 && count_elses(&then) == 0
     }
 
-    /// The calls to end an arm with, each with a blank to put after it. Blanks write nothing, so none is a statement
-    /// control could pass the call by: bare or observed.
+    /// The calls to end an arm with, with none to three arguments, each with a blank to put after it. Blanks write
+    /// nothing, so none is a statement control could pass the call by: bare or observed.
     fn calls_and_blanks() -> Vec<(CStmt, CStmt)> {
         let blanks = [
             CStmt::Empty,
@@ -660,8 +661,8 @@ mod tests {
             at(0x60, CStmt::Empty),
             at(0x60, CStmt::Comment("c".into())),
         ];
-        [exit(), at(0x20, exit())]
-            .into_iter()
+        exit_calls()
+            .flat_map(|call| [call.clone(), at(0x20, call)])
             .flat_map(|call| blanks.clone().map(|blank| (call.clone(), blank)))
             .collect()
     }

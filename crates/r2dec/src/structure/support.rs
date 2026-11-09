@@ -82,6 +82,17 @@ pub(crate) fn exit() -> CStmt {
     call_to(EXIT)
 }
 
+/// Calls to `exit` with none to three arguments: `err` and `errx` take two or more, and no reader may count them.
+pub(crate) fn exit_calls() -> impl Iterator<Item = CStmt> {
+    (0..=3).map(|count| {
+        let callee = CExpr::External {
+            name: EXIT.to_owned(),
+            kind: ExternalKind::Function,
+        };
+        CStmt::Expr(CExpr::call(callee, (0..count).map(CExpr::IntLit).collect()))
+    })
+}
+
 /// The callees the tests' evidence declares never to return: `exit`.
 pub(crate) fn declared() -> std::collections::BTreeSet<String> {
     std::collections::BTreeSet::from([EXIT.to_owned()])

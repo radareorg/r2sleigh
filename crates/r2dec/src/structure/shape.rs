@@ -737,33 +737,59 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_callee_never_returns_by_its_declared_name_and_by_no_name_beside_it() {
-        let sets: [&[&str]; 4] = [&["exit"], &["_exit", "abort"], &["longjmp", "exit"], &[]];
-        for declared in sets {
-            let set = declared.iter().map(|name| (*name).to_owned()).collect();
-            let evidence = Evidence::new(&set, &|_| false);
-            // Names built from each declared one: longer, shorter, shifted or recased are other callees.
-            let mut names = vec![String::new(), "main".to_owned()];
-            for name in declared {
-                let (head, tail) = (&name[..name.len() - 1], &name[1..]);
-                names.extend([
-                    format!("{name}_status"),
-                    format!("{name}s"),
-                    format!("_{name}"),
-                    format!("{name}_"),
-                    format!("my{name}"),
-                    name.to_uppercase(),
-                    head.to_owned(),
-                    tail.to_owned(),
-                    (*name).to_owned(),
-                ]);
+    /// `name` and every name one insert, delete or substitution of a character of `alphabet` away from it.
+    fn single_edits(name: &str, alphabet: &[char]) -> Vec<String> {
+        let chars = name.chars().collect::<Vec<_>>();
+        let edited = |edit: &dyn Fn(&mut Vec<char>)| {
+            let mut chars = chars.clone();
+            edit(&mut chars);
+            chars.into_iter().collect::<String>()
+        };
+        let mut names = vec![name.to_owned()];
+        for at in 0..=chars.len() {
+            names.extend(
+                alphabet
+                    .iter()
+                    .map(|c| edited(&|chars| chars.insert(at, *c))),
+            );
+            if at < chars.len() {
+                names.push(edited(&|chars| {
+                    chars.remove(at);
+                }));
+                names.extend(alphabet.iter().map(|c| edited(&|chars| chars[at] = *c)));
             }
-            for name in &names {
+        }
+        names
+    }
+
+    #[test]
+    fn a_callee_never_returns_by_its_declared_name_and_by_no_name_one_edit_from_it() {
+        // The names the C libraries declare; one may be an edit of another (`exit`, `_exit`), so the set decides.
+        let names = [
+            "exit",
+            "_exit",
+            "_Exit",
+            "abort",
+            "err",
+            "errx",
+            "__longjmp_chk",
+            "__stack_chk_fail",
+        ];
+        let alphabet = (('a'..='z').chain('A'..='Z').chain('0'..='9'))
+            .chain("_.@:- /".chars())
+            .collect::<Vec<_>>();
+        let sets: [&[&str]; 3] = [&names, &["exit"], &[]];
+        for declared in sets {
+            let set = declared
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect::<BTreeSet<_>>();
+            let evidence = Evidence::new(&set, &|_| false);
+            for near in names.iter().flat_map(|name| single_edits(name, &alphabet)) {
                 assert_eq!(
-                    evidence.never_returns(&call(name)),
-                    declared.contains(&name.as_str()),
-                    "{name:?} against {declared:?}"
+                    evidence.never_returns(&call(&near)),
+                    set.contains(&near),
+                    "{near:?} against {declared:?}"
                 );
             }
         }

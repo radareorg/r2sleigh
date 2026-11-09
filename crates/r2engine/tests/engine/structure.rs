@@ -805,6 +805,16 @@ const JOINED_INDIRECT: &[u8] = &[
     0x85, 0xff, 0x75, 0x08, 0xc7, 0x06, 0x07, 0, 0, 0, 0xeb, 0x02, 0xff, 0xd0, 0x31, 0xc0, 0xc3,
 ];
 
+/// `test edi, edi; jne cold; mov eax, 7; ret; cold: mov edi, 1; lea rsi, [rip + 0x2a]; xor eax, eax; call <import>`:
+/// a call with two arguments, the second the string at `FORMAT`, as `err(1, "bad")` is.
+const COLD_CALL_TWO_ARGUMENTS: &[u8] = &[
+    0x85, 0xff, 0x75, 0x06, 0xb8, 0x07, 0, 0, 0, 0xc3, 0xbf, 1, 0, 0, 0, 0x48, 0x8d, 0x35, 0x2a, 0,
+    0, 0, 0x31, 0xc0, 0xe8, 0, 0, 0, 0,
+];
+
+/// Where [`COLD_CALL_TWO_ARGUMENTS`]'s `lea` points, in a data section from there to the stub.
+const FORMAT: u64 = common::BASE + 0x60;
+
 /// `test edi, edi; jne a; mov [rdx], 5; test esi, esi; jne b; mov eax, 7; ret; a: mov edi, 1; call <exit>;
 /// b: call <abort>`: two different callees, each declared never to return, in one function.
 const EXIT_AND_ABORT: &[u8] = &[
@@ -910,6 +920,25 @@ fn a_function_calling_two_different_callees_that_never_return_has_a_guard_for_ea
     let at = |needle: &str| line_of(&c, needle).0;
     let order = [at("exit(1)"), at("5U)"), at("abort()"), at("return 7")];
     assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{c}");
+}
+
+#[test]
+fn a_call_with_two_arguments_declared_never_to_return_is_a_guard() {
+    // `err(1, "bad")`: the callee's declaration decides that the call does not return, whatever its arguments.
+    let mut literal = Literal::new().importing("err").with_data_after(FORMAT);
+    literal.write(FORMAT, b"bad\0");
+    let c = c_over(literal, COLD_CALL_TWO_ARGUMENTS, &[(0x18, common::STUB)]);
+    assert!(
+        !c.contains("r2sleigh refused") && !c.contains("else"),
+        "{c}"
+    );
+    let (test, call, rest) = (
+        line_of(&c, "if ("),
+        line_of(&c, "err(1, "),
+        line_of(&c, "return 7"),
+    );
+    assert!(test.0 < call.0 && call.0 < rest.0, "{c}");
+    assert_eq!((call.1 > test.1, rest.1), (true, test.1), "{c}");
 }
 
 #[test]
@@ -1024,7 +1053,8 @@ fn a_test_with_nothing_in_its_then_arm_keeps_its_else_and_the_exit_under_it_is_t
         ),
         "{c}"
     );
-    // The store the exit's else held follows the `if` on its own level.
+    // The store the exit's else held follows the `if` on its own level: the certificate does not read this order
+    // (ROADMAP D80), so a guard that wrote the store before its test certifies and only this assertion fails.
     assert_eq!((store.0, store.1 + 4), (exit.0 + 2, exit.1), "{c}");
 }
 
