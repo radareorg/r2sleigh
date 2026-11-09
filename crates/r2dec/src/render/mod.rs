@@ -259,13 +259,9 @@ fn structured(
     let body = stage("loop rotation", body, marks, &certified, |body, marks| {
         crate::structure::rotate::rotate(body, marks) != 0
     });
-    // With no callee declared never to return the guard has no arm to find, and a stage clones the body.
-    match evidence.declares_noreturn() {
-        true => stage("noreturn guards", body, marks, &certified, |body, marks| {
-            crate::structure::guard::guard(body, evidence, marks) != 0
-        }),
-        false => body,
-    }
+    stage("noreturn guards", body, marks, &certified, |body, marks| {
+        crate::structure::guard::guard(body, evidence, marks) != 0
+    })
 }
 
 /// SD's §3 certificate over a body.
@@ -527,5 +523,25 @@ mod tests {
         let kept = stage("copies", body, &mut marks, &accept, copies);
         assert_eq!(kept.observation_ids().into_owned(), [id(2)]);
         assert_eq!(marks.issued(), 4);
+    }
+
+    #[test]
+    fn a_call_ends_control_by_its_callee_s_declaration_whatever_it_passes() {
+        let declared = crate::structure::support::declared();
+        let none = std::collections::BTreeSet::new();
+        for (set, role) in [
+            (&declared, StatementRole::Ends),
+            (&none, StatementRole::Plain),
+        ] {
+            let evidence = Evidence::new(set, &|_| false);
+            for call in crate::structure::support::exit_calls() {
+                let selections = std::collections::BTreeSet::new();
+                assert_eq!(
+                    statement_role(&call, &evidence, &selections),
+                    role,
+                    "{call:?}"
+                );
+            }
+        }
     }
 }

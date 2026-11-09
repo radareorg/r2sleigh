@@ -129,7 +129,7 @@ impl super::condition::Marks for Occurrences {
 
 /// What the rewrites may rely on that the tree does not say.
 pub(crate) struct Evidence<'a> {
-    /// The callees declared never to return, which `never_returns` and `declares_noreturn` both read.
+    /// The callees declared never to return, which `never_returns` reads.
     never_return: &'a BTreeSet<String>,
     /// Whether the return ending a block hands back a merge whose inputs are pairwise distinct
     /// values (the compiler merged returns of different values into this one).
@@ -151,11 +151,6 @@ impl<'a> Evidence<'a> {
     pub(crate) fn never_returns(&self, stmt: &CStmt) -> bool {
         matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })
             if matches!(&**func, CExpr::External { name, .. } if self.never_return.contains(name)))
-    }
-
-    /// Whether any callee is declared never to return; when none is, `never_returns` is false everywhere.
-    pub(crate) fn declares_noreturn(&self) -> bool {
-        !self.never_return.is_empty()
     }
 }
 
@@ -700,41 +695,10 @@ pub(super) fn drop_unreferenced_labels(stmt: &mut CStmt) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::structure::support::call_to as call;
+    use crate::structure::support::{call_to as call, exit_calls};
 
     fn id(index: usize) -> RenderObservationId {
         RenderObservationId::from_dense_index(index)
-    }
-
-    #[test]
-    fn evidence_declares_noreturn_exactly_when_some_call_reads_as_never_returning() {
-        let sets: [&[&str]; 6] = [
-            &[],
-            &["abort"],
-            &["exit", "abort"],
-            &["abort", "longjmp", "exit"],
-            &["puts"],
-            &["exit", "abort", "longjmp", "_exit"],
-        ];
-        let names = ["exit", "abort", "longjmp", "_exit", "puts", "main"];
-        for declared in sets {
-            let set = declared.iter().map(|name| (*name).to_owned()).collect();
-            let evidence = Evidence::new(&set, &|_| false);
-            let reads = |name: &&str| evidence.never_returns(&call(name));
-            // The flag and the predicate are the one set read twice, so no set makes them disagree.
-            assert_eq!(
-                evidence.declares_noreturn(),
-                names.iter().any(reads),
-                "{declared:?}"
-            );
-            assert_eq!(evidence.declares_noreturn(), !declared.is_empty());
-            assert!(
-                names
-                    .iter()
-                    .all(|name| reads(name) == declared.contains(name))
-            );
-            assert!(!evidence.never_returns(&CStmt::Expr(CExpr::IntLit(1))));
-        }
     }
 
     /// `name` and every name one insert, delete or substitution of a character of `alphabet` away from it.
@@ -769,7 +733,7 @@ mod tests {
             "__stack_chk_fail",
         ];
         let alphabet = (('a'..='z').chain('A'..='Z').chain('0'..='9'))
-            .chain("_.@:- /".chars())
+            .chain("_.@:$- /".chars())
             .collect::<Vec<_>>();
         let sets: [&[&str]; 3] = [&names, &["exit"], &[]];
         for declared in sets {
@@ -785,6 +749,15 @@ mod tests {
                     "{near:?} against {declared:?}"
                 );
             }
+            // The declaration decides whatever the call passes, and a statement that is no call never ends.
+            for call in exit_calls() {
+                assert_eq!(
+                    evidence.never_returns(&call),
+                    set.contains("exit"),
+                    "{call:?}"
+                );
+            }
+            assert!(!evidence.never_returns(&CStmt::Expr(CExpr::IntLit(1))));
         }
     }
 

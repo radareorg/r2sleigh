@@ -82,9 +82,9 @@ pub(crate) fn exit() -> CStmt {
     call_to(EXIT)
 }
 
-/// Calls to `exit` with none to three arguments: `err` and `errx` take two or more, and no reader may count them.
+/// Calls to `exit` with none to sixteen arguments, past the six and eight registers that pass them: no reader may count them.
 pub(crate) fn exit_calls() -> impl Iterator<Item = CStmt> {
-    (0..=3).map(|count| {
+    (0..=16).map(|count| {
         let callee = CExpr::External {
             name: EXIT.to_owned(),
             kind: ExternalKind::Function,
