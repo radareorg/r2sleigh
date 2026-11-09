@@ -521,15 +521,18 @@ S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
 - Coverage 1 asks to invert D37's test. `ArgumentAreaRead` stays, so the existing test already refuses `f(stack0)`.
 - Coverage 8 asks to name a closer for 109 tail jumps. No owner in this ADR closes them; they stay residual and listed.
 
+## Decided (2026-11-09, by the maintainer)
+
+- **Name base:** `arg0`. The one name owner numbers from `arg0`, as `pdd` does; `afv` and `afi` change to match, and the census does not move.
+- **Unversioned imports:** an unversioned ELF import binds at `Declared` where the container's `DT_NEEDED` names exactly one C library. The binding rests on that container fact, never on the name alone.
+- **Static library bodies:** no row applies to a statically linked body by its name (AGENTS rule 6). Such a body is typed only from its own evidence.
+- **Scratch-result void:** its rule-8 ADR is written now, beside S1.
+
 ## Open decisions
 
-1. **Name base.** Should one owner number from `arg0`, as `pdd` does today, or from `arg1`, as radare2's `afv` does? `arg0` leaves the census unmoved. `diff_r2.py` does not diff `afv`.
-2. **Slots against C parameters.** A by-value record or an `__int128` spanning `rsi:rdx` renders as two `Convention` parameters. Should the proof line say "slots" for a hole run?
-3. **Scratch-result void.** It needs the rule-8 ADR the d72 row names: to_upper and 541 DecBench functions.
-4. **AArch64 and Apple `extension`.** Choose between cited `SpecOverride` rows and an upstream fix to the vendored Ghidra spec, which moves on one commit with the engine.
-5. **Static library bodies.** Should a library row on a statically linked body be admitted as a hint checked against the body, with a `Dispute` on disagreement? This affects static glibc and libnx.
-6. **KERNEL32 and UCRT rows.** Which Microsoft documents qualify as citations? Until rows exist, those imports stay residual, and S10's printf gate waits on `__stdio_common_vfprintf`.
-7. **Held-index RSS.** Is the budget +10% of `aa`'s peak, or is a tighter bound needed before S3 lands?
-8. **Unversioned imports.** Keep the `DT_NEEDED` single-library binding at `Declared`, or leave unversioned imports undeclared?
-9. **musl.** No musl table exists. `CLibrary::Musl` reads only the ISO and POSIX rows until one does.
-10. **D105 timing.** Its row says "before D71 merges". Moving it to S4 lets d71 merge with five known `uint64_t` headers (bash 4, pumasim 1).
+1. **Slots against C parameters.** A by-value record or an `__int128` spanning `rsi:rdx` renders as two `Convention` parameters. Should the proof line say "slots" for a hole run?
+2. **AArch64 and Apple `extension`.** Choose between cited `SpecOverride` rows and an upstream fix to the vendored Ghidra spec, which moves on one commit with the engine.
+3. **KERNEL32 and UCRT rows.** Which Microsoft documents qualify as citations? Until rows exist, those imports stay residual, and S10's printf gate waits on `__stdio_common_vfprintf`.
+4. **Held-index RSS.** Is the budget +10% of `aa`'s peak, or is a tighter bound needed before S3 lands?
+5. **musl.** No musl table exists. `CLibrary::Musl` reads only the ISO and POSIX rows until one does.
+6. **D105 timing.** Its row says "before D71 merges". Moving it to S4 lets d71 merge with five known `uint64_t` headers (bash 4, pumasim 1).
