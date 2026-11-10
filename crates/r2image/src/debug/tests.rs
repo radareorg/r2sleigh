@@ -14,6 +14,8 @@ const REVIEW: &[u8] = include_bytes!("../../../../tests/fixtures/rv_O0g");
 const GRAPH: &[u8] = include_bytes!("../../tests/data/dwarf_graph.elf");
 /// `tests/fixtures/src/two_units_{a,b}.c` at GCC 13.3.0 `-O0 -g`, one binary.
 const TWO_UNITS: &[u8] = include_bytes!("../../../../tests/fixtures/two_units_O0g");
+/// `tests/data/dwarf_nocall.c`; see its header.
+const NOCALL: &[u8] = include_bytes!("../../tests/data/dwarf_nocall.elf");
 
 fn declarations(bytes: &[u8]) -> Declarations {
     read(&object::File::parse(bytes).expect("the fixture parses"))
@@ -409,4 +411,13 @@ fn a_binary_with_no_debug_information_states_nothing() {
     // and nothing left to read any of them from.
     const GRAPH_STRIPPED: &[u8] = include_bytes!("../../tests/data/dwarf_graph_stripped.elf");
     assert!(declarations(GRAPH_STRIPPED).is_empty());
+}
+
+/// Dead-argument elimination moves `add3`'s `c` into esi and states `DW_CC_nocall`, so the
+/// declaration says no convention places it; `entry` keeps the default.
+#[test]
+fn a_nocall_function_says_no_convention_places_it() {
+    let found = declarations(NOCALL);
+    assert!(only(&found, "add3").nocall);
+    assert!(!only(&found, "entry").nocall);
 }

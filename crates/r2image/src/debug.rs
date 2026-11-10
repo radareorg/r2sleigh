@@ -699,8 +699,11 @@ impl Reader<'_, '_, '_> {
             // one of these ends the block, because the bytes after it are the
             // next function's rather than this one's.
             noreturn: self.flag(die, gimli::DW_AT_noreturn),
-            nocall: self.udata(die, gimli::DW_AT_calling_convention)
-                == Some(u64::from(gimli::DW_CC_nocall.0)),
+            // gimli reads the attribute as its own variant, which has no `udata_value`.
+            nocall: matches!(
+                self.attr(die, gimli::DW_AT_calling_convention),
+                Some((_, AttributeValue::CallingConvention(gimli::DW_CC_nocall)))
+            ),
             frame_base,
             locals,
         };
