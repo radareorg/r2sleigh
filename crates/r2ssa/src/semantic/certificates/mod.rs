@@ -1435,12 +1435,18 @@ pub(crate) fn exact_register_call_arguments(
         let Ok(index) = usize::try_from(index) else {
             give_up!("slot index {} is out of range", index);
         };
-        // A lane value stands for the wider root write the slot holds, where the views prove it.
+        // A lane value stands for the wider root write the slot holds, where the views prove it;
+        // the lane is the value's own width (the slot's, or the one its callee holds).
         let carrier = argument.lane_of.unwrap_or(value);
+        let lane = CanonicalStorageId {
+            size: graph.var(value).size,
+            ..storage
+        };
         if argument.lane_of.is_some()
             && views.and_then(|views| {
-                crate::semantic::shared::proven_low_lane(views, graph, carrier, storage)
+                crate::semantic::shared::proven_low_lane(views, graph, carrier, lane)
             }) != Some(value)
+            && !crate::semantic::shared::is_entry_lane_of(graph, value, carrier)
         {
             give_up!(
                 "slot {} value {:?} is not the low lane of {:?}",

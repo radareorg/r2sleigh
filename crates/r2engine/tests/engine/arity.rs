@@ -731,18 +731,16 @@ fn fcntl_caller_parameters(code: &'static [u8]) -> (String, Vec<(String, String)
 }
 
 /// A declared integer is read at its own width, never the register's: the call's argument is
-/// the `edi` lane the body read, so `int fd` is a 32-bit parameter. Open: D105.
+/// the `edi` lane the body read, so `int fd` is a 32-bit parameter (ROADMAP D105).
 #[test]
-#[ignore = "ROADMAP D105: the narrowed lane renders through the whole entry carrier"]
 fn a_declared_integer_is_read_at_its_width_not_the_registers() {
     let (text, parameters) = fcntl_caller_parameters(&DECLARED_INT_MOVED);
     assert_eq!(parameters.len(), 1, "{text}");
     assert_eq!(parameters[0].0, "uint32_t", "{text}");
 }
 
-/// A declared integer handed on untouched has no lane value to name. Open: D105's second half.
+/// A declared integer handed on untouched is the lane its callee holds (ROADMAP D105).
 #[test]
-#[ignore = "ROADMAP D105: an entry carrier handed on whole has no low-lane value"]
 fn a_declared_integer_handed_on_is_a_parameter_at_its_width() {
     let (text, parameters) = fcntl_caller_parameters(&DECLARED_INT);
     assert_eq!(parameters.len(), 1, "{text}");

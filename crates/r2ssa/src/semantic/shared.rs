@@ -1005,6 +1005,55 @@ pub(crate) fn proven_low_lane(
         .filter(|lane| *lane != value)
 }
 
+/// The low lane of register `storage` that a callee's declaration holds for argument `index`, where
+/// it holds less than the register: `int fd` in `rdi` is `edi` (ROADMAP D105).
+pub(crate) fn callee_held_lane(
+    interface: &crate::SourceCallSiteInterface,
+    index: u32,
+    storage: CanonicalStorageId,
+) -> Option<CanonicalStorageId> {
+    let callee = interface.exact_callee_interface()?;
+    let position = (callee.parameters().iter()).position(|parameter| {
+        parameter.index() == index && parameter.register_storage() == Some(storage)
+    })?;
+    let carrier = callee.parameter_logical_value(position)?.carrier();
+    let bytes = u32::try_from(carrier.size_bits() / 8).ok()?;
+    (storage.space == CanonicalStorageSpace::Register
+        && carrier.kind() == crate::SourceCarrierKind::LowBits
+        && carrier.offset_bits() == 0
+        && carrier.size_bits().is_multiple_of(8)
+        && bytes > 0
+        && bytes < storage.size)
+        .then_some(CanonicalStorageId {
+            size: bytes,
+            ..storage
+        })
+}
+
+/// Whether `lane` is this function's own entry value of the low lane of `carrier`, its entry
+/// value of a wider register: the formal a callee holding only that lane is passed (ROADMAP D105).
+pub(crate) fn is_entry_lane_of(graph: &SsaGraph, lane: ValueId, carrier: ValueId) -> bool {
+    let entry = |value: ValueId| {
+        let held = graph.value(value)?;
+        (graph.def_inst(value).is_none() && held.var.version == 0).then_some(held)
+    };
+    let (Some(root), Some(held)) = (entry(carrier), entry(lane)) else {
+        return false;
+    };
+    let lane_storage = graph
+        .formal_projection_storage(lane)
+        .or(held.canonical_storage);
+    match (root.canonical_storage, lane_storage) {
+        (Some(root), Some(lane)) => {
+            root.space == CanonicalStorageSpace::Register
+                && lane.space == root.space
+                && lane.offset == root.offset
+                && lane.size < root.size
+        }
+        _ => false,
+    }
+}
+
 /// A register argument narrowed to the lane its slot's bits are (`value`, with the carrier as `lane_of`),
 /// where the lane's definition has run at the call; else the carrier (ROADMAP D68).
 pub(crate) fn narrowed_argument(

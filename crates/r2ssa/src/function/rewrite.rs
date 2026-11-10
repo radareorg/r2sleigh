@@ -286,16 +286,20 @@ impl SSAFunction {
             );
             lanes.entry((root, offset, lane.size)).or_default();
         }
-        // A lane a call's interface passes is met the same way, where it first meets an entry root (B3).
-        let argument_lanes = machine_context
-            .call_site_interfaces()
-            .values()
-            .flat_map(|interface| interface.arguments())
-            .filter_map(|argument| argument.register_storage());
+        // A lane a call's interface passes, or its callee holds (ROADMAP D105), is met the same way,
+        // where it first meets an entry root (B3).
+        let argument_lanes = (machine_context.call_site_interfaces().values())
+            .flat_map(|interface| {
+                interface.arguments().iter().filter_map(|argument| {
+                    let storage = argument.register_storage()?;
+                    let held =
+                        crate::semantic::callee_held_lane(interface, argument.index(), storage);
+                    Some(held.unwrap_or(storage))
+                })
+            })
+            .collect::<Vec<_>>();
         for lane in argument_lanes {
-            let root = entry_roots
-                .iter()
-                .copied()
+            let root = (entry_roots.iter().copied())
                 .find(|root| *root != lane && machine_context.is_low_lane_of(lane, *root));
             if let Some(root) = root {
                 lanes.entry((root, 0, lane.size)).or_default();
