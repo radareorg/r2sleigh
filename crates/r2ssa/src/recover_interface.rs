@@ -1754,6 +1754,8 @@ fn recover_interface_inner(
     // A variadic prologue's saves to the register save area are its tail, not parameter reads.
     let mut save_area = prep
         .and_then(|prep| crate::save_area::register_save_area(graph, prep, slots, &observations));
+    // Each entry carrier's widest read, found once for every argument that asks (D105).
+    let held_widths = std::cell::OnceCell::new();
     // A carrier passed straight to a call is read by that call, so it belongs
     // in the same evidence as an explicit entry read. The prefix rule below is
     // unchanged and still stops at the first candidate slot nothing observes.
@@ -1762,8 +1764,6 @@ fn recover_interface_inner(
     // either case a preserved carrier is a real entry read by the call. Final
     // preparation materializes its source-declared boundary value so every
     // consumer can use the same identity.
-    // Each entry carrier's widest read, found once for every argument that asks (D105).
-    let held_widths = std::cell::OnceCell::new();
     let entry_reads = |saved: Option<&crate::dense::IdSet<crate::ValueId>>| {
         let mut reads = observed_entry_read_storages(func, graph, &observations, saved);
         let held = |call: crate::CallSiteId, index: u32, storage: CanonicalStorageId, carrier| {

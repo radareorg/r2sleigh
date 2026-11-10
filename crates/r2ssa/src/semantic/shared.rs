@@ -1046,29 +1046,9 @@ impl HeldLaneWidths {
             }) else {
                 continue;
             };
-            let widest = graph
-                .use_sites(value.id)
-                .iter()
-                .try_fold(0, |widest, site| {
-                    let read = match graph.op(site.inst) {
-                        Some(SSAOp::Subpiece { dst, offset, .. }) => {
-                            Some(offset.saturating_add(graph.var(*dst).size))
-                        }
-                        Some(SSAOp::CallUse { .. }) => {
-                            call_after(graph, site.inst, machine_context).and_then(|interface| {
-                                (interface.arguments().iter())
-                                    .filter(|argument| argument.register_storage() == Some(storage))
-                                    .filter_map(|argument| {
-                                        callee_held_lane(interface, argument.index(), storage)
-                                    })
-                                    .map(|lane| lane.size)
-                                    .min()
-                            })
-                        }
-                        _ => None,
-                    };
-                    read.map(|read| u32::max(widest, read))
-                });
+            let widest = (graph.use_sites(value.id).iter()).try_fold(0, |widest, site| {
+                read_width(graph, machine_context, storage, site.inst).map(|read| widest.max(read))
+            });
             widths.insert(value.id, widest);
         }
         Self(widths)
@@ -1091,6 +1071,28 @@ impl HeldLaneWidths {
             }
             _ => true,
         }
+    }
+}
+
+/// The low bytes of entry register `storage` one use reads: a subpiece's end, or the narrowest lane
+/// a call's callee holds of it; `None` where the use may read the whole register.
+fn read_width(
+    graph: &SsaGraph,
+    machine_context: &SourceMachineContext,
+    storage: CanonicalStorageId,
+    reader: crate::graph::InstId,
+) -> Option<u32> {
+    match graph.op(reader)? {
+        SSAOp::Subpiece { dst, offset, .. } => Some(offset.saturating_add(graph.var(*dst).size)),
+        SSAOp::CallUse { .. } => {
+            let interface = call_after(graph, reader, machine_context)?;
+            (interface.arguments().iter())
+                .filter(|argument| argument.register_storage() == Some(storage))
+                .filter_map(|argument| callee_held_lane(interface, argument.index(), storage))
+                .map(|lane| lane.size)
+                .min()
+        }
+        _ => None,
     }
 }
 
