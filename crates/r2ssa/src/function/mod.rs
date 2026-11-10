@@ -1877,64 +1877,16 @@ fn unique_call_site_identity(
     matches.next().is_none().then_some(identity)
 }
 
-/// What the code after every call to `identity`'s callee in this body reads of the result
-/// registers `callee` leaves, so one prototype holds at each (doc/adr-resolved-bodies.md, "Caller reads").
-fn reads_after(
-    (blocks, calls): (&[R2ILBlock], &CallOperations),
-    identity: SourceCallSiteIdentity,
-    callee: &SourceFunctionInterface,
-    entry: u64,
-) -> Option<r2source::SourceResultReads> {
-    let carriers = callee.result_carriers()?;
-    let read = |&(block, op): &(usize, usize)| {
-        let (integer, float, second) = (Some(carriers.integer), carriers.float, carriers.second);
-        crate::caller_reads::reads_after_call(&blocks[block], op, integer, float, second)
-    };
-    // Every direct call to `entry` is read once per body and carrier set, however many sites ask.
-    let key = (entry, carriers.integer, carriers.float, carriers.second);
-    let direct = *calls
-        .direct_reads
-        .borrow_mut()
-        .entry(key)
-        .or_insert_with(|| {
-            calls
-                .calling(entry)
-                .iter()
-                .map(read)
-                .reduce(r2source::SourceResultReads::and)
-        });
-    let indirect = (calls.at(identity.instruction()).iter())
-        .filter(|&&(block, op)| matches!(blocks[block].ops[op], R2ILOp::CallInd { .. }))
-        .map(read);
-    direct
-        .into_iter()
-        .chain(indirect)
-        .reduce(r2source::SourceResultReads::and)
-}
-
-/// A callee's entry and the integer, float and second carriers its calls are read for.
-type DirectReadsKey = (
-    u64,
-    CanonicalStorageId,
-    Option<CanonicalStorageId>,
-    Option<CanonicalStorageId>,
-);
-
-/// Each control-flow operation of the lifted body by the instruction holding it, and each direct
-/// call by its target: built once, so finding a site is O(log n) and no site rescans the body.
+/// Each control-flow operation of the lifted body by the instruction holding it: built once, so
+/// finding a site is O(log n) and no site rescans the body.
 struct CallOperations {
     by_instruction: BTreeMap<u64, Vec<(usize, usize)>>,
-    by_target: BTreeMap<u64, Vec<(usize, usize)>>,
-    /// What the direct calls to each callee read of its carriers, once asked.
-    direct_reads: std::cell::RefCell<BTreeMap<DirectReadsKey, Option<r2source::SourceResultReads>>>,
 }
 
 impl CallOperations {
     fn of(blocks: &[R2ILBlock]) -> Self {
         let mut index = Self {
             by_instruction: BTreeMap::new(),
-            by_target: BTreeMap::new(),
-            direct_reads: std::cell::RefCell::default(),
         };
         for (at, block) in blocks.iter().enumerate() {
             for (op, operation) in block.ops.iter().enumerate() {
@@ -1948,13 +1900,6 @@ impl CallOperations {
                         .or_default()
                         .push((at, op));
                 }
-                if let R2ILOp::Call { target } = operation {
-                    index
-                        .by_target
-                        .entry(target.offset)
-                        .or_default()
-                        .push((at, op));
-                }
             }
         }
         index
@@ -1963,11 +1908,6 @@ impl CallOperations {
     /// The control-flow operations of the instruction at `address`, in order.
     fn at(&self, address: u64) -> &[(usize, usize)] {
         self.by_instruction.get(&address).map_or(&[], Vec::as_slice)
-    }
-
-    /// The direct calls to `target`, in order.
-    fn calling(&self, target: u64) -> &[(usize, usize)] {
-        self.by_target.get(&target).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -2045,7 +1985,6 @@ fn correlate_call_site_interfaces(
                     callee,
                     identity,
                     source.source_revision_identity(),
-                    reads_after((blocks, calls), identity, callee, call.target_address()),
                 )
             {
                 // The gettext family is named, not prototyped, so the rule
@@ -2514,7 +2453,6 @@ impl TrustedSsaArtifact {
         // nothing construction reads differs between the two contexts.
         let stated_interface = source.function_interface().is_some();
         let mut built = None;
-        let mut result_ambiguous = false;
         // Whether the recovered result is void on the premise that no caller outside the image reads it.
         let mut closed_world = false;
         let function_interface = match source.function_interface().cloned() {
@@ -2612,7 +2550,6 @@ impl TrustedSsaArtifact {
                         break 'recovered None;
                     }
                 };
-                result_ambiguous = recovered.result_ambiguous();
                 closed_world = recovered.assumes_closed_world();
                 let minted = crate::recover_interface::mint_recovered_interface(
                     &recovered,
@@ -2655,7 +2592,6 @@ impl TrustedSsaArtifact {
                         own,
                         identity,
                         source.source_revision_identity(),
-                        reads_after((&blocks, &calls), identity, own, call.target_address()),
                     )
                 {
                     call_interfaces.push(interface);
@@ -2681,7 +2617,6 @@ impl TrustedSsaArtifact {
         machine_context.set_reentering_callees(reentering.clone());
         machine_context.set_unstated_imports(unstated_imports.clone());
         machine_context.set_callee_preserved(callees.preserved().clone());
-        machine_context.set_result_ambiguous(result_ambiguous);
         // A call to this function itself is stated by the interface just settled, where it mints none.
         let mut callee_statements = callee_statements;
         let entry = source.image().entry_address();

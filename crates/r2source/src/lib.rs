@@ -70,7 +70,7 @@ impl MachineProfile {
 pub struct FunctionIdentity {
     address: u64,
     loader_role: Option<SourceLoaderRole>,
-    result_reads: Option<SourceResultReads>,
+    closed_result: Option<SourceClosedResult>,
 }
 
 impl FunctionIdentity {
@@ -83,99 +83,36 @@ impl FunctionIdentity {
         self.loader_role
     }
 
-    /// What the program's calls to this function read of its result registers, where r2engine read them.
-    pub const fn result_reads(&self) -> Option<SourceResultReads> {
-        self.result_reads
+    /// What the closed world decides of this function's result, where r2engine decided it.
+    pub const fn closed_result(&self) -> Option<SourceClosedResult> {
+        self.closed_result
     }
 }
 
-/// What the program's own calls to a function read of its result registers as each call leaves
-/// them, read off the callers' code (doc/adr-resolved-bodies.md, "Caller reads").
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct SourceResultReads {
-    /// Calls whose first touch of the integer result register after the call is a read.
-    pub integer: u32,
-    /// Calls whose first touch of the float result register after the call is a read.
-    pub float: u32,
-    /// The width those float reads take.
-    pub float_width: SourceFloatReadWidth,
-    /// Calls that write every byte of the integer result register before reading any, in the call's
-    /// own block.
-    pub integer_overwritten: u32,
-    /// Calls that write every byte of the float result register before reading any, likewise.
-    pub float_overwritten: u32,
-    /// Calls whose first touch of the second integer result register after the call is a read.
-    pub second: u32,
-    /// Calls that write every byte of the second integer result register before reading any.
-    pub second_overwritten: u32,
-    /// Calls read.
-    pub calls: u32,
-    /// Whether these calls are every way the image enters the function: each caller read, and no
-    /// export, entry, jump, computed or stored address reaches it (`Premise::ClosedWorld`).
-    pub exhaustive: bool,
+/// What r2engine's closed-world `CallBoundary` decides of a function's result from every call the
+/// program makes to it (doc/adr-call-boundary.md, "The callee's boundary"); stated into its seal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SourceClosedResult {
+    /// Every call leaves every result lane dead, and the body defines no result byte.
+    Void,
+    /// Every call leaves every result lane dead, but a written lane holds a defined byte (D202).
+    Unread,
+    /// A call returns it on through a cycle of forwarders, which proves no read.
+    ForwardCycle,
+    /// A call reads these lanes as the call leaves them: a value at `Solved` under the closed world.
+    Read(SourceReadLanes),
 }
 
-impl SourceResultReads {
-    /// These calls' reads and `other`'s together.
-    #[must_use]
-    pub fn and(self, other: Self) -> Self {
-        Self {
-            integer: self.integer.saturating_add(other.integer),
-            float: self.float.saturating_add(other.float),
-            float_width: self.float_width.and(other.float_width),
-            integer_overwritten: (self.integer_overwritten)
-                .saturating_add(other.integer_overwritten),
-            float_overwritten: self
-                .float_overwritten
-                .saturating_add(other.float_overwritten),
-            second: self.second.saturating_add(other.second),
-            second_overwritten: (self.second_overwritten).saturating_add(other.second_overwritten),
-            calls: self.calls.saturating_add(other.calls),
-            exhaustive: self.exhaustive && other.exhaustive,
-        }
-    }
-
-    /// Whether no call reads a result register and every call writes the integer one before reading
-    /// it, the float one too where `float`, and the second integer one where `second`.
-    pub const fn all_overwrite(&self, float: bool, second: bool) -> bool {
-        self.calls > 0
-            && self.integer == 0
-            && self.float == 0
-            && self.second == 0
-            && self.integer_overwritten == self.calls
-            && (!float || self.float_overwritten == self.calls)
-            && (!second || self.second_overwritten == self.calls)
-    }
-
-    /// Whether, besides, these calls are every way in: under a closed world, the program reads no
-    /// result of the function.
-    pub const fn none_read(&self, float: bool, second: bool) -> bool {
-        self.exhaustive && self.all_overwrite(float, second)
-    }
-}
-
-/// The width a set of float result reads takes: two reads at different widths state none.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum SourceFloatReadWidth {
-    /// No read states a width: there is none, or each reads the whole register.
-    #[default]
-    Unstated,
-    /// Every read that states a width states this one, in bytes.
-    Bytes(u32),
-    /// Two reads state different widths.
-    Disagree,
-}
-
-impl SourceFloatReadWidth {
-    /// The width these reads and `other`'s take together.
-    #[must_use]
-    pub const fn and(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Unstated, width) | (width, Self::Unstated) => width,
-            (Self::Bytes(a), Self::Bytes(b)) if a == b => Self::Bytes(a),
-            _ => Self::Disagree,
-        }
-    }
+/// The result lanes a reading call takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SourceReadLanes {
+    Integer,
+    /// The float register's low bytes, as wide as every read that states a width.
+    Float {
+        bytes: u8,
+    },
+    /// The integer and second integer registers, one value.
+    Pair,
 }
 
 /// A function the loader itself calls, recorded from the binary's dynamic
@@ -1227,16 +1164,6 @@ impl Eq for OwnedFunctionSnapshot {}
 mod tests {
     use super::*;
 
-    /// Float reads at 4 and 8 bytes state no width, whatever else joins them.
-    #[test]
-    fn float_reads_at_two_widths_state_none() {
-        use SourceFloatReadWidth::{Bytes, Disagree, Unstated};
-        assert_eq!(Bytes(4).and(Unstated), Bytes(4));
-        assert_eq!(Bytes(8).and(Bytes(8)), Bytes(8));
-        assert_eq!(Bytes(4).and(Bytes(8)), Disagree);
-        assert_eq!(Disagree.and(Bytes(4)).and(Unstated), Disagree);
-    }
-
     fn snapshot() -> OwnedFunctionSnapshot {
         OwnedFunctionSnapshot::from_captured_parts(
             MachineProfile {
@@ -1248,7 +1175,7 @@ mod tests {
             FunctionIdentity {
                 address: 0x1000,
                 loader_role: None,
-                result_reads: None,
+                closed_result: None,
             },
             FunctionPresentation {
                 display_name: "fixture".into(),
@@ -1373,7 +1300,7 @@ mod tests {
                 FunctionIdentity {
                     address: 0x2000,
                     loader_role: None,
-                    result_reads: None,
+                    closed_result: None,
                 },
                 valid.presentation().clone(),
                 valid.image().clone(),

@@ -353,7 +353,7 @@ fn a_call_is_rendered_from_the_callee_body() {
         response
             .output
             .text()
-            .contains("uint32_t fcn_100a(uint32_t, uint32_t)"),
+            .contains("r2sleigh_result_u32 fcn_100a(uint32_t, uint32_t)"),
         "{}",
         response.output
     );
@@ -645,7 +645,7 @@ fn a_staged_call_to_a_carried_callee_is_declared_at_its_carriers_widths() {
     let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text();
     assert!(
-        text.contains("uint32_t fcn_100a(uint32_t, uint32_t);"),
+        text.contains("r2sleigh_result_u32 fcn_100a(uint32_t, uint32_t);"),
         "{text}"
     );
     assert!(text.contains("r2sleigh_result_u32 caller("), "{text}");
@@ -7560,7 +7560,8 @@ fn a_stack_pointer_merged_past_a_call_to_nowhere_is_the_frame_argument_it_is() {
     );
     assert!(!rendered.contains("r2sleigh refused"), "{rendered}");
     assert!(
-        rendered.contains("fcn_1030(0x1000, (uint64_t)(frame + 16U))"),
+        // The extern is the callee's header, whose second parameter is the pointer it loads through.
+        rendered.contains("fcn_1030(0x1000, (uint64_t*)(uint64_t)(frame + 16U))"),
         "{rendered}"
     );
 }

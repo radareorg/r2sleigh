@@ -5,10 +5,19 @@ use std::fmt::Write as _;
 use crate::ast::{CFunction, CStmt};
 use crate::codegen::sanitize_comment_text_keeping;
 
+/// What the closed world decided of the result, as the proof line words it (D166).
+#[derive(Clone, Copy)]
+enum Closed {
+    Read,
+    Cycle,
+    Unread,
+}
+
 /// The proof line's columns that appear only when they are not zero, in reading order.
 fn proof_columns(
     closure: &crate::ledger::LedgerClosure,
     ledger: &crate::ledger::ObligationLedger,
+    decided: Closed,
 ) -> String {
     let split = ledger.split_rendered();
     let mut line = String::new();
@@ -36,9 +45,16 @@ fn proof_columns(
             premises.collect::<Vec<_>>().join(", ")
         );
     }
-    // A void result no call reads holds only where those calls are every way in.
+    // The closed world decided the result: a reading call makes it a value, every call dead a void
+    // or unread one (doc/adr-call-boundary.md, D166).
     if ledger.premises().contains(&r2source::Premise::ClosedWorld) {
-        line.push_str(", no call reads the result (assuming closed-world)");
+        line.push_str(match decided {
+            Closed::Read => ", a call reads the result (assuming closed-world)",
+            Closed::Cycle => {
+                ", a call returns the result on through a cycle (assuming closed-world)"
+            }
+            Closed::Unread => ", no call reads the result (assuming closed-world)",
+        });
     }
     if closure.assumed > 0 {
         let _ = write!(
@@ -95,7 +111,13 @@ pub(crate) fn note_unproven_constructs(
                 "{detail}; {} source obligations: {} rendered, {} elided, {} refused",
                 closure.total, closure.rendered, closure.elided, closure.refused
             );
-            line.push_str(&proof_columns(&closure, ledger));
+            let decided = match unproven {
+                Some(Some(r2types::UnprovenCause::ForwardCycle)) => Closed::Cycle,
+                // A value no body proves, decided only by its reading calls.
+                None if func.ret_type != crate::ast::CType::Void => Closed::Read,
+                _ => Closed::Unread,
+            };
+            line.push_str(&proof_columns(&closure, ledger, decided));
             let _ = write!(
                 &mut line,
                 "; {} statements rendered",

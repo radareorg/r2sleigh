@@ -347,6 +347,10 @@ pub enum SourceResultCause {
     Undefined,
     /// The body writes a result lane that no declaration and no reading call decides.
     Written,
+    /// Under the closed world no call reads a written result (D202): unread, never void.
+    Unread,
+    /// A call returns the result on through a cycle of forwarders.
+    ForwardCycle,
 }
 
 /// What the direct paths of a body prove of an unproven result: the convention's carrier, at the
@@ -1027,8 +1031,8 @@ pub struct SourceFunctionInterface {
     /// Where the result is unproven, the registers it may be in: each call takes the one its
     /// caller reads.
     result_carriers: Option<SourceResultCarriers>,
-    /// Whether the callers' reads chose the body's result register (doc/adr-scratch-result.md).
-    result_read_by_callers: bool,
+    /// What the closed world decided of the result (doc/adr-call-boundary.md, D166).
+    closed_result: Option<crate::SourceClosedResult>,
     /// Whether a return hands back a parameter through a merge: its cause is an entry input.
     result_holds_input: bool,
     /// What the logical types are read from (doc/adr-provenance.md):
@@ -1507,7 +1511,7 @@ impl SourceFunctionInterface {
             arity_floor: None,
             unproven_result: None,
             result_carriers: None,
-            result_read_by_callers: false,
+            closed_result: None,
             result_holds_input: false,
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
@@ -1563,7 +1567,7 @@ impl SourceFunctionInterface {
             arity_floor: self.arity_floor.clone(),
             unproven_result: self.unproven_result.clone(),
             result_carriers: self.result_carriers,
-            result_read_by_callers: self.result_read_by_callers,
+            closed_result: self.closed_result,
             result_holds_input: self.result_holds_input,
             types: self.types.clone(),
             ..rebuilt
@@ -1624,33 +1628,6 @@ impl SourceFunctionInterface {
 
     pub const fn return_kind(&self) -> SourceFunctionReturn {
         self.return_kind
-    }
-
-    /// The same interface with a return register the callee's body proved.
-    ///
-    /// Only a return that claims no carrier is replaced: an absent prototype
-    /// defaults to void and an unproven boundary claims nothing, while a body
-    /// that fills the return register on every return path outranks both. A
-    /// stated return is never overridden.
-    pub fn with_body_proven_return(
-        mut self,
-        storage: CanonicalStorageId,
-    ) -> Result<Self, SourceFunctionInterfaceError> {
-        if self.return_kind.storages().next().is_some() {
-            return Ok(self);
-        }
-        if !valid_register_storage(storage) {
-            return Err(SourceFunctionInterfaceError::InvalidRegisterStorage);
-        }
-        if self.parameters.iter().any(|parameter| {
-            parameter
-                .location
-                .overlaps(SourceParameterLocation::Register(storage))
-        }) {
-            return Err(SourceFunctionInterfaceError::OverlappingRegisterStorages);
-        }
-        self.return_kind = SourceFunctionReturn::Register { storage };
-        Ok(self)
     }
 
     /// Record which parameter this function's body forwards as a format
@@ -1877,10 +1854,10 @@ impl SourceFunctionInterface {
         self.result_carriers
     }
 
-    /// Record that the callers' reads chose the result register the body writes.
+    /// Record what r2engine's closed-world boundary decided of the result.
     #[must_use]
-    pub const fn with_result_read_by_callers(mut self) -> Self {
-        self.result_read_by_callers = true;
+    pub const fn with_closed_result(mut self, closed: crate::SourceClosedResult) -> Self {
+        self.closed_result = Some(closed);
         self
     }
 
@@ -1896,10 +1873,15 @@ impl SourceFunctionInterface {
         self.result_holds_input
     }
 
-    /// Whether the callers' reads chose the result register: a value, where the body alone proves
-    /// only a written one (doc/adr-scratch-result.md, "Rendering of Unproven").
+    /// What the closed world decided of the result, where a `CallBoundary` decided it.
+    pub const fn closed_result(&self) -> Option<crate::SourceClosedResult> {
+        self.closed_result
+    }
+
+    /// Whether a closed-world call reads the result: a value at `Solved`, where the body alone
+    /// proves only a written one (doc/adr-scratch-result.md, "Rendering of Unproven").
     pub const fn result_read_by_callers(&self) -> bool {
-        self.result_read_by_callers
+        matches!(self.closed_result, Some(crate::SourceClosedResult::Read(_)))
     }
 
     /// Whether arguments continue past the fixed ones, which `arity` does not count.

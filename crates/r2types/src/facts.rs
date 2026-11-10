@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -488,7 +488,6 @@ pub struct FunctionTypeFacts {
     pub parameter_structures: BTreeMap<usize, ParameterStructure>,
     pub callconv: Option<String>,
     pub noreturn: bool,
-    pub known_function_signatures: HashMap<String, FunctionType>,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub external_type_db: ExternalTypeDb,
@@ -512,7 +511,6 @@ pub struct FunctionTypeFactInputs {
     pub parameter_structures: BTreeMap<usize, ParameterStructure>,
     pub callconv: Option<String>,
     pub noreturn: bool,
-    pub known_function_signatures: HashMap<String, FunctionType>,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub external_type_db: ExternalTypeDb,
@@ -536,7 +534,6 @@ impl FunctionTypeFacts {
         self.merged_signature.is_none()
             && self.callconv.is_none()
             && !self.noreturn
-            && self.known_function_signatures.is_empty()
             && self.register_params.is_empty()
             && self.callee_facts.is_empty()
             && self.external_type_db.structs.is_empty()
@@ -561,7 +558,6 @@ impl FunctionTypeFacts {
             parameter_structures: self.parameter_structures,
             callconv: self.callconv,
             noreturn: self.noreturn,
-            known_function_signatures: self.known_function_signatures,
             register_params: self.register_params,
             callee_facts: self.callee_facts,
             external_type_db: self.external_type_db,
@@ -974,7 +970,6 @@ impl FunctionTypeFactsBuilder {
             parameter_structures,
             callconv,
             noreturn,
-            known_function_signatures,
             mut register_params,
             callee_facts,
             external_type_db,
@@ -1002,7 +997,6 @@ impl FunctionTypeFactsBuilder {
             parameter_structures,
             callconv,
             noreturn,
-            known_function_signatures,
             register_params,
             callee_facts,
             external_type_db,

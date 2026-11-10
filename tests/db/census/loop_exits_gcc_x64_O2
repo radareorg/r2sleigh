@@ -43,7 +43,7 @@ NAME=0x00401040
 FILE=tests/fixtures/loop_exits_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401040
 EXPECT=<<EOF
-r2sleigh_result_u64 find_then_choose(uint64_t arg0, uint32_t arg1, uint32_t arg2)
+uint64_t find_then_choose(uint64_t arg0, uint32_t arg1, uint32_t arg2)
 {
     extern char sink[];
 
@@ -51,7 +51,7 @@ r2sleigh_result_u64 find_then_choose(uint64_t arg0, uint32_t arg1, uint32_t arg2
     uint8_t tmp_40105e_0_1;
     uint32_t tmp_lane_40105e_1_0_1;
 
-    /* r2dec proof: no individual construct is marked; 44 source obligations: 34 rendered, 10 elided, 0 refused; 16 statements rendered; 1 data object type refused; the result is unproven (Written): 3 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 44 source obligations: 34 rendered, 10 elided, 0 refused, a call reads the result (assuming closed-world); 16 statements rendered; 1 data object type refused */
     {
         rdi_1 = arg0;
         for (; ; ) {
@@ -62,10 +62,10 @@ r2sleigh_result_u64 find_then_choose(uint64_t arg0, uint32_t arg1, uint32_t arg2
                 if ((uint8_t)((uint32_t)tmp_lane_40105e_1_0_1 == (uint32_t)arg1)) {
                     if ((uint8_t)((uint32_t)arg2 == (uint32_t)0U)) {
                         r2sleigh_store_u32((void*)&sink, (uint32_t)2U);
-                        return r2sleigh_carrier_u64(20);
+                        return 20;
                     } else {
                         r2sleigh_store_u32((void*)&sink, (uint32_t)1U);
-                        return r2sleigh_carrier_u64(10);
+                        return 10;
                     }
                 } else {
                     rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
@@ -76,7 +76,7 @@ r2sleigh_result_u64 find_then_choose(uint64_t arg0, uint32_t arg1, uint32_t arg2
         }
         {
             r2sleigh_store_u32((void*)&sink, (uint32_t)3U);
-            return r2sleigh_carrier_u64(0);
+            return 0;
         }
     }
 }
@@ -90,7 +90,7 @@ NAME=0x004010a0
 FILE=tests/fixtures/loop_exits_gcc_x64_O2
 CMDS=aa; pdd @ 0x004010a0
 EXPECT=<<EOF
-r2sleigh_result_u64 skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
+uint64_t skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
 {
     extern char sink[];
 
@@ -104,7 +104,7 @@ r2sleigh_result_u64 skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
     uint8_t tmp_4010d0_8_1;
     uint32_t tmp_lane_4010b0_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 79 source obligations: 69 rendered, 10 elided, 0 refused; 26 statements rendered; 1 data object type refused; the result is unproven (Written): 4 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 79 source obligations: 69 rendered, 10 elided, 0 refused, a call reads the result (assuming closed-world); 26 statements rendered; 1 data object type refused */
     {
         rcx_2 = 0;
         rdi_1 = arg0;
@@ -115,7 +115,7 @@ r2sleigh_result_u64 skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
                 tmp_lane_4010b0_6_0_1 = (uint32_t)((uint32_t)((uint64_t)rcx_2 >> 0U) + (uint32_t)1U);
                 if ((uint8_t)((int32_t)arg2 < (int32_t)tmp_lane_4010b0_6_0_1)) {
                     r2sleigh_store_u32((void*)&sink, (uint32_t)tmp_lane_4010b0_6_0_1);
-                    return r2sleigh_carrier_u64((uint64_t)0xffffffffU);
+                    return (uint64_t)0xffffffffU;
                 } else {
                     rcx_2 = (uint64_t)(uint32_t)tmp_lane_4010b0_6_0_1;
                     rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
@@ -132,7 +132,7 @@ r2sleigh_result_u64 skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
                 while ((uint8_t)((uint32_t)((uint64_t)rax_3 >> 0U) != (uint32_t)arg1)) {
                     tmp_4010d0_8_1 = r2sleigh_load_u8((void*)(uint64_t)((uint64_t)rdx_2 + (uint64_t)1U));
                     if ((uint8_t)((uint8_t)tmp_4010d0_8_1 == (uint8_t)0U)) {
-                        return r2sleigh_carrier_u64(0);
+                        return 0;
                     } else {
                         rax_3 = (uint64_t)(uint32_t)(int8_t)tmp_4010d0_8_1;
                         rdx_2 = (uint64_t)((uint64_t)rdx_2 + (uint64_t)1U);
@@ -141,11 +141,11 @@ r2sleigh_result_u64 skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
                 {
                     tmp_lane_4010e2_2_0_1 = (uint32_t)((uint64_t)((uint64_t)(uint32_t)((uint32_t)((uint64_t)rcx_2 >> 0U) - (uint32_t)((uint64_t)rdi_1 >> 0U)) + (uint64_t)rdx_2) >> 0U);
                     r2sleigh_store_u32((void*)&sink, (uint32_t)tmp_lane_4010e2_2_0_1);
-                    return r2sleigh_carrier_u64((uint64_t)(uint32_t)((uint32_t)tmp_lane_4010e2_2_0_1 + (uint32_t)100U));
+                    return (uint64_t)(uint32_t)((uint32_t)tmp_lane_4010e2_2_0_1 + (uint32_t)100U);
                 }
             }
             {
-                return r2sleigh_carrier_u64(0);
+                return 0;
             }
         }
     }

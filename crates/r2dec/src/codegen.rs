@@ -199,6 +199,10 @@ pub(crate) fn prepare_function_for_emission(mut func: CFunction) -> EmissionRead
 /// A name over an arithmetic type (`size_t`) as its target, since the unit declares no such
 /// typedef; plain `char` is C's own and stays (D168).
 fn spell_scalar_names(ty: &mut CType) {
+    // An unproven result's carrier keeps its name wherever it is spelled: the prelude declares it.
+    if crate::prelude::result_typedef(ty).is_some() {
+        return;
+    }
     match ty {
         CType::Typedef { name, ty: inner }
             if name != "char"
@@ -491,8 +495,12 @@ impl<'c> CodeGenerator<'c> {
             prelude.push('\n');
         }
         prelude.push('\n');
-        // An unproven result's carrier typedef, which the header and the helpers spell (D201).
-        if let Some(typedef) = crate::prelude::result_typedef(&func.ret_type) {
+        // Each unproven result's carrier typedef the header, the externs and the helpers spell (D201).
+        let mut typedefs = std::collections::BTreeSet::new();
+        func.visit_types(&mut |ty| {
+            typedefs.extend(crate::prelude::result_typedef(ty));
+        });
+        for typedef in typedefs {
             prelude.push_str(&typedef);
             prelude.push('\n');
         }

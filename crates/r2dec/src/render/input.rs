@@ -161,19 +161,19 @@ impl<'a> RenderInput<'a> {
         graded.or(identity)
     }
 
-    /// The prototype r2types projects for the call at `inst` from a callee body the capture holds,
-    /// whose carriers r2ssa matched to the call site; its types are only those carriers' widths.
-    pub fn callee_carrier_signature(
+    /// The callee's own projection for the call at `inst`, from a callee body the capture holds,
+    /// whose carriers r2ssa matched to the call site: its header's types, and its unproven carrier.
+    pub fn callee_projection(
         &self,
         inst: r2ssa::InstId,
-    ) -> Option<&'a r2types::FunctionType> {
-        (self.facts.report().callsites())
+    ) -> Option<(&'a r2types::FunctionType, Option<u32>)> {
+        let facts = (self.facts.report().callsites())
             .and_then(|callsites| callsites.by_callsite.get(inst))
             .filter(|facts| {
                 (facts.callee_signature_types.as_ref())
                     .is_some_and(|types| types.basis == r2source::Basis::CarrierWidth)
-            })
-            .and_then(|facts| facts.callee_signature.as_ref())
+            })?;
+        Some((facts.callee_signature.as_ref()?, facts.callee_unproven_bits))
     }
 
     /// The text at each address the capture proves holds it: static data the program never writes,

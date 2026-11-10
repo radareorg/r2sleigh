@@ -120,7 +120,7 @@ pub fn argument_registers(slots: &SourceConventionSlots) -> Vec<CanonicalStorage
 pub enum LaneFate {
     /// No path reads them, hands them back or leaves them: overwritten, or the path ends first.
     Dead,
-    /// Some path reads these bytes, the lowest among them, and none loses any.
+    /// Some path reads these bytes, the lowest among them, before any call that may leave them.
     Read(ByteMask),
     /// No path reads or loses them; some returns with these bytes in place.
     Returned(ByteMask),
@@ -367,11 +367,10 @@ impl Live {
         }
     }
 
-    /// Dead only where no byte is read, lost, handed back or handed on. A read is the register's
-    /// value only where it reaches the lowest byte (`or edx, esi` after `sete dl` is not). A tail
-    /// transfer hands the bytes to code whose use of them is not read here.
+    /// A read of the lowest byte before any call that may leave it is the call's value (`or edx,
+    /// esi` after `sete dl` is not); dead only where nothing reads, loses, returns or hands it on.
     fn fate(&self, lane: usize) -> LaneFate {
-        if self.open[lane] | self.forwarded[lane] == 0 && self.read[lane] & 1 != 0 {
+        if self.read[lane] & 1 != 0 {
             LaneFate::Read(ByteMask(self.read[lane]))
         } else if self.read[lane] | self.open[lane] | self.forwarded[lane] != 0 {
             LaneFate::Unknown
@@ -784,6 +783,20 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
         // What the operation overwrites ends those bytes' liveness, ahead of what it reads.
         if !mode.weak {
             live.kill_all(self.overwritten(operation, call.as_ref()));
+        }
+        // A read past a write that may not happen, a call that may leave a byte as it found it or
+        // an operation with unstated effects may read that operation's value: no proof of ours.
+        let doubtful = match &call {
+            Some(call) if call.overwrites != Overwrites::All => self.lanes.every(),
+            _ if operation.reads_unstated() => self.lanes.every(),
+            _ if mode.weak => operation
+                .output()
+                .map_or([0; LANES], |output| self.lanes.bytes_in(output)),
+            _ => [0; LANES],
+        };
+        for ((open, read), doubt) in live.open.iter_mut().zip(&mut live.read).zip(doubtful) {
+            *open |= *read & doubt;
+            *read &= !doubt;
         }
         if matches!(operation, R2ILOp::Return { .. }) {
             merge(&mut live.returned, self.lanes.every());
@@ -1301,7 +1314,8 @@ mod tests {
         for op in [zero_eax(), store(0, 4), ret()] {
             unstamped.push(op);
         }
-        assert_eq!(integer(fates(&[unstamped], &[], &[])), K::Read);
+        // The unstamped zeroing may or may not run: the store may read it, no proof of the call's.
+        assert_eq!(integer(fates(&[unstamped], &[], &[])), K::Unknown);
         let mut stamped = R2ILBlock::new(0x1000, 8);
         stamped.push_from(call(), 0x1000);
         for op in [zero_eax(), zero_extend(), store(0, 4)] {
@@ -1341,7 +1355,8 @@ mod tests {
         lifted.push_from(zero_eax(), 0x1006);
         lifted.push_from(zero_extend(), 0x1006);
         lifted.push_from(ret(), 0x1008);
-        assert_eq!(integer(fates(&[lifted], &[], &[])), K::Unknown);
+        // The copy before the unstated operation reads the call's EAX.
+        assert_eq!(integer(fates(&[lifted], &[], &[])), K::Read);
     }
 
     /// An operation that reads registers no operand names may write any: a read after it is the
@@ -1576,7 +1591,8 @@ mod tests {
             integer(fates_with(&blocks, &[], &[], &later))
         };
         assert_eq!(after(Overwrites::All), K::Dead);
-        assert_eq!(after(Overwrites::Nothing), K::Read);
+        // A read past a call that may leave the register may read that call's value.
+        assert_eq!(after(Overwrites::Nothing), K::Unknown);
         let low = LaneBytes::covered_by(LANES, &[CanonicalStorageId { size: 4, ..RAX }]);
         assert_eq!(after(Overwrites::Bytes(low)), K::Unknown);
         let whole = LaneBytes::covered_by(LANES, &[RAX]);

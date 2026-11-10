@@ -25,7 +25,7 @@ impl<T> PartialEq for Shared<T> {
 
 /// One function's analysis, sealing and rendering: its entry, whether it is Thumb, and whether
 /// it reads its callers.
-pub(super) type Key = (u64, bool, super::Callers);
+pub(super) type Key = (u64, bool, super::World);
 
 /// One function's walk and preparation, by its key; the most recent only.
 pub(super) struct Analysed;

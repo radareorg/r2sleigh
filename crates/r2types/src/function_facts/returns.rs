@@ -54,9 +54,16 @@ impl UnprovenCause {
         }
     }
 
-    /// The cause r2ssa's evidence names: a value reaching a return outranks a handed-back input.
+    /// The cause r2ssa's evidence names: the closed world's decision outranks the body's evidence,
+    /// and a value reaching a return outranks a handed-back input.
     fn of(causes: &[r2ssa::SourceResultCause]) -> Option<Self> {
         use r2ssa::SourceResultCause as Cause;
+        if causes.contains(&Cause::ForwardCycle) {
+            return Some(Self::ForwardCycle);
+        }
+        if causes.contains(&Cause::Unread) {
+            return Some(Self::Unread);
+        }
         let written = causes
             .iter()
             .any(|cause| !matches!(cause, Cause::HandedBack | Cause::NoReturn));
@@ -241,13 +248,16 @@ impl ReturnTypeFact {
         {
             return Self::decided_by(CTypeLike::Void, ReturnTypeEvidence::VoidBoundary);
         }
-        // A body's integer result no declaration and no reading call decides is written, not proven.
+        // A body's integer result no declaration and no reading call decides is written, not proven;
+        // the closed world names why where it decided (D202, D166).
         if let Some(bits) = interface.and_then(written_bits) {
-            let cause =
-                match interface.is_some_and(r2ssa::SourceFunctionInterface::result_holds_input) {
-                    true => UnprovenCause::EntryInput,
-                    false => UnprovenCause::Written,
-                };
+            let input = interface.is_some_and(r2ssa::SourceFunctionInterface::result_holds_input);
+            let cause = match interface.and_then(r2ssa::SourceFunctionInterface::closed_result) {
+                Some(r2source::SourceClosedResult::Unread) => UnprovenCause::Unread,
+                Some(r2source::SourceClosedResult::ForwardCycle) => UnprovenCause::ForwardCycle,
+                _ if input => UnprovenCause::EntryInput,
+                _ => UnprovenCause::Written,
+            };
             return Self::unproven_at(source, Some(bits), Some(cause), true);
         }
         // A return whose result r2ssa left unproven hands back something no exit can type.
