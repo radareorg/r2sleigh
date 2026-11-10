@@ -474,7 +474,7 @@ fn tail_reads(
             storage,
             block.addr,
         );
-        for value in lane {
+        for value in lane.iter() {
             let held = body
                 .graph
                 .value(value)

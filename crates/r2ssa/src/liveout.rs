@@ -97,7 +97,7 @@ impl FunctionLiveOut {
             let mut here = BTreeSet::new();
             for storage in return_storages {
                 let (found, clobbered_here) =
-                    live.collect_reaching(func, graph, *storage, block.addr, &mut here);
+                    live.collect_reaching(func, graph, *storage, block.addr, Some(&mut here));
                 complete &= found && !clobbered_here;
                 clobbered |= clobbered_here;
             }
@@ -135,7 +135,7 @@ impl FunctionLiveOut {
         graph: &SsaGraph,
         return_storage: CanonicalStorageId,
         from: u64,
-        here: &mut BTreeSet<ValueId>,
+        mut here: Option<&mut BTreeSet<ValueId>>,
     ) -> (bool, bool) {
         let mut found = false;
         let mut clobbered_any = false;
@@ -188,8 +188,8 @@ impl FunctionLiveOut {
                     continue;
                 }
                 written = true;
-                self.values.insert(*dst);
-                found |= here.insert(*dst);
+                let new = self.values.insert(*dst);
+                found |= here.as_deref_mut().map_or(new, |here| here.insert(*dst));
                 if covers_fully(storage, return_storage) {
                     defined_here = true;
                     break;
@@ -215,8 +215,8 @@ impl FunctionLiveOut {
                 }
                 written = true;
                 defined_here |= covers_fully(storage, return_storage);
-                self.values.insert(phi);
-                found |= here.insert(phi);
+                let new = self.values.insert(phi);
+                found |= here.as_deref_mut().map_or(new, |here| here.insert(phi));
             }
             if clobbered {
                 // The path answers with the callee's value, which is not one of
@@ -257,10 +257,10 @@ impl FunctionLiveOut {
         graph: &SsaGraph,
         storage: CanonicalStorageId,
         from: u64,
-    ) -> BTreeSet<ValueId> {
-        let mut here = BTreeSet::new();
-        Self::default().collect_reaching(func, graph, storage, from, &mut here);
-        here
+    ) -> crate::dense::IdSet<ValueId> {
+        let mut live = Self::default();
+        live.collect_reaching(func, graph, storage, from, None);
+        live.values
     }
 
     /// Whether the caller reads this value once the function returns.
