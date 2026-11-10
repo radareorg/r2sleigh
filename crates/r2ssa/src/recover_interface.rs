@@ -418,9 +418,9 @@ fn recovered_stack_parameters(
     observations: &crate::deadphi::ProvenProgramObservations,
     first_offset: i64,
     slot_bytes: u32,
-) -> Vec<RecoveredStackParameter> {
+) -> ArgumentArea {
     if slot_bytes == 0 {
-        return Vec::new();
+        return ArgumentArea::default();
     }
     // A slot the body writes can still be a parameter: at -O0 a function with
     // no argument registers advances its own argument in place. The argument
@@ -485,16 +485,40 @@ fn recovered_stack_parameters(
     argument_area_slots(&observed, first_offset, slot_bytes)
 }
 
+/// Unread slots the argument area may hold below its highest read; past them its slots are a floor.
+const HOLE_BUDGET: usize = 64;
+
+/// The argument-area slots as the body reads them, and whether they stop at [`HOLE_BUDGET`].
+#[derive(Debug, Clone, Default)]
+struct ArgumentArea {
+    slots: Vec<RecoveredStackParameter>,
+    past_budget: bool,
+}
+
 /// The argument-area slots below the highest one read, `observed` holding each slot's widest read
 /// (`None` where a read crosses two): the highest read makes each below it a parameter (rule 4).
+/// Work: `O(reads + HOLE_BUDGET)`, whatever offset a read names.
 fn argument_area_slots(
     observed: &BTreeMap<u64, Option<u32>>,
     first_offset: i64,
     slot_bytes: u32,
-) -> Vec<RecoveredStackParameter> {
+) -> ArgumentArea {
     let highest = observed.keys().next_back().copied();
-    let mut parameters = Vec::new();
+    let mut area = ArgumentArea::default();
+    let parameters = &mut area.slots;
+    let mut holes = 0;
     for slot in (0..).take_while(|slot| highest.is_some_and(|highest| *slot <= highest)) {
+        if !observed.contains_key(&slot) {
+            if holes == HOLE_BUDGET {
+                r2il::refusal_evidence!(
+                    "interface-recovery",
+                    "argument-area slot {slot} is past {HOLE_BUDGET} holes below the read at slot {highest:?}"
+                );
+                area.past_budget = true;
+                break;
+            }
+            holes += 1;
+        }
         let Some(observed_bytes) = observed.get(&slot).map_or(Some(None), |bytes| {
             bytes.map(|bytes| Some(bytes.next_power_of_two().min(slot_bytes)))
         }) else {
@@ -514,7 +538,7 @@ fn argument_area_slots(
             hole: observed_bytes.is_none(),
         });
     }
-    parameters
+    area
 }
 
 /// True when this variable is a value the caller supplied.
@@ -2075,16 +2099,19 @@ fn recover_interface_inner(
     let full = registers.is_empty()
         || (counts.iter()).any(|(_, range, count)| !range.is_empty() && *count == range.len());
     let stack_parameters = match (full, &argument_area) {
-        (true, Some(area)) => area.clone(),
+        (true, Some(area)) => area.slots.clone(),
         _ => Vec::new(),
     };
     // Past the registers, a read of the argument area, or an area no exit places, is a floor; a
     // variadic tail continues there.
     let area = match (save_area.is_none(), full, &argument_area) {
         (true, true, None) => Some(SourceFloorCause::ArgumentAreaUnplaced),
-        (true, false, Some(area)) if !area.is_empty() => Some(SourceFloorCause::ArgumentAreaRead),
+        (true, false, Some(area)) if !area.slots.is_empty() => {
+            Some(SourceFloorCause::ArgumentAreaRead)
+        }
         _ => None,
     };
+    let past_budget = (argument_area.as_ref()).is_some_and(|area| area.past_budget);
     // A supervisor call reads registers no operation names, so what it is handed is no read here.
     let enters_supervisor = (graph.insts.iter()).any(|inst| {
         matches!(&inst.payload, crate::graph::InstPayload::Op(op) if func.enters_supervisor(op))
@@ -2094,6 +2121,7 @@ fn recover_interface_inner(
             unseen.then_some(SourceFloorCause::UnresolvedTransfer),
             enters_supervisor.then_some(SourceFloorCause::SupervisorEntry),
             area,
+            past_budget.then_some(SourceFloorCause::ArgumentAreaPastBudget),
         ]
         .into_iter()
         .flatten(),

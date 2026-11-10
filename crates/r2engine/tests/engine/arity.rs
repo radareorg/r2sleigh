@@ -672,6 +672,45 @@ fn an_argument_area_read_past_the_prefix_is_a_floor_of_that_cause() {
     assert_eq!(cause, [SourceFloorCause::ArgumentAreaRead]);
 }
 
+/// `mov eax, [rsp + 0x40000000]; ret`: one load names slot 0x7fffffff of the argument area.
+#[test]
+fn a_read_far_up_the_argument_area_is_a_floor_past_the_hole_budget() {
+    const CODE: &[u8] = &[0x8b, 0x84, 0x24, 0x00, 0x00, 0x00, 0x40, 0xc3];
+    let cause = floor_cause(Literal::of_code(CODE, &[("f", BASE, 8)]));
+    assert_eq!(
+        cause,
+        [
+            SourceFloorCause::ArgumentAreaRead,
+            SourceFloorCause::ArgumentAreaPastBudget
+        ]
+    );
+}
+
+/// The six integer registers summed, then `add rax, [rsp + 0x210]`: slot 65 of the argument area
+/// is read behind a full section, so the 64 holes below it stand and the list is a floor.
+#[test]
+fn holes_past_the_budget_stop_the_stack_parameters_as_a_floor() {
+    const CODE: &[u8] = &[
+        0x48, 0x89, 0xf8, // mov rax, rdi
+        0x48, 0x01, 0xf0, // add rax, rsi
+        0x48, 0x01, 0xd0, // add rax, rdx
+        0x48, 0x01, 0xc8, // add rax, rcx
+        0x4c, 0x01, 0xc0, // add rax, r8
+        0x4c, 0x01, 0xc8, // add rax, r9
+        0x48, 0x03, 0x84, 0x24, 0x10, 0x02, 0x00, 0x00, // add rax, [rsp + 0x210]
+        0xc3, // ret
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+        0xcc,
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(CODE, &[("f", BASE, 0x1b)]));
+    let prepared = open.prepared(BASE).expect("it prepares");
+    let shared = prepared.artifact().shared_artifact();
+    let interface = (shared.machine_context().function_interface()).expect("an interface");
+    let floor = interface.arity_floor().expect("its arity is a floor");
+    assert_eq!(floor.causes(), [SourceFloorCause::ArgumentAreaPastBudget]);
+    assert_eq!(interface.parameters().len(), 6 + 64);
+}
+
 /// All six argument registers stored, then `ud2`: no exit places the argument area.
 #[test]
 fn an_argument_area_no_exit_places_is_a_floor_of_that_cause() {

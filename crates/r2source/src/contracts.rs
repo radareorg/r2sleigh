@@ -308,6 +308,8 @@ pub enum SourceFloorCause {
     ArgumentAreaUnplaced,
     /// The argument area is read past register slots not all of which are parameters.
     ArgumentAreaRead,
+    /// The argument area is read past more unread slots than recovery holds: the slots below stand.
+    ArgumentAreaPastBudget,
     /// A register slot past the parameters is read by a kind of read no rule proves.
     RegisterRead,
     /// A slot past the parameters is only stored to its home: -O0 homes parameters it never uses.

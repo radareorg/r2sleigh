@@ -248,6 +248,9 @@ fn floor_cause(cause: &r2source::SourceFloorCause) -> String {
         C::SupervisorEntry => "a supervisor entry".into(),
         C::ArgumentAreaUnplaced => "the argument area is unplaced".into(),
         C::ArgumentAreaRead => "the argument area is read past an unfull register section".into(),
+        C::ArgumentAreaPastBudget => {
+            "the argument area is read past the slots recovery holds".into()
+        }
         C::RegisterRead => "a register past them is read".into(),
         C::Homed => "a register past them is only homed".into(),
         C::HandedOn(U::Indirect) => "a register past them reaches an indirect call".into(),
