@@ -118,6 +118,8 @@ fn sites_of<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Opti
     let mut unread = false;
     // A call two bodies hold (one walk enters the other's tail) is one call, read once.
     let mut seen = BTreeSet::new();
+    // Each returned lane, by caller and lane, forwarded after the direct fates are joined.
+    let mut returned = BTreeSet::new();
     for &caller in survey.callers_of(callee) {
         let Some(Ok(thumb)) = survey.walked_in(caller) else {
             unread = true;
@@ -134,14 +136,27 @@ fn sites_of<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Opti
             }
             calls = calls.saturating_add(1);
             for (at, joined) in lanes.iter_mut().enumerate() {
-                let fate = site.boundary.fates[at];
-                let fate = match fate {
-                    Some(LaneFate::Returned(_)) => forwarded(db, caller, at),
-                    fate => fate.map(Forwarded::Fate),
-                };
-                join(joined, fate);
+                match site.boundary.fates[at] {
+                    Some(LaneFate::Returned(_)) => {
+                        returned.insert((caller, at));
+                    }
+                    fate => join(joined, fate.map(Forwarded::Fate)),
+                }
             }
         }
+    }
+    // A caller's boundary is asked only where its answer could move the decision: a lane no call
+    // reads, while every lane a body may hold is dead or returned (O(callers) asks, each held).
+    for (caller, at) in returned {
+        let open = lanes
+            .iter()
+            .any(|lane| lane.held && (lane.unknown || lane.cycle));
+        let fate = match (lanes[at].read, open) {
+            (true, _) => Some(Forwarded::Fate(LaneFate::Unknown)),
+            (false, true) if at >= 3 => Some(Forwarded::Fate(LaneFate::Unknown)),
+            _ => forwarded(db, caller, at),
+        };
+        join(&mut lanes[at], fate);
     }
     // Only a result every call leaves dead asks whether the calls are every way in.
     let exhaustive = !unread
@@ -390,8 +405,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeEntry {
     const NAME: &'static str = "callee-entry";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: one backward pass over the callee's body, each callee's own summary held; a cycle of
-    /// summaries is a value of the database, read as a callee nothing is known of.
+    /// Work: one backward pass over the callee's body, its own calls read shallowly, so the
+    /// summary asks no other callee.
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
         let view = View::new(db, true);
         let walker = super::returns::Walking::new(view.clone(), true).ok()?;
@@ -469,7 +484,7 @@ fn flow_of(body: &Body, endian: r2il::Endianness) -> CallerFlow<'_, BodyBlock> {
 enum Depth {
     /// By the callee's own entry summary.
     Deep,
-    /// Inside a summary: its own calls set the variadic count themselves.
+    /// Inside a summary: by what is known without another body, and its own calls set the count.
     Shallow,
 }
 
@@ -542,9 +557,13 @@ impl<S: Source + 'static> Reading<'_, S> {
                 overwrites: Overwrites::All,
             };
         }
-        // A summary reads its own callees' summaries; a cycle among them reads as nothing known.
-        let thumb = self.view.thumb_at(callee);
-        let summary = self.db.get::<CalleeEntry>(&(callee, thumb)).ok();
+        // A summary reads no other summary, so one costs one pass over one body (ADR, Cost).
+        let summary = (self.depth == Depth::Deep)
+            .then(|| {
+                let thumb = self.view.thumb_at(callee);
+                self.db.get::<CalleeEntry>(&(callee, thumb))
+            })
+            .and_then(Result::ok);
         match summary.and_then(|summary| *summary) {
             Some(summary) => CallEffect {
                 takes: summary.takes,
