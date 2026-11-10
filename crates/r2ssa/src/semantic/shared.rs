@@ -1030,6 +1030,60 @@ pub(crate) fn callee_held_lane(
         })
 }
 
+/// Whether a callee's held lane may narrow `carrier` (ROADMAP D105), by default-deny: where the
+/// carrier is this function's entry value of a register, every use of it reads within `bytes`.
+pub(crate) fn held_lane_admitted(
+    graph: &SsaGraph,
+    views: Option<&crate::view::ValueViews<ValueId>>,
+    machine_context: &SourceMachineContext,
+    carrier: ValueId,
+    bytes: u32,
+) -> bool {
+    let root = views.map_or(carrier, |views| views.view(carrier).root);
+    let entry = graph.value(root).filter(|value| {
+        graph.def_inst(root).is_none()
+            && value.var.version == 0
+            && value.canonical_storage.is_some_and(|storage| {
+                storage.space == CanonicalStorageSpace::Register && storage.size > bytes
+            })
+    });
+    let Some(entry) = entry else {
+        return true;
+    };
+    graph.use_sites(root).iter().all(|site| {
+        let reader = graph.op(site.inst);
+        match reader {
+            Some(SSAOp::Subpiece { dst, offset, .. }) => {
+                offset.saturating_add(graph.var(*dst).size) <= bytes
+            }
+            Some(SSAOp::CallUse { .. }) => entry.canonical_storage.is_some_and(|storage| {
+                call_after(graph, site.inst, machine_context).is_some_and(|interface| {
+                    (interface.arguments().iter()).any(|argument| {
+                        argument.register_storage() == Some(storage)
+                            && callee_held_lane(interface, argument.index(), storage)
+                                .is_some_and(|lane| lane.size <= bytes)
+                    })
+                })
+            }),
+            _ => false,
+        }
+    })
+}
+
+/// The interface of the call a `CallUse` precedes in its block.
+fn call_after<'a>(
+    graph: &SsaGraph,
+    read: crate::graph::InstId,
+    machine_context: &'a SourceMachineContext,
+) -> Option<&'a crate::SourceCallSiteInterface> {
+    let block = graph.block(graph.inst(read)?.block)?;
+    let at = block.insts.iter().position(|inst| *inst == read)?;
+    let instruction = (block.insts[at..].iter())
+        .find_map(|inst| graph.op(*inst)?.transfer().filter(|flow| flow.call))?
+        .instruction?;
+    machine_context.call_site_interface(machine_context.raw_call_site_at(instruction)?)
+}
+
 /// Whether `lane` is this function's own entry value of the low lane of `carrier`, its entry
 /// value of a wider register: the formal a callee holding only that lane is passed (ROADMAP D105).
 pub(crate) fn is_entry_lane_of(graph: &SsaGraph, lane: ValueId, carrier: ValueId) -> bool {

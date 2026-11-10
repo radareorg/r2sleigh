@@ -573,13 +573,18 @@ fn observed_entry_read_storages(
 fn passed_through_entry_storages(
     boundaries: &crate::semantic::SourceBoundaryFacts,
     graph: &SsaGraph,
-    held: impl Fn(crate::CallSiteId, u32, CanonicalStorageId) -> Option<CanonicalStorageId>,
+    held: impl Fn(
+        crate::CallSiteId,
+        u32,
+        CanonicalStorageId,
+        Option<crate::ValueId>,
+    ) -> Option<CanonicalStorageId>,
 ) -> Vec<CanonicalStorageId> {
     let mut storages = Vec::new();
     for boundary in boundaries.calls.values() {
         let passed = (boundary.arguments.iter()).filter_map(|argument| {
-            passed_through(graph, argument, &|index, storage| {
-                held(boundary.call_site, index, storage)
+            passed_through(graph, argument, &|index, storage, carrier| {
+                held(boundary.call_site, index, storage, carrier)
             })
         });
         for storage in passed {
@@ -596,7 +601,7 @@ fn passed_through_entry_storages(
 fn passed_through(
     graph: &SsaGraph,
     argument: &crate::semantic::SourceCallArgumentFact,
-    held: &dyn Fn(u32, CanonicalStorageId) -> Option<CanonicalStorageId>,
+    held: &dyn Fn(u32, CanonicalStorageId, Option<crate::ValueId>) -> Option<CanonicalStorageId>,
 ) -> Option<CanonicalStorageId> {
     use crate::semantic::SourceCallArgumentValue::{PreservedEntry, Value};
     let crate::semantic::CallBoundarySlot::Register { index, storage } = argument.slot else {
@@ -615,7 +620,8 @@ fn passed_through(
         Value(value) if graph.var(value).size != storage.size || entry(value) != Some(storage) => {
             None
         }
-        Value(_) | PreservedEntry => Some(held(index, storage).unwrap_or(storage)),
+        Value(value) => Some(held(index, storage, Some(value)).unwrap_or(storage)),
+        PreservedEntry => Some(held(index, storage, None).unwrap_or(storage)),
     }
 }
 
@@ -1758,10 +1764,16 @@ fn recover_interface_inner(
     // consumer can use the same identity.
     let entry_reads = |saved: Option<&crate::dense::IdSet<crate::ValueId>>| {
         let mut reads = observed_entry_read_storages(func, graph, &observations, saved);
-        let held = |call: crate::CallSiteId, index: u32, storage: CanonicalStorageId| {
+        let held = |call: crate::CallSiteId, index: u32, storage: CanonicalStorageId, carrier| {
             let identity = facts.call_sites.by_id.get(&call)?.raw_identity?;
-            let interface = machine_context?.call_site_interface(identity)?;
-            crate::semantic::callee_held_lane(interface, index, storage)
+            let context = machine_context?;
+            let interface = context.call_site_interface(identity)?;
+            let lane = crate::semantic::callee_held_lane(interface, index, storage)?;
+            let views = prep.map(|prep| &prep.views);
+            let admitted = |carrier| {
+                crate::semantic::held_lane_admitted(graph, views, context, carrier, lane.size)
+            };
+            Option::<crate::ValueId>::is_none_or(carrier, admitted).then_some(lane)
         };
         for storage in passed_through_entry_storages(&facts.boundaries, graph, held)
             .into_iter()
@@ -3001,7 +3013,7 @@ mod tests {
         )]);
         let graph = graph_for(R2ILBlock::new(0x1000, 4));
         assert_eq!(
-            passed_through_entry_storages(&boundaries, &graph, |_, _, _| None),
+            passed_through_entry_storages(&boundaries, &graph, |_, _, _, _| None),
             vec![register(0, 8)]
         );
     }
@@ -3030,7 +3042,7 @@ mod tests {
         )]);
 
         assert_eq!(
-            passed_through_entry_storages(&boundaries, &graph, |_, _, _| None),
+            passed_through_entry_storages(&boundaries, &graph, |_, _, _, _| None),
             vec![register(0, 8)]
         );
     }
@@ -3129,7 +3141,7 @@ mod tests {
             register(0, 8),
             crate::semantic::SourceCallArgumentValue::Value(defined),
         )]);
-        assert!(passed_through_entry_storages(&boundaries, &graph, |_, _, _| None).is_empty());
+        assert!(passed_through_entry_storages(&boundaries, &graph, |_, _, _, _| None).is_empty());
     }
 
     #[test]
