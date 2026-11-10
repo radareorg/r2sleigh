@@ -1,0 +1,1315 @@
+{
+ "cd.c": {
+  "p_cd_chain_arm": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "double _Complex"
+  },
+  "p_cd_chain_im": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "double _Complex"
+  },
+  "p_cd_chain_re": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "double _Complex"
+  },
+  "p_cd_compute_arm": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "double _Complex"
+  },
+  "p_cd_compute_im": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "double _Complex"
+  },
+  "p_cd_compute_re": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "double _Complex"
+  },
+  "p_cd_forward_arm": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "double _Complex"
+  },
+  "p_cd_forward_im": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "double _Complex"
+  },
+  "p_cd_forward_re": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "double _Complex"
+  },
+  "p_cd_identity": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "double _Complex"
+  },
+  "p_cd_ignored": {
+   "read": false,
+   "regs": "xmm0:xmm1",
+   "returns": "double _Complex"
+  },
+  "p_cd_inner": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "double _Complex"
+  }
+ },
+ "cld.c": {
+  "p_cld_chain_arm": {
+   "read": true,
+   "regs": "st0:st1",
+   "returns": "long double _Complex"
+  },
+  "p_cld_chain_im": {
+   "read": true,
+   "regs": "st0:st1",
+   "returns": "long double _Complex"
+  },
+  "p_cld_chain_re": {
+   "read": true,
+   "regs": "st0:st1",
+   "returns": "long double _Complex"
+  },
+  "p_cld_compute_arm": {
+   "read": true,
+   "regs": "st0:st1",
+   "returns": "long double _Complex"
+  },
+  "p_cld_compute_im": {
+   "read": true,
+   "regs": "st0:st1",
+   "returns": "long double _Complex"
+  },
+  "p_cld_compute_re": {
+   "read": true,
+   "regs": "st0:st1",
+   "returns": "long double _Complex"
+  },
+  "p_cld_forward_arm": {
+   "read": true,
+   "regs": "st0:st1",
+   "returns": "long double _Complex"
+  },
+  "p_cld_forward_im": {
+   "read": true,
+   "regs": "st0:st1",
+   "returns": "long double _Complex"
+  },
+  "p_cld_forward_re": {
+   "read": true,
+   "regs": "st0:st1",
+   "returns": "long double _Complex"
+  },
+  "p_cld_ignored": {
+   "read": false,
+   "regs": "st0:st1",
+   "returns": "long double _Complex"
+  },
+  "p_cld_inner": {
+   "read": true,
+   "regs": "st0:st1",
+   "returns": "long double _Complex"
+  }
+ },
+ "d.c": {
+  "p_d_chain_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_chain_error": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_chain_indirect": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_chain_pass": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_chain_printf": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_chain_store": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_compute_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_compute_error": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_compute_indirect": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_compute_pass": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_compute_printf": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_compute_store": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_forward_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_forward_error": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_forward_indirect": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_forward_pass": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_forward_printf": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_forward_store": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_identity": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_ignored": {
+   "read": false,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_d_inner": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  }
+ },
+ "dlb.c": {
+  "p_dlb_chain_a": {
+   "read": true,
+   "regs": "xmm0:rax",
+   "returns": "struct dlb"
+  },
+  "p_dlb_chain_arm": {
+   "read": true,
+   "regs": "xmm0:rax",
+   "returns": "struct dlb"
+  },
+  "p_dlb_chain_b": {
+   "read": true,
+   "regs": "xmm0:rax",
+   "returns": "struct dlb"
+  },
+  "p_dlb_compute_a": {
+   "read": true,
+   "regs": "xmm0:rax",
+   "returns": "struct dlb"
+  },
+  "p_dlb_compute_arm": {
+   "read": true,
+   "regs": "xmm0:rax",
+   "returns": "struct dlb"
+  },
+  "p_dlb_compute_b": {
+   "read": true,
+   "regs": "xmm0:rax",
+   "returns": "struct dlb"
+  },
+  "p_dlb_forward_a": {
+   "read": true,
+   "regs": "xmm0:rax",
+   "returns": "struct dlb"
+  },
+  "p_dlb_forward_arm": {
+   "read": true,
+   "regs": "xmm0:rax",
+   "returns": "struct dlb"
+  },
+  "p_dlb_forward_b": {
+   "read": true,
+   "regs": "xmm0:rax",
+   "returns": "struct dlb"
+  },
+  "p_dlb_ignored": {
+   "read": false,
+   "regs": "xmm0:rax",
+   "returns": "struct dlb"
+  },
+  "p_dlb_inner": {
+   "read": true,
+   "regs": "xmm0:rax",
+   "returns": "struct dlb"
+  }
+ },
+ "dr.c": {
+  "p_dr_compute_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dr_compute_indirect": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dr_compute_pass": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dr_compute_printf": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dr_compute_store": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dr_ignored": {
+   "read": false,
+   "regs": "xmm0",
+   "returns": "double"
+  }
+ },
+ "dx.c": {
+  "p_dx_compute_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dx_compute_indirect": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dx_compute_printf": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dx_compute_store": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dx_ignored": {
+   "read": false,
+   "regs": "xmm0",
+   "returns": "double"
+  }
+ },
+ "dz.c": {
+  "p_dz_compute_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dz_compute_indirect": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dz_compute_printf": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dz_compute_store": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "double"
+  },
+  "p_dz_ignored": {
+   "read": false,
+   "regs": "xmm0",
+   "returns": "double"
+  }
+ },
+ "f.c": {
+  "p_f_chain_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_chain_pass": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_chain_printf": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_chain_store": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_compute_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_compute_pass": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_compute_printf": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_compute_store": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_forward_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_forward_pass": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_forward_printf": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_forward_store": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_identity": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_ignored": {
+   "read": false,
+   "regs": "xmm0",
+   "returns": "float"
+  },
+  "p_f_inner": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "float"
+  }
+ },
+ "f3.c": {
+  "p_f3_chain_a": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct f3"
+  },
+  "p_f3_chain_arm": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct f3"
+  },
+  "p_f3_chain_c": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct f3"
+  },
+  "p_f3_compute_a": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct f3"
+  },
+  "p_f3_compute_arm": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct f3"
+  },
+  "p_f3_compute_c": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct f3"
+  },
+  "p_f3_forward_a": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct f3"
+  },
+  "p_f3_forward_arm": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct f3"
+  },
+  "p_f3_forward_c": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct f3"
+  },
+  "p_f3_identity": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct f3"
+  },
+  "p_f3_ignored": {
+   "read": false,
+   "regs": "xmm0:xmm1",
+   "returns": "struct f3"
+  },
+  "p_f3_inner": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct f3"
+  }
+ },
+ "i.c": {
+  "p_i_chain_arm": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_chain_cpuid": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_chain_int80": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_chain_pass": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_chain_printf": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_chain_store": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_chain_syscall": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_chain_xsave": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_compute_arm": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_compute_cpuid": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_compute_int80": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_compute_pass": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_compute_printf": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_compute_store": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_compute_syscall": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_compute_xsave": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_forward_arm": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_forward_cpuid": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_forward_int80": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_forward_pass": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_forward_printf": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_forward_store": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_forward_syscall": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_forward_xsave": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_ignored": {
+   "read": false,
+   "regs": "rax",
+   "returns": "int"
+  },
+  "p_i_inner": {
+   "read": true,
+   "regs": "rax",
+   "returns": "int"
+  }
+ },
+ "i128.c": {
+  "p_i128_chain_arm": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_chain_both": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_chain_hi": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_chain_lo": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_chain_xsave_hi": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_compute_arm": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_compute_both": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_compute_hi": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_compute_lo": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_compute_xsave_hi": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_forward_arm": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_forward_both": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_forward_hi": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_forward_lo": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_forward_xsave_hi": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_ignored": {
+   "read": false,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  },
+  "p_i128_inner": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "__int128"
+  }
+ },
+ "ld.c": {
+  "p_ld_chain_arm": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_chain_compare": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_chain_int": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_chain_store": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_compute_arm": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_compute_compare": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_compute_int": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_compute_store": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_forward_arm": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_forward_compare": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_forward_int": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_forward_store": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_ignored": {
+   "read": false,
+   "regs": "st0",
+   "returns": "long double"
+  },
+  "p_ld_inner": {
+   "read": true,
+   "regs": "st0",
+   "returns": "long double"
+  }
+ },
+ "ldb.c": {
+  "p_ldb_chain_a": {
+   "read": true,
+   "regs": "rax:xmm0",
+   "returns": "struct ldb"
+  },
+  "p_ldb_chain_arm": {
+   "read": true,
+   "regs": "rax:xmm0",
+   "returns": "struct ldb"
+  },
+  "p_ldb_chain_b": {
+   "read": true,
+   "regs": "rax:xmm0",
+   "returns": "struct ldb"
+  },
+  "p_ldb_compute_a": {
+   "read": true,
+   "regs": "rax:xmm0",
+   "returns": "struct ldb"
+  },
+  "p_ldb_compute_arm": {
+   "read": true,
+   "regs": "rax:xmm0",
+   "returns": "struct ldb"
+  },
+  "p_ldb_compute_b": {
+   "read": true,
+   "regs": "rax:xmm0",
+   "returns": "struct ldb"
+  },
+  "p_ldb_forward_a": {
+   "read": true,
+   "regs": "rax:xmm0",
+   "returns": "struct ldb"
+  },
+  "p_ldb_forward_arm": {
+   "read": true,
+   "regs": "rax:xmm0",
+   "returns": "struct ldb"
+  },
+  "p_ldb_forward_b": {
+   "read": true,
+   "regs": "rax:xmm0",
+   "returns": "struct ldb"
+  },
+  "p_ldb_ignored": {
+   "read": false,
+   "regs": "rax:xmm0",
+   "returns": "struct ldb"
+  },
+  "p_ldb_inner": {
+   "read": true,
+   "regs": "rax:xmm0",
+   "returns": "struct ldb"
+  }
+ },
+ "obj.c": {
+  "__object__": true,
+  "g_compute": {
+   "read": true,
+   "regs": "rax",
+   "returns": "long"
+  },
+  "g_forward": {
+   "read": true,
+   "regs": "rax",
+   "returns": "long"
+  },
+  "l_forward": {
+   "read": true,
+   "regs": "rax",
+   "returns": "long"
+  },
+  "l_ignored": {
+   "read": false,
+   "regs": "rax",
+   "returns": "long"
+  }
+ },
+ "pd.c": {
+  "p_pd_chain_a": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_chain_arm": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_chain_b": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_chain_pass": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_chain_printf": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_compute_a": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_compute_arm": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_compute_b": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_compute_pass": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_compute_printf": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_forward_a": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_forward_arm": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_forward_b": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_forward_pass": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_forward_printf": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_identity": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_ignored": {
+   "read": false,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pd_inner": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  }
+ },
+ "pdp.c": {
+  "p_pdp_compute_arm": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pdp_compute_b": {
+   "read": true,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  },
+  "p_pdp_ignored": {
+   "read": false,
+   "regs": "xmm0:xmm1",
+   "returns": "struct pd"
+  }
+ },
+ "pl.c": {
+  "p_pl_chain_a": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_chain_arm": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_chain_b": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_chain_open_mode": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_chain_printf": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_chain_xsave_b": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_compute_a": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_compute_arm": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_compute_b": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_compute_open_mode": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_compute_printf": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_compute_xsave_b": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_forward_a": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_forward_arm": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_forward_b": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_forward_open_mode": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_forward_printf": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_forward_xsave_b": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_ignored": {
+   "read": false,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_pl_inner": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  }
+ },
+ "plp.c": {
+  "p_plp_compute_arm": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_plp_compute_b": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_plp_compute_printf": {
+   "read": true,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  },
+  "p_plp_ignored": {
+   "read": false,
+   "regs": "rax:rdx",
+   "returns": "struct pl"
+  }
+ },
+ "v2.c": {
+  "p_v2_chain_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_chain_hi": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_chain_lo": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_chain_store": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_compute_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_compute_hi": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_compute_lo": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_compute_store": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_forward_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_forward_hi": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_forward_lo": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_forward_store": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_identity": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_ignored": {
+   "read": false,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2_inner": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  }
+ },
+ "v2p.c": {
+  "p_v2p_compute_arm": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2p_compute_hi": {
+   "read": true,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  },
+  "p_v2p_ignored": {
+   "read": false,
+   "regs": "xmm0",
+   "returns": "__m128d"
+  }
+ },
+ "v4.c": {
+  "p_v4_chain_arm": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_chain_hi": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_chain_indirect": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_chain_lo": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_chain_pass": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_chain_store": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_compute_arm": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_compute_hi": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_compute_indirect": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_compute_lo": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_compute_pass": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_compute_store": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_forward_arm": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_forward_hi": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_forward_indirect": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_forward_lo": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_forward_pass": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_forward_store": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_identity": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_ignored": {
+   "read": false,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  },
+  "p_v4_inner": {
+   "read": true,
+   "regs": "ymm0",
+   "returns": "__m256d"
+  }
+ }
+}
