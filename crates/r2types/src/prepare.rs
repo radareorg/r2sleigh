@@ -38,7 +38,6 @@ pub(crate) fn recover_signature_params_from_prepared_ssa(
     prepared: &r2ssa::SsaArtifact,
     ptr_bits: u32,
 ) -> Vec<RecoveredSignatureParam> {
-    let names = prepared.display_names();
     prepared
         .facts()
         .boundaries
@@ -55,7 +54,7 @@ pub(crate) fn recover_signature_params_from_prepared_ssa(
                 size_to_neutral_int_type_like(fact.bytes())
             };
             RecoveredSignatureParam {
-                name: names.parameter_name(index),
+                name: r2source::positional_parameter_name(index),
                 arg_index: index,
                 value: fact.value(),
                 size_bytes: fact.bytes(),
