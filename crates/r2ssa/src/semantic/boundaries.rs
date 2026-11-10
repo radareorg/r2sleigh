@@ -1387,6 +1387,24 @@ pub(crate) fn collect_source_boundary_facts(
                                 storage,
                             );
                             found.map(|value| {
+                                // A lane that is this function's formal is admitted; else default-deny.
+                                let formal = |lane: &CanonicalStorageId| {
+                                    entry_values.get(lane).copied().flatten()
+                                        .is_some_and(|own| formals.contains(&own))
+                                };
+                                let held = held.filter(|lane| match value {
+                                    _ if formal(lane) => true,
+                                    SourceCallArgumentValue::Value(carrier) => {
+                                        super::shared::held_lane_admitted(
+                                            graph,
+                                            prep.map(|prep| &prep.views),
+                                            machine_context,
+                                            carrier,
+                                            lane.size,
+                                        )
+                                    }
+                                    SourceCallArgumentValue::PreservedEntry => true,
+                                });
                                 let (mut value, mut lane_of) = super::shared::narrowed_argument(
                                     &CallPosition {
                                         function,
