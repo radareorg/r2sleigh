@@ -15,7 +15,7 @@ use crate::frame_address::{Affine, Definitions};
 use crate::function::{EditPlan, SSAFunction, ShapeEdit};
 use crate::machine_context::SourceMachineContext;
 use crate::op::SSAOp;
-use crate::value_table::{Minting, VarId};
+use crate::value_table::VarId;
 
 /// One recognised check: what decides it and which operations the compiler inserted for it.
 struct Check {
@@ -30,11 +30,9 @@ struct Check {
     /// The guard read every other read of the check equals under the premise, and those rereads.
     first: VarId,
     rereads: IdMap<OpId, VarId>,
-    difference: Option<Difference>,
+    /// The `reload - guard` (or `^`) the condition tests.
+    difference: Option<VarId>,
 }
-
-/// The `reload - guard` (or `^`) a condition tests, and its destination.
-type Difference = (OpId, VarId);
 
 /// Decide every stack-protector check the function holds; the operations each one inserted are
 /// recorded on the function for the certificate that elides them.
@@ -72,7 +70,7 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
         return;
     }
     let mut decided = EditPlan::new();
-    let mut minting = Minting::new(func.values());
+    let mut passing = Vec::new();
     let mut inserted = IdSet::default();
     let removed_edges = (checks.iter())
         .map(|check| (check.block, check.fail))
@@ -110,13 +108,13 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
                 },
             );
         }
-        // Zero where it is defined, so a carrier returned holding it reads no guard.
-        if let Some((op, dst)) = check.difference {
-            let zero = minting.constant(0, func.var(dst).size);
-            decided.replace(op, SSAOp::Copy { dst, src: zero });
+        // Past the passing edge the difference is 0; read there only where that edge alone enters.
+        if let Some(difference) = check.difference
+            && func.predecessors(check.pass) == [check.block]
+        {
+            passing.push((difference, check.pass));
         }
     }
-    decided.adopt(minting.finish());
     inserted.extend(unchecked.iter());
     // A failure block no other edge reaches goes with the edges into it.
     let failed = checks
@@ -143,13 +141,13 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     let addresses = inserted_addresses(func, &inserted);
     inserted.extend(addresses.iter());
     func.record_compiler_inserted(inserted, removed, removed_edges);
+    func.record_passing_differences(passing);
     // Every decided check removed its failure edge, which holds only of a UB-free source.
     func.record_premise(r2source::Premise::UbFreeSource);
 }
 
-/// The unchecked guard reads, where only frame slots no load reads hold each one, through copies
-/// and lanes, and those stores (gcc's prologue in a function that never returns): a UB-free source
-/// reads neither the guard nor such a slot. One observed read keeps them all. O(ops).
+/// gcc's prologue in a body that never returns: guard reads only unread frame slots hold, and those
+/// stores (doc/adr-call-boundary.md, S11 as built). One other reader keeps them all. O(ops).
 fn unchecked(
     func: &SSAFunction,
     defs: &Definitions,
@@ -157,7 +155,19 @@ fn unchecked(
     stack_pointer: Option<crate::CanonicalStorageId>,
     checked: &IdSet<OpId>,
 ) -> IdSet<OpId> {
-    let Some(stack_pointer) = stack_pointer else {
+    // Only a body with no way out but a call that does not come back: one that returns checks.
+    let leaves = (func.block_addrs().iter())
+        .filter_map(|addr| func.cfg().get_block(*addr))
+        .any(|block| {
+            matches!(
+                block.terminator,
+                BlockTerminator::Return
+                    | BlockTerminator::ConditionalExit { .. }
+                    | BlockTerminator::IndirectBranch
+                    | BlockTerminator::None
+            )
+        });
+    let Some(stack_pointer) = stack_pointer.filter(|_| !leaves) else {
         return IdSet::default();
     };
     let mut read = IdMap::<VarId, Vec<(i64, i64)>>::new(func.values().len());
@@ -450,7 +460,7 @@ fn equality(
     func: &SSAFunction,
     defs: &Definitions,
     cond: VarId,
-) -> Option<(VarId, VarId, bool, Option<Difference>)> {
+) -> Option<(VarId, VarId, bool, Option<VarId>)> {
     let zero = |var: VarId| func.var(var).constant_bits() == Some(0);
     let (left, right, equal) = match &defs.op(defs.copied(cond))?.1 {
         SSAOp::IntEqual { a, b, .. } => (*a, *b, true),
@@ -470,10 +480,10 @@ fn equality(
         None
     };
     if let Some(difference) = difference
-        && let Some((op, SSAOp::IntSub { dst, a, b } | SSAOp::IntXor { dst, a, b })) =
+        && let Some((_, SSAOp::IntSub { dst, a, b } | SSAOp::IntXor { dst, a, b })) =
             defs.op(defs.copied(difference))
     {
-        return Some((*a, *b, equal, Some((*op, *dst))));
+        return Some((*a, *b, equal, Some(*dst)));
     }
     Some((left, right, equal, None))
 }

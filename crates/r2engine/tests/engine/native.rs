@@ -5387,9 +5387,48 @@ fn an_unchecked_canary_in_a_function_that_never_returns_is_compiler_inserted() {
     assert!(output.contains("compiler-inserted"), "{output}");
 }
 
-/// gcc -O0's `rbx` save, reloaded through the frame base before `leave` (bzip2 -O0 `mapSuffix`).
-/// The stack pointer merges at the reload with no phi, since `leave` redefines it; each edge
-/// hands it the same offset, so the save round-trips (hand audit 3.8.5).
+/// `rax = rdx + 1` is computed off the passing edge, so the return still reads the guard. Its
+/// `return 1` is base's: the rereads are copies of the first read (doc/adr-frame-model.md, P4.4).
+#[test]
+fn a_value_computed_from_the_difference_before_the_branch_is_not_zeroed() {
+    let mut bytes = CANARY_CHECKED[..0x22].to_vec(); // through 1019 sub rdx, fs:[0x28]
+    bytes.extend([0x48, 0x8d, 0x42, 0x01]); // 1022 lea rax, [rdx + 1]
+    bytes.extend([0x75, 0x05]); // 1026 jne 0x102d
+    bytes.extend([0x48, 0x83, 0xc4, 0x18, 0xc3]); // 1028 add rsp, 0x18; ret
+    bytes.extend([0xe8, 0x02, 0x00, 0x00, 0x00, 0x90, 0x90, 0xeb, 0xfe]); // 102d call 0x1034
+    bytes.resize(0x50, 0x90);
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "canary_difference_used_early",
+        },
+        halts: 0x1034,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+}
+
+/// A body that returns and stores the guard without checking it is no prologue the bytes prove.
+#[test]
+fn an_unchecked_canary_in_a_function_that_returns_stays() {
+    let mut bytes = CANARY_CHECKED[..0x14].to_vec();
+    bytes.extend([0x48, 0x83, 0xc4, 0x18, 0xc3]); // 1014 add rsp, 0x18; ret
+    bytes.resize(0x30, 0x90);
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes,
+        name: "canary_unchecked_returning",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(!output.contains("compiler-inserted"), "{output}");
+    assert!(response.premises.is_empty(), "{:?}", response.premises);
+}
+
+/// gcc -O0's `rbx` save, reloaded through the frame base before `leave` (bzip2 -O0 `mapSuffix`):
+/// no `rsp` phi meets the reload, and each edge hands it one offset (hand audit 3.8.5).
 const SAVE_RELOADED_THROUGH_THE_FRAME_BASE: &[u8] = &[
     0x55, // 1000 push rbp
     0x48, 0x89, 0xe5, // 1001 mov rbp, rsp
@@ -5423,9 +5462,8 @@ fn a_save_reloaded_through_the_frame_base_is_the_frames() {
     assert!(!output.contains("r2sleigh_store"), "{output}");
 }
 
-/// AAPCS64 6.1.2 keeps the low 8 bytes of `v8`: `str d8` and `ldr d8` around a call that is
-/// handed a frame address are the frame's save and restore of a lane, which bounds what the
-/// address reaches (toybox, hand audit 3.8.6).
+/// AAPCS64 6.1.2 keeps `v8` bytes 0..8: `str d8` and `ldr d8` around a call handed a frame address
+/// are a lane's save and restore, which bound what the address reaches (hand audit 3.8.6).
 const LANE_SAVED: &[u8] = &[
     0xfd, 0x7b, 0xbd, 0xa9, // 1000 stp x29, x30, [sp, #-48]!
     0xfd, 0x03, 0x00, 0x91, // 1004 mov x29, sp

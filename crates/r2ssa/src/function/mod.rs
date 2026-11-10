@@ -2923,6 +2923,8 @@ pub struct SSAFunction {
     compiler_inserted_blocks: BTreeMap<u64, u32>,
     /// The edges those checks removed, (from, to): the source's successors the graph no longer holds.
     compiler_removed_edges: BTreeSet<(u64, u64)>,
+    /// Each decided canary check's `reload - guard` and the block its passing edge alone enters.
+    passing_differences: Vec<(crate::value_table::VarId, u64)>,
     /// The blocks SCCP dropped as unreachable after deciding a branch, by address and byte size; they owe no obligation.
     decided_dead_blocks: BTreeMap<u64, u32>,
     /// The edges SCCP dropped with them, (from, to).
@@ -3328,6 +3330,7 @@ impl Clone for SSAFunction {
             compiler_inserted: self.compiler_inserted.clone(),
             compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
             compiler_removed_edges: self.compiler_removed_edges.clone(),
+            passing_differences: self.passing_differences.clone(),
             decided_dead_blocks: self.decided_dead_blocks.clone(),
             decided_dead_edges: self.decided_dead_edges.clone(),
             premises: self.premises.clone(),
@@ -3881,6 +3884,18 @@ impl SSAFunction {
         self.compiler_inserted.extend(ops.iter());
         self.compiler_inserted_blocks.extend(blocks);
         self.compiler_removed_edges.extend(edges);
+    }
+
+    pub(crate) fn record_passing_differences(
+        &mut self,
+        differences: impl IntoIterator<Item = (crate::value_table::VarId, u64)>,
+    ) {
+        self.passing_differences.extend(differences);
+    }
+
+    /// A decided canary check's difference, 0 past its passing edge, and the block that edge enters.
+    pub(crate) fn passing_differences(&self) -> &[(crate::value_table::VarId, u64)] {
+        &self.passing_differences
     }
 
     /// Record a premise a rewrite relied on.

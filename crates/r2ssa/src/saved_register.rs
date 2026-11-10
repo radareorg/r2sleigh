@@ -1,8 +1,5 @@
-//! The `SavedRegister` frame role (doc/adr-frame-model.md, roles; doc/adr-call-boundary.md, S11).
-//!
-//! A save is a store of the entry value of a register lane the convention preserves: a whole
-//! register, or a lane of one (AAPCS64 6.1.2 keeps `d8` to `d15`, the low 8 bytes of `v8` to
-//! `v15`). Slot promotion, the frame boundaries and the round-trip certificate all read it here.
+//! `SavedRegister` (doc/adr-call-boundary.md, S11): a store of the entry value of a preserved
+//! register or lane (AAPCS64 6.1.2's `d8`), read by promotion, the frame and the round trip.
 
 use std::collections::BTreeSet;
 
@@ -131,9 +128,8 @@ pub(crate) fn entry_lane(graph: &SsaGraph, start: ValueId, width: u32) -> Option
     }
 }
 
-/// The instructions and values a reload passes through to restore `lane`: copies into the
-/// register, or an insert into its root followed by inserts that leave the lane alone. The
-/// restored register is read by nothing. `O(chain)`.
+/// What a reload passes through to restore `lane`, read by nothing after: copies into the register,
+/// or an insert into its root and then inserts that leave the lane alone. `O(chain)`.
 #[cfg_attr(
     dylint_lib = "r2sleigh_lints",
     allow(

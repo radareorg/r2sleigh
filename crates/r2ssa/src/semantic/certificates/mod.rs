@@ -1522,8 +1522,24 @@ fn unobserved_compiler_inserted(
         .iter()
         .filter_map(|op| graph.inst_for_op(op))
         .collect::<crate::dense::IdSet<_>>();
+    // A return past a decided check's passing edge reads its difference as 0 (ADR 3.8.4).
+    let zero = |certificate: &&ReturnValueCertificate| {
+        let block = graph
+            .inst(certificate.at)
+            .and_then(|at| graph.block(at.block));
+        let returned = crate::constant::root_of(graph, certificate.value);
+        certificate.high.is_none()
+            && block.is_some_and(|block| {
+                (function.passing_differences().iter()).any(|(difference, pass)| {
+                    graph.value_of(*difference) == Some(returned)
+                        && function.dominates(*pass, block.addr)
+                })
+            })
+    };
+    let reading = returns.iter().filter(|certificate| !zero(certificate));
+    let returns = reading.cloned().collect::<Vec<_>>();
     loop {
-        let observed = observed_values(graph, returns, &inserted);
+        let observed = observed_values(graph, &returns, &inserted);
         let released = inserted
             .iter()
             .filter(|inst| {
