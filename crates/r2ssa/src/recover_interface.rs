@@ -2155,7 +2155,6 @@ fn recover_interface_inner(
                 },
             }
         }),
-        results: result_bytes(func, graph, slots),
         floor: arity_floor.clone(),
     };
     let unproven_result = match result {
@@ -2400,37 +2399,6 @@ fn slot_locations(
         });
     let all = registers.chain(stack).collect::<Vec<_>>();
     crate::dense::IdVec::from_fn(all.len(), |id| all[crate::dense::DenseId::index(id)])
-}
-
-/// Each typed result lane's bytes joined over every return (`lanes::Byte`): `None` where a return's
-/// value is not resolved, empty where none is reached. O(lanes x live-out).
-fn result_bytes(
-    func: &SSAFunction,
-    graph: &SsaGraph,
-    slots: &SourceConventionSlots,
-) -> crate::dense::IdVec<crate::site_boundary::LaneId, Option<crate::lanes::Bytes>> {
-    let lanes = [
-        slots.result_slot(),
-        slots.float_result_slot(),
-        slots.second_result_slot(),
-    ];
-    let written = func.written_or_captured();
-    crate::dense::IdVec::from_fn(lanes.len(), |lane: crate::site_boundary::LaneId| {
-        let slot = lanes[usize::from(lane.0)]?;
-        let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]);
-        if live_out.unresolved_blocks().next().is_some() {
-            return None;
-        }
-        let mut joined: Option<crate::lanes::Bytes> = None;
-        for value in live_out.iter() {
-            let bytes = written_bytes(&written, graph, value, &mut BTreeSet::new());
-            joined = Some(match joined {
-                None => bytes,
-                Some(held) => crate::lanes::join(&held, &bytes),
-            });
-        }
-        Some(joined.unwrap_or_default())
-    })
 }
 
 /// The calls an unproven result waits on: a tail transfer to a target no prototype describes, or

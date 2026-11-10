@@ -635,15 +635,13 @@ fn an_unread_slot_below_a_read_one_is_a_hole_spelled_as_its_typedef() {
             Some(r2source::Basis::Decoded)
         ]
     );
-    // The evidence travels with the sealed artifact, the result lane's bytes beside it (S7's join).
+    // The evidence travels with the sealed artifact.
     let boundary = (shared.facts().body_boundary.as_ref()).expect("a recovered body states it");
     let uses = boundary.slots.iter().map(|(_, used)| used).take(2);
     assert!(matches!(
         uses.collect::<Vec<_>>()[..],
         [SlotUse::Unread, SlotUse::Read { .. }]
     ));
-    let integer = boundary.results[r2ssa::site_boundary::LaneId::INTEGER].as_ref();
-    assert_eq!(integer.map(Vec::len), Some(8));
     let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
     let header = (text.lines())
         .find(|line| line.contains("f("))

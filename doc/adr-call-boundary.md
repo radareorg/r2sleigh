@@ -220,7 +220,6 @@ pub struct LaneSet { pub storage: CanonicalStorageId, pub bytes: Range<u8> }
 ```rust
 pub struct BodyBoundary {                       // in PreparedFunctionFacts, one per body
     pub slots: IdVec<SlotId, SlotUse>,          // every location of every section
-    pub results: IdVec<LaneId, lanes::Bytes>,   // lanes::Byte, joined over every return path
     pub floor: Option<SourceArityFloor>,        // D37, type unchanged
 }
 pub enum SlotUse {                              // total order, lowest first, for the fixpoint
@@ -373,7 +372,7 @@ A cold `pdd` runs at `World::Open` and joins no sites. A caller's extern then re
 | Version needs, symbol versions, `DW_AT_calling_convention` | r2image `Container` | r2engine binding and convention choice |
 | C library and kernel | r2engine, from `Container` | row selection |
 | `ConventionModel` | r2engine query, Held, per `ConventionId` | r2ssa recovery, placement, promotion, frame reach, frame model |
-| Slot use, result bytes, floor | r2ssa `BodyBoundary` | r2ssa minting, r2engine join |
+| Slot use, floor | r2ssa `BodyBoundary` | r2ssa minting, r2engine join |
 | Bytes written before a call, result fates | r2ssa `SiteBoundary` | r2engine join |
 | Placement | r2ssa `place` | r2ssa minting, r2engine imports |
 | Parameter list, arity, per-slot basis | r2ssa `SourceFunctionInterface` | formal facts, certificates, `CallBoundary` |
@@ -843,7 +842,8 @@ What the code said that this ADR did not, and the owner chosen:
 
 What the code said that this ADR did not, and the owner chosen:
 
-- `BodyBoundary { slots, locations, results, floor }` is r2ssa `body_boundary.rs`, minted by recovery and carried on `PreparedFunctionFacts::body_boundary` of the sealed artifact. `SlotId` numbers the integer section, the float section (or Win64's one `Shared` section), then the stack slots read. `locations` gives each slot its section, position and location. `results` is `IdVec<LaneId, Option<lanes::Bytes>>` over the typed lanes (integer, float, second): each lane's bytes joined over every return, `None` where a return's value is unresolved. It has no reader yet; S7's `CallBoundary` decision reads it in place of a second seal.
+- `BodyBoundary { slots, locations, floor }` is r2ssa `body_boundary.rs`, minted by recovery and carried on `PreparedFunctionFacts::body_boundary` of the sealed artifact. `SlotId` numbers the integer section, the float section (or Win64's one `Shared` section), then the stack slots read. `locations` gives each slot its section, position and location.
+- The sketch's `results` (each typed lane's bytes joined over every return) is not built. It had no reader, and S7's decision cannot use it: `decide` reads the open interface's return kind, carriers and causes, which joined bytes do not state (an `Ambiguous` pair, a `Returned` cause). Its three live-out walks per body went with it.
 - `SlotUse` derives its order: `Unread < Homed < SaveArea < HandedOn < Read < Unknown`. `HandedOn.to` holds the `CallSiteId`s whose boundary passes the entry value to an argument the callee does not leave a hole. A slot `HandedOn` mints at `Basis::Solved`, a `Read` at `Decoded`, a hole at `Convention`.
 - Rule 3 as built:
   - The preliminary build has already dropped a dead frame store, so -O0's homing store is invisible. `Homed` is an entry value whose only uses end in a copy nothing reads. A lane projection nothing reads is the build's own and counts as no home (`xor ecx, ecx` folds the lane it read).

@@ -5,7 +5,7 @@ use r2source::{Basis, SourceArityFloor, SourceFloorCause, SourceParameterLocatio
 
 use crate::CallSiteId;
 use crate::dense::{DenseId, IdVec};
-use crate::site_boundary::{ByteMask, LaneId};
+use crate::site_boundary::ByteMask;
 
 /// One location of one section, numbered densely in convention order: integer, float, stack.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -17,15 +17,6 @@ impl DenseId for SlotId {
     }
     fn from_index(index: usize) -> Self {
         Self(u32::try_from(index).expect("fewer than 2^32 slots"))
-    }
-}
-
-impl DenseId for LaneId {
-    fn index(self) -> usize {
-        usize::from(self.0)
-    }
-    fn from_index(index: usize) -> Self {
-        Self(u8::try_from(index).expect("fewer than 256 result lanes"))
     }
 }
 
@@ -89,9 +80,6 @@ pub struct Slot {
 pub struct BodyBoundary {
     pub slots: IdVec<SlotId, SlotUse>,
     pub locations: IdVec<SlotId, Slot>,
-    /// Each result lane's bytes joined over every return; `None` where a return's value is not
-    /// resolved, empty where no return is reached.
-    pub results: IdVec<LaneId, Option<crate::lanes::Bytes>>,
     pub floor: Option<SourceArityFloor>,
 }
 
