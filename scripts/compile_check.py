@@ -68,7 +68,8 @@ def parse_batch(text):
     for part in text.split(SEPARATOR)[1:]:
         body = part.strip()
         try:
-            answer = json.loads(body[body.index("{") :]) if "{" in body else None
+            # raw_decode stops at the JSON value's end, so stderr after it cannot hide an answer.
+            answer = json.JSONDecoder().raw_decode(body, body.index("{"))[0] if "{" in body else None
         except json.JSONDecodeError:
             answer = None
         code = answer.get("code") if isinstance(answer, dict) and not answer.get("refused") else None

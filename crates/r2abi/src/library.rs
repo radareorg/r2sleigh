@@ -78,16 +78,16 @@ impl Tail {
         !matches!(self, Self::None)
     }
 
-    /// The format parameter a narrow format reader counts the tail from.
-    pub const fn narrow_format(self) -> Option<u8> {
-        use FormatKind::{Printf, Scanf};
+    /// The format parameter the printf reader counts the tail from. A scanf format consumes
+    /// arguments differently (`%*d`), so it states none until a scanf reader exists.
+    pub const fn printf_format(self) -> Option<u8> {
         match self {
             Self::Format {
                 index,
-                kind: Printf | Scanf,
+                kind: FormatKind::Printf,
             }
             | Self::VaList {
-                format: Some((index, Printf | Scanf)),
+                format: Some((index, FormatKind::Printf)),
                 ..
             } => Some(index),
             _ => None,
@@ -438,7 +438,7 @@ mod tests {
             })
         );
         let vfprintf = parse_tail("va_list(2,printf,1)").expect("vfprintf");
-        assert_eq!(vfprintf.narrow_format(), Some(1));
+        assert_eq!(vfprintf.printf_format(), Some(1));
         assert_eq!(parse_tail("format(strftime,1)"), None);
         assert!(!Tail::None.reads_past_fixed());
         assert!(Tail::Unstated.reads_past_fixed());
@@ -446,7 +446,16 @@ mod tests {
             index: 0,
             kind: FormatKind::WidePrintf,
         };
-        assert_eq!(wide.narrow_format(), None);
+        assert_eq!(wide.printf_format(), None);
+        let scanf = Tail::Format {
+            index: 1,
+            kind: FormatKind::Scanf,
+        };
+        assert_eq!(
+            scanf.printf_format(),
+            None,
+            "`%*d %d` reads one argument, printf counts three"
+        );
     }
 
     /// A row of an uncited table is `Unstated` whatever it spells; the cited one states its tail.
@@ -456,7 +465,7 @@ mod tests {
         let puts = glibc.row(LibraryId::Portable, "puts").expect("puts");
         assert_eq!((puts.tail, &*puts.citation), (Tail::Unstated, ""));
         let printf = glibc.row(LibraryId::Portable, "printf").expect("printf");
-        assert_eq!(printf.tail.narrow_format(), Some(0));
+        assert_eq!(printf.tail.printf_format(), Some(0));
         assert!(printf.citation.contains("ISO C17"), "{}", printf.citation);
         let closedir = glibc
             .row(LibraryId::Portable, "closedir")

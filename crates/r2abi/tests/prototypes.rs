@@ -12,7 +12,7 @@ fn the_table_declares_which_functions_never_return() {
     let err = rows.find(scope, "err").expect("err is declared");
     assert!(err.noreturn, "err calls exit and never comes back");
     assert!(rows.prototype(err).variadic);
-    assert_eq!(err.tail.narrow_format(), Some(1));
+    assert_eq!(err.tail.printf_format(), Some(1));
     let memcpy = rows.find(scope, "memcpy").expect("memcpy is declared");
     assert!(!memcpy.noreturn, "memcpy returns");
     assert_eq!(memcpy.tail, Tail::Unstated);

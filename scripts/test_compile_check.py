@@ -38,6 +38,10 @@ class BatchTest(unittest.TestCase):
         )
         self.assertEqual(gate.parse_batch(text), ["int a;", None, None])
 
+    def test_diagnostics_after_the_last_answer_do_not_turn_it_into_a_refusal(self):
+        text = f'{SEP}\n{{"code":"int a;","refused":null}}\nwarning: a stderr line after the answer\n'
+        self.assertEqual(gate.parse_batch(text), ["int a;"])
+
     def test_every_error_line_is_read_and_a_constraint_anywhere_fails_the_unit(self):
         conversion = (
             "u.c:5:20: error: incompatible integer to pointer conversion passing 'uint64_t' to "

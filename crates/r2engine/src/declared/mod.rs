@@ -473,7 +473,7 @@ fn formatted(
 ) -> Option<r2source::SourceFunctionInterface> {
     let prototype = declared.prototype;
     let format = (declared.row)
-        .and_then(|row| row.tail.narrow_format())
+        .and_then(|row| row.tail.printf_format())
         .map(u32::from);
     let stated = match (prototype.variadic, format) {
         (true, format) => interface.with_declared_variadic(format),
