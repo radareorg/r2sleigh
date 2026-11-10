@@ -482,10 +482,8 @@ proptest::proptest! {
 
 #[test]
 fn a_tail_thunk_returns_what_its_target_returns_once_the_target_is_resolved() {
-    // `bump` returns its argument plus one; `thunk` sets an unrelated register and tail-jumps to
-    // it; `root` calls the thunk. Alone, the thunk proves no result: its target owns it. Resolved
-    // against `bump`, it returns `bump`'s four-byte result and passes its own first argument through,
-    // at the `edi` lane `bump` holds (ROADMAP D105).
+    // `thunk` tail-jumps to `bump` (`lea eax, [rdi + 1]`), so resolved it returns `bump`'s four bytes
+    // and passes on the `edi` lane `bump` holds (ROADMAP D105).
     let mut code = [0xcc_u8; 0x40];
     code[0x00..0x04].copy_from_slice(&[0x8d, 0x47, 0x01, 0xc3]); // lea eax, [rdi + 1]; ret
     code[0x10..0x1a].copy_from_slice(&[0xba, 0xff, 0xff, 0xff, 0xff, 0xe9, 0xe6, 0xff, 0xff, 0xff]); // mov edx, -1; jmp bump
