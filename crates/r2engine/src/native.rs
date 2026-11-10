@@ -2577,7 +2577,7 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         slots,
         // Asked in the first pass, before an interface exists; without it a caller loses its frame facts.
         call_effect: call_effect.ok(),
-        convention: Some(target.convention.clone()),
+        convention: Some(Arc::clone(&target.convention)),
     })
 }
 

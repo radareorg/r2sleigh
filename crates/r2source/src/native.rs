@@ -272,7 +272,7 @@ pub fn capture(
         DiagnosticIdentity(0),
     )
     .map(|snapshot| match &machine.convention {
-        Some(model) => snapshot.with_convention(model.clone()),
+        Some(model) => snapshot.with_convention(std::sync::Arc::clone(model)),
         None => snapshot,
     })
 }
