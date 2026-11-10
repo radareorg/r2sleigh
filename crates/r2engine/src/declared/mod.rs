@@ -473,7 +473,42 @@ impl Placement<'_> {
             declared,
             interface.with_types(r2source::Confidence::of(declared.basis)),
         )?;
-        self.carriers(name, interface, frame.frame_pointer)
+        let stacked = placement.locations.iter().any(|at| at.register().is_none());
+        let interface = self.carriers(name, interface, frame.frame_pointer)?;
+        self.stacked_return(name, interface, stacked)
+    }
+
+    /// The return address a call pushes, bound where a stack parameter is placed past it, as the
+    /// recovered path binds it; a call site then reads that parameter from its own `[sp]`.
+    fn stacked_return(
+        &self,
+        name: &str,
+        interface: r2source::SourceFunctionInterface,
+        stacked: bool,
+    ) -> Option<r2source::SourceFunctionInterface> {
+        let pushed = self
+            .target
+            .convention
+            .owned
+            .iter()
+            .find_map(|range| match range {
+                r2source::convention::OwnedRange::ReturnAddress(at) if at.start == 0 => {
+                    u32::try_from(at.end).ok()
+                }
+                _ => None,
+            });
+        let (true, Some(bytes)) = (stacked, pushed) else {
+            return Some(interface);
+        };
+        let bound = interface.with_exact_stacked_return(0, bytes, bytes, bytes);
+        bound
+            .inspect_err(|error| {
+                r2il::refusal_evidence!(
+                    "declared-interface",
+                    "{name}: the pushed return address does not bind: {error:?}"
+                );
+            })
+            .ok()
     }
 
     /// The machine's role carriers, on an interface the declaration states.

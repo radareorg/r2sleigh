@@ -346,6 +346,37 @@ fn an_import_s_seventh_argument_is_placed_on_the_stack() {
     );
 }
 
+/// After `.plt`: six register arguments, the seventh stored at `[rsp]`, then the call.
+const SEVENTH_ON_THE_STACK: [u8; 0x56] = common::plt_then(&[
+    0x48, 0x83, 0xec, 0x08, // 1020 sub rsp, 8
+    0x48, 0xc7, 0x04, 0x24, 0x77, 0x00, 0x00, 0x00, // 1024 mov qword [rsp], 0x77
+    0xbf, 0x01, 0x00, 0x00, 0x00, // 102c mov edi, 1
+    0xbe, 0x02, 0x00, 0x00, 0x00, // 1031 mov esi, 2
+    0xba, 0x03, 0x00, 0x00, 0x00, // 1036 mov edx, 3
+    0xb9, 0x04, 0x00, 0x00, 0x00, // 103b mov ecx, 4
+    0x41, 0xb8, 0x05, 0x00, 0x00, 0x00, // 1040 mov r8d, 5
+    0x41, 0xb9, 0x06, 0x00, 0x00, 0x00, // 1046 mov r9d, 6
+    0xe8, 0xbf, 0xff, 0xff, 0xff, // 104c call stub
+    0x48, 0x83, 0xc4, 0x08, // 1051 add rsp, 8
+    0xc3, // 1055 ret
+]);
+
+/// The declared seventh argument sits at entry + 8, past the return address the call pushes,
+/// so the call reads the caller's `[rsp]` (D163, PR 352 review).
+#[test]
+fn a_declared_stack_argument_is_the_callers_outgoing_slot() {
+    let literal = Literal::plt_wrapped("__libc_start_main", &SEVENTH_ON_THE_STACK);
+    let text = OpenProgram::of(literal)
+        .rendered(common::PLT_CALLER)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    let arguments = common::call_arguments(&text, "__libc_start_main").unwrap_or_default();
+    assert_eq!(arguments.len(), 7, "{text}");
+    assert!(arguments[6].ends_with("119U"), "{text}");
+}
+
 /// `f`: `test edi, edi; je ret; sub edi, 1; call f; ret`, a self-recursive function that never
 /// writes `rsi`; `caller`: `mov edi, 5; mov esi, 7; call f; ret`.
 const SELF_RECURSIVE: &[u8] = &[
