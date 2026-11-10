@@ -467,11 +467,10 @@ A cold `pdd` runs at `World::Open` and joins no sites. A caller's extern then re
 - **`CallBoundary` join:**
   - O(sites of the callee), read from a held reverse call index, and O(call sites) per program under `aa`. Forwarding through `Returned` reads the caller's held entry, O(1) each.
   - A cold `pdd` is `World::Open` and joins nothing.
-- **Measured today:**
+- **Measured before S3:**
   - bash `0x2e630`: `aa; pdd` is 19.43 G instructions, `aa` 7.38 G and a cold `pdd` 0.66 G.
-  - About 12 G of that is `ReferenceIndex` (`requests.rs:781`) walking every body again, because `Walked` is `Retention::Newest` (`program/analysis.rs:126`).
-  - pumasim `0x1fad00` is 148.9 G against 64 G for `aa`. Its split is not profiled. D153 requires that profile before S3's design.
-- **Held index:** compact index rows and site fates built inside `aa`'s walk and held. The lifted blocks are not held. Estimates: bash about 8.2 G, pumasim unknown until profiled. Peak RSS grows by bytes per call site. dhat measures it before landing, against pumasim's 434 MB.
+  - The extra cost is the first `ReferenceIndex` build (`requests.rs:781`), not `Walked`'s retention. "S3 as built" has the split.
+- **Held index:** the index lifts each body once and is held. The lifted blocks are not held. "S3 as built" has the numbers.
 - **Callee preparation:** already 47 to 84% of a cold `pdd`. This design adds none on the cold path. Under `aa` it adds the preparations the H bound allows.
 - **Gates:**
   - release `pdd` and `aa; pdd` on 0pack `0x62ecf0` and pumasim `0x23fdf0` within 2%;
@@ -678,3 +677,32 @@ What the code said that this ADR did not, and the owner chosen:
 - Demand names a tail-transfer exit (`demand::exits_are_named_beside`): where every tail transfer's boundary is complete, has fixed arguments and states a narrower width, the exit reads each argument and the result lane's `logical` bytes. A tail callee whose width is whole or unknown leaves the body unnamed, as base.
 - Gate, DecBench O2 and O2-noinline, non-bash (2,621 functions): `residual_u64(n) << 32` in 142 functions on base, 158 on S2 (O2 68 to 67, O2-noinline 74 to 91). Read by hand: diff `0x9e70` prints `return (uint32_t)strcmp(...)`; `compare_names`, `rpl_fseeko` (`fileno`), `BZ2_bzclose` (`ferror`) and zlib `test_gzio` (two `strcmp`) lose the residual, each value read only in its low four bytes.
 - What remains is no width fact. In 28 hits read: a call that does not come back ends the body outside the walk (the `Call` block's fallthrough is no block), an unresolved jump table (`IndirectBranch`), a return the live-out walk cannot resolve, a tail callee of whole width (`fputs`, `FILE` unknown, S8), and 64-bit returns on another path (D74). Naming the call that does not come back clears 41 more (to 117) but makes five getopt `main`s refuse (`live-value-producer` at the switch's table load unaccounted by r2dec's ledger), so it waits for its own row.
+
+
+## S3 as built (2026-11-10)
+
+What the profile said that this ADR did not, and the design taken from it:
+
+- Holding `Walked` saves nothing. On pumasim, 67 of 15,365 walks repeat (0.4%).
+- The extra cost of `pdd` after `aa` is the first build of `ReferenceIndex`. `ResultReads`' closed-world check asks for it, and a cold `ax` costs the same as `aa; pdd`.
+- Base split of pumasim `aa; pdd` (147.9 G instructions): the survey 63.7 G and the index 84 G. The index spent 30.0 G lifting each body through `Walked`, 34.5 G decoding it again for the listing (19.7 G of lift, 13.1 G of spelling), 8.9 G annotating, 7.7 G on pointer parameters and 3.2 G indexing.
+- Rows built in `aa`'s walk are not taken. The discovery trace keeps no lift, so the rows would need every body's lift held until the survey ends. They would also move about 33 G of annotation and pointer-parameter work into every `aa` on pumasim.
+- The index stays a held query built on first demand, and lifts each body once. `body::listed_body` keeps each instruction's lift, decode window and decoder context. `query::decode::walked_listing` annotates those decodes, so nothing is decoded again.
+- A body whose dispatch tables the survey holds is walked once, through them. Others walk first and read their tables only where the walk stops at a dispatch, as `Walked` does.
+- A line is spelled only where a claim or a computed number reads its operands (`Disassembler::spell`). A line with no claim never reaches the index.
+- A lazily spelled line starts from a fresh decoder context. Inside a Thumb `it` block its text can differ from `pdf`'s; x86-64 and AArch64 keep no such context.
+- The index still holds each claiming line whole, for `ax`'s text. Compact rows that spell at display wait for a reader that needs the memory.
+
+Measured, release, instructions retired, base then S3. The bound is twice `aa` plus a cold `pdd`.
+
+| | `aa` | cold `pdd` | `aa; pdd` base | `aa; pdd` S3 | bound | peak after `aa; pdd` |
+|---|---|---|---|---|---|---|
+| pumasim `0x1fad00` | 63.82 G | 1.24 G | 147.92 G | 116.17 G | 128.88 G | 443.6 to 428.7 MB |
+| 0pack `0x475520` | 56.57 G | 1.04 G | 104.21 G | 84.30 G | 114.18 G | 278.4 to 274.7 MB |
+| bash `0x2e630` | 7.36 G | 0.71 G | 19.31 G | 15.38 G | 15.43 G | 110.6 to 110.0 MB |
+
+- `aa; pdd` and `aa; ax` output is byte-identical to base on all three.
+- Cold release `pdd`: pumasim `0x23fdf0` 19.77 to 19.80 G (+0.1%), 0pack `0x62ecf0` 15.36 to 15.40 G (+0.3%).
+- Peak after `aa`: pumasim 205.6 to 206.9 MB, 0pack 150.4 to 158.4 MB, bash 61.8 to 61.7 MB. Peak footprint varies about 4% run to run on the same binary.
+- bash passes by 0.05 G. What remains of its index is about 2.5 G of walk, 1.4 G of pointer parameters (callee preparations) and 0.7 G of spelling.
+
