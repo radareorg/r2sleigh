@@ -43,12 +43,27 @@ def sh(command: str) -> subprocess.CompletedProcess:
     return subprocess.run(command, shell=True, capture_output=True, text=True)
 
 
-def gate(gate_args: list[str]) -> subprocess.CompletedProcess:
+# The gate's own failure lines: only these grade a mutant killed.
+DIAGNOSTICS = ("FALSE VOID", "VOID LOST", "FLOOR")
+
+
+def gate(gate_args: list[str]) -> tuple[str, subprocess.CompletedProcess]:
+    """`("build", result)` where cargo failed, else `("gate", result)`."""
     built = sh(BUILD)
     if built.returncode != 0:
-        return built
-    return subprocess.run([sys.executable, "scripts/scratch_void.py", "--r2s", R2S, *gate_args],
-                          capture_output=True, text=True)
+        return "build", built
+    return "gate", subprocess.run([sys.executable, "scripts/scratch_void.py", "--r2s", R2S, *gate_args],
+                                  capture_output=True, text=True)
+
+
+def verdict(stage: str, done: subprocess.CompletedProcess) -> tuple[str, bool | None]:
+    """What the run says of the mutant: killed (True), survived (False), or no grade (None) with the reason."""
+    if stage == "build" or done.returncode not in (0, 1):
+        return f"the {stage} failed (exit {done.returncode}): {done.stderr.strip()[-300:]}", None
+    caught = [line for line in done.stderr.splitlines() if line.startswith(DIAGNOSTICS)]
+    if done.returncode == 1 and not caught:
+        return f"the gate exited 1 with no failure line of its own: {done.stderr.strip()[-300:]}", None
+    return (f"killed: {'; '.join(caught[:3])}", True) if caught else ("survived the gate", False)
 
 
 def run(name, edits, must_die, why, check, gate_args):
@@ -65,16 +80,14 @@ def run(name, edits, must_die, why, check, gate_args):
     try:
         for path in files:
             open(path, "w").write(text[path])
-        done = gate(gate_args)
+        stage, done = gate(gate_args)
     finally:
         for path in files:
             open(path, "w").write(originals[path])
-    if done.returncode not in (0, 1):
-        return f"{name}: the build or the gate failed (exit {done.returncode}): {done.stderr.strip()[-300:]}", False
-    died = done.returncode == 1
-    caught = [line for line in done.stderr.splitlines() if line.startswith(("FALSE VOID", "VOID LOST", "FLOOR"))]
-    verdict = f"killed: {'; '.join(caught[:3])}" if died else "survived the gate" + (f" ({why})" if why else "")
-    return f"{name}: {verdict}", died == must_die
+    said, died = verdict(stage, done)
+    if died is None:
+        return f"{name}: {said}", False
+    return f"{name}: {said}" + (f" ({why})" if why and not died else ""), died == must_die
 
 
 def main(argv: list[str]) -> int:
@@ -85,7 +98,7 @@ def main(argv: list[str]) -> int:
     if not check:
         if subprocess.run(["git", "diff", "--quiet", "--", *paths]).returncode:
             sys.exit("a file a mutant edits has changes: commit or restore them first")
-        green = gate(gate_args)
+        _, green = gate(gate_args)
         if green.returncode != 0:
             print(green.stdout + green.stderr[-2000:])
             sys.exit("the unmutated tree fails the gate: no mutant can be graded against it")

@@ -15,7 +15,8 @@ The gate fails (exit 1) on a false void: a source-value function rendered `void`
 either as a clone whose machine code returns nothing (`.isra`, `.constprop`, `.part`) or as a defect its D-row owns.
 Names are read by this gate only; the engine reads none.
 Against a baseline it also fails on a source-void function the baseline renders `void` that is no longer `void`,
-unless the known list names it as moving (ADR, Decided 2). `--floor-open` and `--floor-closed` are D203's totals,
+unless the known list names it as moving (ADR, Decided 2), and on an unanswered function the baseline does not list:
+a crash, a deadline or a malformed `pddj` could hide either failure. `--floor-open` and `--floor-closed` are D203's totals,
 armed once D200 lands. Exit 2 is a build the gate cannot grade.
 """
 
@@ -80,6 +81,9 @@ class Graded:
             tally.setdefault(cls, Counter())[truth] += 1
         return {cls: dict(sorted(t.items())) for cls, t in sorted(tally.items())}
 
+    def named(self, cls: str) -> list[str]:
+        return sorted(name for name, (c, _) in self.rows.items() if c == cls)
+
     def voids(self, truth: str) -> list[str]:
         return sorted(name for name, (cls, t) in self.rows.items() if cls in VOIDS and t == truth)
 
@@ -127,8 +131,11 @@ def grade(build: Build, r2s: str, prefix: str, timeout: float) -> Graded:
     sources = truth(build.debug, prefix)
     if not sources:
         raise Ungradable(f"{build.debug}: no gcc C function with an entry")
-    report = r2s_batch.run_batch(r2s, build.stripped, list(sources), function_timeout=timeout,
-                                 startup_timeout=max(timeout, 1800))
+    try:
+        report = r2s_batch.run_batch(r2s, build.stripped, list(sources), function_timeout=timeout,
+                                     startup_timeout=max(timeout, 1800))
+    except OSError as error:
+        raise Ungradable(f"cannot run {r2s}: {error}") from error
     graded = Graded(build.name)
     for answer in report.answers:
         source = sources[answer.address]
@@ -156,7 +163,7 @@ def read_known(path: Path | None) -> dict[tuple[str, str], str]:
 
 def judge(results: list[Graded], known: dict[tuple[str, str], str], baseline: dict,
           floors: tuple[int | None, int | None]) -> list[str]:
-    """Every failure, in build order: a false void, a lost void, a floor not reached."""
+    """Every failure, in build order: a false void, a lost void, an unlisted unanswered function, a floor."""
     failures = []
     for graded in results:
         for name in graded.voids("value"):
@@ -167,6 +174,10 @@ def judge(results: list[Graded], known: dict[tuple[str, str], str], baseline: di
         for name in recorded.get("voids", []):
             if name not in now and known.get((graded.name, name)) != "moves":
                 failures.append(f"VOID LOST: {graded.name} {name} ({graded.rows.get(name, ('absent',))[0]})")
+        listed = set(recorded.get("unanswered", []))
+        for name in graded.named("unanswered"):
+            if name not in listed:
+                failures.append(f"UNANSWERED: {graded.name} {name}")
     open_now = sum(g.counts().get("void-open", {}).get("void", 0) for g in results)
     closed_now = open_now + sum(g.counts().get("void-closed", {}).get("void", 0) for g in results)
     for label, floor, now in (("open world", floors[0], open_now), ("closed world", floors[1], closed_now)):
@@ -182,7 +193,8 @@ def summary(results: list[Graded]) -> dict:
             totals.setdefault(cls, Counter()).update(truths)
     return {
         "totals": {cls: dict(sorted(t.items())) for cls, t in sorted(totals.items())},
-        "builds": {g.name: {"counts": g.counts(), "voids": g.voids("void"), "false": g.voids("value")}
+        "builds": {g.name: {"counts": g.counts(), "voids": g.voids("void"), "false": g.voids("value"),
+                         "unanswered": g.named("unanswered")}
                    for g in sorted(results, key=lambda g: g.name)},
     }
 
@@ -238,11 +250,13 @@ def main(argv: list[str] | None = None) -> int:
         if kind != "moves" and build in {g.name for g in results} and (build, name) not in false_now:
             print(f"no longer false, drop it from the known list: {build} {name} ({kind})", file=sys.stderr)
     if args.accept_baseline and args.baseline:
-        if failures:
+        # An unanswered function is recorded by name, so the next run fails on any other; a false void never is.
+        if any(not failure.startswith("UNANSWERED") for failure in failures):
             print("not recorded: a baseline holds no false void", file=sys.stderr)
             return 1
         args.baseline.write_text(json.dumps(report, indent=1) + "\n")
         print(f"baseline recorded: {args.baseline}", file=sys.stderr)
+        return 0
     return 1 if failures else 0
 
 

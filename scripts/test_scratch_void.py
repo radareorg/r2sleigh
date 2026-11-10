@@ -104,6 +104,12 @@ class Judge(unittest.TestCase):
         failures = scratch_void.judge([build], {("b", "h"): "moves"}, baseline, (None, None))
         self.assertEqual(failures, ["VOID LOST: b g (unproven:unstated)"])
 
+    def test_an_unanswered_function_fails_unless_the_baseline_lists_it(self):
+        build = graded("b", f=("unanswered", "value"), g=("unanswered", "void"))
+        self.assertEqual(scratch_void.judge([build], {}, {}, (None, None)), ["UNANSWERED: b f", "UNANSWERED: b g"])
+        listed = {"builds": {"b": {"voids": [], "unanswered": ["f"]}}}
+        self.assertEqual(scratch_void.judge([build], {}, listed, (None, None)), ["UNANSWERED: b g"])
+
     def test_a_new_void_is_no_failure(self):
         baseline = {"builds": {"b": {"voids": []}}}
         build = graded("b", f=("void-open", "void"))
@@ -146,12 +152,56 @@ class Main(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertIn("VOID LOST: b f", err)
 
+    def test_a_crash_fails_the_run_and_a_recorded_one_does_not(self):
+        crashed = {"b": graded("b", f=("unanswered", "value"))}
+        code, _, err = self.run_main(crashed)
+        self.assertEqual(code, 1)
+        self.assertIn("UNANSWERED: b f", err)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "baseline.json"
+            self.assertEqual(self.run_main(crashed, "--baseline", str(path), "--accept-baseline")[0], 0)
+            self.assertEqual(json.loads(path.read_text())["builds"]["b"]["unanswered"], ["f"])
+            self.assertEqual(self.run_main(crashed, "--baseline", str(path))[0], 0)
+
+    def test_an_r2s_that_cannot_run_is_exit_2(self):
+        with mock.patch.object(scratch_void, "truth", return_value={0x1000: scratch_void.Source("f", True)}), \
+                contextlib.redirect_stderr(io.StringIO()) as err:
+            code = scratch_void.main(["--build", "b", "d", "s", "--r2s", "/nonexistent/r2s"])
+        self.assertEqual(code, 2)
+        self.assertIn("cannot run /nonexistent/r2s", err.getvalue())
+
     def test_no_build_is_exit_2(self):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(scratch_void.main([]), 2)
 
 
 class Mutants(unittest.TestCase):
+    def grade(self, stage, code, stderr):
+        import subprocess
+        import mutants_d203
+        return mutants_d203.verdict(stage, subprocess.CompletedProcess([], code, "", stderr))
+
+    def test_a_kill_needs_the_gates_own_failure_line(self):
+        self.assertEqual(self.grade("gate", 1, "FALSE VOID: scratch tail_puts\n"),
+                         ("killed: FALSE VOID: scratch tail_puts", True))
+        self.assertIsNone(self.grade("gate", 1, "Traceback (most recent call last):\nKeyError: 'x'\n")[1])
+        self.assertIsNone(self.grade("gate", 1, "UNANSWERED: scratch tail_puts\n")[1])
+
+    def test_a_build_failure_or_refusal_grades_nothing(self):
+        self.assertIsNone(self.grade("build", 1, "error[E0308]: mismatched types\n")[1])
+        self.assertIsNone(self.grade("gate", 2, "refusing to grade: no build given\n")[1])
+        self.assertEqual(self.grade("gate", 0, ""), ("survived the gate", False))
+
+    def test_an_ungraded_mutant_is_wrong_whatever_it_must_do(self):
+        import mutants_d203
+        with mock.patch.object(mutants_d203, "gate", return_value=("gate", __import__("subprocess").CompletedProcess(
+                [], 1, "", "Traceback (most recent call last):\n"))), tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "f.rs"
+            path.write_text("a\n")
+            line, ok = mutants_d203.run("m", [(str(path), "a\n", "b\n")], True, "", False, [])
+            self.assertFalse(ok, line)
+            self.assertEqual(path.read_text(), "a\n")
+
     def test_every_mutant_edit_applies_once_to_the_tree(self):
         import mutants_d203
         root = pathlib.Path(__file__).resolve().parent.parent
