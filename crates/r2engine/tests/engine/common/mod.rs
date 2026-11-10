@@ -184,7 +184,7 @@ const PLT_PASSING: [u8; 0x2b] = [
 ];
 
 /// [`PLT`]'s `.plt` and then `text`, a function of the program's own that reaches the stub at [`PLT_STUB`].
-const fn plt_then<const N: usize>(text: &[u8]) -> [u8; N] {
+pub const fn plt_then<const N: usize>(text: &[u8]) -> [u8; N] {
     let mut bytes = [0; N];
     let mut at = 0;
     while at < 0x20 {
@@ -697,7 +697,7 @@ impl Literal {
     }
 
     /// A `.plt` whose stub is for `import`, then `code`: a function of the program's own that reaches it.
-    fn plt_wrapped(import: &str, code: &'static [u8]) -> Self {
+    pub fn plt_wrapped(import: &str, code: &'static [u8]) -> Self {
         let mut program = Self::plt_importing(import).running_on(GLIBC);
         program.code = code;
         program.container.segments = vec![code_segment(BASE, code.len() as u64)];

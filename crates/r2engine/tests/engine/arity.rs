@@ -656,3 +656,64 @@ fn a_call_whose_stated_argument_is_unreached_is_a_floor_handed_to_it() {
     let cause = floor_cause(Literal::of_code(CODE, &functions));
     assert_eq!(cause, handed_to(SourceUnprovenCall::Stated(BASE + 0x20)));
 }
+
+/// bash's `sh_unset_nodelay_mode` after `.plt`: the body moves `edi`, and two `fcntl` calls read `fd`.
+const DECLARED_INT_MOVED: [u8; 0x42] = common::plt_then(&[
+    0x53, // 1020 push rbx
+    0x31, 0xd2, // 1021 xor edx, edx
+    0x31, 0xc0, // 1023 xor eax, eax
+    0x89, 0xfb, // 1025 mov ebx, edi
+    0xbe, 0x03, 0x00, 0x00, 0x00, // 1027 mov esi, 3
+    0xe8, 0xdf, 0xff, 0xff, 0xff, // 102c call stub
+    0x89, 0xdf, // 1031 mov edi, ebx
+    0xbe, 0x04, 0x00, 0x00, 0x00, // 1033 mov esi, 4
+    0x89, 0xc2, // 1038 mov edx, eax
+    0x31, 0xc0, // 103a xor eax, eax
+    0x5b, // 103c pop rbx
+    0xe9, 0xce, 0xff, 0xff, 0xff, // 103d jmp stub
+]);
+
+/// `return fcntl(fd, F_GETFL) & 4;` after `.plt`: `fd` is handed on untouched.
+const DECLARED_INT: [u8; 0x38] = common::plt_then(&[
+    0x48, 0x83, 0xec, 0x08, // 1020 sub rsp, 8
+    0xbe, 0x03, 0x00, 0x00, 0x00, // 1024 mov esi, 3
+    0x31, 0xc0, // 1029 xor eax, eax
+    0xe8, 0xe0, 0xff, 0xff, 0xff, // 102b call stub
+    0x48, 0x83, 0xc4, 0x08, // 1030 add rsp, 8
+    0x83, 0xe0, 0x04, // 1034 and eax, 4
+    0xc3, // 1037 ret
+]);
+
+/// The caller of `fcntl` at `code`'s one parameter type.
+fn fcntl_caller_parameters(code: &'static [u8]) -> (String, Vec<(String, String)>) {
+    let text = OpenProgram::of(Literal::plt_wrapped("fcntl", code))
+        .rendered(common::PLT_CALLER)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    let header = (text.lines())
+        .find(|line| line.contains("fcn_1020(") && !line.ends_with(';'))
+        .unwrap_or_default();
+    let parameters = common::parameters(header);
+    (text, parameters)
+}
+
+/// A declared integer is read at its own width, never the register's: the call's argument is
+/// the `edi` lane the body read, so `int fd` is a 32-bit parameter. Open: D105.
+#[test]
+#[ignore = "ROADMAP D105: the narrowed lane renders through the whole entry carrier"]
+fn a_declared_integer_is_read_at_its_width_not_the_registers() {
+    let (text, parameters) = fcntl_caller_parameters(&DECLARED_INT_MOVED);
+    assert_eq!(parameters.len(), 1, "{text}");
+    assert_eq!(parameters[0].0, "uint32_t", "{text}");
+}
+
+/// A declared integer handed on untouched has no lane value to name. Open: D105's second half.
+#[test]
+#[ignore = "ROADMAP D105: an entry carrier handed on whole has no low-lane value"]
+fn a_declared_integer_handed_on_is_a_parameter_at_its_width() {
+    let (text, parameters) = fcntl_caller_parameters(&DECLARED_INT);
+    assert_eq!(parameters.len(), 1, "{text}");
+    assert_eq!(parameters[0].0, "uint32_t", "{text}");
+}

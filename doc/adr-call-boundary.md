@@ -706,3 +706,16 @@ Measured, release, instructions retired, base then S3. The bound is twice `aa` p
 - Peak after `aa`: pumasim 205.6 to 206.9 MB, 0pack 150.4 to 158.4 MB, bash 61.8 to 61.7 MB. Peak footprint varies about 4% run to run on the same binary.
 - bash passes by 0.05 G. What remains of its index is about 2.5 G of walk, 1.4 G of pointer parameters (callee preparations) and 0.7 G of spelling.
 
+
+## S4 as built (2026-11-10)
+
+What the code said that this ADR did not, and the owner chosen:
+
+- `place` is r2ssa `place.rs`. `ParamClass` is `Integer(bytes)`, `Float(bytes)` or `Unplaced(SourceUnplacedClass)`, and r2engine maps a type to it (`declared/mod.rs` `class`). `SourceUnplacedClass` names `Float(bits)`, `WideInteger(bits)`, `Aggregate`, `Unsized` and `PackedStack`; the floor is `SourceFloorCause::Unplaced`.
+- The cspec's stack section counts from the call (`offset - stackshift`). `place` adds the `OwnedRange::ReturnAddress` the call pushes, so bzip2 `0x1bc6d`'s seventh is `Stack { 8, 4 }` from the entry.
+- Apple arm64 packs stack arguments by size. `place` refuses a stack class narrower than the step there (`PackedStack`) until a cited row places it.
+- `place_declared` keeps the arrival check and `DW_CC_nocall`; r2image reads `DW_AT_calling_convention` into `Prototype::nocall`. `arrivals_hold`, `placed_prefix`, `placed` and the `break` are deleted.
+- The recovered route mints only where `place` puts each recovered parameter at the slot the body read. The native snapshot carries the `ConventionModel` (`OwnedFunctionSnapshot::convention`) for it; a wire snapshot has none and is not checked.
+- r2dec `carrier_class` is deleted. The class of a register is `SourceConventionSlots::class_of`, the view of the model's sections; r2dec maps class and width to `MachineType`. `SourceAbiParameterSpec.class` waits for S6, which mints classes per slot.
+- A placed stack parameter is a `SourceStackSlotSpec::new_parameter` at the stack pointer, as recovery mints one; its DWARF home is that slot and gets no second spec. The `pdd` header still drops it until S5's `FormalHome::Frame`: bzip2 -g `0x1bc6d` shows 7 in `afi` and `afv` (`alphaSize` last) and 6 in the header.
+- D105 is not closed. Narrowing an entry carrier's argument to the lane the callee holds makes bash's `sh_unset_nodelay_mode` shape `uint32_t`, and then a call reached through `test edi, edi` renders `err((int32_t)rdi_1)` with `rdi_1 = residual << 32 | arg0`, the withdrawn second build's failure. Both D105 tests stay ignored until the formal's lane binds the call argument.
