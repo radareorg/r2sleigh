@@ -87,9 +87,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
     const NAME: &'static str = "call-boundary";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: an import's placement, `O(locations)`; a function's callers' fates, each body solved
-    /// once and held, then one binary search per call and one read per forwarding caller. A cut
-    /// answer is solved again from each entry asked, `O(cycle × callers)`.
+    /// Work: an import's placement; a function's held caller fates, one search per call and one
+    /// read per forwarder; a cut answer again per entry asked, `O(cycle × callers)`.
     fn compute(db: &Db<ProgramInputs<S>>, &(callee, world): &(CalleeKey, World)) -> Self::Value {
         let view = View::new(db, true);
         let walker = super::returns::Walking::new(view.clone(), true).ok()?;
