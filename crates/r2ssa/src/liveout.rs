@@ -237,6 +237,18 @@ impl FunctionLiveOut {
         (found && !reaches_entry, clobbered_any)
     }
 
+    /// The values this body defines that reach the end of block `from` in `storage`.
+    pub(crate) fn reaching(
+        func: &SSAFunction,
+        graph: &SsaGraph,
+        storage: CanonicalStorageId,
+        from: u64,
+    ) -> BTreeSet<ValueId> {
+        let mut here = BTreeSet::new();
+        Self::default().collect_reaching(func, graph, storage, from, &mut here);
+        here
+    }
+
     /// Whether the caller reads this value once the function returns.
     pub fn contains(&self, value: ValueId) -> bool {
         self.values.contains(value)

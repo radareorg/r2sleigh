@@ -2597,6 +2597,32 @@ fn a_tail_transfer_to_a_declared_int_returns_the_callees_width() {
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 
+/// `call f; mov edi, eax; jmp g` over `int f(void)` and `int g(int)`, as gzip's `rpl_fseeko`
+/// hands `fileno`'s result on and tails into `fseeko` on another path.
+const TAILS_AFTER_A_DECLARED_INT: &[u8] = &[
+    0xe8, 0x0b, 0x00, 0x00, 0x00, // 0x1000 call 0x1010
+    0x89, 0xc7, // 0x1005 mov edi, eax
+    0xe9, 0x14, 0x00, 0x00, 0x00, // 0x1007 jmp 0x1020
+    0x90, 0x90, 0x90, 0x90, // 0x100c padding
+    0x6a, 0xff, // 0x1010 push -1
+    0x58, // 0x1012 pop rax
+    0xc3, // 0x1013 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 0x1014 padding
+    0x89, 0xf8, // 0x1020 mov eax, edi
+    0xc3, // 0x1022 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// A tail into `int g(int)` reads its argument and four bytes of the result lane, so `f`'s `int`
+/// handed on holds no residual above it: the tail exit is named for demand (D161).
+#[test]
+fn a_tail_exit_reads_the_tail_callees_width() {
+    let machine = declaring_each(&[(0x1010, "f", "int", &[]), (0x1020, "g", "int", &["int"])]);
+    let text = rendered_on(&machine, TAILS_AFTER_A_DECLARED_INT, "tails_on");
+    assert!(text.contains("fcn_1010()"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
 /// `STORES_A_DECLARED_INT_WHOLE` with the store `mov [rbx], eax`: the caller reads only EAX.
 const STORES_A_DECLARED_INT: &[u8] = &[
     0x53, // 0x1000 push rbx

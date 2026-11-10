@@ -383,6 +383,7 @@ impl PreparedFunctionFacts {
             machine_context,
         );
         phase!("assumptions", 0);
+        let demanded = demanded(body, (&call_sites, &boundaries), &live_out, &ignored_reads);
         let facts = Self {
             addresses,
             values,
@@ -395,7 +396,7 @@ impl PreparedFunctionFacts {
             control_domains,
             private_stack_objects,
             certificates,
-            demanded: demanded(body, &live_out, &ignored_reads),
+            demanded,
             obligations,
             assumptions: assumptions.clone(),
             applied_assumption_bindings,
@@ -414,14 +415,78 @@ impl PreparedFunctionFacts {
 /// What `DemandedBytes` says of `body`, where every exit is named.
 fn demanded(
     body: Body<'_>,
+    calls: (&CallSiteFacts, &SourceBoundaryFacts),
     live_out: &crate::liveout::FunctionLiveOut,
     ignored: &BTreeSet<crate::graph::UseSite>,
 ) -> Option<crate::demand::DemandedBytes> {
     let result = (body.machine_context)
         .and_then(SourceMachineContext::function_interface)
         .and_then(returned_bytes);
-    crate::demand::exits_are_named(body.function, live_out)
-        .then(|| crate::demand::DemandedBytes::of_returning(body.graph, live_out, result, ignored))
+    let (tails, reads) = tail_reads(body, calls).unwrap_or_default();
+    crate::demand::exits_are_named_beside(body.function, live_out, &tails).then(|| {
+        crate::demand::DemandedBytes::of_returning(body.graph, live_out, (result, &reads), ignored)
+    })
+}
+
+/// Blocks that leave by a tail transfer, and the bytes of each value their callees read.
+type TailReads = (BTreeSet<u64>, Vec<(ValueId, crate::bytes::ByteMask)>);
+
+/// Tail-transfer exits and what their callees read: each argument and the result lane's `logical`
+/// bytes; `None` where a tail states no narrower width (doc/adr-call-boundary.md, "S2 as built").
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the tail exits of one body: a few blocks, where a dense index costs O(blocks)"
+    )
+)]
+fn tail_reads(
+    body: Body<'_>,
+    (call_sites, boundaries): (&CallSiteFacts, &SourceBoundaryFacts),
+) -> Option<TailReads> {
+    let mut tails = BTreeSet::new();
+    let mut reads = Vec::new();
+    let tail_calls =
+        (call_sites.by_id.values()).filter(|call| call.transfer == CallSiteTransfer::TailCall);
+    for call in tail_calls {
+        let boundary = boundaries.calls.get(&call.id)?;
+        let named =
+            boundary.complete && boundary.arguments_complete && boundary.variadic == Some(false);
+        let Some(SourceCallResult::Register { storage, width }) = boundary.result_kind else {
+            return None;
+        };
+        if !named || width.fills(storage) {
+            return None;
+        }
+        let block = body
+            .graph
+            .inst(call.at)
+            .and_then(|inst| body.graph.block(inst.block))?;
+        tails.insert(block.addr);
+        for argument in &boundary.arguments {
+            if let SourceCallArgumentValue::Value(value) = argument.value {
+                reads.push((value, crate::bytes::ByteMask::All));
+            }
+        }
+        let lane = crate::liveout::FunctionLiveOut::reaching(
+            body.function,
+            body.graph,
+            storage,
+            block.addr,
+        );
+        for value in lane {
+            let held = body
+                .graph
+                .value(value)
+                .and_then(|held| held.canonical_storage);
+            let mask = match held.is_some_and(|held| held.offset == storage.offset) {
+                true => crate::bytes::ByteMask::whole(u32::from(width.logical)),
+                false => crate::bytes::ByteMask::All,
+            };
+            reads.push((value, mask));
+        }
+    }
+    Some((tails, reads))
 }
 
 /// The bytes of its result register a function's caller reads: the low bytes the declared type
