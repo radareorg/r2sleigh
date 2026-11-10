@@ -31,6 +31,8 @@ pub struct AnalysisStats {
     /// Callees resolved against the owners of their result, which every caller asks.
     pub resolved: db::QueryStats,
     pub rendered: db::QueryStats,
+    /// The program's reference index, built on first demand (`ax`, the closed world's every way in).
+    pub references: db::QueryStats,
 }
 pub use proved::Proved;
 pub use r2ssa::InductionStep;

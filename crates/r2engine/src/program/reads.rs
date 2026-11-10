@@ -78,6 +78,13 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
         }
         let survey = db.get::<SurveyQuery>(&()).ok()?;
         let survey = Arc::clone(&survey.as_ref().as_ref().ok()?.0);
+        // Code no walk decoded may call or name anything; a code byte no body, stub section or padding
+        // accounts for refuses before the index is built (doc/adr-call-boundary.md, "S7 cost").
+        let mut escaped = Vec::new();
+        if let Some(at) = unaccounted_code(db, &survey, &mut escaped) {
+            r2il::refusal_evidence!("closed-world", "{at:#x}: code no body holds");
+            return None;
+        }
         let index = db.get::<ReferenceIndex>(&()).ok()?;
         let index = Arc::clone(&index.as_ref().as_ref().ok()?.0);
         // A body not read may hold any reference.
@@ -87,14 +94,6 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
                 "{} bodies unread: not every way in is known",
                 index.coverage.unread.len()
             );
-            return None;
-        }
-        // Code no walk decoded (past an unresolved transfer, or never reached) may call or name
-        // anything; a code byte no body, stub section or padding accounts for refuses.
-        // A direct transfer in filler is a way in the index does not see: its target escapes.
-        let mut escaped = Vec::new();
-        if let Some(at) = unaccounted_code(db, &survey, &mut escaped) {
-            r2il::refusal_evidence!("closed-world", "{at:#x}: code no body holds");
             return None;
         }
         for (fact, claimant) in index.claimed() {
