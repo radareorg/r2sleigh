@@ -192,7 +192,7 @@ fn a_wrapper_that_computes_the_stub_s_argument_is_a_body_not_the_stub() {
 /// itself jumps through the loader's slot, so this one is a body that calls the import.
 #[test]
 fn a_function_that_only_jumps_to_a_stub_is_a_body_not_the_stub() {
-    let mut program = OpenProgram::of(Literal::plt_forwarding_wrapper());
+    let mut program = OpenProgram::of(Literal::plt_forwarding_to("free"));
     let text = program
         .rendered(PLT_CALLER)
         .expect("it renders")

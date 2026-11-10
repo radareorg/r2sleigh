@@ -19,6 +19,9 @@ is a merge that keeps them rather than a copy that drops them.
 - `types-android.sdb.txt`: what bionic, Android's C library, declares for
   itself.
 - `types-darwin.sdb.txt`: what Darwin's libSystem declares for itself.
+- `void-rows.txt`: the source that states each `ret=void` row returns
+  nothing, and the rows found spelled `void` that return a value.
+  `scripts/audit_abi_rows.py` fails on an uncited `void` row (ROADMAP D204).
 - `syscalls-linux-*.txt`: the Linux kernel's system call numbers, generated
   from its UAPI headers by `scripts/gen_syscalls.py` and never edited by
   hand. These are not radare2's `libr/syscall/d/` tables, which are kept by
@@ -144,6 +147,13 @@ Where radare2 scopes differently:
   `__assert_rtn` replaces radare2's `assert_rtn`, whose key no Mach-O binds and whose
   arguments were glibc's order. `mbr_identifier_translate` is in no public SDK header, so
   it stays undeclared.
+
+- The portable table declares `signal` returning `void *` (C11 7.14.1.1:
+  the previous handler; radare2#27403), `aligned_alloc` under its own name
+  returning `void *` where radare2 keys `*aligned_alloc` returning `void`
+  (C11 7.22.3.1), and `srandom` returning `void` where radare2 says
+  `uint32_t` (POSIX `<stdlib.h>`). The spelling for `signal` is `void *`
+  because a function-pointer spelling reads as refused here.
 
 - The portable table declares POSIX `<dlfcn.h>`'s `dlopen`, `dlsym`,
   `dlclose` and `dlerror`, which radare2 does not; glibc, bionic and

@@ -3,7 +3,7 @@
 
 use crate::common;
 
-use common::{BASE, Literal};
+use common::{BASE, Literal, PLT_CALLER};
 use r2engine::program::OpenProgram;
 use r2ssa::{SourceResultCause, SourceUnstatedCall};
 
@@ -485,4 +485,24 @@ fn under_aa_a_member_stating_its_result_keeps_it_while_its_arity_is_open() {
         let text = surveyed(PROVEN_RESULT_OPEN_ARITY, &functions, at);
         assert!(!text.contains("residual"), "{text}");
     }
+}
+
+/// `jmp signal@plt`: `signal` returns the previous handler (C11 7.14.1.1), so a function that
+/// tails to it returns a value. r2abi's row said `void`, which certified the wrapper void (D204).
+#[test]
+fn a_tail_jump_to_signal_returns_the_previous_handler() {
+    let mut program = OpenProgram::of(Literal::plt_forwarding_to("signal"));
+    let info = program.function_info(PLT_CALLER).expect("it is described");
+    let rendered = program
+        .rendered(PLT_CALLER)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    let returns = info.returns.as_ref().expect("a return is stated");
+    assert!(
+        matches!(&returns.value, Some(ty) if *ty != r2types::CTypeLike::Void),
+        "{info:?}\n{rendered}"
+    );
+    assert!(rendered.contains("return "), "{rendered}");
 }

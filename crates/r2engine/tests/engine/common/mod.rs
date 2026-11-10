@@ -708,9 +708,9 @@ impl Literal {
         Self::plt_wrapped("free", &PLT_GUARDED_WRAPPER)
     }
 
-    /// [`Self::plt_wrapped`] with a function that is one jump to the stub.
-    pub fn plt_forwarding_wrapper() -> Self {
-        Self::plt_wrapped("free", &PLT_FORWARDING_WRAPPER)
+    /// [`Self::plt_wrapped`] with a function that is one jump to the stub for `import`.
+    pub fn plt_forwarding_to(import: &str) -> Self {
+        Self::plt_wrapped(import, &PLT_FORWARDING_WRAPPER)
     }
 
     /// [`Self::plt_wrapped`] with a wrapper that computes the stub's argument.
