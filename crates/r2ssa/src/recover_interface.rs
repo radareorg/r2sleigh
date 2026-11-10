@@ -22,6 +22,9 @@ use r2source::{
     SourceUnprovenResult, SourceUnstatedCall, StackAddressBase,
 };
 
+use r2source::convention::SlotClass;
+
+use crate::body_boundary::{Section, SlotUse};
 use crate::function::SSAFunction;
 use crate::graph::SsaGraph;
 use crate::var::SSAVar;
@@ -39,6 +42,8 @@ use crate::var::SSAVar;
 pub struct RecoveredParameter {
     slot: CanonicalStorageId,
     observed: CanonicalStorageId,
+    class: r2source::convention::SlotClass,
+    basis: r2source::Basis,
 }
 
 impl RecoveredParameter {
@@ -47,9 +52,27 @@ impl RecoveredParameter {
         self.slot
     }
 
-    /// The entry read that satisfied it, never wider than the slot.
+    /// The entry read that satisfied it, never wider than the slot; a hole's is the slot.
     pub const fn observed(&self) -> CanonicalStorageId {
         self.observed
+    }
+
+    /// The section's class: a float register's parameter is a float.
+    pub const fn class(&self) -> r2source::convention::SlotClass {
+        self.class
+    }
+
+    /// `Decoded` for a read, `Solved` for a slot handed on, `Convention` for a hole.
+    pub const fn basis(&self) -> r2source::Basis {
+        self.basis
+    }
+
+    /// Where the parameter arrives: a float in its register's low lane, as `place` puts it.
+    fn location(&self) -> CanonicalStorageId {
+        match self.class {
+            r2source::convention::SlotClass::Float => self.observed,
+            _ => self.slot,
+        }
     }
 }
 
@@ -126,6 +149,8 @@ pub struct RecoveredStackParameter {
     offset: i64,
     slot_bytes: u32,
     observed_bytes: u32,
+    /// Unread below a read slot: a parameter by the convention's order alone.
+    hole: bool,
 }
 
 impl RecoveredStackParameter {
@@ -143,6 +168,11 @@ impl RecoveredStackParameter {
     /// than the slot.
     pub const fn observed_bytes(self) -> u32 {
         self.observed_bytes
+    }
+
+    /// Whether no read reaches the slot: a hole below the highest one read.
+    pub const fn is_hole(self) -> bool {
+        self.hole
     }
 }
 
@@ -179,6 +209,8 @@ pub struct RecoveredInterface {
     closed: Option<r2source::SourceClosedResult>,
     /// Whether some return hands back a parameter through a merge: an entry input, spelled.
     result_holds_input: bool,
+    /// How the body uses each slot and the bytes it leaves in each result lane.
+    boundary: crate::body_boundary::BodyBoundary,
 }
 
 impl RecoveredInterface {
@@ -222,6 +254,11 @@ impl RecoveredInterface {
     /// How the function returns, when every exit agrees.
     pub const fn return_mechanism(&self) -> Option<RecoveredReturnMechanism> {
         self.return_mechanism
+    }
+
+    /// What the body states at its boundary, the evidence the parameters were minted from.
+    pub const fn boundary(&self) -> &crate::body_boundary::BodyBoundary {
+        &self.boundary
     }
 }
 
@@ -437,10 +474,15 @@ fn recovered_stack_parameters(
             _ => *entry = None,
         }
     }
+    // The highest slot read makes each slot below it a parameter (rule 4); a read across two
+    // slots places none past it.
+    let highest = observed.keys().next_back().copied();
     let mut parameters = Vec::new();
-    for slot in 0u64.. {
-        let Some(Some(bytes)) = observed.get(&slot) else {
-            break;
+    for slot in (0..).take_while(|slot| highest.is_some_and(|highest| *slot <= highest)) {
+        let observed_bytes = match observed.get(&slot) {
+            Some(Some(bytes)) => Some(bytes.next_power_of_two().min(slot_bytes)),
+            Some(None) => break,
+            None => None,
         };
         let Some(offset) = i64::try_from(slot)
             .ok()
@@ -452,7 +494,8 @@ fn recovered_stack_parameters(
         parameters.push(RecoveredStackParameter {
             offset,
             slot_bytes,
-            observed_bytes: bytes.next_power_of_two().min(slot_bytes),
+            observed_bytes: observed_bytes.unwrap_or(slot_bytes),
+            hole: observed_bytes.is_none(),
         });
     }
     parameters
@@ -579,17 +622,23 @@ fn passed_through_entry_storages(
         CanonicalStorageId,
         Option<crate::ValueId>,
     ) -> Option<CanonicalStorageId>,
-) -> Vec<CanonicalStorageId> {
+) -> Vec<(CanonicalStorageId, crate::CallSiteId)> {
     let mut storages = Vec::new();
     for boundary in boundaries.calls.values() {
+        // A slot the callee leaves a hole is no read of it (rule 1).
         let passed = (boundary.arguments.iter()).filter_map(|argument| {
-            passed_through(graph, argument, &|index, storage, carrier| {
-                held(boundary.call_site, index, storage, carrier)
-            })
+            let storage = (!boundary.ignores(argument))
+                .then(|| {
+                    passed_through(graph, argument, &|index, storage, carrier| {
+                        held(boundary.call_site, index, storage, carrier)
+                    })
+                })
+                .flatten()?;
+            Some((storage, boundary.call_site))
         });
-        for storage in passed {
-            if !storages.contains(&storage) {
-                storages.push(storage);
+        for passed in passed {
+            if !storages.contains(&passed) {
+                storages.push(passed);
             }
         }
     }
@@ -1754,45 +1803,39 @@ fn recover_interface_inner(
     // A variadic prologue's saves to the register save area are its tail, not parameter reads.
     let mut save_area = prep
         .and_then(|prep| crate::save_area::register_save_area(graph, prep, slots, &observations));
+    // A carrier passed straight to a call is read by that call: the callee's statement reads it.
     // Each entry carrier's widest read, found once for every argument that asks (D105).
     let held_widths = std::cell::OnceCell::new();
-    // A carrier passed straight to a call is read by that call, so it belongs
-    // in the same evidence as an explicit entry read. The prefix rule below is
-    // unchanged and still stops at the first candidate slot nothing observes.
-    // Contextual recovery has the exact callsite interfaces production will
-    // use, while context-free recovery may still derive a local boundary. In
-    // either case a preserved carrier is a real entry read by the call. Final
-    // preparation materializes its source-declared boundary value so every
-    // consumer can use the same identity.
-    let entry_reads = |saved: Option<&crate::dense::IdSet<crate::ValueId>>| {
+    let held = |call: crate::CallSiteId, index: u32, storage: CanonicalStorageId, carrier| {
+        let identity = facts.call_sites.by_id.get(&call)?.raw_identity?;
+        let context = machine_context?;
+        let interface = context.call_site_interface(identity)?;
+        let lane = crate::semantic::callee_held_lane(interface, index, storage)?;
+        let views = prep.map(|prep| &prep.views);
+        let widths =
+            held_widths.get_or_init(|| crate::semantic::HeldLaneWidths::of(graph, context));
+        let admitted = |carrier| widths.admits(graph, views, carrier, lane.size);
+        Option::<crate::ValueId>::is_none_or(carrier, admitted).then_some(lane)
+    };
+    let handed = passed_through_entry_storages(&facts.boundaries, graph, held);
+    let observed_reads = |saved: Option<&crate::dense::IdSet<crate::ValueId>>| {
         let mut reads = observed_entry_read_storages(func, graph, &observations, saved);
-        let held = |call: crate::CallSiteId, index: u32, storage: CanonicalStorageId, carrier| {
-            let identity = facts.call_sites.by_id.get(&call)?.raw_identity?;
-            let context = machine_context?;
-            let interface = context.call_site_interface(identity)?;
-            let lane = crate::semantic::callee_held_lane(interface, index, storage)?;
-            let views = prep.map(|prep| &prep.views);
-            let widths =
-                held_widths.get_or_init(|| crate::semantic::HeldLaneWidths::of(graph, context));
-            let admitted = |carrier| widths.admits(graph, views, carrier, lane.size);
-            Option::<crate::ValueId>::is_none_or(carrier, admitted).then_some(lane)
-        };
-        for storage in passed_through_entry_storages(&facts.boundaries, graph, held)
-            .into_iter()
-            .chain(returned_argument)
-        {
-            if !reads.contains(&storage) {
-                reads.push(storage);
-            }
-        }
+        reads.extend(returned_argument.filter(|returned| !reads.contains(returned)));
         reads
     };
-    let mut reads = entry_reads(save_area.as_ref().map(|area| &area.saved));
+    let mut observed = observed_reads(save_area.as_ref().map(|area| &area.saved));
+    let read_at = |reads: &[CanonicalStorageId], slot: CanonicalStorageId| {
+        (reads.iter()).any(|read| observed_in_slot(*read, slot, machine_context).is_some())
+    };
+    let handed_storages = handed
+        .iter()
+        .map(|(storage, _)| *storage)
+        .collect::<Vec<_>>();
     // A tail slot read past its save contradicts the area.
     if let Some(area) = &save_area
-        && slots.argument_slots()[area.named..].iter().any(|slot| {
-            (reads.iter()).any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
-        })
+        && slots.argument_slots()[area.named..]
+            .iter()
+            .any(|slot| read_at(&observed, *slot) || read_at(&handed_storages, *slot))
     {
         r2il::refusal_evidence!(
             "interface-recovery",
@@ -1800,40 +1843,172 @@ fn recover_interface_inner(
             area.named
         );
         save_area = None;
-        reads = entry_reads(None);
+        observed = observed_reads(None);
     }
-    // The slots fill in order, and the first unread one ends them.
-    let in_order = |class: &[CanonicalStorageId]| {
-        class
-            .iter()
-            .map_while(|slot| {
-                // The widest read, so the width does not depend on scan order.
-                let observed = reads
-                    .iter()
-                    .filter_map(|read| observed_in_slot(*read, *slot, machine_context))
-                    .max_by_key(|read| read.size)?;
-                Some(RecoveredParameter {
-                    slot: *slot,
-                    observed,
-                })
-            })
-            .collect::<Vec<_>>()
+    // A call's read of a register its certified boundary does not pass is no read (`liveness`).
+    let ignored_reads = crate::function::uncertified_call_reads(
+        graph,
+        prep.map(|prep| &prep.views),
+        &facts.boundaries,
+    );
+    // The call of unproven arity a `CallUse` at `inst` reads for: the first after it in its block.
+    let handed_to = |inst: crate::InstId| {
+        let used = graph.inst(inst)?;
+        let call = (facts.boundaries.calls.values())
+            .filter_map(|boundary| Some((boundary, graph.inst(boundary.at)?)))
+            .filter(|(_, at)| at.block == used.block && at.ordinal > used.ordinal)
+            .min_by_key(|(_, at)| at.ordinal)?
+            .0;
+        (!call.arguments_complete).then(|| unproven_call(&facts, machine_context, call.call_site))
     };
-    let mut parameters = in_order(slots.argument_slots());
-    // The save area starts at the first unnamed slot, so each slot below it is a parameter.
-    if let Some(area) = &save_area {
-        let unread = slots.argument_slots()[..area.named]
-            .iter()
-            .skip(parameters.len());
-        parameters.extend(unread.map(|slot| RecoveredParameter {
-            slot: *slot,
-            observed: *slot,
-        }));
+    // Each register slot's use (doc/adr-call-boundary.md, rule 3).
+    let use_of = |slot: CanonicalStorageId| {
+        // The prologue saves every vector register under the count it is handed, and the area
+        // records no float save apart from a named float's read: no float is named here.
+        if save_area.is_some() && slots.float_argument_slots().contains(&slot) {
+            return SlotUse::SaveArea;
+        }
+        let widest = |reads: &[CanonicalStorageId]| {
+            (reads.iter())
+                .filter_map(|read| observed_in_slot(*read, slot, machine_context))
+                .max_by_key(|read| read.size)
+        };
+        if let Some(read) = widest(&observed) {
+            return SlotUse::Read {
+                bytes: low_bytes(read.size),
+            };
+        }
+        if let Some(read) = widest(&handed_storages) {
+            let mut to = (handed.iter())
+                .filter(|(storage, _)| observed_in_slot(*storage, slot, machine_context).is_some())
+                .map(|(_, call)| *call)
+                .collect::<Vec<_>>();
+            to.sort_unstable();
+            to.dedup();
+            return SlotUse::HandedOn {
+                bytes: low_bytes(read.size),
+                to: to.into_boxed_slice(),
+            };
+        }
+        let saved = save_area.as_ref().is_some_and(|area| {
+            (slots.argument_slots().get(area.named..)).is_some_and(|tail| tail.contains(&slot))
+        });
+        if saved {
+            return SlotUse::SaveArea;
+        }
+        unobserved_use(graph, &ignored_reads, &handed_to, slot)
+    };
+    // The register sections in convention order: each slot's class and register, and its use.
+    let (mut registers, mut uses, mut spans) = (Vec::new(), Vec::new(), Vec::new());
+    if slots.shared_positions() {
+        // Microsoft x64 shares positions: a position is a float where only its float register is read.
+        for (position, integer) in slots.argument_slots().iter().enumerate() {
+            let integer_use = use_of(*integer);
+            let float =
+                (slots.float_argument_slots().get(position)).map(|float| (*float, use_of(*float)));
+            match float {
+                Some((float, float_use)) if float_use.proves() && !integer_use.proves() => {
+                    registers.push((SlotClass::Float, float));
+                    uses.push(float_use);
+                }
+                _ => {
+                    registers.push((SlotClass::Integer, *integer));
+                    uses.push(integer_use);
+                }
+            }
+        }
+        spans.push((Section::Shared, 0..registers.len()));
+    } else {
+        for (section, class, section_slots) in [
+            (Section::Integer, SlotClass::Integer, slots.argument_slots()),
+            (
+                Section::Float,
+                SlotClass::Float,
+                slots.float_argument_slots(),
+            ),
+        ] {
+            let start = registers.len();
+            for slot in section_slots {
+                registers.push((class, *slot));
+                uses.push(use_of(*slot));
+            }
+            spans.push((section, start..registers.len()));
+        }
     }
+    // The variadic tail starts at the first unnamed slot, so each slot below it is a parameter.
+    let named = save_area.as_ref().map_or(0, |area| area.named);
+    // Rule 1 per section; the slot past a section's parameters may be handed to a call of unproven
+    // arity (D37), and only the calls it reaches are named.
+    let mut counts = Vec::new();
+    let mut causes = Vec::new();
+    for (section, range) in spans {
+        let (count, mut past) = crate::body_boundary::section_rule(&uses[range.clone()]);
+        // Only the first slot past the parameters names the calls it reaches (D37's probe below),
+        // which the `aa` fixpoint's arity height counts; a float section nothing reads names none.
+        past.retain(|cause| !matches!(cause, SourceFloorCause::HandedOn(_)));
+        if section == Section::Float && count == 0 {
+            past.clear();
+        }
+        let count = match section {
+            Section::Float => count,
+            _ => count.max(named.min(range.len())),
+        };
+        causes.extend(past);
+        // A hole a call of unproven arity may be handed is a parameter the caller must pass.
+        for at in range.start..range.start + count {
+            if matches!(uses[at], SlotUse::Unread | SlotUse::Homed { .. })
+                && let Some(first) = (unproven_calls_reached(
+                    func,
+                    prep,
+                    graph,
+                    &facts,
+                    machine_context,
+                    registers[at].1,
+                ))
+                .first()
+            {
+                uses[at] = SlotUse::Unknown(SourceFloorCause::HandedOn(*first));
+            }
+        }
+        let probed = section != Section::Float || count > 0;
+        if probed && count < range.len() && save_area.is_none() {
+            let at = range.start + count;
+            let reached =
+                unproven_calls_reached(func, prep, graph, &facts, machine_context, registers[at].1);
+            if let Some(first) = reached.first() {
+                uses[at] = SlotUse::Unknown(SourceFloorCause::HandedOn(*first));
+            }
+            causes.extend(reached.into_iter().map(SourceFloorCause::HandedOn));
+        }
+        counts.push((section, range, count));
+    }
+    let parameters = (counts.iter())
+        .flat_map(|(_, range, count)| range.start..range.start + count)
+        .map(|at| {
+            let (class, slot) = registers[at];
+            let read = (observed.iter().chain(&handed_storages))
+                .filter_map(|read| observed_in_slot(*read, slot, machine_context))
+                .max_by_key(|read| read.size);
+            // A hole spells its class's residual type: a float register's at a double's width.
+            let observed = match (read, class) {
+                (Some(read), _) => read,
+                (None, SlotClass::Float) => CanonicalStorageId {
+                    size: slot.size.min(8),
+                    ..slot
+                },
+                (None, _) => slot,
+            };
+            RecoveredParameter {
+                slot,
+                observed,
+                class,
+                basis: uses[at].basis(),
+            }
+        })
+        .collect::<Vec<_>>();
     let tail_count = save_area.as_ref().zip(prep).and_then(|(area, prep)| {
         crate::tail_count::tail_count(func, graph, prep, slots, (area, &observations))
     });
-    let integers = parameters.len();
     let return_mechanism = recovered_return_mechanism(&facts);
     let result_is_return_address = result.register().is_some()
         && result_is_the_return_address(graph, &facts, &live_out, return_mechanism);
@@ -1868,16 +2043,17 @@ fn recover_interface_inner(
             }
         }
     };
-    // The convention fills every register slot before the argument area, so
-    // a stack slot is a parameter only once each register slot is proven.
-    let every_register = integers == slots.argument_slots().len();
-    let stack_parameters = match (every_register, &argument_area) {
+    // Rule 4: a stack slot is a parameter only behind a register section it overflows from that is
+    // full, since SysV and AAPCS64 reach the stack with registers of another class still free.
+    let full = registers.is_empty()
+        || (counts.iter()).any(|(_, range, count)| !range.is_empty() && *count == range.len());
+    let stack_parameters = match (full, &argument_area) {
         (true, Some(area)) => area.clone(),
         _ => Vec::new(),
     };
-    // Past the prefix, a read of the argument area, or an area no exit places, is a floor; a
+    // Past the registers, a read of the argument area, or an area no exit places, is a floor; a
     // variadic tail continues there.
-    let area = match (save_area.is_none(), every_register, &argument_area) {
+    let area = match (save_area.is_none(), full, &argument_area) {
         (true, true, None) => Some(SourceFloorCause::ArgumentAreaUnplaced),
         (true, false, Some(area)) if !area.is_empty() => Some(SourceFloorCause::ArgumentAreaRead),
         _ => None,
@@ -1886,43 +2062,47 @@ fn recover_interface_inner(
     let enters_supervisor = (graph.insts.iter()).any(|inst| {
         matches!(&inst.payload, crate::graph::InstPayload::Op(op) if func.enters_supervisor(op))
     });
-    let register_read = slots.argument_slots()[integers..].iter().any(|slot| {
-        reads
-            .iter()
-            .any(|read| observed_in_slot(*read, *slot, machine_context).is_some())
-    });
-    // A tail register is the variadic tail's, which no call is handed but through the `va_list`.
-    let next = slots
-        .argument_slots()
-        .get(integers)
-        .filter(|_| save_area.is_none());
-    let handed_on = entry_reaches_unproven_call(func, prep, graph, &facts, machine_context, next)
-        || read_for_an_unproven_call(graph, &facts, next);
-    let handed = handed_on
-        .then(|| unproven_calls(&facts, machine_context))
+    causes.extend(
+        [
+            unseen.then_some(SourceFloorCause::UnresolvedTransfer),
+            enters_supervisor.then_some(SourceFloorCause::SupervisorEntry),
+            area,
+        ]
         .into_iter()
-        .flatten()
-        .map(SourceFloorCause::HandedOn);
-    let causes = [
-        unseen.then_some(SourceFloorCause::UnresolvedTransfer),
-        enters_supervisor.then_some(SourceFloorCause::SupervisorEntry),
-        area,
-        register_read.then_some(SourceFloorCause::RegisterRead),
-    ];
-    let arity_floor = SourceArityFloor::of(causes.into_iter().flatten().chain(handed));
+        .flatten(),
+    );
+    let arity_floor = SourceArityFloor::of(causes);
     r2il::refusal_evidence!(
         "interface-recovery",
-        "register parameters {:?} from reads {:?}; a floor: {:?}",
+        "register parameters {:?} from uses {:?}; a floor: {:?}",
         parameters
             .iter()
-            .map(|parameter| (parameter.slot.offset, parameter.observed.size))
+            .map(|parameter| (
+                parameter.slot.offset,
+                parameter.observed.size,
+                parameter.basis
+            ))
             .collect::<Vec<_>>(),
-        reads
-            .iter()
-            .map(|read| (read.offset, read.size))
-            .collect::<Vec<_>>(),
+        uses,
         arity_floor
     );
+    let boundary = crate::body_boundary::BodyBoundary {
+        locations: slot_locations(&counts, &registers, &stack_parameters),
+        slots: crate::dense::IdVec::from_fn(uses.len() + stack_parameters.len(), |id| {
+            let at = crate::dense::DenseId::index(id);
+            match uses.get(at) {
+                Some(used) => used.clone(),
+                None => match stack_parameters[at - uses.len()] {
+                    parameter if parameter.is_hole() => SlotUse::Unread,
+                    parameter => SlotUse::Read {
+                        bytes: low_bytes(parameter.observed_bytes()),
+                    },
+                },
+            }
+        }),
+        results: result_bytes(func, graph, slots),
+        floor: arity_floor.clone(),
+    };
     let unproven_result = match result {
         RecoveredFunctionResult::Unproven => {
             let calls = result_calls(func, graph, &facts, slots.result_slot(), tail_unproven);
@@ -1954,69 +2134,61 @@ fn recover_interface_inner(
         tail_count,
         closed: applied,
         result_holds_input,
+        boundary,
     }))
 }
 
-/// Whether a call of unproven arity may be handed `next`, the first slot past the parameters
-/// (parameters are a prefix, so only it can extend them): unseen there, or the arrival untouched.
-fn entry_reaches_unproven_call(
+/// The calls of unproven arity `slot`, the first past a section's parameters, may be handed: each one
+/// its entry value reaches unseen or untouched, or every one where the body keeps a read of it
+/// (gcc -O2's `mov rbp, rsi` for an indirect call), which no obligation ties to one call (D37).
+/// O(calls x block).
+fn unproven_calls_reached(
     func: &SSAFunction,
     prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
     machine_context: Option<&crate::SourceMachineContext>,
-    next: Option<&CanonicalStorageId>,
-) -> bool {
-    let (Some(machine_context), Some(slot)) = (machine_context, next) else {
-        return false;
-    };
-    let unproven = facts.boundaries.calls.values();
-    unproven
-        .filter(|boundary| !boundary.arguments_complete)
-        .filter_map(|boundary| graph.walk_start(boundary.at))
-        .any(|(block_addr, op_index)| {
-            crate::semantic::reaching_abi_value_in_block_with_policy(
-                func,
-                prep,
-                graph,
-                machine_context,
-                block_addr,
-                op_index,
-                *slot,
-                false,
-            )
-            .is_none_or(|state| match state {
-                crate::semantic::ReachingAbiState::PreservedEntry => true,
-                crate::semantic::ReachingAbiState::Value(value) => !graph.written_by_body(value),
-            })
-        })
-}
-
-/// Whether the body reads `next`, the first slot past the parameters, at entry and makes a call of
-/// unproven arity: the read may be what that call is handed (gcc -O2's `mov rbp, rsi` kept for
-/// an indirect call), which no obligation observes.
-fn read_for_an_unproven_call(
-    graph: &SsaGraph,
-    facts: &crate::semantic::PreparedFunctionFacts,
-    next: Option<&CanonicalStorageId>,
-) -> bool {
-    let Some(slot) = next else {
-        return false;
-    };
-    facts
-        .boundaries
-        .calls
-        .values()
-        .any(|boundary| !boundary.arguments_complete)
-        && graph.values.iter().any(|value| {
-            graph.caller_supplied(value.id)
-                && value.canonical_storage.is_some_and(|storage| {
-                    storage.space == slot.space
-                        && storage.offset < slot.offset + u64::from(slot.size)
-                        && slot.offset < storage.offset + u64::from(storage.size)
+    slot: CanonicalStorageId,
+) -> Vec<SourceUnprovenCall> {
+    let unproven =
+        (facts.boundaries.calls.values()).filter(|boundary| !boundary.arguments_complete);
+    let kept = graph.values.iter().any(|value| {
+        graph.caller_supplied(value.id)
+            && value
+                .canonical_storage
+                .is_some_and(|storage| overlaps(storage, slot))
+            && read_beyond_merges(graph, value.id)
+    });
+    let reached = unproven.filter(|boundary| {
+        kept || machine_context.is_some_and(|machine_context| {
+            graph
+                .walk_start(boundary.at)
+                .is_some_and(|(block_addr, op_index)| {
+                    crate::semantic::reaching_abi_value_in_block_with_policy(
+                        func,
+                        prep,
+                        graph,
+                        machine_context,
+                        block_addr,
+                        op_index,
+                        slot,
+                        false,
+                    )
+                    .is_none_or(|state| match state {
+                        crate::semantic::ReachingAbiState::PreservedEntry => true,
+                        crate::semantic::ReachingAbiState::Value(value) => {
+                            !graph.written_by_body(value)
+                        }
+                    })
                 })
-                && read_beyond_merges(graph, value.id)
         })
+    });
+    let mut calls = reached
+        .map(|boundary| unproven_call(facts, machine_context, boundary.call_site))
+        .collect::<Vec<_>>();
+    calls.sort_unstable();
+    calls.dedup();
+    calls
 }
 
 /// Whether an operation reads `value`, directly or through the merges it flows into: a merge alone
@@ -2041,28 +2213,175 @@ fn read_beyond_merges(graph: &SsaGraph, value: crate::ValueId) -> bool {
     false
 }
 
-/// Every call of unproven arity, each as its callee's statement leaves it (D37). O(calls).
-fn unproven_calls(
+/// One call of unproven arity, as its callee's statement leaves it (D37).
+fn unproven_call(
     facts: &crate::semantic::PreparedFunctionFacts,
     context: Option<&crate::SourceMachineContext>,
-) -> BTreeSet<SourceUnprovenCall> {
-    let unproven = facts.boundaries.calls.values();
-    let unproven = unproven.filter(|boundary| !boundary.arguments_complete);
-    let calls = unproven.map(|boundary| facts.call_sites.by_id.get(&boundary.call_site));
-    let calls = calls.map(|call| {
-        let Some((call, target)) = call.and_then(|call| Some((call, call.direct_target?))) else {
-            return SourceUnprovenCall::Indirect;
-        };
-        let declared = (call.raw_identity.zip(context))
-            .is_some_and(|(identity, context)| context.call_site_interface(identity).is_some());
-        match context.and_then(|context| context.callee_statement(target)) {
-            Some(statement) if !statement.arity.is_exact() => SourceUnprovenCall::Floor(target),
-            Some(_) => SourceUnprovenCall::Stated(target),
-            None if declared => SourceUnprovenCall::Stated(target),
-            None => SourceUnprovenCall::Unstated(target),
-        }
+    call: crate::CallSiteId,
+) -> SourceUnprovenCall {
+    let Some((call, target)) =
+        (facts.call_sites.by_id.get(&call)).and_then(|call| Some((call, call.direct_target?)))
+    else {
+        return SourceUnprovenCall::Indirect;
+    };
+    let declared = (call.raw_identity.zip(context))
+        .is_some_and(|(identity, context)| context.call_site_interface(identity).is_some());
+    match context.and_then(|context| context.callee_statement(target)) {
+        Some(statement) if !statement.arity.is_exact() => SourceUnprovenCall::Floor(target),
+        Some(_) => SourceUnprovenCall::Stated(target),
+        None if declared => SourceUnprovenCall::Stated(target),
+        None => SourceUnprovenCall::Unstated(target),
+    }
+}
+
+/// Bytes `size` low bytes of a register cover.
+fn low_bytes(size: u32) -> crate::site_boundary::ByteMask {
+    crate::site_boundary::ByteMask(match size {
+        0 => 0,
+        128.. => u128::MAX,
+        size => (1u128 << size) - 1,
+    })
+}
+
+/// What the body does with `slot`'s entry value where no proven observation reads it (rule 3):
+/// `Unknown` where it reaches a call of unproven arity, which may read it; `Homed` where it is
+/// only copied, the preliminary build having dropped the dead frame store -O0 homes a parameter
+/// with; else `Unread`, since nothing observable reads it. O(the values it reaches).
+fn unobserved_use(
+    graph: &SsaGraph,
+    ignored: &BTreeSet<crate::graph::UseSite>,
+    handed: &dyn Fn(crate::InstId) -> Option<SourceUnprovenCall>,
+    slot: CanonicalStorageId,
+) -> SlotUse {
+    let entries = (graph.values.iter()).filter(|value| {
+        value
+            .canonical_storage
+            .is_some_and(|storage| storage.location() == slot.location())
+            && (graph.def_inst(value.id).is_none() && value.var.version == 0
+                || graph.formal_projection_storage(value.id).is_some())
     });
-    calls.collect()
+    let (mut moved, mut used) = (false, false);
+    let mut seen = crate::dense::IdSet::default();
+    let mut pending = entries.map(|value| value.id).collect::<Vec<_>>();
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        for site in graph.use_sites(value) {
+            let Some(inst) = graph.inst(site.inst) else {
+                continue;
+            };
+            if let crate::graph::InstPayload::Op(crate::SSAOp::CallUse { .. }) = &inst.payload
+                && let Some(call) = handed(site.inst)
+            {
+                return SlotUse::Unknown(SourceFloorCause::HandedOn(call));
+            }
+            match (&inst.payload, inst.output) {
+                _ if ignored.contains(site) => {}
+                // A copy nothing reads is where the dropped home store was; a lane projection
+                // nothing reads is the build's own (`xor ecx, ecx` folds the lane it read).
+                (crate::graph::InstPayload::Op(op), Some(output)) if moves(graph, output) => {
+                    moved |= matches!(op, crate::SSAOp::Copy { .. })
+                        && graph.use_sites(output).is_empty();
+                    pending.push(output);
+                }
+                (crate::graph::InstPayload::Op(op), _) if folds_to_constant(graph, op) => {}
+                (_, output) => {
+                    used = true;
+                    pending.extend(output);
+                }
+            }
+        }
+    }
+    match moved && !used {
+        true => SlotUse::Homed {
+            loaded: false,
+            escapes: false,
+        },
+        false => SlotUse::Unread,
+    }
+}
+
+/// Whether `op` computes a constant whatever its inputs hold: `x ^ x`, `x - x`, `x & 0`.
+fn folds_to_constant(graph: &SsaGraph, op: &crate::SSAOp<crate::ValueId>) -> bool {
+    let zero = |value: &crate::ValueId| graph.var(*value).constant_bits() == Some(0);
+    match op {
+        crate::SSAOp::IntXor { a, b, .. } | crate::SSAOp::IntSub { a, b, .. } => a == b,
+        crate::SSAOp::IntAnd { a, b, .. } => zero(a) || zero(b),
+        _ => false,
+    }
+}
+
+/// Whether `value` is a copy or a low lane of another, as `mov [rbp-4], edi` stores `rdi`'s.
+fn moves(graph: &SsaGraph, value: crate::ValueId) -> bool {
+    (graph.def_inst(value).and_then(|inst| graph.inst(inst))).is_some_and(|inst| {
+        matches!(
+            &inst.payload,
+            crate::graph::InstPayload::Op(
+                crate::SSAOp::Copy { .. } | crate::SSAOp::Subpiece { offset: 0, .. }
+            )
+        )
+    })
+}
+
+/// Each slot's section, position and location: the register sections, then the stack slots read.
+fn slot_locations(
+    counts: &[(Section, std::ops::Range<usize>, usize)],
+    registers: &[(SlotClass, CanonicalStorageId)],
+    stack: &[RecoveredStackParameter],
+) -> crate::dense::IdVec<crate::body_boundary::SlotId, crate::body_boundary::Slot> {
+    let registers = counts.iter().flat_map(|(section, range, _)| {
+        range.clone().map(move |at| crate::body_boundary::Slot {
+            section: *section,
+            position: u16::try_from(at - range.start).unwrap_or(u16::MAX),
+            location: SourceParameterLocation::Register(registers[at].1),
+        })
+    });
+    let stack = stack
+        .iter()
+        .enumerate()
+        .map(|(position, parameter)| crate::body_boundary::Slot {
+            section: Section::Stack,
+            position: u16::try_from(position).unwrap_or(u16::MAX),
+            location: SourceParameterLocation::Stack {
+                offset: parameter.offset(),
+                size_bytes: parameter.slot_bytes(),
+                callee_offset: parameter.offset(),
+            },
+        });
+    let all = registers.chain(stack).collect::<Vec<_>>();
+    crate::dense::IdVec::from_fn(all.len(), |id| all[crate::dense::DenseId::index(id)])
+}
+
+/// Each typed result lane's bytes joined over every return (`lanes::Byte`): `None` where a return's
+/// value is not resolved, empty where none is reached. O(lanes x live-out).
+fn result_bytes(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    slots: &SourceConventionSlots,
+) -> crate::dense::IdVec<crate::site_boundary::LaneId, Option<crate::lanes::Bytes>> {
+    let lanes = [
+        slots.result_slot(),
+        slots.float_result_slot(),
+        slots.second_result_slot(),
+    ];
+    let written = func.written_or_captured();
+    crate::dense::IdVec::from_fn(lanes.len(), |lane: crate::site_boundary::LaneId| {
+        let slot = lanes[usize::from(lane.0)]?;
+        let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]);
+        if live_out.unresolved_blocks().next().is_some() {
+            return None;
+        }
+        let mut joined: Option<crate::lanes::Bytes> = None;
+        for value in live_out.iter() {
+            let bytes = written_bytes(&written, graph, value, &mut BTreeSet::new());
+            joined = Some(match joined {
+                None => bytes,
+                Some(held) => crate::lanes::join(&held, &bytes),
+            });
+        }
+        Some(joined.unwrap_or_default())
+    })
 }
 
 /// The calls an unproven result waits on: a tail transfer to a target no prototype describes, or
@@ -2411,12 +2730,18 @@ fn placed(recovered: &RecoveredInterface, model: Option<&r2source::ConventionMod
             .ok()
             .map(crate::place::ParamClass::Integer)
     };
+    let class = |parameter: &RecoveredParameter| match parameter.class() {
+        SlotClass::Float => u8::try_from(parameter.observed().size)
+            .ok()
+            .map(crate::place::ParamClass::Float),
+        _ => bytes(parameter.slot().size),
+    };
     let classes = (recovered.parameters().iter())
-        .map(|parameter| bytes(parameter.slot().size))
+        .map(class)
         .chain((recovered.stack_parameters().iter()).map(|parameter| bytes(parameter.slot_bytes())))
         .collect::<Option<Vec<_>>>()?;
     let read = (recovered.parameters().iter())
-        .map(|parameter| SourceParameterLocation::Register(parameter.slot()))
+        .map(|parameter| SourceParameterLocation::Register(parameter.location()))
         .chain(recovered.stack_parameters().iter().map(|parameter| {
             SourceParameterLocation::Stack {
                 offset: parameter.offset(),
@@ -2502,19 +2827,29 @@ fn mint_recovered_interface_inner(
         Some(bits)
     }
     // The logical value is typed by what the function read, not by the size of
-    // the register the convention put it in.
-    let mut parameter_widths = recovered
-        .parameters()
-        .iter()
-        .map(|parameter| width_of(&mut widths, parameter.observed()))
-        .collect::<Option<Vec<_>>>()?;
+    // the register the convention put it in; a hole's is its slot's, its basis `Convention`.
+    let mut floats: Vec<u32> = Vec::new();
+    let mut parameter_widths = Vec::new();
+    for parameter in recovered.parameters() {
+        let bits = storage_bits(parameter.observed())?;
+        parameter_widths.push(match parameter.class() {
+            SlotClass::Float => {
+                if !matches!(bits, 32 | 64) {
+                    return None;
+                }
+                floats.push(bits);
+                Some(bits)
+            }
+            _ => Some(width_of(&mut widths, parameter.observed())?),
+        });
+    }
     for parameter in recovered.stack_parameters() {
         let bits = parameter.observed_bytes().checked_mul(8)?;
         if !matches!(bits, 8 | 16 | 32 | 64) {
             return None;
         }
         note_bits(&mut widths, bits);
-        parameter_widths.push(bits);
+        parameter_widths.push(Some(bits));
     }
     // The slot's width decides whether the read covers the whole carrier or
     // only its low half, and nothing else. It names no logical value, so it
@@ -2529,7 +2864,7 @@ fn mint_recovered_interface_inner(
     let parameter_slot_widths = recovered
         .parameters()
         .iter()
-        .map(|parameter| storage_bits(parameter.slot()))
+        .map(|parameter| storage_bits(parameter.location()))
         .chain(
             recovered
                 .stack_parameters()
@@ -2571,6 +2906,26 @@ fn mint_recovered_interface_inner(
         })
         .collect::<Option<Vec<SourceType>>>()?;
     let float_type = float_type(recovered, &mut types)?;
+    // Each float parameter's width is a node of its own, after the integers and the result's.
+    floats.sort_unstable();
+    floats.dedup();
+    let mut float_ids = Vec::new();
+    for bits in floats {
+        let id = match float_type {
+            Some((id, result_bits)) if result_bits == bits => id,
+            _ => {
+                let id = u32::try_from(types.len()).ok()?;
+                types.push(SourceType::new(
+                    id,
+                    SourceTypeKind::Float,
+                    u64::from(bits),
+                    u64::from(bits),
+                ));
+                id
+            }
+        };
+        float_ids.push((bits, id));
+    }
     let type_graph = SourceTypeGraph::new(types, []).ok()?;
     let type_id = |bits: u32, signed: bool| -> Option<u32> {
         widths
@@ -2600,10 +2955,10 @@ fn mint_recovered_interface_inner(
         .iter()
         .enumerate()
         .map(|(index, parameter)| {
-            Some(SourceAbiParameterSpec::new(
-                u32::try_from(index).ok()?,
-                parameter.slot(),
-            ))
+            Some(
+                SourceAbiParameterSpec::new(u32::try_from(index).ok()?, parameter.location())
+                    .in_section(parameter.class(), parameter.basis()),
+            )
         })
         .chain(
             recovered
@@ -2611,14 +2966,21 @@ fn mint_recovered_interface_inner(
                 .iter()
                 .enumerate()
                 .map(|(index, parameter)| {
-                    Some(SourceAbiParameterSpec::with_location(
-                        u32::try_from(register_count.checked_add(index)?).ok()?,
-                        SourceParameterLocation::Stack {
-                            offset: parameter.offset(),
-                            size_bytes: parameter.slot_bytes(),
-                            callee_offset: parameter.offset(),
-                        },
-                    ))
+                    let basis = match parameter.is_hole() {
+                        true => r2source::Basis::Convention,
+                        false => r2source::Basis::Decoded,
+                    };
+                    Some(
+                        SourceAbiParameterSpec::with_location(
+                            u32::try_from(register_count.checked_add(index)?).ok()?,
+                            SourceParameterLocation::Stack {
+                                offset: parameter.offset(),
+                                size_bytes: parameter.slot_bytes(),
+                                callee_offset: parameter.offset(),
+                            },
+                        )
+                        .in_section(SlotClass::Stack, basis),
+                    )
                 }),
         )
         .collect::<Option<Vec<_>>>()?;
@@ -2638,14 +3000,31 @@ fn mint_recovered_interface_inner(
             ))
         })
         .collect::<Option<Vec<_>>>()?;
+    let float_logical = |bits: u32| {
+        let (_, id) = float_ids.iter().find(|(width, _)| *width == bits)?;
+        Some(SourceLogicalValue::new(
+            *id,
+            SourceCarrierProjection::new(SourceCarrierKind::Full, 0, u64::from(bits)),
+        ))
+    };
+    let classes = (recovered.parameters().iter())
+        .map(|parameter| parameter.class())
+        .chain(
+            recovered
+                .stack_parameters()
+                .iter()
+                .map(|_| SlotClass::Stack),
+        );
     let parameter_logical_values = parameter_widths
         .iter()
         .zip(parameter_slot_widths.iter())
-        .map(|(bits, carrier_bits)| logical(*bits, false, *carrier_bits))
-        .collect::<Option<Vec<_>>>()?
-        .into_iter()
-        .map(Some)
-        .collect::<Vec<_>>();
+        .zip(classes)
+        .map(|((bits, carrier_bits), class)| match (bits, class) {
+            (None, _) => Some(None),
+            (Some(bits), SlotClass::Float) => float_logical(*bits).map(Some),
+            (Some(bits), _) => logical(*bits, false, *carrier_bits).map(Some),
+        })
+        .collect::<Option<Vec<_>>>()?;
     let (return_kind, return_logical_value) = match (recovered.result(), result_width) {
         (RecoveredFunctionResult::Register(result), Some((bits, signed))) => (
             SourceFunctionReturn::Register {
@@ -2967,6 +3346,7 @@ mod tests {
                 noreturn: None,
                 result_kind: None,
                 fixed_argument_count: Some(arguments.len()),
+                ignored: Box::default(),
                 variadic_argument_count_evidence: None,
                 variadic_argument_count_refusal: None,
                 arguments,
@@ -3016,7 +3396,7 @@ mod tests {
         let graph = graph_for(R2ILBlock::new(0x1000, 4));
         assert_eq!(
             passed_through_entry_storages(&boundaries, &graph, |_, _, _, _| None),
-            vec![register(0, 8)]
+            vec![(register(0, 8), crate::CallSiteId(0))]
         );
     }
 
@@ -3045,7 +3425,7 @@ mod tests {
 
         assert_eq!(
             passed_through_entry_storages(&boundaries, &graph, |_, _, _, _| None),
-            vec![register(0, 8)]
+            vec![(register(0, 8), crate::CallSiteId(0))]
         );
     }
 
@@ -3273,24 +3653,36 @@ mod tests {
     }
 
     #[test]
-    fn the_parameter_prefix_stops_at_the_first_unread_slot() {
+    fn an_unread_slot_below_a_read_one_is_a_hole_not_the_end_of_the_parameters() {
         let mut block = R2ILBlock::new(0x1000, 4);
-        // reads x0 and x2 but never x1: x2 cannot be claimed, because an unread
-        // x1 is equally consistent with an unused parameter and with the
-        // function taking one argument
+        // Reads x0 and x2, never x1: the old prefix stopped at x1 and dropped x2 (W12). Rule 2
+        // makes x1 a hole at `Convention`, so a caller still places x2 where the body reads it.
         block.push(R2ILOp::IntAdd {
             dst: Varnode::register(0, 8),
             a: Varnode::register(0, 8),
             b: Varnode::register(16, 8),
         });
         let interface = recovered(block);
+        let parameters = interface.parameters();
         assert_eq!(
-            interface
-                .parameters()
+            parameters
                 .iter()
-                .map(RecoveredParameter::slot)
+                .map(|parameter| (parameter.slot(), parameter.basis()))
                 .collect::<Vec<_>>(),
-            &[register(0, 8)]
+            [
+                (register(0, 8), r2source::Basis::Decoded),
+                (register(8, 8), r2source::Basis::Convention),
+                (register(16, 8), r2source::Basis::Decoded),
+            ]
+        );
+        // Every register slot is a parameter, so an argument area no exit places is the floor.
+        assert_eq!(
+            interface.arity_floor.as_ref().map(SourceArityFloor::causes),
+            Some(&[SourceFloorCause::ArgumentAreaUnplaced][..])
+        );
+        assert_eq!(
+            interface.boundary().slots[crate::body_boundary::SlotId(1)],
+            SlotUse::Unread
         );
     }
 

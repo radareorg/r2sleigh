@@ -45,7 +45,7 @@ r2sleigh_result_u64 fcn_1000(void)
     uint64_t rax_1;
     uint64_t rax_3;
 
-    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2); the result is unproven (Written): 2 unproven-return carried */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2); the parameters are a floor: at least 0 (a register past them reaches an indirect call); the result is unproven (Written): 2 unproven-return carried */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x3fe8U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
@@ -129,7 +129,7 @@ NAME=0x000010c0
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000010c0
 EXPECT=<<EOF
-void entry0(void)
+void entry0(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
 {
     uint64_t tmp_10c9_0_2;
 
@@ -156,7 +156,7 @@ r2sleigh_result_u64 fcn_10f0(void)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered; the parameters are a floor: at least 0 (a transfer is unresolved); the result is unproven (Written): 1 unproven-return carried */
     {
         rax_3 = 0x4020;
         {
@@ -182,7 +182,7 @@ r2sleigh_result_u64 entry_fini0(void)
     uint64_t tmp_116e_0_1;
     uint64_t rdi_1;
 
-    /* r2dec proof: 4 constructs are marked below; 42 source obligations: 16 rendered, 17 elided, 0 refused, 9 residual; 9 statements rendered; 1 never assigned, read as residuals (RAX_2); 1 callee prototype supplied by the source; the result is unproven (Written): 0 unproven-return carried */
+    /* r2dec proof: 4 constructs are marked below; 42 source obligations: 16 rendered, 17 elided, 0 refused, 9 residual; 9 statements rendered; 1 never assigned, read as residuals (RAX_2); 1 callee prototype supplied by the source; the parameters are a floor: at least 0 (a register past them reaches the call to 0x10f0); the result is unproven (Written): 0 unproven-return carried */
     {
         tmp_1164_0_1 = r2sleigh_load_u8((void*)(uint64_t)0x4020U);
         if ((uint8_t)((uint8_t)tmp_1164_0_1 != (uint8_t)0U)) {
@@ -217,7 +217,7 @@ r2sleigh_result_u64 entry_init0(void)
 {
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 13 source obligations: 9 rendered, 4 elided, 0 refused; 2 statements rendered; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 13 source obligations: 9 rendered, 4 elided, 0 refused; 2 statements rendered; the parameters are a floor: at least 0 (a transfer is unresolved); the result is unproven (Written): 1 unproven-return carried */
     {
         {
             rax_4 = 0;

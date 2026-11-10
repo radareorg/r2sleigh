@@ -658,11 +658,39 @@ pub(crate) fn result_carrier(bits: u32) -> CType {
     }
 }
 
-/// The prelude's declaration of `ty`, where it is an unproven result's carrier typedef.
+/// The prelude typedef's name for a slot the callee ignores: a hole below a read slot (D165).
+const UNREAD_TYPEDEF: &str = "r2sleigh_unread_";
+
+/// A hole's type: the prelude typedef over its class, which claims no C type, so recompiled C
+/// passes it in the same register (doc/adr-call-boundary.md, Refusals).
+pub(crate) fn unread_slot(class: &CType) -> Option<CType> {
+    let tag = match class {
+        CType::Int { bits, .. } => format!("u{bits}"),
+        CType::Float(bits) => format!("f{bits}"),
+        _ => return None,
+    };
+    Some(CType::Typedef {
+        name: format!("{UNREAD_TYPEDEF}{tag}"),
+        ty: Box::new(class.clone()),
+    })
+}
+
+/// Whether `ty` is a hole's typedef.
+pub(crate) fn is_unread_slot(ty: &CType) -> bool {
+    matches!(ty, CType::Typedef { name, .. } if name.starts_with(UNREAD_TYPEDEF))
+}
+
+/// The prelude's declaration of `ty`, where it is an unproven result's carrier typedef or a hole's.
 pub(crate) fn result_typedef(ty: &CType) -> Option<String> {
     match ty {
         CType::Typedef { name, ty } if name.starts_with(RESULT_TYPEDEF) => match ty.as_ref() {
             CType::Int { bits, .. } => Some(format!("typedef uint{bits}_t {name};\n")),
+            _ => None,
+        },
+        CType::Typedef { name, ty } if name.starts_with(UNREAD_TYPEDEF) => match ty.as_ref() {
+            CType::Int { bits, .. } => Some(format!("typedef uint{bits}_t {name};\n")),
+            CType::Float(32) => Some(format!("typedef float {name};\n")),
+            CType::Float(64) => Some(format!("typedef double {name};\n")),
             _ => None,
         },
         _ => None,

@@ -176,19 +176,19 @@ fn a_register_save_area_is_a_variadic_tail_not_six_parameters() {
 }
 
 /// `wrapper` sets `al` for its call to `vf`, so even resolved before `vf` is read, the registers it
-/// writes there are no count: `outer`'s call agrees with `wrapper`'s own floor under `aa`.
+/// writes there are no count. It returns `b`, so `rsi` is read, and `a` reaches `vf`'s uncounted
+/// tail, a read of unproven kind below it: two parameters, neither a hole (D165, rule 3).
 #[test]
 fn a_call_handed_a_vector_count_counts_no_argument_from_registers() {
     let mut open = sysv();
     open.analyse_program().expect("it surveys");
     let outer = rendered(&mut open, BASE + 0x1d0);
-    assert!(
-        outer.contains("call to wrapper: its arity is only at least 0 (a floor)"),
-        "{outer}"
-    );
-    assert!(!outer.contains("wrapper(3"), "{outer}");
+    assert!(outer.contains("wrapper(3, 4)"), "{outer}");
     let wrapper = rendered(&mut open, BASE + 0x1a0);
-    assert!(!wrapper.contains("arg0"), "{wrapper}");
+    assert!(
+        wrapper.contains("wrapper(uint64_t arg0, uint64_t arg1)"),
+        "{wrapper}"
+    );
 }
 
 /// `six` spills all six in order and stores the spill's address: no named slot sits below the run.

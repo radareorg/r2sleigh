@@ -91,6 +91,7 @@ pub(crate) fn note_unproven_constructs(
     radare2_local_names: usize,
     (unassigned, open_second_result, laid_out): (&[UnassignedRead], bool, usize),
     unproven: Option<Option<r2types::UnprovenCause>>,
+    floor: Option<(usize, &r2source::SourceArityFloor)>,
 ) {
     let rendered_nothing = func.body.is_empty();
     // Each residual is a construct the rendering says it did not prove, and
@@ -183,6 +184,15 @@ pub(crate) fn note_unproven_constructs(
             "; {radare2_prototypes} {noun} supplied by the source"
         );
     }
+    // The header lists what is proven; a floor says more may be passed (D100).
+    if let Some((count, floor)) = floor {
+        let causes = floor.causes().iter().map(floor_cause).collect::<Vec<_>>();
+        let _ = write!(
+            &mut detail,
+            "; the parameters are a floor: at least {count} ({})",
+            causes.join(", ")
+        );
+    }
     if open_second_result {
         detail.push_str("; the result's second register is open: no call read decides it");
     }
@@ -224,6 +234,24 @@ pub(crate) fn note_unproven_constructs(
         })
     };
     func.body.insert(0, CStmt::comment(text));
+}
+
+/// Why the parameters are only a floor, as the proof line words it (D37).
+fn floor_cause(cause: &r2source::SourceFloorCause) -> String {
+    use r2source::{SourceFloorCause as C, SourceUnprovenCall as U};
+    match cause {
+        C::UnresolvedTransfer => "a transfer is unresolved".into(),
+        C::SupervisorEntry => "a supervisor entry".into(),
+        C::ArgumentAreaUnplaced => "the argument area is unplaced".into(),
+        C::ArgumentAreaRead => "the argument area is read past an unfull register section".into(),
+        C::RegisterRead => "a register past them is read".into(),
+        C::Homed => "a register past them is only homed".into(),
+        C::HandedOn(U::Indirect) => "a register past them reaches an indirect call".into(),
+        C::HandedOn(U::Unstated(at) | U::Floor(at) | U::Stated(at)) => {
+            format!("a register past them reaches the call to {at:#x}")
+        }
+        C::Unplaced(_) => "a declared parameter has no location".into(),
+    }
 }
 
 /// Why a read the rendering spells as a residual has no value C can name.

@@ -134,6 +134,7 @@ pub fn render(
         (input.return_type())
             .filter(|fact| fact.is_unproven())
             .map(r2types::ReturnTypeFact::unproven_cause),
+        input.arity_floor(),
     );
     let mut ready = ready_with_carriers(c, &tags);
     // Each marker names the instruction its statement was written for, so each line names its own.

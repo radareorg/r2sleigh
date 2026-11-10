@@ -5,7 +5,7 @@ use crate::Kernel;
 use crate::platform::{EntryStack, RegisterSaveArea, SaveAreaAnchor, StackGuard};
 
 /// The class of value a parameter or result location carries.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize)]
 pub enum SlotClass {
     /// An integer or a pointer: a cspec `pentry` with no class stated.
     Integer,

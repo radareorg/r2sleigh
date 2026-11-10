@@ -44,9 +44,23 @@ pub(super) struct CallPlan {
     pub(super) tail: Option<Option<(CanonicalStorageId, MachineType)>>,
     /// The callee's declared prototype, where C spells every type in it with no definition.
     pub(super) declared: Option<Prototype>,
+    /// Each argument the callee's interface states it ignores: a hole below a read slot (D165).
+    pub(super) holes: Vec<bool>,
 }
 
 impl CallPlan {
+    /// Whether the argument at `position` is a slot the callee ignores.
+    pub(super) fn ignored(&self, position: usize) -> bool {
+        self.holes.get(position).copied().unwrap_or(false)
+    }
+
+    /// The values the call reads: every argument but the slots its callee ignores.
+    pub(super) fn passed_values(&self) -> impl Iterator<Item = ValueId> + '_ {
+        (self.arguments.iter().enumerate())
+            .filter(|(position, _)| !self.ignored(*position))
+            .map(|(_, (value, _))| *value)
+    }
+
     /// The class the call returns in: its callee's for a tail transfer, else the result it leaves.
     pub(super) fn returns(&self) -> Option<&MachineType> {
         match &self.tail {
@@ -447,7 +461,20 @@ fn planned(
             )
         })
         .collect();
+    // The callee's own interface says which of its parameters are holes.
+    let holes = (artifact.call_site_interface(*site))
+        .and_then(r2source::SourceCallSiteInterface::exact_callee_interface)
+        .map(|callee| {
+            (0..arguments.len())
+                .map(|position| {
+                    (callee.parameters().get(position))
+                        .is_some_and(r2source::SourceAbiParameterSpec::is_hole)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(CallPlan {
+        holes,
         callee,
         arguments,
         stacked,

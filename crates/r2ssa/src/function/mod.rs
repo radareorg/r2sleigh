@@ -360,6 +360,8 @@ struct Finish {
     /// Each native instruction of a genuine lift, which the obligations are
     /// bound to; absent where the function was not lifted from one.
     native_spans: Option<Vec<crate::GenuineNativeInstructionSpan>>,
+    /// The boundary recovery read off the body, where the interface was recovered.
+    body_boundary: Option<Arc<crate::body_boundary::BodyBoundary>>,
 }
 
 impl Finish {
@@ -369,6 +371,7 @@ impl Finish {
             provenance: SsaArtifactProvenance::Manual,
             spellings: ArtifactSpellings::default(),
             native_spans: None,
+            body_boundary: None,
         }
     }
 }
@@ -621,11 +624,8 @@ fn release_undemanded_bytes(
     if !inserts {
         return EditPlan::new();
     }
-    let return_storages = machine_context
-        .abi_model()
-        .return_registers()
-        .iter()
-        .map(|slot| slot.storage())
+    let return_storages = (machine_context.function_interface().into_iter())
+        .flat_map(|interface| interface.return_kind().storages())
         .collect::<Vec<_>>();
     let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
     if !crate::demand::exits_are_named(function, &live_out) {
@@ -1094,8 +1094,8 @@ impl SsaArtifact {
     ///
     /// Derived from the machine context the snapshot carried, so it is the
     /// source's account of the ABI rather than a guess made from a name.
-    pub fn abi(&self) -> Option<crate::abi::AbiProfile> {
-        crate::abi::AbiProfile::from_machine_context(&self.machine_context)
+    pub fn abi(&self) -> Option<crate::abi::Formals<'_>> {
+        crate::abi::Formals::of(&self.machine_context)
     }
 
     /// The value liveness and storage spans the build computed and dropped, computed again the
@@ -1226,7 +1226,7 @@ impl SsaArtifact {
     }
 
     pub fn with_assumptions(&self, assumptions: &AssumptionSet) -> Self {
-        let facts = PreparedFunctionFacts::collect_with_context(
+        let mut facts = PreparedFunctionFacts::collect_with_context(
             self.function(),
             Some(self.decompile_prep_facts()),
             self.graph(),
@@ -1235,6 +1235,7 @@ impl SsaArtifact {
             "assume",
         )
         .expect("assumptions reach no fixpoint, and this function's collection settled");
+        facts.body_boundary.clone_from(&self.facts.body_boundary);
         let aggregate_accesses = collect_aggregate_access_projections(
             self.graph(),
             &facts.addresses,
@@ -2455,6 +2456,7 @@ impl TrustedSsaArtifact {
         let mut built = None;
         // Whether the recovered result is void on the premise that no caller outside the image reads it.
         let mut closed_world = false;
+        let mut body_boundary = None;
         let function_interface = match source.function_interface().cloned() {
             Some(interface) => Some(interface),
             None if recovery == Recovery::Convention => None,
@@ -2551,6 +2553,7 @@ impl TrustedSsaArtifact {
                     }
                 };
                 closed_world = recovered.assumes_closed_world();
+                body_boundary = Some(Arc::new(recovered.boundary().clone()));
                 let minted = crate::recover_interface::mint_recovered_interface(
                     &recovered,
                     source.machine_roles(),
@@ -2705,6 +2708,7 @@ impl TrustedSsaArtifact {
                     user_operations: Arc::from(arch.user_ops.clone()),
                 },
                 native_spans: Some(native_spans),
+                body_boundary,
             },
             source_block_count: blocks.len(),
             arch,
@@ -3019,7 +3023,9 @@ pub(crate) fn uncertified_call_reads(
     let mut passed = std::collections::BTreeSet::new();
     for boundary in boundaries.calls.values() {
         for argument in &boundary.arguments {
-            if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value {
+            if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value
+                && !boundary.ignores(argument)
+            {
                 passed.insert(class_of(value).unwrap_or(value));
             }
         }

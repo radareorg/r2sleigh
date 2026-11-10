@@ -604,12 +604,54 @@ fn an_unfollowed_transfer_is_a_floor_of_that_cause() {
     assert_eq!(cause, [SourceFloorCause::UnresolvedTransfer]);
 }
 
-/// `mov eax, esi; ret`: `rsi` is read and `rdi` is not, so the prefix stops short of it.
+/// `mov eax, esi; ret`, and a caller that hands it `5` in `esi`.
+const HOLE: &[u8] = &[
+    0x89, 0xf0, 0xc3, // 1000 mov eax, esi; ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // padding
+    0x6b, 0xff, 0x07, // 1010 imul edi, edi, 7
+    0xbe, 0x05, 0x00, 0x00, 0x00, // 1013 mov esi, 5
+    0xe8, 0xe3, 0xff, 0xff, 0xff, // 1018 call 0x1000
+    0xc3, // 101d ret
+];
+
+/// An unread `rdi` below a read `rsi` is a hole: two parameters, the first spelled as the slot's
+/// typedef, and no floor (W12; the prefix rule made `rsi` a floor and dropped it).
 #[test]
-fn a_register_read_past_the_prefix_is_a_floor_of_that_cause() {
-    const CODE: &[u8] = &[0x89, 0xf0, 0xc3];
-    let cause = floor_cause(Literal::of_code(CODE, &[("f", BASE, 3)]));
-    assert_eq!(cause, [SourceFloorCause::RegisterRead]);
+fn an_unread_slot_below_a_read_one_is_a_hole_spelled_as_its_typedef() {
+    let functions = [("f", BASE, 3), ("caller", BASE + 0x10, 0x0e)];
+    let mut open = OpenProgram::of(Literal::of_code(HOLE, &functions));
+    let prepared = open.prepared(BASE).expect("it prepares");
+    let shared = prepared.artifact().shared_artifact();
+    let interface = (shared.machine_context().function_interface()).expect("an interface");
+    assert_eq!(interface.arity_floor(), None);
+    let bases = (interface.parameters().iter())
+        .map(|parameter| parameter.basis())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bases,
+        [
+            Some(r2source::Basis::Convention),
+            Some(r2source::Basis::Decoded)
+        ]
+    );
+    let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
+    let header = (text.lines())
+        .find(|line| line.contains("f("))
+        .unwrap_or_default();
+    assert!(
+        header.contains("(r2sleigh_unread_u64 arg0, uint32_t arg1)"),
+        "{text}"
+    );
+}
+
+/// The caller passes the hole its typed residual: the `edi` it computed reaches no parameter, so
+/// no value of it is shown (doc/adr-call-boundary.md, Refusals).
+#[test]
+fn a_caller_passes_a_hole_its_typed_residual_and_no_value() {
+    let functions = [("f", BASE, 3), ("caller", BASE + 0x10, 0x0e)];
+    let text = surveyed(HOLE, &functions, BASE + 0x10);
+    assert!(text.contains("f((r2sleigh_unread_u64)0, 5)"), "{text}");
+    assert!(!text.contains("* 7"), "{text}");
 }
 
 /// `mov eax, [rsp + 8]; ret`: the first argument-area slot is read, and no register slot is.
@@ -655,15 +697,16 @@ fn a_call_to_a_callee_nothing_states_is_a_floor_handed_to_it() {
     assert_eq!(cause, handed_to(SourceUnprovenCall::Unstated(BASE)));
 }
 
-/// `f`: `call g; ret`; `g`: `mov eax, esi; ret`, a floor of its own.
+/// `f`: `call g; ret`; `g`: `mov eax, [rsp + 8]; ret`, a floor of its own (D37's
+/// `ArgumentAreaRead`).
 #[test]
 fn a_call_to_a_callee_that_is_a_floor_is_a_floor_handed_to_it() {
     const CODE: &[u8] = &[
         0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3, // 1000 call 0x1010; ret
         0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1006 padding
-        0x89, 0xf0, 0xc3, // 1010 mov eax, esi; ret
+        0x8b, 0x44, 0x24, 0x08, 0xc3, // 1010 mov eax, [rsp + 8]; ret
     ];
-    let functions = [("f", BASE, 6), ("g", BASE + 0x10, 3)];
+    let functions = [("f", BASE, 6), ("g", BASE + 0x10, 5)];
     let cause = floor_cause(Literal::of_code(CODE, &functions));
     assert_eq!(cause, handed_to(SourceUnprovenCall::Floor(BASE + 0x10)));
 }
@@ -745,4 +788,39 @@ fn a_declared_integer_handed_on_is_a_parameter_at_its_width() {
     let (text, parameters) = fcntl_caller_parameters(&DECLARED_INT);
     assert_eq!(parameters.len(), 1, "{text}");
     assert_eq!(parameters[0].0, "uint32_t", "{text}");
+}
+
+/// `int p_fcntl2(int fd, int flags) { return fcntl(fd, F_SETFL, flags); }` at clang -O0, after
+/// `.plt`: `flags` reaches only `fcntl`'s uncounted tail.
+const UNCOUNTED_TAIL: [u8; 0x46] = common::plt_then(&[
+    0x55, // 1020 push rbp
+    0x48, 0x89, 0xe5, // 1021 mov rbp, rsp
+    0x48, 0x83, 0xec, 0x10, // 1024 sub rsp, 0x10
+    0x89, 0x7d, 0xfc, // 1028 mov [rbp - 4], edi
+    0x89, 0x75, 0xf8, // 102b mov [rbp - 8], esi
+    0x8b, 0x7d, 0xfc, // 102e mov edi, [rbp - 4]
+    0x8b, 0x55, 0xf8, // 1031 mov edx, [rbp - 8]
+    0xbe, 0x04, 0x00, 0x00, 0x00, // 1034 mov esi, 4
+    0xb0, 0x00, // 1039 mov al, 0
+    0xe8, 0xd0, 0xff, 0xff, 0xff, // 103b call stub
+    0x48, 0x83, 0xc4, 0x10, // 1040 add rsp, 0x10
+    0x5d, // 1044 pop rbp
+    0xc3, // 1045 ret
+]);
+
+/// A header whose parameters are only a floor says so on its proof line (ROADMAP D100): the
+/// proven prefix is not the whole interface.
+#[test]
+fn a_floor_of_parameters_is_named_on_the_proof_line() {
+    let (text, parameters) = fcntl_caller_parameters(&UNCOUNTED_TAIL);
+    let proof = (text.lines())
+        .find(|line| line.contains("r2dec proof"))
+        .unwrap_or_default();
+    assert!(
+        proof.contains(&format!(
+            "the parameters are a floor: at least {}",
+            parameters.len()
+        )),
+        "{text}"
+    );
 }

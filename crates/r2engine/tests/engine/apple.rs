@@ -110,8 +110,9 @@ fn a_mach_o_variadic_tail_is_read_from_the_stack_and_an_elf_s_from_registers() {
     let apple = text(true);
     assert!(apple.contains("printf(\"%d\\n\", (uint64_t)7U)"), "{apple}");
     assert!(!apple.contains("X1_0"), "{apple}");
+    // Under AAPCS64 the call reads `x1`, the function's own: its second parameter, `x0` a hole.
     let usual = text(false);
-    assert!(usual.contains("X1_0"), "{usual}");
+    assert!(usual.contains("printf(\"%d\\n\", arg1)"), "{usual}");
     assert!(
         !usual.contains("printf(\"%d\\n\", (uint64_t)7U)"),
         "{usual}"

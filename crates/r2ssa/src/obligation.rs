@@ -930,7 +930,9 @@ impl SemanticObligationInventory {
                 // A preserved-entry argument names no value in this function,
                 // so it has no producer to keep live. The argument obligation
                 // still exists: the call reads that carrier either way.
+                // A slot the callee ignores passes its typed residual, which reads no value.
                 let inputs = match argument.value {
+                    _ if boundary.ignores(argument) => Vec::new(),
                     crate::semantic::SourceCallArgumentValue::Value(value) => vec![value],
                     crate::semantic::SourceCallArgumentValue::PreservedEntry => Vec::new(),
                 };
@@ -943,7 +945,9 @@ impl SemanticObligationInventory {
                     &mut explicit_inputs,
                     &mut duplicate_seeds,
                 );
-                if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value {
+                if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value
+                    && !boundary.ignores(argument)
+                {
                     seed_value_definition(
                         graph,
                         value,
@@ -3216,6 +3220,7 @@ mod tests {
                 variadic: Some(false),
                 noreturn: Some(false),
                 result_kind: Some(crate::SourceCallResult::Void),
+                ignored: Box::default(),
                 arguments: vec![
                     crate::semantic::SourceCallArgumentFact {
                         slot,

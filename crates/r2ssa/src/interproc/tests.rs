@@ -160,8 +160,7 @@ fn exact_return_boundary_ignores_misleading_carrier_names() {
         interface,
     )
     .expect("exact return artifact");
-    let abi =
-        AbiProfile::from_machine_context(prepared.machine_context()).expect("source-owned ABI");
+    let abi = Formals::of(prepared.machine_context()).expect("source-owned ABI");
 
     let local = collect_local_summary_facts(&prepared, &abi);
 
@@ -2027,8 +2026,7 @@ fn call_return_relation_requires_complete_nonvoid_result_carrier() {
             [storage(16), storage(24)],
         )
         .unwrap_or_else(|| panic!("{label} prepared SSA"));
-        let abi = AbiProfile::from_machine_context(prepared.machine_context())
-            .unwrap_or_else(|| panic!("{label} ABI"));
+        let abi = Formals::of(prepared.machine_context()).unwrap_or_else(|| panic!("{label} ABI"));
         let local = collect_local_summary_facts(&prepared, &abi);
         let mut callee = FunctionSemanticSummary::unknown(InterprocFunctionId(0x7100), None);
         callee.return_relation = SummaryReturnRelation::Const(7);
@@ -2243,10 +2241,8 @@ fn source_owned_call_observer_requires_exact_complete_call_carriers() {
         [register_storage(16), register_storage(24)],
     )
     .expect("incomplete call carrier artifact");
-    let complete_abi =
-        AbiProfile::from_machine_context(complete.machine_context()).expect("source-owned ABI");
-    let incomplete_abi =
-        AbiProfile::from_machine_context(incomplete.machine_context()).expect("source-owned ABI");
+    let complete_abi = Formals::of(complete.machine_context()).expect("source-owned ABI");
+    let incomplete_abi = Formals::of(incomplete.machine_context()).expect("source-owned ABI");
     let complete_args = observe_call_arguments(&complete, &complete_abi)
         .into_values()
         .next()

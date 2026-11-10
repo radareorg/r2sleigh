@@ -184,6 +184,9 @@ impl SourceParameterLocation {
 pub struct SourceAbiParameterSpec {
     index: u32,
     location: SourceParameterLocation,
+    /// The section the slot belongs to and where the parameter comes from, where its producer
+    /// states them (doc/adr-call-boundary.md, "The function's parameters").
+    slot: Option<(crate::convention::SlotClass, crate::Basis)>,
 }
 
 impl SourceAbiParameterSpec {
@@ -192,6 +195,7 @@ impl SourceAbiParameterSpec {
         Self {
             index,
             location: SourceParameterLocation::Register(storage),
+            slot: None,
         }
     }
 
@@ -207,11 +211,41 @@ impl SourceAbiParameterSpec {
                 size_bytes,
                 callee_offset: offset,
             },
+            slot: None,
         }
     }
 
     pub const fn with_location(index: u32, location: SourceParameterLocation) -> Self {
-        Self { index, location }
+        Self {
+            index,
+            location,
+            slot: None,
+        }
+    }
+
+    /// The same parameter, stated in `class`'s section on `basis`.
+    pub const fn in_section(
+        mut self,
+        class: crate::convention::SlotClass,
+        basis: crate::Basis,
+    ) -> Self {
+        self.slot = Some((class, basis));
+        self
+    }
+
+    /// The section's class, where the producer states it.
+    pub fn class(&self) -> Option<crate::convention::SlotClass> {
+        self.slot.map(|(class, _)| class)
+    }
+
+    /// Where the parameter comes from: `Convention` for a hole below a read slot.
+    pub fn basis(&self) -> Option<crate::Basis> {
+        self.slot.map(|(_, basis)| basis)
+    }
+
+    /// An unread slot below a read one: a parameter only by the convention's order.
+    pub fn is_hole(&self) -> bool {
+        self.basis() == Some(crate::Basis::Convention)
     }
 
     pub const fn index(&self) -> u32 {
@@ -274,8 +308,10 @@ pub enum SourceFloorCause {
     ArgumentAreaUnplaced,
     /// The argument area is read past register slots not all of which are parameters.
     ArgumentAreaRead,
-    /// A register slot past the parameters is read.
+    /// A register slot past the parameters is read by a kind of read no rule proves.
     RegisterRead,
+    /// A slot past the parameters is only stored to its home: -O0 homes parameters it never uses.
+    Homed,
     /// The first slot past the parameters may be handed to this call.
     HandedOn(SourceUnprovenCall),
     /// A declared parameter of a class the convention places nowhere here; it and the rest drop.

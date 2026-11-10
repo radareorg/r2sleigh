@@ -75,7 +75,7 @@ r2sleigh_result_u64 _table_dispatch(uint64_t arg0, uint64_t arg1)
     uint32_t stack_m76_1;
     _Alignas(16) uint8_t frame[64];
 
-    /* r2dec proof: 3 constructs are marked below; 59 source obligations: 21 rendered, 11 elided, 0 refused, 27 residual; 8 statements rendered; the result is unproven (Written): 0 unproven-return carried */
+    /* r2dec proof: 3 constructs are marked below; 59 source obligations: 21 rendered, 11 elided, 0 refused, 27 residual; 8 statements rendered; the parameters are a floor: at least 2 (a register past them reaches an indirect call); the result is unproven (Written): 0 unproven-return carried */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 32U), (uint64_t)arg1);
