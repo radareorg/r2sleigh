@@ -1311,6 +1311,9 @@ pub(crate) fn collect_source_boundary_facts(
         ..SourceBoundaryFacts::default()
     };
 
+    let formals = (facts.parameters.values())
+        .filter_map(SourceFormalParameterFact::value)
+        .collect::<Vec<_>>();
     // Whether the body writes each argument register an unseen slot asks of, found once per register.
     let mut written_anywhere = BTreeMap::new();
     let arrival_merges = merges_of_arrivals(graph);
@@ -1395,10 +1398,11 @@ pub(crate) fn collect_source_boundary_facts(
                                     value,
                                     held.unwrap_or(storage),
                                 );
-                                // The entry carrier handed on whole is this function's own lane.
+                                // The entry carrier handed on whole passes the formal of that lane.
                                 if let (None, Some(lane), SourceCallArgumentValue::Value(carrier)) =
                                     (lane_of, held, value)
                                     && let Some(own) = entry_values.get(&lane).copied().flatten()
+                                    && formals.contains(&own)
                                     && super::shared::is_entry_lane_of(graph, own, carrier)
                                 {
                                     (value, lane_of) =
@@ -2028,9 +2032,8 @@ pub(crate) fn unique_entry_values_by_storage(
     values
 }
 
-/// The single authoritative projection from source ABI parameter slots to their homes: a register
-/// formal's entry value, a stack formal's argument-area object. Preparation reads the register half
-/// (`objects` absent); the published boundary facts read both.
+/// Each formal at its home: a register's entry value, a stack slot's argument-area object (the
+/// latter only with `objects`, which preparation does not pass).
 pub(crate) fn collect_source_formal_parameter_facts(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,

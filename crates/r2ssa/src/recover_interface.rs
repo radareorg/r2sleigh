@@ -573,38 +573,46 @@ fn observed_entry_read_storages(
 fn passed_through_entry_storages(
     boundaries: &crate::semantic::SourceBoundaryFacts,
     graph: &SsaGraph,
+    held: impl Fn(crate::CallSiteId, u32, CanonicalStorageId) -> Option<CanonicalStorageId>,
 ) -> Vec<CanonicalStorageId> {
     let mut storages = Vec::new();
     for boundary in boundaries.calls.values() {
         for argument in &boundary.arguments {
-            let crate::semantic::CallBoundarySlot::Register { storage, .. } = argument.slot else {
+            let crate::semantic::CallBoundarySlot::Register { index, storage } = argument.slot
+            else {
                 continue;
             };
-            // An entry lane the callee holds (ROADMAP D105) is a parameter of the lane's width.
-            let storage = match argument.value {
-                crate::semantic::SourceCallArgumentValue::PreservedEntry => storage,
+            let is_entry = match argument.value {
+                crate::semantic::SourceCallArgumentValue::PreservedEntry => true,
                 crate::semantic::SourceCallArgumentValue::Value(value) => {
-                    let whole = graph.value(value).is_some_and(|graph_value| {
+                    graph.value(value).is_some_and(|graph_value| {
                         graph.def_inst(value).is_none()
                             && graph_value.var.version == 0
                             && graph_value.var.size == storage.size
                             && graph_value.canonical_storage == Some(storage)
-                    });
-                    let own = graph.value(value).and_then(|graph_value| {
-                        (graph.def_inst(value).is_none() && graph_value.var.version == 0)
-                            .then_some(graph_value.canonical_storage)?
-                    });
-                    let lane = (graph.formal_projection_storage(value).or(own)).filter(|lane| {
-                        lane.space == storage.space
-                            && lane.offset == storage.offset
-                            && lane.size < storage.size
-                    });
-                    match (whole, lane) {
-                        (true, _) => storage,
-                        (false, Some(lane)) => lane,
-                        (false, None) => continue,
+                    })
+                }
+            };
+            // A formal lane the boundary passes is a parameter of its width; so is the entry
+            // carrier handed on whole to a callee that holds only its low lane (ROADMAP D105).
+            let entry_lane = |value: crate::ValueId| {
+                graph.formal_projection_storage(value).or_else(|| {
+                    let lane = graph.value(value)?;
+                    (graph.def_inst(value).is_none() && lane.var.version == 0)
+                        .then_some(lane.canonical_storage)?
+                })
+            };
+            let storage = match argument.value {
+                crate::semantic::SourceCallArgumentValue::Value(value)
+                    if argument.lane_of.is_some() =>
+                {
+                    match entry_lane(value) {
+                        Some(lane) => lane,
+                        None => continue,
                     }
                 }
+                _ if is_entry => held(boundary.call_site, index, storage).unwrap_or(storage),
+                _ => continue,
             };
             if !storages.contains(&storage) {
                 storages.push(storage);
@@ -1753,7 +1761,12 @@ fn recover_interface_inner(
     // consumer can use the same identity.
     let entry_reads = |saved: Option<&crate::dense::IdSet<crate::ValueId>>| {
         let mut reads = observed_entry_read_storages(func, graph, &observations, saved);
-        for storage in passed_through_entry_storages(&facts.boundaries, graph)
+        let held = |call: crate::CallSiteId, index: u32, storage: CanonicalStorageId| {
+            let identity = facts.call_sites.by_id.get(&call)?.raw_identity?;
+            let interface = machine_context?.call_site_interface(identity)?;
+            crate::semantic::callee_held_lane(interface, index, storage)
+        };
+        for storage in passed_through_entry_storages(&facts.boundaries, graph, held)
             .into_iter()
             .chain(returned_argument)
         {
@@ -2991,7 +3004,7 @@ mod tests {
         )]);
         let graph = graph_for(R2ILBlock::new(0x1000, 4));
         assert_eq!(
-            passed_through_entry_storages(&boundaries, &graph),
+            passed_through_entry_storages(&boundaries, &graph, |_, _, _| None),
             vec![register(0, 8)]
         );
     }
@@ -3020,7 +3033,7 @@ mod tests {
         )]);
 
         assert_eq!(
-            passed_through_entry_storages(&boundaries, &graph),
+            passed_through_entry_storages(&boundaries, &graph, |_, _, _| None),
             vec![register(0, 8)]
         );
     }
@@ -3119,7 +3132,7 @@ mod tests {
             register(0, 8),
             crate::semantic::SourceCallArgumentValue::Value(defined),
         )]);
-        assert!(passed_through_entry_storages(&boundaries, &graph).is_empty());
+        assert!(passed_through_entry_storages(&boundaries, &graph, |_, _, _| None).is_empty());
     }
 
     #[test]

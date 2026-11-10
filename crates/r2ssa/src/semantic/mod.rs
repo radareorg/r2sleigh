@@ -585,15 +585,6 @@ pub(crate) fn ensure_source_formal_parameter_values(
             materialize(graph, &mut existing, storage);
         }
     }
-    // The lane a callee holds of an argument slot, which the entry carrier handed on whole is (D105).
-    let held = (machine_context.call_site_interfaces().values()).flat_map(|interface| {
-        (interface.arguments().iter()).filter_map(|argument| {
-            callee_held_lane(interface, argument.index(), argument.register_storage()?)
-        })
-    });
-    for lane in held.collect::<Vec<_>>() {
-        materialize(graph, &mut existing, lane);
-    }
 }
 
 /// The value a storage holds immediately before one operation of a sealed function: the walk a
