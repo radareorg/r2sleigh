@@ -1317,6 +1317,8 @@ pub(crate) fn collect_source_boundary_facts(
     // Whether the body writes each argument register an unseen slot asks of, found once per register.
     let mut written_anywhere = BTreeMap::new();
     let arrival_merges = merges_of_arrivals(graph);
+    // Each entry carrier's widest read, found once for every boundary that asks (D105).
+    let held_widths = std::cell::OnceCell::new();
     for call_site in call_sites.by_id.values() {
         let mut boundary = SourceCallBoundaryFact {
             call_site: call_site.id,
@@ -1395,13 +1397,19 @@ pub(crate) fn collect_source_boundary_facts(
                                 let held = held.filter(|lane| match value {
                                     _ if formal(lane) => true,
                                     SourceCallArgumentValue::Value(carrier) => {
-                                        super::shared::held_lane_admitted(
-                                            graph,
-                                            prep.map(|prep| &prep.views),
-                                            machine_context,
-                                            carrier,
-                                            lane.size,
-                                        )
+                                        held_widths
+                                            .get_or_init(|| {
+                                                super::shared::HeldLaneWidths::of(
+                                                    graph,
+                                                    machine_context,
+                                                )
+                                            })
+                                            .admits(
+                                                graph,
+                                                prep.map(|prep| &prep.views),
+                                                carrier,
+                                                lane.size,
+                                            )
                                     }
                                     SourceCallArgumentValue::PreservedEntry => true,
                                 });

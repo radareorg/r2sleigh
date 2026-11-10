@@ -470,3 +470,65 @@ fn an_unsound_lane_is_refused_by_the_check_of_the_sealed_facts() {
     // A lane read above the branch stands behind the call: the same pick, nothing to refuse.
     assert!(with_facts(Facts::UnsoundLanes, || sealed_lane_call(true)).is_ok());
 }
+
+/// `v` entered and read by `reads`, then a return: the artifact whose entry `v` the index reads.
+fn entry_read(reads: Vec<R2ILOp>) -> SsaArtifact {
+    let revision = b"entry-read";
+    let interface = SourceFunctionInterface::new_exact(
+        revision.to_vec(),
+        r2source::ConventionId::SysVAmd64,
+        [],
+        SourceFunctionReturn::Void,
+        [],
+    )
+    .and_then(|interface| interface.with_return_address_storage(storage(0x80, 8)))
+    .and_then(|interface| interface.with_stack_pointer_storage(storage(0x88, 8)))
+    .expect("a function interface");
+    let ret = R2ILOp::Return {
+        target: make_reg(0x80, 8),
+    };
+    SsaArtifact::for_decompile_with_interfaces_and_control(
+        &[block(0x1000, [reads, vec![ret]].concat())],
+        Some(&crate::Arch::from(lane_arch())),
+        Some(interface),
+        crate::SourceMachineRoles::default(),
+        Vec::new(),
+        crate::testing::call_effect([], [storage(0x88, 8)]),
+        &crate::control::UncheckedSsaWorkControl,
+    )
+    .expect("the entry read prepares")
+}
+
+/// Whether the index admits a held lane `bytes` wide of the entry `v` in `artifact`.
+fn admits(artifact: &SsaArtifact, bytes: u32) -> bool {
+    let graph = artifact.graph();
+    let entry = (graph.values.iter())
+        .find(|value| {
+            value.canonical_storage == Some(storage(VECTOR, 16))
+                && value.var.version == 0
+                && graph.def_inst(value.id).is_none()
+        })
+        .expect("the entry v");
+    let widths = crate::semantic::HeldLaneWidths::of(graph, artifact.machine_context());
+    widths.admits(graph, None, entry.id, bytes)
+}
+
+/// One index per function answers every held lane (ROADMAP D105): a subpiece reads its end, and
+/// a whole read reads past every lane.
+#[test]
+fn an_entry_carrier_s_widest_read_is_indexed_once_for_every_held_lane() {
+    let low = entry_read(lane_read());
+    assert!(admits(&low, 4));
+    assert!(admits(&low, 8));
+    assert!(!admits(&low, 2));
+    let whole = entry_read(vec![R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: make_const(0x3000, 8),
+        val: make_reg(VECTOR, 16),
+    }]);
+    assert!(!admits(&whole, 8));
+    assert!(
+        admits(&whole, 16),
+        "a lane as wide as the register narrows nothing"
+    );
+}

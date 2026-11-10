@@ -1030,55 +1030,79 @@ pub(crate) fn callee_held_lane(
         })
 }
 
-/// Whether a callee's held lane may narrow `carrier` (ROADMAP D105), by default-deny: where the
-/// carrier is this function's entry value of a register, every use of it reads within `bytes`.
-pub(crate) fn held_lane_admitted(
-    graph: &SsaGraph,
-    views: Option<&crate::view::ValueViews<ValueId>>,
-    machine_context: &SourceMachineContext,
-    carrier: ValueId,
-    bytes: u32,
-) -> bool {
-    let root = views.map_or(carrier, |views| views.view(carrier).root);
-    let entry = graph.value(root).filter(|value| {
-        graph.def_inst(root).is_none()
-            && value.var.version == 0
-            && value.canonical_storage.is_some_and(|storage| {
-                storage.space == CanonicalStorageSpace::Register && storage.size > bytes
-            })
-    });
-    let Some(entry) = entry else {
-        return true;
-    };
-    graph.use_sites(root).iter().all(|site| {
-        let reader = graph.op(site.inst);
-        match reader {
-            Some(SSAOp::Subpiece { dst, offset, .. }) => {
-                offset.saturating_add(graph.var(*dst).size) <= bytes
-            }
-            Some(SSAOp::CallUse { .. }) => entry.canonical_storage.is_some_and(|storage| {
-                call_after(graph, site.inst, machine_context).is_some_and(|interface| {
-                    (interface.arguments().iter()).any(|argument| {
-                        argument.register_storage() == Some(storage)
-                            && callee_held_lane(interface, argument.index(), storage)
-                                .is_some_and(|lane| lane.size <= bytes)
-                    })
-                })
-            }),
-            _ => false,
+/// The widest low run each entry register value's uses read (ROADMAP D105): a subpiece's end, or
+/// the narrowest lane a call's callee holds of it; `None` where a use reads past every lane.
+pub(crate) struct HeldLaneWidths(crate::dense::IdMap<ValueId, Option<u32>>);
+
+impl HeldLaneWidths {
+    /// Work: one pass over the entry values' uses, each call's interface found in `O(arguments)`.
+    pub(crate) fn of(graph: &SsaGraph, machine_context: &SourceMachineContext) -> Self {
+        let mut widths = crate::dense::IdMap::new(graph.values.len());
+        for value in &graph.values {
+            let Some(storage) = value.canonical_storage.filter(|storage| {
+                storage.space == CanonicalStorageSpace::Register
+                    && value.var.version == 0
+                    && graph.def_inst(value.id).is_none()
+            }) else {
+                continue;
+            };
+            let widest = graph
+                .use_sites(value.id)
+                .iter()
+                .try_fold(0, |widest, site| {
+                    let read = match graph.op(site.inst) {
+                        Some(SSAOp::Subpiece { dst, offset, .. }) => {
+                            Some(offset.saturating_add(graph.var(*dst).size))
+                        }
+                        Some(SSAOp::CallUse { .. }) => {
+                            call_after(graph, site.inst, machine_context).and_then(|interface| {
+                                (interface.arguments().iter())
+                                    .filter(|argument| argument.register_storage() == Some(storage))
+                                    .filter_map(|argument| {
+                                        callee_held_lane(interface, argument.index(), storage)
+                                    })
+                                    .map(|lane| lane.size)
+                                    .min()
+                            })
+                        }
+                        _ => None,
+                    };
+                    read.map(|read| u32::max(widest, read))
+                });
+            widths.insert(value.id, widest);
         }
-    })
+        Self(widths)
+    }
+
+    /// Whether a callee's held lane `bytes` wide may narrow `carrier`, by default-deny: where the
+    /// carrier is this function's entry value of a wider register, every use reads within `bytes`.
+    pub(crate) fn admits(
+        &self,
+        graph: &SsaGraph,
+        views: Option<&crate::view::ValueViews<ValueId>>,
+        carrier: ValueId,
+        bytes: u32,
+    ) -> bool {
+        let root = views.map_or(carrier, |views| views.view(carrier).root);
+        let wider = graph.value(root).and_then(|value| value.canonical_storage);
+        match self.0.get(root) {
+            Some(widest) if wider.is_some_and(|storage| storage.size > bytes) => {
+                widest.is_some_and(|widest| widest <= bytes)
+            }
+            _ => true,
+        }
+    }
 }
 
-/// The interface of the call a `CallUse` precedes in its block.
+/// The interface of the call a `CallUse` precedes in its block: the reads run up to the call.
 fn call_after<'a>(
     graph: &SsaGraph,
     read: crate::graph::InstId,
     machine_context: &'a SourceMachineContext,
 ) -> Option<&'a crate::SourceCallSiteInterface> {
-    let block = graph.block(graph.inst(read)?.block)?;
-    let at = block.insts.iter().position(|inst| *inst == read)?;
-    let instruction = (block.insts[at..].iter())
+    let inst = graph.inst(read)?;
+    let block = graph.block(inst.block)?;
+    let instruction = (block.insts.get(inst.ordinal..)?.iter())
         .find_map(|inst| graph.op(*inst)?.transfer().filter(|flow| flow.call))?
         .instruction?;
     machine_context.call_site_interface(machine_context.raw_call_site_at(instruction)?)

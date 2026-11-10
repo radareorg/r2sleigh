@@ -1762,6 +1762,8 @@ fn recover_interface_inner(
     // either case a preserved carrier is a real entry read by the call. Final
     // preparation materializes its source-declared boundary value so every
     // consumer can use the same identity.
+    // Each entry carrier's widest read, found once for every argument that asks (D105).
+    let held_widths = std::cell::OnceCell::new();
     let entry_reads = |saved: Option<&crate::dense::IdSet<crate::ValueId>>| {
         let mut reads = observed_entry_read_storages(func, graph, &observations, saved);
         let held = |call: crate::CallSiteId, index: u32, storage: CanonicalStorageId, carrier| {
@@ -1770,9 +1772,9 @@ fn recover_interface_inner(
             let interface = context.call_site_interface(identity)?;
             let lane = crate::semantic::callee_held_lane(interface, index, storage)?;
             let views = prep.map(|prep| &prep.views);
-            let admitted = |carrier| {
-                crate::semantic::held_lane_admitted(graph, views, context, carrier, lane.size)
-            };
+            let widths =
+                held_widths.get_or_init(|| crate::semantic::HeldLaneWidths::of(graph, context));
+            let admitted = |carrier| widths.admits(graph, views, carrier, lane.size);
             Option::<crate::ValueId>::is_none_or(carrier, admitted).then_some(lane)
         };
         for storage in passed_through_entry_storages(&facts.boundaries, graph, held)
