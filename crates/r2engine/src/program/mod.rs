@@ -239,7 +239,10 @@ fn assemble(
     // `__fgets_chk` is two interfaces under one name. The program's own
     // declarations are read by address, beside these, not merged in.
     let library = c_library(container);
-    let rows = r2abi::LibraryRows::embedded(library);
+    let mut rows = r2abi::LibraryRows::embedded(library);
+    // A mangled import states its parameters in its name (doc/adr-call-boundary.md, S13).
+    let imports = container.symbols.iter().filter(|symbol| symbol.import);
+    rows.read_mangled(imports.map(|symbol| symbol.name.as_ref()));
     let linkage = crate::imports::Linkage::of(container);
     let data_model = r2abi::CDataModel::of(&container.arch.name, container.arch.bits, library);
     Ok(Assembled {

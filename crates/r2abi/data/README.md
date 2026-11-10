@@ -22,6 +22,14 @@ is a merge that keeps them rather than a copy that drops them.
   `types-linux.sdb.txt` and on the same terms as `types-posix.sdb.txt`.
 - `types-android.sdb.txt`: what bionic, Android's C library, declares for
   itself.
+- `types-bionic.sdb.txt`: bionic's rows that carry their header, read with
+  `types-android.sdb.txt` and on the same terms as `types-posix.sdb.txt`.
+- `types-kernel32.sdb.txt` and `types-ucrt.sdb.txt`: what KERNEL32.dll and the
+  Universal C Runtime export, each row citing Microsoft's reference page (or
+  header) and the minimum version it states; read only for a PE import that
+  names that DLL.
+- `cxx-objects.txt`: for a mangled member whose name does not say whether it
+  takes `this`, the header that does (see "Mangled names").
 - `types-darwin.sdb.txt`: what Darwin's libSystem declares for itself.
 - `void-rows.txt`: the source that states each `ret=void` row returns
   nothing, and the rows found spelled `void` that return a value.
@@ -140,7 +148,9 @@ Where radare2 scopes differently:
 
 Every row of `types-posix.sdb.txt` and `types-glibc.sdb.txt` names the header it is read from on
 a `func.<name>.include=` line and sits under a comment naming its source (`r2abi::library::SOURCES`:
-ISO C17, POSIX.1-2017, POSIX.1-2024, 4.4BSD, glibc, LSB 5.0 or GCC). A row that spells `...`
+ISO C17, POSIX.1-2017, POSIX.1-2024, 4.4BSD, glibc, LSB 5.0, GCC, bionic or Microsoft). The bionic,
+KERNEL32 and UCRT tables are cited the same way; a Microsoft row adds `func.<name>.cite=`, the
+reference page and its minimum supported client. A row that spells `...`
 states its tail on `func.<name>.tail=`: `variadic`, `format(printf|scanf|wprintf|wscanf,<index>)`
 or `va_list(<index>)`, the index counting fixed parameters from zero. A row with no `...` and no
 `.tail=` states a fixed prototype (`Tail::None`). Every row of the other tables is
@@ -156,20 +166,40 @@ from a parameter called `format`.
 A pointer's own qualifiers (`restrict`, a `const` after the star) are not part of a
 prototype's type, so the rows leave them out.
 
+## Mangled names
+
+An import whose name is an Itanium C++ ABI mangling states its parameter types
+in the name (5.1.5), so r2abi reads its row from the name when no table states
+one (`r2abi::mangled`, `LibraryRows::read_mangled`). A reference is its pointer.
+A class or enum passed by value stays a named opaque type: the name does not
+say whether it is trivially copyable, so the convention cannot place it. The
+row states no result (the return type is refused), and its tail is `None`, or
+`Variadic` for a `z`.
+
+The name says whether the function takes `this` only for a constructor, a
+destructor, a cv- or ref-qualified member, a conversion, and an operator of a
+scope the name proves a class (template arguments, or `So`, `Si`, `Sd`, `Ss`,
+`Sa`, `Sb`). Anything else nested could be a namespace function, a static
+member or a non-static one, so `cxx-objects.txt` states it from the header that
+declares it, and a name it does not list gets no row.
+
 ## Handles
 
 `FILE` and `DIR` are typedefs of tags the C library's header names. `spelling.rs` states the tag
 per library: glibc's `struct _IO_FILE` (`bits/types/FILE.h`) and `struct __dirstream`
-(`dirent.h`), libSystem's `struct __sFILE` (`_stdio.h`). libSystem's `DIR` is a typedef of an
-anonymous struct and bionic's headers were not read, so those state none and the name stays an
-opaque typedef.
+(`dirent.h`), libSystem's `struct __sFILE` (`_stdio.h`), bionic's `struct __sFILE` (`stdio.h`)
+and `struct DIR` (`dirent.h`). libSystem's `DIR` is a typedef of an anonymous struct, so it states
+none and the name stays an opaque typedef.
 
 ## Binding
 
 A row applies only to an import, never to a body by its name (doc/adr-call-boundary.md, Refusals
 "A library row"). r2engine's `imports::Imports` binds a versioned ELF import to the library its
 version names (`GLIBC_*` to glibc, bionic's `LIBC*`, `GLIBCXX_*`, `CXXABI_*` and `GCC_*` to the
-C++ runtime rows) and an unversioned one only where `DT_NEEDED` names exactly one C library.
+C++ runtime rows) and an unversioned one only where `DT_NEEDED` names exactly one C library. A PE
+import that names KERNEL32.dll reads only `types-kernel32.sdb.txt`; one that names
+`ucrtbase.dll` or an `api-ms-win-crt-*` set reads `types-ucrt.sdb.txt` first, then the C++ and
+portable rows as every other PE import does.
 
 ## Other local edits
 

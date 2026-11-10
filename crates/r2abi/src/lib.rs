@@ -8,6 +8,7 @@ pub mod data_model;
 pub mod declarations;
 pub mod frames;
 pub mod library;
+pub mod mangled;
 pub mod platform;
 pub mod prototypes;
 pub mod runtime;
@@ -23,7 +24,7 @@ pub use convention::{
 pub use data_model::CDataModel;
 pub use declarations::{DataObject, Declarations};
 pub use library::{
-    CLibrary, FormatKind, Kernel, LibraryId, LibraryRow, LibraryRows, PrototypeId, Tail,
+    CLibrary, Dll, FormatKind, Kernel, LibraryId, LibraryRow, LibraryRows, PrototypeId, Tail,
 };
 pub use platform::{
     EntryStack, GuardRow, PlatformRegister, RegisterDuty, RegisterSaveArea, SaveAreaAnchor,

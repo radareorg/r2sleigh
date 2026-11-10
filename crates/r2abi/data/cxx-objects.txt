@@ -1,0 +1,105 @@
+# Whether a mangled member takes `this`, where its mangled name leaves that open: a name nested
+# in a scope it does not prove a class, or a member it does not prove non-static (doc/adr-call-
+# boundary.md, S13). The mangling states every explicit parameter; this states only the object.
+# `this` is a non-static member, `none` a static member or a namespace-scope function. Each block
+# names the library and the header that declares the members (`LibraryRows::read_mangled`).
+#
+# name | this or none | header
+
+# libstdc++ (GCC 13.3): <istream> declares these basic_istream<char> members non-static.
+_ZNSi4readEPcl | this | istream
+_ZNSi5seekgElSt12_Ios_Seekdir | this | istream
+_ZNSi5seekgESt4fposI11__mbstate_tE | this | istream
+_ZNSi5tellgEv | this | istream
+_ZNSi7getlineEPclc | this | istream
+
+# libstdc++ (GCC 13.3): <ostream> declares these basic_ostream<char> members non-static, the
+# member template _M_insert among them.
+_ZNSo3putEc | this | ostream
+_ZNSo5flushEv | this | ostream
+_ZNSo5writeEPKcl | this | ostream
+_ZNSo9_M_insertIbEERSoT_ | this | ostream
+_ZNSo9_M_insertIdEERSoT_ | this | ostream
+_ZNSo9_M_insertIlEERSoT_ | this | ostream
+_ZNSo9_M_insertImEERSoT_ | this | ostream
+_ZNSo9_M_insertIPKvEERSoT_ | this | ostream
+_ZNSo9_M_insertIyEERSoT_ | this | ostream
+
+# libstdc++ (GCC 13.3): config/io/basic_file_stdio.h, installed as <bits/basic_file.h>, declares
+# __basic_file<char>::sys_open non-static.
+_ZNSt12__basic_fileIcE8sys_openEiSt13_Ios_Openmode | this | bits/basic_file.h
+
+# libstdc++ (GCC 13.3): <fstream> declares these basic_filebuf, basic_ifstream and basic_ofstream
+# members non-static.
+_ZNSt13basic_filebufIcSt11char_traitsIcEE27_M_allocate_internal_bufferEv | this | fstream
+_ZNSt13basic_filebufIcSt11char_traitsIcEE4openEPKcSt13_Ios_Openmode | this | fstream
+_ZNSt13basic_filebufIcSt11char_traitsIcEE5closeEv | this | fstream
+_ZNSt13basic_filebufIcSt11char_traitsIcEE7seekoffElSt12_Ios_SeekdirSt13_Ios_Openmode | this | fstream
+_ZNSt14basic_ifstreamIcSt11char_traitsIcEE5closeEv | this | fstream
+_ZNSt14basic_ofstreamIcSt11char_traitsIcEE5closeEv | this | fstream
+
+# libstdc++ (GCC 13.3): <bits/random.h> declares random_device's _M_init, _M_fini and _M_getval
+# non-static.
+_ZNSt13random_device7_M_finiEv | this | bits/random.h
+_ZNSt13random_device7_M_initERKNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEEE | this | bits/random.h
+_ZNSt13random_device9_M_getvalEv | this | bits/random.h
+
+# libstdc++ (GCC 13.3): <stdexcept> declares runtime_error's copy assignment, a member.
+_ZNSt13runtime_erroraSERKS_ | this | stdexcept
+
+# libstdc++ (GCC 13.3): <streambuf> declares basic_streambuf<char>'s sgetc and sbumpc non-static.
+_ZNSt15basic_streambufIcSt11char_traitsIcEE5sgetcEv | this | streambuf
+_ZNSt15basic_streambufIcSt11char_traitsIcEE6sbumpcEv | this | streambuf
+
+# libstdc++ (GCC 13.3): <condition_variable> declares condition_variable::notify_one non-static.
+_ZNSt18condition_variable10notify_oneEv | this | condition_variable
+
+# libstdc++ (GCC 13.3): <system_error> declares generic_category and system_category at namespace
+# scope, in the inline namespace std::_V2.
+_ZNSt3_V215system_categoryEv | none | system_error
+_ZNSt3_V216generic_categoryEv | none | system_error
+
+# libstdc++ (GCC 13.3): <bits/chrono.h> declares system_clock::now static.
+_ZNSt6chrono3_V212system_clock3nowEv | none | bits/chrono.h
+
+# libstdc++ (GCC 13.3): <bits/locale_classes.h> declares locale's copy assignment, a member.
+_ZNSt6localeaSERKS_ | this | bits/locale_classes.h
+
+# libstdc++ (GCC 13.3): <bits/std_thread.h> declares thread::join non-static.
+_ZNSt6thread4joinEv | this | bits/std_thread.h
+
+# libstdc++ (GCC 13.3): <bits/basic_string.h> declares these __cxx11::basic_string<char> members
+# non-static.
+_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE10_M_replaceEmmPKcm | this | bits/basic_string.h
+_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE5eraseEmm | this | bits/basic_string.h
+_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE7reserveEm | this | bits/basic_string.h
+_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE8_M_eraseEmm | this | bits/basic_string.h
+_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE9_M_assignERKS4_ | this | bits/basic_string.h
+_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE9_M_createERmm | this | bits/basic_string.h
+
+# libstdc++ (GCC 13.3): <sstream> declares these __cxx11::basic_stringbuf<char> members
+# non-static.
+_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE3strERKNS_12basic_stringIcS2_S3_EE | this | sstream
+_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE7_M_syncEPcmm | this | sstream
+_ZNSt7__cxx1115basic_stringbufIcSt11char_traitsIcESaIcEE9showmanycEv | this | sstream
+
+# libstdc++ (GCC 13.3): <bits/stl_list.h> declares _List_node_base's _M_hook and _M_unhook
+# non-static (its swap is static).
+_ZNSt8__detail15_List_node_base7_M_hookEPS0_ | this | bits/stl_list.h
+_ZNSt8__detail15_List_node_base9_M_unhookEv | this | bits/stl_list.h
+
+# libstdc++ (GCC 13.3): <bits/ios_base.h> declares ios_base::_M_grow_words non-static and
+# ios_base::xalloc static.
+_ZNSt8ios_base13_M_grow_wordsEib | this | bits/ios_base.h
+_ZNSt8ios_base6xallocEv | none | bits/ios_base.h
+
+# libstdc++ (GCC 13.3): <bits/basic_ios.h> declares basic_ios<char>'s init and clear non-static.
+_ZNSt9basic_iosIcSt11char_traitsIcEE4initEPSt15basic_streambufIcS1_E | this | bits/basic_ios.h
+_ZNSt9basic_iosIcSt11char_traitsIcEE5clearESt12_Ios_Iostate | this | bits/basic_ios.h
+
+# OpenCV 4.x: <opencv2/core/mat.hpp> declares Mat's create and deallocate non-static.
+_ZN2cv3Mat10deallocateEv | this | opencv2/core/mat.hpp
+_ZN2cv3Mat6createEiPKii | this | opencv2/core/mat.hpp
+
+# OpenCV 4.x: <opencv2/core/cvstd.hpp> declares fastFree in namespace cv.
+_ZN2cv8fastFreeEPv | none | opencv2/core/cvstd.hpp

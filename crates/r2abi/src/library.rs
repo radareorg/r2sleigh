@@ -38,8 +38,34 @@ pub enum LibraryId {
     Glibc,
     Bionic,
     LibSystem,
-    /// The Itanium C++ ABI runtime and libstdc++'s exports, read beside every C library.
+    /// The Itanium C++ ABI runtime and libstdc++'s exports, read beside every C library, and the
+    /// rows read from an import's mangled name.
     CxxRuntime,
+    /// A Windows DLL's own rows, bound by the DLL a PE import names.
+    Dll(Dll),
+}
+
+/// A DLL whose exports a cited table states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Dll {
+    Kernel32,
+    /// The Universal C Runtime: `ucrtbase.dll` and the `api-ms-win-crt-*` sets that forward to it.
+    Ucrt,
+}
+
+impl Dll {
+    /// The DLL a PE import names, matched as Windows matches a module name: ignoring case.
+    pub fn of(module: &str) -> Option<Self> {
+        let module = module.to_ascii_lowercase();
+        match module.as_str() {
+            "kernel32.dll" => Some(Self::Kernel32),
+            "ucrtbase.dll" => Some(Self::Ucrt),
+            _ if module.starts_with("api-ms-win-crt-") && module.ends_with(".dll") => {
+                Some(Self::Ucrt)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// How a format parameter's conversions consume the tail.
@@ -112,8 +138,9 @@ pub struct LibraryRow {
 }
 
 /// Every row one C library's program reads, and the graph their types are nodes of.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryRows {
+    library: CLibrary,
     graph: TypeGraph,
     prototypes: Vec<Prototype>,
     rows: BTreeMap<LibraryId, BTreeMap<Box<str>, LibraryRow>>,
@@ -126,7 +153,12 @@ const CXX: &str = include_str!("../data/types-cxx.sdb.txt");
 const GLIBC: &str = include_str!("../data/types-linux.sdb.txt");
 const GLIBC_CITED: &str = include_str!("../data/types-glibc.sdb.txt");
 const BIONIC: &str = include_str!("../data/types-android.sdb.txt");
+const BIONIC_CITED: &str = include_str!("../data/types-bionic.sdb.txt");
 const LIBSYSTEM: &str = include_str!("../data/types-darwin.sdb.txt");
+const KERNEL32: &str = include_str!("../data/types-kernel32.sdb.txt");
+const UCRT: &str = include_str!("../data/types-ucrt.sdb.txt");
+/// Whether a mangled member takes `this` where its name leaves it open, by the header declaring it.
+const CXX_OBJECTS: &str = include_str!("../data/cxx-objects.txt");
 
 /// One embedded table: whose rows, whether each row cites its source, and the text.
 struct Embedded {
@@ -144,7 +176,7 @@ const fn table(library: LibraryId, cited: bool, text: &'static str) -> Embedded 
 }
 
 /// The sources a cited row's comment may name.
-pub const SOURCES: [&str; 7] = [
+pub const SOURCES: [&str; 9] = [
     "ISO C17",
     "POSIX.1-2017",
     "POSIX.1-2024",
@@ -152,7 +184,12 @@ pub const SOURCES: [&str; 7] = [
     "glibc",
     "LSB 5.0",
     "GCC",
+    "bionic",
+    "Microsoft",
 ];
+
+/// What a row read from a mangled name cites.
+const MANGLING: &str = "Itanium C++ ABI 5.1, the mangled name";
 
 impl CLibrary {
     /// The libraries whose rows an import bound to this C library reads, the library's own first.
@@ -167,22 +204,43 @@ impl CLibrary {
     }
 }
 
+impl Default for LibraryRows {
+    fn default() -> Self {
+        Self {
+            library: CLibrary::Unknown,
+            graph: TypeGraph::default(),
+            prototypes: Vec::new(),
+            rows: BTreeMap::new(),
+        }
+    }
+}
+
 impl LibraryRows {
     /// The rows a program on this C library can bind, each table read once.
     pub fn embedded(library: CLibrary) -> Self {
         use LibraryId::{Bionic, CxxRuntime, Glibc, LibSystem, Portable};
         let own: &[Embedded] = match library {
             CLibrary::Glibc => &[table(Glibc, false, GLIBC), table(Glibc, true, GLIBC_CITED)],
-            CLibrary::Bionic => &[table(Bionic, false, BIONIC)],
+            CLibrary::Bionic => &[
+                table(Bionic, false, BIONIC),
+                table(Bionic, true, BIONIC_CITED),
+            ],
             CLibrary::LibSystem => &[table(LibSystem, false, LIBSYSTEM)],
-            CLibrary::Musl | CLibrary::Ucrt | CLibrary::Unknown => &[],
+            CLibrary::Ucrt => &[
+                table(LibraryId::Dll(Dll::Kernel32), true, KERNEL32),
+                table(LibraryId::Dll(Dll::Ucrt), true, UCRT),
+            ],
+            CLibrary::Musl | CLibrary::Unknown => &[],
         };
         let shared = [
             table(Portable, false, PORTABLE),
             table(Portable, true, PORTABLE_CITED),
             table(CxxRuntime, false, CXX),
         ];
-        let mut rows = Self::default();
+        let mut rows = Self {
+            library,
+            ..Self::default()
+        };
         for embedded in shared.iter().chain(own) {
             rows.read(embedded, library);
         }
@@ -199,6 +257,72 @@ impl LibraryRows {
         };
         rows.read_text(&embedded, text, CLibrary::Unknown);
         rows
+    }
+
+    /// A row for each mangled name no table states, where the name states its parameters and,
+    /// for a member, whether it takes `this`: O(names x name length).
+    pub fn read_mangled<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
+        let objects = CxxObjects::read(CXX_OBJECTS);
+        for name in names {
+            if self.row(LibraryId::CxxRuntime, name).is_some() {
+                continue;
+            }
+            if let Some(row) = self.mangled(name, &objects) {
+                let rows = self.rows.entry(LibraryId::CxxRuntime).or_default();
+                rows.insert(name.into(), row);
+            }
+        }
+    }
+
+    /// The parameters only: a mangled name states no result, so the return type is refused.
+    fn mangled(&mut self, name: &str, objects: &CxxObjects) -> Option<LibraryRow> {
+        use crate::mangled::Object;
+        let mangled = crate::mangled::parse(name)?;
+        let (this, citation) = match mangled.object {
+            Object::None => (None, MANGLING.to_owned()),
+            Object::This(this) => (Some(this), MANGLING.to_owned()),
+            Object::Unstated(this) => {
+                let (takes, header) = objects.get(name)?;
+                let takes = *takes;
+                (takes.then_some(this), format!("{MANGLING}; {header}"))
+            }
+        };
+        let library = self.library;
+        let object = this.map(|this| (this, Some("this")));
+        let explicit = mangled
+            .parameters
+            .into_iter()
+            .map(|spelling| (spelling, None));
+        let parameters = object.into_iter().chain(explicit);
+        let parameters = parameters
+            .map(|(spelling, called)| {
+                let ty = crate::spelling::read(&spelling, &mut self.graph, library);
+                Parameter::new(ty, spelling, called)
+            })
+            .collect();
+        let return_type = self
+            .graph
+            .refused("a mangled name states no result".to_owned());
+        let id = PrototypeId(u32::try_from(self.prototypes.len()).unwrap_or(u32::MAX));
+        self.prototypes.push(Prototype {
+            name: name.to_owned(),
+            parameters,
+            returns: Spelled::from(""),
+            return_type,
+            variadic: mangled.variadic,
+            ..Prototype::default()
+        });
+        Some(LibraryRow {
+            library: LibraryId::CxxRuntime,
+            linked_name: name.into(),
+            prototype: id,
+            tail: match mangled.variadic {
+                true => Tail::Variadic,
+                false => Tail::None,
+            },
+            noreturn: false,
+            citation: citation.into(),
+        })
     }
 
     fn read(&mut self, embedded: &Embedded, library: CLibrary) {
@@ -241,7 +365,13 @@ impl LibraryRows {
             (true, Some(tail)) => parse_tail(tail).unwrap_or(Tail::Unstated),
         };
         let citation = match (embedded.cited, declared.include) {
-            (true, Some(header)) => format!("{}, <{header}>", declared.source.unwrap_or("?")),
+            (true, Some(header)) => {
+                let source = declared.source.unwrap_or("?");
+                match declared.cite {
+                    Some(page) => format!("{source}, <{header}>, {page}"),
+                    None => format!("{source}, <{header}>"),
+                }
+            }
             _ => String::new(),
         };
         let id = PrototypeId(u32::try_from(self.prototypes.len()).unwrap_or(u32::MAX));
@@ -343,9 +473,50 @@ struct Declared {
     returns: Option<String>,
     noreturn: bool,
     include: Option<String>,
+    /// The reference page and minimum version a Microsoft row cites.
+    cite: Option<String>,
     tail: Option<String>,
     /// The first source the comment above the row names.
     source: Option<&'static str>,
+}
+
+/// `cxx-objects.txt`: each mangled member whose name leaves `this` open, and the header that says.
+struct CxxObjects(BTreeMap<&'static str, (bool, String)>);
+
+impl CxxObjects {
+    /// `name | this|none | header`, under a comment naming the library; O(lines).
+    fn read(text: &'static str) -> Self {
+        let mut objects = BTreeMap::new();
+        let (mut library, mut in_comment) = ("", false);
+        for line in text.lines().map(str::trim) {
+            // A block's first line names the library before its colon.
+            if let Some(comment) = line.strip_prefix('#') {
+                if !in_comment {
+                    library = comment.split(':').next().unwrap_or_default().trim();
+                }
+                in_comment = true;
+                continue;
+            }
+            in_comment = false;
+            let mut fields = line.split('|').map(str::trim);
+            let (Some(name), Some(object), Some(header)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            let takes = match object {
+                "this" => true,
+                "none" => false,
+                _ => continue,
+            };
+            objects.insert(name, (takes, format!("{library} <{header}>")));
+        }
+        Self(objects)
+    }
+
+    fn get(&self, name: &str) -> Option<&(bool, String)> {
+        self.0.get(name)
+    }
 }
 
 /// The functions one `sdb` dump declares.
@@ -405,6 +576,7 @@ impl Table {
             "ret" => declared.returns = Some(value.to_owned()),
             "noreturn" => declared.noreturn = value == "true",
             "include" => declared.include = Some(value.to_owned()),
+            "cite" => declared.cite = Some(value.to_owned()),
             "tail" => declared.tail = Some(value.to_owned()),
             _ => {}
         }
@@ -582,6 +754,57 @@ mod tests {
                     row.linked_name
                 );
             }
+        }
+    }
+
+    /// A mangled import's row states its parameters, `this` where the name or a cited header
+    /// says, and no result; a member whose object nothing states gets no row.
+    #[test]
+    fn a_mangled_import_states_its_parameters_and_no_result() {
+        let mut rows = LibraryRows::embedded(CLibrary::Glibc);
+        let put = "_ZNSo3putEc";
+        let now = "_ZNSt6chrono3_V212system_clock3nowEv";
+        let open = "_ZN3Foo3barEi";
+        rows.read_mangled([put, now, open, "_ZNSolsEi", "_Znwm", "main"]);
+        let count = |name: &str| {
+            let row = rows.row(LibraryId::CxxRuntime, name)?;
+            let prototype = rows.prototype(row);
+            let refused = matches!(
+                rows.graph().get(prototype.return_type),
+                Some(crate::Type::Refused(_))
+            );
+            assert!(refused, "{name} states a result");
+            assert_eq!(row.tail, Tail::None);
+            Some(prototype.parameters.len())
+        };
+        assert_eq!(count(put), Some(2));
+        assert!(
+            rows.row(LibraryId::CxxRuntime, put)
+                .is_some_and(|row| row.citation.contains("<ostream>"))
+        );
+        assert_eq!(count(now), Some(0));
+        assert_eq!(count("_ZNSolsEi"), Some(2));
+        assert_eq!(count(open), None);
+        // The table's own row stands: operator new states its result.
+        let new = rows
+            .row(LibraryId::CxxRuntime, "_Znwm")
+            .expect("operator new");
+        assert!(new.citation.is_empty());
+        assert!(rows.row(LibraryId::CxxRuntime, "main").is_none());
+    }
+
+    /// Every `cxx-objects.txt` name parses, and its name leaves the object open.
+    #[test]
+    fn every_cited_object_is_one_the_name_leaves_open() {
+        let objects = CxxObjects::read(CXX_OBJECTS);
+        assert!(objects.0.len() >= 50, "{}", objects.0.len());
+        for (name, (_, cited)) in &objects.0 {
+            let parsed = crate::mangled::parse(name).unwrap_or_else(|| panic!("{name}"));
+            assert!(
+                matches!(parsed.object, crate::mangled::Object::Unstated(_)),
+                "{name}: the name states its object"
+            );
+            assert!(cited.contains(" <"), "{name}: {cited}");
         }
     }
 

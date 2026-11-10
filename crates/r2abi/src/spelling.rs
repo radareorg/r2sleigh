@@ -126,6 +126,16 @@ fn unqualified(words: &[&str], graph: &mut TypeGraph, library: CLibrary) -> Resu
         }));
     }
     if let [name] = words
+        && library == CLibrary::Ucrt
+        && let Some(spelling) = windows_type(name)
+    {
+        let target = read(spelling, graph, library);
+        return Ok(graph.add(Type::Typedef {
+            name: (*name).to_owned(),
+            target,
+        }));
+    }
+    if let [name] = words
         && let Some(tag) = handle_tag(name, library)
     {
         let target = graph.add(Type::Opaque {
@@ -284,12 +294,55 @@ fn named_scalar(name: &str, library: CLibrary) -> Option<(ScalarKind, Width)> {
         // Bionic takes these from the kernel's `long`-sized types on every
         // target. `mode_t` is sixteen bits on 32-bit ARM and thirty-two on the
         // 64-bit targets, so no one width is bionic's, and it stays opaque.
+        // `dev_t` is 32 bits on bionic's ILP32 targets and 64 on LP64 (`<sys/types.h>`): long's.
+        // `clockid_t` and `speed_t` are the kernel UAPI's `int` and `unsigned int`.
         CLibrary::Bionic => posix(name).or(match name {
             "off_t" | "clock_t" | "suseconds_t" => Some((Signed, Width::Long)),
             "off64_t" => Some((Signed, Width::Bits(64))),
+            "dev_t" => Some((Unsigned, Width::Long)),
+            "clockid_t" => Some((Signed, Width::Bits(32))),
+            "nfds_t" | "speed_t" => Some((Unsigned, Width::Bits(32))),
             _ => None,
         }),
         CLibrary::Musl | CLibrary::Ucrt | CLibrary::Unknown => None,
+    })
+}
+
+/// What Microsoft's "Windows Data Types" defines a name as, for a PE's rows. `LARGE_INTEGER` is
+/// a union whose `QuadPart` is `LONGLONG`; Microsoft x64 passes an 8-byte union as that integer.
+fn windows_type(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "BOOL" => "int",
+        "LONG" => "long",
+        "UINT" => "unsigned int",
+        "DWORD" | "ULONG" | "LCID" => "unsigned long",
+        "WORD" => "unsigned short",
+        "BYTE" => "unsigned char",
+        "DWORD64" | "ULONGLONG" => "unsigned long long",
+        "LONGLONG" | "LARGE_INTEGER" => "long long",
+        "SIZE_T" | "ULONG_PTR" => "uintptr_t",
+        "WCHAR" => "wchar_t",
+        "HANDLE" | "HMODULE" | "PVOID" | "LPVOID" => "void *",
+        "LPCVOID" => "const void *",
+        "LPCSTR" | "LPCCH" => "const char *",
+        "LPSTR" => "char *",
+        "LPCWSTR" | "LPCWCH" | "PCNZWCH" => "const WCHAR *",
+        "LPWSTR" | "LPWCH" => "WCHAR *",
+        "LPDWORD" => "DWORD *",
+        "PDWORD64" => "DWORD64 *",
+        "LPBOOL" => "BOOL *",
+        "PLARGE_INTEGER" => "LARGE_INTEGER *",
+        "FARPROC" | "LPTOP_LEVEL_EXCEPTION_FILTER" | "PEXCEPTION_ROUTINE" => "func",
+        "LPCPINFO" => "struct _cpinfo *",
+        "LPFILETIME" => "struct _FILETIME *",
+        "LPCRITICAL_SECTION" => "struct _RTL_CRITICAL_SECTION *",
+        "LPSECURITY_ATTRIBUTES" => "struct _SECURITY_ATTRIBUTES *",
+        "LPOVERLAPPED" => "struct _OVERLAPPED *",
+        "PCONTEXT" => "struct _CONTEXT *",
+        "PRUNTIME_FUNCTION" => "struct _IMAGE_RUNTIME_FUNCTION_ENTRY *",
+        "PUNWIND_HISTORY_TABLE" => "struct _UNWIND_HISTORY_TABLE *",
+        "PKNONVOLATILE_CONTEXT_POINTERS" => "struct _KNONVOLATILE_CONTEXT_POINTERS *",
+        _ => return None,
     })
 }
 
@@ -299,7 +352,8 @@ fn handle_tag(name: &str, library: CLibrary) -> Option<&'static str> {
     match (library, name) {
         (CLibrary::Glibc, "FILE") => Some("_IO_FILE"),
         (CLibrary::Glibc, "DIR") => Some("__dirstream"),
-        (CLibrary::LibSystem, "FILE") => Some("__sFILE"),
+        (CLibrary::LibSystem | CLibrary::Bionic, "FILE") => Some("__sFILE"),
+        (CLibrary::Bionic, "DIR") => Some("DIR"),
         _ => None,
     }
 }
@@ -330,7 +384,7 @@ mod tests {
     #[test]
     fn a_tag_the_table_never_lays_out_is_opaque() {
         let mut graph = TypeGraph::new();
-        let file = read("FILE *", &mut graph, CLibrary::Bionic);
+        let file = read("FILE *", &mut graph, CLibrary::Musl);
         let Some(Type::Pointer { target }) = graph.get(file) else {
             panic!("{:?}", graph.get(file));
         };

@@ -19,6 +19,9 @@ pub struct Imports {
 pub struct Linkage {
     /// Each versioned import by linked name; an import absent here states no version.
     versions: BTreeMap<Box<str>, Stated>,
+    /// Each PE import by name, and the DLL a cited table states for it; `None` where two
+    /// imports of the name name two DLLs.
+    dlls: BTreeMap<Box<str>, Option<r2abi::Dll>>,
     /// Whether an unversioned import binds: `DT_NEEDED` names exactly one C library, or the
     /// format is one library's (Mach-O's libSystem, a PE's Microsoft runtime).
     one_c_library: bool,
@@ -45,6 +48,17 @@ impl Linkage {
                 *held = Stated::Conflicting;
             }
         }
+        let mut dlls: BTreeMap<Box<str>, Option<r2abi::Dll>> = BTreeMap::new();
+        if matches!(container.format, Format::Pe) {
+            let imports = container.symbols.iter().filter(|symbol| symbol.import);
+            for symbol in imports {
+                let dll = symbol.library.as_deref().and_then(r2abi::Dll::of);
+                let held = dlls.entry(symbol.name.as_ref().into()).or_insert(dll);
+                if *held != dll {
+                    *held = None;
+                }
+            }
+        }
         let one_c_library = match container.format {
             Format::MachO | Format::Pe => true,
             Format::Elf => {
@@ -55,6 +69,7 @@ impl Linkage {
         };
         Self {
             versions,
+            dlls,
             one_c_library,
         }
     }
@@ -63,6 +78,7 @@ impl Linkage {
     pub fn one_c_library() -> Self {
         Self {
             versions: BTreeMap::new(),
+            dlls: BTreeMap::new(),
             one_c_library: true,
         }
     }
@@ -96,6 +112,13 @@ fn versioned_runtime(version: &str) -> bool {
 }
 
 const CXX_RUNTIME: &[LibraryId] = &[LibraryId::CxxRuntime];
+const KERNEL32: &[LibraryId] = &[LibraryId::Dll(r2abi::Dll::Kernel32)];
+/// UCRT's own rows first, then the rows a PE import read before S13.
+const UCRT: &[LibraryId] = &[
+    LibraryId::Dll(r2abi::Dll::Ucrt),
+    LibraryId::CxxRuntime,
+    LibraryId::Portable,
+];
 
 /// The argument registers a call to an import may read (doc/adr-call-boundary.md, "Lower bounds
 /// and upper bounds"): an upper bound only where the row's citation states a fixed prototype.
@@ -140,6 +163,12 @@ impl Imports {
     }
 
     fn scope(&self, name: &str) -> Result<&'static [LibraryId], &'static str> {
+        // A PE import binds by the DLL it names (doc/adr-call-boundary.md, S13).
+        match self.linkage.dlls.get(name) {
+            Some(Some(r2abi::Dll::Kernel32)) => return Ok(KERNEL32),
+            Some(Some(r2abi::Dll::Ucrt)) => return Ok(UCRT),
+            Some(None) | None => {}
+        }
         match self.linkage.versions.get(name) {
             Some(Stated::Versioned(SymbolVersion::Needed { library, version })) => {
                 if versioned_runtime(version) {
@@ -222,6 +251,35 @@ mod tests {
         // libc.so.6 is the one C library DT_NEEDED names, so an unversioned import binds.
         assert!(library("compress").is_err(), "no row states it");
         assert_eq!(library("puts"), Ok(LibraryId::Portable));
+    }
+
+    /// A PE import binds the table of the DLL it names; a DLL no table states binds as before.
+    #[test]
+    fn a_pe_import_binds_the_dll_it_names() {
+        let pe = |dll: &str, name: &str| Symbol {
+            library: Some(dll.into()),
+            ..import(name, None)
+        };
+        let container = Container {
+            format: Format::Pe,
+            symbols: vec![
+                pe("KERNEL32.dll", "GetLastError"),
+                pe("KERNEL32.dll", "puts"),
+                pe("api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vfprintf"),
+                pe("api-ms-win-crt-stdio-l1-1-0.dll", "fputs"),
+                pe("msvcrt.dll", "strlen"),
+            ],
+            ..Container::default()
+        };
+        let imports = imports(&container, CLibrary::Ucrt);
+        let library = |name| imports.bind(name).map(|row| row.library);
+        let dll = LibraryId::Dll;
+        assert_eq!(library("GetLastError"), Ok(dll(r2abi::Dll::Kernel32)));
+        assert!(library("puts").is_err(), "KERNEL32 exports no puts");
+        let vfprintf = library("__stdio_common_vfprintf");
+        assert_eq!(vfprintf, Ok(dll(r2abi::Dll::Ucrt)));
+        assert_eq!(library("fputs"), Ok(LibraryId::Portable));
+        assert_eq!(library("strlen"), Ok(LibraryId::Portable));
     }
 
     /// With no C library named, or two, an unversioned import binds to nothing.

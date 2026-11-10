@@ -113,3 +113,22 @@ clearerr_unlocked | void | glibc <stdio.h>: void clearerr_unlocked(FILE *); unlo
 error_at_line | void | glibc <error.h>: void error_at_line(int, int, const char *, unsigned int, const char *, ...); error(3)
 freeaddrinfo | void | POSIX.1-2017 <netdb.h>: void freeaddrinfo(struct addrinfo *)
 regfree | void | POSIX.1-2017 <regex.h>: void regfree(regex_t *)
+
+# types-bionic.sdb.txt, bionic's cited rows (S13, D210).
+sync | void | bionic <unistd.h> void sync(void)
+setbuffer | void | bionic <stdio.h> void setbuffer(FILE*, char*, int)
+tzset | void | bionic <time.h> void tzset(void)
+cfmakeraw | void | bionic <termios.h> void cfmakeraw(struct termios*)
+siglongjmp | void | bionic <setjmp.h> __noreturn void siglongjmp(sigjmp_buf, int)
+setutent | void | bionic <utmp.h> void setutent(void)
+endutent | void | bionic <utmp.h> void endutent(void)
+openlog | void | bionic <syslog.h> void openlog(const char*, int, int)
+closelog | void | bionic <syslog.h> void closelog(void)
+
+# types-kernel32.sdb.txt, Microsoft's API reference pages (S13, D210).
+DeleteCriticalSection | void | Microsoft synchapi.h VOID DeleteCriticalSection(LPCRITICAL_SECTION)
+ExitProcess | void | Microsoft processthreadsapi.h VOID ExitProcess(UINT)
+GetSystemTimeAsFileTime | void | Microsoft sysinfoapi.h VOID GetSystemTimeAsFileTime(LPFILETIME)
+RaiseException | void | Microsoft errhandlingapi.h VOID RaiseException(DWORD, DWORD, DWORD, const ULONG_PTR *)
+RtlCaptureContext | void | Microsoft winnt.h VOID RtlCaptureContext(PCONTEXT)
+SetLastError | void | Microsoft errhandlingapi.h VOID SetLastError(DWORD)

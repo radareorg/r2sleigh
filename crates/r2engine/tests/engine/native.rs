@@ -960,6 +960,63 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
     );
 }
 
+/// `Importing`, with the import a mangled C++ member: `std::ostream::put(char)`.
+struct MangledImporting;
+
+impl r2engine::body::Program for MangledImporting {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        Importing.read(vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        Importing.region(vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        Importing.is_entry(vaddr)
+    }
+}
+
+impl Program for MangledImporting {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == 0x100a).then(|| "_ZNSo3putEc".to_owned())
+    }
+}
+
+/// A mangled import's row comes from its name and libstdc++'s `<ostream>`: `this` and a `char`,
+/// two arguments, and no result it states (doc/adr-call-boundary.md, S13).
+#[test]
+fn a_mangled_import_takes_the_parameters_its_name_states() {
+    let mut machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let base = decompile(&target, &MangledImporting, BASE).expect("decompile");
+    let base = base.output.text().to_owned();
+    assert!(base.contains("the import has no declaration"), "{base}");
+    let mut rows = LibraryRows::embedded(CLibrary::Glibc);
+    rows.read_mangled(["_ZNSo3putEc"]);
+    machine.imports = Imports::new(rows, CLibrary::Glibc, Linkage::one_c_library());
+    let target = machine.target();
+    let response = decompile(&target, &MangledImporting, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("the import has no declaration"), "{text}");
+    let arguments = common::call_arguments(text, "_ZNSo3putEc").expect("a call to put");
+    assert_eq!(arguments.len(), 2, "{text}");
+}
+
 /// `total = counter + *(uint32_t*)0x2008`, each a 32-bit access at a literal address.
 const SUM_GLOBALS: &[u8] = &[
     0x8b, 0x04, 0x25, 0x00, 0x20, 0x00, 0x00, // 0x1000 mov eax, [0x2000]

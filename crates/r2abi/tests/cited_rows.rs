@@ -1,9 +1,16 @@
 //! Each cited row names its header on `.include=`, sits under a comment naming its standard, and
 //! states its tail where it spells `...` (doc/adr-call-boundary.md, S8).
 
-use r2abi::{CLibrary, LibraryId, LibraryRows, Tail};
+use r2abi::{CLibrary, Dll, LibraryId, LibraryRows, Tail};
 
-const CITED: [&str; 2] = ["types-posix.sdb.txt", "types-glibc.sdb.txt"];
+/// Each cited table and the fewest rows it holds.
+const CITED: [(&str, usize); 5] = [
+    ("types-posix.sdb.txt", 40),
+    ("types-glibc.sdb.txt", 40),
+    ("types-bionic.sdb.txt", 100),
+    ("types-kernel32.sdb.txt", 50),
+    ("types-ucrt.sdb.txt", 1),
+];
 const UNCITED: [&str; 5] = [
     "types.sdb.txt",
     "types-cxx.sdb.txt",
@@ -49,9 +56,9 @@ fn rows(text: &str) -> Vec<(String, String, Option<String>)> {
 
 #[test]
 fn every_row_cites_its_header() {
-    for file in CITED {
+    for (file, fewest) in CITED {
         let rows = rows(&table(file));
-        assert!(rows.len() > 40, "{file}: {} rows", rows.len());
+        assert!(rows.len() >= fewest, "{file}: {} rows", rows.len());
         for (name, comment, header) in rows {
             let header = header.unwrap_or_else(|| panic!("{file}: `{name}` names no header"));
             assert!(
@@ -100,13 +107,75 @@ fn a_cited_row_is_declared_in_no_other_table() {
     }
     let both = posix.intersection(&glibc).collect::<Vec<_>>();
     assert!(both.is_empty(), "declared by both cited tables: {both:?}");
+    let bionic = names("types-bionic.sdb.txt");
+    let android = names("types-android.sdb.txt");
+    for table in [&android, &posix] {
+        let both = bionic.intersection(table).collect::<Vec<_>>();
+        assert!(
+            both.is_empty(),
+            "bionic's cited rows also declared: {both:?}"
+        );
+    }
+}
+
+/// A Microsoft row cites the reference page it is read from and the minimum version it states.
+#[test]
+fn a_microsoft_row_cites_its_page() {
+    let rows = LibraryRows::embedded(CLibrary::Ucrt);
+    let kernel32 = rows
+        .rows()
+        .filter(|row| row.library == LibraryId::Dll(Dll::Kernel32));
+    let mut count = 0;
+    for row in kernel32 {
+        count += 1;
+        let cited = &row.citation;
+        assert!(
+            cited.starts_with("Microsoft, <"),
+            "{}: {cited}",
+            row.linked_name
+        );
+        assert!(cited.contains("https://learn.microsoft.com/"), "{cited}");
+        assert!(
+            cited.ends_with(')'),
+            "{}: no minimum version: {cited}",
+            row.linked_name
+        );
+    }
+    assert!(count >= 50, "{count} KERNEL32 rows");
+    let exit = rows.row(LibraryId::Dll(Dll::Kernel32), "ExitProcess");
+    assert!(exit.is_some_and(|row| row.noreturn));
+    let printf = rows.row(LibraryId::Dll(Dll::Ucrt), "__stdio_common_vfprintf");
+    let printf = printf.expect("UCRT's printf");
+    assert_eq!(printf.tail.printf_format(), Some(2));
+    // A glibc program reads no Windows row.
+    let glibc = LibraryRows::embedded(CLibrary::Glibc);
+    assert!(
+        glibc
+            .rows()
+            .all(|row| !matches!(row.library, LibraryId::Dll(_)))
+    );
+}
+
+/// The Windows type names read as Microsoft defines them: `DWORD` is 32 bits on x64, where
+/// `long` is, and a handle is a pointer.
+#[test]
+fn a_windows_type_name_has_its_defined_width() {
+    let rows = LibraryRows::embedded(CLibrary::Ucrt);
+    let model = r2abi::CDataModel::of("x86", 64, CLibrary::Ucrt).expect("Microsoft x64");
+    let heap_alloc = rows.find(&[LibraryId::Dll(Dll::Kernel32)], "HeapAlloc");
+    let prototype = rows.prototype(heap_alloc.expect("HeapAlloc"));
+    let bits = |index: usize| {
+        let ty = prototype.parameters[index].ty;
+        rows.graph().size_bits(ty, model)
+    };
+    assert_eq!((bits(0), bits(1), bits(2)), (Some(64), Some(32), Some(64)));
 }
 
 /// A pointer's own qualifier is no part of a prototype's type here, and a spelling that states one
 /// would print as a `const` on the pointee: the rows leave it out.
 #[test]
 fn no_cited_row_spells_a_qualifier_on_a_pointer() {
-    for file in CITED {
+    for (file, _) in CITED {
         for line in table(file).lines().filter(|line| line.contains(".arg.")) {
             let spelling = line.split_once('=').map_or("", |(_, spelling)| spelling);
             let spelling = spelling.split(',').next().unwrap_or_default();
@@ -127,6 +196,7 @@ fn every_cited_row_states_a_tail_its_prototype_has() {
         CLibrary::Bionic,
         CLibrary::LibSystem,
         CLibrary::Musl,
+        CLibrary::Ucrt,
         CLibrary::Unknown,
     ] {
         let rows = LibraryRows::embedded(library);
