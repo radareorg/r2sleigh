@@ -577,49 +577,46 @@ fn passed_through_entry_storages(
 ) -> Vec<CanonicalStorageId> {
     let mut storages = Vec::new();
     for boundary in boundaries.calls.values() {
-        for argument in &boundary.arguments {
-            let crate::semantic::CallBoundarySlot::Register { index, storage } = argument.slot
-            else {
-                continue;
-            };
-            let is_entry = match argument.value {
-                crate::semantic::SourceCallArgumentValue::PreservedEntry => true,
-                crate::semantic::SourceCallArgumentValue::Value(value) => {
-                    graph.value(value).is_some_and(|graph_value| {
-                        graph.def_inst(value).is_none()
-                            && graph_value.var.version == 0
-                            && graph_value.var.size == storage.size
-                            && graph_value.canonical_storage == Some(storage)
-                    })
-                }
-            };
-            // A formal lane the boundary passes is a parameter of its width; so is the entry
-            // carrier handed on whole to a callee that holds only its low lane (ROADMAP D105).
-            let entry_lane = |value: crate::ValueId| {
-                graph.formal_projection_storage(value).or_else(|| {
-                    let lane = graph.value(value)?;
-                    (graph.def_inst(value).is_none() && lane.var.version == 0)
-                        .then_some(lane.canonical_storage)?
-                })
-            };
-            let storage = match argument.value {
-                crate::semantic::SourceCallArgumentValue::Value(value)
-                    if argument.lane_of.is_some() =>
-                {
-                    match entry_lane(value) {
-                        Some(lane) => lane,
-                        None => continue,
-                    }
-                }
-                _ if is_entry => held(boundary.call_site, index, storage).unwrap_or(storage),
-                _ => continue,
-            };
+        let passed = (boundary.arguments.iter()).filter_map(|argument| {
+            passed_through(graph, argument, &|index, storage| {
+                held(boundary.call_site, index, storage)
+            })
+        });
+        for storage in passed {
             if !storages.contains(&storage) {
                 storages.push(storage);
             }
         }
     }
     storages
+}
+
+/// The entry storage one argument hands on: a formal lane the boundary passes is a parameter of its
+/// width, and so is an entry carrier handed whole to a callee holding its low lane (ROADMAP D105).
+fn passed_through(
+    graph: &SsaGraph,
+    argument: &crate::semantic::SourceCallArgumentFact,
+    held: &dyn Fn(u32, CanonicalStorageId) -> Option<CanonicalStorageId>,
+) -> Option<CanonicalStorageId> {
+    use crate::semantic::SourceCallArgumentValue::{PreservedEntry, Value};
+    let crate::semantic::CallBoundarySlot::Register { index, storage } = argument.slot else {
+        return None;
+    };
+    let entry = |value: crate::ValueId| {
+        let held = graph.value(value)?;
+        (graph.def_inst(value).is_none() && held.var.version == 0)
+            .then_some(held)?
+            .canonical_storage
+    };
+    match argument.value {
+        Value(value) if argument.lane_of.is_some() => graph
+            .formal_projection_storage(value)
+            .or_else(|| entry(value)),
+        Value(value) if graph.var(value).size != storage.size || entry(value) != Some(storage) => {
+            None
+        }
+        Value(_) | PreservedEntry => Some(held(index, storage).unwrap_or(storage)),
+    }
 }
 
 /// True when a read of `read` observes bytes of the candidate slot.

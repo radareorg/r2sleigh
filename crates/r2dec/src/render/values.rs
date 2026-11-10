@@ -804,11 +804,8 @@ impl<'a> Values<'a> {
         let (planned, unplanned, results) = plan_calls(input, tags);
         let elisions = crate::certified::Elisions::of(artifact);
         let mut dispatch = r2ssa::dense::IdSet::new(graph.insts.len());
-        for switch in artifact.certificates().switches.values() {
-            for inst in &switch.dispatch {
-                dispatch.insert(*inst);
-            }
-        }
+        let switches = artifact.certificates().switches.values();
+        dispatch.extend(switches.flat_map(|switch| switch.dispatch.iter().copied()));
         let bound = Demand {
             artifact,
             graph,
