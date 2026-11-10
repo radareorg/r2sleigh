@@ -175,9 +175,8 @@ fn a_register_save_area_is_a_variadic_tail_not_six_parameters() {
     assert!(callee.contains("variadic tail registers"), "{callee}");
 }
 
-/// `wrapper` sets `al` for its call to `vf`, so even resolved before `vf` is read, the registers it
-/// writes there are no count. It returns `b`, so `rsi` is read, and `a` reaches `vf`'s uncounted
-/// tail, a read of unproven kind below it: two parameters, neither a hole (D165, rule 3).
+/// The registers `wrapper` writes for `vf` are no count; it returns `b`, and `a` reaches `vf`'s
+/// uncounted tail: two parameters, neither a hole (D165, rule 3).
 #[test]
 fn a_call_handed_a_vector_count_counts_no_argument_from_registers() {
     let mut open = sysv();

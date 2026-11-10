@@ -765,6 +765,12 @@ class Presence(unittest.TestCase):
         code, report, _ = run_main({0x1000: "int32_t f(void)"}, {0x1000: fn("r2sleigh_result_u32 fcn_1000(void)")})
         self.assertEqual((code, report["facts"]["silently_wrong"], report["facts"]["marked_wrong"]), (0, 0, 1))
 
+    def test_a_hole_spelled_through_its_typedef_is_marked(self) -> None:
+        # D165: `r2sleigh_unread_u64` is a slot below a read one, which claims no C type.
+        code, report, _ = run_main({0x1000: "int32_t f(int32_t a, int32_t b)"},
+                                   {0x1000: fn("int32_t fcn_1000(r2sleigh_unread_u64 arg0, int32_t arg1)")})
+        self.assertEqual((code, report["facts"]["silently_wrong"], report["facts"]["marked_wrong"]), (0, 0, 1))
+
     def test_another_typedef_named_result_is_a_silent_claim(self) -> None:
         code, report, _ = run_main({0x1000: "int32_t f(void)"}, {0x1000: fn("r2sleigh_result_x fcn_1000(void)")})
         self.assertEqual((code, report["facts"]["silently_wrong"]), (1, 1))

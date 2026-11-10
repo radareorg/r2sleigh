@@ -1840,6 +1840,19 @@ fn recover_interface_inner(
             .0;
         (!call.arguments_complete).then(|| unproven_call(&facts, machine_context, call.call_site))
     };
+    // Each register's entry values and the lanes minted for them, found in one pass. O(V log V).
+    let mut entry_values = BTreeMap::<_, Vec<crate::ValueId>>::new();
+    for value in &graph.values {
+        let entry = graph.def_inst(value.id).is_none() && value.var.version == 0;
+        if let Some(storage) = (value.canonical_storage)
+            .filter(|_| entry || graph.formal_projection_storage(value.id).is_some())
+        {
+            entry_values
+                .entry(storage.location())
+                .or_default()
+                .push(value.id);
+        }
+    }
     // Each register slot's use (doc/adr-call-boundary.md, rule 3).
     let use_of = |slot: CanonicalStorageId| {
         // The prologue saves every vector register under the count it is handed, and the area
@@ -1875,7 +1888,10 @@ fn recover_interface_inner(
         if saved {
             return SlotUse::SaveArea;
         }
-        unobserved_use(graph, &ignored_reads, &handed_to, slot)
+        let entries = entry_values
+            .get(&slot.location())
+            .map_or(&[][..], Vec::as_slice);
+        unobserved_use(graph, &ignored_reads, &handed_to, entries)
     };
     // The register sections in convention order: each slot's class and register, and its use.
     let (mut registers, mut uses, mut spans) = (Vec::new(), Vec::new(), Vec::new());
@@ -2117,10 +2133,8 @@ fn recover_interface_inner(
     }))
 }
 
-/// The calls of unproven arity `slot`, the first past a section's parameters, may be handed: each one
-/// its entry value reaches unseen or untouched, or every one where the body keeps a read of it
-/// (gcc -O2's `mov rbp, rsi` for an indirect call), which no obligation ties to one call (D37).
-/// O(calls x block).
+/// The calls of unproven arity `slot` may be handed (D37): those it reaches untouched, or all where
+/// the body keeps a read of it (gcc -O2's `mov rbp, rsi`). O(calls x block).
 fn unproven_calls_reached(
     func: &SSAFunction,
     prep: Option<&crate::DecompilePrepFacts>,
@@ -2222,26 +2236,17 @@ fn low_bytes(size: u32) -> crate::site_boundary::ByteMask {
     })
 }
 
-/// What the body does with `slot`'s entry value where no proven observation reads it (rule 3):
-/// `Unknown` where it reaches a call of unproven arity, which may read it; `Homed` where it is
-/// only copied, the preliminary build having dropped the dead frame store -O0 homes a parameter
-/// with; else `Unread`, since nothing observable reads it. O(the values it reaches).
+/// `slot`'s use where no observation reads it (rule 3; doc/adr-call-boundary.md, "S6 as built"):
+/// `Unknown` reaching an unproven call, `Homed` only copied, else `Unread`. O(values reached).
 fn unobserved_use(
     graph: &SsaGraph,
     ignored: &BTreeSet<crate::graph::UseSite>,
     handed: &dyn Fn(crate::InstId) -> Option<SourceUnprovenCall>,
-    slot: CanonicalStorageId,
+    entries: &[crate::ValueId],
 ) -> SlotUse {
-    let entries = (graph.values.iter()).filter(|value| {
-        value
-            .canonical_storage
-            .is_some_and(|storage| storage.location() == slot.location())
-            && (graph.def_inst(value.id).is_none() && value.var.version == 0
-                || graph.formal_projection_storage(value.id).is_some())
-    });
     let (mut moved, mut used) = (false, false);
     let mut seen = crate::dense::IdSet::default();
-    let mut pending = entries.map(|value| value.id).collect::<Vec<_>>();
+    let mut pending = entries.to_vec();
     while let Some(value) = pending.pop() {
         if !seen.insert(value) {
             continue;

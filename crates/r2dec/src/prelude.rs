@@ -661,18 +661,15 @@ pub(crate) fn result_carrier(bits: u32) -> CType {
 /// The prelude typedef's name for a slot the callee ignores: a hole below a read slot (D165).
 const UNREAD_TYPEDEF: &str = "r2sleigh_unread_";
 
-/// A hole's type: the prelude typedef over its class, which claims no C type, so recompiled C
-/// passes it in the same register (doc/adr-call-boundary.md, Refusals).
+/// A hole's type at a call: r2types' typedef over the argument's class (`r2types::unread_slot`).
 pub(crate) fn unread_slot(class: &CType) -> Option<CType> {
-    let tag = match class {
-        CType::Int { bits, .. } => format!("u{bits}"),
-        CType::Float(bits) => format!("f{bits}"),
-        _ => return None,
-    };
-    Some(CType::Typedef {
-        name: format!("{UNREAD_TYPEDEF}{tag}"),
-        ty: Box::new(class.clone()),
-    })
+    match class {
+        CType::Int { bits, .. } => r2types::unread_slot(None, *bits),
+        CType::Float(bits) => {
+            r2types::unread_slot(Some(r2source::convention::SlotClass::Float), *bits)
+        }
+        _ => None,
+    }
 }
 
 /// Whether `ty` is a hole's typedef.
