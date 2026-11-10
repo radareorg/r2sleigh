@@ -1,0 +1,853 @@
+{
+ "totals": {
+  "refused": {
+   "value": 96,
+   "void": 36
+  },
+  "unproven:unstated": {
+   "value": 3952,
+   "void": 1157
+  },
+  "void-open": {
+   "value": 6,
+   "void": 230
+  }
+ },
+ "builds": {
+  "O0-bzip2-bzip2": {
+   "counts": {
+    "refused": {
+     "value": 3
+    },
+    "unproven:unstated": {
+     "value": 46,
+     "void": 49
+    },
+    "void-open": {
+     "void": 3
+    }
+   },
+   "voids": [
+    "BZ2_bz__AssertH__fail",
+    "mySIGSEGVorSIGBUScatcher",
+    "mySignalCatcher"
+   ],
+   "false": []
+  },
+  "O2-bzip2-bzip2": {
+   "counts": {
+    "refused": {
+     "value": 2
+    },
+    "unproven:unstated": {
+     "value": 26,
+     "void": 24
+    },
+    "void-open": {
+     "void": 11
+    }
+   },
+   "voids": [
+    "BZ2_blockSort",
+    "BZ2_bsInitWrite",
+    "BZ2_bzReadClose",
+    "BZ2_bzWriteClose",
+    "BZ2_bzWriteClose64",
+    "BZ2_bzWriteClose64.part.0",
+    "BZ2_bz__AssertH__fail",
+    "default_bzfree",
+    "fallbackSort",
+    "mySIGSEGVorSIGBUScatcher",
+    "mySignalCatcher"
+   ],
+   "false": []
+  },
+  "O2-bzip2-bzip2recover": {
+   "counts": {
+    "unproven:unstated": {
+     "value": 3,
+     "void": 1
+    },
+    "void-open": {
+     "void": 3
+    }
+   },
+   "voids": [
+    "bsClose",
+    "mallocFail.constprop.0",
+    "readError"
+   ],
+   "false": []
+  },
+  "O2-diffutils-cmp": {
+   "counts": {
+    "refused": {
+     "value": 4
+    },
+    "unproven:unstated": {
+     "value": 60,
+     "void": 17
+    },
+    "void-open": {
+     "void": 4
+    }
+   },
+   "voids": [
+    "freea",
+    "mbiter_multi_next.part.0",
+    "null_action",
+    "xstdopen"
+   ],
+   "false": []
+  },
+  "O2-diffutils-diff": {
+   "counts": {
+    "refused": {
+     "value": 9,
+     "void": 1
+    },
+    "unproven:unstated": {
+     "value": 170,
+     "void": 73
+    },
+    "void-open": {
+     "void": 11
+    }
+   },
+   "voids": [
+    "add_exclude",
+    "free_exclude",
+    "freea",
+    "hash_free",
+    "mbiter_multi_next.part.0",
+    "null_action",
+    "perror_with_name",
+    "set_color_palette",
+    "setup_output",
+    "string_free",
+    "xstdopen"
+   ],
+   "false": []
+  },
+  "O2-diffutils-diff3": {
+   "counts": {
+    "refused": {
+     "value": 4
+    },
+    "unproven:unstated": {
+     "value": 92,
+     "void": 18
+    },
+    "void-open": {
+     "void": 5
+    }
+   },
+   "voids": [
+    "freea",
+    "mbiter_multi_next.part.0",
+    "null_action",
+    "xfreopen",
+    "xstdopen"
+   ],
+   "false": []
+  },
+  "O2-diffutils-sdiff": {
+   "counts": {
+    "refused": {
+     "value": 6
+    },
+    "unproven:unstated": {
+     "value": 61,
+     "void": 24
+    },
+    "void-open": {
+     "void": 5
+    }
+   },
+   "voids": [
+    "checksigs",
+    "freea",
+    "mbiter_multi_next.part.0",
+    "null_action",
+    "xstdopen"
+   ],
+   "false": []
+  },
+  "O2-findutils-find": {
+   "counts": {
+    "refused": {
+     "value": 9,
+     "void": 2
+    },
+    "unproven:unstated": {
+     "value": 397,
+     "void": 58
+    },
+    "void-open": {
+     "value": 1,
+     "void": 22
+    }
+   },
+   "voids": [
+    "__argmatch_die",
+    "argmatch_invalid",
+    "argv_iter_free",
+    "cdb_free.part.0",
+    "close_stdout_set_file_name",
+    "close_stdout_set_ignore_EPIPE",
+    "cycle_check_init",
+    "do_fprintf",
+    "entry_free",
+    "forget_non_cloexec_fds",
+    "free_cwd",
+    "free_mount_entry",
+    "freea",
+    "hash_free",
+    "i_ring_init",
+    "inside_dir.part.0",
+    "nonfatal_nontarget_file_error",
+    "nonfatal_target_file_error",
+    "parse_begin_user_args",
+    "parse_end_user_args",
+    "set_stat_placeholders",
+    "sharefile_destroy"
+   ],
+   "false": [
+    "insert_primary.part.0"
+   ]
+  },
+  "O2-grep-grep": {
+   "counts": {
+    "refused": {
+     "value": 3,
+     "void": 1
+    },
+    "unproven:unstated": {
+     "value": 218,
+     "void": 65
+    },
+    "void-open": {
+     "value": 1,
+     "void": 21
+    }
+   },
+   "voids": [
+    "__argmatch_die",
+    "add_exclude",
+    "argmatch_invalid",
+    "close_stdout_set_file_name",
+    "close_stdout_set_ignore_EPIPE",
+    "color_cap_rv_fct",
+    "cycle_check_init",
+    "dfafree",
+    "dfamustfree",
+    "dfawarn",
+    "free_exclude",
+    "free_mbdata",
+    "freemust",
+    "hash_free",
+    "i_ring_init",
+    "init_colorize",
+    "kwsfree",
+    "null_action",
+    "private_free",
+    "string_free",
+    "suppressible_error"
+   ],
+   "false": [
+    "add_count.part.0"
+   ]
+  },
+  "O2-gzip-gzip": {
+   "counts": {
+    "refused": {
+     "value": 4,
+     "void": 2
+    },
+    "unproven:unstated": {
+     "value": 76,
+     "void": 29
+    },
+    "void-open": {
+     "void": 4
+    }
+   },
+   "voids": [
+    "clear_bufs",
+    "finish_out",
+    "fseterr",
+    "progerror"
+   ],
+   "false": []
+  },
+  "O2-libexpat-xmlwf": {
+   "counts": {
+    "refused": {
+     "void": 2
+    },
+    "unproven:unstated": {
+     "value": 16,
+     "void": 28
+    },
+    "void-open": {
+     "void": 4
+    }
+   },
+   "voids": [
+    "nopCharacterData",
+    "nopEndElement",
+    "nopStartElement",
+    "usage"
+   ],
+   "false": []
+  },
+  "O2-noinline-bzip2-bzip2": {
+   "counts": {
+    "refused": {
+     "value": 4,
+     "void": 2
+    },
+    "unproven:unstated": {
+     "value": 45,
+     "void": 34
+    },
+    "void-open": {
+     "void": 16
+    }
+   },
+   "voids": [
+    "BZ2_blockSort",
+    "BZ2_bsInitWrite",
+    "BZ2_bzReadClose",
+    "BZ2_bzWriteClose",
+    "BZ2_bzWriteClose64",
+    "BZ2_bz__AssertH__fail",
+    "compress",
+    "default_bzfree",
+    "fallbackSort",
+    "flush_RL",
+    "init_RL",
+    "mySIGSEGVorSIGBUScatcher",
+    "mySignalCatcher",
+    "setExit",
+    "testf",
+    "uncompress"
+   ],
+   "false": []
+  },
+  "O2-noinline-bzip2-bzip2recover": {
+   "counts": {
+    "unproven:unstated": {
+     "value": 5,
+     "void": 3
+    },
+    "void-open": {
+     "void": 4
+    }
+   },
+   "voids": [
+    "bsClose",
+    "mallocFail.constprop.0",
+    "readError",
+    "tooManyBlocks.constprop.0"
+   ],
+   "false": []
+  },
+  "O2-noinline-diffutils-cmp": {
+   "counts": {
+    "refused": {
+     "value": 3
+    },
+    "unproven:unstated": {
+     "value": 100,
+     "void": 23
+    },
+    "void-open": {
+     "void": 5
+    }
+   },
+   "voids": [
+    "freea",
+    "mbiter_multi_reloc",
+    "mbuiter_multi_reloc",
+    "null_action",
+    "xstdopen"
+   ],
+   "false": []
+  },
+  "O2-noinline-diffutils-diff": {
+   "counts": {
+    "refused": {
+     "value": 5,
+     "void": 1
+    },
+    "unproven:unstated": {
+     "value": 265,
+     "void": 93
+    },
+    "void-open": {
+     "void": 14
+    }
+   },
+   "voids": [
+    "add_exclude",
+    "discard_confusing_lines",
+    "free_exclude",
+    "free_exclude_segment",
+    "freea",
+    "hash_free",
+    "mbiter_multi_reloc",
+    "mbuiter_multi_reloc",
+    "null_action",
+    "perror_with_name",
+    "set_color_palette",
+    "setup_output",
+    "string_free",
+    "xstdopen"
+   ],
+   "false": []
+  },
+  "O2-noinline-diffutils-diff3": {
+   "counts": {
+    "refused": {
+     "value": 2
+    },
+    "unproven:unstated": {
+     "value": 150,
+     "void": 25
+    },
+    "void-open": {
+     "void": 6
+    }
+   },
+   "voids": [
+    "freea",
+    "mbiter_multi_reloc",
+    "mbuiter_multi_reloc",
+    "null_action",
+    "xfreopen",
+    "xstdopen"
+   ],
+   "false": []
+  },
+  "O2-noinline-diffutils-sdiff": {
+   "counts": {
+    "refused": {
+     "value": 3
+    },
+    "unproven:unstated": {
+     "value": 102,
+     "void": 35
+    },
+    "void-open": {
+     "void": 6
+    }
+   },
+   "voids": [
+    "checksigs",
+    "freea",
+    "mbiter_multi_reloc",
+    "mbuiter_multi_reloc",
+    "null_action",
+    "xstdopen"
+   ],
+   "false": []
+  },
+  "O2-noinline-findutils-find": {
+   "counts": {
+    "refused": {
+     "value": 9,
+     "void": 4
+    },
+    "unproven:unstated": {
+     "value": 566,
+     "void": 90
+    },
+    "void-open": {
+     "value": 3,
+     "void": 25
+    }
+   },
+   "voids": [
+    "__argmatch_die",
+    "argmatch_invalid",
+    "argv_iter_free",
+    "cdb_init",
+    "cleanup_initial_cwd",
+    "close_stdout_set_file_name",
+    "close_stdout_set_ignore_EPIPE",
+    "cycle_check_init",
+    "entry_free",
+    "forget_non_cloexec_fds",
+    "free_cwd",
+    "free_dir.isra.0",
+    "free_file_system_list",
+    "free_mount_entry",
+    "freea",
+    "fts_lfree",
+    "fts_set_stat_required",
+    "hash_free",
+    "i_ring_init",
+    "issue_loop_warning",
+    "mbuiter_multi_reloc",
+    "parse_begin_user_args",
+    "parse_end_user_args",
+    "set_stat_placeholders",
+    "sharefile_destroy"
+   ],
+   "false": [
+    "constrain_rate",
+    "estimate_timestamp_success_rate",
+    "file_sparseness.isra.0"
+   ]
+  },
+  "O2-noinline-grep-grep": {
+   "counts": {
+    "refused": {
+     "value": 4,
+     "void": 1
+    },
+    "unproven:unstated": {
+     "value": 344,
+     "void": 105
+    },
+    "void-open": {
+     "void": 33
+    }
+   },
+   "voids": [
+    "__argmatch_die",
+    "add_exclude",
+    "argmatch_invalid",
+    "close_stdout_set_file_name",
+    "close_stdout_set_ignore_EPIPE",
+    "color_cap_rv_fct",
+    "cycle_check_init",
+    "dfafree",
+    "dfamustfree",
+    "dfassbuild",
+    "dfawarn",
+    "finalize_input",
+    "free_dir.isra.0",
+    "free_exclude",
+    "free_exclude_segment",
+    "free_mbdata",
+    "freelist",
+    "freemust",
+    "fts_lfree",
+    "fts_set_stat_required",
+    "hash_free",
+    "i_ring_init",
+    "init_colorize",
+    "kwsfree",
+    "kwsmusts",
+    "mbuiter_multi_reloc",
+    "notset",
+    "null_action",
+    "pop_lex_state.isra.0",
+    "private_free",
+    "reorder_tokens",
+    "string_free",
+    "suppressible_error"
+   ],
+   "false": []
+  },
+  "O2-noinline-gzip-gzip": {
+   "counts": {
+    "refused": {
+     "value": 4,
+     "void": 1
+    },
+    "unproven:unstated": {
+     "value": 112,
+     "void": 50
+    },
+    "void-open": {
+     "value": 1,
+     "void": 4
+    }
+   },
+   "voids": [
+    "clear_bufs",
+    "finish_out",
+    "fseterr",
+    "progerror"
+   ],
+   "false": [
+    "huft_free.isra.0"
+   ]
+  },
+  "O2-noinline-libexpat-xmlwf": {
+   "counts": {
+    "refused": {
+     "void": 2
+    },
+    "unproven:unstated": {
+     "value": 17,
+     "void": 30
+    },
+    "void-open": {
+     "void": 8
+    }
+   },
+   "voids": [
+    "cleanupUserData",
+    "endDoctypeDecl",
+    "freeNotations",
+    "nopCharacterData",
+    "nopEndElement",
+    "nopStartElement",
+    "nopStartElement.constprop.0",
+    "usage"
+   ],
+   "false": []
+  },
+  "O2-noinline-zlib-example": {
+   "counts": {
+    "refused": {
+     "value": 2,
+     "void": 1
+    },
+    "unproven:unstated": {
+     "value": 114,
+     "void": 35
+    },
+    "void-open": {
+     "void": 1
+    }
+   },
+   "voids": [
+    "zcfree"
+   ],
+   "false": []
+  },
+  "O2-noinline-zlib-example64": {
+   "counts": {
+    "refused": {
+     "value": 2,
+     "void": 1
+    },
+    "unproven:unstated": {
+     "value": 114,
+     "void": 35
+    },
+    "void-open": {
+     "void": 1
+    }
+   },
+   "voids": [
+    "zcfree"
+   ],
+   "false": []
+  },
+  "O2-noinline-zlib-examplesh": {
+   "counts": {
+    "unproven:unstated": {
+     "value": 1,
+     "void": 10
+    }
+   },
+   "voids": [],
+   "false": []
+  },
+  "O2-noinline-zlib-libz.so.1.2.13": {
+   "counts": {
+    "refused": {
+     "value": 1,
+     "void": 1
+    },
+    "unproven:unstated": {
+     "value": 117,
+     "void": 26
+    },
+    "void-open": {
+     "void": 1
+    }
+   },
+   "voids": [
+    "zcfree"
+   ],
+   "false": []
+  },
+  "O2-noinline-zlib-minigzip": {
+   "counts": {
+    "refused": {
+     "value": 2,
+     "void": 3
+    },
+    "unproven:unstated": {
+     "value": 109,
+     "void": 27
+    },
+    "void-open": {
+     "void": 2
+    }
+   },
+   "voids": [
+    "error",
+    "zcfree"
+   ],
+   "false": []
+  },
+  "O2-noinline-zlib-minigzip64": {
+   "counts": {
+    "refused": {
+     "value": 2,
+     "void": 3
+    },
+    "unproven:unstated": {
+     "value": 109,
+     "void": 27
+    },
+    "void-open": {
+     "void": 2
+    }
+   },
+   "voids": [
+    "error",
+    "zcfree"
+   ],
+   "false": []
+  },
+  "O2-noinline-zlib-minigzipsh": {
+   "counts": {
+    "refused": {
+     "void": 2
+    },
+    "unproven:unstated": {
+     "value": 1,
+     "void": 2
+    },
+    "void-open": {
+     "void": 1
+    }
+   },
+   "voids": [
+    "error"
+   ],
+   "false": []
+  },
+  "O2-zlib-example": {
+   "counts": {
+    "refused": {
+     "value": 2
+    },
+    "unproven:unstated": {
+     "value": 104,
+     "void": 27
+    },
+    "void-open": {
+     "void": 1
+    }
+   },
+   "voids": [
+    "zcfree"
+   ],
+   "false": []
+  },
+  "O2-zlib-example64": {
+   "counts": {
+    "refused": {
+     "value": 2
+    },
+    "unproven:unstated": {
+     "value": 104,
+     "void": 27
+    },
+    "void-open": {
+     "void": 1
+    }
+   },
+   "voids": [
+    "zcfree"
+   ],
+   "false": []
+  },
+  "O2-zlib-examplesh": {
+   "counts": {
+    "unproven:unstated": {
+     "value": 1,
+     "void": 10
+    }
+   },
+   "voids": [],
+   "false": []
+  },
+  "O2-zlib-libz.so.1.2.13": {
+   "counts": {
+    "refused": {
+     "value": 1
+    },
+    "unproven:unstated": {
+     "value": 108,
+     "void": 17
+    },
+    "void-open": {
+     "void": 1
+    }
+   },
+   "voids": [
+    "zcfree"
+   ],
+   "false": []
+  },
+  "O2-zlib-minigzip": {
+   "counts": {
+    "refused": {
+     "value": 2,
+     "void": 2
+    },
+    "unproven:unstated": {
+     "value": 99,
+     "void": 19
+    },
+    "void-open": {
+     "void": 2
+    }
+   },
+   "voids": [
+    "error",
+    "zcfree"
+   ],
+   "false": []
+  },
+  "O2-zlib-minigzip64": {
+   "counts": {
+    "refused": {
+     "value": 2,
+     "void": 2
+    },
+    "unproven:unstated": {
+     "value": 99,
+     "void": 19
+    },
+    "void-open": {
+     "void": 2
+    }
+   },
+   "voids": [
+    "error",
+    "zcfree"
+   ],
+   "false": []
+  },
+  "O2-zlib-minigzipsh": {
+   "counts": {
+    "refused": {
+     "void": 2
+    },
+    "unproven:unstated": {
+     "value": 1,
+     "void": 2
+    },
+    "void-open": {
+     "void": 1
+    }
+   },
+   "voids": [
+    "error"
+   ],
+   "false": []
+  }
+ }
+}

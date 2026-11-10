@@ -297,6 +297,7 @@ jobs:
           python3 scripts/test_spec_evidence.py
           python3 scripts/test_upstream_drift.py
           python3 scripts/test_mutants_d75.py
+          python3 scripts/test_scratch_void.py
           python3 -m unittest tests/test_no_plugin.py
           python3 -m unittest discover -s tests/decbench -p 'test_*.py'
       - name: A rendering may not read what nothing wrote
@@ -507,6 +508,26 @@ jobs:
             --r2s target/ci/r2s \
             --baseline tests/gold/source_gold/returns_baseline.json \
             --json target/source-gold/returns.json
+      # D203: a source-value function renders `void` only where tests/gold/scratch_void/known.txt names it, and a
+      # void the baseline records stays void (doc/adr-scratch-result.md, S4).
+      - name: Grade what each return leaves in the result register
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          mkdir -p target/source-gold
+          gcc -g -O2 -fstack-protector-strong -o target/source-gold/scratch_debug tests/gold/source_gold/scratch.c
+          gcc -g -O2 -o target/source-gold/returns_debug tests/gold/source_gold/returns.c
+          gcc -g -O2 -o target/source-gold/clones_debug tests/gold/source_gold/clones.c
+          for shape in scratch returns clones; do
+            strip -o "target/source-gold/${shape}_stripped" "target/source-gold/${shape}_debug"
+          done
+          python3 scripts/scratch_void.py --r2s target/ci/r2s \
+            --build scratch target/source-gold/scratch_debug target/source-gold/scratch_stripped \
+            --build returns target/source-gold/returns_debug target/source-gold/returns_stripped \
+            --build clones target/source-gold/clones_debug target/source-gold/clones_stripped \
+            --known tests/gold/scratch_void/known.txt \
+            --baseline tests/gold/scratch_void/ci_baseline.json \
+            --json target/source-gold/scratch_void.json
       # Shapes the gate once refused whole (exit 2): a function split by a cold abort(), a result that is a
       # function pointer, seven parameters, code the linker dropped. Clones and types whose ABI class the gate does
       # not state are named in the report and graded as nothing. Exit 1 is the engine's silent errors.

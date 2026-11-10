@@ -1,0 +1,53 @@
+{
+ "totals": {
+  "unproven:unstated": {
+   "value": 21,
+   "void": 4
+  },
+  "void-open": {
+   "void": 3
+  }
+ },
+ "builds": {
+  "clones": {
+   "counts": {
+    "unproven:unstated": {
+     "value": 8
+    }
+   },
+   "voids": [],
+   "false": []
+  },
+  "returns": {
+   "counts": {
+    "unproven:unstated": {
+     "value": 8,
+     "void": 2
+    },
+    "void-open": {
+     "void": 2
+    }
+   },
+   "voids": [
+    "bump",
+    "exported_void"
+   ],
+   "false": []
+  },
+  "scratch": {
+   "counts": {
+    "unproven:unstated": {
+     "value": 5,
+     "void": 2
+    },
+    "void-open": {
+     "void": 1
+    }
+   },
+   "voids": [
+    "tail_free"
+   ],
+   "false": []
+  }
+ }
+}

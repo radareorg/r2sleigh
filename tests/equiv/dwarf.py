@@ -233,6 +233,8 @@ class Subprogram:
     # The DIE states itself through another (`DW_AT_abstract_origin`, `DW_AT_specification`): a clone, an
     # out-of-line copy. Its parameters are the origin's, not necessarily those at its address.
     instance: bool
+    # `DW_AT_noreturn` on the DIE or an origin: the source says no call returns.
+    noreturn: bool = False
 
 
 @dataclass(frozen=True)
@@ -368,6 +370,7 @@ class Dwarf:
         named, _ = self._attr_via_origin(die, "DW_AT_name")
         typed, _ = self._attr_via_origin(die, "DW_AT_type")
         external_die, _ = self._attr_via_origin(die, "DW_AT_external")
+        noreturn_die, _ = self._attr_via_origin(die, "DW_AT_noreturn")
         formals = self._formals(die)
         return Subprogram(
             name=named.text("DW_AT_name") or "",
@@ -380,6 +383,7 @@ class Dwarf:
             producer=unit.text("DW_AT_producer") or "",
             prototyped=die.flag("DW_AT_prototyped"),
             instance=not {"DW_AT_abstract_origin", "DW_AT_specification"}.isdisjoint(die.attrs),
+            noreturn=noreturn_die.flag("DW_AT_noreturn"),
         )
 
     def _formals(self, die: Die) -> tuple[list[Parameter], bool]:

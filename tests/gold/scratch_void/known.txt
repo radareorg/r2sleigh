@@ -1,0 +1,10 @@
+# The scratch-void gate's named functions (scripts/scratch_void.py, ROADMAP D203): `build symbol kind reason`.
+# clone: DWARF states the origin's value, and the clone's machine code returns none.
+# defect: a false void today, owned by the D-row its reason names; the entry goes when the owner lands.
+# moves: a void the baseline records that its owner proves Unproven (doc/adr-scratch-result.md, Decided 2).
+O2-noinline-gzip-gzip huft_free.isra.0 clone IPA-SRA dropped the int result: one exit leaves RAX from entry, the other from free
+O2-findutils-find insert_primary.part.0 clone the split cold part ends in __assert_fail and never returns
+O2-grep-grep add_count.part.0 clone the split cold part ends in error (2, ...) and never returns
+O2-noinline-findutils-find constrain_rate defect returns a float in XMM0 with RAX unwritten; recovery keeps Void where no reading call says Float (D200: a written lane is a carrier)
+O2-noinline-findutils-find estimate_timestamp_success_rate defect tail-jumps to a float function with RAX unwritten (D200: a written lane is a carrier)
+O2-noinline-findutils-find file_sparseness.isra.0 defect returns a double in XMM0 on every path; the clone keeps its result (D200: a written lane is a carrier)
