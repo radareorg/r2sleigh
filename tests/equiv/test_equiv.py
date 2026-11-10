@@ -44,8 +44,8 @@ import link  # noqa: E402
 import run_equiv  # noqa: E402
 import selftest  # noqa: E402
 from dwarf import (  # noqa: E402
-    DISCARDED, NO_FUNC_START, TYPE_UNIT, UNRESOLVED, Die, Dwarf, executable_sections, function_symbols, parse_ranges,
-    parse_readelf,
+    DISCARDED, NO_FUNC_START, RELOCATABLE, TYPE_UNIT, UNRESOLVED, Die, Dwarf, code_addresses, function_symbols, loaded_code,
+    parse_ranges, parse_readelf,
 )
 from r2s_batch import contract_problems, parse_pddj, run_batch  # noqa: E402
 from spec import CallSpec, call_spec  # noqa: E402
@@ -1187,51 +1187,80 @@ def fixture_starts(name: str) -> dict:
         return function_symbols(Path("binary"))
 
 
-def fixture_sections(name: str) -> list[range]:
-    """The executable sections of a `readelf --wide --section-headers` dump kept as a fixture."""
-    done = subprocess.CompletedProcess([], 0, (DWARF_FIXTURES / name).read_text(), "")
-    with unittest.mock.patch.object(subprocess, "run", return_value=done):
-        return executable_sections(Path("binary"))
+def fixture_code(name: str) -> list[range]:
+    """The loaded code of a build whose ELF header and program header table are kept as a fixture."""
+    return code_addresses(bytes.fromhex((DWARF_FIXTURES / f"{name}.head.hex").read_text()), name)
 
 
-class ExecutableSectionTests(unittest.TestCase):
-    def test_the_executable_sections_hold_the_code(self):
-        self.assertEqual(fixture_sections("statics.a64.O0.x.sections.txt"),
-                         [range(0x640, 0x658), range(0x660, 0x6D0), range(0x700, 0xB98), range(0xB98, 0xBAC)])
-        # `.note.gnu.build-id NOTE` meets its type with one space; the debug sections are at address 0 and not executable.
-        self.assertEqual(fixture_sections("gclib.gcc.O2.gc.sections.txt")[4], range(0x1060, 0x120B))
-        self.assertEqual(len(fixture_sections("gclib.gcc.O2.gc.sections.txt")), 6)
+def elf(kind: int = 3, loads: tuple = ((0, 0, 0x650),), wide: bool = True, order: str = "<", other: int = 0) -> bytearray:
+    """An ELF header and program header table: each load is `(offset, address, file size)`, after `other` PT_NOTEs."""
+    size = struct.calcsize(order + ("IIQQQQQQ" if wide else "IIIIIIII"))
+    ident = b"\x7fELF" + bytes([2 if wide else 1, 1 if order == "<" else 2, 1]) + bytes(9)
+    head = struct.pack(order + ("HHIQQQIHHHHHH" if wide else "HHIIIIIHHHHHH"), kind, 62, 1, 0, 64 if wide else 52, 0, 0,
+                       64 if wide else 52, size, other + len(loads), 0, 0, 0)
+    rows = [(4, 0x9000, 0x9000, 0x30)] * other + [(1, *load) for load in loads]
+    table = b"".join(struct.pack(order + "IIQQQQQQ", kind_, 4, offset, address, address, filesz, filesz + 8, 0x1000)
+                     if wide else struct.pack(order + "IIIIIIII", kind_, offset, address, address, filesz, filesz + 8, 4, 0x1000)
+                     for kind_, offset, address, filesz in rows)
+    return bytearray(ident + head + table)
 
-    def test_every_row_of_the_table_is_read_or_the_table_is_unreadable(self):
-        table = (DWARF_FIXTURES / "gclib.gcc.O2.gc.sections.txt").read_text()
-        # gcc writes `section("\"my text\"")` as a name with a space; x86-64 `.ltext` carries the large flag `l`.
-        named = table.replace("[17] .fini            ", "[17] my text         ").replace("00  AX  0   0  4\n  [18]", "00 AXl  0   0  4\n  [18]")
-        self.assertNotEqual(named, table)
-        done = subprocess.CompletedProcess([], 0, named, "")
-        with unittest.mock.patch.object(subprocess, "run", return_value=done):
-            self.assertIn(range(0x120C, 0x1219), executable_sections(Path("binary")))
-        cut = table.replace("000000000000120c 00120c 00000d 00  AX  0   0  4", "000000000000120c")
-        self.assertNotEqual(cut, table)
-        done = subprocess.CompletedProcess([], 0, cut, "")
-        with unittest.mock.patch.object(subprocess, "run", return_value=done), self.assertRaises(RuntimeError):
-            executable_sections(Path("binary"))
 
-    def test_readelf_is_asked_for_the_wide_table_with_the_target_prefix(self):
-        # Without --wide a 64-bit row splits over two lines and no row would read.
-        done = subprocess.CompletedProcess([], 0, (DWARF_FIXTURES / "gclib.gcc.O2.gc.sections.txt").read_text(), "")
-        with unittest.mock.patch.object(subprocess, "run", return_value=done) as run:
-            executable_sections(Path("binary"), dataclasses.replace(X86_64, binutils_prefix="g"))
-        self.assertEqual(run.call_args.args[0], ["greadelf", "--wide", "--section-headers", "binary"])
+class LoadedCodeTests(unittest.TestCase):
+    TOMBSTONES = (0, 1, 0xFFFFFFFE, 0xFFFFFFFF, 0xFFFFFFFFFFFFFFFE, 0xFFFFFFFFFFFFFFFF)
 
-    def test_a_table_with_no_executable_section_or_a_failing_readelf_is_unreadable(self):
-        for done in (subprocess.CompletedProcess([], 0, "There are no sections in this file.\n", ""),
-                     subprocess.CompletedProcess([], 1, "", "readelf: Error: 'binary': No such file"),
-                     # readelf printed the table, then failed on a truncated file: a table it could not finish is no proof.
-                     subprocess.CompletedProcess([], 1, (DWARF_FIXTURES / "gclib.gcc.O2.gc.sections.txt").read_text(),
-                                                 "readelf: Error: Reading 4096 bytes extends past end of file")):
-            with self.subTest(done=done), unittest.mock.patch.object(subprocess, "run", return_value=done):
-                with self.assertRaises(RuntimeError):
-                    executable_sections(Path("binary"))
+    def test_code_is_the_file_bytes_of_each_load_past_the_headers(self):
+        # gcc 13.3 PIEs map their headers at 0: x86-64 13 entries end at 0x318, AArch64 9 at 0x238.
+        self.assertEqual(fixture_code("gclib.gcc.O2.gc"),
+                         [range(0x318, 0x650), range(0x1000, 0x1219), range(0x2000, 0x2134), range(0x3DB8, 0x4008)])
+        self.assertEqual(fixture_code("statics.a64.O0.x"), [range(0x238, 0xE88), range(0x1FD78, 0x20010)])
+        self.assertEqual(fixture_code("gclib.gcc.O2.gc.nopie")[0], range(0x400318, 0x400508))
+
+    def test_a_tombstone_lies_in_no_loaded_code_of_a_pie_or_a_fixed_build(self):
+        for name in ("gclib.gcc.O2.gc", "gclib.gcc.O2.gc.nopie", "statics.a64.O0.x", "fdat.a64.O0.x"):
+            for address in self.TOMBSTONES:
+                with self.subTest(name=name, address=address):
+                    self.assertFalse(any(address in code for code in fixture_code(name)))
+
+    def test_code_in_a_section_without_the_x_flag_is_loaded_code(self):
+        # fdat.c: `.fdat` is WA (`"aw"`) at 0x4010 to 0x40c5 at -O2, A (`"a"`) at 0x2004 at -O0; s_0 starts in each.
+        for name, s_0 in (("fdat.gcc.O2.x", 0x40C0), ("fdat.ro.gcc.O0.x", 0x2004), ("fdat.a64.O0.x", 0x20010)):
+            with self.subTest(name=name):
+                self.assertTrue(any(s_0 in code for code in fixture_code(name)))
+
+    def test_only_the_file_bytes_of_a_load_hold_code(self):
+        # Each load maps 8 bytes past its file size (.bss); a PT_NOTE row is no load.
+        self.assertEqual(code_addresses(bytes(elf(loads=((0, 0, 0x650), (0x2DB8, 0x3DB8, 0x250)), other=2))),
+                         [range(0x40 + 4 * 56, 0x650), range(0x3DB8, 0x4008)])
+        self.assertEqual(code_addresses(bytes(elf(loads=((0, 0x8048000, 0x200),), wide=False, order=">"))),
+                         [range(0x8048000 + 52 + 32, 0x8048200)])
+
+    def test_a_table_that_is_no_whole_program_header_table_is_unreadable(self):
+        good = elf()
+        cases = {"no ELF": bytearray(b"\x7fELG") + good[4:], "class 3": good[:4] + b"\x03" + good[5:],
+                 "cut": good[:-1], "short": good[:20], "no load": elf(loads=()), "empty load": elf(loads=((0, 0, 0),)),
+                 "headers only": elf(loads=((0, 0, 0x78),)), "core": elf(kind=4), "none": elf(kind=0)}
+        # PN_XNUM puts the count in section 0: read as 65535 rows, the second load would be code past the table.
+        xnum, small = elf(loads=((0, 0, 0x650), (0x400000, 0x400000, 0x100))) + bytes(0xFFFF * 56), bytearray(good)
+        struct.pack_into("<H", xnum, 56, 0xFFFF)
+        struct.pack_into("<H", small, 54, 32)
+        cases.update({"PN_XNUM": xnum, "entry too small": small})
+        for name, data in cases.items():
+            with self.subTest(name=name), self.assertRaises(RuntimeError):
+                code_addresses(bytes(data))
+
+    def test_a_relocatable_object_is_refused_by_name(self):
+        # `gcc -c gclib.c`: an object has no program headers.
+        head = bytes.fromhex("7f454c4602010100000000000000000001003e000100000000000000000000000000000000000000"
+                             "281c0000000000000000000040000000000040001b001a00")
+        with self.assertRaises(RuntimeError) as raised:
+            code_addresses(head, "gclib.o")
+        self.assertEqual(str(raised.exception), f"gclib.o: {RELOCATABLE}")
+
+    def test_the_binary_is_read_whole_from_its_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "binary"
+            path.write_bytes(bytes.fromhex((DWARF_FIXTURES / "krt.gcc.O2.head.hex").read_text()))
+            self.assertEqual(loaded_code(path), fixture_code("krt.gcc.O2"))
 
 
 class FunctionSymbolTests(unittest.TestCase):
@@ -1382,13 +1411,14 @@ class PlacementTests(unittest.TestCase):
         starts = fixture_starts("cold.gcc.O2.syms.txt")
         self.assertEqual(self.entry_of(starts=starts, DW_AT_low_pc="0"), (None, NO_FUNC_START))
 
-    def test_an_entry_in_no_executable_section_is_code_the_linker_discarded_and_has_no_code(self):
-        # statics.a64.O0.x: .init 0x640, .plt 0x660, .text 0x700 to 0xb98, .fini 0xb98 to 0xbac.
-        code = fixture_sections("statics.a64.O0.x.sections.txt")
+    def test_an_entry_outside_the_loaded_code_is_code_the_linker_discarded_and_has_no_code(self):
+        # statics.a64.O0.x: headers to 0x238, then file bytes to 0xe88; data from 0x1fd78 to 0x20010.
+        code = fixture_code("statics.a64.O0.x")
         for address, why, has_code in ((0, DISCARDED, False), (0xFFFFFFFFFFFFFFFF, DISCARDED, False),
-                                       (0xFFFFFFFE, DISCARDED, False), (0xBAC, DISCARDED, False), (0x6FF, DISCARDED, False),
-                                       (0x700, NO_FUNC_START, True), (0xB97, NO_FUNC_START, True),
-                                       (0xBAB, NO_FUNC_START, True), (0x640, NO_FUNC_START, True)):
+                                       (0xFFFFFFFE, DISCARDED, False), (0x237, DISCARDED, False), (0xE88, DISCARDED, False),
+                                       (0x1FD77, DISCARDED, False), (0x20010, DISCARDED, False),
+                                       (0x238, NO_FUNC_START, True), (0xE87, NO_FUNC_START, True),
+                                       (0x1FD78, NO_FUNC_START, True), (0x2000F, NO_FUNC_START, True)):
             with self.subTest(address=address):
                 _, unplaced = self.graph(self.function(0x40, DW_AT_low_pc=hex(address))).placed({}, code)
                 self.assertEqual((unplaced[0].why, unplaced[0].code), (why, has_code))

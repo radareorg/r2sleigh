@@ -16,7 +16,7 @@ import sys
 TYPES = "python3 scripts/test_c_types.py"
 GATE = "python3 scripts/test_differential_truth.py"
 EQUIV = ("cd tests/equiv && python3 -m unittest test_equiv.RangesTests test_equiv.PlacementTests "
-         "test_equiv.FunctionSymbolTests test_equiv.ExecutableSectionTests test_equiv.ReferenceTests test_equiv.ContractTests test_equiv.OneGraphTests")
+         "test_equiv.FunctionSymbolTests test_equiv.LoadedCodeTests test_equiv.ReferenceTests test_equiv.ContractTests test_equiv.OneGraphTests")
 DECBENCH = "cd tests/decbench && python3 -m unittest test_type_causes"
 
 C = "scripts/c_types.py"
@@ -305,7 +305,7 @@ MUTANTS += [
     m("listing-name-lost", G, "        return {row[\"addr\"]: row[\"name\"] for row in rows}", "        return {row[\"addr\"]: \"\" for row in rows}", (GATE,)),
     m("dwarf-os-error-uncaught", G, "    except (OSError, RuntimeError) as error:\n        raise Unreadable(binary, \"readelf\"", "    except (RuntimeError,) as error:\n        raise Unreadable(binary, \"readelf\"", (GATE,)),
     m("dwarf-runtime-error-uncaught", G, "    except (OSError, RuntimeError) as error:\n        raise Unreadable(binary, \"readelf\"", "    except (OSError,) as error:\n        raise Unreadable(binary, \"readelf\"", (GATE,)),
-    m("dwarf-prefix-ignored", G, "    target = dataclasses.replace(X86_64, binutils_prefix=binutils_prefix)\n    try:\n        dwarf", "    target = X86_64\n    try:\n        dwarf", (GATE,)),
+    m("dwarf-prefix-ignored", G, "    target = dataclasses.replace(X86_64, binutils_prefix=binutils_prefix)\n    try:\n        code", "    target = X86_64\n    try:\n        code", (GATE,)),
     m("build-id-prefix-ignored", G, "    target = dataclasses.replace(X86_64, binutils_prefix=binutils_prefix)\n    try:\n        proc", "    target = X86_64\n    try:\n        proc", (GATE,)),
     m("signatures-refusal-is-unreadable", G, "        if answer.refusal is not None:\n            continue\n", "", (GATE,)),
     m("signatures-unreadable-skipped", G, "        if not answer.ok:\n            unreadable[f\"{addr:#x}\"] = answer.cause\n            continue\n", "        if not answer.ok:\n            continue\n", (GATE,)),
@@ -653,29 +653,32 @@ MUTANTS += [
     m("offset-forms-no-data4", D, 'OFFSET_FORMS = frozenset({"sec_offset", "rnglistx", "data4", "data8"})', 'OFFSET_FORMS = frozenset({"sec_offset", "rnglistx", "data8"})', (EQUIV,)),
     m("member-plus-uconst-search", D, "_PLUS_UCONST.fullmatch(", "_PLUS_UCONST.search(", (EQUIV,)),
     m("build-id-prefix", G, "        if ids[0] is None or ids[0] != ids[1]:", "        if ids[0] is None or ids[1] is None or ids[0][:4] != ids[1][:4]:", (GATE,)),
-    # The sixth review: every function with code counts in the floor, and only an entry in no executable section has none.
+    # The sixth review: every function with code counts in the floor, and only an entry outside the loaded code has none.
     m("floor-placed-only", G, "        defined = len(placed) + sum(gone.code for gone in unplaced)", "        defined = len(placed)", (GATE,)),
     m("floor-counts-discarded", G, "        defined = len(placed) + sum(gone.code for gone in unplaced)", "        defined = len(placed) + len(unplaced)", (GATE,)),
-    m("floor-sections-not-asked", G, "dwarf.placed(function_symbols(binary, target), executable_sections(binary, target))", "dwarf.placed(function_symbols(binary, target))", (GATE,)),
+    m("floor-shared-out", G, "        defined = len(placed) + sum(", "        defined = len(placed) - len(ungradable.get(SHARED, [])) + sum(", (GATE,)),
+    m("floor-code-not-asked", G, "dwarf.placed(function_symbols(binary, target), code)", "dwarf.placed(function_symbols(binary, target))", (GATE,)),
     m("unplaced-code-default-false", D, "    code: bool = True", "    code: bool = False", (EQUIV, GATE)),
     m("placed-no-sections-no-code", D, "has_code = code is None or any(", "has_code = code is not None and any(", (EQUIV, GATE)),
     m("placed-code-at-a-section-start-only", D, "any(entry in section for section in code)", "any(entry == section.start for section in code)", (EQUIV, GATE)),
     m("placed-discarded-reason-lost", D, "NO_FUNC_START if has_code else DISCARDED", "NO_FUNC_START", (EQUIV, GATE)),
     m("placed-unplaced-code-lost", D, "die.offset, why, has_code))", "die.offset, why))", (EQUIV, GATE)),
     m("placed-unknown-reason-no-code", D, "                has_code = True\n", "                has_code = False\n", (EQUIV, GATE)),
-    m("sections-none-fine", D, '    if not sections:\n        raise RuntimeError(f"readelf lists no executable section of {binary}")\n', "", (EQUIV,)),
-    m("sections-readelf-failure-fine", D, '    if proc.returncode != 0:\n        raise RuntimeError(f"readelf failed on {binary}: {proc.stderr.strip()}")\n    sections = []', "    sections = []", (EQUIV,)),
-    m("sections-one-byte", D, 'range(start, start + int(match["size"], 16))', "range(start, start + 1)", (EQUIV,)),
-    m("sections-end-inclusive", D, 'range(start, start + int(match["size"], 16))', 'range(start, start + int(match["size"], 16) + 1)', (EQUIV,)),
-    m("sections-any-flags", D, '        if "X" in match["flags"]:', "        if True:", (EQUIV,)),
-    m("sections-not-asked-wide", D, '[target.tool("readelf"), "--wide", "--section-headers", str(binary)]', '[target.tool("readelf"), "--section-headers", str(binary)]', (EQUIV,)),
-    # The seventh review: every row of the section table is read, or the table is unreadable.
-    m("sections-unread-row-skipped", D, '            raise RuntimeError(f"readelf lists a section of {binary} the gate cannot read: {line.strip()}")', "            continue", (EQUIV,)),
-    m("sections-name-no-space", D, r"\s(?P<name>.*?)\s+\S+\s+(?P<address>", r"\s+(?P<name>\S*)\s+\S+\s+(?P<address>", (EQUIV,)),
-    m("sections-flags-upper-only", D, "(?P<flags>[A-Za-z]*)", "(?P<flags>[A-Z]*)", (EQUIV,)),
-    m("sections-flags-required", D, "(?P<flags>[A-Za-z]*)", "(?P<flags>[A-Za-z]+)", (EQUIV,)),
-    m("sections-flags-end-in-x", D, '        if "X" in match["flags"]:', '        if match["flags"].endswith("X"):', (EQUIV,)),
-    m("sections-no-row-is-a-row", D, '        if not _SECTION_ROW.match(line):', "        if True:", (EQUIV,)),
+    # The eighth review: code is what a PT_LOAD maps from file bytes past the headers; section flags decide nothing.
+    m("loaded-headers-kept", D, "    headers = ((0, ehsize), (phoff, end))", "    headers = ()", (EQUIV,)),
+    m("loaded-program-headers-kept", D, "    headers = ((0, ehsize), (phoff, end))", "    headers = ((0, ehsize),)", (EQUIV,)),
+    m("loaded-memory-size", D, "(fields[2], fields[3], fields[5]) if wide", "(fields[2], fields[3], fields[6]) if wide", (EQUIV,)),
+    m("loaded-any-segment", D, "        if fields[0] != PT_LOAD:\n            continue\n", "", (EQUIV,)),
+    m("loaded-relocatable-unnamed", D, '    if kind == ET_REL:\n        raise RuntimeError(f"{binary}: {RELOCATABLE}")\n', "", (EQUIV, GATE)),
+    m("loaded-any-kind", D, "    if kind not in LINKED:", "    if False:", (EQUIV,)),
+    m("loaded-xnum-read", D, "    if phnum in (0, PN_XNUM) or", "    if phnum == 0 or", (EQUIV,)),
+    m("loaded-entry-size-unchecked", D, " or phentsize < segment.size or ", " or ", (EQUIV,)),
+    m("loaded-cut-table-read", D, " or end > len(data):", ":", (EQUIV,)),
+    m("loaded-magic-unchecked", D, 'if data[:4] != b"\\x7fELF" or ', "if ", (EQUIV,)),
+    m("loaded-always-wide", D, '    wide, order = data[4:5] == b"\\x02",', "    wide, order = True,", (EQUIV,)),
+    m("loaded-always-little", D, ', "<" if data[5:6] == b"\\x01" else ">"', ', "<"', (EQUIV,)),
+    m("loaded-none-fine", D, '    if not code:\n        raise RuntimeError(f"{binary} has no PT_LOAD with file bytes past its headers")\n', "", (EQUIV,)),
+    m("loaded-end-inclusive", D, "range(vaddr + start - offset, vaddr + stop - offset)", "range(vaddr + start - offset, vaddr + stop - offset + 1)", (EQUIV,)),
 ]
 
 

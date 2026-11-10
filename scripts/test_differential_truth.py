@@ -887,17 +887,15 @@ NOTES = ("Displaying notes found in: .note.gnu.build-id\n  Owner                
          "    Build ID: 6b1d4c0f2a9e7d3b5c8a1f0e2d4b6a8c9e1f3a5b\n")
 
 
-def readelf(info: str, symbols: str, sections: str):
-    """A stand-in for `subprocess.run` answering `readelf --debug-dump`, `--syms` and `--section-headers` with the texts.
+def readelf(info: str, symbols: str):
+    """A stand-in for `subprocess.run` answering `readelf --debug-dump` and `--syms` with the texts.
 
-    The stripped build named `stripped` keeps its sections and has no DWARF or symbols.
+    The stripped build named `stripped` has no DWARF or symbols.
     """
 
     def run(argv, **_):
         if "--notes" in argv:
             return subprocess.CompletedProcess(argv, 0, NOTES, "")
-        if "--section-headers" in argv:
-            return subprocess.CompletedProcess(argv, 0, sections, "")
         text = "" if argv[-1] == "stripped" else symbols if "--syms" in argv else info
         return subprocess.CompletedProcess(argv, 0, text, "")
 
@@ -907,9 +905,21 @@ def readelf(info: str, symbols: str, sections: str):
 FIXTURES = HERE.parent / "tests" / "equiv" / "testdata" / "dwarf"
 
 
-def fixture_texts(name: str) -> tuple[str, str, str]:
-    """The readelf dumps kept for a build (tests/equiv/testdata/dwarf): its DWARF, symbols and section headers."""
-    return tuple((FIXTURES / f"{name}{suffix}").read_text() for suffix in (".txt", ".syms.txt", ".sections.txt"))
+def fixture_texts(name: str) -> tuple[str, str]:
+    """The readelf dumps kept for a build (tests/equiv/testdata/dwarf): its DWARF and symbols."""
+    return tuple((FIXTURES / f"{name}{suffix}").read_text() for suffix in (".txt", ".syms.txt"))
+
+
+@contextlib.contextmanager
+def fixture_build(name: str):
+    """readelf answering with a build's kept dumps, and its program headers read from its kept ELF head; `strip`
+    keeps the program headers, so the stripped build has the same."""
+    head = bytes.fromhex((FIXTURES / f"{name}.head.hex").read_text())
+    with (
+        mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*fixture_texts(name))),
+        mock.patch.object(dt, "loaded_code", side_effect=lambda binary: dwarf.code_addresses(head, str(binary))),
+    ):
+        yield
 
 
 class ReadingDwarf(unittest.TestCase):
@@ -921,18 +931,19 @@ class ReadingDwarf(unittest.TestCase):
         with (
             mock.patch.object(dt.Dwarf, "read", return_value=reading) as read,
             mock.patch.object(dt, "function_symbols", return_value=symbols) as listed,
-            mock.patch.object(dt, "executable_sections", return_value=code) as sections,
+            mock.patch.object(dt, "loaded_code", return_value=code) as loaded,
         ):
             result = dt.read_dwarf(pathlib.Path("debug"), "g")
         self.assertEqual(read.call_args.args[1].binutils_prefix, "g")
         self.assertEqual(listed.call_args.args[1].binutils_prefix, "g")
-        self.assertEqual(sections.call_args.args[1].binutils_prefix, "g")
+        loaded.assert_called_once_with(pathlib.Path("debug"))
         reading.placed.assert_called_once_with(symbols, code)
         self.assertEqual(result, (reading, ["placed"], ["unplaced"]))
 
     def test_readelf_that_is_missing_or_fails_is_unreadable(self) -> None:
         for error in (FileNotFoundError(2, "No such file or directory", "readelf"), RuntimeError("readelf failed on d")):
-            with self.subTest(error=error), mock.patch.object(dt.Dwarf, "read", side_effect=error):
+            with (self.subTest(error=error), mock.patch.object(dt.Dwarf, "read", side_effect=error),
+                  mock.patch.object(dt, "loaded_code", return_value=[range(0x1000, 0x1010)])):
                 with self.assertRaises(dt.Unreadable) as raised:
                     dt.read_dwarf(pathlib.Path("debug"), "")
                 self.assertEqual(raised.exception.command, "readelf")
@@ -944,32 +955,30 @@ class ReadingDwarf(unittest.TestCase):
         with (
             mock.patch.object(dt.Dwarf, "read", return_value=reading),
             mock.patch.object(dt, "function_symbols", return_value={}),
-            mock.patch.object(dt, "executable_sections", return_value=[range(0x1000, 0x1010)]),
+            mock.patch.object(dt, "loaded_code", return_value=[range(0x1000, 0x1010)]),
             self.assertRaises(dt.Unreadable) as raised,
         ):
             dt.read_dwarf(pathlib.Path("debug"), "")
         self.assertIn("a cycle", raised.exception.causes[""])
 
     def test_a_function_is_placed_where_a_function_symbol_starts_and_nowhere_else(self) -> None:
-        gcc, clang = fixture_texts("cold.gcc.O2"), fixture_texts("cold.clang.O2.bbs")
-        for name, texts, placed, unplaced in [
-            ("gcc lists a split function's hot part first", gcc, ["checked_div", "main", "must_alloc", "sum_bytes"], []),
-            ("clang lists a basic-block-sections entry last", clang, [], ["checked_div", "main", "must_alloc", "sum_bytes"]),
+        for name, build, placed, unplaced in [
+            ("gcc lists a split function's hot part first", "cold.gcc.O2", ["checked_div", "main", "must_alloc", "sum_bytes"], []),
+            ("clang lists a basic-block-sections entry last", "cold.clang.O2.bbs", [], ["checked_div", "main", "must_alloc", "sum_bytes"]),
         ]:
-            with self.subTest(name=name), mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)):
+            with self.subTest(name=name), fixture_build(build):
                 _, found, gone = dt.read_dwarf(pathlib.Path("debug"), "")
             self.assertEqual(sorted(sub.name for sub in found), placed)
             self.assertEqual(sorted(g.name for g in gone), unplaced)
 
     def test_the_gate_refuses_a_build_whose_every_function_clang_split_into_sections(self) -> None:
-        texts = fixture_texts("cold.clang.O2.bbs")
         out, err = io.StringIO(), io.StringIO()
         argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
         fragments = {0x11CD: Fn("loc.checked_div.__part.1", {}), 0x11C0: Fn("sym.checked_div", {})}
         with (
             mock.patch.object(sys, "argv", argv),
             shell({DEBUG: fragments, STRIPPED: {}}),
-            mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)),
+            fixture_build("cold.clang.O2.bbs"),
             contextlib.redirect_stdout(out),
             contextlib.redirect_stderr(err),
         ):
@@ -981,21 +990,20 @@ class ReadingDwarf(unittest.TestCase):
 @functools.cache
 def read_fixture(name: str):
     """`read_dwarf` over the readelf dumps kept for a build (tests/equiv/testdata/dwarf), debug build and symbols."""
-    texts = fixture_texts(name)
-    with mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)):
-        return texts, dt.read_dwarf(pathlib.Path("debug"), "")
+    with fixture_build(name):
+        return dt.read_dwarf(pathlib.Path("debug"), "")
 
 
 def main_over_fixture(name: str, stripped: dict[int, Fn] | None = None) -> tuple[int, str, str]:
     """Exit code, stdout and stderr of main over a fixture's debug build, every placed function of it listed."""
-    texts, (_, placed, _) = read_fixture(name)
+    _, placed, _ = read_fixture(name)
     out, err = io.StringIO(), io.StringIO()
     argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
     functions = {sub.low_pc: Fn(f"sym.{sub.name}", {}) for sub in placed}
     with (
         mock.patch.object(sys, "argv", argv),
         shell({DEBUG: functions, STRIPPED: stripped or {}}),
-        mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)),
+        fixture_build(name),
         contextlib.redirect_stdout(out),
         contextlib.redirect_stderr(err),
     ):
@@ -1005,7 +1013,7 @@ def main_over_fixture(name: str, stripped: dict[int, Fn] | None = None) -> tuple
 
 def partition_fixture(name: str):
     """The names the gate grades and the names it refuses by reason, for a build whose every function the engine lists."""
-    _, (reading, placed, unplaced) = read_fixture(name)
+    reading, placed, unplaced = read_fixture(name)
     truth, refused = dt.partition(reading, placed, unplaced, {sub.low_pc: sub.name for sub in placed})
     return sorted(declared.name for declared in truth.values()), refused
 
@@ -1026,7 +1034,7 @@ class RealCompilers(unittest.TestCase):
         graded, refused = partition_fixture("gclib.gcc.O2.gc")
         self.assertEqual(graded, ["main", "used_a", "used_b", "used_c"])
         self.assertEqual(refused, {dwarf.DISCARDED: sorted(f"unused_{index}" for index in range(12))})
-        _, (_, placed, _) = read_fixture("gclib.gcc.O2.gc")
+        _, placed, _ = read_fixture("gclib.gcc.O2.gc")
         said = {"main": "int32_t main(int32_t argc, char** argv)", "used_a": "int32_t used_a(int32_t a, int32_t b)",
                 "used_b": "uint32_t used_b(uint32_t a)", "used_c": "int64_t used_c(int64_t* p, int32_t n)"}
         stripped = {sub.low_pc: fn(said[sub.name], addr=sub.low_pc) for sub in placed}
@@ -1040,16 +1048,45 @@ class RealCompilers(unittest.TestCase):
         # in .text and lose their FUNC symbols, so the gate places only the global ones.
         for name, graded, total in (("returns.gcc.O2.x", 3, 12), ("statics.a64.O0.x", 3, 15)):
             with self.subTest(name=name):
-                _, (_, placed, unplaced) = read_fixture(name)
+                _, placed, unplaced = read_fixture(name)
                 self.assertEqual((len(placed), [gone.why for gone in unplaced]), (graded, [dwarf.NO_FUNC_START] * (total - graded)))
                 code, out, err = main_over_fixture(name)
                 self.assertEqual((code, out), (2, ""))
                 self.assertIn(f"{graded} of {total} functions are gradable, under one in 3 ({total - graded} {dwarf.NO_FUNC_START})", err)
 
+    def test_static_functions_whose_code_lies_in_a_section_without_the_x_flag_count_in_the_floor(self) -> None:
+        # fdat.c with -Wl,-x: an injected directive puts the 12 statics in `.fdat`, flags WA (or A with -DREADONLY).
+        for name in ("fdat.gcc.O2.x", "fdat.gcc.O0.x", "fdat.ro.gcc.O2.x", "fdat.ro.gcc.O0.x", "fdat.a64.O0.x"):
+            with self.subTest(name=name):
+                _, placed, unplaced = read_fixture(name)
+                self.assertEqual(sorted(sub.name for sub in placed), ["g_0", "g_1", "main"])
+                self.assertEqual({(gone.why, gone.code) for gone in unplaced}, {(dwarf.NO_FUNC_START, True)})
+                code, out, err = main_over_fixture(name)
+                self.assertEqual((code, out), (2, ""))
+                self.assertIn(f"3 of 15 functions are gradable, under one in 3 (12 {dwarf.NO_FUNC_START})", err)
+
+    def test_a_relocatable_object_is_refused_by_name(self) -> None:
+        # `gcc -g -O2 -c gclib.c`: its DWARF reads, its program header table is empty.
+        head = bytes.fromhex("7f454c4602010100000000000000000001003e000100000000000000000000000000000000000000"
+                             "281c0000000000000000000040000000000040001b001a00")
+        out, err = io.StringIO(), io.StringIO()
+        argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
+        with (
+            mock.patch.object(sys, "argv", argv),
+            shell({DEBUG: {}, STRIPPED: {}}),
+            fixture_build("gclib.gcc.O2.gc"),
+            mock.patch.object(dt, "loaded_code", side_effect=lambda binary: dwarf.code_addresses(head, str(binary))),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(err),
+        ):
+            code = dt.main()
+        self.assertEqual((code, out.getvalue()), (2, ""))
+        self.assertIn(f"UNREADABLE program headers: debug: debug: {dwarf.RELOCATABLE}", err.getvalue())
+
     def test_a_k_and_r_definition_with_a_prototype_in_scope_is_graded_by_its_own_types(self) -> None:
         # krt.c: gcc states DW_AT_prototyped and `short c` for kr_short, whose callee converts the caller's int to
         # short; kr_bare has no prototype in scope, so its caller promotes and DWARF states no flag.
-        _, (reading, placed, unplaced) = read_fixture("krt.gcc.O2")
+        reading, placed, unplaced = read_fixture("krt.gcc.O2")
         truth, refused = dt.partition(reading, placed, unplaced, {sub.low_pc: sub.name for sub in placed})
         spelled = {graded.name: f"{ct.spell(graded.ret)} ({', '.join(map(ct.spell, graded.params))})"
                    for graded in truth.values()}
@@ -1058,7 +1095,7 @@ class RealCompilers(unittest.TestCase):
 
     def test_gcc_ipa_clones_are_instances_whose_formals_come_in_the_clones_order(self) -> None:
         # `scale(int k, char *p, long n)` became `scale.constprop.0.isra.0` taking (n, p): the DIE lists n, k, p.
-        _, (_, placed, _) = read_fixture("clones.gcc.O2")
+        _, placed, _ = read_fixture("clones.gcc.O2")
         order = {sub.name: [param.name for param in sub.parameters] for sub in placed}
         self.assertEqual(order["scale"], ["n", "k", "p"])
         self.assertEqual(order["field_b"], ["mul", "unused", "r"])
@@ -1080,7 +1117,7 @@ class RealCompilers(unittest.TestCase):
                                   "pickw", "tail", "va_sum"])
 
     def test_the_vector_parameters_of_gcc_are_flagged_arrays_and_no_array(self) -> None:
-        _, (reading, placed, _) = read_fixture("abi.gcc.O2")
+        reading, placed, _ = read_fixture("abi.gcc.O2")
         vec = next(sub for sub in placed if sub.name == "vec_mid")
         with self.assertRaises(ct.NotExpressible) as raised:
             ct.from_dwarf(reading, vec.parameters[1].type_offset)
@@ -1089,7 +1126,7 @@ class RealCompilers(unittest.TestCase):
 
     def test_an_enum_is_the_integer_gcc_states_under_it(self) -> None:
         # enums.c: `enum neg` is int, `enum big` long, `enum pos` and `enum ubig` unsigned int (gcc 13.3, DWARF 5).
-        _, (reading, placed, unplaced) = read_fixture("enums.gcc.O2")
+        reading, placed, unplaced = read_fixture("enums.gcc.O2")
         truth, refused = dt.partition(reading, placed, unplaced, {sub.low_pc: sub.name for sub in placed})
         spelled = {graded.name: f"{ct.spell(graded.ret)} ({', '.join(map(ct.spell, graded.params))})"
                    for graded in truth.values()}
@@ -1106,14 +1143,13 @@ class RealCompilers(unittest.TestCase):
         # DWARF 4 numbers .debug_types from 0, so its DIEs overwrote those of .debug_info: `main` read
         # `(int32_t, int64_t*)`; DWARF 5 leaves stubs whose enum read uint32_t. Both builds are refused whole.
         for name in ("odd.gcc.O2.dwarf4.types", "abi.gcc.O2.types"):
-            texts = fixture_texts(name)
             out, err = io.StringIO(), io.StringIO()
             argv = ["differential_truth.py", "--debug-build", "debug", "--stripped-build", "stripped"]
             with (
                 self.subTest(name=name),
                 mock.patch.object(sys, "argv", argv),
                 shell({DEBUG: {}, STRIPPED: {}}),
-                mock.patch.object(dwarf.subprocess, "run", side_effect=readelf(*texts)),
+                fixture_build(name),
                 contextlib.redirect_stdout(out),
                 contextlib.redirect_stderr(err),
             ):
@@ -1209,6 +1245,15 @@ class Coverage(unittest.TestCase):
         self.assertIn("1 of 13 functions are gradable", err)
         source.unplaced = [dataclasses.replace(gone, code=False) for gone in source.unplaced]
         self.assertIn("1 of 4 functions are gradable", run_main(source, stripped)[2])
+
+    def test_functions_that_share_an_entry_count_in_the_floor(self) -> None:
+        # One graded and four at two shared entries: 1 of 5 is refused, where 1 of 1 would pass.
+        source, stripped = self.build(1, 1)
+        twin = source.placed[0]
+        source.placed += [dataclasses.replace(twin, name=f"twin{index}", low_pc=0x2000 + 0x10 * (index // 2)) for index in range(4)]
+        code, report, err = run_main(source, stripped)
+        self.assertEqual((code, report), (2, None))
+        self.assertIn(f"1 of 5 functions are gradable, under one in 3 (4 {dt.SHARED})", err)
 
 
 class Causes(unittest.TestCase):

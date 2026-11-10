@@ -60,7 +60,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "equiv"))
 import c_types  # noqa: E402
 import r2s_batch  # noqa: E402
-from dwarf import Dwarf, Unplaced, executable_sections, function_symbols  # noqa: E402
+from dwarf import Dwarf, Unplaced, function_symbols, loaded_code  # noqa: E402
 from target import X86_64  # noqa: E402
 
 
@@ -112,13 +112,17 @@ def listing(binary: Path, r2s_bin: str) -> dict[int, str]:
 def read_dwarf(binary: Path, binutils_prefix: str) -> tuple[Dwarf, list, list[Unplaced]]:
     """The binary's DWARF, its functions at their entries, and the ones that have none.
 
-    An entry is placed only where the binary's own symbol table starts a function, and has code only where one of
-    its executable sections lies.
+    An entry is placed only where the binary's own symbol table starts a function, and has code only where a loaded
+    segment maps file bytes past the headers.
     """
     target = dataclasses.replace(X86_64, binutils_prefix=binutils_prefix)
     try:
+        code = loaded_code(binary)
+    except (OSError, RuntimeError) as error:
+        raise Unreadable(binary, "program headers", {"": f"{error}; they show which entries have code"}) from error
+    try:
         dwarf = Dwarf.read(binary, target)
-        placed, unplaced = dwarf.placed(function_symbols(binary, target), executable_sections(binary, target))
+        placed, unplaced = dwarf.placed(function_symbols(binary, target), code)
     except (OSError, RuntimeError) as error:
         raise Unreadable(binary, "readelf", {"": f"{error}; it lists the functions the source defines"}) from error
     return dwarf, placed, unplaced
@@ -403,7 +407,7 @@ def grade() -> int:
         why = "; ".join(f"{len(names)} {reason}" for reason, names in ungradable.items())
         if not truth:
             return refuse(f"no function of the debug build is gradable ({why or 'its DWARF declares no function'}).")
-        # Every function with code counts, placed or not: only an entry in no executable section is left out.
+        # Every function with code counts, placed, shared or not: only an entry outside the loaded code is left out.
         defined = len(placed) + sum(gone.code for gone in unplaced)
         if len(truth) * GRADED_FLOOR < defined:
             return refuse(f"{len(truth)} of {defined} functions are gradable, under one in {GRADED_FLOOR} ({why}).")

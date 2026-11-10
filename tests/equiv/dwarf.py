@@ -19,12 +19,13 @@ A function's address is its entry (DWARF 5, section 2.18): ``DW_AT_entry_pc``, e
 start of the first range of ``DW_AT_ranges``, and it is accepted only where a FUNC symbol of the binary starts (clang
 lists the entry of a basic-block-sections function last). ``subprograms()`` lists the functions that have a
 ``DW_AT_low_pc``; ``placed()`` lists every function with an address and names each one it cannot place, and whether
-its entry lies in an executable section, which is what makes it code of the binary (ROADMAP D70).
+its entry lies in the file bytes a loaded segment maps, which is what makes it code of the binary (ROADMAP D70).
 """
 
 from __future__ import annotations
 
 import re
+import struct
 import subprocess
 from collections.abc import Container, Sequence
 from dataclasses import dataclass, field
@@ -45,17 +46,11 @@ OFFSET_FORMS = frozenset({"sec_offset", "rnglistx", "data4", "data8"})
 _RANGE_ROW = re.compile(
     r"^\s+(?P<offset>[0-9a-f]{8})\s+(?:(?P<end><End of list>)|(?P<begin>[0-9a-f]{8,16})\s+(?:(?P<base>\(base address\))|[0-9a-f]{8,16}))"
 )
-# One row of `readelf --wide --section-headers`: `[Nr] Name Type Address Off Size ES Flg Lk Inf Al`.
-# Read from the right, where every column has a fixed shape, so a name with a space (gcc's `section("\"a b\"")`) reads.
-_SECTION = re.compile(
-    r"^\s*\[\s*\d+\]\s(?P<name>.*?)\s+\S+\s+(?P<address>[0-9a-f]+)\s+[0-9a-f]+\s+(?P<size>[0-9a-f]+)\s+[0-9a-f]+\s+(?P<flags>[A-Za-z]*)\s+\d+\s+\d+\s+\d+\s*$"
-)
-_SECTION_ROW = re.compile(r"^\s*\[\s*\d+\]")
 _RANGE_SECTION = re.compile(r"^Contents of the \.debug_(?:ranges|rnglists) section")
 # Why a function with code is unplaced: a static whose symbol `ld -x` dropped, a fragment of a split function.
 NO_FUNC_START = "no FUNC symbol of the binary starts at its entry"
-# A linker gives the code it discarded a tombstone (0, all ones), which no executable section holds.
-DISCARDED = "its entry lies in no executable section: the linker discarded its code"
+# A linker's tombstone (0, 1, all ones) lies in no such bytes: a PIE maps its ELF headers at 0, a -no-pie build nothing.
+DISCARDED = "its entry lies in no file bytes a loaded segment maps: the linker discarded its code"
 # The offset of a reference no DIE of the dump answers: a DW_FORM_ref_sig8 into a type unit. It is no void.
 UNRESOLVED = -1
 # DWARF 4 numbers .debug_types from 0 as it does .debug_info, so one offset named two DIEs (ROADMAP D70).
@@ -247,7 +242,7 @@ class Unplaced:
     name: str
     offset: int
     why: str
-    # False only for an entry shown to lie in no executable section: the default counts in the floor.
+    # False only for an entry shown to lie outside the loaded code: the default counts in the floor.
     code: bool = True
 
 
@@ -320,7 +315,7 @@ class Dwarf:
         """Every function with code at its entry address, and each one with none.
 
         The function's ``low_pc`` here is its entry, ``starts`` holds the addresses where the binary's FUNC
-        symbols start, and ``code`` the executable sections. A DIE with neither ``DW_AT_low_pc`` nor ``DW_AT_ranges``
+        symbols start, and ``code`` the addresses of ``loaded_code``. A DIE with neither ``DW_AT_low_pc`` nor ``DW_AT_ranges``
         holds no code (a declaration, an abstract instance) and is in neither list. Whatever the DWARF does not
         state as one address the binary also states as a function is unplaced with the reason, never guessed: a
         constant ``DW_AT_entry_pc``, a range list that is empty or unreadable, an address that starts no function.
@@ -644,30 +639,53 @@ def function_symbols(binary: Path, target: Target = X86_64) -> dict[int, tuple[l
     return symbols
 
 
-def executable_sections(binary: Path, target: Target = X86_64) -> list[range]:
-    """The address ranges of the binary's executable sections; a binary with none is unreadable."""
-    proc = subprocess.run(
-        [target.tool("readelf"), "--wide", "--section-headers", str(binary)],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        raise RuntimeError(f"readelf failed on {binary}: {proc.stderr.strip()}")
-    sections = []
-    for line in proc.stdout.splitlines():
-        if not _SECTION_ROW.match(line):
+ET_REL = 1
+LINKED = (2, 3)  # ET_EXEC, ET_DYN
+PT_LOAD = 1
+PN_XNUM = 0xFFFF
+RELOCATABLE = "a relocatable object (ET_REL) has no program headers, so no entry is shown to have code"
+
+
+def loaded_code(binary: Path) -> list[range]:
+    """The addresses of ``binary`` that can hold code: ``code_addresses`` of its bytes."""
+    return code_addresses(binary.read_bytes(), str(binary))
+
+
+def code_addresses(data: bytes, binary: str = "the binary") -> list[range]:
+    """The addresses a PT_LOAD maps from file bytes, less the ELF header and program header table they also map.
+
+    Section flags decide nothing: an injected section directive drops X from code. A table read is no proof unless
+    whole, so anything else raises (ROADMAP D70).
+    """
+    wide, order = data[4:5] == b"\x02", "<" if data[5:6] == b"\x01" else ">"
+    header = struct.Struct(order + ("HHIQQQIHHHHHH" if wide else "HHIIIIIHHHHHH"))
+    segment = struct.Struct(order + ("IIQQQQQQ" if wide else "IIIIIIII"))
+    if data[:4] != b"\x7fELF" or data[4:5] not in (b"\x01", b"\x02") or data[5:6] not in (b"\x01", b"\x02") \
+            or len(data) < 16 + header.size:
+        raise RuntimeError(f"{binary} is no ELF file the gate can read")
+    kind, _, _, _, phoff, _, _, ehsize, phentsize, phnum, *_ = header.unpack_from(data, 16)
+    if kind == ET_REL:
+        raise RuntimeError(f"{binary}: {RELOCATABLE}")
+    if kind not in LINKED:
+        raise RuntimeError(f"{binary} is no linked program (ELF type {kind}), so no entry is shown to have code")
+    end = phoff + phnum * phentsize
+    if phnum in (0, PN_XNUM) or phentsize < segment.size or end > len(data):
+        raise RuntimeError(f"{binary} has no whole program header table ({phnum} entries at {phoff:#x})")
+    headers = ((0, ehsize), (phoff, end))
+    code = []
+    for index in range(phnum):
+        fields = segment.unpack_from(data, phoff + index * phentsize)
+        if fields[0] != PT_LOAD:
             continue
-        # A row skipped would turn an executable section into no code, and its functions into discarded ones.
-        match = _SECTION.match(line)
-        if match is None:
-            raise RuntimeError(f"readelf lists a section of {binary} the gate cannot read: {line.strip()}")
-        if "X" in match["flags"]:
-            start = int(match["address"], 16)
-            sections.append(range(start, start + int(match["size"], 16)))
-    if not sections:
-        raise RuntimeError(f"readelf lists no executable section of {binary}")
-    return sections
+        offset, vaddr, filesz = (fields[2], fields[3], fields[5]) if wide else (fields[1], fields[2], fields[4])
+        pieces = [(offset, offset + filesz)]
+        for low, high in headers:
+            pieces = [cut for start, stop in pieces for cut in ((start, min(stop, low)), (max(start, high), stop))
+                      if cut[0] < cut[1]]
+        code += [range(vaddr + start - offset, vaddr + stop - offset) for start, stop in pieces]
+    if not code:
+        raise RuntimeError(f"{binary} has no PT_LOAD with file bytes past its headers")
+    return code
 
 
 def code_constants(binary: Path, address: int, size: int, limit: int = 32,

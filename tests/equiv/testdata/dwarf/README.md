@@ -20,6 +20,12 @@ and `krt.gcc.O2` (`-g -O2 -std=gnu17`: a K&R definition with a prototype in scop
 `krt.c`.
 
 `returns.gcc.O2.x` (`-g -O2 -Wl,-x`) and `statics.a64.O0.x` (gcc 13.3 for AArch64, `-g -O0 -Wl,-x`) are `returns.c` and
-`statics.c`: `ld -x` drops the FUNC symbols of the static functions, whose code stays in `.text`. Each `*.sections.txt`
-is `readelf --wide --section-headers` of its build, rebuilt from the same source and flags with a byte-identical
-`--syms`: the executable sections tell code the linker discarded from code with no symbol.
+`statics.c`: `ld -x` drops the FUNC symbols of the static functions, whose code stays in `.text`.
+
+`fdat.gcc.O2.x`, `fdat.gcc.O0.x`, `fdat.ro.gcc.O2.x`, `fdat.ro.gcc.O0.x` (`-DREADONLY`) and `fdat.a64.O0.x` (gcc 13.3 for
+AArch64) are `fdat.c` built `-g -w -Wl,-x`: an injected section directive puts the 12 statics' code in `.fdat`, flags
+WA (or A), and `ld -x` drops their symbols.
+
+Each `*.head.hex` is the ELF header and program header table of its build, in hex, rebuilt from the same source and
+flags with a byte-identical `--syms` and the same allocated sections; `gclib.gcc.O2.gc.nopie` adds `-no-pie`. The file
+bytes each PT_LOAD maps past those headers tell code the linker discarded from code with no symbol.

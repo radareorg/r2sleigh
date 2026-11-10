@@ -527,14 +527,14 @@ jobs:
             echo "$shape: exit $status"
             test "$status" -le 1
           done
-      # -Wl,-x drops the FUNC symbols of static functions whose code stays in .text: they count in the floor
-      # ungraded, so under a third is gradable. Exit 2 is the answer; exit 0 or 1 grades a sliver of the build.
+      # -Wl,-x drops the FUNC symbols of static functions whose code stays loaded (fdat.c: in a section without X):
+      # they count in the floor ungraded, so under a third is gradable. Exit 2 is the answer; 0 or 1 grades a sliver.
       - name: Refuse a build whose static functions lost their symbols
         if: ${{ !cancelled() }}
         run: |
           set -eu
           mkdir -p target/source-gold
-          for shape in returns statics; do
+          for shape in returns statics fdat; do
             gcc -g -O2 -Wl,-x -o "target/source-gold/${shape}_x" "tests/gold/source_gold/${shape}.c"
             strip -o "target/source-gold/${shape}_x_stripped" "target/source-gold/${shape}_x"
             status=0
@@ -620,7 +620,7 @@ jobs:
           tests/equiv/bounded.sh 300 \
             test_equiv.AnswerStatusTests test_equiv.BatchTests test_equiv.BuildTests \
             test_equiv.ClassifyTests test_equiv.CompilerVerdictTests \
-            test_equiv.ContractTests test_equiv.CostTests test_equiv.DwarfTests test_equiv.ExecutableSectionTests \
+            test_equiv.ContractTests test_equiv.CostTests test_equiv.DwarfTests test_equiv.LoadedCodeTests \
             test_equiv.FunctionSymbolTests test_equiv.PlacementTests test_equiv.RangesTests \
             test_equiv.ReferenceTests test_equiv.RatchetTests
 
