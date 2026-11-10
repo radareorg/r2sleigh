@@ -300,33 +300,6 @@ fn listed_by_block(answered: &Answered<'_>, blocks: &[r2il::R2ILBlock]) -> Answe
     whole
 }
 
-/// `listed_by_block` over a walk's own decodes: each block's instructions are one run.
-fn walked_by_block(
-    answered: &Answered<'_>,
-    blocks: &[r2il::R2ILBlock],
-    decodes: Vec<crate::body::Decoded>,
-) -> Vec<Line> {
-    let mut extents = (blocks.iter())
-        .filter(|block| block.size > 0)
-        .map(|block| (block.addr, block.addr + u64::from(block.size)))
-        .collect::<Vec<_>>();
-    extents.sort_unstable();
-    extents.dedup();
-    // A walk's blocks partition its instructions, so the runs take them in one pass.
-    let mut decodes = decodes.into_iter().peekable();
-    let mut lines = Vec::new();
-    for (start, end) in extents {
-        while decodes.next_if(|one| one.lift.addr < start).is_some() {}
-        let run = std::iter::from_fn(|| decodes.next_if(|one| one.lift.addr < end));
-        lines.extend(crate::query::decode::walked_listing(
-            answered,
-            run,
-            Work::Function,
-        ));
-    }
-    lines
-}
-
 impl<S: Source + 'static> OpenProgram<S> {
     /// One function's analysis, done once per state of this program.
     pub fn prepared(&mut self, entry: u64) -> Result<Arc<Prepared>, String> {
@@ -910,7 +883,7 @@ fn claimed_by<S: Source + 'static>(
         holdings: false,
         parameters: Some(view),
     };
-    let lines = walked_by_block(&answered, lifted, walk.decodes);
+    let lines = crate::query::decode::walked_by_block(&answered, lifted, walk.decodes);
     // A line that needed the def-use graph, and it did not build, leaves the body unread.
     if let Some(failure) = body.failure() {
         return Err(Unread::NoSsa(failure));
