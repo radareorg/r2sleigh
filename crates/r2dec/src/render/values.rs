@@ -581,12 +581,13 @@ fn plan_calls(
             if let (Some(signature), None) = (signature, &plan.declared) {
                 r2il::refusal_evidence!("staged-call-prototype", "{:?}: {signature:?}", inst.id);
             }
-            // No declaration: the callee body's carriers, which r2ssa matched to this call.
+            // No declaration: the callee's own projection, as its header spells it (W46).
             if signature.is_none() {
-                let (fixed, returns, bits) = (plan.fixed, plan.result.is_some(), input.ptr_bits());
-                let carriers = input.callee_carrier_signature(inst.id);
-                plan.declared =
-                    carriers.and_then(|c| calls::Prototype::of_widths(c, fixed, returns, bits));
+                let (fixed, returns) = (plan.fixed, plan.result.is_some());
+                let projected = input.callee_projection(inst.id);
+                plan.declared = projected.and_then(|(signature, unproven)| {
+                    calls::Prototype::of_projection(signature, fixed, returns, unproven, &defines)
+                });
             }
         }
         for result in plan.result.iter().flat_map(calls::CallResult::values) {

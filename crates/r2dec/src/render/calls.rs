@@ -111,36 +111,23 @@ impl Prototype {
         Some(Self { params, ret })
     }
 
-    /// `signature` at its carriers' widths alone, where it names `fixed` parameters and has a
-    /// result exactly where the call defines one: a sign, a pointee or a name it states is unproven.
-    pub(super) fn of_widths(
+    /// The callee's projection as its own header spells it: its types, its unproven result as the
+    /// carrier typedef, and a result exactly where the call defines one.
+    pub(super) fn of_projection(
         signature: &r2types::FunctionType,
         fixed: usize,
         returns: bool,
-        ptr_bits: u32,
+        unproven: Option<u32>,
+        defines: &dyn Fn(&str, bool) -> bool,
     ) -> Option<Self> {
-        if signature.params.len() != fixed {
-            return None;
+        let mut prototype = Self::of(signature, fixed, defines)?;
+        if let Some(bits) = unproven.filter(|bits| crate::prelude::carrier(*bits).is_some()) {
+            prototype.ret = crate::prelude::result_carrier(bits);
         }
-        let width = |ty: &CType| match ty.unaliased() {
-            CType::Int { bits, .. } if matches!(bits, 8 | 16 | 32 | 64) => Some(CType::uint(*bits)),
-            CType::Pointer(_) | CType::Function { .. } | CType::UnprototypedFunction(_) => {
-                Some(CType::uint(ptr_bits))
-            }
-            CType::Float(bits @ (32 | 64)) => Some(CType::Float(*bits)),
-            _ => None,
-        };
-        let params = signature
-            .params
-            .iter()
-            .map(width)
-            .collect::<Option<Vec<_>>>()?;
-        let ret = match (&signature.return_type, returns) {
-            (CType::Void, false) => CType::Void,
-            (CType::Void, true) => return None,
-            (ty, _) => width(ty)?,
-        };
-        Some(Self { params, ret })
+        match (&prototype.ret, returns) {
+            (CType::Void, true) => None,
+            _ => Some(prototype),
+        }
     }
 }
 
@@ -222,17 +209,20 @@ fn at_width(
 ) -> Option<CExpr> {
     let target = super::terms::c_type(class)?;
     let ty = ty.unwrap_or(&target);
+    // An unproven result's carrier typedef is its integer: assigning it converts nothing.
+    let same = *ty == target
+        || (crate::prelude::result_typedef(ty).is_some() && *ty.unaliased() == target);
     let (held, signed) = match ty.unaliased() {
         CType::Int { bits, signedness } => (*bits, *signedness == r2types::Signedness::Signed),
         CType::Bool => (8, false),
-        _ if *ty == target => return Some(value),
+        _ if same => return Some(value),
         _ => return Some(CExpr::cast(target, value)),
     };
     // C computes no bit past its type, so a declaration narrower than the width holds the rest.
     let stated = u32::from(width.logical).saturating_mul(8);
     let bits = stated.min(held);
     if bits >= class.width_bits() {
-        return Some(match *ty == target {
+        return Some(match same {
             true => value,
             false => CExpr::cast(target, value),
         });
@@ -806,41 +796,37 @@ mod tests {
         assert_eq!(spelled(&to_declared(widened, &uint32, &int32)), "7");
     }
 
-    /// A callee body's prototype is spelled at its carriers' widths alone: the sign and pointee
-    /// r2types read there are no declaration, and a `void` result where the call defines one is
-    /// no prototype.
+    /// A callee body's prototype is its own header's projection (W46): its types as the header
+    /// spells them, an unproven result as the carrier typedef, and a `void` result where the call
+    /// defines one is no prototype.
     #[test]
-    fn a_prototype_from_a_callee_body_is_its_widths() {
+    fn a_prototype_from_a_callee_body_is_its_header() {
+        let int32 = CType::Int {
+            bits: 32,
+            signedness: r2types::Signedness::Signed,
+        };
         let signature = r2types::FunctionType {
-            return_type: CType::Int {
-                bits: 32,
-                signedness: r2types::Signedness::Signed,
-            },
-            params: vec![
-                CType::Pointer(Box::new(CType::Struct("node".to_string()))),
-                CType::Int {
-                    bits: 16,
-                    signedness: r2types::Signedness::Signed,
-                },
-                CType::Float(64),
-            ],
+            return_type: CType::uint(64),
+            params: vec![int32.clone(), CType::Float(64)],
             variadic: false,
         };
-        let widths = Prototype::of_widths(&signature, 3, true, 64).expect("every type has a width");
+        let none = |_: &str, _: bool| false;
+        let header = Prototype::of_projection(&signature, 2, true, None, &none).expect("spelled");
+        assert_eq!(header.params, vec![int32, CType::Float(64)]);
+        assert_eq!(header.ret, CType::uint(64));
+        let unproven = Prototype::of_projection(&signature, 2, true, Some(64), &none);
+        let unproven = unproven.expect("spelled");
+        assert_eq!(unproven.ret, crate::prelude::result_carrier(64));
         assert_eq!(
-            widths,
-            Prototype {
-                params: vec![CType::uint(64), CType::uint(16), CType::Float(64)],
-                ret: CType::uint(32),
-            }
+            Prototype::of_projection(&signature, 1, true, None, &none),
+            None
         );
-        assert_eq!(Prototype::of_widths(&signature, 2, true, 64), None);
         let void = r2types::FunctionType {
             return_type: CType::Void,
             ..signature
         };
-        assert_eq!(Prototype::of_widths(&void, 3, true, 64), None);
-        assert!(Prototype::of_widths(&void, 3, false, 64).is_some());
+        assert_eq!(Prototype::of_projection(&void, 2, true, None, &none), None);
+        assert!(Prototype::of_projection(&void, 2, false, None, &none).is_some());
     }
 
     /// A tag is spelled behind a pointer only where the unit defines it, and a function pointer

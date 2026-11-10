@@ -642,7 +642,8 @@ fn a_call_taking_a_pair_assigns_the_half_its_caller_reads() {
     let pinned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned");
     let staged = on(
         pinned.join("shapes_gcc_x64_O0"),
-        "pdd @ sym.shape_struct_value",
+        // The pair is the callee's, decided by its calls under `aa` (D62, D166).
+        "aa; pdd @ sym.shape_struct_value",
     );
     for line in [
         "pair_401984 = mixed_from(arg0, arg1);",

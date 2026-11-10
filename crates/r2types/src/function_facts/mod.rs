@@ -765,6 +765,9 @@ pub struct SourceOwnedCalleeSignature {
     address: u64,
     interface: r2ssa::SourceFunctionInterface,
     signature: crate::FunctionType,
+    /// The carrier's bits where the callee's own header is an unproven result (D201): its callers
+    /// declare it as the header does (W46).
+    unproven_bits: Option<u32>,
 }
 
 /// Whether `storage` is a float's width at the low end of the float result register `slot`, the
@@ -855,7 +858,15 @@ impl SourceOwnedCalleeSignature {
             address: source.function().entry,
             interface,
             signature,
+            unproven_bits: None,
         })
+    }
+
+    /// The same signature, its result the unproven carrier of `bits` its own header spells.
+    #[must_use]
+    pub(crate) const fn with_unproven_bits(mut self, bits: Option<u32>) -> Self {
+        self.unproven_bits = bits;
+        self
     }
 
     /// A signature the program's own declarations state, for a callee whose
@@ -887,6 +898,7 @@ impl SourceOwnedCalleeSignature {
             address,
             interface,
             signature,
+            unproven_bits: None,
         })
     }
 
@@ -1167,13 +1179,8 @@ impl SourceOwnedFunctionFacts {
     ) {
         let mut names = report.display_names.clone();
         names.absorb(source.display_names());
-        let calls = CallFacts::project(
-            source,
-            &names,
-            &report.types.known_function_signatures,
-            &report.types.callee_facts,
-            &BTreeMap::new(),
-        );
+        let calls =
+            CallFacts::project(source, &names, &report.types.callee_facts, &BTreeMap::new());
         let solved = calls.solve(source);
         let projected =
             Self::enrich_report_from_source(source, std::mem::take(report), calls, &solved);
@@ -1298,7 +1305,6 @@ impl CallFacts {
     pub(crate) fn project(
         source: &r2ssa::SsaArtifact,
         names: &crate::DisplayNames,
-        known_function_signatures: &HashMap<String, crate::FunctionType>,
         callee_facts: &BTreeMap<u64, CalleeFact>,
         callee_signatures: &BTreeMap<u64, SourceOwnedCalleeSignature>,
     ) -> Self {
@@ -1321,8 +1327,7 @@ impl CallFacts {
         }
         let mut resolved = callee_facts.clone();
         resolved.extend(code_pointer_callees.clone());
-        let resolution =
-            prepared_callee_resolution_facts(source, names, known_function_signatures, resolved);
+        let resolution = prepared_callee_resolution_facts(source, names, resolved);
         let mut callsites = prepared_callsite_argument_facts(source);
         FunctionFacts::apply_callsite_callee_signatures(source, &mut callsites, callee_signatures);
         Self {
@@ -1565,6 +1570,7 @@ impl FunctionFacts {
                 logical_signature.variadic = arguments.variadic;
                 arguments.callee_signature = Some(logical_signature);
                 arguments.callee_signature_types = Some(signature.interface.types().clone());
+                arguments.callee_unproven_bits = signature.unproven_bits;
             } else {
                 let site = source
                     .call_site_interface(arguments.call_site_id)
@@ -2201,7 +2207,6 @@ impl FunctionFacts {
         let calls = CallFacts::project(
             prepared,
             &self.display_names,
-            &self.types.known_function_signatures,
             &self.types.callee_facts,
             &BTreeMap::new(),
         );

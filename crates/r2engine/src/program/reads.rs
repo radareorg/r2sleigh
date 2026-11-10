@@ -1,89 +1,22 @@
-//! What the program's calls to a function read of its result registers (doc/adr-resolved-bodies.md,
-//! "Caller reads"): each caller is read as `Walked` holds it, so no answer waits on its own function.
+//! Whether the program's calls to a function are every way in (doc/adr-resolved-bodies.md, "Closed
+//! world"), which a closed-world boundary needs before it reads every call dead.
 
 use std::sync::Arc;
 
 use r2abi::statement::{Binding, EntryKind, Format, SectionRole, SourceLanguage, Symbol};
-use r2source::SourceResultReads;
 
 use super::requests::{ReferenceIndex, SurveyQuery};
 use super::{ProgramInputs, Source, View};
 use crate::query::db::{Db, Query, Retention};
 use crate::query::references::Role;
 
-/// The reads at every call to one function, by its entry: what each read or overwrote of the result
-/// registers; `None` where the program makes no call to it the walk can read.
-pub(super) struct ResultReads;
-
-impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
-    type Key = u64;
-    type Value = Option<SourceResultReads>;
-    const NAME: &'static str = "result-reads";
-    const RETENTION: Retention = Retention::Held;
-
-    /// Work: one walk per caller discovery found, each read from each call the walk found to `callee`
-    /// to its block's end.
-    fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> Self::Value {
-        let survey = db.get::<SurveyQuery>(&()).ok()?;
-        let survey = Arc::clone(&survey.as_ref().as_ref().ok()?.0);
-        let view = View::new(db, true);
-        let walker = super::returns::Walking::new(view.clone(), true).ok()?;
-        let mut reads = SourceResultReads::default();
-        // A caller that is not read may read the result: the calls read are then not every call.
-        let mut unread = false;
-        // A call two bodies hold (one walk enters the other's tail) is one call, read once.
-        let mut read = std::collections::BTreeSet::new();
-        for &caller in survey.callers_of(callee) {
-            let Some(Ok(thumb)) = survey.walked_in(caller) else {
-                unread = true;
-                continue;
-            };
-            let target = walker.target(thumb);
-            let Ok(slots) = target.convention.convention_slots() else {
-                unread = true;
-                continue;
-            };
-            // The caller's body is the one `pdf` and the reference index read, its dispatches followed.
-            let Ok(walking) = db.get::<super::analysis::Walked>(&(caller, thumb)) else {
-                unread = true;
-                continue;
-            };
-            let Ok(walk) = &walking.0 else {
-                unread = true;
-                continue;
-            };
-            let calls = walk.body().blocks.iter().flat_map(|block| {
-                (block.transfers.iter())
-                    .filter(|transfer| {
-                        transfer.target == callee
-                            && transfer.kind == r2source::AdvisoryCallTransfer::Call
-                    })
-                    .map(move |transfer| (&block.lifted, transfer.op))
-            });
-            for (lifted, index) in calls {
-                if !read.insert(lifted.instruction_of(index)) {
-                    continue;
-                }
-                reads = reads.and(r2ssa::caller_reads::reads_after_call(
-                    lifted,
-                    index,
-                    slots.result_slot(),
-                    slots.float_result_slot(),
-                    slots.second_result_slot(),
-                ));
-            }
-        }
-        // Only a result no call reads asks whether the calls are every way in: the reference index
-        // that answers reads every body.
-        reads.exhaustive =
-            !unread && reads.all_overwrite(false, false) && only_called(db, callee, reads.calls);
-        (reads.calls > 0).then_some(reads)
-    }
-}
-
 /// Whether the program enters `callee` only by the `calls` read: no other way in it shows, and every
 /// call the reference index claims is one of them (doc/adr-resolved-bodies.md, "Closed world").
-fn only_called<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64, calls: u32) -> bool {
+pub(super) fn only_called<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    callee: u64,
+    calls: u32,
+) -> bool {
     let language = db.inputs().source.container().languages.at(callee);
     // Swift, Objective-C, Go and .NET reach functions through tables of relative offsets no word holds.
     if !matches!(

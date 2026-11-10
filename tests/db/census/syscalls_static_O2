@@ -95,7 +95,7 @@ EXPECT=<<EOF
 r2sleigh_result_u64 entry0(void)
 {
     uint64_t fcn_401030(void);
-    uint64_t fcn_401050(void);
+    r2sleigh_result_u64 fcn_401050(void);
 
     /* r2dec proof: 6 constructs are marked below; 38 source obligations: 6 rendered, 17 elided, 0 refused, 15 residual; 3 statements rendered; the result is unproven (Written): 0 unproven-return carried */
     {

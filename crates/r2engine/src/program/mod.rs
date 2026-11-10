@@ -7,6 +7,7 @@
 //! whole derivation runs just as well over a program built from byte literals.
 
 mod analysis;
+mod fates;
 pub mod info;
 pub mod naming;
 mod pointers;
@@ -20,8 +21,9 @@ mod view;
 
 use view::View;
 
+pub use fates::World;
 pub use requests::{
-    AnalysisRefused, Callers, EdgeKind, FunctionGraph, FunctionListing, GraphBlock, GraphEdge,
+    AnalysisRefused, EdgeKind, FunctionGraph, FunctionListing, GraphBlock, GraphEdge,
     RenderedResponse, Rendering, Syscall,
 };
 
@@ -263,7 +265,7 @@ pub struct OpenProgram<S: Source + 'static> {
     /// consumes; without one a request runs under a fresh control.
     next: Option<crate::EngineExecutionControl>,
     /// Whether a function's analysis reads the program's calls to it: `aa` asks once.
-    callers: Callers,
+    callers: World,
 }
 
 impl<S: Source + 'static> OpenProgram<S> {
@@ -275,7 +277,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             .collect();
         Self {
             next: None,
-            callers: Callers::Unread,
+            callers: World::Open,
             db: Db::new(ProgramInputs {
                 extents: r2types::ProgramExtents::new(
                     container

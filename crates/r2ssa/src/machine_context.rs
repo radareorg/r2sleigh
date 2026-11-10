@@ -470,8 +470,6 @@ pub struct SourceMachineContext {
     call_universe: Box<[CanonicalStorageId]>,
     /// What each direct callee's own body proves it leaves alone, by entry.
     callee_preserved: crate::function::CalleePreservedCarriers,
-    /// Whether the result is unproven because the body writes both result registers.
-    result_ambiguous: bool,
     /// How many arguments each callee whose result is unproven reads at least.
     callee_statements: BTreeMap<u64, CalleeStatement>,
     /// The projections of what this body writes that the register file does not declare, sorted.
@@ -874,7 +872,6 @@ impl SourceMachineContext {
                 .map(|(effect, arch)| call_universe(effect, arch))
                 .unwrap_or_default(),
             callee_preserved: BTreeMap::new(),
-            result_ambiguous: false,
             callee_statements: BTreeMap::new(),
             call_effect,
             observed_projections,
@@ -1066,16 +1063,6 @@ impl SourceMachineContext {
         preserved: crate::function::CalleePreservedCarriers,
     ) {
         self.callee_preserved = preserved;
-    }
-
-    /// Whether recovery left the result unproven because the body writes both result registers,
-    /// which what the program's calls read can decide (doc/adr-resolved-bodies.md, "Caller reads").
-    pub const fn result_ambiguous(&self) -> bool {
-        self.result_ambiguous
-    }
-
-    pub(crate) const fn set_result_ambiguous(&mut self, ambiguous: bool) {
-        self.result_ambiguous = ambiguous;
     }
 
     /// What the callee at `target` states, where its unproven result mints no call contract.

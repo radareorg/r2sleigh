@@ -60,7 +60,7 @@ fn a_described_call_is_written_from_the_callsite_facts() {
         .expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
     // `call one; ret`: the result register the call leaves is what `caller` returns.
-    assert!(text.contains("uint64_t one(void);"), "{text}");
+    assert!(text.contains("r2sleigh_result_u64 one(void);"), "{text}");
     assert!(text.contains("rax_1 = one();"), "{text}");
     assert!(
         text.contains("return r2sleigh_carrier_u64((uint64_t)rax_1);"),

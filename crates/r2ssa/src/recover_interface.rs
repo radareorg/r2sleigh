@@ -166,8 +166,6 @@ pub struct RecoveredInterface {
     return_mechanism: Option<RecoveredReturnMechanism>,
     /// Why the result is unproven, where it is (doc/adr-verified-layers.md, D37).
     unproven_result: Option<SourceUnprovenResult>,
-    /// Whether the result is unproven because the body writes both result registers on its way out.
-    result_ambiguous: bool,
     /// The registers an unproven result may be in, where a caller's read can say which.
     result_carriers: Option<r2source::SourceResultCarriers>,
     /// Why an argument slot past the parameters may be read, or a call's arguments are unproven.
@@ -177,28 +175,21 @@ pub struct RecoveredInterface {
     variadic: bool,
     /// The parameter a tail-consuming loop is bounded by, where the body proves one (`tail_count`).
     tail_count: Option<r2source::SourceTailCount>,
-    /// Whether the result is void because no call reads it, which holds under a closed world only.
-    closed_world: bool,
-    /// Whether the callers' reads chose the result register (a float, a pair, an argument).
-    result_read: bool,
+    /// What the closed world decided and this recovery applied, which rests on `Premise::ClosedWorld`.
+    closed: Option<r2source::SourceClosedResult>,
     /// Whether some return hands back a parameter through a merge: an entry input, spelled.
     result_holds_input: bool,
 }
 
 impl RecoveredInterface {
-    /// Whether the result rests on `Premise::ClosedWorld`: void because no call the image shows reads it.
+    /// Whether the result rests on `Premise::ClosedWorld`: decided by every call the image shows.
     pub const fn assumes_closed_world(&self) -> bool {
-        self.closed_world
+        self.closed.is_some()
     }
 
     /// Why the result is unproven, where it is.
     pub const fn unproven_result(&self) -> Option<&SourceUnprovenResult> {
         self.unproven_result.as_ref()
-    }
-
-    /// Whether the body writes both result registers and nothing said which a caller reads.
-    pub const fn result_ambiguous(&self) -> bool {
-        self.result_ambiguous
     }
 
     /// Whether arguments continue past the parameters, as the body's register save area proves.
@@ -1043,55 +1034,21 @@ fn written_on_every_return(
     .then_some(slot)
 }
 
-/// Which result register the program's calls read, where every reading call agrees.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CarrierRead {
-    Integer,
-    /// The float register, at the one width every read that states one takes.
-    Float(CanonicalStorageId),
-}
-
-/// What a call reads of an unproven result: nothing, proven, or one carrier.
-enum ResultRead {
-    None,
-    Carrier(CarrierRead),
-}
-
-/// The reads after a call to a callee whose result carriers are the integer one and `float`.
-fn read_of(
-    reads: r2source::SourceResultReads,
-    float: Option<CanonicalStorageId>,
-) -> Option<ResultRead> {
-    match (reads.integer, reads.float, float) {
-        (0, 0, _) if reads.all_overwrite(float.is_some(), false) => Some(ResultRead::None),
-        // A read past the call's block (the next call's argument, under IPA-RA) is still the
-        // integer register the call leaves.
-        (_, 0, None) => Some(ResultRead::Carrier(CarrierRead::Integer)),
-        (_, _, Some(float)) => carrier_read(Some(reads), float).map(ResultRead::Carrier),
+/// The float bytes a closed-world read takes.
+fn float_bytes(closed: r2source::SourceClosedResult) -> Option<u8> {
+    match closed {
+        r2source::SourceClosedResult::Read(r2source::SourceReadLanes::Float { bytes }) => {
+            Some(bytes)
+        }
         _ => None,
     }
 }
 
-fn carrier_read(
-    reads: Option<r2source::SourceResultReads>,
-    float: CanonicalStorageId,
-) -> Option<CarrierRead> {
-    let reads = reads?;
-    match (reads.integer, reads.float) {
-        (1.., 0) => Some(CarrierRead::Integer),
-        (0, 1..) => {
-            let r2source::SourceFloatReadWidth::Bytes(bytes) = reads.float_width else {
-                return None;
-            };
-            let bytes = u16::try_from(bytes).ok()?;
-            (matches!(bytes, 4 | 8) && u32::from(bytes) <= float.size).then_some(
-                CarrierRead::Float(CanonicalStorageId {
-                    size: u32::from(bytes),
-                    ..float
-                }),
-            )
-        }
-        _ => None,
+/// The low `bytes` of the float slot, where they fit it.
+fn float_lane(float: CanonicalStorageId, bytes: u8) -> CanonicalStorageId {
+    CanonicalStorageId {
+        size: u32::from(bytes).min(float.size),
+        ..float
     }
 }
 
@@ -1285,7 +1242,7 @@ pub(crate) fn recover_interface(
 ) -> Option<RecoveredInterface> {
     let stated = Stated {
         loader_role,
-        result_reads: None,
+        closed: None,
         unseen: false,
     };
     recover_interface_inner(func, None, slots, None, stated).expect("a test function settles")
@@ -1295,7 +1252,7 @@ pub(crate) fn recover_interface(
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Stated {
     loader_role: Option<r2source::SourceLoaderRole>,
-    result_reads: Option<r2source::SourceResultReads>,
+    closed: Option<r2source::SourceClosedResult>,
     /// Whether the walk left a transfer it did not follow: code no read sees may take more arguments.
     unseen: bool,
 }
@@ -1305,7 +1262,7 @@ impl Stated {
         let function = source.function();
         Self {
             loader_role: function.loader_role(),
-            result_reads: function.result_reads(),
+            closed: function.closed_result(),
             unseen: (source.image().blocks().iter()).any(|block| block.transfer_unresolved()),
         }
     }
@@ -1339,7 +1296,7 @@ fn recover_interface_inner(
     machine_context: Option<&crate::SourceMachineContext>,
     Stated {
         loader_role,
-        result_reads,
+        closed,
         unseen,
     }: Stated,
 ) -> Result<Option<RecoveredInterface>, crate::fixpoint::Exhausted> {
@@ -1487,11 +1444,13 @@ fn recover_interface_inner(
     let mut result_causes = BTreeSet::new();
     result_causes.extend(beside_void_tails);
     let mut live_out = crate::liveout::FunctionLiveOut::default();
-    let mut result_ambiguous = false;
     // The argument register handed back untouched as the result, which the return reads.
     let mut returned_argument = None;
     let mut result_carriers = None;
-    let mut result_read = false;
+    let read = |lanes: r2source::SourceReadLanes| {
+        closed == Some(r2source::SourceClosedResult::Read(lanes))
+    };
+    let mut applied = None;
     let mut result_holds_input = false;
     // An exact tail-call interface owns this boundary. Looking at the value
     // present before the branch would instead mistake a call argument for the
@@ -1507,9 +1466,6 @@ fn recover_interface_inner(
         result = recovered;
         let handed_back = returned == Returned::HandedBack;
         result_holds_input = returned == Returned::Input;
-        // Every reading call reading the argument register decides it, as for one handed back.
-        result_read |= result_holds_input
-            && result_reads.is_some_and(|reads| reads.integer > 0 && reads.float == 0);
         if result == RecoveredFunctionResult::Unproven {
             let causes = [
                 (!candidate_live_out.has_returns()).then_some(SourceResultCause::NoReturn),
@@ -1531,11 +1487,15 @@ fn recover_interface_inner(
         if result.register().is_some()
             && let Some((float, float_live_out)) = float_result_written(func, graph, slots)
         {
-            match carrier_read(result_reads, float) {
-                Some(CarrierRead::Integer) => {}
+            let float_read = (closed.and_then(float_bytes)).map(|bytes| float_lane(float, bytes));
+            match closed {
+                Some(r2source::SourceClosedResult::Read(r2source::SourceReadLanes::Integer)) => {
+                    applied = closed;
+                }
                 // The carrier is the lane the reads take, as a declared float's is (`low_lane`):
                 // AArch64's float slot is all of q0, and a double is d0.
-                Some(CarrierRead::Float(observed)) => {
+                _ if float_read.is_some() => {
+                    let observed = float_read.expect("checked");
                     result = RecoveredFunctionResult::Register(RecoveredResult {
                         slot: observed,
                         observed,
@@ -1543,9 +1503,9 @@ fn recover_interface_inner(
                         float: true,
                     });
                     candidate_live_out = float_live_out;
-                    result_read = true;
+                    applied = closed;
                 }
-                None => {
+                _ => {
                     result_carriers = Some(r2source::SourceResultCarriers {
                         integer: candidate,
                         float: Some(float),
@@ -1553,7 +1513,6 @@ fn recover_interface_inner(
                     });
                     result = RecoveredFunctionResult::Unproven;
                     result_causes.insert(SourceResultCause::Ambiguous);
-                    result_ambiguous = true;
                 }
             }
         }
@@ -1565,8 +1524,8 @@ fn recover_interface_inner(
         if integer_unheld
             && let Some((float, float_live_out)) = float_result_written(func, graph, slots)
         {
-            match carrier_read(result_reads, float) {
-                Some(CarrierRead::Float(observed)) => {
+            match (closed.and_then(float_bytes)).map(|bytes| float_lane(float, bytes)) {
+                Some(observed) => {
                     result = RecoveredFunctionResult::Register(RecoveredResult {
                         slot: observed,
                         observed,
@@ -1576,11 +1535,10 @@ fn recover_interface_inner(
                     result_carriers = None;
                     candidate_live_out = float_live_out;
                     float_returned = true;
-                    result_read = true;
+                    applied = closed;
                 }
                 // A written float lane is a carrier no read decided: never void (D200).
-                read if result == RecoveredFunctionResult::Void => {
-                    result_ambiguous |= read.is_none() && result_reads.is_none();
+                None if result == RecoveredFunctionResult::Void => {
                     result = RecoveredFunctionResult::Unproven;
                     // What feeds the written lane is observed: its inputs are parameters.
                     candidate_live_out = float_live_out;
@@ -1591,7 +1549,7 @@ fn recover_interface_inner(
                         second: None,
                     });
                 }
-                read => result_ambiguous |= read.is_none() && result_reads.is_none(),
+                None => {}
             }
         }
         // Where callers read the integer register beside a written float, the argument it hands back
@@ -1605,20 +1563,16 @@ fn recover_interface_inner(
         {
             // An argument register the body hands back untouched is its result where every reading
             // call reads it: AArch64's `ret` of a narrowing function returns its argument in x0.
-            match result_reads.map(|reads| (reads.integer, reads.float)) {
-                Some((1.., 0)) => {
-                    result = RecoveredFunctionResult::Register(RecoveredResult {
-                        slot: candidate,
-                        observed: candidate,
-                        signed: false,
-                        float: false,
-                    });
-                    result_carriers = None;
-                    returned_argument = Some(candidate);
-                    result_read = true;
-                }
-                Some(_) => {}
-                None => result_ambiguous = true,
+            if read(r2source::SourceReadLanes::Integer) {
+                result = RecoveredFunctionResult::Register(RecoveredResult {
+                    slot: candidate,
+                    observed: candidate,
+                    signed: false,
+                    float: false,
+                });
+                result_carriers = None;
+                returned_argument = Some(candidate);
+                applied = closed;
             }
         }
         // An integer result whose second register the body also writes on every return is one
@@ -1631,32 +1585,22 @@ fn recover_interface_inner(
         {
             let both =
                 || crate::liveout::FunctionLiveOut::compute(func, graph, &[low.slot(), high]);
-            // A call whose scan ended before it touched the second register is no evidence either way.
-            match result_reads.map(|reads| (reads.second, reads.second_overwritten == reads.calls))
-            {
-                // One call reading the second register is evidence the value spans both: a call
-                // that reads only the first discards the high half.
-                Some((1.., _)) => {
-                    result = RecoveredFunctionResult::Pair {
-                        low: low.slot(),
-                        high,
-                    };
-                    candidate_live_out = both();
-                    result_read = true;
-                }
-                Some((0, true)) => {}
-                // Read for a caller: the result stays the first register, the second is a carrier
-                // a reading call takes, and what feeds it is observed (its parameters are the
-                // call's).
-                Some((0, false)) | None => {
-                    result_ambiguous = true;
-                    result_carriers = Some(r2source::SourceResultCarriers {
-                        integer: low.slot(),
-                        float: None,
-                        second: Some(high),
-                    });
-                    candidate_live_out = both();
-                }
+            // One closed-world call reading the second register is evidence the value spans both.
+            if read(r2source::SourceReadLanes::Pair) {
+                result = RecoveredFunctionResult::Pair {
+                    low: low.slot(),
+                    high,
+                };
+                candidate_live_out = both();
+                applied = closed;
+            } else if !read(r2source::SourceReadLanes::Integer) {
+                // The second register is a carrier a reading call may take; what feeds it is observed.
+                result_carriers = Some(r2source::SourceResultCarriers {
+                    integer: low.slot(),
+                    float: None,
+                    second: Some(high),
+                });
+                candidate_live_out = both();
             }
         }
         if !candidate_live_out.is_empty()
@@ -1705,28 +1649,40 @@ fn recover_interface_inner(
             });
         }
     }
-    // A reading call under the closed world makes a written integer result a value (D201).
-    if matches!(result, RecoveredFunctionResult::Register(written) if !written.float())
-        && machine_context.is_some_and(|context| context.accepts(r2source::Premise::ClosedWorld))
-        && result_reads.is_some_and(|reads| reads.integer > 0)
-    {
-        result_read = true;
-    }
-    // An unproven result no call reads is none, where those calls are every way in
-    // (doc/adr-resolved-bodies.md, "Closed world").
-    let closed_world = result == RecoveredFunctionResult::Unproven
-        && machine_context.is_some_and(|context| context.accepts(r2source::Premise::ClosedWorld))
-        && result_reads.is_some_and(|reads| {
-            // The float and second registers are results only where the body writes them.
-            let second = (slots.second_result_slot())
-                .is_some_and(|slot| result_register_written(func, graph, slot).is_some());
-            reads.none_read(float_result_written(func, graph, slots).is_some(), second)
-        });
-    if closed_world {
-        result = RecoveredFunctionResult::Void;
-        live_out = crate::liveout::FunctionLiveOut::default();
-        result_carriers = None;
-        result_ambiguous = false;
+    // The closed world's decision (doc/adr-call-boundary.md, D166, D202): a read makes a written
+    // integer result a value, every call dead makes a result no byte defines void, a written one unread.
+    match closed {
+        Some(r2source::SourceClosedResult::Read(
+            r2source::SourceReadLanes::Integer | r2source::SourceReadLanes::Pair,
+        )) if matches!(result, RecoveredFunctionResult::Register(written) if !written.float())
+            || matches!(result, RecoveredFunctionResult::Pair { .. }) =>
+        {
+            applied = closed;
+        }
+        Some(r2source::SourceClosedResult::Void) if result == RecoveredFunctionResult::Unproven => {
+            result = RecoveredFunctionResult::Void;
+            live_out = crate::liveout::FunctionLiveOut::default();
+            result_carriers = None;
+            result_causes.clear();
+            applied = closed;
+        }
+        // A written register stays the body's carrier; the decision only names why it is unproven.
+        Some(r2source::SourceClosedResult::Unread | r2source::SourceClosedResult::ForwardCycle)
+            if matches!(result, RecoveredFunctionResult::Register(_)) =>
+        {
+            applied = closed;
+        }
+        Some(
+            cause @ (r2source::SourceClosedResult::Unread
+            | r2source::SourceClosedResult::ForwardCycle),
+        ) if result == RecoveredFunctionResult::Unproven => {
+            result_causes.insert(match cause {
+                r2source::SourceClosedResult::Unread => SourceResultCause::Unread,
+                _ => SourceResultCause::ForwardCycle,
+            });
+            applied = closed;
+        }
+        _ => {}
     }
     r2il::refusal_evidence!(
         "interface-recovery",
@@ -1936,13 +1892,11 @@ fn recover_interface_inner(
         result_is_return_address,
         return_mechanism,
         unproven_result,
-        result_ambiguous,
         result_carriers,
         arity_floor,
         variadic: save_area.is_some(),
         tail_count,
-        closed_world,
-        result_read,
+        closed: applied,
         result_holds_input,
     }))
 }
@@ -2356,9 +2310,9 @@ pub fn mint_recovered_interface(
             Some(carriers) => interface.with_result_carriers(carriers),
             None => interface,
         })
-        .map(|interface| match recovered.result_read {
-            true => interface.with_result_read_by_callers(),
-            false => interface,
+        .map(|interface| match recovered.closed {
+            Some(closed) => interface.with_closed_result(closed),
+            None => interface,
         })
         .map(|interface| match recovered.result_holds_input {
             true => interface.with_result_holding_input(),
@@ -2739,7 +2693,6 @@ pub fn mint_recovered_call_site_interface(
     callee: &SourceFunctionInterface,
     identity: SourceCallSiteIdentity,
     revision_identity: &[u8],
-    caller_reads: Option<r2source::SourceResultReads>,
 ) -> Option<SourceCallSiteInterface> {
     // A stack parameter is named from the callee's entry stack pointer; the
     // call site names the same slot from its own stack pointer before the
@@ -2772,57 +2725,26 @@ pub fn mint_recovered_call_site_interface(
         };
         SourceCallArgumentSpec::with_location(parameter.index(), location)
     });
+    // One result per callee at every call (D62): a call that does not read the high half of a pair
+    // reads the low half; an unproven result with one carrier is that register.
     let result = match callee.return_kind() {
         SourceFunctionReturn::Void => SourceCallResult::Void,
-        // A call that reads the second register a carrier names takes the pair.
-        SourceFunctionReturn::Register { storage } => match (
-            callee
-                .result_carriers()
-                .and_then(|carriers| carriers.second),
-            caller_reads,
-        ) {
-            (Some(high), Some(reads)) if reads.second > 0 => {
-                SourceCallResult::Pair { low: storage, high }
-            }
-            // The callee's width is complete: its declaration's, or its body's on every return.
-            _ => SourceCallResult::Register {
-                storage,
-                width: (callee.result_width()).unwrap_or(SourceResultWidth::whole(storage)),
-            },
+        // The callee's width is complete: its declaration's, or its body's on every return.
+        SourceFunctionReturn::Register { storage } => SourceCallResult::Register {
+            storage,
+            width: (callee.result_width()).unwrap_or(SourceResultWidth::whole(storage)),
         },
-        // A call that reads only the first register keeps it (doc/adr-language-profile.md).
-        SourceFunctionReturn::Pair { low, .. }
-            if caller_reads.is_some_and(|reads| reads.second == 0) =>
-        {
-            SourceCallResult::register(low)
-        }
         SourceFunctionReturn::Pair { low, high } => SourceCallResult::Pair { low, high },
-        // A body nobody read owns the arguments beside the result: an import
-        // thunk forwards every one and reads none, so what its own body proves
-        // is a floor rather than this call's contract.
-        // An unproven result is the register the call leaves, and none where the caller writes
-        // each result register before reading it: the call is then a statement.
-        SourceFunctionReturn::Unproven => match callee.result_carriers().and_then(|carriers| {
-            let read = match caller_reads {
-                Some(reads) => read_of(reads, carriers.float)?,
-                None if carriers.float.is_none() => ResultRead::Carrier(CarrierRead::Integer),
-                None => return None,
-            };
-            Some((carriers, read))
-        }) {
-            Some((_, ResultRead::None)) => SourceCallResult::Void,
-            Some((carriers, ResultRead::Carrier(CarrierRead::Integer))) => {
+        // A second carrier leaves which register is the result open: the call states none.
+        SourceFunctionReturn::Unproven => match callee.result_carriers() {
+            Some(carriers) if carriers.float.is_none() && carriers.second.is_none() => {
                 SourceCallResult::register(carriers.integer)
             }
-            Some((_, ResultRead::Carrier(CarrierRead::Float(storage)))) => {
-                SourceCallResult::register(storage)
-            }
-            None => {
+            _ => {
                 r2il::refusal_evidence!(
                     "call-site-minting",
-                    "the callee's result is unproven ({:?}, read {:?}), so its body describes no call contract",
-                    callee.result_carriers(),
-                    caller_reads
+                    "the callee's result is unproven ({:?}), so its body describes no call contract",
+                    callee.result_carriers()
                 );
                 return None;
             }
@@ -2939,15 +2861,11 @@ mod tests {
         let slots = candidates()
             .with_second_result_slot(Some(register(8, 8)))
             .expect("x1 beside x0");
-        let reads = |second| r2source::SourceResultReads {
-            integer: 1,
-            second,
-            calls: 1,
-            ..Default::default()
-        };
         let stated = Stated {
             loader_role: None,
-            result_reads: Some(reads(1)),
+            closed: Some(r2source::SourceClosedResult::Read(
+                r2source::SourceReadLanes::Pair,
+            )),
             unseen: false,
         };
         let recovered = recover_interface_inner(&func, None, &slots, None, stated)
@@ -2972,14 +2890,11 @@ mod tests {
                 size: 8,
             },
         );
-        let site = |second| {
-            mint_recovered_call_site_interface(&interface, identity, b"pair", Some(reads(second)))
-                .expect("a call site")
-        };
-        assert_eq!(site(0).result(), SourceCallResult::register(low));
-        assert_eq!(site(0).exact_callee_interface(), Some(&interface));
-        assert_eq!(site(1).result(), SourceCallResult::Pair { low, high });
-        assert_eq!(site(1).exact_callee_interface(), Some(&interface));
+        // The pair is the callee's: every call takes it, read whole or not (D62).
+        let site =
+            mint_recovered_call_site_interface(&interface, identity, b"pair").expect("a call site");
+        assert_eq!(site.result(), SourceCallResult::Pair { low, high });
+        assert_eq!(site.exact_callee_interface(), Some(&interface));
     }
 
     fn call_boundary_with(
@@ -3261,7 +3176,6 @@ mod tests {
                 },
             ),
             b"narrow-return-revision",
-            None,
         )
         .expect("callsite with recovered callee interface");
         assert_eq!(callsite.exact_callee_interface(), Some(&interface));
@@ -3446,8 +3360,7 @@ mod tests {
         assert_eq!(minted.return_kind(), SourceFunctionReturn::Unproven);
         // Nothing this body proves describes a call to it, arguments included.
         assert!(
-            mint_recovered_call_site_interface(&minted, identity, b"thunk-revision", None)
-                .is_none(),
+            mint_recovered_call_site_interface(&minted, identity, b"thunk-revision").is_none(),
             "an unproven result cannot be a call site's exact contract"
         );
 

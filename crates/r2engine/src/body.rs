@@ -162,6 +162,12 @@ pub struct BodyBlock {
     pub transfers: Vec<Transfer>,
 }
 
+impl r2ssa::site_boundary::Lifted for BodyBlock {
+    fn lifted(&self) -> &R2ILBlock {
+        &self.lifted
+    }
+}
+
 /// One operation that leaves for another function, as the walk read it: a call it folded to its
 /// target stays the call it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

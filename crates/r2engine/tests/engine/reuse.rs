@@ -241,7 +241,7 @@ fn rendered_returning_object(declared: bool) -> String {
         stack_slot_names: Vec::new(),
         signature: None,
         loader_role: None,
-        result_reads: None,
+        closed_result: None,
         frame_saves: Vec::new(),
     };
     let snapshot = r2source::native::capture(&machine, function).expect("a capture");
@@ -498,7 +498,10 @@ fn a_tail_thunk_returns_what_its_target_returns_once_the_target_is_resolved() {
     let mut program = OpenProgram::of(Literal::of_code(code.to_vec().leak(), &functions));
     let rendering = program.rendered(base + 0x20).expect("it renders");
     let text = rendering.response.output.into_text();
-    assert!(text.contains("uint32_t thunk(uint64_t);"), "{text}");
+    assert!(
+        text.contains("r2sleigh_result_u32 thunk(uint64_t);"),
+        "{text}"
+    );
     assert!(text.contains("= (uint64_t)thunk(5);"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }

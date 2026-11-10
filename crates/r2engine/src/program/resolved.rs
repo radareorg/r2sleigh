@@ -128,7 +128,9 @@ fn result_owners(read: &CalleeRead) -> BTreeSet<u64> {
         | SourceResultCause::HandedBack
         | SourceResultCause::Ambiguous
         | SourceResultCause::Undefined
-        | SourceResultCause::Written => None,
+        | SourceResultCause::Written
+        | SourceResultCause::Unread
+        | SourceResultCause::ForwardCycle => None,
     });
     owners.collect::<Option<_>>().unwrap_or_default()
 }
@@ -151,7 +153,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Resolved {
         let view = View::new(db, true);
         let owners = bodies(&view, &alone.0, demand);
         if owners.is_empty() {
-            return (*alone).clone();
+            return closed_alone(db, &view, node, &alone, demand);
         }
         let cycle = db
             .get::<Component>(&(node, demand))
@@ -192,7 +194,8 @@ fn outside_resolved<S: Source + 'static>(
     if resolved.iter().any(|(_, read)| stopped(read)) {
         return stopped_read();
     }
-    // Resolving again pays only where some owner now states its result or an exact arity.
+    // Resolving again pays only where some owner now states its result or an exact arity, or the
+    // closed world decides it.
     let proves = |(_, read): &(u64, Arc<CalleeRead>)| {
         let Some(interface) = read.interface.as_ref() else {
             return false;
@@ -201,11 +204,43 @@ fn outside_resolved<S: Source + 'static>(
         read.facts.is_ok() && (returns || interface.arity().is_exact())
     };
     if !resolved.iter().any(proves) {
-        return alone.clone();
+        return closed_alone(db, &View::new(db, true), node, alone, demand);
     }
     let stated = Stated {
         owners: &resolved,
         assumed: &[],
+        world: world_of(demand),
+    };
+    Shared(Arc::new(callee_read(db, node, stated)))
+}
+
+/// The world a demand reads results in: `aa`'s arity closure is the closed world's.
+fn world_of(demand: Demand) -> super::World {
+    match demand {
+        Demand::Arity => super::World::Closed,
+        Demand::Result => super::World::Open,
+    }
+}
+
+/// A function read alone, again in the closed world where its `CallBoundary` decides its result.
+fn closed_alone<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    view: &View<'_, S>,
+    node: Node,
+    alone: &Shared<CalleeRead>,
+    demand: Demand,
+) -> Shared<CalleeRead> {
+    let decided = (demand == Demand::Arity)
+        .then(|| alone.0.interface.as_ref())
+        .flatten()
+        .and_then(|open| crate::native::Program::closed_result(view, node.0, open));
+    if decided.is_none() {
+        return alone.clone();
+    }
+    let stated = Stated {
+        owners: &[],
+        assumed: &[],
+        world: super::World::Closed,
     };
     Shared(Arc::new(callee_read(db, node, stated)))
 }
@@ -471,9 +506,11 @@ impl<'m> Cycle<'m> {
             Some((self.members[*callee].0, held.interface.clone()))
         });
         let stated = stated.collect::<Vec<_>>();
+        // A cycle's members keep their open-world results: the fixpoint moves the results it tracks.
         let stated = Stated {
             owners: &self.outside[at],
             assumed: &stated,
+            world: super::World::Open,
         };
         let read = callee_read(db, self.members[at], stated);
         if stopped(&read) {

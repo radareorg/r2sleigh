@@ -773,13 +773,11 @@ fn function_facts_owns_canonical_callee_resolution() {
     let callsite = r2ssa::InstId(3);
     let function_names = HashMap::from([(0x402000, "sym.helper".to_string())]);
     let symbols = HashMap::new();
-    let known_function_signatures = HashMap::new();
     let callee_facts = BTreeMap::new();
     let ctx = crate::CalleeIdentityContext {
         function_names: &function_names,
         symbols: &symbols,
         callee_facts: &callee_facts,
-        known_function_signatures: &known_function_signatures,
     };
     let resolution = CalleeResolutionFacts::from_direct_call_targets([(callsite, 0x402000)], &ctx);
 
@@ -835,6 +833,7 @@ fn function_facts_owns_canonical_callsite_arguments() {
                 variadic: false,
                 fixed_argument_count: None,
                 callee_signature: None,
+                callee_unproven_bits: None,
                 callee_signature_types: None,
                 variadic_argument_count_evidence: None,
                 variadic_argument_count_refusal: None,
@@ -1046,6 +1045,7 @@ fn callsite_facts_own_canonical_argument_vector() {
         variadic: false,
         fixed_argument_count: None,
         callee_signature: None,
+        callee_unproven_bits: None,
         callee_signature_types: None,
         variadic_argument_count_evidence: None,
         variadic_argument_count_refusal: None,
@@ -1468,6 +1468,7 @@ fn prepared_decompile_evidence_replaces_detached_source_dependent_rows() {
         variadic: false,
         fixed_argument_count: None,
         callee_signature: None,
+        callee_unproven_bits: None,
         callee_signature_types: None,
         variadic_argument_count_evidence: None,
         variadic_argument_count_refusal: None,
@@ -1589,7 +1590,6 @@ fn the_enriched_report_holds_the_projection_of_its_final_types() {
     let calls = CallFacts::project(
         source.as_ref(),
         &again.display_names,
-        &again.types.known_function_signatures,
         &again.types.callee_facts,
         &BTreeMap::new(),
     );

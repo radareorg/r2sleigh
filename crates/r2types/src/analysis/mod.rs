@@ -166,6 +166,13 @@ impl TypeAnalysis {
                 ))
             })
             .collect::<Option<Vec<_>>>()?;
+        // The header's own unproven carrier, which every caller's extern spells as the header does.
+        let unproven = (self.function_facts.report().return_type())
+            .filter(|fact| fact.is_unproven())
+            .and_then(|fact| match fact.declared()? {
+                CTypeLike::Int { bits, .. } => Some(*bits),
+                _ => None,
+            });
         crate::SourceOwnedCalleeSignature::new(
             &self.source,
             crate::FunctionType {
@@ -176,6 +183,7 @@ impl TypeAnalysis {
                 variadic: false,
             },
         )
+        .map(|signature| signature.with_unproven_bits(unproven))
     }
 
     pub fn type_facts(&self) -> &FunctionTypeFacts {
@@ -786,7 +794,6 @@ fn build_type_analysis_inner(
         parameter_structures: BTreeMap::new(),
         callconv: input.parsed_context.callconv.clone(),
         noreturn: input.parsed_context.noreturn,
-        known_function_signatures: input.parsed_context.known_function_signatures.clone(),
         register_params: input.parsed_context.register_params.clone(),
         callee_facts,
         external_type_db: type_db,
@@ -923,7 +930,6 @@ pub fn build_source_owned_type_analysis(
     let calls = crate::function_facts::CallFacts::project(
         source.as_ref(),
         source.display_names(),
-        &parsed_context.known_function_signatures,
         &callee_facts,
         &callee_signatures,
     );

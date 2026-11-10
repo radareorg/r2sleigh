@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use super::fates::World;
 use super::{OpenProgram, ProgramInputs, Source, View};
 use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
@@ -122,17 +123,6 @@ fn edges_of(
         }
     }
     edges
-}
-
-/// Whether a function's own analysis reads what the program's calls to it read of its result
-/// registers (doc/adr-resolved-bodies.md, "Caller reads"). Reading them surveys the program.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Callers {
-    /// The body and its callees alone: a fresh open.
-    #[default]
-    Unread,
-    /// The program's calls too, once `aa` surveyed it.
-    Read,
 }
 
 /// Why a function's listing carries no analysis, and what its walk could not follow.
@@ -629,7 +619,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     pub fn analyse_program(&mut self) -> Result<(), String> {
         self.start_request();
         self.surveyed()?;
-        self.callers = Callers::Read;
+        self.callers = World::Closed;
         Ok(())
     }
 

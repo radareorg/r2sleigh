@@ -7,6 +7,7 @@ mod architecture;
 mod arity;
 mod arm;
 mod body;
+mod call_boundary;
 mod call_tables;
 mod control;
 mod conventions;

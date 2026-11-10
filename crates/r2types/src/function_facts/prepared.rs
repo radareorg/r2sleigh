@@ -596,6 +596,8 @@ pub struct CallsiteArgumentFacts {
     /// What that signature's types are read from: a declaration, or a
     /// recovery of the callee's body.
     pub callee_signature_types: Option<r2source::Confidence>,
+    /// The carrier's bits where the callee's own header is an unproven result.
+    pub callee_unproven_bits: Option<u32>,
     /// Per-callsite argument-count proof for a variadic call. This is absent
     /// for fixed calls and never inferred from live argument registers.
     pub variadic_argument_count_evidence: Option<r2ssa::VariadicCallsiteArgumentCountEvidence>,
@@ -1145,7 +1147,6 @@ pub(crate) fn struct_name_from_pointer_type(ty: Option<&CTypeLike>) -> Option<&s
 pub(crate) fn prepared_callee_resolution_facts(
     prepared: &r2ssa::SsaArtifact,
     names: &crate::DisplayNames,
-    known_function_signatures: &HashMap<String, crate::FunctionType>,
     mut callee_facts: BTreeMap<u64, CalleeFact>,
 ) -> CalleeResolutionFacts {
     // These were empty maps, so every direct call resolved to nothing and
@@ -1159,10 +1160,6 @@ pub(crate) fn prepared_callee_resolution_facts(
         .symbols()
         .iter()
         .map(|(addr, name)| (*addr, name.clone()))
-        .collect::<HashMap<_, _>>();
-    let known_function_signatures = known_function_signatures
-        .iter()
-        .map(|(name, ty)| (crate::normalize_callee_name(name), ty.clone()))
         .collect::<HashMap<_, _>>();
     // The linkage radare2 read off the symbol or relocation that named each
     // call target is the fact import policy rests on; a name's shape is not.
@@ -1186,7 +1183,6 @@ pub(crate) fn prepared_callee_resolution_facts(
         function_names: &function_names,
         symbols: &symbols,
         callee_facts: &callee_facts,
-        known_function_signatures: &known_function_signatures,
     };
 
     let mut resolution = CalleeResolutionFacts::from_direct_call_targets(
@@ -1277,6 +1273,7 @@ pub(crate) fn prepared_callsite_argument_facts(
                     // source-owned callee analysis fills this only after its
                     // exact retained interface matches this call site.
                     callee_signature: None,
+                    callee_unproven_bits: None,
                     callee_signature_types: None,
                     variadic_argument_count_evidence: cert.variadic_argument_count_evidence,
                     variadic_argument_count_refusal: cert.variadic_argument_count_refusal,

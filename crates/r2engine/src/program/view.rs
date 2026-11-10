@@ -275,13 +275,13 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
     fn read_callee(
         &self,
         address: u64,
-        callers: super::Callers,
+        callers: super::World,
         _read: &mut dyn FnMut() -> crate::native::CalleeRead,
     ) -> std::sync::Arc<crate::native::CalleeRead> {
         let thumb = self.thumb_at(address);
         let demand = match callers {
-            super::Callers::Read => super::resolved::Demand::Arity,
-            super::Callers::Unread => super::resolved::Demand::Result,
+            super::World::Closed => super::resolved::Demand::Arity,
+            super::World::Open => super::resolved::Demand::Result,
         };
         let read = self
             .db
@@ -310,10 +310,21 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.db.inputs().places_function(vaddr)
     }
 
-    fn result_reads(&self, entry: u64) -> Option<r2source::SourceResultReads> {
+    fn closed_result(
+        &self,
+        entry: u64,
+        open: &r2source::SourceFunctionInterface,
+    ) -> Option<r2source::SourceClosedResult> {
+        use super::fates::{CallBoundary, CalleeKey, World};
         // A survey that is itself preparing this body is a cycle, which reads as no evidence.
-        let reads = self.db.get::<super::reads::ResultReads>(&entry).ok()?;
-        *reads
+        let key = (CalleeKey::Entry(entry), World::Closed);
+        let boundary = self.db.get::<CallBoundary>(&key).ok()?;
+        let decided = super::fates::decide(open, (*boundary).as_ref()?);
+        r2il::refusal_evidence!(
+            "call-boundary",
+            "{entry:#x}: closed world decides {decided:?}"
+        );
+        decided
     }
 
     fn frame_saves(&self, entry: u64) -> Vec<r2source::SourceFrameSave> {

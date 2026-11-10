@@ -1,12 +1,10 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
 use crate::convert::CTypeLike;
 use crate::external::ExternalTypeDb;
-use crate::facts::{
-    CalleeFact, CalleeLinkage, FunctionParamSpec, FunctionSignatureSpec, FunctionType,
-};
+use crate::facts::{CalleeFact, CalleeLinkage, FunctionParamSpec, FunctionSignatureSpec};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExternalRegisterParamSpec {
@@ -23,7 +21,6 @@ pub struct ParsedExternalContext {
     pub context_hash: Option<u64>,
     pub current_signature: Option<FunctionSignatureSpec>,
     pub merged_signature: Option<FunctionSignatureSpec>,
-    pub known_function_signatures: HashMap<String, FunctionType>,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub external_type_db: ExternalTypeDb,
     pub program_data_objects: crate::ProgramDataObjectTypeFacts,

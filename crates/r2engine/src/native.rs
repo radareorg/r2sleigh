@@ -103,9 +103,13 @@ pub trait Program: crate::body::Program {
         Vec::new()
     }
 
-    /// What the program's calls to the function at `entry` read of its result registers, where
-    /// the program read its callers (doc/adr-resolved-bodies.md, "Caller reads").
-    fn result_reads(&self, _entry: u64) -> Option<r2source::SourceResultReads> {
+    /// What the closed world's `CallBoundary` decides of the result of the function at `entry`, given
+    /// what its body proves alone (`open`); none outside `aa` (doc/adr-call-boundary.md, D166).
+    fn closed_result(
+        &self,
+        _entry: u64,
+        _open: &r2source::SourceFunctionInterface,
+    ) -> Option<r2source::SourceClosedResult> {
         None
     }
 
@@ -119,7 +123,7 @@ pub trait Program: crate::body::Program {
     fn read_callee(
         &self,
         _address: u64,
-        _callers: crate::program::Callers,
+        _callers: crate::program::World,
         read: &mut dyn FnMut() -> CalleeRead,
     ) -> Arc<CalleeRead> {
         Arc::new(read())
@@ -435,7 +439,7 @@ pub fn analysed(
     entry: u64,
 ) -> Result<Prepared, NativeRefusal> {
     let walk = walk(target, program, entry)?;
-    analyse(target, program, entry, &walk, crate::program::Callers::Read)
+    analyse(target, program, entry, &walk, crate::program::World::Closed)
 }
 
 /// Prepare one function from its walk, reading its callers where `callers` says; the query
@@ -444,7 +448,7 @@ pub(crate) fn analysed_from(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     (entry, walk): (u64, &Walk),
-    callers: crate::program::Callers,
+    callers: crate::program::World,
 ) -> Result<Prepared, NativeRefusal> {
     analyse(target, program, entry, walk, callers)
 }
@@ -455,7 +459,6 @@ pub struct Outline {
     pub name: String,
     pub blocks: Vec<OutlineBlock>,
     pub unresolved: Vec<crate::body::Unresolved>,
-    callees: Vec<Callee>,
 }
 
 /// One walked block's extent and where control continues from it.
@@ -478,7 +481,6 @@ impl Outline {
             name: walked.name.clone(),
             blocks,
             unresolved: walked.body.unresolved.clone(),
-            callees: walked.callees.clone(),
         }
     }
 }
@@ -948,7 +950,6 @@ fn request(
         tables: _,
     } = prepared;
     let block_count = artifact.source_block_count();
-    let signatures = declared_signatures(target, &outline.callees, extents);
     EngineFunctionDecompileRequestInput::single_function(
         EngineFunctionInput {
             function_name: outline.name.clone(),
@@ -960,7 +961,10 @@ fn request(
             source_snapshot: None,
         },
         Some(*ptr_bits),
-        signatures,
+        r2types::ParsedExternalContext {
+            program_extents: extents.clone(),
+            ..r2types::ParsedExternalContext::default()
+        },
     )
     .with_input_quality(EngineFunctionInputQuality::complete(block_count))
     .with_trusted_ssa(std::sync::Arc::clone(artifact))
@@ -1081,6 +1085,8 @@ type Resolution = Arc<TrustedSsaArtifact>;
 pub(crate) struct Stated<'a> {
     pub(crate) owners: &'a [(u64, Arc<CalleeRead>)],
     pub(crate) assumed: &'a [(u64, r2source::SourceFunctionInterface)],
+    /// Under `aa` a callee's result is its closed-world `CallBoundary`'s, as the root's is.
+    pub(crate) world: crate::program::World,
 }
 
 /// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md).
@@ -1105,7 +1111,7 @@ fn resolved_alone(
     for (member, interface) in stated.assumed {
         imports.interfaces.insert(*member, interface.clone());
     }
-    let resolved = native.resolve(address, walked, &imports, false);
+    let resolved = native.resolve(address, walked, &imports, stated.world);
     resolved.map_err(|refusal| match refusal.stopped() {
         true => Unreadable::Stopped,
         false => Unreadable::NotPrepared,
@@ -1214,7 +1220,7 @@ fn read_callees(
     target: &NativeTarget<'_>,
     (root, entry): (&Walked, u64),
     ptr_bits: u32,
-    callers: crate::program::Callers,
+    callers: crate::program::World,
 ) -> Read {
     // What a call takes and returns is a fact about the callee's body, so the
     // bodies it calls are walked first and the root is prepared against them.
@@ -1225,7 +1231,7 @@ fn read_callees(
     let declared = declare_imports(native, target, &targets, ptr_bits, &mut callees);
     let mut facts = Vec::new();
     // Under `aa` a recursive root reads itself resolved, as its callers do ("Arity").
-    let own = callers == crate::program::Callers::Read;
+    let own = callers == crate::program::World::Closed;
     // An import has no body here, declared or not: its stub's arity is the loader's (P7). A
     // sealed import slot is a word of data.
     let bodies: Vec<u64> = targets
@@ -1269,7 +1275,7 @@ fn analyse(
     program: &dyn Program,
     entry: u64,
     walk: &Walk,
-    callers: crate::program::Callers,
+    callers: crate::program::World,
 ) -> Result<Prepared, NativeRefusal> {
     // A convention whose boundaries carry what none states refuses before anything is read.
     if let Some(reason) = target.convention.refused {
@@ -1291,9 +1297,8 @@ fn analyse(
         unread,
     } = read_callees(&native, target, (&walk.root, entry), ptr_bits, callers);
 
-    let reads = callers == crate::program::Callers::Read;
-    let artifact = native.resolve(entry, walk, &callees, reads)?;
-    let artifact = native.with_call_tables(walk, &callees, reads, artifact)?;
+    let artifact = native.resolve(entry, walk, &callees, callers)?;
+    let artifact = native.with_call_tables(walk, &callees, callers, artifact)?;
     let tables = walk.tables.iter().map(DispatchTable::of).collect();
     Ok(Prepared {
         artifact,
@@ -1344,43 +1349,6 @@ pub(crate) fn declared_pointers(target: &NativeTarget<'_>, name: &str) -> Vec<Ca
 pub fn import_reads(target: &NativeTarget<'_>, name: &str) -> Option<crate::imports::ImportReads> {
     let (declared, machine) = (Declared::import(target, name)?, machine(target).ok()?);
     Some(Placement::new(target, &machine).reads(declared))
-}
-
-/// The declared interfaces of the functions this body calls.
-///
-/// A function whose body the program carries is declared by the binary's
-/// debug information at the address the call reaches; an import, by the
-/// library table under its name. Either reaches the type layer under the
-/// name the call renders with.
-fn declared_signatures(
-    target: &NativeTarget<'_>,
-    callees: &[Callee],
-    extents: &r2types::ProgramExtents,
-) -> r2types::ParsedExternalContext {
-    let mut context = r2types::ParsedExternalContext {
-        program_extents: extents.clone(),
-        ..r2types::ParsedExternalContext::default()
-    };
-    let Ok(machine) = machine(target) else {
-        return context;
-    };
-    let placement = Placement::new(target, &machine);
-    for callee in callees {
-        let declared = Declared::body(target, callee.address).or_else(|| {
-            callee
-                .import
-                .as_deref()
-                .and_then(|import| Declared::import(target, import))
-        });
-        let Some(signature) = declared.and_then(|declared| placement.function_type(declared))
-        else {
-            continue;
-        };
-        context
-            .known_function_signatures
-            .insert(callee.name.clone(), signature);
-    }
-    context
 }
 
 /// One interface again, with stack slots it did not have, stated against
@@ -1510,8 +1478,6 @@ impl TableBytes {
 struct Walked {
     name: String,
     body: crate::body::Body,
-    /// Each function this one reaches, and what it is called.
-    callees: Vec<Callee>,
 }
 
 impl Walked {
@@ -1566,19 +1532,8 @@ impl Walked {
                 unresolved: self.body.unresolved.clone(),
                 exits: self.body.exits.clone(),
             },
-            callees: self.callees.clone(),
         }
     }
-}
-
-/// One function a body calls.
-#[derive(Clone)]
-struct Callee {
-    address: u64,
-    /// What the program calls it.
-    name: String,
-    /// The import it stands for, where the binary says it is one.
-    import: Option<String>,
 }
 
 /// One program, one machine, and the walk over it.
@@ -1604,14 +1559,14 @@ struct Native<'a> {
 
 impl<'a> Native<'a> {
     /// One body sealed against `callees`, and prepared again where it restates its declared frame
-    /// or text it points at; with `caller_reads`, every call decides an ambiguous result. Its first
-    /// seal's facts are collected only where something reads them (doc/adr-resolved-bodies.md).
+    /// or text it points at; in the closed world, sealed once more where its `CallBoundary` decides
+    /// the result. Its first seal's facts are collected only where something reads them.
     fn resolve(
         &self,
         entry: u64,
         walk: &Walk,
         callees: &Callees,
-        caller_reads: bool,
+        world: crate::program::World,
     ) -> Result<Resolution, NativeRefusal> {
         let (root, tables, calls) = (&walk.root, &walk.tables[..], &walk.calls[..]);
         // The binary's debug information declares the body as a library declares an import.
@@ -1633,11 +1588,11 @@ impl<'a> Native<'a> {
             ),
         };
         let mut first = seal_first(None)?;
-        // A body writing both result registers is sealed once more with what the program's calls
-        // read of them (doc/adr-resolved-bodies.md, "Caller reads").
-        let reads = (caller_reads && first.machine_context().result_ambiguous())
-            .then(|| self.program.result_reads(entry))
-            .flatten();
+        // The closed world decides the result from the body's open interface (D166).
+        let reads = (world == crate::program::World::Closed)
+            .then(|| first.machine_context().function_interface().cloned())
+            .flatten()
+            .and_then(|open| self.program.closed_result(entry, &open));
         if reads.is_some() {
             drop(first);
             first = seal_first(reads)?;
@@ -1738,28 +1693,14 @@ impl<'a> Native<'a> {
         Ok(self.walked(body))
     }
 
-    /// One walked body, with what the program calls it and each function it calls.
+    /// One walked body, with what the program calls it.
     fn walked(&self, body: crate::body::Body) -> Walked {
-        // Everything the body reaches, as the preparation reaches it: a
-        // callee reached by a tail jump, or by a jump through an import's
-        // slot, is declared by the same prototype as one reached by a call.
-        let callees = reached(&body, self.program)
-            .iter()
-            .filter_map(|address| {
-                Some(Callee {
-                    address: *address,
-                    name: self.program.name_at(*address)?,
-                    import: self.program.import_at(*address),
-                })
-            })
-            .collect();
         Walked {
             name: self
                 .program
                 .name_at(body.entry)
                 .unwrap_or_else(|| r2source::unnamed_function(body.entry)),
             body,
-            callees,
         }
     }
 
@@ -1797,7 +1738,7 @@ impl<'a> Native<'a> {
         &self,
         walk: &Walk,
         callees: &Callees,
-        caller_reads: bool,
+        world: crate::program::World,
         artifact: Resolution,
     ) -> Result<Resolution, NativeRefusal> {
         let reads = r2ssa::indirect::dispatch_table_reads(artifact.shared_artifact().as_ref());
@@ -1810,7 +1751,7 @@ impl<'a> Native<'a> {
             calls,
             ..walk.clone()
         };
-        self.resolve(walk.root.body.entry, &walk, callees, caller_reads)
+        self.resolve(walk.root.body.entry, &walk, callees, world)
     }
 
     /// Where each of a table's `count` entries sends the dispatch: the value
@@ -2027,14 +1968,14 @@ impl<'a> Native<'a> {
         extra_literals: Vec<(u64, String)>,
         restatement: Restatement,
         (tables, calls): (&[NativePointerTable], &[NativePointerTable]),
-        result_reads: Option<r2source::SourceResultReads>,
+        closed_result: Option<r2source::SourceClosedResult>,
     ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Capture {
             extra_literals,
             restatement,
             tables,
             calls,
-            result_reads,
+            closed_result,
         };
         let (lifted, evidence) = self.lifted(walked, callees, capture)?;
         TrustedSsaArtifact::seal_with_callee_interfaces(
@@ -2042,7 +1983,7 @@ impl<'a> Native<'a> {
             Some(self.target.arch),
             &self.control,
             &evidence,
-            &premises_reading(result_reads.is_some()),
+            &premises_reading(closed_result.is_some()),
         )
         .map_err(NativeRefusal::of_preparation)
     }
@@ -2082,7 +2023,7 @@ impl<'a> Native<'a> {
             restatement,
             tables: &[],
             calls: &[],
-            result_reads: None,
+            closed_result: None,
         };
         let (lifted, evidence) = self.lifted(walked, callees, capture)?;
         TrustedSsaArtifact::seal_against_convention(
@@ -2115,7 +2056,7 @@ impl<'a> Native<'a> {
             restatement,
             tables,
             calls: call_tables,
-            result_reads,
+            closed_result,
         } = capture;
         let Restatement {
             interface,
@@ -2199,7 +2140,7 @@ impl<'a> Native<'a> {
             signature,
             interface,
             loader_role: None,
-            result_reads,
+            closed_result,
             frame_saves: self.program.frame_saves(walked.body.entry),
         };
 
@@ -2218,7 +2159,7 @@ struct Capture<'t> {
     restatement: Restatement,
     tables: &'t [NativePointerTable],
     calls: &'t [NativePointerTable],
-    result_reads: Option<r2source::SourceResultReads>,
+    closed_result: Option<r2source::SourceClosedResult>,
 }
 
 /// Every function this body reaches by a call, tail jump, loaded slot or folded target, each once

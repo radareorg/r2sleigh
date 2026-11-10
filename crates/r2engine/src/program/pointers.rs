@@ -118,19 +118,53 @@ fn derived<S: Source + 'static>(
     body_pointers(view, &target, address)
 }
 
-/// A callee's summary off its walk, resolved alone; no type analysis is derived for it.
-fn body_summary<S: Source + 'static>(
-    view: &View<'_, S>,
-    target: &crate::native::NativeTarget<'_>,
-    address: u64,
-    key: (u64, bool),
-) -> Result<r2ssa::PreparedCalleeSummary, crate::native::Unreadable> {
-    let walked = view.db.get::<super::analysis::Walked>(&key);
-    let walked = walked.expect("a walk asks for no pointer parameters");
-    match walked.resolved() {
-        Ok(walked) => crate::native::callee_summary(target, view, address, walked),
-        Err(refusal) if refusal.stopped() => Err(crate::native::Unreadable::Stopped),
-        Err(_) => Err(crate::native::Unreadable::NotWalked),
+/// A callee's summary off its walk, resolved alone, held per callee: no answer depends on whether
+/// a root read the callee first. No type analysis is derived for it.
+pub(super) struct CalleeSummary;
+
+/// A summary, or why there is none; compared by identity, as a walk is.
+#[derive(Clone)]
+pub(super) struct Summarised(Result<Arc<r2ssa::PreparedCalleeSummary>, crate::native::Unreadable>);
+
+impl PartialEq for Summarised {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Ok(one), Ok(other)) => Arc::ptr_eq(one, other),
+            (Err(one), Err(other)) => one == other,
+            _ => false,
+        }
+    }
+}
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeSummary {
+    type Key = (u64, bool);
+    type Value = Summarised;
+    const NAME: &'static str = "callee-summary";
+    const RETENTION: Retention = Retention::Held;
+
+    /// Work: one walk and one preparation of the callee alone.
+    fn compute(db: &Db<ProgramInputs<S>>, &(address, thumb): &(u64, bool)) -> Summarised {
+        let view = View::new(db, true);
+        let summary = (|| {
+            let target = view
+                .target(address)
+                .map_err(|_| crate::native::Unreadable::NotWalked)?;
+            let walked = db.get::<super::analysis::Walked>(&(address, thumb));
+            let walked = walked.expect("a walk asks for no summary");
+            match walked.resolved() {
+                Ok(walked) => crate::native::callee_summary(&target, &view, address, walked),
+                Err(refusal) if refusal.stopped() => Err(crate::native::Unreadable::Stopped),
+                Err(_) => Err(crate::native::Unreadable::NotWalked),
+            }
+        })();
+        Summarised(summary.map(Arc::new))
+    }
+
+    fn hold(value: &Summarised) -> Hold {
+        match value.0 {
+            Err(crate::native::Unreadable::Stopped) => Hold::Stopped,
+            _ => Hold::Held,
+        }
     }
 }
 
@@ -140,21 +174,22 @@ fn body_pointers<S: Source + 'static>(
     target: &crate::native::NativeTarget<'_>,
     address: u64,
 ) -> (BTreeMap<CanonicalStorageId, Basis>, Cut) {
-    // A callee some root has read already carries its summary; otherwise it
-    // is prepared for this alone, which costs less than reading it whole.
+    // A root's read of the callee alone holds the same summary: reading it prepares nothing.
     let key = (address, target.cpu == "thumb");
     let read = view.db.held::<super::analysis::CalleeReads>(&key);
     let held = read.ok().flatten().and_then(|read| {
         let facts = read.0.facts.as_ref().ok();
-        facts.map(|facts| facts.summary().clone())
+        facts.map(|facts| Arc::new(facts.summary().clone()))
     });
-    let summary = match held {
-        Some(summary) => summary,
-        None => match body_summary(view, target, address, key) {
-            Ok(summary) => summary,
-            Err(crate::native::Unreadable::Stopped) => return (BTreeMap::new(), Cut::Stopped),
-            Err(_) => return (BTreeMap::new(), Cut::Whole),
-        },
+    let summarised = match held {
+        Some(summary) => Ok(std::rc::Rc::new(Summarised(Ok(summary)))),
+        None => view.db.get::<CalleeSummary>(&key),
+    };
+    let summarised = summarised.expect("a summary asks for no pointer parameters");
+    let summary = match &summarised.0 {
+        Ok(summary) => Arc::clone(summary),
+        Err(crate::native::Unreadable::Stopped) => return (BTreeMap::new(), Cut::Stopped),
+        Err(_) => return (BTreeMap::new(), Cut::Whole),
     };
     let slots = crate::native::argument_slots(target);
     let mut found = summary

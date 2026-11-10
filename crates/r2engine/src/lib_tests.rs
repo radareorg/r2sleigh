@@ -2161,14 +2161,6 @@ fn decompile_function_does_not_invent_raw_payload_callee_names() {
         "uncertified raw callee names must not appear in rendered calls: {}",
         response.output
     );
-    assert!(
-        !response
-            .function_facts
-            .type_facts()
-            .known_function_signatures
-            .contains_key("printf"),
-        "uncertified raw callee names must not seed FunctionFacts signatures"
-    );
 }
 
 #[test]
