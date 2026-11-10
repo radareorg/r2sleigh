@@ -166,6 +166,10 @@ Only bytes that no C expression defines separate void from value without a decla
 ## Decided (2026-11-10, by the maintainer)
 
 1. **XMM0 entry lane:** the call-boundary rule stays. An XMM0 entry byte with RAX `Undefined` is `Unproven`, because `double f(double x){ g(); return x; }` under `-fipa-ra` has the same bytes. The 52 base voids it moves are recorded in D208; the closed world decides those whose every site is `Dead` (D202).
+   - Measured at #355 (x86-64 equivalence): 14 records go from `equal` to `residual-trap`, each void in the source with RAX and XMM0 as the caller left them: `and_chain_effect` clang and gcc O1, O2; `inverted_void` gcc O1, O2; `shape_stash` clang and gcc O1, O2; `total_add` clang and gcc O1, O2. Base's `equal` was luck: no fact proved the void.
+   - 8 records that already trapped now trap first at a held-from-entry residual (`and_chain_effect` clang and gcc O0, `inverted_void` clang O0 to O2 and gcc O0, `crc32_init` clang and gcc O0).
+   - Coverage: `_fini` and `_dl_relocate_static_pie` gain 2 gapped obligations on each of the three pinned gcc cells, and `_and_chain_effect` gains 2 on clang 17 O1 and O2. The gcc-O2 `a` equivalence shard ran 1.5 to 2 times slower per source and timed out once at 8 minutes.
+   - D213 is the closed-world rule that renders these `void`.
 2. **The base-void floor:** the 17 base voids that move to `Unproven` are named in S4's known list until their owner proves them. A base `void` that rests on a rejected fact is a lower bound used as an upper bound (call-boundary ADR, "Lower bounds and upper bounds").
 3. **Rows:** a library row decides `void` only when D204's audit has cited it. An uncited row's result stays as base.
 4. **`.isra` clones:** named only by the gate. The engine reads no names.
