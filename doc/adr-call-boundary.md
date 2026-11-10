@@ -339,7 +339,7 @@ Result presence follows six rules:
 - When no path writes a result lane and no lane holds an entry byte of an input location, the result is `Void` at `Decoded`.
 - A lane that holds an entry byte of an input location (`Fill::Entry`: arm64 x0, SysV rdx and xmm0) is `Unproven`. `long keep(long x, long y){sink=y; return x;}` and `void f(long x, long y){sink=y;}` have the same bytes, so neither `Void` nor `Value` is proven.
 - `Value` needs DWARF, a declaration, or a site fate of `Read` under the closed world (`Solved`, premise `UbFreeSource`). A `Returned` fate forwards to the caller's `CallBoundary` (d72 `forwarded`, `reads.rs:123-155`). A cycle of forwarders is `Unproven` with cause `ForwardCycle`. An open world, or `Unknown`, with a written carrier stays `Unproven`. `Unproven` renders as today (`returns.rs:94`), at the seed's width.
-- When a path writes the result, the world is closed and every site is `Dead`, the result is `Void { Solved, ClosedWorld }`. Today this applies to `Unproven` results only (d72). The case of a scratch-written result waits for its rule-8 ADR.
+- When a path writes the result, the world is closed and every site is `Dead`, the result is `Void { Solved, ClosedWorld }`. Today this applies to `Unproven` results only (d72). A written lane that holds a defined byte is `Unproven { cause: Unread }` under the closed world, never `Void` ([scratch-result](adr-scratch-result.md), D202).
 - A pair or a single register is decided per callee (D62). A site that does not read the high half reads the low half, and nothing is invented.
 
 Result width follows five rules:
@@ -393,7 +393,7 @@ A cold `pdd` runs at `World::Open` and joins no sites. A caller's extern then re
 | 3.2.3 `error` | The row cites `error(3)`: `(int, int, const char *, ...)`, `Tail::Variadic` | r2abi | S8 |
 | 3.2.4 libz.so | `DT_NEEDED libc.so.6` together with a `GLIBC_*` version need selects glibc | r2image, r2engine | S8 |
 | 3.2.5 to 3.2.7 | bionic rows, libstdc++ parameters from Itanium mangling with `Unproven` results, KERNEL32 keyed by `Dll` plus name | r2abi | S13 |
-| 3.5.1 to_upper | Under `aa`, every site is `Dead` and the callee does not escape, so `Void { Solved, ClosedWorld }`. The scratch case waits for its ADR. A cold `pdd` keeps the written carrier as `Unproven` | r2engine | S7 |
+| 3.5.1 to_upper | Under `aa`, every site is `Dead` and the callee does not escape, so `Void { Solved, ClosedWorld }`. The scratch case follows [scratch-result](adr-scratch-result.md) (D200, D202). A cold `pdd` keeps the written carrier as `Unproven` | r2engine | S7 |
 | 3.5.2 `\| residual << 32` | The callee's width on the `CallDefine` means a tail into `strcmp` writes 4 Data bytes and `Undefined` above. The header is 32-bit and its sign is D156's | r2ssa, r2engine | S2 |
 | 3.5.3 `int` as `uint64_t` | The call-defined part closes with S2. The lift's `COPY:8` of a `mov eax, imm` constant makes 8 Data bytes, so it stays D74's | r2ssa | S2, D74 |
 | gzclose `uint64_t` for `-2` | `unproven` reads the seed's bits | r2types | S2 |
@@ -541,7 +541,7 @@ S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
 - **Indirect calls with no stated type:** residual. Virtual calls stay residual too.
 - **A library row:** applies only through an import binding. A versioned import binds to the library its version names. An unversioned import binds at `Declared` only where the container's `DT_NEEDED` names one C library. A name match on a static body applies nothing (AGENTS rule 6).
 - **DWARF whose arrivals disagree with placement, or `DW_CC_nocall`:** no declaration for this body; a `Dispute` with refusal evidence.
-- **Void:** only with no written lane and no entry byte on a result lane, or under a proven closed world with every site `Dead`. Exports, taken addresses, variadic callees, unresolved branches, budget `Unknown` and forwarding cycles keep the carrier as `Unproven`. The scratch-result case waits for its ADR.
+- **Void:** only with no written lane and no entry byte on a result lane, or under a proven closed world with every site `Dead`. Exports, taken addresses, variadic callees, unresolved branches, budget `Unknown` and forwarding cycles keep the carrier as `Unproven`. The scratch-result case follows [scratch-result](adr-scratch-result.md).
 - **Value:** only from DWARF, a declaration, or a closed-world `Read` fate. A written carrier alone is `Unproven`.
 - **Bytes read above an `Undefined` result byte:** stay a residual.
 - **`mov eax, imm`:** compilers emit it for a small 64-bit constant (B8+r, 5 bytes). The lift's `COPY:8` makes all 8 bytes Data, so the width stays 8 until D74.
@@ -573,7 +573,7 @@ S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
 - **Name base:** `arg0`. The one name owner numbers from `arg0`, as `pdd` does; `afv` and `afi` change to match, and the census does not move.
 - **Unversioned imports:** an unversioned ELF import binds at `Declared` where the container's `DT_NEEDED` names exactly one C library. The binding rests on that container fact, never on the name alone.
 - **Static library bodies:** no row applies to a statically linked body by its name (AGENTS rule 6). Such a body is typed only from its own evidence.
-- **Scratch-result void:** its rule-8 ADR is written now, beside S1.
+- **Scratch-result void:** its rule-8 ADR is written now, beside S1 ([scratch-result](adr-scratch-result.md), D200 to D208).
 - **Slots against C parameters:** the proof line counts a hole run as slots, not C parameters, so a by-value record or an `__int128` spanning `rsi:rdx` states what is proven and names no C type.
 - **AArch64 and Apple `extension`:** cited `SpecOverride` rows now; the vendored Ghidra spec fix goes upstream as its own pull request, and the override is deleted when the vendored core moves to it.
 - **KERNEL32 and UCRT rows:** a row cites the Microsoft API reference page for the function (header and minimum version). Until a row exists the import stays residual.
