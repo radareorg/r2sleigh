@@ -255,12 +255,13 @@ def declared(dwarf: Dwarf, sub) -> Declared:
 
 
 PRESENCE = ("void_to_void", "void_to_value", "value_to_void", "value_to_value")
-# D201's carrier typedef states where the machine leaves a result and claims no C type (doc/adr-scratch-result.md).
-UNPROVEN_RESULT = re.compile(r"r2sleigh_result_u\d+")
+# D201's carrier typedef states where the machine leaves a result and claims no C type (doc/adr-scratch-result.md);
+# D165's hole typedef states a slot the body never reads and claims none either (doc/adr-call-boundary.md).
+UNPROVEN_RESULT = re.compile(r"r2sleigh_result_u\d+|r2sleigh_unread_[uf]\d+")
 
 
 def unproven(actual: c_types.CType) -> bool:
-    """A result spelled through the carrier typedef: the engine marks it unproven, so it is no silent claim."""
+    """A type spelled through a carrier or hole typedef: the engine marks it unproven, so it is no silent claim."""
     return actual.kind == c_types.NAMED and UNPROVEN_RESULT.fullmatch(actual.name) is not None
 
 

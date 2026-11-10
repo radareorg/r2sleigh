@@ -1,5 +1,25 @@
 mod prepared;
 mod returns;
+/// The type a hole spells: `r2sleigh_unread_uN` or `_fN` over its class at `width_bits`, a typedef
+/// the renderer's prelude declares and that claims no C type (doc/adr-call-boundary.md, Refusals).
+pub fn unread_slot(
+    class: Option<r2source::convention::SlotClass>,
+    width_bits: u32,
+) -> Option<CTypeLike> {
+    let (tag, ty) = match class {
+        Some(r2source::convention::SlotClass::Float) if matches!(width_bits, 32 | 64) => {
+            ('f', CTypeLike::Float(width_bits))
+        }
+        Some(r2source::convention::SlotClass::Float) => return None,
+        _ if matches!(width_bits, 8 | 16 | 32 | 64) => ('u', CTypeLike::machine_bits(width_bits)),
+        _ => return None,
+    };
+    Some(CTypeLike::Typedef {
+        name: format!("r2sleigh_unread_{tag}{width_bits}"),
+        ty: Box::new(ty),
+    })
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -999,6 +1019,14 @@ impl SourceOwnedFunctionFacts {
             .machine_context()
             .memory_model()
             .default_address_bits();
+        // A hole states no type: its class's typedef at its width, which claims none (D165).
+        let hole = (self.source.machine_context().function_interface())
+            .and_then(|interface| interface.parameters().get(slot))
+            .filter(|parameter| parameter.is_hole())
+            .and_then(|parameter| unread_slot(parameter.class(), width_bits));
+        if let Some(hole) = hole {
+            return Some(Fact::new(hole, Confidence::of(Basis::Convention)));
+        }
         let types = (self.source.machine_context().function_interface()).map_or_else(
             || Confidence::of(Basis::Convention),
             |interface| interface.types().clone(),

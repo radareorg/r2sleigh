@@ -951,10 +951,9 @@ impl<'a> Values<'a> {
                 })
                 .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
             let differs = declared.as_ref().is_some_and(|declared| *declared != class);
-            // A hole states no type: its class's typedef, which claims none (D165).
-            let hole = (input.parameter_is_hole(index as usize))
-                .then(|| crate::prelude::unread_slot(&class))
-                .flatten();
+            // A hole states no type: r2types spells its class's typedef, which claims none (D165).
+            let hole = (input.parameter_declaration(index as usize, ty.width_bits()))
+                .filter(crate::prelude::is_unread_slot);
             let differs = differs && hole.is_none();
             let c = hole.or(declared).unwrap_or(class);
             let named = crate::ast::c_identifier(&input.parameter_name(index as usize));

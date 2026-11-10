@@ -71,6 +71,7 @@ pub use function_facts::{
     ReturnTypeRefusal, ReturnValueRenderFact, SourceOwnedCalleeSignature, SourceOwnedFunctionFacts,
     StackCallArgumentLocationFact, UnprovenCause, admissible_declaration_type,
     admit_declaration_type, aggregate_is_definable, aggregate_members, declaration_type_width_bits,
+    unread_slot,
 };
 
 pub use model::{Signedness, Type};

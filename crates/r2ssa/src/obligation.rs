@@ -927,10 +927,8 @@ impl SemanticObligationInventory {
                         SemanticObligationComponent::StackOffset(offset)
                     }
                 };
-                // A preserved-entry argument names no value in this function,
-                // so it has no producer to keep live. The argument obligation
-                // still exists: the call reads that carrier either way.
-                // A slot the callee ignores passes its typed residual, which reads no value.
+                // A preserved-entry argument, or a slot the callee ignores (D165), keeps no producer
+                // live; the argument obligation stands, since the call reads that carrier.
                 let inputs = match argument.value {
                     _ if boundary.ignores(argument) => Vec::new(),
                     crate::semantic::SourceCallArgumentValue::Value(value) => vec![value],
