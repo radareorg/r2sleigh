@@ -413,7 +413,7 @@ A cold `pdd` runs at `World::Open` and joins no sites. A caller's extern then re
 | 3.8.1 Win64 home | `localrange` 8..39 becomes `OwnedRange::Home`. The homing store is a callee-owned save and the reload is no stack parameter | r2sleigh-lift, r2ssa | S10 |
 | 3.8.2 MSVC variadic | A home whose address reaches `__stdio_common_vfprintf`'s `Tail::VaList` starts the tail. UCRT printf becomes `(fmt, ...)` | r2abi, r2ssa | S10 |
 | 3.8.3 `/GS` | r2image reads the load-config `SecurityCookie`. The check callee is proven by its body, and its name decides nothing | r2image, r2ssa | S10 |
-| 3.8.4 canary entry load | `unobserved_compiler_inserted` (`certificates/mod.rs:1515`) reads the returned value on the guard branch's passing edge. There the difference is 0, so the return does not observe the load. This does not depend on D72 | r2ssa | S11 |
+| 3.8.4 canary entry load | The decided check's `reload - guard` is 0 where it is defined (`stack_protector.rs`, `decide`), so a returned carrier holding it does not observe the load. This does not depend on D72 | r2ssa | S11 |
 | 3.8.5 `rbp`-relative restore | One `SavedRegister` role resolves `rbp`-relative reloads through the frame base. An lldb session first decides whether the reload is not reached or removed as dead | r2ssa | S11 |
 | 3.8.6 d8 to d15 | `preserved` holds `LaneSet { v8, 0..8 }`, cited from AAPCS64 6.1.2. A `d8` store is a lane save | r2ssa | S11 |
 
@@ -739,3 +739,18 @@ What the code said that this ADR did not, and the owner chosen:
 - Census: 1 function moved, rv_O0g `main`'s `extern const int8_t* g_msg` to `const char*` (DWARF's `char`, now `Char` in the graph where the spelling read `int8_t`). radare2's arg, back1, bomb and bashbot x86-64: byte-identical.
 - radare2's row gives `sigprocmask` a `pid_t` result (`types.sdb.txt:2996`); POSIX states `int`. The graph carries it; emission spells `int32_t` either way.
 - The Dylint `type_spelling_reparsed` (deny) flags a path to `parse_c_type_like` outside its defining module in production code. Its allowlist, `TYPE_SPELLING_REPARSE_ALLOWLIST`, is empty.
+
+
+## S11 as built (2026-11-10)
+
+What the code said that this ADR did not, and the owner chosen:
+
+- Base `s8-library-rows` leaves 3 bzip2 -O0 functions with `FS_OFFSET_0`, not 16: the audit ran on master 14d384c3b. Two have a decided check, one has none.
+- The decided check's difference: `decide` already rewrote each reread as a copy of the first read, but `reload - guard` read two copies, so `a == b` never fired and the sub stayed. The return read the sub, and the canary load stayed observed. `decide` now writes the difference as 0 where it is defined: under `UbFreeSource` the two reads are equal on every path, and the failing edge is gone. `unobserved_compiler_inserted` is unchanged, and the passing-edge reading the row named is not needed.
+- gcc emits no check in a function that never returns (bzip2 `cleanUpAndFail`): the guard is stored and never read. `stack_protector::unchecked` marks a guard read stored to a frame slot no load reads as compiler-inserted, and the frame round trip admits a save no load reads (its `push rbp` is never popped).
+- `mapSuffix`, decided with lldb on the `debugger` build: the reload `mov rbx, [rbp-8]` is reached and live. The callee-allocation proof read no stack pointer at it: `leave` redefines `rsp`, so the merge before the reload keeps no `rsp` phi, and `ReachingStorage::join` gave `Conflict`. The slot was refused as a callee allocation, so no round trip formed. `ReachingStorage::arriving` hands the proof each edge's state where no write in the block precedes the access, and the proof takes the offset every edge agrees on. The frame base is not read: the edges place the stack pointer exactly.
+- `saved_register.rs` is the `SavedRegister` role: a store of a preserved lane's entry value, whole or a `Subpiece` of an entry root. `slot_promotion::saves`, `structural_save` (now `frame_slot`) and the round trip's two copy-chain walks read it; `exact_copy_chain_to_storage` is deleted. A restore of a lane is the insert into its root at the lane's bits, then inserts that leave those bits alone (`ldr d8` zeroes `z8` bytes 8..32).
+- `preserved` names each cspec register as bytes of the widest register holding it: `d8` is `z8` bytes 0..8 (AARCH64.sla names no `v8`). `killed` and `likely_trash` are placed the same way, and the call effect reads every list narrowed, so the effect is unchanged.
+- toybox: 6 functions save d8 to d15, 4 render, and their 8 residual stores fall to 0. The other 2 refuse at a switch dispatch (hand audit 3.1) at base and head. Saves found also split escaped runs: `0x501c8` moves 36 obligations from rendered to `assumed`, with the same addresses.
+- `frame_agree.py` over the census: agree stays 0 (of 423, then 419), and afv-only falls 389 to 385. Four zig aarch64 census goldens move: each elides its d8 lane save and restore (+2 obligations, `elided`), and `0x10105e4` loses its `StoreNotSpelled` residual.
+- Cost: release `pdd` on 0pack `0x62ecf0`, 0pack `0x58e3d0` and pumasim `0x23fdf0` retires the same instructions within 0.3%. `aa` plus `pdd` over all 1,148 ls-toybox functions retires 211.0 G at base and 212.1 G at head (+0.5%).
