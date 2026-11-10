@@ -85,7 +85,7 @@ impl Placement<'_> {
     pub(super) fn frame(
         &self,
         declared: Declared<'_>,
-        placed: &[CanonicalStorageId],
+        placed: &[Option<CanonicalStorageId>],
         parameters: &[Option<SourceLogicalValue>],
         interned: &mut Interned<'_>,
     ) -> DeclaredFrame {
@@ -100,7 +100,10 @@ impl Placement<'_> {
             .zip(placed)
             .zip(parameters);
         for (index, ((parameter, arrived), value)) in homes.enumerate() {
-            let (Some(offset), Some(value)) = (parameter.frame_offset, value) else {
+            // A stack parameter's home is its own argument slot, stated with the interface.
+            let (Some(offset), Some(value), Some(arrived)) =
+                (parameter.frame_offset, value, arrived)
+            else {
                 continue;
             };
             let Ok(size) = u32::try_from(value.carrier().size_bits() / 8) else {

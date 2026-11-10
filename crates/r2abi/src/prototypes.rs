@@ -26,6 +26,9 @@ pub struct Prototype {
     pub variadic: bool,
     /// DWARF's `DW_AT_noreturn`; a library row states its own on `LibraryRow::noreturn`.
     pub noreturn: bool,
+    /// DWARF's `DW_CC_nocall`: the compiler passes the arguments its own way, so no convention
+    /// places them.
+    pub nocall: bool,
     /// What the offsets in `locals` are measured from.
     pub frame_base: Option<FrameBase>,
     /// Each named variable the declaration places in the frame.

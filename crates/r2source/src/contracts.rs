@@ -9,6 +9,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 
 use crate::ConventionId;
+use crate::convention::SlotClass;
 
 use crate::type_graph::{
     SourceCarrierKind, SourceCarrierProjection, SourceLogicalValue, SourceType, SourceTypeGraph,
@@ -277,6 +278,23 @@ pub enum SourceFloorCause {
     RegisterRead,
     /// The first slot past the parameters may be handed to this call.
     HandedOn(SourceUnprovenCall),
+    /// A declared parameter of a class the convention places nowhere here; it and the rest drop.
+    Unplaced(SourceUnplacedClass),
+}
+
+/// A declared class no location takes here (doc/adr-call-boundary.md, Refusals).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum SourceUnplacedClass {
+    /// A float of this many bits that is no `float` or `double` (`long double`).
+    Float(u32),
+    /// An integer wider than one register (`__int128`).
+    WideInteger(u32),
+    /// A record or array passed by value.
+    Aggregate,
+    /// A type the declaration does not size.
+    Unsized,
+    /// A stack slot this convention packs by size (Apple arm64).
+    PackedStack,
 }
 
 /// Every cause a function's parameters are only a floor, sorted; never empty.
@@ -4208,6 +4226,27 @@ impl SourceConventionSlots {
 
     pub const fn float_result_slot(&self) -> Option<CanonicalStorageId> {
         self.float_result_slot
+    }
+
+    /// The class of the argument or result register holding `storage`; `None` where no
+    /// register of exactly one class holds it.
+    pub fn class_of(&self, storage: CanonicalStorageId) -> Option<SlotClass> {
+        let within = |slot: &CanonicalStorageId| {
+            slot.space == storage.space
+                && slot.offset <= storage.offset
+                && storage.offset + u64::from(storage.size) <= slot.offset + u64::from(slot.size)
+        };
+        let integer = (self.argument_slots.iter())
+            .chain(&self.result_slot)
+            .any(within);
+        let float = (self.float_argument_slots.iter())
+            .chain(&self.float_result_slot)
+            .any(within);
+        match (integer, float) {
+            (true, false) => Some(SlotClass::Integer),
+            (false, true) => Some(SlotClass::Float),
+            _ => None,
+        }
     }
 
     /// Record the second integer result register, refusing one that is no register, is the first,

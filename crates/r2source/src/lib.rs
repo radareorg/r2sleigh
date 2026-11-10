@@ -1000,6 +1000,8 @@ struct SnapshotState {
     convention_slots: SourceConventionSlots,
     /// What the convention says a call does to the registers, where it says.
     call_effect: Option<SourceCallEffect>,
+    /// The model `convention_slots` is a view of, where the capture holds one.
+    convention: Option<Arc<ConventionModel>>,
     captured_fields: CapturedSourceFields,
     diagnostics: DiagnosticIdentity,
 }
@@ -1150,6 +1152,7 @@ impl OwnedFunctionSnapshot {
             machine_roles,
             convention_slots,
             call_effect,
+            convention: None,
             captured_fields,
             diagnostics,
         })))
@@ -1226,6 +1229,19 @@ impl OwnedFunctionSnapshot {
     /// What the convention says a call does to the registers, where it says.
     pub fn call_effect(&self) -> Option<&SourceCallEffect> {
         self.0.call_effect.as_ref()
+    }
+
+    /// The convention model the slots are a view of, where the capture holds one.
+    pub fn convention(&self) -> Option<&ConventionModel> {
+        self.0.convention.as_deref()
+    }
+
+    /// The same capture with the model its slots view; a model of another convention is ignored.
+    pub(crate) fn with_convention(mut self, model: Arc<ConventionModel>) -> Self {
+        if model.id == self.0.convention_slots.convention() {
+            Arc::make_mut(&mut self.0).convention = Some(model);
+        }
+        self
     }
 
     pub fn captured_fields(&self) -> CapturedSourceFields {

@@ -34,6 +34,8 @@ pub struct NativeMachine {
     pub slots: SourceConventionSlots,
     /// What the convention says a call does to the registers, where it says.
     pub call_effect: Option<SourceCallEffect>,
+    /// The convention the slots are a view of; `place` reads its sections.
+    pub convention: Option<std::sync::Arc<crate::ConventionModel>>,
 }
 
 /// One basic block, as bytes and where control goes from it.
@@ -269,6 +271,10 @@ pub fn capture(
         },
         DiagnosticIdentity(0),
     )
+    .map(|snapshot| match &machine.convention {
+        Some(model) => snapshot.with_convention(model.clone()),
+        None => snapshot,
+    })
 }
 
 /// What an interface says about itself, or false where there is none.
@@ -339,6 +345,7 @@ mod tests {
             roles,
             slots,
             call_effect: None,
+            convention: None,
         }
     }
 

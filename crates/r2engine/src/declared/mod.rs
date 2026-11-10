@@ -18,7 +18,11 @@ use graph::Interned;
 
 use r2abi::{Arrival, CDataModel, Prototype, ScalarKind, Type, TypeGraph, TypeId};
 use r2source::native::NativeMachine;
-use r2source::{CanonicalStorageId, SourceFunctionReturn, SourceLogicalValue};
+use r2source::{
+    CanonicalStorageId, SourceFunctionReturn, SourceLogicalValue, SourceParameterLocation,
+    SourceUnplacedClass,
+};
+use r2ssa::place::ParamClass;
 
 use crate::native::{NativeTarget, storage};
 
@@ -94,14 +98,6 @@ pub(crate) struct Restatement {
     pub(crate) slot_names: Vec<r2source::SourceStackSlotName>,
 }
 
-/// Which registers a declared value travels in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Class {
-    Integer,
-    /// A float of this many bytes.
-    Float(u32),
-}
-
 /// The machine one declaration is placed in.
 pub(crate) struct Placement<'a> {
     pub(crate) target: &'a NativeTarget<'a>,
@@ -120,91 +116,110 @@ impl<'a> Placement<'a> {
         }
     }
 
-    /// The register class a value of this type travels in, or why none.
-    ///
-    /// A record's class depends on its members and on the convention's rules
-    /// for them; `long double` has a class of its own on every machine here.
-    /// Neither is decided here, and a declaration needing one is refused
-    /// rather than placed in the next integer register and wrong about every
-    /// argument after it.
-    fn class(&self, graph: &TypeGraph, ty: TypeId) -> Result<Class, String> {
+    /// The class a value of this type travels in; `r2ssa::place` places it.
+    fn class(&self, graph: &TypeGraph, ty: TypeId) -> ParamClass {
         let resolved = graph.resolved(ty);
-        let scalar_bits = match resolved {
+        let bits = match resolved {
             Some(Type::Scalar(scalar)) => self.model.bits(scalar.width),
             Some(Type::Enum { underlying, .. }) => graph
                 .size_bits(*underlying, &self.model)
                 .and_then(|bits| u32::try_from(bits).ok()),
+            Some(Type::Pointer { .. }) => Some(self.model.pointer_bits),
             _ => None,
         };
-        match (resolved, scalar_bits) {
-            (Some(Type::Scalar(scalar)), bits) if scalar.kind == ScalarKind::Float => match bits {
-                Some(bits @ (32 | 64)) => Ok(Class::Float(bits / 8)),
-                bits => Err(format!("a {bits:?}-bit float's class is the convention's")),
-            },
-            (Some(Type::Pointer { .. }), _) => Ok(Class::Integer),
-            // One integer register holds at most its own width; a wider
-            // integer takes two, which is the convention's to place.
-            (_, Some(bits)) if bits <= self.model.pointer_bits => Ok(Class::Integer),
-            (other, _) => Err(format!("no register class for {other:?}")),
+        let bytes = |bits: u32| u8::try_from(bits / 8).unwrap_or(u8::MAX);
+        match (resolved, bits) {
+            (Some(Type::Scalar(scalar)), Some(bits @ (32 | 64)))
+                if scalar.kind == ScalarKind::Float =>
+            {
+                ParamClass::Float(bytes(bits))
+            }
+            (Some(Type::Scalar(scalar)), bits) if scalar.kind == ScalarKind::Float => {
+                ParamClass::Unplaced(
+                    bits.map_or(SourceUnplacedClass::Unsized, SourceUnplacedClass::Float),
+                )
+            }
+            (_, Some(bits)) if bits <= self.model.pointer_bits => ParamClass::Integer(bytes(bits)),
+            (_, Some(bits)) => ParamClass::Unplaced(SourceUnplacedClass::WideInteger(bits)),
+            (Some(Type::Record(_) | Type::Array { .. }), None) => {
+                ParamClass::Unplaced(SourceUnplacedClass::Aggregate)
+            }
+            (_, None) => ParamClass::Unplaced(SourceUnplacedClass::Unsized),
         }
     }
 
-    /// A value narrower than its register takes its low bytes, as a Sleigh pentry places it.
-    fn low_lane(&self, slot: CanonicalStorageId, bytes: u32) -> CanonicalStorageId {
-        match self.target.arch.memory_endianness {
-            r2il::Endianness::Little if bytes < slot.size => CanonicalStorageId {
-                size: bytes,
-                ..slot
-            },
-            _ => slot,
-        }
+    /// Where each declared parameter arrives, up to the first class no location takes.
+    pub(crate) fn placement(&self, declared: Declared<'_>) -> r2ssa::place::Placement {
+        let classes = (declared.prototype.parameters.iter())
+            .map(|parameter| self.class(declared.graph, parameter.ty))
+            .collect::<Vec<_>>();
+        r2ssa::place::place(&self.target.convention, &classes)
     }
 
-    /// Where the declared parameters arrive, up to the first that does not
-    /// arrive in a register this can name.
-    ///
-    /// A parameter takes the next register of its own class, counted per class or, where the
-    /// convention shares positions, by its position. A placed prefix stays placed.
-    pub(crate) fn placed_prefix(&self, declared: Declared<'_>) -> Vec<CanonicalStorageId> {
-        if let Some(why) = self.leading_unstated(declared) {
-            r2il::refusal_evidence!("declared-interface", "{}: {why}", declared.prototype.name);
+    /// The register each placed parameter arrives in; `None` for one on the stack.
+    pub(crate) fn registers(&self, declared: Declared<'_>) -> Vec<Option<CanonicalStorageId>> {
+        if self.leading_unstated(declared).is_some() {
             return Vec::new();
         }
-        let slots = &self.machine.slots;
-        let shared = slots.shared_positions();
-        let index = |position: usize, count: usize| if shared { position } else { count - 1 };
-        let (mut integers, mut floats) = (0usize, 0usize);
-        let mut placed = Vec::with_capacity(declared.prototype.parameters.len());
-        for (position, parameter) in declared.prototype.parameters.iter().enumerate() {
-            let slot = match self.class(declared.graph, parameter.ty) {
-                Ok(Class::Float(bytes)) => {
-                    floats += 1;
-                    let slot = slots.float_argument_slots().get(index(position, floats));
-                    slot.map(|slot| self.low_lane(*slot, bytes))
-                }
-                Ok(Class::Integer) => {
-                    integers += 1;
-                    slots
-                        .argument_slots()
-                        .get(index(position, integers))
-                        .copied()
-                }
-                Err(reason) => {
+        (self.placement(declared).locations.iter())
+            .map(|location| location.register())
+            .collect()
+    }
+
+    /// A declaration placed for the body it describes, or `None` where it is not this body's.
+    fn declared_placement(&self, declared: Declared<'_>) -> Option<r2ssa::place::Placement> {
+        if let Some(why) = self.leading_unstated(declared) {
+            r2il::refusal_evidence!("declared-interface", "{}: {why}", declared.prototype.name);
+            return None;
+        }
+        let prototype = declared.prototype;
+        let classes = (prototype.parameters.iter())
+            .map(|parameter| self.class(declared.graph, parameter.ty))
+            .collect::<Vec<_>>();
+        let arrivals = (prototype.parameters.iter())
+            .map(|parameter| match parameter.arrival? {
+                Arrival::Unpassed => Some(r2ssa::place::Arrival::Unpassed),
+                Arrival::Register(number) => (self.target.dwarf.name_of(number))
+                    .and_then(|name| storage(self.target.arch, name).ok())
+                    .map(r2ssa::place::Arrival::Register),
+            })
+            .collect::<Vec<_>>();
+        let placed = r2ssa::place::place_declared(
+            &self.target.convention,
+            &classes,
+            &arrivals,
+            prototype.nocall,
+        );
+        match placed {
+            Ok(placement) => {
+                if let Some(class) = placement.floor {
                     r2il::refusal_evidence!(
                         "declared-interface",
-                        "{}: `{}`: {reason}",
-                        declared.prototype.name,
-                        parameter.spelling.as_written()
+                        "{}: parameter {} has no location ({class:?}); the prefix stays placed",
+                        prototype.name,
+                        placement.locations.len()
                     );
-                    None
                 }
-            };
-            let Some(slot) = slot else {
-                break;
-            };
-            placed.push(slot);
+                Some(placement)
+            }
+            Err(r2ssa::place::PlacementRefusal::NoCall) => {
+                r2il::refusal_evidence!(
+                    "declared-interface",
+                    "{}: DW_CC_nocall, so no convention places its parameters",
+                    prototype.name
+                );
+                None
+            }
+            Err(r2ssa::place::PlacementRefusal::Arrival(index)) => {
+                r2il::refusal_evidence!(
+                    "declared-interface",
+                    "{}: parameter {index} does not arrive where the declaration places it, so \
+                     the body is a specialisation the prototype does not describe",
+                    prototype.name
+                );
+                None
+            }
         }
-        placed
     }
 
     /// Why a row's first location may hold an argument it does not state (a VTT, or a hidden result
@@ -240,13 +255,6 @@ impl<'a> Placement<'a> {
         })
     }
 
-    /// Where every declared parameter arrives, or nothing where one cannot
-    /// be placed.
-    pub(crate) fn placed(&self, declared: Declared<'_>) -> Option<Vec<CanonicalStorageId>> {
-        let placed = self.placed_prefix(declared);
-        (placed.len() == declared.prototype.parameters.len()).then_some(placed)
-    }
-
     /// Where the result arrives: where its own class arrives. A machine with
     /// separate floating-point registers returns a `double` in one of those.
     /// A result whose class this does not decide is not claimed at all.
@@ -256,16 +264,17 @@ impl<'a> Placement<'a> {
             return (SourceFunctionReturn::Void, None);
         }
         let storage = match self.class(declared.graph, returns) {
-            Ok(Class::Float(bytes)) => self
-                .machine
-                .slots
-                .float_result_slot()
-                .map(|slot| self.low_lane(slot, bytes)),
-            Ok(Class::Integer) => self.machine.slots.result_slot(),
-            Err(reason) => {
+            ParamClass::Float(bytes) => {
+                (self.machine.slots.float_result_slot()).map(|slot| CanonicalStorageId {
+                    size: u32::from(bytes).min(slot.size),
+                    ..slot
+                })
+            }
+            ParamClass::Integer(_) => self.machine.slots.result_slot(),
+            ParamClass::Unplaced(class) => {
                 r2il::refusal_evidence!(
                     "declared-interface",
-                    "{} returns `{}`: {reason}",
+                    "{} returns `{}`: no register class ({class:?})",
                     declared.prototype.name,
                     declared.prototype.returns.as_written()
                 );
@@ -278,43 +287,16 @@ impl<'a> Placement<'a> {
         }
     }
 
-    /// Whether the body begins where the declaration says its parameters are.
-    ///
-    /// A compiler's specialisation of a function -- a `.constprop` clone with
-    /// a constant folded in, an `.isra` one passing a member for the pointer
-    /// to it -- is described against the source's prototype, which is then
-    /// not what the body takes. Where the declaration says a parameter is in
-    /// another register at the first instruction, or passed nowhere, the
-    /// prototype is not this body's interface.
-    fn arrivals_hold(&self, declared: Declared<'_>, placed: &[CanonicalStorageId]) -> bool {
-        for (index, (parameter, slot)) in
-            declared.prototype.parameters.iter().zip(placed).enumerate()
-        {
-            let held = match parameter.arrival {
-                None => true,
-                Some(Arrival::Unpassed) => false,
-                Some(Arrival::Register(number)) => (self.target.dwarf.name_of(number))
-                    .and_then(|name| storage(self.target.arch, name).ok())
-                    .is_none_or(|arrived| arrived.offset == slot.offset),
-            };
-            if !held {
-                r2il::refusal_evidence!(
-                    "declared-interface",
-                    "{}: parameter {index} does not arrive where the declaration places it, so \
-                     the body is a specialisation the prototype does not describe",
-                    declared.prototype.name
-                );
-                return false;
-            }
-        }
-        true
-    }
-
     /// Registers a call to this import may read: its fixed locations, plus every other argument
     /// register under any tail but `None` (Apple arm64 passes `...` on the stack). O(locations).
     pub(crate) fn reads(&self, declared: Declared<'_>) -> crate::imports::ImportReads {
-        let mut registers = self.placed_prefix(declared);
-        let placed_whole = registers.len() == declared.prototype.parameters.len();
+        let unstated = self.leading_unstated(declared).is_some();
+        let placement = self.placement(declared);
+        let placed_whole = !unstated && placement.is_whole();
+        let mut registers = (placement.locations.iter())
+            .filter(|_| !unstated)
+            .filter_map(|location| location.register())
+            .collect::<Vec<_>>();
         let tail = match self.leading_unstated(declared) {
             Some(_) => r2abi::Tail::Unstated,
             None => declared.row.map_or(r2abi::Tail::Unstated, |row| row.tail),
@@ -349,11 +331,8 @@ impl<'a> Placement<'a> {
 
     /// Where a declaration says it takes a pointer.
     pub(crate) fn pointers(&self, declared: Declared<'_>) -> Vec<CanonicalStorageId> {
-        let placed = self.placed_prefix(declared);
-        declared
-            .prototype
-            .parameters
-            .iter()
+        let placed = self.registers(declared);
+        (declared.prototype.parameters.iter())
             .zip(placed)
             .filter(|(parameter, _)| {
                 matches!(
@@ -361,7 +340,7 @@ impl<'a> Placement<'a> {
                     Some(Type::Pointer { .. })
                 )
             })
-            .map(|(_, storage)| storage)
+            .filter_map(|(_, storage)| storage)
             .collect()
     }
 
@@ -390,38 +369,63 @@ impl Placement<'_> {
     /// no place in the interface's graph carries no type, and the others keep
     /// theirs.
     pub(crate) fn restatement(&self, declared: Declared<'_>, with_frame: bool) -> Restatement {
-        let Some(placed) = self.placed(declared) else {
+        let Some(placement) = self.declared_placement(declared) else {
             return Restatement::default();
         };
-        if !self.arrivals_hold(declared, &placed) {
-            return Restatement::default();
-        }
+        let placed = &placement.locations;
         let (returns, result) = self.result(declared);
         let mut interned = Interned::new(declared.graph, self.model);
-        let parameters = declared
-            .prototype
-            .parameters
-            .iter()
-            .zip(&placed)
-            .map(|(parameter, slot)| interned.value(parameter.ty, slot.size))
+        let parameters = (declared.prototype.parameters.iter())
+            .zip(placed)
+            .map(|(parameter, location)| interned.value(parameter.ty, carrier_bytes(location)))
             .collect::<Vec<_>>();
         let return_value =
             result.and_then(|slot| interned.value(declared.prototype.return_type, slot.size));
-        let frame = match with_frame {
-            true => self.frame(declared, &placed, &parameters, &mut interned),
+        let registers = placed.iter().map(|location| location.register());
+        let mut frame = match with_frame {
+            true => self.frame(
+                declared,
+                &registers.collect::<Vec<_>>(),
+                &parameters,
+                &mut interned,
+            ),
             false => frame::DeclaredFrame::default(),
         };
+        let stack_pointer = self.machine.roles.stack_pointer_storage();
+        for (index, (location, value)) in placed.iter().zip(&parameters).enumerate() {
+            let (
+                SourceParameterLocation::Stack {
+                    offset, size_bytes, ..
+                },
+                Some(sp),
+            ) = (location, stack_pointer)
+            else {
+                continue;
+            };
+            let base = r2source::StackAddressBase::StackPointer;
+            let slot = r2source::SourceStackSlotSpec::new_parameter(
+                base,
+                sp,
+                *offset,
+                *size_bytes,
+                index as u32,
+            );
+            frame.slots.push(match value {
+                Some(value) => slot.with_logical_type(value.type_id()),
+                None => slot,
+            });
+        }
         let typed = Typed {
             parameters,
             returns,
             return_value,
             graph: interned.finish(),
         };
-        let interface = self.interface(declared, &placed, typed, &frame);
+        let interface = self.interface(declared, &placement, typed, &frame);
         Restatement {
             signature: interface
                 .is_some()
-                .then(|| presentation(declared.prototype)),
+                .then(|| presentation(declared.prototype, placed.len())),
             slot_names: frame.names,
             interface,
         }
@@ -430,15 +434,14 @@ impl Placement<'_> {
     fn interface(
         &self,
         declared: Declared<'_>,
-        placed: &[CanonicalStorageId],
+        placement: &r2ssa::place::Placement,
         typed: Typed,
         frame: &frame::DeclaredFrame,
     ) -> Option<r2source::SourceFunctionInterface> {
         let name = &declared.prototype.name;
-        let parameters = placed
-            .iter()
-            .enumerate()
-            .map(|(index, storage)| r2source::SourceAbiParameterSpec::new(index as u32, *storage));
+        let parameters = (placement.locations.iter().enumerate()).map(|(index, location)| {
+            r2source::SourceAbiParameterSpec::with_location(index as u32, *location)
+        });
         let revision = format!("declared:{name}").into_bytes();
         let convention = self.machine.slots.convention();
         let interface = r2source::SourceFunctionInterface::new_exact_with_logical_types(
@@ -458,6 +461,12 @@ impl Placement<'_> {
             );
         })
         .ok()?;
+        let interface = match placement.floor {
+            None => interface,
+            Some(class) => interface.with_arity_floor(r2source::SourceArityFloor::of([
+                r2source::SourceFloorCause::Unplaced(class),
+            ])?),
+        };
         // Typed first: a declared format parameter is believed on what the
         // declaration's types are.
         let interface = formatted(
@@ -531,6 +540,14 @@ fn formatted(
         .ok()
 }
 
+/// The bytes a placed parameter's carrier holds.
+fn carrier_bytes(location: &SourceParameterLocation) -> u32 {
+    match *location {
+        SourceParameterLocation::Register(storage) => storage.size,
+        SourceParameterLocation::Stack { size_bytes, .. } => size_bytes,
+    }
+}
+
 /// The typed half of one declaration: a logical value per parameter, the
 /// result's, and the graph they are nodes of.
 struct Typed {
@@ -545,8 +562,8 @@ struct Typed {
 ///
 /// The interface carries the widths; without this the renderer has only
 /// those, so a `size_t` arrives as a 64-bit register and is spelled as one.
-fn presentation(prototype: &Prototype) -> r2source::SourceSignaturePresentation {
-    let parameters = prototype.parameters.iter().map(|parameter| {
+fn presentation(prototype: &Prototype, placed: usize) -> r2source::SourceSignaturePresentation {
+    let parameters = prototype.parameters.iter().take(placed).map(|parameter| {
         r2source::SourceSignatureParameter::new(
             parameter.name.clone(),
             Some(parameter.spelling.as_written().to_owned()),

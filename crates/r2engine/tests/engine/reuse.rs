@@ -204,6 +204,7 @@ fn amd64(embedded: &r2sleigh_lift::EmbeddedMachine) -> r2source::native::NativeM
         roles,
         slots,
         call_effect: None,
+        convention: None,
     }
 }
 

@@ -1856,7 +1856,7 @@ impl<'a> Values<'a> {
             (r2source::SourceFunctionReturn::Register { storage }, Some((carried, class)))
                 if storage == *carried =>
             {
-                let carrier = carrier_class(self.artifact, storage, storage.size * 8);
+                let carrier = located_class(self.artifact, storage, storage.size * 8);
                 let own = match decided {
                     Some(CType::Void) => return None,
                     Some(decided) => agreed(class_of(decided, storage.size * 8), carrier)?,
@@ -2239,7 +2239,7 @@ impl<'a> Values<'a> {
                     SemanticObligationComponent::RegisterSlot { storage, .. }
                         if o.id.kind == SemanticObligationKind::ReturnValue =>
                     {
-                        carrier_class(self.artifact, storage, storage.size * 8)
+                        located_class(self.artifact, storage, storage.size * 8)
                     }
                     _ => None,
                 });
@@ -2651,33 +2651,27 @@ pub(super) fn class_of(ty: &r2types::CTypeLike, width_bits: u32) -> Option<Machi
     }
 }
 
-/// The class a value `width_bits` wide passes in, held in `storage`: its slot says general or
-/// float register, `storage`'s size the width (a float's lane); `None` outside every slot.
-pub(super) fn carrier_class(
+/// The type a value `width_bits` wide spells in `storage`, of the class the convention gives it
+/// (`SourceConventionSlots::class_of`); `None` outside every slot.
+pub(super) fn located_class(
     artifact: &SsaArtifact,
     storage: r2source::CanonicalStorageId,
     width_bits: u32,
 ) -> Option<MachineType> {
-    let slots = artifact.machine_context().convention_slots()?;
-    let within = |slot: &r2source::CanonicalStorageId| {
-        slot.space == storage.space
-            && slot.offset <= storage.offset
-            && storage.offset + u64::from(storage.size) <= slot.offset + u64::from(slot.size)
-    };
-    let general = slots
-        .argument_slots()
-        .iter()
-        .chain(&slots.result_slot())
-        .any(within);
-    let float = (slots.float_argument_slots().iter())
-        .chain(&slots.float_result_slot())
-        .any(within);
-    match (general, float) {
-        (true, false) if matches!(width_bits, 8 | 16 | 32 | 64) => Some(MachineType::Integer {
-            width_bits,
-            signedness: r2ssa::MachineSignedness::Unsigned,
-        }),
-        (false, true) if matches!(width_bits, 32 | 64) => Some(MachineType::Float { width_bits }),
+    let class = artifact
+        .machine_context()
+        .convention_slots()?
+        .class_of(storage)?;
+    match class {
+        r2source::convention::SlotClass::Integer if matches!(width_bits, 8 | 16 | 32 | 64) => {
+            Some(MachineType::Integer {
+                width_bits,
+                signedness: r2ssa::MachineSignedness::Unsigned,
+            })
+        }
+        r2source::convention::SlotClass::Float if matches!(width_bits, 32 | 64) => {
+            Some(MachineType::Float { width_bits })
+        }
         _ => None,
     }
 }
@@ -2729,7 +2723,7 @@ fn parameters(
             let declared = input
                 .parameter_declaration(parameter.index as usize, width_bits)
                 .map(|declared| class_of(&declared, width_bits));
-            let carrier = carrier_class(artifact, parameter.abi_storage, width_bits);
+            let carrier = located_class(artifact, parameter.abi_storage, width_bits);
             let class = match declared {
                 Some(None) => return None,
                 Some(Some(declared)) => agreed(Some(declared), carrier)?,

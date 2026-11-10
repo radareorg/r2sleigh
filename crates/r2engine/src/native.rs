@@ -2395,13 +2395,13 @@ impl Native<'_> {
                 };
                 let prototype = declared.prototype;
                 // The convention places each parameter: by class, or by position where shared.
-                let placed = Placement::new(self.target, &self.machine).placed_prefix(declared);
+                let placed = Placement::new(self.target, &self.machine).registers(declared);
                 for (index, (parameter, storage)) in
                     prototype.parameters.iter().zip(&placed).enumerate()
                 {
-                    if !parameter.is_function() {
+                    let (true, Some(storage)) = (parameter.is_function(), storage) else {
                         continue;
-                    }
+                    };
                     let Some(address) = (seal.value_reaching(id, *storage))
                         .and_then(|value| seal.folded_value(value))
                     else {
@@ -2577,6 +2577,7 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         slots,
         // Asked in the first pass, before an interface exists; without it a caller loses its frame facts.
         call_effect: call_effect.ok(),
+        convention: Some(target.convention.clone()),
     })
 }
 

@@ -335,16 +335,13 @@ fn an_undeclared_import_is_a_gap_naming_its_missing_declaration() {
     assert!(!text.contains("_ZN3Foo3barEv(16"), "{text}");
 }
 
-/// glibc declares `__libc_start_main` with seven arguments, and x86-64 passes six in registers:
-/// a declaration this convention does not place states nothing, and the gap says so.
+/// glibc declares `__libc_start_main` with seven arguments: `place` puts the seventh in the
+/// first stack slot, so a caller that stores none leaves that argument a gap naming it (D163).
 #[test]
-fn an_import_whose_declaration_is_not_placed_is_a_gap_saying_so() {
+fn an_import_s_seventh_argument_is_placed_on_the_stack() {
     let text = plt_caller("__libc_start_main");
     assert!(
-        text.contains(
-            "call to __libc_start_main: the import's declaration has an argument this convention \
-             does not place */"
-        ),
+        text.contains("call to __libc_start_main: no value reaches its declared argument 6 */"),
         "{text}"
     );
 }

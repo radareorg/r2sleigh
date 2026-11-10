@@ -2670,6 +2670,7 @@ impl TrustedSsaArtifact {
                     source.machine_roles(),
                     source.source_revision_identity(),
                     source.convention_slots().convention(),
+                    source.convention(),
                 );
                 if minted.is_none() {
                     r2il::refusal_evidence!(

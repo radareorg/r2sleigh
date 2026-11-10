@@ -527,7 +527,7 @@ fn tail_result(
     let Some(r2source::SourceCallResult::Register { storage, .. }) = boundary.result_kind else {
         return None;
     };
-    let carrier = super::values::carrier_class(artifact, storage, storage.size * 8);
+    let carrier = super::values::located_class(artifact, storage, storage.size * 8);
     let declared = match declared {
         Some(r2types::CTypeLike::Void) => return None,
         Some(ty) => Some(super::values::class_of(ty, storage.size * 8)?),
@@ -666,7 +666,7 @@ fn arguments(
     // A register says its class; an outgoing stack slot carries the value's integer bits.
     let located = |value: ValueId| match location(certificate, value)? {
         r2ssa::CallArgumentLocation::Register { storage } => {
-            super::values::carrier_class(artifact, *storage, storage.size * 8)
+            super::values::located_class(artifact, *storage, storage.size * 8)
         }
         r2ssa::CallArgumentLocation::Stack { .. }
         | r2ssa::CallArgumentLocation::Variable { .. } => matches!(width(value), 8 | 16 | 32 | 64)
@@ -714,7 +714,7 @@ fn result_class(
         .and_then(|boundary| boundary.result_kind)
     {
         Some(r2source::SourceCallResult::Register { storage, .. }) => {
-            super::values::carrier_class(artifact, storage, storage.size * 8)
+            super::values::located_class(artifact, storage, storage.size * 8)
         }
         // Undescribed: the slot the result obligation names, at its own width.
         _ => inventory
@@ -723,7 +723,7 @@ fn result_class(
                 r2ssa::SemanticObligationComponent::RegisterSlot { storage, .. }
                     if o.id.kind == SemanticObligationKind::CallResult =>
                 {
-                    super::values::carrier_class(artifact, storage, storage.size * 8)
+                    super::values::located_class(artifact, storage, storage.size * 8)
                 }
                 _ => None,
             }),

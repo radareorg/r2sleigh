@@ -2132,8 +2132,12 @@ pub fn mint_recovered_interface(
     roles: &SourceMachineRoles,
     revision_identity: &[u8],
     convention: r2source::ConventionId,
+    model: Option<&r2source::ConventionModel>,
 ) -> Option<SourceFunctionInterface> {
-    let minted = mint_recovered_interface_inner(recovered, roles, revision_identity, convention)
+    let minted = placed(recovered, model)
+        .and_then(|()| {
+            mint_recovered_interface_inner(recovered, roles, revision_identity, convention)
+        })
         .map(|interface| match &recovered.arity_floor {
             Some(floor) => interface.with_arity_floor(floor.clone()),
             None => interface,
@@ -2181,6 +2185,40 @@ pub fn mint_recovered_interface(
         );
     }
     minted
+}
+
+/// `place` puts each recovered parameter where the body read it; a disagreement mints nothing.
+fn placed(recovered: &RecoveredInterface, model: Option<&r2source::ConventionModel>) -> Option<()> {
+    let Some(model) = model else {
+        return Some(());
+    };
+    let bytes = |size: u32| {
+        u8::try_from(size)
+            .ok()
+            .map(crate::place::ParamClass::Integer)
+    };
+    let classes = (recovered.parameters().iter())
+        .map(|parameter| bytes(parameter.slot().size))
+        .chain((recovered.stack_parameters().iter()).map(|parameter| bytes(parameter.slot_bytes())))
+        .collect::<Option<Vec<_>>>()?;
+    let read = (recovered.parameters().iter())
+        .map(|parameter| SourceParameterLocation::Register(parameter.slot()))
+        .chain(recovered.stack_parameters().iter().map(|parameter| {
+            SourceParameterLocation::Stack {
+                offset: parameter.offset(),
+                size_bytes: parameter.slot_bytes(),
+                callee_offset: parameter.offset(),
+            }
+        }));
+    let placement = crate::place::place(model, &classes);
+    if placement.is_whole() && read.eq(placement.locations) {
+        return Some(());
+    }
+    r2il::refusal_evidence!(
+        "interface-minting",
+        "the convention places the recovered parameters elsewhere than the body reads them"
+    );
+    None
 }
 
 /// A float result's own type node, after the integers in `types`: its id and width.
@@ -2721,7 +2759,7 @@ mod tests {
             .expect("machine roles")
             .with_role_register_names(names);
         let interface =
-            mint_recovered_interface(&recovered, &roles, b"pair", AAPCS64).expect("a pair");
+            mint_recovered_interface(&recovered, &roles, b"pair", AAPCS64, None).expect("a pair");
         let identity = SourceCallSiteIdentity::new(
             0x2003,
             CanonicalStorageId {
@@ -2987,7 +3025,7 @@ mod tests {
             .expect("machine roles")
             .with_role_register_names(names);
         let interface =
-            mint_recovered_interface(&recovered, &roles, b"narrow-return-revision", AAPCS64)
+            mint_recovered_interface(&recovered, &roles, b"narrow-return-revision", AAPCS64, None)
                 .expect("minted narrow return interface");
         // The lift restates carriers by name; an interface minted without the
         // roles' names had its carriers cleared there.
@@ -3199,7 +3237,7 @@ mod tests {
         );
         let roles = SourceMachineRoles::new(Some(register(0x80, 8)), Some(register(0x88, 8)))
             .expect("machine roles");
-        let minted = mint_recovered_interface(&unproven, &roles, b"thunk-revision", AAPCS64)
+        let minted = mint_recovered_interface(&unproven, &roles, b"thunk-revision", AAPCS64, None)
             .expect("an unproven result mints an interface");
         assert_eq!(minted.return_kind(), SourceFunctionReturn::Unproven);
         // Nothing this body proves describes a call to it, arguments included.
