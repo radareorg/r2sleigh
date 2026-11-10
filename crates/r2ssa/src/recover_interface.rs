@@ -174,6 +174,14 @@ impl RecoveredStackParameter {
     pub const fn is_hole(self) -> bool {
         self.hole
     }
+
+    /// `Convention` for a hole, else `Decoded`.
+    pub const fn basis(self) -> r2source::Basis {
+        match self.hole {
+            true => r2source::Basis::Convention,
+            false => r2source::Basis::Decoded,
+        }
+    }
 }
 
 /// Where every exit of the function takes its return address from.
@@ -474,15 +482,23 @@ fn recovered_stack_parameters(
             _ => *entry = None,
         }
     }
-    // The highest slot read makes each slot below it a parameter (rule 4); a read across two
-    // slots places none past it.
+    argument_area_slots(&observed, first_offset, slot_bytes)
+}
+
+/// The argument-area slots below the highest one read, `observed` holding each slot's widest read
+/// (`None` where a read crosses two): the highest read makes each below it a parameter (rule 4).
+fn argument_area_slots(
+    observed: &BTreeMap<u64, Option<u32>>,
+    first_offset: i64,
+    slot_bytes: u32,
+) -> Vec<RecoveredStackParameter> {
     let highest = observed.keys().next_back().copied();
     let mut parameters = Vec::new();
     for slot in (0..).take_while(|slot| highest.is_some_and(|highest| *slot <= highest)) {
-        let observed_bytes = match observed.get(&slot) {
-            Some(Some(bytes)) => Some(bytes.next_power_of_two().min(slot_bytes)),
-            Some(None) => break,
-            None => None,
+        let Some(observed_bytes) = observed.get(&slot).map_or(Some(None), |bytes| {
+            bytes.map(|bytes| Some(bytes.next_power_of_two().min(slot_bytes)))
+        }) else {
+            break;
         };
         let Some(offset) = i64::try_from(slot)
             .ok()
@@ -626,16 +642,11 @@ fn passed_through_entry_storages(
     let mut storages = Vec::new();
     for boundary in boundaries.calls.values() {
         // A slot the callee leaves a hole is no read of it (rule 1).
-        let passed = (boundary.arguments.iter()).filter_map(|argument| {
-            let storage = (!boundary.ignores(argument))
-                .then(|| {
-                    passed_through(graph, argument, &|index, storage, carrier| {
-                        held(boundary.call_site, index, storage, carrier)
-                    })
-                })
-                .flatten()?;
-            Some((storage, boundary.call_site))
-        });
+        let held = |index, storage, carrier| held(boundary.call_site, index, storage, carrier);
+        let arguments = boundary.arguments.iter();
+        let passed = (arguments.filter(|argument| !boundary.ignores(argument)))
+            .filter_map(|argument| passed_through(graph, argument, &held))
+            .map(|storage| (storage, boundary.call_site));
         for passed in passed {
             if !storages.contains(&passed) {
                 storages.push(passed);
@@ -2153,27 +2164,8 @@ fn unproven_calls_reached(
             && read_beyond_merges(graph, value.id)
     });
     let reached = unproven.filter(|boundary| {
-        kept || machine_context.is_some_and(|machine_context| {
-            graph
-                .walk_start(boundary.at)
-                .is_some_and(|(block_addr, op_index)| {
-                    crate::semantic::reaching_abi_value_in_block_with_policy(
-                        func,
-                        prep,
-                        graph,
-                        machine_context,
-                        block_addr,
-                        op_index,
-                        slot,
-                        false,
-                    )
-                    .is_none_or(|state| match state {
-                        crate::semantic::ReachingAbiState::PreservedEntry => true,
-                        crate::semantic::ReachingAbiState::Value(value) => {
-                            !graph.written_by_body(value)
-                        }
-                    })
-                })
+        kept || machine_context.is_some_and(|context| {
+            arrives_untouched((func, prep, graph, context), boundary.at, slot)
         })
     });
     let mut calls = reached
@@ -2182,6 +2174,30 @@ fn unproven_calls_reached(
     calls.sort_unstable();
     calls.dedup();
     calls
+}
+
+/// Whether the call at `at` may be handed `slot` as the function entered with it: unseen there, or
+/// a value the body did not write.
+fn arrives_untouched(
+    (func, prep, graph, context): (
+        &SSAFunction,
+        Option<&crate::DecompilePrepFacts>,
+        &SsaGraph,
+        &crate::SourceMachineContext,
+    ),
+    at: crate::InstId,
+    slot: CanonicalStorageId,
+) -> bool {
+    let Some((block_addr, op_index)) = graph.walk_start(at) else {
+        return false;
+    };
+    let reached = crate::semantic::reaching_abi_value_in_block_with_policy(
+        func, prep, graph, context, block_addr, op_index, slot, false,
+    );
+    reached.is_none_or(|state| match state {
+        crate::semantic::ReachingAbiState::PreservedEntry => true,
+        crate::semantic::ReachingAbiState::Value(value) => !graph.written_by_body(value),
+    })
 }
 
 /// Whether an operation reads `value`, directly or through the merges it flows into: a merge alone
@@ -2763,6 +2779,56 @@ fn float_type(
     Some(Some((id, bits)))
 }
 
+/// Each parameter's logical width, as read, and the float widths among them; `note` records each
+/// integer width for the type graph.
+fn parameter_widths(
+    recovered: &RecoveredInterface,
+    note: &mut dyn FnMut(u32),
+) -> Option<(Vec<u32>, Vec<u32>)> {
+    let (mut all, mut floats) = (Vec::new(), Vec::new());
+    for parameter in recovered.parameters() {
+        let bits = storage_bits(parameter.observed())?;
+        match parameter.class() {
+            SlotClass::Float if matches!(bits, 32 | 64) => floats.push(bits),
+            SlotClass::Float => return None,
+            _ => note(bits),
+        }
+        all.push(bits);
+    }
+    for parameter in recovered.stack_parameters() {
+        let bits = parameter.observed_bytes().checked_mul(8)?;
+        if !matches!(bits, 8 | 16 | 32 | 64) {
+            return None;
+        }
+        note(bits);
+        all.push(bits);
+    }
+    Some((all, floats))
+}
+
+/// Each float parameter's width as a type node of its own, after the integers; the result's where
+/// it is as wide: each width and its node.
+fn float_nodes(
+    mut floats: Vec<u32>,
+    result: Option<(u32, u32)>,
+    types: &mut Vec<SourceType>,
+) -> Option<Vec<(u32, u32)>> {
+    floats.sort_unstable();
+    floats.dedup();
+    let node = |bits: u32, types: &mut Vec<SourceType>| {
+        let id = u32::try_from(types.len()).ok()?;
+        let (size, align) = (u64::from(bits), u64::from(bits));
+        types.push(SourceType::new(id, SourceTypeKind::Float, size, align));
+        Some(id)
+    };
+    (floats.into_iter())
+        .map(|bits| match result {
+            Some((id, result_bits)) if result_bits == bits => Some((bits, id)),
+            _ => Some((bits, node(bits, types)?)),
+        })
+        .collect()
+}
+
 /// A float result's return: its own type node `id`, read at the low `bits` of its slot.
 fn float_return(
     result: RecoveredResult,
@@ -2805,36 +2871,11 @@ fn mint_recovered_interface_inner(
             widths.push((bits, signed));
         }
     }
-    fn width_of(widths: &mut Vec<(u32, bool)>, storage: CanonicalStorageId) -> Option<u32> {
-        let bits = storage_bits(storage)?;
-        note_bits(widths, bits);
-        Some(bits)
-    }
     // The logical value is typed by what the function read, not by the size of
     // the register the convention put it in; a hole's is its slot's, its basis `Convention`.
-    let mut floats: Vec<u32> = Vec::new();
-    let mut parameter_widths = Vec::new();
-    for parameter in recovered.parameters() {
-        let bits = storage_bits(parameter.observed())?;
-        parameter_widths.push(match parameter.class() {
-            SlotClass::Float => {
-                if !matches!(bits, 32 | 64) {
-                    return None;
-                }
-                floats.push(bits);
-                Some(bits)
-            }
-            _ => Some(width_of(&mut widths, parameter.observed())?),
-        });
-    }
-    for parameter in recovered.stack_parameters() {
-        let bits = parameter.observed_bytes().checked_mul(8)?;
-        if !matches!(bits, 8 | 16 | 32 | 64) {
-            return None;
-        }
+    let (parameter_widths, floats) = parameter_widths(recovered, &mut |bits| {
         note_bits(&mut widths, bits);
-        parameter_widths.push(Some(bits));
-    }
+    })?;
     // The slot's width decides whether the read covers the whole carrier or
     // only its low half, and nothing else. It names no logical value, so it
     // must not put a type in the graph: an `int` parameter arriving in a
@@ -2890,26 +2931,7 @@ fn mint_recovered_interface_inner(
         })
         .collect::<Option<Vec<SourceType>>>()?;
     let float_type = float_type(recovered, &mut types)?;
-    // Each float parameter's width is a node of its own, after the integers and the result's.
-    floats.sort_unstable();
-    floats.dedup();
-    let mut float_ids = Vec::new();
-    for bits in floats {
-        let id = match float_type {
-            Some((id, result_bits)) if result_bits == bits => id,
-            _ => {
-                let id = u32::try_from(types.len()).ok()?;
-                types.push(SourceType::new(
-                    id,
-                    SourceTypeKind::Float,
-                    u64::from(bits),
-                    u64::from(bits),
-                ));
-                id
-            }
-        };
-        float_ids.push((bits, id));
-    }
+    let float_ids = float_nodes(floats, float_type, &mut types)?;
     let type_graph = SourceTypeGraph::new(types, []).ok()?;
     let type_id = |bits: u32, signed: bool| -> Option<u32> {
         widths
@@ -2950,10 +2972,6 @@ fn mint_recovered_interface_inner(
                 .iter()
                 .enumerate()
                 .map(|(index, parameter)| {
-                    let basis = match parameter.is_hole() {
-                        true => r2source::Basis::Convention,
-                        false => r2source::Basis::Decoded,
-                    };
                     Some(
                         SourceAbiParameterSpec::with_location(
                             u32::try_from(register_count.checked_add(index)?).ok()?,
@@ -2963,7 +2981,7 @@ fn mint_recovered_interface_inner(
                                 callee_offset: parameter.offset(),
                             },
                         )
-                        .in_section(SlotClass::Stack, basis),
+                        .in_section(SlotClass::Stack, parameter.basis()),
                     )
                 }),
         )
@@ -3003,10 +3021,9 @@ fn mint_recovered_interface_inner(
         .iter()
         .zip(parameter_slot_widths.iter())
         .zip(classes)
-        .map(|((bits, carrier_bits), class)| match (bits, class) {
-            (None, _) => Some(None),
-            (Some(bits), SlotClass::Float) => float_logical(*bits).map(Some),
-            (Some(bits), _) => logical(*bits, false, *carrier_bits).map(Some),
+        .map(|((bits, carrier_bits), class)| match class {
+            SlotClass::Float => float_logical(*bits).map(Some),
+            _ => logical(*bits, false, *carrier_bits).map(Some),
         })
         .collect::<Option<Vec<_>>>()?;
     let (return_kind, return_logical_value) = match (recovered.result(), result_width) {
