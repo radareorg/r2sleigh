@@ -535,6 +535,7 @@ S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
 - **A read not attributable to the entry value:** a floor `AtLeast(k)` with a typed cause. It never fills a hole.
 - **A homing store with no load:** a floor cause `Homed`. It is no parameter and no hole.
 - **A stack read:** fills only the stack slots below it, and only behind a full register section. Otherwise `ArgumentAreaRead`. It claims no register.
+- **A stack read past 64 unread slots:** the slots up to the 64th hole stand and the arity is a floor with cause `ArgumentAreaPastBudget`, so one load at `[rsp + 0x40000000]` costs `O(reads + 64)`, never a record per slot.
 - **Caller writes:** evidence only. They are never arity proof, for a callee with a body or without one.
 - **Indirect calls with no stated type:** residual. Virtual calls stay residual too.
 - **A library row:** applies only through an import binding. A versioned import binds to the library its version names. An unversioned import binds at `Declared` only where the container's `DT_NEEDED` names one C library. A name match on a static body applies nothing (AGENTS rule 6).
@@ -857,6 +858,7 @@ What the code said that this ADR did not, and the owner chosen:
 - A hole's argument at a call: `SourceCallBoundaryFact::ignored` lists the positions the callee's exact interface leaves holes. The value reaching one seeds no producer obligation, is no observation root and no live read, so the caller's `a*7` before `jmp` is dead. r2dec passes `(r2sleigh_unread_uN)0`, and `pddj`'s `calls[].ignored` counts these apart from invented arguments.
 - D100: r2dec's proof line names a floor, `the parameters are a floor: at least N (causes)`. The glibc static `_exit` probe (D172) prints `void _exit(void)` with `at least 0 (a supervisor entry)`.
 - Deleted: the `map_while` prefix; `MachineAbiModel`'s argument and return registers with `MachineAbiRegisterSlot` (the return registers read the interface's `return_kind`); `AbiProfile`. The interprocedural summaries read the interface through `abi::Formals`, a borrowed view that holds no second list.
+- The argument area holds at most 64 holes below its highest read (`HOLE_BUDGET`, r2ssa `recover_interface.rs`). Past them the list stops as a floor, cause `ArgumentAreaPastBudget` (Codex review of #358: one hostile load built ~134 million records). Two engine tests in `arity.rs`.
 
 Gates, debug build, base `20c1f7832`:
 
