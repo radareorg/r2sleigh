@@ -1549,6 +1549,14 @@ fn recover_interface_inner(
                         second: None,
                     });
                 }
+                // An argument handed back beside a written float: the callers' reads choose.
+                None if handed_back => {
+                    result_carriers = Some(r2source::SourceResultCarriers {
+                        integer: candidate,
+                        float: Some(float),
+                        second: None,
+                    });
+                }
                 None => {}
             }
         }

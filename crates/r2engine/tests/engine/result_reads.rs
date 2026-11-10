@@ -851,3 +851,27 @@ fn a_cold_caller_reads_no_float_result_the_callee_does_not_state() {
     assert!(!text.contains("double f("), "{text}");
     assert!(text.contains("r2sleigh_residual"), "{text}");
 }
+
+/// AArch64 `f`: `ldr d0, [x0]; ret`, which hands back x0 (its argument) untouched and writes d0;
+/// `caller`: `bl f; str d0, [x1]; ret`.
+const A64_FLOAT_BESIDE_A_HANDED_BACK_ARGUMENT: &[u8] = &[
+    0x00, 0x00, 0x40, 0xfd, // 1000 ldr d0, [x0]
+    0xc0, 0x03, 0x5f, 0xd6, // 1004 ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 1008 padding
+    0xfc, 0xff, 0xff, 0x97, // 1010 bl 0x1000
+    0x20, 0x00, 0x00, 0xfd, // 1014 str d0, [x1]
+    0xc0, 0x03, 0x5f, 0xd6, // 1018 ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5,
+    0x1f, 0x20, 0x03, 0xd5, // 101c padding
+];
+
+/// The integer register holds the argument the body was entered with and the float one what it
+/// wrote: the calls read d0, so the result is the double (review.c `avg` on AArch64).
+#[test]
+fn an_aarch64_float_beside_a_handed_back_argument_is_the_result_callers_read() {
+    let functions = [("f", BASE, 0x08), ("caller", BASE + 0x10, 0x0c)];
+    let f = rendered(
+        Literal::of_code(A64_FLOAT_BESIDE_A_HANDED_BACK_ARGUMENT, &functions).in_aarch64(),
+    );
+    assert!(f.starts_with("double f("), "{f}");
+}
