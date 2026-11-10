@@ -263,8 +263,35 @@ pub fn lift_body(
     program: &dyn Program,
     dispatched: &BTreeMap<u64, Vec<u64>>,
 ) -> Result<Body, BodyError> {
-    let lifting = Walk::start(entry, disasm, program, dispatched.clone(), true);
-    lifting.map(Walk::into_body)
+    let lifting = Walk::start(entry, disasm, program, dispatched.clone(), Keep::Lifts);
+    lifting.map(|walk| walk.into_body().0)
+}
+
+/// The same body with each instruction's own lift, as the reference index lists it (ROADMAP D162).
+pub fn listed_body(
+    entry: u64,
+    disasm: &Disassembler,
+    program: &dyn Program,
+    dispatched: &BTreeMap<u64, Vec<u64>>,
+) -> Result<(Body, Vec<Decoded>), BodyError> {
+    let walk = Walk::start(entry, disasm, program, dispatched.clone(), Keep::Decodes);
+    walk.map(Walk::into_body)
+}
+
+/// One instruction a walk decoded: its lift, its decode window and the context it left.
+#[derive(Debug, Clone)]
+pub struct Decoded {
+    pub lift: R2ILBlock,
+    pub window: Vec<u8>,
+    pub continuation: Continuation,
+}
+
+/// What a walk keeps of each instruction it decodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keep {
+    Nothing,
+    Lifts,
+    Decodes,
 }
 
 /// One instruction the walk decoded, and where control goes after it.
@@ -273,6 +300,8 @@ struct Instruction {
     lifted: R2ILBlock,
     bytes: Vec<u8>,
     terminator: BlockTerminator,
+    /// The decode window and context, where the walk keeps its decodes.
+    decode: Option<Box<(Vec<u8>, Continuation)>>,
 }
 
 impl Instruction {
@@ -318,7 +347,7 @@ impl Trace {
         disasm: &Disassembler,
         program: &dyn Program,
     ) -> Result<Self, BodyError> {
-        Walk::start(entry, disasm, program, BTreeMap::new(), false).map(Self)
+        Walk::start(entry, disasm, program, BTreeMap::new(), Keep::Nothing).map(Self)
     }
 
     /// Continue past every call to `callee`, visiting only what is not yet decoded.
@@ -445,6 +474,8 @@ struct Walk {
     return_addresses: BTreeMap<u64, Box<[u64]>>,
     /// The lift of each instruction, where the walk keeps it.
     lifted: Option<BTreeMap<u64, Instruction>>,
+    /// Whether each instruction keeps its decode window and context.
+    decodes: bool,
     /// The address of the instruction recorded last in this run.
     last: Option<u64>,
     leaders: BTreeSet<u64>,
@@ -480,13 +511,13 @@ struct Walk {
 }
 
 impl Walk {
-    /// Walk the body at `entry`, past every call the program says returns, keeping each lift where `lifting`.
+    /// Walk the body at `entry`, past every call the program says returns, keeping what `keep` says.
     fn start(
         entry: u64,
         disasm: &Disassembler,
         program: &dyn Program,
         dispatched: BTreeMap<u64, Vec<u64>>,
-        lifting: bool,
+        keep: Keep,
     ) -> Result<Self, BodyError> {
         let mut walk = Self {
             entry,
@@ -494,7 +525,8 @@ impl Walk {
             link: program.return_address_register(),
             decoded: BTreeMap::new(),
             return_addresses: BTreeMap::new(),
-            lifted: lifting.then(BTreeMap::new),
+            lifted: (keep != Keep::Nothing).then(BTreeMap::new),
+            decodes: keep == Keep::Decodes,
             last: None,
             leaders: BTreeSet::from([entry]),
             arms: BTreeSet::new(),
@@ -695,10 +727,12 @@ impl Walk {
                 .entry(target.address)
                 .or_insert(target.foreign);
         }
+        let decode = self.decodes.then(|| Box::new((fetch, one.continuation)));
         Some(Instruction {
             lifted,
             bytes,
             terminator,
+            decode,
         })
     }
 
@@ -970,7 +1004,7 @@ impl Walk {
     }
 
     /// Gather the decoded instructions into blocks, each ending where control leaves, a leader begins, a hole opens or a fallthrough is closed.
-    fn into_body(self) -> Body {
+    fn into_body(self) -> (Body, Vec<Decoded>) {
         let closed = (self.gated.values().flatten())
             .map(|(call, _)| *call)
             .chain(self.halting.iter().copied())
@@ -978,6 +1012,7 @@ impl Walk {
         let link = self.link.as_ref();
         let mut blocks: Vec<BodyBlock> = Vec::new();
         let mut parts: Vec<Instruction> = Vec::new();
+        let mut decodes = Vec::new();
 
         let ending = Ending {
             link,
@@ -985,7 +1020,16 @@ impl Walk {
             tail_calls: &self.tail_calls,
             slot_calls: &self.slot_calls,
         };
-        for (addr, instruction) in self.lifted.unwrap_or_default() {
+        for (addr, mut instruction) in self.lifted.unwrap_or_default() {
+            if let Some(decode) = instruction.decode.take() {
+                let (window, continuation) = *decode;
+                let lift = instruction.lifted.clone();
+                decodes.push(Decoded {
+                    lift,
+                    window,
+                    continuation,
+                });
+            }
             let broken = parts
                 .last()
                 .is_some_and(|last| last.end() != addr || self.leaders.contains(&addr));
@@ -1012,14 +1056,15 @@ impl Walk {
                 exits.premises.extend(premises.iter().copied());
             }
         }
-        Body {
+        let body = Body {
             entry: self.entry,
             blocks,
             calls: self.calls.into_iter().collect(),
             tail_calls: self.tail_calls.into_iter().collect(),
             unresolved: self.unresolved,
             exits,
-        }
+        };
+        (body, decodes)
     }
 }
 
@@ -1229,6 +1274,7 @@ mod transfer_tests {
         let instruction = Instruction {
             lifted,
             bytes: Vec::new(),
+            decode: None,
             terminator: BlockTerminator::ConditionalBranch {
                 true_target: 0x2000,
                 false_target: 0x1006,

@@ -2681,6 +2681,14 @@ impl Disassembler {
         })
     }
 
+    /// Spell one instruction as `decode` does, from a fresh context, without lifting it.
+    pub fn spell(&self, bytes: &[u8], addr: u64) -> Result<syntax::Syntax> {
+        let (mnemonic, body, size) = self.disasm_parts(bytes, addr)?;
+        let mut syntax = syntax::radare2(&mnemonic, &body, size, &self.arch_name, bytes);
+        syntax.registers = syntax::register_spans(&syntax.body, &self.spec.register_names);
+        Ok(syntax)
+    }
+
     /// One instruction's operation and operands, as Sleigh itself spells them.
     fn disasm_parts(&self, bytes: &[u8], addr: u64) -> Result<(String, String, usize)> {
         self.clear_decode_cache()?;

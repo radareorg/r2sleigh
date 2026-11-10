@@ -29,7 +29,44 @@ pub fn listing(answered: &Answered<'_>, request: Listing, work: Work) -> Answer<
 
 /// A run read and annotated as a listing of it says.
 fn annotated(answered: &Answered<'_>, request: Listing, work: Work) -> Run {
-    let mut run = Run::read(answered, request, work);
+    let run = Run::read(answered, request, work);
+    annotate(answered, work, run, false)
+}
+
+/// The lines of one run a walk decoded, annotated as `listing` reads them; only a line a claim
+/// needs is spelled.
+pub fn walked_listing(
+    answered: &Answered<'_>,
+    decodes: impl Iterator<Item = crate::body::Decoded>,
+    work: Work,
+) -> Vec<Line> {
+    let mut run = Run {
+        lines: Vec::new(),
+        lifts: Vec::new(),
+        windows: Vec::new(),
+        completion: Completion::Complete,
+        next: 0,
+        context: None,
+    };
+    for one in decodes {
+        let size = one.lift.size as usize;
+        run.next = one.lift.addr + u64::from(one.lift.size);
+        run.context = Some(one.continuation);
+        run.lines.push(Line {
+            address: one.lift.addr,
+            bytes: one.window[..size].to_vec(),
+            syntax: None,
+            flow: Some(r2sleigh_lift::flow::of(&one.lift)),
+            annotations: Vec::new(),
+        });
+        run.lifts.push((work > Work::Decode).then_some(one.lift));
+        run.windows.push(Some(one.window));
+    }
+    annotate(answered, work, run, true).lines
+}
+
+/// Annotate a run read, spelling a line a claim needs where `spell`.
+fn annotate(answered: &Answered<'_>, work: Work, mut run: Run, spell: bool) -> Run {
     let mut beyond = Lookahead {
         answered,
         next: run.next,
@@ -40,6 +77,7 @@ fn annotated(answered: &Answered<'_>, request: Listing, work: Work) -> Run {
     let lifted = super::annotate::Run {
         lifts: &run.lifts,
         windows: &run.windows,
+        spell,
     };
     super::annotate::over_run(answered, work, &lifted, &mut beyond, &mut run.lines);
     run
@@ -645,6 +683,48 @@ mod tests {
 
     fn after_lea(rest: &[u8]) -> Vec<u8> {
         mapped(&LEA.iter().chain(rest).copied().collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn a_walked_run_claims_what_its_listing_claims_and_spells_only_those_lines() {
+        // lea rax, [rip + 0x10]; nop; mov ecx, [0x1020]; ret
+        let bytes = after_lea(&[0x90, 0x8b, 0x0c, 0x25, 0x20, 0x10, 0x00, 0x00, 0xc3]);
+        let machine = Everywhere(Machine::new(
+            embedded_machine("x86-64").expect("x86-64 is compiled in"),
+        ));
+        let program = Mapped::new(BASE, bytes);
+        let answered = Answered {
+            decoders: &machine,
+            memory: Memory {
+                program: &program,
+                endian: Endianness::Little,
+            },
+            call_effect: None,
+            proved: None,
+            body: None,
+            holdings: false,
+            parameters: None,
+        };
+        let walked =
+            crate::body::listed_body(BASE, &machine.0.disasm, &program, &Default::default());
+        let (_, decodes) = walked.expect("the body walks");
+        let walked = walked_listing(&answered, decodes.into_iter(), Work::Function);
+        let request = Listing {
+            start: BASE,
+            stop: Stop::After(walked.len()),
+        };
+        let listed = listing(&answered, request, Work::Function).value;
+        assert_eq!(walked.len(), 4);
+        for (walked, listed) in walked.iter().zip(&listed) {
+            assert_eq!(
+                walked.annotations, listed.annotations,
+                "{:#x}",
+                listed.address
+            );
+            let spelled = (!walked.annotations.is_empty()).then_some(&listed.syntax);
+            assert_eq!(walked.syntax.as_ref(), spelled.and_then(Option::as_ref));
+        }
+        assert!(walked[1].syntax.is_none() && !walked[2].annotations.is_empty());
     }
 
     #[test]

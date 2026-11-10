@@ -80,7 +80,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
 }
 
 /// The machine the function at `entry` runs on, under its language's convention, or why there is none.
-fn target<'a, S: Source + 'static>(
+pub(super) fn target<'a, S: Source + 'static>(
     view: &View<'a, S>,
     entry: u64,
     thumb: bool,

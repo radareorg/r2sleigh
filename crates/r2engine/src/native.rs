@@ -519,28 +519,36 @@ impl Walk {
     /// The lift of each block of the body, dispatches followed: a dispatch's block carries the cases
     /// its table read, so the graph built over the blocks reaches every arm.
     pub fn lifted(&self) -> Vec<r2il::R2ILBlock> {
-        let mut blocks = (self.root.body.blocks.iter())
+        let blocks = (self.root.body.blocks.iter())
             .map(|block| block.lifted.clone())
             .collect::<Vec<_>>();
-        // The body's blocks are in address order, so each table finds its block by search.
-        for table in &self.tables {
-            let after = blocks.partition_point(|block| block.addr <= table.instruction);
-            let Some(block) = after.checked_sub(1).map(|at| &mut blocks[at]) else {
-                continue;
-            };
-            if table.instruction - block.addr < u64::from(block.size) {
-                let cases = (table.cases.iter())
-                    .map(|&(value, target)| r2il::SwitchCase { value, target })
-                    .collect();
-                block.switch_info = Some(r2il::SwitchInfo {
-                    switch_addr: table.instruction,
-                    default_target: None,
-                    cases,
-                });
-            }
-        }
-        blocks
+        switched(blocks, &self.tables)
     }
+}
+
+/// Blocks with the cases each dispatch's table read set on the block that makes it.
+fn switched(
+    mut blocks: Vec<r2il::R2ILBlock>,
+    tables: &[NativePointerTable],
+) -> Vec<r2il::R2ILBlock> {
+    // The body's blocks are in address order, so each table finds its block by search.
+    for table in tables {
+        let after = blocks.partition_point(|block| block.addr <= table.instruction);
+        let Some(block) = after.checked_sub(1).map(|at| &mut blocks[at]) else {
+            continue;
+        };
+        if table.instruction - block.addr < u64::from(block.size) {
+            let cases = (table.cases.iter())
+                .map(|&(value, target)| r2il::SwitchCase { value, target })
+                .collect();
+            block.switch_info = Some(r2il::SwitchInfo {
+                switch_addr: table.instruction,
+                default_target: None,
+                cases,
+            });
+        }
+    }
+    blocks
 }
 
 /// Walk one function, and where a dispatch stops the walk, read its tables and walk again through them.
@@ -574,6 +582,53 @@ pub(crate) fn walk_reading(
     Ok(Walk::of(through, tables))
 }
 
+/// One body as the reference index lists it: walked once, through the tables `read` gives.
+pub(crate) struct ListedWalk {
+    pub(crate) body: crate::body::Body,
+    /// The lift of each block, dispatches' cases set; `body.blocks` is left empty.
+    pub(crate) lifted: Vec<r2il::R2ILBlock>,
+    /// Each instruction's own decode, in address order.
+    pub(crate) decodes: Vec<crate::body::Decoded>,
+}
+
+/// The walk `walk_reading` makes, keeping each instruction's own decode.
+pub(crate) fn listed_walk(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+    held: Option<Tables>,
+    read: &dyn Fn() -> Tables,
+) -> Result<ListedWalk, NativeRefusal> {
+    Native::over(target, program)?;
+    let walk = |dispatched: &BTreeMap<u64, Vec<u64>>| {
+        crate::body::listed_body(entry, target.disasm, program, dispatched)
+            .map_err(NativeRefusal::Body)
+    };
+    // Tables already read were read because the body stops at a dispatch: one walk through them.
+    let (walked, tables) = match held {
+        Some(tables) => (walk(&tables.dispatched())?, tables.read),
+        None => {
+            let root = walk(&BTreeMap::new())?;
+            let tables = match (root.0.unresolved.iter()).any(Tables::stops) {
+                true => read().read,
+                false => Vec::new(),
+            };
+            match tables.is_empty() {
+                true => (root, tables),
+                false => (walk(&dispatched(&tables))?, tables),
+            }
+        }
+    };
+    let (mut body, decodes) = walked;
+    let blocks = std::mem::take(&mut body.blocks).into_iter();
+    let lifted = switched(blocks.map(|block| block.lifted).collect(), &tables);
+    Ok(ListedWalk {
+        body,
+        lifted,
+        decodes,
+    })
+}
+
 /// The tables the dispatches of the body at `entry` read, off a preparation against the imports' declarations alone.
 /// A refused read leaves the walk no table and says why.
 pub(crate) fn dispatch_tables(
@@ -589,6 +644,13 @@ pub(crate) fn dispatch_tables(
         Ok(root) if root.body.unresolved.iter().any(Tables::stops) => native.read_tables(&root),
         _ => Tables::default(),
     }
+}
+
+/// Where each dispatch goes, by the instruction making it.
+fn dispatched(tables: &[NativePointerTable]) -> BTreeMap<u64, Vec<u64>> {
+    (tables.iter())
+        .map(|table| (table.instruction, table.targets.clone()))
+        .collect()
 }
 
 /// What reading a body's dispatch tables left: the tables, or the refusal that left the body following none.
@@ -618,10 +680,7 @@ impl Tables {
 
     /// Where each dispatch goes, by the instruction making it.
     pub(crate) fn dispatched(&self) -> BTreeMap<u64, Vec<u64>> {
-        let tables = self.read.iter();
-        tables
-            .map(|table| (table.instruction, table.targets.clone()))
-            .collect()
+        dispatched(&self.read)
     }
 
     /// Why the read was refused, where it was.
