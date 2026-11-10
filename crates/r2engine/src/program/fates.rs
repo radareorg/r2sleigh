@@ -135,13 +135,13 @@ fn sites_of<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Opti
                 continue;
             }
             calls = calls.saturating_add(1);
-            for (at, joined) in lanes.iter_mut().enumerate() {
-                match site.boundary.fates[at] {
-                    Some(LaneFate::Returned(_)) => {
-                        returned.insert((caller, at));
-                    }
-                    fate => join(joined, fate.map(Forwarded::Fate)),
-                }
+            let fates = lanes.iter_mut().zip(site.boundary.fates).enumerate();
+            for (at, (joined, fate)) in fates {
+                let Some(LaneFate::Returned(_)) = fate else {
+                    join(joined, fate.map(Forwarded::Fate));
+                    continue;
+                };
+                returned.insert((caller, at));
             }
         }
     }

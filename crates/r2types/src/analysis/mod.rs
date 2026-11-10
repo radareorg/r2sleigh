@@ -86,6 +86,15 @@ impl TypeAnalysis {
         })
     }
 
+    /// The header's own unproven carrier, which every caller's extern spells as the header does.
+    fn unproven_carrier_bits(&self) -> Option<u32> {
+        let fact = self.function_facts.report().return_type()?;
+        match fact.declared().filter(|_| fact.is_unproven())? {
+            CTypeLike::Int { bits, .. } => Some(*bits),
+            _ => None,
+        }
+    }
+
     /// Export the signature this exact retained body proves for its callers.
     ///
     /// The opaque result keeps the SSA and physical interface that authorize
@@ -166,13 +175,7 @@ impl TypeAnalysis {
                 ))
             })
             .collect::<Option<Vec<_>>>()?;
-        // The header's own unproven carrier, which every caller's extern spells as the header does.
-        let unproven = (self.function_facts.report().return_type())
-            .filter(|fact| fact.is_unproven())
-            .and_then(|fact| match fact.declared()? {
-                CTypeLike::Int { bits, .. } => Some(*bits),
-                _ => None,
-            });
+        let unproven = self.unproven_carrier_bits();
         crate::SourceOwnedCalleeSignature::new(
             &self.source,
             crate::FunctionType {
