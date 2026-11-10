@@ -728,8 +728,6 @@ r2sleigh_result_u64 _main(uint32_t arg0, uint64_t* arg1)
     struct r2sleigh_bits_256 z0_2;
     struct r2sleigh_bits_256 z0_3;
     uint32_t tmp_100000e34_8_1;
-    uint32_t tmp_100000e3c_8_1;
-    uint64_t x2_3;
     uint64_t x0_4;
     uint32_t tmp_100000e4c_8_1;
     uint32_t tmp_100000e58_8_1;
@@ -739,8 +737,6 @@ r2sleigh_result_u64 _main(uint32_t arg0, uint64_t* arg1)
     uint64_t x0_9;
     uint64_t x8_18;
     uint32_t tmp_100000ec4_8_1;
-    uint32_t tmp_100000ed0_8_1;
-    uint32_t tmp_100000ed4_8_1;
     uint64_t x8_19;
     uint64_t x0_11;
     uint64_t x9_12;
@@ -760,7 +756,7 @@ r2sleigh_result_u64 _main(uint32_t arg0, uint64_t* arg1)
     uint32_t tmp_100000fc0_8_1;
     _Alignas(16) uint8_t frame[192];
 
-    /* r2dec proof: no individual construct is marked; 229 source obligations: 178 rendered, 35 elided, 0 refused, 16 assumed (frame extent unproven); 61 statements rendered; 1 data object type refused; 1 callee prototype supplied by the source; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 225 source obligations: 174 rendered, 35 elided, 0 refused, 16 assumed (frame extent unproven); 57 statements rendered; 1 data object type refused; 1 callee prototype supplied by the source; the result is unproven (Written): 1 unproven-return carried */
     {
         r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)124U), (uint32_t)0U);
         r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U), (uint32_t)arg0);
@@ -774,9 +770,7 @@ r2sleigh_result_u64 _main(uint32_t arg0, uint64_t* arg1)
         r2sleigh_store_u128((void*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)16U), (__uint128_t)r2sleigh_bits_extract_256_128(z0_3, 0U));
         r2sleigh_store_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)64U), (uint64_t)((uint64_t)x0_3 + (uint64_t)40U));
         tmp_100000e34_8_1 = r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U));
-        tmp_100000e3c_8_1 = r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U));
-        x2_3 = (uint64_t)(uint32_t)tmp_100000e3c_8_1;
-        x0_4 = (uint64_t)_struct_nested_array((void*)x0_3, (uint32_t)((uint32_t)tmp_100000e34_8_1 & (uint32_t)1U), (uint32_t)x2_3);
+        x0_4 = (uint64_t)_struct_nested_array((void*)x0_3, (uint32_t)((uint32_t)tmp_100000e34_8_1 & (uint32_t)1U), (uint32_t)r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U)));
         tmp_100000e4c_8_1 = r2sleigh_load_u32((void*)&_manual_sink);
         r2sleigh_store_u32((void*)&_manual_sink, (uint32_t)((uint32_t)((uint64_t)x0_4 >> 0U) + (uint32_t)tmp_100000e4c_8_1));
         tmp_100000e58_8_1 = r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U));
@@ -797,10 +791,8 @@ r2sleigh_result_u64 _main(uint32_t arg0, uint64_t* arg1)
             x8_18 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
             tmp_100000ec4_8_1 = r2sleigh_load_u32((void*)x8_18);
             r2sleigh_store_u32((void*)x8_18, (uint32_t)((uint32_t)((uint64_t)x0_9 >> 0U) + (uint32_t)tmp_100000ec4_8_1));
-            tmp_100000ed0_8_1 = r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U));
-            tmp_100000ed4_8_1 = r2sleigh_load_u32((void*)x8_18);
             x8_19 = r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)24U));
-            x0_11 = (uint64_t)_sparse_switch((uint32_t)tmp_100000ed0_8_1, (uint32_t)tmp_100000ed4_8_1, (uint32_t)x8_19);
+            x0_11 = (uint64_t)_sparse_switch((uint32_t)r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U)), (uint32_t)r2sleigh_load_u32((void*)x8_18), (uint32_t)x8_19);
             x9_12 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
             tmp_100000ee8_8_1 = r2sleigh_load_u32((void*)x9_12);
             r2sleigh_store_u32((void*)x9_12, (uint32_t)((uint32_t)((uint64_t)x0_11 >> 0U) + (uint32_t)tmp_100000ee8_8_1));

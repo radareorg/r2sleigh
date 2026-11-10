@@ -66,7 +66,7 @@ cyclomatic-complexity: 1
 num-bbs: 1
 num-instrs: 18
 edges: 0
-signature: r2sleigh_result_u64 sym.shape_step (uint64_t arg1);
+signature: r2sleigh_result_u64 sym.shape_step (uint64_t arg0);
 result: unproven (a0, Written)
 minaddr: 0x01001fe8
 maxaddr: 0x0100201a

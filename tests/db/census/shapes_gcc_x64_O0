@@ -1263,7 +1263,7 @@ uint64_t shape_pointer_to_pointer(uint64_t arg0, uint64_t arg1)
     uint32_t tmp_401fe2_8_1;
     _Alignas(16) uint8_t frame[168];
 
-    /* r2dec proof: no individual construct is marked; 198 source obligations: 108 rendered, 66 elided, 0 refused, 5 compiler-inserted (assuming ub-free), a call reads the result (assuming closed-world), 19 assumed (frame extent unproven); 52 statements rendered */
+    /* r2dec proof: no individual construct is marked; 196 source obligations: 106 rendered, 66 elided, 0 refused, 5 compiler-inserted (assuming ub-free), a call reads the result (assuming closed-world), 19 assumed (frame extent unproven); 52 statements rendered */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)arg1);

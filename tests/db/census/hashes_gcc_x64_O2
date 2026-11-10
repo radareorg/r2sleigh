@@ -1620,7 +1620,7 @@ uint64_t combined(uint64_t arg0, uint64_t arg1)
     uint64_t r9_3;
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 58 source obligations: 42 rendered, 16 elided, 0 refused, a call reads the result (assuming closed-world); 7 statements rendered */
+    /* r2dec proof: no individual construct is marked; 57 source obligations: 41 rendered, 16 elided, 0 refused, a call reads the result (assuming closed-world); 7 statements rendered */
     {
         rax_1 = fnv1a64(arg0, arg1);
         rax_2 = djb2(arg0, arg1);

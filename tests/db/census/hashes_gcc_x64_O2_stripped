@@ -1596,7 +1596,7 @@ uint64_t fcn_401b50(uint64_t arg0, uint64_t arg1)
     uint64_t r9_3;
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 58 source obligations: 42 rendered, 16 elided, 0 refused, a call reads the result (assuming closed-world); 7 statements rendered */
+    /* r2dec proof: no individual construct is marked; 57 source obligations: 41 rendered, 16 elided, 0 refused, a call reads the result (assuming closed-world); 7 statements rendered */
     {
         rax_1 = fcn_401370(arg0, arg1);
         rax_2 = fcn_4013b0(arg0, arg1);
