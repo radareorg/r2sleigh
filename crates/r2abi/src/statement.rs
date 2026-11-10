@@ -47,6 +47,8 @@ pub struct Container {
     /// done, sorted and disjoint: ELF's `PT_GNU_RELRO`, and a Mach-O segment
     /// flagged `SG_READ_ONLY`, whose fixups dyld applies before sealing it.
     pub sealed: Vec<Range<u64>>,
+    /// The `/GS` cookie's address, as a PE's load configuration names it (`SecurityCookie`).
+    pub security_cookie: Option<u64>,
     /// How the container says the program is linked and protected.
     pub posture: Posture,
     /// The libraries the program states it needs, in the order it states them, once each.

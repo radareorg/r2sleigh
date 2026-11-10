@@ -904,6 +904,7 @@ impl Image {
         );
 
         let sealed = loader::sealed(&file);
+        let security_cookie = pe.as_ref().and_then(|pe| pe.security_cookie);
         let posture = posture::read(&file);
         let libraries = language::libraries(&file);
         let platform = platform::evidence(&file);
@@ -1014,6 +1015,7 @@ impl Image {
                 loader_writes,
                 entries,
                 sealed,
+                security_cookie,
                 posture,
                 libraries,
                 version_needs: versions.needs,

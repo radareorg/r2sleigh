@@ -54,6 +54,8 @@ pub(crate) struct Read {
     pub exports: Vec<Exported>,
     /// Each import address table and each word a base relocation rewrites.
     pub written: Vec<Range<u64>>,
+    /// The `/GS` cookie's address, as the load configuration names it.
+    pub security_cookie: Option<u64>,
 }
 
 pub(crate) fn read(file: &object::File<'_>, data: &[u8]) -> Option<Read> {
@@ -241,6 +243,7 @@ fn read_of<'data, Pe: ImageNtHeaders, R: ReadRef<'data>>(
             }
         }
     }
+    let security_cookie = security_cookie(&layout, data, &directory, pointer);
     let optional = file.nt_headers().optional_header();
     let dll =
         (file.nt_headers().file_header().characteristics.get(LE)).contains(pe::IMAGE_FILE_DLL);
@@ -256,7 +259,27 @@ fn read_of<'data, Pe: ImageNtHeaders, R: ReadRef<'data>>(
         entry,
         imports,
         written,
+        security_cookie,
     }
+}
+
+/// `IMAGE_LOAD_CONFIG_DIRECTORY`'s `SecurityCookie` (winnt.h): the address of the `/GS` cookie,
+/// where the directory and its own `Size` both reach past the field and the field names one.
+fn security_cookie(
+    layout: &Layout,
+    data: &[u8],
+    directory: &dyn Fn(usize) -> Option<(u64, u64)>,
+    pointer: u64,
+) -> Option<u64> {
+    let (rva, size) = directory(pe::IMAGE_DIRECTORY_ENTRY_LOAD_CONFIG)?;
+    // PE32+ keeps it past ten 8-byte fields, PE32 past their 4-byte forms.
+    let field = if pointer == 8 { 0x58 } else { 0x3c };
+    let stated = layout.word(data, rva, 4)?;
+    if size.min(stated) < field + pointer {
+        return None;
+    }
+    let cookie = layout.word(data, rva + field, pointer)?;
+    (cookie != 0).then_some(cookie & layout.mask)
 }
 
 /// One import table: where its slots begin, its DLL, where its names begin, and whether a delay
