@@ -632,8 +632,10 @@ fn observed_in_slot(
 /// What a live-out value says about the result, where a call defined it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReturnedByCall {
-    /// A value the program produced: no call, or a callee that returns one.
+    /// A value the program produced, or one a call defines under a boundary that is not complete.
     Produced,
+    /// The value a callee's complete boundary states it returns in this register.
+    Stated,
     /// The callee returns nothing, so the register holds no value.
     Void,
     /// The callee's result is stated nowhere, so what the register holds is unproven.
@@ -696,6 +698,7 @@ fn returned_by_call(
         (true, Some(crate::SourceCallResult::Void)) => ReturnedByCall::Void,
         (true, None) => ReturnedByCall::Unstated(*id),
         (true, Some(result)) if outside(result) => ReturnedByCall::Void,
+        (true, Some(_)) => ReturnedByCall::Stated,
         _ => ReturnedByCall::Produced,
     }
 }
@@ -971,14 +974,16 @@ fn float_result_written(
     graph: &SsaGraph,
     slots: &SourceConventionSlots,
 ) -> Option<(CanonicalStorageId, crate::liveout::FunctionLiveOut)> {
-    result_register_written(func, graph, slots.float_result_slot()?)
+    result_register_written(func, graph, slots.float_result_slot()?, None)
 }
 
-/// `slot` and its live-out, where an operation of the body reaches a return there through any merge.
+/// `slot` and its live-out, where an operation of the body reaches a return there through any merge;
+/// with `stated`, so does a call whose complete boundary states its result there.
 fn result_register_written(
     func: &SSAFunction,
     graph: &SsaGraph,
     float: CanonicalStorageId,
+    stated: Option<&crate::semantic::PreparedFunctionFacts>,
 ) -> Option<(CanonicalStorageId, crate::liveout::FunctionLiveOut)> {
     let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[float]);
     let mut seen = crate::dense::IdSet::default();
@@ -995,7 +1000,12 @@ fn result_register_written(
             crate::graph::InstPayload::Phi { .. } => {
                 pending.extend(graph.inputs(inst.id).iter().copied())
             }
-            crate::graph::InstPayload::Op(crate::op::SSAOp::CallDefine { .. }) => {}
+            crate::graph::InstPayload::Op(crate::op::SSAOp::CallDefine { .. }) => {
+                let stated = stated.map(|facts| returned_by_call(graph, facts, value));
+                if stated == Some(ReturnedByCall::Stated) {
+                    return Some((float, live_out));
+                }
+            }
             crate::graph::InstPayload::Op(_) => return Some((float, live_out)),
         }
     }
@@ -1102,7 +1112,7 @@ fn recovered_result_over(
             ReturnedByCall::Void => continue,
             ReturnedByCall::Unstated(_) if skip_unstated => continue,
             ReturnedByCall::Unstated(_) => return RecoveredFunctionResult::Unproven,
-            ReturnedByCall::Produced => {}
+            ReturnedByCall::Produced | ReturnedByCall::Stated => {}
         }
         let Some(storage) = graph.value(value).and_then(|value| value.canonical_storage) else {
             return RecoveredFunctionResult::Unproven;
@@ -1516,13 +1526,14 @@ fn recover_interface_inner(
                 }
             }
         }
-        // A body whose integer register holds nothing it computed (the caller's value, or none)
-        // and that writes the float one hands back the float one where every reading call reads it
-        // there; unasked, it asks them.
+        // An integer register holding nothing the body computed leaves the float one, which the body
+        // or a callee's stated result fills, as the result where every reading call reads it there.
         let integer_unheld = handed_back || result == RecoveredFunctionResult::Void;
         let mut float_returned = false;
         if integer_unheld
-            && let Some((float, float_live_out)) = float_result_written(func, graph, slots)
+            && let Some(float) = slots.float_result_slot()
+            && let Some((float, float_live_out)) =
+                result_register_written(func, graph, float, Some(&facts))
         {
             match (closed.and_then(float_bytes)).map(|bytes| float_lane(float, bytes)) {
                 Some(observed) => {

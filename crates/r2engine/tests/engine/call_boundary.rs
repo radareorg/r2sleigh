@@ -336,3 +336,40 @@ fn a_forwarding_ring_is_solved_once_per_caller() {
     assert!(two <= 2 * (2 + 2), "ring 2: {two}");
     assert!(eight <= 2 * (8 + 2), "ring 8: {eight}");
 }
+
+/// `f`: `lea rax, [rdi + 1]; cvtsi2sd xmm0, rdi; ret`; `g`: `sub rsp, 0x28; call f; add rsp,
+/// 0x28; ret`; `caller`: `call g; movsd [rsi], xmm0; ret`.
+const FORWARDED_FLOAT: &[u8] = &[
+    0x48, 0x8d, 0x47, 0x01, // 1000 lea rax, [rdi + 1]
+    0xf2, 0x48, 0x0f, 0x2a, 0xc7, // 1004 cvtsi2sd xmm0, rdi
+    0xc3, // 1009 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 100a padding
+    0x48, 0x83, 0xec, 0x28, // 1010 sub rsp, 0x28
+    0xe8, 0xe7, 0xff, 0xff, 0xff, // 1014 call 0x1000
+    0x48, 0x83, 0xc4, 0x28, // 1019 add rsp, 0x28
+    0xc3, // 101d ret
+    0x90, 0x90, // 101e padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1020 call 0x1010
+    0xf2, 0x0f, 0x11, 0x06, // 1025 movsd [rsi], xmm0
+    0xc3, // 1029 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 102a padding
+];
+
+/// `g` hands back the `double` `f` states in XMM0, which `caller` reads: never `void`, though the
+/// call leaves RAX outside `f`'s result (the f3 struct forwarders, gcc -O1).
+#[test]
+fn a_forwarder_of_a_stated_float_result_its_caller_reads_is_never_void() {
+    let functions = [
+        ("f", BASE, 0x0a),
+        ("g", BASE + 0x10, 0x0e),
+        ("caller", BASE + 0x20, 0x0a),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(FORWARDED_FLOAT, &functions));
+    open.analyse_program().expect("it surveys");
+    let mut header = |at| (open.rendered(at).expect("it renders").response.output).into_text();
+    let text = header(BASE);
+    assert!(text.starts_with("double f("), "{text}");
+    let text = header(BASE + 0x10);
+    assert!(text.starts_with("double g("), "{text}");
+}
