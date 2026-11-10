@@ -577,17 +577,17 @@
     "branchy_arm64_O2::sym._inverted_void": 2,
     "branchy_arm64_O2::sym._main": 41,
     "branchy_x64_O0::sym._and_chain_effect": 2,
-    "branchy_x64_O0::sym._inverted_void": 2,
+    "branchy_x64_O0::sym._inverted_void": 1,
     "branchy_x64_O0::sym._main": 22,
-    "branchy_x64_O1::sym._inverted_void": 2,
+    "branchy_x64_O1::sym._inverted_void": 1,
     "branchy_x64_O1::sym._main": 32,
-    "branchy_x64_O2::sym._inverted_void": 2,
-    "branchy_x64_O2::sym._main": 80,
+    "branchy_x64_O2::sym._inverted_void": 1,
+    "branchy_x64_O2::sym._main": 82,
     "hashes_arm64_O0::sym._crc32_init": 2,
     "hashes_arm64_O0::sym._main": 42,
     "hashes_arm64_O1::sym._crc32_init": 2,
     "hashes_arm64_O2::sym._crc32_init": 2,
-    "hashes_x64_O0::sym._crc32_init": 2,
+    "hashes_x64_O0::sym._crc32_init": 3,
     "hashes_x64_O2::sym._crc32_init": 2,
     "pinned_branchy_gcc_x64_O0::sym._init": 4,
     "pinned_branchy_gcc_x64_O0::sym._start": 23,
@@ -722,6 +722,8 @@
     "pinned_hashes_gcc_x64_O2::sym._fini": 2,
     "pinned_hashes_gcc_x64_O2::sym._dl_relocate_static_pie": 2,
     "pinned_shapes_gcc_x64_O0::sym._fini": 2,
-    "pinned_shapes_gcc_x64_O0::sym._dl_relocate_static_pie": 2
+    "pinned_shapes_gcc_x64_O0::sym._dl_relocate_static_pie": 2,
+    "branchy_x64_O1::sym._and_chain_effect": 2,
+    "branchy_x64_O2::sym._and_chain_effect": 2
   }
 }
