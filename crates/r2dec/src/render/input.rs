@@ -101,6 +101,22 @@ impl<'a> RenderInput<'a> {
             .type_graph()
     }
 
+    /// Whether parameter `slot` is a hole: unread below a read slot, a parameter only by the
+    /// convention's order (doc/adr-call-boundary.md, rule 2).
+    pub fn parameter_is_hole(&self, slot: usize) -> bool {
+        (self.artifact().machine_context().function_interface())
+            .and_then(|interface| interface.parameters().get(slot))
+            .is_some_and(r2source::SourceAbiParameterSpec::is_hole)
+    }
+
+    /// How many parameters the function takes at least, where its interface states only a floor
+    /// (D37), with the causes it names; the proof line carries it to the header (D100).
+    pub fn arity_floor(&self) -> Option<(usize, &'a r2source::SourceArityFloor)> {
+        let interface = self.artifact().machine_context().function_interface()?;
+        let floor = interface.arity_floor()?;
+        Some((interface.arity().floor(), floor))
+    }
+
     /// Whether arguments continue past the parameters, as the function's interface states.
     pub fn variadic(&self) -> bool {
         (self.artifact().machine_context().function_interface())

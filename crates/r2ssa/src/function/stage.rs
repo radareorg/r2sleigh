@@ -379,6 +379,7 @@ impl Sealed {
             live_out,
             ignored_reads,
         } = liveness;
+        facts.body_boundary = finish.body_boundary;
         let unobserved_merges = crate::deadphi::DeadPhis::find(&self.graph, &live_out, &facts);
         let aggregate_accesses = crate::aggregate_access::collect_aggregate_access_projections(
             &self.graph,

@@ -159,7 +159,8 @@ fn extern_decl(plan: &CallPlan, mut types: Vec<CType>, ret_type: CType) -> Optio
         return None;
     };
     if let Some(declared) = &plan.declared {
-        for (ty, to) in types.iter_mut().zip(&declared.params) {
+        let declared = types.iter_mut().zip(&declared.params);
+        for (ty, to) in declared.filter(|(ty, _)| !crate::prelude::is_unread_slot(ty)) {
             *ty = to.clone();
         }
     }
@@ -413,8 +414,8 @@ impl Demand<'_> {
             }
             _ if op.is_call() || matches!(op, SSAOp::Branch { .. }) => {
                 let plan = planned.get(inst.id);
-                for (argument, _) in plan.map_or(&[][..], |plan| &plan.arguments[..]) {
-                    self.operand(*argument, inst.id);
+                for argument in plan.into_iter().flat_map(CallPlan::passed_values) {
+                    self.operand(argument, inst.id);
                 }
             }
             SSAOp::CBranch { cond, .. } => self.operand(*cond, inst.id),
@@ -433,8 +434,8 @@ impl Demand<'_> {
             // A tail transfer reads its arguments, and its target where it goes through one.
             SSAOp::BranchInd { target, .. } if planned.get(inst.id).is_some() => {
                 let plan = planned.get(inst.id).expect("planned above");
-                for (argument, _) in &plan.arguments {
-                    self.operand(*argument, inst.id);
+                for argument in plan.passed_values() {
+                    self.operand(argument, inst.id);
                 }
                 if matches!(plan.callee, calls::Callee::Through(_)) {
                     self.operand(*target, inst.id);
@@ -950,7 +951,12 @@ impl<'a> Values<'a> {
                 })
                 .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
             let differs = declared.as_ref().is_some_and(|declared| *declared != class);
-            let c = declared.unwrap_or(class);
+            // A hole states no type: its class's typedef, which claims none (D165).
+            let hole = (input.parameter_is_hole(index as usize))
+                .then(|| crate::prelude::unread_slot(&class))
+                .flatten();
+            let differs = differs && hole.is_none();
+            let c = hole.or(declared).unwrap_or(class);
             let named = crate::ast::c_identifier(&input.parameter_name(index as usize));
             let name = self.symbols.borrow_mut().declare(
                 Some(named)
@@ -1238,9 +1244,19 @@ impl<'a> Values<'a> {
                 .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
         });
         // A variadic body's tail: an argument slot past its parameters, or the vector count.
+        // The integer section's own parameters: a float one takes no integer slot.
+        let integers = |interface: &r2ssa::SourceFunctionInterface| {
+            (interface.parameters().iter())
+                .filter_map(r2source::SourceAbiParameterSpec::register_storage)
+                .filter(|storage| {
+                    (slots.into_iter().flat_map(|slots| slots.argument_slots()))
+                        .any(|slot| slot.space == storage.space && slot.offset == storage.offset)
+                })
+                .count()
+        };
         let tail = context.function_interface().is_some_and(|interface| {
             interface.is_variadic()
-                && (position.is_some_and(|slot| slot >= interface.parameters().len())
+                && (position.is_some_and(|slot| slot >= integers(interface))
                     || storage
                         .zip(slots.and_then(r2ssa::SourceConventionSlots::variadic_count_register))
                         .is_some_and(|(storage, count)| {
@@ -1666,7 +1682,8 @@ impl<'a> Values<'a> {
         texts: Vec<Option<&str>>,
         fixed: usize,
     ) {
-        for (argument, ty) in arguments.iter_mut().zip(types).take(fixed) {
+        let passed = arguments.iter_mut().zip(types).take(fixed);
+        for (argument, ty) in passed.filter(|(_, ty)| !crate::prelude::is_unread_slot(ty)) {
             *argument = terms::at_sink(ty, std::mem::replace(argument, CExpr::IntLit(0)));
         }
         for ((argument, ty), text) in arguments.iter_mut().zip(types).zip(texts) {
@@ -1686,8 +1703,20 @@ impl<'a> Values<'a> {
     ) -> Result<(Vec<CExpr>, Vec<CType>), CallRefusal> {
         let mut arguments = Vec::with_capacity(plan.arguments.len());
         let mut types = Vec::with_capacity(plan.arguments.len());
-        for ((argument, class), stacked) in plan.arguments.iter().zip(&plan.stacked) {
+        for (position, ((argument, class), stacked)) in
+            plan.arguments.iter().zip(&plan.stacked).enumerate()
+        {
             let (held, ty) = self.argument_type(inst, *argument, class, *stacked)?;
+            // A slot the callee ignores passes its typed residual: no caller value reaches it.
+            if let Some(hole) = plan
+                .ignored(position)
+                .then(|| crate::prelude::unread_slot(&ty))
+            {
+                let hole = needed(hole, inst, CallRefusal::ArgumentType)?;
+                arguments.push(CExpr::cast(hole.clone(), CExpr::IntLit(0)));
+                types.push(hole);
+                continue;
+            }
             let operand = self.operand(*argument, inst);
             let operand = needed(operand, inst, CallRefusal::ArgumentOperand)?;
             let fitted = fit(operand, &held, class);
@@ -1737,8 +1766,18 @@ impl<'a> Values<'a> {
             return Ok(None);
         };
         let mut types = Vec::with_capacity(plan.arguments.len());
-        for ((argument, class), stacked) in plan.arguments.iter().zip(&plan.stacked) {
-            types.push(self.argument_type(inst, *argument, class, *stacked)?.1);
+        for (position, ((argument, class), stacked)) in
+            plan.arguments.iter().zip(&plan.stacked).enumerate()
+        {
+            let ty = self.argument_type(inst, *argument, class, *stacked)?.1;
+            types.push(match plan.ignored(position) {
+                true => needed(
+                    crate::prelude::unread_slot(&ty),
+                    inst,
+                    CallRefusal::ArgumentType,
+                )?,
+                false => ty,
+            });
         }
         let ret_type = self.return_type(inst, plan)?;
         Ok(extern_decl(plan, types, ret_type))
@@ -1779,7 +1818,9 @@ impl<'a> Values<'a> {
         let ret_type = self.return_type(inst, plan)?;
         // A declared prototype passes and returns at the types the source states.
         if let Some(declared) = &plan.declared {
-            for ((argument, ty), to) in arguments.iter_mut().zip(&mut types).zip(&declared.params) {
+            let passed = (arguments.iter_mut().zip(&mut types).zip(&declared.params))
+                .filter(|((_, ty), _)| !crate::prelude::is_unread_slot(ty));
+            for ((argument, ty), to) in passed {
                 let taken = std::mem::replace(argument, CExpr::IntLit(0));
                 *argument = match self.declared_variable(&taken, to) {
                     Some(variable) => variable,
@@ -2030,7 +2071,12 @@ impl<'a> Values<'a> {
             return None;
         }
         let mut arguments = Vec::with_capacity(params.len());
-        for ((argument, _), class) in plan.arguments.iter().zip(params) {
+        for (position, ((argument, _), class)) in plan.arguments.iter().zip(params).enumerate() {
+            if plan.ignored(position) {
+                let hole = crate::prelude::unread_slot(&terms::c_type(class)?)?;
+                arguments.push(CExpr::cast(hole, CExpr::IntLit(0)));
+                continue;
+            }
             let held = self.value_type(*argument)?;
             arguments.push(fit(self.operand(*argument, inst)?, &held, class)?);
         }

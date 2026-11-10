@@ -157,7 +157,14 @@ def arity(args, binary, chosen):
     wrong C whatever the proof line says. A pointer call is counted, not judged:
     nothing names what it reaches.
     """
-    tally = {"calls graded": 0, "invented": 0, "dropped": 0, "pointer calls": 0, "unjudged": 0}
+    tally = {
+        "calls graded": 0,
+        "invented": 0,
+        "dropped": 0,
+        "hole arguments": 0,
+        "pointer calls": 0,
+        "unjudged": 0,
+    }
     rendered = batch_json(args.r2s, binary, [address for address, _ in chosen], args.timeout)
     callees = sorted(
         {
@@ -188,6 +195,8 @@ def arity(args, binary, chosen):
                 tally["unjudged"] += 1
                 continue
             tally["calls graded"] += 1
+            # A slot the callee ignores is passed as its typed residual: counted apart (D165).
+            tally["hole arguments"] += call.get("ignored", 0)
             if call["arguments"] == takes:
                 continue
             key = "invented" if call["arguments"] > takes else "dropped"
@@ -406,7 +415,7 @@ def main():
         print(f"{key:16} {totals.get(key, 0)}")
     # The arity check reports; it gates once its counts are blessed (ROADMAP GT).
     print("arity:")
-    for key in ("calls graded", "invented", "dropped", "pointer calls", "unjudged"):
+    for key in ("calls graded", "invented", "dropped", "hole arguments", "pointer calls", "unjudged"):
         print(f"  {key:14} {totals.get(key, 0)}")
     # An uncertified rendering is a defect on its own terms, and so is a
     # panic the engine isolated or a process that never answered.

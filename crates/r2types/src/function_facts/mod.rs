@@ -1176,10 +1176,6 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
             .parameters()
             .iter()
             .find(|candidate| candidate.index() == *index)?;
-        let abi_slot = abi
-            .argument_registers()
-            .iter()
-            .find(|candidate| candidate.index() == *index)?;
         let graph_value = source.graph().value(parameter_value)?;
         // The formal's value is the carrier's entry value, or the projection
         // minted for a lane of it (doc/adr-register-identity.md §6).
@@ -1192,7 +1188,6 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
             && graph_value.var.size == graph_storage.size;
         if parameter.index != *index
             || Some(abi_storage) != source_parameter.register_storage()
-            || abi_storage != abi_slot.storage()
             || !(entry_value || projection)
             || resolver
                 .slots_by_value

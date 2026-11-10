@@ -30,24 +30,7 @@ pub use r2source::{
     SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, StackAddressBase,
 };
 
-pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 27;
-
-/// One canonical register carrier in the immutable ABI snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct MachineAbiRegisterSlot {
-    index: u32,
-    storage: CanonicalStorageId,
-}
-
-impl MachineAbiRegisterSlot {
-    pub const fn index(&self) -> u32 {
-        self.index
-    }
-
-    pub const fn storage(&self) -> CanonicalStorageId {
-        self.storage
-    }
-}
+pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 28;
 
 /// Typed calling-convention carrier snapshot injected with the function.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -62,8 +45,6 @@ pub struct MachineAbiModel {
     frame_geometry_coherent: bool,
     /// Whether the return-address, stack- and frame-pointer carriers hold.
     machine_carriers_coherent: bool,
-    argument_registers: Box<[MachineAbiRegisterSlot]>,
-    return_registers: Box<[MachineAbiRegisterSlot]>,
     frame_pointer_storage: Option<CanonicalStorageId>,
 }
 
@@ -76,8 +57,6 @@ impl MachineAbiModel {
             argument_placement_coherent: false,
             frame_geometry_coherent: false,
             machine_carriers_coherent: false,
-            argument_registers: Box::new([]),
-            return_registers: Box::new([]),
             frame_pointer_storage: None,
         }
     }
@@ -86,27 +65,9 @@ impl MachineAbiModel {
         interface: Option<&SourceFunctionInterface>,
         frame_pointer_storage: Option<CanonicalStorageId>,
     ) -> Self {
-        let Some(interface) = interface else {
+        if interface.is_none() {
             return Self::unavailable();
-        };
-        // The register slots only: a parameter the convention passes on the
-        // stack is a frame object, and the object model answers for it.
-        let argument_registers = interface
-            .parameters()
-            .iter()
-            .filter_map(|parameter| {
-                parameter
-                    .register_storage()
-                    .map(|storage| MachineAbiRegisterSlot {
-                        index: parameter.index(),
-                        storage,
-                    })
-            })
-            .collect::<Vec<_>>();
-        let return_registers = (interface.return_kind().storages())
-            .zip(0..)
-            .map(|(storage, index)| MachineAbiRegisterSlot { index, storage })
-            .collect::<Vec<_>>();
+        }
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
             available: true,
@@ -114,8 +75,6 @@ impl MachineAbiModel {
             argument_placement_coherent: true,
             frame_geometry_coherent: true,
             machine_carriers_coherent: true,
-            argument_registers: argument_registers.into_boxed_slice(),
-            return_registers: return_registers.into_boxed_slice(),
             frame_pointer_storage,
         }
     }
@@ -150,14 +109,6 @@ impl MachineAbiModel {
     /// Whether the return-address, stack- and frame-pointer carriers hold.
     pub const fn machine_carriers_are_coherent(&self) -> bool {
         self.machine_carriers_coherent
-    }
-
-    pub const fn argument_registers(&self) -> &[MachineAbiRegisterSlot] {
-        &self.argument_registers
-    }
-
-    pub const fn return_registers(&self) -> &[MachineAbiRegisterSlot] {
-        &self.return_registers
     }
 
     pub const fn frame_pointer_storage(&self) -> Option<CanonicalStorageId> {

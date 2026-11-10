@@ -91,6 +91,9 @@ pub struct PreparedFunctionFacts {
     pub assumptions: AssumptionSet,
     pub applied_assumption_bindings: Vec<PreparedAssumptionBinding>,
     pub assumption_usage: AssumptionUsageReport,
+    /// What the body states at its boundary, where its interface was recovered from it: the slot
+    /// uses its parameters were minted from and its result lanes' bytes (doc/adr-call-boundary.md).
+    pub body_boundary: Option<std::sync::Arc<crate::body_boundary::BodyBoundary>>,
 }
 
 /// What one collection reads, so the phases take one name rather than six.
@@ -257,10 +260,9 @@ impl PreparedFunctionFacts {
                 control.poll()?;
             }};
         }
-        let return_storages = machine_context
+        let return_storages = (machine_context.and_then(SourceMachineContext::function_interface))
             .into_iter()
-            .flat_map(|context| context.abi_model().return_registers())
-            .map(|slot| slot.storage())
+            .flat_map(|interface| interface.return_kind().storages())
             .collect::<Vec<_>>();
         let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
         let boundaries = collect_source_boundary_facts(
@@ -402,6 +404,7 @@ impl PreparedFunctionFacts {
             assumptions: assumptions.clone(),
             applied_assumption_bindings,
             assumption_usage,
+            body_boundary: None,
         };
         Ok((
             facts,

@@ -60,6 +60,8 @@ pub struct RenderedCallJson {
     pub callee: Option<String>,
     pub addr: Option<u64>,
     pub arguments: usize,
+    /// Arguments that are slots the callee ignores (D165), counted apart from invented ones.
+    pub ignored: usize,
     pub variadic: bool,
 }
 
@@ -311,6 +313,7 @@ fn call_json(call: &r2dec::report::RenderedCall) -> RenderedCallJson {
         callee: call.callee.clone(),
         addr: call.addr,
         arguments: call.arguments,
+        ignored: call.ignored,
         variadic: call.variadic,
     }
 }

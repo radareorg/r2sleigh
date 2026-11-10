@@ -21,7 +21,7 @@ CMDS=aa; pdd @ 0x00401000
 EXPECT=<<EOF
 r2sleigh_result_u64 fcn_401000(void)
 {
-    /* r2dec proof: 2 constructs are marked below; 7 source obligations: 0 rendered, 4 elided, 0 refused, 3 residual; 1 statements rendered; the result is unproven (Written): 0 unproven-return carried */
+    /* r2dec proof: 2 constructs are marked below; 7 source obligations: 0 rendered, 4 elided, 0 refused, 3 residual; 1 statements rendered; the parameters are a floor: at least 0 (a supervisor entry, a register past them is only homed); the result is unproven (Written): 0 unproven-return carried */
     {
         r2sleigh_residual_void(1); /* r2dec gap: UserOperation(syscall) at 0x401000:15 covering 1 op (render::values) */
         return r2sleigh_residual_u64(2);
@@ -39,7 +39,7 @@ CMDS=aa; pdd @ 0x00401010
 EXPECT=<<EOF
 r2sleigh_result_u64 fcn_401010(void)
 {
-    /* r2dec proof: 2 constructs are marked below; 8 source obligations: 1 rendered, 4 elided, 0 refused, 3 residual; 1 statements rendered; the result is unproven (Written): 0 unproven-return carried */
+    /* r2dec proof: 2 constructs are marked below; 8 source obligations: 1 rendered, 4 elided, 0 refused, 3 residual; 1 statements rendered; the parameters are a floor: at least 0 (a supervisor entry); the result is unproven (Written): 0 unproven-return carried */
     {
         {
             r2sleigh_residual_void(1); /* r2dec gap: UserOperation(syscall) at 0x401019:15 covering 1 op (render::values) */
@@ -59,7 +59,7 @@ CMDS=aa; pdd @ 0x00401030
 EXPECT=<<EOF
 r2sleigh_result_u64 fcn_401030(void)
 {
-    /* r2dec proof: 2 constructs are marked below; 7 source obligations: 0 rendered, 4 elided, 0 refused, 3 residual; 1 statements rendered; the result is unproven (Written): 0 unproven-return carried */
+    /* r2dec proof: 2 constructs are marked below; 7 source obligations: 0 rendered, 4 elided, 0 refused, 3 residual; 1 statements rendered; the parameters are a floor: at least 0 (a supervisor entry); the result is unproven (Written): 0 unproven-return carried */
     {
         r2sleigh_residual_void(1); /* r2dec gap: UserOperation(syscall) at 0x401030:22 covering 1 op (render::values) */
         return r2sleigh_residual_u64(2);
@@ -97,7 +97,7 @@ r2sleigh_result_u64 entry0(void)
     uint64_t fcn_401030(void);
     r2sleigh_result_u64 fcn_401050(void);
 
-    /* r2dec proof: 6 constructs are marked below; 38 source obligations: 6 rendered, 17 elided, 0 refused, 15 residual; 3 statements rendered; the result is unproven (Written): 0 unproven-return carried */
+    /* r2dec proof: 6 constructs are marked below; 38 source obligations: 6 rendered, 17 elided, 0 refused, 15 residual; 3 statements rendered; the parameters are a floor: at least 0 (a supervisor entry); the result is unproven (Written): 0 unproven-return carried */
     {
         r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401060:6 covering 1 op (render::values): call to fcn_401000: its arity is only at least 0 (a floor), and this call writes 1 */
         r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x401060:11 covering 1 op (render::values) */

@@ -169,7 +169,9 @@ impl DeadPhis {
         );
         for boundary in boundaries.calls.values() {
             for argument in &boundary.arguments {
-                if let SourceCallArgumentValue::Value(value) = argument.value {
+                if let SourceCallArgumentValue::Value(value) = argument.value
+                    && !boundary.ignores(argument)
+                {
                     roots.insert(value);
                 }
             }

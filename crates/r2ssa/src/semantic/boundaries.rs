@@ -904,14 +904,9 @@ pub(crate) fn convention_call_boundary(
     let at_least = arity.map_or(0, crate::SourceArity::floor);
     // Whether a call returns its result in `slot`: what a call leaves there is a value, elsewhere garbage.
     let result_slot = |slot: CanonicalStorageId| {
-        machine_context
-            .abi_model()
-            .return_registers()
-            .iter()
-            .any(|register| {
-                let storage = register.storage();
-                storage.space == slot.space && storage.offset == slot.offset
-            })
+        (machine_context.function_interface().into_iter())
+            .flat_map(|interface| interface.return_kind().storages())
+            .any(|storage| storage.space == slot.space && storage.offset == slot.offset)
     };
     // Whether this function itself may take `slot` as a parameter: its interface says, and while
     // recovery has none yet, any slot the body did not write may be one it hands on.
@@ -1326,6 +1321,7 @@ pub(crate) fn collect_source_boundary_facts(
             noreturn: None,
             result_kind: None,
             arguments: Vec::new(),
+            ignored: Box::default(),
             fixed_argument_count: None,
             variadic_argument_count_evidence: None,
             variadic_argument_count_refusal: None,
@@ -1349,6 +1345,11 @@ pub(crate) fn collect_source_boundary_facts(
             boundary.noreturn = Some(interface.is_noreturn());
             boundary.result_kind = Some(interface.result());
             boundary.refusal = Some(CallBoundaryRefusal::InterfaceIncomplete);
+            boundary.ignored = (interface.exact_callee_interface().into_iter())
+                .flat_map(|callee| callee.parameters())
+                .filter(|parameter| parameter.is_hole())
+                .map(r2source::SourceAbiParameterSpec::index)
+                .collect();
             if interface.is_complete()
                 && let Some((block_addr, op_index)) = graph.walk_start(call_site.at)
             {
@@ -1708,7 +1709,10 @@ pub(crate) fn collect_source_boundary_facts(
                     && machine_context.abi_model().return_boundary_is_coherent();
                 let stack_pointer_storage = machine_context.stack_pointer_carrier();
                 let return_address_storage = machine_context.return_address_carrier();
-                let return_slots = machine_context.abi_model().return_registers();
+                let return_slots = (machine_context.function_interface().into_iter())
+                    .flat_map(|interface| interface.return_kind().storages())
+                    .zip(0u32..)
+                    .collect::<Vec<_>>();
                 // A void return carries no values, so nothing about it is an
                 // ABI question: there is no carrier to resolve and no
                 // convention to be coherent about. Only a returned value is.
@@ -1724,7 +1728,7 @@ pub(crate) fn collect_source_boundary_facts(
                         SourceFunctionReturn::Register { .. } | SourceFunctionReturn::Pair { .. },
                     ) if abi_is_coherent => {
                         if let Some((block_addr, op_index)) = graph.walk_start(inst.id) {
-                            for slot in return_slots {
+                            for &(storage, index) in &return_slots {
                                 let reached = reaching_source_return_register_in_block(
                                     function,
                                     prep,
@@ -1732,18 +1736,13 @@ pub(crate) fn collect_source_boundary_facts(
                                     machine_context,
                                     block_addr,
                                     op_index,
-                                    slot.storage(),
+                                    storage,
                                 );
-                                let input = carries_input(machine_context, slot.storage());
+                                let input = carries_input(machine_context, storage);
                                 match reached {
-                                    Some(value)
-                                        if input || !entry_of(graph, value, slot.storage()) =>
-                                    {
+                                    Some(value) if input || !entry_of(graph, value, storage) => {
                                         values.push(CallBoundaryValueFact {
-                                            slot: CallBoundarySlot::Register {
-                                                index: slot.index(),
-                                                storage: slot.storage(),
-                                            },
+                                            slot: CallBoundarySlot::Register { index, storage },
                                             value,
                                         });
                                     }
@@ -1755,7 +1754,7 @@ pub(crate) fn collect_source_boundary_facts(
                                             && left_undefined(
                                                 (function, prep, graph, machine_context),
                                                 (block_addr, op_index),
-                                                slot.storage(),
+                                                storage,
                                             );
                                     }
                                 }
@@ -1803,7 +1802,7 @@ pub(crate) fn collect_source_boundary_facts(
                         machine_context
                             .function_interface()
                             .map(|interface| interface.return_kind()),
-                        machine_context.abi_model().return_registers().len(),
+                        return_slots.len(),
                         values.len(),
                         exit_stack_pointer.is_some(),
                         return_address.is_some()
@@ -1960,22 +1959,6 @@ pub(crate) fn source_formal_parameter_projections(
                     });
                 }
             };
-            if machine_context
-                .abi_model()
-                .argument_registers()
-                .iter()
-                .filter(|slot| slot.index() == parameter.index() && slot.storage() == abi_storage)
-                .count()
-                != 1
-            {
-                r2il::refusal_evidence!(
-                    "formal-projections",
-                    "parameter {} storage {:?} is not exactly one argument register of the ABI model",
-                    parameter.index(),
-                    abi_storage
-                );
-                return None;
-            }
             // A parameter the capture could not place keeps its ABI storage
             // and no exact type, which is what a function with no graph at all
             // already gets. It is not a reason to refuse the parameter.

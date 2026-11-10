@@ -188,7 +188,15 @@ fn a_wrapper_that_computes_the_stub_s_argument_is_a_body_not_the_stub() {
         .output
         .into_text();
     assert!(!text.contains("import stub at"), "{text}");
-    assert!(text.contains("malloc(") && text.contains(") * ("), "{text}");
+    // zlib's `zcalloc(opaque, items, size)`: `opaque` is a hole, the product its two read slots.
+    assert!(
+        text.contains("(r2sleigh_unread_u64 arg0, uint32_t arg1, uint32_t arg2)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("malloc(") && text.contains("arg1 * "),
+        "{text}"
+    );
 }
 
 /// One jump to the stub, with nothing else, is still a jump to another function: only the stub

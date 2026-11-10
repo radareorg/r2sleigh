@@ -754,6 +754,9 @@ pub struct SourceCallBoundaryFact {
     pub noreturn: Option<bool>,
     pub result_kind: Option<SourceCallResult>,
     pub arguments: Vec<SourceCallArgumentFact>,
+    /// The argument positions the callee's interface states it ignores (holes, D165): each is
+    /// passed as a typed residual, so the value reaching it is no read and holds nothing live.
+    pub ignored: Box<[u32]>,
     /// How many leading entries of `arguments` the callee's prototype names.
     ///
     /// The rest are the tail a variadic call passes and no prototype can
@@ -784,6 +787,13 @@ pub struct SourceCallBoundaryFact {
     pub arguments_proven: bool,
     /// Why `complete` or `arguments_proven` is false; `None` exactly where both hold.
     pub refusal: Option<CallBoundaryRefusal>,
+}
+
+impl SourceCallBoundaryFact {
+    /// Whether `argument` is a slot the callee ignores (`ignored`).
+    pub fn ignores(&self, argument: &SourceCallArgumentFact) -> bool {
+        matches!(argument.slot, CallBoundarySlot::Register { index, .. } if self.ignored.contains(&index))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

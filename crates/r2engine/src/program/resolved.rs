@@ -107,6 +107,7 @@ fn arity_owners(read: &CalleeRead) -> BTreeSet<u64> {
         | SourceFloorCause::ArgumentAreaUnplaced
         | SourceFloorCause::ArgumentAreaRead
         | SourceFloorCause::RegisterRead
+        | SourceFloorCause::Homed
         | SourceFloorCause::Unplaced(_) => None,
     });
     owners.collect::<Option<_>>().unwrap_or_default()

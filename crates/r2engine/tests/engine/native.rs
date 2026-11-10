@@ -2271,8 +2271,7 @@ fn an_untouched_result_register_is_unproven_where_it_is_also_the_first_argument(
 }
 
 /// `lea rax, [rbx + rsi]; ret`: one register the function entered holding, and
-/// one argument slot whose parameter recovery does not admit, because the slot
-/// before it is never read.
+/// one argument slot read past an unread one, which makes that one a hole (D165).
 const ENTRY_AND_ARGUMENT: &[u8] = &[
     0x48, 0x8d, 0x04, 0x33, // 1000 lea rax, [rbx + rsi]
     0xc3, // 1004 ret
@@ -2302,16 +2301,16 @@ fn a_value_no_statement_assigns_is_named_on_the_proof_line() {
         proof.contains("; 1 held from entry, read as residuals (rbx_0)"),
         "{text}"
     );
-    // rsi is an argument slot with no parameter, so the rendering reads a value
-    // its own signature says it was never given. It is not excused as held.
+    // rsi is the second parameter, read by name, and rdi below it a hole: no
+    // argument slot is read without a parameter (D165's rule 2).
     assert!(
-        proof.contains("; 1 argument slot read with no parameter, read as residuals (rsi_0)"),
+        text.contains("entry_and_argument(r2sleigh_unread_u64 arg0, uint64_t arg1)"),
         "{text}"
     );
-    // Neither is declared as an object nothing assigns: each read traps.
-    assert!(!lower.contains("uint64_t rsi_0;"), "{text}");
+    assert!(!proof.contains("argument slot"), "{text}");
+    // rbx is not declared as an object nothing assigns: its read traps.
     assert!(!lower.contains("uint64_t rbx_0;"), "{text}");
-    assert_eq!(text.matches("r2sleigh_residual_u64(").count(), 2, "{text}");
+    assert_eq!(text.matches("r2sleigh_residual_u64(").count(), 1, "{text}");
 
     // The first stack argument is an argument slot too: above the return
     // address, where the caller placed it. It was counted as held from entry.
@@ -6164,7 +6163,7 @@ fn an_unseen_argument_below_a_written_one_leaves_the_call_unrendered() {
 }
 
 /// `f` hands `rdi` on unchanged to a call through memory and adds `rsi` to its
-/// result; `main` calls it with `edi = 3, esi = 5`.
+/// result; `main` calls it with `edi = 3, esi = 5, edx = 7`.
 const READS_PAST_ITS_PARAMETERS: &[u8] = &[
     0x53, // 0x1000 push rbx
     0x48, 0x89, 0xf3, // 0x1001 mov rbx, rsi
@@ -6174,13 +6173,14 @@ const READS_PAST_ITS_PARAMETERS: &[u8] = &[
     0xc3, // 0x100f ret
     0xbf, 0x03, 0x00, 0x00, 0x00, // 0x1010 mov edi, 3
     0xbe, 0x05, 0x00, 0x00, 0x00, // 0x1015 mov esi, 5
-    0xe8, 0xe1, 0xff, 0xff, 0xff, // 0x101a call 0x1000
-    0xc3, // 0x101f ret
+    0xba, 0x07, 0x00, 0x00, 0x00, // 0x101a mov edx, 7
+    0xe8, 0xdc, 0xff, 0xff, 0xff, // 0x101f call 0x1000
+    0xc3, // 0x1024 ret
 ];
 
 /// A callee whose parameters are a floor mints no contract, and what its caller wrote past the floor
-/// is no argument the callee is shown to take: `past(3, 5)` was the caller's registers, so the call
-/// is a residual (audit W7; `past` reads `rsi` and hands `rdi` to a call nothing describes).
+/// is no argument the callee is shown to take: `past` reads `rsi` and hands `rdi` and maybe `rdx` to
+/// a call nothing describes, a floor of two, so `past(3, 5, 7)` would invent `7` (audit W7).
 #[test]
 fn a_call_past_its_callees_floor_is_a_residual() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -6191,7 +6191,7 @@ fn a_call_past_its_callees_floor_is_a_residual() {
     };
     let response = decompile(&target, &program, BASE + 0x10).expect("decompile");
     let text = response.output.text();
-    assert!(!text.contains("past(3, 5)"), "{text}");
+    assert!(!text.contains("past(3, 5"), "{text}");
     assert!(text.contains("r2sleigh_residual"), "{text}");
 }
 
