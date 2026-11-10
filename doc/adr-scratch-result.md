@@ -1,6 +1,6 @@
 # ADR: the scratch result
 
-Status: proposed (ROADMAP P7 and T, after the call-boundary ADR's S2; decisions D200 to D208; hand audit 3.5.1, D72 remainder 2)
+Status: S1 (D200) and S2 (D201) built; the rest proposed (ROADMAP P7 and T, after the call-boundary ADR's S2; decisions D200 to D208; hand audit 3.5.1, D72 remainder 2)
 
 ## Problem
 
@@ -170,3 +170,39 @@ Only bytes that no C expression defines separate void from value without a decla
 3. **Rows:** a library row decides `void` only when D204's audit has cited it. An uncited row's result stays as base.
 4. **`.isra` clones:** named only by the gate. The engine reads no names.
 5. **D206 and D207:** D206 waits for its own ADR on the Value side. D207 is measured with D203 on an arm64 DWARF sample before S1 claims AArch64.
+
+## S1 and S2 as built (2026-11-10)
+
+What the code said that this ADR did not, and the owner chosen:
+
+- This base has no r2engine `CallBoundary` query. Result presence stays in r2ssa `recover_interface`, its one owner today. r2types projects Written and EntryInput into `ReturnTypeFact`, and r2dec spells it.
+- Case 1 is `entry_defines_nothing`: the result slot is no convention argument, and `read_on_entry` finds no use of its entry value past copies, merges, zero extensions and subpieces, other than a call's or a return's boundary read. A path that leaves the slot untouched then leaves no result. A body that reads AL, or stores entry RAX, keeps the base rule: Unproven.
+- Case 2 needed no new code. `returned_by_call` already counts a complete void boundary, or a register outside the stated result, as no value. An image callee that leaves the register untouched on every path is `preserved_by_target`, so its call defines nothing and the pre-call bytes flow on. A callee that leaves it untouched on some paths only still defines it at the call. d72's `EntrySummary::overwrites` is not on this base.
+- Case 3: `lanes` marks every operation in `compiler_inserted()`, and each decided check's difference, `Fill::Undefined`. `stack_protector::decide` records the differences (`checked_differences`). gcc's `xor eax, eax` scrub after storing the guard is not recorded and stays data.
+- `lanes::defines_nothing` judges a returned value. Its bytes are Undefined, Zero, Sign or, under case 1, the slot's own entry bytes: the path leaves nothing. Otherwise undefined joined with data is data.
+- A void tail beside direct returns joins them (`direct_returns_beside_void_tails`). `direct_return_result` answers an unproven tail only where a direct return defines a byte.
+- XMM0: a written float lane that no reading call decides `Float` is `Unproven` (Written). D208: where RAX defines nothing, an XMM0 entry byte at a direct return, unwritten on a path or a merge's arm, is `Unproven` (`HandedBack`, spelled EntryInput).
+- Demand was off in every void function: `FunctionLiveOut` over no storage leaves each return unresolved. `semantic::demanded` now reads no register at a void return. A written result's return that still holds the caller's RAX carries no value (boundaries `left_undefined`), renders a residual, and is left out of demand.
+- D201: `ReturnTypeFact::Unproven { carrier, cause }` with `UnprovenCause` Written, EntryInput, Unread or ForwardCycle. r2types decides Written for a recovered integer `Register` result that no declaration states and no reading call chose; `SourceFunctionInterface::result_read_by_callers` marks a float, a pair or a handed-back argument the reads chose. Of r2ssa's causes, `HandedBack` alone is EntryInput, `NoReturn` names none, and any other is Written. Unread (D202) and ForwardCycle are named and not produced.
+- The carrier is `r2sleigh_result_uN` at the result's observed width, not always u64: a u64 header over a 32-bit value would claim 4 upper bytes. The typedef sits in the unit's prelude, so the definition `pdd` shows starts at the header. `r2sleigh_carrier_uN` is a static inline identity among the prelude's helpers, so `tests/equiv` needs no definition of its own. A value spelled as a residual is not wrapped.
+- The proof line ends `; the result is unproven (CAUSE): N unproven-return carried`. `afi` prints `result: unproven (rax, CAUSE)`.
+- Under `aa` a closed-world call that reads the integer register makes a written result a value (`result_read_by_callers`): 685 source values and 7 source voids. The value claim records no `ClosedWorld` premise on the proof line yet.
+- Left: a caller's extern keeps the callee interface's integer type (`uint32_t f(void);`), the typedef's target. A callee D208 leaves Unproven forwards that through every call or tail that returns its value; per-lane pass-through is D212.
+
+Measured, release r2s on the 35 builds (`decbench_baseline.json`), base then head:
+
+| Class | Source void | Source value |
+|---|---|---|
+| `void-open` | 230 to 272 | 6 to 2 |
+| `unproven:Written` | 0 to 964 | 0 to 3,273 |
+| `unproven:EntryInput` | 0 to 144 | 0 to 3 |
+| `unproven:unstated` | 1,157 to 7 | 3,952 to 685 |
+| `refused` | 36 to 36 | 96 to 91 |
+
+- 169 new voids, 127 base voids moved, each named `moves` in `known.txt`: 91 XMM0 entry bytes (D208), 26 a callee's value or a written XMM0 at a return (D200), 10 a call or tail to a callee D208 left Unproven (D212).
+- The 2 false voids are the named clones `insert_primary.part.0` and `add_count.part.0`. The 3 XMM0 defects are Written: `constrain_rate`, `file_sparseness.isra.0`, and `estimate_timestamp_success_rate` through its tail to `constrain_rate`. `huft_free.isra.0` and both `visit_open_fds` clones are no longer void.
+- bzip2 O2 `compress` (`0x49d0`) is `void`, its 5 `return 0;` now `return;`.
+- CI's shapes: `canary_void` and `tail_free` void; `sum_args` (reads AL), `identity` and `some_path` not; `bump` and `exported_void` move by D208. The mutants `entry-byte` and `inserted-write-unread` replace their base forms.
+- Certification on radare2's ELF bins (24 binaries, 8 functions): 0 invented, 0 undefined reads.
+- Census and goldens: 18 files, 215 headers move to the carrier typedef and their spelled returns to `r2sleigh_carrier_uN`. 13 void leaves (`_fini`, `_dl_relocate_static_pie`, `entry_fini0`) move to EntryInput with a residual return. `__do_global_dtors_aux` falls from 4 residuals to 2 in 3 builds and rises from 7 to 9 in 4 PIE builds, where its return reads a call the renderer leaves a gap.
+
