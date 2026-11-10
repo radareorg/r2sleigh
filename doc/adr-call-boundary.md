@@ -906,3 +906,54 @@ Gates, debug build, base `20c1f7832`:
 - pumasim `Gui::Gui(QWidget *, const char *, unsigned)` goes from `(void *arg0)` to three parameters, and its call to `QWidget::QWidget` passes four arguments. 0pack `0x62ecf0`'s proof line names its floor of two and the four calls it rests on.
 - Dylint: 8 warnings, the baseline; no `entity_keyed_map`. Structure counts match base finding for finding; `long_comments` falls from 2,498 to 2,493.
 - Equivalence, on one x86-64 host (gcc 13.3, clang 18.1; aarch64 under qemu-user), S7's head then S6's: x86-64 730 to 731 equal of 828. `manual_limits.c` clang-O1 `table_walk` and `code_pointer_table.c` clang-O2 `main` become equal; `manual_limits.c` clang-O1 `main` leaves equal, since S6 counts `table_walk`'s entry ECX, read by a `cmove` only on paths where its condition rejects it, and `main` never writes RCX (D214 owns the proof). aarch64 holds 736: `code_pointer_table.c` gcc-O1 `table_dispatch` and `main` trap for another reason. gcc -O0 `pure_zero_guard` stays equal on both, by the `Homed` floor rule above.
+
+## S10 as built (2026-11-10)
+
+What the code said that this ADR did not, and the owner chosen:
+
+- The row states only what the cspec does not. `MICROSOFT_X64` gains `home: Some(HomeArea { step: 8 })`, cited from Microsoft x64 "Stack allocation" and the Windows SDK `vadefs.h`. The cspec's `localrange` 8..39 says where the area lies. The model splits a `localrange` that starts at the return address's end, and holds one home per shared position, into four `OwnedRange::Home`. x86-64-win's negative `localrange` stays `Callee`. The sketch's `HomeVaList` needs no field: `va_list` is `&home[first unnamed]`.
+- `ConventionModel::owner(offset)` returns `StackOwner { Callee, Home { position }, ReturnAddress, Caller }`. Without a model the rule is the old one, below the entry stack pointer. The machine context holds the snapshot's `Arc<ConventionModel>`. Five readers take it:
+  - `SsaArtifact::caller_frame_offset`, now a method;
+  - slot promotion's caller gate;
+  - the stack geometry's `names_own_object`;
+  - `CalleeStackAllocationCertificate`, which treats a home as the callee's at every access whatever the stack pointer, because a callee's home lies below the pointer it is called with;
+  - r2dec `Frame::lay_out`, whose array reaches past the return address to a home.
+- `SourceStackAllocationContract` (`contracts.rs:562`) is unchanged. It states what a stack-pointer move allocates, and a home is no move.
+- Recovery's argument area starts at the stack section's first offset past the return address: entry+40 under Microsoft x64, unchanged where the section starts at 0. A home reload was read as stack slot 0, so `place` refused the interface. That refusal left hello_gs's UCRT `printf` with no parameters.
+- Rule 3 under Microsoft x64 (`homed_in_its_home`): an entry value read only by stores to its own home is `Homed`, where no load reads that home and its address does not escape (`FrameReach::escapes_directly`). Above the read prefix it is floor cause `Homed`.
+- Rule 6: `SourceFunctionInterface::va_list_parameter` states the parameter `Tail::VaList { index }` names, set by r2engine `formatted`. `save_area::home_va_list` proves a tail at position k where:
+  - `&home[k]` is the argument at that index of a call whose exact callee interface states it;
+  - each later position's entry value is read only by its home.
+  - It reuses `SaveArea { named: k }`, so the body mints `(fixed..., ...)`. Its format comes from S8's body-proven forwarding.
+- A promoted home leaves a copy and no store. The proof therefore reads the entry values, and does not search for the stores.
+- Not built:
+  - `printf.rs` on the `Shared` section. A variadic callee homes and reads the integer register. A floating operand's C value is in the float register. The argument is that value only where SSA proves the two registers equal, as `movq r8, xmm2` does. The first cut read `xmm2` alone and was withdrawn. `a_floating_variadic_operand_whose_registers_differ_is_no_argument` keeps it a residual (D220).
+  - `tail_count` over a home `va_list`. Its row is SysV's `RegisterSaveArea` (D220).
+  - `/GS`. r2image reads `IMAGE_LOAD_CONFIG_DIRECTORY`'s `SecurityCookie` into `Container::security_cookie`: hello_gs `0x14001d040`, testapp `0x140016108`. `GuardRow::LoadConfigCookie` and the check proven from its body are D215, the field's reader. 29 hello_gs and 27 testapp functions read the cookie. 21 and 20 keep the read or the check as a residual or a literal at base, 16 and 17 at head. None is elided.
+  - A Win64 equivalence target. No PE in the corpus imports UCRT, and the equivalence harness compiles for ELF hosts (D216).
+- The gate "hello_gs `main` prints printf with 2 arguments, given a cited row" cannot hold. hello_gs links UCRT statically: it imports 67 KERNEL32 functions and nothing else. `__stdio_common_vfprintf` is the body at `0x140004448`, and no row binds a body by its name. Only the engine test `a_home_handed_on_as_a_cited_va_list_is_a_variadic_tail` exercises the cited-row path. Its import comes from `api-ms-win-crt-stdio-l1-1-0.dll`; it prints `print_line(uint64_t arg0, ...)`, and its caller prints `print_line(0x10a0, (uint64_t)7U)`.
+  - On hello_gs, head prints `fcn_140001090(uint64_t arg0, uint64_t arg1)` with "at least 2 (a register past them is only homed)". `main` prints `fcn_140001090((uint64_t)0x14001d008U, rax_1)`. That comes from the floor and the two registers the call writes, not from a tail.
+- Found: slot promotion promotes a frame address held in an outgoing stack-argument slot. The callee reads that slot, and promotion does not count the address as escaped. In the `va_list` fixture, `&home[1]` at `[rsp+0x20]` let all four homes promote. The defect predates S10 for locals: it hits SysV from the seventh argument and Microsoft x64 from the fifth. S10 extends it to home slots, which base never promoted (D217).
+
+Gates, release r2s, base `b2f9b4758`:
+
+- Home stores rendered as residuals, by function: hello_gs 74 of 89 homing functions to 3, testapp 61 of 70 to 3. The three are `__isa_available_init`, where `push rdi` is a residual too around `cpuid`, and two functions whose every operation is `UnsupportedUnknown` at base and head.
+- Residual obligations over every `afl` function: hello_gs 30,639 to 12,482, testapp 16,050 to 7,694.
+- Refusals: hello_gs 28 to 20 (6 new, 14 gone), testapp 12 to 12 (3 new, 3 gone). Each new one is an unaccounted `live-value-producer` or `volatile-or-unknown` effect obligation. S13 recorded the same cause once a call is declared and named r2ssa's effect accounting its owner.
+- Signatures: 13 move and are listed. Three bodies were read:
+  - `0x140001040` (`_vfprintf_l`) gets 4 parameters, its 4 homes reloaded.
+  - `0x140008258` gets 6: `arg4` and `arg5` are the slots at entry+40 and +48 that the body reads.
+  - `0x140010000` gets `(void *, void *)`. It hands its entry `rcx` and `rdx` to `0x1400115d0`, which hands them to `0x1400115f0`. `0x1400115f0`'s arity is a floor of 3. A register handed to a call that may read it is a parameter (S6 rule 3). At base, `0x1400115f0`'s interface was refused because its home read at entry+16 counted as stack slot 1.
+- Four rendered functions gain residual obligations. Each was read:
+  - hello_gs `0x1400105b8`, 6 to 13. `stmxcsr [rsp+8]` stores MXCSR into home 0 and reloads it. The home promotes, so the entry MXCSR is read where the reload stood. That is a held-from-entry residual at each of 13 uses. Base had one residual temporary and a false "argument area read" floor.
+  - hello_gs `0x140010000`, 102 to 119. Its two new parameters bring 28 obligations into reach: 11 render and 17 stay residual, with 7 more `TermNotSpelled` markers.
+  - testapp `0x14000a364`, 79 to 80. Its saves go through `mov rax, rsp; mov [rax+8], rbx`. The promoted homes read `RBX_0`, `RBP_0` and `RSI_0` as held-from-entry residuals, and the text holds 24 residual sites at base and head.
+  - testapp `0x140001368` (`entry0`), 146 to 148, has the same proof line at base and head.
+- Census: 444 golden tests pass and 0 lines move. The 23 census binaries are ELF and Mach-O, where `owner` is the old rule and the stack section starts at 0.
+- Touched crates' tests: 1,908 pass (r2engine, r2dec, r2ssa, r2source, r2abi, r2image).
+- Cost, release, instructions retired, median of three, base then head: cold `pdd` on 0pack `0x62ecf0` 15.40 to 15.42 G (+0.1%), pumasim `0x23fdf0` 19.85 to 19.84 G (−0.04%). Peak footprint 0pack 216 to 216 MB, pumasim 212 to 214 MB. `owner` scans at most six ranges, and `homed_in_its_home` runs once per shared position: O(objects + accesses).
+- Dylint: 8 warnings, the baseline, none in a touched file. Structure counts match base; `long_comments` stays 2,493. One nesting finding the first cut added in `names_own_object` was flattened.
+- Certification, radare2 `test/bins/elf --limit 24 --functions 8`: base and head print 50 rendered, 30 refused, 0 invented, 0 dropped.
+- Not run:
+  - Equivalence. The x86-64 and aarch64 runs need the Linux build host, which this slice did not use, and no corpus PE has a target (D216).
+  - The full workspace suite. Only the touched crates' suites and the census goldens ran.

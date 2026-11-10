@@ -977,6 +977,11 @@ pub(crate) fn collect_stack_geometry_certificate(
     });
     // Frame setup also admits a read naming an object below the entry stack pointer, where the
     // source states the stack grows down: C names it. Another growth admits nothing.
+    let callee_owned = |offset: i64| {
+        machine_context.map_or(offset < 0, |machine| {
+            machine.stack_owner(offset).callee_owned()
+        })
+    };
     let names_own_object = |site: &UseSite| {
         grows_down(*machine_context)
             && geometry_outputs.get(site.inst).is_some_and(|output| {
@@ -990,10 +995,7 @@ pub(crate) fn collect_stack_geometry_certificate(
                     })
                     .and_then(|object| objects.entry_stack_roots.get(&object))
                     .is_some_and(|root| {
-                        root.base == StackAddressBase::StackPointer
-                            && (machine_context.map_or(root.offset < 0, |machine| {
-                                machine.stack_owner(root.offset).callee_owned()
-                            }))
+                        root.base == StackAddressBase::StackPointer && callee_owned(root.offset)
                     })
             })
     };
