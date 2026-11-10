@@ -46,10 +46,11 @@ _RANGE_ROW = re.compile(
     r"^\s+(?P<offset>[0-9a-f]{8})\s+(?:(?P<end><End of list>)|(?P<begin>[0-9a-f]{8,16})\s+(?:(?P<base>\(base address\))|[0-9a-f]{8,16}))"
 )
 # One row of `readelf --wide --section-headers`: `[Nr] Name Type Address Off Size ES Flg Lk Inf Al`.
+# Read from the right, where every column has a fixed shape, so a name with a space (gcc's `section("\"a b\"")`) reads.
 _SECTION = re.compile(
-    r"^\s*\[\s*\d+\]\s+\S+\s+\S+\s+(?P<address>[0-9a-f]+)\s+[0-9a-f]+\s+(?P<size>[0-9a-f]+)\s+[0-9a-f]+\s+(?P<flags>[A-Za-z]+)\s+\d+\s+\d+\s+\d+\s*$",
-    re.MULTILINE,
+    r"^\s*\[\s*\d+\]\s(?P<name>.*?)\s+\S+\s+(?P<address>[0-9a-f]+)\s+[0-9a-f]+\s+(?P<size>[0-9a-f]+)\s+[0-9a-f]+\s+(?P<flags>[A-Za-z]*)\s+\d+\s+\d+\s+\d+\s*$"
 )
+_SECTION_ROW = re.compile(r"^\s*\[\s*\d+\]")
 _RANGE_SECTION = re.compile(r"^Contents of the \.debug_(?:ranges|rnglists) section")
 # Why a function with code is unplaced: a static whose symbol `ld -x` dropped, a fragment of a split function.
 NO_FUNC_START = "no FUNC symbol of the binary starts at its entry"
@@ -654,7 +655,13 @@ def executable_sections(binary: Path, target: Target = X86_64) -> list[range]:
     if proc.returncode != 0:
         raise RuntimeError(f"readelf failed on {binary}: {proc.stderr.strip()}")
     sections = []
-    for match in _SECTION.finditer(proc.stdout):
+    for line in proc.stdout.splitlines():
+        if not _SECTION_ROW.match(line):
+            continue
+        # A row skipped would turn an executable section into no code, and its functions into discarded ones.
+        match = _SECTION.match(line)
+        if match is None:
+            raise RuntimeError(f"readelf lists a section of {binary} the gate cannot read: {line.strip()}")
         if "X" in match["flags"]:
             start = int(match["address"], 16)
             sections.append(range(start, start + int(match["size"], 16)))

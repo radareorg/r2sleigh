@@ -1202,6 +1202,20 @@ class ExecutableSectionTests(unittest.TestCase):
         self.assertEqual(fixture_sections("gclib.gcc.O2.gc.sections.txt")[4], range(0x1060, 0x120B))
         self.assertEqual(len(fixture_sections("gclib.gcc.O2.gc.sections.txt")), 6)
 
+    def test_every_row_of_the_table_is_read_or_the_table_is_unreadable(self):
+        table = (DWARF_FIXTURES / "gclib.gcc.O2.gc.sections.txt").read_text()
+        # gcc writes `section("\"my text\"")` as a name with a space; x86-64 `.ltext` carries the large flag `l`.
+        named = table.replace("[17] .fini            ", "[17] my text         ").replace("00  AX  0   0  4\n  [18]", "00 AXl  0   0  4\n  [18]")
+        self.assertNotEqual(named, table)
+        done = subprocess.CompletedProcess([], 0, named, "")
+        with unittest.mock.patch.object(subprocess, "run", return_value=done):
+            self.assertIn(range(0x120C, 0x1219), executable_sections(Path("binary")))
+        cut = table.replace("000000000000120c 00120c 00000d 00  AX  0   0  4", "000000000000120c")
+        self.assertNotEqual(cut, table)
+        done = subprocess.CompletedProcess([], 0, cut, "")
+        with unittest.mock.patch.object(subprocess, "run", return_value=done), self.assertRaises(RuntimeError):
+            executable_sections(Path("binary"))
+
     def test_readelf_is_asked_for_the_wide_table_with_the_target_prefix(self):
         # Without --wide a 64-bit row splits over two lines and no row would read.
         done = subprocess.CompletedProcess([], 0, (DWARF_FIXTURES / "gclib.gcc.O2.gc.sections.txt").read_text(), "")

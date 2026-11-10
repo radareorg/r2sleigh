@@ -669,6 +669,13 @@ MUTANTS += [
     m("sections-end-inclusive", D, 'range(start, start + int(match["size"], 16))', 'range(start, start + int(match["size"], 16) + 1)', (EQUIV,)),
     m("sections-any-flags", D, '        if "X" in match["flags"]:', "        if True:", (EQUIV,)),
     m("sections-not-asked-wide", D, '[target.tool("readelf"), "--wide", "--section-headers", str(binary)]', '[target.tool("readelf"), "--section-headers", str(binary)]', (EQUIV,)),
+    # The seventh review: every row of the section table is read, or the table is unreadable.
+    m("sections-unread-row-skipped", D, '            raise RuntimeError(f"readelf lists a section of {binary} the gate cannot read: {line.strip()}")', "            continue", (EQUIV,)),
+    m("sections-name-no-space", D, r"\s(?P<name>.*?)\s+\S+\s+(?P<address>", r"\s+(?P<name>\S*)\s+\S+\s+(?P<address>", (EQUIV,)),
+    m("sections-flags-upper-only", D, "(?P<flags>[A-Za-z]*)", "(?P<flags>[A-Z]*)", (EQUIV,)),
+    m("sections-flags-required", D, "(?P<flags>[A-Za-z]*)", "(?P<flags>[A-Za-z]+)", (EQUIV,)),
+    m("sections-flags-end-in-x", D, '        if "X" in match["flags"]:', '        if match["flags"].endswith("X"):', (EQUIV,)),
+    m("sections-no-row-is-a-row", D, '        if not _SECTION_ROW.match(line):', "        if True:", (EQUIV,)),
 ]
 
 
