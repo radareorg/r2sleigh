@@ -163,7 +163,13 @@ impl EmissionReadyFunction {
 /// caller owns the function it hands over, so the tree is moved through instead
 /// and the expressions inside it are never copied.
 pub(crate) fn prepare_function_for_emission(mut func: CFunction) -> EmissionReadyFunction {
+    // The unproven result's carrier keeps its name: the prelude declares it (D201).
+    let ret = std::mem::replace(&mut func.ret_type, CType::Unknown);
     func.visit_types_mut(&mut spell_scalar_names);
+    func.ret_type = ret;
+    if crate::prelude::result_typedef(&func.ret_type).is_none() {
+        spell_scalar_names(&mut func.ret_type);
+    }
     for object in &mut func.extern_objects {
         if let Some(fact) = object.type_fact.as_mut() {
             spell_scalar_names(&mut fact.ty);
@@ -485,6 +491,11 @@ impl<'c> CodeGenerator<'c> {
             prelude.push('\n');
         }
         prelude.push('\n');
+        // An unproven result's carrier typedef, which the header and the helpers spell (D201).
+        if let Some(typedef) = crate::prelude::result_typedef(&func.ret_type) {
+            prelude.push_str(&typedef);
+            prelude.push('\n');
+        }
         if defines {
             for helper in crate::prelude::helpers_called(func) {
                 prelude.push_str(&helper.definition());

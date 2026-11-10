@@ -143,10 +143,17 @@ fn afi_and_the_header_declare_an_unproven_return_alike() {
     );
     let declared = returns.value.as_ref().expect("the carrier is declared");
     assert_eq!(declared.to_string(), "uint64_t", "{rendered}");
+    // The header spells the same carrier through the prelude typedef, which claims no C type (D201).
     let header = rendered.lines().next().expect("a header");
     assert!(
-        header.starts_with(&format!("{declared} forward(")),
+        header.starts_with("r2sleigh_result_u64 forward("),
         "{header}"
+    );
+    let unproven = info.unproven.expect("afi names the unproven result");
+    assert_eq!(unproven.cause_name(), "Written", "{rendered}");
+    assert!(
+        rendered.contains("the result is unproven (Written)"),
+        "{rendered}"
     );
     assert!(
         rendered.contains("return r2sleigh_residual_u64("),

@@ -435,15 +435,16 @@ fn a_value_in_two_registers_is_one_result_where_callers_read_the_second() {
     assert!(!caller.contains("r2sleigh_residual"), "{caller}");
     let open = "the result's second register is open";
     assert!(!f.contains(open), "{f}");
+    // No call reads it: the body's written RAX is unproven (D201).
     let alone = rendered(program(&[("f", BASE, 7)]));
-    assert!(alone.starts_with("uint64_t f("), "{alone}");
+    assert!(alone.starts_with("r2sleigh_result_u64 f("), "{alone}");
     assert!(
         alone.contains(open),
         "no call read decides the high half: {alone}"
     );
     // Before `aa`, the calls are not read: the low half alone, and the high half is open.
     let unread = fresh(OpenProgram::of(program(&both)));
-    assert!(unread.starts_with("uint64_t f("), "{unread}");
+    assert!(unread.starts_with("r2sleigh_result_u64 f("), "{unread}");
     assert!(unread.contains(open), "{unread}");
 }
 
@@ -463,8 +464,9 @@ const SCRATCH_SECOND: &[u8] = &[
 #[test]
 fn a_second_register_no_caller_reads_is_no_half_of_the_result() {
     let functions = [("f", BASE, 6), ("caller", BASE + 0x10, 6)];
+    // The caller returns RAX, a forwarded fate and no read, so RAX stays written, not proven.
     let f = rendered(Literal::of_code(SCRATCH_SECOND, &functions));
-    assert!(f.starts_with("uint64_t f("), "{f}");
+    assert!(f.starts_with("r2sleigh_result_u64 f("), "{f}");
     assert!(!f.contains("__uint128_t"), "{f}");
     let caller = OpenProgram::of(Literal::of_code(SCRATCH_SECOND, &functions))
         .rendered(BASE + 0x10)
@@ -497,7 +499,7 @@ const SECOND_READ_PAST_A_JUMP: &[u8] = &[
 fn a_call_scanned_to_its_block_s_end_leaves_the_second_register_open() {
     let functions = [("f", BASE, 7), ("caller", BASE + 0x10, 0x0b)];
     let f = rendered(Literal::of_code(SECOND_READ_PAST_A_JUMP, &functions));
-    assert!(f.starts_with("uint64_t f("), "{f}");
+    assert!(f.starts_with("r2sleigh_result_u64 f("), "{f}");
     assert!(f.contains("the result's second register is open"), "{f}");
 }
 
@@ -608,7 +610,7 @@ const BYTE_OVER_THE_CALLERS: &[u8] = &[
 fn a_byte_written_over_the_callers_register_is_no_half_of_the_result() {
     let functions = [("f", BASE, 0x0a), ("caller", BASE + 0x10, 9)];
     let f = rendered(Literal::of_code(BYTE_OVER_THE_CALLERS, &functions));
-    assert!(f.starts_with("uint64_t f(uint64_t arg0)"), "{f}");
+    assert!(f.starts_with("r2sleigh_result_u64 f(uint64_t arg0)"), "{f}");
     assert!(!f.contains("second register is open"), "{f}");
 }
 
@@ -856,6 +858,7 @@ fn a_caller_takes_the_float_result_beside_an_untouched_integer_register() {
         .response
         .output
         .into_text();
-    assert!(text.contains("double f(uint32_t);"), "{text}");
+    // `f` is unproven (a written XMM0 nothing decides), so the call hands it the caller's `rdi`.
+    assert!(text.contains("double f(uint64_t);"), "{text}");
     assert!(!text.contains("(double)f("), "{text}");
 }

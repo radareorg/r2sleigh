@@ -1145,6 +1145,22 @@ fn parenthesized(text: &str, open: usize) -> Option<&str> {
     None
 }
 
+/// A line with an unproven result's carrier identity taken off its returned value (D201):
+/// `return r2sleigh_carrier_u32(x);` reads `return x;`.
+pub fn uncarried(line: &str) -> String {
+    let Some(at) = line.find("r2sleigh_carrier_u") else {
+        return line.to_owned();
+    };
+    let Some(open) = line[at..].find('(').map(|open| at + open) else {
+        return line.to_owned();
+    };
+    let Some(inner) = parenthesized(line, open) else {
+        return line.to_owned();
+    };
+    let close = open + 1 + inner.len();
+    format!("{}{inner}{}", &line[..at], &line[close + 1..])
+}
+
 /// The rendered function's parameters, as `(type, name)`, read off its signature line.
 ///
 /// Each pipeline spells a parameter its own way, so a test compares the

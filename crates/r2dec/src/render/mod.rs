@@ -131,6 +131,9 @@ pub fn render(
             input.open_second_result(),
             input.inferred_aggregates().len(),
         ),
+        (input.return_type())
+            .filter(|fact| fact.is_unproven())
+            .map(r2types::ReturnTypeFact::unproven_cause),
     );
     let mut ready = ready_with_carriers(c, &tags);
     // Each marker names the instruction its statement was written for, so each line names its own.
@@ -157,7 +160,8 @@ fn spell_function<'a>(
 ) -> Result<(CFunction, Option<values::Values<'a>>, spelled::Spelled), DecompileExecutionStop> {
     let mut forced = r2ssa::dense::IdSet::new(input.graph().values.len());
     loop {
-        let c = CFunction::new(name.to_owned(), result_type(input));
+        let mut c = CFunction::new(name.to_owned(), result_type(input));
+        spell_unproven_carrier(&mut c, input);
         let values = values::Values::new(input, tags, std::rc::Rc::clone(&c.symbols), &forced);
         let spelled = spelled::spell(input, values.as_ref(), order, work)?;
         let broken = values
@@ -408,9 +412,26 @@ fn traps(stmt: &CStmt) -> bool {
 fn result_type(input: &RenderInput<'_>) -> CType {
     input
         .return_type()
-        .and_then(r2types::ReturnTypeFact::decided)
+        .and_then(r2types::ReturnTypeFact::declared)
         .cloned()
         .unwrap_or_else(|| word(input))
+}
+
+/// The bits of an unproven result's carrier, where it is an integer C names.
+fn unproven_carrier_bits(input: &RenderInput<'_>) -> Option<u32> {
+    let fact = input.return_type().filter(|fact| fact.is_unproven())?;
+    match fact.declared()? {
+        CType::Int { bits, .. } if crate::prelude::carrier(*bits).is_some() => Some(*bits),
+        _ => None,
+    }
+}
+
+/// An unproven result's header states only where the machine leaves a value: the prelude typedef
+/// `r2sleigh_result_uN`, which claims no C type (doc/adr-scratch-result.md, "Rendering of Unproven").
+fn spell_unproven_carrier(c: &mut CFunction, input: &RenderInput<'_>) {
+    if let Some(bits) = unproven_carrier_bits(input) {
+        c.ret_type = crate::prelude::result_carrier(bits);
+    }
 }
 
 /// The machine word, unsigned: the storage a result carrier holds.

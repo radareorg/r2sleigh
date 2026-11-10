@@ -4,7 +4,7 @@ mod returns;
 mod tests;
 
 pub use prepared::*;
-pub use returns::{ReturnTypeEvidence, ReturnTypeFact, ReturnTypeRefusal};
+pub use returns::{ReturnTypeEvidence, ReturnTypeFact, ReturnTypeRefusal, UnprovenCause};
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
@@ -2663,7 +2663,7 @@ impl FunctionFacts {
         );
         if let Some(signature) = self.types.merged_signature.as_mut() {
             let previous = signature.clone();
-            signature.ret_type = fact.decided().cloned();
+            signature.ret_type = fact.signature_type().cloned();
             let mut sources = self
                 .types
                 .signature_certificate

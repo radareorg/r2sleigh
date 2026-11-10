@@ -65,7 +65,7 @@ fn the_exit_only_the_chain_reaches_is_the_if_s_body() {
     assert_eq!(tests.len(), 1, "{c}");
     assert_eq!(tests[0].matches("== (uint32_t)0U").count(), 2, "{c}");
     assert!(tests[0].contains(" && "), "{c}");
-    assert!(c.contains("return 0;"), "{c}");
+    assert!(c.contains("return r2sleigh_carrier_u64(0);"), "{c}");
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn what_the_code_after_a_loop_reads_is_not_what_the_hoisted_copy_writes() {
     let copied = lines[end - 1].split(" = ").next().expect("a copy");
     let returned = lines
         .iter()
-        .find(|line| line.starts_with("return (uint32_t)"))
+        .find(|line| line.starts_with("return r2sleigh_carrier_u32((uint32_t)"))
         .expect("a return of the loop's value");
     assert!(!returned.contains(copied), "{c}");
 }
@@ -452,7 +452,10 @@ fn a_merge_whose_forward_copies_all_render_reads_as_a_variable_in_every_order() 
         let c = c_under(order, BOTH_COPIES_RENDER);
         assert_eq!(verdicts_of(&c), natural, "{order:?}\n{c}");
         assert!(!c.contains("r2sleigh_residual_"), "{order:?}\n{c}");
-        assert!(c.contains("return (uint64_t)rax_3;"), "{order:?}\n{c}");
+        assert!(
+            c.contains("return r2sleigh_carrier_u64((uint64_t)rax_3);"),
+            "{order:?}\n{c}"
+        );
     }
 }
 
@@ -871,10 +874,11 @@ const EXIT_IN_THEN_ARM: &[u8] = &[
     0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xc7, 0x02, 0x05, 0, 0, 0, 0xb8, 0x01, 0, 0, 0, 0xc3,
 ];
 
-/// The indent of the first line holding `needle`, and its position among the lines.
+/// The indent of the first line holding `needle`, and its position among the lines; `return 7` also
+/// finds an unproven result's `return r2sleigh_carrier_uN(7)` (D201).
 fn line_of(c: &str, needle: &str) -> (usize, usize) {
     let (at, line) = (c.lines().enumerate())
-        .find(|(_, line)| line.contains(needle))
+        .find(|(_, line)| common::uncarried(line).contains(needle))
         .unwrap_or_else(|| panic!("a line with {needle}: {c}"));
     (at, line.len() - line.trim_start().len())
 }

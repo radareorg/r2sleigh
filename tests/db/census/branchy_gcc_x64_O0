@@ -58,22 +58,22 @@ NAME=0x00401000
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401000
 EXPECT=<<EOF
-uint64_t _init(void)
+r2sleigh_result_u64 _init(void)
 {
     uint64_t rax_1;
     uint64_t rax_3;
 
-    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2) */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2); the result is unproven (Written): 2 unproven-return carried */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x403fe0U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
             rax_3 = rax_1;
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         } else {
             r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
             r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401014:11 covering 1 op (render::values) */
             rax_3 = r2sleigh_residual_u64(3);
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         }
     }
 }
@@ -134,11 +134,11 @@ NAME=0x004010a0
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004010a0
 EXPECT=<<EOF
-void _dl_relocate_static_pie(void)
+r2sleigh_result_u64 _dl_relocate_static_pie(void)
 {
-    /* r2dec proof: no individual construct is marked; 5 source obligations: 1 rendered, 4 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: 1 construct is marked below; 6 source obligations: 0 rendered, 4 elided, 0 refused, 2 residual; 1 statements rendered; the result is unproven (EntryInput): 0 unproven-return carried */
     {
-        return;
+        return r2sleigh_residual_u64(1);
     }
 }
 
@@ -151,15 +151,15 @@ NAME=0x004010b0
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004010b0
 EXPECT=<<EOF
-uint64_t deregister_tm_clones(void)
+r2sleigh_result_u64 deregister_tm_clones(void)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
         rax_3 = 0x404020;
         {
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         }
     }
 }
@@ -173,15 +173,15 @@ NAME=0x004010e0
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004010e0
 EXPECT=<<EOF
-uint64_t register_tm_clones(void)
+r2sleigh_result_u64 register_tm_clones(void)
 {
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 10 source obligations: 7 rendered, 3 elided, 0 refused; 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 7 rendered, 3 elided, 0 refused; 2 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
         rax_4 = 0;
         {
-            return (uint64_t)rax_4;
+            return r2sleigh_carrier_u64((uint64_t)rax_4);
         }
     }
 }
@@ -195,22 +195,23 @@ NAME=0x00401120
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401120
 EXPECT=<<EOF
-uint64_t __do_global_dtors_aux(void)
+r2sleigh_result_u64 __do_global_dtors_aux(void)
 {
-    void deregister_tm_clones(void);
+    uint64_t deregister_tm_clones(void);
     extern char __TMC_END__[];
 
     uint8_t tmp_401124_0_1;
+    uint64_t rax_1;
 
-    /* r2dec proof: 2 constructs are marked below; 24 source obligations: 8 rendered, 12 elided, 0 refused, 4 residual; 6 statements rendered; 1 data object type refused */
+    /* r2dec proof: 1 construct is marked below; 26 source obligations: 12 rendered, 12 elided, 0 refused, 2 residual; 6 statements rendered; 1 data object type refused; the result is unproven (Written): 1 unproven-return carried */
     {
         tmp_401124_0_1 = r2sleigh_load_u8((void*)&__TMC_END__);
         if ((uint8_t)((uint8_t)tmp_401124_0_1 != (uint8_t)0U)) {
             return r2sleigh_residual_u64(1);
         } else {
-            deregister_tm_clones();
+            rax_1 = deregister_tm_clones();
             r2sleigh_store_u8((void*)&__TMC_END__, (uint8_t)1U);
-            return r2sleigh_residual_u64(2);
+            return r2sleigh_carrier_u64((uint64_t)rax_1);
         }
     }
 }
@@ -224,13 +225,13 @@ NAME=0x00401150
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401150
 EXPECT=<<EOF
-uint64_t frame_dummy(void)
+r2sleigh_result_u64 frame_dummy(void)
 {
     uint64_t register_tm_clones(void);
 
-    /* r2dec proof: no individual construct is marked; 3 source obligations: 2 rendered, 1 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 3 source obligations: 2 rendered, 1 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
-        return register_tm_clones();
+        return r2sleigh_carrier_u64(register_tm_clones());
     }
 }
 
@@ -243,18 +244,18 @@ NAME=0x00401156
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401156
 EXPECT=<<EOF
-uint64_t gate_one(uint32_t arg0)
+r2sleigh_result_u64 gate_one(uint32_t arg0)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 18 source obligations: 11 rendered, 7 elided, 0 refused; 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 18 source obligations: 11 rendered, 7 elided, 0 refused; 5 statements rendered; the result is unproven (Written): 2 unproven-return carried */
     {
         if ((uint8_t)((uint32_t)arg0 != (uint32_t)0xbeefU)) {
             rax_3 = 0;
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         } else {
             rax_3 = 1;
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         }
     }
 }
@@ -268,19 +269,19 @@ NAME=0x00401178
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401178
 EXPECT=<<EOF
-uint64_t gate_three(uint32_t arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_result_u64 gate_three(uint32_t arg0, uint32_t arg1, uint32_t arg2)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 28 source obligations: 21 rendered, 7 elided, 0 refused; 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 28 source obligations: 21 rendered, 7 elided, 0 refused; 5 statements rendered; the result is unproven (Written): 2 unproven-return carried */
     {
         if ((uint8_t)((uint32_t)arg0 == (uint32_t)7U) && (uint8_t)((uint32_t)arg1 == (uint32_t)14U) && (uint8_t)((uint32_t)arg2 == (uint32_t)21U)) {
             rax_3 = 1;
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         } else {
             {
                 rax_3 = 0;
-                return (uint64_t)rax_3;
+                return r2sleigh_carrier_u64((uint64_t)rax_3);
             }
         }
     }
@@ -349,21 +350,21 @@ NAME=0x00401216
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401216
 EXPECT=<<EOF
-uint64_t mask_probe(uint8_t arg0)
+r2sleigh_result_u64 mask_probe(uint8_t arg0)
 {
     uint32_t tmp_lane_40121e_1_0_1;
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused; 6 statements rendered */
+    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused; 6 statements rendered; the result is unproven (Written): 2 unproven-return carried */
     {
         tmp_lane_40121e_1_0_1 = (uint32_t)((uint64_t)(uint8_t)arg0 >> 0U);
         if ((uint8_t)((uint32_t)((uint32_t)tmp_lane_40121e_1_0_1 & (uint32_t)192U) == (uint32_t)64U) && (uint8_t)((uint32_t)((uint32_t)tmp_lane_40121e_1_0_1 & (uint32_t)7U) == (uint32_t)5U)) {
             rax_7 = 1;
-            return (uint64_t)rax_7;
+            return r2sleigh_carrier_u64((uint64_t)rax_7);
         } else {
             {
                 rax_7 = 0;
-                return (uint64_t)rax_7;
+                return r2sleigh_carrier_u64((uint64_t)rax_7);
             }
         }
     }
@@ -378,21 +379,21 @@ NAME=0x00401247
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401247
 EXPECT=<<EOF
-uint64_t bounded_fetch(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_result_u64 bounded_fetch(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
 {
     uint32_t tmp_401282_0_1;
     uint64_t rax_8;
 
-    /* r2dec proof: no individual construct is marked; 25 source obligations: 18 rendered, 7 elided, 0 refused; 6 statements rendered */
+    /* r2dec proof: no individual construct is marked; 25 source obligations: 18 rendered, 7 elided, 0 refused; 6 statements rendered; the result is unproven (Written): 2 unproven-return carried */
     {
         if ((uint8_t)((int32_t)arg1 >= (int32_t)0U) && (uint8_t)((int32_t)arg1 < (int32_t)arg2)) {
             tmp_401282_0_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)(int32_t)arg1 * 4U));
             rax_8 = (uint64_t)(uint32_t)tmp_401282_0_1;
-            return (uint64_t)rax_8;
+            return r2sleigh_carrier_u64((uint64_t)rax_8);
         } else {
             {
                 rax_8 = (uint64_t)0xffffffffU;
-                return (uint64_t)rax_8;
+                return r2sleigh_carrier_u64((uint64_t)rax_8);
             }
         }
     }
@@ -407,11 +408,11 @@ NAME=0x00401286
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401286
 EXPECT=<<EOF
-uint64_t narrow64(uint64_t arg0)
+r2sleigh_result_u64 narrow64(uint64_t arg0)
 {
-    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
-        return (uint64_t)arg0;
+        return r2sleigh_carrier_u64((uint64_t)arg0);
     }
 }
 
@@ -490,11 +491,11 @@ NAME=0x00401310
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401310
 EXPECT=<<EOF
-uint64_t zero_of(void)
+r2sleigh_result_u64 zero_of(void)
 {
-    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
-        return 0;
+        return r2sleigh_carrier_u64(0);
     }
 }
 
@@ -507,22 +508,22 @@ NAME=0x00401322
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401322
 EXPECT=<<EOF
-uint64_t pure_zero_guard(void)
+r2sleigh_result_u64 pure_zero_guard(void)
 {
     uint64_t zero_of(void);
 
     uint64_t rax_2;
     uint64_t rax_5;
 
-    /* r2dec proof: no individual construct is marked; 24 source obligations: 14 rendered, 10 elided, 0 refused; 6 statements rendered */
+    /* r2dec proof: no individual construct is marked; 24 source obligations: 14 rendered, 10 elided, 0 refused; 6 statements rendered; the result is unproven (Written): 2 unproven-return carried */
     {
         rax_2 = zero_of();
         if ((uint8_t)((uint32_t)((uint64_t)rax_2 >> 0U) == (uint32_t)0U)) {
             rax_5 = 0;
-            return (uint64_t)rax_5;
+            return r2sleigh_carrier_u64((uint64_t)rax_5);
         } else {
             rax_5 = 1;
-            return (uint64_t)rax_5;
+            return r2sleigh_carrier_u64((uint64_t)rax_5);
         }
     }
 }
@@ -536,23 +537,23 @@ NAME=0x0040134d
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x0040134d
 EXPECT=<<EOF
-uint64_t global_eq_guard(uint32_t arg0)
+r2sleigh_result_u64 global_eq_guard(uint32_t arg0)
 {
     extern char g_opaque[];
 
     uint32_t tmp_lane_401361_0_0_1;
     uint64_t rax_5;
 
-    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused; 7 statements rendered; 1 data object type refused */
+    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused; 7 statements rendered; 1 data object type refused; the result is unproven (Written): 2 unproven-return carried */
     {
         r2sleigh_store_u32((void*)&g_opaque, (uint32_t)arg0);
         tmp_lane_401361_0_0_1 = r2sleigh_load_u32((void*)&g_opaque);
         if ((uint8_t)((uint32_t)tmp_lane_401361_0_0_1 != (uint32_t)11U)) {
             rax_5 = 0;
-            return (uint64_t)rax_5;
+            return r2sleigh_carrier_u64((uint64_t)rax_5);
         } else {
             rax_5 = 1;
-            return (uint64_t)rax_5;
+            return r2sleigh_carrier_u64((uint64_t)rax_5);
         }
     }
 }
@@ -566,16 +567,16 @@ NAME=0x0040137a
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x0040137a
 EXPECT=<<EOF
-uint64_t slot_eq_guard(uint32_t arg0)
+r2sleigh_result_u64 slot_eq_guard(uint32_t arg0)
 {
     uint64_t rax_9;
 
-    /* r2dec proof: no individual construct is marked; 22 source obligations: 12 rendered, 7 elided, 0 refused, 3 compiler-inserted (assuming ub-free); 2 statements rendered; the result's second register is open: no call read decides it */
+    /* r2dec proof: no individual construct is marked; 22 source obligations: 12 rendered, 7 elided, 0 refused, 3 compiler-inserted (assuming ub-free); 2 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
         rax_9 = (uint8_t)((uint32_t)arg0 != (uint32_t)11U) ? 0 : 1;
         {
             {
-                return (uint64_t)rax_9;
+                return r2sleigh_carrier_u64((uint64_t)rax_9);
             }
         }
     }
@@ -624,11 +625,11 @@ NAME=0x00401421
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401421
 EXPECT=<<EOF
-uint32_t narrow8(uint32_t arg0)
+r2sleigh_result_u32 narrow8(uint32_t arg0)
 {
-    /* r2dec proof: no individual construct is marked; 9 source obligations: 2 rendered, 7 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 9 source obligations: 2 rendered, 7 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
-        return (uint32_t)arg0;
+        return r2sleigh_carrier_u32((uint32_t)arg0);
     }
 }
 
@@ -773,16 +774,16 @@ NAME=0x00401558
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401558
 EXPECT=<<EOF
-uint32_t constant_branch(uint32_t arg0)
+r2sleigh_result_u32 constant_branch(uint32_t arg0)
 {
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 13 source obligations: 6 rendered, 7 elided, 0 refused; 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 13 source obligations: 6 rendered, 7 elided, 0 refused; 2 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
         {
             rax_7 = (uint64_t)(uint32_t)((uint32_t)arg0 + (uint32_t)25U);
             {
-                return (uint32_t)rax_7;
+                return r2sleigh_carrier_u32((uint32_t)rax_7);
             }
         }
     }
@@ -797,19 +798,19 @@ NAME=0x00401590
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401590
 EXPECT=<<EOF
-uint64_t and_chain(uint32_t arg0, uint32_t arg1)
+r2sleigh_result_u64 and_chain(uint32_t arg0, uint32_t arg1)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 19 source obligations: 12 rendered, 7 elided, 0 refused; 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 19 source obligations: 12 rendered, 7 elided, 0 refused; 5 statements rendered; the result is unproven (Written): 2 unproven-return carried */
     {
         if ((uint8_t)((uint32_t)arg0 != (uint32_t)0U) && (uint8_t)((uint32_t)arg1 != (uint32_t)0U)) {
             rax_3 = 1;
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         } else {
             {
                 rax_3 = 0;
-                return (uint64_t)rax_3;
+                return r2sleigh_carrier_u64((uint64_t)rax_3);
             }
         }
     }
@@ -824,7 +825,7 @@ NAME=0x004015b8
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004015b8
 EXPECT=<<EOF
-uint64_t inverted_guard(uint32_t arg0)
+r2sleigh_result_u64 inverted_guard(uint32_t arg0)
 {
     extern char g_sink[];
     extern char g_note[];
@@ -832,17 +833,17 @@ uint64_t inverted_guard(uint32_t arg0)
     uint64_t rax_5;
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused; 8 statements rendered; 2 data object types refused */
+    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused; 8 statements rendered; 2 data object types refused; the result is unproven (Written): 2 unproven-return carried */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)9U)) {
             rax_7 = (uint64_t)0xffffffffU;
-            return (uint64_t)rax_7;
+            return r2sleigh_carrier_u64((uint64_t)rax_7);
         } else {
             r2sleigh_store_u64((void*)&g_note, (uint64_t)(int32_t)((uint32_t)arg0 + (uint32_t)2U));
             r2sleigh_store_u32((void*)&g_sink, (uint32_t)arg0);
             rax_5 = r2sleigh_load_u64((void*)&g_note);
             rax_7 = rax_5;
-            return (uint64_t)rax_7;
+            return r2sleigh_carrier_u64((uint64_t)rax_7);
         }
     }
 }
@@ -856,18 +857,28 @@ NAME=0x004015f1
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004015f1
 EXPECT=<<EOF
-uint64_t and_chain_effect(uint32_t arg0, uint32_t arg1)
+r2sleigh_result_u32 and_chain_effect(uint32_t arg0, uint32_t arg1)
 {
     extern char g_sink[];
 
-    /* r2dec proof: 1 construct is marked below; 18 source obligations: 8 rendered, 8 elided, 0 refused, 2 residual; 3 statements rendered; 1 data object type refused */
+    uint32_t tmp_lane_401611_6_0_1;
+    uint64_t rax_3;
+
+    /* r2dec proof: 2 constructs are marked below; 20 source obligations: 11 rendered, 8 elided, 0 refused, 1 residual; 8 statements rendered; 1 held from entry, read as residuals (RAX_0); 1 data object type refused; the result is unproven (Written): 1 unproven-return carried */
     {
-        if ((uint8_t)((uint32_t)arg0 != (uint32_t)0U) && (uint8_t)((uint32_t)arg1 != (uint32_t)0U)) {
-            r2sleigh_store_u32((void*)&g_sink, (uint32_t)((uint32_t)arg1 + (uint32_t)arg0));
+        if ((uint8_t)((uint32_t)arg0 == (uint32_t)0U)) {
+            rax_3 = r2sleigh_residual_u64(1);
         } else {
+            if ((uint8_t)((uint32_t)arg1 == (uint32_t)0U)) {
+                rax_3 = r2sleigh_residual_u64(2);
+            } else {
+                tmp_lane_401611_6_0_1 = (uint32_t)((uint32_t)arg1 + (uint32_t)arg0);
+                r2sleigh_store_u32((void*)&g_sink, (uint32_t)tmp_lane_401611_6_0_1);
+                rax_3 = (uint64_t)(uint32_t)tmp_lane_401611_6_0_1;
+            }
         }
         {
-            return r2sleigh_residual_u64(1);
+            return r2sleigh_carrier_u32((uint32_t)rax_3);
         }
     }
 }
@@ -881,20 +892,23 @@ NAME=0x0040161c
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x0040161c
 EXPECT=<<EOF
-uint64_t inverted_void(uint32_t arg0)
+r2sleigh_result_u32 inverted_void(uint32_t arg0)
 {
     extern char g_sink[];
     extern char g_note[];
 
-    /* r2dec proof: 1 construct is marked below; 17 source obligations: 7 rendered, 8 elided, 0 refused, 2 residual; 4 statements rendered; 2 data object types refused */
+    uint64_t rax_4;
+
+    /* r2dec proof: 1 construct is marked below; 19 source obligations: 10 rendered, 8 elided, 0 refused, 1 residual; 7 statements rendered; 1 held from entry, read as residuals (RAX_0); 2 data object types refused; the result is unproven (Written): 2 unproven-return carried */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)9U)) {
+            rax_4 = r2sleigh_residual_u64(1);
+            return r2sleigh_carrier_u32((uint32_t)rax_4);
         } else {
             r2sleigh_store_u64((void*)&g_note, (uint64_t)(int32_t)arg0);
             r2sleigh_store_u32((void*)&g_sink, (uint32_t)arg0);
-        }
-        {
-            return r2sleigh_residual_u64(1);
+            rax_4 = (uint64_t)(uint32_t)arg0;
+            return r2sleigh_carrier_u32((uint32_t)rax_4);
         }
     }
 }
@@ -908,12 +922,12 @@ NAME=0x00401647
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401647
 EXPECT=<<EOF
-uint64_t inverted_goto(uint32_t arg0)
+r2sleigh_result_u64 inverted_goto(uint32_t arg0)
 {
     extern char g_sink[];
     extern char g_note[];
 
-    /* r2dec proof: no individual construct is marked; 19 source obligations: 11 rendered, 8 elided, 0 refused; 4 statements rendered; 2 data object types refused */
+    /* r2dec proof: no individual construct is marked; 19 source obligations: 11 rendered, 8 elided, 0 refused; 4 statements rendered; 2 data object types refused; the result is unproven (Written): 1 unproven-return carried */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)9U)) {
         } else {
@@ -921,7 +935,7 @@ uint64_t inverted_goto(uint32_t arg0)
             r2sleigh_store_u32((void*)&g_sink, (uint32_t)arg0);
         }
         {
-            return (uint64_t)r2sleigh_load_u64((void*)&g_note);
+            return r2sleigh_carrier_u64((uint64_t)r2sleigh_load_u64((void*)&g_note));
         }
     }
 }
@@ -935,12 +949,12 @@ NAME=0x00401679
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401679
 EXPECT=<<EOF
-uint64_t tail_guard(uint32_t arg0)
+r2sleigh_result_u64 tail_guard(uint32_t arg0)
 {
     extern char g_sink[];
     extern char g_note[];
 
-    /* r2dec proof: no individual construct is marked; 18 source obligations: 11 rendered, 7 elided, 0 refused; 4 statements rendered; 2 data object types refused */
+    /* r2dec proof: no individual construct is marked; 18 source obligations: 11 rendered, 7 elided, 0 refused; 4 statements rendered; 2 data object types refused; the result is unproven (Written): 1 unproven-return carried */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)9U)) {
         } else {
@@ -948,7 +962,7 @@ uint64_t tail_guard(uint32_t arg0)
             r2sleigh_store_u32((void*)&g_sink, (uint32_t)((uint32_t)arg0 - (uint32_t)3U));
         }
         {
-            return 0;
+            return r2sleigh_carrier_u64(0);
         }
     }
 }
@@ -962,11 +976,11 @@ NAME=0x004016ac
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004016ac
 EXPECT=<<EOF
-uint32_t addr_chain(void)
+r2sleigh_result_u32 addr_chain(void)
 {
-    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
-        return 1;
+        return r2sleigh_carrier_u32(1);
     }
 }
 
@@ -1006,25 +1020,25 @@ NAME=0x0040170f
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x0040170f
 EXPECT=<<EOF
-uint64_t bool_relay(uint32_t arg0, uint32_t arg1)
+r2sleigh_result_u64 bool_relay(uint32_t arg0, uint32_t arg1)
 {
     uint32_t tmp_lane_401724_0_1_1;
     uint32_t tmp_lane_401731_0_1_1;
     uint64_t rax_8;
 
-    /* r2dec proof: no individual construct is marked; 32 source obligations: 25 rendered, 7 elided, 0 refused; 10 statements rendered */
+    /* r2dec proof: no individual construct is marked; 32 source obligations: 25 rendered, 7 elided, 0 refused; 10 statements rendered; the result is unproven (Written): 3 unproven-return carried */
     {
         tmp_lane_401724_0_1_1 = (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg0);
         tmp_lane_401731_0_1_1 = (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg1);
         if ((uint8_t)((uint32_t)tmp_lane_401724_0_1_1 != (uint32_t)0U) && (uint8_t)((uint32_t)tmp_lane_401731_0_1_1 != (uint32_t)0U)) {
             rax_8 = 2;
-            return (uint64_t)rax_8;
+            return r2sleigh_carrier_u64((uint64_t)rax_8);
         } else {
         }
         {
             if ((uint8_t)((uint32_t)tmp_lane_401724_0_1_1 == (uint32_t)0U) && (uint8_t)((uint32_t)tmp_lane_401731_0_1_1 == (uint32_t)0U)) {
                 rax_8 = 0;
-                return (uint64_t)rax_8;
+                return r2sleigh_carrier_u64((uint64_t)rax_8);
             } else {
             }
             {
@@ -1032,7 +1046,7 @@ uint64_t bool_relay(uint32_t arg0, uint32_t arg1)
             }
         }
         {
-            return (uint64_t)rax_8;
+            return r2sleigh_carrier_u64((uint64_t)rax_8);
         }
     }
 }
@@ -1046,12 +1060,12 @@ NAME=0x00401764
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401764
 EXPECT=<<EOF
-uint64_t fcn_401764(void)
+r2sleigh_result_u64 fcn_401764(void)
 {
     uint32_t addr_chain(void);
     uint64_t affine_probe(uint32_t);
     uint64_t and_chain(uint32_t, uint32_t);
-    uint64_t and_chain_effect(uint32_t, uint32_t);
+    uint32_t and_chain_effect(uint32_t, uint32_t);
     uint64_t bool_relay(uint32_t, uint32_t);
     uint64_t bounded_fetch(uint64_t, uint32_t, uint32_t);
     uint32_t constant_branch(uint32_t);
@@ -1063,7 +1077,7 @@ uint64_t fcn_401764(void)
     uint32_t half_stride(uint64_t, uint32_t);
     uint64_t inverted_goto(uint32_t);
     uint64_t inverted_guard(uint32_t);
-    uint64_t inverted_void(uint32_t);
+    uint32_t inverted_void(uint32_t);
     uint64_t mask_probe(uint8_t);
     uint64_t narrow64(uint64_t);
     uint32_t narrow8(uint32_t);
@@ -1127,7 +1141,7 @@ uint64_t fcn_401764(void)
     uint64_t rax_62;
     _Alignas(16) uint8_t frame[568];
 
-    /* r2dec proof: no individual construct is marked; 555 source obligations: 367 rendered, 171 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 12 assumed (frame extent unproven); 82 statements rendered; 6 callee prototypes supplied by the source; the result's second register is open: no call read decides it */
+    /* r2dec proof: no individual construct is marked; 555 source obligations: 367 rendered, 171 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 12 assumed (frame extent unproven); 82 statements rendered; 6 callee prototypes supplied by the source; the result is unproven (Written): 1 unproven-return carried */
     /* symbol `main`; C allows that name no other prototype */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 48U), (uint64_t)0U);
@@ -1215,7 +1229,7 @@ uint64_t fcn_401764(void)
         rax_62 = (uint64_t)addr_chain();
         printf("%d %d %d\n", (uint64_t)(uint32_t)((uint64_t)rax_62 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_61 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_59 >> 0U));
         {
-            return 0;
+            return r2sleigh_carrier_u64(0);
         }
     }
 }
@@ -1229,11 +1243,11 @@ NAME=0x00401b6c
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401b6c
 EXPECT=<<EOF
-void _fini(void)
+r2sleigh_result_u64 _fini(void)
 {
-    /* r2dec proof: no individual construct is marked; 7 source obligations: 1 rendered, 6 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: 1 construct is marked below; 8 source obligations: 0 rendered, 6 elided, 0 refused, 2 residual; 1 statements rendered; the result is unproven (EntryInput): 0 unproven-return carried */
     {
-        return;
+        return r2sleigh_residual_u64(1);
     }
 }
 

@@ -111,7 +111,7 @@ NAME=fnv1a32 C
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=s 0x401330; pdd
 EXPECT=<<EOF
-uint64_t fnv1a32(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u64 fnv1a32(uint64_t arg0, uint64_t arg1)
 {
     uint64_t rsi_1;
     uint64_t rax_2;
@@ -120,10 +120,10 @@ uint64_t fnv1a32(uint64_t arg0, uint64_t arg1)
     uint64_t rdi_2;
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 40 source obligations: 32 rendered, 8 elided, 0 refused; 12 statements rendered */
+    /* r2dec proof: no individual construct is marked; 40 source obligations: 32 rendered, 8 elided, 0 refused; 12 statements rendered; the result is unproven (Written): 2 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
-            return (uint64_t)0x811c9dc5U;
+            return r2sleigh_carrier_u64((uint64_t)0x811c9dc5U);
         } else {
             rsi_1 = (uint64_t)((uint64_t)arg1 + (uint64_t)arg0);
             rax_2 = (uint64_t)0x811c9dc5U;
@@ -136,7 +136,7 @@ uint64_t fnv1a32(uint64_t arg0, uint64_t arg1)
                 rdi_1 = rdi_2;
             } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));
             {
-                return (uint64_t)rax_4;
+                return r2sleigh_carrier_u64((uint64_t)rax_4);
             }
         }
     }

@@ -19,7 +19,7 @@ fn the_staged_pipeline_renders_a_leaf_function_s_values() {
         "{text}"
     );
     assert!(
-        text.contains("return (uint64_t)((uint64_t)rax_3 + (uint64_t)8U);"),
+        text.contains("return r2sleigh_carrier_u64((uint64_t)((uint64_t)rax_3 + (uint64_t)8U));"),
         "{text}"
     );
     assert!(!text.contains("r2sleigh_residual"), "{text}");
@@ -62,7 +62,10 @@ fn a_described_call_is_written_from_the_callsite_facts() {
     // `call one; ret`: the result register the call leaves is what `caller` returns.
     assert!(text.contains("uint64_t one(void);"), "{text}");
     assert!(text.contains("rax_1 = one();"), "{text}");
-    assert!(text.contains("return (uint64_t)rax_1;"), "{text}");
+    assert!(
+        text.contains("return r2sleigh_carrier_u64((uint64_t)rax_1);"),
+        "{text}"
+    );
     // `one` returns, so nothing may tell C otherwise; its return push writes nothing.
     assert!(!text.contains("noreturn"), "{text}");
     assert!(!text.contains("r2sleigh_store"), "{text}");

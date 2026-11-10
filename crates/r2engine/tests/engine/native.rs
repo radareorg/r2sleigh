@@ -481,11 +481,11 @@ fn each_line_names_its_instructions_and_each_outside_name_its_address() {
     let emission = emission(&response);
     let unit = emission.unit();
 
+    assert!(named_by(emission, "rax_1 = ").contains(&0x1000), "{unit}");
     assert!(
-        named_by(emission, "fcn_100a((uint32_t)").contains(&0x1000),
+        named_by(emission, "return r2sleigh_carrier").contains(&0x1005),
         "{unit}"
     );
-    assert!(named_by(emission, "return").contains(&0x1005), "{unit}");
     let lines = unit.lines().count();
     for line in emission.lines() {
         assert!((1..=lines).contains(&line.line), "{line:?}\n{unit}");
@@ -572,8 +572,16 @@ const A64_EMPTY_FRAME: &[u8] = &[
 /// function returned the caller's frame pointer, which its source never does.
 #[test]
 fn a_frame_pointer_the_body_restores_is_no_result() {
+    // RAX defines nothing; XMM0 still holds its entry byte, an input, so the result is unproven (D208).
     let text = rendered(EMPTY_FRAME, "empty_frame");
-    assert!(text.contains("void empty_frame(void)"), "{text}");
+    assert!(
+        text.contains("r2sleigh_result_u64 empty_frame(void)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("the result is unproven (EntryInput)"),
+        "{text}"
+    );
     assert!(!text.to_lowercase().contains("rbp_"), "{text}");
     // AArch64's untouched x0 may be an argument handed back, so the result is unproven, not x29.
     let a64 = Machine::new("aarch64", "aarch64", 64);
@@ -640,7 +648,7 @@ fn a_staged_call_to_a_carried_callee_is_declared_at_its_carriers_widths() {
         text.contains("uint32_t fcn_100a(uint32_t, uint32_t);"),
         "{text}"
     );
-    assert!(text.contains("uint32_t caller("), "{text}");
+    assert!(text.contains("r2sleigh_result_u32 caller("), "{text}");
     assert!(
         text.contains("= (uint64_t)fcn_100a((uint32_t)arg0, (uint32_t)arg1);"),
         "{text}"
@@ -667,11 +675,12 @@ fn a_staged_return_line_names_the_return_instruction() {
     let response = decompile(&target, &program, BASE).expect("decompile");
     let emission = emission(&response);
     let unit = emission.unit();
-    assert_eq!(named_by(emission, "return"), vec![0x1005], "{unit}");
-    assert!(
-        named_by(emission, "fcn_100a((uint32_t)").contains(&0x1000),
+    assert_eq!(
+        named_by(emission, "return r2sleigh_carrier"),
+        vec![0x1005],
         "{unit}"
     );
+    assert!(named_by(emission, "rax_1 = ").contains(&0x1000), "{unit}");
 }
 
 /// Staged declares the import as its prototype states and passes the argument at that type.
@@ -1477,7 +1486,8 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
     // Every arm, with the value the source case returned, in order.
     for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
         assert!(output.contains(&format!("case {case}:")), "{output}");
-        assert!(output.contains(&format!("return {returns};")), "{output}");
+        let carried = format!("return r2sleigh_carrier_u64({returns});");
+        assert!(output.contains(&carried), "{output}");
     }
     let labels = output
         .match_indices("case ")
@@ -1559,7 +1569,7 @@ fn a_guard_on_an_escaped_slot_bounds_the_dispatch_that_reloads_it() {
     assert!(output.contains("switch ("), "{output}");
     for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
         assert!(output.contains(&format!("case {case}:")), "{output}");
-        assert!(output.contains(&format!("{returns};")), "{output}");
+        assert!(output.contains(&format!("({returns});")), "{output}");
     }
     assert!(!output.contains("residual"), "{output}");
 }
@@ -1580,7 +1590,7 @@ fn a_guard_on_a_parameters_home_bounds_the_dispatch_that_reloads_it() {
     assert!(output.contains("switch ("), "{output}");
     for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
         assert!(output.contains(&format!("case {case}:")), "{output}");
-        assert!(output.contains(&format!("{returns};")), "{output}");
+        assert!(output.contains(&format!("({returns});")), "{output}");
     }
     assert!(!output.contains("residual"), "{output}");
 }
@@ -1784,7 +1794,8 @@ fn what_a_function_returns_is_read_off_the_arms_its_dispatch_reaches() {
     assert!(response.output.function().is_some(), "{output}");
     assert!(!output.starts_with("void "), "{output}");
     for returns in ["10", "20", "30"] {
-        assert!(output.contains(&format!("return {returns};")), "{output}");
+        let carried = format!("return r2sleigh_carrier_u64({returns});");
+        assert!(output.contains(&carried), "{output}");
     }
 }
 
@@ -1890,7 +1901,7 @@ fn an_aarch64_exclusive_loop_returns_the_value_it_loaded() {
             })
             .unwrap_or_else(|| panic!("{ordered}: the loaded value is assigned: {output}"));
         assert!(
-            output.contains(&format!("return (uint32_t){loaded};")),
+            output.contains(&format!("return r2sleigh_carrier_u32((uint32_t){loaded});")),
             "{ordered}: {output}"
         );
         for absent in [
@@ -2102,7 +2113,7 @@ fn a_barrier_writes_no_register_so_the_value_before_it_is_returned() {
 /// result carrier a caller reads, and the return hands back a residual of it,
 /// which traps if it is ever reached. Nothing else in the text claims a value.
 fn marks_an_unproven_return(output: &str) -> bool {
-    output.starts_with("uint64_t ") && output.contains("return r2sleigh_residual_u64(")
+    output.starts_with("r2sleigh_result_u64 ") && output.contains("return r2sleigh_residual_u64(")
 }
 
 /// A field of an element of a struct array, through a pointer the certified
@@ -2182,7 +2193,14 @@ fn a_result_written_on_one_path_only_is_a_marked_gap() {
     let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(response.output.function().is_some(), "{output}");
-    assert!(marks_an_unproven_return(output), "{output}");
+    // The written arm is carried; the skipped arm holds RAX's entry byte, a residual (D200).
+    assert!(output.starts_with("r2sleigh_result_u32 half("), "{output}");
+    assert!(
+        output.contains("the result is unproven (Written)"),
+        "{output}"
+    );
+    assert!(output.contains("return r2sleigh_carrier_u32("), "{output}");
+    assert!(output.contains("r2sleigh_residual_u"), "{output}");
 }
 
 /// The kernel writes x0 and no declared contract says so, so the result is neither `void` nor the
@@ -2232,7 +2250,7 @@ fn an_untouched_result_register_is_unproven_where_it_is_also_the_first_argument(
     assert!(response.output.function().is_some(), "{output}");
     assert!(marks_an_unproven_return(output), "{output}");
 
-    // On x86-64 rax is no argument, so a caller never filled it and nothing is returned.
+    // On x86-64 rax is no argument, so it defines nothing; XMM0's entry byte, an input, still may (D208).
     const STORE: &[u8] = &[
         0xc7, 0x07, 0x01, 0x00, 0x00, 0x00, // mov dword [rdi], 1
         0xc3, // ret
@@ -2245,7 +2263,11 @@ fn an_untouched_result_register_is_unproven_where_it_is_also_the_first_argument(
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(output.starts_with("void store("), "{output}");
+    assert!(output.starts_with("r2sleigh_result_u64 store("), "{output}");
+    assert!(
+        output.contains("the result is unproven (EntryInput)"),
+        "{output}"
+    );
 }
 
 /// `lea rax, [rbx + rsi]; ret`: one register the function entered holding, and
@@ -2592,8 +2614,11 @@ fn a_tail_transfer_to_a_declared_int_returns_the_callees_width() {
         .output
         .text()
         .to_owned();
-    assert!(text.contains("uint32_t wrapper(void)"), "{text}");
-    assert!(text.contains("return (uint32_t)rand();"), "{text}");
+    assert!(text.contains("r2sleigh_result_u32 wrapper(void)"), "{text}");
+    assert!(
+        text.contains("return r2sleigh_carrier_u32((uint32_t)rand());"),
+        "{text}"
+    );
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 
@@ -2661,7 +2686,7 @@ fn a_narrow_tail_beside_a_wide_return_keeps_the_wide_result() {
         .text()
         .to_owned();
     assert!(text.contains("rand()"), "{text}");
-    assert!(text.contains("uint64_t wide_or_tail("), "{text}");
+    assert!(text.contains("r2sleigh_result_u64 wide_or_tail("), "{text}");
     assert!(text.contains("0x1122334455667788"), "{text}");
 }
 
@@ -2767,6 +2792,8 @@ fn run_rendered(name: &str, units: &[&Rendered], harness: &str) {
             "#define _POSIX_C_SOURCE 200809L\n#include <stdint.h>\n#include <string.h>\n\
              #include <unistd.h>\n\
              __attribute__((constructor)) static void r2engine_watchdog(void) {{ alarm(30); }}\n\
+             typedef uint8_t r2sleigh_result_u8; typedef uint16_t r2sleigh_result_u16;\n\
+             typedef uint32_t r2sleigh_result_u32; typedef uint64_t r2sleigh_result_u64;\n\
              {prototypes}\n{harness}\n"
         ),
     )
@@ -3072,7 +3099,7 @@ const CLEAR_LOW_BIT: &[u8] = &[
 fn an_and_that_clears_one_bit_takes_the_whole_argument() {
     let text = rendered(CLEAR_LOW_BIT, "clear_low_bit");
     assert!(
-        text.starts_with("uint64_t clear_low_bit(uint64_t "),
+        text.starts_with("r2sleigh_result_u64 clear_low_bit(uint64_t "),
         "{text}"
     );
     run_rendered(
@@ -3119,7 +3146,7 @@ const AARCH64_MASK_24_OF_W0: &[u8] = &[
 fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
     let text = rendered(MASK_24_OF_EDI, "mask24_of_edi");
     assert!(
-        text.starts_with("uint32_t mask24_of_edi(uint32_t "),
+        text.starts_with("r2sleigh_result_u32 mask24_of_edi(uint32_t "),
         "{text}"
     );
     run_rendered(
@@ -3141,7 +3168,7 @@ fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
 
     let text = rendered(MASK_24_OF_RDI, "mask24_of_rdi");
     assert!(
-        text.starts_with("uint64_t mask24_of_rdi(uint32_t "),
+        text.starts_with("r2sleigh_result_u64 mask24_of_rdi(uint32_t "),
         "{text}"
     );
     run_rendered(
@@ -3166,7 +3193,7 @@ fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
         "mask24_of_w0",
     );
     assert!(
-        text.starts_with("uint32_t mask24_of_w0(uint32_t "),
+        text.starts_with("r2sleigh_result_u32 mask24_of_w0(uint32_t "),
         "{text}"
     );
     run_rendered(
@@ -3370,7 +3397,7 @@ fn an_and_that_keeps_six_or_seven_bytes_takes_the_whole_register() {
     ] {
         let text = rendered_on(&machine, bytes, name);
         assert!(
-            text.starts_with(&format!("uint64_t {name}(uint64_t ")),
+            text.starts_with(&format!("r2sleigh_result_u64 {name}(uint64_t ")),
             "{text}"
         );
         run_rendered(
@@ -3541,18 +3568,27 @@ fn a_packed_extension_from_memory_renders_every_lane() {
 fn a_packed_extension_of_an_argument_takes_the_argument() {
     let text = rendered(PACKED_SIGN_EXTEND_ARGUMENT, "sign_extend_argument");
     assert_packed_extension_rendered(&text);
+    // The packed result is left in XMM0, a written float lane no reading call decides (D200).
     assert!(
-        text.starts_with("void sign_extend_argument(uint32_t "),
+        text.starts_with("r2sleigh_result_u64 sign_extend_argument(uint32_t "),
         "{text}"
     );
     run_rendered(
         "sign_extend_argument",
         &[&text],
-        r#"int main(void) {
+        r#"#include <setjmp.h>
+#include <signal.h>
+/* The result is unproven, so each return traps once the body ran; the harness resumes after it. */
+static sigjmp_buf resumed;
+static void returned(int sig) { (void)sig; siglongjmp(resumed, 1); }
+#define UNPROVEN(call) do { if (!sigsetjmp(resumed, 1)) { call; } } while (0)
+int main(void) {
+    signal(SIGILL, returned);
+    signal(SIGTRAP, returned);
     const uint32_t want[4] = {0x00000001u, 0xffffff80u, 0x0000007fu, 0xfffffffeu};
-    uint32_t got[4];
+    static uint32_t got[4];
     memset(got, 0xa5, sizeof got);
-    sign_extend_argument(0xfe7f8001u, (void*)got);
+    UNPROVEN(sign_extend_argument(0xfe7f8001u, (void*)got));
     return memcmp(got, want, sizeof want) != 0;
 }"#,
     );
@@ -4304,11 +4340,19 @@ fn a_repeated_move_walks_the_way_the_specification_says() {
     run_rendered(
         "copy",
         &[&rendered],
-        r#"int main(void) {
+        r#"#include <setjmp.h>
+#include <signal.h>
+/* The result is unproven, so each return traps once the body ran; the harness resumes after it. */
+static sigjmp_buf resumed;
+static void returned(int sig) { (void)sig; siglongjmp(resumed, 1); }
+#define UNPROVEN(call) do { if (!sigsetjmp(resumed, 1)) { call; } } while (0)
+int main(void) {
+    signal(SIGILL, returned);
+    signal(SIGTRAP, returned);
     uint64_t words[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    copy((uint64_t)(uintptr_t)&words[0], (uint64_t)(uintptr_t)&words[4], 3);
+    UNPROVEN(copy((uint64_t)(uintptr_t)&words[0], (uint64_t)(uintptr_t)&words[4], 3));
     /* Ascending one element at a time, as the machine walks. */
-    copy((uint64_t)(uintptr_t)&words[5], (uint64_t)(uintptr_t)&words[4], 3);
+    UNPROVEN(copy((uint64_t)(uintptr_t)&words[5], (uint64_t)(uintptr_t)&words[4], 3));
     const uint64_t want[8] = {5, 6, 7, 4, 5, 5, 5, 5};
     return memcmp(words, want, sizeof want) != 0;
 }"#,
@@ -5105,7 +5149,10 @@ fn a_parameter_every_read_of_which_is_rewritten_away_is_still_declared() {
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     assert!(response.output.function().is_some(), "{}", response.output);
     let output = response.output.text();
-    assert!(output.contains("return 0;"), "{output}");
+    assert!(
+        output.contains("return r2sleigh_carrier_u32(0);"),
+        "{output}"
+    );
 }
 
 /// A stack-protector check around a call: the canary is read through the
@@ -5199,7 +5246,10 @@ fn a_stack_protector_check_is_compiler_inserted_under_a_ub_free_source() {
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(thread_pointer_versions(output).is_empty(), "{output}");
-    assert!(output.contains("return 0;"), "{output}");
+    assert!(
+        output.contains("return r2sleigh_carrier_u32(0);"),
+        "{output}"
+    );
     assert!(!output.contains("fcn_1030"), "{output}");
     assert!(
         output.contains("compiler-inserted (assuming ub-free)"),
@@ -5321,10 +5371,10 @@ fn a_thread_local_read_twice_is_no_stack_guard() {
     assert!(!output.contains("compiler-inserted"), "{output}");
 }
 
-/// The canary is still in RAX at `ret`, so the function returns the guard: that read is the
-/// program's and keeps its residual, while the check and the slot are still the compiler's.
+/// The canary is still in RAX at `ret`: a compiler-inserted write defines no result byte (D200 case
+/// 3), so no guard is returned; XMM0's entry byte leaves the result unproven (D208).
 #[test]
-fn a_canary_the_function_returns_keeps_its_read() {
+fn a_canary_left_in_the_result_register_is_no_value() {
     let mut bytes = CANARY_CHECKED.to_vec();
     bytes[0x12..0x14].copy_from_slice(&[0x90, 0x90]); // 1012 no `xor eax, eax`
     let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
@@ -5337,13 +5387,17 @@ fn a_canary_the_function_returns_keeps_its_read() {
     };
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("FS_OFFSET_0"), "{output}");
+    assert!(
+        output.contains("the result is unproven (EntryInput)"),
+        "{output}"
+    );
     assert!(!output.contains("fcn_1030"), "{output}");
     assert!(output.contains("compiler-inserted"), "{output}");
 }
 
-/// gcc -O0's check in the result register: `rax` returns `reload - guard`, zero once the check
-/// passes, so the return reads no guard (bzip2 -O0 `mainQSort3`, hand audit 3.8.4).
+/// gcc -O0's check in the result register: `rax` holds `reload - guard`, which no C expression
+/// defines, so no `return 0` is claimed (D200 case 3; bzip2 -O0 `mainQSort3`).
 #[test]
 fn a_check_whose_difference_is_returned_reads_no_guard() {
     let mut bytes = CANARY_CHECKED.to_vec();
@@ -5360,7 +5414,11 @@ fn a_check_whose_difference_is_returned_reads_no_guard() {
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(thread_pointer_versions(output).is_empty(), "{output}");
-    assert!(output.contains("return 0;"), "{output}");
+    assert!(!output.contains("return 0;"), "{output}");
+    assert!(
+        output.contains("the result is unproven (EntryInput)"),
+        "{output}"
+    );
     assert!(output.contains("compiler-inserted"), "{output}");
 }
 
@@ -5608,7 +5666,10 @@ fn a_stack_protector_check_whose_failure_calls_through_a_slot_is_decided() {
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(thread_pointer_versions(output).is_empty(), "{output}");
-    assert!(output.contains("return 0;"), "{output}");
+    assert!(
+        output.contains("return r2sleigh_carrier_u32(0);"),
+        "{output}"
+    );
     assert!(
         output.contains("compiler-inserted (assuming ub-free)"),
         "{output}"
@@ -5669,8 +5730,17 @@ fn a_call_through_a_halting_slot_has_no_edge_to_the_join_after_it() {
     };
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(!output.contains("residual_u64"), "{output}");
-    assert_eq!(output.matches("return").count(), 1, "{output}");
+    // One return: XMM0's entry byte reaches it, so its value is the one residual (D208).
+    let returns = (output.lines())
+        .filter(|line| line.trim_start().starts_with("return"))
+        .collect::<Vec<_>>();
+    assert_eq!(returns.len(), 1, "{output}");
+    assert!(returns[0].contains("r2sleigh_residual_u64("), "{output}");
+    assert_eq!(output.matches("residual_u64(").count(), 1, "{output}");
+    assert!(
+        output.contains("the result is unproven (EntryInput)"),
+        "{output}"
+    );
 }
 
 /// `mul_div` from `tests/gold/review.c` at gcc -O0: `a * 7 / b + a % b`, with
@@ -7734,16 +7804,15 @@ impl Program for CallsAFunction {
     }
 }
 
-/// Two calls of `release` disagree about a result; the layouts write them in opposite orders, the
-/// declaration and the call left as a residual must not differ.
+/// `release` leaves RAX as it found it and tails to `free`: void (D200 case 1). Its call site states
+/// no result (its arity is a floor), so `scan`'s result is unproven in either layout.
 #[test]
-fn a_callee_is_declared_by_its_first_call_in_address_order_whichever_block_is_written_first() {
+fn a_call_to_a_void_callee_leaves_the_exit_returning_it_no_value_in_either_layout() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
-    // The higher exit is written in the loop in the first, after it in the second.
-    for (code, callee, higher) in [
-        (RELEASE_AT_BOTH_EXITS, 0x1030, 0x1015),
-        (RELEASE_AFTER_A_SECOND_WAY_IN, 0x1034, 0x101a),
+    for (code, callee) in [
+        (RELEASE_AT_BOTH_EXITS, 0x1030),
+        (RELEASE_AFTER_A_SECOND_WAY_IN, 0x1034),
     ] {
         let program = CallsAFunction {
             code,
@@ -7752,12 +7821,18 @@ fn a_callee_is_declared_by_its_first_call_in_address_order_whichever_block_is_wr
         };
         let response = decompile(&target, &program, BASE).expect("decompile");
         let text = response.output.text();
-        let declaration = format!("uint64_t fcn_{callee:x}(uint64_t, uint64_t);");
-        assert!(text.contains(&declaration), "{declaration}:\n{text}");
-        let disagrees = "another call disagrees with its declaration";
-        assert_eq!(text.matches(disagrees).count(), 1, "{text}");
-        let gap = format!("CallNotRendered at {higher:#x}:");
-        assert!(text.contains(&gap), "{gap}:\n{text}");
+        let declaration = format!("void fcn_{callee:x}(uint64_t, uint64_t);");
+        assert_eq!(
+            text.matches(&declaration).count(),
+            1,
+            "{declaration}:\n{text}"
+        );
+        assert!(text.contains("the result is unproven (Written)"), "{text}");
+        assert_eq!(
+            text.matches("return r2sleigh_residual_u64(").count(),
+            2,
+            "{text}"
+        );
     }
 }
 

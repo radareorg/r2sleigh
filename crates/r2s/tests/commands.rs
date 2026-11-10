@@ -690,7 +690,11 @@ fn a_staged_float_truncation_is_guarded_by_its_range() {
 fn a_staged_tail_call_returns_its_callee_s_result() {
     let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures");
     for (binary, function, line) in [
-        ("rv_O0g", "sym.frame_dummy", "return register_tm_clones();"),
+        (
+            "rv_O0g",
+            "sym.frame_dummy",
+            "return r2sleigh_carrier_u64(register_tm_clones());",
+        ),
         (
             "float_moves_zig_x86_64_O2g",
             "sym.swap_call",
@@ -732,9 +736,11 @@ fn a_staged_control_residual_states_its_cause() {
             residual["cause"] == cause && residual["gap"].as_str() == gap
         };
         assert!(residuals.iter().any(|r| stated(&r)), "{function}: {answer}");
+        // Beside gaps, a return may read the value of a call left a gap: never assigned (D201).
         for residual in residuals.iter().filter(|r| !stated(r)) {
-            assert_eq!(residual["cause"], "gap", "{function}: {residual}");
-            assert!(residual["gap"].is_string(), "{function}: {residual}");
+            let read = residual["cause"] == "never-assigned" && residual["gap"].is_null();
+            let gap = residual["cause"] == "gap" && residual["gap"].is_string();
+            assert!(read || gap, "{function}: {residual}");
         }
     }
 }
@@ -872,7 +878,7 @@ fn the_staged_frame_is_one_array_a_call_may_be_passed_into() {
 fn pdd_writes_from_the_sealed_facts() {
     let staged = r2s(&format!("pdd @ {FNV1A32}"));
     for line in [
-        "return (uint64_t)0x811c9dc5U;",
+        "return r2sleigh_carrier_u64((uint64_t)0x811c9dc5U);",
         "r2sleigh_load_u8((void*)rdi_1)",
         "* (uint64_t)0x1000193U",
     ] {

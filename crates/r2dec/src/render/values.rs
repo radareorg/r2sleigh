@@ -1888,6 +1888,21 @@ impl<'a> Values<'a> {
                 };
                 vec![CStmt::Return(Some(returned))]
             }
+            // A void tail callee leaves an unproven or written result nothing: the return traps.
+            (
+                r2source::SourceFunctionReturn::Register { .. }
+                | r2source::SourceFunctionReturn::Unproven,
+                None,
+            ) if plan
+                .declared
+                .as_ref()
+                .is_some_and(|declared| declared.ret == CType::Void) =>
+            {
+                let call = self.call_expr(inst, plan).ok()?;
+                let undefined =
+                    crate::prelude::residual(ty, crate::prelude::ResidualCause::UnprovenReturn)?;
+                vec![CStmt::Expr(call), CStmt::Return(Some(undefined))]
+            }
             _ => return None,
         };
         self.mark(inst);

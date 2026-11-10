@@ -3312,8 +3312,9 @@ fn untyped_return_source() -> r2ssa::SsaArtifact {
     .expect("prepared untyped return")
 }
 
+/// A declared graph decides the exact type; a body's recovered graph only writes its carrier (D201).
 #[test]
-fn a_recovered_graph_decides_a_carrier_and_a_read_one_the_exact_type() {
+fn a_recovered_graph_is_a_written_carrier_and_a_read_one_the_exact_type() {
     let int32 = CTypeLike::Int {
         bits: 32,
         signedness: crate::Signedness::Signed,
@@ -3330,9 +3331,9 @@ fn a_recovered_graph_decides_a_carrier_and_a_read_one_the_exact_type() {
     );
     assert_eq!(
         decide(&signed_i32_return_source(true, false)),
-        ReturnTypeFact::Decided {
-            ty: int32,
-            by: ReturnTypeEvidence::Carrier,
+        ReturnTypeFact::Unproven {
+            carrier: Some(CTypeLike::uint(32)),
+            cause: Some(crate::UnprovenCause::Written),
         }
     );
 }
@@ -3356,7 +3357,10 @@ fn no_value_is_void_only_where_the_boundary_proves_it() {
             &BTreeMap::new(),
             &crate::EvidenceTypes::default()
         ),
-        ReturnTypeFact::Unproven { carrier: None }
+        ReturnTypeFact::Unproven {
+            carrier: None,
+            cause: None
+        }
     );
 }
 
@@ -3385,18 +3389,24 @@ fn a_locally_inferred_signature_does_not_decide_the_return() {
         &crate::EvidenceTypes::default(),
     );
     facts.apply_return_type_fact(returns);
+    // The body writes the carrier and nothing states its type: unproven, never the local signature's.
     assert_eq!(
         facts.return_type(),
-        Some(&ReturnTypeFact::Refused(ReturnTypeRefusal::UntypedReturn))
+        Some(&ReturnTypeFact::Unproven {
+            carrier: Some(CTypeLike::uint(64)),
+            cause: Some(crate::UnprovenCause::Written),
+        })
     );
     let merged = facts
         .type_facts()
         .merged_signature
         .as_ref()
         .expect("signature");
+    // A caller's declaration reads the written carrier, the typedef's target, not the local `u32`.
     assert_eq!(
-        merged.ret_type, None,
-        "the signature claims a return r2types refused"
+        merged.ret_type,
+        Some(CTypeLike::uint(64)),
+        "the signature states the carrier"
     );
 }
 

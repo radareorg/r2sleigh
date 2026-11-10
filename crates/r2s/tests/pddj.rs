@@ -350,7 +350,7 @@ fn dispatch_marks_its_unproven_return(answer: &Value) -> bool {
     let returns_residual = sites
         .iter()
         .any(|site| site["cause"] == "unproven-return" && site["type"] == "u64");
-    signature.starts_with("uint64_t ")
+    signature.starts_with("r2sleigh_result_u64 ")
         && code.contains("return r2sleigh_residual_u64(")
         && returns_residual
         && answer["proof"]["residual"].as_u64() != Some(0)

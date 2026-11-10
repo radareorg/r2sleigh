@@ -74,6 +74,7 @@ pub(crate) fn note_unproven_constructs(
     radare2_prototypes: usize,
     radare2_local_names: usize,
     (unassigned, open_second_result, laid_out): (&[UnassignedRead], bool, usize),
+    unproven: Option<Option<r2types::UnprovenCause>>,
 ) {
     let rendered_nothing = func.body.is_empty();
     // Each residual is a construct the rendering says it did not prove, and
@@ -162,6 +163,14 @@ pub(crate) fn note_unproven_constructs(
     }
     if open_second_result {
         detail.push_str("; the result's second register is open: no call read decides it");
+    }
+    if let Some(cause) = unproven {
+        let carried = crate::prelude::count_carried(func);
+        let cause = cause.map_or("no return reached", r2types::UnprovenCause::name);
+        let _ = write!(
+            &mut detail,
+            "; the result is unproven ({cause}): {carried} unproven-return carried"
+        );
     }
     // A layout the accesses prove, spelled as a structure no declaration states (doc/adr-aggregates.md).
     match laid_out {

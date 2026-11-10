@@ -30,12 +30,31 @@ pub struct FunctionInfo {
     /// the result carrier a caller reads, on the convention alone, where the value is unproven
     /// (none where C has no carrier that wide). Absent where r2types refuses a type.
     pub returns: Option<Fact<Option<CTypeLike>>>,
+    /// Where the result is unproven: the convention's carrier and why (doc/adr-scratch-result.md).
+    pub unproven: Option<UnprovenResult>,
     /// Whether control never comes back from it, and what that takes for granted: nothing where
     /// the whole program proves it, a premise where a runtime model says it. `None` where it may.
     pub noreturn: Option<std::collections::BTreeSet<r2source::Premise>>,
     /// Why there is no analysis, where there is none: the blocks are then the walk's, and
     /// the calls, convention, parameters, locals and return are unknown, not empty (ROADMAP D29).
     pub refused: Option<crate::native::NativeRefusal>,
+}
+
+/// An unproven result: the register a caller reads it from, and the cause the proof line names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnprovenResult {
+    pub carrier: Option<r2ssa::CanonicalStorageId>,
+    pub cause: Option<r2types::UnprovenCause>,
+    /// The carrier's width, where the header spells it `r2sleigh_result_uN`.
+    pub bits: Option<u32>,
+}
+
+impl UnprovenResult {
+    /// The cause as the proof line spells it.
+    pub fn cause_name(self) -> &'static str {
+        self.cause
+            .map_or("no return reached", r2types::UnprovenCause::name)
+    }
 }
 
 /// One basic block.
@@ -105,6 +124,16 @@ impl FunctionInfo {
             variadic: (artifact.machine_context().function_interface())
                 .is_some_and(r2source::SourceFunctionInterface::is_variadic),
             returns: returns(artifact, sealed),
+            unproven: (sealed.return_type())
+                .filter(|fact| fact.is_unproven())
+                .map(|fact| UnprovenResult {
+                    carrier: artifact.machine_context().return_value_carrier(),
+                    cause: fact.unproven_cause(),
+                    bits: match fact.declared() {
+                        Some(CTypeLike::Int { bits, .. }) => Some(*bits),
+                        _ => None,
+                    },
+                }),
             locals: locals(artifact, sealed, &entities),
             noreturn,
             refused: None,
@@ -135,6 +164,7 @@ impl FunctionInfo {
             variadic: false,
             locals: Vec::new(),
             returns: None,
+            unproven: None,
             noreturn,
             refused: Some(refusal),
         }
