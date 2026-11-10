@@ -794,5 +794,22 @@ Gates, release, base `6129d1797`:
 - Cost, instructions retired:
   - Cold `pdd`: pumasim `0x23fdf0` 19.78 to 19.73 G, 0pack `0x62ecf0` 15.38 to 15.34 G; RSS unchanged.
   - `aa; pdd`: pumasim `0x1fad00` 115.9 to 65.9 G and 0pack `0x475520` 84.3 to 56.6 G. Base built the reference index there; head decides without it.
-  - bash `0x2e630`: 15.4 to 22.2 G, over D153's bound of 15.43 G. The callees' closed boundaries lift their callers' bodies and those bodies' callees. Holding fates from `aa`'s walk (S3's deferred rows) is the owner of that cost.
-  - pumasim `0x3b6b20` after `aa`: peak RSS goes from 221 to 438 MB. Its every-way-in check builds the reference index, which S3 measured at 428.7 MB.
+  - bash `0x2e630`: 15.4 to 22.2 G before "S7 cost" below, over D153's bound of 15.43 G; 14.32 G after it.
+  - pumasim `0x3b6b20` after `aa`: peak RSS 221 to 438 MB before "S7 cost" below, which removes the reference index it built.
+
+S7 cost (2026-11-10):
+
+- The profile (samply, bash `aa; pdd @ 0x2e630`, 6,782 samples) split the 22.24 G:
+  - 32.7% built the reference index for `Escapes`, which then refused at `0x1e887` (code no body holds). pumasim `0x3b6b20`: 43%, refused at `0x1c5102`.
+  - 17.5% was `CalleeEntry` (878 callees of callers lifted and summarised), 17.6% `SiteFates` (450 callers lifted, 4.5% its pass). 1,331 walks of 1,018 bodies.
+  - The second seal was under 1%: 2 functions decided in bash, 4 in pumasim `0x3b6b20`.
+- `Escapes` refuses on code no body holds before it asks for the index. The index is built only where the closed world can still hold, as for `ax`. A test (`code_no_body_holds_refuses_the_closed_world_before_the_reference_index`) counts no index built (`AnalysisStats::references`).
+- Not taken here: deciding inside one seal (r2ssa `site_boundary::decide`) rests on S6's `BodyBoundary` seal and lands above S6. `CalleeEntry` still lifts each callee of a caller: those 878 callees are two calls from the root, and preparing one costs more than its lift and pass.
+- Release, instructions retired and peak footprint; base and before as measured on `s7-cost` (base `bf3e9d8ce`, before at S6), after the median of three on S7:
+
+| | base | before | after |
+|---|---|---|---|
+| bash `0x2e630` `aa; pdd` | 15.42 G, 104.3 MB | 22.24 G, 104.4 MB | 14.32 G, 65.1 MB |
+| pumasim `0x3b6b20` `aa; pdd` | 64.42 G, 196.4 MB | 118.47 G, 411.0 MB | 66.29 G, 206.3 MB |
+
+  - bash is under D153's 15.43 G. Output: each `aa; pdd` prints the bytes it printed before, and the census goldens do not move.
