@@ -3583,8 +3583,11 @@ static sigjmp_buf resumed;
 static void returned(int sig) { (void)sig; siglongjmp(resumed, 1); }
 #define UNPROVEN(call) do { if (!sigsetjmp(resumed, 1)) { call; } } while (0)
 int main(void) {
-    signal(SIGILL, returned);
-    signal(SIGTRAP, returned);
+    /* sigaction keeps the handler: under -std=c11 glibc's signal() resets it after one trap. */
+    struct sigaction on = {0};
+    on.sa_handler = returned;
+    sigaction(SIGILL, &on, 0);
+    sigaction(SIGTRAP, &on, 0);
     const uint32_t want[4] = {0x00000001u, 0xffffff80u, 0x0000007fu, 0xfffffffeu};
     static uint32_t got[4];
     memset(got, 0xa5, sizeof got);
@@ -4347,8 +4350,11 @@ static sigjmp_buf resumed;
 static void returned(int sig) { (void)sig; siglongjmp(resumed, 1); }
 #define UNPROVEN(call) do { if (!sigsetjmp(resumed, 1)) { call; } } while (0)
 int main(void) {
-    signal(SIGILL, returned);
-    signal(SIGTRAP, returned);
+    /* sigaction keeps the handler: under -std=c11 glibc's signal() resets it after one trap. */
+    struct sigaction on = {0};
+    on.sa_handler = returned;
+    sigaction(SIGILL, &on, 0);
+    sigaction(SIGTRAP, &on, 0);
     uint64_t words[8] = {1, 2, 3, 4, 5, 6, 7, 8};
     UNPROVEN(copy((uint64_t)(uintptr_t)&words[0], (uint64_t)(uintptr_t)&words[4], 3));
     /* Ascending one element at a time, as the machine walks. */
