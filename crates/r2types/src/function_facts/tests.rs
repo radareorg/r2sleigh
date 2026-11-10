@@ -3325,7 +3325,7 @@ fn a_recovered_graph_is_a_written_carrier_and_a_read_one_the_exact_type() {
     assert_eq!(
         decide(&signed_i32_return_source(true, true)),
         ReturnTypeFact::Decided {
-            ty: int32.clone(),
+            ty: int32,
             by: ReturnTypeEvidence::ExactSource,
         }
     );

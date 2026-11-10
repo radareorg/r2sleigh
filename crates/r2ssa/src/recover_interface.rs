@@ -810,9 +810,8 @@ fn returned_result(
         return (RecoveredFunctionResult::Unproven, false);
     };
     let entry_undefined = entry_defines_nothing(graph, slots, slot);
-    // A return path where the carrier still holds what the caller left in it is untouched whether
-    // that path names no definition at all or reaches the return through a merge whose arm is the
-    // entry value. Where that entry byte defines nothing (case 1) the path leaves no result.
+    // A path whose carrier holds the caller's value (no definition, or a merge arm of the entry
+    // value) is untouched; where that entry byte defines nothing (case 1) it leaves no result.
     let untouched = !entry_undefined
         && (live_out.unresolved_blocks().next().is_some()
             || returns_the_callers_value(graph, live_out, slot));
@@ -1550,20 +1549,19 @@ fn recover_interface_inner(
                     result_read = true;
                 }
                 // A written float lane is a carrier no read decided: never void (D200).
-                read => {
+                read if result == RecoveredFunctionResult::Void => {
                     result_ambiguous |= read.is_none() && result_reads.is_none();
-                    if result == RecoveredFunctionResult::Void {
-                        result = RecoveredFunctionResult::Unproven;
-                        // What feeds the written lane is observed: its inputs are parameters.
-                        candidate_live_out = float_live_out;
-                        result_causes.insert(SourceResultCause::Written);
-                        result_carriers = Some(r2source::SourceResultCarriers {
-                            integer: candidate,
-                            float: Some(float),
-                            second: None,
-                        });
-                    }
+                    result = RecoveredFunctionResult::Unproven;
+                    // What feeds the written lane is observed: its inputs are parameters.
+                    candidate_live_out = float_live_out;
+                    result_causes.insert(SourceResultCause::Written);
+                    result_carriers = Some(r2source::SourceResultCarriers {
+                        integer: candidate,
+                        float: Some(float),
+                        second: None,
+                    });
                 }
+                read => result_ambiguous |= read.is_none() && result_reads.is_none(),
             }
         }
         // Where callers read the integer register beside a written float, the argument it hands back
