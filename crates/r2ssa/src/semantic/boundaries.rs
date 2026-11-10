@@ -1377,8 +1377,14 @@ pub(crate) fn collect_source_boundary_facts(
                                     storage
                                 );
                             }
+                            // A callee holding only a low lane reads that lane of the carrier.
+                            let held = super::shared::callee_held_lane(
+                                interface,
+                                argument.index(),
+                                storage,
+                            );
                             found.map(|value| {
-                                let (value, lane_of) = super::shared::narrowed_argument(
+                                let (mut value, mut lane_of) = super::shared::narrowed_argument(
                                     &CallPosition {
                                         function,
                                         prep,
@@ -1387,8 +1393,17 @@ pub(crate) fn collect_source_boundary_facts(
                                         op_index,
                                     },
                                     value,
-                                    storage,
+                                    held.unwrap_or(storage),
                                 );
+                                // The entry carrier handed on whole is this function's own lane.
+                                if let (None, Some(lane), SourceCallArgumentValue::Value(carrier)) =
+                                    (lane_of, held, value)
+                                    && let Some(own) = entry_values.get(&lane).copied().flatten()
+                                    && super::shared::is_entry_lane_of(graph, own, carrier)
+                                {
+                                    (value, lane_of) =
+                                        (SourceCallArgumentValue::Value(own), Some(carrier));
+                                }
                                 SourceCallArgumentFact {
                                     slot: CallBoundarySlot::Register {
                                         index: argument.index(),
@@ -1913,12 +1928,12 @@ pub(crate) fn source_formal_parameter_projections(
                 r2source::SourceParameterLocation::Stack {
                     offset, size_bytes, ..
                 } => {
+                    let bytes = logical_value
+                        .and_then(|logical| low_stack_lane(machine_context, logical, size_bytes))
+                        .unwrap_or(size_bytes);
                     return Some(SourceFormalParameterProjection {
                         index: parameter.index(),
-                        home: ProjectedHome::Stack {
-                            offset,
-                            bytes: size_bytes,
-                        },
+                        home: ProjectedHome::Stack { offset, bytes },
                         logical_value,
                     });
                 }
@@ -1959,6 +1974,26 @@ pub(crate) fn source_formal_parameter_projections(
             })
         })
         .collect()
+}
+
+/// The low lane of a stack slot a logical value states, at the slot's own address where memory
+/// is little-endian.
+fn low_stack_lane(
+    machine_context: &SourceMachineContext,
+    logical: SourceLogicalValue,
+    size_bytes: u32,
+) -> Option<u32> {
+    let carrier = logical.carrier();
+    let little = machine_context.memory_model().default_endianness()
+        == crate::MachineMemoryEndianness::Little;
+    let bytes = u32::try_from(carrier.size_bits() / 8).ok()?;
+    (little
+        && carrier.kind() == SourceCarrierKind::LowBits
+        && carrier.offset_bits() == 0
+        && carrier.size_bits().is_multiple_of(8)
+        && bytes > 0
+        && bytes < size_bytes)
+        .then_some(bytes)
 }
 
 /// Index the exact entry values by source storage in one graph pass.

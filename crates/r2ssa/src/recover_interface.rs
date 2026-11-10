@@ -496,7 +496,8 @@ fn observed_entry_read_storages(
         if observations.contains(value.id)
             && graph.def_inst(value.id).is_none()
             && saved.is_none_or(|saved| !saved.contains(value.id))
-            && let Some(root) = is_entry_read(func, &value.var)
+            && let Some(root) = (is_entry_read(func, &value.var))
+                .or_else(|| graph.formal_projection_storage(value.id))
         {
             // Every register value is its root, so the width the program
             // read is the low lane holding every observed byte, not the
@@ -579,20 +580,32 @@ fn passed_through_entry_storages(
             let crate::semantic::CallBoundarySlot::Register { storage, .. } = argument.slot else {
                 continue;
             };
-            let is_entry = match argument.value {
-                crate::semantic::SourceCallArgumentValue::PreservedEntry => true,
+            // An entry lane the callee holds (ROADMAP D105) is a parameter of the lane's width.
+            let storage = match argument.value {
+                crate::semantic::SourceCallArgumentValue::PreservedEntry => storage,
                 crate::semantic::SourceCallArgumentValue::Value(value) => {
-                    graph.value(value).is_some_and(|graph_value| {
+                    let whole = graph.value(value).is_some_and(|graph_value| {
                         graph.def_inst(value).is_none()
                             && graph_value.var.version == 0
                             && graph_value.var.size == storage.size
                             && graph_value.canonical_storage == Some(storage)
-                    })
+                    });
+                    let own = graph.value(value).and_then(|graph_value| {
+                        (graph.def_inst(value).is_none() && graph_value.var.version == 0)
+                            .then_some(graph_value.canonical_storage)?
+                    });
+                    let lane = (graph.formal_projection_storage(value).or(own)).filter(|lane| {
+                        lane.space == storage.space
+                            && lane.offset == storage.offset
+                            && lane.size < storage.size
+                    });
+                    match (whole, lane) {
+                        (true, _) => storage,
+                        (false, Some(lane)) => lane,
+                        (false, None) => continue,
+                    }
                 }
             };
-            if !is_entry {
-                continue;
-            }
             if !storages.contains(&storage) {
                 storages.push(storage);
             }

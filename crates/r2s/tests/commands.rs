@@ -1318,8 +1318,8 @@ mod dispatch_table {
             frame,
             // The loaded table leaves q0 written on the path that skips the loop, so the body does
             // not say whether x0 or v0 is the result, and no returned use makes the arguments unsigned.
-            "arg int64_t arg1 @ x0\n\
-             arg int64_t arg2 @ x1\n\
+            "arg int64_t arg0 @ x0\n\
+             arg int64_t arg1 @ x1\n\
              var uint32_t stack_m76 @ entry.sp-0x4c\n\
              var uint64_t stack_m72 @ entry.sp-0x48\n\
              var struct r2sleigh_bits_192 stack_m64 @ entry.sp-0x40\n\
