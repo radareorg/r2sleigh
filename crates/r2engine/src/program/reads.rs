@@ -39,7 +39,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
                 continue;
             };
             let target = walker.target(thumb);
-            let Ok(slots) = crate::native::convention_slots(target) else {
+            let Ok(slots) = target.convention.convention_slots() else {
                 unread = true;
                 continue;
             };

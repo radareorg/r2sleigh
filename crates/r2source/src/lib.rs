@@ -13,9 +13,11 @@
 #![deny(unsafe_code)]
 
 pub mod confidence;
+pub mod convention;
 pub mod display_names;
 pub mod native;
 pub use confidence::{Basis, Confidence, Fact, Grade, Premise};
+pub use convention::{ConventionId, ConventionModel};
 pub use display_names::{DisplayNames, unnamed_function, unnamed_identifier};
 
 use std::collections::BTreeSet;

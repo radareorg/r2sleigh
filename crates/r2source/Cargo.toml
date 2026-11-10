@@ -6,6 +6,7 @@ license.workspace = true
 description = "Opaque ownership for coherent reverse-engineering source snapshots"
 
 [dependencies]
+r2abi = { path = "../r2abi" }
 r2il = { path = "../r2il" }
 serde.workspace = true
 

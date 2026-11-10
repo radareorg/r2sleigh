@@ -39,10 +39,9 @@ use crate::query::Decoders;
 use crate::query::db::{Db, Inputs, Query, Retention};
 
 /// Everything a native request needs that is not the decoder itself.
-struct Assembled {
-    convention: &'static r2abi::ConventionRow,
-    /// What the default convention says a call does; both instruction sets share one register file.
-    call_effect: Option<r2source::SourceCallEffect>,
+pub(super) struct Assembled {
+    convention: r2abi::ConventionId,
+    /// The specification the convention reads, under its prototype.
     compiler: r2sleigh_lift::profile::LanguageProfile,
     prototypes: r2abi::Prototypes,
     /// The C data model of the architecture under that C library.
@@ -99,7 +98,7 @@ impl Machines {
         };
         let assembled = r2abi::ConventionId::default_for(&arch, bits, psabi)
             .ok_or_else(|| unstated(false))
-            .and_then(|id| assemble(&machine, container, id.row()));
+            .and_then(|id| assemble(&machine, container, id));
         let languages = &container.languages;
         let written_in_go = languages.program == SourceLanguage::Go
             || languages
@@ -112,17 +111,17 @@ impl Machines {
         let go = convention.map(|convention| {
             convention
                 .ok_or_else(|| unstated(true))
-                .and_then(|id| assemble(&machine, container, id.row()))
+                .and_then(|id| assemble(&machine, container, id))
         });
         let go_abi0 = convention
             .flatten()
             .zip(abi0)
             .filter(|(convention, abi0)| convention != abi0)
-            .map(|(_, abi0)| assemble(&machine, container, abi0.row()));
+            .map(|(_, abi0)| assemble(&machine, container, abi0));
         let go_unstated = (go_abi0.is_some() && languages.go_assembly.is_none())
             .then(|| r2abi::ConventionId::go_unstated(&arch, bits))
             .flatten()
-            .map(|id| assemble(&machine, container, id.row()));
+            .map(|id| assemble(&machine, container, id));
         Ok(Self {
             machine,
             thumb,
@@ -148,6 +147,46 @@ impl Machines {
         };
         chosen.as_ref().map_err(Clone::clone)
     }
+
+    /// What a native request needs under one convention, where the program assembled it.
+    fn of(&self, id: r2abi::ConventionId) -> Option<&Result<Assembled, Unassembled>> {
+        let go = [&self.go, &self.go_abi0, &self.go_unstated];
+        std::iter::once(&self.assembled)
+            .chain(go.into_iter().flatten())
+            .find(|assembled| assembled.as_ref().is_ok_and(|it| it.convention == id))
+    }
+}
+
+/// One convention's joined model, built once per program: the container decides it, so no write
+/// moves it (doc/adr-call-boundary.md, "The joined model").
+pub(super) struct Convention;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for Convention {
+    type Key = r2abi::ConventionId;
+    type Value = Result<std::sync::Arc<r2source::ConventionModel>, NativeRefusal>;
+    const NAME: &'static str = "convention";
+    const RETENTION: Retention = Retention::Held;
+
+    fn compute(db: &Db<ProgramInputs<S>>, id: &r2abi::ConventionId) -> Self::Value {
+        let inputs = db.inputs();
+        let machines = inputs.machines().map_err(NativeRefusal::Unassembled)?;
+        let assembled = machines.of(*id).ok_or(NativeRefusal::Machine(
+            "the program assembled no such convention",
+        ))?;
+        let assembled = assembled
+            .as_ref()
+            .map_err(|why| NativeRefusal::Unassembled(why.clone()))?;
+        let container = inputs.source.container();
+        let (arch, bits) = (&machines.machine.arch, container.arch.bits);
+        let model = crate::native::convention_model(
+            arch,
+            bits,
+            kernel(container),
+            &assembled.compiler,
+            id.row(),
+        );
+        model.map(std::sync::Arc::new)
+    }
 }
 
 /// Assemble what a native request needs of the machine under one convention, once per program:
@@ -155,14 +194,9 @@ impl Machines {
 fn assemble(
     machine: &Machine,
     container: &Container,
-    convention: &'static r2abi::ConventionRow,
+    id: r2abi::ConventionId,
 ) -> Result<Assembled, Unassembled> {
-    let bits = container.arch.bits;
-    // The system's ABI says which register it reserves for the thread
-    // pointer and which control registers it makes callee-saved. A system
-    // fact, so a static ELF that names no C library has it too; which
-    // library's declarations apply is `platform`'s question.
-    let psabi = kernel(container);
+    let convention = id.row();
     // A convention naming its compiler runs under it; the rest under the toolchain the container
     // names: a PE under Windows', a Mach-O under Apple's where the language has one.
     let specification = match (convention.cspec.toolchain, container.format) {
@@ -185,8 +219,6 @@ fn assemble(
             .ok_or(Unassembled::NoPrototype(prototype))?,
         None => compiler,
     };
-    let call_effect =
-        crate::native::call_effect(&machine.arch, bits, psabi, &compiler, Some(convention));
     // The specification names the register; the architecture says where it
     // lives, and the lift spells writes to it in those coordinates.
     let link = compiler.return_address.as_ref().and_then(|name| {
@@ -209,8 +241,7 @@ fn assemble(
     let prototypes = r2abi::Prototypes::embedded_for(library);
     let data_model = r2abi::CDataModel::of(&container.arch.name, container.arch.bits, library);
     Ok(Assembled {
-        convention,
-        call_effect,
+        convention: id,
         compiler,
         prototypes,
         data_model,

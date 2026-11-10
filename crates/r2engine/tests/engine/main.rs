@@ -9,6 +9,7 @@ mod arm;
 mod body;
 mod call_tables;
 mod control;
+mod conventions;
 mod degraded;
 mod discovery;
 mod imports;

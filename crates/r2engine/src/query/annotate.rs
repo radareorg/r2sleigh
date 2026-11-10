@@ -43,7 +43,7 @@ pub(super) fn over_run(
         return;
     }
     let memory = &answered.memory;
-    let call_effect = answered.call_effect;
+    let call_effect = answered.call_effect.as_ref();
     let body = (work >= Work::Function).then_some(answered.body).flatten();
     let fresh = fresh_over(lines, body);
     let mut named = named_over(run.lifts, &fresh, call_effect);
@@ -315,7 +315,7 @@ fn relative_over(
         return vec![false; lines.len()];
     };
     let shifted = super::decode::lift_run(answered, &lines[..=last], &run.windows[..=last], PAGE);
-    let there = named_over(&shifted, fresh, answered.call_effect);
+    let there = named_over(&shifted, fresh, answered.call_effect.as_ref());
     lines
         .iter()
         .enumerate()

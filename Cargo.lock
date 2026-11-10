@@ -1420,6 +1420,7 @@ dependencies = [
 name = "r2source"
 version = "0.1.0"
 dependencies = [
+ "r2abi",
  "r2il",
  "serde",
 ]

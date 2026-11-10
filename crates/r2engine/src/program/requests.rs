@@ -764,11 +764,7 @@ impl<S: Source + 'static> OpenProgram<S> {
                 program: self,
                 endian: self.endian(),
             },
-            call_effect: self
-                .db
-                .inputs()
-                .assembled()
-                .and_then(|held| held.call_effect.as_ref()),
+            call_effect: self.view().default_call_effect(),
             proved,
             body: None,
             holdings: true,
@@ -856,7 +852,7 @@ fn claimed_by<S: Source + 'static>(
             program: view,
             endian: super::view::endian(view.source()),
         },
-        call_effect: target.call_effect,
+        call_effect: target.convention.call_effect().ok(),
         proved: None,
         body: Some(&body),
         holdings: false,

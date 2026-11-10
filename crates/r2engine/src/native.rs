@@ -14,14 +14,16 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::body::{BodyError, WINDOW};
-use r2abi::{ConventionRow, Prototypes};
+use r2abi::Prototypes;
 use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
-use r2sleigh_lift::profile::{LanguageProfile, SlotClass, SpecStorage};
+use r2sleigh_lift::profile::{LanguageProfile, ParamEntry, SlotClass, SpecStorage};
+use r2source::convention::{
+    BoundaryForms, LaneSet, LaneSource, Location, OwnedRange, ResultLane, Section, SectionClass,
+};
 use r2source::{
-    CanonicalStorageId, CanonicalStorageSpace, SourceBoundaryReads, SourceCallEffect,
-    SourceConventionSlots, SourceDataObject, SourceEndianness, SourceMachineRoles,
-    SourceRoleRegisterNames, SourceStackAllocationContract, SourceStackGrowth,
+    CanonicalStorageId, CanonicalStorageSpace, ConventionModel, SourceDataObject, SourceEndianness,
+    SourceMachineRoles, SourceRoleRegisterNames, SourceStackAllocationContract, SourceStackGrowth,
     native::{NativeBlock, NativeCall, NativeFunction, NativeMachine},
 };
 use r2ssa::{ArgumentReach, CalleePreservedCarriers, TrustedSsaArtifact};
@@ -142,12 +144,10 @@ pub struct NativeTarget<'a> {
     /// tuple spells it. `arm` and `thumb` share an architecture, and this is
     /// the one fact the trusted lift has to tell them apart.
     pub cpu: &'a str,
-    /// What the platform's ABI says of the convention every function is
-    /// assumed to use that the compiler specification does not: its name,
-    /// its red zone, where a variadic tail goes.
-    pub convention: &'a ConventionRow,
-    /// What that convention says a call does here, resolved once by [`call_effect`].
-    pub call_effect: Option<&'a SourceCallEffect>,
+    /// The function's convention: the specification's prototype joined with the ABI's row, held
+    /// once per convention ([`convention_model`]).
+    pub convention: Arc<ConventionModel>,
+    /// The machine facts of the specification the convention reads: stack pointer, return address.
     pub compiler: &'a LanguageProfile,
     /// The language's DWARF register numbering.
     pub dwarf: &'a r2sleigh_lift::profile::DwarfRegisters,
@@ -1279,9 +1279,7 @@ fn declared_parameter_names(
 
 /// Where each integer argument arrives under this machine's convention, by index.
 pub(crate) fn argument_slots(target: &NativeTarget<'_>) -> Vec<CanonicalStorageId> {
-    machine(target)
-        .map(|machine| machine.slots.argument_slots().to_vec())
-        .unwrap_or_default()
+    (target.convention.argument_registers(SlotClass::Integer)).collect()
 }
 
 /// Where an import's declaration says it takes a pointer.
@@ -2451,7 +2449,7 @@ fn literal_accesses(body: &crate::body::Body) -> (BTreeMap<u64, usize>, Vec<std:
     (loads, stores)
 }
 
-/// State the machine from the convention data and the compiler specification.
+/// State the machine from the compiler specification and the function's convention model.
 fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
     let (family, bits, endianness) = profile(target.arch)?;
     // A machine that leaves the return address in a register says so; one that
@@ -2477,11 +2475,15 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         r2sleigh_lift::profile::StackGrowth::Lower => SourceStackGrowth::LowerAddresses,
         r2sleigh_lift::profile::StackGrowth::Higher => SourceStackGrowth::HigherAddresses,
     };
-    let redzone = target.convention.red_zone;
+    let model = &*target.convention;
+    let frame_pointer = model.forms.frame_pointer;
     let roles = SourceMachineRoles::new(Some(return_address), Some(stack_pointer))
         .and_then(|roles| {
             roles.with_stack_allocation_contract(
-                SourceStackAllocationContract::with_implicit_active_sp_bytes(growth, redzone),
+                SourceStackAllocationContract::with_implicit_active_sp_bytes(
+                    growth,
+                    model.forms.red_zone,
+                ),
             )
         })
         .map_err(|_| NativeRefusal::Machine("the carriers are not register storages"))?
@@ -2492,22 +2494,20 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         .with_role_register_names(SourceRoleRegisterNames::new(
             Some(return_address_name),
             Some(stack_pointer_name),
-            target.convention.frame_pointer.map(|name| name.0),
+            frame_pointer.and_then(|storage| register_named(target.arch, storage)),
         ));
-    // The register the convention keeps a frame base in, where the architecture places it.
-    let roles = match target
-        .convention
-        .frame_pointer
-        .map(|name| storage(target.arch, name.0))
-    {
-        Some(Ok(frame_pointer)) => roles
+    let roles = match frame_pointer {
+        Some(frame_pointer) => roles
             .with_frame_pointer(frame_pointer)
             .map_err(|_| NativeRefusal::Machine("the frame pointer is not a register storage"))?,
-        _ => roles,
+        None => roles,
     };
-
-    let slots = convention_slots(target)?;
-
+    let slots = model
+        .convention_slots()
+        .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?;
+    let call_effect = model.call_effect().inspect_err(|error| {
+        r2il::refusal_evidence!("call-effect", "{:?}: {error:?}", model.id);
+    });
     Ok(NativeMachine {
         arch_id: family.to_owned(),
         cpu_id: target.cpu.to_owned(),
@@ -2516,62 +2516,272 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         roles,
         slots,
         // Asked in the first pass, before an interface exists; without it a caller loses its frame facts.
-        call_effect: target.call_effect.cloned(),
+        call_effect: call_effect.ok(),
     })
 }
 
-/// Where the convention leaves each argument and result: the compiler
-/// specification's registers and stack placement, and what the ABI adds.
-pub(crate) fn convention_slots(
-    target: &NativeTarget<'_>,
-) -> Result<SourceConventionSlots, NativeRefusal> {
-    // The default prototype's general-purpose register entries, in order:
-    // its argument registers, and its first result register. A float or a
-    // hidden-return entry is no integer argument slot.
-    let prototype = target
-        .compiler
-        .default_prototype()
-        .ok_or(NativeRefusal::Machine(
-            "the compiler specification states no prototype",
-        ))?;
-    let place = |names: Vec<&str>| {
-        names
-            .into_iter()
-            .map(|name| storage(target.arch, name))
-            .collect::<Result<Vec<_>, _>>()
+/// The name the architecture gives a register storage.
+fn register_named(arch: &ArchSpec, storage: CanonicalStorageId) -> Option<&str> {
+    let named = arch.registers.iter().find(|register| {
+        storage.space == CanonicalStorageSpace::Register
+            && register.offset == storage.offset
+            && register.size == storage.size
+    });
+    named.map(|register| register.name.as_str())
+}
+
+/// One convention's model on this machine: the specification's default prototype joined with
+/// the ABI's row, every register resolved once (doc/adr-call-boundary.md, "The joined model").
+///
+/// A location or result register the architecture lacks refuses the model; a preserved,
+/// killed or reserved one it lacks costs precision, never soundness, and is left out.
+pub fn convention_model(
+    arch: &ArchSpec,
+    bits: u32,
+    kernel: r2abi::Platform,
+    profile: &LanguageProfile,
+    row: &r2abi::ConventionRow,
+) -> Result<ConventionModel, NativeRefusal> {
+    let prototype = profile.default_prototype().ok_or(NativeRefusal::Machine(
+        "the compiler specification states no prototype",
+    ))?;
+    let at = Resolver { arch, id: row.id };
+    let (sections, hidden_return) = sections(&at, prototype, row)?;
+    let link = profile.return_address.as_deref().and_then(|n| at.placed(n));
+    let (preserved, reserved) = duties(&at, prototype, link, bits, kernel);
+    let model = ConventionModel {
+        id: row.id,
+        sections,
+        hidden_return,
+        results: results(&at, prototype, row)?,
+        owned: owned(prototype, profile.return_address_slot),
+        preserved,
+        killed: at.lanes(&prototype.killed_by_call),
+        likely_trash: at.lanes(&prototype.likely_trash),
+        reserved,
+        link,
+        forms: forms(&at, prototype, row, bits, kernel),
+        refused: row.refused,
     };
-    let argument_slots = place(registers_of(&prototype.input, SlotClass::Integer))?;
-    let result_slots = place(registers_of(&prototype.output, SlotClass::Integer))?;
-    let result_slot = result_slots.first().copied();
-    // The specification's second integer result entry holds a two-register value's high half.
-    let second_result_slot = result_slots
-        .get(1)
-        .copied()
-        .filter(|second| result_slot.is_some_and(|first| first.size == second.size));
-    let float_slots = place(registers_of(&prototype.input, SlotClass::Float))?;
-    let float_result = place(registers_of(&prototype.output, SlotClass::Float))?
-        .first()
-        .copied();
-    // Where an argument past the registers goes is the compiler specification's
-    // own statement: its stack parameter entry carries the first offset and the
-    // step between entries.
-    let stack_arguments = target
-        .compiler
-        .stack_arguments()
-        .and_then(|(offset, align)| r2source::SourceStackArgumentPlacement::new(offset, align));
-    Ok(SourceConventionSlots::new(
-        target.convention.id.radare2_name(),
-        argument_slots,
-        result_slot,
-    )
-    .and_then(|slots| slots.with_float_slots(float_slots, float_result))
-    .and_then(|slots| slots.with_second_result_slot(second_result_slot))
-    .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
-    .with_shared_positions(prototype.shares_positions())
-    .with_stack_arguments(stack_arguments)
-    .with_variadic_tail_on_stack(prototype.variadic_on_stack)
-    .with_register_save_area(target.convention.save_area.map(|area| {
-        r2source::SourceRegisterSaveArea {
+    // The slots are a view; one that does not hold refuses the model, as it refused each function.
+    model
+        .convention_slots()
+        .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?;
+    Ok(model)
+}
+
+/// Where a convention's register names are placed on one architecture.
+struct Resolver<'a> {
+    arch: &'a ArchSpec,
+    id: r2abi::ConventionId,
+}
+
+impl Resolver<'_> {
+    fn resolve(&self, name: &str) -> Option<CanonicalStorageId> {
+        r2sleigh_lift::lifted_register_storage(self.arch, name).filter(|storage| storage.size != 0)
+    }
+
+    /// Placed, or left out with the evidence of why.
+    fn placed(&self, name: &str) -> Option<CanonicalStorageId> {
+        let placed = self.resolve(name);
+        if placed.is_none() {
+            r2il::refusal_evidence!(
+                "call-effect",
+                "{:?}: {} names no single register of {}",
+                self.id,
+                name,
+                self.arch.name
+            );
+        }
+        placed
+    }
+
+    fn required(&self, name: &str) -> Result<CanonicalStorageId, NativeRefusal> {
+        (self.resolve(name)).ok_or_else(|| NativeRefusal::UnknownRegister(name.to_owned()))
+    }
+
+    /// Every register of a list, whole; addresses are no lanes.
+    fn lanes(&self, list: &[SpecStorage]) -> Box<[LaneSet]> {
+        (list.iter())
+            .filter_map(|storage| match storage {
+                SpecStorage::Register(name) => self.placed(name).map(LaneSet::whole),
+                SpecStorage::Address { .. } => None,
+            })
+            .collect()
+    }
+}
+
+/// How a narrower value fills an entry: the ABI's override where it states one, else the cspec's.
+fn extension(
+    row: &r2abi::ConventionRow,
+    side: r2abi::Side,
+    entry: &ParamEntry,
+) -> r2abi::Extension {
+    let stated = row.overrides.iter().find_map(|item| match *item {
+        r2abi::SpecOverride::Extension {
+            side: on,
+            class,
+            extension,
+            ..
+        } if on == side && class == entry.class => Some(extension),
+        _ => None,
+    });
+    stated.unwrap_or(entry.extension)
+}
+
+/// Integer, float and stack apart, or Microsoft x64's shared positions; and the hidden result pointer.
+fn sections(
+    at: &Resolver<'_>,
+    prototype: &r2sleigh_lift::profile::ProtoModel,
+    row: &r2abi::ConventionRow,
+) -> Result<(Box<[Section]>, Option<CanonicalStorageId>), NativeRefusal> {
+    let mut locations = Vec::new();
+    let mut hidden_return = None;
+    for entry in &prototype.input {
+        let SpecStorage::Register(name) = &entry.at else {
+            continue;
+        };
+        match entry.class {
+            SlotClass::Integer | SlotClass::Float => locations.push(Location::Register {
+                storage: at.required(name)?,
+                bytes: u8::try_from(*entry.size.end()).unwrap_or(u8::MAX),
+                class: entry.class,
+                position: entry.group,
+                extension: extension(row, r2abi::Side::Input, entry),
+            }),
+            SlotClass::HiddenReturn => hidden_return = at.placed(name),
+            SlotClass::Stack => {}
+        }
+    }
+    let section = |class, of: SlotClass| Section {
+        class,
+        locations: (locations.iter())
+            .filter(|location| matches!(location, Location::Register { class, .. } if *class == of))
+            .copied()
+            .collect(),
+    };
+    let mut sections = match prototype.shares_positions() {
+        true => vec![Section {
+            class: SectionClass::Shared,
+            locations: locations.clone().into(),
+        }],
+        false => vec![
+            section(SectionClass::Integer, SlotClass::Integer),
+            section(SectionClass::Float, SlotClass::Float),
+        ],
+    };
+    if let Some((first, step)) = prototype.stack_arguments() {
+        sections.push(Section {
+            class: SectionClass::Stack { first, step },
+            locations: Box::default(),
+        });
+    }
+    Ok((sections.into(), hidden_return))
+}
+
+/// The specification's `<output>` registers, then the lanes a cited override adds.
+fn results(
+    at: &Resolver<'_>,
+    prototype: &r2sleigh_lift::profile::ProtoModel,
+    row: &r2abi::ConventionRow,
+) -> Result<Box<[ResultLane]>, NativeRefusal> {
+    let mut results = Vec::new();
+    for entry in &prototype.output {
+        if let SpecStorage::Register(name) = &entry.at {
+            results.push(ResultLane {
+                storage: at.required(name)?,
+                class: entry.class,
+                extension: extension(row, r2abi::Side::Output, entry),
+                stated_by: LaneSource::Specification,
+            });
+        }
+    }
+    for item in row.overrides {
+        let r2abi::SpecOverride::Results { class, lanes, .. } = *item else {
+            continue;
+        };
+        for lane in lanes.iter().filter_map(|name| at.placed(name.0)) {
+            if !results.iter().any(|stated| stated.storage == lane) {
+                results.push(ResultLane {
+                    storage: lane,
+                    class,
+                    extension: r2abi::Extension::Unspecified,
+                    stated_by: LaneSource::Override,
+                });
+            }
+        }
+    }
+    Ok(results.into())
+}
+
+/// Who owns each entry-relative stack range the specification states.
+fn owned(
+    prototype: &r2sleigh_lift::profile::ProtoModel,
+    return_address: Option<(i64, u32)>,
+) -> Box<[OwnedRange]> {
+    let range = |r: &r2sleigh_lift::profile::StackRange| Some(r.first..r.last.checked_add(1)?);
+    let slot = return_address.and_then(|(offset, size)| {
+        Some(OwnedRange::ReturnAddress(
+            offset..offset.checked_add(i64::from(size))?,
+        ))
+    });
+    (prototype.local_range.iter())
+        .filter_map(|r| range(r).map(OwnedRange::Callee))
+        .chain((prototype.param_range.iter()).filter_map(|r| range(r).map(OwnedRange::Arguments)))
+        .chain(slot)
+        .collect()
+}
+
+/// What a call preserves (`unaffected` less the return address, and the ABI's callee-saved
+/// rows) and what the platform reserves.
+fn duties(
+    at: &Resolver<'_>,
+    prototype: &r2sleigh_lift::profile::ProtoModel,
+    link: Option<CanonicalStorageId>,
+    bits: u32,
+    kernel: r2abi::Platform,
+) -> (Box<[LaneSet]>, Box<[LaneSet]>) {
+    let mut preserved = at.lanes(&prototype.unaffected).into_vec();
+    preserved.retain(|lanes| Some(lanes.storage) != link);
+    let mut reserved = Vec::new();
+    let rows = r2abi::architecture_registers(&at.arch.name)
+        .iter()
+        .chain(r2abi::platform_registers(&at.arch.name, bits, kernel));
+    for duty in rows {
+        let Some(storage) = at.placed(duty.register) else {
+            continue;
+        };
+        let into = match duty.duty {
+            r2abi::RegisterDuty::SystemReserved => &mut reserved,
+            r2abi::RegisterDuty::CalleeSaved => &mut preserved,
+        };
+        into.extend(covered_runs(storage, duty));
+    }
+    preserved.sort_unstable();
+    preserved.dedup();
+    (preserved.into(), reserved.into())
+}
+
+/// What the row states beyond locations, its registers placed.
+fn forms(
+    at: &Resolver<'_>,
+    prototype: &r2sleigh_lift::profile::ProtoModel,
+    row: &r2abi::ConventionRow,
+    bits: u32,
+    kernel: r2abi::Platform,
+) -> BoundaryForms {
+    let guard = |guard: Option<&r2abi::StackGuard>| {
+        let guard = guard?;
+        Some(r2source::SourceStackGuard {
+            base: at.placed(guard.register.0)?,
+            offset: guard.offset,
+            width: guard.width,
+        })
+    };
+    BoundaryForms {
+        frame_pointer: row.frame_pointer.and_then(|name| at.resolve(name.0)),
+        red_zone: row.red_zone,
+        save_area: row.save_area.map(|area| r2source::SourceRegisterSaveArea {
             anchor: match area.anchor {
                 r2abi::SaveAreaAnchor::Base => r2source::SourceSaveAreaAnchor::Base,
                 r2abi::SaveAreaAnchor::End => r2source::SourceSaveAreaAnchor::End,
@@ -2579,180 +2789,34 @@ pub(crate) fn convention_slots(
             offset_field: area.offset_field,
             offset_width: area.offset_width,
             stack_field: area.stack_field,
-        }
-    }))
-    .with_variadic_count_register(
-        (target.convention.count_register).and_then(|name| storage(target.arch, name.0).ok()),
-    )
-    .with_entry_stack(
-        target
-            .convention
-            .entry_stack
-            .map(|stack| r2source::SourceEntryStack {
-                alignment: stack.alignment,
-                residue: stack.residue,
-            }),
-    ))
-}
-
-/// A prototype's register entries of one class, in order.
-fn registers_of(entries: &[r2sleigh_lift::profile::ParamEntry], class: SlotClass) -> Vec<&str> {
-    entries
-        .iter()
-        .filter(|entry| entry.class == class)
-        .filter_map(|entry| match &entry.at {
-            SpecStorage::Register(name) => Some(name.as_str()),
-            SpecStorage::Address { .. } => None,
-        })
-        .collect()
-}
-
-/// What a call does here, from the compiler specification's default
-/// prototype and what the ABIs add -- the registers a platform reserves to
-/// the system and the control registers it makes callee-saved.
-///
-/// Preserved is the prototype's `unaffected` less the return address
-/// register: the stack pointer and the callee-saved registers. Clobbered is
-/// what the prototype names a call reading or writing -- its argument and
-/// result registers and its `killedbycall` -- and the return address
-/// register, less anything preserved or reserved. That list is not exhaustive and need
-/// not be: the effect clobbers every register it does not preserve or
-/// reserve, and a callee is asked about all of them (r2ssa's call universe).
-///
-/// Every name is placed by the lifter's register naming. A name the arch
-/// lacks costs precision, never soundness: an unplaced preserved or reserved
-/// register reads as clobbered by every call.
-pub fn call_effect(
-    arch: &ArchSpec,
-    bits: u32,
-    platform: r2abi::Platform,
-    profile: &LanguageProfile,
-    convention: Option<&r2abi::ConventionRow>,
-) -> Option<SourceCallEffect> {
-    let prototype = profile.default_prototype()?;
-    let place = |name: &str| {
-        let placed =
-            r2sleigh_lift::lifted_register_storage(arch, name).filter(|storage| storage.size != 0);
-        if placed.is_none() {
-            r2il::refusal_evidence!(
-                "call-effect",
-                "{}: {} names no single register of {}",
-                prototype.name,
-                name,
-                arch.name
-            );
-        }
-        placed
-    };
-    let registers = |storages: &mut dyn Iterator<Item = &SpecStorage>| {
-        storages
-            .filter_map(|storage| match storage {
-                SpecStorage::Register(name) => place(name),
-                SpecStorage::Address { .. } => None,
-            })
-            .collect::<Vec<_>>()
-    };
-    let link = profile.return_address.as_deref().and_then(place);
-    let mut preserved = registers(&mut prototype.unaffected.iter());
-    preserved.retain(|storage| Some(*storage) != link);
-    let mut system_reserved = Vec::new();
-    let rows = r2abi::architecture_registers(&arch.name)
-        .iter()
-        .chain(r2abi::platform_registers(&arch.name, bits, platform));
-    for row in rows {
-        let Some(storage) = place(row.register) else {
-            continue;
-        };
-        let into = match row.duty {
-            r2abi::RegisterDuty::SystemReserved => &mut system_reserved,
-            r2abi::RegisterDuty::CalleeSaved => &mut preserved,
-        };
-        into.extend(covered_runs(storage, row));
+        }),
+        count_register: row.count_register.and_then(|name| at.resolve(name.0)),
+        entry_stack: row.entry_stack.map(|stack| r2source::SourceEntryStack {
+            alignment: stack.alignment,
+            residue: stack.residue,
+        }),
+        variadic_on_stack: prototype.variadic_on_stack,
+        guard: guard(r2abi::stack_guard(&at.arch.name, bits, kernel)),
+        stack_bound: guard(row.stack_bound.as_ref()),
     }
-    // A specification may restate what an ABI row adds: Windows x64 lists DF.
-    preserved.sort_unstable();
-    preserved.dedup();
-    let mut clobbered = registers(
-        &mut prototype
-            .input
-            .iter()
-            .chain(&prototype.output)
-            .map(|entry| &entry.at)
-            .chain(&prototype.killed_by_call),
-    );
-    clobbered.extend(link);
-    // A register a platform reserves is one the prototype's own lists may
-    // still name -- AArch64's `killedbycall` lists x18, which Apple reserves.
-    let kept = preserved
-        .iter()
-        .chain(&system_reserved)
-        .copied()
-        .collect::<Vec<_>>();
-    clobbered.retain(|storage| !kept.iter().any(|kept| overlap(*kept, *storage)));
-    // A call may read every input register and the psABI's variadic count;
-    // a return hands back every output register.
-    let mut call_reads = registers(&mut prototype.input.iter().map(|entry| &entry.at));
-    call_reads.extend(
-        convention.and_then(|convention| convention.count_register.and_then(|name| place(name.0))),
-    );
-    let return_reads = registers(&mut prototype.output.iter().map(|entry| &entry.at));
-    SourceBoundaryReads::new(call_reads, return_reads)
-        .and_then(|reads| SourceCallEffect::new(clobbered, preserved, reads))
-        .and_then(|effect| effect.with_system_reserved(system_reserved))
-        .and_then(|effect| {
-            effect.with_stack_guard(placed(
-                r2abi::stack_guard(&arch.name, bits, platform),
-                &place,
-            ))
-        })
-        .and_then(|effect| {
-            let bound = convention.and_then(|convention| convention.stack_bound.as_ref());
-            effect.with_stack_bound(placed(bound, &place))
-        })
-        .inspect_err(|error| {
-            r2il::refusal_evidence!("call-effect", "{}: {error:?}", prototype.name);
-        })
-        .ok()
-}
-
-/// A stated stack guard at the storage its register is placed in; none where it is unplaced.
-fn placed(
-    guard: Option<&r2abi::StackGuard>,
-    place: &dyn Fn(&str) -> Option<CanonicalStorageId>,
-) -> Option<r2source::SourceStackGuard> {
-    let guard = guard?;
-    Some(r2source::SourceStackGuard {
-        base: place(guard.register.0)?,
-        offset: guard.offset,
-        width: guard.width,
-    })
-}
-
-/// Whether two storages share a byte.
-fn overlap(left: CanonicalStorageId, right: CanonicalStorageId) -> bool {
-    left.space == right.space
-        && left.offset < right.offset + u64::from(right.size)
-        && right.offset < left.offset + u64::from(left.size)
 }
 
 /// The runs of whole bytes of `storage` a platform row's duty covers.
 ///
 /// A row that speaks for the whole register is the register; one that speaks
 /// for some of its bits claims only the bytes those bits fill, each run of
-/// adjacent ones as one storage.
-fn covered_runs(
-    storage: CanonicalStorageId,
-    row: &r2abi::PlatformRegister,
-) -> Vec<CanonicalStorageId> {
-    let mut runs = Vec::<CanonicalStorageId>::new();
+/// adjacent ones as one lane set.
+fn covered_runs(storage: CanonicalStorageId, row: &r2abi::PlatformRegister) -> Vec<LaneSet> {
+    let mut runs = Vec::<LaneSet>::new();
     for byte in row.covered_bytes(storage.size) {
-        let offset = storage.offset + u64::from(byte);
+        let Ok(byte) = u8::try_from(byte) else {
+            continue;
+        };
         match runs.last_mut() {
-            Some(run) if run.offset + u64::from(run.size) == offset => run.size += 1,
-            _ => runs.push(CanonicalStorageId {
-                space: storage.space,
-                offset,
-                size: 1,
+            Some(run) if run.bytes.end == byte => run.bytes.end += 1,
+            _ => runs.push(LaneSet {
+                storage,
+                bytes: byte..byte + 1,
             }),
         }
     }
@@ -2884,14 +2948,14 @@ mod tests {
             r2sleigh_lift::embedded_machine("x86-64").expect("embedded machine"),
         );
         let compiler = LanguageProfile::parse(embedded.compiler_spec).expect("parses");
-        let convention = r2abi::ConventionId::SysVAmd64.row();
-        let effect = call_effect(
+        let convention = convention_model(
             &embedded.arch,
             64,
             r2abi::Platform::Unknown,
             &compiler,
-            Some(convention),
-        );
+            r2abi::ConventionId::SysVAmd64.row(),
+        )
+        .expect("System V");
         let prototypes = r2abi::Prototypes::parse(
             "on_double=func\nfunc.on_double.args=2\nfunc.on_double.arg.0=double,x\n\
              func.on_double.arg.1=func,callback\nfunc.on_double.ret=void\n",
@@ -2901,8 +2965,7 @@ mod tests {
             arch: embedded.tables(),
             disasm: &embedded.disasm,
             cpu: embedded.cpu,
-            convention,
-            call_effect: effect.as_ref(),
+            convention: Arc::new(convention),
             compiler: &compiler,
             dwarf: &embedded.dwarf,
             prototypes: &prototypes,

@@ -6,11 +6,11 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::TABLE_SWITCH;
 
-use r2abi::{ConventionId, ConventionRow, Platform, Prototypes};
+use r2abi::{ConventionId, Platform, Prototypes};
 use r2engine::machine::Machine as Embedded;
-use r2engine::native::{NativeTarget, Program, call_effect, decompile};
+use r2engine::native::{NativeTarget, Program, convention_model, decompile};
 use r2sleigh_lift::profile::{LanguageProfile, SpecStorage};
-use r2source::{CanonicalStorageId, CanonicalStorageSpace, SourceCallEffect};
+use r2source::{CanonicalStorageId, CanonicalStorageSpace, ConventionModel};
 use r2ssa::{InstPayload, SSAOp};
 
 const BASE: u64 = 0x1000;
@@ -70,11 +70,10 @@ struct Machine {
     declarations: r2abi::Declarations,
 }
 
-/// One convention and what the engine reads beside it.
+/// One convention's model and the specification it reads.
 struct Under {
-    convention: &'static ConventionRow,
+    convention: std::sync::Arc<ConventionModel>,
     compiler: LanguageProfile,
-    effect: Option<SourceCallEffect>,
 }
 
 impl Machine {
@@ -88,12 +87,10 @@ impl Machine {
             Embedded::new(r2sleigh_lift::embedded_machine(sleigh).expect("embedded machine"));
         let under = |platform: Platform, specification: &str| {
             let compiler = LanguageProfile::parse(specification).expect("parses");
-            let convention =
-                ConventionId::default_for(family, bits, platform).expect("a convention");
-            let convention = convention.row();
+            let id = ConventionId::default_for(family, bits, platform).expect("a convention");
+            let model = convention_model(&embedded.arch, bits, platform, &compiler, id.row());
             Under {
-                convention,
-                effect: call_effect(&embedded.arch, bits, platform, &compiler, Some(convention)),
+                convention: std::sync::Arc::new(model.expect("the convention's model")),
                 compiler,
             }
         };
@@ -134,8 +131,7 @@ impl Machine {
             arch: self.embedded.tables(),
             disasm: &self.embedded.disasm,
             cpu: self.embedded.cpu,
-            convention: under.convention,
-            call_effect: under.effect.as_ref(),
+            convention: std::sync::Arc::clone(&under.convention),
             compiler: &under.compiler,
             dwarf: &self.embedded.dwarf,
             prototypes: &self.prototypes,
@@ -3944,9 +3940,8 @@ fn every_register_a_default_prototype_names_is_one_of_its_machine() {
             })
             .collect::<Vec<_>>();
         assert!(!named.is_empty(), "{sleigh}");
-        let effect = machine.conventions[machine.default]
-            .effect
-            .as_ref()
+        let effect = (machine.conventions[machine.default].convention)
+            .call_effect()
             .expect("the default prototype states a call effect");
         for register in named {
             let placed = machine
@@ -6591,9 +6586,7 @@ fn go_machine() -> Machine {
 
 fn go_machine_on(arch: &str) -> Machine {
     let mut machine = Machine::on(arch, arch, 64, Platform::Linux);
-    let convention = ConventionId::go(arch, 64, Platform::Linux, Some((1, 21)))
-        .expect("ABIInternal")
-        .row();
+    let id = ConventionId::go(arch, 64, Platform::Linux, Some((1, 21))).expect("ABIInternal");
     let compiler = LanguageProfile::parse(
         machine
             .embedded
@@ -6603,25 +6596,24 @@ fn go_machine_on(arch: &str) -> Machine {
     .expect("parses")
     .under("abi-internal")
     .expect("ABIInternal's prototype");
-    let effect = call_effect(
+    let model = convention_model(
         &machine.embedded.arch,
         64,
         Platform::Linux,
         &compiler,
-        Some(convention),
-    );
+        id.row(),
+    )
+    .expect("ABIInternal's model");
     assert!(
-        effect
-            .as_ref()
-            .and_then(|effect| effect.stack_bound())
+        (model.call_effect().ok())
+            .and_then(|effect| effect.stack_bound().copied())
             .is_some(),
         "the convention states g.stackguard0"
     );
     machine.conventions.insert(
         "golang",
         Under {
-            convention,
-            effect,
+            convention: std::sync::Arc::new(model),
             compiler,
         },
     );

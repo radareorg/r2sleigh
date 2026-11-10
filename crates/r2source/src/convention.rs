@@ -1,0 +1,279 @@
+//! One calling convention as a function's boundary reads it: the compiler specification's
+//! `ProtoModel` joined with the ABI's `ConventionRow` (doc/adr-call-boundary.md, "The joined
+//! model"). r2engine builds it once per convention and holds it; the older contracts are views.
+
+use std::ops::Range;
+
+pub use r2abi::{ConventionId, Extension, SlotClass};
+
+use crate::{
+    CanonicalStorageId, SourceBoundaryReads, SourceCallEffect, SourceConventionSlots,
+    SourceEntryStack, SourceMachineRolesError, SourceRegisterSaveArea,
+    SourceStackArgumentPlacement, SourceStackGuard,
+};
+
+/// Every location of one class, in the convention's order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Section {
+    pub class: SectionClass,
+    pub locations: Box<[Location]>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionClass {
+    Integer,
+    Float,
+    /// Integer and float alternatives sharing positions (Microsoft x64).
+    Shared,
+    /// The caller's argument area: the first slot from the stack pointer entering the call, and
+    /// the step to the next.
+    Stack {
+        first: i64,
+        step: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Location {
+    Register {
+        storage: CanonicalStorageId,
+        /// The widest value the location takes.
+        bytes: u8,
+        class: SlotClass,
+        /// The argument position; alternatives of a shared position have one.
+        position: u16,
+        extension: Extension,
+    },
+    Stack {
+        offset: i64,
+        bytes: u32,
+    },
+}
+
+/// Where a result may be returned, and who states it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResultLane {
+    pub storage: CanonicalStorageId,
+    pub class: SlotClass,
+    pub extension: Extension,
+    pub stated_by: LaneSource,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneSource {
+    /// The compiler specification's `<output>`.
+    Specification,
+    /// A cited ABI override the specification omits (`SpecOverride::Results`).
+    Override,
+}
+
+/// Who owns an entry-relative stack range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OwnedRange {
+    /// `localrange`: the callee's own data (Win64's home area until S10 states it as `Home`).
+    Callee(Range<i64>),
+    Home {
+        position: u8,
+        at: Range<i64>,
+    },
+    /// `paramrange`.
+    Arguments(Range<i64>),
+    ReturnAddress(Range<i64>),
+}
+
+/// Some bytes of one register: `d8` is `v8` bytes 0..8, MXCSR's control bits are byte 1.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LaneSet {
+    pub storage: CanonicalStorageId,
+    pub bytes: Range<u8>,
+}
+
+impl Ord for LaneSet {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        let key = |lanes: &Self| (lanes.storage, lanes.bytes.start, lanes.bytes.end);
+        key(self).cmp(&key(other))
+    }
+}
+
+impl PartialOrd for LaneSet {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl LaneSet {
+    /// The whole register.
+    pub fn whole(storage: CanonicalStorageId) -> Self {
+        let bytes = 0..u8::try_from(storage.size).unwrap_or(u8::MAX);
+        Self { storage, bytes }
+    }
+
+    /// The bytes as a storage of their own.
+    pub fn narrowed(&self) -> CanonicalStorageId {
+        CanonicalStorageId {
+            space: self.storage.space,
+            offset: self.storage.offset + u64::from(self.bytes.start),
+            size: u32::from(self.bytes.end - self.bytes.start),
+        }
+    }
+}
+
+/// What a boundary of this convention has beyond its locations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryForms {
+    pub frame_pointer: Option<CanonicalStorageId>,
+    pub red_zone: u32,
+    pub save_area: Option<SourceRegisterSaveArea>,
+    /// SysV `al`: the count of vector arguments a variadic callee is handed.
+    pub count_register: Option<CanonicalStorageId>,
+    pub entry_stack: Option<SourceEntryStack>,
+    /// Every variadic argument on the stack, whatever registers are free (Apple arm64).
+    pub variadic_on_stack: bool,
+    /// The platform's stack protector word, addressed from a reserved register.
+    pub guard: Option<SourceStackGuard>,
+    /// The runtime's lowest stack pointer (Go's `g.stackguard0`).
+    pub stack_bound: Option<SourceStackGuard>,
+}
+
+/// One convention on one target, every register resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConventionModel {
+    pub id: ConventionId,
+    /// Integer, float and stack apart; Microsoft x64's shared positions and the stack.
+    pub sections: Box<[Section]>,
+    /// The pointer to a result the caller allocates (AAPCS64 x8).
+    pub hidden_return: Option<CanonicalStorageId>,
+    pub results: Box<[ResultLane]>,
+    pub owned: Box<[OwnedRange]>,
+    /// What a call leaves as it found it: the specification's `unaffected`, less the return
+    /// address, and the ABI's callee-saved control bits.
+    pub preserved: Box<[LaneSet]>,
+    pub killed: Box<[LaneSet]>,
+    pub likely_trash: Box<[LaneSet]>,
+    /// What the platform reserves to the system, which no call writes.
+    pub reserved: Box<[LaneSet]>,
+    /// The register a call leaves the return address in, where the machine uses one.
+    pub link: Option<CanonicalStorageId>,
+    pub forms: BoundaryForms,
+    /// Why every function under the convention is refused, where it is.
+    pub refused: Option<&'static str>,
+}
+
+impl ConventionModel {
+    fn register_locations(&self) -> impl Iterator<Item = &Location> {
+        (self.sections.iter())
+            .filter(|section| !matches!(section.class, SectionClass::Stack { .. }))
+            .flat_map(|section| section.locations.iter())
+    }
+
+    /// The argument registers of one class, in the convention's order.
+    pub fn argument_registers(&self, of: SlotClass) -> impl Iterator<Item = CanonicalStorageId> {
+        self.register_locations()
+            .filter_map(move |location| match *location {
+                Location::Register { storage, class, .. } if class == of => Some(storage),
+                _ => None,
+            })
+    }
+
+    /// The specification's result registers of one class, in its order.
+    pub fn result_registers(&self, of: SlotClass) -> impl Iterator<Item = CanonicalStorageId> {
+        (self.results.iter())
+            .filter(move |lane| lane.class == of && lane.stated_by == LaneSource::Specification)
+            .map(|lane| lane.storage)
+    }
+
+    /// The first stack argument and the step to the next.
+    pub fn stack_arguments(&self) -> Option<SourceStackArgumentPlacement> {
+        self.sections
+            .iter()
+            .find_map(|section| match section.class {
+                SectionClass::Stack { first, step } => {
+                    SourceStackArgumentPlacement::new(first, step)
+                }
+                _ => None,
+            })
+    }
+
+    /// Whether integer and float arguments count one position sequence together.
+    pub fn shares_positions(&self) -> bool {
+        (self.sections.iter()).any(|section| section.class == SectionClass::Shared)
+    }
+
+    /// The candidate slots: a view of this model, as the snapshot carries it.
+    pub fn convention_slots(&self) -> Result<SourceConventionSlots, SourceMachineRolesError> {
+        let results = self
+            .result_registers(SlotClass::Integer)
+            .collect::<Vec<_>>();
+        let result = results.first().copied();
+        // The second integer result entry holds a two-register value's high half.
+        let second = (results.get(1).copied())
+            .filter(|second| result.is_some_and(|first| first.size == second.size));
+        let float_result = self.result_registers(SlotClass::Float).next();
+        Ok(SourceConventionSlots::new(
+            self.id.radare2_name(),
+            self.argument_registers(SlotClass::Integer),
+            result,
+        )
+        .and_then(|slots| {
+            slots.with_float_slots(self.argument_registers(SlotClass::Float), float_result)
+        })
+        .and_then(|slots| slots.with_second_result_slot(second))?
+        .with_shared_positions(self.shares_positions())
+        .with_stack_arguments(self.stack_arguments())
+        .with_variadic_tail_on_stack(self.forms.variadic_on_stack)
+        .with_register_save_area(self.forms.save_area)
+        .with_variadic_count_register(self.forms.count_register)
+        .with_entry_stack(self.forms.entry_stack))
+    }
+
+    /// What a call does to the registers: a view of this model.
+    ///
+    /// Clobbered is every location the specification names a call reading or writing, its
+    /// `killedbycall` and the return address register, less what is preserved or reserved.
+    pub fn call_effect(&self) -> Result<SourceCallEffect, SourceMachineRolesError> {
+        let inputs = self
+            .register_locations()
+            .filter_map(|location| match *location {
+                Location::Register { storage, .. } => Some(storage),
+                Location::Stack { .. } => None,
+            })
+            .chain(self.hidden_return)
+            .collect::<Vec<_>>();
+        let outputs = (self.results.iter())
+            .filter(|lane| lane.stated_by == LaneSource::Specification)
+            .map(|lane| lane.storage)
+            .collect::<Vec<_>>();
+        let mut preserved = self
+            .preserved
+            .iter()
+            .map(LaneSet::narrowed)
+            .collect::<Vec<_>>();
+        preserved.sort_unstable();
+        preserved.dedup();
+        let reserved = self.reserved.iter().map(LaneSet::narrowed);
+        let reserved = reserved.collect::<Vec<_>>();
+        let kept = preserved
+            .iter()
+            .chain(&reserved)
+            .copied()
+            .collect::<Vec<_>>();
+        let mut clobbered = (inputs.iter().chain(&outputs).copied())
+            .chain(self.killed.iter().map(|lane| lane.storage))
+            .chain(self.link)
+            .collect::<Vec<_>>();
+        clobbered.retain(|storage| !kept.iter().any(|kept| overlap(*kept, *storage)));
+        let call_reads = inputs.into_iter().chain(self.forms.count_register);
+        SourceBoundaryReads::new(call_reads, outputs)
+            .and_then(|reads| SourceCallEffect::new(clobbered, preserved, reads))
+            .and_then(|effect| effect.with_system_reserved(reserved))
+            .and_then(|effect| effect.with_stack_guard(self.forms.guard))
+            .and_then(|effect| effect.with_stack_bound(self.forms.stack_bound))
+    }
+}
+
+/// Whether two storages share a byte.
+fn overlap(left: CanonicalStorageId, right: CanonicalStorageId) -> bool {
+    left.space == right.space
+        && left.offset < right.offset + u64::from(right.size)
+        && right.offset < left.offset + u64::from(left.size)
+}

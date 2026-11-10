@@ -92,7 +92,6 @@ fn target<'a, S: Source + 'static>(
         ));
     };
     view.target_of(machine, entry)
-        .map_err(NativeRefusal::Unassembled)
 }
 
 /// One function's walk through the dispatch tables it reads, by its entry and whether it is Thumb.

@@ -7,7 +7,7 @@ use crate::machine::Machine;
 
 use super::starts::{Stated, StatedStarts};
 use super::{Imports, NameDb, Names, ProgramInputs, Source, naming};
-use crate::native::NativeTarget;
+use crate::native::{NativeRefusal, NativeTarget};
 use crate::query::db::Db;
 
 /// Which instruction set the code the survey found is in.
@@ -127,34 +127,49 @@ impl<'a, S: Source + 'static> View<'a, S> {
         &self,
         machine: &'a Machine,
         entry: u64,
-    ) -> Result<NativeTarget<'a>, crate::native::Unassembled> {
-        Ok(self.target_under(machine, self.db.inputs().assembled_at(entry)?))
+    ) -> Result<NativeTarget<'a>, crate::native::NativeRefusal> {
+        let assembled = self.db.inputs().assembled_at(entry);
+        self.target_under(machine, assembled.map_err(NativeRefusal::Unassembled)?)
     }
 
     /// A decoder under the program's default convention, for a walk that reads no boundary.
     pub(super) fn decoder_of(&self, machine: &'a Machine) -> Result<NativeTarget<'a>, String> {
         let assembled = self.db.inputs().assembled();
-        Ok(self.target_under(machine, assembled.ok_or("the program was not assembled")?))
+        let assembled = assembled.ok_or("the program was not assembled")?;
+        self.target_under(machine, assembled)
+            .map_err(|why| why.to_string())
     }
 
+    /// What a call does under the program's default convention: a view of its held model.
+    pub(super) fn default_call_effect(&self) -> Option<r2ssa::SourceCallEffect> {
+        let assembled = self.db.inputs().assembled()?;
+        let model = self
+            .db
+            .get::<super::Convention>(&assembled.convention)
+            .ok()?;
+        (*model).as_ref().ok()?.call_effect().ok()
+    }
+
+    /// The machine under one convention, its model the program's held one.
     fn target_under(
         &self,
         machine: &'a Machine,
         assembled: &'a super::Assembled,
-    ) -> NativeTarget<'a> {
+    ) -> Result<NativeTarget<'a>, NativeRefusal> {
         let inputs = self.db.inputs();
-        NativeTarget {
+        let model = self.db.get::<super::Convention>(&assembled.convention);
+        let model = model.map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
+        Ok(NativeTarget {
             arch: machine.tables(),
             disasm: &machine.disasm,
             cpu: machine.cpu,
-            convention: assembled.convention,
-            call_effect: assembled.call_effect.as_ref(),
+            convention: (*model).clone()?,
             compiler: &assembled.compiler,
             dwarf: &machine.dwarf,
             prototypes: &assembled.prototypes,
             declarations: &inputs.source.container().declarations,
             data_model: assembled.data_model,
-        }
+        })
     }
 
     pub(super) fn target(&self, addr: u64) -> Result<NativeTarget<'a>, String> {
