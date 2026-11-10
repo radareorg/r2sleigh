@@ -273,9 +273,8 @@ impl<'a> Placement<'a> {
         true
     }
 
-    /// The registers a call to this import may read: its fixed locations and, under any tail but
-    /// `None`, every other argument register of the convention. Apple arm64 passes a cited `...` on
-    /// the stack, so only the fixed registers are read there. O(locations).
+    /// Registers a call to this import may read: its fixed locations, plus every other argument
+    /// register under any tail but `None` (Apple arm64 passes `...` on the stack). O(locations).
     pub(crate) fn reads(&self, declared: Declared<'_>) -> crate::imports::ImportReads {
         let mut registers = self.placed_prefix(declared);
         let placed_whole = registers.len() == declared.prototype.parameters.len();

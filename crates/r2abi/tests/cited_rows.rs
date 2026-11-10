@@ -1,6 +1,5 @@
-//! A row that cites no header is a claim nobody can check (doc/adr-call-boundary.md, S8): each
-//! row of the cited tables names it on `.include=`, sits under a comment naming its standard, and
-//! states its tail where it spells `...`.
+//! Each cited row names its header on `.include=`, sits under a comment naming its standard, and
+//! states its tail where it spells `...` (doc/adr-call-boundary.md, S8).
 
 use r2abi::{CLibrary, LibraryId, LibraryRows, Tail};
 

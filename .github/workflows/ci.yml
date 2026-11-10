@@ -290,6 +290,7 @@ jobs:
           python3 scripts/test_census.py
           python3 scripts/test_audit_abi_rows.py
           python3 scripts/audit_abi_rows.py --cc gcc
+          python3 scripts/test_compile_check.py
           python3 scripts/test_diff_r2.py
           python3 scripts/test_c_types.py
           python3 scripts/test_differential_truth.py

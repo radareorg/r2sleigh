@@ -1,6 +1,5 @@
-//! Which library row an import binds (doc/adr-call-boundary.md, Refusals "A library row"): a
-//! versioned import binds to the library its version names, an unversioned one at `Declared`
-//! only where the container names one C library, and no row applies to a body by its name.
+//! Which library row an import binds: by its version, else at `Declared` where the container names
+//! one C library; never to a body by name (doc/adr-call-boundary.md, Refusals "A library row").
 
 use std::collections::BTreeMap;
 

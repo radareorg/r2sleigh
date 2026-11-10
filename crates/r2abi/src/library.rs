@@ -1,6 +1,5 @@
-//! Library rows by the name a program links (doc/adr-call-boundary.md, "What only the ABI
-//! states"): each row parsed once into a [`LibraryRow`] keyed by `(LibraryId, linked_name)`, with
-//! the [`Tail`] its citation states. `data/README.md` says how the tables are kept.
+//! Library rows parsed once into [`LibraryRow`]s keyed by `(LibraryId, linked_name)`, each with the
+//! [`Tail`] its citation states (doc/adr-call-boundary.md; tables kept per `data/README.md`).
 
 use std::collections::BTreeMap;
 

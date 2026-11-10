@@ -7374,9 +7374,8 @@ const RELEASE_AFTER_A_SECOND_WAY_IN: &[u8] = &[
     0xc3, // +30 free's stub
 ];
 
-/// The registers a call to an import may read (doc/adr-call-boundary.md, "Lower bounds and upper
-/// bounds"): only a row citing a fixed prototype bounds them by its parameters; a tail reads every
-/// other argument register, with SysV's `al`, and Apple arm64 passes a cited `...` on the stack.
+/// Only a row citing a fixed prototype bounds an import's reads; a tail reads every other argument
+/// register (SysV `al`; Apple arm64 on the stack). doc/adr-call-boundary.md, "Lower bounds".
 #[test]
 fn an_import_reads_past_its_fixed_parameters_unless_its_citation_fixes_them() {
     let names = |machine: &Machine, target: &r2engine::native::NativeTarget<'_>, import: &str| {

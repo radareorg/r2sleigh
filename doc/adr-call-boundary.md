@@ -25,7 +25,7 @@ The audit counts below were rerun on master b99f00ee0 unless marked.
 | 3.5.3: `int` returns are declared `uint64_t` | bzip2 -O0 15 of 17, ls-toybox 698 of 814 (not rerun) |
 | 3.2.1: a linked glibc name has no row | 426 DecBench functions. pigz has 99 asserts |
 | 3.2.2: `FILE` turns a prototype into `uint64_t` | `__fprintf_chk` 28 declarations over a-user. bomb `fopen`. Closes in S8 (d71 A1's rows) |
-| 3.2.3: `error` has no ellipsis | 84 sites in 52 functions. Closes in S8 (`Tail::Variadic`) |
+| 3.2.3: `error` has no ellipsis | 84 sites in 52 functions. Closes in S8 (`Tail::Format { index: 2 }`) |
 | 3.2.4: libz.so has platform `Unknown` | 22 `__stack_chk_fail` calls are undeclared |
 | 3.2.5 to 3.2.7: bionic, libstdc++, KERNEL32 | ls-toybox 703 residuals; 0pack 7,621 sites in 1,153 functions, pumasim 4,942 in 357; hello_gs 98 sites, testapp 96 |
 | 3.8.1: Win64 home stores are residuals | hello_gs 71 of 246, testapp 51 of 174 |
@@ -141,7 +141,7 @@ pub struct LibraryRow {
 pub enum Tail {
     None,                                     // the citation states a fixed prototype
     Unstated,                                 // no citation yet: reads every argument location
-    Variadic,                                 // `...` with no format or va_list parameter: error(3)
+    Variadic,                                 // `...` with no format or va_list parameter
     Format { index: u8, kind: FormatKind },   // glibc __attribute__((format(printf|scanf, i, j)))
     VaList { index: u8 },                     // vprintf, __stdio_common_vfprintf
 }
@@ -390,7 +390,7 @@ A cold `pdd` runs at `World::Open` and joins no sites. A caller's extern then re
 |---|---|---|---|
 | 3.2.1 linked names | Rows keyed `(LibraryId, linked_name)`, bound through the import's version. The radare2 keys `assert_fail`, `errno_location`, `libc_start_main`, `cxa_throw`, `libc_init` and `uClibc_main` are deleted | r2image, r2abi | S8 |
 | 3.2.2 `FILE` | d71 A1's handle rows and `TagScope::opaque`, moved into S8 with the rest: an `Unknown` parameter type no longer drops the prototype (`declared/mod.rs:276`, `function_type`'s `?`) | r2abi, r2engine | S8 |
-| 3.2.3 `error` | The row cites `error(3)`: `(int, int, const char *, ...)`, `Tail::Variadic` | r2abi | S8 |
+| 3.2.3 `error` | The row cites `error(3)`: `(int, int, const char *, ...)`; glibc's `format(printf, 3, 4)` makes it `Tail::Format { index: 2 }` | r2abi | S8 |
 | 3.2.4 libz.so | `DT_NEEDED libc.so.6` together with a `GLIBC_*` version need selects glibc | r2image, r2engine | S8 |
 | 3.2.5 to 3.2.7 | bionic rows, libstdc++ parameters from Itanium mangling with `Unproven` results, KERNEL32 keyed by `Dll` plus name | r2abi | S13 |
 | 3.5.1 to_upper | Under `aa`, every site is `Dead` and the callee does not escape, so `Void { Solved, ClosedWorld }`. The scratch case follows [scratch-result](adr-scratch-result.md) (D200, D202). A cold `pdd` keeps the written carrier as `Unproven` | r2engine | S7 |
@@ -507,7 +507,7 @@ S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
 - **D37:** kept. `ArgumentAreaRead` stays as rule 4's floor cause (readers at `resolved.rs:108,680`, `arity.rs:592`). Its engine test stays: a stack read with an unfull register section is no parameter. `RegisterRead` now means a read whose kind is unproven (rule 3). `HandedOn` lists only the calls a slot reaches.
 - **D62:** absorbed by S7. The join moves to r2engine, because it is a program query. r2types projects it. The row text is amended.
 - **D71 (`d71-prototypes`, shelved at 856416c26 on 2026-11-10):** seven review rounds each found a new blocker in row typing. Round 7 found aarch64 `const char *` parameters printed `int8_t*` where base printed `uint64_t`. The branch is the code source for three slices:
-  - A1's handle rows (`FILE`, `DIR`) and the compile gate move to S8. 3.2.2 and 3.2.3 close there, with `error` as `Tail::Variadic`.
+  - A1's handle rows (`FILE`, `DIR`) and the compile gate move to S8. 3.2.2 and 3.2.3 close there, with `error` as `Tail::Format { index: 2 }` (S8 as built).
   - A2, pointer types from a declared row, moves after S6 and S14. It reads the per-slot `Basis` and the model's `char` sign.
   - A3 stays with T.
 - **D100:** fix (b), the floor in the header, lands in S6. Fix (a) is not taken: shown tail registers are caller writes, which never prove arity.
@@ -606,3 +606,31 @@ What the code said that this ADR did not, and the owner chosen:
 - d72's `result_registers` and its `ld.c`/`ldb.c` golds are on the shelved branch, not this base. The override row has no reader until S7.
 - `home_va_list` waits for S10 and `GuardRow` for S8. `StackGuard.register` is a `RegName` now.
 - Left for later: `AdvisoryCallPrototype` has no producer and is typed, not removed; `SourceSignaturePresentation`'s convention is always `None`; r2types `callconv` strings are spelled from `radare2_name()` until `CalleeFact.signature_callconv` goes.
+
+## S8 as built (2026-11-10)
+
+What the code said that this ADR did not, and the owner chosen:
+
+- `LibraryRows` (r2abi `library.rs`) parses each table once per program's `CLibrary` into `LibraryRow`s keyed `(LibraryId, linked_name)`. `Prototypes` and `Platform` are deleted.
+- `LibraryId` is `Portable`, `Glibc`, `Bionic`, `LibSystem` or `CxxRuntime`. The sketch's `Iso` and `Posix` fold into `Portable`: a lookup never tells them apart, and the citation names the standard. `Ucrt` and `Dll` wait for S13's rows.
+- `Tail::VaList` carries the format its citation names: `vfprintf` is GCC's `format(printf, 2, 0)`. `FormatKind` adds `WidePrintf` and `WideScanf`. The engine counts only narrow formats, because no format reader here reads a wide literal.
+- `error` is `Tail::Format { index: 2 }`, not `Variadic`. glibc's `error.h` declares it `format(printf, 3, 4)`. On d72 round 7's aarch64 `e1.c` and `e2.c`, base printed `error(0, 0, "%f")` and dropped d0 at 8 sites. S8 leaves each site a residual (`floating_variadic_argument`): no argument invented, none dropped. `Variadic` gives the same residual there and loses the count where the tail is integer.
+- The printf and scanf families, `err`, `syslog`, the fortified `__*printf_chk` and the twenty `va_list` functions moved into the cited tables to state their tails. radare2's other rows are `Unstated`.
+- The format test by name is deleted for DWARF bodies too. A wrapper's format now comes from its body: r2ssa binds a callee's body-proven format at each call (`recover_interface.rs`), and the body proves it through a cited `va_list` row. pigz `try_throw_` forwards `fmt` to `__vsnprintf_chk`, so its 91 calls still count their tails. Base rendered 93: the 2 more were a duplicated tail behind an `__assert_fail` base thought returned.
+- `va_list` spells as a typedef over a pointer to an opaque state. Every graded convention passes it as a pointer: SysV's one-element array decays, AAPCS64's 32-byte struct goes by reference, and Microsoft's and Apple's are `char *`. Without this, the twenty rows stayed unplaced.
+- Binding lives in r2engine `imports::Imports`:
+  - `GLIBC_*` binds glibc's rows.
+  - bionic's `LIBC` and `LIBC_*` on its `libc.so`, `libm.so` or `libdl.so` bind bionic's.
+  - `GLIBCXX_*`, `CXXABI_*` and `GCC_*` bind the C++ runtime's rows only. Any other version binds none.
+  - An unversioned ELF import binds at `Declared` where `DT_NEEDED` names exactly one of `libc.so.6`, `libc.so` or `libc.musl-*.so.1`.
+  - Mach-O and PE imports bind as before, because the format names libSystem or Microsoft's runtime. S13 keys a PE import by its DLL.
+  - A versioned binding is also `Declared`.
+- Two readers typed a body by its name: `hands_a_function` and `handed_functions` called `name_at`. They read `import_at` now. A program's own `atexit` body hands nothing.
+- glibc from `DT_NEEDED libc.so.6` and a `GLIBC_*` need applies wherever no evidence names a library, not only without `PT_INTERP`.
+- `GuardRow` has `ThreadSlot` only: glibc and musl x86-64 (`fs:0x28`), glibc i386 (`gs:0x14`). `LinkedGlobal` and `LoadConfigCookie` wait for S11 and S10. A bionic or unknown-library ELF loses `fs:0x28`, because no row cites it.
+- `CDataModel`, `spelling.rs`'s type names and the handle rows are keyed by `CLibrary`. Syscalls, `platform_registers`, `ConventionId::default_for` and Go's first systems are keyed by `Kernel`.
+- D151's `Unknown` parameter: `function_type` keeps the prototype with that slot `Unknown`, and r2types' width check accepts it. An `Unknown` result still states nothing.
+- The registers an import reads are `Placement::reads`. SysV reads all 14 argument registers and `al` under a tail. AAPCS64 reads 16, Microsoft x64 reads 8, and Apple arm64 reads the fixed ones under a cited `...`. No reader exists until S7.
+- d71's `TagScope::opaque` and r2dec's handle typedefs are not taken. Without A2, no call or definition here spells `FILE *`; calls keep their carriers as d71's D109 did. `c_type.rs` keeps the handle's name over its tag.
+- d71's compile gate (`scripts/compile_check.py`) and its unit test run in CI. The binary step waits: pigz fails one unit at base and head (`int-conversion` into `struct Node *`), which is A2's.
+- r2ssa's second format-by-name test (`function/mod.rs`, `parameter_names_a_format_string`) is on the snapshot path. The native capture passes no callee signatures, so it decides nothing. It goes with S9's strings.

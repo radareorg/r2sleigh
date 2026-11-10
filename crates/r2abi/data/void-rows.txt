@@ -35,17 +35,12 @@ signal | void (*)(int) | C11 7.14.1.1: signal returns the previous handler or SI
 aligned_alloc | void * | C11 7.22.3.1
 
 # types-linux.sdb.txt, glibc's own; also types-darwin.sdb.txt and types-android.sdb.txt.
-assert_fail | void | glibc <assert.h> __assert_fail (noreturn); radare2's key, which no program links
 xalloc_die | void | gnulib lib/xalloc.h: _Noreturn void xalloc_die (void)
 _exit | void | POSIX.1-2017 <unistd.h> _exit (noreturn)
 _Exit | void | C11 7.22.4.5 (_Noreturn)
-libc_init | void | bionic libc_init_dynamic.cpp __libc_init (noreturn); radare2's key, which no program links
-libc_init_array | void | newlib libc/misc/init.c: void __libc_init_array (void); radare2's key, which no program links
 abort | void | C11 7.22.4.1 (_Noreturn)
 exit | void | C11 7.22.4.4 (_Noreturn)
 __stack_chk_fail | void | LSB 5.0 Core, generic: void __stack_chk_fail(void) (noreturn)
-cxa_throw | void | Itanium C++ ABI EH 2.4.3 __cxa_throw; radare2's key, which no program links
-cxa_finalize | void | Itanium C++ ABI 3.3.5.3 __cxa_finalize; radare2's key, which no program links
 __longjmp_chk | void | LSB 5.0 Core, generic: void __longjmp_chk(jmp_buf, int) (noreturn)
 __bzero | void | libsystem_platform's bzero under a second name (README.md); <strings.h> bzero
 objc_storeStrong | void | objc4 runtime/objc-internal.h
@@ -110,3 +105,11 @@ _ZSt19__throw_ios_failurePKci | void | libstdc++ bits/functexcept.h
 _ZSt20__throw_system_errori | void | libstdc++ bits/functexcept.h
 _ZSt20__throw_future_errori | void | libstdc++ bits/functexcept.h
 _ZSt25__throw_bad_function_callv | void | libstdc++ bits/functexcept.h
+
+# The glibc and POSIX tables S8 cites (D167).
+__assert_fail | void | glibc <assert.h>: void __assert_fail(const char *, const char *, unsigned int, const char *), noreturn
+__fpurge | void | glibc <stdio_ext.h>: void __fpurge(FILE *); __fpurge(3)
+clearerr_unlocked | void | glibc <stdio.h>: void clearerr_unlocked(FILE *); unlocked_stdio(3)
+error_at_line | void | glibc <error.h>: void error_at_line(int, int, const char *, unsigned int, const char *, ...); error(3)
+freeaddrinfo | void | POSIX.1-2017 <netdb.h>: void freeaddrinfo(struct addrinfo *)
+regfree | void | POSIX.1-2017 <regex.h>: void regfree(regex_t *)

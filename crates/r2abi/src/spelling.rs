@@ -112,9 +112,8 @@ fn unqualified(words: &[&str], graph: &mut TypeGraph, library: CLibrary) -> Resu
             target,
         }));
     }
-    // A `va_list` is passed as a pointer under every convention here: SysV's array of one
-    // struct decays (psABI 3.5.7), AAPCS64's 32-byte struct goes by reference (B.4), Microsoft's
-    // and Apple's are `char *`. Its pointee stays unstated.
+    // `va_list` passes as a pointer everywhere here (SysV psABI 3.5.7, AAPCS64 B.4, Microsoft and
+    // Apple `char *`); its pointee stays unstated.
     if let ["va_list" | "__gnuc_va_list"] = words {
         let state = graph.add(Type::Opaque {
             keyword: Keyword::Typedef,
