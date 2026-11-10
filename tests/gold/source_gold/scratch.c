@@ -45,6 +45,9 @@ KEEP int falls_off(int k) {
         return k * 5 + (int)sink;
 }
 
+/* long: returns its argument, an input's entry byte (any entry byte taken as undefined) */
+KEEP long identity(long x) { return x; }
+
 /* void and variadic: the prologue reads AL to save the vector registers, so RAX's entry byte is an input */
 KEEP void sum_args(int n, ...) {
     __builtin_va_list ap;
@@ -61,6 +64,7 @@ int main(int argc, char **argv) {
     sink = tail_puts(argv[0]);
     sink = some_path(malloc(4), argc);
     sink = falls_off(argc);
+    sink = identity(argc);
     sum_args(2, (double)argc, 0.5);
     return 0;
 }

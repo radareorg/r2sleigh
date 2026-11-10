@@ -142,6 +142,7 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     inserted.extend(addresses.iter());
     func.record_compiler_inserted(inserted, removed, removed_edges);
     func.record_passing_differences(passing);
+    func.record_checked_differences(checks.iter().filter_map(|check| check.difference));
     // Every decided check removed its failure edge, which holds only of a UB-free source.
     func.record_premise(r2source::Premise::UbFreeSource);
 }

@@ -20,7 +20,7 @@ BUILD = "cargo build --release -p r2s --features sleigh"
 R2S = "target/release/r2s"
 RECOVER = "crates/r2ssa/src/recover_interface.rs"
 PORTABLE = "crates/r2abi/data/types.sdb.txt"
-PROTECTOR = "crates/r2ssa/src/stack_protector.rs"
+LANES = "crates/r2ssa/src/lanes.rs"
 
 # (name, edits, whether it must die, why it may live)
 MUTANTS = [
@@ -29,13 +29,11 @@ MUTANTS = [
                          "ReturnedByCall::Void => return RecoveredFunctionResult::Void,")], True, ""),
     # `puts` stated void: `tail_puts` forwards its result.
     ("void-row", [(PORTABLE, "func.puts.ret=int\n", "func.puts.ret=void\n")], True, ""),
-    # An entry byte at some return voids the result: `falls_off` returns a value on its other path.
-    ("entry-byte", [(RECOVER, "RecoveredFunctionResult::Register(_) if untouched => RecoveredFunctionResult::Unproven,",
-                     "RecoveredFunctionResult::Register(_) if untouched => RecoveredFunctionResult::Void,")], True, ""),
-    ("inserted-write-unrecorded", [(PROTECTOR, "func.record_compiler_inserted(inserted, removed, removed_edges);",
-                                    "let _ = (inserted, removed, removed_edges);")], False,
-     "today the canary residue is the value 0, recorded or not; D200 case 3 makes it Undefined and `canary_void` void, "
-     "and then losing the record loses that void"),
+    # Any entry byte defines nothing: `identity` returns its argument, an input's entry byte.
+    ("entry-byte", [(LANES, "Fill::Entry(from) => own(at, from),", "Fill::Entry(_) => true,")], True, ""),
+    # The canary's residue is a write like any other: `canary_void` returns it (D200 case 3).
+    ("inserted-write-unread", [(LANES, "_ if inserted.contains(id) || function.is_checked_difference(*dst) => {",
+                                "_ if false => {")], True, ""),
 ]
 
 

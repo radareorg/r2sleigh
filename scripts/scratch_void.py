@@ -16,8 +16,8 @@ either as a clone whose machine code returns nothing (`.isra`, `.constprop`, `.p
 Names are read by this gate only; the engine reads none.
 Against a baseline it also fails on a source-void function the baseline renders `void` that is no longer `void`,
 unless the known list names it as moving (ADR, Decided 2), and on an unanswered function the baseline does not list:
-a crash, a deadline or a malformed `pddj` could hide either failure. `--floor-open` and `--floor-closed` are D203's totals,
-armed once D200 lands. Exit 2 is a build the gate cannot grade.
+a crash, a deadline or a malformed `pddj` could hide either failure. `--floor-open` and `--floor-closed` are D203's totals;
+absent, the baseline's recorded `floors` apply. Exit 2 is a build the gate cannot grade.
 """
 
 from __future__ import annotations
@@ -241,8 +241,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         args.json.write_text(json.dumps(report, indent=1) + "\n")
     baseline = json.loads(args.baseline.read_text()) if args.baseline and args.baseline.exists() else {}
-    failures = judge(results, known, {} if args.accept_baseline else baseline,
-                     (args.floor_open, args.floor_closed))
+    # The floors default to the ones the baseline records (D203), so a lost void moves them only by name.
+    recorded = {} if args.accept_baseline else baseline.get("floors", {})
+    floors = (args.floor_open if args.floor_open is not None else recorded.get("open"),
+              args.floor_closed if args.floor_closed is not None else recorded.get("closed"))
+    failures = judge(results, known, {} if args.accept_baseline else baseline, floors)
     for failure in failures:
         print(failure, file=sys.stderr)
     false_now = {(g.name, name) for g in results for name in g.voids("value")}
@@ -254,6 +257,10 @@ def main(argv: list[str] | None = None) -> int:
         if any(not failure.startswith("UNANSWERED") for failure in failures):
             print("not recorded: a baseline holds no false void", file=sys.stderr)
             return 1
+        totals = report["totals"]
+        open_voids = totals.get("void-open", {}).get("void", 0)
+        report["floors"] = {"open": open_voids,
+                            "closed": open_voids + totals.get("void-closed", {}).get("void", 0)}
         args.baseline.write_text(json.dumps(report, indent=1) + "\n")
         print(f"baseline recorded: {args.baseline}", file=sys.stderr)
         return 0

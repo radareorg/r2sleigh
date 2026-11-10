@@ -1654,6 +1654,7 @@ pub(crate) fn collect_source_boundary_facts(
             let mut exit_stack_pointer = None;
             let mut complete = false;
             let mut machine_state_complete = false;
+            let mut undefined = false;
             // Machine exit state and return values are separate questions. The
             // carriers holding the return address and the stack pointer come
             // from the machine, so they are recoverable for any function; the
@@ -1684,7 +1685,7 @@ pub(crate) fn collect_source_boundary_facts(
                     ) if abi_is_coherent => {
                         if let Some((block_addr, op_index)) = graph.walk_start(inst.id) {
                             for slot in return_slots {
-                                if let Some(value) = reaching_source_return_register_in_block(
+                                let reached = reaching_source_return_register_in_block(
                                     function,
                                     prep,
                                     graph,
@@ -1692,18 +1693,35 @@ pub(crate) fn collect_source_boundary_facts(
                                     block_addr,
                                     op_index,
                                     slot.storage(),
-                                ) {
-                                    values.push(CallBoundaryValueFact {
-                                        slot: CallBoundarySlot::Register {
-                                            index: slot.index(),
-                                            storage: slot.storage(),
-                                        },
-                                        value,
-                                    });
+                                );
+                                let input = carries_input(machine_context, slot.storage());
+                                match reached {
+                                    Some(value)
+                                        if input || !entry_of(graph, value, slot.storage()) =>
+                                    {
+                                        values.push(CallBoundaryValueFact {
+                                            slot: CallBoundarySlot::Register {
+                                                index: slot.index(),
+                                                storage: slot.storage(),
+                                            },
+                                            value,
+                                        });
+                                    }
+                                    // A non-input carrier's entry byte defines no result
+                                    // (doc/adr-scratch-result.md, case 1): this return hands back none.
+                                    Some(_) => undefined = true,
+                                    None => {
+                                        undefined |= !input
+                                            && left_undefined(
+                                                (function, prep, graph, machine_context),
+                                                (block_addr, op_index),
+                                                slot.storage(),
+                                            );
+                                    }
                                 }
                             }
-                            complete =
-                                !return_slots.is_empty() && values.len() == return_slots.len();
+                            complete = undefined
+                                || (!return_slots.is_empty() && values.len() == return_slots.len());
                         }
                     }
                     _ => {}
@@ -1752,9 +1770,12 @@ pub(crate) fn collect_source_boundary_facts(
                     );
                 }
             }
-            let result_unproven = machine_context
-                .and_then(SourceMachineContext::function_interface)
-                .is_some_and(|interface| interface.return_kind() == SourceFunctionReturn::Unproven);
+            let result_unproven = undefined
+                || machine_context
+                    .and_then(SourceMachineContext::function_interface)
+                    .is_some_and(|interface| {
+                        interface.return_kind() == SourceFunctionReturn::Unproven
+                    });
             facts.returns.insert(
                 inst.id,
                 SourceReturnBoundaryFact {
@@ -1770,6 +1791,46 @@ pub(crate) fn collect_source_boundary_facts(
         }
     }
     facts
+}
+
+/// Whether `storage` still holds its entry byte at a return, on every path that reaches it.
+fn left_undefined(
+    (function, prep, graph, machine_context): (
+        &SSAFunction,
+        Option<&crate::DecompilePrepFacts>,
+        &SsaGraph,
+        &SourceMachineContext,
+    ),
+    (block_addr, op_index): (u64, usize),
+    storage: CanonicalStorageId,
+) -> bool {
+    matches!(
+        reaching_preserved_abi_value_in_block(
+            function,
+            prep,
+            graph,
+            machine_context,
+            block_addr,
+            op_index,
+            storage,
+        ),
+        Some(ReachingAbiState::PreservedEntry)
+    )
+}
+
+/// Whether the convention passes an argument in `storage`, or states no convention.
+fn carries_input(machine_context: &SourceMachineContext, storage: CanonicalStorageId) -> bool {
+    (machine_context.convention_slots()).is_none_or(|slots| {
+        (slots.argument_slots().iter()).any(|slot| slot.location() == storage.location())
+    })
+}
+
+/// Whether `value` is `storage`'s own entry value.
+fn entry_of(graph: &SsaGraph, value: ValueId, storage: CanonicalStorageId) -> bool {
+    graph.def_inst(value).is_none()
+        && graph.var(value).constant_bits().is_none()
+        && (graph.value(value).and_then(|held| held.canonical_storage))
+            .is_some_and(|held| held.location() == storage.location())
 }
 
 #[derive(Debug, Clone, Copy)]

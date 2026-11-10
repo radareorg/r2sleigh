@@ -1,16 +1,24 @@
 {
  "totals": {
   "refused": {
-   "value": 96,
+   "value": 91,
    "void": 36
   },
+  "unproven:EntryInput": {
+   "value": 3,
+   "void": 144
+  },
+  "unproven:Written": {
+   "value": 3273,
+   "void": 964
+  },
   "unproven:unstated": {
-   "value": 3952,
-   "void": 1157
+   "value": 685,
+   "void": 7
   },
   "void-open": {
-   "value": 6,
-   "void": 230
+   "value": 2,
+   "void": 272
   }
  },
  "builds": {
@@ -19,52 +27,66 @@
     "refused": {
      "value": 3
     },
+    "unproven:EntryInput": {
+     "void": 12
+    },
+    "unproven:Written": {
+     "value": 34,
+     "void": 34
+    },
     "unproven:unstated": {
-     "value": 46,
-     "void": 49
+     "value": 12
     },
     "void-open": {
-     "void": 3
+     "void": 6
     }
    },
    "voids": [
+    "BZ2_blockSort",
     "BZ2_bz__AssertH__fail",
+    "applySavedTimeInfoToOutputFile",
+    "compressStream",
     "mySIGSEGVorSIGBUScatcher",
     "mySignalCatcher"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-bzip2-bzip2": {
    "counts": {
     "refused": {
      "value": 2
     },
+    "unproven:EntryInput": {
+     "void": 8
+    },
+    "unproven:Written": {
+     "value": 20,
+     "void": 19
+    },
     "unproven:unstated": {
-     "value": 26,
-     "void": 24
+     "value": 6
     },
     "void-open": {
-     "void": 11
+     "void": 8
     }
    },
    "voids": [
     "BZ2_blockSort",
-    "BZ2_bsInitWrite",
-    "BZ2_bzReadClose",
-    "BZ2_bzWriteClose",
-    "BZ2_bzWriteClose64",
-    "BZ2_bzWriteClose64.part.0",
     "BZ2_bz__AssertH__fail",
-    "default_bzfree",
-    "fallbackSort",
+    "compress",
+    "compressStream",
     "mySIGSEGVorSIGBUScatcher",
-    "mySignalCatcher"
+    "mySignalCatcher",
+    "testf",
+    "uncompress"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-bzip2-bzip2recover": {
    "counts": {
-    "unproven:unstated": {
+    "unproven:Written": {
      "value": 3,
      "void": 1
     },
@@ -77,115 +99,163 @@
     "mallocFail.constprop.0",
     "readError"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-diffutils-cmp": {
    "counts": {
     "refused": {
-     "value": 4
+     "value": 3
+    },
+    "unproven:EntryInput": {
+     "void": 2
+    },
+    "unproven:Written": {
+     "value": 47,
+     "void": 13
     },
     "unproven:unstated": {
-     "value": 60,
-     "void": 17
+     "value": 14
     },
     "void-open": {
-     "void": 4
+     "void": 6
     }
    },
    "voids": [
-    "freea",
+    "install_for.constprop.0",
     "mbiter_multi_next.part.0",
-    "null_action",
-    "xstdopen"
+    "specify_ignore_initial",
+    "stackoverflow_deinstall_handler",
+    "version_etc",
+    "version_etc_va"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-diffutils-diff": {
    "counts": {
     "refused": {
-     "value": 9,
+     "value": 8,
      "void": 1
     },
+    "unproven:EntryInput": {
+     "void": 13
+    },
+    "unproven:Written": {
+     "value": 140,
+     "void": 51
+    },
     "unproven:unstated": {
-     "value": 170,
-     "void": 73
+     "value": 31,
+     "void": 1
     },
     "void-open": {
-     "void": 11
+     "void": 19
     }
    },
    "voids": [
-    "add_exclude",
     "free_exclude",
-    "freea",
     "hash_free",
+    "install_for.constprop.0",
     "mbiter_multi_next.part.0",
-    "null_action",
     "perror_with_name",
-    "set_color_palette",
-    "setup_output",
+    "pr_context_hunk",
+    "pr_forward_ed_hunk",
+    "pr_unidiff_hunk",
+    "print_context_number_range",
+    "print_ed_hunk",
+    "print_ifdef_hunk",
+    "print_ifdef_script",
+    "print_normal_hunk",
+    "print_sdiff_hunk",
+    "print_unidiff_number_range",
+    "stackoverflow_deinstall_handler",
     "string_free",
-    "xstdopen"
+    "version_etc",
+    "version_etc_va"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-diffutils-diff3": {
    "counts": {
     "refused": {
-     "value": 4
+     "value": 3
+    },
+    "unproven:EntryInput": {
+     "void": 2
+    },
+    "unproven:Written": {
+     "value": 80,
+     "void": 16
     },
     "unproven:unstated": {
-     "value": 92,
-     "void": 18
+     "value": 13
     },
     "void-open": {
      "void": 5
     }
    },
    "voids": [
-    "freea",
+    "install_for.constprop.0",
     "mbiter_multi_next.part.0",
-    "null_action",
-    "xfreopen",
-    "xstdopen"
+    "stackoverflow_deinstall_handler",
+    "version_etc",
+    "version_etc_va"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-diffutils-sdiff": {
    "counts": {
     "refused": {
-     "value": 6
+     "value": 5,
+     "void": 1
+    },
+    "unproven:EntryInput": {
+     "void": 3
+    },
+    "unproven:Written": {
+     "value": 48,
+     "void": 20
     },
     "unproven:unstated": {
-     "value": 61,
-     "void": 24
+     "value": 14
     },
     "void-open": {
      "void": 5
     }
    },
    "voids": [
-    "checksigs",
-    "freea",
+    "install_for.constprop.0",
     "mbiter_multi_next.part.0",
-    "null_action",
-    "xstdopen"
+    "stackoverflow_deinstall_handler",
+    "version_etc",
+    "version_etc_va"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-findutils-find": {
    "counts": {
     "refused": {
-     "value": 9,
-     "void": 2
+     "value": 8,
+     "void": 1
+    },
+    "unproven:EntryInput": {
+     "value": 1,
+     "void": 13
+    },
+    "unproven:Written": {
+     "value": 326,
+     "void": 49
     },
     "unproven:unstated": {
-     "value": 397,
-     "void": 58
+     "value": 71
     },
     "void-open": {
      "value": 1,
-     "void": 22
+     "void": 19
     }
    },
    "voids": [
@@ -193,28 +263,26 @@
     "argmatch_invalid",
     "argv_iter_free",
     "cdb_free.part.0",
-    "close_stdout_set_file_name",
-    "close_stdout_set_ignore_EPIPE",
-    "cycle_check_init",
-    "do_fprintf",
+    "checked_fprintf",
+    "complain_about_leaky_fds",
+    "dbg_printf",
     "entry_free",
     "forget_non_cloexec_fds",
     "free_cwd",
     "free_mount_entry",
-    "freea",
     "hash_free",
-    "i_ring_init",
     "inside_dir.part.0",
     "nonfatal_nontarget_file_error",
-    "nonfatal_target_file_error",
-    "parse_begin_user_args",
-    "parse_end_user_args",
-    "set_stat_placeholders",
-    "sharefile_destroy"
+    "print_list",
+    "remember_non_cloexec_fds",
+    "sharefile_destroy",
+    "version_etc",
+    "version_etc_va"
    ],
    "false": [
     "insert_primary.part.0"
-   ]
+   ],
+   "unanswered": []
   },
   "O2-grep-grep": {
    "counts": {
@@ -222,9 +290,16 @@
      "value": 3,
      "void": 1
     },
+    "unproven:EntryInput": {
+     "void": 9
+    },
+    "unproven:Written": {
+     "value": 169,
+     "void": 55
+    },
     "unproven:unstated": {
-     "value": 218,
-     "void": 65
+     "value": 49,
+     "void": 1
     },
     "void-open": {
      "value": 1,
@@ -233,30 +308,31 @@
    },
    "voids": [
     "__argmatch_die",
-    "add_exclude",
+    "addtok_wc",
     "argmatch_invalid",
-    "close_stdout_set_file_name",
-    "close_stdout_set_ignore_EPIPE",
-    "color_cap_rv_fct",
-    "cycle_check_init",
-    "dfafree",
+    "closure",
+    "dfacomp",
     "dfamustfree",
     "dfawarn",
+    "fgrep_to_grep_pattern",
     "free_exclude",
     "free_mbdata",
     "freemust",
     "hash_free",
-    "i_ring_init",
-    "init_colorize",
+    "init_localeinfo",
+    "install_for.constprop.0",
     "kwsfree",
-    "null_action",
+    "printf_errno",
     "private_free",
+    "stackoverflow_deinstall_handler",
     "string_free",
-    "suppressible_error"
+    "version_etc",
+    "version_etc_va"
    ],
    "false": [
     "add_count.part.0"
-   ]
+   ],
+   "unanswered": []
   },
   "O2-gzip-gzip": {
    "counts": {
@@ -264,42 +340,51 @@
      "value": 4,
      "void": 2
     },
+    "unproven:EntryInput": {
+     "void": 5
+    },
+    "unproven:Written": {
+     "value": 55,
+     "void": 26
+    },
     "unproven:unstated": {
-     "value": 76,
-     "void": 29
+     "value": 21
     },
     "void-open": {
-     "void": 4
+     "void": 2
     }
    },
    "voids": [
-    "clear_bufs",
     "finish_out",
-    "fseterr",
     "progerror"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-libexpat-xmlwf": {
    "counts": {
     "refused": {
      "void": 2
     },
-    "unproven:unstated": {
-     "value": 16,
+    "unproven:EntryInput": {
+     "void": 3
+    },
+    "unproven:Written": {
+     "value": 14,
      "void": 28
     },
+    "unproven:unstated": {
+     "value": 2
+    },
     "void-open": {
-     "void": 4
+     "void": 1
     }
    },
    "voids": [
-    "nopCharacterData",
-    "nopEndElement",
-    "nopStartElement",
     "usage"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-bzip2-bzip2": {
    "counts": {
@@ -307,39 +392,40 @@
      "value": 4,
      "void": 2
     },
+    "unproven:EntryInput": {
+     "void": 8
+    },
+    "unproven:Written": {
+     "value": 31,
+     "void": 35
+    },
     "unproven:unstated": {
-     "value": 45,
-     "void": 34
+     "value": 14
     },
     "void-open": {
-     "void": 16
+     "void": 7
     }
    },
    "voids": [
     "BZ2_blockSort",
-    "BZ2_bsInitWrite",
-    "BZ2_bzReadClose",
-    "BZ2_bzWriteClose",
-    "BZ2_bzWriteClose64",
     "BZ2_bz__AssertH__fail",
-    "compress",
-    "default_bzfree",
+    "applySavedTimeInfoToOutputFile.constprop.0",
     "fallbackSort",
-    "flush_RL",
-    "init_RL",
+    "mainQSort3.constprop.0",
     "mySIGSEGVorSIGBUScatcher",
-    "mySignalCatcher",
-    "setExit",
-    "testf",
-    "uncompress"
+    "mySignalCatcher"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-bzip2-bzip2recover": {
    "counts": {
-    "unproven:unstated": {
-     "value": 5,
+    "unproven:Written": {
+     "value": 4,
      "void": 3
+    },
+    "unproven:unstated": {
+     "value": 1
     },
     "void-open": {
      "void": 4
@@ -351,29 +437,38 @@
     "readError",
     "tooManyBlocks.constprop.0"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-diffutils-cmp": {
    "counts": {
     "refused": {
      "value": 3
     },
+    "unproven:EntryInput": {
+     "void": 4
+    },
+    "unproven:Written": {
+     "value": 83,
+     "void": 18
+    },
     "unproven:unstated": {
-     "value": 100,
-     "void": 23
+     "value": 17
     },
     "void-open": {
-     "void": 5
+     "void": 6
     }
    },
    "voids": [
-    "freea",
-    "mbiter_multi_reloc",
-    "mbuiter_multi_reloc",
-    "null_action",
-    "xstdopen"
+    "install_for.constprop.0",
+    "remember_stack_top",
+    "specify_ignore_initial",
+    "stackoverflow_deinstall_handler",
+    "version_etc",
+    "version_etc_va"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-diffutils-diff": {
    "counts": {
@@ -381,125 +476,153 @@
      "value": 5,
      "void": 1
     },
+    "unproven:EntryInput": {
+     "void": 15
+    },
+    "unproven:Written": {
+     "value": 227,
+     "void": 68
+    },
     "unproven:unstated": {
-     "value": 265,
-     "void": 93
+     "value": 38,
+     "void": 2
     },
     "void-open": {
-     "void": 14
+     "void": 22
     }
    },
    "voids": [
-    "add_exclude",
     "discard_confusing_lines",
+    "format_ifdef",
     "free_exclude",
     "free_exclude_segment",
-    "freea",
     "hash_free",
-    "mbiter_multi_reloc",
-    "mbuiter_multi_reloc",
-    "null_action",
+    "install_for.constprop.0",
+    "install_signal_handlers",
     "perror_with_name",
-    "set_color_palette",
-    "setup_output",
+    "pr_context_hunk",
+    "pr_forward_ed_hunk",
+    "pr_unidiff_hunk",
+    "print_context_number_range",
+    "print_ed_hunk",
+    "print_ifdef_hunk",
+    "print_normal_hunk",
+    "print_sdiff_hunk",
+    "print_unidiff_number_range",
+    "remember_stack_top",
+    "stackoverflow_deinstall_handler",
     "string_free",
-    "xstdopen"
+    "version_etc",
+    "version_etc_va"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-diffutils-diff3": {
    "counts": {
     "refused": {
      "value": 2
     },
+    "unproven:EntryInput": {
+     "void": 5
+    },
+    "unproven:Written": {
+     "value": 127,
+     "void": 21
+    },
     "unproven:unstated": {
-     "value": 150,
-     "void": 25
+     "value": 23
     },
     "void-open": {
-     "void": 6
+     "void": 5
     }
    },
    "voids": [
-    "freea",
-    "mbiter_multi_reloc",
-    "mbuiter_multi_reloc",
-    "null_action",
-    "xfreopen",
-    "xstdopen"
+    "install_for.constprop.0",
+    "remember_stack_top",
+    "stackoverflow_deinstall_handler",
+    "version_etc",
+    "version_etc_va"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-diffutils-sdiff": {
    "counts": {
     "refused": {
-     "value": 3
+     "value": 3,
+     "void": 1
+    },
+    "unproven:EntryInput": {
+     "void": 5
+    },
+    "unproven:Written": {
+     "value": 86,
+     "void": 30
     },
     "unproven:unstated": {
-     "value": 102,
-     "void": 35
+     "value": 16
     },
     "void-open": {
-     "void": 6
+     "void": 5
     }
    },
    "voids": [
-    "checksigs",
-    "freea",
-    "mbiter_multi_reloc",
-    "mbuiter_multi_reloc",
-    "null_action",
-    "xstdopen"
+    "install_for.constprop.0",
+    "remember_stack_top",
+    "stackoverflow_deinstall_handler",
+    "version_etc",
+    "version_etc_va"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-findutils-find": {
    "counts": {
     "refused": {
      "value": 9,
-     "void": 4
+     "void": 3
+    },
+    "unproven:EntryInput": {
+     "value": 1,
+     "void": 13
+    },
+    "unproven:Written": {
+     "value": 465,
+     "void": 82
     },
     "unproven:unstated": {
-     "value": 566,
-     "void": 90
+     "value": 103
     },
     "void-open": {
-     "value": 3,
-     "void": 25
+     "void": 21
     }
    },
    "voids": [
     "__argmatch_die",
     "argmatch_invalid",
     "argv_iter_free",
-    "cdb_init",
+    "check_path_safety",
+    "checked_fprintf",
     "cleanup_initial_cwd",
-    "close_stdout_set_file_name",
-    "close_stdout_set_ignore_EPIPE",
-    "cycle_check_init",
+    "consider_visiting",
+    "dbg_printf",
     "entry_free",
     "forget_non_cloexec_fds",
     "free_cwd",
-    "free_dir.isra.0",
-    "free_file_system_list",
     "free_mount_entry",
-    "freea",
-    "fts_lfree",
-    "fts_set_stat_required",
     "hash_free",
-    "i_ring_init",
     "issue_loop_warning",
-    "mbuiter_multi_reloc",
-    "parse_begin_user_args",
-    "parse_end_user_args",
-    "set_stat_placeholders",
-    "sharefile_destroy"
+    "print_list",
+    "process_debug_options",
+    "process_optimisation_option",
+    "remember_non_cloexec_fds",
+    "sharefile_destroy",
+    "version_etc",
+    "version_etc_va"
    ],
-   "false": [
-    "constrain_rate",
-    "estimate_timestamp_success_rate",
-    "file_sparseness.isra.0"
-   ]
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-grep-grep": {
    "counts": {
@@ -507,50 +630,51 @@
      "value": 4,
      "void": 1
     },
+    "unproven:EntryInput": {
+     "void": 14
+    },
+    "unproven:Written": {
+     "value": 280,
+     "void": 95
+    },
     "unproven:unstated": {
-     "value": 344,
-     "void": 105
+     "value": 64,
+     "void": 3
     },
     "void-open": {
-     "void": 33
+     "void": 26
     }
    },
    "voids": [
     "__argmatch_die",
-    "add_exclude",
+    "add_utf8_anychar",
+    "addtok_wc",
     "argmatch_invalid",
-    "close_stdout_set_file_name",
-    "close_stdout_set_ignore_EPIPE",
-    "color_cap_rv_fct",
-    "cycle_check_init",
-    "dfafree",
+    "dfaanalyze",
     "dfamustfree",
+    "dfaoptimize",
     "dfassbuild",
     "dfawarn",
-    "finalize_input",
-    "free_dir.isra.0",
+    "fgrep_to_grep_pattern",
     "free_exclude",
     "free_exclude_segment",
     "free_mbdata",
-    "freelist",
     "freemust",
-    "fts_lfree",
-    "fts_set_stat_required",
     "hash_free",
-    "i_ring_init",
-    "init_colorize",
+    "init_localeinfo",
+    "install_for.constprop.0",
     "kwsfree",
-    "kwsmusts",
-    "mbuiter_multi_reloc",
-    "notset",
-    "null_action",
-    "pop_lex_state.isra.0",
+    "printf_errno",
     "private_free",
+    "remember_stack_top",
     "reorder_tokens",
+    "stackoverflow_deinstall_handler",
     "string_free",
-    "suppressible_error"
+    "version_etc",
+    "version_etc_va"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-gzip-gzip": {
    "counts": {
@@ -558,49 +682,54 @@
      "value": 4,
      "void": 1
     },
+    "unproven:EntryInput": {
+     "value": 1,
+     "void": 5
+    },
+    "unproven:Written": {
+     "value": 83,
+     "void": 45
+    },
     "unproven:unstated": {
-     "value": 112,
-     "void": 50
+     "value": 29
     },
     "void-open": {
-     "value": 1,
      "void": 4
     }
    },
    "voids": [
-    "clear_bufs",
+    "copy_stat.constprop.0",
     "finish_out",
-    "fseterr",
+    "install_signal_handlers",
     "progerror"
    ],
-   "false": [
-    "huft_free.isra.0"
-   ]
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-libexpat-xmlwf": {
    "counts": {
     "refused": {
      "void": 2
     },
+    "unproven:EntryInput": {
+     "void": 5
+    },
+    "unproven:Written": {
+     "value": 15,
+     "void": 32
+    },
     "unproven:unstated": {
-     "value": 17,
-     "void": 30
+     "value": 2
     },
     "void-open": {
-     "void": 8
+     "void": 1
     }
    },
    "voids": [
-    "cleanupUserData",
-    "endDoctypeDecl",
-    "freeNotations",
-    "nopCharacterData",
-    "nopEndElement",
-    "nopStartElement",
-    "nopStartElement.constprop.0",
     "usage"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-zlib-example": {
    "counts": {
@@ -608,18 +737,30 @@
      "value": 2,
      "void": 1
     },
+    "unproven:Written": {
+     "value": 96,
+     "void": 27
+    },
     "unproven:unstated": {
-     "value": 114,
-     "void": 35
+     "value": 18
     },
     "void-open": {
-     "void": 1
+     "void": 9
     }
    },
    "voids": [
+    "test_deflate",
+    "test_dict_deflate",
+    "test_dict_inflate",
+    "test_flush",
+    "test_inflate",
+    "test_large_deflate",
+    "test_large_inflate",
+    "test_sync",
     "zcfree"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-zlib-example64": {
    "counts": {
@@ -627,28 +768,53 @@
      "value": 2,
      "void": 1
     },
+    "unproven:Written": {
+     "value": 96,
+     "void": 27
+    },
     "unproven:unstated": {
-     "value": 114,
-     "void": 35
+     "value": 18
     },
     "void-open": {
-     "void": 1
+     "void": 9
     }
    },
    "voids": [
+    "test_deflate",
+    "test_dict_deflate",
+    "test_dict_inflate",
+    "test_flush",
+    "test_inflate",
+    "test_large_deflate",
+    "test_large_inflate",
+    "test_sync",
     "zcfree"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-zlib-examplesh": {
    "counts": {
-    "unproven:unstated": {
+    "unproven:Written": {
      "value": 1,
-     "void": 10
+     "void": 2
+    },
+    "void-open": {
+     "void": 8
     }
    },
-   "voids": [],
-   "false": []
+   "voids": [
+    "test_deflate",
+    "test_dict_deflate",
+    "test_dict_inflate",
+    "test_flush",
+    "test_inflate",
+    "test_large_deflate",
+    "test_large_inflate",
+    "test_sync"
+   ],
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-zlib-libz.so.1.2.13": {
    "counts": {
@@ -656,9 +822,12 @@
      "value": 1,
      "void": 1
     },
-    "unproven:unstated": {
-     "value": 117,
+    "unproven:Written": {
+     "value": 103,
      "void": 26
+    },
+    "unproven:unstated": {
+     "value": 14
     },
     "void-open": {
      "void": 1
@@ -667,7 +836,8 @@
    "voids": [
     "zcfree"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-zlib-minigzip": {
    "counts": {
@@ -675,19 +845,25 @@
      "value": 2,
      "void": 3
     },
+    "unproven:Written": {
+     "value": 93,
+     "void": 25
+    },
     "unproven:unstated": {
-     "value": 109,
-     "void": 27
+     "value": 16
     },
     "void-open": {
-     "void": 2
+     "void": 4
     }
    },
    "voids": [
     "error",
+    "file_compress",
+    "file_uncompress",
     "zcfree"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-zlib-minigzip64": {
    "counts": {
@@ -695,92 +871,140 @@
      "value": 2,
      "void": 3
     },
+    "unproven:Written": {
+     "value": 93,
+     "void": 25
+    },
     "unproven:unstated": {
-     "value": 109,
-     "void": 27
+     "value": 16
     },
     "void-open": {
-     "void": 2
+     "void": 4
     }
    },
    "voids": [
     "error",
+    "file_compress",
+    "file_uncompress",
     "zcfree"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-noinline-zlib-minigzipsh": {
    "counts": {
     "refused": {
      "void": 2
     },
-    "unproven:unstated": {
-     "value": 1,
-     "void": 2
+    "unproven:Written": {
+     "value": 1
     },
     "void-open": {
-     "void": 1
+     "void": 3
     }
    },
    "voids": [
-    "error"
+    "error",
+    "file_compress",
+    "file_uncompress"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-zlib-example": {
    "counts": {
     "refused": {
      "value": 2
     },
+    "unproven:Written": {
+     "value": 90,
+     "void": 19
+    },
     "unproven:unstated": {
-     "value": 104,
-     "void": 27
+     "value": 14
     },
     "void-open": {
-     "void": 1
+     "void": 9
     }
    },
    "voids": [
+    "test_deflate",
+    "test_dict_deflate",
+    "test_dict_inflate",
+    "test_flush",
+    "test_inflate",
+    "test_large_deflate",
+    "test_large_inflate",
+    "test_sync",
     "zcfree"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-zlib-example64": {
    "counts": {
     "refused": {
      "value": 2
     },
+    "unproven:Written": {
+     "value": 90,
+     "void": 19
+    },
     "unproven:unstated": {
-     "value": 104,
-     "void": 27
+     "value": 14
     },
     "void-open": {
-     "void": 1
+     "void": 9
     }
    },
    "voids": [
+    "test_deflate",
+    "test_dict_deflate",
+    "test_dict_inflate",
+    "test_flush",
+    "test_inflate",
+    "test_large_deflate",
+    "test_large_inflate",
+    "test_sync",
     "zcfree"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-zlib-examplesh": {
    "counts": {
-    "unproven:unstated": {
+    "unproven:Written": {
      "value": 1,
-     "void": 10
+     "void": 2
+    },
+    "void-open": {
+     "void": 8
     }
    },
-   "voids": [],
-   "false": []
+   "voids": [
+    "test_deflate",
+    "test_dict_deflate",
+    "test_dict_inflate",
+    "test_flush",
+    "test_inflate",
+    "test_large_deflate",
+    "test_large_inflate",
+    "test_sync"
+   ],
+   "false": [],
+   "unanswered": []
   },
   "O2-zlib-libz.so.1.2.13": {
    "counts": {
     "refused": {
      "value": 1
     },
-    "unproven:unstated": {
-     "value": 108,
+    "unproven:Written": {
+     "value": 97,
      "void": 17
+    },
+    "unproven:unstated": {
+     "value": 11
     },
     "void-open": {
      "void": 1
@@ -789,7 +1013,8 @@
    "voids": [
     "zcfree"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-zlib-minigzip": {
    "counts": {
@@ -797,19 +1022,25 @@
      "value": 2,
      "void": 2
     },
+    "unproven:Written": {
+     "value": 87,
+     "void": 17
+    },
     "unproven:unstated": {
-     "value": 99,
-     "void": 19
+     "value": 12
     },
     "void-open": {
-     "void": 2
+     "void": 4
     }
    },
    "voids": [
     "error",
+    "file_compress",
+    "file_uncompress",
     "zcfree"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-zlib-minigzip64": {
    "counts": {
@@ -817,37 +1048,49 @@
      "value": 2,
      "void": 2
     },
+    "unproven:Written": {
+     "value": 87,
+     "void": 17
+    },
     "unproven:unstated": {
-     "value": 99,
-     "void": 19
+     "value": 12
     },
     "void-open": {
-     "void": 2
+     "void": 4
     }
    },
    "voids": [
     "error",
+    "file_compress",
+    "file_uncompress",
     "zcfree"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "O2-zlib-minigzipsh": {
    "counts": {
     "refused": {
      "void": 2
     },
-    "unproven:unstated": {
-     "value": 1,
-     "void": 2
+    "unproven:Written": {
+     "value": 1
     },
     "void-open": {
-     "void": 1
+     "void": 3
     }
    },
    "voids": [
-    "error"
+    "error",
+    "file_compress",
+    "file_uncompress"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   }
+ },
+ "floors": {
+  "open": 272,
+  "closed": 272
  }
 }

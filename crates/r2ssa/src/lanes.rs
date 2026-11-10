@@ -54,8 +54,8 @@ pub enum Fill {
     Sign,
     /// The byte this register byte held when the function was entered.
     Entry(RegisterByte),
-    /// A byte of a call's result register above the width the callee states, which holds nothing
-    /// the program defines (doc/adr-call-boundary.md, "Result width follows five rules").
+    /// A byte no C expression of the function defines: above a callee's stated width, or written by a
+    /// compiler-inserted operation (doc/adr-scratch-result.md, Decision).
     Undefined,
 }
 
@@ -298,12 +298,17 @@ fn capture_block(
     }
     // The call a `CallDefine` follows is the last one above it in its block.
     let mut stated = None;
+    let inserted = function.compiler_inserted();
     for (id, op) in block.sited() {
         if op.is_call() {
             stated = (function.instruction_of(id)).and_then(|instruction| calls.at(instruction));
         }
         if let Some(dst) = op.dst() {
             let bytes = match op {
+                // The stack protector's write is no C expression's (doc/adr-scratch-result.md, case 3).
+                _ if inserted.contains(id) || function.is_checked_difference(*dst) => {
+                    vec![Byte::fill(Fill::Undefined); function.var(*dst).size as usize]
+                }
                 SSAOp::CallDefine { dst } => {
                     call_defined(function.storage_of(*dst), function.var(*dst).size, stated)
                 }
@@ -502,6 +507,20 @@ pub fn written_width(bytes: &[Byte], storage: CanonicalStorageId) -> Option<u32>
         .find(|&at| bytes[at].written_at(home(Some(storage), at as u64)))?;
     let width = u32::try_from(highest + 1).ok()?.next_power_of_two();
     Some(width.min(storage.size))
+}
+
+/// Whether no byte holds what a C expression of the function defines: each is undefined, a machine
+/// fill, or, where `entry` is set, `storage`'s own entry byte (doc/adr-scratch-result.md, case 1).
+pub fn defines_nothing(bytes: &[Byte], storage: CanonicalStorageId, entry: bool) -> bool {
+    let own =
+        |at: usize, from: &RegisterByte| entry && Some(*from) == home(Some(storage), at as u64);
+    (bytes.iter().enumerate()).all(|(at, byte)| match byte {
+        Byte::Data | Byte::Widened { .. } => false,
+        Byte::Filled(ways) => ways.iter().all(|way| match way {
+            Fill::Zero | Fill::Sign | Fill::Undefined => true,
+            Fill::Entry(from) => own(at, from),
+        }),
+    })
 }
 
 /// Whether a byte of `storage` holds what the caller left in that byte, on some path.

@@ -1,53 +1,63 @@
 {
  "totals": {
-  "unproven:unstated": {
-   "value": 21,
-   "void": 4
+  "unproven:EntryInput": {
+   "void": 3
+  },
+  "unproven:Written": {
+   "value": 22,
+   "void": 2
   },
   "void-open": {
-   "void": 3
+   "void": 2
   }
  },
  "builds": {
   "clones": {
    "counts": {
-    "unproven:unstated": {
+    "unproven:Written": {
      "value": 8
     }
    },
    "voids": [],
-   "false": []
+   "false": [],
+   "unanswered": []
   },
   "returns": {
    "counts": {
-    "unproven:unstated": {
-     "value": 8,
+    "unproven:EntryInput": {
      "void": 2
     },
-    "void-open": {
+    "unproven:Written": {
+     "value": 8,
      "void": 2
     }
    },
-   "voids": [
-    "bump",
-    "exported_void"
-   ],
-   "false": []
+   "voids": [],
+   "false": [],
+   "unanswered": []
   },
   "scratch": {
    "counts": {
-    "unproven:unstated": {
-     "value": 5,
-     "void": 2
+    "unproven:EntryInput": {
+     "void": 1
+    },
+    "unproven:Written": {
+     "value": 6
     },
     "void-open": {
-     "void": 1
+     "void": 2
     }
    },
    "voids": [
+    "canary_void",
     "tail_free"
    ],
-   "false": []
+   "false": [],
+   "unanswered": []
   }
+ },
+ "floors": {
+  "open": 2,
+  "closed": 2
  }
 }

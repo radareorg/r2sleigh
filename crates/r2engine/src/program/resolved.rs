@@ -127,7 +127,8 @@ fn result_owners(read: &CalleeRead) -> BTreeSet<u64> {
         | SourceResultCause::Clobbered
         | SourceResultCause::HandedBack
         | SourceResultCause::Ambiguous
-        | SourceResultCause::Undefined => None,
+        | SourceResultCause::Undefined
+        | SourceResultCause::Written => None,
     });
     owners.collect::<Option<_>>().unwrap_or_default()
 }

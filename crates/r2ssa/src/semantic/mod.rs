@@ -419,9 +419,21 @@ fn demanded(
     live_out: &crate::liveout::FunctionLiveOut,
     ignored: &BTreeSet<crate::graph::UseSite>,
 ) -> Option<crate::demand::DemandedBytes> {
-    let result = (body.machine_context)
-        .and_then(SourceMachineContext::function_interface)
-        .and_then(returned_bytes);
+    let interface = (body.machine_context).and_then(SourceMachineContext::function_interface);
+    let result = interface.and_then(returned_bytes);
+    // A void function's return reads no register, so no return block is left unnamed.
+    let void = interface.map(r2source::SourceFunctionInterface::return_kind)
+        == Some(r2source::SourceFunctionReturn::Void);
+    // A return a written result leaves undefined (case 1) reads no register either.
+    let undefined = (calls.1.returns.values())
+        .filter(|boundary| boundary.result_unproven && result.is_some())
+        .filter_map(|boundary| body.graph.block_addr_of(boundary.at))
+        .collect::<BTreeSet<_>>();
+    let without = match void {
+        true => crate::liveout::FunctionLiveOut::default(),
+        false => live_out.without(&undefined),
+    };
+    let live_out = &without;
     let (tails, reads) = tail_reads(body, calls).unwrap_or_default();
     crate::demand::exits_are_named_beside(body.function, live_out, &tails).then(|| {
         crate::demand::DemandedBytes::of_returning(body.graph, live_out, (result, &reads), ignored)

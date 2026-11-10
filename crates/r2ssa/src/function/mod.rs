@@ -2925,6 +2925,8 @@ pub struct SSAFunction {
     compiler_removed_edges: BTreeSet<(u64, u64)>,
     /// Each decided canary check's `reload - guard` and the block its passing edge alone enters.
     passing_differences: Vec<(crate::value_table::VarId, u64)>,
+    /// Every decided canary check's difference, sorted: a write no C expression defines.
+    checked_differences: Vec<crate::value_table::VarId>,
     /// The blocks SCCP dropped as unreachable after deciding a branch, by address and byte size; they owe no obligation.
     decided_dead_blocks: BTreeMap<u64, u32>,
     /// The edges SCCP dropped with them, (from, to).
@@ -3331,6 +3333,7 @@ impl Clone for SSAFunction {
             compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
             compiler_removed_edges: self.compiler_removed_edges.clone(),
             passing_differences: self.passing_differences.clone(),
+            checked_differences: self.checked_differences.clone(),
             decided_dead_blocks: self.decided_dead_blocks.clone(),
             decided_dead_edges: self.decided_dead_edges.clone(),
             premises: self.premises.clone(),
@@ -3891,6 +3894,20 @@ impl SSAFunction {
         differences: impl IntoIterator<Item = (crate::value_table::VarId, u64)>,
     ) {
         self.passing_differences.extend(differences);
+    }
+
+    pub(crate) fn record_checked_differences(
+        &mut self,
+        differences: impl IntoIterator<Item = crate::value_table::VarId>,
+    ) {
+        self.checked_differences.extend(differences);
+        self.checked_differences.sort_unstable();
+        self.checked_differences.dedup();
+    }
+
+    /// Whether `var` is a decided canary check's difference (doc/adr-scratch-result.md, case 3).
+    pub(crate) fn is_checked_difference(&self, var: crate::value_table::VarId) -> bool {
+        self.checked_differences.binary_search(&var).is_ok()
     }
 
     /// A decided canary check's difference, 0 past its passing edge, and the block that edge enters.

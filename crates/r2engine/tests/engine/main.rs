@@ -27,6 +27,7 @@ mod rendered;
 mod result_reads;
 mod results;
 mod reuse;
+mod scratch;
 mod signature;
 mod staged;
 mod start;
