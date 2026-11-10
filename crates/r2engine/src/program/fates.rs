@@ -70,8 +70,10 @@ pub enum CallBoundary {
     Sites {
         lanes: [JoinedLane; LANES],
         calls: u32,
-        /// Whether these calls are every way the image enters the callee.
-        exhaustive: bool,
+        /// Some caller the survey names was not read, so these calls may not be every call.
+        unread: bool,
+        /// The callers a returned lane is dead in only if their own calls are every way in.
+        forwarders: Box<[u64]>,
         /// Whether a forwarding cycle the database cut reached the answer, which then depends on
         /// the function of the cycle asked first: such an answer is not held.
         cut: bool,
@@ -115,7 +117,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
 }
 
 /// The fates of every call to `callee`, joined, with each returned lane forwarded to its caller's
-/// own boundary; `None` where the program makes no call the walk read.
+/// own boundary; a function nothing calls joins no call.
 fn sites_of<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Option<CallBoundary> {
     let survey = db.get::<SurveyQuery>(&()).ok()?;
     let survey = Arc::clone(&survey.as_ref().as_ref().ok()?.0);
@@ -132,6 +134,7 @@ fn sites_of<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Opti
     let mut seen = BTreeSet::new();
     // Each returned lane, by caller, lane and bytes, forwarded after the direct fates are joined.
     let mut returned = BTreeSet::new();
+    let mut forwarders = BTreeSet::new();
     for &caller in survey.callers_of(callee) {
         let Some(Ok(thumb)) = survey.walked_in(caller) else {
             unread = true;
@@ -177,23 +180,67 @@ fn sites_of<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Opti
                 forwarded(boundary.as_deref(), at, bytes, &mut cut)
             }
         };
+        if let Some(Forwarded::DeadIfEveryWayIn) = fate {
+            forwarders.insert(caller);
+        }
         join(&mut lanes[at], fate);
     }
-    // Only a result every call leaves dead asks whether the calls are every way in.
-    let exhaustive = !unread
-        && calls > 0
-        && lanes.iter().all(|lane| lane.dead || !lane.held)
-        && super::reads::only_called(db, callee, calls);
     r2il::refusal_evidence!(
         "call-boundary",
-        "{callee:#x}: {calls} calls, unread callers {unread}, exhaustive {exhaustive}, lanes {lanes:?}"
+        "{callee:#x}: {calls} calls, unread callers {unread}, lanes {lanes:?}"
     );
-    (calls > 0).then_some(CallBoundary::Sites {
+    // No call at all is evidence too: the closed world decides only where nothing else enters.
+    Some(CallBoundary::Sites {
         lanes,
         calls,
-        exhaustive,
+        unread,
+        forwarders: forwarders.into_iter().collect(),
         cut,
     })
+}
+
+/// Whether the calls a boundary joined are every way the image enters `callee`, and each forwarder's
+/// too: asked only by a decision that rests on it. Each function is answered once per question.
+pub(crate) fn every_way_in<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    callee: u64,
+    boundary: &CallBoundary,
+) -> bool {
+    every_way_in_from(db, callee, boundary, &mut BTreeMap::new())
+}
+
+/// `every_way_in`, with each function's answer so far: `None` while it is being asked.
+fn every_way_in_from<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    callee: u64,
+    boundary: &CallBoundary,
+    asked: &mut BTreeMap<u64, Option<bool>>,
+) -> bool {
+    let CallBoundary::Sites {
+        calls,
+        unread,
+        forwarders,
+        ..
+    } = boundary
+    else {
+        return false;
+    };
+    if let Some(answer) = asked.get(&callee) {
+        return answer.unwrap_or(false);
+    }
+    asked.insert(callee, None);
+    let mut answer = !unread && super::reads::only_called(db, callee, *calls);
+    for caller in forwarders.iter() {
+        if !answer {
+            break;
+        }
+        let key = (CalleeKey::Entry(*caller), World::Closed);
+        let found = db.get::<CallBoundary>(&key).ok();
+        let theirs = found.as_deref().and_then(Option::as_ref);
+        answer = theirs.is_some_and(|theirs| every_way_in_from(db, *caller, theirs, asked));
+    }
+    asked.insert(callee, Some(answer));
+    answer
 }
 
 /// Which result lanes of `callee`'s convention a body may leave a result in: the typed three, and
@@ -226,6 +273,8 @@ enum Forwarded {
     /// The caller's callers read these bytes, at the width their reads agree on (`JoinedLane`).
     Read(ByteMask, Option<Option<u32>>),
     Cycle,
+    /// Every call to the caller leaves the lane dead: dead where those calls are every way in.
+    DeadIfEveryWayIn,
 }
 
 /// The caller's own boundary on lane `at` (`None` where the database cut a cycle): what its callers
@@ -241,10 +290,7 @@ fn forwarded(
         return Some(Forwarded::Cycle);
     };
     let Some(CallBoundary::Sites {
-        lanes,
-        exhaustive,
-        cut: theirs,
-        ..
+        lanes, cut: theirs, ..
     }) = boundary
     else {
         return Some(Forwarded::Fate(LaneFate::Unknown));
@@ -261,7 +307,8 @@ fn forwarded(
         _ if reached.0 & 1 != 0 => Forwarded::Read(reached, width),
         _ if reached.0 != 0 => Forwarded::Fate(LaneFate::Unknown),
         lane if lane.cycle => Forwarded::Cycle,
-        lane if lane.dead && *exhaustive => Forwarded::Fate(LaneFate::Dead),
+        // Whether the caller's calls are every way in is asked only by the decision that rests on it.
+        lane if lane.dead => Forwarded::DeadIfEveryWayIn,
         _ => Forwarded::Fate(LaneFate::Unknown),
     })
 }
@@ -270,7 +317,7 @@ fn forwarded(
 fn join(lane: &mut JoinedLane, fate: Option<Forwarded>) {
     let Some(fate) = fate else { return };
     match fate {
-        Forwarded::Fate(LaneFate::Dead) => {}
+        Forwarded::Fate(LaneFate::Dead) | Forwarded::DeadIfEveryWayIn => {}
         Forwarded::Fate(LaneFate::Read(bytes)) => {
             // A read of the whole register states no width.
             let width = bytes.low_run().filter(|width| *width < 16);
@@ -301,33 +348,39 @@ fn read(lane: &mut JoinedLane, bytes: ByteMask, width: Option<Option<u32>>) {
     }
 }
 
-/// What the closed world decides of a body's result from its open interface and its boundary
-/// (doc/adr-call-boundary.md, "S7 as built"; D202).
+/// What the closed world decides of a body's result from its open interface and its boundary (D202,
+/// D213); `every_way_in` is asked only where every call leaving the result dead decides it.
 pub(crate) fn decide(
     open: &r2source::SourceFunctionInterface,
     boundary: &CallBoundary,
+    every_way_in: impl FnOnce() -> bool,
 ) -> Option<SourceClosedResult> {
-    let CallBoundary::Sites {
-        lanes, exhaustive, ..
-    } = boundary
-    else {
+    let CallBoundary::Sites { lanes, calls, .. } = boundary else {
         return None;
     };
     // A declaration states the result.
     if open.types_are_declared() {
         return None;
     }
+    let carriers = open.result_carriers();
+    // An integer register no return defines holds no result, and the second one holds a result
+    // only beside it (SysV psABI 3.2.3, AAPCS64 6.9): a call reading either reads its own bytes.
+    let undefined = carriers.is_some_and(|carriers| carriers.integer_undefined);
+    let holds = |at: usize| {
+        lanes[at].held
+            && !(undefined
+                && (at == usize::from(LaneId::INTEGER.0) || at == usize::from(LaneId::SECOND.0)))
+    };
     let lane = |id: LaneId| lanes[usize::from(id.0)];
     let (integer, float, second) = (
         lane(LaneId::INTEGER),
         lane(LaneId::FLOAT),
         lane(LaneId::SECOND),
     );
-    let carriers = open.result_carriers();
-    // Every lane of the return set: a body may hand back any of them as its caller left it (d72
-    // round 6), so a void needs each dead at every call.
-    let all_dead = *exhaustive && lanes.iter().all(|lane| lane.dead || !lane.held);
-    let cycle = lanes.iter().any(|lane| lane.cycle);
+    let integer_read = integer.read && !undefined;
+    // Every lane a body may hand back as its caller left it (d72 round 6) is dead at every call.
+    let all_dead = || (0..LANES).all(|at| lanes[at].dead || !holds(at)) && every_way_in();
+    let cycle = (0..LANES).any(|at| holds(at) && lanes[at].cycle);
     match open.return_kind() {
         r2source::SourceFunctionReturn::Register { .. } => {
             let paired = carriers.is_some_and(|carriers| carriers.second.is_some());
@@ -337,17 +390,18 @@ pub(crate) fn decide(
             if integer.read {
                 return Some(SourceClosedResult::Read(SourceReadLanes::Integer));
             }
-            if all_dead {
+            // Nothing calls it: only a void the reference index proves is worth building it for.
+            if *calls > 0 && all_dead() {
                 return Some(SourceClosedResult::Unread);
             }
             cycle.then_some(SourceClosedResult::ForwardCycle)
         }
         r2source::SourceFunctionReturn::Unproven => {
             let carriers = carriers?;
-            if integer.read && (carriers.float.is_none() || !float.read) {
+            if integer_read && (carriers.float.is_none() || !float.read) {
                 return Some(SourceClosedResult::Read(SourceReadLanes::Integer));
             }
-            if carriers.float.is_some() && float.read && !integer.read {
+            if carriers.float.is_some() && float.read && !integer_read {
                 let bytes = float
                     .width
                     .flatten()
@@ -355,18 +409,18 @@ pub(crate) fn decide(
                 let bytes = u8::try_from(bytes).ok()?;
                 return Some(SourceClosedResult::Read(SourceReadLanes::Float { bytes }));
             }
-            if all_dead {
-                // No defined byte reaches a return where the body only hands back an input.
-                let causes = (open.unproven_result())
-                    .map(|unproven| unproven.causes().to_vec())
-                    .unwrap_or_default();
-                let undefined = causes.iter().all(|cause| {
-                    matches!(
-                        cause,
-                        SourceResultCause::HandedBack | SourceResultCause::NoReturn
-                    )
-                });
-                return Some(match undefined {
+            // No defined byte reaches a return where the body only hands back an input.
+            let causes = (open.unproven_result())
+                .map(|unproven| unproven.causes().to_vec())
+                .unwrap_or_default();
+            let handed_back = causes.iter().all(|cause| {
+                matches!(
+                    cause,
+                    SourceResultCause::HandedBack | SourceResultCause::NoReturn
+                )
+            });
+            if (*calls > 0 || handed_back) && all_dead() {
+                return Some(match handed_back {
                     true => SourceClosedResult::Void,
                     false => SourceClosedResult::Unread,
                 });
@@ -375,6 +429,53 @@ pub(crate) fn decide(
         }
         _ => None,
     }
+}
+
+/// A source of a callee's result, strongest first (doc/adr-call-boundary.md, "The callee's boundary").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Authority {
+    /// DWARF or a library declaration whose arrivals hold.
+    Declared,
+    /// The body's own proof.
+    Body,
+    /// What every call the closed world shows does with the result.
+    Calls,
+}
+
+/// A source the authority order overrules on one result lane: refusal evidence, never a decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Dispute {
+    pub lane: LaneId,
+    pub kept: Authority,
+    pub lost: Authority,
+}
+
+/// A call reading a lane the callee overwrites on every path, where a declaration or the body says
+/// it returns nothing, loses; one it leaves alone hands the caller its own bytes. O(lanes).
+pub(crate) fn disputes(
+    open: &r2source::SourceFunctionInterface,
+    boundary: &CallBoundary,
+    overwritten: impl Fn(LaneId) -> bool,
+) -> Vec<Dispute> {
+    let CallBoundary::Sites { lanes, .. } = boundary else {
+        return Vec::new();
+    };
+    if open.return_kind() != r2source::SourceFunctionReturn::Void {
+        return Vec::new();
+    }
+    let kept = match open.types_are_declared() {
+        true => Authority::Declared,
+        false => Authority::Body,
+    };
+    [LaneId::INTEGER, LaneId::FLOAT, LaneId::SECOND]
+        .into_iter()
+        .filter(|lane| lanes[usize::from(lane.0)].read && overwritten(*lane))
+        .map(|lane| Dispute {
+            lane,
+            kept,
+            lost: Authority::Calls,
+        })
+        .collect()
 }
 
 /// One direct call a body makes, and its boundary.
@@ -677,5 +778,67 @@ impl CallEffects for Effects<'_> {
             .and_then(|callee| self.by_callee.get(&callee))
             .copied()
             .unwrap_or(self.indirect)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Authority, CallBoundary, Dispute, JoinedLane, LANES, LaneId, disputes};
+    use r2source::confidence::{Basis, Confidence};
+    use r2source::{ConventionId, SourceFunctionInterface, SourceFunctionReturn};
+
+    fn void(declared: bool) -> SourceFunctionInterface {
+        let interface = SourceFunctionInterface::new(
+            b"void".to_vec(),
+            ConventionId::SysVAmd64,
+            [],
+            SourceFunctionReturn::Void,
+            [],
+        )
+        .expect("a void interface");
+        match declared {
+            true => interface.with_types(Confidence::of(Basis::DebugInfo)),
+            false => interface,
+        }
+    }
+
+    /// Every call leaves every lane dead but the integer one, which one call reads.
+    fn read_integer() -> CallBoundary {
+        let mut lanes = [JoinedLane {
+            held: true,
+            dead: true,
+            ..JoinedLane::default()
+        }; LANES];
+        lanes[usize::from(LaneId::INTEGER.0)] = JoinedLane {
+            held: true,
+            read: true,
+            ..JoinedLane::default()
+        };
+        CallBoundary::Sites {
+            lanes,
+            calls: 1,
+            unread: false,
+            forwarders: Box::default(),
+            cut: false,
+        }
+    }
+
+    #[test]
+    fn a_call_reading_a_lane_the_callee_overwrites_loses_to_the_declaration() {
+        let found = disputes(&void(true), &read_integer(), |_| true);
+        let lost = Dispute {
+            lane: LaneId::INTEGER,
+            kept: Authority::Declared,
+            lost: Authority::Calls,
+        };
+        assert_eq!(found, vec![lost]);
+        let found = disputes(&void(false), &read_integer(), |_| true);
+        assert_eq!(found[0].kept, Authority::Body);
+    }
+
+    /// A callee that leaves the lane alone hands the caller its own bytes back: no dispute.
+    #[test]
+    fn a_call_reading_a_lane_the_callee_leaves_alone_disputes_nothing() {
+        assert!(disputes(&void(true), &read_integer(), |_| false).is_empty());
     }
 }

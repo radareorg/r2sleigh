@@ -373,3 +373,209 @@ fn a_forwarder_of_a_stated_float_result_its_caller_reads_is_never_void() {
     let text = header(BASE + 0x10);
     assert!(text.starts_with("double g("), "{text}");
 }
+
+/// `f` is `ret`: RAX defines nothing and XMM0 holds its entry byte; `hlt` and a multi-byte `nop` pad
+/// it. `caller` is `call f; mov [rsi], eax; mov [rdi], rdx; xorps xmm0, xmm0; xorps xmm1, xmm1; ret`.
+const HANDED_BACK: &[u8] = &[
+    0xc3, // 1000 ret
+    0xf4, // 1001 hlt
+    0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, // 1002 nop word [rax + rax]
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1008 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x89, 0x06, // 1015 mov [rsi], eax
+    0x48, 0x89, 0x17, // 1017 mov [rdi], rdx
+    0x0f, 0x57, 0xc0, // 101a xorps xmm0, xmm0
+    0x0f, 0x57, 0xc9, // 101d xorps xmm1, xmm1
+    0xc3, // 1020 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1021 padding
+];
+
+/// `caller` reads XMM0 as `f` handed it back: `call f; movsd [rsi], xmm0; xorps xmm1, xmm1; ret`.
+const FLOAT_READ: &[u8] = &[
+    0xc3, // 1000 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xe8,
+    0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0xf2, 0x0f, 0x11, 0x06, // 1015 movsd [rsi], xmm0
+    0x0f, 0x57, 0xc9, // 1019 xorps xmm1, xmm1
+    0xc3, // 101c ret
+    0x90, 0x90, 0x90,
+];
+
+/// `f` is `ret` and nothing calls it: `caller` is `xor eax, eax; ret`.
+const UNCALLED: &[u8] = &[
+    0xc3, // 1000 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x31,
+    0xc0, // 1010 xor eax, eax
+    0xc3, // 1012 ret
+    0x90,
+];
+
+fn analysed(program: Literal) -> String {
+    let mut open = OpenProgram::of(program);
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(BASE).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// D213: an entry-input lane every call leaves dead is void under `aa`, with the premise; a read of
+/// RAX or RDX, which the body defines nothing in, reads the caller's own bytes. Cold, EntryInput.
+#[test]
+fn an_entry_input_lane_every_call_leaves_dead_is_void_under_the_closed_world() {
+    let program = || {
+        Literal::of_code(
+            HANDED_BACK,
+            &[("f", BASE, 0x01), ("caller", BASE + 0x10, 0x11)],
+        )
+    };
+    let cold = OpenProgram::of(program())
+        .rendered(BASE)
+        .expect("it renders");
+    let text = cold.response.output.into_text();
+    assert!(text.contains("EntryInput"), "{text}");
+    let text = analysed(program());
+    assert!(text.starts_with("void f("), "{text}");
+    assert!(text.contains("(assuming closed-world)"), "{text}");
+}
+
+/// A call that reads the XMM0 bytes `f` hands back keeps the result unproven.
+#[test]
+fn an_entry_input_lane_a_call_reads_is_never_void() {
+    let program = Literal::of_code(
+        FLOAT_READ,
+        &[("f", BASE, 0x01), ("caller", BASE + 0x10, 0x0d)],
+    );
+    let text = analysed(program);
+    assert!(!text.starts_with("void f("), "{text}");
+}
+
+/// `caller` stores ST0 after `call f`: the x87 stack is empty on entry (SysV 3.2.1), so `f` holds no
+/// result there and the read is no evidence: `f` is void under `aa`.
+const X87_READ: &[u8] = &[
+    0xc3, // 1000 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xe8,
+    0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0xdd, 0x1e, // 1015 fstp qword [rsi]
+    0x0f, 0x57, 0xc0, // 1017 xorps xmm0, xmm0
+    0x0f, 0x57, 0xc9, // 101a xorps xmm1, xmm1
+    0xc3, // 101d ret
+    0x90, 0x90,
+];
+
+/// `mid` is `call f; ret`, handing back what `f` left; `top` is `call mid; xorps xmm0, xmm0; xorps
+/// xmm1, xmm1; ret`. The lanes `f` hands back die in `top`'s call: void, through `mid`.
+const FORWARDED: &[u8] = &[
+    0xc3, // 1000 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xe8,
+    0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0xc3, // 1015 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1016 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1020 call 0x1010
+    0x0f, 0x57, 0xc0, // 1025 xorps xmm0, xmm0
+    0x0f, 0x57, 0xc9, // 1028 xorps xmm1, xmm1
+    0xc3, // 102b ret
+    0x90, 0x90, 0x90, 0x90,
+];
+
+/// `f` is `pxor xmm0, xmm0; ret`: a written float lane, which every call leaves dead.
+const WRITTEN_FLOAT: &[u8] = &[
+    0x66, 0x0f, 0xef, 0xc0, // 1000 pxor xmm0, xmm0
+    0xc3, // 1004 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0xe8, 0xeb, 0xff, 0xff,
+    0xff, // 1010 call 0x1000
+    0x0f, 0x57, 0xc0, // 1015 xorps xmm0, xmm0
+    0x0f, 0x57, 0xc9, // 1018 xorps xmm1, xmm1
+    0xc3, // 101b ret
+    0x90, 0x90, 0x90, 0x90,
+];
+
+#[test]
+fn an_x87_read_after_the_call_is_no_evidence_against_void() {
+    let program = Literal::of_code(
+        X87_READ,
+        &[("f", BASE, 0x01), ("caller", BASE + 0x10, 0x0e)],
+    );
+    let text = analysed(program);
+    assert!(text.starts_with("void f("), "{text}");
+}
+
+#[test]
+fn an_entry_input_lane_a_caller_returns_into_a_dead_call_is_void() {
+    let functions = [
+        ("f", BASE, 0x01),
+        ("mid", BASE + 0x10, 0x06),
+        ("top", BASE + 0x20, 0x0c),
+    ];
+    let text = analysed(Literal::of_code(FORWARDED, &functions));
+    assert!(text.starts_with("void f("), "{text}");
+}
+
+/// A written lane no call reads is unread, never void (D202), where the integer register holds nothing.
+#[test]
+fn a_written_float_no_call_reads_is_unread_never_void() {
+    let program = Literal::of_code(
+        WRITTEN_FLOAT,
+        &[("f", BASE, 0x05), ("caller", BASE + 0x10, 0x0c)],
+    );
+    let text = analysed(program);
+    assert!(!text.starts_with("void f("), "{text}");
+    assert!(text.contains("unproven (Unread)"), "{text}");
+}
+
+/// A stored pointer to `f` is a way in no call shows: never void.
+#[test]
+fn an_entry_input_lane_a_pointer_enters_is_never_void() {
+    let mut program = Literal::of_code(
+        UNCALLED,
+        &[("f", BASE, 0x01), ("caller", BASE + 0x10, 0x03)],
+    );
+    program.write(BASE + 0x08, &0x1000u64.to_le_bytes());
+    let text = analysed(program);
+    assert!(!text.starts_with("void f("), "{text}");
+}
+
+/// A function nothing enters has no call that reads its result.
+#[test]
+fn an_entry_input_lane_nothing_enters_is_void_under_the_closed_world() {
+    let program = Literal::of_code(
+        UNCALLED,
+        &[("f", BASE, 0x01), ("caller", BASE + 0x10, 0x03)],
+    );
+    let text = analysed(program);
+    assert!(text.starts_with("void f("), "{text}");
+}
+
+/// `f` is `ret`. `a` and `b` each return early on a zero argument, else call the other and return
+/// what it left; `a` calls `f` first and kills XMM0 after, `b` kills XMM1: the question ends.
+const FORWARDER_CYCLE: &[u8] = &[
+    0xc3, // 1000 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x85,
+    0xff, // 1010 test edi, edi
+    0x74, 0x0e, // 1012 jz 0x1022
+    0xe8, 0xe7, 0xff, 0xff, 0xff, // 1014 call 0x1000
+    0xe8, 0x12, 0x00, 0x00, 0x00, // 1019 call 0x1030
+    0x0f, 0x57, 0xc0, // 101e xorps xmm0, xmm0
+    0xc3, // 1021 ret
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1022 mov eax, 1
+    0xc3, // 1027 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1028 padding
+    0x85, 0xff, // 1030 test edi, edi
+    0x74, 0x09, // 1032 jz 0x103d
+    0xe8, 0xd7, 0xff, 0xff, 0xff, // 1034 call 0x1010
+    0x0f, 0x57, 0xc9, // 1039 xorps xmm1, xmm1
+    0xc3, // 103c ret
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 103d mov eax, 1
+    0xc3, // 1042 ret
+    0x90, 0x90, 0x90, 0x90, 0x90,
+];
+
+#[test]
+fn forwarders_that_forward_to_each_other_end() {
+    let functions = [
+        ("f", BASE, 0x01),
+        ("a", BASE + 0x10, 0x18),
+        ("b", BASE + 0x30, 0x13),
+    ];
+    let text = analysed(Literal::of_code(FORWARDER_CYCLE, &functions));
+    assert!(!text.starts_with("void f("), "{text}");
+    assert!(!text.contains("closed-world"), "{text}");
+}

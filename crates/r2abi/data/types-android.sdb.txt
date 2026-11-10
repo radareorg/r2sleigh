@@ -9,17 +9,6 @@ func.__stack_chk_fail.args=0
 func.__stack_chk_fail.noreturn=true
 func.__stack_chk_fail.ret=void
 
-exit=func
-func.exit.args=1
-func.exit.arg.0=int,status
-func.exit.noreturn=true
-func.exit.ret=void
-
-abort=func
-func.abort.args=0
-func.abort.noreturn=true
-func.abort.ret=void
-
 # bionic's fortified stdio, from <bits/fortify/stdio.h>: the size the caller
 # asked for is an `int` third-from-last, and the size the compiler knows of the
 # buffer comes last. glibc's (types-linux.sdb.txt) puts the buffer's size

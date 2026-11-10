@@ -24,7 +24,8 @@ fn table(file: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"))
 }
 
-/// Each row's name with the comment block above it and the header it includes.
+/// Each row's name with the comment block above it and the header it includes, or for a
+/// binary-only interface the section it cites.
 fn rows(text: &str) -> Vec<(String, String, Option<String>)> {
     let mut rows: Vec<(String, String, Option<String>)> = Vec::new();
     let mut comment = String::new();
@@ -49,6 +50,15 @@ fn rows(text: &str) -> Vec<(String, String, Option<String>)> {
             && let Some(row) = rows.iter_mut().find(|row| row.0 == name)
         {
             row.2 = Some(header.trim().to_owned());
+        } else if let Some((key, page)) = line.split_once('=')
+            && let Some(name) = key
+                .strip_prefix("func.")
+                .and_then(|rest| rest.strip_suffix(".cite"))
+            && let Some(row) = rows.iter_mut().find(|row| row.0 == name && row.2.is_none())
+            && row.1.contains("LSB 5.0")
+            && row.1.contains("binary standard only")
+        {
+            row.2 = Some(format!("LSB: {}", page.trim()));
         }
     }
     rows
@@ -62,7 +72,7 @@ fn every_row_cites_its_header() {
         for (name, comment, header) in rows {
             let header = header.unwrap_or_else(|| panic!("{file}: `{name}` names no header"));
             assert!(
-                header.ends_with(".h"),
+                header.ends_with(".h") || header.starts_with("LSB: LSB-Core-generic 5.0, "),
                 "{file}: `{name}` includes `{header}`"
             );
             assert!(

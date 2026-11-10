@@ -663,11 +663,17 @@ fn closed() -> Literal {
     )
 }
 
-/// Every call writes RAX and XMM0 before reading either, but returns RDX as `f` left it, an input
-/// `f` may hand back: no call proves the result unread (D166), and it is never void.
+/// Every call writes RAX and XMM0 before reading either, but returns RDX as `f` left it to a caller
+/// `other` names: no call proves the result unread (D166), and it is never void.
 #[test]
 fn a_result_a_call_returns_on_is_never_void_in_a_closed_world() {
-    let text = rendered(closed());
+    let mut program = closed();
+    // 1020 lea rdi, [rip - 0x17] (0x1010); 1027 ret
+    program.write(
+        BASE + 0x20,
+        &[0x48, 0x8d, 0x3d, 0xe9, 0xff, 0xff, 0xff, 0xc3],
+    );
+    let text = rendered(program);
     assert!(text.starts_with("r2sleigh_result_u64 f("), "{text}");
     assert!(!text.contains("closed-world"), "{text}");
     let before = fresh(OpenProgram::of(closed()));

@@ -443,3 +443,19 @@ func.__vfprintf_chk.arg.3=va_list,ap
 func.__vfprintf_chk.ret=int
 func.__vfprintf_chk.include=stdio.h
 func.__vfprintf_chk.tail=va_list(3,printf,2)
+
+# unistd.h: POSIX.1-2017, glibc's declaration. _exit does not return.
+_exit=func
+func._exit.args=1
+func._exit.arg.0=int,status
+func._exit.noreturn=true
+func._exit.ret=void
+func._exit.include=unistd.h
+
+# LSB 5.0 Core, generic: __stack_chk_fail is in the binary standard only, so no header declares
+# it. The compiler's canary check calls it with no arguments, and it does not return.
+__stack_chk_fail=func
+func.__stack_chk_fail.args=0
+func.__stack_chk_fail.noreturn=true
+func.__stack_chk_fail.ret=void
+func.__stack_chk_fail.cite=LSB-Core-generic 5.0, libc: void __stack_chk_fail(void)

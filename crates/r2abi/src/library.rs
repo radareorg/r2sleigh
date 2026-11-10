@@ -376,6 +376,11 @@ impl LibraryRows {
                     None => format!("{source}, <{header}>"),
                 }
             }
+            // A binary-only interface (LSB's `__stack_chk_fail`) has no header: its section is cited.
+            (true, None) => match (declared.source, declared.cite) {
+                (Some(source), Some(page)) => format!("{source}, {page}"),
+                _ => String::new(),
+            },
             _ => String::new(),
         };
         let id = PrototypeId(u32::try_from(self.prototypes.len()).unwrap_or(u32::MAX));

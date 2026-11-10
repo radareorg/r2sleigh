@@ -204,12 +204,17 @@ fn padding<S: Source + 'static>(
                 .iter()
                 .filter(|op| op.is_control_flow())
                 .peekable();
-            lifted.ops.is_empty()
+            // A multi-byte `nop` forms an address into a temporary and drops it.
+            let none = |op: &r2il::R2ILOp| !op.is_control_flow() && op.writes_only_temporaries();
+            lifted.ops.iter().all(none)
                 || (transfers.peek().is_some()
                     && transfers.all(|op| {
                         matches!(op, r2il::R2ILOp::Breakpoint)
                             || (op.transfer()).is_some_and(|transfer| {
-                                transfer.direct && known(transfer.target.offset)
+                                // `hlt` lifts to a branch to itself, which reaches no other code.
+                                transfer.direct
+                                    && (known(transfer.target.offset)
+                                        || (!transfer.call && transfer.target.offset == address))
                             })
                     }))
         };
@@ -225,7 +230,7 @@ fn padding<S: Source + 'static>(
                 targets.extend(
                     (lifted.ops.iter())
                         .filter_map(r2il::R2ILOp::transfer)
-                        .filter(|transfer| transfer.direct)
+                        .filter(|transfer| transfer.direct && transfer.target.offset != address)
                         .map(|transfer| transfer.target.offset),
                 );
                 at += lifted.size as usize;

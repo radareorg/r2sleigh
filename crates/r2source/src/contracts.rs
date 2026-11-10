@@ -977,6 +977,9 @@ pub struct SourceResultCarriers {
     /// The high half's register, beside a proven or unproven integer result: a call that reads it
     /// takes the pair (doc/adr-language-profile.md, item 1).
     pub second: Option<CanonicalStorageId>,
+    /// No return leaves in the integer register a byte the body defines or an input's entry byte
+    /// (doc/adr-scratch-result.md, cases 1 to 3), so neither it nor the second register holds a result.
+    pub integer_undefined: bool,
 }
 
 impl SourceResultCarriers {

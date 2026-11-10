@@ -1597,6 +1597,7 @@ fn recover_interface_inner(
                 integer: candidate,
                 float: None,
                 second: None,
+                integer_undefined: false,
             });
         }
         // A body that writes both result registers on its way out hands back one of them: the
@@ -1627,6 +1628,7 @@ fn recover_interface_inner(
                         integer: candidate,
                         float: Some(float),
                         second: None,
+                        integer_undefined: false,
                     });
                     result = RecoveredFunctionResult::Unproven;
                     result_causes.insert(SourceResultCause::Ambiguous);
@@ -1665,6 +1667,7 @@ fn recover_interface_inner(
                         integer: candidate,
                         float: Some(float),
                         second: None,
+                        integer_undefined: true,
                     });
                 }
                 // An argument handed back beside a written float: the callers' reads choose.
@@ -1673,6 +1676,7 @@ fn recover_interface_inner(
                         integer: candidate,
                         float: Some(float),
                         second: None,
+                        integer_undefined: false,
                     });
                 }
                 None => {}
@@ -1725,6 +1729,7 @@ fn recover_interface_inner(
                     integer: low.slot(),
                     float: None,
                     second: Some(high),
+                    integer_undefined: false,
                 });
                 candidate_live_out = both();
             }
@@ -1772,6 +1777,7 @@ fn recover_interface_inner(
                 integer,
                 float: Some(float),
                 second: None,
+                integer_undefined: true,
             });
         }
     }

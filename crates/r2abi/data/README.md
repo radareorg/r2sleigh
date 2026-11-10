@@ -150,7 +150,9 @@ Every row of `types-posix.sdb.txt` and `types-glibc.sdb.txt` names the header it
 a `func.<name>.include=` line and sits under a comment naming its source (`r2abi::library::SOURCES`:
 ISO C17, POSIX.1-2017, POSIX.1-2024, 4.4BSD, glibc, LSB 5.0, GCC, bionic or Microsoft). The bionic,
 KERNEL32 and UCRT tables are cited the same way; a Microsoft row adds `func.<name>.cite=`, the
-reference page and its minimum supported client. A row that spells `...`
+reference page and its minimum supported client. A binary-only LSB 5.0 interface
+(`__stack_chk_fail`) has no header: it cites its LSB section on `func.<name>.cite=` instead, under
+a comment saying it is in the binary standard only. A row that spells `...`
 states its tail on `func.<name>.tail=`: `variadic`, `format(printf|scanf|wprintf|wscanf,<index>)`
 or `va_list(<index>)`, the index counting fixed parameters from zero. A row with no `...` and no
 `.tail=` states a fixed prototype (`Tail::None`). Every row of the other tables is

@@ -143,11 +143,11 @@ NAME=0x004010c0
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x004010c0
 EXPECT=<<EOF
-r2sleigh_result_u64 _dl_relocate_static_pie(void)
+void _dl_relocate_static_pie(void)
 {
-    /* r2dec proof: 1 construct is marked below; 6 source obligations: 0 rendered, 4 elided, 0 refused, 2 residual; 1 statements rendered; the result is unproven (EntryInput): 0 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 5 source obligations: 1 rendered, 4 elided, 0 refused, no call reads the result (assuming closed-world); 1 statements rendered */
     {
-        return r2sleigh_residual_u64(1);
+        return;
     }
 }
 
@@ -517,7 +517,7 @@ CMDS=aa; pdd @ 0x00401660
 EXPECT=<<EOF
 r2sleigh_result_u64 shape_stash(uint64_t* arg0, uint64_t arg1)
 {
-    /* r2dec proof: no individual construct is marked; 12 source obligations: 4 rendered, 8 elided, 0 refused; 2 statements rendered; the result's second register is open: no call read decides it; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 12 source obligations: 4 rendered, 8 elided, 0 refused, no call reads the result (assuming closed-world); 2 statements rendered; the result's second register is open: no call read decides it; the result is unproven (Unread): 1 unproven-return carried */
     {
         r2sleigh_store_u64((void*)(uint64_t)arg0, (uint64_t)arg1);
         return r2sleigh_carrier_u64((uint64_t)arg0);
@@ -628,7 +628,7 @@ r2sleigh_result_u64 mixed_touch(struct fcn_4017ac_arg0* arg0)
     uint16_t tmp_40180a_8_1;
     uint8_t tmp_401818_0_1;
 
-    /* r2dec proof: no individual construct is marked; 53 source obligations: 45 rendered, 8 elided, 0 refused; 12 statements rendered; the result's second register is open: no call read decides it; the result is unproven (Written): 1 unproven-return carried; 1 structure laid out from a parameter's accesses */
+    /* r2dec proof: no individual construct is marked; 53 source obligations: 45 rendered, 8 elided, 0 refused, no call reads the result (assuming closed-world); 12 statements rendered; the result's second register is open: no call read decides it; the result is unproven (Unread): 1 unproven-return carried; 1 structure laid out from a parameter's accesses */
     {
         tmp_4017bc_0_1 = r2sleigh_load_u8((void*)&arg0->f_0);
         r2sleigh_store_u8((void*)&arg0->f_0, (uint8_t)((uint64_t)((uint64_t)(uint8_t)tmp_4017bc_0_1 + (uint64_t)3U) >> 0U));
@@ -1214,7 +1214,7 @@ r2sleigh_result_u64 indirect_store(uint64_t* arg0, uint32_t arg1, uint64_t arg2)
 {
     uint64_t tmp_401f0f_0_1;
 
-    /* r2dec proof: no individual construct is marked; 17 source obligations: 9 rendered, 8 elided, 0 refused; 3 statements rendered; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 17 source obligations: 9 rendered, 8 elided, 0 refused, no call reads the result (assuming closed-world); 3 statements rendered; the result is unproven (Unread): 1 unproven-return carried */
     {
         tmp_401f0f_0_1 = r2sleigh_load_u64((void*)((uint64_t)arg0 + (uint64_t)(uint32_t)arg1 * 8U));
         r2sleigh_store_u64((void*)tmp_401f0f_0_1, (uint64_t)arg2);

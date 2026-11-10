@@ -856,3 +856,17 @@ func.__vsnprintf_chk.arg.5=va_list,ap
 func.__vsnprintf_chk.ret=int
 func.__vsnprintf_chk.include=stdio.h
 func.__vsnprintf_chk.tail=va_list(5,printf,4)
+
+# stdlib.h: ISO C17 7.22.4.1 and 7.22.4.4. abort and exit do not return.
+abort=func
+func.abort.args=0
+func.abort.noreturn=true
+func.abort.ret=void
+func.abort.include=stdlib.h
+
+exit=func
+func.exit.args=1
+func.exit.arg.0=int,status
+func.exit.noreturn=true
+func.exit.ret=void
+func.exit.include=stdlib.h

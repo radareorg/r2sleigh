@@ -319,7 +319,20 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         // A survey that is itself preparing this body is a cycle, which reads as no evidence.
         let key = (CalleeKey::Entry(entry), World::Closed);
         let boundary = self.db.get::<CallBoundary>(&key).ok()?;
-        let decided = super::fates::decide(open, (*boundary).as_ref()?);
+        let boundary = (*boundary).as_ref()?;
+        let overwritten = |lane: r2ssa::site_boundary::LaneId| {
+            let summary = self
+                .db
+                .get::<super::fates::CalleeEntry>(&(entry, self.thumb_at(entry)));
+            (summary.ok().and_then(|summary| *summary))
+                .is_some_and(|summary| summary.overwrites.touches(usize::from(lane.0)))
+        };
+        for dispute in super::fates::disputes(open, boundary, overwritten) {
+            r2il::refusal_evidence!("call-boundary-dispute", "{entry:#x}: {dispute:?}");
+        }
+        let decided = super::fates::decide(open, boundary, || {
+            super::fates::every_way_in(self.db, entry, boundary)
+        });
         r2il::refusal_evidence!(
             "call-boundary",
             "{entry:#x}: closed world decides {decided:?}"

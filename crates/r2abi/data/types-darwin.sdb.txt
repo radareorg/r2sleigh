@@ -17,11 +17,6 @@ func._Exit.arg.0=int,status
 func._Exit.noreturn=true
 func._Exit.ret=void
 
-abort=func
-func.abort.args=0
-func.abort.noreturn=true
-func.abort.ret=void
-
 xalloc_die=func
 func.xalloc_die.args=0
 func.xalloc_die.noreturn=true
@@ -31,12 +26,6 @@ atexit=func
 func.atexit.args=1
 func.atexit.arg.0=func,function
 func.atexit.ret=int
-
-exit=func
-func.exit.args=1
-func.exit.arg.0=int,status
-func.exit.noreturn=true
-func.exit.ret=void
 
 access=func
 func.access.args=2
