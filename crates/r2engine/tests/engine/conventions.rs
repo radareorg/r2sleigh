@@ -155,6 +155,21 @@ fn the_aapcs64_model_overrides_the_cspec_s_zero_extension() {
     assert!(model.forms.save_area.is_some() && !model.forms.variadic_on_stack);
 }
 
+/// AAPCS64 6.1.2: a call keeps the low 8 bytes of `v8` to `v15`, lanes of their vector roots.
+#[test]
+fn the_aapcs64_model_preserves_d8_to_d15_as_lanes() {
+    let model = model("aarch64", None, ConventionId::Aapcs64, Kernel::Linux);
+    let machine = r2sleigh_lift::embedded_machine("aarch64").expect("an embedded machine");
+    let d8 = r2sleigh_lift::lifted_register_storage(&machine.arch, "d8").expect("d8");
+    let lane = (model.preserved.iter())
+        .find(|lane| lane.narrowed() == d8)
+        .unwrap_or_else(|| panic!("{:?}", model.preserved));
+    assert_eq!(lane.bytes, 0..8);
+    assert!(lane.storage.size > 8, "{lane:?}");
+    let lanes = (model.preserved.iter()).filter(|lane| lane.storage.size > lane.bytes.len() as u32);
+    assert_eq!(lanes.count(), 8, "{:?}", model.preserved);
+}
+
 /// AARCH64_apple and Apple arm64: the variadic tail on the stack, no save area, x18 reserved, and
 /// the caller's extension to 32 bits.
 #[test]

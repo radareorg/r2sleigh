@@ -70,6 +70,7 @@ pub mod recover_interface;
 mod reload;
 pub(crate) mod rename;
 pub(crate) mod save_area;
+pub(crate) mod saved_register;
 pub(crate) mod semantic;
 mod slice;
 pub(crate) mod slot_promotion;

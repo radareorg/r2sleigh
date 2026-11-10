@@ -603,36 +603,28 @@ fn non_negative(func: &SSAFunction, defs: &Definitions, var: VarId) -> bool {
     }
 }
 
-/// The places a register the convention preserves is saved into at its entry value; they bound
-/// what an escaped address reaches.
+/// The places a register lane the convention preserves is saved into at its entry value
+/// (`saved_register`); they bound what an escaped address reaches.
 fn saves(
     func: &SSAFunction,
     defs: &Definitions,
     accesses: &BTreeMap<i64, Vec<Access>>,
     machine: &SourceMachineContext,
 ) -> BTreeSet<i64> {
-    // With no convention nothing says which register a callee may keep, so every one is saved.
-    let effect = machine.call_effect();
+    let (effect, stack_pointer) = (machine.call_effect(), machine.stack_pointer_carrier());
+    let saved = |access: &Access| {
+        let val = match func.get_block(access.block)?.ops().get(access.index)? {
+            SSAOp::Store { val, .. } => *val,
+            _ => return None,
+        };
+        crate::saved_register::entry_lane_of_var(func, defs, val)
+            .filter(|lane| crate::saved_register::preserved(effect, stack_pointer, *lane))
+    };
     accesses
         .iter()
         .filter(|(_, list)| {
-            list.iter().any(|access| {
-                access.store
-                    && access.block == func.root()
-                    && func
-                        .get_block(access.block)
-                        .and_then(|block| match block.ops().get(access.index) {
-                            Some(SSAOp::Store { val, .. }) => Some(defs.copied(*val)),
-                            _ => None,
-                        })
-                        .is_some_and(|val| {
-                            // A register the convention preserves: the compiler's save, not a variable.
-                            func.var(val).version == 0
-                                && func.storage_of(val).is_some_and(|storage| {
-                                    storage.space == crate::CanonicalStorageSpace::Register
-                                        && effect.is_none_or(|effect| effect.preserves(storage))
-                                })
-                        })
+            (list.iter()).any(|access| {
+                access.store && access.block == func.root() && saved(access).is_some()
             })
         })
         .map(|(offset, _)| *offset)

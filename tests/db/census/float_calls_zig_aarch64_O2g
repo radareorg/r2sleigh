@@ -83,7 +83,7 @@ void forward(double x, double* p)
 {
     void store(double, double*);
 
-    /* r2dec proof: no individual construct is marked; 14 source obligations: 9 rendered, 5 elided, 0 refused; 3 statements rendered; 2 callee prototypes supplied by the source */
+    /* r2dec proof: no individual construct is marked; 16 source obligations: 9 rendered, 7 elided, 0 refused; 3 statements rendered; 2 callee prototypes supplied by the source */
     {
         store(x, p);
         store(x + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U), p);

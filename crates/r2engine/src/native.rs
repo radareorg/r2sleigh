@@ -2662,14 +2662,38 @@ impl Resolver<'_> {
         (self.resolve(name)).ok_or_else(|| NativeRefusal::UnknownRegister(name.to_owned()))
     }
 
-    /// Every register of a list, whole; addresses are no lanes.
+    /// Every register of a list as the lanes it is of its root; addresses are no lanes.
     fn lanes(&self, list: &[SpecStorage]) -> Box<[LaneSet]> {
         (list.iter())
             .filter_map(|storage| match storage {
-                SpecStorage::Register(name) => self.placed(name).map(LaneSet::whole),
+                SpecStorage::Register(name) => self.placed(name).map(|lane| self.in_root(lane)),
                 SpecStorage::Address { .. } => None,
             })
             .collect()
+    }
+
+    /// A register as bytes of the widest register holding it: AAPCS64 6.1.2's `d8` is `z8` 0..8.
+    fn in_root(&self, lane: CanonicalStorageId) -> LaneSet {
+        let end = |offset: u64, size: u32| offset + u64::from(size);
+        let root = (self.arch.registers.iter())
+            .filter(|root| !root.hidden && root.offset <= lane.offset)
+            .filter(|root| end(lane.offset, lane.size) <= end(root.offset, root.size))
+            .max_by_key(|root| (root.size, std::cmp::Reverse(root.offset)))
+            .map(|root| CanonicalStorageId {
+                space: lane.space,
+                offset: root.offset,
+                size: root.size,
+            });
+        let bytes = |root: CanonicalStorageId| {
+            let start = u8::try_from(lane.offset - root.offset).ok()?;
+            Some(start..start.checked_add(u8::try_from(lane.size).ok()?)?)
+        };
+        match root.and_then(|root| Some((root, bytes(root)?))) {
+            Some((storage, bytes)) if storage.size <= u32::from(u8::MAX) => {
+                LaneSet { storage, bytes }
+            }
+            _ => LaneSet::whole(lane),
+        }
     }
 }
 

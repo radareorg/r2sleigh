@@ -5342,6 +5342,123 @@ fn a_canary_the_function_returns_keeps_its_read() {
     assert!(output.contains("compiler-inserted"), "{output}");
 }
 
+/// gcc -O0's check in the result register: `rax` returns `reload - guard`, zero once the check
+/// passes, so the return reads no guard (bzip2 -O0 `mainQSort3`, hand audit 3.8.4).
+#[test]
+fn a_check_whose_difference_is_returned_reads_no_guard() {
+    let mut bytes = CANARY_CHECKED.to_vec();
+    bytes[0x16] = 0x44; // 1014 mov rax, [rsp+8]
+    bytes[0x1c] = 0x04; // 1019 sub rax, fs:[0x28]
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "canary_difference_returned",
+        },
+        halts: 0x1030,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(thread_pointer_versions(output).is_empty(), "{output}");
+    assert!(output.contains("return 0;"), "{output}");
+    assert!(output.contains("compiler-inserted"), "{output}");
+}
+
+/// gcc's prologue in a function that never returns: the guard is stored and never checked, and
+/// no UB-free code reads it or the slot (bzip2 -O0 `cleanUpAndFail`, hand audit 3.8.4).
+#[test]
+fn an_unchecked_canary_in_a_function_that_never_returns_is_compiler_inserted() {
+    let mut bytes = CANARY_CHECKED[..0x14].to_vec();
+    bytes.extend([0xe8, 0x17, 0x00, 0x00, 0x00]); // 1014 call 0x1030
+    bytes.resize(0x30, 0x90);
+    bytes.extend([0xeb, 0xfe]); // 1030 jmp 0x1030
+    bytes.resize(0x40, 0x90);
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "canary_unchecked",
+        },
+        halts: 0x1030,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(thread_pointer_versions(output).is_empty(), "{output}");
+    assert!(output.contains("compiler-inserted"), "{output}");
+}
+
+/// gcc -O0's `rbx` save, reloaded through the frame base before `leave` (bzip2 -O0 `mapSuffix`).
+/// The stack pointer merges at the reload with no phi, since `leave` redefines it; each edge
+/// hands it the same offset, so the save round-trips (hand audit 3.8.5).
+const SAVE_RELOADED_THROUGH_THE_FRAME_BASE: &[u8] = &[
+    0x55, // 1000 push rbp
+    0x48, 0x89, 0xe5, // 1001 mov rbp, rsp
+    0x53, // 1004 push rbx
+    0x48, 0x83, 0xec, 0x18, // 1005 sub rsp, 0x18
+    0x89, 0xfb, // 1009 mov ebx, edi
+    0x85, 0xff, // 100b test edi, edi
+    0x74, 0x05, // 100d je 0x1014
+    0xe8, 0x1c, 0x00, 0x00, 0x00, // 100f call 0x1030
+    0x89, 0xd8, // 1014 mov eax, ebx
+    0x48, 0x8b, 0x5d, 0xf8, // 1016 mov rbx, [rbp - 8]
+    0xc9, // 101a leave
+    0xc3, // 101b ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 101c padding
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1026 padding
+    0xc3, // 1030 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+];
+
+#[test]
+fn a_save_reloaded_through_the_frame_base_is_the_frames() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: SAVE_RELOADED_THROUGH_THE_FRAME_BASE.to_vec(),
+        name: "save_through_frame_base",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(!output.contains("RBX_0"), "{output}");
+    assert!(!output.contains("held from entry"), "{output}");
+    assert!(!output.contains("r2sleigh_store"), "{output}");
+}
+
+/// AAPCS64 6.1.2 keeps the low 8 bytes of `v8`: `str d8` and `ldr d8` around a call that is
+/// handed a frame address are the frame's save and restore of a lane, which bounds what the
+/// address reaches (toybox, hand audit 3.8.6).
+const LANE_SAVED: &[u8] = &[
+    0xfd, 0x7b, 0xbd, 0xa9, // 1000 stp x29, x30, [sp, #-48]!
+    0xfd, 0x03, 0x00, 0x91, // 1004 mov x29, sp
+    0xe8, 0x0b, 0x00, 0xfd, // 1008 str d8, [sp, #16]
+    0x28, 0x40, 0x60, 0x1e, // 100c fmov d8, d1
+    0xe0, 0x63, 0x00, 0x91, // 1010 add x0, sp, #24
+    0x04, 0x00, 0x00, 0x94, // 1014 bl 0x1024
+    0xe8, 0x0b, 0x40, 0xfd, // 1018 ldr d8, [sp, #16]
+    0xfd, 0x7b, 0xc3, 0xa8, // 101c ldp x29, x30, [sp], #48
+    0xc0, 0x03, 0x5f, 0xd6, // 1020 ret
+    0x1f, 0x00, 0x00, 0xf9, // 1024 str xzr, [x0]
+    0x20, 0x00, 0x80, 0x52, // 1028 mov w0, #1
+    0xc0, 0x03, 0x5f, 0xd6, // 102c ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 1030 nop; nop
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 1038 nop; nop
+];
+
+#[test]
+fn a_saved_vector_lane_is_the_frames() {
+    let machine = Machine::on("aarch64", "aarch64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: LANE_SAVED.to_vec(),
+        name: "lane_saved",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    let proof = (output.lines())
+        .find(|line| line.contains("r2dec proof:"))
+        .unwrap_or_else(|| panic!("a proof line: {output}"));
+    assert!(!proof.contains("residual"), "{output}");
+    assert!(!output.contains("r2sleigh_store"), "{output}");
+}
+
 /// The failure path calls a function that returns, so nothing proves the check is a protector.
 #[test]
 fn a_check_whose_failure_returns_is_not_decided() {

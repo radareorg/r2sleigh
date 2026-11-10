@@ -257,7 +257,7 @@ impl ConventionModel {
             .copied()
             .collect::<Vec<_>>();
         let mut clobbered = (inputs.iter().chain(&outputs).copied())
-            .chain(self.killed.iter().map(|lane| lane.storage))
+            .chain(self.killed.iter().map(LaneSet::narrowed))
             .chain(self.link)
             .collect::<Vec<_>>();
         clobbered.retain(|storage| !kept.iter().any(|kept| overlap(*kept, *storage)));

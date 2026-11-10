@@ -9,6 +9,8 @@ pub(crate) struct StorageBoundary {
     pub(crate) before: ReachingStorageState,
     pub(crate) instruction_start: ReachingStorageState,
     pub(crate) instruction_end: ReachingStorageState,
+    /// No operation of the block before this one writes the storage.
+    pub(crate) entered: bool,
 }
 
 /// One storage's reaching states, solved where asked.
@@ -65,6 +67,22 @@ impl<'a> ReachingStorage<'a> {
         self.boundaries.get(inst).copied()
     }
 
+    /// The state each predecessor hands `inst`'s block, where nothing in the block writes the
+    /// storage before it: a merge keeps no phi of a storage nothing reads there. O(preds).
+    pub(crate) fn arriving(&mut self, inst: InstId) -> Vec<ReachingStorageState> {
+        let Some(block_addr) = self.graph.block_addr_of(inst) else {
+            return Vec::new();
+        };
+        let entered = self.at(inst).is_some_and(|boundary| boundary.entered);
+        if !entered || block_addr == self.function.root() {
+            return Vec::new();
+        }
+        let solved = BTreeMap::new();
+        (self.function.predecessors(block_addr).into_iter())
+            .map(|predecessor| self.exit(predecessor, &solved))
+            .collect()
+    }
+
     fn scan(&mut self, block_addr: u64) {
         let mut state = self.entry(block_addr);
         let Some(block) = self.graph.block_id_for_addr(block_addr) else {
@@ -73,6 +91,7 @@ impl<'a> ReachingStorage<'a> {
         // The machine instruction being walked: its stamp, its start state and its insts.
         let mut pending: (Option<u64>, ReachingStorageState, Vec<InstId>) =
             (None, state, Vec::new());
+        let mut entered = true;
         for &inst in self.graph.op_insts(block) {
             let instruction = self.graph.instruction_for_inst(inst);
             if instruction.is_none() || instruction != pending.0 {
@@ -86,10 +105,13 @@ impl<'a> ReachingStorage<'a> {
                     before: state,
                     instruction_start: pending.1,
                     instruction_end: state,
+                    entered,
                 },
             );
             pending.2.push(inst);
-            state = written(self.graph, inst, self.storage).unwrap_or(state);
+            let write = written(self.graph, inst, self.storage);
+            entered &= write.is_none();
+            state = write.unwrap_or(state);
         }
         self.close(pending.2, state);
     }

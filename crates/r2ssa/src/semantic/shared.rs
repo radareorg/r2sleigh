@@ -1664,8 +1664,8 @@ impl FrameBoundaries {
         };
         let stack_pointer = machine_context.stack_pointer_carrier();
         let saves = graph.insts.iter().filter_map(|inst| match &inst.payload {
-            InstPayload::Op(op) => structural_save(facts, graph, op, |storage| {
-                Some(storage) != stack_pointer && effect.preserves(storage)
+            InstPayload::Op(op) => crate::saved_register::frame_slot(facts, graph, op, |lane| {
+                crate::saved_register::preserved(Some(effect), stack_pointer, lane)
             }),
             InstPayload::Phi { .. } => None,
         });
@@ -1744,36 +1744,6 @@ fn clipped(boundaries: &FrameBoundaries, start: StackAddressRoot, end: i64) -> i
         }
         _ => end,
     }
-}
-
-/// A frame store of a preserved register's value on entry: the slot it
-/// saves to and its width. No local holds the caller's register, so such a
-/// store is the frame's bookkeeping.
-fn structural_save(
-    facts: &DecompilePrepFacts,
-    graph: &SsaGraph,
-    op: &SSAOp<ValueId>,
-    preserved: impl Fn(CanonicalStorageId) -> bool,
-) -> Option<(StackAddressRoot, i64)> {
-    let SSAOp::Store {
-        space: SpaceId::Ram,
-        addr,
-        val,
-    } = *op
-    else {
-        return None;
-    };
-    let root = resolve_stack_root(Some(facts), addr)?;
-    let size = graph.var(val).size;
-    let (storage, ..) = super::certificates::exact_copy_chain_to_entry_storage(graph, val, size)?;
-    if !preserved(storage) {
-        return None;
-    }
-    r2il::refusal_evidence!(
-        "frame-boundary",
-        "{root:?} saves {storage:?}, preserved across calls"
-    );
-    Some((root, i64::from(size)))
 }
 
 pub(crate) fn evidenced_stack_roots(

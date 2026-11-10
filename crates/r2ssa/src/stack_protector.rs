@@ -15,7 +15,7 @@ use crate::frame_address::{Affine, Definitions};
 use crate::function::{EditPlan, SSAFunction, ShapeEdit};
 use crate::machine_context::SourceMachineContext;
 use crate::op::SSAOp;
-use crate::value_table::VarId;
+use crate::value_table::{Minting, VarId};
 
 /// One recognised check: what decides it and which operations the compiler inserted for it.
 struct Check {
@@ -30,7 +30,11 @@ struct Check {
     /// The guard read every other read of the check equals under the premise, and those rereads.
     first: VarId,
     rereads: IdMap<OpId, VarId>,
+    difference: Option<Difference>,
 }
+
+/// The `reload - guard` (or `^`) a condition tests, and its destination.
+type Difference = (OpId, VarId);
 
 /// Decide every stack-protector check the function holds; the operations each one inserted are
 /// recorded on the function for the certificate that elides them.
@@ -55,10 +59,20 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
         .iter()
         .filter_map(|addr| check(func, &defs, &slots, guard, *addr))
         .collect::<Vec<_>>();
-    if checks.is_empty() {
+    let mut checked = IdSet::default();
+    checked.extend(checks.iter().flat_map(|check| check.inserted.iter()));
+    let unchecked = unchecked(
+        func,
+        &defs,
+        guard,
+        machine.stack_pointer_carrier(),
+        &checked,
+    );
+    if checks.is_empty() && unchecked.is_empty() {
         return;
     }
     let mut decided = EditPlan::new();
+    let mut minting = Minting::new(func.values());
     let mut inserted = IdSet::default();
     let removed_edges = (checks.iter())
         .map(|check| (check.block, check.fail))
@@ -86,7 +100,7 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
             pred: check.block,
         });
         inserted.extend(check.inserted.iter());
-        // Under the premise every reread holds what the first read did, so `reload - guard` folds to zero.
+        // Under the premise every reread holds what the first read did, so `reload - guard` is zero.
         for (op, dst) in check.rereads.iter() {
             decided.replace(
                 op,
@@ -96,7 +110,14 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
                 },
             );
         }
+        // Zero where it is defined, so a carrier returned holding it reads no guard.
+        if let Some((op, dst)) = check.difference {
+            let zero = minting.constant(0, func.var(dst).size);
+            decided.replace(op, SSAOp::Copy { dst, src: zero });
+        }
     }
+    decided.adopt(minting.finish());
+    inserted.extend(unchecked.iter());
     // A failure block no other edge reaches goes with the edges into it.
     let failed = checks
         .iter()
@@ -124,6 +145,81 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     func.record_compiler_inserted(inserted, removed, removed_edges);
     // Every decided check removed its failure edge, which holds only of a UB-free source.
     func.record_premise(r2source::Premise::UbFreeSource);
+}
+
+/// The unchecked guard reads, where only frame slots no load reads hold each one, through copies
+/// and lanes, and those stores (gcc's prologue in a function that never returns): a UB-free source
+/// reads neither the guard nor such a slot. One observed read keeps them all. O(ops).
+fn unchecked(
+    func: &SSAFunction,
+    defs: &Definitions,
+    guard: &r2source::SourceStackGuard,
+    stack_pointer: Option<crate::CanonicalStorageId>,
+    checked: &IdSet<OpId>,
+) -> IdSet<OpId> {
+    let Some(stack_pointer) = stack_pointer else {
+        return IdSet::default();
+    };
+    let mut read = IdMap::<VarId, Vec<(i64, i64)>>::new(func.values().len());
+    let mut uses = IdMap::<VarId, Vec<(OpId, &SSAOp<VarId>)>>::new(func.values().len());
+    let mut loads = Vec::new();
+    // A merge is a reader this rule does not follow.
+    let mut merged = IdSet::new(func.values().len());
+    for block in (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr)) {
+        for (_, phi) in block.sited_phis() {
+            merged.extend(phi.sources.iter().map(|(_, source)| *source));
+        }
+        for (id, op) in block.sited() {
+            op.for_each_source(|source| uses.get_or_insert_with(*source, Vec::new).push((id, op)));
+            if let SSAOp::Load { dst, addr, .. } = op {
+                let (root, offset) = defs.affine(func, *addr);
+                let width = func.var(*dst).size;
+                if !checked.contains(id) && is_guard(func, guard, (root, offset), width) {
+                    loads.push((id, *dst));
+                }
+                read.get_or_insert_with(root, Vec::new)
+                    .push((offset, offset + i64::from(width)));
+            }
+        }
+    }
+    let unread_frame_slot = |addr: VarId, width: u32| {
+        let (root, offset) = defs.affine(func, addr);
+        let end = offset + i64::from(width);
+        func.var(root).version == 0
+            && func.storage_of(root) == Some(stack_pointer)
+            && (read.get(root).into_iter().flatten()).all(|(lo, hi)| *hi <= offset || end <= *lo)
+    };
+    let mut inserted = IdSet::default();
+    for (load, loaded) in loads {
+        let (mut taken, mut work) = (vec![load], vec![loaded]);
+        while let Some(var) = work.pop() {
+            if merged.contains(var) {
+                return IdSet::default();
+            }
+            for (id, op) in uses.get(var).into_iter().flatten() {
+                match op {
+                    SSAOp::Copy { dst, .. } | SSAOp::Subpiece { dst, .. } => work.push(*dst),
+                    // `xor eax, eax` reads the guard's lane and computes 0 whatever it holds.
+                    SSAOp::IntXor { a, b, .. } | SSAOp::IntSub { a, b, .. } if a == b => {}
+                    SSAOp::Store { addr, val, .. }
+                        if *val == var && unread_frame_slot(*addr, func.var(var).size) =>
+                    {
+                        taken.push(*id);
+                    }
+                    _ => {
+                        r2il::refusal_evidence!(
+                            "unchecked-guard",
+                            "{:#x}: guard read {load:?} reaches {op:?}, so no read is the prologue's",
+                            func.entry
+                        );
+                        return IdSet::default();
+                    }
+                }
+            }
+        }
+        inserted.extend(taken);
+    }
+    inserted
 }
 
 /// The temporary address arithmetic only inserted operations read: the guard's address the
@@ -283,7 +379,7 @@ fn check(
         SSAOp::CBranch { target, cond } => Some((id, *target, *cond)),
         _ => None,
     })?;
-    let (left, right, equal_when_true) = equality(func, defs, cond)?;
+    let (left, right, equal_when_true, difference) = equality(func, defs, cond)?;
     let left = guard_read(func, defs, slots, guard, left)?;
     let right = guard_read(func, defs, slots, guard, right)?;
     if left.guard != right.guard {
@@ -344,19 +440,24 @@ fn check(
         inserted,
         first: first.1,
         rereads,
+        difference,
     })
 }
 
-/// A condition that is true exactly when two values are equal (or exactly when they differ), and
-/// the two values.
-fn equality(func: &SSAFunction, defs: &Definitions, cond: VarId) -> Option<(VarId, VarId, bool)> {
+/// A condition that is true exactly when two values are equal (or exactly when they differ), the
+/// two values, and the difference the condition tests where it tests one.
+fn equality(
+    func: &SSAFunction,
+    defs: &Definitions,
+    cond: VarId,
+) -> Option<(VarId, VarId, bool, Option<Difference>)> {
     let zero = |var: VarId| func.var(var).constant_bits() == Some(0);
     let (left, right, equal) = match &defs.op(defs.copied(cond))?.1 {
         SSAOp::IntEqual { a, b, .. } => (*a, *b, true),
         SSAOp::IntNotEqual { a, b, .. } => (*a, *b, false),
         SSAOp::BoolNot { src, .. } => {
-            let (left, right, equal) = equality(func, defs, *src)?;
-            return Some((left, right, !equal));
+            let (left, right, equal, difference) = equality(func, defs, *src)?;
+            return Some((left, right, !equal, difference));
         }
         _ => return None,
     };
@@ -369,12 +470,12 @@ fn equality(func: &SSAFunction, defs: &Definitions, cond: VarId) -> Option<(VarI
         None
     };
     if let Some(difference) = difference
-        && let Some((_, SSAOp::IntSub { a, b, .. } | SSAOp::IntXor { a, b, .. })) =
+        && let Some((op, SSAOp::IntSub { dst, a, b } | SSAOp::IntXor { dst, a, b })) =
             defs.op(defs.copied(difference))
     {
-        return Some((*a, *b, equal));
+        return Some((*a, *b, equal, Some((*op, *dst))));
     }
-    Some((left, right, equal))
+    Some((left, right, equal, None))
 }
 
 /// Whether the block ends in a call that does not come back, by the CFG terminator.
