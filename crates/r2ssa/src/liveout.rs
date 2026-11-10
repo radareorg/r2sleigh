@@ -237,6 +237,20 @@ impl FunctionLiveOut {
         (found && !reaches_entry, clobbered_any)
     }
 
+    /// The same, with the returning `blocks` set aside.
+    pub(crate) fn without(&self, blocks: &BTreeSet<u64>) -> Self {
+        let mut kept = Self::default();
+        for (addr, values) in (self.by_return.iter()).filter(|(addr, _)| !blocks.contains(addr)) {
+            values.iter().for_each(|value| {
+                kept.values.insert(*value);
+            });
+            kept.by_return.insert(*addr, values.clone());
+        }
+        kept.unresolved = self.unresolved.difference(blocks).copied().collect();
+        kept.clobbered = self.clobbered.difference(blocks).copied().collect();
+        kept
+    }
+
     /// The values this body defines that reach the end of block `from` in `storage`.
     pub(crate) fn reaching(
         func: &SSAFunction,

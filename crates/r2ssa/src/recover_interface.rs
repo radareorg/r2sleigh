@@ -1373,17 +1373,18 @@ fn recover_interface_inner(
             storage: slot,
             width,
         }) if loader_role.is_none() => {
+            let narrow = CanonicalStorageId {
+                size: u32::from(width.logical),
+                ..slot
+            };
             let observed = match width.fills(slot) {
                 true => slot,
-                false => CanonicalStorageId {
-                    size: u32::from(width.logical),
-                    ..slot
-                },
+                false => joined_with_direct_returns(func, graph, &facts, (slot, narrow)),
             };
             RecoveredFunctionResult::Register(RecoveredResult {
                 slot,
                 observed,
-                signed: width.above == r2source::SourceAbove::Sign,
+                signed: observed == narrow && width.above == r2source::SourceAbove::Sign,
                 float: false,
             })
         }
@@ -2032,6 +2033,40 @@ fn direct_return_result(
         .filter(|(block, _)| !tail_blocks.contains(block))
         .count();
     (resolved > 0).then_some(candidate)
+}
+
+/// The tail callee's `narrow` width joined with every direct return's written width: a wider
+/// direct return widens it, and one whose width is unknown keeps the whole `slot`.
+fn joined_with_direct_returns(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    (slot, narrow): (CanonicalStorageId, CanonicalStorageId),
+) -> CanonicalStorageId {
+    let tails = (facts.call_sites.by_id.values())
+        .filter(|call| call.transfer == crate::CallSiteTransfer::TailCall)
+        .filter_map(|call| graph.block_addr_of(call.at))
+        .collect::<BTreeSet<_>>();
+    let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]).without(&tails);
+    if live_out.unresolved_blocks().next().is_some() {
+        return slot;
+    }
+    let returns = Returns {
+        func,
+        graph,
+        facts,
+        live_out: &live_out,
+    };
+    match recovered_result_over(&returns, slot, false) {
+        RecoveredFunctionResult::Void => narrow,
+        RecoveredFunctionResult::Register(direct) if !direct.float() => {
+            match direct.observed().size > narrow.size {
+                true => direct.observed(),
+                false => narrow,
+            }
+        }
+        _ => slot,
+    }
 }
 
 fn tail_result_storage(facts: &crate::semantic::PreparedFunctionFacts) -> TailResult {

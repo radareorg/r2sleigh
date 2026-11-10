@@ -2597,6 +2597,74 @@ fn a_tail_transfer_to_a_declared_int_returns_the_callees_width() {
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 
+/// `if (edi == 0) jmp rand; else return 0x1122334455667788;`.
+const TAILS_NARROW_BESIDE_A_WIDE_RETURN: &[u8] = &[
+    0x85, 0xff, // 0x1000 test edi, edi
+    0x74, 0x0c, // 0x1002 je 0x1010
+    0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // 0x1004 movabs rax, imm64
+    0xc3, // 0x100e ret
+    0x90, // 0x100f padding
+    0xe9, 0x0b, 0x00, 0x00, 0x00, // 0x1010 jmp 0x1020
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 0x1015 padding
+    0x89, 0xf8, // 0x1020 mov eax, edi
+    0xc3, // 0x1022 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// `TAILS_NARROW_BESIDE_A_WIDE_RETURN`, with `rand` an import's stub at 0x1020.
+struct WideOrTail;
+
+impl r2engine::body::Program for WideOrTail {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = TAILS_NARROW_BESIDE_A_WIDE_RETURN.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        code_region(TAILS_NARROW_BESIDE_A_WIDE_RETURN.len(), vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x1020)
+    }
+}
+
+impl Program for WideOrTail {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "wide_or_tail".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == 0x1020).then(|| "rand".to_owned())
+    }
+}
+
+/// A tail into `int rand(void)` does not narrow a function whose direct return writes eight bytes:
+/// every return path's width joins, so the result stays 64-bit (D161, PR #350 review).
+#[test]
+fn a_narrow_tail_beside_a_wide_return_keeps_the_wide_result() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let text = decompile(&machine.target(), &WideOrTail, BASE)
+        .expect("decompile")
+        .output
+        .text()
+        .to_owned();
+    assert!(text.contains("rand()"), "{text}");
+    assert!(text.contains("uint64_t wide_or_tail("), "{text}");
+    assert!(text.contains("0x1122334455667788"), "{text}");
+}
+
 /// `call f; mov edi, eax; jmp g` over `int f(void)` and `int g(int)`, as gzip's `rpl_fseeko`
 /// hands `fileno`'s result on and tails into `fseeko` on another path.
 const TAILS_AFTER_A_DECLARED_INT: &[u8] = &[
