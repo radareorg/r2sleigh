@@ -52,9 +52,8 @@ fn a_closed_world_read_states_its_premise_and_a_cold_render_stays_unproven() {
     assert!(!text.contains("no call reads the result"), "{text}");
 }
 
-/// AArch64 `keep`: `mov x2, #0x2000; str x1, [x2]; ret`, which hands back x0 as it arrived, and
-/// `caller`: `bl keep; str x0, [x3]; ret`. `long keep(long x, long y){sink=y; return x;}` and
-/// `void f(long x, long y){sink=y;}` are these bytes, so `keep` is never `void` (D208).
+/// AArch64 `keep` (`mov x2, #0x2000; str x1, [x2]; ret`) hands back x0; `caller` is `bl keep;
+/// str x0, [x3]; ret`. `void f(long x, long y){sink=y;}` has `keep`'s bytes: never `void` (D208).
 const KEEP: &[u8] = &[
     0x02, 0x00, 0x84, 0xd2, // 1000 mov x2, #0x2000
     0x41, 0x00, 0x00, 0xf9, // 1004 str x1, [x2]

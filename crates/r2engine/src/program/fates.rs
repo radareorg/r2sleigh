@@ -257,8 +257,7 @@ fn join(lane: &mut JoinedLane, fate: Option<Forwarded>) {
 }
 
 /// What the closed world decides of a body's result from its open interface and its boundary
-/// (doc/adr-call-boundary.md, D166; doc/adr-scratch-result.md, D202). `Read` needs one reading call
-/// and no other reading the other lane; `Void` and `Unread` need every call, every lane dead.
+/// (doc/adr-call-boundary.md, "S7 as built"; D202).
 pub(crate) fn decide(
     open: &r2source::SourceFunctionInterface,
     boundary: &CallBoundary,
@@ -578,9 +577,8 @@ impl<S: Source + 'static> Reading<'_, S> {
         }
     }
 
-    /// The registers the import's placement reads under the bounds rule (S8 `Placement::reads`):
-    /// a count register bounds the vector registers, which the call takes unless its block counts
-    /// none. An import no row binds takes what an unknown callee does.
+    /// What the import's placement reads (S8 `Placement::reads`); its count register bounds the
+    /// vector registers. An import no row binds takes what an unknown callee does.
     fn import_takes(
         &self,
         reads: Option<crate::imports::ImportReads>,
