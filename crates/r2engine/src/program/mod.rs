@@ -40,7 +40,7 @@ use crate::query::db::{Db, Inputs, Query, Retention};
 
 /// Everything a native request needs that is not the decoder itself.
 struct Assembled {
-    convention: &'static r2abi::CallingConvention,
+    convention: &'static r2abi::ConventionRow,
     /// What the default convention says a call does; both instruction sets share one register file.
     call_effect: Option<r2source::SourceCallEffect>,
     compiler: r2sleigh_lift::profile::LanguageProfile,
@@ -97,9 +97,9 @@ impl Machines {
             bits,
             go,
         };
-        let assembled = r2abi::calling_convention(&arch, bits, psabi)
+        let assembled = r2abi::ConventionId::default_for(&arch, bits, psabi)
             .ok_or_else(|| unstated(false))
-            .and_then(|convention| assemble(&machine, container, convention));
+            .and_then(|id| assemble(&machine, container, id.row()));
         let languages = &container.languages;
         let written_in_go = languages.program == SourceLanguage::Go
             || languages
@@ -107,22 +107,22 @@ impl Machines {
                 .iter()
                 .any(|(_, language)| *language == SourceLanguage::Go);
         let convention = written_in_go
-            .then(|| r2abi::go_calling_convention(&arch, bits, psabi, languages.go_version));
-        let abi0 = r2abi::go_abi0_convention(&arch, bits);
+            .then(|| r2abi::ConventionId::go(&arch, bits, psabi, languages.go_version));
+        let abi0 = r2abi::ConventionId::go_abi0(&arch, bits);
         let go = convention.map(|convention| {
             convention
                 .ok_or_else(|| unstated(true))
-                .and_then(|convention| assemble(&machine, container, convention))
+                .and_then(|id| assemble(&machine, container, id.row()))
         });
         let go_abi0 = convention
             .flatten()
             .zip(abi0)
-            .filter(|(convention, abi0)| convention.name != abi0.name)
-            .map(|(_, abi0)| assemble(&machine, container, abi0));
+            .filter(|(convention, abi0)| convention != abi0)
+            .map(|(_, abi0)| assemble(&machine, container, abi0.row()));
         let go_unstated = (go_abi0.is_some() && languages.go_assembly.is_none())
-            .then(|| r2abi::go_unstated_convention(&arch, bits))
+            .then(|| r2abi::ConventionId::go_unstated(&arch, bits))
             .flatten()
-            .map(|convention| assemble(&machine, container, convention));
+            .map(|id| assemble(&machine, container, id.row()));
         Ok(Self {
             machine,
             thumb,
@@ -155,7 +155,7 @@ impl Machines {
 fn assemble(
     machine: &Machine,
     container: &Container,
-    convention: &'static r2abi::CallingConvention,
+    convention: &'static r2abi::ConventionRow,
 ) -> Result<Assembled, Unassembled> {
     let bits = container.arch.bits;
     // The system's ABI says which register it reserves for the thread
@@ -163,24 +163,24 @@ fn assemble(
     // fact, so a static ELF that names no C library has it too; which
     // library's declarations apply is `platform`'s question.
     let psabi = kernel(container);
-    // A convention naming its compiler's prototype runs under it; a PE under Windows', a Mach-O
-    // under Apple's where the language names one; the rest under the usual toolchain's.
-    let specification = match (convention.prototype, container.format) {
-        (Some((compiler, _)), _) => machine
+    // A convention naming its compiler runs under it; the rest under the toolchain the container
+    // names: a PE under Windows', a Mach-O under Apple's where the language has one.
+    let specification = match (convention.cspec.toolchain, container.format) {
+        (r2abi::Toolchain::Compiler(compiler), _) => machine
             .compiler_spec_of(compiler)
             .ok_or(Unassembled::NoCompiler(compiler))?,
-        (None, Format::Pe) => machine
+        (r2abi::Toolchain::Container, Format::Pe) => machine
             .compiler_spec_of("windows")
             .unwrap_or(machine.compiler_spec),
-        (None, Format::MachO) => machine
+        (r2abi::Toolchain::Container, Format::MachO) => machine
             .compiler_spec_of("apple")
             .unwrap_or(machine.compiler_spec),
-        (None, _) => machine.compiler_spec,
+        (r2abi::Toolchain::Container, _) => machine.compiler_spec,
     };
     let compiler = r2sleigh_lift::profile::LanguageProfile::parse(specification)
         .map_err(|error| Unassembled::UnparsedCompiler(error.0))?;
-    let compiler = match convention.prototype {
-        Some((_, prototype)) => compiler
+    let compiler = match convention.cspec.prototype {
+        Some(prototype) => compiler
             .under(prototype)
             .ok_or(Unassembled::NoPrototype(prototype))?,
         None => compiler,

@@ -15,13 +15,15 @@ pub mod statement;
 pub mod syscalls;
 pub mod types;
 
-pub use convention::{Extension, SlotClass};
+pub use convention::{
+    ConventionId, ConventionRow, Cspec, Extension, RegName, Side, SlotClass, SpecOverride,
+    Toolchain,
+};
 pub use data_model::CDataModel;
 pub use declarations::{DataObject, Declarations};
 pub use platform::{
-    CallingConvention, EntryStack, PlatformRegister, RegisterDuty, RegisterSaveArea,
-    SaveAreaAnchor, StackGuard, architecture_registers, calling_convention, go_abi0_convention,
-    go_calling_convention, go_unstated_convention, platform_registers, stack_guard,
+    EntryStack, PlatformRegister, RegisterDuty, RegisterSaveArea, SaveAreaAnchor, StackGuard,
+    architecture_registers, platform_registers, stack_guard,
 };
 pub use prototypes::{
     Arrival, FrameBase, Local, Parameter, Platform, Prototype, Prototypes, Spelled,

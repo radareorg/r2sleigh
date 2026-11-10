@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::TABLE_SWITCH;
 
-use r2abi::{CallingConvention, Platform, Prototypes, calling_convention};
+use r2abi::{ConventionId, ConventionRow, Platform, Prototypes};
 use r2engine::machine::Machine as Embedded;
 use r2engine::native::{NativeTarget, Program, call_effect, decompile};
 use r2sleigh_lift::profile::{LanguageProfile, SpecStorage};
@@ -72,7 +72,7 @@ struct Machine {
 
 /// One convention and what the engine reads beside it.
 struct Under {
-    convention: &'static CallingConvention,
+    convention: &'static ConventionRow,
     compiler: LanguageProfile,
     effect: Option<SourceCallEffect>,
 }
@@ -88,7 +88,9 @@ impl Machine {
             Embedded::new(r2sleigh_lift::embedded_machine(sleigh).expect("embedded machine"));
         let under = |platform: Platform, specification: &str| {
             let compiler = LanguageProfile::parse(specification).expect("parses");
-            let convention = calling_convention(family, bits, platform).expect("a convention");
+            let convention =
+                ConventionId::default_for(family, bits, platform).expect("a convention");
+            let convention = convention.row();
             Under {
                 convention,
                 effect: call_effect(&embedded.arch, bits, platform, &compiler, Some(convention)),
@@ -103,12 +105,12 @@ impl Machine {
             _ => embedded.compiler_spec,
         };
         let default = under(platform, toolchain);
-        let name = default.convention.name;
+        let name = default.convention.id.radare2_name();
         let mut conventions = BTreeMap::from([(name, default)]);
         if let Some(windows) = embedded.compiler_spec_of("windows") {
             let ms = under(Platform::Windows, windows);
-            if ms.convention.name != name {
-                conventions.insert(ms.convention.name, ms);
+            if ms.convention.id.radare2_name() != name {
+                conventions.insert(ms.convention.id.radare2_name(), ms);
             }
         }
         Self {
@@ -6589,8 +6591,9 @@ fn go_machine() -> Machine {
 
 fn go_machine_on(arch: &str) -> Machine {
     let mut machine = Machine::on(arch, arch, 64, Platform::Linux);
-    let convention = r2abi::go_calling_convention(arch, 64, Platform::Linux, Some((1, 21)))
-        .expect("ABIInternal");
+    let convention = ConventionId::go(arch, 64, Platform::Linux, Some((1, 21)))
+        .expect("ABIInternal")
+        .row();
     let compiler = LanguageProfile::parse(
         machine
             .embedded

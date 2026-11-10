@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::body::{BodyError, WINDOW};
-use r2abi::{CallingConvention, Prototypes};
+use r2abi::{ConventionRow, Prototypes};
 use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
 use r2sleigh_lift::profile::{LanguageProfile, SlotClass, SpecStorage};
@@ -145,7 +145,7 @@ pub struct NativeTarget<'a> {
     /// What the platform's ABI says of the convention every function is
     /// assumed to use that the compiler specification does not: its name,
     /// its red zone, where a variadic tail goes.
-    pub convention: &'a CallingConvention,
+    pub convention: &'a ConventionRow,
     /// What that convention says a call does here, resolved once by [`call_effect`].
     pub call_effect: Option<&'a SourceCallEffect>,
     pub compiler: &'a LanguageProfile,
@@ -1223,7 +1223,7 @@ fn analyse(
 ) -> Result<Prepared, NativeRefusal> {
     // A convention whose boundaries carry what none states refuses before anything is read.
     if let Some(reason) = target.convention.refused {
-        let name = target.convention.name;
+        let name = target.convention.id.radare2_name();
         return Err(NativeRefusal::Convention { name, reason });
     }
     let native = Native {
@@ -2477,7 +2477,7 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         r2sleigh_lift::profile::StackGrowth::Lower => SourceStackGrowth::LowerAddresses,
         r2sleigh_lift::profile::StackGrowth::Higher => SourceStackGrowth::HigherAddresses,
     };
-    let redzone = target.convention.red_zone_bytes;
+    let redzone = target.convention.red_zone;
     let roles = SourceMachineRoles::new(Some(return_address), Some(stack_pointer))
         .and_then(|roles| {
             roles.with_stack_allocation_contract(
@@ -2492,13 +2492,13 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
         .with_role_register_names(SourceRoleRegisterNames::new(
             Some(return_address_name),
             Some(stack_pointer_name),
-            target.convention.frame_pointer,
+            target.convention.frame_pointer.map(|name| name.0),
         ));
     // The register the convention keeps a frame base in, where the architecture places it.
     let roles = match target
         .convention
         .frame_pointer
-        .map(|name| storage(target.arch, name))
+        .map(|name| storage(target.arch, name.0))
     {
         Some(Ok(frame_pointer)) => roles
             .with_frame_pointer(frame_pointer)
@@ -2559,36 +2559,40 @@ pub(crate) fn convention_slots(
         .compiler
         .stack_arguments()
         .and_then(|(offset, align)| r2source::SourceStackArgumentPlacement::new(offset, align));
-    Ok(
-        SourceConventionSlots::new(target.convention.name, argument_slots, result_slot)
-            .and_then(|slots| slots.with_float_slots(float_slots, float_result))
-            .and_then(|slots| slots.with_second_result_slot(second_result_slot))
-            .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
-            .with_shared_positions(prototype.shares_positions())
-            .with_stack_arguments(stack_arguments)
-            .with_variadic_tail_on_stack(prototype.variadic_on_stack)
-            .with_register_save_area(target.convention.register_save_area.map(|area| {
-                r2source::SourceRegisterSaveArea {
-                    anchor: match area.anchor {
-                        r2abi::SaveAreaAnchor::Base => r2source::SourceSaveAreaAnchor::Base,
-                        r2abi::SaveAreaAnchor::End => r2source::SourceSaveAreaAnchor::End,
-                    },
-                    offset_field: area.offset_field,
-                    offset_width: area.offset_width,
-                    stack_field: area.stack_field,
-                }
-            }))
-            .with_variadic_count_register(
-                (target.convention.variadic_count_register)
-                    .and_then(|name| storage(target.arch, name).ok()),
-            )
-            .with_entry_stack(target.convention.entry_stack.map(|stack| {
-                r2source::SourceEntryStack {
-                    alignment: stack.alignment,
-                    residue: stack.residue,
-                }
-            })),
+    Ok(SourceConventionSlots::new(
+        target.convention.id.radare2_name(),
+        argument_slots,
+        result_slot,
     )
+    .and_then(|slots| slots.with_float_slots(float_slots, float_result))
+    .and_then(|slots| slots.with_second_result_slot(second_result_slot))
+    .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?
+    .with_shared_positions(prototype.shares_positions())
+    .with_stack_arguments(stack_arguments)
+    .with_variadic_tail_on_stack(prototype.variadic_on_stack)
+    .with_register_save_area(target.convention.save_area.map(|area| {
+        r2source::SourceRegisterSaveArea {
+            anchor: match area.anchor {
+                r2abi::SaveAreaAnchor::Base => r2source::SourceSaveAreaAnchor::Base,
+                r2abi::SaveAreaAnchor::End => r2source::SourceSaveAreaAnchor::End,
+            },
+            offset_field: area.offset_field,
+            offset_width: area.offset_width,
+            stack_field: area.stack_field,
+        }
+    }))
+    .with_variadic_count_register(
+        (target.convention.count_register).and_then(|name| storage(target.arch, name.0).ok()),
+    )
+    .with_entry_stack(
+        target
+            .convention
+            .entry_stack
+            .map(|stack| r2source::SourceEntryStack {
+                alignment: stack.alignment,
+                residue: stack.residue,
+            }),
+    ))
 }
 
 /// A prototype's register entries of one class, in order.
@@ -2623,7 +2627,7 @@ pub fn call_effect(
     bits: u32,
     platform: r2abi::Platform,
     profile: &LanguageProfile,
-    convention: Option<&r2abi::CallingConvention>,
+    convention: Option<&r2abi::ConventionRow>,
 ) -> Option<SourceCallEffect> {
     let prototype = profile.default_prototype()?;
     let place = |name: &str| {
@@ -2689,7 +2693,7 @@ pub fn call_effect(
     // a return hands back every output register.
     let mut call_reads = registers(&mut prototype.input.iter().map(|entry| &entry.at));
     call_reads.extend(
-        convention.and_then(|convention| convention.variadic_count_register.and_then(place)),
+        convention.and_then(|convention| convention.count_register.and_then(|name| place(name.0))),
     );
     let return_reads = registers(&mut prototype.output.iter().map(|entry| &entry.at));
     SourceBoundaryReads::new(call_reads, return_reads)
@@ -2718,7 +2722,7 @@ fn placed(
 ) -> Option<r2source::SourceStackGuard> {
     let guard = guard?;
     Some(r2source::SourceStackGuard {
-        base: place(guard.register)?,
+        base: place(guard.register.0)?,
         offset: guard.offset,
         width: guard.width,
     })
@@ -2880,8 +2884,7 @@ mod tests {
             r2sleigh_lift::embedded_machine("x86-64").expect("embedded machine"),
         );
         let compiler = LanguageProfile::parse(embedded.compiler_spec).expect("parses");
-        let convention =
-            r2abi::calling_convention("x86-64", 64, r2abi::Platform::Unknown).expect("System V");
+        let convention = r2abi::ConventionId::SysVAmd64.row();
         let effect = call_effect(
             &embedded.arch,
             64,

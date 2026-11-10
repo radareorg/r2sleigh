@@ -65,7 +65,7 @@ impl Placement<'_> {
                 // Only the convention's frame pointer: the stack pointer moves inside the body.
                 let name = self.target.dwarf.name_of(number)?;
                 let frame_pointer = self.target.convention.frame_pointer?;
-                let placed = storage(self.target.arch, frame_pointer).ok()?;
+                let placed = storage(self.target.arch, frame_pointer.0).ok()?;
                 let storage = storage(self.target.arch, name).ok()?;
                 if placed != storage {
                     return None;
