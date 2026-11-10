@@ -50,6 +50,7 @@ pub mod lanes;
 pub mod liveness;
 pub(crate) mod liveout;
 pub(crate) mod machine;
+pub mod site_boundary;
 pub use arch::Arch;
 pub(crate) mod machine_context;
 pub(crate) mod mirror;
