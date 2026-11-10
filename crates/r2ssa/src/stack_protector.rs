@@ -171,16 +171,28 @@ fn unchecked(
         return IdSet::default();
     };
     let mut read = IdMap::<VarId, Vec<(i64, i64)>>::new(func.values().len());
-    let mut uses = IdMap::<VarId, Vec<(OpId, &SSAOp<VarId>)>>::new(func.values().len());
+    let mut uses = Uses::new(func.values().len());
     let mut loads = Vec::new();
-    // A merge is a reader this rule does not follow.
+    // A merge is a reader the guard rule does not follow; the escape walk follows it.
     let mut merged = IdSet::new(func.values().len());
+    let mut merges = IdMap::<VarId, Vec<VarId>>::new(func.values().len());
+    let entry =
+        |var: VarId| func.var(var).version == 0 && func.storage_of(var) == Some(stack_pointer);
+    let mut frame = Vec::new();
     for block in (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr)) {
         for (_, phi) in block.sited_phis() {
-            merged.extend(phi.sources.iter().map(|(_, source)| *source));
+            for (_, source) in &phi.sources {
+                merged.insert(*source);
+                merges.get_or_insert_with(*source, Vec::new).push(phi.dst);
+            }
         }
         for (id, op) in block.sited() {
-            op.for_each_source(|source| uses.get_or_insert_with(*source, Vec::new).push((id, op)));
+            op.for_each_source(|source| {
+                uses.get_or_insert_with(*source, Vec::new).push((id, op));
+                if entry(*source) {
+                    frame.push(*source);
+                }
+            });
             if let SSAOp::Load { dst, addr, .. } = op {
                 let (root, offset) = defs.affine(func, *addr);
                 let width = func.var(*dst).size;
@@ -192,11 +204,14 @@ fn unchecked(
             }
         }
     }
+    let escaped = escapes(func, defs, entry, frame, (&uses, &merges));
     let unread_frame_slot = |addr: VarId, width: u32| {
         let (root, offset) = defs.affine(func, addr);
         let end = offset + i64::from(width);
-        func.var(root).version == 0
-            && func.storage_of(root) == Some(stack_pointer)
+        let reached = |at: &i64| offset <= *at && *at < end;
+        entry(root)
+            && !escaped.whole
+            && !escaped.at.iter().any(reached)
             && (read.get(root).into_iter().flatten()).all(|(lo, hi)| *hi <= offset || end <= *lo)
     };
     let mut inserted = IdSet::default();
@@ -230,6 +245,67 @@ fn unchecked(
         inserted.extend(taken);
     }
     inserted
+}
+
+/// The frame addresses a body hands on: each one put anywhere but a load's or store's address, by
+/// its entry offset, or `whole` where no offset places it (a callee may then read the slot).
+struct Escapes {
+    whole: bool,
+    at: Vec<i64>,
+}
+
+/// Each variable's readers.
+type Uses<'f> = IdMap<VarId, Vec<(OpId, &'f SSAOp<VarId>)>>;
+
+/// One walk from the entry stack pointer through exact address arithmetic and merges. O(ops).
+fn escapes(
+    func: &SSAFunction,
+    defs: &Definitions,
+    entry: impl Fn(VarId) -> bool,
+    frame: Vec<VarId>,
+    (uses, merges): (&Uses<'_>, &IdMap<VarId, Vec<VarId>>),
+) -> Escapes {
+    let mut escaped = Escapes {
+        whole: false,
+        at: Vec::new(),
+    };
+    let exact = |var: VarId| {
+        let (root, offset) = defs.affine(func, var);
+        entry(root).then_some(offset)
+    };
+    let mut seen = IdSet::new(func.values().len());
+    let mut work = frame;
+    while let Some(var) = work.pop() {
+        if !seen.insert(var) {
+            continue;
+        }
+        let mut hand_on = || match exact(var) {
+            Some(offset) => escaped.at.push(offset),
+            None => escaped.whole = true,
+        };
+        for (_, op) in uses.get(var).into_iter().flatten() {
+            match op {
+                SSAOp::Load { addr, .. } if *addr == var => {}
+                SSAOp::Store { addr, val, .. } if *addr == var && *val != var => {}
+                SSAOp::Copy { dst, .. }
+                | SSAOp::CallRestore { dst, .. }
+                | SSAOp::IntAdd { dst, .. }
+                | SSAOp::IntSub { dst, .. }
+                    if exact(*dst).is_some() =>
+                {
+                    work.push(*dst);
+                }
+                _ => hand_on(),
+            }
+        }
+        for dst in merges.get(var).into_iter().flatten() {
+            match exact(*dst) {
+                Some(_) => work.push(*dst),
+                None => hand_on(),
+            }
+        }
+    }
+    escaped
 }
 
 /// The temporary address arithmetic only inserted operations read: the guard's address the

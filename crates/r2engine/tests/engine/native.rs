@@ -5410,6 +5410,30 @@ fn a_value_computed_from_the_difference_before_the_branch_is_not_zeroed() {
     assert!(output.contains("FS_OFFSET_0"), "{output}");
 }
 
+/// The slot's address goes to a callee that may read the stored guard, so the store stays (PR 354).
+#[test]
+fn an_unchecked_canary_whose_slot_address_escapes_stays() {
+    let mut bytes = CANARY_CHECKED[..0x14].to_vec();
+    bytes.extend([0x48, 0x8d, 0x7c, 0x24, 0x08]); // 1014 lea rdi, [rsp + 8]
+    bytes.extend([0xe8, 0x12, 0x00, 0x00, 0x00]); // 1019 call 0x1030
+    bytes.resize(0x30, 0x90);
+    bytes.extend([0xeb, 0xfe]); // 1030 jmp 0x1030
+    bytes.resize(0x40, 0x90);
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "canary_slot_escapes",
+        },
+        halts: 0x1030,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("compiler-inserted"), "{output}");
+    assert!(response.premises.is_empty(), "{:?}", response.premises);
+}
+
 /// A body that returns and stores the guard without checking it is no prologue the bytes prove.
 #[test]
 fn an_unchecked_canary_in_a_function_that_returns_stays() {
