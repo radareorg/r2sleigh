@@ -120,3 +120,41 @@ fn a_written_result_no_call_reads_is_unread_never_void() {
         "{text}"
     );
 }
+
+/// `UNREAD`, then `mov eax, 1; ret` at 0x1020, which no function holds.
+const UNREAD_BESIDE_CODE: &[u8] = &[
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1000 mov eax, 7
+    0xc3, // 1005 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1006 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x31, 0xc0, // 1015 xor eax, eax
+    0x31, 0xd2, // 1017 xor edx, edx
+    0x0f, 0x57, 0xc0, // 1019 xorps xmm0, xmm0
+    0x0f, 0x57, 0xc9, // 101c xorps xmm1, xmm1
+    0xc3, // 101f ret
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1020 mov eax, 1
+    0xc3, // 1025 ret
+];
+
+/// Code no body holds may call `f`, so the calls read are not every way in: the closed world refuses
+/// before it builds the reference index, and the result stays unproven with no premise.
+#[test]
+fn code_no_body_holds_refuses_the_closed_world_before_the_reference_index() {
+    let program = Literal::of_code(
+        UNREAD_BESIDE_CODE,
+        &[("f", BASE, 0x06), ("caller", BASE + 0x10, 0x10)],
+    );
+    let mut open = OpenProgram::of(program);
+    open.analyse_program().expect("it surveys");
+    let rendering = open.rendered(BASE).expect("it renders");
+    let text = rendering.response.output.into_text();
+    assert!(text.starts_with("r2sleigh_result_u64 f("), "{text}");
+    assert!(!text.contains("no call reads the result"), "{text}");
+    assert!(
+        !rendering
+            .response
+            .premises
+            .contains(&r2source::Premise::ClosedWorld)
+    );
+    assert_eq!(open.analysis_stats().references.computed, 0);
+}

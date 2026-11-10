@@ -497,6 +497,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             callee_reads: self.db.query_stats::<analysis::CalleeReads>(),
             resolved: self.db.query_stats::<resolved::Resolved>(),
             rendered: self.db.query_stats::<analysis::Rendered>(),
+            references: self.db.query_stats::<requests::ReferenceIndex>(),
         }
     }
 
