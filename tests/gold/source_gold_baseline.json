@@ -16,14 +16,14 @@
     "sym.register_tm_clones"
   ],
   "facts": {
-    "correct": 33,
+    "correct": 19,
     "missing": 0,
-    "marked_wrong": 3,
-    "silently_wrong": 15
+    "marked_wrong": 18,
+    "silently_wrong": 14
   },
-  "recovery_rate": 0.6471,
-  "soundness_rate": 0.6875,
-  "soundness_without_qualifier": 0.8462,
+  "recovery_rate": 0.3725,
+  "soundness_rate": 0.5758,
+  "soundness_without_qualifier": 0.7917,
   "silent": [
     "fnv1a32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
     "fnv1a64 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
@@ -37,7 +37,6 @@
     "murmur3_32 parameter 0: expected 'const uint8_t*', said 'void*'",
     "xxhash32 parameter 0: expected 'const uint8_t*', said 'uint64_t'",
     "siphash24 parameter 0: expected 'const uint8_t*', said 'uint64_t'",
-    "pearson return: expected 'uint8_t', said 'uint32_t'",
     "pearson parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
     "unaligned_words parameter 0: expected 'const uint8_t*', said 'void*'"
   ],
@@ -47,9 +46,6 @@
       "pointer_as_integer": 2,
       "qualifier": 9,
       "sign": 1
-    },
-    "return": {
-      "width_wider": 1
     }
   },
   "marked_buckets": {
@@ -57,8 +53,8 @@
       "pointer_as_integer": 1
     },
     "return": {
-      "void_vs_value": 1,
-      "width_wider": 1
+      "other": 16,
+      "void_vs_value": 1
     }
   },
   "return_presence": {
@@ -92,7 +88,6 @@
     "murmur3_32 parameter 0: expected 'const uint8_t*', said 'void*'": "the parameter is certified a pointer, but its accesses read several widths, so no one pointee is proven",
     "xxhash32 parameter 0: expected 'const uint8_t*', said 'uint64_t'": "no certified memory access is attributed to this parameter (reads through memcpy or a pointer advanced in a loop), so it keeps its carrier width",
     "siphash24 parameter 0: expected 'const uint8_t*', said 'uint64_t'": "no certified memory access is attributed to this parameter (reads through memcpy or a pointer advanced in a loop), so it keeps its carrier width",
-    "pearson return: expected 'uint8_t', said 'uint32_t'": "the result is zero-extended into eax, and the carrier width is what the body proves",
     "pearson parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
     "unaligned_words parameter 0: expected 'const uint8_t*', said 'void*'": "the parameter is certified a pointer, but its accesses read several widths, so no one pointee is proven"
   }

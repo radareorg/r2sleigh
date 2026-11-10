@@ -255,6 +255,13 @@ def declared(dwarf: Dwarf, sub) -> Declared:
 
 
 PRESENCE = ("void_to_void", "void_to_value", "value_to_void", "value_to_value")
+# D201's carrier typedef states where the machine leaves a result and claims no C type (doc/adr-scratch-result.md).
+UNPROVEN_RESULT = re.compile(r"r2sleigh_result_u\d+")
+
+
+def unproven(actual: c_types.CType) -> bool:
+    """A result spelled through the carrier typedef: the engine marks it unproven, so it is no silent claim."""
+    return actual.kind == c_types.NAMED and UNPROVEN_RESULT.fullmatch(actual.name) is not None
 
 
 @dataclass
@@ -290,12 +297,13 @@ def score(truth: dict[int, Declared],
         if actual == expected:
             counts["correct"] += 1
             return
-        how = "marked" if seen.marked else "silent"
-        counts["marked_wrong" if seen.marked else "silently_wrong"] += 1
+        marked = seen.marked or unproven(actual)
+        how = "marked" if marked else "silent"
+        counts["marked_wrong" if marked else "silently_wrong"] += 1
         kind = c_types.classify(expected, actual)
         by_kind = tally.wrong.setdefault(how, {}).setdefault(role, {})
         by_kind[kind] = by_kind.get(kind, 0) + 1
-        if not seen.marked:
+        if not marked:
             # A silent error has to be nameable, or a gate that catches one
             # tells nobody which fact to go and look at.
             tally.silent.append(f"{label}: expected {c_types.spell(expected)!r}, said {c_types.spell(actual)!r}")
@@ -320,7 +328,7 @@ def presence(tally: Tally, expected: c_types.CType, actual: c_types.CType, seen:
     cell = tally.presence[f"{'void' if gone[0] else 'value'}_to_{'void' if gone[1] else 'value'}"]
     cell["total"] += 1
     if gone[0] != gone[1]:
-        cell["silent"] += not seen.marked
+        cell["silent"] += not (seen.marked or unproven(actual))
 
 
 PLACEHOLDERS = {"todo", "tbd", "fixme", "xxx", "wip"}

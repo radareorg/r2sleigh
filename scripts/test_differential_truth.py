@@ -758,6 +758,17 @@ class Presence(unittest.TestCase):
         cells = self.cells("void f(void)", "uint32_t fcn_1000(void)", marked=True)
         self.assertEqual(cells["void_to_value"], {"total": 1, "silent": 0})
 
+    def test_a_result_spelled_through_the_carrier_typedef_is_marked(self) -> None:
+        # D201: `r2sleigh_result_u32` says where the machine leaves a value and claims no C type.
+        cells = self.cells("void f(void)", "r2sleigh_result_u32 fcn_1000(void)")
+        self.assertEqual(cells["void_to_value"], {"total": 1, "silent": 0})
+        code, report, _ = run_main({0x1000: "int32_t f(void)"}, {0x1000: fn("r2sleigh_result_u32 fcn_1000(void)")})
+        self.assertEqual((code, report["facts"]["silently_wrong"], report["facts"]["marked_wrong"]), (0, 0, 1))
+
+    def test_another_typedef_named_result_is_a_silent_claim(self) -> None:
+        code, report, _ = run_main({0x1000: "int32_t f(void)"}, {0x1000: fn("r2sleigh_result_x fcn_1000(void)")})
+        self.assertEqual((code, report["facts"]["silently_wrong"]), (1, 1))
+
     def test_a_returned_value_that_agrees_is_never_silent(self) -> None:
         self.assertEqual(self.cells("int32_t f(void)", "int32_t fcn_1000(void)")["value_to_value"], {"total": 1, "silent": 0})
 
