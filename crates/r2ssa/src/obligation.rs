@@ -3053,16 +3053,9 @@ mod tests {
             .values()
             .next()
             .expect("return boundary");
-        let parameter = artifact
-            .facts()
-            .boundaries
-            .parameters
-            .get(&0)
-            .expect("exact ABI parameter identity");
-        assert_eq!(
-            parameter.register(),
-            Some((parameter_storage, parameter_storage))
-        );
+        let parameter = artifact.facts().boundaries.parameters[&0];
+        let lanes = Some((parameter_storage, parameter_storage));
+        assert_eq!(parameter.register(), lanes, "exact ABI parameter identity");
         assert_eq!(parameter.logical_value, None);
         // A plain interface's slot roles are not exact, which used to make the
         // whole model incoherent and empty the return boundary. The return
