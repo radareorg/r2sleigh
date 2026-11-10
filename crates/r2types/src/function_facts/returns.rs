@@ -23,6 +23,8 @@ pub enum ReturnTypeFact {
     Unproven {
         carrier: Option<CTypeLike>,
         cause: Option<UnprovenCause>,
+        /// Whether the returns spell their values through the carrier: r2ssa states a register.
+        spelled: bool,
     },
     Refused(ReturnTypeRefusal),
 }
@@ -127,14 +129,15 @@ impl ReturnTypeFact {
         matches!(self, Self::Unproven { .. })
     }
 
-    /// The result type a caller's declaration states: the decided type, or a written result's
-    /// carrier, the typedef's target (doc/adr-scratch-result.md, "S1 and S2 as built").
+    /// The result type a caller's declaration states: the decided type, or a spelled unproven
+    /// result's carrier, the typedef's target (doc/adr-scratch-result.md, "S1 and S2 as built").
     pub fn signature_type(&self) -> Option<&CTypeLike> {
         match self {
             Self::Decided { ty, .. } => Some(ty),
             Self::Unproven {
                 carrier,
-                cause: Some(UnprovenCause::Written),
+                spelled: true,
+                ..
             } => carrier.as_ref(),
             Self::Unproven { .. } | Self::Refused(_) => None,
         }
@@ -158,7 +161,7 @@ impl ReturnTypeFact {
             .and_then(r2ssa::SourceUnprovenResult::seed)
             .map(|seed| seed.bits);
         let cause = unproven.and_then(|result| UnprovenCause::of(result.causes()));
-        Self::unproven_at(source, seed, cause)
+        Self::unproven_at(source, seed, cause, false)
     }
 
     /// An unproven result at `bits`, else at the convention's storage word.
@@ -166,6 +169,7 @@ impl ReturnTypeFact {
         source: &r2ssa::SsaArtifact,
         bits: Option<u32>,
         cause: Option<UnprovenCause>,
+        spelled: bool,
     ) -> Self {
         let context = source.machine_context();
         let carrier = bits
@@ -174,7 +178,11 @@ impl ReturnTypeFact {
             })
             .filter(|bits| CTypeLike::is_integer_width(*bits))
             .map(CTypeLike::uint);
-        Self::Unproven { carrier, cause }
+        Self::Unproven {
+            carrier,
+            cause,
+            spelled,
+        }
     }
 
     /// What this return type rests on (doc/adr-provenance.md, C2); none where it is refused. A type
@@ -235,7 +243,12 @@ impl ReturnTypeFact {
         }
         // A body's integer result no declaration and no reading call decides is written, not proven.
         if let Some(bits) = interface.and_then(written_bits) {
-            return Self::unproven_at(source, Some(bits), Some(UnprovenCause::Written));
+            let cause =
+                match interface.is_some_and(r2ssa::SourceFunctionInterface::result_holds_input) {
+                    true => UnprovenCause::EntryInput,
+                    false => UnprovenCause::Written,
+                };
+            return Self::unproven_at(source, Some(bits), Some(cause), true);
         }
         // A return whose result r2ssa left unproven hands back something no exit can type.
         let unproven = interface.map(r2ssa::SourceFunctionInterface::return_kind)

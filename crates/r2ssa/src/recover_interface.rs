@@ -181,6 +181,8 @@ pub struct RecoveredInterface {
     closed_world: bool,
     /// Whether the callers' reads chose the result register (a float, a pair, an argument).
     result_read: bool,
+    /// Whether some return hands back a parameter through a merge: an entry input, spelled.
+    result_holds_input: bool,
 }
 
 impl RecoveredInterface {
@@ -805,16 +807,18 @@ fn returned_result(
     facts: &crate::semantic::PreparedFunctionFacts,
     live_out: &crate::liveout::FunctionLiveOut,
     slots: &SourceConventionSlots,
-) -> (RecoveredFunctionResult, bool) {
+) -> (RecoveredFunctionResult, Returned) {
     let Some(slot) = slots.result_slot() else {
-        return (RecoveredFunctionResult::Unproven, false);
+        return (RecoveredFunctionResult::Unproven, Returned::Value);
     };
     let entry_undefined = entry_defines_nothing(graph, slots, slot);
-    // A path whose carrier holds the caller's value (no definition, or a merge arm of the entry
-    // value) is untouched; where that entry byte defines nothing (case 1) it leaves no result.
+    let input =
+        (slots.argument_slots().iter()).any(|argument| argument.location() == slot.location());
+    let merged_entry = returns_the_callers_value(graph, live_out, slot);
+    // A path holding the caller's carrier is untouched, unless its byte defines nothing (case 1)
+    // or a merge hands back the parameter in an argument register, a value the text spells.
     let untouched = !entry_undefined
-        && (live_out.unresolved_blocks().next().is_some()
-            || returns_the_callers_value(graph, live_out, slot));
+        && (live_out.unresolved_blocks().next().is_some() || (merged_entry && !input));
     let result = if !live_out.has_returns() {
         if closed_by_calls_that_do_not_return(func) {
             RecoveredFunctionResult::Void
@@ -848,7 +852,26 @@ fn returned_result(
         && live_out.has_returns()
         && live_out.clobbered_blocks().next().is_none()
         && untouched;
-    (result, handed_back)
+    if result.register().is_some() && merged_entry && input {
+        return (result, Returned::Input);
+    }
+    (
+        result,
+        if handed_back {
+            Returned::HandedBack
+        } else {
+            Returned::Value
+        },
+    )
+}
+
+/// How the returns hold a register result: a value, the caller's own carrier, or a parameter a
+/// merge hands back (an entry input, spelled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Returned {
+    Value,
+    HandedBack,
+    Input,
 }
 
 /// Whether some return hands back the carrier's entry value, directly or as an
@@ -1469,6 +1492,7 @@ fn recover_interface_inner(
     let mut returned_argument = None;
     let mut result_carriers = None;
     let mut result_read = false;
+    let mut result_holds_input = false;
     // An exact tail-call interface owns this boundary. Looking at the value
     // present before the branch would instead mistake a call argument for the
     // value the callee returns into the same register.
@@ -1478,8 +1502,14 @@ fn recover_interface_inner(
     {
         let mut candidate_live_out =
             crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
-        let handed_back;
-        (result, handed_back) = returned_result(func, graph, &facts, &candidate_live_out, slots);
+        let (recovered, returned) =
+            returned_result(func, graph, &facts, &candidate_live_out, slots);
+        result = recovered;
+        let handed_back = returned == Returned::HandedBack;
+        result_holds_input = returned == Returned::Input;
+        // Every reading call reading the argument register decides it, as for one handed back.
+        result_read |= result_holds_input
+            && result_reads.is_some_and(|reads| reads.integer > 0 && reads.float == 0);
         if result == RecoveredFunctionResult::Unproven {
             let causes = [
                 (!candidate_live_out.has_returns()).then_some(SourceResultCause::NoReturn),
@@ -1913,6 +1943,7 @@ fn recover_interface_inner(
         tail_count,
         closed_world,
         result_read,
+        result_holds_input,
     }))
 }
 
@@ -2327,6 +2358,10 @@ pub fn mint_recovered_interface(
         })
         .map(|interface| match recovered.result_read {
             true => interface.with_result_read_by_callers(),
+            false => interface,
+        })
+        .map(|interface| match recovered.result_holds_input {
+            true => interface.with_result_holding_input(),
             false => interface,
         })
         .map(|interface| match &recovered.unproven_result {

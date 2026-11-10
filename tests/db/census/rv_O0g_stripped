@@ -715,7 +715,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
     uint64_t fcn_120a(uint32_t);
     uint32_t fcn_1277(uint64_t);
     uint64_t fcn_12a8(uint64_t, uint64_t);
-    double fcn_12ef(uint64_t, uint64_t);
+    double fcn_12ef(uint64_t, uint32_t);
     uint64_t fcn_1362(uint32_t);
     uint32_t fcn_1391(uint32_t);
     uint64_t fcn_13e3(uint64_t, uint64_t, uint64_t);

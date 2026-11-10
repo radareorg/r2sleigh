@@ -858,7 +858,6 @@ fn a_caller_takes_the_float_result_beside_an_untouched_integer_register() {
         .response
         .output
         .into_text();
-    // `f` is unproven (a written XMM0 nothing decides), so the call hands it the caller's `rdi`.
-    assert!(text.contains("double f(uint64_t);"), "{text}");
+    assert!(text.contains("double f(uint32_t);"), "{text}");
     assert!(!text.contains("(double)f("), "{text}");
 }

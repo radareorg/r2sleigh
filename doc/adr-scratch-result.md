@@ -191,6 +191,7 @@ What the code said that this ADR did not, and the owner chosen:
 - The carrier is `r2sleigh_result_uN` at the result's observed width, not always u64: a u64 header over a 32-bit value would claim 4 upper bytes. The typedef sits in the unit's prelude, so the definition `pdd` shows starts at the header. `r2sleigh_carrier_uN` is a static inline identity among the prelude's helpers, so `tests/equiv` needs no definition of its own. A value spelled as a residual is not wrapped.
 - The proof line ends `; the result is unproven (CAUSE): N unproven-return carried`. `afi` prints `result: unproven (rax, CAUSE)`.
 - Under `aa` a closed-world call that reads the integer register makes a written result a value (`result_read_by_callers`): 685 source values and 7 source voids. The value claim records no `ClosedWorld` premise on the proof line yet.
+- An argument register a merge hands back (AArch64 x0 = `arg0` on one path) is a spelled value: the result stays a register, its cause EntryInput (`result_holds_input`), and each return carries its value. Treating it as untouched made aarch64 `inverted_void`, `classify` and `avg` (#355) traps, and `avg`'s callers lost its float lane. A reading call decides it a value, as for one handed back.
 - Left: a caller's extern keeps the callee interface's integer type (`uint32_t f(void);`), the typedef's target. A callee D208 leaves Unproven forwards that through every call or tail that returns its value; per-lane pass-through is D212.
 
 Measured, release r2s on the 35 builds (`decbench_baseline.json`), base then head:

@@ -255,7 +255,7 @@ NAME=0x100000650
 FILE=tests/fixtures/manual_limits_O2
 CMDS=aa; pdd @ 0x100000650
 EXPECT=<<EOF
-uint64_t _table_walk(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u32 _table_walk(uint64_t arg0, uint64_t arg1)
 {
     uint64_t x0_1;
     uint64_t x8_2;
@@ -278,11 +278,11 @@ uint64_t _table_walk(uint64_t arg0, uint64_t arg1)
     uint64_t x0_2;
     uint64_t x0_5;
 
-    /* r2dec proof: no individual construct is marked; 93 source obligations: 93 rendered, 0 elided, 0 refused; 51 statements rendered */
+    /* r2dec proof: no individual construct is marked; 92 source obligations: 92 rendered, 0 elided, 0 refused; 51 statements rendered; the result is unproven (EntryInput): 3 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg0 == (uint64_t)0U)) {
             x0_5 = arg0;
-            return (uint64_t)x0_5;
+            return r2sleigh_carrier_u32((uint32_t)x0_5);
         } else {
             x0_1 = arg0;
             x8_2 = 0;
@@ -355,12 +355,12 @@ L1: ;
             }
             {
                 tmp_1000006bc_8_1 = r2sleigh_load_u32((void*)x0_1);
-                return (uint64_t)(uint32_t)((uint32_t)tmp_1000006bc_8_1 + (uint32_t)tmp_100000670_4_1);
+                return r2sleigh_carrier_u32((uint32_t)((uint32_t)tmp_1000006bc_8_1 + (uint32_t)tmp_100000670_4_1));
             }
             {
 L4: ;
                 x0_5 = (uint64_t)(uint32_t)~(uint32_t)((uint64_t)x8_2 >> 0U);
-                return (uint64_t)x0_5;
+                return r2sleigh_carrier_u32((uint32_t)x0_5);
             }
         }
     }
@@ -2873,12 +2873,12 @@ static inline struct r2sleigh_bits_256 r2sleigh_bits_zero_extend_64_256(uint64_t
 r2sleigh_result_u64 _main(uint64_t arg0, uint64_t* arg1)
 {
     uint64_t _fnv_fold(uint64_t, uint64_t);
-    uint64_t _mem_scan2(uint64_t, uint64_t, uint64_t, uint64_t);
+    uint64_t _mem_scan2(uint64_t, uint64_t, uint32_t, uint32_t);
     uint64_t _out_param_parse(uint64_t, uint64_t);
     uint64_t _sparse_switch(uint32_t, uint32_t, uint32_t);
     uint64_t _state_machine(uint64_t);
     uint32_t _struct_nested_array(uint64_t, uint32_t, uint32_t);
-    uint64_t _table_walk(uint64_t, uint64_t);
+    uint32_t _table_walk(uint64_t, uint64_t);
     extern char _manual_sink[];
 
     __uint128_t tmp_lane_100000b70_5_0_1;
@@ -2956,7 +2956,7 @@ r2sleigh_result_u64 _main(uint64_t arg0, uint64_t* arg1)
                 x1_9 = x1_6;
             }
             {
-                x0_14 = _table_walk((uint64_t)((uint64_t)(frame + 0U) + (uint64_t)32U), x1_9);
+                x0_14 = (uint64_t)_table_walk((uint64_t)((uint64_t)(frame + 0U) + (uint64_t)32U), x1_9);
                 tmp_100000c44_8_1 = r2sleigh_load_u32((void*)&_manual_sink);
                 r2sleigh_store_u32((void*)&_manual_sink, (uint32_t)((uint32_t)((uint64_t)x0_14 >> 0U) + (uint32_t)tmp_100000c44_8_1));
                 if ((uint8_t)((int32_t)((uint64_t)arg0 >> 0U) < (int32_t)4U)) {

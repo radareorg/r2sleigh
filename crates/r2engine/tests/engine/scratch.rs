@@ -147,3 +147,51 @@ fn an_entry_float_lane_beside_an_undefined_integer_one_is_unproven() {
         "{text}"
     );
 }
+
+fn aarch64(code: &'static [u8], functions: &[(&str, u64, u64)], at: u64) -> String {
+    rendered(Literal::of_code(code, functions).in_aarch64(), at)
+}
+
+/// AArch64 `cbz w0, 1f; mov w0, #7; 1: ret`: one path hands back `arg0` in x0, an input.
+const A64_HANDS_BACK: &[u8] = &[
+    0x40, 0x00, 0x00, 0x34, // 1000 cbz w0, 0x1008
+    0xe0, 0x00, 0x80, 0x52, // 1004 mov w0, #7
+    0xc0, 0x03, 0x5f, 0xd6, // 1008 ret
+];
+
+#[test]
+fn an_argument_handed_back_is_carried_not_trapped() {
+    let text = aarch64(A64_HANDS_BACK, &[("f", common::BASE, 0x0c)], common::BASE);
+    assert!(text.contains("r2sleigh_carrier_u"), "{text}");
+    assert!(!text.contains("return r2sleigh_residual"), "{text}");
+    assert!(
+        text.contains("the result is unproven (EntryInput)"),
+        "{text}"
+    );
+}
+
+/// AArch64 `avg`'s shape: `cbz x0, 1f; ldr d0, [x0]; add x0, x0, #8; 1: ret`, a double in d0 beside
+/// a pointer in x0; `caller` is `bl avg; fcvtzs w0, d0; ret`.
+const A64_DOUBLE_BESIDE_POINTER: &[u8] = &[
+    0x60, 0x00, 0x00, 0xb4, // 1000 cbz x0, 0x100c
+    0x00, 0x00, 0x40, 0xfd, // 1004 ldr d0, [x0]
+    0x00, 0x20, 0x00, 0x91, // 1008 add x0, x0, #8
+    0xc0, 0x03, 0x5f, 0xd6, // 100c ret
+    0xfd, 0x7b, 0xbf, 0xa9, // 1010 stp x29, x30, [sp, #-16]!
+    0xfb, 0xff, 0xff, 0x97, // 1014 bl 0x1000
+    0x00, 0x00, 0x78, 0x1e, // 1018 fcvtzs w0, d0
+    0xfd, 0x7b, 0xc1, 0xa8, // 101c ldp x29, x30, [sp], #16
+    0xc0, 0x03, 0x5f, 0xd6, // 1020 ret
+];
+
+#[test]
+fn a_callee_s_float_lane_is_the_value_the_caller_reads() {
+    let functions = [
+        ("avg", common::BASE, 0x10),
+        ("caller", common::BASE + 0x10, 0x14),
+    ];
+    let text = aarch64(A64_DOUBLE_BESIDE_POINTER, &functions, common::BASE + 0x10);
+    assert!(text.contains("avg("), "{text}");
+    assert!(!text.contains("never assigned"), "{text}");
+    assert!(!text.contains("r2sleigh_residual_u128"), "{text}");
+}

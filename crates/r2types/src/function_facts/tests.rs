@@ -3334,6 +3334,7 @@ fn a_recovered_graph_is_a_written_carrier_and_a_read_one_the_exact_type() {
         ReturnTypeFact::Unproven {
             carrier: Some(CTypeLike::uint(32)),
             cause: Some(crate::UnprovenCause::Written),
+            spelled: true,
         }
     );
 }
@@ -3359,7 +3360,8 @@ fn no_value_is_void_only_where_the_boundary_proves_it() {
         ),
         ReturnTypeFact::Unproven {
             carrier: None,
-            cause: None
+            cause: None,
+            spelled: false,
         }
     );
 }
@@ -3395,6 +3397,7 @@ fn a_locally_inferred_signature_does_not_decide_the_return() {
         Some(&ReturnTypeFact::Unproven {
             carrier: Some(CTypeLike::uint(64)),
             cause: Some(crate::UnprovenCause::Written),
+            spelled: true,
         })
     );
     let merged = facts

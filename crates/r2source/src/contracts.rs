@@ -1029,6 +1029,8 @@ pub struct SourceFunctionInterface {
     result_carriers: Option<SourceResultCarriers>,
     /// Whether the callers' reads chose the body's result register (doc/adr-scratch-result.md).
     result_read_by_callers: bool,
+    /// Whether a return hands back a parameter through a merge: its cause is an entry input.
+    result_holds_input: bool,
     /// What the logical types are read from (doc/adr-provenance.md):
     /// `DebugInfo` where the binary declares the body, `Declared` where a
     /// library's prototype was found by an import's name, `CarrierWidth`
@@ -1506,6 +1508,7 @@ impl SourceFunctionInterface {
             unproven_result: None,
             result_carriers: None,
             result_read_by_callers: false,
+            result_holds_input: false,
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
     }
@@ -1561,6 +1564,7 @@ impl SourceFunctionInterface {
             unproven_result: self.unproven_result.clone(),
             result_carriers: self.result_carriers,
             result_read_by_callers: self.result_read_by_callers,
+            result_holds_input: self.result_holds_input,
             types: self.types.clone(),
             ..rebuilt
         })
@@ -1878,6 +1882,18 @@ impl SourceFunctionInterface {
     pub const fn with_result_read_by_callers(mut self) -> Self {
         self.result_read_by_callers = true;
         self
+    }
+
+    /// Record that a return hands back a parameter through a merge.
+    #[must_use]
+    pub const fn with_result_holding_input(mut self) -> Self {
+        self.result_holds_input = true;
+        self
+    }
+
+    /// Whether a return hands back a parameter: the result is an entry input, not a written value.
+    pub const fn result_holds_input(&self) -> bool {
+        self.result_holds_input
     }
 
     /// Whether the callers' reads chose the result register: a value, where the body alone proves
