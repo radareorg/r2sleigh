@@ -788,6 +788,8 @@ Gates, release, base `6129d1797`:
   - 1 is a cycle member (rv_O0g_stripped `fcn_1362`), which keeps its open result where its header is closed.
   - 2 are the measurement's own: two static `helper`s in two units, and a function-pointer parameter split at its comma.
   - The ADR's 41 of 234 came from a corpus the audit did not record.
+- `scripts/scratch_void.py` over the 35 DecBench builds: exit 0 at base and head, so no false void beyond the 2 named clones. Source values a closed-world read decides (`unstated`) go from 685 to 1,864, and written source values from 3,273 to 2,092. 12 source voids and 2 source values are `ForwardCycle`. `void-open` stays 272 void and 2 value. Closed-world voids are 0 at base and head, and no `Unread` is decided: at some call, some lane a body may hold is never dead (RDX, XMM1, or a lane its caller returns on). Source voids rendered with a value fall from 7 to 6.
+- The CI source-gold steps (hashes, returns, the CI scratch-void corpus and the 10 shapes) exit as at base, and their reports match base line for line.
 - Census: 10 goldens and 436 lines move. A written result a closed-world call reads goes from `r2sleigh_result_uN` to its integer, and its proof line names the premise. Residual obligations in the moved proof lines are 56 at base and 56 at head.
 - Cost, instructions retired:
   - Cold `pdd`: pumasim `0x23fdf0` 19.78 to 19.73 G, 0pack `0x62ecf0` 15.38 to 15.34 G; RSS unchanged.
