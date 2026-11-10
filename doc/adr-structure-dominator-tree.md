@@ -347,12 +347,20 @@ block does not have, which section 3 (ii) refuses (`a_guard_the_machine_does_not
 The certificate reads transfers and the test's polarity, never the order of plain statements (`plain_statement_opens`,
 ROADMAP D80): a guard that wrote what it frees before its test certifies, and kept wrong text in 45 of 134 changed
 functions in the fourth review's mutant run. The order of the freed statements is held by the unit tests in `guard.rs`
-and by the engine test `a_test_with_nothing_in_its_then_arm_keeps_its_else_and_the_exit_under_it_is_the_guard`, whose
-store the mutant writes before the guard's test with the certificate holding (`scripts/mutants_d75.py`).
+and by the engine tests `a_call_passing_a_register_declared_never_to_return_is_a_guard`, which `scripts/mutants_d75.py`
+sees fail first, and `a_test_with_nothing_in_its_then_arm_keeps_its_else_and_the_exit_under_it_is_the_guard`, whose
+store the mutant writes before the guard's test with the certificate holding.
 The decision reads the callee alone, never what the call passes. `support::exit_calls` builds calls of none to sixteen
 arguments with each `CExpr` form at each position (a match with no wildcard lists the forms, so a new one must join)
-and every ordered pair of forms; the predicate and its five readers run over all of them. `scripts/mutants_d75.py` runs
-each test command on the unmutated tree first and stops if one fails, and a mutant dies only by a test that passed there.
+and every ordered pair of forms. Those vary the top-level form only, so a reader keyed to a value, a symbol, a site or
+a nested form passed them (the sixth review: 50 of 58 such mutants lived, 8 of them moving real output, `exit(0)` and
+`errx(1, fmt, x2_1, x3_2)` among them). `exit_calls` also draws 2,048 calls from a fixed xorshift seed (`Draw`): none
+to twenty arguments, each a tree of every form to depth eight, with the literal values (zero, one, the extremes, a raw
+draw), six symbols, the sites, operators, cast types and roles, and the callee as a function or an import drawn;
+`the_drawn_calls_reach_twenty_arguments_depth_eight_and_both_sites` holds that reach. The predicate and its five
+readers run over all of them, and `scripts/mutants_d75.py` carries the review's 58 mutants as source edits. A reader
+keyed to one value no draw holds, or to a depth past eight, is untested. `scripts/mutants_d75.py` runs each test
+command on the unmutated tree first and stops if one fails, and a mutant dies only by a test that passed there.
 O(statements) and no recursion (below): the statements a guard frees join the sequence the `if` sits in, where they
 are visited in their turn.
 
