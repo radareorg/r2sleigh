@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """D75's mutation target: each mutant of the noreturn guard and of the `never_returns` predicate's readers is applied to
 the tree, the tests that should kill it run, and the file is restored (doc/adr-structure-dominator-tree.md, "the
-noreturn guard").
+noreturn guard"). The predicate takes the callee alone, so a mutant of it reading a call's arguments must not build.
 
   mutants_d75.py [--check] [NAME...]    run (or only --check that every edit applies once) the named mutants, else all
 
 Run from the repository root with the files below unmodified. Each test command first runs once on the unmutated tree,
 and any failure there stops the script (exit 1). A mutant dies only when every test command builds and a test that
-passed on that baseline fails; one that does not build, or that fails no baseline test, is WRONG. Exit 1 where a
-mutant is not killed."""
+passed on that baseline fails; one that does not build, or that fails no baseline test, is WRONG. An UNBUILT mutant
+dies only when the build fails naming a value out of scope (E0425). Exit 1 where a mutant is not killed."""
 
 import os
 import re
@@ -17,6 +17,7 @@ import subprocess
 import sys
 
 R2DEC = "cargo test -p r2dec --lib --all-features"
+ARCH = "cargo test -p r2dec --all-features --test architecture"
 ENGINE = "cargo test -p r2engine --test engine structure::"
 
 SHAPE = "crates/r2dec/src/structure/shape.rs"
@@ -24,19 +25,22 @@ TAILS = "crates/r2dec/src/structure/tails.rs"
 GUARD = "crates/r2dec/src/structure/guard.rs"
 RENDER = "crates/r2dec/src/render/mod.rs"
 
-# The predicate's lookup and its call pattern.
-LOOKUP = "if self.never_return.contains(name)))"
-PREDICATE = "matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })\n            if matches!("
+# The predicate's lookup, over the callee alone.
+LOOKUP = "callee.is_some_and(|callee| self.never_return.contains(callee))"
+
+# The one place a call's callee is read off a statement.
+EXTRACT = "CStmt::Expr(CExpr::Call { func, .. }) => match &**func {"
 
 # Every reader of the predicate: the file, its text, and that text reading `{call}` as the predicate's verdict.
 READERS = [
-    ("tail-run", TAILS, "CStmt::Expr(_) if ev.never_returns(stmt) => Some(Ended::Terminal),",
+    ("tail-run", TAILS, "CStmt::Expr(_) if ev.never_returns(callee_of(stmt)) => Some(Ended::Terminal),",
      "CStmt::Expr(_) if {call} => Some(Ended::Terminal),"),
-    ("completes", TAILS, "CStmt::Expr(_) => !ev.never_returns(stmt),", "CStmt::Expr(_) => !({call}),"),
-    ("falling-ends", TAILS, "CStmt::Expr(_) => Some(usize::from(!ev.never_returns(stmt))),",
+    ("completes", TAILS, "CStmt::Expr(_) => !ev.never_returns(callee_of(stmt)),", "CStmt::Expr(_) => !({call}),"),
+    ("falling-ends", TAILS, "CStmt::Expr(_) => Some(usize::from(!ev.never_returns(callee_of(stmt)))),",
      "CStmt::Expr(_) => Some(usize::from(!({call}))),"),
-    ("arm-end", GUARD, "CStmt::Expr(_) => return ev.never_returns(stmt),", "CStmt::Expr(_) => return {call},"),
-    ("role", RENDER, "false => (traps(stmt) || evidence.never_returns(stmt)).into(),",
+    ("arm-end", GUARD, "CStmt::Expr(_) => return ev.never_returns(callee_of(stmt)),",
+     "CStmt::Expr(_) => return {call},"),
+    ("role", RENDER, "false => (traps(stmt) || evidence.never_returns(callee_of(stmt))).into(),",
      "false => (traps(stmt) || {call}).into(),"),
 ]
 
@@ -48,14 +52,14 @@ def counted(reader, cut):
     """`reader` ignoring a call with `cut` or more arguments."""
     name, path, old, new = next(r for r in READERS if r[0] == reader)
     ev = "evidence" if path == RENDER else "ev"
-    verdict = (f"{ev}.never_returns(stmt) && !matches!(stmt, crate::ast::CStmt::Expr(crate::ast::CExpr::Call {{ args, .. }})"
-               f" if args.len() >= {cut})")
+    verdict = (f"{ev}.never_returns(callee_of(stmt)) && !matches!(stmt, crate::ast::CStmt::Expr(crate::ast::CExpr::Call"
+               f" {{ args, .. }}) if args.len() >= {cut})")
     return (f"{name}-ignores-{cut}-args", [(path, old, new.replace("{call}", verdict))])
 
 
 def name_as(spelled):
-    """The predicate reading the name as `spelled` (a Rust expression over `name`) before the lookup."""
-    return (SHAPE, LOOKUP, f"if self.never_return.contains({spelled})))")
+    """The predicate reading the name as `spelled` (a Rust expression over `callee`) before the lookup."""
+    return (SHAPE, LOOKUP, f"callee.is_some_and(|callee| self.never_return.contains({spelled}))")
 
 
 # One pattern per `CExpr` form an argument may take (crates/r2dec/src/ast.rs).
@@ -78,16 +82,16 @@ SHAPES = [
 
 
 def predicate_unless(condition):
-    """The predicate false for a call whose `args` meet `condition`."""
-    return [(SHAPE, PREDICATE, "matches!(stmt, CStmt::Expr(CExpr::Call { func, args, .. })\n            if !("
-             + condition + ") && matches!(")]
+    """The predicate false for a call whose `args` meet `condition`: it must not build, as no call is in scope."""
+    return [(SHAPE, LOOKUP, f"!({condition}) && {LOOKUP}")]
 
 
 def reader_unless(reader, condition):
     """`reader` reading a call whose `args` meet `condition` as returning."""
     _, path, old, new = next(r for r in READERS if r[0] == reader)
     ev = "evidence" if path == RENDER else "ev"
-    verdict = f"{ev}.never_returns(stmt) && !matches!(stmt, crate::ast::CStmt::Expr({E}::Call {{ args, .. }}) if {condition})"
+    verdict = (f"{ev}.never_returns(callee_of(stmt)) && !matches!(stmt, crate::ast::CStmt::Expr({E}::Call {{ args, .. }})"
+               f" if {condition})")
     return [(path, old, new.replace("{call}", verdict))]
 
 
@@ -144,7 +148,10 @@ CONTENT = [(what, f"args.iter().any(|a| {cond})") for what, cond in ARGUMENT] + 
 # The readers' share: one value, one nested form, the depth, a second symbol, a site.
 READ_CONTENT = ("int0", "cast-binary", "depth3", "var-not-first", "stmt-sited")
 
-ROLE = "false => (traps(stmt) || evidence.never_returns(stmt)).into(),"
+ROLE = "false => (traps(stmt) || evidence.never_returns(callee_of(stmt))).into(),"
+
+# The build a predicate mutant must fail, and the error naming a value out of the predicate's scope.
+UNBUILT = ("cargo build -p r2dec --lib --all-features 2>&1", "error[E0425]")
 
 FREED = "stmts.push(stmt);\n            todo.extend(freed.into_iter().flat_map(Vec::into_iter).rev());"
 
@@ -156,49 +163,53 @@ MUTANTS = [
     ("freed-after-sequence", [(GUARD, FREED, "stmts.push(stmt);\n            todo.splice(0..0, freed.into_iter().flatten());")],
      [ENGINE, R2DEC]),
     # A name read through a cut, a trim or a digit strip.
-    ("name-cut-at-dot", [name_as("name.split('.').next().unwrap_or(name)")], [R2DEC]),
-    ("name-cut-at-at", [name_as("name.split('@').next().unwrap_or(name)")], [R2DEC]),
-    ("name-cut-at-dollar", [name_as("name.split('$').next().unwrap_or(name)")], [R2DEC]),
-    ("name-trimmed", [name_as("name.trim()")], [R2DEC]),
-    ("name-cut-at-colon", [name_as("name.split(':').next().unwrap_or(name)")], [R2DEC]),
-    ("name-digits-stripped", [name_as("name.trim_end_matches(|c: char| c.is_ascii_digit())")], [R2DEC]),
-    ("name-after-last-colon", [name_as("name.rsplit(':').next().unwrap_or(name)")], [R2DEC]),
-    ("name-by-prefix", [(SHAPE, LOOKUP, "if self.never_return.iter().any(|n| name.starts_with(n.as_str()))))")], [R2DEC]),
-    ("name-lowercased", [name_as("&name.to_lowercase()")], [R2DEC]),
+    ("name-cut-at-dot", [name_as("callee.split('.').next().unwrap_or(callee)")], [R2DEC]),
+    ("name-cut-at-at", [name_as("callee.split('@').next().unwrap_or(callee)")], [R2DEC]),
+    ("name-cut-at-dollar", [name_as("callee.split('$').next().unwrap_or(callee)")], [R2DEC]),
+    ("name-trimmed", [name_as("callee.trim()")], [R2DEC]),
+    ("name-cut-at-colon", [name_as("callee.split(':').next().unwrap_or(callee)")], [R2DEC]),
+    ("name-digits-stripped", [name_as("callee.trim_end_matches(|c: char| c.is_ascii_digit())")], [R2DEC]),
+    ("name-after-last-colon", [name_as("callee.rsplit(':').next().unwrap_or(callee)")], [R2DEC]),
+    ("name-by-prefix",
+     [(SHAPE, LOOKUP, "callee.is_some_and(|callee| self.never_return.iter().any(|n| callee.starts_with(n.as_str())))")],
+     [R2DEC]),
+    ("name-lowercased", [name_as("&callee.to_lowercase()")], [R2DEC]),
 ] + [
-    # The predicate itself cut at an argument count.
-    (f"predicate-ignores-{cut}-args",
-     [(SHAPE, PREDICATE, f"matches!(stmt, CStmt::Expr(CExpr::Call {{ func, args, .. }})\n            if args.len() < {cut} && matches!(")],
-     [R2DEC, ENGINE])
-    for cut in CUTS
+    # The predicate cut at an argument count, reading an argument's form, the order `err(value, fmt)` passes them in,
+    # or what a call passes: no call is in its scope, so none builds.
+    (f"predicate-ignores-{cut}-args", predicate_unless(f"args.len() >= {cut}"), UNBUILT) for cut in CUTS
 ] + [
-    # Each reader cut at an argument count.
-    (*counted(reader, cut), [R2DEC, ENGINE])
-    for reader, *_ in READERS for cut in CUTS
-] + [
-    # The predicate reading an argument's form, or the order `err(value, fmt)` passes them in.
-    (f"predicate-ignores-{form}-arg", predicate_unless(ANY_FORM.format(pattern)), [R2DEC, ENGINE])
-    for form, pattern in FORMS
+    (f"predicate-ignores-{form}-arg", predicate_unless(ANY_FORM.format(pattern)), UNBUILT) for form, pattern in FORMS
 ] + [
     ("predicate-ignores-var-then-string",
-     predicate_unless(f"matches!(args.as_slice(), [{E}::Var(_), {E}::StringLit(_), ..])"), [R2DEC, ENGINE]),
+     predicate_unless(f"matches!(args.as_slice(), [{E}::Var(_), {E}::StringLit(_), ..])"), UNBUILT),
 ] + [
-    # Each reader reading an argument's shape.
-    (f"{reader}-ignores-{shape}-arg", reader_unless(reader, condition), [R2DEC, ENGINE])
+    (f"predicate-reads-{what}", predicate_unless(condition), UNBUILT) for what, condition in CONTENT
+] + [
+    # Each reader cut at an argument count, reading an argument's shape, or reading what a call passes; the
+    # architecture test finds the call read in a function deciding the predicate.
+    (*counted(reader, cut), [ARCH, R2DEC, ENGINE])
+    for reader, *_ in READERS for cut in CUTS
+] + [
+    (f"{reader}-ignores-{shape}-arg", reader_unless(reader, condition), [ARCH, R2DEC, ENGINE])
     for reader, *_ in READERS for shape, condition in SHAPES
 ] + [
-    # The predicate and each reader reading what a call passes; the drawn calls in `support::exit_calls` kill them.
-    (f"predicate-reads-{what}", predicate_unless(condition), [R2DEC]) for what, condition in CONTENT
-] + [
-    (f"{reader}-reads-{what}", reader_unless(reader, dict(CONTENT)[what]), [R2DEC])
+    (f"{reader}-reads-{what}", reader_unless(reader, dict(CONTENT)[what]), [ARCH, R2DEC])
     for reader, *_ in READERS for what in READ_CONTENT
+] + [
+    # The callee read off a call only when the call's arguments or site allow it.
+    (f"callee-of-reads-{what}", [(SHAPE, EXTRACT, EXTRACT.replace("{ func, .. })", f"{{ func, {bind}, .. }}) if {cond}"))],
+     [ARCH, R2DEC])
+    for what, bind, cond in [("args", "args", "args.len() < 21"), ("site", "site", "site.is_none_or(|s| s.0 < 64)")]
 ] + [
     # The role reading whether the stage selected anything, in place of the call.
     ("role-when-nothing-selected",
-     [(RENDER, ROLE, "false => (traps(stmt) || (selections.is_empty() && evidence.never_returns(stmt))).into(),")],
+     [(RENDER, ROLE,
+       "false => (traps(stmt) || (selections.is_empty() && evidence.never_returns(callee_of(stmt)))).into(),")],
      [R2DEC, ENGINE]),
     ("role-when-anything-selected",
-     [(RENDER, ROLE, "false => (traps(stmt) || !selections.is_empty() || evidence.never_returns(stmt)).into(),")],
+     [(RENDER, ROLE,
+       "false => (traps(stmt) || !selections.is_empty() || evidence.never_returns(callee_of(stmt))).into(),")],
      [R2DEC, ENGINE]),
 ]
 
@@ -249,6 +260,8 @@ def run(name, edits, tests, check, passed, sh):
     try:
         for path in files:
             open(path, "w").write(text[path])
+        if tests == UNBUILT:
+            return refused(name, sh)
         for command in tests:
             if sh(f"{command} --no-run")[0]:
                 return f"{name}: does not build under `{command}`", False
@@ -265,6 +278,19 @@ def run(name, edits, tests, check, passed, sh):
     return f"{name}: survived {len(tests)} test commands", False
 
 
+def refused(name, sh):
+    """An UNBUILT mutant dies when its build fails naming a value out of scope."""
+    code, out = sh(UNBUILT[0])
+    if code and UNBUILT[1] in out:
+        return f"{name}: does not build ({UNBUILT[1]}), the predicate's type kills it", True
+    return f"{name}: `{UNBUILT[0]}` exits {code} without {UNBUILT[1]}", False
+
+
+def commands(tests):
+    """The commands a mutant's baseline runs."""
+    return [UNBUILT[0]] if tests == UNBUILT else tests
+
+
 def main(args, sh=shell):
     check = "--check" in args
     names = [a for a in args if not a.startswith("--")]
@@ -273,7 +299,7 @@ def main(args, sh=shell):
     if not check:
         if sh("git diff --quiet -- " + " ".join(sorted({p for _, e, _ in MUTANTS for p, _, _ in e})))[0]:
             return "a file a mutant edits has changes: commit or restore them first"
-        passed, reason = baseline(sorted({c for _, _, tests in chosen for c in tests}), sh)
+        passed, reason = baseline(sorted({c for _, _, tests in chosen for c in commands(tests)}), sh)
         if passed is None:
             return reason
     bad = 0

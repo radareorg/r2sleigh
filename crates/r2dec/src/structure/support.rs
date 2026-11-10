@@ -386,8 +386,7 @@ pub(crate) fn declared() -> std::collections::BTreeSet<String> {
 
 /// Whether a statement is a call to `exit`, which is what [`declared`] says.
 pub(crate) fn never_returns(stmt: &CStmt) -> bool {
-    matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })
-        if matches!(&**func, CExpr::External { name, .. } if name == EXIT))
+    super::shape::callee_of(stmt) == Some(EXIT)
 }
 
 /// Markers whose block is their index; the copy of marker `n` is marker `1000 + n`.

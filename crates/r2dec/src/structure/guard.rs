@@ -2,7 +2,7 @@
 //! the arms the other way round `if (!c) { f(); } rest`: `doc/adr-structure-dominator-tree.md`, "the noreturn guard".
 
 use super::condition::{Marks, as_atoms, negated};
-use super::shape::Evidence;
+use super::shape::{Evidence, callee_of};
 use crate::ast::{CExpr, CStmt};
 
 /// A place the pass has still to visit, borrowed from the tree.
@@ -165,7 +165,7 @@ fn ends_in_never_return(mut stmt: &CStmt, ev: &Evidence<'_>) -> bool {
                     None => return false,
                 }
             }
-            CStmt::Expr(_) => return ev.never_returns(stmt),
+            CStmt::Expr(_) => return ev.never_returns(callee_of(stmt)),
             _ => return false,
         }
     }

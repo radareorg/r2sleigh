@@ -147,10 +147,20 @@ impl<'a> Evidence<'a> {
         }
     }
 
-    /// Whether a statement is a call to a callee declared never to return.
-    pub(crate) fn never_returns(&self, stmt: &CStmt) -> bool {
-        matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })
-            if matches!(&**func, CExpr::External { name, .. } if self.never_return.contains(name)))
+    /// Whether `callee` is named and declared never to return; what a call passes cannot reach this.
+    pub(crate) fn never_returns(&self, callee: Option<&str>) -> bool {
+        callee.is_some_and(|callee| self.never_return.contains(callee))
+    }
+}
+
+/// The named callee of a call statement, the one input of [`Evidence::never_returns`].
+pub(crate) fn callee_of(stmt: &CStmt) -> Option<&str> {
+    match stmt {
+        CStmt::Expr(CExpr::Call { func, .. }) => match &**func {
+            CExpr::External { name, .. } => Some(name),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -742,22 +752,19 @@ mod tests {
                 .map(|name| (*name).to_owned())
                 .collect::<BTreeSet<_>>();
             let evidence = Evidence::new(&set, &|_| false);
+            let ends = |stmt: &CStmt| evidence.never_returns(callee_of(stmt));
             for near in names.iter().flat_map(|name| single_edits(name, &alphabet)) {
                 assert_eq!(
-                    evidence.never_returns(&call(&near)),
+                    ends(&call(&near)),
                     set.contains(&near),
                     "{near:?} against {declared:?}"
                 );
             }
             // The declaration decides whatever the call passes, and a statement that is no call never ends.
             for call in exit_calls() {
-                assert_eq!(
-                    evidence.never_returns(&call),
-                    set.contains("exit"),
-                    "{call:?}"
-                );
+                assert_eq!(ends(&call), set.contains("exit"), "{call:?}");
             }
-            assert!(!evidence.never_returns(&CStmt::Expr(CExpr::IntLit(1))));
+            assert!(!ends(&CStmt::Expr(CExpr::IntLit(1))));
         }
     }
 

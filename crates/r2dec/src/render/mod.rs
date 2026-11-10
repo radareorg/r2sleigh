@@ -24,7 +24,7 @@ use crate::codegen::{
 use crate::control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
 use crate::ledger::{ObligationLedger, Outcome};
 use crate::structure::certify::StatementRole;
-use crate::structure::shape::{Evidence, Occurrences};
+use crate::structure::shape::{Evidence, Occurrences, callee_of};
 
 /// One function the staged pipeline rendered, and what became of each obligation.
 pub struct Rendered {
@@ -367,7 +367,7 @@ fn statement_role(
         .any(|id| selections.contains(id))
     {
         true => StatementRole::Selects,
-        false => (traps(stmt) || evidence.never_returns(stmt)).into(),
+        false => (traps(stmt) || evidence.never_returns(callee_of(stmt))).into(),
     }
 }
 

@@ -97,6 +97,26 @@ class Kill(unittest.TestCase):
         self.assertEqual((line, ok), ("m: does not build under `cargo test`", False))
 
 
+class Unbuilt(unittest.TestCase):
+    """A predicate mutant dies only when its build fails naming a value out of scope."""
+
+    def mutant(self, answer):
+        sh = Shell([("cargo build", answer)])
+        with tempfile.TemporaryDirectory() as root:
+            path = pathlib.Path(root, "f.rs")
+            path.write_text("old\n")
+            result = mutants_d75.run("m", [(str(path), "old", "new")], mutants_d75.UNBUILT, False, {}, sh)
+            self.assertEqual(path.read_text(), "old\n", "the file is restored")
+        return result
+
+    def test_a_build_failing_on_a_name_out_of_scope_kills(self):
+        self.assertTrue(self.mutant((101, "error[E0425]: cannot find value `args` in this scope\n"))[1])
+
+    def test_a_build_that_passes_or_fails_otherwise_is_wrong(self):
+        self.assertFalse(self.mutant((0, ""))[1])
+        self.assertFalse(self.mutant((101, "error[E0308]: mismatched types\n"))[1])
+
+
 class Timeout(unittest.TestCase):
     def test_a_command_past_its_time_exits_124_and_a_mutant_under_it_is_wrong(self):
         self.assertEqual(mutants_d75.shell("echo early; sleep 5", timeout=0.5), (124, "early\n"))
