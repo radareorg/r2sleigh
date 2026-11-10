@@ -20,7 +20,7 @@ use super::requests::SurveyQuery;
 use super::{ProgramInputs, Source, View};
 use crate::body::{Body, BodyBlock, UnresolvedReason};
 use crate::native::NativeTarget;
-use crate::query::db::{Db, Query, Retention};
+use crate::query::db::{Db, Hold, Query, Retention};
 
 /// Whether a boundary joins the program's calls: only under `aa`, which surveys every caller.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -51,6 +51,8 @@ pub struct JoinedLane {
     pub held: bool,
     /// Some call reads the lane as the call leaves it.
     pub read: bool,
+    /// The bytes those reads take.
+    pub bytes: ByteMask,
     /// Some call may take, lose or hand on the lane.
     pub unknown: bool,
     /// Some call returns the lane on into a cycle of forwarders.
@@ -70,6 +72,9 @@ pub enum CallBoundary {
         calls: u32,
         /// Whether these calls are every way the image enters the callee.
         exhaustive: bool,
+        /// Whether a forwarding cycle the database cut reached the answer, which then depends on
+        /// the function of the cycle asked first: such an answer is not held.
+        cut: bool,
     },
     Import {
         reads: Option<crate::imports::ImportReads>,
@@ -83,7 +88,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
     const RETENTION: Retention = Retention::Held;
 
     /// Work: an import's placement, `O(locations)`; a function's callers' fates, each body solved
-    /// once and held, then one binary search per call and one held read per forwarding caller.
+    /// once and held, then one binary search per call and one read per forwarding caller. A cut
+    /// answer is solved again from each entry asked, `O(cycle × callers)`.
     fn compute(db: &Db<ProgramInputs<S>>, &(callee, world): &(CalleeKey, World)) -> Self::Value {
         let view = View::new(db, true);
         let walker = super::returns::Walking::new(view.clone(), true).ok()?;
@@ -98,6 +104,13 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
             // A cold `pdd` joins no sites.
             (CalleeKey::Entry(_), World::Open) => None,
             (CalleeKey::Entry(entry), World::Closed) => sites_of(db, entry),
+        }
+    }
+
+    fn hold(value: &Self::Value) -> Hold {
+        match value {
+            Some(CallBoundary::Sites { cut: true, .. }) => Hold::Transient,
+            _ => Hold::Held,
         }
     }
 }
@@ -118,7 +131,7 @@ fn sites_of<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Opti
     let mut unread = false;
     // A call two bodies hold (one walk enters the other's tail) is one call, read once.
     let mut seen = BTreeSet::new();
-    // Each returned lane, by caller and lane, forwarded after the direct fates are joined.
+    // Each returned lane, by caller, lane and bytes, forwarded after the direct fates are joined.
     let mut returned = BTreeSet::new();
     for &caller in survey.callers_of(callee) {
         let Some(Ok(thumb)) = survey.walked_in(caller) else {
@@ -137,24 +150,25 @@ fn sites_of<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Opti
             calls = calls.saturating_add(1);
             let fates = lanes.iter_mut().zip(site.boundary.fates).enumerate();
             for (at, (joined, fate)) in fates {
-                let Some(LaneFate::Returned(_)) = fate else {
+                let Some(LaneFate::Returned(bytes)) = fate else {
                     join(joined, fate.map(Forwarded::Fate));
                     continue;
                 };
-                returned.insert((caller, at));
+                returned.insert((caller, at, bytes));
             }
         }
     }
     // A caller's boundary is asked only where its answer could move the decision: a lane no call
     // reads, while every lane a body may hold is dead or returned (O(callers) asks, each held).
-    for (caller, at) in returned {
+    let mut cut = false;
+    for (caller, at, bytes) in returned {
         let open = lanes
             .iter()
             .any(|lane| lane.held && (lane.unknown || lane.cycle));
         let fate = match (lanes[at].read, open) {
             (true, _) => Some(Forwarded::Fate(LaneFate::Unknown)),
             (false, true) if at >= 3 => Some(Forwarded::Fate(LaneFate::Unknown)),
-            _ => forwarded(db, caller, at),
+            _ => forwarded(db, caller, at, bytes, &mut cut),
         };
         join(&mut lanes[at], fate);
     }
@@ -171,6 +185,7 @@ fn sites_of<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Opti
         lanes,
         calls,
         exhaustive,
+        cut,
     })
 }
 
@@ -204,25 +219,38 @@ enum Forwarded {
     Cycle,
 }
 
-/// The caller's own boundary on lane `at`: what its callers do with the bytes it returns.
+/// The caller's own boundary on lane `at`: what its callers do with the `bytes` a call returns into
+/// it. A cycle the database cut, here or in the caller's answer, sets `cut`.
 fn forwarded<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     caller: u64,
     at: usize,
+    bytes: ByteMask,
+    cut: &mut bool,
 ) -> Option<Forwarded> {
     let boundary = match db.get::<CallBoundary>(&(CalleeKey::Entry(caller), World::Closed)) {
         Ok(boundary) => boundary,
-        Err(_) => return Some(Forwarded::Cycle),
+        Err(_) => {
+            *cut = true;
+            return Some(Forwarded::Cycle);
+        }
     };
     let Some(CallBoundary::Sites {
-        lanes, exhaustive, ..
+        lanes,
+        exhaustive,
+        cut: theirs,
+        ..
     }) = boundary.as_ref()
     else {
         return Some(Forwarded::Fate(LaneFate::Unknown));
     };
+    *cut |= *theirs;
     let lane = lanes[at];
+    // A read takes the callee's bytes only where it reads them, from the lowest (`Live::fate`).
+    let reached = ByteMask(lane.bytes.0 & bytes.0);
     Some(match lane {
-        lane if lane.read => Forwarded::Fate(LaneFate::Read(ByteMask(1))),
+        _ if reached.0 & 1 != 0 => Forwarded::Fate(LaneFate::Read(reached)),
+        _ if reached.0 != 0 => Forwarded::Fate(LaneFate::Unknown),
         lane if lane.cycle => Forwarded::Cycle,
         lane if lane.dead && *exhaustive => Forwarded::Fate(LaneFate::Dead),
         _ => Forwarded::Fate(LaneFate::Unknown),
@@ -236,6 +264,7 @@ fn join(lane: &mut JoinedLane, fate: Option<Forwarded>) {
         Forwarded::Fate(LaneFate::Dead) => {}
         Forwarded::Fate(LaneFate::Read(bytes)) => {
             lane.read = true;
+            lane.bytes = ByteMask(lane.bytes.0 | bytes.0);
             lane.dead = false;
             // A read of the whole register states no width.
             if let Some(width) = bytes.low_run().filter(|width| *width < 16) {

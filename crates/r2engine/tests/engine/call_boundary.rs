@@ -120,3 +120,98 @@ fn a_written_result_no_call_reads_is_unread_never_void() {
         "{text}"
     );
 }
+
+/// `f`: `mov eax, 7; ret`; `g`: `call f; mov al, 0; ret`; `caller`: `call g; mov [rsi], al; ret`.
+const LOW_BYTE_OVERWRITTEN: &[u8] = &[
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1000 mov eax, 7
+    0xc3, // 1005 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1006 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0xb0, 0x00, // 1015 mov al, 0
+    0xc3, // 1017 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1018 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1020 call 0x1010
+    0x88, 0x06, // 1025 mov [rsi], al
+    0xc3, // 1027 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1028 padding
+];
+
+/// `g` returns `f`'s bytes 1 to 7 and its own AL, the one byte `caller` reads: no byte of `f`'s
+/// reaches a read, so forwarding proves no read of `f`'s result.
+#[test]
+fn a_forwarded_read_of_bytes_the_forwarder_wrote_is_no_read_of_the_callee() {
+    let functions = [
+        ("f", BASE, 0x06),
+        ("g", BASE + 0x10, 0x08),
+        ("caller", BASE + 0x20, 0x08),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(LOW_BYTE_OVERWRITTEN, &functions));
+    open.analyse_program().expect("it surveys");
+    let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
+    assert!(text.starts_with("r2sleigh_result_u64 f("), "{text}");
+    assert!(!text.contains("a call reads the result"), "{text}");
+}
+
+/// `a`: `test edi, edi; je 1f; call b; ret; 1: mov eax, 1; ret`; `b` the same over `esi`, calling
+/// `a`; `c`: `call b; ret`; `d`: `call c; mov [rsi], eax; ret`. `a` and `b` forward into each other.
+const FORWARDING_CYCLE: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x06, // 1002 je 0x100a
+    0xe8, 0x07, 0x00, 0x00, 0x00, // 1004 call 0x1010
+    0xc3, // 1009 ret
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 100a mov eax, 1
+    0xc3, // 100f ret
+    0x85, 0xf6, // 1010 test esi, esi
+    0x74, 0x06, // 1012 je 0x101a
+    0xe8, 0xe7, 0xff, 0xff, 0xff, // 1014 call 0x1000
+    0xc3, // 1019 ret
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 101a mov eax, 1
+    0xc3, // 101f ret
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1020 call 0x1010
+    0xc3, // 1025 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1026 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1030 call 0x1020
+    0x89, 0x06, // 1035 mov [rsi], eax
+    0xc3, // 1037 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1038 padding
+];
+
+/// What the closed world decides of `a`'s and `b`'s results once `order` is prepared after `aa`.
+fn closed_after(order: &[u64]) -> Vec<Option<r2source::SourceClosedResult>> {
+    let functions = [
+        ("a", BASE, 0x10),
+        ("b", BASE + 0x10, 0x10),
+        ("c", BASE + 0x20, 0x06),
+        ("d", BASE + 0x30, 0x08),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(FORWARDING_CYCLE, &functions));
+    open.analyse_program().expect("it surveys");
+    for &entry in order {
+        open.prepared(entry).expect("it prepares");
+    }
+    [BASE, BASE + 0x10]
+        .iter()
+        .map(|&entry| {
+            let prepared = open.prepared(entry).expect("it prepares");
+            let shared = prepared.artifact().shared_artifact();
+            let interface = shared.machine_context().function_interface();
+            interface.and_then(r2source::SourceFunctionInterface::closed_result)
+        })
+        .collect()
+}
+
+/// A forwarding cycle's answer is the same whichever of its functions is asked first (AGENTS 7).
+#[test]
+fn a_forwarding_cycle_decides_the_same_whichever_function_is_asked_first() {
+    let a_first = closed_after(&[BASE]);
+    let b_first = closed_after(&[BASE + 0x10]);
+    assert_eq!(a_first, b_first);
+    assert!(
+        a_first
+            .iter()
+            .all(|decided| matches!(decided, Some(r2source::SourceClosedResult::Read(_)))),
+        "{a_first:?}"
+    );
+}
