@@ -796,9 +796,8 @@ mod tests {
         assert_eq!(spelled(&to_declared(widened, &uint32, &int32)), "7");
     }
 
-    /// A callee body's prototype is its own header's projection (W46): its types as the header
-    /// spells them, an unproven result as the carrier typedef, and a `void` result where the call
-    /// defines one is no prototype.
+    /// A callee body's prototype is its header's projection (W46): its types, an unproven result's
+    /// carrier typedef, and no prototype where a `void` header meets a call defining a result.
     #[test]
     fn a_prototype_from_a_callee_body_is_its_header() {
         let int32 = CType::Int {
