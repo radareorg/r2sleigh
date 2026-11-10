@@ -26,7 +26,9 @@
 //! [`MOST_WAYS`] + 1, so the passes are bounded by that height times the loop
 //! nesting, O(ops × W) each for width W in bytes.
 
-use r2source::{CanonicalStorageId, CanonicalStorageSpace};
+use r2source::{
+    CanonicalStorageId, CanonicalStorageSpace, SourceAbove, SourceCallResult, SourceResultWidth,
+};
 
 use crate::SSAFunction;
 use crate::arena::OpId;
@@ -52,6 +54,9 @@ pub enum Fill {
     Sign,
     /// The byte this register byte held when the function was entered.
     Entry(RegisterByte),
+    /// A byte of a call's result register above the width the callee states, which holds nothing
+    /// the program defines (doc/adr-call-boundary.md, "Result width follows five rules").
+    Undefined,
 }
 
 /// More ways than this and a byte is taken as data: it is computed on some
@@ -108,7 +113,7 @@ impl Byte {
             Self::Data | Self::Widened { .. } => true,
             Self::Filled(ways) => ways.iter().any(|way| match way {
                 Fill::Entry(from) => Some(*from) != home,
-                Fill::Zero | Fill::Sign => false,
+                Fill::Zero | Fill::Sign | Fill::Undefined => false,
             }),
         }
     }
@@ -189,13 +194,14 @@ impl Written {
         }
     }
 
-    /// Take the record of a function before anything rewrites it.
-    pub fn capture(function: &SSAFunction) -> Self {
+    /// Take the record of a function before anything rewrites it, each call's result at the width
+    /// `calls` states.
+    pub fn capture(function: &SSAFunction, calls: &CallResults) -> Self {
         let mut records = Records::default();
         let writes = Writes::of(function);
         // Until nothing changes: a loop's phi reads a value defined below it.
         while function.blocks().iter().fold(false, |changed, block| {
-            changed | capture_block(function, &writes, block, &mut records)
+            changed | capture_block(function, (&writes, calls), block, &mut records)
         }) {}
         let conventional = function
             .blocks()
@@ -219,10 +225,64 @@ struct Records {
     defs: IdMap<VarId, OpId>,
 }
 
+/// The result register and width each call states, by the instruction the call was lifted from;
+/// a call that states its register whole is not held.
+#[derive(Debug, Clone, Default)]
+pub struct CallResults(Box<[(u64, CanonicalStorageId, SourceResultWidth)]>);
+
+impl CallResults {
+    /// The narrower results the call sites of `context` state.
+    pub fn of(context: &crate::SourceMachineContext) -> Self {
+        let narrower = (context.call_site_interfaces().iter()).filter_map(|(identity, call)| {
+            match call.result() {
+                SourceCallResult::Register { storage, width } if !width.fills(storage) => {
+                    Some((identity.instruction(), storage, width))
+                }
+                _ => None,
+            }
+        });
+        let held: Vec<_> = narrower.collect();
+        // One instruction is one call; two identities at it state nothing for either.
+        let single = held
+            .chunk_by(|a, b| a.0 == b.0)
+            .filter(|run| run.len() == 1);
+        Self(single.map(|run| run[0]).collect())
+    }
+
+    /// What the call lifted from `instruction` states of its result, in O(log calls).
+    fn at(&self, instruction: u64) -> Option<(CanonicalStorageId, SourceResultWidth)> {
+        let index = (self.0)
+            .binary_search_by_key(&instruction, |held| held.0)
+            .ok()?;
+        let (_, storage, width) = self.0[index];
+        Some((storage, width))
+    }
+}
+
+/// The bytes of a `CallDefine` of `storage` after a call that states `stated`: the callee's
+/// `logical` bytes as data, its stated fill above them; data throughout where it states nothing.
+fn call_defined(
+    storage: Option<CanonicalStorageId>,
+    size: u32,
+    stated: Option<(CanonicalStorageId, SourceResultWidth)>,
+) -> Bytes {
+    let Some((result, width)) = stated.filter(|(result, _)| Some(*result) == storage) else {
+        return vec![Byte::Data; size as usize];
+    };
+    let above = match width.above {
+        SourceAbove::Zero => Byte::fill(Fill::Zero),
+        SourceAbove::Sign => Byte::fill(Fill::Sign),
+        SourceAbove::Undefined => Byte::fill(Fill::Undefined),
+    };
+    let mut bytes = vec![Byte::Data; usize::from(width.logical).min(result.size as usize)];
+    bytes.resize(size as usize, above);
+    bytes
+}
+
 /// One pass over a block's phis and operations; whether any record moved.
 fn capture_block(
     function: &SSAFunction,
-    writes: &Writes,
+    (writes, calls): (&Writes, &CallResults),
     block: &crate::block::SSABlock<VarId>,
     records: &mut Records,
 ) -> bool {
@@ -236,11 +296,23 @@ fn capture_block(
             .fold(vec![Byte::NONE; size], |held, source| join(&held, &source));
         changed |= settle(records, id, phi.dst, bytes);
     }
+    // The call a `CallDefine` follows is the last one above it in its block.
+    let mut stated = None;
     for (id, op) in block.sited() {
+        if op.is_call() {
+            stated = (function.instruction_of(id)).and_then(|instruction| calls.at(instruction));
+        }
         if let Some(dst) = op.dst() {
-            let convention = by_convention(function, writes, op);
-            let facts = |var: &VarId| crate::op::var_facts(function.var(*var));
-            let bytes = transfer(op, convention, facts, |var| read(function, records, *var));
+            let bytes = match op {
+                SSAOp::CallDefine { dst } => {
+                    call_defined(function.storage_of(*dst), function.var(*dst).size, stated)
+                }
+                _ => {
+                    let convention = by_convention(function, writes, op);
+                    let facts = |var: &VarId| crate::op::var_facts(function.var(*var));
+                    transfer(op, convention, facts, |var| read(function, records, *var))
+                }
+            };
             changed |= settle(records, id, *dst, bytes);
         }
     }
@@ -588,5 +660,30 @@ mod tests {
             .map(|byte| Byte::fill(at(byte)))
             .fold(Byte::NONE, |held, byte| held.join(&byte));
         assert_eq!(many, Byte::Data);
+    }
+
+    /// A call to a callee that states a four-byte result defines four bytes of RAX and nothing
+    /// above them: the result is four bytes wide, and a path that computes the rest makes it data.
+    #[test]
+    fn a_call_result_is_as_wide_as_its_callee_states() {
+        let width = SourceResultWidth {
+            logical: 4,
+            above: SourceAbove::Undefined,
+        };
+        let bytes = call_defined(Some(rax()), 8, Some((rax(), width)));
+        assert_eq!(
+            &bytes[..4],
+            &[Byte::Data, Byte::Data, Byte::Data, Byte::Data]
+        );
+        assert!((bytes[4..].iter()).all(|byte| *byte == Byte::fill(Fill::Undefined)));
+        assert_eq!(written_width(&bytes, rax()), Some(4));
+        assert_eq!(bytes[4].join(&Byte::Data), Byte::Data);
+        // Another register the call clobbers, or a call that states nothing, is data throughout.
+        let rcx = CanonicalStorageId { offset: 8, ..rax() };
+        assert_eq!(
+            call_defined(Some(rcx), 8, Some((rax(), width))),
+            vec![Byte::Data; 8]
+        );
+        assert_eq!(call_defined(Some(rax()), 8, None), vec![Byte::Data; 8]);
     }
 }

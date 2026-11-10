@@ -88,14 +88,18 @@ impl ReturnTypeFact {
         matches!(self, Self::Unproven { .. })
     }
 
-    /// An unproven result, declared as the carrier a caller reads after the
-    /// call: the convention's result slot where the interface proves nothing,
-    /// at its storage word, where C has an integer that wide.
+    /// An unproven result, declared at the width the body's own returns write (r2ssa's seed), else
+    /// at the convention's result slot's storage word, where C has an integer that wide.
     fn unproven(source: &r2ssa::SsaArtifact) -> Self {
-        let carrier = source
-            .machine_context()
-            .return_value_carrier()
-            .map(|storage| storage.size.saturating_mul(8))
+        let context = source.machine_context();
+        let seed = (context.function_interface())
+            .and_then(r2ssa::SourceFunctionInterface::unproven_result)
+            .and_then(r2ssa::SourceUnprovenResult::seed)
+            .map(|seed| seed.bits);
+        let carrier = seed
+            .or_else(|| {
+                (context.return_value_carrier()).map(|storage| storage.size.saturating_mul(8))
+            })
             .filter(|bits| CTypeLike::is_integer_width(*bits))
             .map(CTypeLike::uint);
         Self::Unproven { carrier }

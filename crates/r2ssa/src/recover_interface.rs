@@ -17,9 +17,9 @@ use r2source::{
     SourceCallArgumentSpec, SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
     SourceCarrierKind, SourceCarrierProjection, SourceConventionSlots, SourceFloorCause,
     SourceFunctionInterface, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
-    SourceParameterLocation, SourceResultCause, SourceResultSeed, SourceStackSlotSpec, SourceType,
-    SourceTypeGraph, SourceTypeKind, SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall,
-    StackAddressBase,
+    SourceParameterLocation, SourceResultCause, SourceResultSeed, SourceResultWidth,
+    SourceStackSlotSpec, SourceType, SourceTypeGraph, SourceTypeKind, SourceUnprovenCall,
+    SourceUnprovenResult, SourceUnstatedCall, StackAddressBase,
 };
 
 use crate::function::SSAFunction;
@@ -1338,9 +1338,7 @@ fn recover_interface_inner(
                 "a tail transfer owns one path and a direct return owns another; \
                  the direct return's {slot:?} is the result"
             );
-            TailResult::Exact(slot.map_or(SourceCallResult::Void, |storage| {
-                SourceCallResult::Register { storage }
-            }))
+            TailResult::Exact(slot.map_or(SourceCallResult::Void, SourceCallResult::register))
         }
         TailResult::Unproven => {
             r2il::refusal_evidence!(
@@ -1370,13 +1368,22 @@ fn recover_interface_inner(
     // The loader's hook has a void result whatever its tail leaves behind.
     let mut result = match tail {
         TailResult::Unproven => RecoveredFunctionResult::Unproven,
-        TailResult::Exact(SourceCallResult::Register { storage: slot })
-            if loader_role.is_none() =>
-        {
+        // The tail callee's value is this function's, at the width the callee states.
+        TailResult::Exact(SourceCallResult::Register {
+            storage: slot,
+            width,
+        }) if loader_role.is_none() => {
+            let observed = match width.fills(slot) {
+                true => slot,
+                false => CanonicalStorageId {
+                    size: u32::from(width.logical),
+                    ..slot
+                },
+            };
             RecoveredFunctionResult::Register(RecoveredResult {
                 slot,
-                observed: slot,
-                signed: false,
+                observed,
+                signed: width.above == r2source::SourceAbove::Sign,
                 float: false,
             })
         }
@@ -2044,11 +2051,25 @@ fn tail_result_storage(facts: &crate::semantic::PreparedFunctionFacts) -> TailRe
     if results.peek().is_none() {
         return TailResult::NoTailBoundary;
     }
-    let Some(Some(first)) = results.next() else {
+    let Some(Some(mut first)) = results.next() else {
         return TailResult::Unproven;
     };
-    if results.any(|result| result != Some(first)) {
-        return TailResult::Unproven;
+    for result in results {
+        // Tails into one register agree; the result is as wide as the widest of them.
+        first = match (first, result) {
+            (
+                SourceCallResult::Register { storage, width },
+                Some(SourceCallResult::Register {
+                    storage: other,
+                    width: wider,
+                }),
+            ) if storage == other => SourceCallResult::Register {
+                storage,
+                width: width.join(wider),
+            },
+            (first, Some(result)) if result == first => first,
+            _ => return TailResult::Unproven,
+        };
     }
     TailResult::Exact(first)
 }
@@ -2486,13 +2507,17 @@ pub fn mint_recovered_call_site_interface(
             (Some(high), Some(reads)) if reads.second > 0 => {
                 SourceCallResult::Pair { low: storage, high }
             }
-            _ => SourceCallResult::Register { storage },
+            // The callee's width is complete: its declaration's, or its body's on every return.
+            _ => SourceCallResult::Register {
+                storage,
+                width: (callee.result_width()).unwrap_or(SourceResultWidth::whole(storage)),
+            },
         },
         // A call that reads only the first register keeps it (doc/adr-language-profile.md).
         SourceFunctionReturn::Pair { low, .. }
             if caller_reads.is_some_and(|reads| reads.second == 0) =>
         {
-            SourceCallResult::Register { storage: low }
+            SourceCallResult::register(low)
         }
         SourceFunctionReturn::Pair { low, high } => SourceCallResult::Pair { low, high },
         // A body nobody read owns the arguments beside the result: an import
@@ -2510,12 +2535,10 @@ pub fn mint_recovered_call_site_interface(
         }) {
             Some((_, ResultRead::None)) => SourceCallResult::Void,
             Some((carriers, ResultRead::Carrier(CarrierRead::Integer))) => {
-                SourceCallResult::Register {
-                    storage: carriers.integer,
-                }
+                SourceCallResult::register(carriers.integer)
             }
             Some((_, ResultRead::Carrier(CarrierRead::Float(storage)))) => {
-                SourceCallResult::Register { storage }
+                SourceCallResult::register(storage)
             }
             None => {
                 r2il::refusal_evidence!(
@@ -2676,10 +2699,7 @@ mod tests {
             mint_recovered_call_site_interface(&interface, identity, b"pair", Some(reads(second)))
                 .expect("a call site")
         };
-        assert_eq!(
-            site(0).result(),
-            SourceCallResult::Register { storage: low }
-        );
+        assert_eq!(site(0).result(), SourceCallResult::register(low));
         assert_eq!(site(0).exact_callee_interface(), Some(&interface));
         assert_eq!(site(1).result(), SourceCallResult::Pair { low, high });
         assert_eq!(site(1).exact_callee_interface(), Some(&interface));
@@ -2802,9 +2822,7 @@ mod tests {
             [SourceCallArgumentSpec::new(0, register(0, 8))],
             false,
             false,
-            SourceCallResult::Register {
-                storage: register(0, 8),
-            },
+            SourceCallResult::register(register(0, 8)),
         )
         .expect("exact callsite interface");
         // A call clobbers the argument registers, so the carrier reaches the call only from entry.
@@ -3166,9 +3184,7 @@ mod tests {
             [SourceCallArgumentSpec::new(0, register(0, 8))],
             false,
             false,
-            SourceCallResult::Register {
-                storage: register(0, 8),
-            },
+            SourceCallResult::register(register(0, 8)),
         )
         .expect("exact tail interface");
         let known = crate::SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(

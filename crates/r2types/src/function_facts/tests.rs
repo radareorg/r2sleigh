@@ -599,7 +599,7 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
         convention: Some(r2ssa::ConventionId::SysVAmd64),
         variadic: Some(false),
         noreturn: Some(false),
-        result_kind: Some(r2ssa::SourceCallResult::Register { storage }),
+        result_kind: Some(r2ssa::SourceCallResult::register(storage)),
         arguments: Vec::new(),
         fixed_argument_count: Some(0),
         variadic_argument_count_evidence: None,
@@ -1278,9 +1278,7 @@ fn prepared_call_results_bind_certified_exprs_to_stable_call_ids() {
         [],
         false,
         false,
-        r2ssa::SourceCallResult::Register {
-            storage: result_storage,
-        },
+        r2ssa::SourceCallResult::register(result_storage),
     )
     .expect("exact call-result interface");
     let prepared = x86_stack_home_under(&[block], None, vec![call_interface])

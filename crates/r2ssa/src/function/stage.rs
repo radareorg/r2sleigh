@@ -61,12 +61,12 @@ impl Lifted {
     pub(crate) fn prepare<C: SsaWorkControl + ?Sized>(
         mut self,
         config: &crate::optimize::DecompilePrepConfig,
-        return_carriers: &[r2source::CanonicalStorageId],
+        (return_carriers, calls): (&[r2source::CanonicalStorageId], &crate::lanes::CallResults),
         control: &C,
     ) -> Result<Prepared, SsaPrepareError> {
         control.poll()?;
         // What each operation wrote, before an optimisation folds it away.
-        self.ir.capture_written();
+        self.ir.capture_written(calls);
         let config: crate::optimize::OptimizationConfig = config.into();
         crate::optimize::optimize_function_with_return_and_control(
             &mut self.ir,
@@ -84,7 +84,8 @@ impl Lifted {
         control: &C,
     ) -> Result<Prepared, SsaPrepareError> {
         // As `prepare`: what each operation wrote, before an optimisation folds it away.
-        self.ir.capture_written();
+        self.ir
+            .capture_written(&crate::lanes::CallResults::default());
         crate::optimize::optimize_function_with_control(&mut self.ir, config, control)?;
         self.validate().map_err(super::integrity_refusal)
     }

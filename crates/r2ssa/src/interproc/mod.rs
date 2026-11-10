@@ -2028,7 +2028,7 @@ fn exact_call_result_storage(
         return None;
     }
     match interface.result() {
-        crate::SourceCallResult::Register { storage }
+        crate::SourceCallResult::Register { storage, .. }
             if Some(storage) == exact_function_return_storage(prepared) =>
         {
             Some(storage)

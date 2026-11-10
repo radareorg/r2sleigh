@@ -1,6 +1,7 @@
 //! D2's calls: one written from its callsite certificate, to the callee r2types resolved or
 //! through the value an indirect call reaches (doc/adr-decompiler-rewrite.md); any other is a gap.
 
+use r2source::{SourceAbove, SourceResultWidth};
 use r2ssa::{
     CallSiteTransfer, CanonicalStorageId, InstId, InstPayload, MachineType, SSAOp,
     SemanticObligationInventory, SemanticObligationKind, SsaArtifact, ValueId,
@@ -35,6 +36,8 @@ pub(super) struct CallPlan {
     pub(super) variadic: bool,
     /// What the call leaves its caller: one value, or a pair's halves.
     pub(super) result: Option<CallResult>,
+    /// How many low bytes of its one result register r2ssa states the callee's value fills.
+    pub(super) width: Option<SourceResultWidth>,
     pub(super) noreturn: bool,
     /// For a tail transfer, the register and class its callee returns in; `Some(None)` where the
     /// facts state no result.
@@ -178,46 +181,81 @@ pub(super) fn text_as(text: &str, to: &CType) -> CExpr {
 }
 
 /// What the call `plan` describes returns, read at `class`, of which the program reads the bytes
-/// in `demanded`.
+/// in `demanded`: the low bytes r2ssa states the callee's value fills, spelled at the declared type.
 pub(super) fn read_result(
     plan: &CallPlan,
     call: CExpr,
     class: &MachineType,
     demanded: u64,
 ) -> Option<CExpr> {
-    match &plan.declared {
-        Some(declared) => from_declared(call, &declared.ret, class, demanded),
-        None => Some(call),
-    }
+    let ty = plan.declared.as_ref().map(|declared| &declared.ret);
+    let width = plan.width.unwrap_or(SourceResultWidth {
+        logical: u8::try_from(class.width_bits() / 8).ok()?,
+        above: SourceAbove::Undefined,
+    });
+    at_width(call, ty, width, class, demanded)
 }
 
-/// A result of the declared type read at `class`. The ABI leaves the bits above a narrower declared
+/// A value of the declared type read at `class`. The ABI leaves the bits above a narrower declared
 /// integer undefined: unread (r2ssa's `demanded`), any extension is unobservable; read, a residual.
 pub(super) fn from_declared(
-    call: CExpr,
+    value: CExpr,
     declared: &CType,
     class: &MachineType,
     demanded: u64,
 ) -> Option<CExpr> {
+    let width = SourceResultWidth {
+        logical: u8::try_from(class.width_bits() / 8).ok()?,
+        above: SourceAbove::Undefined,
+    };
+    at_width(value, Some(declared), width, class, demanded)
+}
+
+/// `value`, of C type `ty` (the class's where none), read at `class`: the low `width.logical` bytes
+/// are the value, as far as `ty` holds them, and the bytes above hold what `width.above` states.
+fn at_width(
+    value: CExpr,
+    ty: Option<&CType>,
+    width: SourceResultWidth,
+    class: &MachineType,
+    demanded: u64,
+) -> Option<CExpr> {
     let target = super::terms::c_type(class)?;
-    if *declared == target {
-        return Some(call);
-    }
-    let (bits, signed) = match declared.unaliased() {
+    let ty = ty.unwrap_or(&target);
+    let (held, signed) = match ty.unaliased() {
         CType::Int { bits, signedness } => (*bits, *signedness == r2types::Signedness::Signed),
         CType::Bool => (8, false),
-        _ => return Some(CExpr::cast(target, call)),
+        _ if *ty == target => return Some(value),
+        _ => return Some(CExpr::cast(target, value)),
     };
+    // C computes no bit past its type, so a declaration narrower than the width holds the rest.
+    let stated = u32::from(width.logical).saturating_mul(8);
+    let bits = stated.min(held);
     if bits >= class.width_bits() {
-        return Some(CExpr::cast(target, call));
+        return Some(match *ty == target {
+            true => value,
+            false => CExpr::cast(target, value),
+        });
     }
-    // C widens a signed result by its sign: through its unsigned type, the low bits alone.
-    let low = match signed {
-        true => CExpr::cast(target.clone(), CExpr::cast(CType::uint(bits), call)),
-        false => CExpr::cast(target.clone(), call),
+    let above = match held < stated {
+        true => SourceAbove::Undefined,
+        false => width.above,
+    };
+    // C widens a signed value by its sign: through the unsigned type of its low bits, those alone.
+    let low = match signed || held > bits {
+        true => CExpr::cast(target.clone(), CExpr::cast(CType::uint(bits), value)),
+        false => CExpr::cast(target.clone(), value),
     };
     if demanded >> (bits / 8) == 0 {
         return Some(low);
+    }
+    match above {
+        SourceAbove::Zero => return Some(low),
+        SourceAbove::Sign => {
+            let low = CExpr::cast(CType::int(bits), CExpr::cast(CType::uint(bits), low));
+            return Some(CExpr::cast(target, low));
+        }
+        SourceAbove::Undefined => {}
     }
     if super::terms::wide(class.width_bits()) {
         return None;
@@ -348,12 +386,16 @@ fn planned(
     let graph = artifact.graph();
     let identity = resolution.and_then(|resolution| resolution.identity_for_callsite(inst));
     let callee = callee(certificate, identity, graph, inst).ok_or(CallRefusal::NoCallee)?;
-    let pair = (artifact.facts().boundaries.calls.get(site)).and_then(|boundary| {
-        match boundary.result_kind {
-            Some(r2source::SourceCallResult::Pair { low, high }) => Some((low, high)),
-            _ => None,
-        }
-    });
+    let result_kind =
+        (artifact.facts().boundaries.calls.get(site)).and_then(|boundary| boundary.result_kind);
+    let pair = match result_kind {
+        Some(r2source::SourceCallResult::Pair { low, high }) => Some((low, high)),
+        _ => None,
+    };
+    let width = match result_kind {
+        Some(r2source::SourceCallResult::Register { width, .. }) => Some(width),
+        _ => None,
+    };
     let pair = match pair {
         Some(registers) => {
             Some(pair_values(inventory, graph, inst, registers).ok_or(CallRefusal::ResultUnclear)?)
@@ -422,6 +464,7 @@ fn planned(
         fixed,
         variadic: certificate.variadic,
         result,
+        width,
         // C may drop what follows a call it believes never returns, so only the source says so.
         noreturn: artifact
             .facts()
@@ -481,7 +524,7 @@ fn tail_result(
     declared: Option<&r2types::CTypeLike>,
 ) -> Option<(CanonicalStorageId, MachineType)> {
     let boundary = artifact.facts().boundaries.calls.get(&site)?;
-    let Some(r2source::SourceCallResult::Register { storage }) = boundary.result_kind else {
+    let Some(r2source::SourceCallResult::Register { storage, .. }) = boundary.result_kind else {
         return None;
     };
     let carrier = super::values::carrier_class(artifact, storage, storage.size * 8);
@@ -670,7 +713,7 @@ fn result_class(
         .get(&site)
         .and_then(|boundary| boundary.result_kind)
     {
-        Some(r2source::SourceCallResult::Register { storage }) => {
+        Some(r2source::SourceCallResult::Register { storage, .. }) => {
             super::values::carrier_class(artifact, storage, storage.size * 8)
         }
         // Undescribed: the slot the result obligation names, at its own width.

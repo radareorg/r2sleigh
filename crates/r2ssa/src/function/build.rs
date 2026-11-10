@@ -218,7 +218,10 @@ impl SSAFunction {
         // the declared stack bases.
         let prepared = Lifted::new(func).prepare(
             &crate::optimize::DecompilePrepConfig::default(),
-            &questions.return_carriers(),
+            (
+                &questions.return_carriers(),
+                &crate::lanes::CallResults::of(machine_context),
+            ),
             control,
         )?;
         phase("prepared", prepared.num_blocks());

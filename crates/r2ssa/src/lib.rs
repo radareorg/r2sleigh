@@ -159,9 +159,9 @@ pub use machine_context::{
     SourceFormatParameterRule, SourceFunctionInterface, SourceFunctionInterfaceError,
     SourceFunctionReturn, SourceLogicalValue, SourceMachineContext, SourceMachineRoles,
     SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation, SourceResultCause,
-    SourceResultSeed, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
-    SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure,
-    SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
+    SourceResultSeed, SourceResultWidth, SourceStackAllocationContract, SourceStackGrowth,
+    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
+    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
     SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, loaded_target_slot,
     terminal_indirect_loaded_slot,
 };

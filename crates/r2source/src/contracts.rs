@@ -410,12 +410,66 @@ fn storage_or(kind: SourceFunctionReturn, fallback: CanonicalStorageId) -> Canon
     }
 }
 
+/// What the bytes of a result register above its value hold (doc/adr-call-boundary.md, "Result
+/// width follows five rules").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+pub enum SourceAbove {
+    /// Zero on every path.
+    Zero,
+    /// The value's sign on every path.
+    Sign,
+    /// Nothing the callee states: a read of them is a residual.
+    Undefined,
+}
+
+/// How many low bytes of a result register the value occupies, and what lies above them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct SourceResultWidth {
+    pub logical: u8,
+    pub above: SourceAbove,
+}
+
+impl SourceResultWidth {
+    /// The whole of `storage`, which leaves nothing above.
+    pub fn whole(storage: CanonicalStorageId) -> Self {
+        Self {
+            logical: u8::try_from(storage.size).unwrap_or(u8::MAX),
+            above: SourceAbove::Undefined,
+        }
+    }
+
+    /// Whether the value fills all of `storage`.
+    pub fn fills(self, storage: CanonicalStorageId) -> bool {
+        u32::from(self.logical) >= storage.size
+    }
+
+    /// The width either of two paths may leave: the wider value, and a fill both state.
+    #[must_use]
+    pub fn join(self, other: Self) -> Self {
+        Self {
+            logical: self.logical.max(other.logical),
+            above: match self.above == other.above {
+                true => self.above,
+                false => SourceAbove::Undefined,
+            },
+        }
+    }
+}
+
 impl SourceCallResult {
+    /// The whole of one register.
+    pub fn register(storage: CanonicalStorageId) -> Self {
+        Self::Register {
+            storage,
+            width: SourceResultWidth::whole(storage),
+        }
+    }
+
     /// The registers the call's result occupies, low first.
     pub fn storages(self) -> impl Iterator<Item = CanonicalStorageId> {
         let (first, second) = match self {
             Self::Void => (None, None),
-            Self::Register { storage } => (Some(storage), None),
+            Self::Register { storage, .. } => (Some(storage), None),
             Self::Pair { low, high } => (Some(low), Some(high)),
         };
         first.into_iter().chain(second)
@@ -2171,6 +2225,41 @@ impl SourceFunctionInterface {
         self.return_logical_value
     }
 
+    /// The bytes of the result register the stated integer result occupies: its logical value's
+    /// low bytes, with nothing stated above them; the whole register where no integer is stated.
+    pub fn result_width(&self) -> Option<SourceResultWidth> {
+        let SourceFunctionReturn::Register { storage } = self.return_kind else {
+            return None;
+        };
+        let whole = SourceResultWidth::whole(storage);
+        let Some(logical) = self.return_logical_value else {
+            return Some(whole);
+        };
+        let integer = (self.type_graph.as_ref())
+            .and_then(|graph| graph.types().get(usize::try_from(logical.type_id()).ok()?))
+            .is_some_and(|held| {
+                matches!(
+                    held.kind(),
+                    SourceTypeKind::SignedInteger
+                        | SourceTypeKind::UnsignedInteger
+                        | SourceTypeKind::Char { .. }
+                )
+            });
+        let carrier = logical.carrier();
+        let bits = carrier.size_bits();
+        let narrower = carrier.offset_bits() == 0
+            && bits % 8 == 0
+            && bits > 0
+            && bits < u64::from(storage.size) * 8;
+        Some(match (integer && narrower, u8::try_from(bits / 8)) {
+            (true, Ok(logical)) => SourceResultWidth {
+                logical,
+                above: SourceAbove::Undefined,
+            },
+            _ => whole,
+        })
+    }
+
     pub const fn type_graph(&self) -> Option<&SourceTypeGraph> {
         self.type_graph.as_ref()
     }
@@ -2293,8 +2382,10 @@ impl SourceCallArgumentSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SourceCallResult {
     Void,
+    /// One register, of which the low `width.logical` bytes are the callee's result.
     Register {
         storage: CanonicalStorageId,
+        width: SourceResultWidth,
     },
     /// One value in two registers, its low half in the first.
     Pair {
@@ -2531,22 +2622,23 @@ impl SourceCallSiteInterface {
             {
                 SourceCallResult::Pair { low, high }
             }
-            (SourceFunctionReturn::Register { storage }, ..) => {
-                SourceCallResult::Register { storage }
-            }
+            (SourceFunctionReturn::Register { storage }, ..) => SourceCallResult::Register {
+                storage,
+                width: (callee.result_width()).unwrap_or(SourceResultWidth::whole(storage)),
+            },
             // A call that reads only the pair's first register takes that register.
-            (SourceFunctionReturn::Pair { low, .. }, _, SourceCallResult::Register { storage })
-                if storage == low =>
-            {
-                SourceCallResult::Register { storage }
-            }
+            (
+                SourceFunctionReturn::Pair { low, .. },
+                _,
+                SourceCallResult::Register { storage, width },
+            ) if storage == low => SourceCallResult::Register { storage, width },
             (SourceFunctionReturn::Pair { low, high }, ..) => SourceCallResult::Pair { low, high },
             // A carrier the unproven result may be in: its parameters are still the call's.
             (
                 SourceFunctionReturn::Unproven,
                 Some(carriers),
-                SourceCallResult::Register { storage },
-            ) if carriers.holds(storage) => SourceCallResult::Register { storage },
+                SourceCallResult::Register { storage, width },
+            ) if carriers.holds(storage) => SourceCallResult::Register { storage, width },
             // A call that reads no result of an unproven one is a statement.
             (SourceFunctionReturn::Unproven, Some(_), SourceCallResult::Void) => {
                 SourceCallResult::Void

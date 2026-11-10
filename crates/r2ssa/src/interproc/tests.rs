@@ -586,9 +586,7 @@ fn prepared_summary_set_models_missing_direct_callee_as_unknown() {
         [crate::SourceCallArgumentSpec::new(0, storage(8))],
         false,
         false,
-        crate::SourceCallResult::Register {
-            storage: storage(0),
-        },
+        crate::SourceCallResult::register(storage(0)),
     )
     .expect("exact external callsite interface");
     let root = Arc::new(
@@ -1977,9 +1975,7 @@ fn call_return_relation_requires_complete_nonvoid_result_carrier() {
         (
             "exact",
             true,
-            crate::SourceCallResult::Register {
-                storage: storage(0),
-            },
+            crate::SourceCallResult::register(storage(0)),
             SummaryReturnRelation::Const(7),
         ),
         (
@@ -1991,17 +1987,13 @@ fn call_return_relation_requires_complete_nonvoid_result_carrier() {
         (
             "incomplete",
             false,
-            crate::SourceCallResult::Register {
-                storage: storage(0),
-            },
+            crate::SourceCallResult::register(storage(0)),
             SummaryReturnRelation::Unknown,
         ),
         (
             "foreign-carrier",
             true,
-            crate::SourceCallResult::Register {
-                storage: storage(8),
-            },
+            crate::SourceCallResult::register(storage(8)),
             SummaryReturnRelation::Unknown,
         ),
     ] {

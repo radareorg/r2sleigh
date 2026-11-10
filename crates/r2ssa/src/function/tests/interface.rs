@@ -408,9 +408,7 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
         [SourceCallArgumentSpec::new(0, argument_storage)],
         false,
         false,
-        SourceCallResult::Register {
-            storage: argument_storage,
-        },
+        SourceCallResult::register(argument_storage),
     )
     .expect("exact callsite interface");
 

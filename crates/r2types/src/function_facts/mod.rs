@@ -802,7 +802,7 @@ fn call_result_type(
     }
     if let (
         r2ssa::SourceFunctionReturn::Pair { low, .. },
-        r2ssa::SourceCallResult::Register { storage },
+        r2ssa::SourceCallResult::Register { storage, .. },
     ) = (callee.return_kind(), result)
     {
         return (low == storage).then_some(CTypeLike::Int {
@@ -811,7 +811,7 @@ fn call_result_type(
         });
     }
     let carriers = callee.result_carriers()?;
-    let r2ssa::SourceCallResult::Register { storage } = result else {
+    let r2ssa::SourceCallResult::Register { storage, .. } = result else {
         return None;
     };
     let bits = storage.size.checked_mul(8)?;
@@ -1552,7 +1552,7 @@ impl FunctionFacts {
                 // The convention's float register read at a float's width is that float, whatever
                 // carrier-width integer the callee's body spells (doc/adr-resolved-bodies.md).
                 (
-                    Some(r2ssa::SourceCallResult::Register { storage }),
+                    Some(r2ssa::SourceCallResult::Register { storage, .. }),
                     CTypeLike::Int { bits, .. },
                 ) if float_lane(float_slot, storage) && *bits == storage.size * 8 => {
                     Some(CTypeLike::Float(*bits))

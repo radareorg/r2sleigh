@@ -624,8 +624,8 @@ impl Program for Importing {
     }
 }
 
-/// Staged declares a callee the program carries at the widths its body reads and writes: `add_two`
-/// reads EDI and ESI and writes EAX. The interface states no zero above EAX, so RAX's upper half is a residual.
+/// Staged declares a carried callee at its carriers' widths (`add_two` reads EDI and ESI, writes
+/// EAX); the caller returns the call's four bytes, so it is `uint32_t` and reads none above (D161).
 #[test]
 fn a_staged_call_to_a_carried_callee_is_declared_at_its_carriers_widths() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -640,12 +640,12 @@ fn a_staged_call_to_a_carried_callee_is_declared_at_its_carriers_widths() {
         text.contains("uint32_t fcn_100a(uint32_t, uint32_t);"),
         "{text}"
     );
+    assert!(text.contains("uint32_t caller("), "{text}");
     assert!(
-        text.contains(
-            "= (uint64_t)fcn_100a((uint32_t)arg0, (uint32_t)arg1) | r2sleigh_residual_u64(1) << 32;"
-        ),
+        text.contains("= (uint64_t)fcn_100a((uint32_t)arg0, (uint32_t)arg1);"),
         "{text}"
     );
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
     // Widths only: the body states no sign, so no `int32_t` is read into the declaration.
     assert!(
         !text
@@ -2579,6 +2579,21 @@ fn a_tail_transfer_returning_a_declared_int_reads_no_bits_above_it() {
         .text()
         .to_owned();
     assert!(text.contains("rand()"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
+/// Stripped, the wrapper's result is its tail callee's: `rand` states four bytes and nothing above
+/// them, so the wrapper returns four bytes and the tail holds no residual (D161, diff `0x9e70`).
+#[test]
+fn a_tail_transfer_to_a_declared_int_returns_the_callees_width() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let text = decompile(&machine.target(), &TailToRand, BASE)
+        .expect("decompile")
+        .output
+        .text()
+        .to_owned();
+    assert!(text.contains("uint32_t wrapper(void)"), "{text}");
+    assert!(text.contains("return (uint32_t)rand();"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 

@@ -959,10 +959,10 @@ pub(crate) fn exact_tail_return_certificate_matches(
         && boundary.call_site == call_site.id
         && boundary.at == call_site.at
         && boundary.complete
-        && boundary.result_kind
-            == Some(r2ssa::SourceCallResult::Register {
-                storage: expected_storage,
-            })
+        && matches!(
+            boundary.result_kind,
+            Some(r2ssa::SourceCallResult::Register { storage, .. }) if storage == expected_storage
+        )
 }
 
 /// The aggregate a type node names, when it names one.

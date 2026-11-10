@@ -24,9 +24,9 @@ pub use r2source::{
     SourceConventionSlots, SourceFloorCause, SourceFormatParameterRule, SourceFunctionInterface,
     SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
     SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation, SourceResultCause,
-    SourceResultSeed, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
-    SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure,
-    SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
+    SourceResultSeed, SourceResultWidth, SourceStackAllocationContract, SourceStackGrowth,
+    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
+    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
     SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, StackAddressBase,
 };
 
@@ -2800,9 +2800,7 @@ mod tests {
                 [],
                 false,
                 true,
-                SourceCallResult::Register {
-                    storage: register_storage(0, 8),
-                },
+                SourceCallResult::register(register_storage(0, 8)),
             ),
             Err(SourceCallSiteInterfaceError::NoreturnWithResult)
         );
@@ -3070,7 +3068,11 @@ impl CalleeStatement {
                     result: match interface.return_kind() {
                         crate::SourceFunctionReturn::Void => Some(crate::SourceCallResult::Void),
                         crate::SourceFunctionReturn::Register { storage } => {
-                            Some(crate::SourceCallResult::Register { storage })
+                            Some(crate::SourceCallResult::Register {
+                                storage,
+                                width: (interface.result_width())
+                                    .unwrap_or(crate::SourceResultWidth::whole(storage)),
+                            })
                         }
                         crate::SourceFunctionReturn::Pair { low, high } => {
                             Some(crate::SourceCallResult::Pair { low, high })

@@ -1435,7 +1435,7 @@ pub(crate) fn collect_source_boundary_facts(
                     (CallSiteTransfer::TailCall, _) | (_, SourceCallResult::Void) => {
                         Some(Vec::new())
                     }
-                    (CallSiteTransfer::Call, SourceCallResult::Register { storage }) => {
+                    (CallSiteTransfer::Call, SourceCallResult::Register { storage, .. }) => {
                         call_result_values_after_call(
                             graph,
                             machine_context,

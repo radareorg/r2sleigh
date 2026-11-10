@@ -2660,9 +2660,7 @@ mod tests {
             [SourceCallArgumentSpec::new(0, argument_storage)],
             false,
             false,
-            SourceCallResult::Register {
-                storage: result_storage,
-            },
+            SourceCallResult::register(result_storage),
         );
         let artifact = crate::testing::prepared_under(
             &[block],
@@ -2684,9 +2682,7 @@ mod tests {
         assert_eq!(boundary.noreturn, Some(false));
         assert_eq!(
             boundary.result_kind,
-            Some(SourceCallResult::Register {
-                storage: result_storage,
-            })
+            Some(SourceCallResult::register(result_storage))
         );
         assert_eq!(boundary.arguments.len(), 1);
         assert_eq!(

@@ -3184,7 +3184,10 @@ impl SSAFunction {
     pub fn written_or_captured(&self) -> std::borrow::Cow<'_, crate::lanes::Written> {
         match self.written.is_empty() && !self.blocks.is_sealed() {
             false => std::borrow::Cow::Borrowed(&self.written),
-            true => std::borrow::Cow::Owned(crate::lanes::Written::capture(self)),
+            true => std::borrow::Cow::Owned(crate::lanes::Written::capture(
+                self,
+                &crate::lanes::CallResults::default(),
+            )),
         }
     }
 
@@ -3200,8 +3203,8 @@ impl SSAFunction {
     }
 
     /// Record what each operation writes, before anything rewrites one.
-    pub(crate) fn capture_written(&mut self) {
-        self.written = crate::lanes::Written::capture(self);
+    pub(crate) fn capture_written(&mut self, calls: &crate::lanes::CallResults) {
+        self.written = crate::lanes::Written::capture(self, calls);
     }
 
     /// The seal's last step: the graph owns each operation, its origin and each value from here
