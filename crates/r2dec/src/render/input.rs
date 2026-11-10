@@ -65,15 +65,9 @@ impl<'a> RenderInput<'a> {
             .flatten()
     }
 
-    /// The name the source gives parameter `slot`: its certified signature's, else the one its
-    /// debug information or symbols state; a positional placeholder is no name.
-    pub fn declared_parameter_name(&self, slot: usize) -> Option<&'a str> {
-        let report = self.facts.report();
-        (report.type_facts().render_authorized_signature())
-            .and_then(|signature| signature.params.get(slot))
-            .map(|parameter| parameter.name.as_str())
-            .filter(|name| !r2types::is_generic_arg_name(name))
-            .or_else(|| report.display_names().parameter(slot))
+    /// The one name of parameter `slot` (r2types `FunctionFacts::parameter_name`).
+    pub fn parameter_name(&self, slot: usize) -> String {
+        self.facts.report().parameter_name(slot)
     }
 
     /// The structures the function's parameter accesses lay out, by tag (doc/adr-aggregates.md).

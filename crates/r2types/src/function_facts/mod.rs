@@ -980,99 +980,6 @@ impl SourceOwnedFunctionFacts {
         self.report.return_type()
     }
 
-    /// The interface's formals as `(slot, width in bytes)`: the stated low lane, else the declared one, else the carrier.
-    pub fn interface_parameter_widths(&self) -> Vec<(u32, u32)> {
-        let Some(interface) = self.source.machine_context().function_interface() else {
-            return Vec::new();
-        };
-        interface
-            .parameters()
-            .iter()
-            .enumerate()
-            .map(|(position, parameter)| {
-                let carrier_bytes = parameter.location().size_bytes();
-                let lane = interface
-                    .parameter_logical_value(position)
-                    .and_then(|logical| match logical.carrier().kind() {
-                        r2ssa::SourceCarrierKind::LowBits => {
-                            u32::try_from(logical.carrier().size_bits() / 8).ok()
-                        }
-                        r2ssa::SourceCarrierKind::Full => None,
-                    });
-                let width = lane
-                    .or_else(|| {
-                        self.declared_parameter_width_bytes(parameter.index(), carrier_bytes)
-                    })
-                    .unwrap_or(carrier_bytes);
-                (parameter.index(), width)
-            })
-            .collect()
-    }
-
-    /// A declared width narrower than the carrier, where the declaration and the parameter's one frame home agree on it.
-    pub fn declared_parameter_width_bytes(&self, slot: u32, carrier_bytes: u32) -> Option<u32> {
-        let ptr_bits = self
-            .source
-            .machine_context()
-            .memory_model()
-            .default_address_bits();
-        let bits =
-            crate::declaration_type_width_bits(self.declared_parameter_type(slot)?, ptr_bits)?;
-        let bytes = (bits % 8 == 0).then_some(bits / 8)?;
-        if bytes == 0 || bytes >= carrier_bytes {
-            return None;
-        }
-        (self.parameter_home_width_bytes(slot) == Some(bytes)).then_some(bytes)
-    }
-
-    /// The width of the parameter's one home slot; two homes of different widths answer nothing.
-    fn parameter_home_width_bytes(&self, slot: u32) -> Option<u32> {
-        let mut homes = self
-            .report
-            .render()?
-            .certified_entities
-            .values()
-            .filter_map(|entity| match entity {
-                CertifiedEntity::StackSlot { size, role, .. } => role
-                    .filter(|role| {
-                        matches!(
-                            role,
-                            r2ssa::SourceStackSlotRole::ParameterHome { parameter_index, .. }
-                                if *parameter_index == slot
-                        )
-                    })
-                    .and(*size),
-                _ => None,
-            });
-        let first = homes.next()?;
-        homes.all(|other| other == first).then_some(first)
-    }
-
-    /// What the parameter's declaration says it is, the certified entity's first.
-    fn declared_parameter_type(&self, slot: u32) -> Option<&CTypeLike> {
-        let exact = self
-            .report
-            .render()
-            .and_then(|render| {
-                render
-                    .certified_entities
-                    .get(&r2ssa::SemanticId::Parameter(slot))
-            })
-            .and_then(|entity| match entity {
-                CertifiedEntity::Parameter { ty, .. } => ty.as_ref(),
-                _ => None,
-            });
-        exact.or_else(|| {
-            self.report
-                .type_facts()
-                .render_authorized_signature()?
-                .params
-                .get(usize::try_from(slot).ok()?)?
-                .ty
-                .as_ref()
-        })
-    }
-
     /// The type parameter `slot` is declared with at this width: the signature's where it fits, else the certified entity's.
     pub fn parameter_declaration(&self, slot: usize, width_bits: u32) -> Option<CTypeLike> {
         self.parameter_declaration_fact(slot, width_bits)
@@ -1259,6 +1166,11 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
     }
     let mut resolver = ParamSlotResolver::default();
     for (index, parameter) in &source.facts().boundaries.parameters {
+        // A stack formal has no entry value to resolve (`FormalHome::Frame`).
+        let Some((abi_storage, graph_storage)) = parameter.register() else {
+            continue;
+        };
+        let parameter_value = parameter.value()?;
         let slot = usize::try_from(*index).ok()?;
         let source_parameter = interface
             .parameters()
@@ -1268,23 +1180,23 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
             .argument_registers()
             .iter()
             .find(|candidate| candidate.index() == *index)?;
-        let graph_value = source.graph().value(parameter.value)?;
+        let graph_value = source.graph().value(parameter_value)?;
         // The formal's value is the carrier's entry value, or the projection
         // minted for a lane of it (doc/adr-register-identity.md §6).
-        let entry_value = graph_value.canonical_storage == Some(parameter.graph_storage)
-            && graph_value.var.size == parameter.graph_storage.size
+        let entry_value = graph_value.canonical_storage == Some(graph_storage)
+            && graph_value.var.size == graph_storage.size
             && graph_value.var.version == 0
-            && source.graph().def_inst(parameter.value).is_none();
-        let projection = source.graph().formal_projection_storage(parameter.value)
-            == Some(parameter.graph_storage)
-            && graph_value.var.size == parameter.graph_storage.size;
+            && source.graph().def_inst(parameter_value).is_none();
+        let projection = source.graph().formal_projection_storage(parameter_value)
+            == Some(graph_storage)
+            && graph_value.var.size == graph_storage.size;
         if parameter.index != *index
-            || Some(parameter.abi_storage) != source_parameter.register_storage()
-            || parameter.abi_storage != abi_slot.storage()
+            || Some(abi_storage) != source_parameter.register_storage()
+            || abi_storage != abi_slot.storage()
             || !(entry_value || projection)
             || resolver
                 .slots_by_value
-                .insert(parameter.value, slot)
+                .insert(parameter_value, slot)
                 .is_some()
         {
             return None;
@@ -1649,6 +1561,16 @@ impl FunctionFacts {
     /// starts inventing semantics from symbol strings.
     pub fn display_names(&self) -> &crate::DisplayNames {
         &self.display_names
+    }
+
+    /// The one name of parameter `slot` that `pdd`, `afv` and `afi` spell: the certified
+    /// signature's, else the source's, else its position from `arg0`.
+    pub fn parameter_name(&self, slot: usize) -> String {
+        (self.type_facts().render_authorized_signature())
+            .and_then(|signature| signature.params.get(slot))
+            .map(|parameter| parameter.name.as_str())
+            .filter(|name| !crate::is_generic_arg_name(name))
+            .map_or_else(|| self.display_names.parameter_name(slot), str::to_owned)
     }
 
     /// Attach the spellings radare2 already holds.
@@ -2617,7 +2539,7 @@ impl FunctionFacts {
                 .as_ref()
                 .and_then(|names| names.get(index).cloned())
                 .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| format!("arg{index}"));
+                .unwrap_or_else(|| r2source::positional_parameter_name(index));
             params.push(crate::FunctionParamSpec { name, ty: Some(ty) });
         }
         let ret_type = match interface.return_kind() {
@@ -2747,7 +2669,10 @@ impl FunctionFacts {
             let Ok(index) = usize::try_from(*slot) else {
                 continue;
             };
-            let Some(candidate) = recovered.value_type(parameter.value) else {
+            let Some(candidate) = parameter
+                .value()
+                .and_then(|value| recovered.value_type(value))
+            else {
                 continue;
             };
             let Some(param) = signature.params.get_mut(index) else {

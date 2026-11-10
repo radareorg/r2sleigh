@@ -75,8 +75,8 @@ pub struct Argument {
     /// Its type, and what that rests on: the interface's types, the body's solve, or only the
     /// width of the carrier it arrives in.
     pub ty: Fact<CTypeLike>,
-    /// What the source calls it, where the source names it.
-    pub name: Option<String>,
+    /// Its one name (r2types `FunctionFacts::parameter_name`).
+    pub name: String,
 }
 
 /// One stack object in the function's own frame, frame management excluded.
@@ -120,7 +120,7 @@ impl FunctionInfo {
                 .map(|site| site.direct_target)
                 .collect(),
             convention: facts.type_facts().callconv.clone(),
-            arguments: arguments(artifact, sealed, &entities),
+            arguments: arguments(artifact, sealed),
             variadic: (artifact.machine_context().function_interface())
                 .is_some_and(r2source::SourceFunctionInterface::is_variadic),
             returns: returns(artifact, sealed),
@@ -259,69 +259,22 @@ fn blocks(artifact: &r2ssa::SsaArtifact) -> Vec<Block> {
     blocks
 }
 
-/// Every certified parameter, typed as r2types declares that slot, else as storage of its width.
-fn arguments(
-    artifact: &r2ssa::SsaArtifact,
-    sealed: &SourceOwnedFunctionFacts,
-    entities: &[&CertifiedEntity],
-) -> Vec<Argument> {
-    let graph = artifact.graph();
-    let mut arguments = entities
-        .iter()
-        .filter_map(|entity| {
-            let CertifiedEntity::Parameter {
-                slot,
-                entry_values,
-                carrier_width,
-                ..
-            } = entity
-            else {
-                return None;
-            };
-            // A declared lane of a wider register is a formal of its own, with its own storage.
-            let storage = entry_values.iter().find_map(|value| {
-                graph
-                    .formal_projection_storage(*value)
-                    .or(graph.value(*value)?.canonical_storage)
-            });
-            let width_bits = storage.map_or(*carrier_width, |storage| storage.size) * 8;
-            Some(Argument {
-                slot: *slot,
-                storage,
-                name: sealed
-                    .report()
-                    .display_names()
-                    .parameter(*slot as usize)
-                    .map(str::to_owned),
-                ty: (sealed.parameter_declaration_fact(*slot as usize, width_bits))
+/// Every formal parameter of the one list `pdd` declares (r2ssa's formal facts), named by the one
+/// name owner and typed as r2types declares that slot, else as storage of its width.
+fn arguments(artifact: &r2ssa::SsaArtifact, sealed: &SourceOwnedFunctionFacts) -> Vec<Argument> {
+    (artifact.facts().boundaries.parameters.values())
+        .map(|formal| {
+            let width_bits = formal.bytes() * 8;
+            let slot = formal.index as usize;
+            Argument {
+                slot: formal.index,
+                storage: formal.register().map(|(_, lane)| lane),
+                name: sealed.report().parameter_name(slot),
+                ty: (sealed.parameter_declaration_fact(slot, width_bits))
                     .unwrap_or_else(|| carrier_typed(width_bits)),
-            })
+            }
         })
-        .collect::<Vec<_>>();
-    // The interface owns arity: a formal the body never reads is still one of its parameters.
-    let interface = artifact.machine_context().function_interface();
-    for (slot, width_bytes) in sealed.interface_parameter_widths() {
-        if arguments.iter().any(|argument| argument.slot == slot) {
-            continue;
-        }
-        let width_bits = width_bytes * 8;
-        let storage = interface
-            .and_then(|interface| interface.parameters().iter().find(|p| p.index() == slot))
-            .and_then(|parameter| parameter.register_storage());
-        arguments.push(Argument {
-            slot,
-            storage,
-            name: sealed
-                .report()
-                .display_names()
-                .parameter(slot as usize)
-                .map(str::to_owned),
-            ty: (sealed.parameter_declaration_fact(slot as usize, width_bits))
-                .unwrap_or_else(|| carrier_typed(width_bits)),
-        });
-    }
-    arguments.sort_unstable_by_key(|argument| argument.slot);
-    arguments
+        .collect()
 }
 
 /// A type that is only the width of the carrier a value arrives in.

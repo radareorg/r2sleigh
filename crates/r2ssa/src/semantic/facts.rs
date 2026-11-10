@@ -349,6 +349,19 @@ impl ObjectModel {
         self.objects.get(&id)
     }
 
+    /// The caller's argument-area object at `offset` from the entry stack pointer.
+    pub fn argument_object(&self, offset: i64) -> Option<ObjectId> {
+        let root = StackAddressRoot {
+            base: StackAddressBase::StackPointer,
+            offset,
+        };
+        let key = StackObjectKey {
+            root,
+            space: SpaceId::Ram,
+        };
+        self.stack_objects.get(&key).copied()
+    }
+
     pub fn escaped_unknown_object(&self, space: SpaceId) -> Option<ObjectId> {
         self.escaped_unknown.get(&ObjectSpaceId(space)).copied()
     }
@@ -834,21 +847,69 @@ impl SourceReturnStackPointerFact {
     }
 }
 
-/// One exact source-declared ABI parameter and its canonical graph carrier.
-///
-/// `abi_storage` is the source calling-convention carrier. `graph_storage`
-/// is the exact, source-declared logical projection used by SSA; it is never
-/// inferred from a register name or an overlapping storage range.
+/// Where a formal parameter arrives (doc/adr-call-boundary.md, "The function's parameters").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormalHome {
+    /// An entry register: `abi_storage` the convention's carrier, `graph_storage` the declared lane
+    /// SSA reads, `value` its one entry value or lane projection.
+    Register {
+        abi_storage: CanonicalStorageId,
+        graph_storage: CanonicalStorageId,
+        value: ValueId,
+    },
+    /// A caller's argument-area slot `bytes` wide at `offset` from the entry stack pointer.
+    Frame {
+        object: ObjectId,
+        offset: i64,
+        bytes: u32,
+    },
+}
+
+/// One formal parameter of the source interface, at its home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceFormalParameterFact {
     pub index: u32,
-    pub abi_storage: CanonicalStorageId,
-    pub graph_storage: CanonicalStorageId,
-    /// Exact logical projection when the source supplied one. A full-width
-    /// physical ABI parameter remains authoritative without a type graph; in
-    /// that case `graph_storage == abi_storage` and this field is absent.
+    /// Exact logical projection when the source supplied one.
     pub logical_value: Option<SourceLogicalValue>,
-    pub value: ValueId,
+    pub home: FormalHome,
+}
+
+impl SourceFormalParameterFact {
+    /// The entry value of a register formal.
+    pub const fn value(&self) -> Option<ValueId> {
+        match self.home {
+            FormalHome::Register { value, .. } => Some(value),
+            FormalHome::Frame { .. } => None,
+        }
+    }
+
+    /// The convention's carrier and the declared lane of a register formal.
+    pub const fn register(&self) -> Option<(CanonicalStorageId, CanonicalStorageId)> {
+        match self.home {
+            FormalHome::Register {
+                abi_storage,
+                graph_storage,
+                ..
+            } => Some((abi_storage, graph_storage)),
+            FormalHome::Frame { .. } => None,
+        }
+    }
+
+    /// The argument-area object of a stack formal.
+    pub const fn object(&self) -> Option<ObjectId> {
+        match self.home {
+            FormalHome::Frame { object, .. } => Some(object),
+            FormalHome::Register { .. } => None,
+        }
+    }
+
+    /// The formal's width in bytes.
+    pub const fn bytes(&self) -> u32 {
+        match self.home {
+            FormalHome::Register { graph_storage, .. } => graph_storage.size,
+            FormalHome::Frame { bytes, .. } => bytes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1758,6 +1819,19 @@ impl<'a> ObjectModelBuilder<'a> {
             }
         }
 
+        // Each stack formal is an argument-area object, read or not (doc/adr-call-boundary.md, S5).
+        let stack_formals = (self.machine_context)
+            .and_then(SourceMachineContext::function_interface)
+            .map(|interface| interface.parameters())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|parameter| parameter.location().stack());
+        for (offset, _) in stack_formals {
+            self.ensure_stack_object(StackAddressRoot {
+                base: StackAddressBase::StackPointer,
+                offset,
+            });
+        }
         let callee_write_reach = self
             .stack_objects
             .iter()

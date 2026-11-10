@@ -189,7 +189,7 @@ pub use semantic::{
     CallSiteTransfer, CalleeStackAllocationCertificate, CallerSlotSupply,
     CallerStackSlotCertificate, CallsiteCertificate, CompareKind, CompareProvenance, ControlDomain,
     ControlDomainFacts, ControlDomainId, ControlGuard, EntryAffineForm, ExtentAssumption,
-    ForLoopCertificate, FrameReach, GlobalObjectKey, InductionFact, InductionStep,
+    ForLoopCertificate, FormalHome, FrameReach, GlobalObjectKey, InductionFact, InductionStep,
     LoopCarrierEdgeValue, LoopCarrierFact, LoopCarrierMemberFact, LoopCarrierMemberRole,
     LoopCarrierUpdateFact, LoopCertificate, LoopId, LoopTrips, MachineReturnControlCertificate,
     MemberRunPlace, MemberRunSource, MemberRunStoreCertificate, MemberRunStoreMember,

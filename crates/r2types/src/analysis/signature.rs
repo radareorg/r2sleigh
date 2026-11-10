@@ -553,7 +553,7 @@ pub(crate) fn merge_local_signature_into_merged_signature(
                 }
                 let target = &mut external.params[idx];
                 if target.name.is_empty() {
-                    target.name = format!("arg{}", idx + 1);
+                    target.name = r2source::positional_parameter_name(idx);
                 }
                 if !is_generic_arg_name(&local_param.name) && is_generic_arg_name(&target.name) {
                     target.name = local_param.name.clone();
@@ -678,7 +678,7 @@ pub(crate) fn apply_signature_context_overrides(
             .and_then(|param| param.ty.clone())
             .unwrap_or_else(|| CTypeLike::Pointer(Box::new(CTypeLike::Void)));
         signature_out.params.push(InferredSignatureParam {
-            name: format!("arg{}", idx + 1),
+            name: r2source::positional_parameter_name(idx),
             ty,
         });
     }

@@ -60,6 +60,8 @@ pub(super) struct Values<'a> {
     frame: Option<super::frame::Frame>,
     /// The frame array, once a spelled term names an object in it.
     frame_array: RefCell<Option<SymbolId>>,
+    /// Each stack formal: its index, name, class, and whether it is declared other than its class.
+    frame_formals: Vec<(u32, SymbolId, MachineType, bool)>,
     symbols: Rc<RefCell<SymbolTable>>,
     params: Vec<CParam>,
     locals: RefCell<Vec<CLocal>>,
@@ -835,6 +837,7 @@ impl<'a> Values<'a> {
             bound,
             frame: super::frame::Frame::of(artifact),
             frame_array: RefCell::new(None),
+            frame_formals: Vec::new(),
             symbols,
             params: Vec::new(),
             locals: RefCell::new(Vec::new()),
@@ -935,10 +938,10 @@ impl<'a> Values<'a> {
         &mut self,
         input: &RenderInput<'_>,
         tags: &super::tags::Tags,
-        parameters: Option<Vec<(u32, ValueId, MachineType)>>,
+        parameters: Option<Vec<(u32, r2ssa::FormalHome, MachineType)>>,
     ) {
         let mut pointing = Vec::new();
-        for (index, value, ty) in parameters.into_iter().flatten() {
+        for (index, home, ty) in parameters.into_iter().flatten() {
             let class = terms::c_type(&ty).expect("a classed parameter has a C type");
             // A declared type is spelled as stated; an analysed one only where it is a pointer.
             let analysed = (input.parameter_declaration(index as usize, ty.width_bits()))
@@ -949,23 +952,26 @@ impl<'a> Values<'a> {
                     calls::spellable(&declared, &|tag, union| tags.defines(tag, union))
                 })
                 .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
-            let c = match declared {
-                Some(declared) => {
-                    self.declared[value.0 as usize] = declared != class;
-                    declared
-                }
-                None => class,
-            };
-            let declared_name = (input.declared_parameter_name(index as usize))
-                .map(crate::ast::c_identifier)
-                .filter(|name| spells_an_identifier(name));
+            let differs = declared.as_ref().is_some_and(|declared| *declared != class);
+            let c = declared.unwrap_or(class);
+            let named = crate::ast::c_identifier(&input.parameter_name(index as usize));
             let name = self.symbols.borrow_mut().declare(
-                declared_name.unwrap_or_else(|| format!("arg{index}")),
+                Some(named)
+                    .filter(|name| spells_an_identifier(name))
+                    .unwrap_or_else(|| r2source::positional_parameter_name(index as usize)),
                 c.clone(),
                 SymbolRole::Parameter(index),
             );
-            self.names[value.0 as usize] = Some((name, ty));
-            self.owed.get_mut()[value.0 as usize] = 0;
+            match home {
+                r2ssa::FormalHome::Register { value, .. } => {
+                    self.declared[value.0 as usize] = differs;
+                    self.names[value.0 as usize] = Some((name, ty));
+                    self.owed.get_mut()[value.0 as usize] = 0;
+                }
+                r2ssa::FormalHome::Frame { .. } => {
+                    self.frame_formals.push((index, name, ty, differs))
+                }
+            }
             if let CType::Pointer(pointee) = &c
                 && let CType::Struct(tag) = pointee.as_ref()
             {
@@ -1277,10 +1283,23 @@ impl<'a> Values<'a> {
                 super::proof::UnassignedCause::Held,
                 crate::prelude::ResidualCause::HeldFromEntry,
             ),
+            r2ssa::CallerSlotSupply::Formal(index) => return self.frame_formal(index, ty),
         };
         let read = crate::prelude::residual(&terms::c_type(ty)?, residual)?;
         self.unassigned_named(r2ssa::frame_object_name(slot.entry_offset), cause, ty);
         Some(read)
+    }
+
+    /// A whole read of stack formal `index` at its home: the parameter, at the class `ty` reads.
+    fn frame_formal(&self, index: u32, ty: &MachineType) -> Option<CExpr> {
+        let (_, name, held, differs) =
+            self.frame_formals.iter().find(|formal| formal.0 == index)?;
+        let var = CExpr::var(*name);
+        let var = match differs {
+            true => CExpr::cast(terms::c_type(held)?, var),
+            false => var,
+        };
+        terms::reclass(var, held, ty)
     }
 
     /// Record a read the proof line names once its text is kept; the name is declared, as the value
@@ -2727,19 +2746,22 @@ fn spells_an_identifier(name: &str) -> bool {
 fn parameters(
     input: &RenderInput<'_>,
     artifact: &SsaArtifact,
-) -> Option<Vec<(u32, ValueId, MachineType)>> {
-    let graph = artifact.graph();
+) -> Option<Vec<(u32, r2ssa::FormalHome, MachineType)>> {
     artifact
         .facts()
         .boundaries
         .parameters
         .values()
         .map(|parameter| {
-            let width_bits = graph.var(parameter.value).size * 8;
+            let width_bits = parameter.bytes() * 8;
             let declared = input
                 .parameter_declaration(parameter.index as usize, width_bits)
                 .map(|declared| class_of(&declared, width_bits));
-            let carrier = located_class(artifact, parameter.abi_storage, width_bits);
+            // A stack slot carries any class; a register's class is the convention's.
+            let carrier = match parameter.register() {
+                Some((abi_storage, _)) => located_class(artifact, abi_storage, width_bits),
+                None => class_of(&r2types::CTypeLike::machine_bits(width_bits), width_bits),
+            };
             let class = match declared {
                 Some(None) => return None,
                 Some(Some(declared)) => agreed(Some(declared), carrier)?,
@@ -2749,7 +2771,7 @@ fn parameters(
             if class.width_bits() != width_bits {
                 return None;
             }
-            Some((parameter.index, parameter.value, class))
+            Some((parameter.index, parameter.home, class))
         })
         .collect()
 }

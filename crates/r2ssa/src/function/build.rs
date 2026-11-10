@@ -637,21 +637,28 @@ impl DecompilePrepFacts {
             let Ok(index) = usize::try_from(*slot) else {
                 continue;
             };
-            let Some(value) = graph.value(parameter.value) else {
+            let crate::semantic::FormalHome::Register {
+                abi_storage,
+                graph_storage,
+                value: id,
+            } = parameter.home
+            else {
                 continue;
             };
-            let entry_value = graph.def_inst(parameter.value).is_none()
+            let Some(value) = graph.value(id) else {
+                continue;
+            };
+            let entry_value = graph.def_inst(id).is_none()
                 && value.var.version == 0
-                && value.var.size == parameter.graph_storage.size
-                && value.canonical_storage == Some(parameter.graph_storage);
-            let projection =
-                graph.formal_projection_storage(parameter.value) == Some(parameter.graph_storage);
+                && value.var.size == graph_storage.size
+                && value.canonical_storage == Some(graph_storage);
+            let projection = graph.formal_projection_storage(id) == Some(graph_storage);
             if parameter.index != *slot || !(entry_value || projection) {
                 continue;
             }
-            prep.formal_parameters.insert(parameter.value, index);
-            if parameter.graph_storage == parameter.abi_storage {
-                prep.formal_parameter_bases.insert(parameter.value, index);
+            prep.formal_parameters.insert(id, index);
+            if graph_storage == abi_storage {
+                prep.formal_parameter_bases.insert(id, index);
             }
         }
     }

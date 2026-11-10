@@ -3059,8 +3059,10 @@ mod tests {
             .parameters
             .get(&0)
             .expect("exact ABI parameter identity");
-        assert_eq!(parameter.abi_storage, parameter_storage);
-        assert_eq!(parameter.graph_storage, parameter_storage);
+        assert_eq!(
+            parameter.register(),
+            Some((parameter_storage, parameter_storage))
+        );
         assert_eq!(parameter.logical_value, None);
         // A plain interface's slot roles are not exact, which used to make the
         // whole model incoherent and empty the return boundary. The return

@@ -118,6 +118,23 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
         },
     )
     .expect("artifact");
+    let formal = artifact
+        .facts()
+        .boundaries
+        .parameters
+        .get(&0)
+        .expect("the stack formal");
+    assert!(
+        matches!(
+            formal.home,
+            crate::semantic::FormalHome::Frame {
+                offset: 16,
+                bytes: 8,
+                ..
+            }
+        ),
+        "{formal:?}"
+    );
     (artifact.certificates().caller_stack_slots.values())
         .map(
             |CallerStackSlotCertificate {
@@ -129,7 +146,7 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
 }
 
 #[test]
-fn caller_slots_name_the_unadmitted_argument_and_the_return_address_only() {
+fn caller_slots_name_the_unadmitted_argument_the_formal_and_the_return_address() {
     let slots = caller_slots();
     // +8: the argument area, at no parameter the interface admits.
     assert_eq!(
@@ -143,7 +160,11 @@ fn caller_slots_name_the_unadmitted_argument_and_the_return_address_only() {
         Some(&CallerSlotSupply::HeldFromEntry),
         "{slots:?}"
     );
-    // +16: an admitted stack parameter; +24: written before it is read.
-    assert!(!slots.contains_key(&16), "{slots:?}");
+    // +16: the admitted stack parameter, its formal read whole; +24: written before it is read.
+    assert_eq!(
+        slots.get(&16),
+        Some(&CallerSlotSupply::Formal(0)),
+        "{slots:?}"
+    );
     assert!(!slots.contains_key(&24), "{slots:?}");
 }
