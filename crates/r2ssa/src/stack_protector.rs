@@ -189,16 +189,14 @@ fn unchecked(
         for (id, op) in block.sited() {
             op.for_each_source(|source| {
                 uses.get_or_insert_with(*source, Vec::new).push((id, op));
-                if entry(*source) {
-                    frame.push(*source);
-                }
+                frame.extend(Some(*source).filter(|source| entry(*source)));
             });
             if let SSAOp::Load { dst, addr, .. } = op {
                 let (root, offset) = defs.affine(func, *addr);
                 let width = func.var(*dst).size;
-                if !checked.contains(id) && is_guard(func, guard, (root, offset), width) {
-                    loads.push((id, *dst));
-                }
+                let read_of_guard =
+                    !checked.contains(id) && is_guard(func, guard, (root, offset), width);
+                loads.extend(read_of_guard.then_some((id, *dst)));
                 read.get_or_insert_with(root, Vec::new)
                     .push((offset, offset + i64::from(width)));
             }
@@ -215,36 +213,70 @@ fn unchecked(
             && (read.get(root).into_iter().flatten()).all(|(lo, hi)| *hi <= offset || end <= *lo)
     };
     let mut inserted = IdSet::default();
-    for (load, loaded) in loads {
-        let (mut taken, mut work) = (vec![load], vec![loaded]);
-        while let Some(var) = work.pop() {
-            if merged.contains(var) {
-                return IdSet::default();
-            }
-            for (id, op) in uses.get(var).into_iter().flatten() {
-                match op {
-                    SSAOp::Copy { dst, .. } | SSAOp::Subpiece { dst, .. } => work.push(*dst),
-                    // `xor eax, eax` reads the guard's lane and computes 0 whatever it holds.
-                    SSAOp::IntXor { a, b, .. } | SSAOp::IntSub { a, b, .. } if a == b => {}
-                    SSAOp::Store { addr, val, .. }
-                        if *val == var && unread_frame_slot(*addr, func.var(var).size) =>
-                    {
-                        taken.push(*id);
-                    }
-                    _ => {
-                        r2il::refusal_evidence!(
-                            "unchecked-guard",
-                            "{:#x}: guard read {load:?} reaches {op:?}, so no read is the prologue's",
-                            func.entry
-                        );
-                        return IdSet::default();
-                    }
-                }
-            }
-        }
+    for found in loads {
+        let Some(taken) = guard_stores(func, found, (&uses, &merged), &unread_frame_slot) else {
+            return IdSet::default();
+        };
         inserted.extend(taken);
     }
     inserted
+}
+
+/// What one reader of the guard's value does with it.
+enum GuardUse {
+    /// A copy or a narrowing hands it on.
+    Follow(VarId),
+    /// `xor eax, eax` reads the guard's lane and computes 0 whatever it holds.
+    Cancel,
+    /// A store to a frame slot nothing reads.
+    Store,
+}
+
+/// The guard read at `load` and the stores it reaches, or `None` where any other reader sees it.
+fn guard_stores(
+    func: &SSAFunction,
+    (load, loaded): (OpId, VarId),
+    (uses, merged): (&Uses<'_>, &IdSet<VarId>),
+    unread_frame_slot: &impl Fn(VarId, u32) -> bool,
+) -> Option<Vec<OpId>> {
+    let (mut taken, mut work) = (vec![load], vec![loaded]);
+    while let Some(var) = work.pop() {
+        if merged.contains(var) {
+            return None;
+        }
+        for (id, op) in uses.get(var).into_iter().flatten() {
+            let size = func.var(var).size;
+            let Some(step) = guard_use(op, var, |addr| unread_frame_slot(addr, size)) else {
+                r2il::refusal_evidence!(
+                    "unchecked-guard",
+                    "{:#x}: guard read {load:?} reaches {op:?}, so no read is the prologue's",
+                    func.entry
+                );
+                return None;
+            };
+            match step {
+                GuardUse::Follow(dst) => work.push(dst),
+                GuardUse::Cancel => {}
+                GuardUse::Store => taken.push(*id),
+            }
+        }
+    }
+    Some(taken)
+}
+
+fn guard_use(
+    op: &SSAOp<VarId>,
+    var: VarId,
+    unread_frame_slot: impl Fn(VarId) -> bool,
+) -> Option<GuardUse> {
+    match op {
+        SSAOp::Copy { dst, .. } | SSAOp::Subpiece { dst, .. } => Some(GuardUse::Follow(*dst)),
+        SSAOp::IntXor { a, b, .. } | SSAOp::IntSub { a, b, .. } if a == b => Some(GuardUse::Cancel),
+        SSAOp::Store { addr, val, .. } if *val == var && unread_frame_slot(*addr) => {
+            Some(GuardUse::Store)
+        }
+        _ => None,
+    }
 }
 
 /// The frame addresses a body hands on: each one put anywhere but a load's or store's address, by
