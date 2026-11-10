@@ -582,9 +582,14 @@ impl SourceConversion<'_> {
                 target_type_id,
                 const_target,
             } => match self.node(target_type_id) {
-                // `Function` already spells a pointer to code.
-                Some(code @ (CTypeLike::Function { .. } | CTypeLike::UnprototypedFunction(_))) => {
-                    code
+                // `Function` already spells a pointer to code, a named one (`callback *`) too.
+                Some(code)
+                    if matches!(
+                        code.unaliased(),
+                        CTypeLike::Function { .. } | CTypeLike::UnprototypedFunction(_)
+                    ) =>
+                {
+                    code.unaliased().clone()
                 }
                 Some(target) if const_target => {
                     CTypeLike::Pointer(Box::new(CTypeLike::Const(Box::new(target))))
@@ -919,6 +924,41 @@ fn named_integer_bits(spelling: &str, ptr_bits: u32) -> Option<(u32, Signedness)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `typedef int callback(int);` and a `callback *`: one pointer, to the code.
+    #[test]
+    fn a_pointer_to_a_named_function_type_is_one_pointer() {
+        use r2source::{
+            SourceCodeSignature, SourceType, SourceTypeAlias, SourceTypeGraph,
+            SourceTypeGraphParts, SourceTypeKind,
+        };
+        let parts = SourceTypeGraphParts {
+            types: vec![
+                SourceType::new(0, SourceTypeKind::SignedInteger, 32, 32),
+                SourceType::new(1, SourceTypeKind::Code { signature_id: 0 }, 0, 0),
+                SourceType::new(
+                    2,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 1,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
+            ],
+            signatures: vec![SourceCodeSignature::new(0, 0, [0], false, true)],
+            aliases: vec![SourceTypeAlias::new("callback".to_owned(), 1)],
+            ..SourceTypeGraphParts::default()
+        };
+        let graph = SourceTypeGraph::from_parts(parts).expect("the graph states");
+        assert_eq!(
+            source_type_like(&graph, 2),
+            Some(CTypeLike::Function {
+                ret: Box::new(CTypeLike::i32()),
+                params: Box::new([CTypeLike::i32()]),
+            })
+        );
+    }
 
     /// `p[i]` needs a complete element: through `void *` it is not C, and a
     /// recovered pointer whose accesses read several widths is `void *`.

@@ -38,6 +38,8 @@ pub(crate) struct Interned<'a> {
     aliased: BTreeSet<u32>,
     /// A named copy of a pointer still being placed, resynced at `finish`.
     copies: Vec<(u32, u32)>,
+    /// Every record's node, which a name binds to even while its layout is placed.
+    records: BTreeSet<u32>,
 }
 
 impl<'a> Interned<'a> {
@@ -53,6 +55,7 @@ impl<'a> Interned<'a> {
             named: BTreeMap::new(),
             aliased: BTreeSet::new(),
             copies: Vec::new(),
+            records: BTreeSet::new(),
         }
     }
 
@@ -157,6 +160,12 @@ impl<'a> Interned<'a> {
                     == SourceTagKeyword::Typedef =>
             {
                 return structure;
+            }
+            _ if self.records.contains(&structure) => {
+                if !self.aliased.insert(structure) {
+                    return structure;
+                }
+                structure
             }
             SourceTypeKind::Struct { .. } | SourceTypeKind::Union { .. } => {
                 if !self.aliased.insert(structure) {
@@ -378,6 +387,7 @@ impl Interned<'_> {
     fn record(&mut self, id: TypeId, record: &Record) -> u32 {
         let slot = self.push(SourceTypeKind::Void, 0, 0);
         self.nodes.insert(id, Some(slot));
+        self.records.insert(slot);
         let Some(tag) = record.tag.clone().filter(|tag| is_identifier(tag)) else {
             r2il::refusal_evidence!(
                 "declared-types",
@@ -717,6 +727,41 @@ mod tests {
         assert!(
             matches!(&list, CTypeLike::Typedef { name, ty } if name == "va_list" && ty.is_pointer()),
             "{list:?}"
+        );
+    }
+
+    /// `typedef struct node node; struct node { node *next; };`: the alias reached while the
+    /// record is still being placed names the record, and the graph states.
+    #[test]
+    fn a_typedef_a_record_reaches_through_itself_names_the_record() {
+        use r2types::CTypeLike;
+        let mut graph = TypeGraph::new();
+        let record = graph.reserve();
+        let node = graph.add(Type::Typedef {
+            name: "node".to_owned(),
+            target: record,
+        });
+        let next = graph.add(Type::Pointer { target: node });
+        graph.define(
+            record,
+            Type::Record(Record {
+                kind: RecordKind::Struct,
+                tag: Some("node".to_owned()),
+                size_bytes: 8,
+                members: vec![Member {
+                    name: Some("next".to_owned()),
+                    ty: next,
+                    offset_bits: 0,
+                    bit_size: None,
+                }],
+            }),
+        );
+        // `struct node *` reaches the record first, and `next` names it while it is placed.
+        let parameter = graph.add(Type::Pointer { target: record });
+        let named = CTypeLike::named("node", CTypeLike::Struct("node".to_owned()));
+        assert_eq!(
+            converted(&graph, parameter, CDataModel::unix(64)),
+            CTypeLike::Pointer(Box::new(named))
         );
     }
 }
