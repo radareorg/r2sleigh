@@ -253,3 +253,86 @@ fn code_no_body_holds_refuses_the_closed_world_before_the_reference_index() {
     );
     assert_eq!(open.analysis_stats().references.computed, 0);
 }
+
+/// `f`: `pxor xmm0, xmm0; mov eax, 7; ret`; `g`: `call f; ret`; `caller_a`: `call g; movss [rsi],
+/// xmm0; ret`; `caller_b`: `call g; movsd [rsi], xmm0; ret`.
+const FORWARDED_AT_TWO_WIDTHS: &[u8] = &[
+    0x66, 0x0f, 0xef, 0xc0, // 1000 pxor xmm0, xmm0
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1004 mov eax, 7
+    0xc3, // 1009 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 100a padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0xc3, // 1015 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1016 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1020 call 0x1010
+    0xf3, 0x0f, 0x11, 0x06, // 1025 movss [rsi], xmm0
+    0xc3, // 1029 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 102a padding
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1030 call 0x1010
+    0xf2, 0x0f, 0x11, 0x06, // 1035 movsd [rsi], xmm0
+    0xc3, // 1039 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 103a padding
+];
+
+/// `g`'s callers read XMM0 as a `float` and as a `double`: forwarded through `g`, the reads still
+/// disagree, so `f` proves no width, where their joined bytes would make it a `double`.
+#[test]
+fn forwarded_float_reads_at_two_widths_prove_no_result() {
+    let functions = [
+        ("f", BASE, 0x0a),
+        ("g", BASE + 0x10, 0x06),
+        ("caller_a", BASE + 0x20, 0x0a),
+        ("caller_b", BASE + 0x30, 0x0a),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(FORWARDED_AT_TWO_WIDTHS, &functions));
+    open.analyse_program().expect("it surveys");
+    let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
+    assert!(!text.starts_with("double f("), "{text}");
+    assert!(!text.starts_with("float f("), "{text}");
+}
+
+/// `k` functions in a ring, each `test edi, edi; je 1f; call next; ret; 1: mov eax, 1; ret`, then
+/// `c`: `call f0; ret` and `d`: `call c; mov [rsi], eax; ret`.
+fn forwarding_ring(k: u64) -> Literal {
+    let mut code = Vec::new();
+    for at in 0..k {
+        let next = BASE + 0x10 * ((at + 1) % k);
+        let rel = (next.wrapping_sub(BASE + 0x10 * at + 9) as u32).to_le_bytes();
+        code.extend([0x85, 0xff, 0x74, 0x06, 0xe8]);
+        code.extend(rel);
+        code.extend([0xc3, 0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    }
+    let c = BASE + 0x10 * k;
+    code.extend([0xe8]);
+    code.extend((BASE.wrapping_sub(c + 5) as u32).to_le_bytes());
+    code.extend([0xc3; 11]);
+    code.extend([0xe8]);
+    code.extend((c.wrapping_sub(c + 0x10 + 5) as u32).to_le_bytes());
+    code.extend([0x89, 0x06, 0xc3]);
+    code.extend([0xcc; 24]);
+    let names = (0..k).map(|at| format!("f{at}")).collect::<Vec<_>>();
+    let mut functions = (names.iter().enumerate())
+        .map(|(at, name)| (name.as_str(), BASE + 0x10 * at as u64, 0x10))
+        .collect::<Vec<_>>();
+    functions.extend([("c", c, 6), ("d", c + 0x10, 8)]);
+    Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
+}
+
+/// The boundaries one request computes over a forwarding ring of `k`.
+fn ring_boundaries(k: u64) -> u64 {
+    let mut open = OpenProgram::of(forwarding_ring(k));
+    open.analyse_program().expect("it surveys");
+    let before = open.analysis_stats().call_boundaries.computed;
+    open.prepared(BASE).expect("it prepares");
+    open.analysis_stats().call_boundaries.computed - before
+}
+
+/// A cut forwarding cycle is solved again per ask, each caller's boundary once per lane set: the
+/// work is linear in the ring, where asking per lane computed 3,282 boundaries for a ring of 8.
+#[test]
+fn a_forwarding_ring_is_solved_once_per_caller() {
+    let (two, eight) = (ring_boundaries(2), ring_boundaries(8));
+    assert!(two <= 2 * (2 + 2), "ring 2: {two}");
+    assert!(eight <= 2 * (8 + 2), "ring 8: {eight}");
+}

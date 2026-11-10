@@ -33,6 +33,8 @@ pub struct AnalysisStats {
     pub rendered: db::QueryStats,
     /// The program's reference index, built on first demand (`ax`, the closed world's every way in).
     pub references: db::QueryStats,
+    /// The closed world's boundaries, one per callee; a forwarding cycle's are computed per ask.
+    pub call_boundaries: db::QueryStats,
 }
 pub use proved::Proved;
 pub use r2ssa::InductionStep;

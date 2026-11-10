@@ -498,6 +498,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             resolved: self.db.query_stats::<resolved::Resolved>(),
             rendered: self.db.query_stats::<analysis::Rendered>(),
             references: self.db.query_stats::<requests::ReferenceIndex>(),
+            call_boundaries: self.db.query_stats::<fates::CallBoundary>(),
         }
     }
 
