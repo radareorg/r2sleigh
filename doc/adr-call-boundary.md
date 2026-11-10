@@ -796,3 +796,22 @@ Gates, release, base `6129d1797`:
   - `aa; pdd`: pumasim `0x1fad00` 115.9 to 65.9 G and 0pack `0x475520` 84.3 to 56.6 G. Base built the reference index there; head decides without it.
   - bash `0x2e630`: 15.4 to 22.2 G, over D153's bound of 15.43 G. The callees' closed boundaries lift their callers' bodies and those bodies' callees. Holding fates from `aa`'s walk (S3's deferred rows) is the owner of that cost.
   - pumasim `0x3b6b20` after `aa`: peak RSS goes from 221 to 438 MB. Its every-way-in check builds the reference index, which S3 measured at 428.7 MB.
+
+## S5 as built (2026-11-10)
+
+What the code said that this ADR did not, and the owner chosen:
+
+- `FormalHome` carries its storages: `Register { abi_storage, graph_storage, value }` or `Frame { object, offset, bytes }`. `SourceFormalParameterFact` is `{ index, logical_value, home }`, with `value()`, `register()`, `object()` and `bytes()`. The r2source spec stays id-free.
+- The object model mints an argument-area object (`StackSlot` at the entry offset) for each stack parameter of the interface, read or not, after every other object, so no other object's id moves. `ObjectModel::argument_object(offset)` finds it.
+- A stack formal is `bytes` wide: the low lane its logical value states where memory is little-endian, else the slot. bzip2 stripped `0x1bc6d`'s seventh is an 8-byte slot holding a 4-byte lane.
+- Preparation reads only register formals (`collect_source_formal_parameter_facts` with no object model). The published boundary facts read both, after the object model.
+- A read of a stack formal is `CallerSlotSupply::Formal(index)` in the caller-slot certificate: the object at the formal's offset, read whole and written nowhere. A read that overlaps a formal any other way gives the object no certificate. r2dec declares the formal and spells that read as its name.
+- One list: `afv` and `afi` list `boundaries.parameters`, and the `pdd` header declares the same list. The entity-and-interface rebuild in `info.rs` is deleted, with r2types `interface_parameter_widths`, `declared_parameter_width_bytes` and `parameter_home_width_bytes`, which only it read.
+- One name: r2types `FunctionFacts::parameter_name(slot)` (the certified signature's name, else the source's, else `r2source::positional_parameter_name`, `arg{slot}`). r2dec, `afv`, `afi` and r2types' recovered signature read it. r2s `argument_name` (`arg{slot + 1}`) is deleted, and the other positional spellings in r2types and r2engine call the one function.
+- D105 is closed by four pieces in r2ssa, all reading `callee_held_lane` (`semantic/shared.rs`): the low lane of an argument register that the callee's interface states as a narrower logical value (`int fd` in `rdi` is `edi`).
+  - The boundary narrows the argument to that lane (`narrowed_argument` at the held width). Where no lane value is named and the carrier is the entry register handed on whole, the argument is this function's own formal of that lane, if one exists (`is_entry_lane_of`).
+  - The call-argument certificate checks a lane at the value's own width, so either proof holds.
+  - Recovery reads an entry carrier handed on whole at the held lane (`passed_through_entry_storages`).
+- No projection is minted for a held lane, and no entry value is materialized for one: a lane that is no formal binds nothing, and the argument stays the carrier.
+- S4's declared interface bound a stacked return address (`stacked_return`) without the carriers' names, so the trusted lift dropped the return-address and stack-pointer carriers and refused the body: bzip2 -g `0x1bc6d` refused at base `e7a294146`. `Placement::carriers` now copies the machine's role names onto the interface, as the recovered route does.
+- Open: a register copied whole into a callee-saved one and then handed to a callee that holds its low lane keeps the root's high half demanded. Copy forwarding leaves the `CallUse` reading the rebuilt root with no record of its slot, so demand cannot read it at the held lane. Census aarch64 `_main` (`manual_limits_O2` `0x100000b4c`, `mov x20, x0`) prints `uint32_t arg0` and `x0_1 = residual << 32 | arg0`, where base printed `uint64_t arg0`.

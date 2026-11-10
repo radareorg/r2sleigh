@@ -555,7 +555,8 @@ impl Placement<'_> {
             );
             return None;
         };
-        let placed = interface
+        // The names too: the trusted lift restates each carrier by name, and drops one it cannot name.
+        let placed = (interface.with_role_register_names(roles.role_register_names()))
             .with_return_address_storage(return_address)
             .and_then(|interface| interface.with_stack_pointer_storage(stack_pointer))
             .and_then(|interface| match frame_pointer {
