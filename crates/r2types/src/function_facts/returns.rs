@@ -186,11 +186,19 @@ impl ReturnTypeFact {
     }
 }
 
-/// `void` where the program's declaration of this function states it.
+/// The return type the program's declaration of this function states, from its interface's graph.
 fn declared(source: &r2ssa::SsaArtifact) -> Option<CTypeLike> {
     let interface = source.machine_context().function_interface()?;
-    (interface.types_are_declared() && interface.return_kind() == r2ssa::SourceFunctionReturn::Void)
-        .then_some(CTypeLike::Void)
+    if !interface.types_are_declared() {
+        return None;
+    }
+    match interface.return_kind() {
+        r2ssa::SourceFunctionReturn::Void => Some(CTypeLike::Void),
+        _ => crate::convert::source_type_like(
+            interface.type_graph()?,
+            interface.return_logical_value()?.type_id(),
+        ),
+    }
 }
 
 /// What each value-carrying return hands back, then each tail call's result.

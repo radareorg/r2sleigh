@@ -59,9 +59,9 @@ fn a_struct_parameter_costs_the_function_none_of_its_types() {
     // declared pointee of the variable it reads through.)
     let by_name =
         out.contains("while ((uint64_t)n != 0)") && out.contains("n = (const struct node*)");
-    // ADR D4's one `frame` array: the slot afv lists at `struct node*` takes the entry `n` once and
+    // ADR D4's one `frame` array: the slot afv lists at `const struct node*` takes the entry `n` once and
     // a loaded successor after, and nothing else reads the entry `n`.
-    let home = (common::afv_locals(&afv).into_values()).find(|(_, ty)| ty == "struct node*");
+    let home = (common::afv_locals(&afv).into_values()).find(|(_, ty)| ty == "const struct node*");
     let writes = common::stack_writes(&out, &afv);
     let at_home = (writes.iter())
         .filter(|(at, _)| home.as_ref().is_some_and(|(home, _)| at == home))

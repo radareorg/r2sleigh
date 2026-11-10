@@ -840,7 +840,7 @@ int32_t main(int32_t argc, char** argv)
     uint32_t rotl(uint32_t, int32_t);
     int16_t sext(int8_t);
     uint32_t sum_array(const uint32_t*, int32_t);
-    extern const int8_t* g_msg;
+    extern const char* g_msg;
 
     uint32_t tmp_161e_8_1;
     uint64_t rax_6;
