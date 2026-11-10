@@ -549,7 +549,7 @@ struct SourceConversion<'a> {
 
 impl SourceConversion<'_> {
     fn node(&mut self, type_id: u32) -> Option<CTypeLike> {
-        use r2source::{SourceTagKeyword, SourceTypeKind};
+        use r2source::SourceTypeKind;
         if !self.visiting.insert(type_id) {
             return None;
         }
@@ -581,23 +581,7 @@ impl SourceConversion<'_> {
             SourceTypeKind::Pointer {
                 target_type_id,
                 const_target,
-            } => match self.node(target_type_id) {
-                // `Function` already spells a pointer to code, a named one (`callback *`) too.
-                Some(code)
-                    if matches!(
-                        code.unaliased(),
-                        CTypeLike::Function { .. } | CTypeLike::UnprototypedFunction(_)
-                    ) =>
-                {
-                    code.unaliased().clone()
-                }
-                Some(target) if const_target => {
-                    CTypeLike::Pointer(Box::new(CTypeLike::Const(Box::new(target))))
-                }
-                Some(target) => CTypeLike::Pointer(Box::new(target)),
-                // A pointer to code the type layer cannot spell is still a pointer.
-                None => CTypeLike::Pointer(Box::new(CTypeLike::Unknown)),
-            },
+            } => self.pointer(target_type_id, const_target),
             SourceTypeKind::Struct { aggregate_id } => CTypeLike::Struct(aggregate(aggregate_id)?),
             SourceTypeKind::Union { aggregate_id } => CTypeLike::Union(aggregate(aggregate_id)?),
             SourceTypeKind::Array {
@@ -613,16 +597,7 @@ impl SourceConversion<'_> {
             SourceTypeKind::Float => CTypeLike::Float(bits),
             SourceTypeKind::Void => CTypeLike::Void,
             SourceTypeKind::Code { signature_id } => self.code(signature_id)?,
-            SourceTypeKind::Opaque { tag_id } => {
-                let tag = graph.opaque_tags().get(usize::try_from(tag_id).ok()?)?;
-                let name = tag.name().to_owned();
-                match tag.keyword() {
-                    SourceTagKeyword::Struct => CTypeLike::Struct(name),
-                    SourceTagKeyword::Union => CTypeLike::Union(name),
-                    SourceTagKeyword::Enum => CTypeLike::Enum(name),
-                    SourceTagKeyword::Typedef => CTypeLike::typedef(name),
-                }
-            }
+            SourceTypeKind::Opaque { tag_id } => self.opaque(tag_id)?,
         };
         self.visiting.remove(&type_id);
         Some(
@@ -635,6 +610,42 @@ impl SourceConversion<'_> {
                 None => ty,
             },
         )
+    }
+
+    fn pointer(&mut self, target_type_id: u32, const_target: bool) -> CTypeLike {
+        match self.node(target_type_id) {
+            // `Function` already spells a pointer to code, a named one (`callback *`) too.
+            Some(code)
+                if matches!(
+                    code.unaliased(),
+                    CTypeLike::Function { .. } | CTypeLike::UnprototypedFunction(_)
+                ) =>
+            {
+                code.unaliased().clone()
+            }
+            Some(target) if const_target => {
+                CTypeLike::Pointer(Box::new(CTypeLike::Const(Box::new(target))))
+            }
+            Some(target) => CTypeLike::Pointer(Box::new(target)),
+            // A pointer to code the type layer cannot spell is still a pointer.
+            None => CTypeLike::Pointer(Box::new(CTypeLike::Unknown)),
+        }
+    }
+
+    /// A tag the graph names and does not lay out.
+    fn opaque(&self, tag_id: u32) -> Option<CTypeLike> {
+        use r2source::SourceTagKeyword;
+        let tag = self
+            .graph
+            .opaque_tags()
+            .get(usize::try_from(tag_id).ok()?)?;
+        let name = tag.name().to_owned();
+        Some(match tag.keyword() {
+            SourceTagKeyword::Struct => CTypeLike::Struct(name),
+            SourceTagKeyword::Union => CTypeLike::Union(name),
+            SourceTagKeyword::Enum => CTypeLike::Enum(name),
+            SourceTagKeyword::Typedef => CTypeLike::typedef(name),
+        })
     }
 
     /// Code of one signature. A variadic one has no spelling here.
