@@ -74,7 +74,7 @@ The rule closes each case at its owner:
 
 - An import whose row is not cited complete reads every argument location of its convention. A `Tail::None` row is complete only when its citation states a fixed prototype. Rows parsed from radare2's sdb are `Tail::Unstated` until cited (S8).
 - The sign and width of `char` and `wchar_t` come from the target's C data model (below). A target the model does not list leaves the sign unstated, and the pointee spells as base did.
-- Code lies wherever a loaded segment has bytes (the d70 gate's D70 row).
+- Code lies in the file bytes a loaded segment maps past the headers (the d70 gate's D70 row).
 - A predicate that depends only on the callee takes only the callee, so a mutant that reads an argument does not compile (D75 row).
 
 ### What the cspec states (r2sleigh-lift)
@@ -526,7 +526,7 @@ S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
   - The dereferenced-pointer item stays D74's.
   - The silent `void` item stays D74's.
 - **D151, D153, D154 and D155:** each keeps its row and gate, D153's restated. Their designs are D167, D162, D169 and D170.
-- **d70-gate:** lands first, after its floor counts every DWARF function whose entry lies in a loaded segment (`PT_LOAD` with file bytes). Section flags decide nothing. It grades S4, S6 and S9.
+- **d70-gate:** lands first, after its floor counts every DWARF function whose entry lies in file bytes a `PT_LOAD` maps, less the ELF and program headers (a PIE's first load starts at 0, where `--gc-sections` leaves its tombstone). Section flags decide nothing. It grades S4, S6 and S9.
 - **d75-noreturn-guard:** lands after `never_returns` takes the callee alone. S8 carries `noreturn` on `LibraryRow`.
 - **The "`_exit` is `AtLeast(1)`" gate** (hand audit section 6, item 9): dropped. A glibc static `_exit` probe replaces it.
 
