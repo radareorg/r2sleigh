@@ -184,14 +184,22 @@ const A64_DOUBLE_BESIDE_POINTER: &[u8] = &[
     0xc0, 0x03, 0x5f, 0xd6, // 1020 ret
 ];
 
+/// Two carriers leave each call no contract cold (D62); under `aa` the caller's read of d0 decides
+/// `avg`'s result per callee (D166), and the call assigns it.
 #[test]
 fn a_callee_s_float_lane_is_the_value_the_caller_reads() {
     let functions = [
         ("avg", common::BASE, 0x10),
         ("caller", common::BASE + 0x10, 0x14),
     ];
-    let text = aarch64(A64_DOUBLE_BESIDE_POINTER, &functions, common::BASE + 0x10);
-    assert!(text.contains("avg("), "{text}");
+    let literal = Literal::of_code(A64_DOUBLE_BESIDE_POINTER, &functions).in_aarch64();
+    let mut open = OpenProgram::of(literal);
+    open.analyse_program().expect("it surveys");
+    let rendering = open.rendered(common::BASE + 0x10).expect("it renders");
+    let text = rendering.response.output.into_text();
+    assert!(text.contains("double avg("), "{text}");
     assert!(!text.contains("never assigned"), "{text}");
     assert!(!text.contains("r2sleigh_residual_u128"), "{text}");
+    let cold = aarch64(A64_DOUBLE_BESIDE_POINTER, &functions, common::BASE + 0x10);
+    assert!(!cold.contains("double avg("), "{cold}");
 }
