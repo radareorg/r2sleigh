@@ -12,6 +12,7 @@ mutant is not killed."""
 
 import os
 import re
+import signal
 import subprocess
 import sys
 
@@ -90,6 +91,59 @@ def reader_unless(reader, condition):
     return [(path, old, new.replace("{call}", verdict))]
 
 
+# What an argument may be read for, past its form: a value, a symbol, a site, a nested form, the depth (round 6).
+UNOB = "(match {x} {{ " + E + "::Observed {{ expr, .. }} => &**expr, e => e }})"
+
+
+def inner(form, field, pattern):
+    """An argument of `form` whose `field`, seen through an observation, matches `pattern`."""
+    return f"matches!(a, {E}::{form} if matches!({UNOB.format(x='&**' + field)}, {E}::{pattern}))"
+
+
+DEPTH = ("{ fn depth(e: &" + E + ") -> usize { use " + E + " as X; match e { "
+         "X::Observed { expr, .. } | X::Cast { expr, .. } | X::Sizeof(expr) | X::AddrOf(expr) | X::Deref(expr) "
+         "| X::Paren(expr) | X::Unary { operand: expr, .. } | X::Member { base: expr, .. } "
+         "| X::PtrMember { base: expr, .. } => 1 + depth(expr), "
+         "X::Binary { left, right, .. } | X::Subscript { base: left, index: right } => 1 + depth(left).max(depth(right)), "
+         "X::Ternary { cond, then_expr, else_expr } => 1 + depth(cond).max(depth(then_expr)).max(depth(else_expr)), "
+         "X::Call { args, .. } | X::Comma(args) => 1 + args.iter().map(depth).max().unwrap_or(0), "
+         "_ => 0 } } depth(a) >= 3 }")
+ARGUMENT = [
+    ("int0", f"matches!(a, {E}::IntLit(0))"), ("intnot1", f"matches!(a, {E}::IntLit(v) if *v != 1)"),
+    ("uintnot1", f"matches!(a, {E}::UIntLit(v) if *v != 1)"), ("uint0", f"matches!(a, {E}::UIntLit(0))"),
+    ("cast-deref", inner("Cast { expr, .. }", "expr", "Deref(_)")),
+    ("cast-binary", inner("Cast { expr, .. }", "expr", "Binary { .. }")),
+    ("cast-call", inner("Cast { expr, .. }", "expr", "Call { .. }")),
+    ("cast-observed", f"matches!(a, {E}::Cast {{ expr, .. }} if matches!(**expr, {E}::Observed {{ .. }}))"),
+    ("cast-role-step", f"matches!(a, {E}::Cast {{ role: crate::ast::CastRole::PointerWidthStep, .. }})"),
+    ("cast-not-int32", f"matches!(a, {E}::Cast {{ ty, .. }} if !matches!(ty, crate::ast::CType::Int {{ bits: 32, .. }}))"),
+    ("deref-binary", inner("Deref(e)", "e", "Binary { .. }")), ("deref-cast", inner("Deref(e)", "e", "Cast { .. }")),
+    ("binary-not-add", f"matches!(a, {E}::Binary {{ op, .. }} if *op != crate::ast::BinaryOp::Add)"),
+    ("binary-lit-left", f"matches!(a, {E}::Binary {{ left, .. }} if !matches!({UNOB.format(x='&**left')}, {E}::Var(_)))"),
+    ("string-long", f"matches!(a, {E}::StringLit(s) if s.len() > 1)"),
+    ("string-percent", f"matches!(a, {E}::StringLit(s) if s.contains('%'))"),
+    ("var-not-first", f"matches!(a, {E}::Var(id) if id.index() != 0)"),
+    ("observed-not-var", f"matches!(a, {E}::Observed {{ expr, .. }} if !matches!(**expr, {E}::Var(_)))"),
+    ("call-noargs", f"matches!(a, {E}::Call {{ args, .. }} if args.is_empty())"),
+    ("call-sited", f"matches!(a, {E}::Call {{ site: Some(_), .. }})"),
+    ("external-not-global", f"matches!(a, {E}::External {{ kind, .. }} if *kind != crate::symbol::ExternalKind::Global)"),
+    ("depth3", DEPTH), ("char-not-c", f"matches!(a, {E}::CharLit(c) if *c != 'c')"),
+    ("unary-not-neg", f"matches!(a, {E}::Unary {{ op, .. }} if *op != crate::ast::UnaryOp::Neg)"),
+    ("subscript-lit", inner("Subscript { index, .. }", "index", "IntLit(_) | " + E + "::UIntLit(_)")),
+    ("ternary-cond-not-var", f"matches!(a, {E}::Ternary {{ cond, .. }} if !matches!({UNOB.format(x='&**cond')}, {E}::Var(_)))"),
+    ("comma-not-2", f"matches!(a, {E}::Comma(v) if v.len() != 2)"),
+    ("data-not-40", f"matches!(a, {E}::DataObject {{ address, .. }} if *address != 0x40)"),
+    ("addrof-not-var", f"matches!(a, {E}::AddrOf(e) if !matches!({UNOB.format(x='&**e')}, {E}::Var(_)))"),
+    ("paren-not-var", f"matches!(a, {E}::Paren(e) if !matches!({UNOB.format(x='&**e')}, {E}::Var(_)))"),
+]
+SITED = "matches!(stmt, crate::ast::CStmt::Expr(" + E + "::Call {{ site: {}, .. }}))"
+# Conditions over the whole call: any argument above, its count past the AArch64 registers, its site.
+CONTENT = [(what, f"args.iter().any(|a| {cond})") for what, cond in ARGUMENT] + [
+    ("args17", "args.len() >= 17"), ("stmt-sited", SITED.format("Some(_)")), ("stmt-unsited", SITED.format("None")),
+]
+# The readers' share: one value, one nested form, the depth, a second symbol, a site.
+READ_CONTENT = ("int0", "cast-binary", "depth3", "var-not-first", "stmt-sited")
+
 ROLE = "false => (traps(stmt) || evidence.never_returns(stmt)).into(),"
 
 FREED = "stmts.push(stmt);\n            todo.extend(freed.into_iter().flat_map(Vec::into_iter).rev());"
@@ -133,6 +187,12 @@ MUTANTS = [
     (f"{reader}-ignores-{shape}-arg", reader_unless(reader, condition), [R2DEC, ENGINE])
     for reader, *_ in READERS for shape, condition in SHAPES
 ] + [
+    # The predicate and each reader reading what a call passes; the drawn calls in `support::exit_calls` kill them.
+    (f"predicate-reads-{what}", predicate_unless(condition), [R2DEC]) for what, condition in CONTENT
+] + [
+    (f"{reader}-reads-{what}", reader_unless(reader, dict(CONTENT)[what]), [R2DEC])
+    for reader, *_ in READERS for what in READ_CONTENT
+] + [
     # The role reading whether the stage selected anything, in place of the call.
     ("role-when-nothing-selected",
      [(RENDER, ROLE, "false => (traps(stmt) || (selections.is_empty() && evidence.never_returns(stmt))).into(),")],
@@ -150,10 +210,17 @@ def outcomes(output):
     return passed, failed
 
 
-def shell(command):
-    """`command` run in a shell: its exit code and its standard output."""
-    done = subprocess.run(command, shell=True, capture_output=True, text=True)
-    return done.returncode, done.stdout
+def shell(command, timeout=3600):
+    """`command` run in a shell: its exit code and standard output; past `timeout` seconds its process group is killed
+    and the code is 124, so a mutant that loops is WRONG and the script finishes."""
+    proc = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True)
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(proc.pid, signal.SIGKILL)
+        return 124, proc.communicate()[0]
+    return proc.returncode, out
 
 
 def baseline(commands, sh):

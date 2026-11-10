@@ -97,6 +97,18 @@ class Kill(unittest.TestCase):
         self.assertEqual((line, ok), ("m: does not build under `cargo test`", False))
 
 
+class Timeout(unittest.TestCase):
+    def test_a_command_past_its_time_exits_124_and_a_mutant_under_it_is_wrong(self):
+        self.assertEqual(mutants_d75.shell("echo early; sleep 5", timeout=0.5), (124, "early\n"))
+        sh = lambda command: (0, "") if "--no-run" in command else mutants_d75.shell("sleep 5", timeout=0.5)
+        with tempfile.TemporaryDirectory() as root:
+            path = pathlib.Path(root, "f.rs")
+            path.write_text("old\n")
+            line, ok = mutants_d75.run("m", [(str(path), "old", "new")], ["cargo test"], False, {"cargo test": set()}, sh)
+            self.assertEqual(path.read_text(), "old\n", "the file is restored")
+        self.assertEqual((line, ok), ("m: `cargo test` exits 124 with no baseline test failing", False))
+
+
 class Repository(unittest.TestCase):
     def test_every_mutant_applies_once_to_the_tree(self):
         cwd = os.getcwd()
