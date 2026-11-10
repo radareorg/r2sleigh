@@ -1,6 +1,6 @@
 # ADR: one owner of the call boundary
 
-Status: proposed (ROADMAP P7, with P4 and T slices; decisions D160 to D172; hand audit 3.2, 3.5 to 3.8)
+Status: proposed (ROADMAP P7, with P4 and T slices; decisions D160 to D172 and D209; hand audit 3.2, 3.5 to 3.8; amended 2026-11-10 after round 6 of the typed-values tracks)
 
 ## Problem
 
@@ -24,8 +24,8 @@ The audit counts below were rerun on master b99f00ee0 unless marked.
 | 3.5.2: `callee() \| residual(n) << 32` | DecBench 149, `ls` 14, zlib 9 |
 | 3.5.3: `int` returns are declared `uint64_t` | bzip2 -O0 15 of 17, ls-toybox 698 of 814 (not rerun) |
 | 3.2.1: a linked glibc name has no row | 426 DecBench functions. pigz has 99 asserts |
-| 3.2.2: `FILE` turns a prototype into `uint64_t` | `__fprintf_chk` 28 declarations over a-user. bomb `fopen`. Closes in step 7 (d71 A1) |
-| 3.2.3: `error` has no ellipsis | 84 sites in 52 functions. Closes in step 7 (d71 A1) |
+| 3.2.2: `FILE` turns a prototype into `uint64_t` | `__fprintf_chk` 28 declarations over a-user. bomb `fopen`. Closes in S8 (d71 A1's rows) |
+| 3.2.3: `error` has no ellipsis | 84 sites in 52 functions. Closes in S8 (`Tail::Variadic`) |
 | 3.2.4: libz.so has platform `Unknown` | 22 `__stack_chk_fail` calls are undeclared |
 | 3.2.5 to 3.2.7: bionic, libstdc++, KERNEL32 | ls-toybox 703 residuals; 0pack 7,621 sites in 1,153 functions, pumasim 4,942 in 357; hello_gs 98 sites, testapp 96 |
 | 3.8.1: Win64 home stores are residuals | hello_gs 71 of 246, testapp 51 of 174 |
@@ -58,6 +58,24 @@ Ghidra's `ParamListStandard` (`fspec.cc`) is the prior art for sections and hole
 - `unref` trials passed as call arguments (`:5682`);
 - the scored choice of convention (`:2706`);
 - a leftover RAX from an unknown call counted as a result.
+
+### Lower bounds and upper bounds
+
+A fact used as an upper bound ("reads only these", "holds no code", "is signed") must come from an owner that states it complete. Otherwise the fact is a lower bound, and it may only move output toward refusal or toward base output. Round 6 of the typed-values tracks (2026-11-10) found one blocker per track, and each used a lower bound as an upper bound:
+
+| Fact | Used as | What its owner states |
+|---|---|---|
+| A library row's fixed parameters | every register the import reads (d72 `import_takes`) | the reads at least. glibc `error` is variadic, and AAPCS64 has no count register, so a call may read x0 to x7 and v0 to v7 |
+| `char` is `Signed` (`spelling.rs` `integer_specifiers`) | the sign on every target (d71) | the sign on SysV x86-64 only. AAPCS64 makes plain `char` and `wchar_t` unsigned |
+| A section's `X` flag | the only place code lies (d70 gate) | where the linker marked code; `section(".x,\"aw\"")` puts code in a `WA` section |
+| 920 drawn arguments | proof that `never_returns` ignores arguments (d75) | 920 cases. The signature `never_returns(&CStmt)` can read any argument |
+
+The rule closes each case at its owner:
+
+- An import whose row is not cited complete reads every argument location of its convention. A `Tail::None` row is complete only when its citation states a fixed prototype. Rows parsed from radare2's sdb are `Tail::Unstated` until cited (S8).
+- The sign and width of `char` and `wchar_t` come from the target's C data model (below). A target the model does not list leaves the sign unstated, and the pointee spells as base did.
+- Code lies wherever a loaded segment has bytes (the d70 gate's D70 row).
+- A predicate that depends only on the callee takes only the callee, so a mutant that reads an argument does not compile (D75 row).
 
 ### What the cspec states (r2sleigh-lift)
 
@@ -121,7 +139,9 @@ pub struct LibraryRow {
     pub prototype: PrototypeId, pub tail: Tail, pub noreturn: bool, pub citation: Box<str>,
 }
 pub enum Tail {
-    None,
+    None,                                     // the citation states a fixed prototype
+    Unstated,                                 // no citation yet: reads every argument location
+    Variadic,                                 // `...` with no format or va_list parameter: error(3)
     Format { index: u8, kind: FormatKind },   // glibc __attribute__((format(printf|scanf, i, j)))
     VaList { index: u8 },                     // vprintf, __stdio_common_vfprintf
 }
@@ -135,7 +155,26 @@ pub enum LibraryId { Iso, Posix, Glibc, Bionic, LibSystem, Ucrt, Dll(Box<str>) }
 - A row from Itanium mangling states parameters only. A non-template mangled name encodes no return type, so its result is `Unproven`.
 - Handle types are data rows. ISO C 7.21.1 states that `FILE` is an object type. d71 A1 adds the `FILE` and `DIR` handle rows beside `named_scalar`. S8 moves any tag still in code (`spelling.rs:285`) into those rows.
 - `Platform`'s two meanings split by retyping `platform()` (`program/mod.rs:570`) into `CLibrary` and keeping `kernel()` (`:603`) as `Kernel`. `CLibrary` picks the library and guard rows. `Kernel` picks the syscalls and the psABI. `stack_guard` is keyed on `kernel()` today (`native.rs:2701`) while it cites glibc. Under the split it is keyed on `CLibrary`.
+- An import reads its row's fixed locations. Under `Unstated`, `Variadic`, `Format` or `VaList` it also reads every later argument location of the convention, bounded only by a count register the convention states (SysV `al` bounds the vector registers). AAPCS64 and Win64 state none, so all of x0 to x7 and v0 to v7, or all four shared positions, are read. Apple arm64 passes the tail on the stack (`variadic_on_stack`), so only the fixed registers are read there.
 - glibc evidence for an ELF with no `PT_INTERP` is `DT_NEEDED libc.so.6` together with a `.gnu.version_r` need of `GLIBC_*` on that library. r2image reads the version needs and per-symbol versions into `Container` (a `VersionNeed` and a symbol `version`). Today `Container` has `libraries` and no versions (r2image `lib.rs:998-1016`).
+
+### The C data model (r2abi)
+
+A C type spelled in a row or in DWARF has a sign and a width only on a target. `Width::Long` and `Width::Pointer` already resolve per target (`spelling.rs`). The sign of plain `char` and the sign and width of `wchar_t` do not: `integer_specifiers` makes `char` `Signed` everywhere, and `named_scalar` makes `wchar_t` signed 32-bit on Linux.
+
+```rust
+pub struct CDataModel {                 // one row per (arch, CLibrary), cited
+    pub plain_char: ScalarKind,         // SysV x86-64 Signed; AAPCS64 Unsigned; Apple arm64 Signed
+    pub wchar: (ScalarKind, Width),     // glibc x86-64 (Signed, 32); glibc aarch64 (Unsigned, 32); Win64 (Unsigned, 16)
+    pub long: Width, pub pointer: Width,
+    pub citation: &'static str,
+}
+```
+
+- `ScalarKind` gains `PlainChar`, resolved by the model as `Width::Long` is. `signed char` and `unsigned char` keep their stated sign.
+- A target the model does not list resolves `PlainChar` to no sign. The type then spells as base spelled it, and the proof line names the missing row.
+- The conformance test compiles an empty file with each listed target's compiler and reads `__CHAR_UNSIGNED__`, `__WCHAR_TYPE__`, `__SIZEOF_LONG__` and `__SIZEOF_POINTER__` from `-dM -E`. A row that disagrees fails the test.
+- One model serves row types, DWARF base types without `DW_ATE_signed_char`/`DW_ATE_unsigned_char`, and the r2types projection. No second table states a sign.
 
 ### The joined model (r2source type, r2engine query)
 
@@ -329,6 +368,8 @@ A cold `pdd` runs at `World::Open` and joins no sites. A caller's extern then re
 | cspec choice, frame pointer, red zone, `al`, save area, home `va_list`, entry stack, refusal, overrides | r2abi `ConventionRow` | r2engine model build |
 | Guard | r2abi `GuardRow`, keyed by `CLibrary` | r2engine model build |
 | Library prototypes and tails by linked name | r2abi `LibraryRow` | r2engine `Declared::import` |
+| Sign of plain `char`, sign and width of `wchar_t`, `long`, pointer | r2abi `CDataModel` | row and DWARF type conversion, r2types projection |
+| Registers an import reads | r2ssa `place` over the row and its `Tail` | `CallBoundary`, d72's site fates |
 | Version needs, symbol versions, `DW_AT_calling_convention` | r2image `Container` | r2engine binding and convention choice |
 | C library and kernel | r2engine, from `Container` | row selection |
 | `ConventionModel` | r2engine query, Held, per `ConventionId` | r2ssa recovery, placement, promotion, frame reach, frame model |
@@ -348,8 +389,8 @@ A cold `pdd` runs at `World::Open` and joins no sites. A caller's extern then re
 | Finding | Closes by | Owner | Slice |
 |---|---|---|---|
 | 3.2.1 linked names | Rows keyed `(LibraryId, linked_name)`, bound through the import's version. The radare2 keys `assert_fail`, `errno_location`, `libc_start_main`, `cxa_throw`, `libc_init` and `uClibc_main` are deleted | r2image, r2abi | S8 |
-| 3.2.2 `FILE` | d71 A1's handle rows and `TagScope::opaque`. S8 adds the rest: an `Unknown` parameter type no longer drops the prototype (`declared/mod.rs:276`, `function_type`'s `?`) | r2abi, r2engine | step 7, S8 |
-| 3.2.3 `error` | d71 A1 cites `error(3)`: `(int, int, const char *, ...)` | r2abi | step 7 |
+| 3.2.2 `FILE` | d71 A1's handle rows and `TagScope::opaque`, moved into S8 with the rest: an `Unknown` parameter type no longer drops the prototype (`declared/mod.rs:276`, `function_type`'s `?`) | r2abi, r2engine | S8 |
+| 3.2.3 `error` | The row cites `error(3)`: `(int, int, const char *, ...)`, `Tail::Variadic` | r2abi | S8 |
 | 3.2.4 libz.so | `DT_NEEDED libc.so.6` together with a `GLIBC_*` version need selects glibc | r2image, r2engine | S8 |
 | 3.2.5 to 3.2.7 | bionic rows, libstdc++ parameters from Itanium mangling with `Unproven` results, KERNEL32 keyed by `Dll` plus name | r2abi | S13 |
 | 3.5.1 to_upper | Under `aa`, every site is `Dead` and the callee does not escape, so `Void { Solved, ClosedWorld }`. The scratch case waits for its ADR. A cold `pdd` keeps the written carrier as `Unproven` | r2engine | S7 |
@@ -387,7 +428,7 @@ A cold `pdd` runs at `World::Open` and joins no sites. A caller's extern then re
 - Argument-register copies: the argument and return halves of `MachineAbiModel`, `r2ssa::abi::AbiProfile`, and `RegisterIdentity::argument_registers: Vec<String>`.
 - The formal-facts filter on stack parameters (`boundaries.rs:1823`).
 - Parameter lists and names: the argument rebuild in `info.rs:233`, and the second numbering in r2s `function.rs:125`.
-- Results, as left after step 7 (d72 already removes `direct_reads` and most of `reads_after`; lines are re-cited then):
+- Results (S7 re-cites the lines; the shelved d72 branch removes `direct_reads` and most of `reads_after`, and S7 takes that code):
   - `body_proven_return` and `with_body_proven_return` (`lib.rs:1120`, `:1163`);
   - the per-site Pair or Register choice in `mint_recovered_call_site_interface`;
   - the tie-break by address in `decide_prototypes`;
@@ -439,7 +480,7 @@ A cold `pdd` runs at `World::Open` and joins no sites. A caller's extern then re
 
 ## Slices
 
-Slice 0 is Order step 7: d70-gate, d71 A1 and A2 and d72 land as they are, before S1. S2, S3 and S8 touch other crates and stack beside S1. Each slice deletes its old path in its own PR.
+Slice 0 is Order step 7: d70-gate and d75's follow-up land, each after its one structural fix. The d71 and d72 branches are shelved (see Fate). S2, S3, S8 and S14 touch other crates and stack beside S1. Each slice deletes its old path in its own PR.
 
 | # | Slice | Owner | Gate | Deletes |
 |---|---|---|---|---|
@@ -449,13 +490,15 @@ Slice 0 is Order step 7: d70-gate, d71 A1 and A2 and d72 land as they are, befor
 | S4 | One `place` for the declared, body and import routes, with stack placement, the arrival check and `DW_CC_nocall` (r2image reads `DW_AT_calling_convention`). Partial DWARF keeps its placed prefix plus a typed floor. D105: the boundary names the low lane of an entry carrier as the argument where the callee holds only that lane | r2image, r2ssa, r2engine | bzip2 -g `0x1bc6d` has 7 parameters with DWARF names. `__libc_start_main`'s seventh places. 32 `arity.rs` tests. `.isra`/`.constprop` refusals unmoved. D105's `a_declared_integer_is_read_at_its_width_not_the_registers` un-ignored, its five corpus functions `uint32_t`, 0 pointers turned into integers on bash, ls-toybox and pigz | `placed_prefix`, `placed`, all-or-nothing `restatement`, `carrier_class` |
 | S5 | `FormalHome::Frame` stack formals in r2ssa formal facts. One list for `pdd`, `afv` and `afi`. One name owner | r2ssa, r2engine, r2s | bzip2 stripped `0x1bc6d`: `afi args: 7`, header 7, `cmp eax, arg6`. `frame_agree.py` does not fall | `boundaries.rs:1823` filter, `info.rs:233` rebuild, `function.rs:125` numbering |
 | S6 | `BodyBoundary` section rule with the read refusals, rule 4's full-section guard, the argument-area save area. Per-slot `Basis`. `HandedOn` limited to the calls reached. Hole arguments as typed residuals. D100's floor carried to the header's proof line | r2ssa | libz (O2-noinline-libz) `0xe160` 3 parameters. fp fadd, dmul and dcmp true prototypes. Certification: 0 invented arguments (W7), hole arguments counted apart, 0 invented variadic parameters (W14). D37's engine test that refuses `f(stack0)` kept. D100's `fcntl` test. Equivalence. d70 soundness floor (43%, 21%) holds or rises | `map_while`, `MachineAbiModel` argument half, `AbiProfile`. The prefix test at `:3006` becomes its negative test |
-| S7 | `CallBoundary` keyed `(CalleeKey, World)`: result presence per callee (D62), d72 fates with byte masks and forwarding, entry-lane `Unproven`, caller externs from the callee's projection, `CalleeFacts::derive` under the root's context, cold externs at `Decoded` | r2engine, r2types, r2dec | bash `0x61520` D62 gate. pumasim `png_free`. `shape_mutual_even` and `shape_mutual_odd` equal. An arm64 engine test: `keep` never `void`. `void_soundness`, `mutants_d72.py`, `result_reads.rs`. W46 caller mismatches from 41 of 234 to 0 or each named | `body_proven_return`, remaining `reads_after`, `known_function_signatures`, `by_name`, `body_summary`, `result_ambiguous`, `input.rs:166` |
-| S8 | r2image version needs and symbol versions. Library rows by linked name with `Tail`. `CLibrary` and `Kernel` as the retyped `platform()` and `kernel()`. `GuardRow`. An `Unknown` parameter keeps the prototype (D151) | r2image, r2abi, r2engine | pigz `__assert_fail` declared and its 99 asserts end control. libz.so `__stack_chk_fail` declared. printf-family tails from `Tail::Format`. `cited_rows.rs`. `library_named_type` falls | radare2 keys, d71 duplicate rows, `Platform`'s two meanings, the format-name test |
+| S7 | `CallBoundary` keyed `(CalleeKey, World)`: result presence per callee (D62), d72 fates with byte masks and forwarding, entry-lane `Unproven`, caller externs from the callee's projection, `CalleeFacts::derive` under the root's context, cold externs at `Decoded` | r2engine, r2types, r2dec | bash `0x61520` D62 gate. pumasim `png_free`. `shape_mutual_even` and `shape_mutual_odd` equal. An arm64 engine test: `keep` never `void`. d72 round 7's aarch64 `e1.c`, `e2.c` and `d.c` print base's declarations. `void_soundness`, `mutants_d72.py`, `result_reads.rs`. W46 caller mismatches from 41 of 234 to 0 or each named | `body_proven_return`, remaining `reads_after`, `known_function_signatures`, `by_name`, `body_summary`, `result_ambiguous`, `input.rs:166` |
+| S8 | r2image version needs and symbol versions. Library rows by linked name with `Tail`. `CLibrary` and `Kernel` as the retyped `platform()` and `kernel()`. `GuardRow`. An `Unknown` parameter keeps the prototype (D151) | r2image, r2abi, r2engine | pigz `__assert_fail` declared and its 99 asserts end control. libz.so `__stack_chk_fail` declared. printf-family tails from `Tail::Format`. `error` is `Tail::Variadic`, every sdb row `Unstated` until cited. `cited_rows.rs`. `library_named_type` falls | radare2 keys, d71 duplicate rows, `Platform`'s two meanings, the format-name test |
 | S9 | `SourceTypeGraph` into r2types through one converter | r2types, r2engine | Production `parse_c_type_like` references from 54 in 14 caller files to the definition alone, under a Dylint with a falling allowlist. Census judged | `c_type.rs`, `source_spelled_type`, `param_type`/`ret_type` and `ExternalTypeDb` strings |
 | S10 | Win64 forms: `OwnedRange::Home`, the `va_list` escape tail, `printf.rs` and `tail_count` on the `Shared` section and `HomeVaList`, `/GS` through the load config (D154) | r2sleigh-lift, r2abi, r2image, r2ssa | hello_gs `main` prints printf with 2 arguments, given a cited `__stdio_common_vfprintf` row. Home residuals from 71 to 0. Cookie reads elided where the check body is proven. A Win64 equivalence target | `MICROSOFT_X64` fields `localrange` states |
 | S11 | ELF forms: edge-conditioned canary observation, `SavedRegister` aware of lanes and the frame base (D155) | r2ssa | One engine test per form. bzip2 -O0 `FS_OFFSET` residuals from 16 to 0. `mapSuffix` clean. toybox d8 to d15 5 of 5 clean. `frame_agree.py` rises | `slot_promotion::saves`, `structural_save` |
 | S12 | Indirect calls through a DWARF function-pointer member, placed by `place` (after P9's field types) | r2types, r2ssa | zlib `inflateEnd` renders both `ZFREE` calls. Certification invented arguments stay 0 | none |
 | S13 | Data rows: bionic, libstdc++ parameters from mangling with `Unproven` results, KERNEL32 once cited rows exist | r2abi | ls-toybox: 0 residuals at `__errno`, `__strchr_chk`, `__open_2`, `getline`, `_exit`, `dup2` (of 703). 0pack (7,621 sites) and pumasim (4,942): every mangled callee states its parameter count. hello_gs (98) and testapp (96): each cited KERNEL32 row's sites declared | none |
+
+| S14 | `CDataModel` per `(arch, CLibrary)` with citations; `ScalarKind::PlainChar`; `wchar_t` from the model | r2abi | The `-dM -E` conformance test per listed target. d71 round-7 probes: aarch64 `mkdir`, `strnlen`, `unlinkat`, `regexec`, `error_at_line` and `wcsdup` parameters never `int8_t*` or `int32_t*`. x86-64 output unmoved | the fixed `Signed` default for `char`, `named_scalar`'s `wchar_t` |
 
 S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
 
@@ -463,14 +506,18 @@ S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
 
 - **D37:** kept. `ArgumentAreaRead` stays as rule 4's floor cause (readers at `resolved.rs:108,680`, `arity.rs:592`). Its engine test stays: a stack read with an unfull register section is no parameter. `RegisterRead` now means a read whose kind is unproven (rule 3). `HandedOn` lists only the calls a slot reaches.
 - **D62:** absorbed by S7. The join moves to r2engine, because it is a program query. r2types projects it. The row text is amended.
-- **D71 (`d71-prototypes`, aeac340fb):** A1 and A2 land unchanged in step 7. A1 closes 3.2.2 and 3.2.3; both are re-measured after step 7. S8 rekeys the rows and deletes the duplicate `assert_fail` and `errno_location` rows. A2 reads the per-slot `Basis` from S6. A3 stays with T.
+- **D71 (`d71-prototypes`, shelved at 856416c26 on 2026-11-10):** seven review rounds each found a new blocker in row typing. Round 7 found aarch64 `const char *` parameters printed `int8_t*` where base printed `uint64_t`. The branch is the code source for three slices:
+  - A1's handle rows (`FILE`, `DIR`) and the compile gate move to S8. 3.2.2 and 3.2.3 close there, with `error` as `Tail::Variadic`.
+  - A2, pointer types from a declared row, moves after S6 and S14. It reads the per-slot `Basis` and the model's `char` sign.
+  - A3 stays with T.
 - **D100:** fix (b), the floor in the header, lands in S6. Fix (a) is not taken: shown tail registers are caller writes, which never prove arity.
 - **D105:** moves to S4. Its fix is a placement and narrowing rule. Its test stays ignored until S4.
 - **D106:** independent of this ADR (r2dec's ledger). It keeps its row and timing.
-- **D72 (`d72-return-fates`, 8f40204d1):**
-  - It lands unchanged in step 7. Its void applies only to `Unproven` results, so it does not put a scratch void before the width work.
+- **D72 (`d72-return-fates`, shelved at f40057e78 on 2026-11-10):**
+  - Six review rounds found 1 to 7 blockers each in per-instruction lane rules. The round-6 strict core kept only site fates and the closed-world void. Round 7 found 13 false voids on aarch64 plus 3 in the gate's own `d.c`: `error`'s row has no ellipsis, so `import_takes` read only x0 to x2 and the caller's d0 became `Dead`.
+  - S7 builds `SiteBoundary` from the branch's `site_fates`, with byte masks and forwarding. Import reads come from `place` under the bounds rule above.
   - S1 turns its `result_registers` into the cited `SpecOverride::Results` row.
-  - S7 gives `LaneFate` byte masks, keeps its forwarding, and deletes what remains of the per-body read path.
+  - S7's gate adds round 7's repros (`e1.c`, `e2.c`, `d.c` built for aarch64): every one prints base's declaration.
   - Its "Return storage" invariant and its closed-world ADR stay in doc/adr-resolved-bodies.md.
 - **D73:** B1 reads `SlotUse::Read { bytes }` and the per-slot `Basis` that D165 mints. The row text is amended. It stays with T after S6.
 - **D74:**
@@ -479,8 +526,8 @@ S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
   - The dereferenced-pointer item stays D74's.
   - The silent `void` item stays D74's.
 - **D151, D153, D154 and D155:** each keeps its row and gate, D153's restated. Their designs are D167, D162, D169 and D170.
-- **d70-gate:** lands first. It grades S4, S6 and S9.
-- **d75-noreturn-guard:** independent. S8 carries `noreturn` on `LibraryRow`.
+- **d70-gate:** lands first, after its floor counts every DWARF function whose entry lies in a loaded segment (`PT_LOAD` with file bytes). Section flags decide nothing. It grades S4, S6 and S9.
+- **d75-noreturn-guard:** lands after `never_returns` takes the callee alone. S8 carries `noreturn` on `LibraryRow`.
 - **The "`_exit` is `AtLeast(1)`" gate** (hand audit section 6, item 9): dropped. A glibc static `_exit` probe replaces it.
 
 ## Refusals
@@ -533,3 +580,9 @@ S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
 - **Held-index RSS:** peak RSS after `aa` within 10% of today's, measured with dhat before S3 lands.
 - **musl:** `CLibrary::Musl` reads only the ISO and POSIX rows until a cited musl table exists.
 - **D105 timing:** D105 moves to S4 (D163). d71 merges with the five known `uint64_t` headers (bash 4, pumasim 1) recorded in its row.
+
+## Decided (2026-11-10, by the maintainer)
+
+- **Design before branches:** the d71 and d72 branches stop taking review rounds. Their blockers belong to owners this ADR defines, so the slices rebuild them: d71 into S8, S14 and after S6; d72 into S7. d70 and d75 each take one structural fix and land.
+- **Bounds:** the "Lower bounds and upper bounds" rule above applies to every slice's review.
+- **C data model:** S14 (D209) adds `CDataModel` to r2abi beside S1.
