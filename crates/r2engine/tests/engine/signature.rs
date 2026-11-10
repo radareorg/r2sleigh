@@ -261,3 +261,60 @@ fn a_rows_wchar_t_and_char_are_the_targets() {
         ]
     );
 }
+
+/// `movsd xmm0, [rsp + 8]; movsd [rdi], xmm0; ret`: the ninth double stored through the pointer.
+const STORES_THE_NINTH_DOUBLE: &[u8] = &[
+    0xf2, 0x0f, 0x10, 0x44, 0x24, 0x08, // movsd xmm0, [rsp + 8]
+    0xf2, 0x0f, 0x11, 0x07, // movsd [rdi], xmm0
+    0xc3, // ret
+];
+
+/// `void ninth(double *out, double a, ..., double i)`: under SysV `a` to `h` are in the vector
+/// registers and `i` is on the stack.
+fn ninth() -> r2abi::Declarations {
+    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Type, TypeGraph, Width};
+    let mut graph = TypeGraph::new();
+    let double = graph.add(Type::Scalar(Scalar {
+        kind: ScalarKind::Float,
+        width: Width::Bits(64),
+        name: Some("double".to_owned()),
+    }));
+    let pointer = graph.add(Type::Pointer { target: double });
+    let void = graph.add(Type::Void);
+    let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+    let doubles = names.map(|name| Parameter::new(double, "double", Some(name)));
+    let prototype = Prototype {
+        name: "ninth".to_owned(),
+        parameters: [Parameter::new(pointer, "double *", Some("out"))]
+            .into_iter()
+            .chain(doubles)
+            .collect(),
+        returns: "void".into(),
+        return_type: void,
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(BASE, prototype);
+    declarations
+}
+
+/// A stack slot carries any class: the declared double there is a parameter beside the register
+/// ones, never an integer whose disagreement refuses the whole list.
+#[test]
+fn a_declared_double_on_the_stack_is_declared_beside_the_register_ones() {
+    let code = STORES_THE_NINTH_DOUBLE;
+    let literal = Literal::of_code(code, &[("ninth", BASE, code.len() as u64)]);
+    let text = (OpenProgram::of(literal.with_declarations(ninth())).rendered(BASE))
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    let header = text.lines().next().unwrap_or_default();
+    let parameters = common::parameters(header);
+    assert_eq!(parameters.len(), 10, "{text}");
+    assert_eq!(
+        parameters[9],
+        ("double".to_owned(), "i".to_owned()),
+        "{text}"
+    );
+}

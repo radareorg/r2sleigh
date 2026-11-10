@@ -2754,15 +2754,20 @@ fn parameters(
             let declared = input
                 .parameter_declaration(parameter.index as usize, width_bits)
                 .map(|declared| class_of(&declared, width_bits));
-            // A stack slot carries any class; a register's class is the convention's.
-            let carrier = match parameter.register() {
-                Some((abi_storage, _)) => located_class(artifact, abi_storage, width_bits),
-                None => class_of(&r2types::CTypeLike::machine_bits(width_bits), width_bits),
-            };
-            let class = match declared {
-                Some(None) => return None,
-                Some(Some(declared)) => agreed(Some(declared), carrier)?,
-                None => carrier?,
+            // A register's class is the convention's; a stack slot carries any, so its declaration
+            // decides and the machine word is the class only where none is declared.
+            let register = parameter.register();
+            let class = match (declared, register) {
+                (Some(None), _) => return None,
+                (Some(Some(declared)), Some((abi_storage, _))) => agreed(
+                    Some(declared),
+                    located_class(artifact, abi_storage, width_bits),
+                )?,
+                (Some(Some(declared)), None) => declared,
+                (None, Some((abi_storage, _))) => located_class(artifact, abi_storage, width_bits)?,
+                (None, None) => {
+                    class_of(&r2types::CTypeLike::machine_bits(width_bits), width_bits)?
+                }
             };
             // A parameter is declared at its value's own width: a lane of it is read by name.
             if class.width_bits() != width_bits {
