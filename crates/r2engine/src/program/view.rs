@@ -310,21 +310,15 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.db.inputs().places_function(vaddr)
     }
 
-    fn closed_result(
-        &self,
-        entry: u64,
-        open: &r2source::SourceFunctionInterface,
-    ) -> Option<r2source::SourceClosedResult> {
+    fn callers(&self, entry: u64) -> Option<r2source::SourceCallerLanes> {
         use super::fates::{CallBoundary, CalleeKey, World};
         // A survey that is itself preparing this body is a cycle, which reads as no evidence.
         let key = (CalleeKey::Entry(entry), World::Closed);
         let boundary = self.db.get::<CallBoundary>(&key).ok()?;
-        let decided = super::fates::decide(open, (*boundary).as_ref()?);
-        r2il::refusal_evidence!(
-            "call-boundary",
-            "{entry:#x}: closed world decides {decided:?}"
-        );
-        decided
+        match (*boundary).as_ref()? {
+            CallBoundary::Sites { callers, .. } => Some(*callers),
+            CallBoundary::Import { .. } => None,
+        }
     }
 
     fn frame_saves(&self, entry: u64) -> Vec<r2source::SourceFrameSave> {

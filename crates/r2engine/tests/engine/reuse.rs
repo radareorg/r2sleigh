@@ -241,7 +241,7 @@ fn rendered_returning_object(declared: bool) -> String {
         stack_slot_names: Vec::new(),
         signature: None,
         loader_role: None,
-        closed_result: None,
+        callers: None,
         frame_saves: Vec::new(),
     };
     let snapshot = r2source::native::capture(&machine, function).expect("a capture");

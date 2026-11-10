@@ -72,7 +72,7 @@ impl MachineProfile {
 pub struct FunctionIdentity {
     address: u64,
     loader_role: Option<SourceLoaderRole>,
-    closed_result: Option<SourceClosedResult>,
+    callers: Option<SourceCallerLanes>,
 }
 
 impl FunctionIdentity {
@@ -85,14 +85,43 @@ impl FunctionIdentity {
         self.loader_role
     }
 
-    /// What the closed world decides of this function's result, where r2engine decided it.
-    pub const fn closed_result(&self) -> Option<SourceClosedResult> {
-        self.closed_result
+    /// What every call the closed world shows does with this function's result lanes, under `aa`.
+    pub const fn callers(&self) -> Option<&SourceCallerLanes> {
+        self.callers.as_ref()
     }
 }
 
-/// What r2engine's closed-world `CallBoundary` decides of a function's result from every call the
-/// program makes to it (doc/adr-call-boundary.md, "The callee's boundary"); stated into its seal.
+/// The result lanes a convention names: integer, float, second integer, then four of its return set.
+pub const RESULT_LANES: usize = 7;
+
+/// One result lane of a callee joined over every call the closed world shows (doc/adr-call-boundary.md).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct SourceJoinedLane {
+    /// Whether a body may leave a result here: the typed lanes, and each lane the convention also
+    /// passes arguments in (its entry bytes may be handed back). x87's are written before they hold one.
+    pub held: bool,
+    /// Some call reads the lane as the call leaves it.
+    pub read: bool,
+    /// Some call may take, lose or hand on the lane.
+    pub unknown: bool,
+    /// Some call returns the lane on into a cycle of forwarders.
+    pub cycle: bool,
+    /// Every call leaves the lane dead.
+    pub dead: bool,
+    /// The bytes every read narrower than the lane takes, where they agree; `Some(None)` where two disagree.
+    pub width: Option<Option<u32>>,
+}
+
+/// r2engine's closed-world `CallBoundary`: each result lane joined over every call, and whether those
+/// calls are every way in. Recovery decides the result from it inside its one seal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SourceCallerLanes {
+    pub lanes: [SourceJoinedLane; RESULT_LANES],
+    pub exhaustive: bool,
+}
+
+/// What the closed world decides of a function's result from its open recovery and every call the
+/// program makes to it (doc/adr-call-boundary.md, "The callee's boundary"); r2ssa decides and applies it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SourceClosedResult {
     /// Every call leaves every result lane dead, and the body defines no result byte.
@@ -1177,7 +1206,7 @@ mod tests {
             FunctionIdentity {
                 address: 0x1000,
                 loader_role: None,
-                closed_result: None,
+                callers: None,
             },
             FunctionPresentation {
                 display_name: "fixture".into(),
@@ -1302,7 +1331,7 @@ mod tests {
                 FunctionIdentity {
                     address: 0x2000,
                     loader_role: None,
-                    closed_result: None,
+                    callers: None,
                 },
                 valid.presentation().clone(),
                 valid.image().clone(),

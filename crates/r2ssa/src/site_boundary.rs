@@ -3,7 +3,10 @@
 
 use r2il::eval::independence::{leaves_zero, reads_of};
 use r2il::{Endianness, R2ILBlock, R2ILOp, SpaceId, Varnode};
-use r2source::{CanonicalStorageId, SourceConventionSlots};
+use r2source::{
+    CanonicalStorageId, SourceCallerLanes, SourceClosedResult, SourceConventionSlots,
+    SourceFunctionInterface, SourceReadLanes, SourceResultCause,
+};
 
 /// One bit per byte of a result register; a register past 128 bytes keeps its last bit for the rest.
 type Bytes = u128;
@@ -49,7 +52,8 @@ impl Lifted for R2ILBlock {
 pub const TYPED: usize = 3;
 /// The return set past the typed lanes: x86-64 states xmm1, st0 and st1, AArch64 q1 to q3.
 pub const OTHERS: usize = 4;
-pub const LANES: usize = TYPED + OTHERS;
+pub const LANES: usize = r2source::RESULT_LANES;
+const _: () = assert!(TYPED + OTHERS == LANES);
 
 /// The result registers of a convention: the integer, float and second integer ones, each absent
 /// where it names none, and the rest of its return set.
@@ -937,6 +941,77 @@ fn overlap(a: CanonicalStorageId, b: CanonicalStorageId) -> bool {
     a.space == b.space
         && a.offset < b.offset.saturating_add(u64::from(b.size))
         && b.offset < a.offset.saturating_add(u64::from(a.size))
+}
+
+/// What the closed world decides of a body's result from its open interface and every call's fate on
+/// each lane (doc/adr-call-boundary.md, "S7 as built"; D202). Recovery applies it in the same seal.
+pub fn decide(
+    open: &SourceFunctionInterface,
+    callers: &SourceCallerLanes,
+) -> Option<SourceClosedResult> {
+    // A declaration states the result.
+    if open.types_are_declared() {
+        return None;
+    }
+    let lane = |id: LaneId| callers.lanes[usize::from(id.0)];
+    let (integer, float, second) = (
+        lane(LaneId::INTEGER),
+        lane(LaneId::FLOAT),
+        lane(LaneId::SECOND),
+    );
+    let carriers = open.result_carriers();
+    // A body may hand back any lane of the return set as its caller left it (d72 round 6), so a void
+    // needs each dead at every call.
+    let lanes = &callers.lanes;
+    let all_dead = callers.exhaustive && lanes.iter().all(|lane| lane.dead || !lane.held);
+    let cycle = lanes.iter().any(|lane| lane.cycle);
+    match open.return_kind() {
+        r2source::SourceFunctionReturn::Register { .. } => {
+            let paired = carriers.is_some_and(|carriers| carriers.second.is_some());
+            if paired && second.read {
+                return Some(SourceClosedResult::Read(SourceReadLanes::Pair));
+            }
+            if integer.read {
+                return Some(SourceClosedResult::Read(SourceReadLanes::Integer));
+            }
+            if all_dead {
+                return Some(SourceClosedResult::Unread);
+            }
+            cycle.then_some(SourceClosedResult::ForwardCycle)
+        }
+        r2source::SourceFunctionReturn::Unproven => {
+            let carriers = carriers?;
+            if integer.read && (carriers.float.is_none() || !float.read) {
+                return Some(SourceClosedResult::Read(SourceReadLanes::Integer));
+            }
+            if carriers.float.is_some() && float.read && !integer.read {
+                let bytes = float
+                    .width
+                    .flatten()
+                    .filter(|bytes| matches!(bytes, 4 | 8))?;
+                let bytes = u8::try_from(bytes).ok()?;
+                return Some(SourceClosedResult::Read(SourceReadLanes::Float { bytes }));
+            }
+            if all_dead {
+                // No defined byte reaches a return where the body only hands back an input.
+                let causes = (open.unproven_result())
+                    .map(|unproven| unproven.causes().to_vec())
+                    .unwrap_or_default();
+                let undefined = causes.iter().all(|cause| {
+                    matches!(
+                        cause,
+                        SourceResultCause::HandedBack | SourceResultCause::NoReturn
+                    )
+                });
+                return Some(match undefined {
+                    true => SourceClosedResult::Void,
+                    false => SourceClosedResult::Unread,
+                });
+            }
+            cycle.then_some(SourceClosedResult::ForwardCycle)
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

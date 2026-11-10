@@ -223,7 +223,8 @@ fn world_of(demand: Demand) -> super::World {
     }
 }
 
-/// A function read alone, again in the closed world where its `CallBoundary` decides its result.
+/// A function read alone, again in the closed world where its `CallBoundary` decides its result:
+/// the held alone read is the open interface that seal's recovery decides from.
 fn closed_alone<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     view: &View<'_, S>,
@@ -231,10 +232,17 @@ fn closed_alone<S: Source + 'static>(
     alone: &Shared<CalleeRead>,
     demand: Demand,
 ) -> Shared<CalleeRead> {
-    let decided = (demand == Demand::Arity)
+    let open = (demand == Demand::Arity)
         .then(|| alone.0.interface.as_ref())
-        .flatten()
-        .and_then(|open| crate::native::Program::closed_result(view, node.0, open));
+        .flatten();
+    let callers = open.and_then(|_| crate::native::Program::callers(view, node.0));
+    let decided = (open.zip(callers.as_ref()))
+        .and_then(|(open, callers)| r2ssa::site_boundary::decide(open, callers));
+    r2il::refusal_evidence!(
+        "call-boundary",
+        "{:#x}: closed world decides {decided:?}",
+        node.0
+    );
     if decided.is_none() {
         return alone.clone();
     }

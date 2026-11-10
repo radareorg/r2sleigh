@@ -2537,30 +2537,59 @@ impl TrustedSsaArtifact {
                 if let Some(exhausted) = preliminary_prep.facts.exhausted {
                     preliminary.note_exhausted(exhausted);
                 }
-                let recovered = crate::recover_interface::recover_interface_with_context(
+                let stated = crate::recover_interface::Stated::of(&source);
+                let mint = |recovered: &crate::recover_interface::RecoveredInterface| {
+                    crate::recover_interface::mint_recovered_interface(
+                        recovered,
+                        source.machine_roles(),
+                        source.source_revision_identity(),
+                        source.convention_slots().convention(),
+                        source.convention(),
+                    )
+                };
+                let open = crate::recover_interface::recover_interface_with_context(
                     preliminary,
                     &preliminary_prep,
                     source.convention_slots(),
                     &provisional_machine_context,
-                    crate::recover_interface::Stated::of(&source),
+                    stated,
                 );
-                let recovered = match recovered {
-                    Ok(Some(recovered)) => recovered,
+                let open = match open {
+                    Ok(Some(open)) => open,
                     Ok(None) => break 'recovered None,
                     Err(exhausted) => {
                         preliminary.note_exhausted(exhausted);
                         break 'recovered None;
                     }
                 };
+                // The closed world decides from the open interface; recovery applies it in this seal.
+                let decided = source
+                    .function()
+                    .callers()
+                    .and_then(|callers| crate::site_boundary::decide(&mint(&open)?, callers));
+                let recovered = match decided {
+                    None => open,
+                    Some(closed) => {
+                        let closing = crate::recover_interface::recover_interface_with_context(
+                            preliminary,
+                            &preliminary_prep,
+                            source.convention_slots(),
+                            &provisional_machine_context,
+                            stated.closing(closed),
+                        );
+                        match closing {
+                            Ok(Some(recovered)) => recovered,
+                            Ok(None) => break 'recovered None,
+                            Err(exhausted) => {
+                                preliminary.note_exhausted(exhausted);
+                                break 'recovered None;
+                            }
+                        }
+                    }
+                };
                 closed_world = recovered.assumes_closed_world();
                 body_boundary = Some(Arc::new(recovered.boundary().clone()));
-                let minted = crate::recover_interface::mint_recovered_interface(
-                    &recovered,
-                    source.machine_roles(),
-                    source.source_revision_identity(),
-                    source.convention_slots().convention(),
-                    source.convention(),
-                );
+                let minted = mint(&recovered);
                 if minted.is_none() {
                     r2il::refusal_evidence!(
                         "interface-recovery",

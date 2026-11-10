@@ -103,13 +103,9 @@ pub trait Program: crate::body::Program {
         Vec::new()
     }
 
-    /// What the closed world's `CallBoundary` decides of the result of the function at `entry`, given
-    /// what its body proves alone (`open`); none outside `aa` (doc/adr-call-boundary.md, D166).
-    fn closed_result(
-        &self,
-        _entry: u64,
-        _open: &r2source::SourceFunctionInterface,
-    ) -> Option<r2source::SourceClosedResult> {
+    /// What every call the closed world shows does with the result lanes of the function at `entry`,
+    /// from its `CallBoundary`; none outside `aa` (doc/adr-call-boundary.md, D166).
+    fn callers(&self, _entry: u64) -> Option<r2source::SourceCallerLanes> {
         None
     }
 
@@ -1559,8 +1555,8 @@ struct Native<'a> {
 
 impl<'a> Native<'a> {
     /// One body sealed against `callees`, and prepared again where it restates its declared frame
-    /// or text it points at; in the closed world, sealed once more where its `CallBoundary` decides
-    /// the result. Its first seal's facts are collected only where something reads them.
+    /// or text it points at; in the closed world, its `CallBoundary` goes into that seal. Its first
+    /// seal's facts are collected only where something reads them.
     fn resolve(
         &self,
         entry: u64,
@@ -1573,7 +1569,11 @@ impl<'a> Native<'a> {
         let declared_prototype =
             Declared::body(self.target, entry).map(|declared| declared.prototype);
         let declared_root = self.declaration(entry);
-        let seal_first = |reads| match (declared_root.interface.is_some(), tables.is_empty()) {
+        // Recovery decides the closed world's result inside the seal; a declaration states its own (D166).
+        let reads = (world == crate::program::World::Closed && declared_root.interface.is_none())
+            .then(|| self.program.callers(entry))
+            .flatten();
+        let first = match (declared_root.interface.is_some(), tables.is_empty()) {
             (false, true) => {
                 let restatement = Restatement::default();
                 self.seal(root, callees, Vec::new(), restatement, (&[], calls), reads)
@@ -1586,17 +1586,7 @@ impl<'a> Native<'a> {
                 (tables, calls),
                 reads,
             ),
-        };
-        let mut first = seal_first(None)?;
-        // The closed world decides the result from the body's open interface (D166).
-        let reads = (world == crate::program::World::Closed)
-            .then(|| first.machine_context().function_interface().cloned())
-            .flatten()
-            .and_then(|open| self.program.closed_result(entry, &open));
-        if reads.is_some() {
-            drop(first);
-            first = seal_first(reads)?;
-        }
+        }?;
         // aarch64 forms an address from a page and an offset: its text is captured once folded.
         let folded = self.folded_literals(&first, root);
         // Only a declared frame's restatement reads the first's facts, or the first is the answer.
@@ -1968,14 +1958,14 @@ impl<'a> Native<'a> {
         extra_literals: Vec<(u64, String)>,
         restatement: Restatement,
         (tables, calls): (&[NativePointerTable], &[NativePointerTable]),
-        closed_result: Option<r2source::SourceClosedResult>,
+        callers: Option<r2source::SourceCallerLanes>,
     ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Capture {
             extra_literals,
             restatement,
             tables,
             calls,
-            closed_result,
+            callers,
         };
         let (lifted, evidence) = self.lifted(walked, callees, capture)?;
         TrustedSsaArtifact::seal_with_callee_interfaces(
@@ -1983,7 +1973,7 @@ impl<'a> Native<'a> {
             Some(self.target.arch),
             &self.control,
             &evidence,
-            &premises_reading(closed_result.is_some()),
+            &premises_reading(callers.is_some()),
         )
         .map_err(NativeRefusal::of_preparation)
     }
@@ -2023,7 +2013,7 @@ impl<'a> Native<'a> {
             restatement,
             tables: &[],
             calls: &[],
-            closed_result: None,
+            callers: None,
         };
         let (lifted, evidence) = self.lifted(walked, callees, capture)?;
         TrustedSsaArtifact::seal_against_convention(
@@ -2056,7 +2046,7 @@ impl<'a> Native<'a> {
             restatement,
             tables,
             calls: call_tables,
-            closed_result,
+            callers,
         } = capture;
         let Restatement {
             interface,
@@ -2140,7 +2130,7 @@ impl<'a> Native<'a> {
             signature,
             interface,
             loader_role: None,
-            closed_result,
+            callers,
             frame_saves: self.program.frame_saves(walked.body.entry),
         };
 
@@ -2153,13 +2143,13 @@ impl<'a> Native<'a> {
 }
 
 /// What a capture states beyond the walked body: literals folded since, a restatement, the tables
-/// its dispatches and its indirect calls read, and what callers read of its result.
+/// its dispatches and its indirect calls read, and what the closed world's calls do with its result.
 struct Capture<'t> {
     extra_literals: Vec<(u64, String)>,
     restatement: Restatement,
     tables: &'t [NativePointerTable],
     calls: &'t [NativePointerTable],
-    closed_result: Option<r2source::SourceClosedResult>,
+    callers: Option<r2source::SourceCallerLanes>,
 }
 
 /// Every function this body reaches by a call, tail jump, loaded slot or folded target, each once

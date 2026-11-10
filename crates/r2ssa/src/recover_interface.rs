@@ -1346,8 +1346,16 @@ impl Stated {
         let function = source.function();
         Self {
             loader_role: function.loader_role(),
-            closed: function.closed_result(),
+            closed: None,
             unseen: (source.image().blocks().iter()).any(|block| block.transfer_unresolved()),
+        }
+    }
+
+    /// The same statement, with what the closed world decided of the result.
+    pub(crate) const fn closing(self, closed: r2source::SourceClosedResult) -> Self {
+        Self {
+            closed: Some(closed),
+            ..self
         }
     }
 }

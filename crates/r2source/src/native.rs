@@ -123,8 +123,8 @@ pub struct NativeFunction {
     /// `size_t` or a parameter's own name survives.
     pub signature: Option<SourceSignaturePresentation>,
     pub loader_role: Option<SourceLoaderRole>,
-    /// What the program's calls to this function read of its result registers.
-    pub closed_result: Option<crate::SourceClosedResult>,
+    /// What the closed world's calls to this function do with its result lanes.
+    pub callers: Option<crate::SourceCallerLanes>,
     /// The register saves the container's call-frame information states for
     /// this function.
     pub frame_saves: Vec<crate::SourceFrameSave>,
@@ -220,7 +220,7 @@ pub fn capture(
         FunctionIdentity {
             address: function.address,
             loader_role: function.loader_role,
-            closed_result: function.closed_result,
+            callers: function.callers,
         },
         FunctionPresentation {
             display_name: function.name.as_str().into(),
@@ -382,7 +382,7 @@ mod tests {
             stack_slot_names: Vec::new(),
             signature: None,
             loader_role: None,
-            closed_result: None,
+            callers: None,
             frame_saves: Vec::new(),
         }
     }
