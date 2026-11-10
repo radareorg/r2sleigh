@@ -17,7 +17,7 @@ use crate::body::{BodyError, WINDOW};
 use r2abi::{CallingConvention, Prototypes};
 use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
-use r2sleigh_lift::profile::{EntryClass, LanguageProfile, SpecStorage};
+use r2sleigh_lift::profile::{LanguageProfile, SlotClass, SpecStorage};
 use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SourceBoundaryReads, SourceCallEffect,
     SourceConventionSlots, SourceDataObject, SourceEndianness, SourceMachineRoles,
@@ -2540,16 +2540,16 @@ pub(crate) fn convention_slots(
             .map(|name| storage(target.arch, name))
             .collect::<Result<Vec<_>, _>>()
     };
-    let argument_slots = place(registers_of(&prototype.inputs, EntryClass::General))?;
-    let result_slots = place(registers_of(&prototype.outputs, EntryClass::General))?;
+    let argument_slots = place(registers_of(&prototype.input, SlotClass::Integer))?;
+    let result_slots = place(registers_of(&prototype.output, SlotClass::Integer))?;
     let result_slot = result_slots.first().copied();
     // The specification's second integer result entry holds a two-register value's high half.
     let second_result_slot = result_slots
         .get(1)
         .copied()
         .filter(|second| result_slot.is_some_and(|first| first.size == second.size));
-    let float_slots = place(registers_of(&prototype.inputs, EntryClass::Float))?;
-    let float_result = place(registers_of(&prototype.outputs, EntryClass::Float))?
+    let float_slots = place(registers_of(&prototype.input, SlotClass::Float))?;
+    let float_result = place(registers_of(&prototype.output, SlotClass::Float))?
         .first()
         .copied();
     // Where an argument past the registers goes is the compiler specification's
@@ -2592,14 +2592,11 @@ pub(crate) fn convention_slots(
 }
 
 /// A prototype's register entries of one class, in order.
-fn registers_of(
-    entries: &[r2sleigh_lift::profile::PrototypeEntry],
-    class: EntryClass,
-) -> Vec<&str> {
+fn registers_of(entries: &[r2sleigh_lift::profile::ParamEntry], class: SlotClass) -> Vec<&str> {
     entries
         .iter()
         .filter(|entry| entry.class == class)
-        .filter_map(|entry| match &entry.storage {
+        .filter_map(|entry| match &entry.at {
             SpecStorage::Register(name) => Some(name.as_str()),
             SpecStorage::Address { .. } => None,
         })
@@ -2673,10 +2670,10 @@ pub fn call_effect(
     preserved.dedup();
     let mut clobbered = registers(
         &mut prototype
-            .inputs
+            .input
             .iter()
-            .chain(&prototype.outputs)
-            .map(|entry| &entry.storage)
+            .chain(&prototype.output)
+            .map(|entry| &entry.at)
             .chain(&prototype.killed_by_call),
     );
     clobbered.extend(link);
@@ -2690,11 +2687,11 @@ pub fn call_effect(
     clobbered.retain(|storage| !kept.iter().any(|kept| overlap(*kept, *storage)));
     // A call may read every input register and the psABI's variadic count;
     // a return hands back every output register.
-    let mut call_reads = registers(&mut prototype.inputs.iter().map(|entry| &entry.storage));
+    let mut call_reads = registers(&mut prototype.input.iter().map(|entry| &entry.at));
     call_reads.extend(
         convention.and_then(|convention| convention.variadic_count_register.and_then(place)),
     );
-    let return_reads = registers(&mut prototype.outputs.iter().map(|entry| &entry.storage));
+    let return_reads = registers(&mut prototype.output.iter().map(|entry| &entry.at));
     SourceBoundaryReads::new(call_reads, return_reads)
         .and_then(|reads| SourceCallEffect::new(clobbered, preserved, reads))
         .and_then(|effect| effect.with_system_reserved(system_reserved))

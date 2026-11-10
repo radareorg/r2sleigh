@@ -1405,6 +1405,7 @@ name = "r2sleigh-lift"
 version = "0.1.0"
 dependencies = [
  "libsla",
+ "r2abi",
  "r2il",
  "r2source",
  "roxmltree",

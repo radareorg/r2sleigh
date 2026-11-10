@@ -3930,10 +3930,10 @@ fn every_register_a_default_prototype_names_is_one_of_its_machine() {
             .default_prototype()
             .expect("a default prototype");
         let named = prototype
-            .inputs
+            .input
             .iter()
-            .chain(&prototype.outputs)
-            .map(|entry| &entry.storage)
+            .chain(&prototype.output)
+            .map(|entry| &entry.at)
             .chain(&prototype.killed_by_call)
             .chain(&prototype.unaffected)
             .filter_map(|storage| match storage {
