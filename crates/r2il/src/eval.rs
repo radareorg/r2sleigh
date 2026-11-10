@@ -3,6 +3,8 @@
 //! [`apply`] is the one statement of what a value operation computes from its
 //! operands, and every constant fold in the engine answers through it.
 
+pub mod independence;
+
 use std::collections::BTreeMap;
 
 use crate::{

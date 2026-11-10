@@ -1117,6 +1117,29 @@ impl R2ILOp {
             .any(|access| access.kind == crate::eval::AccessKind::Write)
     }
 
+    /// Whether it reads registers its operands do not name (`syscall` takes RAX, `cpuid` EAX, `xsave`
+    /// the vector registers): a pass that follows operands must treat it as reading any register.
+    pub fn reads_unstated(&self) -> bool {
+        matches!(
+            self,
+            R2ILOp::CallOther { .. } | R2ILOp::CpuId { .. } | R2ILOp::Unimplemented
+        )
+    }
+
+    /// Whether this operation changes nothing the program keeps: no register, flag, memory or
+    /// machine state, only a temporary. The address a multi-byte `nop` forms is one.
+    pub fn writes_only_temporaries(&self) -> bool {
+        match self {
+            R2ILOp::Load { dst, .. } => return dst.space == SpaceId::Unique,
+            R2ILOp::Nop => return true,
+            _ => {}
+        }
+        match self {
+            control_operation!() | memory_operation!() | state_operation!() => false,
+            value_operation!() => self.output().is_none_or(|dst| dst.space == SpaceId::Unique),
+        }
+    }
+
     /// Returns true when this value operation may be evaluated speculatively.
     ///
     /// This is intentionally narrower than "has an output": reads, writes,
@@ -1949,6 +1972,34 @@ mod tests {
             assert_eq!(op.is_memory_read(), kind.reads_memory(), "{kind:?}");
             assert_eq!(op.is_memory_write(), kind.writes_memory(), "{kind:?}");
         }
+    }
+
+    /// The address a multi-byte `nop` forms is a temporary; a register, a flag or a store is state.
+    #[test]
+    fn only_a_temporary_write_leaves_no_state() {
+        let (temp, reg) = (Varnode::unique(0, 8), Varnode::register(0, 8));
+        let add = |dst: &Varnode| R2ILOp::IntAdd {
+            dst: dst.clone(),
+            a: reg.clone(),
+            b: reg.clone(),
+        };
+        assert!(R2ILOp::Nop.writes_only_temporaries());
+        assert!(add(&temp).writes_only_temporaries());
+        assert!(!add(&reg).writes_only_temporaries());
+        let load = |dst: &Varnode| R2ILOp::Load {
+            dst: dst.clone(),
+            space: SpaceId::Ram,
+            addr: reg.clone(),
+        };
+        assert!(load(&temp).writes_only_temporaries());
+        assert!(!load(&reg).writes_only_temporaries());
+        let store = R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: reg.clone(),
+            val: temp,
+        };
+        assert!(!store.writes_only_temporaries());
+        assert!(!R2ILOp::Return { target: reg }.writes_only_temporaries());
     }
 
     /// A division can be undefined where its guard would have skipped it, so it is never hoisted.
