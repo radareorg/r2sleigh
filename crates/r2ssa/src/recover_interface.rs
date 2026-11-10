@@ -2075,36 +2075,35 @@ pub fn mint_recovered_interface(
     recovered: &RecoveredInterface,
     roles: &SourceMachineRoles,
     revision_identity: &[u8],
-    calling_convention: &str,
+    convention: r2source::ConventionId,
 ) -> Option<SourceFunctionInterface> {
-    let minted =
-        mint_recovered_interface_inner(recovered, roles, revision_identity, calling_convention)
-            .map(|interface| match &recovered.arity_floor {
-                Some(floor) => interface.with_arity_floor(floor.clone()),
-                None => interface,
-            })
-            .map(|interface| match recovered.variadic {
-                true => interface.with_variadic_tail(),
-                false => interface,
-            })
-            .map(|interface| match recovered.tail_count {
-                Some(count) => match interface.clone().with_body_proven_tail_count(count) {
-                    Ok(counted) => counted,
-                    Err(why) => {
-                        r2il::refusal_evidence!("tail-count", "the proven count is refused: {why}");
-                        interface
-                    }
-                },
-                None => interface,
-            })
-            .map(|interface| match recovered.result_carriers {
-                Some(carriers) => interface.with_result_carriers(carriers),
-                None => interface,
-            })
-            .map(|interface| match &recovered.unproven_result {
-                Some(result) => interface.with_unproven_result(result.clone()),
-                None => interface,
-            });
+    let minted = mint_recovered_interface_inner(recovered, roles, revision_identity, convention)
+        .map(|interface| match &recovered.arity_floor {
+            Some(floor) => interface.with_arity_floor(floor.clone()),
+            None => interface,
+        })
+        .map(|interface| match recovered.variadic {
+            true => interface.with_variadic_tail(),
+            false => interface,
+        })
+        .map(|interface| match recovered.tail_count {
+            Some(count) => match interface.clone().with_body_proven_tail_count(count) {
+                Ok(counted) => counted,
+                Err(why) => {
+                    r2il::refusal_evidence!("tail-count", "the proven count is refused: {why}");
+                    interface
+                }
+            },
+            None => interface,
+        })
+        .map(|interface| match recovered.result_carriers {
+            Some(carriers) => interface.with_result_carriers(carriers),
+            None => interface,
+        })
+        .map(|interface| match &recovered.unproven_result {
+            Some(result) => interface.with_unproven_result(result.clone()),
+            None => interface,
+        });
     if minted.is_none() {
         r2il::refusal_evidence!(
             "interface-minting",
@@ -2113,7 +2112,7 @@ pub fn mint_recovered_interface(
             roles.return_address_storage(),
             roles.stack_pointer_storage(),
             revision_identity.len(),
-            calling_convention,
+            convention,
             recovered
                 .parameters()
                 .iter()
@@ -2167,11 +2166,11 @@ fn mint_recovered_interface_inner(
     recovered: &RecoveredInterface,
     roles: &SourceMachineRoles,
     revision_identity: &[u8],
-    calling_convention: &str,
+    convention: r2source::ConventionId,
 ) -> Option<SourceFunctionInterface> {
     let return_address_storage = roles.return_address_storage()?;
     let stack_pointer_storage = roles.stack_pointer_storage()?;
-    if revision_identity.is_empty() || calling_convention.trim().is_empty() {
+    if revision_identity.is_empty() {
         return None;
     }
 
@@ -2364,7 +2363,7 @@ fn mint_recovered_interface_inner(
     // complete, which certification requires before it will trust the model.
     let interface = SourceFunctionInterface::new_exact_with_logical_types(
         revision_identity.to_vec(),
-        calling_convention,
+        convention,
         parameters,
         return_kind,
         stack_slots,
@@ -2533,7 +2532,7 @@ pub fn mint_recovered_call_site_interface(
         revision_identity.to_vec(),
         identity,
         true,
-        callee.calling_convention(),
+        callee.convention(),
         arguments,
         callee.is_variadic(),
         false,
@@ -2555,6 +2554,8 @@ mod tests {
     use r2source::SourceCallSiteInterfaceError;
 
     use super::*;
+
+    const AAPCS64: r2source::ConventionId = r2source::ConventionId::Aapcs64;
 
     fn arch() -> crate::Arch {
         crate::Arch::new(arch_spec())
@@ -2596,7 +2597,7 @@ mod tests {
 
     fn candidates() -> SourceConventionSlots {
         SourceConventionSlots::new(
-            "arm64",
+            AAPCS64,
             [register(0, 8), register(8, 8), register(16, 8)],
             Some(register(0, 8)),
         )
@@ -2658,7 +2659,7 @@ mod tests {
             .expect("machine roles")
             .with_role_register_names(names);
         let interface =
-            mint_recovered_interface(&recovered, &roles, b"pair", "aapcs64").expect("a pair");
+            mint_recovered_interface(&recovered, &roles, b"pair", AAPCS64).expect("a pair");
         let identity = SourceCallSiteIdentity::new(
             0x2003,
             CanonicalStorageId {
@@ -2689,7 +2690,7 @@ mod tests {
             crate::semantic::SourceCallBoundaryFact {
                 call_site: crate::semantic::CallSiteId(0),
                 at: crate::graph::InstId(0),
-                calling_convention: None,
+                convention: None,
                 variadic: None,
                 noreturn: None,
                 result_kind: None,
@@ -2793,7 +2794,7 @@ mod tests {
             b"contextual-preserved-entry".to_vec(),
             SourceCallSiteIdentity::new(0x1000, CanonicalStorageId::from_varnode(&target)),
             true,
-            "arm64",
+            AAPCS64,
             [SourceCallArgumentSpec::new(0, register(0, 8))],
             false,
             false,
@@ -2929,7 +2930,7 @@ mod tests {
             .expect("machine roles")
             .with_role_register_names(names);
         let interface =
-            mint_recovered_interface(&recovered, &roles, b"narrow-return-revision", "aapcs64")
+            mint_recovered_interface(&recovered, &roles, b"narrow-return-revision", AAPCS64)
                 .expect("minted narrow return interface");
         // The lift restates carriers by name; an interface minted without the
         // roles' names had its carriers cleared there.
@@ -2970,7 +2971,7 @@ mod tests {
             b"narrow-return-revision".to_vec(),
             callsite.identity(),
             true,
-            "aapcs64",
+            AAPCS64,
             [],
             false,
             false,
@@ -3091,7 +3092,8 @@ mod tests {
             src: Varnode::register(0, 8),
         });
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
-        let empty = SourceConventionSlots::new("", [], None).expect("empty");
+        let empty =
+            SourceConventionSlots::new(r2source::ConventionId::SysVAmd64, [], None).expect("empty");
         assert!(recover_interface(&func, &empty, None).is_none());
     }
 
@@ -3140,7 +3142,7 @@ mod tests {
         );
         let roles = SourceMachineRoles::new(Some(register(0x80, 8)), Some(register(0x88, 8)))
             .expect("machine roles");
-        let minted = mint_recovered_interface(&unproven, &roles, b"thunk-revision", "arm64")
+        let minted = mint_recovered_interface(&unproven, &roles, b"thunk-revision", AAPCS64)
             .expect("an unproven result mints an interface");
         assert_eq!(minted.return_kind(), SourceFunctionReturn::Unproven);
         // Nothing this body proves describes a call to it, arguments included.
@@ -3156,7 +3158,7 @@ mod tests {
             b"thunk-prototype".to_vec(),
             identity,
             true,
-            "arm64",
+            AAPCS64,
             [SourceCallArgumentSpec::new(0, register(0, 8))],
             false,
             false,

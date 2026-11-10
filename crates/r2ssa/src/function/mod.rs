@@ -2066,7 +2066,7 @@ fn correlate_call_site_interfaces(
             source.source_revision_identity().to_vec(),
             identity,
             true,
-            prototype.calling_convention.clone(),
+            prototype.convention,
             prototype.arguments.iter().copied(),
             prototype.variadic,
             prototype.noreturn,
@@ -2669,7 +2669,7 @@ impl TrustedSsaArtifact {
                     &recovered,
                     source.machine_roles(),
                     source.source_revision_identity(),
-                    source.convention_slots().calling_convention(),
+                    source.convention_slots().convention(),
                 );
                 if minted.is_none() {
                     r2il::refusal_evidence!(
@@ -2678,7 +2678,7 @@ impl TrustedSsaArtifact {
                          parameters={} result={:?} convention={:?}",
                         recovered.parameters().len(),
                         recovered.result(),
-                        source.convention_slots().calling_convention()
+                        source.convention_slots().convention()
                     );
                 }
                 minted

@@ -250,7 +250,7 @@ fn exact_source_param_slots_ignore_misleading_register_names() {
     .expect("exact parameter type graph");
     let interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
         b"exact-param-alias".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [r2ssa::SourceAbiParameterSpec::new(0, storage)],
         r2ssa::SourceFunctionReturn::Void,
         [],
@@ -425,7 +425,7 @@ fn signed_i32_return_source(has_return: bool, read: bool) -> r2ssa::SsaArtifact 
     .expect("exact signed return graph");
     let interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
         b"exact-signed-return".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [],
         r2ssa::SourceFunctionReturn::Register {
             storage: storage(0),
@@ -596,7 +596,7 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
     let mut boundary = r2ssa::SourceCallBoundaryFact {
         call_site: call_site_id,
         at,
-        calling_convention: Some("sysv64".to_string()),
+        convention: Some(r2ssa::ConventionId::SysVAmd64),
         variadic: Some(false),
         noreturn: Some(false),
         result_kind: Some(r2ssa::SourceCallResult::Register { storage }),
@@ -649,7 +649,7 @@ fn exact_source_param_slots_accept_exact_empty_interface() {
     };
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         b"exact-empty-interface".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [],
         r2ssa::SourceFunctionReturn::Void,
         [],
@@ -1274,7 +1274,7 @@ fn prepared_call_results_bind_certified_exprs_to_stable_call_ids() {
         b"certified-call-result-fixture".to_vec(),
         r2ssa::SourceCallSiteIdentity::new(0x401000, target_storage),
         true,
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [],
         false,
         false,
@@ -1326,7 +1326,7 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
     let parameter_storage = register_storage(0x10);
     let function_interface = r2ssa::SourceFunctionInterface::new_exact(
         revision.clone(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [r2ssa::SourceAbiParameterSpec::new(0, parameter_storage)],
         r2ssa::SourceFunctionReturn::Void,
         [],
@@ -1340,7 +1340,7 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
     );
     let callee_interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
         revision.clone(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [r2ssa::SourceAbiParameterSpec::new(0, parameter_storage)],
         r2ssa::SourceFunctionReturn::Void,
         [],
@@ -1367,7 +1367,7 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
             r2ssa::CanonicalStorageId::from_varnode(&target),
         ),
         true,
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [r2ssa::SourceCallArgumentSpec::new(0, parameter_storage)],
         false,
         false,
@@ -1937,7 +1937,7 @@ fn x86_stack_home_prepared(blocks: &[R2ILBlock]) -> r2ssa::SsaArtifact {
     let second_parameter = register_storage(0x18);
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         b"x86-stack-home-fixture".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [
             r2ssa::SourceAbiParameterSpec::new(0, parameter),
             r2ssa::SourceAbiParameterSpec::new(1, second_parameter),
@@ -3262,7 +3262,7 @@ fn untyped_return_source() -> r2ssa::SsaArtifact {
     };
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         b"untyped-return".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [],
         r2ssa::SourceFunctionReturn::Register {
             storage: register(0),

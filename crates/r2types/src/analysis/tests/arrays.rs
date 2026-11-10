@@ -37,7 +37,7 @@ fn prepared_parameter_indexed_accesses_keep_semantic_index_identity() {
     };
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         b"prepared-indexed-access-fixture".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [
             r2ssa::SourceAbiParameterSpec::new(0, register_storage(0x10)),
             r2ssa::SourceAbiParameterSpec::new(1, register_storage(0x18)),

@@ -90,7 +90,7 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
     }
     let interface = SourceFunctionInterface::new_exact(
         b"caller-slots".to_vec(),
-        "test-stack-abi",
+        r2source::ConventionId::SysVAmd64,
         [SourceAbiParameterSpec::on_stack(0, 16, 8)],
         SourceFunctionReturn::Register {
             storage: storage(0),
@@ -101,9 +101,10 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
     .and_then(|interface| interface.with_stack_pointer_storage(storage(SP)))
     .and_then(|interface| interface.with_exact_stacked_return(0, 8, 8, 8))
     .expect("stacked-return interface");
-    let convention = SourceConventionSlots::new("test-stack-abi", [], Some(storage(0)))
-        .expect("stack-only convention")
-        .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(8, 8));
+    let convention =
+        SourceConventionSlots::new(r2source::ConventionId::SysVAmd64, [], Some(storage(0)))
+            .expect("stack-only convention")
+            .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(8, 8));
     let artifact = SsaArtifact::for_decompile_with(
         &[block],
         DecompileInputs {

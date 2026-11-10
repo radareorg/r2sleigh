@@ -867,7 +867,7 @@ mod tests {
     ) -> SourceFunctionInterface {
         SourceFunctionInterface::new_exact(
             revision.to_vec(),
-            "aarch64-test",
+            r2source::ConventionId::Aapcs64,
             (0..parameter_count).map(|index| {
                 SourceAbiParameterSpec::new(
                     index as u32,
@@ -1049,7 +1049,7 @@ mod tests {
         let return_address_storage = register_storage(24);
         let interface = SourceFunctionInterface::new_exact(
             b"exact-space-parameter-spill".to_vec(),
-            "aarch64-test",
+            r2source::ConventionId::Aapcs64,
             [SourceAbiParameterSpec::new(0, parameter_storage)],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
@@ -1146,7 +1146,7 @@ mod tests {
         let stack_pointer_storage = register_storage(16);
         let interface = SourceFunctionInterface::new_exact(
             b"narrow-spill-reload".to_vec(),
-            "aarch64-test",
+            r2source::ConventionId::Aapcs64,
             [SourceAbiParameterSpec::new(0, register_storage(0))],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
@@ -1259,7 +1259,7 @@ mod tests {
         };
         let interface = SourceFunctionInterface::new_exact(
             b"sign-extended-parameter".to_vec(),
-            "aarch64-test",
+            r2source::ConventionId::Aapcs64,
             [
                 SourceAbiParameterSpec::new(0, register(0, 8)),
                 SourceAbiParameterSpec::new(1, register(8, 4)),

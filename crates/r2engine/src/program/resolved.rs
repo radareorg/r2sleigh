@@ -649,7 +649,7 @@ mod tests {
     fn floor_of(causes: impl IntoIterator<Item = SourceFloorCause>) -> CalleeRead {
         let interface = SourceFunctionInterface::new(
             b"owners".to_vec(),
-            "sysv",
+            r2source::ConventionId::SysVAmd64,
             Vec::<r2source::SourceAbiParameterSpec>::new(),
             r2source::SourceFunctionReturn::Void,
             Vec::<r2source::SourceStackSlotSpec>::new(),

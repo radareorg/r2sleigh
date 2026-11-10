@@ -485,7 +485,7 @@ pub(crate) fn variadic_callsite_arguments(
         .convention_slots()
         .ok_or(VariadicCallsiteArgumentCountRefusal::CallingConventionMismatch)?;
     let slots = convention.argument_slots();
-    if convention.calling_convention() != interface.calling_convention()
+    if convention.convention() != interface.convention()
         || interface.arguments().len() > slots.len()
         || interface
             .arguments()
@@ -585,7 +585,7 @@ pub(crate) fn variadic_callsite_arguments(
 
 /// What a call boundary carries when nothing knows the callee's signature.
 pub(crate) struct ConventionCallBoundary {
-    pub(crate) calling_convention: String,
+    pub(crate) convention: r2source::ConventionId,
     pub(crate) arguments: Vec<SourceCallArgumentFact>,
     /// Why the registers do not prove how many arguments the call takes; the results stand either way.
     pub(crate) unproven: Option<CallBoundaryRefusal>,
@@ -893,7 +893,7 @@ pub(crate) fn convention_call_boundary(
         let (arguments, arguments_proven) =
             stated_call_arguments(at, machine_context, count, entry_values, stack_pointer);
         return Ok(ConventionCallBoundary {
-            calling_convention: convention.calling_convention().to_string(),
+            convention: convention.convention(),
             arguments,
             unproven: (!arguments_proven).then_some(CallBoundaryRefusal::StatedArgumentUnreached {
                 count: position(count),
@@ -1150,7 +1150,7 @@ pub(crate) fn convention_call_boundary(
         });
     }
     Ok(ConventionCallBoundary {
-        calling_convention: convention.calling_convention().to_string(),
+        convention: convention.convention(),
         arguments,
         unproven,
         results: results(convention),
@@ -1252,7 +1252,7 @@ fn adopt_convention(
     stated: Option<&crate::machine_context::CalleeStatement>,
     unstated: Option<crate::UnstatedImport>,
 ) {
-    boundary.calling_convention = Some(convention.calling_convention);
+    boundary.convention = Some(convention.convention);
     // Nothing said this callee is variadic, and the count came from the machine rather than from a
     // prototype, so every argument found is a fixed one as far as anything here can tell.
     boundary.variadic = Some(false);
@@ -1315,7 +1315,7 @@ pub(crate) fn collect_source_boundary_facts(
         let mut boundary = SourceCallBoundaryFact {
             call_site: call_site.id,
             at: call_site.at,
-            calling_convention: None,
+            convention: None,
             variadic: None,
             noreturn: None,
             result_kind: None,
@@ -1338,7 +1338,7 @@ pub(crate) fn collect_source_boundary_facts(
                 .and_then(|identity| context.call_site_interface(identity))
                 .map(|interface| (context, interface))
         }) {
-            boundary.calling_convention = Some(interface.calling_convention().to_string());
+            boundary.convention = Some(interface.convention());
             boundary.variadic = Some(interface.is_variadic());
             boundary.noreturn = Some(interface.is_noreturn());
             boundary.result_kind = Some(interface.result());
@@ -1575,7 +1575,7 @@ pub(crate) fn collect_source_boundary_facts(
         // A callee that mints no contract (a floor of parameters, or an unproven result) is called
         // with what this body provably wrote, at least what the callee reads (CalleeStatement).
         if !boundary.complete
-            && boundary.calling_convention.is_none()
+            && boundary.convention.is_none()
             && let Some(machine_context) = machine_context
             && let Some((block_addr, op_index)) = graph.walk_start(call_site.at)
         {

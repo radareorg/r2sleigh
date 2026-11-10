@@ -370,7 +370,7 @@ mod tests {
         if !exact_graph {
             return SourceFunctionInterface::new(
                 REVISION.to_vec(),
-                "aapcs64",
+                r2source::ConventionId::Aapcs64,
                 parameters,
                 SourceFunctionReturn::Void,
                 [],
@@ -380,7 +380,7 @@ mod tests {
         let scalar_carrier = SourceCarrierProjection::new(SourceCarrierKind::LowBits, 0, 32);
         SourceFunctionInterface::new_with_logical_types(
             REVISION.to_vec(),
-            "aapcs64",
+            r2source::ConventionId::Aapcs64,
             parameters,
             SourceFunctionReturn::Void,
             [],

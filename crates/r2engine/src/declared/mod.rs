@@ -366,7 +366,7 @@ impl Placement<'_> {
             .enumerate()
             .map(|(index, storage)| r2source::SourceAbiParameterSpec::new(index as u32, *storage));
         let revision = format!("declared:{name}").into_bytes();
-        let convention = self.machine.slots.calling_convention();
+        let convention = self.machine.slots.convention();
         let interface = r2source::SourceFunctionInterface::new_exact_with_logical_types(
             revision,
             convention,

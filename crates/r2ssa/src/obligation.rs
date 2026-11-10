@@ -2375,7 +2375,7 @@ mod tests {
             revision.to_vec(),
             identity,
             complete,
-            "test-call-abi",
+            r2source::ConventionId::SysVAmd64,
             arguments,
             variadic,
             noreturn,
@@ -2573,7 +2573,7 @@ mod tests {
             .get(&crate::semantic::CallSiteId(0))
             .expect("missing call boundary");
         assert!(!missing_call.complete);
-        assert_eq!(missing_call.calling_convention, None);
+        assert_eq!(missing_call.convention, None);
         assert_eq!(missing_call.variadic, None);
         assert_eq!(missing_call.noreturn, None);
         assert_eq!(missing_call.result_kind, None);
@@ -2604,8 +2604,8 @@ mod tests {
             .expect("explicit call boundary");
         assert!(explicit_call.complete);
         assert_eq!(
-            explicit_call.calling_convention.as_deref(),
-            Some("test-call-abi")
+            explicit_call.convention,
+            Some(r2source::ConventionId::SysVAmd64)
         );
         assert_eq!(explicit_call.variadic, Some(false));
         assert_eq!(explicit_call.noreturn, Some(true));
@@ -2939,7 +2939,7 @@ mod tests {
         });
         let function_interface = SourceFunctionInterface::new(
             b"function-revision".to_vec(),
-            "test-call-abi",
+            r2source::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [],
@@ -3038,7 +3038,7 @@ mod tests {
         };
         let interface = SourceFunctionInterface::new(
             b"fixture-revision-1".to_vec(),
-            "sysv-amd64",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, parameter_storage)],
             SourceFunctionReturn::Register {
                 storage: return_storage,
@@ -3221,7 +3221,7 @@ mod tests {
             crate::semantic::SourceCallBoundaryFact {
                 call_site,
                 at: call_inst,
-                calling_convention: Some("test-abi".to_string()),
+                convention: Some(r2source::ConventionId::SysVAmd64),
                 variadic: Some(false),
                 noreturn: Some(false),
                 result_kind: Some(crate::SourceCallResult::Void),

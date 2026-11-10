@@ -251,7 +251,8 @@ fn call_result_certificates_require_a_complete_machine_boundary() {
         size: 8,
     });
     let convention =
-        SourceConventionSlots::new("amd64", [], Some(full_result)).expect("result convention");
+        SourceConventionSlots::new(r2source::ConventionId::SysVAmd64, [], Some(full_result))
+            .expect("result convention");
     let prepared = SsaArtifact::for_decompile_with(
         &blocks,
         DecompileInputs {
@@ -469,7 +470,7 @@ fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
     ]);
     let returns_rbx = SourceFunctionInterface::new(
         b"rev".to_vec(),
-        "cdecl",
+        r2source::ConventionId::I386Cdecl,
         [],
         crate::SourceFunctionReturn::Register {
             storage: call_preservation_storage(32, 8),

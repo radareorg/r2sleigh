@@ -45,7 +45,7 @@ fn tail_slot_is_a_terminal_callsite_through_either_ssa_shape() {
             b"tail-slot".to_vec(),
             identity,
             true,
-            "sysv64",
+            r2source::ConventionId::SysVAmd64,
             [],
             false,
             false,
@@ -98,7 +98,7 @@ fn stack_root_follows_a_displacement_materialised_into_a_temp() {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"custom-frame-roots".to_vec(),
-        "custom-unknown",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [],
@@ -217,7 +217,7 @@ fn decompile_artifact_two_address_stack_updates_read_incoming_versions() {
     }];
     let interface = SourceFunctionInterface::new_exact(
         b"two-address-stack-updates".to_vec(),
-        "sysv",
+        r2source::ConventionId::SysVAmd64,
         [],
         crate::SourceFunctionReturn::Void,
         [],
@@ -609,7 +609,7 @@ fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
             },
         ),
         true,
-        "arm64",
+        r2source::ConventionId::Aapcs64,
         [SourceCallArgumentSpec::new(0, slot(0))],
         true,
         false,
@@ -618,11 +618,14 @@ fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
     .expect("exact callsite interface")
     .with_radare2_format_parameter(0)
     .expect("format parameter belongs to the fixed prefix");
-    let convention =
-        SourceConventionSlots::new("arm64", (0..4).map(slot).collect::<Vec<_>>(), None)
-            .expect("convention slots")
-            .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(0, 8))
-            .with_variadic_tail_on_stack(true);
+    let convention = SourceConventionSlots::new(
+        r2source::ConventionId::Aapcs64,
+        (0..4).map(slot).collect::<Vec<_>>(),
+        None,
+    )
+    .expect("convention slots")
+    .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(0, 8))
+    .with_variadic_tail_on_stack(true);
     let roles =
         SourceMachineRoles::new(Some(register(72)), Some(register(64))).expect("machine roles");
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
@@ -917,7 +920,7 @@ fn test_decompile_prep_facts_use_only_exact_typed_stack_carriers() {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"typed-stack-roots".to_vec(),
-        "sysv",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [
@@ -1103,7 +1106,7 @@ fn artifact_projects_typed_stack_roots_by_value_id_without_register_aliases() {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"opaque-stack-registers".to_vec(),
-        "opaque",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [SourceStackSlotSpec::new_local(
@@ -1199,7 +1202,7 @@ fn a_mask_that_aligns_the_stack_pointer_opens_a_frame_of_its_own() {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"custom-realign-roots".to_vec(),
-        "custom-unknown",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [],
@@ -1279,7 +1282,7 @@ fn entry_stack_roots_use_call_preservation_but_refuse_unknown_effects() {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"custom-stack-call-roots".to_vec(),
-        "custom-unknown",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [SourceStackSlotSpec::new_local(
@@ -1398,7 +1401,7 @@ fn new_subregister_result_cannot_inherit_stack_address_authority() {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"new-subregister-stack-roots".to_vec(),
-        "sysv",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [SourceStackSlotSpec::new_local(
@@ -1654,7 +1657,7 @@ fn custom_frame() -> (ArchSpec, SourceFunctionInterface) {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"custom-reload".to_vec(),
-        "custom-unknown",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [],

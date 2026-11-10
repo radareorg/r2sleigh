@@ -139,7 +139,7 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
 
     let interface = SourceFunctionInterface::new_exact(
         b"call-chain-stack-pointer".to_vec(),
-        "sysv",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [],
@@ -392,7 +392,7 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
     blocks[0].stamp_instruction(0, 0x1600);
     let function_interface = SourceFunctionInterface::new_exact(
         revision.to_vec(),
-        "aapcs64",
+        r2source::ConventionId::Aapcs64,
         [SourceAbiParameterSpec::new(0, argument_storage)],
         SourceFunctionReturn::Void,
         [],
@@ -404,7 +404,7 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
         revision.to_vec(),
         SourceCallSiteIdentity::new(0x1600, CanonicalStorageId::from_varnode(&target)),
         true,
-        "aapcs64",
+        r2source::ConventionId::Aapcs64,
         [SourceCallArgumentSpec::new(0, argument_storage)],
         false,
         false,
@@ -526,7 +526,7 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
             },
         ),
         true,
-        "aapcs64",
+        r2source::ConventionId::Aapcs64,
         [SourceCallArgumentSpec::new(0, argument_storage)],
         false,
         false,
@@ -652,9 +652,12 @@ fn a_register_an_earlier_call_clobbered_is_not_an_argument_of_the_next_call() {
             target: make_const(0, 8),
         },
     ]);
-    let convention =
-        SourceConventionSlots::new("amd64", vec![slot(8), slot(16), slot(24)], Some(slot(0)))
-            .expect("convention slots");
+    let convention = SourceConventionSlots::new(
+        r2source::ConventionId::SysVAmd64,
+        vec![slot(8), slot(16), slot(24)],
+        Some(slot(0)),
+    )
+    .expect("convention slots");
     let machine_context = SourceMachineContext::from_blocks_with_interfaces(
         std::slice::from_ref(&block),
         Some(&arch),
@@ -766,7 +769,7 @@ fn a_convention_with_no_argument_registers_reads_the_area_it_passes_on() {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"convention-stack-argument".to_vec(),
-        "test-stack-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [],
@@ -774,9 +777,10 @@ fn a_convention_with_no_argument_registers_reads_the_area_it_passes_on() {
     .and_then(|interface| interface.with_return_address_storage(storage(16, 8)))
     .and_then(|interface| interface.with_stack_pointer_storage(storage(32, 8)))
     .expect("caller interface");
-    let convention = SourceConventionSlots::new("test-stack-abi", [], Some(storage(0, 8)))
-        .expect("stack-only convention")
-        .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(0, 8));
+    let convention =
+        SourceConventionSlots::new(r2source::ConventionId::SysVAmd64, [], Some(storage(0, 8)))
+            .expect("stack-only convention")
+            .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(0, 8));
     let artifact = SsaArtifact::for_decompile_with(
         &[block],
         DecompileInputs {
@@ -851,7 +855,7 @@ fn a_narrow_formal_is_the_callers_lane_and_the_whole_register_keeps_the_callers_
     }
     let interface = SourceFunctionInterface::new_exact(
         b"narrow-formal".to_vec(),
-        "aapcs64",
+        r2source::ConventionId::Aapcs64,
         [SourceAbiParameterSpec::new(0, lane)],
         SourceFunctionReturn::Void,
         [],

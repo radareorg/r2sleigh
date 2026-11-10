@@ -123,11 +123,8 @@ impl ConventionId {
         }
     }
 
-    /// The convention a Go function uses, by the toolchain's version (`None` where the program
-    /// states none: build information predates Go 1.13, so ABI0).
-    ///
-    /// Go 1.17 release notes: register arguments "enabled for Linux, macOS, and Windows on the
-    /// 64-bit x86 architecture"; Go 1.18: arm64 and amd64 "on all operating systems".
+    /// The Go convention by toolchain version; `None` (no build information, before Go 1.13) is ABI0.
+    /// Registers: Go 1.17 on amd64 Linux, macOS and Windows, Go 1.18 on arm64 and amd64 everywhere.
     pub fn go(
         arch: &str,
         bits: u32,

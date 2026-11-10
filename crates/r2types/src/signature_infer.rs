@@ -135,7 +135,7 @@ pub(crate) fn infer_signature_from_prepared_ssa(
 
     let callconv = prepared.machine_context().function_interface().map_or_else(
         || "unknown".to_string(),
-        |interface| interface.calling_convention().to_string(),
+        |interface| interface.convention().radare2_name().to_string(),
     );
     build_inferred_signature(
         &function_name,
@@ -1082,7 +1082,7 @@ mod tests {
 
     fn prepared_x86_scalar_return(
         return_carrier_name: &str,
-        calling_convention: &str,
+        convention: r2source::ConventionId,
     ) -> SsaArtifact {
         let mut arch = r2il::ArchSpec::new("x86-64");
         arch.add_register(r2il::RegisterDef::new(return_carrier_name, 0, 8));
@@ -1095,7 +1095,7 @@ mod tests {
         };
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             format!("signature-{return_carrier_name}").into_bytes(),
-            calling_convention,
+            convention,
             [],
             r2ssa::SourceFunctionReturn::Register {
                 storage: register(0),
@@ -1147,7 +1147,7 @@ mod tests {
         let parameter = register_storage(0);
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"aarch64-stack-fixture".to_vec(),
-            "aarch64",
+            r2source::ConventionId::Aapcs64,
             [r2ssa::SourceAbiParameterSpec::new(0, parameter)],
             r2ssa::SourceFunctionReturn::Void,
             [stack_slot],
@@ -1337,7 +1337,7 @@ mod tests {
         };
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"certified-signature-return-fixture".to_vec(),
-            "sysv64",
+            r2source::ConventionId::SysVAmd64,
             [],
             r2ssa::SourceFunctionReturn::Register {
                 storage: return_storage,
@@ -1374,19 +1374,19 @@ mod tests {
 
     #[test]
     fn prepared_signature_callconv_is_source_owned_and_rename_invariant() {
-        let expected = "source-owned-test-cc";
+        let expected = r2source::ConventionId::Win64;
         let ordinary = inferred(&prepared_x86_scalar_return("rax", expected));
         let renamed = inferred(&prepared_x86_scalar_return("xmm0_misleading", expected));
 
-        assert_eq!(ordinary.callconv, expected);
-        assert_eq!(renamed.callconv, expected);
+        assert_eq!(ordinary.callconv, expected.radare2_name());
+        assert_eq!(renamed.callconv, expected.radare2_name());
     }
 
     #[test]
     fn misleading_xmm0_spelling_does_not_manufacture_a_float_return() {
         let inferred = inferred(&prepared_x86_scalar_return(
             "xmm0_misleading",
-            "source-owned-test-cc",
+            r2source::ConventionId::SysVAmd64,
         ));
 
         assert_eq!(inferred.ret_type, "");
@@ -1415,7 +1415,7 @@ mod tests {
         };
         let void = r2ssa::SourceFunctionInterface::new_exact(
             b"void-return-through-pc".to_vec(),
-            "amd64",
+            r2source::ConventionId::SysVAmd64,
             [],
             r2ssa::SourceFunctionReturn::Void,
             [],

@@ -166,7 +166,7 @@ fn buffer_then_undeclared_pointer() -> (r2il::ArchSpec, r2ssa::SourceFunctionInt
     .expect("Buffer graph");
     let interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
         b"member-names-by-parameter".to_vec(),
-        "aarch64",
+        r2source::ConventionId::Aapcs64,
         [
             r2ssa::SourceAbiParameterSpec::new(0, storage(0)),
             r2ssa::SourceAbiParameterSpec::new(1, storage(8)),

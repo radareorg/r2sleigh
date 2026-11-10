@@ -132,7 +132,7 @@ mod tests {
         )];
         let interface = SourceFunctionInterface::new_exact(
             b"abi-storage-only-test".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, ARGUMENT)],
             SourceFunctionReturn::Register { storage: RETURNED },
             [],

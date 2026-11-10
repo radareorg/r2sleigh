@@ -191,7 +191,7 @@ fn amd64(embedded: &r2sleigh_lift::EmbeddedMachine) -> r2source::native::NativeM
             None,
         ));
     let slots = r2source::SourceConventionSlots::new(
-        "amd64",
+        r2source::ConventionId::SysVAmd64,
         ["RDI", "RSI", "RDX", "RCX", "R8", "R9"].map(register),
         Some(register("RAX")),
     )

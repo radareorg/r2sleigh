@@ -736,7 +736,7 @@ pub enum UnstatedImport {
 pub struct SourceCallBoundaryFact {
     pub call_site: CallSiteId,
     pub at: InstId,
-    pub calling_convention: Option<String>,
+    pub convention: Option<r2source::ConventionId>,
     pub variadic: Option<bool>,
     pub noreturn: Option<bool>,
     pub result_kind: Option<SourceCallResult>,

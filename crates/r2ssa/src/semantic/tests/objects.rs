@@ -235,7 +235,7 @@ fn a_member_of_a_declared_aggregate_is_the_aggregate_at_an_offset() {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"aggregate-member-revision-1".to_vec(),
-        "test-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [SourceStackSlotSpec::new_local(
@@ -357,7 +357,7 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"dual-stack-coordinate-revision-1".to_vec(),
-        "test-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [SourceStackSlotSpec::new_local(
@@ -700,7 +700,7 @@ fn a_stack_position_nothing_accesses_or_passes_on_has_no_extent() {
         };
         let interface = SourceFunctionInterface::new_exact(
             b"stack-position-revision-1".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
@@ -818,7 +818,7 @@ fn unknown_pointer_versions(escape: bool) -> (MemoryVersion, Vec<MemoryVersion>)
     // Declared, so it stays a memory object rather than a promoted variable.
     let interface = SourceFunctionInterface::new_exact(
         b"unknown-pointer-revision-1".to_vec(),
-        "test-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [SourceStackSlotSpec::new_local(

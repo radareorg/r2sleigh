@@ -859,7 +859,7 @@ pub struct AdvisoryCallSite {
 /// function has been lifted, so the correlation happens there rather than here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdvisoryCallPrototype {
-    pub calling_convention: String,
+    pub convention: ConventionId,
     pub arguments: Box<[SourceCallArgumentSpec]>,
     pub variadic: bool,
     pub noreturn: bool,
@@ -1317,7 +1317,8 @@ mod tests {
             Box::from([7]),
             None,
             SourceMachineRoles::default(),
-            SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+            SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                .expect("empty convention slots"),
             None,
             CapturedSourceFields {
                 bounded_function_image: true,
@@ -1346,7 +1347,7 @@ mod tests {
     fn exact_interface() -> SourceFunctionInterface {
         SourceFunctionInterface::new_exact(
             [7],
-            "sysv",
+            crate::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, register(0))],
             SourceFunctionReturn::Register {
                 storage: register(8),
@@ -1453,7 +1454,8 @@ mod tests {
             Box::from([7]),
             Some(interface.clone()),
             exact_machine_roles(),
-            SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+            SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                .expect("empty convention slots"),
             None,
             captured_fields,
             valid.diagnostic_identity(),
@@ -1474,11 +1476,16 @@ mod tests {
             offset,
             size: 4,
         };
-        let wrong_machine_width =
-            SourceFunctionInterface::new_exact([7], "sysv", [], SourceFunctionReturn::Void, [])
-                .and_then(|interface| interface.with_stack_pointer_storage(narrow(24)))
-                .and_then(|interface| interface.with_frame_pointer_storage(narrow(32)))
-                .expect("internally width-coherent narrow interface");
+        let wrong_machine_width = SourceFunctionInterface::new_exact(
+            [7],
+            crate::ConventionId::SysVAmd64,
+            [],
+            SourceFunctionReturn::Void,
+            [],
+        )
+        .and_then(|interface| interface.with_stack_pointer_storage(narrow(24)))
+        .and_then(|interface| interface.with_frame_pointer_storage(narrow(32)))
+        .expect("internally width-coherent narrow interface");
         let narrow_fields = CapturedSourceFields {
             bounded_function_image: true,
             function_interface: true,
@@ -1500,7 +1507,8 @@ mod tests {
                 Box::from([7]),
                 Some(wrong_machine_width),
                 exact_machine_roles(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 narrow_fields,
                 valid.diagnostic_identity()
@@ -1520,7 +1528,8 @@ mod tests {
                 Box::from([7]),
                 Some(interface.clone()),
                 exact_machine_roles(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 missing_frame_pointer,
                 valid.diagnostic_identity()
@@ -1540,7 +1549,8 @@ mod tests {
                 Box::from([7]),
                 Some(interface.clone()),
                 exact_machine_roles(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 missing_stack_allocation_contract,
                 valid.diagnostic_identity()
@@ -1550,7 +1560,7 @@ mod tests {
 
         let interface_without_frame_pointer = SourceFunctionInterface::new_exact(
             [7],
-            "sysv",
+            crate::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, register(0))],
             SourceFunctionReturn::Register {
                 storage: register(8),
@@ -1580,7 +1590,8 @@ mod tests {
                 Box::from([7]),
                 Some(interface_without_frame_pointer.clone()),
                 exact_machine_roles(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 captured_fields,
                 valid.diagnostic_identity()
@@ -1598,7 +1609,8 @@ mod tests {
             Box::from([7]),
             Some(interface_without_frame_pointer),
             exact_machine_roles(),
-            SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+            SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                .expect("empty convention slots"),
             None,
             fields_without_frame_pointer,
             valid.diagnostic_identity(),
@@ -1623,7 +1635,8 @@ mod tests {
                 Box::from([7]),
                 Some(interface),
                 exact_machine_roles(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 missing_return_mechanism,
                 valid.diagnostic_identity()
@@ -1643,7 +1656,8 @@ mod tests {
                 Box::from([7]),
                 None,
                 SourceMachineRoles::default(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 mechanism_without_interface,
                 valid.diagnostic_identity()
@@ -1663,7 +1677,8 @@ mod tests {
                 Box::from([7]),
                 None,
                 SourceMachineRoles::default(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 frame_pointer_without_interface,
                 valid.diagnostic_identity()
@@ -1673,7 +1688,7 @@ mod tests {
 
         let wrong_revision = SourceFunctionInterface::new_exact(
             [8],
-            "sysv",
+            crate::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, register(0))],
             SourceFunctionReturn::Register {
                 storage: register(8),
@@ -1694,7 +1709,8 @@ mod tests {
                 Box::from([7]),
                 Some(wrong_revision),
                 exact_machine_roles(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 captured_fields,
                 valid.diagnostic_identity()

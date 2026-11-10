@@ -1193,7 +1193,7 @@ fn trusted_return_mechanism_validation_uses_only_exact_machine_facts() {
     };
     let without_mechanism = SourceFunctionInterface::new_exact(
         b"trusted-return-mechanism".to_vec(),
-        "test-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         r2source::SourceFunctionReturn::Void,
         [],
@@ -1244,7 +1244,7 @@ fn trusted_frame_pointer_validation_uses_only_exact_machine_facts() {
     };
     let absent = SourceFunctionInterface::new_exact(
         b"trusted-frame-pointer".to_vec(),
-        "test-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         r2source::SourceFunctionReturn::Void,
         [],

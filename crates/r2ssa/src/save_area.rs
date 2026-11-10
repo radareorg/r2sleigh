@@ -238,14 +238,18 @@ mod tests {
     /// Three argument slots `x0`..`x2`, a `va_list` holding the byte past the area and, 16 bytes
     /// on, the first unnamed slot's distance from it.
     fn slots() -> SourceConventionSlots {
-        SourceConventionSlots::new("test", [register(0), register(8), register(16)], None)
-            .expect("slots")
-            .with_register_save_area(Some(SourceRegisterSaveArea {
-                anchor: SourceSaveAreaAnchor::End,
-                offset_field: 16,
-                offset_width: 4,
-                stack_field: -8,
-            }))
+        SourceConventionSlots::new(
+            r2source::ConventionId::SysVAmd64,
+            [register(0), register(8), register(16)],
+            None,
+        )
+        .expect("slots")
+        .with_register_save_area(Some(SourceRegisterSaveArea {
+            anchor: SourceSaveAreaAnchor::End,
+            offset_field: 16,
+            offset_width: 4,
+            stack_field: -8,
+        }))
     }
 
     /// The `va_list` offset field of `named == 1` beside a bound stored at `sp + 0x28`.
@@ -337,7 +341,7 @@ mod tests {
         }
         let interface = SourceFunctionInterface::new_exact(
             b"save-area".to_vec(),
-            "test",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, register(0))],
             SourceFunctionReturn::Void,
             [],

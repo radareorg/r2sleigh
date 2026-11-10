@@ -586,3 +586,23 @@ S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
 - **Design before branches:** the d71 and d72 branches stop taking review rounds. Their blockers belong to owners this ADR defines, so the slices rebuild them: d71 into S8, S14 and after S6; d72 into S7. d70 and d75 each take one structural fix and land.
 - **Bounds:** the "Lower bounds and upper bounds" rule above applies to every slice's review.
 - **C data model:** S14 (D209) adds `CDataModel` to r2abi beside S1.
+
+## S1 as built (2026-11-10)
+
+What the code said that this ADR did not, and the owner chosen:
+
+- None of the four graded cspecs states `paramrange` or `likelytrash`. x86-64-gcc states `localrange` only in a non-default prototype. `likelytrash` appears in x86gcc, x86win and three ungraded i386 cspecs. `ProtoModel` reads all three anyway.
+- A cspec's prototypes are not conventions: x86-64-gcc's `__thiscall` and `syscall` have no `ConventionId`. So `ProtoModel` carries the cspec's `name`, and the id lives in `ConventionRow` and `ConventionModel`.
+- `ParamEntry.size` is `RangeInclusive<u32>`: the stack entry's `maxsize` is 500. `align` is `Option<u32>`.
+- `SlotClass` gains `HiddenReturn` (AARCH64 `x8`, `storage="hiddenret"`). `Extension` gains `Float` (13 vendored `extension="float"` entries).
+- `ConventionModel` lives in r2source and holds r2abi's `ConventionId`, so r2source and r2sleigh-lift gain an r2abi edge. r2abi stays the leaf; it gains serde for `ConventionId`.
+- `ConventionRow.cspec` names a toolchain (an `.ldefs` compiler id, or the container's) and a prototype, never a file: the language picks the file (AppleSilicon or v8A). A PE under cdecl, AAPCS32 or AAPCS64 reads x86win, ARM_win or AARCH64_win, as before.
+- Five of the "other ten" cspecs are selected today: x86gcc (`I386Cdecl`), x86win and AARCH64_win (a PE), x86-64-golang and AARCH64_golang (Go). Refusing them would move i386, PE and Go output. The every-element test grades all nine selected cspecs and names the five no id selects.
+- Ids beyond the sketch: `Aapcs32`, `RiscVLp64`, and arch-specific Go ids (`GoAmd64`, `GoArm64`, their `Abi0`, and `Unstated`, which refuses).
+- `SpecOverride::Results` states a class (SysV 3.2.3's SSE and X87 lanes are float). `SpecOverride::Extension` states a side: AAPCS64 C.16 covers arguments and, by 6.9, results; Apple's 32-bit extension covers arguments only.
+- `MachineAbiModel`'s argument and return registers, and `AbiProfile` built from them, read the function's interface parameters (`machine_context.rs:94-118`), not the convention. They are no convention holders; they go with the one parameter list (S5, S6). `RegisterIdentity::argument_registers` reads `SourceConventionSlots` (`machine_context.rs:1029`), so it is a view once the slots are.
+- The model adds `hidden_return`, `reserved` (platform rows), `link` and `refused`. `BoundaryForms` adds the frame pointer, red zone, `variadic_on_stack` and Go's stack bound. `Location::Register` adds class, position and extension. `ResultLane` says whether the cspec or an override states it, and the call effect reads the cspec's lanes only, as before.
+- The query is keyed by `ConventionId` alone: a program fixes the target, and ARM and Thumb share one register file.
+- d72's `result_registers` and its `ld.c`/`ldb.c` golds are on the shelved branch, not this base. The override row has no reader until S7.
+- `home_va_list` waits for S10 and `GuardRow` for S8. `StackGuard.register` is a `RegName` now.
+- Left for later: `AdvisoryCallPrototype` has no producer and is typed, not removed; `SourceSignaturePresentation`'s convention is always `None`; r2types `callconv` strings are spelled from `radare2_name()` until `CalleeFact.signature_callconv` goes.

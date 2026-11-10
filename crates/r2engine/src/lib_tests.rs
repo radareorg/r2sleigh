@@ -46,7 +46,7 @@ fn exact_empty_test_source_snapshot(revision: &str) -> Arc<EngineSourceSnapshot>
     let revision_identity = revision.as_bytes().to_vec();
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         revision_identity.clone(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         std::iter::empty::<r2ssa::SourceAbiParameterSpec>(),
         r2ssa::SourceFunctionReturn::Void,
         std::iter::empty::<r2ssa::SourceStackSlotSpec>(),
@@ -76,7 +76,7 @@ fn exact_rdi_test_source_snapshot(revision: &str) -> Arc<EngineSourceSnapshot> {
     let revision_identity = revision.as_bytes().to_vec();
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         revision_identity.clone(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [r2ssa::SourceAbiParameterSpec::new(
             0,
             r2ssa::CanonicalStorageId {
@@ -139,7 +139,7 @@ fn source_snapshot_call_interface(
             },
         ),
         true,
-        "sysv",
+        r2source::ConventionId::SysVAmd64,
         Vec::<r2ssa::SourceCallArgumentSpec>::new(),
         false,
         false,
@@ -151,7 +151,7 @@ fn source_snapshot_call_interface(
 fn source_snapshot_function_interface(revision_identity: &[u8]) -> r2ssa::SourceFunctionInterface {
     r2ssa::SourceFunctionInterface::new(
         revision_identity.to_vec(),
-        "sysv",
+        r2source::ConventionId::SysVAmd64,
         Vec::<r2ssa::SourceAbiParameterSpec>::new(),
         r2ssa::SourceFunctionReturn::Register {
             storage: r2ssa::CanonicalStorageId {
@@ -236,7 +236,7 @@ fn authoritative_source_interface_reaches_prepared_ssa_through_request() {
     };
     let function_interface = r2ssa::SourceFunctionInterface::new_exact(
         revision.to_vec(),
-        "sysv",
+        r2source::ConventionId::SysVAmd64,
         Vec::<r2ssa::SourceAbiParameterSpec>::new(),
         r2ssa::SourceFunctionReturn::Register {
             storage: register(0),
@@ -562,7 +562,7 @@ fn interproc_summary_build_uses_only_trusted_callee_bodies() {
     };
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         b"interproc-owner/rev1".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [r2ssa::SourceAbiParameterSpec::new(0, storage(8))],
         r2ssa::SourceFunctionReturn::Register {
             storage: storage(0),
@@ -825,7 +825,7 @@ fn controlled_r2dec_sealed() -> SealedFunctionAnalysis {
     let blocks = vec![block];
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         b"controlled-r2dec-source".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         std::iter::empty::<r2ssa::SourceAbiParameterSpec>(),
         r2ssa::SourceFunctionReturn::Register {
             storage: r2ssa::CanonicalStorageId {

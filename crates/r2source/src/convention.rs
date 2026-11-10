@@ -1,6 +1,5 @@
-//! One calling convention as a function's boundary reads it: the compiler specification's
-//! `ProtoModel` joined with the ABI's `ConventionRow` (doc/adr-call-boundary.md, "The joined
-//! model"). r2engine builds it once per convention and holds it; the older contracts are views.
+//! One calling convention: the cspec's `ProtoModel` joined with the ABI's `ConventionRow`, held
+//! once per convention by r2engine (doc/adr-call-boundary.md, "The joined model").
 
 use std::ops::Range;
 
@@ -209,27 +208,27 @@ impl ConventionModel {
         let second = (results.get(1).copied())
             .filter(|second| result.is_some_and(|first| first.size == second.size));
         let float_result = self.result_registers(SlotClass::Float).next();
-        Ok(SourceConventionSlots::new(
-            self.id.radare2_name(),
-            self.argument_registers(SlotClass::Integer),
-            result,
+        Ok(
+            SourceConventionSlots::new(
+                self.id,
+                self.argument_registers(SlotClass::Integer),
+                result,
+            )
+            .and_then(|slots| {
+                slots.with_float_slots(self.argument_registers(SlotClass::Float), float_result)
+            })
+            .and_then(|slots| slots.with_second_result_slot(second))?
+            .with_shared_positions(self.shares_positions())
+            .with_stack_arguments(self.stack_arguments())
+            .with_variadic_tail_on_stack(self.forms.variadic_on_stack)
+            .with_register_save_area(self.forms.save_area)
+            .with_variadic_count_register(self.forms.count_register)
+            .with_entry_stack(self.forms.entry_stack),
         )
-        .and_then(|slots| {
-            slots.with_float_slots(self.argument_registers(SlotClass::Float), float_result)
-        })
-        .and_then(|slots| slots.with_second_result_slot(second))?
-        .with_shared_positions(self.shares_positions())
-        .with_stack_arguments(self.stack_arguments())
-        .with_variadic_tail_on_stack(self.forms.variadic_on_stack)
-        .with_register_save_area(self.forms.save_area)
-        .with_variadic_count_register(self.forms.count_register)
-        .with_entry_stack(self.forms.entry_stack))
     }
 
-    /// What a call does to the registers: a view of this model.
-    ///
-    /// Clobbered is every location the specification names a call reading or writing, its
-    /// `killedbycall` and the return address register, less what is preserved or reserved.
+    /// What a call does to the registers, a view of this model: clobbered is every location a call
+    /// reads or writes, `killedbycall` and the return address, less what is preserved or reserved.
     pub fn call_effect(&self) -> Result<SourceCallEffect, SourceMachineRolesError> {
         let inputs = self
             .register_locations()

@@ -142,7 +142,7 @@ fn sealed_lane_call(lane_in_the_merge: bool) -> Result<SsaArtifact, crate::SsaPr
     let revision = b"lane-call";
     let interface = SourceFunctionInterface::new_exact(
         revision.to_vec(),
-        "lane-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [],
@@ -155,7 +155,7 @@ fn sealed_lane_call(lane_in_the_merge: bool) -> Result<SsaArtifact, crate::SsaPr
         revision.to_vec(),
         SourceCallSiteIdentity::new(CALLER, callee),
         true,
-        "lane-abi",
+        r2source::ConventionId::SysVAmd64,
         [SourceCallArgumentSpec::new(0, storage(VECTOR, 4))],
         false,
         false,

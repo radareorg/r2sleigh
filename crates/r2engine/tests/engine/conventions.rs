@@ -1,6 +1,5 @@
-//! The conformance test per selected cspec (doc/adr-call-boundary.md, S1): each graded convention's
-//! model builds on its machine, every register its row names resolves, and its sections, results,
-//! owned ranges and overrides are the ones the cspec and the ABI state.
+//! Conformance per selected cspec (doc/adr-call-boundary.md, S1): each model builds, its row's
+//! registers resolve, and its sections, results, ranges and overrides are the cspec's and the ABI's.
 
 use r2abi::{ConventionId, Extension, Platform, SlotClass};
 use r2engine::native::convention_model;

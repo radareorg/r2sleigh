@@ -325,8 +325,12 @@ mod tests {
     fn machine() -> NativeMachine {
         let roles = SourceMachineRoles::new(Some(storage(0x288, 8)), Some(storage(0x20, 8)))
             .expect("machine roles");
-        let slots = SourceConventionSlots::new("amd64", [storage(0x38, 8)], Some(storage(0x0, 8)))
-            .expect("convention slots");
+        let slots = SourceConventionSlots::new(
+            crate::ConventionId::SysVAmd64,
+            [storage(0x38, 8)],
+            Some(storage(0x0, 8)),
+        )
+        .expect("convention slots");
         NativeMachine {
             arch_id: "x86".to_owned(),
             cpu_id: "x86-64".to_owned(),
@@ -383,7 +387,10 @@ mod tests {
         // No prototype is claimed; the artifact builder reads the ABI off the
         // instructions instead.
         assert!(snapshot.function_interface().is_none());
-        assert_eq!(snapshot.convention_slots().calling_convention(), "amd64");
+        assert_eq!(
+            snapshot.convention_slots().convention(),
+            crate::ConventionId::SysVAmd64
+        );
     }
 
     #[test]

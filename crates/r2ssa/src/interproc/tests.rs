@@ -135,7 +135,7 @@ fn exact_return_boundary_ignores_misleading_carrier_names() {
     };
     let interface = crate::SourceFunctionInterface::new_exact(
         b"misleading-return-names".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [],
         crate::SourceFunctionReturn::Register {
             storage: storage(0),
@@ -230,7 +230,7 @@ fn exact_untyped_artifact(
     blocks: &[R2ILBlock],
     arch: &crate::Arch,
     revision: &[u8],
-    calling_convention: &str,
+    convention: r2source::ConventionId,
     parameter_offsets: &[u64],
     return_address_offset: u64,
     stack_pointer_offset: u64,
@@ -245,7 +245,7 @@ fn exact_untyped_artifact(
         .collect::<Vec<_>>();
     let function_interface = crate::SourceFunctionInterface::new_exact(
         revision.to_vec(),
-        calling_convention,
+        convention,
         parameters,
         crate::SourceFunctionReturn::Void,
         [],
@@ -285,7 +285,7 @@ fn exact_untyped_artifact(
                                 crate::CanonicalStorageId::from_varnode(target),
                             ),
                             true,
-                            calling_convention,
+                            convention,
                             call_arguments(),
                             false,
                             false,
@@ -319,7 +319,7 @@ fn prepared_owner(addr: u64, arch: &crate::Arch) -> Arc<SsaArtifact> {
     };
     let interface = crate::SourceFunctionInterface::new_exact(
         b"prepared-interproc-owner".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [crate::SourceAbiParameterSpec::new(0, storage(8))],
         crate::SourceFunctionReturn::Register {
             storage: storage(0),
@@ -564,7 +564,7 @@ fn prepared_summary_set_models_missing_direct_callee_as_unknown() {
     let revision = b"prepared-interproc-missing-direct-callee";
     let function_interface = crate::SourceFunctionInterface::new_exact(
         revision.to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [crate::SourceAbiParameterSpec::new(0, storage(8))],
         crate::SourceFunctionReturn::Register {
             storage: storage(0),
@@ -582,7 +582,7 @@ fn prepared_summary_set_models_missing_direct_callee_as_unknown() {
             crate::CanonicalStorageId::from_varnode(&target),
         ),
         true,
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [crate::SourceCallArgumentSpec::new(0, storage(8))],
         false,
         false,
@@ -944,7 +944,7 @@ fn prepared_summary_uses_exact_abi_carrier_not_callconv_label() {
     };
     let interface = crate::SourceFunctionInterface::new_exact(
         b"prepared-interproc-exact-abi".to_vec(),
-        "misleading-sysv-label",
+        r2source::ConventionId::SysVAmd64,
         [crate::SourceAbiParameterSpec::new(0, storage(32))],
         crate::SourceFunctionReturn::Void,
         [],
@@ -1252,7 +1252,7 @@ fn direct_pointer_load_marks_argument_read() {
         &[blk],
         &arch,
         b"direct-pointer-load",
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         &[8],
         16,
         24,
@@ -1382,8 +1382,15 @@ fn store_conditional_marks_argument_read_and_write() {
             R2ILOp::Return { target: reg(16, 8) },
         ],
     );
-    let prepared =
-        exact_untyped_artifact(&[blk], &arch, b"store-conditional", "sysv64", &[8], 16, 24);
+    let prepared = exact_untyped_artifact(
+        &[blk],
+        &arch,
+        b"store-conditional",
+        r2source::ConventionId::SysVAmd64,
+        &[8],
+        16,
+        24,
+    );
     let set = solve_interproc_summary_set(
         &[InterprocFunctionInput {
             id: InterprocFunctionId(0x4100),
@@ -1454,7 +1461,15 @@ fn atomic_cas_marks_argument_read_and_write() {
             R2ILOp::Return { target: reg(16, 8) },
         ],
     );
-    let prepared = exact_untyped_artifact(&[blk], &arch, b"atomic-cas", "sysv64", &[8], 16, 24);
+    let prepared = exact_untyped_artifact(
+        &[blk],
+        &arch,
+        b"atomic-cas",
+        r2source::ConventionId::SysVAmd64,
+        &[8],
+        16,
+        24,
+    );
     let set = solve_interproc_summary_set(
         &[InterprocFunctionInput {
             id: InterprocFunctionId(0x4200),
@@ -1529,7 +1544,7 @@ fn symbolic_store_plus_constant_preserves_arg_offset_range() {
         &blocks,
         &arch,
         b"symbolic-store-plus",
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         &[8],
         16,
         24,
@@ -1603,7 +1618,7 @@ fn symbolic_store_minus_constant_preserves_arg_offset_range() {
         &blocks,
         &arch,
         b"symbolic-store-minus",
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         &[8],
         16,
         24,
@@ -1678,7 +1693,7 @@ fn windows_x64_call_arg_observer_tracks_registration_handler_constant() {
         &blocks,
         &arch,
         b"windows-handler-call",
-        "windows-x64",
+        r2source::ConventionId::SysVAmd64,
         &[8, 16, 24, 32],
         40,
         48,
@@ -1721,7 +1736,7 @@ fn call_arg_observer_does_not_reuse_pre_call_carriers_after_call() {
         &blocks,
         &arch,
         b"windows-two-call-carriers",
-        "windows-x64",
+        r2source::ConventionId::SysVAmd64,
         &[8, 16, 24, 32],
         40,
         48,
@@ -1795,7 +1810,7 @@ fn volatile_or_unknown_effects_clobber_call_carriers_and_observable_state() {
             )],
             &arch,
             b"windows-volatile-carriers",
-            "windows-x64",
+            r2source::ConventionId::SysVAmd64,
             &[8, 16, 24, 32],
             40,
             48,
@@ -1853,7 +1868,7 @@ fn volatile_or_unknown_effects_invalidate_pre_effect_return_relations() {
             )],
             &arch,
             b"windows-volatile-return",
-            "windows-x64",
+            r2source::ConventionId::SysVAmd64,
             &[8, 16, 24, 32],
             40,
             48,
@@ -1889,7 +1904,7 @@ fn callother_maps_explicit_argument_and_unknown_escape() {
         &blocks,
         &arch,
         b"callother-explicit-argument",
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         &[8],
         16,
         24,
@@ -1947,7 +1962,7 @@ fn call_return_relation_requires_complete_nonvoid_result_carrier() {
     let function_interface = || {
         crate::SourceFunctionInterface::new_exact(
             revision.to_vec(),
-            "sysv64",
+            r2source::ConventionId::SysVAmd64,
             [],
             crate::SourceFunctionReturn::Register {
                 storage: storage(0),
@@ -1997,7 +2012,7 @@ fn call_return_relation_requires_complete_nonvoid_result_carrier() {
                 crate::CanonicalStorageId::from_varnode(&target),
             ),
             complete,
-            "sysv64",
+            r2source::ConventionId::SysVAmd64,
             [],
             false,
             false,
@@ -2072,7 +2087,7 @@ fn call_carrier_nonconvergence_degrades_all_observations() {
         ],
         &arch,
         b"windows-carrier-loop",
-        "windows-x64",
+        r2source::ConventionId::SysVAmd64,
         &[8, 16, 24, 32],
         40,
         48,
@@ -2148,7 +2163,7 @@ fn call_arg_observer_preserves_ambiguous_join_as_unknown() {
         ],
         &arch,
         b"windows-ambiguous-join",
-        "windows-x64",
+        r2source::ConventionId::SysVAmd64,
         &[8, 16, 24, 32],
         40,
         48,
@@ -2181,7 +2196,7 @@ fn source_owned_call_observer_requires_exact_complete_call_carriers() {
     let function_interface = || {
         crate::SourceFunctionInterface::new_exact(
             revision.to_vec(),
-            "sysv64",
+            r2source::ConventionId::SysVAmd64,
             [crate::SourceAbiParameterSpec::new(0, storage(8))],
             crate::SourceFunctionReturn::Void,
             [],
@@ -2212,7 +2227,7 @@ fn source_owned_call_observer_requires_exact_complete_call_carriers() {
                 crate::CanonicalStorageId::from_varnode(&target),
             ),
             complete,
-            "win64",
+            r2source::ConventionId::Win64,
             [crate::SourceCallArgumentSpec::new(0, storage(32))],
             false,
             false,
@@ -2323,8 +2338,15 @@ fn an_access_at_no_stated_place_leaves_the_formal_its_address_depends_on_unbound
             ],
         ),
     ];
-    let prepared =
-        exact_untyped_artifact(&blocks, &arch, b"merged-walk", "sysv64", &[8, 32], 16, 24);
+    let prepared = exact_untyped_artifact(
+        &blocks,
+        &arch,
+        b"merged-walk",
+        r2source::ConventionId::SysVAmd64,
+        &[8, 32],
+        16,
+        24,
+    );
     let reach = touch_reach(&prepared);
     assert!(
         reach.get(&0).is_some_and(ArgumentReach::is_unbounded),
@@ -2368,7 +2390,7 @@ fn a_constant_address_read_at_a_scaled_index_is_the_global() {
         &blocks,
         &arch,
         b"constant-table",
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         &[8, 32],
         16,
         24,
@@ -2428,7 +2450,15 @@ fn every_access_through_an_argument_is_a_term_of_its_reach() {
             R2ILOp::Return { target: reg(16, 8) },
         ],
     )];
-    let prepared = exact_untyped_artifact(&blocks, &arch, b"two-terms", "sysv64", &[8, 32], 16, 24);
+    let prepared = exact_untyped_artifact(
+        &blocks,
+        &arch,
+        b"two-terms",
+        r2source::ConventionId::SysVAmd64,
+        &[8, 32],
+        16,
+        24,
+    );
     let reach = touch_reach(&prepared);
     let through = reach
         .get(&0)
@@ -2473,7 +2503,7 @@ fn a_sign_extended_index_reaches_only_as_far_as_its_sign_bit_is_clear() {
         &blocks,
         &arch,
         b"sign-extended-index",
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         &[8, 32],
         16,
         24,

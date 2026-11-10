@@ -16,7 +16,7 @@ use crate::arch::Arch;
 use crate::origin::BlockOrigins;
 pub use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
-    SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass,
+    SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION,
     SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceArity,
     SourceArityFloor, SourceBoundaryReads, SourceCallArgumentSpec, SourceCallEffect,
     SourceCallPreservedCarriers, SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
@@ -1779,7 +1779,7 @@ mod tests {
             arch.add_register(RegisterDef::new(name, index as u64 * 8, 8));
         }
         let slots = SourceConventionSlots::new(
-            "aapcs64",
+            r2source::ConventionId::Aapcs64,
             [
                 register_storage(0, 8),
                 register_storage(8, 8),
@@ -1818,7 +1818,7 @@ mod tests {
         assert_eq!(
             SourceFunctionInterface::new(
                 b"overlapping-register-interface".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [
                     SourceAbiParameterSpec::new(0, register_storage(0, 8)),
                     SourceAbiParameterSpec::new(1, register_storage(4, 4)),
@@ -1836,7 +1836,7 @@ mod tests {
         let base_storage = register_storage(64, 8);
         let interface = SourceFunctionInterface::new_exact(
             b"exact-stack-slot-roles".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, parameter_storage)],
             SourceFunctionReturn::Void,
             [
@@ -1884,7 +1884,7 @@ mod tests {
 
         let compatibility = SourceFunctionInterface::new(
             b"compatibility-stack-slot".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, parameter_storage)],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new(
@@ -1912,7 +1912,7 @@ mod tests {
         let unbound = |slots| {
             SourceFunctionInterface::new_exact(
                 b"typed-stack-pointer".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [SourceAbiParameterSpec::new(0, parameter)],
                 SourceFunctionReturn::Register { storage: result },
                 slots,
@@ -2011,7 +2011,7 @@ mod tests {
         let make = || {
             SourceFunctionInterface::new_exact(
                 b"exact-machine-roles".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [],
                 SourceFunctionReturn::Void,
                 [],
@@ -2071,7 +2071,7 @@ mod tests {
             Some(
                 SourceFunctionInterface::new(
                     b"compatibility-machine-roles".to_vec(),
-                    "test-abi",
+                    r2source::ConventionId::SysVAmd64,
                     [],
                     SourceFunctionReturn::Void,
                     [],
@@ -2156,7 +2156,7 @@ mod tests {
         let make = || {
             SourceFunctionInterface::new_exact(
                 b"exact-stacked-return".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [],
                 SourceFunctionReturn::Void,
                 [],
@@ -2268,7 +2268,7 @@ mod tests {
         let make_explicit = |frame_pointer| {
             SourceFunctionInterface::new_exact(
                 b"exact-machine-frame-pointer".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [],
                 SourceFunctionReturn::Void,
                 [],
@@ -2281,7 +2281,7 @@ mod tests {
         let make_slot_derived = |frame_pointer, stack_pointer, return_address| {
             SourceFunctionInterface::new_exact(
                 b"slot-derived-machine-frame-pointer".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [],
                 SourceFunctionReturn::Void,
                 [SourceStackSlotSpec::new_local(
@@ -2337,7 +2337,7 @@ mod tests {
 
         let absent = SourceFunctionInterface::new_exact(
             b"absent-machine-frame-pointer".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [],
@@ -2377,7 +2377,7 @@ mod tests {
         ));
         let narrow_interface = SourceFunctionInterface::new_exact(
             b"narrow-machine-frame-pointer".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
@@ -2437,7 +2437,7 @@ mod tests {
 
         let overlapping = SourceFunctionInterface::new_exact(
             b"overlapping-machine-frame-pointer".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, frame_pointer)],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
@@ -2472,7 +2472,7 @@ mod tests {
         let build = |slots| {
             SourceFunctionInterface::new_exact(
                 b"malformed-stack-slot-role".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [SourceAbiParameterSpec::new(0, parameter_storage)],
                 SourceFunctionReturn::Void,
                 slots,
@@ -2605,7 +2605,7 @@ mod tests {
         let low_i32 = SourceCarrierProjection::new(SourceCarrierKind::LowBits, 0, 32);
         let interface = SourceFunctionInterface::new_with_logical_types(
             b"exact-type-layout".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             parameters,
             SourceFunctionReturn::Register {
                 storage: register_storage(24, 8),
@@ -2652,7 +2652,7 @@ mod tests {
 
         let invalid = SourceFunctionInterface::new_with_logical_types(
             b"exact-type-layout".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             parameters,
             SourceFunctionReturn::Register {
                 storage: register_storage(24, 8),
@@ -2692,7 +2692,7 @@ mod tests {
         let full64 = SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64);
         let interface = SourceFunctionInterface::new_exact_with_logical_types(
             b"fnv-u8-pointer-revision".to_vec(),
-            "aapcs64",
+            r2source::ConventionId::Aapcs64,
             [
                 SourceAbiParameterSpec::new(0, register_storage(0, 8)),
                 SourceAbiParameterSpec::new(1, register_storage(8, 8)),
@@ -2767,7 +2767,7 @@ mod tests {
                 b"call-revision".to_vec(),
                 identity,
                 true,
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [SourceCallArgumentSpec::new(1, register_storage(0, 8))],
                 false,
                 false,
@@ -2780,7 +2780,7 @@ mod tests {
                 b"call-revision".to_vec(),
                 identity,
                 true,
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [
                     SourceCallArgumentSpec::new(0, register_storage(0, 8)),
                     SourceCallArgumentSpec::new(1, register_storage(4, 8)),
@@ -2796,7 +2796,7 @@ mod tests {
                 b"call-revision".to_vec(),
                 identity,
                 true,
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [],
                 false,
                 true,
@@ -2919,7 +2919,7 @@ mod tests {
     fn interface_registers_missing_from_architecture_are_incoherent() {
         let interface = SourceFunctionInterface::new(
             b"missing-register-interface".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, register_storage(0, 8))],
             SourceFunctionReturn::Void,
             [],
@@ -2942,7 +2942,7 @@ mod tests {
     fn stack_base_storage_missing_from_architecture_is_incoherent() {
         let interface = SourceFunctionInterface::new(
             b"missing-stack-base-interface".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new(
