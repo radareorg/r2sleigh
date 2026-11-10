@@ -208,8 +208,8 @@ fn amd64(embedded: &r2sleigh_lift::EmbeddedMachine) -> r2source::native::NativeM
     }
 }
 
-/// The C for that function in a program whose object at 0x2000 has this declared type.
-fn rendered_returning_object(declared: Option<&str>) -> String {
+/// The C for that function in a program whose object at 0x2000 is, where `declared`, an `int32_t`.
+fn rendered_returning_object(declared: bool) -> String {
     use r2source::native::{NativeBlock, NativeFunction};
     let embedded = r2sleigh_lift::embedded_machine("x86-64").expect("an x86-64 machine");
     let machine = amd64(&embedded);
@@ -229,8 +229,12 @@ fn rendered_returning_object(declared: Option<&str>) -> String {
         data_symbols: vec![r2source::SourceDataObject::new(
             0x2000,
             "obj.counter",
-            declared,
+            declared.then_some(0),
         )],
+        data_types: declared.then(|| {
+            let int = r2source::SourceType::new(0, r2source::SourceTypeKind::SignedInteger, 32, 32);
+            r2source::SourceTypeGraph::new([int], []).expect("an int32_t graph")
+        }),
         code_pointer_tables: Vec::new(),
         interface: None,
         parameter_names: Vec::new(),
@@ -268,11 +272,11 @@ fn rendered_returning_object(declared: Option<&str>) -> String {
 
 #[test]
 fn a_data_object_type_stays_with_the_program_that_stated_it() {
-    let fresh = rendered_returning_object(None);
-    let typed = rendered_returning_object(Some("int32_t"));
+    let fresh = rendered_returning_object(false);
+    let typed = rendered_returning_object(true);
     assert!(typed.contains("int32_t counter"), "{typed}");
     assert_eq!(
-        rendered_returning_object(None),
+        rendered_returning_object(false),
         fresh,
         "a type another program stated reached this one"
     );

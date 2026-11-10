@@ -9,7 +9,6 @@
 //! placed here the same way: the convention says where each parameter
 //! arrives, the declaration says what it is, and the interface carries both.
 
-mod c_type;
 mod frame;
 mod graph;
 
@@ -98,6 +97,28 @@ pub(crate) struct Restatement {
     pub(crate) slot_names: Vec<r2source::SourceStackSlotName>,
 }
 
+/// The target's C data model, or the Unix one at its pointer width where none is listed.
+fn model_of(target: &NativeTarget<'_>) -> CDataModel {
+    (target.data_model.copied()).unwrap_or(CDataModel::unix(crate::engine_effective_ptr_bits(
+        target.arch,
+    )))
+}
+
+/// Debug information's types for data objects, as one graph and a node per object.
+pub(crate) fn object_types(
+    target: &NativeTarget<'_>,
+    types: &[Option<TypeId>],
+) -> (Vec<Option<u32>>, Option<r2source::SourceTypeGraph>) {
+    let mut interned = Interned::new(target.declarations.graph(), model_of(target));
+    let nodes = (types.iter())
+        .map(|ty| ty.and_then(|ty| interned.node(ty)))
+        .collect::<Vec<_>>();
+    match nodes.iter().any(Option::is_some) {
+        true => (nodes, interned.finish()),
+        false => (nodes, None),
+    }
+}
+
 /// The machine one declaration is placed in.
 pub(crate) struct Placement<'a> {
     pub(crate) target: &'a NativeTarget<'a>,
@@ -110,9 +131,7 @@ impl<'a> Placement<'a> {
         Self {
             target,
             machine,
-            model: target.data_model.copied().unwrap_or(CDataModel::unix(
-                crate::engine_effective_ptr_bits(target.arch),
-            )),
+            model: model_of(target),
         }
     }
 
@@ -344,14 +363,21 @@ impl<'a> Placement<'a> {
             .collect()
     }
 
-    /// A declared prototype as the type layer states it. A parameter whose type the layer cannot
-    /// hold is `Unknown` and keeps the rest (D151); a result it cannot hold states nothing.
+    /// A declared prototype as the type layer states it, through the graph. A parameter with no
+    /// place is `Unknown` and keeps the rest (D151); such a result states nothing.
     pub(crate) fn function_type(&self, declared: Declared<'_>) -> Option<r2types::FunctionType> {
-        let convert = |ty| c_type::c_type(declared.graph, ty, &self.model);
+        let mut interned = Interned::new(declared.graph, self.model);
         let params = (declared.prototype.parameters.iter())
-            .map(|parameter| convert(parameter.ty))
-            .collect();
-        let return_type = convert(declared.prototype.return_type);
+            .map(|parameter| interned.declared(parameter.ty))
+            .collect::<Vec<_>>();
+        let returns = interned.declared(declared.prototype.return_type);
+        let graph = interned.finish()?;
+        let convert = |id: Option<u32>| {
+            id.and_then(|id| r2types::source_type_like(&graph, id))
+                .unwrap_or(r2types::CTypeLike::Unknown)
+        };
+        let params = params.into_iter().map(convert).collect();
+        let return_type = convert(returns);
         Some(r2types::FunctionType {
             return_type: (return_type != r2types::CTypeLike::Unknown).then_some(return_type)?,
             params,
@@ -592,25 +618,12 @@ struct Typed {
     graph: Option<r2source::SourceTypeGraph>,
 }
 
-/// How a declaration spells a function, for rendering rather than for
-/// reading.
-///
-/// The interface carries the widths; without this the renderer has only
-/// those, so a `size_t` arrives as a 64-bit register and is spelled as one.
+/// What a declaration calls a function's parameters; their types travel on the interface's graph.
 fn presentation(prototype: &Prototype, placed: usize) -> r2source::SourceSignaturePresentation {
-    let parameters = prototype.parameters.iter().take(placed).map(|parameter| {
-        r2source::SourceSignatureParameter::new(
-            parameter.name.clone(),
-            Some(parameter.spelling.as_written().to_owned()),
-        )
-    });
-    let ellipsis = prototype
-        .variadic
-        .then(|| r2source::SourceSignatureParameter::new(Some("..."), None::<String>));
-    r2source::SourceSignaturePresentation::new(
-        Some(prototype.returns.as_written().to_owned()),
-        None::<String>,
-        false,
-        parameters.chain(ellipsis),
-    )
+    let parameters = (prototype.parameters.iter())
+        .take(placed)
+        .map(|parameter| r2source::SourceSignatureParameter::new(parameter.name.clone()));
+    let ellipsis =
+        (prototype.variadic).then(|| r2source::SourceSignatureParameter::new(Some("...")));
+    r2source::SourceSignaturePresentation::new(None::<String>, false, parameters.chain(ellipsis))
 }

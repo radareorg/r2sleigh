@@ -1624,7 +1624,10 @@ fn field_certificates_populate_direct_member_render_facts() {
             slot: 0,
             field_offset: 8,
             field_name: "hash".to_string(),
-            field_type: Some("uint64_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 64,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     };
@@ -1702,13 +1705,18 @@ fn field_certificates_do_not_follow_a_loop_carried_pointer_as_the_parameter() {
                 slot: 0,
                 field_offset: 8,
                 field_name: "value".to_string(),
-                field_type: Some("uint64_t".to_string()),
+                field_type: Some(CTypeLike::Int {
+                    bits: 64,
+                    signedness: crate::Signedness::Unsigned,
+                }),
             },
             crate::facts::FieldAccessCertificate {
                 slot: 0,
                 field_offset: 0x10,
                 field_name: "next".to_string(),
-                field_type: Some("struct Node *".to_string()),
+                field_type: Some(CTypeLike::Pointer(Box::new(CTypeLike::Struct(
+                    "Node".to_owned(),
+                )))),
             },
         ],
         ..FunctionTypeFacts::default()
@@ -1791,7 +1799,10 @@ fn field_certificates_do_not_populate_member_render_facts_for_wrong_width() {
             slot: 0,
             field_offset: 8,
             field_name: "small".to_string(),
-            field_type: Some("uint32_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 32,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     };
@@ -1830,7 +1841,10 @@ fn field_certificates_do_not_populate_member_render_facts_for_wrong_param_slot()
             slot: 0,
             field_offset: 8,
             field_name: "hash".to_string(),
-            field_type: Some("uint64_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 64,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     };
@@ -1854,7 +1868,10 @@ fn field_certificates_do_not_populate_member_render_facts_for_wrong_param_slot()
             slot: 1,
             field_offset: 8,
             field_name: "hash".to_string(),
-            field_type: Some("uint64_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 64,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     };
@@ -2256,7 +2273,10 @@ fn field_certificate_type_facts(slot: usize, offset: u64) -> FunctionTypeFacts {
             slot,
             field_offset: offset,
             field_name: "hash".to_string(),
-            field_type: Some("uint64_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 64,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     }
@@ -2330,7 +2350,10 @@ fn field_certificates_populate_stack_home_member_render_facts() {
             slot: 0,
             field_offset: 4,
             field_name: "hash".to_string(),
-            field_type: Some("uint32_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 32,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     };
@@ -2358,7 +2381,10 @@ fn field_certificates_do_not_populate_stack_home_member_without_reload_proof() {
             slot: 0,
             field_offset: 4,
             field_name: "hash".to_string(),
-            field_type: Some("uint32_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 32,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     };
@@ -2434,7 +2460,7 @@ fn scalar_array_candidates_populate_indexed_member_render_facts() {
             slot: 0,
             field_offset: 4,
             field_name: "score".to_string(),
-            field_type: Some("int32_t".to_string()),
+            field_type: Some(CTypeLike::i32()),
         }],
         scalar_array_render_candidates: vec![crate::facts::ScalarArrayRenderCandidate {
             slot: 0,
@@ -2521,7 +2547,7 @@ fn scalar_array_member_candidate_requires_semantic_index_identity() {
             slot,
             field_offset: 4,
             field_name: "score".to_string(),
-            field_type: Some("int32_t".to_string()),
+            field_type: Some(CTypeLike::i32()),
         }],
         scalar_array_render_candidates: vec![crate::facts::ScalarArrayRenderCandidate {
             slot,

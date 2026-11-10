@@ -609,33 +609,24 @@ fn normalized_signature_type(ty: &CTypeLike, ptr_bits: u32) -> CTypeLike {
     ))
 }
 
-/// Fold a typedef whose name is itself a C type spelling into that type.
+/// Fold a typedef whose name spells its own type (`int32_t`) into that type.
 ///
-/// `Typedef("int32_t")` and `Int { bits: 32, signedness: Signed }` are the same
-/// type -- one arrived through radare2's type database and the other through
-/// inference -- and the comparison this replaced got that right by accident,
-/// because both print `int32_t`. Parsing the name is how to get it right on
-/// purpose.
-///
-/// The fold normally applies only when the parsed type spells itself the same
-/// way again. That separates `int32_t` from `size_t`, which is also sixty-four
-/// bits unsigned on this target but is a more specific statement about the
-/// value. Plain C `int` is the exception: it is a language scalar spelling, not
-/// a typedef identity, and this model's canonical spelling for it is
-/// `int32_t`.
+/// `size_t` stays a name: it states more than its width. Plain `int` folds to `int32_t`.
 pub(crate) fn resolve_builtin_typedefs(ty: CTypeLike, ptr_bits: u32) -> CTypeLike {
     match ty {
         CTypeLike::Typedef { name, ty } => {
-            let Some(parsed) = crate::convert::parse_c_type_like(&name, ptr_bits) else {
-                return CTypeLike::Typedef { name, ty };
+            let target = match ty.unaliased() {
+                CTypeLike::Unknown => crate::convert::standard_type(&name, ptr_bits),
+                target => Some(target.clone()),
             };
             let is_plain_c_int = matches!(name.trim().to_ascii_lowercase().as_str(), "int");
-            if matches!(parsed, CTypeLike::Typedef { .. })
-                || (!is_plain_c_int && render_signature_type(&parsed, ptr_bits) != name)
-            {
-                CTypeLike::Typedef { name, ty }
-            } else {
-                parsed
+            match target {
+                Some(target)
+                    if is_plain_c_int || render_signature_type(&target, ptr_bits) == name =>
+                {
+                    target
+                }
+                _ => CTypeLike::Typedef { name, ty },
             }
         }
         CTypeLike::Pointer(inner) => {
@@ -895,19 +886,26 @@ fn normalize_inferred_param_name(
 
 pub(crate) fn format_signature_prototype(
     function_name: &str,
-    ret_type: &str,
+    ret_type: Option<&CTypeLike>,
     params: &[InferredSignatureParam],
+    ptr_bits: u32,
 ) -> String {
     let params_str = if params.is_empty() {
         "void".to_string()
     } else {
         params
             .iter()
-            .map(|p| format!("{} {}", p.param_type, p.name))
+            .map(|p| format!("{} {}", render_signature_type(&p.ty, ptr_bits), p.name))
             .collect::<Vec<_>>()
             .join(", ")
     };
+    let ret_type = ret_type.map_or_else(String::new, |ty| render_signature_type(ty, ptr_bits));
     format!("{ret_type} {function_name} ({params_str})")
+}
+
+/// A type as an inferred signature states it: materialized, an unstated sign spelled signed.
+fn signature_type(ty: &CTypeLike, ptr_bits: u32) -> CTypeLike {
+    settle_unknown_signedness(materialize_signature_type_like(ty.clone(), ptr_bits))
 }
 
 pub(crate) fn build_inferred_signature(
@@ -940,7 +938,7 @@ pub(crate) fn build_inferred_signature(
                     gap_slot,
                     &mut used_param_names,
                 ),
-                param_type: render_signature_type(
+                ty: signature_type(
                     &CTypeLike::Int {
                         bits: ptr_bits.max(8),
                         signedness: Signedness::Unknown,
@@ -951,15 +949,20 @@ pub(crate) fn build_inferred_signature(
         }
         json_params.push(InferredSignatureParam {
             name: normalize_inferred_param_name(&param.name, slot, &mut used_param_names),
-            param_type: render_signature_type(&param.ty, ptr_bits),
+            ty: signature_type(&param.ty, ptr_bits),
         });
     }
-    // An undecided return is spelled as nothing, so no type is read back from it.
-    let rendered_ret = ret_type.map_or_else(String::new, |ty| render_signature_type(ty, ptr_bits));
+    // An undecided return states nothing.
+    let ret_type = ret_type.map(|ty| signature_type(ty, ptr_bits));
     InferredSignature {
         function_name: function_name.to_string(),
-        signature: format_signature_prototype(function_name, &rendered_ret, &json_params),
-        ret_type: rendered_ret,
+        signature: format_signature_prototype(
+            function_name,
+            ret_type.as_ref(),
+            &json_params,
+            ptr_bits,
+        ),
+        ret_type,
         params: json_params,
         callconv,
         arch: arch_name.to_string(),
@@ -979,15 +982,6 @@ mod tests {
         let solved =
             crate::function_facts::SolvedFunction::of(prepared, &BTreeMap::new(), ptr_bits);
         infer_signature_from_prepared_ssa(prepared, &solved)
-    }
-
-    #[test]
-    fn rendered_machine_bitvectors_parse_back_to_the_same_type() {
-        for bits in [1, 24, 129, 256] {
-            let ty = CTypeLike::BitVector(bits);
-            let spelling = render_signature_type(&ty, 64);
-            assert_eq!(crate::parse_c_type_like(&spelling, 64), Some(ty));
-        }
     }
 
     #[test]
@@ -1206,7 +1200,10 @@ mod tests {
         let inferred = inferred(&prepared);
 
         assert_eq!(inferred.arch, "aarch64");
-        assert_eq!(inferred.params[0].param_type, "uint8_t*");
+        assert_eq!(
+            render_signature_type(&inferred.params[0].ty, 64),
+            "uint8_t*"
+        );
     }
 
     #[test]
@@ -1259,7 +1256,10 @@ mod tests {
         );
         let inferred = inferred(&prepared);
 
-        assert_eq!(inferred.params[0].param_type, "uint64_t");
+        assert_eq!(
+            render_signature_type(&inferred.params[0].ty, 64),
+            "uint64_t"
+        );
     }
 
     #[test]
@@ -1369,7 +1369,14 @@ mod tests {
         let inferred = inferred(&prepared);
 
         // The certified value is untyped, so no return is claimed, least of all the control target's.
-        assert_eq!(inferred.ret_type, "");
+        assert_eq!(
+            inferred
+                .ret_type
+                .as_ref()
+                .map(|ty| render_signature_type(ty, 64))
+                .unwrap_or_default(),
+            ""
+        );
     }
 
     #[test]
@@ -1389,9 +1396,30 @@ mod tests {
             r2source::ConventionId::SysVAmd64,
         ));
 
-        assert_eq!(inferred.ret_type, "");
-        assert_ne!(inferred.ret_type, "float");
-        assert_ne!(inferred.ret_type, "double");
+        assert_eq!(
+            inferred
+                .ret_type
+                .as_ref()
+                .map(|ty| render_signature_type(ty, 64))
+                .unwrap_or_default(),
+            ""
+        );
+        assert_ne!(
+            inferred
+                .ret_type
+                .as_ref()
+                .map(|ty| render_signature_type(ty, 64))
+                .unwrap_or_default(),
+            "float"
+        );
+        assert_ne!(
+            inferred
+                .ret_type
+                .as_ref()
+                .map(|ty| render_signature_type(ty, 64))
+                .unwrap_or_default(),
+            "double"
+        );
     }
 
     #[test]
@@ -1407,7 +1435,14 @@ mod tests {
         };
         let unstated =
             SsaArtifact::for_patterns(&[returning()], Some(&arch)).expect("prepared SSA");
-        assert_eq!(inferred(&unstated).ret_type, "");
+        assert_eq!(
+            inferred(&unstated)
+                .ret_type
+                .as_ref()
+                .map(|ty| render_signature_type(ty, 64))
+                .unwrap_or_default(),
+            ""
+        );
         let register = |offset| r2ssa::CanonicalStorageId {
             space: r2ssa::CanonicalStorageSpace::Register,
             offset,
@@ -1425,7 +1460,14 @@ mod tests {
         .expect("void interface");
         let stated = SsaArtifact::for_decompile_with_interface(&[returning()], Some(&arch), void)
             .expect("prepared void source");
-        assert_eq!(inferred(&stated).ret_type, "void");
+        assert_eq!(
+            inferred(&stated)
+                .ret_type
+                .as_ref()
+                .map(|ty| render_signature_type(ty, 64))
+                .unwrap_or_default(),
+            "void"
+        );
     }
 
     #[test]
@@ -1470,7 +1512,7 @@ mod tests {
         for (slot, param) in inferred.params.iter().enumerate() {
             assert_eq!(param.name, format!("arg{slot}"));
         }
-        assert_eq!(inferred.params[1].param_type, "int64_t");
-        assert_eq!(inferred.params[6].param_type, "int32_t");
+        assert_eq!(render_signature_type(&inferred.params[1].ty, 64), "int64_t");
+        assert_eq!(render_signature_type(&inferred.params[6].ty, 64), "int32_t");
     }
 }

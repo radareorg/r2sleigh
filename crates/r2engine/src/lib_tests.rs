@@ -1659,7 +1659,7 @@ fn external_layout_names_rewrite_placeholder_field_certificates() {
                         r2types::ExternalField {
                             name: "thirteenth".to_string(),
                             offset: 48,
-                            ty: Some("int32_t".to_string()),
+                            ty: Some(r2types::CTypeLike::i32()),
                         },
                     )]),
                 },
@@ -1683,10 +1683,8 @@ fn external_layout_names_rewrite_placeholder_field_certificates() {
         "thirteenth"
     );
     assert_eq!(
-        facts.type_facts().field_access_certificates[0]
-            .field_type
-            .as_deref(),
-        Some("int32_t")
+        facts.type_facts().field_access_certificates[0].field_type,
+        Some(r2types::CTypeLike::i32())
     );
 }
 

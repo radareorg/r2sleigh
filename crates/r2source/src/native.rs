@@ -94,6 +94,8 @@ pub struct NativeFunction {
     pub read_only: Vec<(u64, Vec<u8>)>,
     /// Program data the body points at, named.
     pub data_symbols: Vec<SourceDataObject>,
+    /// The graph each data object's type is a node of.
+    pub data_types: Option<crate::SourceTypeGraph>,
     /// Tables of code pointers the body dispatches through, as read.
     ///
     /// Empty on a first capture: finding one needs the value analysis to say
@@ -229,7 +231,6 @@ pub fn capture(
                 .collect(),
             stack_slot_names: function.stack_slot_names.into_boxed_slice(),
             signature: function.signature,
-            callee_signatures: Box::from([]),
         },
         OwnedFunctionImage {
             entry_address: function.address,
@@ -238,6 +239,7 @@ pub fn capture(
             string_literals: function.string_literals.into_boxed_slice(),
             read_only: function.read_only.into_boxed_slice(),
             data_symbols: function.data_symbols.into_boxed_slice(),
+            data_types: function.data_types,
             code_pointer_tables: function.code_pointer_tables.into_boxed_slice(),
             frame_saves: {
                 let mut saves = function.frame_saves;
@@ -373,6 +375,7 @@ mod tests {
             string_literals: Vec::new(),
             read_only: Vec::new(),
             data_symbols: Vec::new(),
+            data_types: None,
             code_pointer_tables: Vec::new(),
             interface: None,
             parameter_names: Vec::new(),

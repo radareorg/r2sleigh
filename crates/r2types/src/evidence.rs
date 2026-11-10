@@ -646,13 +646,16 @@ impl<'a> EvidenceBuilder<'a> {
                     .arena_mut()
                     .unknown_alias(format!("enum {name}")),
             ),
-            CTypeLike::Typedef { name, .. } => {
-                let resolved = crate::parse_c_type_like(name, self.ptr_bits)?;
-                if matches!(resolved, CTypeLike::Typedef { .. }) {
-                    return Some(self.solver.arena_mut().unknown_alias(name.clone()));
+            CTypeLike::Typedef { name, ty } => match ty.unaliased() {
+                CTypeLike::Unknown => match crate::convert::standard_type(name, self.ptr_bits) {
+                    Some(standard) => self.intern_structural(&standard),
+                    None => Some(self.solver.arena_mut().unknown_alias(name.clone())),
+                },
+                target => {
+                    let target = target.clone();
+                    self.intern_structural(&target)
                 }
-                self.intern_structural(&resolved)
-            }
+            },
         }
     }
 

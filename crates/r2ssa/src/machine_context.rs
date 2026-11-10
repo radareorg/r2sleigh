@@ -2547,7 +2547,15 @@ mod tests {
             [
                 SourceType::new(0, SourceTypeKind::Struct { aggregate_id: 0 }, 56 * 8, 32),
                 SourceType::new(1, SourceTypeKind::SignedInteger, 32, 32),
-                SourceType::new(2, SourceTypeKind::Pointer { target_type_id: 0 }, 64, 64),
+                SourceType::new(
+                    2,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 0,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
             ],
             [SourceAggregateLayout::new(
                 0,
@@ -2583,7 +2591,15 @@ mod tests {
             [
                 SourceType::new(0, SourceTypeKind::Struct { aggregate_id: 0 }, 32, 32),
                 SourceType::new(1, SourceTypeKind::SignedInteger, 32, 32),
-                SourceType::new(2, SourceTypeKind::Pointer { target_type_id: 0 }, 32, 32),
+                SourceType::new(
+                    2,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 0,
+                        const_target: false,
+                    },
+                    32,
+                    32,
+                ),
             ],
             [SourceAggregateLayout::new(
                 0,
@@ -2683,7 +2699,15 @@ mod tests {
         let graph = SourceTypeGraph::new(
             [
                 SourceType::new(0, SourceTypeKind::UnsignedInteger, 8, 8),
-                SourceType::new(1, SourceTypeKind::Pointer { target_type_id: 0 }, 64, 64),
+                SourceType::new(
+                    1,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 0,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
                 SourceType::new(2, SourceTypeKind::UnsignedInteger, 64, 64),
             ],
             [],
@@ -2713,7 +2737,10 @@ mod tests {
         let graph = interface.type_graph().expect("logical graph");
         assert_eq!(
             graph.types()[1].kind(),
-            SourceTypeKind::Pointer { target_type_id: 0 }
+            SourceTypeKind::Pointer {
+                target_type_id: 0,
+                const_target: false
+            }
         );
         assert_eq!(graph.types()[0].kind(), SourceTypeKind::UnsignedInteger);
     }
@@ -2723,15 +2750,34 @@ mod tests {
         let graph = SourceTypeGraph::new(
             [
                 SourceType::new(0, SourceTypeKind::SignedInteger, 8, 8),
-                SourceType::new(1, SourceTypeKind::Pointer { target_type_id: 0 }, 64, 64),
-                SourceType::new(2, SourceTypeKind::Pointer { target_type_id: 1 }, 64, 64),
+                SourceType::new(
+                    1,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 0,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
+                SourceType::new(
+                    2,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 1,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
             ],
             [],
         )
         .expect("char ** is a well formed source type");
         assert_eq!(
             graph.types()[2].kind(),
-            SourceTypeKind::Pointer { target_type_id: 1 }
+            SourceTypeKind::Pointer {
+                target_type_id: 1,
+                const_target: false
+            }
         );
         assert!(graph.validates_pointer_width(64));
     }
@@ -2742,7 +2788,10 @@ mod tests {
             SourceTypeGraph::new(
                 [SourceType::new(
                     0,
-                    SourceTypeKind::Pointer { target_type_id: 1 },
+                    SourceTypeKind::Pointer {
+                        target_type_id: 1,
+                        const_target: false
+                    },
                     64,
                     64,
                 )],

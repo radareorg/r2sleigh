@@ -186,14 +186,11 @@ impl ReturnTypeFact {
     }
 }
 
-/// The return type the program's declaration of this function spells, where it spells one.
+/// `void` where the program's declaration of this function states it.
 fn declared(source: &r2ssa::SsaArtifact) -> Option<CTypeLike> {
-    let spelling = source.source_signature()?.return_type()?;
-    let ptr_bits = source
-        .machine_context()
-        .memory_model()
-        .default_address_bits();
-    crate::parse_c_type_like(spelling, ptr_bits).filter(|ty| *ty != CTypeLike::Unknown)
+    let interface = source.machine_context().function_interface()?;
+    (interface.types_are_declared() && interface.return_kind() == r2ssa::SourceFunctionReturn::Void)
+        .then_some(CTypeLike::Void)
 }
 
 /// What each value-carrying return hands back, then each tail call's result.

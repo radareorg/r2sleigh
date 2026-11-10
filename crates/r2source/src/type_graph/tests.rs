@@ -97,7 +97,15 @@ fn a_pointer_to_an_incomplete_type_is_a_pointer() {
     let graph = SourceTypeGraph::from_parts(SourceTypeGraphParts {
         types: vec![
             ty(0, SourceTypeKind::Opaque { tag_id: 0 }, 0, 0),
-            ty(1, SourceTypeKind::Pointer { target_type_id: 0 }, 64, 64),
+            ty(
+                1,
+                SourceTypeKind::Pointer {
+                    target_type_id: 0,
+                    const_target: false,
+                },
+                64,
+                64,
+            ),
         ],
         opaque_tags: vec![SourceOpaqueTag::new(0, SourceTagKeyword::Typedef, "FILE")],
         ..SourceTypeGraphParts::default()
@@ -156,7 +164,15 @@ fn code_carries_its_signature() {
         types: vec![
             int(0, 32, 32),
             ty(1, SourceTypeKind::Code { signature_id: 0 }, 0, 0),
-            ty(2, SourceTypeKind::Pointer { target_type_id: 1 }, 64, 64),
+            ty(
+                2,
+                SourceTypeKind::Pointer {
+                    target_type_id: 1,
+                    const_target: false,
+                },
+                64,
+                64,
+            ),
         ],
         signatures: vec![SourceCodeSignature::new(0, 0, [0, 0], false, true)],
         ..SourceTypeGraphParts::default()
@@ -173,7 +189,15 @@ fn a_closure_keeps_what_its_roots_reach_and_nothing_else() {
         [
             int(0, 32, 32),
             ty(1, SourceTypeKind::Float, 64, 64),
-            ty(2, SourceTypeKind::Pointer { target_type_id: 3 }, 64, 64),
+            ty(
+                2,
+                SourceTypeKind::Pointer {
+                    target_type_id: 3,
+                    const_target: false,
+                },
+                64,
+                64,
+            ),
             ty(3, SourceTypeKind::Struct { aggregate_id: 0 }, 128, 64),
         ],
         [SourceAggregateLayout::new(
@@ -197,7 +221,10 @@ fn a_closure_keeps_what_its_roots_reach_and_nothing_else() {
     // The cycle through `next` survives renumbering.
     assert_eq!(
         closed.types()[1].kind(),
-        SourceTypeKind::Pointer { target_type_id: 2 }
+        SourceTypeKind::Pointer {
+            target_type_id: 2,
+            const_target: false
+        }
     );
     assert_eq!(closed.aggregates()[0].members()[1].type_id(), 1);
     // And the closure is itself a valid graph.
@@ -270,7 +297,15 @@ fn a_type_graph_in_which_an_aggregate_contains_itself_is_refused() {
         [
             int.clone(),
             SourceType::new(1, SourceTypeKind::Struct { aggregate_id: 0 }, 32, 32),
-            SourceType::new(2, SourceTypeKind::Pointer { target_type_id: 1 }, 32, 32),
+            SourceType::new(
+                2,
+                SourceTypeKind::Pointer {
+                    target_type_id: 1,
+                    const_target: false,
+                },
+                32,
+                32,
+            ),
             SourceType::new(3, SourceTypeKind::Struct { aggregate_id: 1 }, 32, 32),
         ],
         [wrapper(0, 1, 2), wrapper(1, 3, 1)],

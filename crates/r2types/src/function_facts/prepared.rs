@@ -140,8 +140,7 @@ fn natural_member(
     graph: &r2ssa::SourceTypeGraph,
     member: &r2ssa::SourceAggregateMember,
 ) -> Option<(CTypeLike, u64, u64)> {
-    let mut visiting = std::collections::BTreeSet::<u32>::new();
-    let ty = crate::analysis::source_type_like(graph, member.type_id(), &mut visiting)?;
+    let ty = crate::convert::source_type_like(graph, member.type_id())?;
     let width = u64::from(declaration_type_width_bits(&ty, 64)?);
     let align = natural_alignment(&ty)?;
     let ty = match member.size_bits() {
@@ -228,9 +227,8 @@ pub(crate) fn field_certificate_width_matches(
     ptr_bits: u32,
 ) -> bool {
     cert.field_type
-        .as_deref()
-        .and_then(|field_type| parse_c_type_like(field_type, ptr_bits))
-        .and_then(|ty| type_like_size_bytes(&ty, ptr_bits))
+        .as_ref()
+        .and_then(|ty| type_like_size_bytes(ty, ptr_bits))
         .is_none_or(|width| width == u64::from(access_width))
 }
 
@@ -891,7 +889,7 @@ pub fn exact_source_return_type(source: &r2ssa::SsaArtifact) -> Option<CTypeLike
         return None;
     }
 
-    crate::analysis::source_type_like(graph, logical.type_id(), &mut BTreeSet::new())
+    crate::convert::source_type_like(graph, logical.type_id())
 }
 
 /// A pair's logical type, one integer of both halves' width, where a pair certificate licenses
@@ -930,7 +928,7 @@ fn exact_pair_return_type(
     if returns == 0 || tails || source.certificates().returns.len() != returns {
         return None;
     }
-    crate::analysis::source_type_like(graph, logical.type_id(), &mut BTreeSet::new())
+    crate::convert::source_type_like(graph, logical.type_id())
 }
 
 pub(crate) fn exact_return_certificate_matches(
@@ -986,7 +984,7 @@ pub(crate) fn parameter_pointee_type(
         .types()
         .get(usize::try_from(logical.type_id()).ok()?)?;
     match ty.kind() {
-        r2ssa::SourceTypeKind::Pointer { target_type_id } => Some(target_type_id),
+        r2ssa::SourceTypeKind::Pointer { target_type_id, .. } => Some(target_type_id),
         _ => None,
     }
 }
@@ -1117,7 +1115,8 @@ pub(crate) fn recovered_scalar_signedness_outranks(
 ) -> bool {
     let scalar = |ty: &CTypeLike| match ty {
         CTypeLike::Int { bits, signedness } => Some((*bits, *signedness)),
-        CTypeLike::Typedef { name, .. } => match crate::parse_c_type_like(name, ptr_bits) {
+        CTypeLike::Typedef { name, ty } => match crate::convert::typedef_target(name, ty, ptr_bits)
+        {
             Some(CTypeLike::Int { bits, signedness }) => Some((bits, signedness)),
             _ => None,
         },
@@ -1966,7 +1965,7 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                                 .machine_context()
                                 .function_interface()?
                                 .type_graph()?;
-                            crate::analysis::source_type_like(graph, type_id, &mut BTreeSet::new())
+                            crate::convert::source_type_like(graph, type_id)
                         }),
                 },
             )

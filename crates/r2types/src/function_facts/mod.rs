@@ -16,7 +16,7 @@ use crate::facts::{
     CalleeFact, CalleeLinkage, FunctionTypeFacts, OutParamCertificateEvidence,
     OutParamCertificateSource, SignatureCertificateSource,
 };
-use crate::{CTypeLike, normalize_external_type_name, parse_c_type_like};
+use crate::{CTypeLike, normalize_external_type_name};
 use r2ssa::InstId;
 use r2ssa::dense::IdMap;
 
@@ -580,14 +580,11 @@ pub fn declaration_type_width_bits(ty: &CTypeLike, ptr_bits: u32) -> Option<u32>
         // declared `BitVector(96)` by the rule that names it and had no width
         // at all to the rule that checks it.
         CTypeLike::BitVector(bits) => Some(*bits),
-        // A name is as wide as what it stands for. The target is asked first
-        // because it is evidence -- the capture resolved it -- and the name
-        // text is only a fallback for a spelling C itself defines.
+        // A name is as wide as what it stands for, or, unstated, as C defines it.
         CTypeLike::Const(inner) => declaration_type_width_bits(inner, ptr_bits),
         CTypeLike::Typedef { name, ty } => {
             declaration_type_width_bits(ty, ptr_bits).or_else(|| {
-                crate::parse_external_type_like_spec(name, ptr_bits)
-                    .and_then(|parsed| parsed.bits(ptr_bits))
+                crate::convert::standard_type(name, ptr_bits).and_then(|ty| ty.bits(ptr_bits))
             })
         }
         _ => None,
@@ -1877,11 +1874,7 @@ impl FunctionFacts {
                 is_write: memory.is_write,
                 field_offset: offset_bits / 8,
                 field_name: member.name().to_string(),
-                field_type: crate::analysis::source_type_like(
-                    graph,
-                    member.type_id(),
-                    &mut BTreeSet::new(),
-                ),
+                field_type: crate::convert::source_type_like(graph, member.type_id()),
                 access_width: memory.width,
                 base: pointer_base.and_then(r2ssa::SemanticId::parameter),
                 source: MemberAccessSource::DeclaredType,
@@ -2025,10 +2018,7 @@ impl FunctionFacts {
                 is_write: memory.is_write,
                 field_offset,
                 field_name: cert.field_name.clone(),
-                field_type: cert
-                    .field_type
-                    .as_deref()
-                    .and_then(|ty| parse_c_type_like(ty, ptr_bits)),
+                field_type: cert.field_type.clone(),
                 access_width: memory.width,
                 base: u32::try_from(cert.slot)
                     .ok()
@@ -2378,29 +2368,7 @@ impl FunctionFacts {
                 .and_then(|interface| {
                     let graph = interface.type_graph()?;
                     let logical = interface.parameter_logical_value(slot as usize)?;
-                    let ty = crate::analysis::source_type_like(
-                        graph,
-                        logical.type_id(),
-                        &mut BTreeSet::new(),
-                    )?;
-                    // The graph has no qualifier; the prototype's own spelling does.
-                    let spelled = prepared
-                        .source_signature()
-                        .and_then(|signature| signature.named_parameters().get(slot as usize))
-                        .and_then(r2source::SourceSignatureParameter::type_spelling)
-                        .and_then(|spelling| {
-                            crate::parse_c_type_like(
-                                spelling,
-                                prepared
-                                    .machine_context()
-                                    .memory_model()
-                                    .default_address_bits(),
-                            )
-                        });
-                    Some(match spelled {
-                        Some(spelled) => crate::analysis::requalify(ty, &spelled),
-                        None => ty,
-                    })
+                    crate::convert::source_type_like(graph, logical.type_id())
                 });
             self.render.certified_entities.insert(
                 id,
@@ -2605,41 +2573,7 @@ impl FunctionFacts {
                     .map(|param| param.name.clone())
                     .collect::<Vec<_>>()
             });
-        // The graph carries no qualifier; the spelling does, and a `const`
-        // pointee is part of the declared type.
         let ptr_bits = context.memory_model().default_address_bits();
-        let spelled_types = spelled
-            .as_ref()
-            .filter(|signature| signature.params.len() == logical.len())
-            .map(|signature| {
-                signature
-                    .params
-                    .iter()
-                    .map(|param| param.ty.clone())
-                    .collect::<Vec<_>>()
-            })
-            .or_else(|| {
-                let signature = source.source_signature()?;
-                let parameters = signature.named_parameters();
-                (parameters.len() == logical.len()).then(|| {
-                    parameters
-                        .iter()
-                        .map(|parameter| {
-                            parameter
-                                .type_spelling()
-                                .and_then(|spelling| crate::parse_c_type_like(spelling, ptr_bits))
-                        })
-                        .collect::<Vec<_>>()
-                })
-            });
-        r2il::refusal_evidence!(
-            "exact-source-signature",
-            "{:#x}: spelled={} presentation={} spelled_types={:?}",
-            source.function().entry,
-            spelled.is_some(),
-            source.source_signature().is_some(),
-            spelled_types
-        );
         let mut params = Vec::with_capacity(logical.len());
         let mut bases = BTreeMap::new();
         for (index, value) in logical.iter().enumerate() {
@@ -2654,22 +2588,12 @@ impl FunctionFacts {
                 );
                 return false;
             };
-            let Some(ty) =
-                crate::analysis::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
-            else {
+            let Some(ty) = crate::convert::source_type_like(graph, value.type_id()) else {
                 r2il::refusal_evidence!(
                     "exact-source-signature",
                     "parameter {index}'s logical type is not in the graph"
                 );
                 return false;
-            };
-            let ty = match spelled_types
-                .as_ref()
-                .and_then(|types| types.get(index))
-                .and_then(Option::as_ref)
-            {
-                Some(spelled) => crate::analysis::requalify(ty, spelled),
-                None => ty,
             };
             let ty = match certified_pointers
                 .as_ref()
@@ -2695,11 +2619,9 @@ impl FunctionFacts {
             r2ssa::SourceFunctionReturn::Void => Some(CTypeLike::Void),
             // A pair's logical value is the one integer of both halves' width.
             r2ssa::SourceFunctionReturn::Register { .. }
-            | r2ssa::SourceFunctionReturn::Pair { .. } => {
-                interface.return_logical_value().and_then(|value| {
-                    crate::analysis::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
-                })
-            }
+            | r2ssa::SourceFunctionReturn::Pair { .. } => interface
+                .return_logical_value()
+                .and_then(|value| crate::convert::source_type_like(graph, value.type_id())),
             // Nothing proved a result, so no return type can be spelled.
             r2ssa::SourceFunctionReturn::Unproven => None,
         };

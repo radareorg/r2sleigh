@@ -130,8 +130,7 @@ impl Placement<'_> {
                 Some(ty) => slot.with_logical_type(ty),
                 None => slot,
             };
-            let name = SourceStackSlotName::new(origin.base, offset, local.name.clone())
-                .with_type_spelling(local.spelling.as_ref().map(|s| s.as_written().to_owned()));
+            let name = SourceStackSlotName::new(origin.base, offset, local.name.clone());
             candidates.push((slot, Some(name)));
         }
         let mut frame = disjoint(&declared.prototype.name, candidates);
@@ -243,8 +242,7 @@ pub(crate) fn rebased(
                     StackAddressBase::StackPointer,
                     name.offset().saturating_add(shift),
                     name.name(),
-                )
-                .with_type_spelling(name.type_spelling()),
+                ),
             })
             .collect(),
     }

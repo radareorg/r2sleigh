@@ -186,7 +186,10 @@ mod tests {
                     r2ssa::SourceType::new(0, r2ssa::SourceTypeKind::UnsignedInteger, 8, 8),
                     r2ssa::SourceType::new(
                         1,
-                        r2ssa::SourceTypeKind::Pointer { target_type_id: 0 },
+                        r2ssa::SourceTypeKind::Pointer {
+                            target_type_id: 0,
+                            const_target: false,
+                        },
                         64,
                         64,
                     ),

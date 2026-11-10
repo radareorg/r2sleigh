@@ -2084,37 +2084,6 @@ fn correlate_call_site_interfaces(
         {
             interface = with_callee;
         }
-        // The exact target identity correlates this call with the prototype
-        // radare2 recovered for that target. Parameter names are otherwise
-        // presentation-only; promote precisely one `format` name into the
-        // checked callsite contract, where it serves as provenance for literal
-        // format counting at a variadic call and, at a `va_list` call, says
-        // which argument a caller's body forwards as its own format.
-        if let Some(target_name) = call.target_name() {
-            let mut signatures =
-                source
-                    .presentation()
-                    .callee_signatures()
-                    .iter()
-                    .filter(|(name, signature)| {
-                        name.as_ref() == target_name
-                            && signature.is_variadic() == prototype.variadic
-                            && signature.named_parameters().len() == prototype.arguments.len()
-                    });
-            if let (Some((_, signature)), None) = (signatures.next(), signatures.next()) {
-                let mut formats = signature
-                    .named_parameters()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, parameter)| parameter_names_a_format_string(parameter));
-                if let (Some((index, _)), None) = (formats.next(), formats.next())
-                    && let Ok(index) = u32::try_from(index)
-                    && let Ok(bound) = interface.clone().with_radare2_format_parameter(index)
-                {
-                    interface = bound;
-                }
-            }
-        }
         // A call to the gettext family hands back a translation of one of its
         // own arguments, so a caller whose format came from here counts from
         // the msgid it passed. radare2 has no prototype for the family and
@@ -2147,26 +2116,6 @@ fn correlate_call_site_interfaces(
         callee_names,
         slot_targets,
     }
-}
-
-/// Whether a prototype's parameter is the format string of a variadic call.
-///
-/// The name is the evidence and the type is the guard. radare2 spells the role
-/// `format` for the printf family and `fmt` for the err/warn family, and both
-/// are the same role; `execl(const char *path, const char *arg, ...)` is why
-/// the name is still required, because its last named parameter is a `char *`
-/// that no conversion specifier is counted from.
-fn parameter_names_a_format_string(parameter: &r2source::SourceSignatureParameter) -> bool {
-    let named = parameter.name().is_some_and(|name| {
-        matches!(
-            name.trim_start_matches('_'),
-            "format" | "fmt" | "format_string" | "fmtstr"
-        )
-    });
-    named
-        && parameter
-            .type_spelling()
-            .is_some_and(|spelling| spelling.contains("char") && spelling.contains('*'))
 }
 
 /// Which of this function's own parameters its body forwards as a format.

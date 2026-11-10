@@ -1169,10 +1169,7 @@ pub(crate) fn callee_read(
     let resolved = crate::isolation::isolated(|| {
         resolved_alone(&native, target, address, ptr_bits, walked, stated)
     });
-    read_of(
-        resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked))),
-        ptr_bits,
-    )
+    read_of(resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked))))
 }
 
 /// What one callee's body proves, read under the same isolation boundary as its preparation.
@@ -1182,11 +1179,11 @@ fn read_callee(
     address: u64,
     ptr_bits: u32,
 ) -> CalleeRead {
-    read_of(prepared_callee(native, target, address, ptr_bits), ptr_bits)
+    read_of(prepared_callee(native, target, address, ptr_bits))
 }
 
 /// What a resolved callee proves, derived under isolation.
-fn read_of(resolved: Result<Resolution, Unreadable>, ptr_bits: u32) -> CalleeRead {
+fn read_of(resolved: Result<Resolution, Unreadable>) -> CalleeRead {
     let artifact = match resolved {
         Ok(resolved) => resolved,
         Err(reason) => {
@@ -1204,7 +1201,7 @@ fn read_of(resolved: Result<Resolution, Unreadable>, ptr_bits: u32) -> CalleeRea
         .machine_context()
         .function_interface()
         .cloned();
-    let facts = match crate::isolation::isolated(|| CalleeFacts::derive(&artifact, ptr_bits)) {
+    let facts = match crate::isolation::isolated(|| CalleeFacts::derive(&artifact)) {
         Ok(Some(derived)) => Ok(derived),
         Ok(None) => Err(Unreadable::NothingProved),
         Err(panicked) => Err(Unreadable::Panicked(panicked)),
@@ -2166,6 +2163,7 @@ impl<'a> Native<'a> {
         let library = library_evidence(self.program, &calls);
         let reentering = reentering_calls(&calls);
         let exits = walked.body.exits.clone();
+        let (data_symbols, data_types) = self.data_symbols(&walked.body);
         let function = NativeFunction {
             address: walked.body.entry,
             name: walked.name.clone(),
@@ -2179,7 +2177,8 @@ impl<'a> Native<'a> {
                 literals
             },
             read_only: self.read_only(&walked.body),
-            data_symbols: self.data_symbols(&walked.body),
+            data_symbols,
+            data_types,
             code_pointer_tables: (tables.iter().chain(call_tables))
                 .map(|table| table.table.clone())
                 .collect(),
@@ -2331,10 +2330,13 @@ impl Native<'_> {
     }
 
     /// The named program data this body points at, each with the type the
-    /// binary's debug information declares at its address.
-    fn data_symbols(&self, body: &crate::body::Body) -> Vec<SourceDataObject> {
+    /// binary's debug information declares at its address, and their graph.
+    fn data_symbols(
+        &self,
+        body: &crate::body::Body,
+    ) -> (Vec<SourceDataObject>, Option<r2source::SourceTypeGraph>) {
         let declarations = self.target.declarations;
-        referenced(body)
+        let named = referenced(body)
             .into_iter()
             .filter(|address| !body.calls.contains(address))
             // An import's slot is a word the loader fills, not an object the source names: its
@@ -2344,17 +2346,16 @@ impl Native<'_> {
                     || r2abi::statement::write_at(self.program.loader_writes(), *address)
                         .is_none_or(|write| write.place != *address)
             })
-            .filter_map(|address| {
-                let name = self.program.name_at(address)?;
-                // What the type is, rather than what it is called: a name
-                // the rendering has no declaration of spells nothing.
-                let spelling = declarations
-                    .object_at(address)
-                    .and_then(|object| declarations.graph().spelled(object.ty))
-                    .map(|spelled| spelled.as_type().to_owned());
-                Some(SourceDataObject::new(address, name, spelling))
-            })
-            .collect()
+            .filter_map(|address| Some((address, self.program.name_at(address)?)))
+            .collect::<Vec<_>>();
+        let types = (named.iter())
+            .map(|(address, _)| declarations.object_at(*address).map(|object| object.ty))
+            .collect::<Vec<_>>();
+        let (nodes, graph) = crate::declared::object_types(self.target, &types);
+        let objects = (named.into_iter().zip(nodes))
+            .map(|((address, name), node)| SourceDataObject::new(address, name, node))
+            .collect();
+        (objects, graph)
     }
 
     /// What one call operation calls, as the walk's transfer names it: a direct call its

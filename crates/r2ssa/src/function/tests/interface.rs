@@ -48,30 +48,6 @@ fn tail_slot_identity_unifies_direct_ram_and_loaded_register_targets() {
     assert!(identity_of(&[R2ILBlock::new(0x2000, 0x14)], &tail,).is_none());
 }
 
-#[test]
-fn a_format_parameter_is_named_and_is_a_char_pointer() {
-    use r2source::SourceSignatureParameter as Parameter;
-    // radare2 spells the role `format` for the printf family and `fmt` for
-    // err/warn, and both count conversion specifiers the same way.
-    for name in ["format", "fmt", "__format", "format_string", "fmtstr"] {
-        assert!(parameter_names_a_format_string(&Parameter::new(
-            Some(name),
-            Some("const char *")
-        )));
-    }
-    // `execl(const char *path, const char *arg, ...)` is the reason the
-    // name is required: nothing counts specifiers from its last parameter.
-    assert!(!parameter_names_a_format_string(&Parameter::new(
-        Some("arg"),
-        Some("const char *")
-    )));
-    // And the type is the guard on the name: `ioctl`'s request is not one.
-    assert!(!parameter_names_a_format_string(&Parameter::new(
-        Some("fmt"),
-        Some("unsigned long")
-    )));
-}
-
 /// One call, two calls, three: the stack pointer is where it started.
 ///
 /// Sleigh lifts an x86-64 `call` as `RSP = RSP - 8` and the store of the

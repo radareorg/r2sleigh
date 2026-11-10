@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::{CTypeLike, ExternalAggregateKind, ExternalTypeDb, parse_c_type_like};
+use crate::{CTypeLike, ExternalAggregateKind, ExternalTypeDb};
 
 /// The owner that supplied a program data object's type.
 ///
@@ -27,9 +27,8 @@ pub struct DataObjectTypeFact {
 pub enum DataObjectTypeRefusal {
     /// The source named the object but stated no type at its address.
     MissingSourceType,
-    /// The parser could not turn the spelling into a type declared by the
-    /// current source type context.
-    UnplaceableSourceType(String),
+    /// The source's type is not one the current source type context declares.
+    UnplaceableSourceType(CTypeLike),
     /// Two source observations for one structural address disagreed. Neither
     /// is allowed to win by observation order.
     ConflictingSourceTypes { first: CTypeLike, second: CTypeLike },
@@ -43,29 +42,21 @@ pub struct ProgramDataObjectTypeFacts {
 }
 
 impl ProgramDataObjectTypeFacts {
-    /// Parse one function snapshot's source observations without minting
-    /// typedefs that its type database cannot place.
-    pub fn from_source<'a>(
-        observations: impl IntoIterator<Item = (u64, Option<&'a str>)>,
-        ptr_bits: u32,
+    /// One function snapshot's source observations, each kept where its type
+    /// database can place it.
+    pub fn from_source(
+        observations: impl IntoIterator<Item = (u64, Option<CTypeLike>)>,
         type_db: &ExternalTypeDb,
     ) -> Self {
         let mut facts = Self::default();
-        for (address, spelling) in observations {
-            match spelling {
-                None => {
-                    facts.observe_refused(address, DataObjectTypeRefusal::MissingSourceType);
+        for (address, ty) in observations {
+            match ty {
+                None => facts.observe_refused(address, DataObjectTypeRefusal::MissingSourceType),
+                Some(ty) if data_object_type_is_placeable(&ty, type_db, false) => {
+                    facts.observe_accepted(address, ty);
                 }
-                Some(spelling) => {
-                    match parse_placeable_data_object_type(spelling, ptr_bits, type_db) {
-                        Some(ty) => facts.observe_accepted(address, ty),
-                        None => {
-                            facts.observe_refused(
-                                address,
-                                DataObjectTypeRefusal::UnplaceableSourceType(spelling.to_string()),
-                            );
-                        }
-                    }
+                Some(ty) => {
+                    facts.observe_refused(address, DataObjectTypeRefusal::UnplaceableSourceType(ty))
                 }
             }
         }
@@ -151,15 +142,6 @@ impl ProgramDataObjectTypeFacts {
     }
 }
 
-fn parse_placeable_data_object_type(
-    spelling: &str,
-    ptr_bits: u32,
-    type_db: &ExternalTypeDb,
-) -> Option<CTypeLike> {
-    let ty = parse_c_type_like(spelling, ptr_bits)?;
-    data_object_type_is_placeable(&ty, type_db, false).then_some(ty)
-}
-
 fn data_object_type_is_placeable(
     ty: &CTypeLike,
     type_db: &ExternalTypeDb,
@@ -182,7 +164,11 @@ fn data_object_type_is_placeable(
         CTypeLike::Enum(name) => {
             type_db.resolve_aggregate_kind(name) == Some(ExternalAggregateKind::Enum)
         }
-        CTypeLike::Typedef { name, .. } => type_db.declares_typedef(name),
+        // A name is placeable where what it stands for is.
+        CTypeLike::Typedef { ty, .. } => {
+            !matches!(ty.as_ref(), CTypeLike::Unknown)
+                && data_object_type_is_placeable(ty, type_db, behind_pointer)
+        }
         CTypeLike::Function { .. } | CTypeLike::UnprototypedFunction(_) | CTypeLike::Unknown => {
             false
         }
@@ -196,8 +182,7 @@ mod tests {
     #[test]
     fn a_builtin_radare_type_is_accepted_and_marked() {
         let facts = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, Some("int32_t"))],
-            64,
+            [(0x7000, Some(CTypeLike::i32()))],
             &ExternalTypeDb::default(),
         );
         assert_eq!(
@@ -213,15 +198,14 @@ mod tests {
     #[test]
     fn an_undeclared_typedef_spelling_is_refused() {
         let facts = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, Some("looks_specific_t"))],
-            64,
+            [(0x7000, Some(CTypeLike::typedef("looks_specific_t")))],
             &ExternalTypeDb::default(),
         );
         assert!(facts.get(0x7000).is_none());
         assert_eq!(
             facts.refused().get(&0x7000),
             Some(&DataObjectTypeRefusal::UnplaceableSourceType(
-                "looks_specific_t".to_string()
+                CTypeLike::typedef("looks_specific_t")
             ))
         );
     }
@@ -229,8 +213,7 @@ mod tests {
     #[test]
     fn no_radare_type_is_a_refusal_not_a_default_type() {
         let facts = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, None)],
-            64,
+            [(0x7000, None::<CTypeLike>)],
             &ExternalTypeDb::default(),
         );
         assert!(facts.get(0x7000).is_none());
@@ -243,13 +226,11 @@ mod tests {
     #[test]
     fn accepted_program_fact_survives_a_later_missing_observation() {
         let mut accepted = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, Some("int32_t"))],
-            64,
+            [(0x7000, Some(CTypeLike::i32()))],
             &ExternalTypeDb::default(),
         );
         let missing = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, None)],
-            64,
+            [(0x7000, None::<CTypeLike>)],
             &ExternalTypeDb::default(),
         );
         accepted.absorb(&missing);
@@ -262,13 +243,17 @@ mod tests {
     #[test]
     fn conflicting_program_types_refuse_independent_of_order() {
         let signed = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, Some("int32_t"))],
-            64,
+            [(0x7000, Some(CTypeLike::i32()))],
             &ExternalTypeDb::default(),
         );
         let unsigned = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, Some("uint32_t"))],
-            64,
+            [(
+                0x7000,
+                Some(CTypeLike::Int {
+                    bits: 32,
+                    signedness: crate::Signedness::Unsigned,
+                }),
+            )],
             &ExternalTypeDb::default(),
         );
         for (mut first, second) in [(signed.clone(), unsigned.clone()), (unsigned, signed)] {

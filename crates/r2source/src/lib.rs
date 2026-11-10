@@ -201,7 +201,6 @@ pub struct FunctionPresentation {
     parameter_names: Box<[Box<str>]>,
     stack_slot_names: Box<[SourceStackSlotName]>,
     signature: Option<SourceSignaturePresentation>,
-    callee_signatures: Box<[(Box<str>, SourceSignaturePresentation)]>,
 }
 
 impl FunctionPresentation {
@@ -220,25 +219,13 @@ impl FunctionPresentation {
     pub const fn signature(&self) -> Option<&SourceSignaturePresentation> {
         self.signature.as_ref()
     }
-
-    /// The prototype of each function this one calls, keyed by the name the
-    /// call renders with.
-    pub fn callee_signatures(&self) -> &[(Box<str>, SourceSignaturePresentation)] {
-        &self.callee_signatures
-    }
 }
 
-/// The prototype the source recovered, spelled the way the source spells it.
+/// What a declaration calls a function's parameters, and its ellipsis.
 ///
-/// The interface says where each value lives; this says what it is called and
-/// what it is called *as*, which is the only place a spelling like `size_t`
-/// survives. It remains presentation unless trusted snapshot preparation
-/// promotes one uniquely named `format` parameter into the exact callsite
-/// interface. That narrow promotion is recorded as radare2 provenance; the
-/// presentation's arity remains independent of the ABI interface.
+/// Types travel on the interface's `SourceTypeGraph` (ADR call-boundary, Types on the wire).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSignaturePresentation {
-    return_type: Option<Box<str>>,
     calling_convention: Option<Box<str>>,
     noreturn: bool,
     parameters: Box<[SourceSignatureParameter]>,
@@ -246,21 +233,15 @@ pub struct SourceSignaturePresentation {
 
 impl SourceSignaturePresentation {
     pub fn new(
-        return_type: Option<impl Into<Box<str>>>,
         calling_convention: Option<impl Into<Box<str>>>,
         noreturn: bool,
         parameters: impl IntoIterator<Item = SourceSignatureParameter>,
     ) -> Self {
         Self {
-            return_type: return_type.map(Into::into),
             calling_convention: calling_convention.map(Into::into),
             noreturn,
             parameters: parameters.into_iter().collect(),
         }
-    }
-
-    pub fn return_type(&self) -> Option<&str> {
-        self.return_type.as_deref()
     }
 
     pub fn calling_convention(&self) -> Option<&str> {
@@ -275,12 +256,7 @@ impl SourceSignaturePresentation {
         &self.parameters
     }
 
-    /// The parameters the prototype names, without the variadic tail.
-    ///
-    /// A prototype that ends in an ellipsis carries it as a trailing
-    /// parameter, so the parameter list on its own over-counts what the callee
-    /// is declared to take by one, and every caller that treated its length as
-    /// the arity said so for every call site of a variadic callee alike.
+    /// The parameters the prototype names, without the trailing ellipsis.
     pub fn named_parameters(&self) -> &[SourceSignatureParameter] {
         match self.parameters.split_last() {
             Some((last, rest)) if last.is_variadic_tail() => rest,
@@ -296,21 +272,16 @@ impl SourceSignaturePresentation {
     }
 }
 
-/// One parameter of a recovered prototype: what it is called and its spelling.
+/// One parameter of a declaration: what it is called.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSignatureParameter {
     name: Option<Box<str>>,
-    type_spelling: Option<Box<str>>,
 }
 
 impl SourceSignatureParameter {
-    pub fn new(
-        name: Option<impl Into<Box<str>>>,
-        type_spelling: Option<impl Into<Box<str>>>,
-    ) -> Self {
+    pub fn new(name: Option<impl Into<Box<str>>>) -> Self {
         Self {
             name: name.map(Into::into),
-            type_spelling: type_spelling.map(Into::into),
         }
     }
 
@@ -318,22 +289,9 @@ impl SourceSignatureParameter {
         self.name.as_deref()
     }
 
-    pub fn type_spelling(&self) -> Option<&str> {
-        self.type_spelling.as_deref()
-    }
-
-    /// Whether this entry is the ellipsis rather than a parameter.
-    ///
-    /// This is how the source spells a variadic tail: a trailing entry called
-    /// `...`, which names no storage and stands for however many arguments a
-    /// call chooses to pass. Older captures put the ellipsis in the type half
-    /// instead, so both spellings are recognised -- the same two the source's
-    /// own `r_type_arg_is_vararg` accepts.
+    /// Whether this entry is the ellipsis, a trailing entry named `...`.
     pub fn is_variadic_tail(&self) -> bool {
-        [self.name(), self.type_spelling()]
-            .into_iter()
-            .flatten()
-            .any(|spelling| spelling.trim() == "...")
+        self.name().is_some_and(|name| name.trim() == "...")
     }
 }
 
@@ -346,7 +304,6 @@ pub struct SourceStackSlotName {
     base: StackAddressBase,
     offset: i64,
     name: Box<str>,
-    type_spelling: Option<Box<str>>,
 }
 
 impl SourceStackSlotName {
@@ -355,17 +312,7 @@ impl SourceStackSlotName {
             base,
             offset,
             name: name.into(),
-            type_spelling: None,
         }
-    }
-
-    pub fn with_type_spelling(mut self, type_spelling: Option<impl Into<Box<str>>>) -> Self {
-        self.type_spelling = type_spelling.map(Into::into);
-        self
-    }
-
-    pub fn type_spelling(&self) -> Option<&str> {
-        self.type_spelling.as_deref()
     }
 
     pub const fn base(&self) -> StackAddressBase {
@@ -470,12 +417,10 @@ pub struct OwnedFunctionImage {
     /// Bytes the container states read-only and the loader leaves alone, at each address the
     /// function loads from: semantic evidence, since a load there reads them (ROADMAP P5).
     read_only: Box<[(u64, Vec<u8>)]>,
-    /// Data objects radare2 already knows this function points at.
-    ///
-    /// The name is display data. An optional type spelling is a source-owned
-    /// analysis fact linked to the object's structural address; consumers must
-    /// still refuse a spelling their canonical type context cannot place.
+    /// Named data objects this function points at. The name is display data.
     data_symbols: Box<[SourceDataObject]>,
+    /// The graph each data object's `type_id` is a node of.
+    data_types: Option<SourceTypeGraph>,
     /// Tables of function pointers the function indexes, with the addresses
     /// each table holds.
     ///
@@ -504,25 +449,21 @@ pub struct SourceFrameSave {
 
 /// One program data object referenced by a captured function.
 ///
-/// Address is identity. Name is presentation. The optional spelling is the
-/// exact address-linked type radare2 supplied and is not machine-derived.
+/// Address is identity and name is presentation. `type_id` is a node of the
+/// image's `data_types`, the type the binary's debug information declares there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceDataObject {
     address: u64,
     name: Box<str>,
-    type_spelling: Option<Box<str>>,
+    type_id: Option<u32>,
 }
 
 impl SourceDataObject {
-    pub fn new(
-        address: u64,
-        name: impl Into<Box<str>>,
-        type_spelling: Option<impl Into<Box<str>>>,
-    ) -> Self {
+    pub fn new(address: u64, name: impl Into<Box<str>>, type_id: Option<u32>) -> Self {
         Self {
             address,
             name: name.into(),
-            type_spelling: type_spelling.map(Into::into),
+            type_id,
         }
     }
 
@@ -534,8 +475,8 @@ impl SourceDataObject {
         &self.name
     }
 
-    pub fn type_spelling(&self) -> Option<&str> {
-        self.type_spelling.as_deref()
+    pub const fn type_id(&self) -> Option<u32> {
+        self.type_id
     }
 }
 
@@ -598,6 +539,11 @@ impl OwnedFunctionImage {
 
     pub fn data_symbols(&self) -> &[SourceDataObject] {
         &self.data_symbols
+    }
+
+    /// The graph the data objects' types are nodes of.
+    pub const fn data_types(&self) -> Option<&SourceTypeGraph> {
+        self.data_types.as_ref()
     }
 
     pub fn string_literals(&self) -> &[(u64, String)] {
@@ -1309,12 +1255,12 @@ mod tests {
                 parameter_names: Box::new([]),
                 stack_slot_names: Box::new([]),
                 signature: None,
-                callee_signatures: Box::new([]),
             },
             OwnedFunctionImage {
                 string_literals: Box::new([]),
                 read_only: Box::new([]),
                 data_symbols: Box::new([]),
+                data_types: None,
                 code_pointer_tables: Box::new([]),
                 frame_saves: Box::new([]),
                 entry_address: 0x1000,
