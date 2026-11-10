@@ -922,10 +922,11 @@ fn what_the_machine_runs_after_the_test_is_written_after_the_guard_in_the_machin
 fn a_function_calling_two_different_callees_that_never_return_has_a_guard_for_each() {
     // What is declared is each callee, so one stub for `exit` and one for `abort` make two declarations in
     // one function, and neither the count nor the name of the callees decides whether the guards are written.
-    let mut literal =
-        Literal::new()
-            .importing("exit")
-            .importing_at("abort", common::STUB2, common::SLOT2);
+    let mut literal = Literal::new().importing("exit").importing_through(
+        common::STUB2..common::STUB2 + 6,
+        common::SLOT2,
+        "abort",
+    );
     literal.write(common::STUB2, &common::JUMP_STUB);
     let calls = [(0x19, common::STUB), (0x1e, common::STUB2)];
     let c = c_over(literal, EXIT_AND_ABORT, &calls);

@@ -168,3 +168,89 @@ fn a_parameter_the_body_reads_through_rests_on_the_dereference() {
     let bases = (info.arguments.iter()).map(|argument| argument.ty.confidence.basis);
     assert_eq!(bases.collect::<Vec<_>>(), [Basis::Dereferenced]);
 }
+
+/// AArch64: `caller` is `x0 = import(x0) + 1` through a stub at 0x1020 whose slot is 0x1040
+/// (a lone stub without glibc's `add x16`, which would start its cell at the `br`).
+const A64_CALLS_THROUGH_A_STUB: &[u8] = &[
+    0xfd, 0x7b, 0xbf, 0xa9, // 1000 stp x29, x30, [sp, #-16]!
+    0xfd, 0x03, 0x00, 0x91, // 1004 mov x29, sp
+    0x06, 0x00, 0x00, 0x94, // 1008 bl 0x1020
+    0x00, 0x04, 0x00, 0x91, // 100c add x0, x0, #1
+    0xfd, 0x7b, 0xc1, 0xa8, // 1010 ldp x29, x30, [sp], #16
+    0xc0, 0x03, 0x5f, 0xd6, // 1014 ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 1018 nop; nop
+    0x10, 0x00, 0x00, 0x90, // 1020 adrp x16, 0x1000
+    0x11, 0x22, 0x40, 0xf9, // 1024 ldr x17, [x16, #0x40]
+    0x20, 0x02, 0x1f, 0xd6, // 1028 br x17
+    0x1f, 0x20, 0x03, 0xd5, // 102c nop
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03,
+    0xd5, // 1030 padding
+    0, 0, 0, 0, 0, 0, 0, 0, // 1040 the slot
+];
+
+/// The callee's declaration as `caller`'s rendering states it, on glibc or on no stated library.
+fn a64_declared(import: &str, glibc: bool) -> String {
+    let program = Literal::of_code(A64_CALLS_THROUGH_A_STUB, &[("caller", BASE, 0x18)])
+        .in_aarch64()
+        .importing_through(BASE + 0x20..BASE + 0x30, BASE + 0x40, import);
+    let program = match glibc {
+        true => program.running_on(common::GLIBC),
+        false => program,
+    };
+    let text = OpenProgram::of(program)
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    let declared = text
+        .lines()
+        .find(|line| line.contains(&format!(" {import}(")) && line.ends_with(");"));
+    declared.map(str::trim).unwrap_or(&text).to_owned()
+}
+
+/// `x0 = import(x0) + 1` on x86-64 glibc: `call` the stub, `add rax, 1`, `ret`.
+fn x86_64_declared(import: &str) -> String {
+    let mut program = OpenProgram::of(Literal::new().importing(import).running_on(common::GLIBC));
+    let call = i32::try_from(common::STUB as i64 - (common::TWO + 5) as i64).expect("near");
+    let mut code = vec![0xe8];
+    code.extend_from_slice(&call.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x83, 0xc0, 0x01, 0xc3]);
+    program.source_mut().write(common::TWO, &code);
+    let text = (program
+        .rendered(common::TWO)
+        .expect("it renders")
+        .response
+        .output)
+        .into_text();
+    let declared = text
+        .lines()
+        .find(|line| line.contains(&format!(" {import}(")) && line.ends_with(");"));
+    declared.map(str::trim).unwrap_or(&text).to_owned()
+}
+
+/// A row's `wchar_t` and `char` take the target's sign: unsigned under AAPCS64 glibc, signed
+/// under SysV x86-64; with no C library stated, nothing states `wchar_t` and it renders as base.
+#[test]
+fn a_rows_wchar_t_and_char_are_the_targets() {
+    assert_eq!(
+        a64_declared("wcslen", true),
+        "uint64_t wcslen(const uint32_t*);"
+    );
+    assert_eq!(
+        a64_declared("strlen", true),
+        "uint64_t strlen(const char*);"
+    );
+    assert_eq!(
+        x86_64_declared("wcslen"),
+        "uint64_t wcslen(const int32_t*);"
+    );
+    assert_eq!(x86_64_declared("strlen"), "uint64_t strlen(const char*);");
+    assert_eq!(
+        [a64_declared("wcslen", false), a64_declared("strlen", false)],
+        [
+            "uint64_t wcslen(uint64_t);",
+            "uint64_t strlen(const char*);"
+        ]
+    );
+}

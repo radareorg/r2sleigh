@@ -138,6 +138,7 @@ impl Machine {
             dwarf: &self.embedded.dwarf,
             prototypes: &self.prototypes,
             declarations: &self.declarations,
+            data_model: None,
         }
     }
 

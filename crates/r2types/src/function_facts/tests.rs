@@ -3382,7 +3382,7 @@ fn pair_graph(i_at: u64, size: u64, align: u64) -> Option<r2ssa::SourceTypeGraph
     r2ssa::SourceTypeGraph::new(
         [
             r2ssa::SourceType::new(0, pair, size, align),
-            r2ssa::SourceType::new(1, r2ssa::SourceTypeKind::Char { signed: true }, 8, 8),
+            r2ssa::SourceType::new(1, r2ssa::SourceTypeKind::Char { signed: Some(true) }, 8, 8),
             r2ssa::SourceType::new(2, r2ssa::SourceTypeKind::SignedInteger, 32, 32),
         ],
         [r2ssa::SourceAggregateLayout::new(

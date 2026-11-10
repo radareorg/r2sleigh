@@ -213,17 +213,23 @@ fn integer_specifiers(words: &[&str]) -> Option<(ScalarKind, Width)> {
         (_, _, 1) => Width::Long,
         _ => Width::Bits(64),
     };
-    Some((sign.unwrap_or(ScalarKind::Signed), width))
+    // Plain `char` is a type of its own, signed or not as the target states.
+    let plain = match char_ {
+        true => ScalarKind::PlainChar,
+        false => ScalarKind::Signed,
+    };
+    Some((sign.unwrap_or(plain), width))
 }
 
 /// What the platform's own headers make a name that stands for an integer.
 ///
 /// Only names whose width the platform states for every target it runs on are
-/// here; where the width is `long`'s or an address's, it is said that way and
-/// the target answers. A name this does not list is opaque.
+/// here; where the width is `long`'s, an address's or `wchar_t`'s, it is said
+/// that way and the target answers. A name this does not list is opaque.
 fn named_scalar(name: &str, platform: Platform) -> Option<(ScalarKind, Width)> {
     use ScalarKind::{Signed, Unsigned};
     let portable = match name {
+        "wchar_t" => Some((ScalarKind::WideChar, Width::WideChar)),
         "size_t" | "uintptr_t" => Some((Unsigned, Width::Pointer)),
         "ssize_t" | "intptr_t" | "ptrdiff_t" => Some((Signed, Width::Pointer)),
         "intmax_t" => Some((Signed, Width::Bits(64))),
@@ -231,9 +237,7 @@ fn named_scalar(name: &str, platform: Platform) -> Option<(ScalarKind, Width)> {
         _ => None,
     };
     let posix = |name: &str| match name {
-        "pid_t" | "nl_item" | "key_t" | "wchar_t" | "sig_atomic_t" => {
-            Some((Signed, Width::Bits(32)))
-        }
+        "pid_t" | "nl_item" | "key_t" | "sig_atomic_t" => Some((Signed, Width::Bits(32))),
         "uid_t" | "gid_t" | "id_t" | "socklen_t" | "useconds_t" => {
             Some((Unsigned, Width::Bits(32)))
         }
@@ -271,7 +275,7 @@ fn named_scalar(name: &str, platform: Platform) -> Option<(ScalarKind, Width)> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::DataModel;
+    use crate::CDataModel;
 
     fn spelled(spelling: &str) -> Option<String> {
         let mut graph = TypeGraph::new();
@@ -302,19 +306,19 @@ mod tests {
             graph.get(*target),
             Some(Type::Opaque { keyword: Keyword::Typedef, tag }) if tag == "FILE"
         ));
-        assert_eq!(graph.size_bits(file, &DataModel::unix(64)), Some(64));
+        assert_eq!(graph.size_bits(file, &CDataModel::unix(64)), Some(64));
     }
 
     #[test]
     fn a_platform_name_for_an_integer_has_the_width_the_target_gives_it() {
         let mut graph = TypeGraph::new();
         let size = read("size_t", &mut graph, Platform::Unknown);
-        assert_eq!(graph.size_bits(size, &DataModel::unix(64)), Some(64));
-        assert_eq!(graph.size_bits(size, &DataModel::unix(32)), Some(32));
+        assert_eq!(graph.size_bits(size, &CDataModel::unix(64)), Some(64));
+        assert_eq!(graph.size_bits(size, &CDataModel::unix(32)), Some(32));
         let long = read("unsigned long", &mut graph, Platform::Unknown);
-        assert_eq!(graph.size_bits(long, &DataModel::unix(32)), Some(32));
+        assert_eq!(graph.size_bits(long, &CDataModel::unix(32)), Some(32));
         let mode = read("mode_t", &mut graph, Platform::Darwin);
-        assert_eq!(graph.size_bits(mode, &DataModel::unix(64)), Some(16));
+        assert_eq!(graph.size_bits(mode, &CDataModel::unix(64)), Some(16));
     }
 
     #[test]

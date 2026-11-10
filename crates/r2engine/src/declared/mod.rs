@@ -16,16 +16,27 @@ mod graph;
 pub(crate) use frame::rebased;
 use graph::Interned;
 
-use r2abi::{Arrival, DataModel, Prototype, ScalarKind, Type, TypeGraph, TypeId};
+use r2abi::{Arrival, CDataModel, Prototype, ScalarKind, Type, TypeGraph, TypeId};
 use r2source::native::NativeMachine;
 use r2source::{CanonicalStorageId, SourceFunctionReturn, SourceLogicalValue};
 
 use crate::native::{NativeTarget, storage};
 
-/// Whether a declared scalar is plain `char`, a type distinct from signed and
-/// unsigned char; its kind says whether this ABI makes it signed.
-fn is_plain_char(scalar: &r2abi::Scalar, bits: impl Into<u64>) -> bool {
-    bits.into() == 8 && scalar.name.as_deref() == Some("char")
+/// Plain `char`'s sign, or `None` for any other scalar. A row's `char` takes
+/// the target's model; debug information names `char` and states its sign.
+fn plain_char(scalar: &r2abi::Scalar, model: &CDataModel) -> Option<Option<bool>> {
+    let sign = |kind| match kind {
+        Some(ScalarKind::Signed) => Some(true),
+        Some(ScalarKind::Unsigned) => Some(false),
+        _ => None,
+    };
+    match scalar.kind {
+        ScalarKind::PlainChar => Some(sign(model.plain_char)),
+        _ if model.bits(scalar.width) == Some(8) && scalar.name.as_deref() == Some("char") => {
+            Some(sign(Some(scalar.kind)))
+        }
+        _ => None,
+    }
 }
 
 /// One declaration and the graph its types are nodes of.
@@ -89,7 +100,7 @@ enum Class {
 pub(crate) struct Placement<'a> {
     pub(crate) target: &'a NativeTarget<'a>,
     pub(crate) machine: &'a NativeMachine,
-    pub(crate) model: DataModel,
+    pub(crate) model: CDataModel,
 }
 
 impl<'a> Placement<'a> {
@@ -97,7 +108,9 @@ impl<'a> Placement<'a> {
         Self {
             target,
             machine,
-            model: DataModel::unix(crate::engine_effective_ptr_bits(target.arch)),
+            model: target.data_model.copied().unwrap_or(CDataModel::unix(
+                crate::engine_effective_ptr_bits(target.arch),
+            )),
         }
     }
 

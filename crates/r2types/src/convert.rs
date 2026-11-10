@@ -188,12 +188,13 @@ impl CTypeLike {
         }
     }
 
-    /// Plain `char`, spelled as itself over the byte it is.
-    pub fn plain_char(signed: bool) -> Self {
-        let signedness = if signed {
-            Signedness::Signed
-        } else {
-            Signedness::Unsigned
+    /// Plain `char`, spelled as itself over the byte it is, signed where the
+    /// target states it.
+    pub fn plain_char(signed: Option<bool>) -> Self {
+        let signedness = match signed {
+            Some(true) => Signedness::Signed,
+            Some(false) => Signedness::Unsigned,
+            None => Signedness::Unknown,
         };
         Self::named(
             "char",

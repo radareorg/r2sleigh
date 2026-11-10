@@ -45,6 +45,8 @@ struct Assembled {
     call_effect: Option<r2source::SourceCallEffect>,
     compiler: r2sleigh_lift::profile::LanguageProfile,
     prototypes: r2abi::Prototypes,
+    /// The C data model of the architecture under that C library.
+    data_model: Option<&'static r2abi::CDataModel>,
     /// The register a call returns through, in the coordinates the lift spells.
     link: Option<r2il::Varnode>,
 }
@@ -203,12 +205,15 @@ fn assemble(
     // states of it, and nothing else: `_Exit` is each library's, and
     // `__fgets_chk` is two interfaces under one name. The program's own
     // declarations are read by address, beside these, not merged in.
-    let prototypes = r2abi::Prototypes::embedded_for(platform(container));
+    let library = platform(container);
+    let prototypes = r2abi::Prototypes::embedded_for(library);
+    let data_model = r2abi::CDataModel::of(&container.arch.name, container.arch.bits, library);
     Ok(Assembled {
         convention,
         call_effect,
         compiler,
         prototypes,
+        data_model,
         link,
     })
 }
@@ -560,7 +565,7 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
 
 /// Which platform's declarations a program's calls are read against, as its container states it.
 ///
-/// Mach-O is Apple's format, so it is Darwin's libSystem. An ELF is the
+/// Mach-O is Apple's format, so it is Darwin's libSystem, and a PE is Windows'. An ELF is the
 /// platform of the one C library its evidence names -- the dynamic linker
 /// `PT_INTERP` asks for, the notes that library's start files leave -- and
 /// runs on Linux as far as `EI_OSABI` says. Anything else is `Unknown`, which
@@ -572,6 +577,7 @@ fn platform(container: &Container) -> r2abi::Platform {
     use r2abi::Platform;
     match container.format {
         Format::MachO => return Platform::Darwin,
+        Format::Pe => return Platform::Windows,
         Format::Elf => {}
         _ => return Platform::Unknown,
     }

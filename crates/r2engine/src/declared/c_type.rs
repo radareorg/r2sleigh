@@ -5,12 +5,14 @@
 
 use std::collections::BTreeSet;
 
-use r2abi::{DataModel, Keyword, Qualifiers, RecordKind, ScalarKind, Type, TypeGraph, TypeId};
+use r2abi::{
+    CDataModel, Keyword, Qualifiers, RecordKind, Scalar, ScalarKind, Type, TypeGraph, TypeId,
+};
 use r2types::{CTypeLike, Signedness};
 
 /// One declared node, or `Unknown` where the declaration states nothing the
 /// type layer can hold.
-pub(crate) fn c_type(graph: &TypeGraph, ty: TypeId, model: &DataModel) -> CTypeLike {
+pub(crate) fn c_type(graph: &TypeGraph, ty: TypeId, model: &CDataModel) -> CTypeLike {
     Conversion {
         graph,
         model,
@@ -21,7 +23,7 @@ pub(crate) fn c_type(graph: &TypeGraph, ty: TypeId, model: &DataModel) -> CTypeL
 
 struct Conversion<'a> {
     graph: &'a TypeGraph,
-    model: &'a DataModel,
+    model: &'a CDataModel,
     /// Nodes being converted. A type reaches itself only through a record,
     /// which ends at its name; reaching one of these again is a declaration
     /// that describes a type through itself, which states nothing.
@@ -45,22 +47,7 @@ impl Conversion<'_> {
         };
         match node {
             Type::Void => CTypeLike::Void,
-            Type::Scalar(scalar) => match (scalar.kind, self.model.bits(scalar.width)) {
-                (_, None) => CTypeLike::Unknown,
-                (ScalarKind::Bool, Some(_)) => CTypeLike::Bool,
-                (_, Some(bits)) if super::is_plain_char(scalar, bits) => {
-                    CTypeLike::plain_char(scalar.kind == ScalarKind::Signed)
-                }
-                (ScalarKind::Float, Some(bits)) => CTypeLike::Float(bits),
-                (ScalarKind::Signed, Some(bits)) => CTypeLike::Int {
-                    bits,
-                    signedness: Signedness::Signed,
-                },
-                (ScalarKind::Unsigned, Some(bits)) => CTypeLike::Int {
-                    bits,
-                    signedness: Signedness::Unsigned,
-                },
-            },
+            Type::Scalar(scalar) => self.scalar(scalar),
             Type::Pointer { target } => match self.convert(*target, true) {
                 // The type layer spells a function type as a pointer to one.
                 code @ (CTypeLike::Function { .. } | CTypeLike::UnprototypedFunction(_)) => code,
@@ -103,14 +90,94 @@ impl Conversion<'_> {
                     false => target,
                 }
             }
-            // What a name stands for, which is what the call is read with;
-            // the spelling that keeps the name travels beside the signature.
-            Type::Typedef { target, .. } => self.convert(*target, pointee),
+            // What a name stands for (its spelling travels beside the signature);
+            // a scalar the target's model leaves unstated is its name alone.
+            Type::Typedef { name, target } => match self.convert(*target, pointee) {
+                CTypeLike::Unknown if matches!(graph.get(*target), Some(Type::Scalar(_))) => {
+                    CTypeLike::typedef(name.clone())
+                }
+                target => target,
+            },
             // A code type the declaration gives no parameters for (r2abi's `func`).
             Type::Code(signature) if !signature.prototyped => {
                 CTypeLike::UnprototypedFunction(Box::new(self.convert(signature.returns, false)))
             }
             Type::Code(_) | Type::Refused(_) => CTypeLike::Unknown,
         }
+    }
+
+    fn scalar(&self, scalar: &Scalar) -> CTypeLike {
+        let bits = self.model.bits(scalar.width);
+        if let Some(signed) = super::plain_char(scalar, self.model) {
+            return CTypeLike::plain_char(signed);
+        }
+        match (self.model.kind(scalar.kind), bits) {
+            (_, None) | (None, _) => CTypeLike::Unknown,
+            (Some(ScalarKind::Bool), Some(_)) => CTypeLike::Bool,
+            (Some(ScalarKind::Float), Some(bits)) => CTypeLike::Float(bits),
+            (Some(ScalarKind::Signed), Some(bits)) => CTypeLike::Int {
+                bits,
+                signedness: Signedness::Signed,
+            },
+            (Some(ScalarKind::Unsigned), Some(bits)) => CTypeLike::Int {
+                bits,
+                signedness: Signedness::Unsigned,
+            },
+            // The model resolves both to a sign.
+            (Some(ScalarKind::PlainChar | ScalarKind::WideChar), Some(_)) => CTypeLike::Unknown,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use r2abi::{Platform, Prototypes, Width};
+
+    /// `strlen`'s `const char *` under a model: the byte's sign is the model's, or none.
+    fn strlen_char(model: &CDataModel) -> CTypeLike {
+        let prototypes = Prototypes::embedded_for(Platform::Linux);
+        let strlen = prototypes.get("strlen").expect("strlen is declared");
+        c_type(prototypes.graph(), strlen.parameters[0].ty, model)
+    }
+
+    fn char_of(signedness: Signedness) -> CTypeLike {
+        let char_ = CTypeLike::named(
+            "char",
+            CTypeLike::Int {
+                bits: 8,
+                signedness,
+            },
+        );
+        CTypeLike::Pointer(Box::new(CTypeLike::Const(Box::new(char_))))
+    }
+
+    #[test]
+    fn a_rows_plain_char_takes_the_models_sign_and_debug_information_keeps_its_own() {
+        let aarch64 = CDataModel::of("aarch64", 64, Platform::Linux).expect("AAPCS64 glibc");
+        let x86_64 = CDataModel::of("x86-64", 64, Platform::Linux).expect("SysV glibc");
+        assert_eq!(strlen_char(aarch64), char_of(Signedness::Unsigned));
+        assert_eq!(strlen_char(x86_64), char_of(Signedness::Signed));
+        assert_eq!(
+            strlen_char(&CDataModel::unix(64)),
+            char_of(Signedness::Unknown)
+        );
+        // DWARF's `char` states DW_ATE_signed_char, which no model overrides.
+        let mut graph = TypeGraph::new();
+        let stated = graph.add(Type::Scalar(r2abi::Scalar {
+            kind: ScalarKind::Signed,
+            width: Width::Bits(8),
+            name: Some("char".to_owned()),
+        }));
+        assert_eq!(
+            c_type(&graph, stated, aarch64),
+            CTypeLike::named(
+                "char",
+                CTypeLike::Int {
+                    bits: 8,
+                    signedness: Signedness::Signed
+                }
+            )
+        );
     }
 }

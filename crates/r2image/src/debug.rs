@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gimli::{AttributeValue, DwAt};
 use r2abi::{
-    Arrival, DataModel, DataObject, Declarations, FrameBase, Keyword, Local, Member, Parameter,
+    Arrival, CDataModel, DataObject, Declarations, FrameBase, Keyword, Local, Member, Parameter,
     Prototype, Qualifiers, Record, RecordKind, Scalar, ScalarKind, Signature, Type, TypeGraph,
     TypeId, Width,
 };
@@ -208,12 +208,12 @@ impl<'d, 'a> Units<'d, 'a> {
     }
 
     /// What pointers are in this unit: its address size.
-    fn model(&self, unit: usize) -> DataModel {
+    fn model(&self, unit: usize) -> CDataModel {
         let bits = self
             .units
             .get(unit)
             .map_or(64, |unit| u32::from(unit.header.address_size()) * 8);
-        DataModel::unix(bits)
+        CDataModel::unix(bits)
     }
 }
 

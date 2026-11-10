@@ -153,6 +153,7 @@ impl<'a, S: Source + 'static> View<'a, S> {
             dwarf: &machine.dwarf,
             prototypes: &assembled.prototypes,
             declarations: &inputs.source.container().declarations,
+            data_model: assembled.data_model,
         }
     }
 

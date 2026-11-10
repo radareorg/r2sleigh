@@ -381,7 +381,8 @@ impl Table {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{DataModel, Type};
+    use crate::CDataModel;
+    use crate::types::Type;
 
     fn spelled(prototypes: &Prototypes, parameter: &Parameter) -> Option<String> {
         prototypes
@@ -444,7 +445,7 @@ mod tests {
     fn the_cxx_runtime_is_declared_as_its_mangling_and_the_abi_state() {
         let prototypes = Prototypes::embedded();
         let graph = prototypes.graph();
-        let model = DataModel::unix(64);
+        let model = CDataModel::unix(64);
         let size = |name: &str| {
             let prototype = prototypes.get(name).expect(name);
             let [size] = prototype.parameters.as_slice() else {
@@ -515,7 +516,7 @@ mod tests {
         let prototypes = Prototypes::embedded_for(Platform::Linux);
         let graph = prototypes.graph();
         let fwrite = prototypes.get("fwrite").expect("fwrite");
-        let model = DataModel::unix(64);
+        let model = CDataModel::unix(64);
         assert_eq!(graph.size_bits(fwrite.return_type, &model), Some(64));
         let stream = fwrite.parameters.last().expect("a stream");
         let Some(Type::Pointer { target }) = graph.resolved(stream.ty) else {

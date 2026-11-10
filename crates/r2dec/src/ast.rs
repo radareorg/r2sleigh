@@ -2766,7 +2766,7 @@ mod tests {
         let strings = |element: CType| {
             r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Pointer(Box::new(element))))
         };
-        let char_ = r2types::CTypeLike::plain_char(true);
+        let char_ = r2types::CTypeLike::plain_char(Some(true));
         let int8 = r2types::CTypeLike::Int {
             bits: 8,
             signedness: r2types::Signedness::Signed,

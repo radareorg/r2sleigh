@@ -17,16 +17,16 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-pub const SOURCE_TYPE_GRAPH_SCHEMA_VERSION: u32 = 2;
+pub const SOURCE_TYPE_GRAPH_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SourceTypeKind {
     SignedInteger,
     UnsignedInteger,
     /// Plain `char`: one byte, a type distinct from both signed and unsigned
-    /// char, whose signedness the ABI states.
+    /// char, whose signedness the ABI states; `None` where nothing states it.
     Char {
-        signed: bool,
+        signed: Option<bool>,
     },
     Pointer {
         target_type_id: u32,

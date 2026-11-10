@@ -66,7 +66,7 @@ fn local<'a>(prototype: &'a Prototype, name: &str) -> &'a Local {
         .unwrap_or_else(|| panic!("no local {name}"))
 }
 
-const LP64: DataModel = DataModel::unix(64);
+const LP64: CDataModel = CDataModel::unix(64);
 
 #[test]
 fn a_declared_signature_is_read_with_its_own_spellings() {

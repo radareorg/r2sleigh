@@ -10,7 +10,7 @@
 
 use std::collections::BTreeMap;
 
-use r2abi::{DataModel, Keyword, Member, Record, RecordKind, Scalar, ScalarKind, Signature, Type};
+use r2abi::{CDataModel, Keyword, Member, Record, RecordKind, Scalar, ScalarKind, Signature, Type};
 use r2abi::{TypeGraph, TypeId};
 use r2source::{
     SourceAggregateLayout, SourceAggregateMember, SourceCarrierKind, SourceCarrierProjection,
@@ -21,7 +21,7 @@ use r2source::{
 /// The interface's graph, built one declared node at a time.
 pub(crate) struct Interned<'a> {
     graph: &'a TypeGraph,
-    model: DataModel,
+    model: CDataModel,
     parts: SourceTypeGraphParts,
     /// Each declared node's place, or nothing where it has none.
     nodes: BTreeMap<TypeId, Option<u32>>,
@@ -35,7 +35,7 @@ pub(crate) struct Interned<'a> {
 }
 
 impl<'a> Interned<'a> {
-    pub(crate) fn new(graph: &'a TypeGraph, model: DataModel) -> Self {
+    pub(crate) fn new(graph: &'a TypeGraph, model: CDataModel) -> Self {
         Self {
             graph,
             model,
@@ -92,7 +92,11 @@ impl<'a> Interned<'a> {
         let graph = self.graph;
         let placed = match graph.get(id)? {
             Type::Void => Some(self.leaf(SourceTypeKind::Void, 0, 0)),
-            Type::Scalar(scalar) => self.scalar(scalar),
+            // A name over a scalar the target's model leaves unstated is that name alone.
+            Type::Scalar(scalar) => (self.scalar(scalar)).or_else(|| {
+                self.name_of(ty)
+                    .map(|name| self.opaque(Keyword::Typedef, &name))
+            }),
             Type::Enum { underlying, .. } => self.node(*underlying),
             Type::Pointer { target } => Some(self.pointer(id, *target)),
             Type::Array { element, count } => self.array(*element, *count),
@@ -103,6 +107,22 @@ impl<'a> Interned<'a> {
         };
         self.nodes.insert(id, placed);
         placed
+    }
+
+    /// The innermost typedef name `ty` reaches through names and qualifiers.
+    fn name_of(&self, ty: TypeId) -> Option<String> {
+        let (mut at, mut name) = (ty, None);
+        for _ in 0..self.graph.len() {
+            match self.graph.get(at)? {
+                Type::Typedef {
+                    name: named,
+                    target,
+                } => (name, at) = (Some(named.clone()), *target),
+                Type::Qualified { target, .. } => at = *target,
+                _ => break,
+            }
+        }
+        name
     }
 
     fn push(&mut self, kind: SourceTypeKind, size: u64, align: u64) -> u32 {
@@ -122,8 +142,11 @@ impl<'a> Interned<'a> {
             SourceTypeKind::SignedInteger => 0,
             SourceTypeKind::UnsignedInteger => 1,
             SourceTypeKind::Float => 2,
-            SourceTypeKind::Char { signed: true } => 4,
-            SourceTypeKind::Char { signed: false } => 5,
+            SourceTypeKind::Char { signed: Some(true) } => 4,
+            SourceTypeKind::Char {
+                signed: Some(false),
+            } => 5,
+            SourceTypeKind::Char { signed: None } => 6,
             _ => 3,
         };
         if let Some(found) = self.leaves.get(&(shape, size)) {
@@ -136,13 +159,14 @@ impl<'a> Interned<'a> {
 
     fn scalar(&mut self, scalar: &Scalar) -> Option<u32> {
         let bits = u64::from(self.model.bits(scalar.width)?);
-        let (kind, stated) = match scalar.kind {
-            _ if super::is_plain_char(scalar, bits) => (
-                SourceTypeKind::Char {
-                    signed: scalar.kind == ScalarKind::Signed,
-                },
-                true,
-            ),
+        if let Some(signed) = super::plain_char(scalar, &self.model) {
+            return Some(self.leaf(
+                SourceTypeKind::Char { signed },
+                bits,
+                natural_alignment(bits),
+            ));
+        }
+        let (kind, stated) = match self.model.kind(scalar.kind)? {
             ScalarKind::Signed => (SourceTypeKind::SignedInteger, integer_width(bits)),
             ScalarKind::Unsigned | ScalarKind::Bool => {
                 (SourceTypeKind::UnsignedInteger, integer_width(bits))
@@ -151,6 +175,8 @@ impl<'a> Interned<'a> {
                 SourceTypeKind::Float,
                 matches!(bits, 16 | 32 | 64 | 80 | 96 | 128),
             ),
+            // The model resolves both to a sign.
+            ScalarKind::PlainChar | ScalarKind::WideChar => return None,
         };
         stated.then(|| self.leaf(kind, bits, natural_alignment(bits)))
     }
@@ -441,7 +467,7 @@ mod tests {
         });
         let parameter = graph.add(Type::Pointer { target: constant });
 
-        let mut interned = Interned::new(&graph, DataModel::unix(64));
+        let mut interned = Interned::new(&graph, CDataModel::unix(64));
         let value = interned.value(parameter, 8).expect("a pointer is placed");
         let local = interned.object(int).expect("an int is placed");
         let placed = interned.finish().expect("the graph states");
@@ -489,7 +515,7 @@ mod tests {
             members: vec![],
         }));
         let pointer = graph.add(Type::Pointer { target: anonymous });
-        let mut interned = Interned::new(&graph, DataModel::unix(64));
+        let mut interned = Interned::new(&graph, CDataModel::unix(64));
         let pointer = interned.value(pointer, 8).expect("the pointer is placed");
         assert!(interned.object(anonymous).is_none());
         let int = interned.value(int, 8).expect("the int is placed");

@@ -896,11 +896,11 @@ impl Literal {
 
     /// The same program with an import: a linkage stub, and the slot it reads.
     pub fn importing(self, import: &str) -> Self {
-        self.importing_at(import, STUB, SLOT)
+        self.importing_through(STUB..STUB + 6, SLOT, import)
     }
 
-    /// The same program with an import whose stub is at `stub` and whose slot, which the stub reads, is at `slot`.
-    pub fn importing_at(mut self, import: &str, stub: u64, slot: u64) -> Self {
+    /// [`Self::importing`] with the stub over `stub` and the slot at `slot`.
+    pub fn importing_through(mut self, stub: Range<u64>, slot: u64, import: &str) -> Self {
         let section = |name: &str, vaddr, vsize, is_code| Section {
             name: name.to_owned(),
             vaddr,
@@ -915,9 +915,9 @@ impl Literal {
         };
         // The code before the stub is the program's own; the stub and its slot are the loader's.
         let code = &mut self.container.sections[0];
-        code.vsize = code.vsize.min(stub - code.vaddr);
+        code.vsize = code.vsize.min(stub.start - code.vaddr);
         self.container.sections.extend([
-            section(".plt", stub, 6, true),
+            section(".plt", stub.start, stub.end - stub.start, true),
             section(".got", slot, 8, false),
         ]);
         self.container.relocations.push(import_slot(slot, import));

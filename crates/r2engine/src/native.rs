@@ -158,6 +158,8 @@ pub struct NativeTarget<'a> {
     /// What the binary's own debug information declares, by the address each
     /// body begins and each object sits at.
     pub declarations: &'a r2abi::Declarations,
+    /// The target's cited C data model; `None` where no row states one.
+    pub data_model: Option<&'static r2abi::CDataModel>,
 }
 
 /// Why a native decompile could not be attempted: the record `pdd`, `pddj`, `afi` and the listing
@@ -2905,6 +2907,7 @@ mod tests {
             dwarf: &embedded.dwarf,
             prototypes: &prototypes,
             declarations: &declarations,
+            data_model: None,
         };
         let walked = walk(&target, &HandsAfterADouble, BASE).expect("walks");
         let handed = handed(&target, &HandsAfterADouble, walked.root.body.clone());

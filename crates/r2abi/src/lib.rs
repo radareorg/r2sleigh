@@ -3,6 +3,7 @@
 //! call's arguments arrive is the compiler specification's (`r2sleigh_lift::profile`).
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
+pub mod data_model;
 pub mod declarations;
 pub mod frames;
 pub mod platform;
@@ -13,6 +14,7 @@ pub mod statement;
 pub mod syscalls;
 pub mod types;
 
+pub use data_model::CDataModel;
 pub use declarations::{DataObject, Declarations};
 pub use platform::{
     CallingConvention, EntryStack, PlatformRegister, RegisterDuty, RegisterSaveArea,
@@ -24,8 +26,8 @@ pub use prototypes::{
 };
 pub use syscalls::Syscalls;
 pub use types::{
-    DataModel, Keyword, Member, Qualifiers, Record, RecordKind, Refusal, Scalar, ScalarKind,
-    Signature, Type, TypeGraph, TypeId, Width,
+    Keyword, Member, Qualifiers, Record, RecordKind, Refusal, Scalar, ScalarKind, Signature, Type,
+    TypeGraph, TypeId, Width,
 };
 
 /// The file family an architecture name belongs to.
