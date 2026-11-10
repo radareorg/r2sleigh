@@ -871,3 +871,34 @@ fn a_floor_of_parameters_is_named_on_the_proof_line() {
         "{text}"
     );
 }
+
+/// gcc -O0 `int zero_of(int x) { return 0; }`: `x` is homed and never loaded. `caller` is
+/// `mov edi, 5; call zero_of; ret`.
+const HOMED_ONLY: &[u8] = &[
+    0xf3, 0x0f, 0x1e, 0xfa, // 1000 endbr64
+    0x55, // 1004 push rbp
+    0x48, 0x89, 0xe5, // 1005 mov rbp, rsp
+    0x89, 0x7d, 0xfc, // 1008 mov [rbp - 4], edi
+    0xb8, 0x00, 0x00, 0x00, 0x00, // 100b mov eax, 0
+    0x5d, // 1010 pop rbp
+    0xc3, // 1011 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1012
+    0xbf, 0x05, 0x00, 0x00, 0x00, // 1020 mov edi, 5
+    0xe8, 0xd6, 0xff, 0xff, 0xff, // 1025 call 0x1000
+    0xc3, // 102a ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 102b padding
+];
+
+/// A floor whose only cause is a home nothing loads reads no slot past the parameters: the call
+/// passes exactly them, and the register it wrote reaches nothing (D165).
+#[test]
+fn a_call_past_a_homed_only_floor_passes_exactly_the_parameters() {
+    let functions = [("zero_of", BASE, 0x12), ("caller", BASE + 0x20, 0x0b)];
+    let callee = floor_cause(Literal::of_code(HOMED_ONLY, &functions));
+    assert_eq!(callee, [SourceFloorCause::Homed]);
+    let text = surveyed(HOMED_ONLY, &functions, BASE + 0x20);
+    assert!(text.contains("zero_of()"), "{text}");
+    assert!(!text.contains("a floor), and this call writes"), "{text}");
+}

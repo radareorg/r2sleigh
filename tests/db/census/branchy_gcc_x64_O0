@@ -508,15 +508,17 @@ NAME=0x00401322
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401322
 EXPECT=<<EOF
-uint64_t pure_zero_guard(uint32_t arg0)
+uint64_t pure_zero_guard(void)
 {
+    uint64_t zero_of(void);
+
+    uint64_t rax_2;
     uint64_t rax_5;
 
-    /* r2dec proof: 3 constructs are marked below; 28 source obligations: 9 rendered, 10 elided, 0 refused, a call reads the result (assuming closed-world), 9 residual; 5 statements rendered; 1 never assigned, read as residuals (RAX_2); the parameters are a floor: at least 1 (a register past them reaches the call to 0x401310) */
+    /* r2dec proof: no individual construct is marked; 24 source obligations: 14 rendered, 10 elided, 0 refused, a call reads the result (assuming closed-world); 6 statements rendered */
     {
-        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401322:31 covering 1 op (render::values): call to zero_of: its arity is only at least 0 (a floor), and this call writes 1 */
-        r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401322:32 covering 1 op (render::values) */
-        if ((uint8_t)((uint32_t)((uint64_t)r2sleigh_residual_u64(3) >> 0U) == (uint32_t)0U)) {
+        rax_2 = zero_of();
+        if ((uint8_t)((uint32_t)((uint64_t)rax_2 >> 0U) == (uint32_t)0U)) {
             rax_5 = 0;
             return (uint64_t)rax_5;
         } else {
@@ -1082,7 +1084,7 @@ r2sleigh_result_u64 fcn_401764(void)
     uint64_t opaque_self_xor(uint32_t);
     uint64_t paired_sum_diff(uint32_t, uint32_t);
     int32_t printf(const char*, ...);
-    uint64_t pure_zero_guard(uint64_t);
+    uint64_t pure_zero_guard(void);
     uint32_t rec_index(uint32_t*, uint32_t, uint32_t);
     uint64_t rec_spread(uint64_t, uint64_t);
     uint32_t rec_write(uint32_t*, uint32_t);
@@ -1105,7 +1107,6 @@ r2sleigh_result_u64 fcn_401764(void)
     uint64_t rax_11;
     uint32_t tmp_4018cc_8_1;
     uint64_t rax_13;
-    uint32_t tmp_4018ff_8_1;
     uint64_t rax_17;
     uint32_t tmp_40190f_8_1;
     uint64_t rax_19;
@@ -1137,7 +1138,7 @@ r2sleigh_result_u64 fcn_401764(void)
     uint64_t rax_62;
     _Alignas(16) uint8_t frame[568];
 
-    /* r2dec proof: no individual construct is marked; 550 source obligations: 362 rendered, 171 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 12 assumed (frame extent unproven); 79 statements rendered; 6 callee prototypes supplied by the source; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 547 source obligations: 359 rendered, 171 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 12 assumed (frame extent unproven); 79 statements rendered; 6 callee prototypes supplied by the source; the result is unproven (Written): 1 unproven-return carried */
     /* symbol `main`; C allows that name no other prototype */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 48U), (uint64_t)0U);
@@ -1183,8 +1184,8 @@ r2sleigh_result_u64 fcn_401764(void)
         rax_13 = gate_one((uint32_t)tmp_4018cc_8_1);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)rbx_1);
         printf("%d %d %d %d %d %d\n", (uint64_t)(uint32_t)((uint64_t)rax_13 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_11 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_9 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_8 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_7 >> 0U), rbx_1);
-        tmp_4018ff_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-        rax_17 = pure_zero_guard((uint64_t)(uint32_t)tmp_4018ff_8_1);
+        (void)r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
+        rax_17 = pure_zero_guard();
         tmp_40190f_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         rax_19 = opaque_self_xor((uint32_t)tmp_40190f_8_1);
         rax_20 = (uint64_t)sign_xor(1, (uint32_t)0xffffffffU);

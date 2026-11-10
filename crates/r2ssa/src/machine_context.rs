@@ -3050,6 +3050,13 @@ impl CalleeStatement {
                     // A statement counts no call's variadic tail, so its parameters are only a floor.
                     arity: match interface.is_variadic() {
                         true => crate::SourceArity::AtLeast(interface.parameters().len()),
+                        false
+                            if !interface
+                                .arity_floor()
+                                .is_some_and(|floor| floor.reads_past()) =>
+                        {
+                            crate::SourceArity::Exact(interface.parameters().len())
+                        }
                         false => interface.arity(),
                     },
                     result: match interface.return_kind() {

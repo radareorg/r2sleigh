@@ -353,6 +353,15 @@ impl SourceArityFloor {
     pub fn causes(&self) -> &[SourceFloorCause] {
         &self.causes
     }
+
+    /// Whether a slot past the parameters may be read: not where every cause is a home nothing
+    /// loads, so a call passes exactly the parameters (D165).
+    pub fn reads_past(&self) -> bool {
+        !self
+            .causes
+            .iter()
+            .all(|cause| *cause == SourceFloorCause::Homed)
+    }
 }
 
 /// How a call a result waits on is named (doc/adr-verified-layers.md, D37).
