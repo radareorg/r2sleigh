@@ -15,6 +15,7 @@ mod tests;
 pub mod body;
 mod declared;
 pub mod discovery;
+pub mod imports;
 pub mod isolation;
 pub mod machine;
 pub mod names;

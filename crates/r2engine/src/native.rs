@@ -14,7 +14,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use crate::body::{BodyError, WINDOW};
-use r2abi::Prototypes;
 use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
 use r2sleigh_lift::profile::{LanguageProfile, ParamEntry, SlotClass, SpecStorage};
@@ -151,10 +150,9 @@ pub struct NativeTarget<'a> {
     pub compiler: &'a LanguageProfile,
     /// The language's DWARF register numbering.
     pub dwarf: &'a r2sleigh_lift::profile::DwarfRegisters,
-    /// What the library functions this program calls take and return. An
-    /// import has no body to read an interface off, so without this a call to
-    /// one renders with no arguments at all.
-    pub prototypes: &'a Prototypes,
+    /// The library rows this program's imports bind. An import has no body to read an
+    /// interface off, so without its row a call to one renders with no arguments at all.
+    pub imports: &'a crate::imports::Imports,
     /// What the binary's own debug information declares, by the address each
     /// body begins and each object sits at.
     pub declarations: &'a r2abi::Declarations,
@@ -776,18 +774,16 @@ pub(crate) fn hands_a_function(
     callees: impl IntoIterator<Item = u64>,
     loads: &BTreeSet<u64>,
 ) -> bool {
+    // A row applies to an import only: a body of the same name is typed by its own evidence.
     let direct = callees
         .into_iter()
-        .filter_map(|callee| program.name_at(callee));
+        .filter_map(|callee| program.import_at(callee));
     let sealed = |slot: &u64| crate::stated::sealed_import(program, *slot).map(str::to_owned);
     let through_a_slot = loads.iter().filter_map(sealed);
     direct.chain(through_a_slot).any(|name| {
-        let prototype = target.prototypes.get(&name);
-        prototype.is_some_and(|prototype| {
-            prototype
-                .parameters
-                .iter()
-                .any(r2abi::Parameter::is_function)
+        let declared = Declared::import(target, &name);
+        declared.is_some_and(|declared| {
+            (declared.prototype.parameters.iter()).any(r2abi::Parameter::is_function)
         })
     })
 }
@@ -842,13 +838,11 @@ pub(crate) fn declared_return(
             .filter(|name| r2abi::runtime::exits(name))
             .map(|_| Return::Never(std::collections::BTreeSet::from([premise])));
     };
-    let prototype = target.prototypes.get(&name);
-    Some(
-        match prototype.is_some_and(|prototype| prototype.noreturn) {
-            true => Return::Never(std::collections::BTreeSet::new()),
-            false => Return::Comes,
-        },
-    )
+    let row = target.imports.row(&name);
+    Some(match row.is_some_and(|row| row.noreturn) {
+        true => Return::Never(std::collections::BTreeSet::new()),
+        false => Return::Comes,
+    })
 }
 
 fn render(
@@ -1288,6 +1282,12 @@ pub(crate) fn declared_pointers(target: &NativeTarget<'_>, name: &str) -> Vec<Ca
         return Vec::new();
     };
     Placement::new(target, &machine).pointers(declared)
+}
+
+/// The registers a call to the import `name` may read, where it binds a row (S7 reads it).
+pub fn import_reads(target: &NativeTarget<'_>, name: &str) -> Option<crate::imports::ImportReads> {
+    let (declared, machine) = (Declared::import(target, name)?, machine(target).ok()?);
+    Some(Placement::new(target, &machine).reads(declared))
 }
 
 /// The declared interfaces of the functions this body calls.
@@ -2307,7 +2307,8 @@ impl Native<'_> {
     ) -> Option<(u64, String)> {
         let instruction = op.call()?.instruction?;
         let site = sites.iter().find(|site| site.instruction == instruction)?;
-        Some((instruction, self.program.name_at(site.target)?))
+        // A row applies to an import only, never to a body by its name.
+        Some((instruction, self.program.import_at(site.target)?))
     }
 
     /// Addresses this body hands to a parameter a declaration calls a function.
@@ -2538,7 +2539,7 @@ fn register_named(arch: &ArchSpec, storage: CanonicalStorageId) -> Option<&str> 
 pub fn convention_model(
     arch: &ArchSpec,
     bits: u32,
-    kernel: r2abi::Platform,
+    (kernel, library): (r2abi::Kernel, r2abi::CLibrary),
     profile: &LanguageProfile,
     row: &r2abi::ConventionRow,
 ) -> Result<ConventionModel, NativeRefusal> {
@@ -2560,7 +2561,7 @@ pub fn convention_model(
         likely_trash: at.lanes(&prototype.likely_trash),
         reserved,
         link,
-        forms: forms(&at, prototype, row, bits, kernel),
+        forms: forms(&at, prototype, row, bits, library),
         refused: row.refused,
     };
     // The slots are a view; one that does not hold refuses the model, as it refused each function.
@@ -2739,7 +2740,7 @@ fn duties(
     prototype: &r2sleigh_lift::profile::ProtoModel,
     link: Option<CanonicalStorageId>,
     bits: u32,
-    kernel: r2abi::Platform,
+    kernel: r2abi::Kernel,
 ) -> (Box<[LaneSet]>, Box<[LaneSet]>) {
     let mut preserved = at.lanes(&prototype.unaffected).into_vec();
     preserved.retain(|lanes| Some(lanes.storage) != link);
@@ -2768,7 +2769,7 @@ fn forms(
     prototype: &r2sleigh_lift::profile::ProtoModel,
     row: &r2abi::ConventionRow,
     bits: u32,
-    kernel: r2abi::Platform,
+    library: r2abi::CLibrary,
 ) -> BoundaryForms {
     let guard = |guard: Option<&r2abi::StackGuard>| {
         let guard = guard?;
@@ -2796,7 +2797,10 @@ fn forms(
             residue: stack.residue,
         }),
         variadic_on_stack: prototype.variadic_on_stack,
-        guard: guard(r2abi::stack_guard(&at.arch.name, bits, kernel)),
+        guard: guard(
+            r2abi::guard_row(&at.arch.name, bits, library)
+                .map(|r2abi::GuardRow::ThreadSlot(slot)| slot),
+        ),
         stack_bound: guard(row.stack_bound.as_ref()),
     }
 }
@@ -2951,14 +2955,20 @@ mod tests {
         let convention = convention_model(
             &embedded.arch,
             64,
-            r2abi::Platform::Unknown,
+            (r2abi::Kernel::Unknown, r2abi::CLibrary::Unknown),
             &compiler,
             r2abi::ConventionId::SysVAmd64.row(),
         )
         .expect("System V");
-        let prototypes = r2abi::Prototypes::parse(
+        let rows = r2abi::LibraryRows::parse(
+            r2abi::LibraryId::Portable,
             "on_double=func\nfunc.on_double.args=2\nfunc.on_double.arg.0=double,x\n\
              func.on_double.arg.1=func,callback\nfunc.on_double.ret=void\n",
+        );
+        let imports = crate::imports::Imports::new(
+            rows,
+            r2abi::CLibrary::Unknown,
+            crate::imports::Linkage::one_c_library(),
         );
         let declarations = r2abi::Declarations::default();
         let target = NativeTarget {
@@ -2968,7 +2978,7 @@ mod tests {
             convention: Arc::new(convention),
             compiler: &compiler,
             dwarf: &embedded.dwarf,
-            prototypes: &prototypes,
+            imports: &imports,
             declarations: &declarations,
             data_model: None,
         };

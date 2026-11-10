@@ -11,8 +11,8 @@
 //! Registers are spelled as radare2 spells them (`fs_base`, `cwd`, `mxcsr`);
 //! placing a spelling in the lifted architecture is the lifter's job.
 
-use crate::Platform;
 use crate::convention::RegName;
+use crate::{CLibrary, Kernel};
 
 /// What a call does to a register the platform ABI speaks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -143,13 +143,22 @@ const I386_LINUX_GUARD: StackGuard = StackGuard {
                gcc/config/i386/gnu-user.h: TARGET_THREAD_SSP_OFFSET 0x14",
 };
 
-/// Where the platform keeps the stack guard, if it addresses it from a reserved register.
-///
-/// AArch64 Linux keeps it in the global `__stack_chk_guard`, which no register addresses.
-pub fn stack_guard(arch: &str, bits: u32, platform: Platform) -> Option<&'static StackGuard> {
-    match (crate::family(arch), bits, platform) {
-        (Some("x86"), 64, Platform::Linux) => Some(&X86_64_LINUX_GUARD),
-        (Some("x86"), 32, Platform::Linux) => Some(&I386_LINUX_GUARD),
+/// Where a C library keeps the stack protector's canary (doc/adr-call-boundary.md, `GuardRow`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardRow {
+    /// A word at a constant offset from the thread pointer.
+    ThreadSlot(StackGuard),
+}
+
+const X86_64_GLIBC_GUARD: GuardRow = GuardRow::ThreadSlot(X86_64_LINUX_GUARD);
+const I386_GLIBC_GUARD: GuardRow = GuardRow::ThreadSlot(I386_LINUX_GUARD);
+
+/// The C library's guard row for an architecture. AArch64 glibc keeps it in the global
+/// `__stack_chk_guard`, which no register addresses; a library no row cites states none.
+pub fn guard_row(arch: &str, bits: u32, library: CLibrary) -> Option<&'static GuardRow> {
+    match (crate::family(arch), bits, library) {
+        (Some("x86"), 64, CLibrary::Glibc | CLibrary::Musl) => Some(&X86_64_GLIBC_GUARD),
+        (Some("x86"), 32, CLibrary::Glibc) => Some(&I386_GLIBC_GUARD),
         _ => None,
     }
 }
@@ -212,19 +221,15 @@ pub fn architecture_registers(arch: &str) -> &'static [PlatformRegister] {
 /// program runs at. A platform the table does not know gets nothing, which
 /// costs precision -- a reserved register reads as clobbered by every call --
 /// and never soundness.
-pub fn platform_registers(
-    arch: &str,
-    bits: u32,
-    platform: Platform,
-) -> &'static [PlatformRegister] {
-    match (crate::family(arch), bits, platform) {
-        (Some("x86"), 64, Platform::Linux) => &X86_64_SYSV_LINUX,
+pub fn platform_registers(arch: &str, bits: u32, kernel: Kernel) -> &'static [PlatformRegister] {
+    match (crate::family(arch), bits, kernel) {
+        (Some("x86"), 64, Kernel::Linux) => &X86_64_SYSV_LINUX,
         // Darwin follows the psABI for x86-64 but keeps its thread pointer in
         // %gs, which no document this table can cite states.
-        (Some("x86"), 64, Platform::Darwin) => &X86_64_SYSV_CONTROL,
-        (Some("x86"), 32, Platform::Linux) => &I386_SYSV_LINUX,
-        (Some("arm"), 64, Platform::Linux) => &AARCH64_ELF,
-        (Some("arm"), 64, Platform::Darwin) => &AARCH64_DARWIN,
+        (Some("x86"), 64, Kernel::Darwin) => &X86_64_SYSV_CONTROL,
+        (Some("x86"), 32, Kernel::Linux) => &I386_SYSV_LINUX,
+        (Some("arm"), 64, Kernel::Linux) => &AARCH64_ELF,
+        (Some("arm"), 64, Kernel::Darwin) => &AARCH64_DARWIN,
         _ => &[],
     }
 }
@@ -233,8 +238,8 @@ pub fn platform_registers(
 mod tests {
     use super::*;
 
-    fn duty(arch: &str, bits: u32, platform: Platform, register: &str) -> Option<RegisterDuty> {
-        platform_registers(arch, bits, platform)
+    fn duty(arch: &str, bits: u32, kernel: Kernel, register: &str) -> Option<RegisterDuty> {
+        platform_registers(arch, bits, kernel)
             .iter()
             .find(|row| row.register == register)
             .map(|row| row.duty)
@@ -244,27 +249,27 @@ mod tests {
     #[test]
     fn each_platform_reserves_its_own_thread_pointer() {
         assert_eq!(
-            duty("x86-64", 64, Platform::Linux, "fs_base"),
+            duty("x86-64", 64, Kernel::Linux, "fs_base"),
             Some(RegisterDuty::SystemReserved)
         );
         assert_eq!(
-            duty("x86", 32, Platform::Linux, "gs_base"),
+            duty("x86", 32, Kernel::Linux, "gs_base"),
             Some(RegisterDuty::SystemReserved)
         );
         assert_eq!(
-            duty("aarch64", 64, Platform::Linux, "tpidr_el0"),
+            duty("aarch64", 64, Kernel::Linux, "tpidr_el0"),
             Some(RegisterDuty::SystemReserved)
         );
         assert_eq!(
-            duty("arm64", 64, Platform::Darwin, "x18"),
+            duty("arm64", 64, Kernel::Darwin, "x18"),
             Some(RegisterDuty::SystemReserved)
         );
         // x18 is an ordinary temporary on Linux, and fs means nothing on i386.
-        assert_eq!(duty("aarch64", 64, Platform::Linux, "x18"), None);
-        assert_eq!(duty("x86", 32, Platform::Linux, "fs_base"), None);
-        assert!(platform_registers("x86-64", 64, Platform::Unknown).is_empty());
+        assert_eq!(duty("aarch64", 64, Kernel::Linux, "x18"), None);
+        assert_eq!(duty("x86", 32, Kernel::Linux, "fs_base"), None);
+        assert!(platform_registers("x86-64", 64, Kernel::Unknown).is_empty());
         assert!(
-            platform_registers("x86-64", 64, Platform::Linux)
+            platform_registers("x86-64", 64, Kernel::Linux)
                 .iter()
                 .all(|row| !row.citation.is_empty())
         );
@@ -274,13 +279,13 @@ mod tests {
     /// its four bytes only the one holding nothing but control bits is claimed.
     #[test]
     fn a_partly_callee_saved_register_claims_only_its_whole_bytes() {
-        let mxcsr = platform_registers("x86-64", 64, Platform::Linux)
+        let mxcsr = platform_registers("x86-64", 64, Kernel::Linux)
             .iter()
             .find(|row| row.register == "mxcsr")
             .expect("mxcsr row");
         assert_eq!(mxcsr.duty, RegisterDuty::CalleeSaved);
         assert_eq!(mxcsr.covered_bytes(4).collect::<Vec<_>>(), [1]);
-        let cwd = platform_registers("x86-64", 64, Platform::Linux)
+        let cwd = platform_registers("x86-64", 64, Kernel::Linux)
             .iter()
             .find(|row| row.register == "cwd")
             .expect("cwd row");

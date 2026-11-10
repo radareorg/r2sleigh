@@ -1,7 +1,7 @@
 //! The vocabulary a calling convention is stated in, shared by the compiler specification's
 //! reading (`r2sleigh_lift::profile`) and the ABI rows (doc/adr-call-boundary.md).
 
-use crate::Platform;
+use crate::Kernel;
 use crate::platform::{EntryStack, RegisterSaveArea, SaveAreaAnchor, StackGuard};
 
 /// The class of value a parameter or result location carries.
@@ -110,12 +110,12 @@ impl ConventionId {
 
     /// The convention a program for this architecture runs under on this kernel, where no fact
     /// about one function says otherwise.
-    pub fn default_for(arch: &str, bits: u32, kernel: Platform) -> Option<Self> {
+    pub fn default_for(arch: &str, bits: u32, kernel: Kernel) -> Option<Self> {
         match (crate::family(arch), bits, kernel) {
-            (Some("x86"), 64, Platform::Windows) => Some(Self::Win64),
+            (Some("x86"), 64, Kernel::Windows) => Some(Self::Win64),
             (Some("x86"), 64, _) => Some(Self::SysVAmd64),
             (Some("x86"), 32, _) => Some(Self::I386Cdecl),
-            (Some("arm"), 64, Platform::Darwin) => Some(Self::AppleArm64),
+            (Some("arm"), 64, Kernel::Darwin) => Some(Self::AppleArm64),
             (Some("arm"), 64, _) => Some(Self::Aapcs64),
             (Some("arm"), 32, _) => Some(Self::Aapcs32),
             (Some("riscv"), 64, _) => Some(Self::RiscVLp64),
@@ -125,17 +125,9 @@ impl ConventionId {
 
     /// The Go convention by toolchain version; `None` (no build information, before Go 1.13) is ABI0.
     /// Registers: Go 1.17 on amd64 Linux, macOS and Windows, Go 1.18 on arm64 and amd64 everywhere.
-    pub fn go(
-        arch: &str,
-        bits: u32,
-        platform: Platform,
-        version: Option<(u32, u32)>,
-    ) -> Option<Self> {
+    pub fn go(arch: &str, bits: u32, kernel: Kernel, version: Option<(u32, u32)>) -> Option<Self> {
         let at_least = |minor: u32| version.is_some_and(|version| version >= (1, minor));
-        let first_systems = matches!(
-            platform,
-            Platform::Linux | Platform::Darwin | Platform::Windows
-        );
+        let first_systems = matches!(kernel, Kernel::Linux | Kernel::Darwin | Kernel::Windows);
         match (crate::family(arch), bits) {
             (Some("x86"), 64) if at_least(18) || at_least(17) && first_systems => {
                 Some(Self::GoAmd64)
@@ -536,10 +528,10 @@ mod tests {
             ConventionId::default_for(arch, bits, platform).and_then(|id| id.row().entry_stack)
         };
         let stack = |alignment, residue| Some(EntryStack { alignment, residue });
-        assert_eq!(entry("x86", 64, Platform::Linux), stack(16, 8));
-        assert_eq!(entry("x86", 64, Platform::Windows), stack(16, 8));
-        assert_eq!(entry("arm", 64, Platform::Linux), stack(16, 0));
-        let go = ConventionId::go("x86", 64, Platform::Linux, Some((1, 20)));
+        assert_eq!(entry("x86", 64, Kernel::Linux), stack(16, 8));
+        assert_eq!(entry("x86", 64, Kernel::Windows), stack(16, 8));
+        assert_eq!(entry("arm", 64, Kernel::Linux), stack(16, 0));
+        let go = ConventionId::go("x86", 64, Kernel::Linux, Some((1, 20)));
         assert_eq!(go.and_then(|id| id.row().entry_stack), stack(8, 0));
     }
 
@@ -549,27 +541,24 @@ mod tests {
         let name = |arch, platform, version| {
             ConventionId::go(arch, 64, platform, version).map(ConventionId::radare2_name)
         };
-        assert_eq!(name("x86", Platform::Linux, Some((1, 17))), Some("golang"));
+        assert_eq!(name("x86", Kernel::Linux, Some((1, 17))), Some("golang"));
         assert_eq!(
-            name("x86", Platform::Unknown, Some((1, 17))),
+            name("x86", Kernel::Unknown, Some((1, 17))),
             Some("golang_abi0")
         );
+        assert_eq!(name("x86", Kernel::Unknown, Some((1, 18))), Some("golang"));
         assert_eq!(
-            name("x86", Platform::Unknown, Some((1, 18))),
-            Some("golang")
-        );
-        assert_eq!(
-            name("x86", Platform::Linux, Some((1, 14))),
+            name("x86", Kernel::Linux, Some((1, 14))),
             Some("golang_abi0")
         );
-        assert_eq!(name("x86", Platform::Linux, None), Some("golang_abi0"));
+        assert_eq!(name("x86", Kernel::Linux, None), Some("golang_abi0"));
         assert_eq!(
-            name("arm", Platform::Darwin, Some((1, 17))),
+            name("arm", Kernel::Darwin, Some((1, 17))),
             Some("golang_abi0")
         );
-        assert_eq!(name("arm", Platform::Darwin, Some((1, 21))), Some("golang"));
-        assert_eq!(name("riscv", Platform::Linux, Some((1, 21))), None);
-        let abi0 = ConventionId::go("x86", 64, Platform::Linux, None).expect("ABI0");
+        assert_eq!(name("arm", Kernel::Darwin, Some((1, 21))), Some("golang"));
+        assert_eq!(name("riscv", Kernel::Linux, Some((1, 21))), None);
+        let abi0 = ConventionId::go("x86", 64, Kernel::Linux, None).expect("ABI0");
         assert!(abi0.row().refused.is_some());
     }
 
@@ -578,15 +567,15 @@ mod tests {
     #[test]
     fn each_platform_states_its_own_convention() {
         let x64 = |platform| ConventionId::default_for("x86-64", 64, platform).expect("an id");
-        assert_eq!(x64(Platform::Linux), ConventionId::SysVAmd64);
-        assert_eq!(x64(Platform::Linux).radare2_name(), "amd64");
-        assert_eq!(x64(Platform::Linux).row().red_zone, 128);
-        assert_eq!(x64(Platform::Darwin).row().red_zone, 128);
-        assert_eq!(x64(Platform::Windows).radare2_name(), "ms");
-        assert_eq!(x64(Platform::Windows).row().red_zone, 0);
+        assert_eq!(x64(Kernel::Linux), ConventionId::SysVAmd64);
+        assert_eq!(x64(Kernel::Linux).radare2_name(), "amd64");
+        assert_eq!(x64(Kernel::Linux).row().red_zone, 128);
+        assert_eq!(x64(Kernel::Darwin).row().red_zone, 128);
+        assert_eq!(x64(Kernel::Windows).radare2_name(), "ms");
+        assert_eq!(x64(Kernel::Windows).row().red_zone, 0);
         let arm64 = |platform| ConventionId::default_for("aarch64", 64, platform).expect("an id");
         assert_eq!(
-            arm64(Platform::Linux).row().save_area,
+            arm64(Kernel::Linux).row().save_area,
             Some(RegisterSaveArea {
                 anchor: SaveAreaAnchor::End,
                 offset_field: 16,
@@ -594,11 +583,11 @@ mod tests {
                 stack_field: -8,
             })
         );
-        assert_eq!(arm64(Platform::Darwin), ConventionId::AppleArm64);
-        assert_eq!(arm64(Platform::Darwin).row().save_area, None);
-        assert_eq!(x64(Platform::Windows).row().save_area, None);
-        assert_eq!(arm64(Platform::Darwin).radare2_name(), "arm64");
-        assert!(ConventionId::default_for("mips", 32, Platform::Linux).is_none());
+        assert_eq!(arm64(Kernel::Darwin), ConventionId::AppleArm64);
+        assert_eq!(arm64(Kernel::Darwin).row().save_area, None);
+        assert_eq!(x64(Kernel::Windows).row().save_area, None);
+        assert_eq!(arm64(Kernel::Darwin).radare2_name(), "arm64");
+        assert!(ConventionId::default_for("mips", 32, Kernel::Linux).is_none());
     }
 
     /// The cspec's AArch64 `extension="zero"` is overridden by the ABI, cited; Apple's caller

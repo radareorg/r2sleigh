@@ -178,6 +178,10 @@ pub(crate) fn function_type_matches_source_interface(
         return false;
     }
     let parameter_widths_match = signature.params.iter().enumerate().all(|(index, ty)| {
+        // A parameter the declaration types as nothing the layer holds states no width (D151).
+        if *ty == CTypeLike::Unknown {
+            return true;
+        }
         let Some(actual_bits) = declaration_type_width_bits(ty, ptr_bits).map(u64::from) else {
             return false;
         };

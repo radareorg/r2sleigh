@@ -1,7 +1,7 @@
 //! The target's C data model: `long`, pointers, plain `char`'s sign, `wchar_t`'s sign and width.
-//! One cited row per architecture and [`Platform`] until S8's `CLibrary` (doc/adr-call-boundary.md).
+//! One cited row per architecture and [`CLibrary`] (doc/adr-call-boundary.md, "The C data model").
 
-use crate::Platform;
+use crate::CLibrary;
 use crate::types::{ScalarKind, Width};
 
 /// What one target makes of the widths and signs a C spelling leaves open.
@@ -33,17 +33,17 @@ impl CDataModel {
         }
     }
 
-    /// The cited row for an architecture, its address width and its platform.
-    pub fn of(arch: &str, bits: u32, platform: Platform) -> Option<&'static CDataModel> {
-        use Platform::{Android, Darwin, Linux, Windows};
-        match (crate::family(arch), bits, platform) {
-            (Some("x86"), 64, Linux | Android | Darwin) => Some(&SYSV_X86_64),
-            (Some("x86"), 64, Windows) => Some(&MICROSOFT_X64),
-            (Some("x86"), 32, Linux | Android) => Some(&SYSV_I386),
-            (Some("arm"), 64, Linux | Android) => Some(&AAPCS64),
-            (Some("arm"), 64, Darwin) => Some(&APPLE_ARM64),
-            (Some("arm"), 32, Linux | Android) => Some(&AAPCS32),
-            (Some("riscv"), 64, Linux) => Some(&RISCV_LP64),
+    /// The cited row for an architecture, its address width and its C library.
+    pub fn of(arch: &str, bits: u32, library: CLibrary) -> Option<&'static CDataModel> {
+        use CLibrary::{Bionic, Glibc, LibSystem, Ucrt};
+        match (crate::family(arch), bits, library) {
+            (Some("x86"), 64, Glibc | Bionic | LibSystem) => Some(&SYSV_X86_64),
+            (Some("x86"), 64, Ucrt) => Some(&MICROSOFT_X64),
+            (Some("x86"), 32, Glibc | Bionic) => Some(&SYSV_I386),
+            (Some("arm"), 64, Glibc | Bionic) => Some(&AAPCS64),
+            (Some("arm"), 64, LibSystem) => Some(&APPLE_ARM64),
+            (Some("arm"), 32, Glibc | Bionic) => Some(&AAPCS32),
+            (Some("riscv"), 64, Glibc) => Some(&RISCV_LP64),
             _ => None,
         }
     }

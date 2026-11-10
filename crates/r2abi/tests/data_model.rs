@@ -3,22 +3,22 @@
 
 use std::process::Command;
 
-use r2abi::{CDataModel, Platform, ScalarKind, Width};
+use r2abi::{CDataModel, CLibrary, ScalarKind, Width};
 
 /// A compiler triple and the row the engine looks up for a program built by it.
-const TARGETS: &[(&str, &str, u32, Platform)] = &[
-    ("x86_64-linux-gnu", "x86-64", 64, Platform::Linux),
-    ("x86_64-linux-android", "x86-64", 64, Platform::Android),
-    ("x86_64-apple-darwin", "x86-64", 64, Platform::Darwin),
-    ("x86_64-pc-windows-msvc", "x86-64", 64, Platform::Windows),
-    ("i386-linux-gnu", "x86", 32, Platform::Linux),
-    ("i686-linux-android", "x86", 32, Platform::Android),
-    ("aarch64-linux-gnu", "aarch64", 64, Platform::Linux),
-    ("aarch64-linux-android", "aarch64", 64, Platform::Android),
-    ("arm64-apple-darwin", "arm64", 64, Platform::Darwin),
-    ("arm-linux-gnueabihf", "arm", 32, Platform::Linux),
-    ("armv7a-linux-androideabi", "arm", 32, Platform::Android),
-    ("riscv64-linux-gnu", "riscv64", 64, Platform::Linux),
+const TARGETS: &[(&str, &str, u32, CLibrary)] = &[
+    ("x86_64-linux-gnu", "x86-64", 64, CLibrary::Glibc),
+    ("x86_64-linux-android", "x86-64", 64, CLibrary::Bionic),
+    ("x86_64-apple-darwin", "x86-64", 64, CLibrary::LibSystem),
+    ("x86_64-pc-windows-msvc", "x86-64", 64, CLibrary::Ucrt),
+    ("i386-linux-gnu", "x86", 32, CLibrary::Glibc),
+    ("i686-linux-android", "x86", 32, CLibrary::Bionic),
+    ("aarch64-linux-gnu", "aarch64", 64, CLibrary::Glibc),
+    ("aarch64-linux-android", "aarch64", 64, CLibrary::Bionic),
+    ("arm64-apple-darwin", "arm64", 64, CLibrary::LibSystem),
+    ("arm-linux-gnueabihf", "arm", 32, CLibrary::Glibc),
+    ("armv7a-linux-androideabi", "arm", 32, CLibrary::Bionic),
+    ("riscv64-linux-gnu", "riscv64", 64, CLibrary::Glibc),
 ];
 
 /// `clang -target T -dM -E -x c /dev/null` (Apple clang 21.0.0): `__CHAR_UNSIGNED__`, `__WCHAR_TYPE__`,
@@ -147,8 +147,8 @@ fn every_row_agrees_with_the_compiler_here() {
 
 #[test]
 fn a_target_no_row_lists_states_no_sign() {
-    assert_eq!(CDataModel::of("x86-64", 64, Platform::Unknown), None);
-    assert_eq!(CDataModel::of("mips", 32, Platform::Linux), None);
+    assert_eq!(CDataModel::of("x86-64", 64, CLibrary::Unknown), None);
+    assert_eq!(CDataModel::of("mips", 32, CLibrary::Glibc), None);
     let unlisted = CDataModel::unix(64);
     assert_eq!(unlisted.kind(ScalarKind::PlainChar), None);
     assert_eq!(unlisted.kind(ScalarKind::WideChar), None);
@@ -163,10 +163,11 @@ fn a_target_no_row_lists_states_no_sign() {
 /// them: AAPCS64 makes both unsigned, SysV x86-64 both signed.
 #[test]
 fn a_rows_char_and_wchar_take_the_targets_sign() {
-    let prototypes = r2abi::Prototypes::embedded_for(Platform::Linux);
-    let graph = prototypes.graph();
-    let wcschr = prototypes.get("wcschr").expect("wcschr is declared");
-    let strlen = prototypes.get("strlen").expect("strlen is declared");
+    let rows = r2abi::LibraryRows::embedded(CLibrary::Glibc);
+    let graph = rows.graph();
+    let scope = CLibrary::Glibc.scope();
+    let wcschr = rows.prototype(rows.find(scope, "wcschr").expect("wcschr is declared"));
+    let strlen = rows.prototype(rows.find(scope, "strlen").expect("strlen is declared"));
     let scalar_under = |ty| {
         let (mut at, _) = graph.peel(ty);
         while let Some(r2abi::Type::Pointer { target }) = graph.get(at) {

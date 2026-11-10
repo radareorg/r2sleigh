@@ -267,7 +267,6 @@ func.setlocale.arg.0=int,category
 func.setlocale.arg.1=const char *,locale
 func.setlocale.ret=char *
 
-
 dcgettext=func
 func.dcgettext.args=3
 func.dcgettext.arg.0=const char *,domainname
@@ -2067,85 +2066,17 @@ func.strftime.arg.2=const char *,format
 func.strftime.arg.3=const tm *,timeptr
 func.strftime.ret=size_t
 
-fwprintf=func
-func.fwprintf.args=3
-func.fwprintf.arg.0=FILE *,stream
-func.fwprintf.arg.1=const wchar_t *,format
-func.fwprintf.arg.2=,...
-func.fwprintf.ret=int
-
 fwscanf=func
 func.fwscanf.args=2
 func.fwscanf.arg.0=FILE *,stream
 func.fwscanf.arg.1=const wchar_t *,format
 func.fwscanf.ret=int
 
-swprintf=func
-func.swprintf.args=4
-func.swprintf.arg.0=wchar_t *,s
-func.swprintf.arg.1=size_t,n
-func.swprintf.arg.2=const wchar_t *,format
-func.swprintf.arg.3=,...
-func.swprintf.ret=int
-
 swscanf=func
 func.swscanf.args=2
 func.swscanf.arg.0=const wchar_t *,s
 func.swscanf.arg.1=const wchar_t *,format
 func.swscanf.ret=int
-
-vfwprintf=func
-func.vfwprintf.args=3
-func.vfwprintf.arg.0=FILE *,stream
-func.vfwprintf.arg.1=const wchar_t *,format
-func.vfwprintf.arg.2=va_list,arg
-func.vfwprintf.ret=int
-
-vfwscanf=func
-func.vfwscanf.args=3
-func.vfwscanf.arg.0=FILE *,stream
-func.vfwscanf.arg.1=const wchar_t *,format
-func.vfwscanf.arg.2=va_list,arg
-func.vfwscanf.ret=int
-
-vswprintf=func
-func.vswprintf.args=4
-func.vswprintf.arg.0=wchar_t *,s
-func.vswprintf.arg.1=size_t,n
-func.vswprintf.arg.2=const wchar_t *,format
-func.vswprintf.arg.3=va_list,arg
-func.vswprintf.ret=int
-
-vswscanf=func
-func.vswscanf.args=3
-func.vswscanf.arg.0=const wchar_t *,s
-func.vswscanf.arg.1=const wchar_t *,format
-func.vswscanf.arg.2=va_list,arg
-func.vswscanf.ret=int
-
-vwprintf=func
-func.vwprintf.args=2
-func.vwprintf.arg.0=const wchar_t *,format
-func.vwprintf.arg.1=va_list,arg
-func.vwprintf.ret=int
-
-vwscanf=func
-func.vwscanf.args=2
-func.vwscanf.arg.0=const wchar_t *,format
-func.vwscanf.arg.1=va_list,arg
-func.vwscanf.ret=int
-
-wprintf=func
-func.wprintf.args=2
-func.wprintf.arg.0=const wchar_t *,format
-func.wprintf.arg.1=,...
-func.wprintf.ret=int
-
-wscanf=func
-func.wscanf.args=2
-func.wscanf.arg.0=const wchar_t *,format
-func.wscanf.arg.1=,...
-func.wscanf.ret=int
 
 fgetwc=func
 func.fgetwc.args=1
@@ -2581,7 +2512,7 @@ func.rename.ret=int
 
 tmpfile=func
 func.tmpfile.args=0
-func.tmpfile.ret=file*
+func.tmpfile.ret=FILE *
 
 tmpnam=func
 func.tmpnam.args=1
@@ -2597,20 +2528,20 @@ fopen=func
 func.fopen.args=2
 func.fopen.arg.0=const char *,filename
 func.fopen.arg.1=const char *,mode
-func.fopen.ret=file*
+func.fopen.ret=FILE *
 
 popen=func
 func.popen.args=2
 func.popen.arg.0=const char *,filename
 func.popen.arg.1=const char *,mode
-func.popen.ret=file*
+func.popen.ret=FILE *
 
 freopen=func
 func.freopen.args=3
 func.freopen.arg.0=const char *,filename
 func.freopen.arg.1=const char *,mode
 func.freopen.arg.2=FILE *,stream
-func.freopen.ret=file*
+func.freopen.ret=FILE *
 
 setbuf=func
 func.setbuf.args=2
@@ -2626,154 +2557,11 @@ func.setvbuf.arg.2=int,mode
 func.setvbuf.arg.3=size_t,size
 func.setvbuf.ret=int
 
-fprintf=func
-func.fprintf.args=3
-func.fprintf.arg.0=FILE *,stream
-func.fprintf.arg.1=const char *,format
-func.fprintf.arg.2= ,...
-func.fprintf.ret=int
-
-fscanf=func
-func.fscanf.args=3
-func.fscanf.arg.0=FILE *,stream
-func.fscanf.arg.1=const char *,format
-func.fscanf.arg.2=,...
-func.fscanf.ret=int
-
-printf=func
-func.printf.args=2
-func.printf.arg.0=const char *,format
-func.printf.arg.1=,...
-func.printf.ret=int
-
 lstat=func
 func.lstat.args=2
 func.lstat.arg.0=const char *,path
 func.lstat.arg.1=void *,buf
 func.lstat.ret=int
-
-scanf=func
-func.scanf.args=2
-func.scanf.arg.0=const char *,format
-func.scanf.arg.1=,...
-func.scanf.ret=int
-
-asprintf=func
-func.asprintf.args=3
-func.asprintf.arg.0=char **,ptr
-func.asprintf.arg.1=const char *,format
-func.asprintf.arg.2=,...
-func.asprintf.ret=int
-
-dprintf=func
-func.dprintf.args=3
-func.dprintf.arg.0=int,fd
-func.dprintf.arg.1=const char *,format
-func.dprintf.arg.2=,...
-func.dprintf.ret=int
-
-snprintf=func
-func.snprintf.args=4
-func.snprintf.arg.0=char *,s
-func.snprintf.arg.1=size_t,size
-func.snprintf.arg.2=const char *,format
-func.snprintf.arg.3=,...
-func.snprintf.ret=int
-
-__snprintf_chk=func
-func.__snprintf_chk.args=6
-func.__snprintf_chk.arg.0=char *,s
-func.__snprintf_chk.arg.1=size_t,maxlen
-func.__snprintf_chk.arg.2=int,flag
-func.__snprintf_chk.arg.3=size_t,slen
-func.__snprintf_chk.arg.4=const char *,format
-func.__snprintf_chk.arg.5=,...
-func.__snprintf_chk.ret=int
-
-sprintf=func
-func.sprintf.args=3
-func.sprintf.arg.0=char *,s
-func.sprintf.arg.1=const char *,format
-func.sprintf.arg.2=,...
-func.sprintf.ret=int
-
-__sprintf_chk=func
-func.__sprintf_chk.args=5
-func.__sprintf_chk.arg.0=char *,s
-func.__sprintf_chk.arg.1=int,flag
-func.__sprintf_chk.arg.2=size_t,slen
-func.__sprintf_chk.arg.3=const char *,format
-func.__sprintf_chk.arg.4=,...
-func.__sprintf_chk.ret=int
-
-sscanf=func
-func.sscanf.args=3
-func.sscanf.arg.0=const char *,s
-func.sscanf.arg.1=const char *,format
-func.sscanf.arg.2= ,...
-func.sscanf.ret=int
-
-vfprintf=func
-func.vfprintf.args=3
-func.vfprintf.arg.0=FILE *,stream
-func.vfprintf.arg.1=const char *,format
-func.vfprintf.arg.2=va_list,ap
-func.vfprintf.ret=int
-
-vfscanf=func
-func.vfscanf.args=3
-func.vfscanf.arg.0=FILE *,stream
-func.vfscanf.arg.1=const char *,format
-func.vfscanf.arg.2=va_list,ap
-func.vfscanf.ret=int
-
-vprintf=func
-func.vprintf.args=2
-func.vprintf.arg.0=const char *,format
-func.vprintf.arg.1=va_list,ap
-func.vprintf.ret=int
-
-vscanf=func
-func.vscanf.args=2
-func.vscanf.arg.0=const char *,format
-func.vscanf.arg.1=va_list,ap
-func.vscanf.ret=int
-
-vasprintf=func
-func.vasprintf.args=3
-func.vasprintf.arg.0=char **,ptr
-func.vasprintf.arg.1=const char *,format
-func.vasprintf.arg.2=va_list,ap
-func.vasprintf.ret=int
-
-vdprintf=func
-func.vdprintf.args=3
-func.vdprintf.arg.0=int,fd
-func.vdprintf.arg.1=const char *,format
-func.vdprintf.arg.2=va_list,ap
-func.vdprintf.ret=int
-
-vsnprintf=func
-func.vsnprintf.args=4
-func.vsnprintf.arg.0=char *,s
-func.vsnprintf.arg.1=size_t,size
-func.vsnprintf.arg.2=const char *,format
-func.vsnprintf.arg.3=va_list,arg
-func.vsnprintf.ret=int
-
-vsprintf=func
-func.vsprintf.args=3
-func.vsprintf.arg.0=char *,s
-func.vsprintf.arg.1=const char *,format
-func.vsprintf.arg.2=va_list,arg
-func.vsprintf.ret=int
-
-vsscanf=func
-func.vsscanf.args=3
-func.vsscanf.arg.0=const char *,s
-func.vsscanf.arg.1=const char *,format
-func.vsscanf.arg.2=va_list,arg
-func.vsscanf.ret=int
 
 fputc=func
 func.fputc.args=2
@@ -2998,13 +2786,6 @@ func.textdomain.args=1
 func.textdomain.arg.0=char *,domainname
 func.textdomain.ret=char *
 
-error=func
-func.error.args=3
-func.error.arg.0=int,status
-func.error.arg.1=int,errname
-func.error.arg.2=char *,format
-func.error.ret=void
-
 nl_langinfo=func
 func.nl_langinfo.args=1
 func.nl_langinfo.arg.0=nl_item,item
@@ -3104,22 +2885,6 @@ func.swift_beginAccess.arg.2=void *
 func.swift_beginAccess.arg.3=void *
 func.swift_beginAccess.ret=void
 
-err=func
-func.err.noreturn=true
-func.err.args=3
-func.err.arg.0=int,eval
-func.err.arg.1=const char *,fmt
-func.err.arg.2=,...
-func.err.ret=void
-
-errx=func
-func.errx.noreturn=true
-func.errx.args=3
-func.errx.arg.0=int,eval
-func.errx.arg.1=const char *,fmt
-func.errx.arg.2=,...
-func.errx.ret=void
-
 errc=func
 func.errc.noreturn=true
 func.errc.args=3
@@ -3127,24 +2892,6 @@ func.errc.arg.0=int,eval
 func.errc.arg.1=int,code
 func.errc.arg.2=const char *,fmt
 func.errc.ret=void
-
-warn=func
-func.warn.args=2
-func.warn.arg.0=const char *,fmt
-func.warn.arg.1=,...
-func.warn.ret=void
-
-warnx=func
-func.warnx.args=2
-func.warnx.arg.0=const char *,fmt
-func.warnx.arg.1=,...
-func.warnx.ret=void
-syslog=func
-func.syslog.args=3
-func.syslog.arg.0=int,priority
-func.syslog.arg.1=const char *,format
-func.syslog.arg.2=,...
-func.syslog.ret=void
 
 warnc=func
 func.warnc.args=3
@@ -3286,7 +3033,7 @@ fdopen=func
 func.fdopen.args=2
 func.fdopen.arg.0=int,fd
 func.fdopen.arg.1=const char *,mode
-func.fdopen.ret=file*
+func.fdopen.ret=FILE *
 
 fchown=func
 func.fchown.args=3
@@ -3306,25 +3053,6 @@ func.utimes.args=2
 func.utimes.arg.0=const char *,filename
 func.utimes.arg.1=const void *,times
 func.utimes.ret=int
-
-__vsprintf_chk=func
-func.__vsprintf_chk.args=5
-func.__vsprintf_chk.arg.0=char *,s
-func.__vsprintf_chk.arg.1=int,flag
-func.__vsprintf_chk.arg.2=size_t,slen
-func.__vsprintf_chk.arg.3=const char *,format
-func.__vsprintf_chk.arg.4=va_list,ap
-func.__vsprintf_chk.ret=int
-
-__vsnprintf_chk=func
-func.__vsnprintf_chk.args=6
-func.__vsnprintf_chk.arg.0=char *,s
-func.__vsnprintf_chk.arg.1=size_t,maxlen
-func.__vsnprintf_chk.arg.2=int,flag
-func.__vsnprintf_chk.arg.3=size_t,slen
-func.__vsnprintf_chk.arg.4=const char *,format
-func.__vsnprintf_chk.arg.5=va_list,ap
-func.__vsnprintf_chk.ret=int
 
 __memcpy_chk=func
 func.__memcpy_chk.args=4

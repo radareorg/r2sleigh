@@ -2540,11 +2540,15 @@ pub fn mint_recovered_call_site_interface(
     )
     .and_then(|interface| interface.with_exact_callee_interface(callee.clone()))
     .ok()?;
-    // The format the declaration names counts the tail at each call; without
-    // one, a variadic call's tail is unproven and residualized, never dropped.
-    match callee.declared_format_parameter() {
-        Some(index) => interface.with_radare2_format_parameter(index).ok(),
-        None => Some(interface),
+    // The format the declaration names counts the tail at each call, else the one the callee's
+    // body forwards; without either, a variadic call's tail is residualized, never dropped.
+    match (
+        callee.declared_format_parameter(),
+        callee.body_proven_format_parameter(),
+    ) {
+        (Some(index), _) => interface.with_radare2_format_parameter(index).ok(),
+        (None, Some(index)) => interface.with_body_proven_format_parameter(index).ok(),
+        (None, None) => Some(interface),
     }
 }
 

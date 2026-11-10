@@ -8,13 +8,13 @@
 //! function-pointer spelling -- is a refused node, and only the declaration
 //! that needs it loses anything.
 
-use crate::Platform;
+use crate::CLibrary;
 use crate::types::{
     Keyword, Qualifiers, Scalar, ScalarKind, Signature, Type, TypeGraph, TypeId, Width,
 };
 
 /// Read one spelling into the graph.
-pub(crate) fn read(spelling: &str, graph: &mut TypeGraph, platform: Platform) -> TypeId {
+pub(crate) fn read(spelling: &str, graph: &mut TypeGraph, library: CLibrary) -> TypeId {
     let Some(tokens) = tokens(spelling) else {
         return graph.refused(format!("`{spelling}` is not a C type spelling"));
     };
@@ -22,7 +22,7 @@ pub(crate) fn read(spelling: &str, graph: &mut TypeGraph, platform: Platform) ->
     // is one pointer, qualified by the words that follow it.
     let mut levels = tokens.split(|token| *token == "*");
     let base = levels.next().unwrap_or_default();
-    let mut ty = match base_type(base, graph, platform) {
+    let mut ty = match base_type(base, graph, library) {
         Ok(ty) => ty,
         Err(reason) => return graph.refused(format!("`{spelling}`: {reason}")),
     };
@@ -82,7 +82,7 @@ fn qualifiers_of(words: &[&str]) -> Option<Qualifiers> {
 }
 
 /// The type the words before any star name, qualified as they say.
-fn base_type(words: &[&str], graph: &mut TypeGraph, platform: Platform) -> Result<TypeId, String> {
+fn base_type(words: &[&str], graph: &mut TypeGraph, library: CLibrary) -> Result<TypeId, String> {
     let qualifiers = words
         .iter()
         .filter_map(|word| qualifier(word))
@@ -92,7 +92,7 @@ fn base_type(words: &[&str], graph: &mut TypeGraph, platform: Platform) -> Resul
         .copied()
         .filter(|word| qualifier(word).is_none())
         .collect::<Vec<_>>();
-    let ty = unqualified(&words, graph, platform)?;
+    let ty = unqualified(&words, graph, library)?;
     Ok(match qualifiers.is_empty() {
         true => ty,
         false => graph.add(Type::Qualified {
@@ -102,15 +102,37 @@ fn base_type(words: &[&str], graph: &mut TypeGraph, platform: Platform) -> Resul
     })
 }
 
-fn unqualified(
-    words: &[&str],
-    graph: &mut TypeGraph,
-    platform: Platform,
-) -> Result<TypeId, String> {
+fn unqualified(words: &[&str], graph: &mut TypeGraph, library: CLibrary) -> Result<TypeId, String> {
     if let [name] = words
-        && let Some((kind, width)) = named_scalar(name, platform)
+        && let Some((kind, width)) = named_scalar(name, library)
     {
         let target = graph.add(scalar(kind, width, None));
+        return Ok(graph.add(Type::Typedef {
+            name: (*name).to_owned(),
+            target,
+        }));
+    }
+    // A `va_list` is passed as a pointer under every convention here: SysV's array of one
+    // struct decays (psABI 3.5.7), AAPCS64's 32-byte struct goes by reference (B.4), Microsoft's
+    // and Apple's are `char *`. Its pointee stays unstated.
+    if let ["va_list" | "__gnuc_va_list"] = words {
+        let state = graph.add(Type::Opaque {
+            keyword: Keyword::Typedef,
+            tag: "va_list".to_owned(),
+        });
+        let target = graph.add(Type::Pointer { target: state });
+        return Ok(graph.add(Type::Typedef {
+            name: "va_list".to_owned(),
+            target,
+        }));
+    }
+    if let [name] = words
+        && let Some(tag) = handle_tag(name, library)
+    {
+        let target = graph.add(Type::Opaque {
+            keyword: Keyword::Struct,
+            tag: tag.to_owned(),
+        });
         return Ok(graph.add(Type::Typedef {
             name: (*name).to_owned(),
             target,
@@ -226,7 +248,7 @@ fn integer_specifiers(words: &[&str]) -> Option<(ScalarKind, Width)> {
 /// Only names whose width the platform states for every target it runs on are
 /// here; where the width is `long`'s, an address's or `wchar_t`'s, it is said
 /// that way and the target answers. A name this does not list is opaque.
-fn named_scalar(name: &str, platform: Platform) -> Option<(ScalarKind, Width)> {
+fn named_scalar(name: &str, library: CLibrary) -> Option<(ScalarKind, Width)> {
     use ScalarKind::{Signed, Unsigned};
     let portable = match name {
         "wchar_t" => Some((ScalarKind::WideChar, Width::WideChar)),
@@ -244,15 +266,15 @@ fn named_scalar(name: &str, platform: Platform) -> Option<(ScalarKind, Width)> {
         "time_t" => Some((Signed, Width::Long)),
         _ => None,
     };
-    portable.or_else(|| match platform {
-        Platform::Linux => posix(name).or(match name {
+    portable.or_else(|| match library {
+        CLibrary::Glibc => posix(name).or(match name {
             "off_t" | "clock_t" | "suseconds_t" => Some((Signed, Width::Long)),
             "off64_t" => Some((Signed, Width::Bits(64))),
             "wint_t" | "mode_t" => Some((Unsigned, Width::Bits(32))),
             "wctype_t" | "nfds_t" => Some((Unsigned, Width::Long)),
             _ => None,
         }),
-        Platform::Darwin => posix(name).or(match name {
+        CLibrary::LibSystem => posix(name).or(match name {
             "off_t" => Some((Signed, Width::Bits(64))),
             "clock_t" => Some((Unsigned, Width::Long)),
             "wint_t" | "suseconds_t" => Some((Signed, Width::Bits(32))),
@@ -263,13 +285,24 @@ fn named_scalar(name: &str, platform: Platform) -> Option<(ScalarKind, Width)> {
         // Bionic takes these from the kernel's `long`-sized types on every
         // target. `mode_t` is sixteen bits on 32-bit ARM and thirty-two on the
         // 64-bit targets, so no one width is bionic's, and it stays opaque.
-        Platform::Android => posix(name).or(match name {
+        CLibrary::Bionic => posix(name).or(match name {
             "off_t" | "clock_t" | "suseconds_t" => Some((Signed, Width::Long)),
             "off64_t" => Some((Signed, Width::Bits(64))),
             _ => None,
         }),
-        Platform::Windows | Platform::Unknown => None,
+        CLibrary::Musl | CLibrary::Ucrt | CLibrary::Unknown => None,
     })
+}
+
+/// The tag a C library's header gives a handle typedef, and none where no header read states
+/// one (data/README.md, "Handles").
+fn handle_tag(name: &str, library: CLibrary) -> Option<&'static str> {
+    match (library, name) {
+        (CLibrary::Glibc, "FILE") => Some("_IO_FILE"),
+        (CLibrary::Glibc, "DIR") => Some("__dirstream"),
+        (CLibrary::LibSystem, "FILE") => Some("__sFILE"),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -279,7 +312,7 @@ mod tests {
 
     fn spelled(spelling: &str) -> Option<String> {
         let mut graph = TypeGraph::new();
-        let id = read(spelling, &mut graph, Platform::Linux);
+        let id = read(spelling, &mut graph, CLibrary::Glibc);
         graph.spelled(id).map(|spelled| spelled.declared)
     }
 
@@ -298,7 +331,7 @@ mod tests {
     #[test]
     fn a_tag_the_table_never_lays_out_is_opaque() {
         let mut graph = TypeGraph::new();
-        let file = read("FILE *", &mut graph, Platform::Linux);
+        let file = read("FILE *", &mut graph, CLibrary::Bionic);
         let Some(Type::Pointer { target }) = graph.get(file) else {
             panic!("{:?}", graph.get(file));
         };
@@ -309,15 +342,38 @@ mod tests {
         assert_eq!(graph.size_bits(file, &CDataModel::unix(64)), Some(64));
     }
 
+    /// The handle row: `FILE` names glibc's tag and keeps its name over it.
+    #[test]
+    fn a_handle_a_library_states_is_its_typedef_over_the_tag() {
+        let mut graph = TypeGraph::new();
+        let file = read("FILE *", &mut graph, CLibrary::Glibc);
+        let Some(Type::Pointer { target }) = graph.get(file) else {
+            panic!("{:?}", graph.get(file));
+        };
+        let Some(Type::Typedef { name, target }) = graph.get(*target) else {
+            panic!("{:?}", graph.get(*target));
+        };
+        assert_eq!(name, "FILE");
+        assert!(matches!(
+            graph.get(*target),
+            Some(Type::Opaque { keyword: Keyword::Struct, tag }) if tag == "_IO_FILE"
+        ));
+        assert_eq!(graph.size_bits(file, &CDataModel::unix(64)), Some(64));
+        assert_eq!(
+            graph.spelled(file).map(|s| s.declared).as_deref(),
+            Some("FILE *")
+        );
+    }
+
     #[test]
     fn a_platform_name_for_an_integer_has_the_width_the_target_gives_it() {
         let mut graph = TypeGraph::new();
-        let size = read("size_t", &mut graph, Platform::Unknown);
+        let size = read("size_t", &mut graph, CLibrary::Unknown);
         assert_eq!(graph.size_bits(size, &CDataModel::unix(64)), Some(64));
         assert_eq!(graph.size_bits(size, &CDataModel::unix(32)), Some(32));
-        let long = read("unsigned long", &mut graph, Platform::Unknown);
+        let long = read("unsigned long", &mut graph, CLibrary::Unknown);
         assert_eq!(graph.size_bits(long, &CDataModel::unix(32)), Some(32));
-        let mode = read("mode_t", &mut graph, Platform::Darwin);
+        let mode = read("mode_t", &mut graph, CLibrary::LibSystem);
         assert_eq!(graph.size_bits(mode, &CDataModel::unix(64)), Some(16));
     }
 
@@ -329,7 +385,7 @@ mod tests {
             "struct std::type_info *",
             "long char",
         ] {
-            let id = read(spelling, &mut graph, Platform::Linux);
+            let id = read(spelling, &mut graph, CLibrary::Glibc);
             assert!(
                 matches!(graph.get(id), Some(Type::Refused(_))),
                 "{spelling}: {:?}",
@@ -338,7 +394,7 @@ mod tests {
         }
         // A name the table never defines is a tag, not a refusal: a pointer
         // to it is still a pointer.
-        let generic = read("arithmetic", &mut graph, Platform::Linux);
+        let generic = read("arithmetic", &mut graph, CLibrary::Glibc);
         assert!(matches!(graph.get(generic), Some(Type::Opaque { .. })));
     }
 }

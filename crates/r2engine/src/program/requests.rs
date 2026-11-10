@@ -678,7 +678,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         self.start_request();
         let sites = self.surveyed()?.supervisor.clone();
         let container = self.source().container();
-        let table = r2abi::Syscalls::for_platform(
+        let table = r2abi::Syscalls::for_kernel(
             super::kernel(container),
             &container.arch.name,
             container.arch.bits,

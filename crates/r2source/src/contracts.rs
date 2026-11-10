@@ -1626,6 +1626,25 @@ impl SourceFunctionInterface {
         Ok(self)
     }
 
+    /// Record the fixed parameter a declaration names as the format of a `va_list` tail
+    /// (`vfprintf`'s): the call takes no `...`, and a caller forwarding a format is seen through it.
+    pub fn with_declared_format_parameter(
+        mut self,
+        parameter_index: u32,
+    ) -> Result<Self, SourceFunctionInterfaceError> {
+        if usize::try_from(parameter_index)
+            .ok()
+            .is_none_or(|index| index >= self.parameters.len())
+        {
+            return Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex);
+        }
+        self.format_parameter = Some(crate::confidence::Fact::new(
+            parameter_index,
+            self.types.clone(),
+        ));
+        Ok(self)
+    }
+
     /// Record that arguments continue past the parameters, as a body's register save area proves.
     #[must_use]
     pub const fn with_variadic_tail(mut self) -> Self {

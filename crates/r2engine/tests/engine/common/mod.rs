@@ -545,6 +545,8 @@ impl Literal {
                     function("passes", PASSES, 0xd),
                     function("stepped", STEPPED, 0xc),
                 ],
+                // The one C library an unversioned import binds to (doc/adr-call-boundary.md, S8).
+                libraries: vec!["libc.so.6".to_owned()],
                 ..Container::default()
             },
         }
@@ -798,6 +800,23 @@ impl Literal {
     /// The same program as a Mach-O, which states Darwin by its format.
     pub fn mach_o(mut self) -> Self {
         self.container.format = Format::MachO;
+        self
+    }
+
+    /// The same program, its `DT_NEEDED` naming these libraries.
+    pub fn needing(mut self, libraries: &[&str]) -> Self {
+        self.container.libraries = libraries.iter().map(|name| (*name).to_owned()).collect();
+        self
+    }
+
+    /// The same program, its `.gnu.version_r` needing these versions of `library`.
+    pub fn needing_versions(mut self, library: &str, versions: &[&str]) -> Self {
+        self.container
+            .version_needs
+            .push(r2engine::program::VersionNeed {
+                library: library.into(),
+                versions: versions.iter().map(|version| (*version).into()).collect(),
+            });
         self
     }
 

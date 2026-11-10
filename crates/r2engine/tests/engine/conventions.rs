@@ -1,18 +1,28 @@
 //! Conformance per selected cspec (doc/adr-call-boundary.md, S1): each model builds, its row's
 //! registers resolve, and its sections, results, ranges and overrides are the cspec's and the ABI's.
 
-use r2abi::{ConventionId, Extension, Platform, SlotClass};
+use r2abi::{CLibrary, ConventionId, Extension, Kernel, SlotClass};
 use r2engine::native::convention_model;
 use r2sleigh_lift::profile::LanguageProfile;
 use r2source::ConventionModel;
 use r2source::convention::{LaneSource, Location, OwnedRange, SectionClass};
+
+/// The C library a program on `kernel` reads here: glibc, libSystem or Microsoft's.
+fn library(kernel: Kernel) -> CLibrary {
+    match kernel {
+        Kernel::Linux => CLibrary::Glibc,
+        Kernel::Darwin => CLibrary::LibSystem,
+        Kernel::Windows => CLibrary::Ucrt,
+        Kernel::Unknown => CLibrary::Unknown,
+    }
+}
 
 /// The model of `id` on the embedded machine `sleigh`, reading the cspec compiler `toolchain`.
 fn model(
     sleigh: &str,
     toolchain: Option<&str>,
     id: ConventionId,
-    kernel: Platform,
+    kernel: Kernel,
 ) -> ConventionModel {
     let machine = r2sleigh_lift::embedded_machine(sleigh).expect("an embedded machine");
     let spec = toolchain.map_or(machine.compiler_spec, |id| {
@@ -22,7 +32,13 @@ fn model(
     });
     let profile = LanguageProfile::parse(spec).expect("parses");
     assert!(profile.unknown.is_empty(), "{id:?}: {:?}", profile.unknown);
-    let built = convention_model(&machine.arch, 64, kernel, &profile, id.row());
+    let built = convention_model(
+        &machine.arch,
+        64,
+        (kernel, library(kernel)),
+        &profile,
+        id.row(),
+    );
     let built = built.unwrap_or_else(|why| panic!("{id:?}: {why}"));
     assert!(built.call_effect().is_ok(), "{id:?}: the call effect holds");
     assert!(built.convention_slots().is_ok(), "{id:?}: the slots hold");
@@ -78,7 +94,7 @@ fn extensions(model: &ConventionModel, class: SlotClass) -> Vec<Extension> {
 /// address, and SysV 3.2.3's `st0`/`st1` results beside the cspec's four.
 #[test]
 fn the_sysv_model_is_x86_64_gcc_joined_with_the_psabi() {
-    let model = model("x86-64", None, ConventionId::SysVAmd64, Platform::Linux);
+    let model = model("x86-64", None, ConventionId::SysVAmd64, Kernel::Linux);
     assert_eq!(
         classes(&model),
         [
@@ -102,7 +118,7 @@ fn the_win64_model_shares_positions_and_owns_the_home_area() {
         "x86-64",
         Some("windows"),
         ConventionId::Win64,
-        Platform::Windows,
+        Kernel::Windows,
     );
     assert_eq!(
         classes(&model),
@@ -120,7 +136,7 @@ fn the_win64_model_shares_positions_and_owns_the_home_area() {
 /// upper bits over the cspec's `extension="zero"`.
 #[test]
 fn the_aapcs64_model_overrides_the_cspec_s_zero_extension() {
-    let model = model("aarch64", None, ConventionId::Aapcs64, Platform::Linux);
+    let model = model("aarch64", None, ConventionId::Aapcs64, Kernel::Linux);
     assert_eq!(
         classes(&model)[..2],
         [(SectionClass::Integer, 8), (SectionClass::Float, 8)]
@@ -147,7 +163,7 @@ fn the_apple_arm64_model_extends_arguments_to_32_bits() {
         "aarch64",
         Some("apple"),
         ConventionId::AppleArm64,
-        Platform::Darwin,
+        Kernel::Darwin,
     );
     assert!(model.forms.variadic_on_stack && model.forms.save_area.is_none());
     let integer = extensions(&model, SlotClass::Integer);

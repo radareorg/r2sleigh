@@ -166,7 +166,7 @@ impl<'a, S: Source + 'static> View<'a, S> {
             convention: (*model).clone()?,
             compiler: &assembled.compiler,
             dwarf: &machine.dwarf,
-            prototypes: &assembled.prototypes,
+            imports: &assembled.imports,
             declarations: &inputs.source.container().declarations,
             data_model: assembled.data_model,
         })

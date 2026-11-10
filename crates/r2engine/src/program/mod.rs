@@ -43,7 +43,8 @@ pub(super) struct Assembled {
     convention: r2abi::ConventionId,
     /// The specification the convention reads, under its prototype.
     compiler: r2sleigh_lift::profile::LanguageProfile,
-    prototypes: r2abi::Prototypes,
+    /// The rows the program's C library states, and how each import binds one.
+    imports: crate::imports::Imports,
     /// The C data model of the architecture under that C library.
     data_model: Option<&'static r2abi::CDataModel>,
     /// The register a call returns through, in the coordinates the lift spells.
@@ -181,7 +182,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Convention {
         let model = crate::native::convention_model(
             arch,
             bits,
-            kernel(container),
+            (kernel(container), c_library(container)),
             &assembled.compiler,
             id.row(),
         );
@@ -237,13 +238,14 @@ fn assemble(
     // states of it, and nothing else: `_Exit` is each library's, and
     // `__fgets_chk` is two interfaces under one name. The program's own
     // declarations are read by address, beside these, not merged in.
-    let library = platform(container);
-    let prototypes = r2abi::Prototypes::embedded_for(library);
+    let library = c_library(container);
+    let rows = r2abi::LibraryRows::embedded(library);
+    let linkage = crate::imports::Linkage::of(container);
     let data_model = r2abi::CDataModel::of(&container.arch.name, container.arch.bits, library);
     Ok(Assembled {
         convention: id,
         compiler,
-        prototypes,
+        imports: crate::imports::Imports::new(rows, library, linkage),
         data_model,
         link,
     })
@@ -594,23 +596,19 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     }
 }
 
-/// Which platform's declarations a program's calls are read against, as its container states it.
+/// The C library a program runs against, as its container states it.
 ///
-/// Mach-O is Apple's format, so it is Darwin's libSystem, and a PE is Windows'. An ELF is the
-/// platform of the one C library its evidence names -- the dynamic linker
-/// `PT_INTERP` asks for, the notes that library's start files leave -- and
-/// runs on Linux as far as `EI_OSABI` says. Anything else is `Unknown`, which
-/// reads only the declarations every library shares: no evidence, evidence
-/// naming two libraries, an OS ABI that is not Linux's, and musl, which
-/// declares nothing r2abi keeps a table for. A call then has no prototype,
-/// which is visible, rather than another library's, which is wrong.
-fn platform(container: &Container) -> r2abi::Platform {
-    use r2abi::Platform;
+/// Mach-O is libSystem's and a PE Microsoft's runtime. An ELF is the one library its evidence
+/// names (`PT_INTERP`, the start files' notes), or glibc where nothing names one but `DT_NEEDED`
+/// names `libc.so.6` with a `GLIBC_*` version need on it (a shared object has no `PT_INTERP`).
+/// Two libraries named, or an OS ABI not Linux's, is `Unknown`: only portable rows apply.
+fn c_library(container: &Container) -> r2abi::CLibrary {
+    use r2abi::CLibrary;
     match container.format {
-        Format::MachO => return Platform::Darwin,
-        Format::Pe => return Platform::Windows,
+        Format::MachO => return CLibrary::LibSystem,
+        Format::Pe => return CLibrary::Ucrt,
         Format::Elf => {}
-        _ => return Platform::Unknown,
+        _ => return CLibrary::Unknown,
     }
     let mut named = std::collections::BTreeSet::new();
     for evidence in &container.platform {
@@ -620,15 +618,28 @@ fn platform(container: &Container) -> r2abi::Platform {
             }
             // GNU/Linux; zero, which states nothing, is never stated.
             PlatformEvidence::OsAbi(ELFOSABI_GNU) => {}
-            PlatformEvidence::OsAbi(_) => return Platform::Unknown,
+            PlatformEvidence::OsAbi(_) => return CLibrary::Unknown,
         }
     }
     let mut named = named.into_iter();
     match (named.next(), named.next()) {
-        (Some(Libc::Glibc), None) => Platform::Linux,
-        (Some(Libc::Bionic), None) => Platform::Android,
-        _ => Platform::Unknown,
+        (Some(Libc::Glibc), None) => CLibrary::Glibc,
+        (Some(Libc::Bionic), None) => CLibrary::Bionic,
+        (Some(Libc::Musl), None) => CLibrary::Musl,
+        (None, _) if needs_glibc(container) => CLibrary::Glibc,
+        _ => CLibrary::Unknown,
     }
+}
+
+/// `DT_NEEDED libc.so.6` and a `.gnu.version_r` need of a `GLIBC_*` node on it: musl and bionic
+/// ship no such soname or node.
+fn needs_glibc(container: &Container) -> bool {
+    const SONAME: &str = "libc.so.6";
+    let needed = container.libraries.iter().any(|library| library == SONAME);
+    let versioned = container.version_needs.iter().any(|need| {
+        &*need.library == SONAME && need.versions.iter().any(|v| v.starts_with("GLIBC_"))
+    });
+    needed && versioned
 }
 
 /// Which kernel a program's system calls go to, as its container states it.
@@ -637,21 +648,21 @@ fn platform(container: &Container) -> r2abi::Platform {
 /// still traps into Linux. Mach-O runs on Darwin's. An ELF runs on Linux
 /// unless its `EI_OSABI` names another system; one that states nothing is
 /// Linux's convention, which is what every Linux toolchain writes.
-pub(super) fn kernel(container: &Container) -> r2abi::Platform {
-    use r2abi::Platform;
+pub(super) fn kernel(container: &Container) -> r2abi::Kernel {
+    use r2abi::Kernel;
     match container.format {
-        Format::MachO => Platform::Darwin,
-        Format::Pe => Platform::Windows,
+        Format::MachO => Kernel::Darwin,
+        Format::Pe => Kernel::Windows,
         Format::Elf => {
             let other = container.platform.iter().any(
                 |evidence| matches!(evidence, PlatformEvidence::OsAbi(abi) if *abi != ELFOSABI_GNU),
             );
             match other {
-                true => Platform::Unknown,
-                false => Platform::Linux,
+                true => Kernel::Unknown,
+                false => Kernel::Linux,
             }
         }
-        _ => Platform::Unknown,
+        _ => Kernel::Unknown,
     }
 }
 

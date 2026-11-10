@@ -1,5 +1,5 @@
 //! What a platform's ABI and its C library state, read natively: library
-//! prototypes, system calls, types and the cited ABI rows (`platform`). Where a
+//! rows by linked name (`library`), system calls, types and the cited ABI rows (`platform`). Where a
 //! call's arguments arrive is the compiler specification's (`r2sleigh_lift::profile`).
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
@@ -7,6 +7,7 @@ pub mod convention;
 pub mod data_model;
 pub mod declarations;
 pub mod frames;
+pub mod library;
 pub mod platform;
 pub mod prototypes;
 pub mod runtime;
@@ -21,13 +22,14 @@ pub use convention::{
 };
 pub use data_model::CDataModel;
 pub use declarations::{DataObject, Declarations};
+pub use library::{
+    CLibrary, FormatKind, Kernel, LibraryId, LibraryRow, LibraryRows, PrototypeId, Tail,
+};
 pub use platform::{
-    EntryStack, PlatformRegister, RegisterDuty, RegisterSaveArea, SaveAreaAnchor, StackGuard,
-    architecture_registers, platform_registers, stack_guard,
+    EntryStack, GuardRow, PlatformRegister, RegisterDuty, RegisterSaveArea, SaveAreaAnchor,
+    StackGuard, architecture_registers, guard_row, platform_registers,
 };
-pub use prototypes::{
-    Arrival, FrameBase, Local, Parameter, Platform, Prototype, Prototypes, Spelled,
-};
+pub use prototypes::{Arrival, FrameBase, Local, Parameter, Prototype, Spelled};
 pub use syscalls::Syscalls;
 pub use types::{
     Keyword, Member, Qualifiers, Record, RecordKind, Refusal, Scalar, ScalarKind, Signature, Type,

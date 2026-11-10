@@ -15,7 +15,11 @@ is a merge that keeps them rather than a copy that drops them.
   `_Unwind_Resume`, `std::terminate` and libstdc++'s `std::__throw_*`. None
   of it is radare2's, so a refresh leaves it alone; each block cites its
   source.
+- `types-posix.sdb.txt`: ISO C17, POSIX and 4.4BSD rows that carry the header they are read
+  from, portable like `types.sdb.txt`, each with its tail stated (see "Cited rows").
 - `types-linux.sdb.txt`: what the GNU C library declares for itself.
+- `types-glibc.sdb.txt`: the GNU C library's rows that carry their header, read with
+  `types-linux.sdb.txt` and on the same terms as `types-posix.sdb.txt`.
 - `types-android.sdb.txt`: what bionic, Android's C library, declares for
   itself.
 - `types-darwin.sdb.txt`: what Darwin's libSystem declares for itself.
@@ -32,7 +36,7 @@ radare2 is LGPL-3.0, as is this tree.
 ## Keys are C identifiers
 
 A record is keyed by the C identifier a program links against: `__memcpy_chk`,
-`__libc_start_main`, `_Exit`. `Prototypes::get` is an exact lookup. Nothing is
+`__libc_start_main`, `_Exit`. `LibraryRows::row` is an exact lookup. Nothing is
 stripped to make a name match, because a name that differs names another
 function: `__memcpy_chk` takes one argument more than `memcpy`, and a
 program's own `_strlen` is not the library's `strlen`.
@@ -131,10 +135,47 @@ Where radare2 scopes differently:
   underscores dropped, with arities that are not `<android/log.h>`'s) and
   `xalloc_die` (gnulib's, not bionic's).
 
+## Cited rows
+
+Every row of `types-posix.sdb.txt` and `types-glibc.sdb.txt` names the header it is read from on
+a `func.<name>.include=` line and sits under a comment naming its source (`r2abi::library::SOURCES`:
+ISO C17, POSIX.1-2017, POSIX.1-2024, 4.4BSD, glibc, LSB 5.0 or GCC). A row that spells `...`
+states its tail on `func.<name>.tail=`: `variadic`, `format(printf|scanf|wprintf|wscanf,<index>)`
+or `va_list(<index>)`, the index counting fixed parameters from zero. A row with no `...` and no
+`.tail=` states a fixed prototype (`Tail::None`). Every row of the other tables is
+`Tail::Unstated`: its fixed list is radare2's and only a lower bound of what a call reads
+(doc/adr-call-boundary.md, "Lower bounds and upper bounds"). `tests/cited_rows.rs` fails a cited
+row without its header, source or tail, a tail its prototype does not have, a `.tail=` in an
+uncited table, and a row declared in two tables.
+
+The printf and scanf families, `err`, `syslog`, `error` and the fortified `__*printf_chk` moved
+here from radare2's tables to state `Tail::Format`, which replaced the engine's guess of a format
+from a parameter called `format`.
+
+A pointer's own qualifiers (`restrict`, a `const` after the star) are not part of a
+prototype's type, so the rows leave them out.
+
+## Handles
+
+`FILE` and `DIR` are typedefs of tags the C library's header names. `spelling.rs` states the tag
+per library: glibc's `struct _IO_FILE` (`bits/types/FILE.h`) and `struct __dirstream`
+(`dirent.h`), libSystem's `struct __sFILE` (`_stdio.h`). libSystem's `DIR` is a typedef of an
+anonymous struct and bionic's headers were not read, so those state none and the name stays an
+opaque typedef.
+
+## Binding
+
+A row applies only to an import, never to a body by its name (doc/adr-call-boundary.md, Refusals
+"A library row"). r2engine's `imports::Imports` binds a versioned ELF import to the library its
+version names (`GLIBC_*` to glibc, bionic's `LIBC*`, `GLIBCXX_*`, `CXXABI_*` and `GCC_*` to the
+C++ runtime rows) and an unversioned one only where `DT_NEEDED` names exactly one C library.
+
 ## Other local edits
 
-- `types-linux.sdb.txt` declares `__libc_start_main`, the name glibc exports,
-  beside radare2's `libc_start_main`.
+- `fopen`, `fdopen`, `freopen`, `popen`, `tmpfile` and glibc's `fopen64` return `FILE *`, where
+  radare2 spells their result `file*`, a name no header has.
+
+- `types-linux.sdb.txt` declares `__libc_start_main`, the name glibc exports.
 - `types-darwin.sdb.txt` declares `__bzero`, which radare2 does not.
   libsystem_platform exports `___bzero` at the address of
   `__platform_bzero`, the function libsystem_c re-exports as `_bzero`

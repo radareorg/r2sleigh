@@ -1,0 +1,858 @@
+# Rows that cite the header they are read from. Portable: ISO C17 and POSIX.1-2017 declare
+# them, and glibc, bionic and libSystem declare them alike. None of it is radare2's, so a
+# refresh leaves it alone; see README.md. Every row carries `.include=` and sits under a
+# comment naming its source, which `tests/cited_rows.rs` requires. A pointer's own qualifiers
+# (`restrict`, `const` after the star) are not part of a prototype's type and are left out.
+
+# stdio.h: POSIX.1-2017 (getline, getdelim). A stream is `FILE *`; the platform's handle row
+# (spelling.rs) says which tag the typedef names, and a platform that states none reads it as
+# `void *`.
+getline=func
+func.getline.args=3
+func.getline.arg.0=char **,lineptr
+func.getline.arg.1=size_t *,n
+func.getline.arg.2=FILE *,stream
+func.getline.ret=ssize_t
+func.getline.include=stdio.h
+
+getdelim=func
+func.getdelim.args=4
+func.getdelim.arg.0=char **,lineptr
+func.getdelim.arg.1=size_t *,n
+func.getdelim.arg.2=int,delimiter
+func.getdelim.arg.3=FILE *,stream
+func.getdelim.ret=ssize_t
+func.getdelim.include=stdio.h
+
+# dirent.h: POSIX.1-2017. DIR is the opaque directory stream.
+opendir=func
+func.opendir.args=1
+func.opendir.arg.0=const char *,dirname
+func.opendir.ret=DIR *
+func.opendir.include=dirent.h
+
+fdopendir=func
+func.fdopendir.args=1
+func.fdopendir.arg.0=int,fd
+func.fdopendir.ret=DIR *
+func.fdopendir.include=dirent.h
+
+readdir=func
+func.readdir.args=1
+func.readdir.arg.0=DIR *,dirp
+func.readdir.ret=struct dirent *
+func.readdir.include=dirent.h
+
+closedir=func
+func.closedir.args=1
+func.closedir.arg.0=DIR *,dirp
+func.closedir.ret=int
+func.closedir.include=dirent.h
+
+dirfd=func
+func.dirfd.args=1
+func.dirfd.arg.0=DIR *,dirp
+func.dirfd.ret=int
+func.dirfd.include=dirent.h
+
+# unistd.h: POSIX.1-2017. `char *const argv[]` is spelled `char **`: a pointer's own const is no
+# part of a prototype's type here.
+chdir=func
+func.chdir.args=1
+func.chdir.arg.0=const char *,path
+func.chdir.ret=int
+func.chdir.include=unistd.h
+
+chown=func
+func.chown.args=3
+func.chown.arg.0=const char *,path
+func.chown.arg.1=uid_t,owner
+func.chown.arg.2=gid_t,group
+func.chown.ret=int
+func.chown.include=unistd.h
+
+execv=func
+func.execv.args=2
+func.execv.arg.0=const char *,path
+func.execv.arg.1=char **,argv
+func.execv.ret=int
+func.execv.include=unistd.h
+
+execve=func
+func.execve.args=3
+func.execve.arg.0=const char *,path
+func.execve.arg.1=char **,argv
+func.execve.arg.2=char **,envp
+func.execve.ret=int
+func.execve.include=unistd.h
+
+execvp=func
+func.execvp.args=2
+func.execvp.arg.0=const char *,file
+func.execvp.arg.1=char **,argv
+func.execvp.ret=int
+func.execvp.include=unistd.h
+
+getcwd=func
+func.getcwd.args=2
+func.getcwd.arg.0=char *,buf
+func.getcwd.arg.1=size_t,size
+func.getcwd.ret=char *
+func.getcwd.include=unistd.h
+
+gethostname=func
+func.gethostname.args=2
+func.gethostname.arg.0=char *,name
+func.gethostname.arg.1=size_t,namelen
+func.gethostname.ret=int
+func.gethostname.include=unistd.h
+
+getgroups=func
+func.getgroups.args=2
+func.getgroups.arg.0=int,gidsetsize
+func.getgroups.arg.1=gid_t *,grouplist
+func.getgroups.ret=int
+func.getgroups.include=unistd.h
+
+pathconf=func
+func.pathconf.args=2
+func.pathconf.arg.0=const char *,path
+func.pathconf.arg.1=int,name
+func.pathconf.ret=long
+func.pathconf.include=unistd.h
+
+ttyname=func
+func.ttyname.args=1
+func.ttyname.arg.0=int,fildes
+func.ttyname.ret=char *
+func.ttyname.include=unistd.h
+
+unlinkat=func
+func.unlinkat.args=3
+func.unlinkat.arg.0=int,fd
+func.unlinkat.arg.1=const char *,path
+func.unlinkat.arg.2=int,flag
+func.unlinkat.ret=int
+func.unlinkat.include=unistd.h
+
+readlinkat=func
+func.readlinkat.args=4
+func.readlinkat.arg.0=int,fd
+func.readlinkat.arg.1=const char *,path
+func.readlinkat.arg.2=char *,buf
+func.readlinkat.arg.3=size_t,bufsize
+func.readlinkat.ret=ssize_t
+func.readlinkat.include=unistd.h
+
+confstr=func
+func.confstr.args=3
+func.confstr.arg.0=int,name
+func.confstr.arg.1=char *,buf
+func.confstr.arg.2=size_t,len
+func.confstr.ret=size_t
+func.confstr.include=unistd.h
+
+pipe=func
+func.pipe.args=1
+func.pipe.arg.0=int *,fildes
+func.pipe.ret=int
+func.pipe.include=unistd.h
+
+faccessat=func
+func.faccessat.args=4
+func.faccessat.arg.0=int,fd
+func.faccessat.arg.1=const char *,path
+func.faccessat.arg.2=int,amode
+func.faccessat.arg.3=int,flag
+func.faccessat.ret=int
+func.faccessat.include=unistd.h
+
+# sys/stat.h and fcntl.h: POSIX.1-2017. `fcntl`'s third argument depends on `cmd`, so it is
+# the variadic tail.
+mkdir=func
+func.mkdir.args=2
+func.mkdir.arg.0=const char *,path
+func.mkdir.arg.1=mode_t,mode
+func.mkdir.ret=int
+func.mkdir.include=sys/stat.h
+
+fstatat=func
+func.fstatat.args=4
+func.fstatat.arg.0=int,fd
+func.fstatat.arg.1=const char *,path
+func.fstatat.arg.2=struct stat *,buf
+func.fstatat.arg.3=int,flag
+func.fstatat.ret=int
+func.fstatat.include=sys/stat.h
+
+futimens=func
+func.futimens.args=2
+func.futimens.arg.0=int,fd
+func.futimens.arg.1=const struct timespec *,times
+func.futimens.ret=int
+func.futimens.include=sys/stat.h
+
+utimensat=func
+func.utimensat.args=4
+func.utimensat.arg.0=int,fd
+func.utimensat.arg.1=const char *,path
+func.utimensat.arg.2=const struct timespec *,times
+func.utimensat.arg.3=int,flag
+func.utimensat.ret=int
+func.utimensat.include=sys/stat.h
+
+fcntl=func
+func.fcntl.args=3
+func.fcntl.arg.0=int,fildes
+func.fcntl.arg.1=int,cmd
+func.fcntl.arg.2=,...
+func.fcntl.ret=int
+func.fcntl.include=fcntl.h
+func.fcntl.tail=variadic
+
+# regex.h: POSIX.1-2017. regex_t and regmatch_t are the header's typedefs; the table lays out
+# neither.
+regcomp=func
+func.regcomp.args=3
+func.regcomp.arg.0=regex_t *,preg
+func.regcomp.arg.1=const char *,pattern
+func.regcomp.arg.2=int,cflags
+func.regcomp.ret=int
+func.regcomp.include=regex.h
+
+regexec=func
+func.regexec.args=5
+func.regexec.arg.0=const regex_t *,preg
+func.regexec.arg.1=const char *,string
+func.regexec.arg.2=size_t,nmatch
+func.regexec.arg.3=regmatch_t *,pmatch
+func.regexec.arg.4=int,eflags
+func.regexec.ret=int
+func.regexec.include=regex.h
+
+regfree=func
+func.regfree.args=1
+func.regfree.arg.0=regex_t *,preg
+func.regfree.ret=void
+func.regfree.include=regex.h
+
+# string.h and stdlib.h: POSIX.1-2017 (strnlen, strtok_r, strsignal, unsetenv, mkdtemp).
+strnlen=func
+func.strnlen.args=2
+func.strnlen.arg.0=const char *,s
+func.strnlen.arg.1=size_t,maxlen
+func.strnlen.ret=size_t
+func.strnlen.include=string.h
+
+strtok_r=func
+func.strtok_r.args=3
+func.strtok_r.arg.0=char *,s
+func.strtok_r.arg.1=const char *,sep
+func.strtok_r.arg.2=char **,lasts
+func.strtok_r.ret=char *
+func.strtok_r.include=string.h
+
+strsignal=func
+func.strsignal.args=1
+func.strsignal.arg.0=int,signum
+func.strsignal.ret=char *
+func.strsignal.include=string.h
+
+unsetenv=func
+func.unsetenv.args=1
+func.unsetenv.arg.0=const char *,name
+func.unsetenv.ret=int
+func.unsetenv.include=stdlib.h
+
+mkdtemp=func
+func.mkdtemp.args=1
+func.mkdtemp.arg.0=char *,template
+func.mkdtemp.ret=char *
+func.mkdtemp.include=stdlib.h
+
+# time.h, sys/time.h, sys/resource.h and sys/utsname.h: POSIX.1-2017. The `int` selectors
+# (`which`, `resource`, `who`) are glibc's enumerations at the same width.
+gmtime_r=func
+func.gmtime_r.args=2
+func.gmtime_r.arg.0=const time_t *,timer
+func.gmtime_r.arg.1=struct tm *,result
+func.gmtime_r.ret=struct tm *
+func.gmtime_r.include=time.h
+
+localtime_r=func
+func.localtime_r.args=2
+func.localtime_r.arg.0=const time_t *,timer
+func.localtime_r.arg.1=struct tm *,result
+func.localtime_r.ret=struct tm *
+func.localtime_r.include=time.h
+
+gettimeofday=func
+func.gettimeofday.args=2
+func.gettimeofday.arg.0=struct timeval *,tp
+func.gettimeofday.arg.1=void *,tzp
+func.gettimeofday.ret=int
+func.gettimeofday.include=sys/time.h
+
+setitimer=func
+func.setitimer.args=3
+func.setitimer.arg.0=int,which
+func.setitimer.arg.1=const struct itimerval *,value
+func.setitimer.arg.2=struct itimerval *,ovalue
+func.setitimer.ret=int
+func.setitimer.include=sys/time.h
+
+getrlimit=func
+func.getrlimit.args=2
+func.getrlimit.arg.0=int,resource
+func.getrlimit.arg.1=struct rlimit *,rlp
+func.getrlimit.ret=int
+func.getrlimit.include=sys/resource.h
+
+setrlimit=func
+func.setrlimit.args=2
+func.setrlimit.arg.0=int,resource
+func.setrlimit.arg.1=const struct rlimit *,rlp
+func.setrlimit.ret=int
+func.setrlimit.include=sys/resource.h
+
+getrusage=func
+func.getrusage.args=2
+func.getrusage.arg.0=int,who
+func.getrusage.arg.1=struct rusage *,r_usage
+func.getrusage.ret=int
+func.getrusage.include=sys/resource.h
+
+uname=func
+func.uname.args=1
+func.uname.arg.0=struct utsname *,name
+func.uname.ret=int
+func.uname.include=sys/utsname.h
+
+# signal.h: POSIX.1-2017. sigset_t and stack_t are the header's types; the table lays out
+# neither.
+sigemptyset=func
+func.sigemptyset.args=1
+func.sigemptyset.arg.0=sigset_t *,set
+func.sigemptyset.ret=int
+func.sigemptyset.include=signal.h
+
+sigfillset=func
+func.sigfillset.args=1
+func.sigfillset.arg.0=sigset_t *,set
+func.sigfillset.ret=int
+func.sigfillset.include=signal.h
+
+sigaddset=func
+func.sigaddset.args=2
+func.sigaddset.arg.0=sigset_t *,set
+func.sigaddset.arg.1=int,signo
+func.sigaddset.ret=int
+func.sigaddset.include=signal.h
+
+sigdelset=func
+func.sigdelset.args=2
+func.sigdelset.arg.0=sigset_t *,set
+func.sigdelset.arg.1=int,signo
+func.sigdelset.ret=int
+func.sigdelset.include=signal.h
+
+sigismember=func
+func.sigismember.args=2
+func.sigismember.arg.0=const sigset_t *,set
+func.sigismember.arg.1=int,signo
+func.sigismember.ret=int
+func.sigismember.include=signal.h
+
+sigaltstack=func
+func.sigaltstack.args=2
+func.sigaltstack.arg.0=const stack_t *,ss
+func.sigaltstack.arg.1=stack_t *,oss
+func.sigaltstack.ret=int
+func.sigaltstack.include=signal.h
+
+# poll.h, sys/select.h, fnmatch.h, netdb.h, sys/socket.h and termios.h: POSIX.1-2017.
+poll=func
+func.poll.args=3
+func.poll.arg.0=struct pollfd *,fds
+func.poll.arg.1=nfds_t,nfds
+func.poll.arg.2=int,timeout
+func.poll.ret=int
+func.poll.include=poll.h
+
+pselect=func
+func.pselect.args=6
+func.pselect.arg.0=int,nfds
+func.pselect.arg.1=fd_set *,readfds
+func.pselect.arg.2=fd_set *,writefds
+func.pselect.arg.3=fd_set *,errorfds
+func.pselect.arg.4=const struct timespec *,timeout
+func.pselect.arg.5=const sigset_t *,sigmask
+func.pselect.ret=int
+func.pselect.include=sys/select.h
+
+fnmatch=func
+func.fnmatch.args=3
+func.fnmatch.arg.0=const char *,pattern
+func.fnmatch.arg.1=const char *,string
+func.fnmatch.arg.2=int,flags
+func.fnmatch.ret=int
+func.fnmatch.include=fnmatch.h
+
+getaddrinfo=func
+func.getaddrinfo.args=4
+func.getaddrinfo.arg.0=const char *,nodename
+func.getaddrinfo.arg.1=const char *,servname
+func.getaddrinfo.arg.2=const struct addrinfo *,hints
+func.getaddrinfo.arg.3=struct addrinfo **,res
+func.getaddrinfo.ret=int
+func.getaddrinfo.include=netdb.h
+
+freeaddrinfo=func
+func.freeaddrinfo.args=1
+func.freeaddrinfo.arg.0=struct addrinfo *,ai
+func.freeaddrinfo.ret=void
+func.freeaddrinfo.include=netdb.h
+
+gai_strerror=func
+func.gai_strerror.args=1
+func.gai_strerror.arg.0=int,ecode
+func.gai_strerror.ret=const char *
+func.gai_strerror.include=netdb.h
+
+getpeername=func
+func.getpeername.args=3
+func.getpeername.arg.0=int,socket
+func.getpeername.arg.1=struct sockaddr *,address
+func.getpeername.arg.2=socklen_t *,address_len
+func.getpeername.ret=int
+func.getpeername.include=sys/socket.h
+
+tcgetattr=func
+func.tcgetattr.args=2
+func.tcgetattr.arg.0=int,fildes
+func.tcgetattr.arg.1=struct termios *,termios_p
+func.tcgetattr.ret=int
+func.tcgetattr.include=termios.h
+
+tcsetattr=func
+func.tcsetattr.args=3
+func.tcsetattr.arg.0=int,fildes
+func.tcsetattr.arg.1=int,optional_actions
+func.tcsetattr.arg.2=const struct termios *,termios_p
+func.tcsetattr.ret=int
+func.tcsetattr.include=termios.h
+
+# pwd.h, grp.h and wchar.h: POSIX.1-2017. The user and group records are returned by pointer
+# to storage the library owns.
+getpwnam=func
+func.getpwnam.args=1
+func.getpwnam.arg.0=const char *,name
+func.getpwnam.ret=struct passwd *
+func.getpwnam.include=pwd.h
+
+getpwuid=func
+func.getpwuid.args=1
+func.getpwuid.arg.0=uid_t,uid
+func.getpwuid.ret=struct passwd *
+func.getpwuid.include=pwd.h
+
+getpwent=func
+func.getpwent.args=0
+func.getpwent.ret=struct passwd *
+func.getpwent.include=pwd.h
+
+getgrnam=func
+func.getgrnam.args=1
+func.getgrnam.arg.0=const char *,name
+func.getgrnam.ret=struct group *
+func.getgrnam.include=grp.h
+
+getgrgid=func
+func.getgrgid.args=1
+func.getgrgid.arg.0=gid_t,gid
+func.getgrgid.ret=struct group *
+func.getgrgid.include=grp.h
+
+getgrent=func
+func.getgrent.args=0
+func.getgrent.ret=struct group *
+func.getgrent.include=grp.h
+
+wcswidth=func
+func.wcswidth.args=2
+func.wcswidth.arg.0=const wchar_t *,pwcs
+func.wcswidth.arg.1=size_t,n
+func.wcswidth.ret=int
+func.wcswidth.include=wchar.h
+
+wcsdup=func
+func.wcsdup.args=1
+func.wcsdup.arg.0=const wchar_t *,s
+func.wcsdup.ret=wchar_t *
+func.wcsdup.include=wchar.h
+
+mbsnrtowcs=func
+func.mbsnrtowcs.args=5
+func.mbsnrtowcs.arg.0=wchar_t *,dst
+func.mbsnrtowcs.arg.1=const char **,src
+func.mbsnrtowcs.arg.2=size_t,nmc
+func.mbsnrtowcs.arg.3=size_t,len
+func.mbsnrtowcs.arg.4=mbstate_t *,ps
+func.mbsnrtowcs.ret=size_t
+func.mbsnrtowcs.include=wchar.h
+
+# stdio.h: ISO C17 7.21.6. A format's conversions consume the arguments after it in order
+# (7.21.6.1p2 for fprintf, 7.21.6.2 for fscanf); printf, sprintf and snprintf are fprintf's.
+printf=func
+func.printf.args=2
+func.printf.arg.0=const char *,format
+func.printf.arg.1=,...
+func.printf.ret=int
+func.printf.include=stdio.h
+func.printf.tail=format(printf,0)
+
+fprintf=func
+func.fprintf.args=3
+func.fprintf.arg.0=FILE *,stream
+func.fprintf.arg.1=const char *,format
+func.fprintf.arg.2=,...
+func.fprintf.ret=int
+func.fprintf.include=stdio.h
+func.fprintf.tail=format(printf,1)
+
+sprintf=func
+func.sprintf.args=3
+func.sprintf.arg.0=char *,s
+func.sprintf.arg.1=const char *,format
+func.sprintf.arg.2=,...
+func.sprintf.ret=int
+func.sprintf.include=stdio.h
+func.sprintf.tail=format(printf,1)
+
+snprintf=func
+func.snprintf.args=4
+func.snprintf.arg.0=char *,s
+func.snprintf.arg.1=size_t,size
+func.snprintf.arg.2=const char *,format
+func.snprintf.arg.3=,...
+func.snprintf.ret=int
+func.snprintf.include=stdio.h
+func.snprintf.tail=format(printf,2)
+
+scanf=func
+func.scanf.args=2
+func.scanf.arg.0=const char *,format
+func.scanf.arg.1=,...
+func.scanf.ret=int
+func.scanf.include=stdio.h
+func.scanf.tail=format(scanf,0)
+
+fscanf=func
+func.fscanf.args=3
+func.fscanf.arg.0=FILE *,stream
+func.fscanf.arg.1=const char *,format
+func.fscanf.arg.2=,...
+func.fscanf.ret=int
+func.fscanf.include=stdio.h
+func.fscanf.tail=format(scanf,1)
+
+sscanf=func
+func.sscanf.args=3
+func.sscanf.arg.0=const char *,s
+func.sscanf.arg.1=const char *,format
+func.sscanf.arg.2=,...
+func.sscanf.ret=int
+func.sscanf.include=stdio.h
+func.sscanf.tail=format(scanf,1)
+
+# stdio.h: POSIX.1-2017 dprintf, fprintf to a file descriptor.
+dprintf=func
+func.dprintf.args=3
+func.dprintf.arg.0=int,fd
+func.dprintf.arg.1=const char *,format
+func.dprintf.arg.2=,...
+func.dprintf.ret=int
+func.dprintf.include=stdio.h
+func.dprintf.tail=format(printf,1)
+
+# stdio.h: POSIX.1-2024 asprintf, sprintf into storage it allocates.
+asprintf=func
+func.asprintf.args=3
+func.asprintf.arg.0=char **,ptr
+func.asprintf.arg.1=const char *,format
+func.asprintf.arg.2=,...
+func.asprintf.ret=int
+func.asprintf.include=stdio.h
+func.asprintf.tail=format(printf,1)
+
+# syslog.h: POSIX.1-2017 (XSI). The message is the format's conversions, as printf's.
+syslog=func
+func.syslog.args=3
+func.syslog.arg.0=int,priority
+func.syslog.arg.1=const char *,format
+func.syslog.arg.2=,...
+func.syslog.ret=void
+func.syslog.include=syslog.h
+func.syslog.tail=format(printf,1)
+
+# err.h: 4.4BSD. glibc, bionic and libSystem declare them alike, each format(printf). err and
+# errx call exit.
+err=func
+func.err.args=3
+func.err.arg.0=int,eval
+func.err.arg.1=const char *,fmt
+func.err.arg.2=,...
+func.err.noreturn=true
+func.err.ret=void
+func.err.include=err.h
+func.err.tail=format(printf,1)
+
+errx=func
+func.errx.args=3
+func.errx.arg.0=int,eval
+func.errx.arg.1=const char *,fmt
+func.errx.arg.2=,...
+func.errx.noreturn=true
+func.errx.ret=void
+func.errx.include=err.h
+func.errx.tail=format(printf,1)
+
+warn=func
+func.warn.args=2
+func.warn.arg.0=const char *,fmt
+func.warn.arg.1=,...
+func.warn.ret=void
+func.warn.include=err.h
+func.warn.tail=format(printf,0)
+
+warnx=func
+func.warnx.args=2
+func.warnx.arg.0=const char *,fmt
+func.warnx.arg.1=,...
+func.warnx.ret=void
+func.warnx.include=err.h
+func.warnx.tail=format(printf,0)
+
+# wchar.h: ISO C17 7.29.2. A wide format consumes the arguments as the narrow one does; no
+# format reader here reads a wide literal.
+fwprintf=func
+func.fwprintf.args=3
+func.fwprintf.arg.0=FILE *,stream
+func.fwprintf.arg.1=const wchar_t *,format
+func.fwprintf.arg.2=,...
+func.fwprintf.ret=int
+func.fwprintf.include=wchar.h
+func.fwprintf.tail=format(wprintf,1)
+
+swprintf=func
+func.swprintf.args=4
+func.swprintf.arg.0=wchar_t *,s
+func.swprintf.arg.1=size_t,n
+func.swprintf.arg.2=const wchar_t *,format
+func.swprintf.arg.3=,...
+func.swprintf.ret=int
+func.swprintf.include=wchar.h
+func.swprintf.tail=format(wprintf,2)
+
+wprintf=func
+func.wprintf.args=2
+func.wprintf.arg.0=const wchar_t *,format
+func.wprintf.arg.1=,...
+func.wprintf.ret=int
+func.wprintf.include=wchar.h
+func.wprintf.tail=format(wprintf,0)
+
+wscanf=func
+func.wscanf.args=2
+func.wscanf.arg.0=const wchar_t *,format
+func.wscanf.arg.1=,...
+func.wscanf.ret=int
+func.wscanf.include=wchar.h
+func.wscanf.tail=format(wscanf,0)
+
+# stdio.h: GCC builtins.def checks __sprintf_chk's format as format(printf, 4, 5) and
+# __snprintf_chk's as format(printf, 5, 6); glibc, bionic and libSystem declare them alike.
+__sprintf_chk=func
+func.__sprintf_chk.args=5
+func.__sprintf_chk.arg.0=char *,s
+func.__sprintf_chk.arg.1=int,flag
+func.__sprintf_chk.arg.2=size_t,slen
+func.__sprintf_chk.arg.3=const char *,format
+func.__sprintf_chk.arg.4=,...
+func.__sprintf_chk.ret=int
+func.__sprintf_chk.include=stdio.h
+func.__sprintf_chk.tail=format(printf,3)
+
+__snprintf_chk=func
+func.__snprintf_chk.args=6
+func.__snprintf_chk.arg.0=char *,s
+func.__snprintf_chk.arg.1=size_t,maxlen
+func.__snprintf_chk.arg.2=int,flag
+func.__snprintf_chk.arg.3=size_t,slen
+func.__snprintf_chk.arg.4=const char *,format
+func.__snprintf_chk.arg.5=,...
+func.__snprintf_chk.ret=int
+func.__snprintf_chk.include=stdio.h
+func.__snprintf_chk.tail=format(printf,4)
+
+# stdio.h: ISO C17 7.21.6.8 to 7.21.6.14. Each takes the arguments its format consumes through a
+# va_list instead of `...`: vprintf, vfprintf, vsprintf and vsnprintf, vscanf, vfscanf and vsscanf.
+vprintf=func
+func.vprintf.args=2
+func.vprintf.arg.0=const char *,format
+func.vprintf.arg.1=va_list,ap
+func.vprintf.ret=int
+func.vprintf.include=stdio.h
+func.vprintf.tail=va_list(1,printf,0)
+
+vfprintf=func
+func.vfprintf.args=3
+func.vfprintf.arg.0=FILE *,stream
+func.vfprintf.arg.1=const char *,format
+func.vfprintf.arg.2=va_list,ap
+func.vfprintf.ret=int
+func.vfprintf.include=stdio.h
+func.vfprintf.tail=va_list(2,printf,1)
+
+vsprintf=func
+func.vsprintf.args=3
+func.vsprintf.arg.0=char *,s
+func.vsprintf.arg.1=const char *,format
+func.vsprintf.arg.2=va_list,arg
+func.vsprintf.ret=int
+func.vsprintf.include=stdio.h
+func.vsprintf.tail=va_list(2,printf,1)
+
+vsnprintf=func
+func.vsnprintf.args=4
+func.vsnprintf.arg.0=char *,s
+func.vsnprintf.arg.1=size_t,size
+func.vsnprintf.arg.2=const char *,format
+func.vsnprintf.arg.3=va_list,arg
+func.vsnprintf.ret=int
+func.vsnprintf.include=stdio.h
+func.vsnprintf.tail=va_list(3,printf,2)
+
+vscanf=func
+func.vscanf.args=2
+func.vscanf.arg.0=const char *,format
+func.vscanf.arg.1=va_list,ap
+func.vscanf.ret=int
+func.vscanf.include=stdio.h
+func.vscanf.tail=va_list(1,scanf,0)
+
+vfscanf=func
+func.vfscanf.args=3
+func.vfscanf.arg.0=FILE *,stream
+func.vfscanf.arg.1=const char *,format
+func.vfscanf.arg.2=va_list,ap
+func.vfscanf.ret=int
+func.vfscanf.include=stdio.h
+func.vfscanf.tail=va_list(2,scanf,1)
+
+vsscanf=func
+func.vsscanf.args=3
+func.vsscanf.arg.0=const char *,s
+func.vsscanf.arg.1=const char *,format
+func.vsscanf.arg.2=va_list,arg
+func.vsscanf.ret=int
+func.vsscanf.include=stdio.h
+func.vsscanf.tail=va_list(2,scanf,1)
+
+# stdio.h: POSIX.1-2017 vdprintf and POSIX.1-2024 vasprintf, dprintf and asprintf over a va_list.
+vdprintf=func
+func.vdprintf.args=3
+func.vdprintf.arg.0=int,fd
+func.vdprintf.arg.1=const char *,format
+func.vdprintf.arg.2=va_list,ap
+func.vdprintf.ret=int
+func.vdprintf.include=stdio.h
+func.vdprintf.tail=va_list(2,printf,1)
+
+vasprintf=func
+func.vasprintf.args=3
+func.vasprintf.arg.0=char **,ptr
+func.vasprintf.arg.1=const char *,format
+func.vasprintf.arg.2=va_list,ap
+func.vasprintf.ret=int
+func.vasprintf.include=stdio.h
+func.vasprintf.tail=va_list(2,printf,1)
+
+# wchar.h: ISO C17 7.29.2.5 to 7.29.2.10, the wide formats over a va_list.
+vfwprintf=func
+func.vfwprintf.args=3
+func.vfwprintf.arg.0=FILE *,stream
+func.vfwprintf.arg.1=const wchar_t *,format
+func.vfwprintf.arg.2=va_list,arg
+func.vfwprintf.ret=int
+func.vfwprintf.include=wchar.h
+func.vfwprintf.tail=va_list(2,wprintf,1)
+
+vfwscanf=func
+func.vfwscanf.args=3
+func.vfwscanf.arg.0=FILE *,stream
+func.vfwscanf.arg.1=const wchar_t *,format
+func.vfwscanf.arg.2=va_list,arg
+func.vfwscanf.ret=int
+func.vfwscanf.include=wchar.h
+func.vfwscanf.tail=va_list(2,wscanf,1)
+
+vswprintf=func
+func.vswprintf.args=4
+func.vswprintf.arg.0=wchar_t *,s
+func.vswprintf.arg.1=size_t,n
+func.vswprintf.arg.2=const wchar_t *,format
+func.vswprintf.arg.3=va_list,arg
+func.vswprintf.ret=int
+func.vswprintf.include=wchar.h
+func.vswprintf.tail=va_list(3,wprintf,2)
+
+vswscanf=func
+func.vswscanf.args=3
+func.vswscanf.arg.0=const wchar_t *,s
+func.vswscanf.arg.1=const wchar_t *,format
+func.vswscanf.arg.2=va_list,arg
+func.vswscanf.ret=int
+func.vswscanf.include=wchar.h
+func.vswscanf.tail=va_list(2,wscanf,1)
+
+vwprintf=func
+func.vwprintf.args=2
+func.vwprintf.arg.0=const wchar_t *,format
+func.vwprintf.arg.1=va_list,arg
+func.vwprintf.ret=int
+func.vwprintf.include=wchar.h
+func.vwprintf.tail=va_list(1,wprintf,0)
+
+vwscanf=func
+func.vwscanf.args=2
+func.vwscanf.arg.0=const wchar_t *,format
+func.vwscanf.arg.1=va_list,arg
+func.vwscanf.ret=int
+func.vwscanf.include=wchar.h
+func.vwscanf.tail=va_list(1,wscanf,0)
+
+# stdio.h: GCC builtins.def checks __vsprintf_chk's format as format(printf, 4, 0) and
+# __vsnprintf_chk's as format(printf, 5, 0); glibc, bionic and libSystem declare them alike.
+__vsprintf_chk=func
+func.__vsprintf_chk.args=5
+func.__vsprintf_chk.arg.0=char *,s
+func.__vsprintf_chk.arg.1=int,flag
+func.__vsprintf_chk.arg.2=size_t,slen
+func.__vsprintf_chk.arg.3=const char *,format
+func.__vsprintf_chk.arg.4=va_list,ap
+func.__vsprintf_chk.ret=int
+func.__vsprintf_chk.include=stdio.h
+func.__vsprintf_chk.tail=va_list(4,printf,3)
+
+__vsnprintf_chk=func
+func.__vsnprintf_chk.args=6
+func.__vsnprintf_chk.arg.0=char *,s
+func.__vsnprintf_chk.arg.1=size_t,maxlen
+func.__vsnprintf_chk.arg.2=int,flag
+func.__vsnprintf_chk.arg.3=size_t,slen
+func.__vsnprintf_chk.arg.4=const char *,format
+func.__vsnprintf_chk.arg.5=va_list,ap
+func.__vsnprintf_chk.ret=int
+func.__vsnprintf_chk.include=stdio.h
+func.__vsnprintf_chk.tail=va_list(5,printf,4)

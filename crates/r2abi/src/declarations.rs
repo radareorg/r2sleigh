@@ -7,7 +7,7 @@
 //! the address the body begins at, the objects by the address they occupy,
 //! and nothing is looked up by what it is called. The library table, which
 //! declares what an import is expected to be, is keyed by name and kept apart
-//! in [`crate::Prototypes`].
+//! in [`crate::LibraryRows`].
 
 use std::collections::{BTreeMap, BTreeSet};
 

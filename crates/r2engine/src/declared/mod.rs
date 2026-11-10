@@ -47,6 +47,8 @@ pub(crate) struct Declared<'a> {
     /// Which declaration it is: the binary's debug information, or a
     /// library's prototype found by a name.
     pub(crate) basis: r2source::Basis,
+    /// The library row an import binds; `None` for the binary's own declaration.
+    pub(crate) row: Option<&'a r2abi::LibraryRow>,
 }
 
 impl<'a> Declared<'a> {
@@ -63,15 +65,19 @@ impl<'a> Declared<'a> {
             prototype: declarations.function_at(entry)?,
             graph: declarations.graph(),
             basis: r2source::Basis::DebugInfo,
+            row: None,
         })
     }
 
-    /// What the library table declares of an import, by its name.
+    /// The row an import binds through its version or the one C library its container names.
     pub(crate) fn import(target: &NativeTarget<'a>, name: &str) -> Option<Self> {
+        let imports = target.imports;
+        let row = imports.row(name)?;
         Some(Self {
-            prototype: target.prototypes.get(name)?,
-            graph: target.prototypes.graph(),
+            prototype: imports.rows().prototype(row),
+            graph: imports.rows().graph(),
             basis: r2source::Basis::Declared,
+            row: Some(row),
         })
     }
 }
@@ -267,6 +273,41 @@ impl<'a> Placement<'a> {
         true
     }
 
+    /// The registers a call to this import may read: its fixed locations and, under any tail but
+    /// `None`, every other argument register of the convention. Apple arm64 passes a cited `...` on
+    /// the stack, so only the fixed registers are read there. O(locations).
+    pub(crate) fn reads(&self, declared: Declared<'_>) -> crate::imports::ImportReads {
+        let mut registers = self.placed_prefix(declared);
+        let placed_whole = registers.len() == declared.prototype.parameters.len();
+        let tail = declared.row.map_or(r2abi::Tail::Unstated, |row| row.tail);
+        let forms = &self.target.convention.forms;
+        let on_stack = forms.variadic_on_stack
+            && matches!(tail, r2abi::Tail::Variadic | r2abi::Tail::Format { .. });
+        if placed_whole && (tail == r2abi::Tail::None || on_stack) {
+            return crate::imports::ImportReads {
+                registers,
+                count_register: None,
+            };
+        }
+        let overlaps = |a: &CanonicalStorageId, b: &CanonicalStorageId| {
+            a.space == b.space
+                && a.offset < b.offset + u64::from(b.size)
+                && b.offset < a.offset + u64::from(a.size)
+        };
+        let sections = self.target.convention.sections.iter();
+        for location in sections.flat_map(|section| section.locations.iter()) {
+            if let r2source::convention::Location::Register { storage, .. } = location
+                && !registers.iter().any(|read| overlaps(read, storage))
+            {
+                registers.push(*storage);
+            }
+        }
+        crate::imports::ImportReads {
+            registers,
+            count_register: forms.count_register,
+        }
+    }
+
     /// Where a declaration says it takes a pointer.
     pub(crate) fn pointers(&self, declared: Declared<'_>) -> Vec<CanonicalStorageId> {
         let placed = self.placed_prefix(declared);
@@ -285,22 +326,16 @@ impl<'a> Placement<'a> {
             .collect()
     }
 
-    /// A declared prototype as the type layer states it, or nothing where a
-    /// part of it states nothing the type layer can hold.
+    /// A declared prototype as the type layer states it. A parameter whose type the layer cannot
+    /// hold is `Unknown` and keeps the rest (D151); a result it cannot hold states nothing.
     pub(crate) fn function_type(&self, declared: Declared<'_>) -> Option<r2types::FunctionType> {
-        let known = |ty: r2types::CTypeLike| (ty != r2types::CTypeLike::Unknown).then_some(ty);
-        let params = declared
-            .prototype
-            .parameters
-            .iter()
-            .map(|parameter| known(c_type::c_type(declared.graph, parameter.ty, &self.model)))
-            .collect::<Option<Vec<_>>>()?;
+        let convert = |ty| c_type::c_type(declared.graph, ty, &self.model);
+        let params = (declared.prototype.parameters.iter())
+            .map(|parameter| convert(parameter.ty))
+            .collect();
+        let return_type = convert(declared.prototype.return_type);
         Some(r2types::FunctionType {
-            return_type: known(c_type::c_type(
-                declared.graph,
-                declared.prototype.return_type,
-                &self.model,
-            ))?,
+            return_type: (return_type != r2types::CTypeLike::Unknown).then_some(return_type)?,
             params,
             variadic: declared.prototype.variadic,
         })
@@ -386,8 +421,8 @@ impl Placement<'_> {
         .ok()?;
         // Typed first: a declared format parameter is believed on what the
         // declaration's types are.
-        let interface = variadic(
-            declared.prototype,
+        let interface = formatted(
+            declared,
             interface.with_types(r2source::Confidence::of(declared.basis)),
         )?;
         self.carriers(name, interface, frame.frame_pointer)
@@ -431,38 +466,26 @@ impl Placement<'_> {
     }
 }
 
-/// A variadic declaration says the call carries a tail past the fixed
-/// parameters. Which parameter is the format that counts it is the one the
-/// declaration names so: a `char *` called `format` or `fmt`, which is the
-/// table's statement and not an inference from the callee's name.
-fn variadic(
-    prototype: &Prototype,
+/// The row's cited format: a `...` counted by `Tail::Format`, or a `va_list` whose format
+/// `Tail::VaList` names, through which a caller's body is seen to forward its own format.
+fn formatted(
+    declared: Declared<'_>,
     interface: r2source::SourceFunctionInterface,
 ) -> Option<r2source::SourceFunctionInterface> {
-    if !prototype.variadic {
-        return Some(interface);
-    }
-    let format = prototype
-        .parameters
-        .iter()
-        .position(|parameter| {
-            parameter.name.as_deref().is_some_and(|name| {
-                matches!(
-                    name.trim_start_matches('_'),
-                    "format" | "fmt" | "format_string" | "fmtstr"
-                )
-            }) && {
-                let spelling = parameter.spelling.as_type();
-                spelling.contains("char") && spelling.contains('*')
-            }
-        })
-        .and_then(|index| u32::try_from(index).ok());
-    interface
-        .with_declared_variadic(format)
+    let prototype = declared.prototype;
+    let format = (declared.row)
+        .and_then(|row| row.tail.narrow_format())
+        .map(u32::from);
+    let stated = match (prototype.variadic, format) {
+        (true, format) => interface.with_declared_variadic(format),
+        (false, Some(format)) => interface.with_declared_format_parameter(format),
+        (false, None) => return Some(interface),
+    };
+    stated
         .inspect_err(|error| {
             r2il::refusal_evidence!(
                 "declared-interface",
-                "{} does not state its variadic tail: {error:?}",
+                "{} does not state its format or tail: {error:?}",
                 prototype.name
             );
         })

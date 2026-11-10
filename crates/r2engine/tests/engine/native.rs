@@ -6,7 +6,37 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::TABLE_SWITCH;
 
-use r2abi::{ConventionId, Platform, Prototypes};
+use r2abi::{CLibrary, ConventionId, Kernel, LibraryRows};
+use r2engine::imports::{Imports, Linkage};
+
+/// A test program's kernel and C library, as one container states both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Platform {
+    Linux,
+    Darwin,
+    Windows,
+    Unknown,
+}
+
+impl Platform {
+    pub(crate) fn kernel(self) -> Kernel {
+        match self {
+            Self::Linux => Kernel::Linux,
+            Self::Darwin => Kernel::Darwin,
+            Self::Windows => Kernel::Windows,
+            Self::Unknown => Kernel::Unknown,
+        }
+    }
+
+    pub(crate) fn library(self) -> CLibrary {
+        match self {
+            Self::Linux => CLibrary::Glibc,
+            Self::Darwin => CLibrary::LibSystem,
+            Self::Windows => CLibrary::Ucrt,
+            Self::Unknown => CLibrary::Unknown,
+        }
+    }
+}
 use r2engine::machine::Machine as Embedded;
 use r2engine::native::{NativeTarget, Program, convention_model, decompile};
 use r2sleigh_lift::profile::{LanguageProfile, SpecStorage};
@@ -66,7 +96,7 @@ struct Machine {
     /// the default, and Microsoft x64 under the Windows toolchain's
     /// specification where the language has one and it differs.
     conventions: BTreeMap<&'static str, Under>,
-    prototypes: Prototypes,
+    imports: Imports,
     declarations: r2abi::Declarations,
 }
 
@@ -87,8 +117,11 @@ impl Machine {
             Embedded::new(r2sleigh_lift::embedded_machine(sleigh).expect("embedded machine"));
         let under = |platform: Platform, specification: &str| {
             let compiler = LanguageProfile::parse(specification).expect("parses");
-            let id = ConventionId::default_for(family, bits, platform).expect("a convention");
-            let model = convention_model(&embedded.arch, bits, platform, &compiler, id.row());
+            let id =
+                ConventionId::default_for(family, bits, platform.kernel()).expect("a convention");
+            let (kernel, library) = (platform.kernel(), platform.library());
+            let model =
+                convention_model(&embedded.arch, bits, (kernel, library), &compiler, id.row());
             Under {
                 convention: std::sync::Arc::new(model.expect("the convention's model")),
                 compiler,
@@ -114,7 +147,11 @@ impl Machine {
             embedded,
             default: name,
             conventions,
-            prototypes: Prototypes::embedded(),
+            imports: Imports::new(
+                LibraryRows::embedded(platform.library()),
+                platform.library(),
+                Linkage::one_c_library(),
+            ),
             declarations: r2abi::Declarations::default(),
         }
     }
@@ -134,7 +171,7 @@ impl Machine {
             convention: std::sync::Arc::clone(&under.convention),
             compiler: &under.compiler,
             dwarf: &self.embedded.dwarf,
-            prototypes: &self.prototypes,
+            imports: &self.imports,
             declarations: &self.declarations,
             data_model: None,
         }
@@ -6586,7 +6623,7 @@ fn go_machine() -> Machine {
 
 fn go_machine_on(arch: &str) -> Machine {
     let mut machine = Machine::on(arch, arch, 64, Platform::Linux);
-    let id = ConventionId::go(arch, 64, Platform::Linux, Some((1, 21))).expect("ABIInternal");
+    let id = ConventionId::go(arch, 64, Kernel::Linux, Some((1, 21))).expect("ABIInternal");
     let compiler = LanguageProfile::parse(
         machine
             .embedded
@@ -6599,7 +6636,7 @@ fn go_machine_on(arch: &str) -> Machine {
     let model = convention_model(
         &machine.embedded.arch,
         64,
-        Platform::Linux,
+        (Kernel::Linux, CLibrary::Glibc),
         &compiler,
         id.row(),
     )
@@ -7336,3 +7373,46 @@ const RELEASE_AFTER_A_SECOND_WAY_IN: &[u8] = &[
     0xeb, 0x00, // +28 jmp +30
     0xc3, // +30 free's stub
 ];
+
+/// The registers a call to an import may read (doc/adr-call-boundary.md, "Lower bounds and upper
+/// bounds"): only a row citing a fixed prototype bounds them by its parameters; a tail reads every
+/// other argument register, with SysV's `al`, and Apple arm64 passes a cited `...` on the stack.
+#[test]
+fn an_import_reads_past_its_fixed_parameters_unless_its_citation_fixes_them() {
+    let names = |machine: &Machine, target: &r2engine::native::NativeTarget<'_>, import: &str| {
+        let reads = r2engine::native::import_reads(target, import).expect(import);
+        let name = |storage: CanonicalStorageId| {
+            let registers = machine.embedded.arch.registers.iter();
+            let named = registers
+                .filter(|r| r.offset == storage.offset && r.size == storage.size)
+                .map(|r| r.name.to_ascii_lowercase())
+                .min_by_key(String::len);
+            named.unwrap_or_else(|| format!("{storage:?}"))
+        };
+        let registers = reads.registers.into_iter().map(name).collect::<Vec<_>>();
+        (registers, reads.count_register.map(name))
+    };
+    let sysv = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let (fixed, count) = names(&sysv, &sysv.target(), "__assert_fail");
+    assert_eq!(
+        (fixed, count),
+        (
+            ["rdi", "rsi", "rdx", "rcx"].map(str::to_owned).to_vec(),
+            None
+        )
+    );
+    let (error, count) = names(&sysv, &sysv.target(), "error");
+    assert_eq!(error.len(), 6 + 8, "{error:?}");
+    assert_eq!(count.as_deref(), Some("al"));
+    // radare2's `puts` row is uncited, so a call may read past it.
+    assert_eq!(names(&sysv, &sysv.target(), "puts").0.len(), 6 + 8);
+    let aapcs64 = Machine::on("aarch64", "aarch64", 64, Platform::Linux);
+    let (error, count) = names(&aapcs64, &aapcs64.target(), "error");
+    assert_eq!((error.len(), count), (8 + 8, None), "{error:?}");
+    let apple = Machine::on("aarch64", "aarch64", 64, Platform::Darwin);
+    let (printf, count) = names(&apple, &apple.target(), "printf");
+    assert_eq!((printf, count), (vec!["x0".to_owned()], None));
+    let microsoft = Machine::new("x86-64", "x86-64", 64);
+    let (printf, _) = names(&microsoft, &microsoft.under("ms"), "printf");
+    assert_eq!(printf.len(), 4 + 4, "{printf:?}");
+}

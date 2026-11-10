@@ -96,6 +96,14 @@ impl Conversion<'_> {
                 CTypeLike::Unknown if matches!(graph.get(*target), Some(Type::Scalar(_))) => {
                     CTypeLike::typedef(name.clone())
                 }
+                // A name over a tag nothing completes is how C spells a handle (`FILE`), and one
+                // over a pointer to such a tag a pointer-passed state (`va_list`).
+                converted
+                @ (CTypeLike::Struct(_) | CTypeLike::Union(_) | CTypeLike::Pointer(_))
+                    if opaque_behind(graph, *target) =>
+                {
+                    CTypeLike::named(name.clone(), converted)
+                }
                 target => target,
             },
             // A code type the declaration gives no parameters for (r2abi's `func`).
@@ -129,16 +137,29 @@ impl Conversion<'_> {
     }
 }
 
+/// Whether `ty` is a tag nothing completes, or a pointer to one.
+fn opaque_behind(graph: &TypeGraph, ty: TypeId) -> bool {
+    match graph.resolved(ty) {
+        Some(Type::Opaque { .. }) => true,
+        Some(Type::Pointer { target }) => {
+            matches!(graph.resolved(*target), Some(Type::Opaque { .. }))
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use r2abi::{Platform, Prototypes, Width};
+    use r2abi::{CLibrary, LibraryRows, Width};
 
     /// `strlen`'s `const char *` under a model: the byte's sign is the model's, or none.
     fn strlen_char(model: &CDataModel) -> CTypeLike {
-        let prototypes = Prototypes::embedded_for(Platform::Linux);
-        let strlen = prototypes.get("strlen").expect("strlen is declared");
-        c_type(prototypes.graph(), strlen.parameters[0].ty, model)
+        let rows = LibraryRows::embedded(CLibrary::Glibc);
+        let strlen = rows
+            .find(CLibrary::Glibc.scope(), "strlen")
+            .expect("strlen is declared");
+        c_type(rows.graph(), rows.prototype(strlen).parameters[0].ty, model)
     }
 
     fn char_of(signedness: Signedness) -> CTypeLike {
@@ -154,8 +175,8 @@ mod tests {
 
     #[test]
     fn a_rows_plain_char_takes_the_models_sign_and_debug_information_keeps_its_own() {
-        let aarch64 = CDataModel::of("aarch64", 64, Platform::Linux).expect("AAPCS64 glibc");
-        let x86_64 = CDataModel::of("x86-64", 64, Platform::Linux).expect("SysV glibc");
+        let aarch64 = CDataModel::of("aarch64", 64, CLibrary::Glibc).expect("AAPCS64 glibc");
+        let x86_64 = CDataModel::of("x86-64", 64, CLibrary::Glibc).expect("SysV glibc");
         assert_eq!(strlen_char(aarch64), char_of(Signedness::Unsigned));
         assert_eq!(strlen_char(x86_64), char_of(Signedness::Signed));
         assert_eq!(
@@ -178,6 +199,32 @@ mod tests {
                     signedness: Signedness::Signed
                 }
             )
+        );
+    }
+
+    /// glibc's `FILE` keeps its name over the tag its header gives it.
+    #[test]
+    fn a_handle_keeps_its_name_over_its_tag() {
+        let rows = LibraryRows::embedded(CLibrary::Glibc);
+        let fclose = rows
+            .find(CLibrary::Glibc.scope(), "fclose")
+            .expect("fclose");
+        let model = CDataModel::of("x86-64", 64, CLibrary::Glibc).expect("SysV glibc");
+        let stream = c_type(rows.graph(), rows.prototype(fclose).parameters[0].ty, model);
+        let file = CTypeLike::named("FILE", CTypeLike::Struct("_IO_FILE".to_owned()));
+        assert_eq!(stream, CTypeLike::Pointer(Box::new(file)));
+        // `va_list` is passed as a pointer and spelled by its name.
+        let vfprintf = rows
+            .find(CLibrary::Glibc.scope(), "vfprintf")
+            .expect("vfprintf");
+        let list = c_type(
+            rows.graph(),
+            rows.prototype(vfprintf).parameters[2].ty,
+            model,
+        );
+        assert!(
+            matches!(&list, CTypeLike::Typedef { name, .. } if name == "va_list"),
+            "{list:?}"
         );
     }
 }

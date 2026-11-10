@@ -130,15 +130,18 @@ fn an_arm_plt0_whose_literal_word_decodes_as_a_conditional_instruction_still_hol
 
 /// Each parameter's type, as the declaration a call to `import` is read against writes it.
 fn declared(import: &str, evidence: &[PlatformEvidence]) -> Option<Vec<String>> {
-    let mut program = OpenProgram::of(Literal::plt_importing(import).running_on(evidence));
+    declared_in(Literal::plt_importing(import).running_on(evidence), import)
+}
+
+fn declared_in(program: Literal, import: &str) -> Option<Vec<String>> {
+    let mut program = OpenProgram::of(program);
     // Describing the caller reads its call against the machine's declarations.
     program.function_info(PLT_CALLER).expect("it is described");
     let target = r2engine::native::Program::target_at(&program, PLT_CALLER).expect("a machine");
-    let prototype = target.prototypes.get(import)?;
+    let row = target.imports.bind(import).ok()?;
+    let parameters = target.imports.rows().prototype(row).parameters.iter();
     Some(
-        prototype
-            .parameters
-            .iter()
+        parameters
             .map(|parameter| parameter.spelling.as_written().to_owned())
             .collect(),
     )
@@ -181,8 +184,13 @@ fn a_call_is_read_against_the_c_library_the_container_names_and_no_other() {
     ] {
         assert_eq!(declared("__fgets_chk", evidence), None, "{evidence:?}");
     }
-    // What every library declares alike applies with or without any.
+    // What every library declares alike applies with or without any evidence, where `DT_NEEDED`
+    // names one C library; with none named, an unversioned import binds to no row.
     assert!(declared("__memcpy_chk", &[]).is_some());
+    let unlinked = Literal::plt_importing("__memcpy_chk").needing(&[]);
+    assert_eq!(declared_in(unlinked, "__memcpy_chk"), None);
+    let two = Literal::plt_importing("__memcpy_chk").needing(&["libc.so.6", "libc.so"]);
+    assert_eq!(declared_in(two, "__memcpy_chk"), None);
     // An identifier is looked up as it is: a program's own `_strlen` is not `strlen`.
     assert_eq!(declared("_strlen", &[Interpreter(Glibc)]), None);
 }
@@ -197,4 +205,18 @@ fn a_header_the_section_s_entries_jump_to_is_no_import_s_stub() {
         named.values().all(|stub| stub.symbol != "dyld_stub_binder"),
         "{named:x?}"
     );
+}
+
+/// A shared object has no `PT_INTERP`: `DT_NEEDED libc.so.6` with a `GLIBC_*` need on it names
+/// glibc (libz.so's 22 `__stack_chk_fail` calls, hand audit 3.2.4); the soname alone names none.
+#[test]
+fn a_glibc_version_need_names_the_c_library_of_a_shared_object() {
+    let glibc = ["char *", "size_t", "int", "FILE *"]
+        .map(str::to_owned)
+        .to_vec();
+    let needing =
+        Literal::plt_importing("__fgets_chk").needing_versions("libc.so.6", &["GLIBC_2.2.5"]);
+    assert_eq!(declared_in(needing, "__fgets_chk"), Some(glibc));
+    // musl and bionic also ship a `libc.so`, and no version need names glibc there.
+    assert_eq!(declared("__fgets_chk", &[]), None);
 }
