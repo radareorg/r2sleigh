@@ -495,14 +495,14 @@ impl CxxObjects {
         let (mut library, mut in_comment) = ("", false);
         for line in text.lines().map(str::trim) {
             // A block's first line names the library before its colon.
-            if let Some(comment) = line.strip_prefix('#') {
-                if !in_comment {
-                    library = comment.split(':').next().unwrap_or_default().trim();
-                }
-                in_comment = true;
+            let comment = line.strip_prefix('#');
+            if let (Some(comment), false) = (comment, in_comment) {
+                library = comment.split(':').next().unwrap_or_default().trim();
+            }
+            in_comment = comment.is_some();
+            if in_comment {
                 continue;
             }
-            in_comment = false;
             let mut fields = line.split('|').map(str::trim);
             let (Some(name), Some(object), Some(header)) =
                 (fields.next(), fields.next(), fields.next())

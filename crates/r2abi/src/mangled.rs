@@ -50,7 +50,7 @@ pub fn parse(name: &str) -> Option<Mangled> {
         template_args: None,
     };
     let function = parser.name()?;
-    parser.template_args = function.template_args.clone();
+    parser.template_args.clone_from(&function.template_args);
     // A template function's first type is its result (5.1.3); a conversion names its own.
     let result = match (&function.special, function.template_args.is_some()) {
         (Some(Special::Conversion(ty)), _) => Some(ty.clone()),
@@ -156,6 +156,64 @@ enum Component {
     Operator([u8; 2]),
     /// A conversion, by the type it converts to.
     Conversion(Ty),
+}
+
+/// The components of a nested name as far as they are read.
+#[derive(Default)]
+struct Prefixes {
+    /// What the components so far name.
+    current: Option<Ty>,
+    /// `current` is a substitution, already a candidate.
+    fresh: bool,
+    /// The scope the last component is named in.
+    enclosing: Option<Ty>,
+    last: Option<Component>,
+    template_args: Option<Vec<Ty>>,
+}
+
+impl Prefixes {
+    /// A substitution or template parameter names everything so far afresh.
+    fn restart(&mut self, ty: Ty) {
+        (self.current, self.fresh) = (Some(ty), true);
+        (self.last, self.template_args) = (None, None);
+    }
+
+    /// The function the components name, its `this` cv- or ref-qualified where `qualified`.
+    fn into_name(self, qualified: bool, constant: bool) -> Option<Name> {
+        let this = |ty: &Ty| -> Option<String> {
+            let class = match constant {
+                true => Ty::Qualified("const", Box::new(ty.clone())),
+                false => ty.clone(),
+            };
+            Ty::Pointer(Box::new(class)).spell()
+        };
+        let enclosing_is_class = matches!(self.enclosing, Some(Ty::Named { class: true, .. }));
+        let special = match &self.last {
+            Some(Component::Constructor(variant) | Component::Destructor(variant)) => {
+                Some(Special::Structor(*variant))
+            }
+            Some(Component::Conversion(ty)) => Some(Special::Conversion(ty.clone())),
+            _ => None,
+        };
+        let object = match (&self.enclosing, &self.last) {
+            (None, _) => Object::None,
+            (Some(ty), _) if qualified || special.is_some() => Object::This(this(ty)?),
+            // [over.oper]: an operator other than new, delete, () and [] is a non-static member
+            // where it is a member at all.
+            (Some(ty), Some(Component::Operator(code)))
+                if enclosing_is_class
+                    && !matches!(code, b"nw" | b"na" | b"dl" | b"da" | b"cl" | b"ix") =>
+            {
+                Object::This(this(ty)?)
+            }
+            (Some(ty), _) => Object::Unstated(this(ty)?),
+        };
+        Some(Name {
+            object,
+            template_args: self.template_args,
+            special,
+        })
+    }
 }
 
 struct Parser<'a> {
@@ -332,98 +390,69 @@ impl Parser<'_> {
             constant |= byte == b'K';
             self.at += 1;
         }
-        // `current` is what the components so far name; `fresh` that it is a substitution,
-        // already a candidate; `enclosing` the scope the last component is named in.
-        let (mut current, mut fresh): (Option<Ty>, bool) = (None, false);
-        let mut enclosing: Option<Ty> = None;
-        let mut last: Option<Component> = None;
-        let mut template_args = None;
+        let mut prefixes = self.prefixes()?;
+        let current = prefixes.current.take()?;
+        if as_type {
+            self.candidate(&current, prefixes.fresh);
+            let unnamed = Name {
+                object: Object::None,
+                template_args: None,
+                special: None,
+            };
+            return Some((unnamed, current));
+        }
+        Some((prefixes.into_name(qualified, constant)?, current))
+    }
+
+    /// The components of a nested name through its `E`.
+    fn prefixes(&mut self) -> Option<Prefixes> {
+        let mut at = Prefixes::default();
         while !self.eat(b'E') {
             match self.peek()? {
                 b'S' if self.text.get(self.at + 1) == Some(&b't') => self.at += 2,
                 b'S' => {
                     self.at += 1;
-                    (current, fresh) = (Some(self.substitution()?), true);
-                    (last, template_args) = (None, None);
+                    at.restart(self.substitution()?);
                 }
                 b'T' => {
                     let param = self.template_param()?;
                     self.substitutions.push(param.clone());
-                    (current, fresh) = (Some(param), true);
-                    (last, template_args) = (None, None);
+                    at.restart(param);
                 }
                 b'I' => {
-                    let template = current.take()?;
-                    if !fresh {
-                        self.substitutions.push(template.clone());
-                    }
-                    template_args = Some(self.template_args()?);
-                    (current, fresh) = (Some(class(template)), false);
+                    let template = at.current.take()?;
+                    self.candidate(&template, at.fresh);
+                    at.template_args = Some(self.template_args()?);
+                    (at.current, at.fresh) = (Some(class(template)), false);
                 }
                 b'L' => self.at += 1,
-                _ => {
-                    if let Some(prefix) = current.take() {
-                        if !fresh {
-                            self.substitutions.push(prefix.clone());
-                        }
-                        enclosing = Some(prefix);
-                    }
-                    let component = self.unqualified()?;
-                    let name = match &component {
-                        Component::Source(name) => name.clone(),
-                        _ => String::new(),
-                    };
-                    (current, fresh) = (Some(Ty::Named { name, class: false }), false);
-                    (last, template_args) = (Some(component), None);
-                }
+                _ => self.component(&mut at)?,
             }
         }
-        let current = current?;
-        let unnamed = Name {
-            object: Object::None,
-            template_args: None,
-            special: None,
-        };
-        if as_type {
-            if !fresh {
-                self.substitutions.push(current.clone());
-            }
-            return Some((unnamed, current));
+        Some(at)
+    }
+
+    /// An unqualified component, named in the scope the components before it name.
+    fn component(&mut self, at: &mut Prefixes) -> Option<()> {
+        if let Some(prefix) = at.current.take() {
+            self.candidate(&prefix, at.fresh);
+            at.enclosing = Some(prefix);
         }
-        let this = |ty: &Ty| -> Option<String> {
-            let class = match constant {
-                true => Ty::Qualified("const", Box::new(ty.clone())),
-                false => ty.clone(),
-            };
-            Ty::Pointer(Box::new(class)).spell()
+        let component = self.unqualified()?;
+        let name = match &component {
+            Component::Source(name) => name.clone(),
+            _ => String::new(),
         };
-        let enclosing_is_class = matches!(enclosing, Some(Ty::Named { class: true, .. }));
-        let special = match &last {
-            Some(Component::Constructor(variant) | Component::Destructor(variant)) => {
-                Some(Special::Structor(*variant))
-            }
-            Some(Component::Conversion(ty)) => Some(Special::Conversion(ty.clone())),
-            _ => None,
-        };
-        let object = match (&enclosing, &last) {
-            (None, _) => Object::None,
-            (Some(ty), _) if qualified || special.is_some() => Object::This(this(ty)?),
-            // [over.oper]: an operator other than new, delete, () and [] is a non-static member
-            // where it is a member at all.
-            (Some(ty), Some(Component::Operator(code)))
-                if enclosing_is_class
-                    && !matches!(code, b"nw" | b"na" | b"dl" | b"da" | b"cl" | b"ix") =>
-            {
-                Object::This(this(ty)?)
-            }
-            (Some(ty), _) => Object::Unstated(this(ty)?),
-        };
-        let name = Name {
-            object,
-            template_args,
-            special,
-        };
-        Some((name, current))
+        (at.current, at.fresh) = (Some(Ty::Named { name, class: false }), false);
+        (at.last, at.template_args) = (Some(component), None);
+        Some(())
+    }
+
+    /// A prefix becomes a substitution candidate unless it already is one.
+    fn candidate(&mut self, ty: &Ty, fresh: bool) {
+        if !fresh {
+            self.substitutions.push(ty.clone());
+        }
     }
 
     fn template_param(&mut self) -> Option<Ty> {
@@ -446,24 +475,39 @@ impl Parser<'_> {
         let mut args = Vec::new();
         while !self.eat(b'E') {
             match self.peek()? {
-                b'L' => {
-                    // A literal: `L <type> <value> E`; it is no type a parameter names.
-                    self.at += 1;
-                    if self.peek() == Some(b'_') {
-                        return None;
-                    }
-                    self.ty()?;
-                    while self.peek()? != b'E' {
-                        self.at += 1;
-                    }
-                    self.at += 1;
-                    args.push(Ty::Builtin("int"));
-                }
+                b'L' => args.push(self.literal()?),
                 b'X' | b'J' => return None,
                 _ => args.push(self.ty()?),
             }
         }
         Some(args)
+    }
+
+    /// A literal argument, `L <type> <value> E`; it is no type a parameter names.
+    fn literal(&mut self) -> Option<Ty> {
+        self.at += 1;
+        if self.peek() == Some(b'_') {
+            return None;
+        }
+        self.ty()?;
+        while self.peek()? != b'E' {
+            self.at += 1;
+        }
+        self.at += 1;
+        Some(Ty::Builtin("int"))
+    }
+
+    /// `F [Y] <type>+ [ref-qualifier] E`, after the `F`.
+    fn function(&mut self) -> Option<Ty> {
+        self.eat(b'Y');
+        while !self.eat(b'E') {
+            // A ref-qualifier sits right before the `E`; elsewhere `R` is a reference.
+            let ref_qualifier = self.text.get(self.at + 1) == Some(&b'E');
+            if !(ref_qualifier && (self.eat(b'R') || self.eat(b'O'))) {
+                self.ty()?;
+            }
+        }
+        Some(Ty::Function)
     }
 
     fn ty(&mut self) -> Option<Ty> {
@@ -499,15 +543,7 @@ impl Parser<'_> {
             }
             b'F' => {
                 self.at += 1;
-                self.eat(b'Y');
-                while !self.eat(b'E') {
-                    // A ref-qualifier sits right before the `E`; elsewhere `R` is a reference.
-                    let ref_qualifier = self.text.get(self.at + 1) == Some(&b'E');
-                    if !(ref_qualifier && (self.eat(b'R') || self.eat(b'O'))) {
-                        self.ty()?;
-                    }
-                }
-                Ty::Function
+                self.function()?
             }
             b'A' => {
                 self.at += 1;

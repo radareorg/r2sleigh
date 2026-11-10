@@ -49,14 +49,16 @@ impl Linkage {
             }
         }
         let mut dlls: BTreeMap<Box<str>, Option<r2abi::Dll>> = BTreeMap::new();
-        if matches!(container.format, Format::Pe) {
-            let imports = container.symbols.iter().filter(|symbol| symbol.import);
-            for symbol in imports {
-                let dll = symbol.library.as_deref().and_then(r2abi::Dll::of);
-                let held = dlls.entry(symbol.name.as_ref().into()).or_insert(dll);
-                if *held != dll {
-                    *held = None;
-                }
+        let pe = matches!(container.format, Format::Pe);
+        for symbol in container
+            .symbols
+            .iter()
+            .filter(|symbol| pe && symbol.import)
+        {
+            let dll = symbol.library.as_deref().and_then(r2abi::Dll::of);
+            let held = dlls.entry(symbol.name.as_ref().into()).or_insert(dll);
+            if *held != dll {
+                *held = None;
             }
         }
         let one_c_library = match container.format {

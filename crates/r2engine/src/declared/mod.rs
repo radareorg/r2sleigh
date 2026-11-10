@@ -214,26 +214,30 @@ impl<'a> Placement<'a> {
         match declared.row?.passing {
             Passing::Stated => None,
             Passing::VttUnstated => Some("a base-object constructor or destructor may take a VTT"),
-            Passing::HiddenResultUnstated => {
-                let convention = &self.target.convention;
-                let arguments = convention.sections.iter().flat_map(|s| s.locations.iter());
-                let mut registers = arguments.filter_map(|location| match location {
-                    r2source::convention::Location::Register { storage, .. } => Some(storage),
-                    _ => None,
-                });
-                let separate = convention.hidden_return.is_some_and(|hidden| {
-                    registers.all(|storage| {
-                        storage.space != hidden.space
-                            || storage.offset + u64::from(storage.size) <= hidden.offset
-                            || hidden.offset + u64::from(hidden.size) <= storage.offset
-                    })
-                });
-                (!separate).then_some(
-                    "no result is stated, and one returned in memory passes a pointer in the \
-                     first argument register",
-                )
-            }
+            Passing::HiddenResultUnstated => self.hidden_result_in_argument().then_some(
+                "no result is stated, and one returned in memory passes a pointer in the \
+                 first argument register",
+            ),
         }
+    }
+
+    /// The hidden result pointer may arrive in an argument register: the convention states no
+    /// register for it, or one that overlaps an argument register.
+    fn hidden_result_in_argument(&self) -> bool {
+        let convention = &self.target.convention;
+        let Some(hidden) = convention.hidden_return else {
+            return true;
+        };
+        let arguments = convention.sections.iter().flat_map(|s| s.locations.iter());
+        let mut registers = arguments.filter_map(|location| match location {
+            r2source::convention::Location::Register { storage, .. } => Some(storage),
+            _ => None,
+        });
+        registers.any(|storage| {
+            storage.space == hidden.space
+                && storage.offset + u64::from(storage.size) > hidden.offset
+                && hidden.offset + u64::from(hidden.size) > storage.offset
+        })
     }
 
     /// Where every declared parameter arrives, or nothing where one cannot
