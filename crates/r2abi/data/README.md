@@ -77,14 +77,15 @@ stripping underscores at lookup:
 | `realpath_chk`    | `__realpath_chk`    | linux       |
 | `longjmp_chk`     | `__longjmp_chk`     | linux       |
 | `fdelt_chk`       | `__fdelt_chk`       | linux       |
-| `libc_start_main` | `__libc_start_main` | linux (kept beside radare2's key) |
-| `cxa_throw`       | `__cxa_throw`       | cxx (radare2's record kept under its key) |
-| `cxa_finalize`    | `__cxa_finalize`    | cxx (radare2's record kept under its key) |
+| `libc_start_main` | `__libc_start_main` | linux |
+| `cxa_throw`       | `__cxa_throw`       | cxx |
+| `cxa_finalize`    | `__cxa_finalize`    | cxx |
+| `assert_fail`     | `__assert_fail`     | glibc (cited) |
+| `errno_location`  | `__errno_location`  | glibc (cited) |
 
-A radare2 record whose key is not an identifier any program links, and that
-this table does not translate, is unreachable here and stays as radare2 has
-it: `libc_init`, `libc_init_array` and `errno_location` in
-`types-linux.sdb.txt`, for instance.
+A radare2 record whose key is not an identifier any program links is deleted, not kept: one
+fact has one key. `libc_init`, `libc_init_array` and `uClibc_main` went with the keys above, and
+`tests/cited_rows.rs` fails if one returns.
 
 ## Records are scoped per C library
 

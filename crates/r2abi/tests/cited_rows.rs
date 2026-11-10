@@ -171,3 +171,32 @@ fn every_cited_row_states_a_tail_its_prototype_has() {
         assert!(count > 80, "{library:?}: {count} cited rows");
     }
 }
+
+/// radare2 keys a row by the name with its underscores dropped, which no program links: those
+/// keys are gone, and the linked names glibc exports are cited rows.
+#[test]
+fn a_row_is_keyed_by_the_name_a_program_links() {
+    let glibc = LibraryRows::embedded(CLibrary::Glibc);
+    for key in [
+        "assert_fail",
+        "errno_location",
+        "libc_start_main",
+        "cxa_throw",
+        "cxa_finalize",
+        "libc_init",
+        "libc_init_array",
+        "uClibc_main",
+    ] {
+        assert!(glibc.rows().all(|row| &*row.linked_name != key), "{key}");
+    }
+    let assert_fail = glibc.row(LibraryId::Glibc, "__assert_fail").expect("cited");
+    assert!(assert_fail.noreturn);
+    assert_eq!(assert_fail.tail, Tail::None);
+    assert!(glibc.row(LibraryId::Glibc, "__errno_location").is_some());
+    let libsystem = LibraryRows::embedded(CLibrary::LibSystem);
+    assert!(
+        libsystem
+            .rows()
+            .all(|row| &*row.linked_name != "assert_fail")
+    );
+}
