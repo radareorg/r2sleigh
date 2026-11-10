@@ -495,9 +495,8 @@ struct ArgumentArea {
     past_budget: bool,
 }
 
-/// The argument-area slots below the highest one read, `observed` holding each slot's widest read
-/// (`None` where a read crosses two): the highest read makes each below it a parameter (rule 4).
-/// Work: `O(reads + HOLE_BUDGET)`, whatever offset a read names.
+/// The slots below the highest read, each `observed` its widest read (`None` crossing two), are
+/// parameters (rule 4). Work: `O(reads + HOLE_BUDGET)`, whatever offset a read names.
 fn argument_area_slots(
     observed: &BTreeMap<u64, Option<u32>>,
     first_offset: i64,
