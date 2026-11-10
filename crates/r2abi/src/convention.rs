@@ -213,6 +213,8 @@ pub struct ConventionRow {
     pub count_register: Option<RegName>,
     /// Where a variadic prologue saves argument register `i`, and what its `va_list` holds of it.
     pub save_area: Option<RegisterSaveArea>,
+    /// The caller-allocated area a callee may store its register arguments in (Microsoft x64).
+    pub home: Option<HomeArea>,
     /// The entry stack pointer's residue modulo an alignment.
     pub entry_stack: Option<EntryStack>,
     /// The lowest stack pointer a function may run with, where the runtime keeps one (Go).
@@ -222,6 +224,13 @@ pub struct ConventionRow {
     pub overrides: &'static [SpecOverride],
     /// The documents that state these.
     pub citation: &'static str,
+}
+
+/// That the `localrange` above the return address is one home per shared position, `step` bytes
+/// each, in position order; where it lies is the specification's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HomeArea {
+    pub step: u32,
 }
 
 const USUAL: Cspec = Cspec {
@@ -256,6 +265,7 @@ const SYSTEM_V_AMD64: ConventionRow = ConventionRow {
         offset_width: 4,
         stack_field: -8,
     }),
+    home: None,
     refused: None,
     entry_stack: Some(EntryStack {
         alignment: 16,
@@ -279,6 +289,7 @@ const MICROSOFT_X64: ConventionRow = ConventionRow {
     frame_pointer: Some(RegName("rbp")),
     count_register: None,
     save_area: None,
+    home: Some(HomeArea { step: 8 }),
     refused: None,
     entry_stack: Some(EntryStack {
         alignment: 16,
@@ -287,7 +298,7 @@ const MICROSOFT_X64: ConventionRow = ConventionRow {
     stack_bound: None,
     overrides: &[],
     citation: "Microsoft x64 software conventions, \"Stack usage\": the convention \
-               defines no red zone; its register usage table lists RBP as nonvolatile and usable as a frame pointer; \"Stack allocation\": \"The stack will always be maintained 16-byte aligned, except within the prolog (for example, after the return address is pushed)\"",
+               defines no red zone; its register usage table lists RBP as nonvolatile and usable as a frame pointer; \"Stack allocation\": \"The stack will always be maintained 16-byte aligned, except within the prolog (for example, after the return address is pushed)\"; \"The caller is responsible for allocating space for the parameters to the callee. The caller must always allocate sufficient space to store four register parameters, even if the callee doesn't take that many parameters\", the area directly above the return address; \"Varargs\": \"It's the callee's responsibility to dump arguments that have their address taken\"; Windows SDK vadefs.h: _crt_va_arg on _M_X64 steps the char * va_list by sizeof(__int64) per argument",
 };
 
 const I386_CDECL: ConventionRow = ConventionRow {
@@ -297,6 +308,7 @@ const I386_CDECL: ConventionRow = ConventionRow {
     frame_pointer: Some(RegName("ebp")),
     count_register: None,
     save_area: None,
+    home: None,
     refused: None,
     entry_stack: Some(EntryStack {
         alignment: 16,
@@ -340,6 +352,7 @@ const AAPCS64: ConventionRow = ConventionRow {
         offset_width: 4,
         stack_field: -8,
     }),
+    home: None,
     refused: None,
     entry_stack: Some(EntryStack {
         alignment: 16,
@@ -385,6 +398,7 @@ const AAPCS32: ConventionRow = ConventionRow {
     frame_pointer: Some(RegName("r11")),
     count_register: None,
     save_area: None,
+    home: None,
     refused: None,
     entry_stack: Some(EntryStack {
         alignment: 8,
@@ -404,6 +418,7 @@ const RISCV_LP64: ConventionRow = ConventionRow {
     frame_pointer: Some(RegName("s0")),
     count_register: None,
     save_area: None,
+    home: None,
     refused: None,
     entry_stack: Some(EntryStack {
         alignment: 16,
@@ -432,6 +447,7 @@ const GO_AMD64: ConventionRow = ConventionRow {
     count_register: None,
     save_area: None,
     frame_pointer: Some(RegName("rbp")),
+    home: None,
     refused: None,
     entry_stack: Some(EntryStack {
         alignment: 8,
@@ -475,6 +491,7 @@ const GO_ABI0_REFUSED: &str = "Go ABI0 returns results on the stack, which no ca
 const GO_AMD64_ABI0: ConventionRow = ConventionRow {
     id: ConventionId::GoAmd64Abi0,
     cspec: GO_ABI0,
+    home: None,
     refused: Some(GO_ABI0_REFUSED),
     ..GO_AMD64
 };
@@ -482,6 +499,7 @@ const GO_AMD64_ABI0: ConventionRow = ConventionRow {
 const GO_ARM64_ABI0: ConventionRow = ConventionRow {
     id: ConventionId::GoArm64Abi0,
     cspec: GO_ABI0,
+    home: None,
     refused: Some(GO_ABI0_REFUSED),
     ..GO_ARM64
 };
@@ -490,12 +508,14 @@ const GO_UNSTATED_REFUSED: &str = "the toolchain states no function's ABI: an as
 
 const GO_AMD64_UNSTATED: ConventionRow = ConventionRow {
     id: ConventionId::GoAmd64Unstated,
+    home: None,
     refused: Some(GO_UNSTATED_REFUSED),
     ..GO_AMD64
 };
 
 const GO_ARM64_UNSTATED: ConventionRow = ConventionRow {
     id: ConventionId::GoArm64Unstated,
+    home: None,
     refused: Some(GO_UNSTATED_REFUSED),
     ..GO_ARM64
 };

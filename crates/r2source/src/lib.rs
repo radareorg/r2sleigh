@@ -1121,6 +1121,11 @@ impl OwnedFunctionSnapshot {
         self.0.convention.as_deref()
     }
 
+    /// The model, shared with whatever keeps it beside the capture.
+    pub fn shared_convention(&self) -> Option<Arc<ConventionModel>> {
+        self.0.convention.clone()
+    }
+
     /// The same capture with the model its slots view; a model of another convention is ignored.
     pub(crate) fn with_convention(mut self, model: Arc<ConventionModel>) -> Self {
         if model.id == self.0.convention_slots.convention() {

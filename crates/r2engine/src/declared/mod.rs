@@ -586,6 +586,13 @@ fn formatted(
     let format = (declared.row)
         .and_then(|row| row.tail.printf_format())
         .map(u32::from);
+    // The `va_list` parameter a Microsoft x64 home escape is proven a tail by (ADR rule 6).
+    let interface = match declared.row.map(|row| row.tail) {
+        Some(r2abi::Tail::VaList { index, .. }) => (interface.clone())
+            .with_declared_va_list_parameter(u32::from(index))
+            .unwrap_or(interface),
+        _ => interface,
+    };
     let stated = match (prototype.variadic, format) {
         (true, format) => interface.with_declared_variadic(format),
         (false, Some(format)) => interface.with_declared_format_parameter(format),

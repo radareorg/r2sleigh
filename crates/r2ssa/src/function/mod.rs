@@ -1513,20 +1513,17 @@ impl SsaArtifact {
         }
     }
 
-    /// Whether this stack object is the caller's storage rather than this body's.
-    ///
-    /// The frame grows down from the entry stack pointer, so an object at or above
-    /// it is the caller's storage: the return address, a stack-passed argument, or
-    /// -- at a process entry -- what the loader left there. Nothing in this body
-    /// assigns it, and requiring a definition asks for one that cannot exist.
+    /// Whether this stack object is the caller's storage rather than this body's: the return
+    /// address, a stack-passed argument, or what the loader left at a process entry.
     pub fn caller_stack_object(&self, object: crate::ObjectId) -> bool {
         self.entry_stack_offset(object)
-            .is_some_and(Self::caller_frame_offset)
+            .is_some_and(|offset| self.caller_frame_offset(offset))
     }
 
-    /// Whether an offset from the entry stack pointer lies in the caller's storage.
-    pub const fn caller_frame_offset(offset: i64) -> bool {
-        offset >= 0
+    /// Whether an offset from the entry stack pointer lies in the caller's storage, by the
+    /// convention's one rule (`ConventionModel::owner`): a Microsoft x64 home is the callee's.
+    pub fn caller_frame_offset(&self, offset: i64) -> bool {
+        !self.machine_context().stack_owner(offset).callee_owned()
     }
 
     /// Whether this object is the slot the caller pushed the return address into.
@@ -2499,6 +2496,7 @@ impl TrustedSsaArtifact {
                 provisional_machine_context.set_unstated_imports(unstated_imports.clone());
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
+                provisional_machine_context.set_convention(source.shared_convention());
                 let Ok(preliminary) =
                     SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                         &blocks,
@@ -2633,6 +2631,7 @@ impl TrustedSsaArtifact {
         machine_context.set_slot_targets(correlated_call_sites.slot_targets);
         machine_context.set_frame_saves(source.image().frame_saves());
         machine_context.set_accepted_premises(premises.clone());
+        machine_context.set_convention(source.shared_convention());
         // What each entry of a captured code pointer table names, recorded
         // before the facts are collected: a load of such a slot is proven
         // from this, and the collection is what proves it.

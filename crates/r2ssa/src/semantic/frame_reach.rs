@@ -56,6 +56,11 @@ impl FrameReach {
         self.whole || self.escaped.contains(&object)
     }
 
+    /// Whether the object's own address escapes, before the closure reaches any neighbour.
+    pub fn escapes_directly(&self, object: ObjectId) -> bool {
+        self.whole || self.direct.contains(&object)
+    }
+
     /// Whether an escaping frame address named no object, so every frame
     /// object is reachable.
     pub const fn whole(&self) -> bool {

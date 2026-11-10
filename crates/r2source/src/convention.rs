@@ -69,8 +69,9 @@ pub enum LaneSource {
 /// Who owns an entry-relative stack range.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OwnedRange {
-    /// `localrange`: the callee's own data (Win64's home area until S10 states it as `Home`).
+    /// `localrange`: the callee's own data.
     Callee(Range<i64>),
+    /// A shared position's home in the area the caller allocates (Microsoft x64).
     Home {
         position: u8,
         at: Range<i64>,
@@ -78,6 +79,36 @@ pub enum OwnedRange {
     /// `paramrange`.
     Arguments(Range<i64>),
     ReturnAddress(Range<i64>),
+}
+
+/// Who owns one entry-relative stack byte: `ConventionModel::owner`, the one caller-region rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackOwner {
+    /// Below the entry stack pointer, or a range the convention gives the callee.
+    Callee,
+    /// A shared position's home, which the caller allocates and the callee may write.
+    Home {
+        position: u8,
+    },
+    ReturnAddress,
+    /// The caller's: its argument area and what lies above it.
+    Caller,
+}
+
+impl StackOwner {
+    /// Whether the callee may write the byte as its own storage.
+    pub const fn callee_owned(self) -> bool {
+        matches!(self, Self::Callee | Self::Home { .. })
+    }
+
+    /// The rule without a model: the frame grows down from the entry stack pointer.
+    pub const fn growing_down(offset: i64) -> Self {
+        if offset < 0 {
+            Self::Callee
+        } else {
+            Self::Caller
+        }
+    }
 }
 
 /// Some bytes of one register: `d8` is `v8` bytes 0..8, MXCSR's control bits are byte 1.
@@ -191,6 +222,29 @@ impl ConventionModel {
                 }
                 _ => None,
             })
+    }
+
+    /// Who owns the stack byte at `offset` from the entry stack pointer; O(owned ranges).
+    pub fn owner(&self, offset: i64) -> StackOwner {
+        let stated = self.owned.iter().find_map(|range| match range {
+            OwnedRange::Home { position, at } if at.contains(&offset) => Some(StackOwner::Home {
+                position: *position,
+            }),
+            OwnedRange::Callee(at) if at.contains(&offset) => Some(StackOwner::Callee),
+            OwnedRange::ReturnAddress(at) if at.contains(&offset) => {
+                Some(StackOwner::ReturnAddress)
+            }
+            _ => None,
+        });
+        stated.unwrap_or(StackOwner::growing_down(offset))
+    }
+
+    /// The home of argument position `position`, where the convention states one.
+    pub fn home(&self, position: u8) -> Option<Range<i64>> {
+        self.owned.iter().find_map(|range| match range {
+            OwnedRange::Home { position: of, at } if *of == position => Some(at.clone()),
+            _ => None,
+        })
     }
 
     /// Whether integer and float arguments count one position sequence together.

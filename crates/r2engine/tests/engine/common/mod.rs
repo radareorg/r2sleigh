@@ -803,6 +803,13 @@ impl Literal {
         self
     }
 
+    /// The same program as a PE, which states Windows and Microsoft x64 by its format.
+    pub fn pe(mut self) -> Self {
+        self.container.format = Format::Pe;
+        self.container.libraries.clear();
+        self
+    }
+
     /// The same program, its `DT_NEEDED` naming these libraries.
     pub fn needing(mut self, libraries: &[&str]) -> Self {
         self.container.libraries = libraries.iter().map(|name| (*name).to_owned()).collect();
@@ -945,6 +952,20 @@ impl Literal {
             .loader_writes
             .push(import_write(slot, 8, import));
         self
+    }
+
+    /// [`Self::importing`], the container naming the DLL that defines the import, as a PE's
+    /// import directory does.
+    pub fn importing_from(self, dll: &str, import: &str) -> Self {
+        let mut program = self.importing(import);
+        program.container.symbols.push(Symbol {
+            name: import.into(),
+            vaddr: SLOT,
+            import: true,
+            library: Some(dll.into()),
+            ..Symbol::default()
+        });
+        program
     }
 
     /// The same program with a data section, where a write can put a string.

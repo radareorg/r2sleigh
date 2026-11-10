@@ -2552,12 +2552,13 @@ pub fn convention_model(
     let (sections, hidden_return) = sections(&at, prototype, row)?;
     let link = profile.return_address.as_deref().and_then(|n| at.placed(n));
     let (preserved, reserved) = duties(&at, prototype, link, bits, kernel);
+    let owned = owned(prototype, row.home, &sections, profile.return_address_slot);
     let model = ConventionModel {
         id: row.id,
         sections,
         hidden_return,
         results: results(&at, prototype, row)?,
-        owned: owned(prototype, profile.return_address_slot),
+        owned,
         preserved,
         killed: at.lanes(&prototype.killed_by_call),
         likely_trash: at.lanes(&prototype.likely_trash),
@@ -2741,9 +2742,12 @@ fn results(
     Ok(results.into())
 }
 
-/// Who owns each entry-relative stack range the specification states.
+/// Who owns each entry-relative stack range the specification states. A `localrange` from the
+/// return address's end, one ABI home per shared position, is those homes; any other the callee's.
 fn owned(
     prototype: &r2sleigh_lift::profile::ProtoModel,
+    home: Option<r2abi::HomeArea>,
+    sections: &[Section],
     return_address: Option<(i64, u32)>,
 ) -> Box<[OwnedRange]> {
     let range = |r: &r2sleigh_lift::profile::StackRange| Some(r.first..r.last.checked_add(1)?);
@@ -2752,8 +2756,30 @@ fn owned(
             offset..offset.checked_add(i64::from(size))?,
         ))
     });
+    let positions = (sections.iter())
+        .filter(|section| section.class == SectionClass::Shared)
+        .flat_map(|section| section.locations.iter())
+        .filter_map(|location| match *location {
+            Location::Register { position, .. } => u8::try_from(position).ok(),
+            Location::Stack { .. } => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let above = return_address.and_then(|(offset, size)| offset.checked_add(i64::from(size)));
+    let homes = |at: &std::ops::Range<i64>| -> Option<Vec<OwnedRange>> {
+        let step = i64::from(home?.step);
+        let end = at.start + step * i64::try_from(positions.len()).ok()?;
+        (Some(at.start) == above && at.end == end && !positions.is_empty()).then(|| {
+            (positions.iter().zip(0..))
+                .map(|(&position, nth)| OwnedRange::Home {
+                    position,
+                    at: at.start + nth * step..at.start + (nth + 1) * step,
+                })
+                .collect()
+        })
+    };
     (prototype.local_range.iter())
-        .filter_map(|r| range(r).map(OwnedRange::Callee))
+        .filter_map(range)
+        .flat_map(|at| homes(&at).unwrap_or_else(|| vec![OwnedRange::Callee(at)]))
         .chain((prototype.param_range.iter()).filter_map(|r| range(r).map(OwnedRange::Arguments)))
         .chain(slot)
         .collect()

@@ -1071,6 +1071,8 @@ pub struct SourceFunctionInterface {
     variadic: bool,
     /// The fixed parameter the body's loop bounds its tail by, where it proves one.
     tail_count: Option<SourceTailCount>,
+    /// The fixed parameter a declaration states carries a `va_list` (`Tail::VaList`).
+    va_list_parameter: Option<u32>,
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
@@ -1557,6 +1559,7 @@ impl SourceFunctionInterface {
             format_parameter: None,
             variadic: false,
             tail_count: None,
+            va_list_parameter: None,
             body_proven_return_address: false,
             arity_floor: None,
             unproven_result: None,
@@ -1613,6 +1616,7 @@ impl SourceFunctionInterface {
             format_parameter: self.format_parameter.clone(),
             variadic: self.variadic,
             tail_count: self.tail_count,
+            va_list_parameter: self.va_list_parameter,
             body_proven_return_address: self.body_proven_return_address,
             arity_floor: self.arity_floor.clone(),
             unproven_result: self.unproven_result.clone(),
@@ -1752,6 +1756,26 @@ impl SourceFunctionInterface {
             self.types.clone(),
         ));
         Ok(self)
+    }
+
+    /// Record the fixed parameter a declaration states carries the caller's `va_list`.
+    pub fn with_declared_va_list_parameter(
+        mut self,
+        parameter_index: u32,
+    ) -> Result<Self, SourceFunctionInterfaceError> {
+        if usize::try_from(parameter_index)
+            .ok()
+            .is_none_or(|index| index >= self.parameters.len())
+        {
+            return Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex);
+        }
+        self.va_list_parameter = Some(parameter_index);
+        Ok(self)
+    }
+
+    /// The fixed parameter a declaration states carries a `va_list`, where it states one.
+    pub const fn va_list_parameter(&self) -> Option<u32> {
+        self.va_list_parameter
     }
 
     /// Record that arguments continue past the parameters, as a body's register save area proves.

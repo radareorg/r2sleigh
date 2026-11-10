@@ -1842,7 +1842,12 @@ fn recover_interface_inner(
     };
     // A variadic prologue's saves to the register save area are its tail, not parameter reads.
     let mut save_area = prep
-        .and_then(|prep| crate::save_area::register_save_area(graph, prep, slots, &observations));
+        .and_then(|prep| crate::save_area::register_save_area(graph, prep, slots, &observations))
+        .or_else(|| {
+            let (prep, machine) = prep.zip(machine_context)?;
+            let homes = (graph, prep);
+            crate::save_area::home_va_list(homes, &facts, slots, machine, &observations)
+        });
     // A carrier passed straight to a call is read by that call: the callee's statement reads it.
     // Each entry carrier's widest read, found once for every argument that asks (D105).
     let held_widths = std::cell::OnceCell::new();
@@ -1926,6 +1931,23 @@ fn recover_interface_inner(
                 .filter_map(|read| observed_in_slot(*read, slot, machine_context))
                 .max_by_key(|read| read.size)
         };
+        let entries = entry_values
+            .get(&slot.location())
+            .map_or(&[][..], Vec::as_slice);
+        let saved = save_area.as_ref().is_some_and(|area| {
+            (slots.argument_slots().get(area.named..)).is_some_and(|tail| tail.contains(&slot))
+        });
+        let home = (machine_context.and_then(crate::SourceMachineContext::convention))
+            .zip(shared_position(slots, slot))
+            .and_then(|(model, position)| model.home(position));
+        if let Some(home) = home.filter(|_| !saved)
+            && homed_in_its_home(graph, &facts, &observations, home, entries)
+        {
+            return SlotUse::Homed {
+                loaded: false,
+                escapes: false,
+            };
+        }
         if let Some(read) = widest(&observed) {
             return SlotUse::Read {
                 bytes: low_bytes(read.size),
@@ -1943,15 +1965,9 @@ fn recover_interface_inner(
                 to: to.into_boxed_slice(),
             };
         }
-        let saved = save_area.as_ref().is_some_and(|area| {
-            (slots.argument_slots().get(area.named..)).is_some_and(|tail| tail.contains(&slot))
-        });
         if saved {
             return SlotUse::SaveArea;
         }
-        let entries = entry_values
-            .get(&slot.location())
-            .map_or(&[][..], Vec::as_slice);
         unobserved_use(graph, &ignored_reads, &handed_to, entries)
     };
     // The register sections in convention order: each slot's class and register, and its use.
@@ -2080,16 +2096,23 @@ fn recover_interface_inner(
             },
             |slot| slot.size,
         );
+        // The area starts where the convention's stack section does: past Microsoft x64's home.
+        let first = (slots.stack_arguments()).map_or(0, |placement| placement.first_offset());
         match return_mechanism {
             Some(RecoveredReturnMechanism::Link) => Some(recovered_stack_parameters(
                 &facts,
                 &observations,
-                0,
+                first,
                 slot_bytes,
             )),
-            Some(RecoveredReturnMechanism::Stacked { slot_bytes: spent }) => Some(
-                recovered_stack_parameters(&facts, &observations, i64::from(spent), slot_bytes),
-            ),
+            Some(RecoveredReturnMechanism::Stacked { slot_bytes: spent }) => {
+                Some(recovered_stack_parameters(
+                    &facts,
+                    &observations,
+                    i64::from(spent) + first,
+                    slot_bytes,
+                ))
+            }
             None => {
                 r2il::refusal_evidence!(
                     "interface-recovery",
@@ -2307,6 +2330,48 @@ fn low_bytes(size: u32) -> crate::site_boundary::ByteMask {
 
 /// `slot`'s use where no observation reads it (rule 3; doc/adr-call-boundary.md, "S6 as built"):
 /// `Unknown` reaching an unproven call, `Homed` only copied, else `Unread`. O(values reached).
+/// The shared position a register is a location of (Microsoft x64), integer or float.
+fn shared_position(slots: &SourceConventionSlots, slot: CanonicalStorageId) -> Option<u8> {
+    if !slots.shared_positions() {
+        return None;
+    }
+    let at = |section: &[CanonicalStorageId]| section.iter().position(|of| *of == slot);
+    let position = at(slots.argument_slots()).or_else(|| at(slots.float_argument_slots()))?;
+    u8::try_from(position).ok()
+}
+
+/// Rule 3 under Microsoft x64: an entry value read only by stores to its own home, which no load
+/// reads and whose address does not escape, is homed. O(objects + accesses + uses).
+fn homed_in_its_home(
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    observations: &crate::deadphi::ProvenProgramObservations,
+    home: std::ops::Range<i64>,
+    entries: &[crate::ValueId],
+) -> bool {
+    let objects = (facts.objects.entry_stack_roots.iter())
+        .filter(|(_, root)| {
+            root.base == StackAddressBase::StackPointer && home.contains(&root.offset)
+        })
+        .map(|(object, _)| *object)
+        .collect::<Vec<_>>();
+    let reach = &facts.objects.frame_reach;
+    if objects.is_empty() || objects.iter().any(|object| reach.escapes_directly(*object)) {
+        return false;
+    }
+    let mut stores = crate::dense::IdSet::new(graph.insts.len());
+    let accesses = facts.structured.memory_accesses.values();
+    for access in accesses.filter(|access| objects.contains(&access.object)) {
+        if !access.is_write {
+            return false;
+        }
+        stores.insert(access.id.inst);
+    }
+    !stores.is_empty()
+        && (entries.iter())
+            .all(|value| crate::save_area::read_only_by(graph, *value, &stores, observations))
+}
+
 fn unobserved_use(
     graph: &SsaGraph,
     ignored: &BTreeSet<crate::graph::UseSite>,

@@ -665,8 +665,8 @@ fn eligible(
     let mut promotable = BTreeMap::new();
     let overlapped = overlapped_places(accesses);
     for (offset, list) in accesses {
-        // At or above the entry stack pointer is the caller's: the return address, stack arguments.
-        if *offset >= 0 {
+        // The caller's storage stays in memory: the return address, stack arguments.
+        if !machine.stack_owner(*offset).callee_owned() {
             continue;
         }
         let widths = list

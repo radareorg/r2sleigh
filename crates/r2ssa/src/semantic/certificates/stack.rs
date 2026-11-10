@@ -276,6 +276,19 @@ pub(crate) fn collect_callee_stack_allocation_certificates<'a>(
                 .unwrap_or((element_width, false)),
         };
 
+        // A home the convention gives the callee is its own at every access, wherever the
+        // stack pointer stands: its callees' homes lie below the stack pointer it passes.
+        let home = |offset: i64| {
+            matches!(
+                machine_context.stack_owner(offset),
+                r2source::convention::StackOwner::Home { .. }
+            )
+        };
+        let in_home = home(entry_root.offset)
+            && entry_root
+                .offset
+                .checked_add(i64::from(size_bytes) - 1)
+                .is_some_and(home);
         let mut active_sp_offsets = BTreeSet::new();
         let mut uses_implicit_area = false;
         let mut complete = true;
@@ -312,6 +325,10 @@ pub(crate) fn collect_callee_stack_allocation_certificates<'a>(
                 (None, Some(offset)) => {
                     uses_implicit_area = true;
                     offset
+                }
+                (None, None) if in_home => {
+                    active_sp_offsets.extend(offsets.into_iter().flatten().next());
+                    continue;
                 }
                 (None, None) => {
                     complete = false;
@@ -973,7 +990,10 @@ pub(crate) fn collect_stack_geometry_certificate(
                     })
                     .and_then(|object| objects.entry_stack_roots.get(&object))
                     .is_some_and(|root| {
-                        root.base == StackAddressBase::StackPointer && root.offset < 0
+                        root.base == StackAddressBase::StackPointer
+                            && (machine_context.map_or(root.offset < 0, |machine| {
+                                machine.stack_owner(root.offset).callee_owned()
+                            }))
                     })
             })
     };

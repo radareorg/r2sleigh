@@ -112,6 +112,95 @@ pub(crate) fn register_save_area(
     None
 }
 
+/// Microsoft x64's variadic prologue (doc/adr-call-boundary.md, rule 6): `&home[named]` is a declared
+/// callee's `va_list` argument, and each later position is read only by its home. O(insts + calls).
+pub(crate) fn home_va_list(
+    (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
+    facts: &crate::semantic::PreparedFunctionFacts,
+    slots: &SourceConventionSlots,
+    machine: &crate::SourceMachineContext,
+    observations: &crate::deadphi::ProvenProgramObservations,
+) -> Option<SaveArea> {
+    let model = machine.convention().filter(|_| slots.shared_positions())?;
+    let arguments = slots.argument_slots();
+    let at_entry = |value: ValueId| {
+        prep.entry_stack_address_root_of(value)
+            .filter(|root| root.base == StackAddressBase::StackPointer)
+            .map(|root| root.offset)
+    };
+    let home_of = |position: usize| Some(model.home(u8::try_from(position).ok()?)?.start);
+    let mut named = None::<usize>;
+    for boundary in facts.boundaries.calls.values() {
+        let callee = (facts.call_sites.by_id.get(&boundary.call_site))
+            .and_then(|site| site.raw_identity)
+            .and_then(|identity| machine.call_site_interface(identity))
+            .and_then(r2source::SourceCallSiteInterface::exact_callee_interface);
+        let Some(index) = callee
+            .and_then(r2source::SourceFunctionInterface::va_list_parameter)
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            continue;
+        };
+        let address = (boundary.arguments.get(index)).and_then(|argument| match argument.value {
+            crate::semantic::SourceCallArgumentValue::Value(value) => at_entry(value),
+            crate::semantic::SourceCallArgumentValue::PreservedEntry => None,
+        });
+        let handed =
+            address.and_then(|offset| (0..arguments.len()).find(|p| home_of(*p) == Some(offset)));
+        r2il::refusal_evidence!(
+            "home-va-list",
+            "{:?} hands its va_list argument {index} the entry offset {address:?} of {} arguments",
+            boundary.call_site,
+            boundary.arguments.len()
+        );
+        match (named, handed) {
+            (_, None) => {}
+            (None, Some(position)) => named = Some(position),
+            (Some(known), Some(position)) if known == position => {}
+            (Some(_), Some(_)) => return None,
+        }
+    }
+    // A tail from position 0 leaves no fixed parameter to name it, which C cannot declare.
+    let named = named.filter(|named| *named > 0)?;
+    // Each tail position's entry value is read only by its home: a store there, or the copy a
+    // promoted home left that nothing reads.
+    let (saves, _) = entry_saves((graph, prep), arguments, &at_entry);
+    let mut saved = crate::dense::IdSet::new(graph.values.len());
+    let mut stores = crate::dense::IdSet::new(graph.insts.len());
+    for (position, homed) in saves.iter().enumerate().skip(named) {
+        let home = home_of(position)?;
+        for (_, _, store) in homed.iter().filter(|(at, ..)| *at == home) {
+            stores.insert(*store);
+        }
+    }
+    for value in &graph.values {
+        if graph.def_inst(value.id).is_none()
+            && entry_slot(graph, value.id, arguments).is_some_and(|slot| slot >= named)
+        {
+            saved.insert(value.id);
+        }
+    }
+    if let Some(value) = saved
+        .iter()
+        .find(|value| !read_only_by(graph, *value, &stores, observations))
+    {
+        r2il::refusal_evidence!(
+            "home-va-list",
+            "the homed {value:?} is read beyond its home"
+        );
+        return None;
+    }
+    let base = home_of(0)?;
+    let bound = home_of(named)?;
+    Some(SaveArea {
+        named,
+        saved,
+        base,
+        bound,
+        stored_at: bound,
+    })
+}
+
 /// Per argument slot, where its entry value is stored: the position, the value and the store.
 type Saves = Vec<Vec<(i64, ValueId, InstId)>>;
 
@@ -185,7 +274,7 @@ fn entry_slot(graph: &SsaGraph, value: ValueId, arguments: &[CanonicalStorageId]
 
 /// Whether only `stores` read `value`, through merges and copies; a use nothing observes (`xor ecx,
 /// ecx`) or a call's implicit use reads nothing (ADR "Variadic tail"). Each value is taken once.
-fn read_only_by(
+pub(crate) fn read_only_by(
     graph: &SsaGraph,
     value: ValueId,
     stores: &crate::dense::IdSet<InstId>,

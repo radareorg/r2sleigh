@@ -18,8 +18,8 @@ pub mod syscalls;
 pub mod types;
 
 pub use convention::{
-    ConventionId, ConventionRow, Cspec, Extension, RegName, Side, SlotClass, SpecOverride,
-    Toolchain,
+    ConventionId, ConventionRow, Cspec, Extension, HomeArea, RegName, Side, SlotClass,
+    SpecOverride, Toolchain,
 };
 pub use data_model::CDataModel;
 pub use declarations::{DataObject, Declarations};

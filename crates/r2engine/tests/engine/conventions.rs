@@ -5,7 +5,7 @@ use r2abi::{CLibrary, ConventionId, Extension, Kernel, SlotClass};
 use r2engine::native::convention_model;
 use r2sleigh_lift::profile::LanguageProfile;
 use r2source::ConventionModel;
-use r2source::convention::{LaneSource, Location, OwnedRange, SectionClass};
+use r2source::convention::{LaneSource, Location, OwnedRange, SectionClass, StackOwner};
 
 /// The C library a program on `kernel` reads here: glibc, libSystem or Microsoft's.
 fn library(kernel: Kernel) -> CLibrary {
@@ -90,11 +90,15 @@ fn extensions(model: &ConventionModel, class: SlotClass) -> Vec<Extension> {
         .collect()
 }
 
+fn model_of_sysv() -> ConventionModel {
+    model("x86-64", None, ConventionId::SysVAmd64, Kernel::Linux)
+}
+
 /// x86-64-gcc and SysV: six integer and eight float registers apart, the stack past the return
 /// address, and SysV 3.2.3's `st0`/`st1` results beside the cspec's four.
 #[test]
 fn the_sysv_model_is_x86_64_gcc_joined_with_the_psabi() {
-    let model = model("x86-64", None, ConventionId::SysVAmd64, Kernel::Linux);
+    let model = model_of_sysv();
     assert_eq!(
         classes(&model),
         [
@@ -111,7 +115,7 @@ fn the_sysv_model_is_x86_64_gcc_joined_with_the_psabi() {
 }
 
 /// x86-64-win and Microsoft x64: four shared positions, the stack past the 32-byte home area,
-/// which `localrange` gives the callee.
+/// which `localrange` gives the callee and the ABI splits into one home per position.
 #[test]
 fn the_win64_model_shares_positions_and_owns_the_home_area() {
     let model = model(
@@ -127,7 +131,26 @@ fn the_win64_model_shares_positions_and_owns_the_home_area() {
             (SectionClass::Stack { first: 32, step: 8 }, 0)
         ]
     );
-    assert!(model.owned.contains(&OwnedRange::Callee(8..40)));
+    let homes = (model.owned.iter())
+        .filter_map(|owned| match owned {
+            OwnedRange::Home { position, at } => Some((*position, at.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(homes, [(0, 8..16), (1, 16..24), (2, 24..32), (3, 32..40)]);
+    let above = |owned: &OwnedRange| matches!(owned, OwnedRange::Callee(at) if at.end > 0);
+    assert!(!model.owned.iter().any(above), "{:?}", model.owned);
+    assert_eq!(model.owner(8), StackOwner::Home { position: 0 });
+    assert_eq!(model.owner(39), StackOwner::Home { position: 3 });
+    assert_eq!(
+        model.owner(40),
+        StackOwner::Caller,
+        "the first stack argument"
+    );
+    assert_eq!(model.owner(0), StackOwner::ReturnAddress);
+    assert_eq!(model.owner(-8), StackOwner::Callee);
+    let sysv = model_of_sysv();
+    assert_eq!(sysv.owner(8), StackOwner::Caller, "SysV has no home");
     assert_eq!(model.forms.red_zone, 0);
     assert!(model.forms.count_register.is_none() && model.forms.save_area.is_none());
 }

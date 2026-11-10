@@ -38,7 +38,7 @@ fn caller_stack_slots(artifact: &SsaArtifact) -> BTreeMap<ObjectId, CallerStackS
     let mut partial = BTreeSet::new();
     for access in accesses.filter(|access| !access.is_write && !written.contains(&access.object)) {
         let Some(entry_offset) = (artifact.entry_stack_offset(access.object))
-            .filter(|offset| SsaArtifact::caller_frame_offset(*offset))
+            .filter(|offset| artifact.caller_frame_offset(*offset))
         else {
             continue;
         };

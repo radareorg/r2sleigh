@@ -337,7 +337,7 @@ fn locals(
         .filter(|value| !saves_return_address(value.id))
         .filter_map(|value| value.canonical_storage)
         .filter_map(|storage| Some((r2ssa::promoted_slot_offset(&storage)?, storage.size)))
-        .filter(|(offset, _)| !r2ssa::SsaArtifact::caller_frame_offset(*offset))
+        .filter(|(offset, _)| !artifact.caller_frame_offset(*offset))
         .filter(|(offset, _)| !held.contains(offset))
         .collect::<BTreeSet<_>>()
         .into_iter()

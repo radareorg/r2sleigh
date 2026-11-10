@@ -451,6 +451,8 @@ pub struct SourceMachineContext {
     frame_saves: Vec<r2source::SourceFrameSave>,
     /// The premises the engine grants its derivations (`r2engine::premises`).
     accepted_premises: BTreeSet<r2source::Premise>,
+    /// The convention model the slots and the call effect view, where the capture holds one.
+    convention: Option<std::sync::Arc<r2source::ConventionModel>>,
     /// The function each captured code pointer table entry names, by the
     /// address of the entry. A slot a relocation fills holds no address the
     /// file states, so what it becomes is a fact about the program rather
@@ -837,6 +839,7 @@ impl SourceMachineContext {
             unstated_imports: BTreeMap::new(),
             frame_saves: Vec::new(),
             accepted_premises: BTreeSet::new(),
+            convention: None,
             code_pointer_entries: BTreeMap::new(),
             code_pointer_tables: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
@@ -1184,6 +1187,25 @@ impl SourceMachineContext {
 
     pub(crate) fn set_accepted_premises(&mut self, premises: BTreeSet<r2source::Premise>) {
         self.accepted_premises = premises;
+    }
+
+    pub(crate) fn set_convention(
+        &mut self,
+        convention: Option<std::sync::Arc<r2source::ConventionModel>>,
+    ) {
+        self.convention = convention;
+    }
+
+    pub fn convention(&self) -> Option<&r2source::ConventionModel> {
+        self.convention.as_deref()
+    }
+
+    /// Who owns the stack byte at an entry-relative offset: the model's rule, else growing down.
+    pub fn stack_owner(&self, offset: i64) -> r2source::convention::StackOwner {
+        self.convention().map_or(
+            r2source::convention::StackOwner::growing_down(offset),
+            |model| model.owner(offset),
+        )
     }
 
     /// Whether the engine grants this premise to what it derives here.
