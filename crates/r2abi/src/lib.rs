@@ -26,6 +26,7 @@ pub use declarations::{DataObject, Declarations};
 pub use library::{
     CLibrary, Dll, FormatKind, Kernel, LibraryId, LibraryRow, LibraryRows, PrototypeId, Tail,
 };
+pub use mangled::Passing;
 pub use platform::{
     EntryStack, GuardRow, PlatformRegister, RegisterDuty, RegisterSaveArea, SaveAreaAnchor,
     StackGuard, architecture_registers, guard_row, platform_registers,

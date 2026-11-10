@@ -166,6 +166,10 @@ impl<'a> Placement<'a> {
     /// A parameter takes the next register of its own class, counted per class or, where the
     /// convention shares positions, by its position. A placed prefix stays placed.
     pub(crate) fn placed_prefix(&self, declared: Declared<'_>) -> Vec<CanonicalStorageId> {
+        if let Some(why) = self.leading_unstated(declared) {
+            r2il::refusal_evidence!("declared-interface", "{}: {why}", declared.prototype.name);
+            return Vec::new();
+        }
         let slots = &self.machine.slots;
         let shared = slots.shared_positions();
         let index = |position: usize, count: usize| if shared { position } else { count - 1 };
@@ -201,6 +205,35 @@ impl<'a> Placement<'a> {
             placed.push(slot);
         }
         placed
+    }
+
+    /// Why a row's first location may hold an argument it does not state (a VTT, or a hidden result
+    /// pointer in an argument register), so nothing is placed (call-boundary ADR, S13 as built).
+    fn leading_unstated(&self, declared: Declared<'_>) -> Option<&'static str> {
+        use r2abi::Passing;
+        match declared.row?.passing {
+            Passing::Stated => None,
+            Passing::VttUnstated => Some("a base-object constructor or destructor may take a VTT"),
+            Passing::HiddenResultUnstated => {
+                let convention = &self.target.convention;
+                let arguments = convention.sections.iter().flat_map(|s| s.locations.iter());
+                let mut registers = arguments.filter_map(|location| match location {
+                    r2source::convention::Location::Register { storage, .. } => Some(storage),
+                    _ => None,
+                });
+                let separate = convention.hidden_return.is_some_and(|hidden| {
+                    registers.all(|storage| {
+                        storage.space != hidden.space
+                            || storage.offset + u64::from(storage.size) <= hidden.offset
+                            || hidden.offset + u64::from(hidden.size) <= storage.offset
+                    })
+                });
+                (!separate).then_some(
+                    "no result is stated, and one returned in memory passes a pointer in the \
+                     first argument register",
+                )
+            }
+        }
     }
 
     /// Where every declared parameter arrives, or nothing where one cannot
@@ -278,7 +311,10 @@ impl<'a> Placement<'a> {
     pub(crate) fn reads(&self, declared: Declared<'_>) -> crate::imports::ImportReads {
         let mut registers = self.placed_prefix(declared);
         let placed_whole = registers.len() == declared.prototype.parameters.len();
-        let tail = declared.row.map_or(r2abi::Tail::Unstated, |row| row.tail);
+        let tail = match self.leading_unstated(declared) {
+            Some(_) => r2abi::Tail::Unstated,
+            None => declared.row.map_or(r2abi::Tail::Unstated, |row| row.tail),
+        };
         let forms = &self.target.convention.forms;
         let on_stack = forms.variadic_on_stack
             && matches!(tail, r2abi::Tail::Variadic | r2abi::Tail::Format { .. });

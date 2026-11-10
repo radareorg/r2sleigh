@@ -558,7 +558,7 @@ S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
   - The width above `logical` stays `Undefined` there until a `SpecOverride` row or an upstream fix settles it.
   - Every override is listed and tested.
 - **`libc.so` with no `GLIBC_*` need:** stays `Unknown`, because musl and bionic both use that soname.
-- **A mangled libstdc++ row:** parameters only; the result is `Unproven`.
+- **A mangled libstdc++ row:** parameters only; the result is `Unproven`. Where the name encodes no result, or names a base-object structor, it places nothing on a convention whose first argument register could hold a hidden result pointer or a VTT (S13 as built, PR #349 review).
 
 ## Rejected objections
 
@@ -648,10 +648,15 @@ What the code said that this ADR did not, and the owner chosen:
 - r2abi `mangled` reads an Itanium name's parameters, including templates, whose first type is the result (5.1.3). No demangler was in the tree. A reference is its pointer. A class or enum by value stays opaque and unplaced, because the name does not say whether it is trivially copyable. `Dp`, `J`, `X`, vendor types and local names refuse the whole name.
 - The mangling states `this` only for a constructor, a destructor, a conversion, a cv- or ref-qualified member, and an operator other than new, delete, `()` and `[]` of a scope the name proves a class. Any other nested name can be a namespace function, a static member or a non-static one: `std::_V2::generic_category` is the first, `ios_base::xalloc` the second. `data/cxx-objects.txt` states those 52 from the declaring header (libstdc++ 13.3, OpenCV 4.x). A name it does not list gets no row: pumasim's 5 NEWMAT callees (9 sites).
 - Mangled rows are built once per program from the container's imports (`LibraryRows::read_mangled`, O(imports x name length)) under `LibraryId::CxxRuntime`. They apply to any C++ import, libstdc++'s or another library's: the name is the ABI's statement, and a body's name still binds nothing. The return type is refused, so the result is `Unproven` and `function_type` states no signature.
-- With no declared signature, r2dec derives each call's extern from its own arguments. Calls to one callee that disagree are `declaration-disagrees`: 0pack's mangled callees 374 to 1,334, pumasim's 630 to 725. A signature with an `Unproven` result is S7's per-callee result presence.
+- PR #349 review: a row that does not state its result must not place arguments where a result returned in memory passes a hidden pointer in an argument register (Itanium C++ ABI 3.1.3; SysV x86-64 `rdi`, Microsoft x64 `rcx`). `LibraryRow::passing` (`r2abi::Passing`) records it:
+  - `Stated`: a template or conversion whose encoded result is `void`, a builtin, a pointer or a reference; a complete-object constructor (C1) or destructor (D0, D1), which return nothing.
+  - `HiddenResultUnstated`: every other name, such as `Big foo(int)` mangled `_Z3fooi`, and a template returning a class by value. r2engine `Placement::placed_prefix` places nothing unless the convention's `hidden_return` is outside its argument registers (AAPCS64 x8), and `reads` treats the tail as `Unstated`.
+  - `VttUnstated`: a base-object constructor or destructor (C2, D2), which takes a VTT after `this` for a class with virtual bases (2.6.2), and C3, D4 and D5. It places nothing on any convention. No cited row states a class has no virtual base yet.
+  - The call stays an `import-unplaced` residual with its parameter count in the refusal evidence.
+- With no declared signature, r2dec derives each call's extern from its own arguments. Calls to one callee that disagree are `declaration-disagrees`: 0pack's mangled callees 374 to 1,222, pumasim's 630 to 690. A signature with an `Unproven` result is S7's per-callee result presence.
 - Gates (release, `aa` then `pddj` of every `afl` function, base `e616a0b87`):
   - ls-toybox: `__errno` 81, `__strchr_chk` 62, `__open_2` 26, `_exit` 12, `dup2` 11 and `getline` 0 fall to 0. Import-call residuals fall from 666 to 195; all residuals from 5,823 to 4,019.
-  - 0pack: undeclared mangled sites fall from 7,621 (118 callees) to 0. 266 sites at 9 callees stay `import-unplaced` (an enum or class by value).
-  - pumasim: 4,942 (50 callees) fall to 9, all at NEWMAT. 15 sites are unplaced.
+  - 0pack: undeclared mangled sites fall from 7,621 (118 callees) to 0. About 3,088 render; 3,634 are `import-unplaced` (a result or VTT the name does not state on x86-64, or an enum or class by value) and 860 `declaration-disagrees`.
+  - pumasim: 4,942 (50 callees) fall to 9, all at NEWMAT. About 2,852 render; 2,016 are `import-unplaced` and 60 `declaration-disagrees`.
   - hello_gs: 98 KERNEL32 residuals fall to 26; testapp: 96 to 28. Every one of the 53 rows binds. 16 and 18 are `import-unplaced`: a row with more than four parameters needs Win64 stack placement (S4). 10 and 10 are `argument-operand`, a frame address passed.
-- 11 functions newly refuse and 1 renders, all on unaccounted effect obligations (`live-value-producer`, `volatile-or-unknown` at a register phi) once a call is declared: ls-toybox 2, hello_gs 1, testapp 2, 0pack 5. The owner is r2ssa's effect accounting, not the rows.
+- 5 functions newly refuse and 1 renders, all on unaccounted effect obligations (`live-value-producer`, `volatile-or-unknown` at a register phi) once a call is declared: ls-toybox 2, hello_gs 1, testapp 2. 0pack's 5 went with the review fix. The owner is r2ssa's effect accounting, not the rows.

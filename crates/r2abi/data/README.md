@@ -174,7 +174,12 @@ one (`r2abi::mangled`, `LibraryRows::read_mangled`). A reference is its pointer.
 A class or enum passed by value stays a named opaque type: the name does not
 say whether it is trivially copyable, so the convention cannot place it. The
 row states no result (the return type is refused), and its tail is `None`, or
-`Variadic` for a `z`.
+`Variadic` for a `z`. A name that encodes no result (any non-template function)
+may still return in memory through a hidden pointer in the first argument
+register, and a base-object constructor or destructor (C2, D2) may take a VTT,
+so such a row (`Passing::HiddenResultUnstated`, `Passing::VttUnstated`) places
+no argument on SysV x86-64 or Microsoft x64; AAPCS64 passes the pointer in x8
+and places it.
 
 The name says whether the function takes `this` only for a constructor, a
 destructor, a cv- or ref-qualified member, a conversion, and an operator of a

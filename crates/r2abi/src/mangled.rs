@@ -1,6 +1,5 @@
-//! The parameters an Itanium C++ ABI mangled name states (Itanium C++ ABI 5.1). A name states no
-//! result a caller can use, so a row read from one returns `Unproven` (doc/adr-call-boundary.md,
-//! S13). Anything this reader does not parse refuses the whole name.
+//! The parameters an Itanium C++ ABI mangled name states (5.1); its rows return `Unproven`, and
+//! a name this does not parse is refused whole (doc/adr-call-boundary.md, S13 as built).
 
 /// Whether a function takes an implicit object parameter (`this`) before its explicit ones.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,10 +14,24 @@ pub enum Object {
     Unstated(String),
 }
 
+/// Whether the explicit parameters (after `this`) are all a call passes before its arguments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Passing {
+    /// The result is encoded and returns in registers, or there is none (C1, D0, D1).
+    Stated,
+    /// No result is encoded: one returned in memory passes a hidden pointer first (Itanium C++
+    /// ABI 3.1.3), in an argument register on SysV x86-64 and Microsoft x64.
+    HiddenResultUnstated,
+    /// A base-object constructor or destructor (C2, D2) of a class with virtual bases takes a VTT
+    /// after `this` (Itanium C++ ABI 2.6.2); C3, D4 and D5 are not read either.
+    VttUnstated,
+}
+
 /// What one mangled function name states.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mangled {
     pub object: Object,
+    pub passing: Passing,
     /// Each explicit parameter, spelled as C (a reference is its pointer, Itanium C++ ABI 3.1.2).
     pub parameters: Vec<String>,
     /// The parameter list ends in `...` (`z`).
@@ -38,10 +51,18 @@ pub fn parse(name: &str) -> Option<Mangled> {
     };
     let function = parser.name()?;
     parser.template_args = function.template_args.clone();
-    // A template function's first type is its result (5.1.3); it is not read.
-    if function.template_args.is_some() && !function.special {
-        parser.ty()?;
-    }
+    // A template function's first type is its result (5.1.3); a conversion names its own.
+    let result = match (&function.special, function.template_args.is_some()) {
+        (Some(Special::Conversion(ty)), _) => Some(ty.clone()),
+        (None, true) => Some(parser.ty()?),
+        _ => None,
+    };
+    let passing = match (&function.special, result) {
+        (Some(Special::Structor(b'1' | b'0')), _) => Passing::Stated,
+        (Some(Special::Structor(_)), _) => Passing::VttUnstated,
+        (_, Some(result)) if result.in_registers() => Passing::Stated,
+        _ => Passing::HiddenResultUnstated,
+    };
     let (mut parameters, mut variadic, mut none) = (Vec::new(), false, false);
     while !parser.done() {
         match parser.peek() {
@@ -59,6 +80,7 @@ pub fn parse(name: &str) -> Option<Mangled> {
     }
     (variadic || none || !parameters.is_empty()).then_some(Mangled {
         object: function.object,
+        passing,
         parameters,
         variadic,
     })
@@ -79,6 +101,16 @@ enum Ty {
 }
 
 impl Ty {
+    /// A result no ABI here returns in memory: `void`, a builtin this reads, a pointer or a
+    /// reference. A class or enum by value may be returned in memory.
+    fn in_registers(&self) -> bool {
+        match self {
+            Self::Builtin(_) | Self::Pointer(_) => true,
+            Self::Qualified(_, target) => target.in_registers(),
+            Self::Named { .. } | Self::Function => false,
+        }
+    }
+
     fn spell(&self) -> Option<String> {
         Some(match self {
             Self::Builtin(spelling) => (*spelling).to_owned(),
@@ -102,16 +134,28 @@ struct Name {
     object: Object,
     template_args: Option<Vec<Ty>>,
     /// A constructor, destructor or conversion, whose template arguments encode no result.
-    special: bool,
+    special: Option<Special>,
+}
+
+/// A name whose result the template arguments do not encode.
+#[derive(Debug, Clone)]
+enum Special {
+    /// A constructor (`C1`, `C2`, `C3`) or destructor (`D0` to `D5`) by its variant digit; `0`
+    /// stands for `D0`, and a constructor's `1` and a destructor's `1` read alike.
+    Structor(u8),
+    /// A conversion, by the type it converts to.
+    Conversion(Ty),
 }
 
 /// One component of a nested name.
 enum Component {
     Source(String),
-    Constructor,
-    Destructor,
-    /// An operator by its two-letter code; a conversion is `cv`.
+    Constructor(u8),
+    Destructor(u8),
+    /// An operator by its two-letter code.
     Operator([u8; 2]),
+    /// A conversion, by the type it converts to.
+    Conversion(Ty),
 }
 
 struct Parser<'a> {
@@ -219,7 +263,7 @@ impl Parser<'_> {
             return Some(Name {
                 object: Object::None,
                 template_args: Some(args),
-                special: false,
+                special: None,
             });
         }
         self.eat(b'L');
@@ -241,7 +285,7 @@ impl Parser<'_> {
         Some(Name {
             object: Object::None,
             template_args,
-            special: false,
+            special: None,
         })
     }
 
@@ -250,21 +294,21 @@ impl Parser<'_> {
             b'0'..=b'9' => Some(Component::Source(self.source_name()?)),
             b'C' => {
                 self.at += 1;
-                matches!(self.take(1)?, b"1" | b"2" | b"3").then_some(Component::Constructor)
+                let variant = self.take(1)?[0];
+                matches!(variant, b'1' | b'2' | b'3').then_some(Component::Constructor(variant))
             }
             b'D' => {
                 self.at += 1;
-                matches!(self.take(1)?, b"0" | b"1" | b"2" | b"4" | b"5")
-                    .then_some(Component::Destructor)
+                let variant = self.take(1)?[0];
+                matches!(variant, b'0' | b'1' | b'2' | b'4' | b'5')
+                    .then_some(Component::Destructor(variant))
             }
             b'a'..=b'z' => {
                 let code = self.take(2)?;
                 let code = [code[0], code[1]];
                 match &code {
                     // A conversion names its target type; a literal operator, its suffix.
-                    b"cv" => {
-                        self.ty()?;
-                    }
+                    b"cv" => return Some(Component::Conversion(self.ty()?)),
                     b"li" => {
                         self.source_name()?;
                         return Some(Component::Source(String::new()));
@@ -338,7 +382,7 @@ impl Parser<'_> {
         let unnamed = Name {
             object: Object::None,
             template_args: None,
-            special: false,
+            special: None,
         };
         if as_type {
             if !fresh {
@@ -354,15 +398,16 @@ impl Parser<'_> {
             Ty::Pointer(Box::new(class)).spell()
         };
         let enclosing_is_class = matches!(enclosing, Some(Ty::Named { class: true, .. }));
-        let special = matches!(
-            last,
-            Some(
-                Component::Constructor | Component::Destructor | Component::Operator([b'c', b'v'])
-            )
-        );
+        let special = match &last {
+            Some(Component::Constructor(variant) | Component::Destructor(variant)) => {
+                Some(Special::Structor(*variant))
+            }
+            Some(Component::Conversion(ty)) => Some(Special::Conversion(ty.clone())),
+            _ => None,
+        };
         let object = match (&enclosing, &last) {
             (None, _) => Object::None,
-            (Some(ty), _) if qualified || special => Object::This(this(ty)?),
+            (Some(ty), _) if qualified || special.is_some() => Object::This(this(ty)?),
             // [over.oper]: an operator other than new, delete, () and [] is a non-static member
             // where it is a member at all.
             (Some(ty), Some(Component::Operator(code)))
@@ -656,6 +701,28 @@ mod tests {
             stated("_ZN2cvlsERSoRKNS_3MatE").0,
             Object::Unstated(_)
         ));
+    }
+
+    /// A result the name does not encode may pass a hidden pointer first, and a base-object
+    /// structor may take a VTT: neither states every leading location (PR #349 review).
+    #[test]
+    fn a_name_states_its_leading_locations_only_where_it_encodes_them() {
+        let passing = |name: &str| parse(name).unwrap_or_else(|| panic!("{name}")).passing;
+        assert_eq!(passing("_Z3fooi"), Passing::HiddenResultUnstated);
+        assert_eq!(passing("_ZNSo5flushEv"), Passing::HiddenResultUnstated);
+        assert_eq!(passing("_ZN1BC2Ei"), Passing::VttUnstated);
+        assert_eq!(passing("_ZN1BD2Ev"), Passing::VttUnstated);
+        for name in [
+            "_ZN1BC1Ei",
+            "_ZN1BD1Ev",
+            "_ZN1BD0Ev",
+            "_ZNSo9_M_insertImEERSoT_",
+        ] {
+            assert_eq!(passing(name), Passing::Stated, "{name}");
+        }
+        // A template returning a class by value may return it in memory.
+        assert_eq!(passing("_Z4makeIiE3Bigv"), Passing::HiddenResultUnstated);
+        assert_eq!(passing("_ZNK1AcviEv"), Passing::Stated);
     }
 
     #[test]

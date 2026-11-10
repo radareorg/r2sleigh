@@ -291,11 +291,8 @@ fn named_scalar(name: &str, library: CLibrary) -> Option<(ScalarKind, Width)> {
             "mode_t" => Some((Unsigned, Width::Bits(16))),
             _ => None,
         }),
-        // Bionic takes these from the kernel's `long`-sized types on every
-        // target. `mode_t` is sixteen bits on 32-bit ARM and thirty-two on the
-        // 64-bit targets, so no one width is bionic's, and it stays opaque.
-        // `dev_t` is 32 bits on bionic's ILP32 targets and 64 on LP64 (`<sys/types.h>`): long's.
-        // `clockid_t` and `speed_t` are the kernel UAPI's `int` and `unsigned int`.
+        // Bionic's `<sys/types.h>` and the kernel UAPI; `mode_t` has no one width and stays opaque
+        // (doc/adr-call-boundary.md, S13 as built).
         CLibrary::Bionic => posix(name).or(match name {
             "off_t" | "clock_t" | "suseconds_t" => Some((Signed, Width::Long)),
             "off64_t" => Some((Signed, Width::Bits(64))),

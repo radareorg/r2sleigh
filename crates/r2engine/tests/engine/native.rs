@@ -960,7 +960,7 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
     );
 }
 
-/// `Importing`, with the import a mangled C++ member: `std::ostream::put(char)`.
+/// `Importing`, with the import a mangled C++ member template: `std::ostream::_M_insert<unsigned long>`.
 struct MangledImporting;
 
 impl r2engine::body::Program for MangledImporting {
@@ -993,12 +993,12 @@ impl Program for MangledImporting {
     }
 
     fn import_at(&self, vaddr: u64) -> Option<String> {
-        (vaddr == 0x100a).then(|| "_ZNSo3putEc".to_owned())
+        (vaddr == 0x100a).then(|| "_ZNSo9_M_insertImEERSoT_".to_owned())
     }
 }
 
-/// A mangled import's row comes from its name and libstdc++'s `<ostream>`: `this` and a `char`,
-/// two arguments, and no result it states (doc/adr-call-boundary.md, S13).
+/// A mangled import's row comes from its name and libstdc++'s `<ostream>`: `this` and an
+/// `unsigned long`, two arguments; its encoded result is a reference (doc/adr-call-boundary.md, S13).
 #[test]
 fn a_mangled_import_takes_the_parameters_its_name_states() {
     let mut machine = Machine::new("x86-64", "x86-64", 64);
@@ -1007,14 +1007,118 @@ fn a_mangled_import_takes_the_parameters_its_name_states() {
     let base = base.output.text().to_owned();
     assert!(base.contains("the import has no declaration"), "{base}");
     let mut rows = LibraryRows::embedded(CLibrary::Glibc);
-    rows.read_mangled(["_ZNSo3putEc"]);
+    rows.read_mangled(["_ZNSo9_M_insertImEERSoT_"]);
     machine.imports = Imports::new(rows, CLibrary::Glibc, Linkage::one_c_library());
     let target = machine.target();
     let response = decompile(&target, &MangledImporting, BASE).expect("decompile");
     let text = response.output.text();
     assert!(!text.contains("the import has no declaration"), "{text}");
-    let arguments = common::call_arguments(text, "_ZNSo3putEc").expect("a call to put");
+    let insert = "_ZNSo9_M_insertImEERSoT_";
+    let arguments = common::call_arguments(text, insert).expect("a call to _M_insert");
     assert_eq!(arguments.len(), 2, "{text}");
+}
+
+/// `sub rsp, 0x28; mov rdi, rsp; mov esi, 7; call 0x1020; add rsp, 0x28; ret`: what GCC emits
+/// for `Big foo(int)`, the hidden result pointer in RDI and the `int` in ESI.
+const HIDDEN_RESULT_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 0x1000 sub rsp, 0x28
+    0x48, 0x89, 0xe7, // 0x1004 mov rdi, rsp
+    0xbe, 0x07, 0x00, 0x00, 0x00, // 0x1007 mov esi, 7
+    0xe8, 0x0f, 0x00, 0x00, 0x00, // 0x100c call 0x1020
+    0x48, 0x83, 0xc4, 0x28, // 0x1011 add rsp, 0x28
+    0xc3, // 0x1015 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 0x1016 padding
+    0xc3, // 0x1020 the import's stub
+];
+
+/// `sub rsp, 0x28; mov rdi, rsp; mov esi, 0x2000; mov edx, 7; call 0x1020; ...`: GCC's call of
+/// `B::B(int)`'s base-object variant for `B : virtual A`, `this`, the VTT, then the `int`.
+const VTT_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 0x1000 sub rsp, 0x28
+    0x48, 0x89, 0xe7, // 0x1004 mov rdi, rsp
+    0xbe, 0x00, 0x20, 0x00, 0x00, // 0x1007 mov esi, 0x2000
+    0xba, 0x07, 0x00, 0x00, 0x00, // 0x100c mov edx, 7
+    0xe8, 0x0a, 0x00, 0x00, 0x00, // 0x1011 call 0x1020
+    0x48, 0x83, 0xc4, 0x28, // 0x1016 add rsp, 0x28
+    0xc3, // 0x101a ret
+    0x90, 0x90, 0x90, 0x90, 0x90, // 0x101b padding
+    0xc3, // 0x1020 the import's stub
+];
+
+/// A caller whose call at 0x1020 is the import `name`.
+struct CallsImport {
+    bytes: &'static [u8],
+    name: &'static str,
+}
+
+impl r2engine::body::Program for CallsImport {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = self.bytes.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        code_region(self.bytes.len(), vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x1020)
+    }
+}
+
+impl Program for CallsImport {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == 0x1020).then(|| self.name.to_owned())
+    }
+}
+
+/// The rendered caller of `name` under rows read from its mangled name.
+fn rendered_calling(bytes: &'static [u8], name: &'static str) -> String {
+    let mut machine = Machine::new("x86-64", "x86-64", 64);
+    let mut rows = LibraryRows::embedded(CLibrary::Glibc);
+    rows.read_mangled([name]);
+    machine.imports = Imports::new(rows, CLibrary::Glibc, Linkage::one_c_library());
+    let target = machine.target();
+    let program = CallsImport { bytes, name };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    response.output.text().to_owned()
+}
+
+/// `_Z3fooi` may be `Big foo(int)`: its name states no result, so a SysV call may pass a hidden
+/// result pointer in RDI first, and no argument is placed (PR #349 review, Itanium C++ ABI 3.1.3).
+#[test]
+fn a_mangled_import_whose_result_is_unstated_places_no_argument() {
+    let text = rendered_calling(HIDDEN_RESULT_CALL, "_Z3fooi");
+    assert_eq!(common::call_arguments(&text, "_Z3fooi"), None, "{text}");
+    assert!(text.contains("does not place"), "{text}");
+    // A complete-object constructor returns nothing and takes no VTT: `this`, then the `int`.
+    let text = rendered_calling(HIDDEN_RESULT_CALL, "_ZN1BC1Ei");
+    let arguments = common::call_arguments(&text, "_ZN1BC1Ei").expect("a call to B::B");
+    assert_eq!(arguments.len(), 2, "{text}");
+}
+
+/// `_ZN1BC2Ei` takes a VTT after `this` where `B` has a virtual base, so the `int` is in EDX, not
+/// ESI: the base-object variant places nothing (PR #349 review, Itanium C++ ABI 2.6.2).
+#[test]
+fn a_base_object_constructor_places_no_argument() {
+    let text = rendered_calling(VTT_CALL, "_ZN1BC2Ei");
+    assert_eq!(common::call_arguments(&text, "_ZN1BC2Ei"), None, "{text}");
+    assert!(text.contains("does not place"), "{text}");
 }
 
 /// `total = counter + *(uint32_t*)0x2008`, each a 32-bit access at a literal address.

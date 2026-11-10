@@ -132,6 +132,9 @@ pub struct LibraryRow {
     pub linked_name: Box<str>,
     pub prototype: PrototypeId,
     pub tail: Tail,
+    /// Whether the parameters are all a call passes before its arguments: a row read from a
+    /// mangled name may not know of a hidden result pointer or a VTT.
+    pub passing: crate::mangled::Passing,
     pub noreturn: bool,
     /// The standard and header the row is read from; empty for a row radare2's tables state.
     pub citation: Box<str>,
@@ -320,6 +323,7 @@ impl LibraryRows {
                 true => Tail::Variadic,
                 false => Tail::None,
             },
+            passing: mangled.passing,
             noreturn: false,
             citation: citation.into(),
         })
@@ -388,6 +392,7 @@ impl LibraryRows {
             linked_name: name.into(),
             prototype: id,
             tail,
+            passing: crate::mangled::Passing::Stated,
             noreturn: declared.noreturn,
             citation: citation.into(),
         }
