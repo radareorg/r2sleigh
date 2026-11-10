@@ -766,9 +766,9 @@ What the code said that this ADR did not, and the owner chosen:
 - r2engine `program/fates.rs`: `World { Open, Closed }` replaces `Callers`, `CalleeKey { Entry(u64), Import(ImportId) }`, `ImportId(u64)` (the address calls reach). The `CallBoundary` query keyed `(CalleeKey, World)` holds the evidence half: `Sites { lanes: [JoinedLane; LANES], calls, exhaustive }` for a function under `Closed`, `Import { reads }` (S8's `Placement::reads`) for an import. `Open` joins nothing.
 - `JoinedLane.held` marks the lanes a body may leave a result in: the typed three and each lane that is an argument location (SysV xmm1, AAPCS64 q1 to q3). x87 `st0`/`st1` are not held: the x87 stack is empty on entry (SysV 3.2.1), so a body writes them before they hold its value. A `Void` or `Unread` decision needs every held lane `Dead` at every call, and the calls must be every way in (`only_called`).
 - A `Returned` lane forwards to `CallBoundary(caller, Closed)`: `Read` there is a read, `Dead` with the caller exhaustive is dead, a database cycle is `ForwardCycle`. Forwarding is asked only where its answer can move the decision (a lane no call reads while every held lane is dead or returned, or a typed lane), so `aa; pdd @ bash 0x2e630` joins 111 boundaries, not 253.
-- Presence is decided by `fates::decide(open interface, CallBoundary)` at seal time, not held in the query: a declared interface is left alone; `Read` gives `SourceClosedResult::Read(Integer | Float { bytes } | Pair)`; every held lane dead gives `Void` where the body's causes are only `HandedBack` or `NoReturn`, else `Unread` (D202); a cycle gives `ForwardCycle`. r2ssa applies it in the function's second seal (`FunctionIdentity.closed_result` replaces `result_reads`) and records it on the interface (`SourceFunctionInterface::closed_result`, which replaces the `result_read_by_callers` bool). `Unread` and `ForwardCycle` on a written register only name the cause: the carrier and its returns render as before.
+- Presence is decided by r2ssa `site_boundary::decide(open interface, SourceCallerLanes)` inside the function's one seal ("S7 cost" below): a declared interface is left alone; `Read` gives `SourceClosedResult::Read(Integer | Float { bytes } | Pair)`; every held lane dead gives `Void` where the body's causes are only `HandedBack` or `NoReturn`, else `Unread` (D202); a cycle gives `ForwardCycle`. The seal's snapshot carries the boundary's lanes (`FunctionIdentity.callers`, which replaces `result_reads`); recovery mints the open interface, decides, and recovers the result once more where the decision applies. It records the decision on the interface (`SourceFunctionInterface::closed_result`, which replaces the `result_read_by_callers` bool). `Unread` and `ForwardCycle` on a written register only name the cause: the carrier and its returns render as before.
 - The closed-world premise: every applied decision puts `Premise::ClosedWorld` on the function and in the response premises (PR #355 review). The proof line says "a call reads the result", "no call reads the result" or "a call returns the result on through a cycle", each "(assuming closed-world)".
-- Under `aa` a callee is read in the closed world too: `Resolved` at `Demand::Arity` reseals a callee where its boundary decides (`closed_alone`), so its callers' externs and its own header agree. Members of a cycle (`least_fixpoint`) keep their open results: the fixpoint moves the results it tracks.
+- Under `aa` a callee is read in the closed world too: `Resolved` at `Demand::Arity` reseals a callee where its boundary decides (`closed_alone`), so its callers' externs and its own header agree. `closed_alone` asks `decide` of the held alone read's interface, the open interface that reseal's recovery decides from, and reseals only where it decides. Members of a cycle (`least_fixpoint`) keep their open results: the fixpoint moves the results it tracks.
 - D62, per callee: `mint_recovered_call_site_interface` takes no caller reads. A pair is the callee's at every call; an unproven result with one carrier is that register at every call; with two carriers the call states no result, as base's cold path did. The per-body `reads_after` and `direct_reads` are deleted.
 - W46: `SourceOwnedCalleeSignature` carries the header's unproven carrier bits. r2dec's extern for a body-recovered callee is `Prototype::of_projection`: the header's own types, `r2sleigh_result_uN` for an unproven result, refused where the call defines a result and the header is `void`. `of_widths` and `callee_carrier_signature` are deleted. The prelude declares every carrier typedef the unit spells. An assignment from the typedef to its integer takes no cast.
 - `CalleeFacts::derive` still projects under the callee's own context: base had no case where the root's context changes a callee's projection, so the move waits for one. No `Dispute` is minted: a declared interface skips the decision, so DWARF and the body never meet here. r2dec `decide_prototypes` stays for callees with no projection.
@@ -794,8 +794,33 @@ Gates, release, base `6129d1797`:
 - Cost, instructions retired:
   - Cold `pdd`: pumasim `0x23fdf0` 19.78 to 19.73 G, 0pack `0x62ecf0` 15.38 to 15.34 G; RSS unchanged.
   - `aa; pdd`: pumasim `0x1fad00` 115.9 to 65.9 G and 0pack `0x475520` 84.3 to 56.6 G. Base built the reference index there; head decides without it.
-  - bash `0x2e630`: 15.4 to 22.2 G, over D153's bound of 15.43 G. The callees' closed boundaries lift their callers' bodies and those bodies' callees. Holding fates from `aa`'s walk (S3's deferred rows) is the owner of that cost.
-  - pumasim `0x3b6b20` after `aa`: peak RSS goes from 221 to 438 MB. Its every-way-in check builds the reference index, which S3 measured at 428.7 MB.
+  - bash `0x2e630`: 15.4 to 22.2 G, over D153's bound of 15.43 G. "S7 cost" below brings it to 14.34 G.
+  - pumasim `0x3b6b20` after `aa`: peak RSS goes from 221 to 438 MB. Its every-way-in check builds the reference index, which S3 measured at 428.7 MB. "S7 cost" below removes it.
+
+S7 cost (2026-11-10, branch `s7-cost` on S6 `b2f9b4758`):
+
+- The profile (samply, bash `aa; pdd @ 0x2e630` at S6, 6,782 samples) split the 22.24 G:
+  - 32.7% built the reference index for `Escapes`, which then refused at `0x1e887` (code no body holds). pumasim `0x3b6b20`: 43%, refused at `0x1c5102`.
+  - 17.5% was `CalleeEntry` (878 callees of callers lifted and summarised), 17.6% `SiteFates` (450 callers lifted, 4.5% its pass). 1,331 walks of 1,018 bodies.
+  - The second seal was under 1%: 2 functions decided in bash, 4 in pumasim `0x3b6b20`.
+- `Escapes` refuses on code no body holds before it asks for the index. The index is built only where the closed world can still hold, as for `ax`. A test (`code_no_body_holds_refuses_the_closed_world_before_the_reference_index`) counts no index built (`AnalysisStats::references`).
+- One seal: the decision moves from r2engine `fates::decide` to r2ssa `site_boundary::decide`, beside the lane fates. `SourceJoinedLane` and `SourceCallerLanes` (r2source) carry the join; `Program::callers` replaces `closed_result`. The root and `outside_resolved` no longer seal twice; `closed_alone` seals once past its held alone read, not twice.
+- Not taken:
+  - `BodyBoundary::results` still has no reader. `decide` reads the open interface's return kind, carriers and causes, which the joined bytes do not state (an `Ambiguous` pair, a `Returned` cause), so it reads the interface recovery mints in the same seal.
+  - `CalleeEntry` still lifts each callee of a caller. Those 878 callees are two calls from the root; no artifact of theirs is held, and preparing one costs more than its lift and pass.
+- Gates, release, instructions retired and peak footprint; base `bf3e9d8ce` (D200), parent S6 `b2f9b4758`, head:
+
+| | base | parent | head |
+|---|---|---|---|
+| bash `0x2e630` `aa; pdd` | 15.42 G, 104.3 MB | 22.24 G, 104.4 MB | 14.32 G, 62.1 MB |
+| pumasim `0x3b6b20` `aa; pdd` | 64.42 G, 196.4 MB | 118.47 G, 411.0 MB | 66.13 G, 197.3 MB |
+| pumasim `0x1fad00` `aa; pdd` | 116.21 G, 410.0 MB | 65.16 G, 196.7 MB | 65.18 G, 196.5 MB |
+| 0pack `0x475520` `aa; pdd` | 84.31 G, 251.6 MB | 56.63 G, 147.7 MB | 56.68 G, 147.7 MB |
+| pumasim `0x23fdf0` cold `pdd` | 19.77 G, 205.3 MB | 19.85 G, 206.0 MB | 19.85 G, 204.7 MB |
+| 0pack `0x62ecf0` cold `pdd` | 15.31 G, 211.1 MB | 15.36 G, 212.6 MB | 15.37 G, 212.1 MB |
+
+  - bash is under D153's 15.43 G. Cold rows are the median of three runs at parent and head; peak footprint varies up to 4% run to run.
+  - Output: every `aa; pdd` above prints the parent's bytes; the census (`census.py run`, 27 binaries, 444 functions) is byte-identical to the parent. avg's `double avg(` test passes.
 
 ## S5 as built (2026-11-10)
 
@@ -824,7 +849,7 @@ What the code said that this ADR did not, and the owner chosen:
 
 What the code said that this ADR did not, and the owner chosen:
 
-- `BodyBoundary { slots, locations, results, floor }` is r2ssa `body_boundary.rs`, minted by recovery and carried on `PreparedFunctionFacts::body_boundary` of the sealed artifact. `SlotId` numbers the integer section, the float section (or Win64's one `Shared` section), then the stack slots read. `locations` gives each slot its section, position and location. `results` is `IdVec<LaneId, Option<lanes::Bytes>>` over the typed lanes (integer, float, second): each lane's bytes joined over every return, `None` where a return's value is unresolved. It has no reader yet; S7's `CallBoundary` decision reads it in place of a second seal.
+- `BodyBoundary { slots, locations, results, floor }` is r2ssa `body_boundary.rs`, minted by recovery and carried on `PreparedFunctionFacts::body_boundary` of the sealed artifact. `SlotId` numbers the integer section, the float section (or Win64's one `Shared` section), then the stack slots read. `locations` gives each slot its section, position and location. `results` is `IdVec<LaneId, Option<lanes::Bytes>>` over the typed lanes (integer, float, second): each lane's bytes joined over every return, `None` where a return's value is unresolved. It has no reader yet: S7's decision reads the open interface inside the one seal ("S7 cost").
 - `SlotUse` derives its order: `Unread < Homed < SaveArea < HandedOn < Read < Unknown`. `HandedOn.to` holds the `CallSiteId`s whose boundary passes the entry value to an argument the callee does not leave a hole. A slot `HandedOn` mints at `Basis::Solved`, a `Read` at `Decoded`, a hole at `Convention`.
 - Rule 3 as built:
   - The preliminary build has already dropped a dead frame store, so -O0's homing store is invisible. `Homed` is an entry value whose only uses end in a copy nothing reads. A lane projection nothing reads is the build's own and counts as no home (`xor ecx, ecx` folds the lane it read).
