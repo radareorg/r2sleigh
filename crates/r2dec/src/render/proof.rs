@@ -184,15 +184,7 @@ pub(crate) fn note_unproven_constructs(
             "; {radare2_prototypes} {noun} supplied by the source"
         );
     }
-    // The header lists what is proven; a floor says more may be passed (D100).
-    if let Some((count, floor)) = floor {
-        let causes = floor.causes().iter().map(floor_cause).collect::<Vec<_>>();
-        let _ = write!(
-            &mut detail,
-            "; the parameters are a floor: at least {count} ({})",
-            causes.join(", ")
-        );
-    }
+    note_floor(&mut detail, floor);
     if open_second_result {
         detail.push_str("; the result's second register is open: no call read decides it");
     }
@@ -234,6 +226,18 @@ pub(crate) fn note_unproven_constructs(
         })
     };
     func.body.insert(0, CStmt::comment(text));
+}
+
+/// The header lists what is proven; a floor says more may be passed (D100).
+fn note_floor(detail: &mut String, floor: Option<(usize, &r2source::SourceArityFloor)>) {
+    if let Some((count, floor)) = floor {
+        let causes = floor.causes().iter().map(floor_cause).collect::<Vec<_>>();
+        let _ = write!(
+            detail,
+            "; the parameters are a floor: at least {count} ({})",
+            causes.join(", ")
+        );
+    }
 }
 
 /// Why the parameters are only a floor, as the proof line words it (D37).
