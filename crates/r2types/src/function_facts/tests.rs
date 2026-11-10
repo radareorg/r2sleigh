@@ -292,16 +292,19 @@ fn exact_source_param_slots_ignore_misleading_register_names() {
         .parameters
         .get(&0)
         .expect("exact boundary parameter");
-    assert_eq!(resolver.slot_for_value(parameter.value), Some(0));
+    assert_eq!(
+        resolver.slot_for_value(parameter.value().expect("a register formal")),
+        Some(0)
+    );
     let parameter_var = &source
         .graph()
-        .value(parameter.value)
+        .value(parameter.value().expect("a register formal"))
         .expect("parameter graph value")
         .var;
     assert_eq!(
         source
             .decompile_prep_facts()
-            .formal_parameter_of(parameter.value),
+            .formal_parameter_of(parameter.value().expect("a register formal")),
         Some(0),
         "SSA preparation must consume the same exact boundary slot"
     );
@@ -1381,13 +1384,18 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
         .parameters
         .get(&0)
         .expect("entry parameter boundary");
-    assert!(prepared.graph().use_sites(parameter.value).is_empty());
+    assert!(
+        prepared
+            .graph()
+            .use_sites(parameter.value().expect("a register formal"))
+            .is_empty()
+    );
     assert_eq!(
         prepared
             .callsite_certificate_for_inst(inst_at(&prepared, 0x401000, 0))
             .expect("callsite certificate")
             .argument_values,
-        [parameter.value]
+        [parameter.value().expect("a register formal")]
     );
 
     let mut facts = FunctionFacts::default();
@@ -1442,7 +1450,7 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
             .expect("render facts")
             .parameter_values(0)
             .collect::<Vec<_>>(),
-        [parameter.value]
+        [parameter.value().expect("a register formal")]
     );
 }
 

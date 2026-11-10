@@ -1014,7 +1014,7 @@ impl FunctionTypeFactsBuilder {
 
 fn canonical_generic_param_name(index: usize, name: &str) -> String {
     if crate::context::is_generic_arg_name(name) {
-        format!("arg{index}")
+        r2source::positional_parameter_name(index)
     } else {
         name.to_string()
     }

@@ -928,7 +928,10 @@ fn trusted_source_signature(
         .map(|(index, parameter)| r2types::FunctionParamSpec {
             name: (parameter.name())
                 .filter(|name| !name.is_empty())
-                .map_or_else(|| format!("arg{index}"), str::to_string),
+                .map_or_else(
+                    || r2source::positional_parameter_name(index),
+                    str::to_string,
+                ),
             ty: typed(interface.and_then(|interface| interface.parameter_logical_value(index))),
         })
         .collect();

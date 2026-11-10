@@ -1327,7 +1327,7 @@ fn declared_parameter_names(
                 .and_then(|signature| signature.named_parameters().get(index))
                 .and_then(r2source::SourceSignatureParameter::name)
                 .map(str::to_owned)
-                .unwrap_or_else(|| format!("arg{index}"))
+                .unwrap_or_else(|| r2source::positional_parameter_name(index))
         })
         .collect()
 }

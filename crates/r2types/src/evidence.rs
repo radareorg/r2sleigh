@@ -345,10 +345,11 @@ impl<'a> EvidenceBuilder<'a> {
             .parameter_expression(access.address)?;
         let slot = u32::try_from(address.parameter).ok()?;
         let parameter = self.source.facts().boundaries.parameters.get(&slot)?;
+        let (_, graph_storage) = parameter.register()?;
         (parameter.index == slot
             && parameter.index as usize == address.parameter
-            && address.parameter_storage == Some(parameter.graph_storage))
-        .then_some(parameter.value)
+            && address.parameter_storage == Some(graph_storage))
+        .then_some(parameter.value()?)
     }
 
     /// The element width of a block the function allocated.
@@ -1005,7 +1006,8 @@ mod tests {
             .parameters
             .get(&0)
             .expect("exact parameter")
-            .value;
+            .value()
+            .expect("a register formal");
         let address = source
             .certificates()
             .memory_accesses
@@ -1075,8 +1077,12 @@ mod tests {
             interface,
         )
         .expect("prepared source");
-        let parameter = source.facts().boundaries.parameters[&0].value;
-        let index = source.facts().boundaries.parameters[&1].value;
+        let parameter = source.facts().boundaries.parameters[&0]
+            .value()
+            .expect("a register formal");
+        let index = source.facts().boundaries.parameters[&1]
+            .value()
+            .expect("a register formal");
         let access = source
             .certificates()
             .memory_accesses
@@ -1201,7 +1207,9 @@ mod tests {
             source.unobserved_merges().contains(merged),
             "the merge is read only by an increment nothing observes"
         );
-        let index = source.facts().boundaries.parameters[&1].value;
+        let index = source.facts().boundaries.parameters[&1]
+            .value()
+            .expect("a register formal");
         let solved =
             crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
         assert!(
@@ -1264,8 +1272,12 @@ mod tests {
             interface,
         )
         .expect("prepared source");
-        let signed = source.facts().boundaries.parameters[&0].value;
-        let untouched = source.facts().boundaries.parameters[&1].value;
+        let signed = source.facts().boundaries.parameters[&0]
+            .value()
+            .expect("a register formal");
+        let untouched = source.facts().boundaries.parameters[&1]
+            .value()
+            .expect("a register formal");
 
         let solved =
             crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
@@ -1377,7 +1389,9 @@ mod tests {
             interface,
         )
         .expect("prepared source");
-        let parameter = source.facts().boundaries.parameters[&0].value;
+        let parameter = source.facts().boundaries.parameters[&0]
+            .value()
+            .expect("a register formal");
         let solved =
             crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
         let unsigned = CTypeLike::Int {

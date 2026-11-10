@@ -161,9 +161,12 @@ impl DeadPhis {
         // Parameters are rendered program variables even when the body does
         // not read them, so their canonical entry values remain in the named
         // domain independently of effect liveness.
-        for parameter in boundaries.parameters.values() {
-            roots.insert(parameter.value);
-        }
+        roots.extend(
+            boundaries
+                .parameters
+                .values()
+                .filter_map(|parameter| parameter.value()),
+        );
         for boundary in boundaries.calls.values() {
             for argument in &boundary.arguments {
                 if let SourceCallArgumentValue::Value(value) = argument.value {

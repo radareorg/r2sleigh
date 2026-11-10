@@ -58,7 +58,10 @@ pub(crate) fn collect_parameter_fields(
     }
     let mut out = BTreeMap::new();
     for (slot, parameter) in &boundaries.parameters {
-        let operations = reached_memory_operations(graph, &reloads_of, parameter.value);
+        let Some(value) = parameter.value() else {
+            continue;
+        };
+        let operations = reached_memory_operations(graph, &reloads_of, value);
         if operations.is_empty() {
             continue;
         }

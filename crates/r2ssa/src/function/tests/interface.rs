@@ -407,12 +407,16 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
         .parameters
         .get(&0)
         .expect("source formal parameter fact");
-    assert_eq!(parameter.graph_storage, argument_storage);
-    assert_eq!(prepared.graph().def_inst(parameter.value), None);
+    assert_eq!(
+        parameter.register().map(|(_, lane)| lane),
+        Some(argument_storage)
+    );
+    let parameter_value = parameter.value().expect("a register formal");
+    assert_eq!(prepared.graph().def_inst(parameter_value), None);
     assert_eq!(
         prepared
             .graph()
-            .value(parameter.value)
+            .value(parameter_value)
             .and_then(|value| prepared
                 .decompile_prep_facts()
                 .formal_parameter_of(value.id)),
@@ -433,23 +437,23 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
                 index: 0,
                 storage: argument_storage,
             },
-            value: SourceCallArgumentValue::Value(parameter.value),
+            value: SourceCallArgumentValue::Value(parameter_value),
             lane_of: None,
         }]
     );
     let certificate = prepared
         .sole_callsite_certificate_in_block(0x1600)
         .expect("prepared callsite certificate");
-    assert_eq!(certificate.argument_values, [parameter.value]);
+    assert_eq!(certificate.argument_values, [parameter_value]);
     assert_eq!(certificate.argument_certificates.len(), 1);
-    assert_eq!(certificate.argument_certificates[0].value, parameter.value);
+    assert_eq!(certificate.argument_certificates[0].value, parameter_value);
     assert_eq!(certificate.argument_certificates[0].source_inst, None);
     let obligation = prepared
         .obligations()
         .obligations_for_inst(certificate.at)
         .find(|obligation| obligation.id.kind == crate::SemanticObligationKind::CallArgument)
         .expect("call argument obligation");
-    assert_eq!(obligation.inputs, [parameter.value]);
+    assert_eq!(obligation.inputs, [parameter_value]);
 }
 
 #[test]

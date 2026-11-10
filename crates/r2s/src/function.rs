@@ -114,7 +114,7 @@ fn signature(info: &r2engine::program::info::FunctionInfo, name: Option<&str>) -
     let mut parameters = info
         .arguments
         .iter()
-        .map(|argument| argument.declared_as(&argument_name(argument)))
+        .map(|argument| argument.declared_as(&argument.name))
         .collect::<Vec<_>>();
     // A tail with no named parameter has no C spelling: the list stays unspecified, as `pdd`'s.
     if info.variadic && !parameters.is_empty() {
@@ -125,14 +125,6 @@ fn signature(info: &r2engine::program::info::FunctionInfo, name: Option<&str>) -
         name?,
         parameters.join(", ")
     ))
-}
-
-/// What the source calls a parameter, or `argN` numbered from one as radare2 numbers them.
-fn argument_name(argument: &Argument) -> String {
-    argument
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("arg{}", argument.slot + 1))
 }
 
 /// `afv`: the function's arguments, then its locals.
@@ -157,7 +149,7 @@ fn spell_argument(session: &Session, entry: u64, argument: &Argument) -> String 
         .and_then(|storage| session.program.spell_storage(entry, storage))
         .map(|register| format!(" @ {register}"))
         .unwrap_or_default();
-    format!("arg {} {}{at}", argument.ty.value, argument_name(argument))
+    format!("arg {} {}{at}", argument.ty.value, argument.name)
 }
 
 /// `var <type> <name> @ <base><offset>`, named as the decompiler names it.

@@ -1285,6 +1285,7 @@ pub(crate) fn collect_source_boundary_facts(
     body: Body<'_>,
     call_sites: &CallSiteFacts,
     live_out: &crate::liveout::FunctionLiveOut,
+    objects: &ObjectModel,
 ) -> SourceBoundaryFacts {
     let Body {
         function,
@@ -1303,7 +1304,9 @@ pub(crate) fn collect_source_boundary_facts(
         .map(|stack_pointer| ReachingStorage::new(function, graph, stack_pointer));
     let mut facts = SourceBoundaryFacts {
         parameters: machine_context
-            .map(|machine_context| collect_source_formal_parameter_facts(graph, machine_context))
+            .map(|machine_context| {
+                collect_source_formal_parameter_facts(graph, machine_context, Some(objects))
+            })
             .unwrap_or_default(),
         ..SourceBoundaryFacts::default()
     };
@@ -1833,12 +1836,37 @@ fn entry_of(graph: &SsaGraph, value: ValueId, storage: CanonicalStorageId) -> bo
             .is_some_and(|held| held.location() == storage.location())
 }
 
+/// Where a projected formal arrives: a register lane, or an argument-area slot.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProjectedHome {
+    Register {
+        abi_storage: CanonicalStorageId,
+        graph_storage: CanonicalStorageId,
+    },
+    Stack {
+        offset: i64,
+        bytes: u32,
+    },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SourceFormalParameterProjection {
     pub(crate) index: u32,
-    pub(crate) abi_storage: CanonicalStorageId,
-    pub(crate) graph_storage: CanonicalStorageId,
+    pub(crate) home: ProjectedHome,
     pub(crate) logical_value: Option<SourceLogicalValue>,
+}
+
+impl SourceFormalParameterProjection {
+    /// The convention's carrier and the declared lane, for a register formal.
+    pub(crate) const fn register(&self) -> Option<(CanonicalStorageId, CanonicalStorageId)> {
+        match self.home {
+            ProjectedHome::Register {
+                abi_storage,
+                graph_storage,
+            } => Some((abi_storage, graph_storage)),
+            ProjectedHome::Stack { .. } => None,
+        }
+    }
 }
 
 /// Validate and project the source's ABI parameter slots once.
@@ -1879,9 +1907,22 @@ pub(crate) fn source_formal_parameter_projections(
         .iter()
         .enumerate()
         .filter_map(|(parameter_position, parameter)| {
-            // A parameter the convention passes on the stack is a frame
-            // object rather than an entry register; the object model owns it.
-            let abi_storage = parameter.register_storage()?;
+            let logical_value = interface.parameter_logical_value(parameter_position);
+            let abi_storage = match parameter.location() {
+                r2source::SourceParameterLocation::Register(storage) => storage,
+                r2source::SourceParameterLocation::Stack {
+                    offset, size_bytes, ..
+                } => {
+                    return Some(SourceFormalParameterProjection {
+                        index: parameter.index(),
+                        home: ProjectedHome::Stack {
+                            offset,
+                            bytes: size_bytes,
+                        },
+                        logical_value,
+                    });
+                }
+            };
             if machine_context
                 .abi_model()
                 .argument_registers()
@@ -1901,7 +1942,6 @@ pub(crate) fn source_formal_parameter_projections(
             // A parameter the capture could not place keeps its ABI storage
             // and no exact type, which is what a function with no graph at all
             // already gets. It is not a reason to refuse the parameter.
-            let logical_value = interface.parameter_logical_value(parameter_position);
             let graph_storage = match (logical_value, interface.type_graph()) {
                 (Some(logical_value), Some(type_graph)) => {
                     projected_logical_register_storage(abi_storage, logical_value, type_graph)?
@@ -1911,8 +1951,10 @@ pub(crate) fn source_formal_parameter_projections(
             };
             Some(SourceFormalParameterProjection {
                 index: parameter.index(),
-                abi_storage,
-                graph_storage,
+                home: ProjectedHome::Register {
+                    abi_storage,
+                    graph_storage,
+                },
                 logical_value,
             })
         })
@@ -1951,31 +1993,49 @@ pub(crate) fn unique_entry_values_by_storage(
     values
 }
 
-/// The single authoritative projection from source ABI parameter slots to
-/// entry SSA values. Preparation and published boundary facts consume this
-/// same answer; register spelling is never an identity input.
+/// The single authoritative projection from source ABI parameter slots to their homes: a register
+/// formal's entry value, a stack formal's argument-area object. Preparation reads the register half
+/// (`objects` absent); the published boundary facts read both.
 pub(crate) fn collect_source_formal_parameter_facts(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
+    objects: Option<&ObjectModel>,
 ) -> BTreeMap<u32, SourceFormalParameterFact> {
     let entry_values = unique_entry_values_by_storage(graph);
     let mut facts = BTreeMap::new();
     for parameter in source_formal_parameter_projections(machine_context) {
-        let Some(value) = entry_values
-            .get(&parameter.graph_storage)
-            .copied()
-            .flatten()
-        else {
-            continue;
+        let home = match parameter.home {
+            ProjectedHome::Register {
+                abi_storage,
+                graph_storage,
+            } => {
+                let Some(value) = entry_values.get(&graph_storage).copied().flatten() else {
+                    continue;
+                };
+                FormalHome::Register {
+                    abi_storage,
+                    graph_storage,
+                    value,
+                }
+            }
+            ProjectedHome::Stack { offset, bytes } => {
+                let Some(object) = objects.and_then(|objects| objects.argument_object(offset))
+                else {
+                    continue;
+                };
+                FormalHome::Frame {
+                    object,
+                    offset,
+                    bytes,
+                }
+            }
         };
         facts.insert(
             parameter.index,
             SourceFormalParameterFact {
                 index: parameter.index,
-                abi_storage: parameter.abi_storage,
-                graph_storage: parameter.graph_storage,
                 logical_value: parameter.logical_value,
-                value,
+                home,
             },
         );
     }

@@ -256,6 +256,8 @@ pub enum CallerSlotSupply {
     /// Caller storage outside a placed argument area: the return address, or any slot while the
     /// return address's place, and so the area's, is unproven.
     HeldFromEntry,
+    /// The stack formal at this index, read whole at its home (`FormalHome::Frame`).
+    Formal(u32),
 }
 
 /// A caller's stack slot this body reads and never writes (doc/adr-frame-model.md, "Caller slots").

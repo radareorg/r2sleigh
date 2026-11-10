@@ -1176,7 +1176,7 @@ fn out_param_certificates_from_projection(
             let param_name = param
                 .map(|param| param.name.clone())
                 .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| format!("arg{}", param_index + 1));
+                .unwrap_or_else(|| r2source::positional_parameter_name(*param_index));
             let pointee_type = param
                 .and_then(|param| param.ty.as_ref())
                 .and_then(|ty| match ty {

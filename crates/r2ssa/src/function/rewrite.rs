@@ -255,7 +255,9 @@ impl SSAFunction {
             .map(|(_, storage)| storage)
             .collect::<Vec<_>>();
         for projection in crate::semantic::source_formal_parameter_projections(machine_context) {
-            let lane = projection.graph_storage;
+            let Some((abi_storage, lane)) = projection.register() else {
+                continue;
+            };
             let root = entry_roots
                 .iter()
                 .copied()
@@ -264,7 +266,7 @@ impl SSAFunction {
                         && root.offset <= lane.offset
                         && lane.offset + u64::from(lane.size) <= root.offset + u64::from(root.size)
                 })
-                .unwrap_or(projection.abi_storage);
+                .unwrap_or(abi_storage);
             if root == lane {
                 continue;
             }

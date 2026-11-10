@@ -553,9 +553,11 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
                 .chain(roles.return_address_storage())
                 .any(|reserved| register_storages_overlap(storage, reserved))
         }) || boundaries.parameters.values().any(|parameter| {
-            parameter.value == entry_value
-                || register_storages_overlap(storage, parameter.graph_storage)
-                || register_storages_overlap(storage, parameter.abi_storage)
+            parameter.value() == Some(entry_value)
+                || parameter.register().is_some_and(|(abi, lane)| {
+                    register_storages_overlap(storage, lane)
+                        || register_storages_overlap(storage, abi)
+                })
         }) || boundaries.calls.values().any(|boundary| {
             boundary.arguments.iter().any(|argument| {
                 matches!(argument.value, SourceCallArgumentValue::Value(value) if value == entry_value)
@@ -909,7 +911,7 @@ pub(crate) fn collect_stack_geometry_certificate(
     let mut program_values = boundaries
         .parameters
         .values()
-        .map(|parameter| parameter.value)
+        .filter_map(|parameter| parameter.value())
         .collect::<crate::dense::IdSet<_>>();
     for boundary in boundaries.calls.values() {
         program_values.extend(boundary.arguments.iter().filter_map(

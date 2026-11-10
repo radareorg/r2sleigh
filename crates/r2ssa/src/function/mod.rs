@@ -2155,7 +2155,7 @@ fn forwarded_parameter_index(
     if let Some((index, _)) = boundaries
         .parameters
         .iter()
-        .find(|(_, parameter)| parameter.value == value)
+        .find(|(_, parameter)| parameter.value() == Some(value))
     {
         return Some(*index);
     }

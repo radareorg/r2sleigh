@@ -1,6 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
-
-use r2ssa::SSAVar;
+use std::collections::HashMap;
 
 use crate::signature_infer::RecoveredSignatureParam;
 
@@ -35,43 +33,32 @@ pub fn merge_type_hint(hints: &mut HashMap<String, TypeHint>, key: String, incom
     }
 }
 
-/// The variable each formal enters in.
-///
-/// This is the inverse of the identity relation, not a second copy of it: the
-/// forward map answers which formal a value is, and once it holds every value
-/// that is a formal it can no longer name the one variable a signature
-/// parameter is declared from. The boundary facts state that directly.
-fn prepared_formal_parameters(prepared: &r2ssa::SsaArtifact) -> BTreeMap<usize, SSAVar> {
+/// Each formal parameter of the boundary facts, in slot order: register and stack alike.
+pub(crate) fn recover_signature_params_from_prepared_ssa(
+    prepared: &r2ssa::SsaArtifact,
+    ptr_bits: u32,
+) -> Vec<RecoveredSignatureParam> {
+    let names = prepared.display_names();
     prepared
         .facts()
         .boundaries
         .parameters
         .iter()
         .filter(|(index, fact)| fact.index == **index)
-        .filter_map(|(index, fact)| {
-            Some((*index as usize, prepared.value_var(fact.value)?.clone()))
-        })
-        .collect()
-}
-
-pub(crate) fn recover_signature_params_from_prepared_ssa(
-    prepared: &r2ssa::SsaArtifact,
-    ptr_bits: u32,
-) -> Vec<RecoveredSignatureParam> {
-    prepared_formal_parameters(prepared)
-        .into_iter()
-        .map(|(index, var)| {
+        .map(|(index, fact)| {
+            let index = *index as usize;
             let initial_ty = if source_parameter_is_logical_pointer(prepared, index, ptr_bits)
                 || source_parameter_has_certified_memory_use(prepared, index)
             {
                 crate::CTypeLike::Pointer(Box::new(crate::CTypeLike::Void))
             } else {
-                size_to_neutral_int_type_like(var.size)
+                size_to_neutral_int_type_like(fact.bytes())
             };
             RecoveredSignatureParam {
-                name: format!("arg{index}"),
+                name: names.parameter_name(index),
                 arg_index: index,
-                ssa_var: var,
+                value: fact.value(),
+                size_bytes: fact.bytes(),
                 initial_ty: if matches!(initial_ty, crate::CTypeLike::Unknown) && ptr_bits > 0 {
                     crate::CTypeLike::Int {
                         bits: ptr_bits,

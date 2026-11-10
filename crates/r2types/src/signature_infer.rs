@@ -57,7 +57,9 @@ pub struct SignatureParamCandidate {
 pub struct RecoveredSignatureParam {
     pub name: String,
     pub arg_index: usize,
-    pub ssa_var: SSAVar,
+    /// A register formal's entry value; a stack formal has none (`FormalHome::Frame`).
+    pub value: Option<r2ssa::ValueId>,
+    pub size_bytes: u32,
     pub initial_ty: CTypeLike,
 }
 
@@ -91,9 +93,8 @@ pub(crate) fn infer_signature_from_prepared_ssa(
                 CTypeLike::Pointer(Box::new(CTypeLike::Struct(aggregate.tag.clone())))
             });
             let initial_ty = aggregate.unwrap_or_else(|| {
-                prepared
-                    .graph()
-                    .value_id_for_var(&param.ssa_var)
+                param
+                    .value
                     .and_then(|value| evidence_types.value_type(value))
                     .cloned()
                     .unwrap_or(certified_ty)
@@ -104,7 +105,7 @@ pub(crate) fn infer_signature_from_prepared_ssa(
             }
             let ty = resolve_evidence_driven_signature_type(
                 initial_ty,
-                param.ssa_var.size,
+                param.size_bytes,
                 ptr_bits,
                 &evidence,
             );
@@ -112,7 +113,7 @@ pub(crate) fn infer_signature_from_prepared_ssa(
                 name: param.name.clone(),
                 ty,
                 arg_index: param.arg_index,
-                size_bytes: param.ssa_var.size,
+                size_bytes: param.size_bytes,
                 evidence,
             }
         })
@@ -272,7 +273,7 @@ fn refine_parameter_signedness(
         let scalar_observed = recovered_params
             .iter()
             .find(|recovered| recovered.arg_index == param.arg_index)
-            .and_then(|recovered| graph.value_id_for_var(&recovered.ssa_var))
+            .and_then(|recovered| recovered.value)
             .and_then(|value| inferred.get(value));
         let observed = match &mut param.ty {
             CTypeLike::Int { signedness, .. } if *signedness == Signedness::Unknown => {
@@ -375,9 +376,10 @@ fn certified_parameter_home_aliases(
         else {
             continue;
         };
-        let Some(parameter) = recovered_params
+        let Some(parameter_var) = recovered_params
             .iter()
-            .find(|parameter| parameter.ssa_var == stored)
+            .filter_map(|parameter| prepared.value_var(parameter.value?))
+            .find(|var| **var == stored)
         else {
             continue;
         };
@@ -389,7 +391,7 @@ fn certified_parameter_home_aliases(
                 !access.is_write && access.space == r2il::SpaceId::Ram && access.object == object
             })
         {
-            if load.width != store.width || load.width != parameter.ssa_var.size {
+            if load.width != store.width || load.width != parameter_var.size {
                 continue;
             }
             let Some(reload) = load
@@ -399,7 +401,7 @@ fn certified_parameter_home_aliases(
             else {
                 continue;
             };
-            aliases.push((parameter.ssa_var.clone(), reload));
+            aliases.push((parameter_var.clone(), reload));
         }
     }
     aliases.sort();
@@ -878,7 +880,7 @@ fn normalize_inferred_param_name(
     fallback_idx: usize,
     used: &mut HashSet<String>,
 ) -> String {
-    let fallback = format!("arg{}", fallback_idx);
+    let fallback = r2source::positional_parameter_name(fallback_idx);
     let clean = sanitize_c_identifier(raw_name).unwrap_or_else(|| fallback.clone());
     let clean = if clean.is_empty() { fallback } else { clean };
     uniquify_name(clean, used)
@@ -934,7 +936,7 @@ pub(crate) fn build_inferred_signature(
             let gap_slot = json_params.len();
             json_params.push(InferredSignatureParam {
                 name: normalize_inferred_param_name(
-                    &format!("arg{gap_slot}"),
+                    &r2source::positional_parameter_name(gap_slot),
                     gap_slot,
                     &mut used_param_names,
                 ),
@@ -1309,7 +1311,8 @@ mod tests {
         let recovered = [RecoveredSignatureParam {
             name: "value".to_string(),
             arg_index: 0,
-            ssa_var: SSAVar::new("x0", 0, 8),
+            value: prepared.graph().value_id_for_var(&SSAVar::new("x0", 0, 8)),
+            size_bytes: 8,
             initial_ty: CTypeLike::Int {
                 bits: 64,
                 signedness: Signedness::Unknown,

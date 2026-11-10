@@ -272,6 +272,7 @@ impl PreparedFunctionFacts {
             },
             &call_sites,
             &live_out,
+            &objects,
         );
         phase!("boundaries", boundaries.calls.len());
         // The one liveness of this function. A call's conventional read of a
@@ -568,8 +569,11 @@ pub(crate) fn ensure_source_formal_parameter_values(
             existing.insert(storage, Some(value));
         }
     };
-    for parameter in source_formal_parameter_projections(machine_context) {
-        materialize(graph, &mut existing, parameter.graph_storage);
+    for (_, graph_storage) in source_formal_parameter_projections(machine_context)
+        .iter()
+        .filter_map(|parameter| parameter.register())
+    {
+        materialize(graph, &mut existing, graph_storage);
     }
     // The convention's own argument slots, not the interface's parameter list:
     // what a call may read implicitly is fixed by the calling convention, and
