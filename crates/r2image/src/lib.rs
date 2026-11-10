@@ -17,6 +17,7 @@ mod platform;
 mod posture;
 mod roles;
 pub mod unwind;
+mod versions;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -722,6 +723,7 @@ impl Image {
         // every name it still carries is in `.dynsym`. Reading only the first
         // is why such a library listed no functions at all.
         let static_image = loader::is_static_image(&file);
+        let versions = versions::read(&file);
         let read_symbol = |symbol: object::read::Symbol<'_, '_>, dynamic: bool| {
             let name = symbol.name().ok()?;
             if name.is_empty() || macho_indirect(&file, symbol.index()) {
@@ -820,6 +822,9 @@ impl Image {
                     },
                 },
                 library: None,
+                version: dynamic
+                    .then(|| versions.of_symbol(symbol.index().0))
+                    .flatten(),
             })
         };
         let mut symbols: Vec<Symbol> = file
@@ -877,6 +882,7 @@ impl Image {
                 kept.origin.dynamic = kept.origin.dynamic.or(later.origin.dynamic);
                 kept.origin.directory = kept.origin.directory.or(later.origin.directory);
                 kept.library = kept.library.take().or_else(|| later.library.take());
+                kept.version = kept.version.take().or_else(|| later.version.take());
             }
             same
         });
@@ -1010,6 +1016,7 @@ impl Image {
                 sealed,
                 posture,
                 libraries,
+                version_needs: versions.needs,
                 declarations,
                 platform,
                 unwind,

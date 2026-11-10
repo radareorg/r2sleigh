@@ -51,6 +51,8 @@ pub struct Container {
     pub posture: Posture,
     /// The libraries the program states it needs, in the order it states them, once each.
     pub libraries: Vec<String>,
+    /// The versions the program needs of each library (ELF `.gnu.version_r`), in file order.
+    pub version_needs: Vec<VersionNeed>,
     /// What the program's own debug information declares: its functions by
     /// the address each body begins, its objects by address.
     pub declarations: crate::Declarations,
@@ -595,6 +597,29 @@ pub struct Symbol {
     /// The module the container names beside it: a PE import's DLL, or the
     /// module name a PE export directory states for itself.
     pub library: Option<std::sync::Arc<str>>,
+    /// The version `.gnu.version` gives a dynamic symbol; `None` where it gives none.
+    pub version: Option<SymbolVersion>,
+}
+
+/// The versions a program needs of one library: one `.gnu.version_r` entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionNeed {
+    /// `vn_file`: the library's soname, as `DT_NEEDED` names it.
+    pub library: std::sync::Arc<str>,
+    /// Each `vna_name`, in file order.
+    pub versions: Vec<std::sync::Arc<str>>,
+}
+
+/// One dynamic symbol's version, as `.gnu.version` indexes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymbolVersion {
+    /// An import bound to a version another library defines: `memcpy@GLIBC_2.14` in `libc.so.6`.
+    Needed {
+        library: std::sync::Arc<str>,
+        version: std::sync::Arc<str>,
+    },
+    /// A version this image defines (`.gnu.version_d`), for a symbol it exports.
+    Defined { version: std::sync::Arc<str> },
 }
 
 /// Where each symbol table states a symbol, by its index there.
