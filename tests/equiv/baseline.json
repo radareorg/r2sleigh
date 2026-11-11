@@ -132,12 +132,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::and_chain_effect": {
-   "cause": "D208 entry-input lane, honest residual: `and_chain_effect` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O1::bool_relay": {
    "status": "equal"
@@ -246,12 +241,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::and_chain_effect": {
-   "cause": "D208 entry-input lane, honest residual: `and_chain_effect` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::clang-O2::bool_relay": {
    "status": "equal"
@@ -472,12 +462,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O1::and_chain_effect": {
-   "cause": "D208 entry-input lane, honest residual: `and_chain_effect` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O1::bool_relay": {
    "status": "equal"
@@ -518,12 +503,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O1::inverted_void": {
-   "cause": "D208 entry-input lane, honest residual: `inverted_void` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O1::main": {
    "cause": "paired_sum_diff writes only DL (`sete %dl`) and then reads EDX whole (`and %edx,%eax`), though its result keeps only the low byte; its interface therefore admits EDX as a third parameter, and main passes it RDX, which nothing assigns (never-assigned), so the call's third argument is a residual. Demanded bytes across the call would leave EDX's upper bytes no parameter. Before, this record carried the SSP canary's cause, which no longer describes it.",
@@ -591,12 +571,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O2::and_chain_effect": {
-   "cause": "D208 entry-input lane, honest residual: `and_chain_effect` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O2::bool_relay": {
    "status": "equal"
@@ -637,12 +612,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O2::inverted_void": {
-   "cause": "D208 entry-input lane, honest residual: `inverted_void` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::gcc-O2::main": {
    "cause": "paired_sum_diff writes only DL (`sete %dl`) and then reads EDX whole (`and %edx,%eax`), though its result keeps only the low byte; its interface therefore admits EDX as a third parameter, and main passes it RDX, which nothing assigns (never-assigned), so the call's third argument is a residual. Demanded bytes across the call would leave EDX's upper bytes no parameter. Before, this record carried the SSP canary's cause, which no longer describes it.",
@@ -1221,12 +1191,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_stash": {
-   "cause": "D208 entry-input lane, honest residual: `shape_stash` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_step": {
    "status": "equal"
@@ -1343,12 +1308,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_stash": {
-   "cause": "D208 entry-input lane, honest residual: `shape_stash` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O2::shape_step": {
    "status": "equal"
@@ -1589,12 +1549,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_stash": {
-   "cause": "D208 entry-input lane, honest residual: `shape_stash` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_step": {
    "status": "equal"
@@ -1711,12 +1666,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_stash": {
-   "cause": "D208 entry-input lane, honest residual: `shape_stash` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_step": {
    "status": "equal"
@@ -2060,12 +2010,7 @@
    "status": "equal"
   },
   "tests/gold/atomics.c::clang-O1::total_add": {
-   "cause": "D208 entry-input lane, honest residual: `total_add` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/atomics.c::clang-O2::cell_exchange": {
    "status": "equal"
@@ -2095,12 +2040,7 @@
    "status": "equal"
   },
   "tests/gold/atomics.c::clang-O2::total_add": {
-   "cause": "D208 entry-input lane, honest residual: `total_add` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/atomics.c::gcc-O0::cell_exchange": {
    "status": "equal"
@@ -2160,12 +2100,7 @@
    "status": "equal"
   },
   "tests/gold/atomics.c::gcc-O1::total_add": {
-   "cause": "D208 entry-input lane, honest residual: `total_add` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/atomics.c::gcc-O2::cell_exchange": {
    "status": "equal"
@@ -2195,12 +2130,7 @@
    "status": "equal"
   },
   "tests/gold/atomics.c::gcc-O2::total_add": {
-   "cause": "D208 entry-input lane, honest residual: `total_add` is void in the source and leaves RAX and XMM0 as the caller left them, the bytes of `double f(double x){...; return x;}`, so the result is Unproven and the return traps. Base's equal was luck (rule 8); D213's closed world makes it void.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/code_pointer_table.c::clang-O0::main": {
    "status": "equal"

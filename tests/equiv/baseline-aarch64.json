@@ -447,12 +447,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::aarch64-gcc-O1::and_chain_effect": {
-   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::aarch64-gcc-O1::bool_relay": {
    "status": "equal"
@@ -551,12 +546,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::aarch64-gcc-O2::and_chain_effect": {
-   "cause": "[P7, result proof] The source returns void; nothing proves x0 is not a result, so the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface). The x86-64 records of the void functions carry the same cause.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::aarch64-gcc-O2::bool_relay": {
    "status": "equal"
@@ -2005,12 +1995,7 @@
    "status": "equal"
   },
   "tests/gold/atomics.c::aarch64-clang-O0::total_add": {
-   "cause": "[P7, result proof] The source returns void; its one `stadd` writes no register, so x0 still holds the `total` pointer it arrived in and nothing proves it is not a result: the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface), the class the corpus's void functions carry; the store itself renders as r2sleigh_atomic_fetch_add_u64_relaxed. gcc -O0 emits `ldadd x1, x0, [x0]` instead, so x0 holds the value read and that record is equal.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/atomics.c::aarch64-clang-O1::cell_exchange": {
    "status": "equal"
@@ -2040,12 +2025,7 @@
    "status": "equal"
   },
   "tests/gold/atomics.c::aarch64-clang-O1::total_add": {
-   "cause": "[P7, result proof] The source returns void; its one `stadd` writes no register, so x0 still holds the `total` pointer it arrived in and nothing proves it is not a result: the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface), the class the corpus's void functions carry; the store itself renders as r2sleigh_atomic_fetch_add_u64_relaxed. gcc -O0 emits `ldadd x1, x0, [x0]` instead, so x0 holds the value read and that record is equal.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/atomics.c::aarch64-clang-O2::cell_exchange": {
    "status": "equal"
@@ -2075,12 +2055,7 @@
    "status": "equal"
   },
   "tests/gold/atomics.c::aarch64-clang-O2::total_add": {
-   "cause": "[P7, result proof] The source returns void; its one `stadd` writes no register, so x0 still holds the `total` pointer it arrived in and nothing proves it is not a result: the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface), the class the corpus's void functions carry; the store itself renders as r2sleigh_atomic_fetch_add_u64_relaxed. gcc -O0 emits `ldadd x1, x0, [x0]` instead, so x0 holds the value read and that record is equal.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/atomics.c::aarch64-gcc-O0::cell_exchange": {
    "status": "equal"
@@ -2140,12 +2115,7 @@
    "status": "equal"
   },
   "tests/gold/atomics.c::aarch64-gcc-O1::total_add": {
-   "cause": "[P7, result proof] The source returns void; its one `stadd` writes no register, so x0 still holds the `total` pointer it arrived in and nothing proves it is not a result: the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface), the class the corpus's void functions carry; the store itself renders as r2sleigh_atomic_fetch_add_u64_relaxed. gcc -O0 emits `ldadd x1, x0, [x0]` instead, so x0 holds the value read and that record is equal.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/atomics.c::aarch64-gcc-O2::cell_exchange": {
    "status": "equal"
@@ -2175,12 +2145,7 @@
    "status": "equal"
   },
   "tests/gold/atomics.c::aarch64-gcc-O2::total_add": {
-   "cause": "[P7, result proof] The source returns void; its one `stadd` writes no register, so x0 still holds the `total` pointer it arrived in and nothing proves it is not a result: the rendered return is a counted residual that traps where it would be read (r2ssa recover_interface), the class the corpus's void functions carry; the store itself renders as r2sleigh_atomic_fetch_add_u64_relaxed. gcc -O0 emits `ldadd x1, x0, [x0]` instead, so x0 holds the value read and that record is equal.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/code_pointer_table.c::aarch64-clang-O0::main": {
    "cause": "[P7] main passes table_dispatch its two arguments and returns what it returns. clang -O0's table_dispatch copies its table through q0 (`ldr q0; str q0`), so it leaves both x0 and q0 written (#85), and no call reads either (#86): main hands x0 on by returning it, which reads nothing until main's own result is stated. Its result is unproven, and main's return is a residual. Owner: r2abi, __libc_start_main's main stated as int (*)(int, char**, char**), spelled `func` today; with main's result stated, its return reads x0.",

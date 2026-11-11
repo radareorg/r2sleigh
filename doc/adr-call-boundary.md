@@ -843,6 +843,13 @@ Gates, release, base `1e4a74a1a`:
 - Census: 4 goldens, 19 lines. `_dl_relocate_static_pie` (and stripped `fcn_401270`) is `void`: nothing enters it, glibc declares it `void`. Seven proof lines of written results nothing reads now name the closed-world premise. Coverage: 560 of 562 rendered, no regression; the three pinned `_dl_relocate_static_pie` go from 2 gapped obligations to 0.
 - Source-gold CI steps (hashes, returns, the CI scratch-void corpus, the 10 shapes): exit codes and reports equal base's. `comment_runs` adds no run; structure counts equal the baseline; Dylint 8 warnings, the baseline. The 24 W46 pairs read the same at `1e4a74a1a`.
 
+On S6 (`31a8371bb`, 2026-11-11), release r2s on one x86-64 host (gcc 13.3, clang 18.1; aarch64 under qemu-user):
+
+- S7's arm for an argument handed back beside a written float states `integer_undefined: false`: the integer register holds an input's entry byte, which the field excludes.
+- Equivalence: x86-64 731 to 745 equal of 828, exactly the 14 above; aarch64 736 to 743, exactly the 7 above. No other record departs from S6's baseline on either target, so the 18 aarch64 records the run at `1e4a74a1a` showed leaving `equal` do not recur. The 21 are blessed.
+- `void_soundness.py`: 1,858 read results, 16 rendered void, all 16 x87 results named in `known.json`, at S6 and here. S7's `ReturnedByCall::Stated` ended the 3 `f3.gcc.O1` false voids and clang's `p_ldb_chain_b` at O1, O2, O2.avx2 and O3; those 4 stale entries are deleted, and the gate exits 0.
+- `mutants_d213.py --check`: 19 of 19 mutants apply. Touched crates 1,590 tests pass; census 444 goldens, 0 moved; Dylint 8; structure counts equal the baseline; coverage 560 of 562 rendered, no regression.
+
 ## S5 as built (2026-11-10)
 
 What the code said that this ADR did not, and the owner chosen:
