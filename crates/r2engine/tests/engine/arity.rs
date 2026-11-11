@@ -290,7 +290,9 @@ fn a_load_of_a_sealed_word_folds_only_where_an_interpreter_seals_the_image() {
 /// a gap naming the import and why, never an unsupported instruction (audit M3, RF's W10 case).
 #[test]
 fn a_variadic_call_with_no_count_is_a_gap_naming_its_callee() {
-    let darwin = Literal::of_code(CALL_THROUGH_A_SLOT, &[("caller", BASE, 0x11)]).mach_o();
+    let darwin = Literal::of_code(CALL_THROUGH_A_SLOT, &[("caller", BASE, 0x11)])
+        .mach_o()
+        .from_dylib("objc_msgSend", "/usr/lib/libobjc.A.dylib");
     let text = slot_caller_in(darwin, "objc_msgSend", true);
     assert!(
         text.contains(

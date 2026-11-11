@@ -268,7 +268,11 @@ const SYSV_RESULTS: SpecOverride = SpecOverride::Results {
 
 const SYSTEM_V_AMD64: ConventionRow = ConventionRow {
     id: ConventionId::SysVAmd64,
-    cspec: USUAL,
+    // gcc's, which every x86-64 container but a PE reads anyway; a PE's `sysv_abi` function too.
+    cspec: Cspec {
+        toolchain: Toolchain::Compiler("gcc"),
+        prototype: None,
+    },
     red_zone: 128,
     frame_pointer: Some(RegName("rbp")),
     count_register: Some(RegName("al")),

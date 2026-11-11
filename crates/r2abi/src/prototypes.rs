@@ -26,13 +26,45 @@ pub struct Prototype {
     pub variadic: bool,
     /// DWARF's `DW_AT_noreturn`; a library row states its own on `LibraryRow::noreturn`.
     pub noreturn: bool,
-    /// DWARF's `DW_CC_nocall`: the compiler passes the arguments its own way, so no convention
-    /// places them.
-    pub nocall: bool,
+    /// DWARF's `DW_AT_calling_convention`; the engine chooses the convention from it (S20).
+    pub convention: StatedConvention,
     /// What the offsets in `locals` are measured from.
     pub frame_base: Option<FrameBase>,
     /// Each named variable the declaration places in the frame.
     pub locals: Vec<Local>,
+}
+
+/// A subprogram's `DW_AT_calling_convention` as its producer writes it (DWARF 5 3.3.1.1; LLVM's
+/// vendor codes are `llvm/BinaryFormat/Dwarf.def`'s `HANDLE_DW_CC`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StatedConvention {
+    /// No attribute, or `DW_CC_normal`.
+    #[default]
+    Normal,
+    /// `DW_CC_program`: a main program, not callable by the ordinary convention.
+    Program,
+    /// `DW_CC_nocall`: the compiler passes the arguments its own way.
+    NoCall,
+    /// `DW_CC_LLVM_Win64` (0xc1), clang's `ms_abi`.
+    LlvmWin64,
+    /// `DW_CC_LLVM_X86_64SysV` (0xc2), clang's `sysv_abi`.
+    LlvmX8664SysV,
+    /// Any other code.
+    Other(u8),
+}
+
+impl StatedConvention {
+    /// The attribute's constant.
+    pub const fn of(code: u8) -> Self {
+        match code {
+            0x01 => Self::Normal,
+            0x02 => Self::Program,
+            0x03 => Self::NoCall,
+            0xc1 => Self::LlvmWin64,
+            0xc2 => Self::LlvmX8664SysV,
+            code => Self::Other(code),
+        }
+    }
 }
 
 /// One C type, as the declaration writes it and as the language reads it.

@@ -632,7 +632,9 @@ fn held_lanes<S: Source + 'static>(
 ) -> Option<[bool; LANES]> {
     let view = View::new(db, true);
     let walker = super::returns::Walking::new(view.clone(), true).ok()?;
-    let target = walker.target(view.thumb_at(callee));
+    let thumb = view.thumb_at(callee);
+    let stated = stated_target(&view, &walker, callee, thumb);
+    let target = stated.as_ref().unwrap_or(walker.target(thumb));
     let slots = target.convention.convention_slots().ok()?;
     let slots_of = lanes_of(target, &slots).slots();
     let arguments = argument_registers(&slots);
@@ -922,7 +924,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
     fn compute(db: &Db<ProgramInputs<S>>, &(caller, thumb): &(u64, bool)) -> Self::Value {
         let view = View::new(db, true);
         let walker = super::returns::Walking::new(view.clone(), true).ok()?;
-        let target = walker.target(thumb);
+        let stated = stated_target(&view, &walker, caller, thumb);
+        let target = stated.as_ref().unwrap_or(walker.target(thumb));
         let slots = target.convention.convention_slots().ok()?;
         let walking = db.get::<Walked>(&(caller, thumb)).ok()?;
         let body = walking.0.as_ref().ok()?.body();
@@ -931,7 +934,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
             view: &view,
             lanes: lanes_of(target, &slots),
             slots: &slots,
-            call: target.convention.call_effect().ok(),
+            call: target.call.call_effect().ok(),
             depth: Depth::Deep,
         };
         let direct = direct_calls(body).collect::<Vec<_>>();
@@ -969,7 +972,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeEntry {
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
         let view = View::new(db, true);
         let walker = super::returns::Walking::new(view.clone(), true).ok()?;
-        let target = walker.target(thumb);
+        let stated = stated_target(&view, &walker, entry, thumb);
+        let target = stated.as_ref().unwrap_or(walker.target(thumb));
         let slots = target.convention.convention_slots().ok()?;
         let walking = db.get::<Walked>(&(entry, thumb)).ok()?;
         let body = walking.0.as_ref().ok()?.body();
@@ -978,13 +982,25 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeEntry {
             view: &view,
             lanes: lanes_of(target, &slots),
             slots: &slots,
-            call: target.convention.call_effect().ok(),
+            call: target.call.call_effect().ok(),
             depth: Depth::Shallow,
         };
         let effects = reading.effects(body);
         let flow = flow_of(body, target.disasm.arch_spec().memory_endianness);
         flow.entry_summary(entry, reading.lanes, &effects)
     }
+}
+
+/// The function's own target where its debug information states a convention other than the
+/// program's (S20); `None` keeps the walker's. O(log functions).
+fn stated_target<'p, S: Source + 'static>(
+    view: &View<'p, S>,
+    walker: &super::returns::Walking<'p, S>,
+    entry: u64,
+    thumb: bool,
+) -> Option<NativeTarget<'p>> {
+    let target = view.target_of(walker.machine(thumb)?, entry).ok()?;
+    target.program.is_some().then_some(target)
 }
 
 /// The convention's result lanes: the typed three, then the rest of its return set.

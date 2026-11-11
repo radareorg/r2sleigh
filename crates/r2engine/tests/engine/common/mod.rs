@@ -1001,6 +1001,17 @@ impl Literal {
         self
     }
 
+    /// The same program stating `import` from `dylib`, as a two-level namespace's ordinal names it.
+    pub fn from_dylib(mut self, import: &str, dylib: &str) -> Self {
+        self.container.symbols.push(Symbol {
+            name: import.into(),
+            import: true,
+            library: Some(dylib.into()),
+            ..Symbol::default()
+        });
+        self
+    }
+
     /// The same program with a data section, where a write can put a string.
     pub fn with_data(mut self) -> Self {
         self.container.sections.push(Section {

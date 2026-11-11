@@ -207,7 +207,10 @@ impl<'a> Placement<'a> {
             &self.target.convention,
             &classes,
             &arrivals,
-            prototype.nocall,
+            matches!(
+                prototype.convention,
+                r2abi::StatedConvention::NoCall | r2abi::StatedConvention::Program
+            ),
         );
         match placed {
             Ok(placement) => {
@@ -224,8 +227,9 @@ impl<'a> Placement<'a> {
             Err(r2ssa::place::PlacementRefusal::NoCall) => {
                 r2il::refusal_evidence!(
                     "declared-interface",
-                    "{}: DW_CC_nocall, so no convention places its parameters",
-                    prototype.name
+                    "{}: {:?}, so no convention places its parameters",
+                    prototype.name,
+                    prototype.convention
                 );
                 None
             }

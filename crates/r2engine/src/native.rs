@@ -153,6 +153,11 @@ pub struct NativeTarget<'a> {
     pub convention: Arc<ConventionModel>,
     /// The machine facts of the specification the convention reads: stack pointer, return address.
     pub compiler: &'a LanguageProfile,
+    /// What a call here may run under: `convention`, joined with each other convention a function
+    /// of the program states (doc/adr-call-boundary.md, "S20 as built").
+    pub call: Arc<ConventionModel>,
+    /// The program's own convention where this function's debug information states another.
+    pub program: Option<Assembly<'a>>,
     /// The language's DWARF register numbering.
     pub dwarf: &'a r2sleigh_lift::profile::DwarfRegisters,
     /// The library rows this program's imports bind. An import has no body to read an
@@ -163,6 +168,28 @@ pub struct NativeTarget<'a> {
     pub declarations: &'a r2abi::Declarations,
     /// The target's cited C data model; `None` where no row states one.
     pub data_model: Option<&'static r2abi::CDataModel>,
+}
+
+/// One convention's held model and the specification it reads.
+#[derive(Clone)]
+pub struct Assembly<'a> {
+    pub convention: Arc<ConventionModel>,
+    pub compiler: &'a LanguageProfile,
+}
+
+impl<'a> NativeTarget<'a> {
+    /// The target an import is placed in: the program's own convention, which its libraries run
+    /// under; `None` where it is this function's too.
+    pub fn importing(&self) -> Option<Self> {
+        let program = self.program.as_ref()?;
+        Some(Self {
+            convention: Arc::clone(&program.convention),
+            call: Arc::clone(&self.call),
+            compiler: program.compiler,
+            program: None,
+            ..*self
+        })
+    }
 }
 
 /// Why a native decompile could not be attempted: the record `pdd`, `pddj`, `afi` and the listing
@@ -263,6 +290,8 @@ pub enum Unassembled {
     UnparsedCompiler(String),
     /// The compiler specification states no prototype of the convention's name.
     NoPrototype(&'static str),
+    /// The function's debug information states a convention no model here has.
+    StatedConvention(r2abi::StatedConvention),
 }
 
 impl std::fmt::Display for Unassembled {
@@ -283,6 +312,12 @@ impl std::fmt::Display for Unassembled {
             }
             Self::NoPrototype(prototype) => {
                 write!(f, "the compiler specification states no {prototype}")
+            }
+            Self::StatedConvention(stated) => {
+                write!(
+                    f,
+                    "the debug information states a convention no model has: {stated:?}"
+                )
             }
         }
     }
@@ -998,7 +1033,6 @@ fn declare_imports(
     ptr_bits: u32,
     callees: &mut Callees,
 ) -> Vec<r2types::SourceOwnedCalleeSignature> {
-    let placement = Placement::new(target, &native.machine);
     let mut signatures = Vec::new();
     for address in targets {
         let Some(name) = native.program.import_at(*address) else {
@@ -1012,13 +1046,17 @@ fn declare_imports(
         };
         // An import has no body here, so nothing it declares about its own
         // frame is about anything this program can see.
-        let Some(interface) = placement.restatement(declared, false).interface else {
+        let placed = placing_imports(target, Some(&native.machine), |placement| {
+            let interface = placement.restatement(declared, false).interface?;
+            Some((interface, placement.function_type(declared)))
+        });
+        let Some((interface, signature)) = placed.flatten() else {
             callees
                 .unstated
                 .insert(*address, r2ssa::UnstatedImport::Unplaced);
             continue;
         };
-        if let Some(signature) = placement.function_type(declared)
+        if let Some(signature) = signature
             && let Some(declaration) = r2types::SourceOwnedCalleeSignature::declared(
                 *address,
                 interface.clone(),
@@ -1340,16 +1378,37 @@ pub(crate) fn argument_slots(target: &NativeTarget<'_>) -> Vec<CanonicalStorageI
 
 /// Where an import's declaration says it takes a pointer.
 pub(crate) fn declared_pointers(target: &NativeTarget<'_>, name: &str) -> Vec<CanonicalStorageId> {
-    let (Some(declared), Ok(machine)) = (Declared::import(target, name), machine(target)) else {
+    let Some(declared) = Declared::import(target, name) else {
         return Vec::new();
     };
-    Placement::new(target, &machine).pointers(declared)
+    placing_imports(target, None, |placement| placement.pointers(declared)).unwrap_or_default()
 }
 
 /// The registers a call to the import `name` may read, where it binds a row (S7 reads it).
 pub fn import_reads(target: &NativeTarget<'_>, name: &str) -> Option<crate::imports::ImportReads> {
-    let (declared, machine) = (Declared::import(target, name)?, machine(target).ok()?);
-    Some(Placement::new(target, &machine).reads(declared))
+    let declared = Declared::import(target, name)?;
+    placing_imports(target, None, |placement| placement.reads(declared))
+}
+
+/// `f` over the placement an import's row takes: the program's own convention, which its libraries
+/// run under, where this function's debug information states another (S20). `None` where the
+/// machine does not build.
+fn placing_imports<R>(
+    target: &NativeTarget<'_>,
+    built: Option<&NativeMachine>,
+    f: impl FnOnce(&Placement<'_>) -> R,
+) -> Option<R> {
+    let library = target.importing();
+    let target = library.as_ref().unwrap_or(target);
+    let owned;
+    let machine = match (built, &library) {
+        (Some(machine), None) => machine,
+        _ => {
+            owned = machine(target).ok()?;
+            &owned
+        }
+    };
+    Some(f(&Placement::new(target, machine)))
 }
 
 /// One interface again, with stack slots it did not have, stated against
@@ -2337,7 +2396,10 @@ impl Native<'_> {
                 };
                 let prototype = declared.prototype;
                 // The convention places each parameter: by class, or by position where shared.
-                let placed = Placement::new(self.target, &self.machine).registers(declared);
+                let placed = placing_imports(self.target, Some(&self.machine), |placement| {
+                    placement.registers(declared)
+                })
+                .unwrap_or_default();
                 for (index, (parameter, storage)) in
                     prototype.parameters.iter().zip(&placed).enumerate()
                 {
@@ -2515,7 +2577,7 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
     let slots = model
         .convention_slots()
         .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?;
-    let call_effect = model.call_effect().inspect_err(|error| {
+    let call_effect = target.call.call_effect().inspect_err(|error| {
         r2il::refusal_evidence!("call-effect", "{:?}: {error:?}", model.id);
     });
     Ok(NativeMachine {
@@ -3116,8 +3178,10 @@ mod tests {
             arch: embedded.tables(),
             disasm: &embedded.disasm,
             cpu: embedded.cpu,
+            call: Arc::new(convention.clone()),
             convention: Arc::new(convention),
             compiler: &compiler,
+            program: None,
             dwarf: &embedded.dwarf,
             imports: &imports,
             declarations: &declarations,

@@ -165,6 +165,23 @@ fn a_floating_variadic_operand_both_registers_carry_is_the_double() {
     assert!(text.contains("0x4004000000000000"), "{text}");
 }
 
+/// msvcrt.dll exports a `printf` too, and no cited table states msvcrt's: the call is a gap
+/// naming the import, never UCRT's or ISO C's row found by the name (S20).
+#[test]
+fn an_import_from_a_dll_no_table_states_stays_undeclared() {
+    let program = Literal::of_code(FLOATING, &[("caller", BASE, 0x2c)])
+        .with_data()
+        .importing_from("msvcrt.dll", "printf")
+        .pe();
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(common::TEXT, b"%d %f\n\0");
+    let text = rendered(&mut open, BASE);
+    assert!(
+        text.contains("call to printf: the import has no declaration to state its arguments"),
+        "{text}"
+    );
+}
+
 /// The same body calling a DLL no cited table states: the home escapes to no `va_list` the
 /// container proves, so no tail is claimed and the call states no count.
 #[test]

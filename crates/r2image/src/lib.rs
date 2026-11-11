@@ -205,6 +205,44 @@ fn macho_indirect(file: &object::File<'_>, index: object::SymbolIndex) -> bool {
     n_type.is_ok_and(|n_type| !n_type.is_stab() && n_type.typ() == object::macho::N_INDR)
 }
 
+/// The dylibs a two-level namespace image loads, in load-command order: a library ordinal `n` is
+/// entry `n - 1` (`<mach-o/nlist.h>`, `GET_LIBRARY_ORDINAL`). `None` for a flat namespace.
+fn macho_dylibs(file: &object::File<'_>) -> Option<Vec<Option<Arc<str>>>> {
+    match file {
+        object::File::MachO32(macho) => two_level_dylibs(macho),
+        object::File::MachO64(macho) => two_level_dylibs(macho),
+        _ => None,
+    }
+}
+
+fn two_level_dylibs<Mach: object::read::macho::MachHeader>(
+    macho: &object::read::macho::MachOFile<'_, Mach>,
+) -> Option<Vec<Option<Arc<str>>>> {
+    let endian = macho.endian();
+    if !(macho.macho_header().flags(endian)).contains(object::macho::MH_TWOLEVEL) {
+        return None;
+    }
+    let mut commands = macho.macho_load_commands().ok()?;
+    let mut dylibs = Vec::new();
+    while let Ok(Some(command)) = commands.next() {
+        if let Ok(Some(dylib)) = command.dylib() {
+            let name = command.string(endian, dylib.dylib.name).ok();
+            dylibs.push(name.map(|name| String::from_utf8_lossy(name).into()));
+        }
+    }
+    Some(dylibs)
+}
+
+/// The dylib an undefined symbol's `n_desc` names by ordinal; 0 (this image), `0xfe` (dynamic
+/// lookup) and `0xff` (the executable) name none.
+fn ordinal_dylib(
+    dylibs: &[Option<Arc<str>>],
+    n_desc: object::macho::SymbolDesc,
+) -> Option<Arc<str>> {
+    let ordinal = usize::from(n_desc.library().index()?);
+    dylibs.get(ordinal.checked_sub(1)?)?.clone()
+}
+
 /// Where ELF's header states the entry point: `e_entry`, after the sixteen
 /// identification bytes and the type, machine and version fields.
 const ELF_ENTRY_FIELD: u64 = 0x18;
@@ -724,6 +762,7 @@ impl Image {
         // is why such a library listed no functions at all.
         let static_image = loader::is_static_image(&file);
         let versions = versions::read(&file);
+        let dylibs = macho_dylibs(&file);
         let read_symbol = |symbol: object::read::Symbol<'_, '_>, dynamic: bool| {
             let name = symbol.name().ok()?;
             if name.is_empty() || macho_indirect(&file, symbol.index()) {
@@ -821,7 +860,12 @@ impl Image {
                         directory: None,
                     },
                 },
-                library: None,
+                library: match (import, &dylibs, symbol.flags()) {
+                    (true, Some(dylibs), object::SymbolFlags::MachO { n_desc, .. }) => {
+                        ordinal_dylib(dylibs, n_desc)
+                    }
+                    _ => None,
+                },
                 version: dynamic
                     .then(|| versions.of_symbol(symbol.index().0))
                     .flatten(),

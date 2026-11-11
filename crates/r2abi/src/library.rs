@@ -38,9 +38,12 @@ pub enum LibraryId {
     Glibc,
     Bionic,
     LibSystem,
-    /// The Itanium C++ ABI runtime and libstdc++'s exports, read beside every C library, and the
-    /// rows read from an import's mangled name.
+    /// objc4's runtime, `libobjc.A.dylib`: bound only by an import that names that dylib.
+    Objc,
+    /// The Itanium C++ ABI runtime and libstdc++'s exports, read beside every C library.
     CxxRuntime,
+    /// Rows read from an import's mangled name: the ABI's statement, whichever library defines it.
+    Itanium,
     /// A Windows DLL's own rows, bound by the DLL a PE import names.
     Dll(Dll),
 }
@@ -175,6 +178,7 @@ const GLIBC_CITED: &str = include_str!("../data/types-glibc.sdb.txt");
 const BIONIC: &str = include_str!("../data/types-android.sdb.txt");
 const BIONIC_CITED: &str = include_str!("../data/types-bionic.sdb.txt");
 const LIBSYSTEM: &str = include_str!("../data/types-darwin.sdb.txt");
+const OBJC: &str = include_str!("../data/types-objc.sdb.txt");
 const KERNEL32: &str = include_str!("../data/types-kernel32.sdb.txt");
 const UCRT: &str = include_str!("../data/types-ucrt.sdb.txt");
 /// Whether a mangled member takes `this` where its name leaves it open, by the header declaring it.
@@ -245,7 +249,10 @@ impl LibraryRows {
                 table(Bionic, false, BIONIC),
                 table(Bionic, true, BIONIC_CITED),
             ],
-            CLibrary::LibSystem => &[table(LibSystem, false, LIBSYSTEM)],
+            CLibrary::LibSystem => &[
+                table(LibSystem, false, LIBSYSTEM),
+                table(LibraryId::Objc, false, OBJC),
+            ],
             CLibrary::Ucrt => &[
                 table(LibraryId::Dll(Dll::Kernel32), true, KERNEL32),
                 table(LibraryId::Dll(Dll::Ucrt), true, UCRT),
@@ -279,16 +286,13 @@ impl LibraryRows {
         rows
     }
 
-    /// A row for each mangled name no table states, where the name states its parameters and,
-    /// for a member, whether it takes `this`: O(names x name length).
+    /// A row for each mangled name, where the name states its parameters and, for a member,
+    /// whether it takes `this`: O(names x name length).
     pub fn read_mangled<'a>(&mut self, names: impl IntoIterator<Item = &'a str>) {
         let objects = CxxObjects::read(CXX_OBJECTS);
         for name in names {
-            if self.row(LibraryId::CxxRuntime, name).is_some() {
-                continue;
-            }
             if let Some(row) = self.mangled(name, &objects) {
-                let rows = self.rows.entry(LibraryId::CxxRuntime).or_default();
+                let rows = self.rows.entry(LibraryId::Itanium).or_default();
                 rows.insert(name.into(), row);
             }
         }
@@ -333,7 +337,7 @@ impl LibraryRows {
             ..Prototype::default()
         });
         Some(LibraryRow {
-            library: LibraryId::CxxRuntime,
+            library: LibraryId::Itanium,
             linked_name: name.into(),
             prototype: id,
             tail: match mangled.variadic {
@@ -717,7 +721,7 @@ mod tests {
     }
 
     /// objc4, Darwin's runtime: a message send passes whatever the method takes after `self` and
-    /// `op`, and `objc_storeStrong` stores through a pointer (audit W10); no other library has it.
+    /// `op`, and `objc_storeStrong` stores through a pointer (audit W10); only libobjc has it.
     #[test]
     fn the_objective_c_runtime_is_declared_as_objc4_declares_it() {
         let glibc = LibraryRows::embedded(CLibrary::Glibc);
@@ -727,10 +731,13 @@ mod tests {
                 .is_none()
         );
         let rows = LibraryRows::embedded(CLibrary::LibSystem);
-        let send = prototype(&rows, CLibrary::LibSystem, "objc_msgSend");
+        let libsystem = CLibrary::LibSystem.scope();
+        assert!(rows.find(libsystem, "objc_msgSend").is_none());
+        let objc = |name: &str| rows.prototype(rows.row(LibraryId::Objc, name).expect(name));
+        let send = objc("objc_msgSend");
         assert_eq!(send.parameters.len(), 2);
         assert!(send.variadic);
-        let store = prototype(&rows, CLibrary::LibSystem, "objc_storeStrong");
+        let store = objc("objc_storeStrong");
         let spellings: Vec<_> = (store.parameters.iter())
             .map(|parameter| spelled(&rows, parameter))
             .collect();
@@ -739,8 +746,7 @@ mod tests {
             [Some("void **".to_owned()), Some("void *".to_owned())]
         );
         assert_eq!(store.returns.as_written(), "void");
-        let retain = prototype(&rows, CLibrary::LibSystem, "objc_retain");
-        assert_eq!(retain.returns.as_written(), "void *");
+        assert_eq!(objc("objc_retain").returns.as_written(), "void *");
     }
 
     /// The C++ runtime's rows (`types-cxx.sdb.txt`): operator new takes the width its mangling
@@ -806,7 +812,7 @@ mod tests {
         let open = "_ZN3Foo3barEi";
         rows.read_mangled([put, now, open, "_ZNSolsEi", "_Znwm", "main"]);
         let count = |name: &str| {
-            let row = rows.row(LibraryId::CxxRuntime, name)?;
+            let row = rows.row(LibraryId::Itanium, name)?;
             let prototype = rows.prototype(row);
             let refused = matches!(
                 rows.graph().get(prototype.return_type),
@@ -818,18 +824,19 @@ mod tests {
         };
         assert_eq!(count(put), Some(2));
         assert!(
-            rows.row(LibraryId::CxxRuntime, put)
+            rows.row(LibraryId::Itanium, put)
                 .is_some_and(|row| row.citation.contains("<ostream>"))
         );
         assert_eq!(count(now), Some(0));
         assert_eq!(count("_ZNSolsEi"), Some(2));
         assert_eq!(count(open), None);
-        // The table's own row stands: operator new states its result.
+        // The table's own row stands beside the name's: operator new states its result there.
         let new = rows
             .row(LibraryId::CxxRuntime, "_Znwm")
             .expect("operator new");
         assert!(new.citation.is_empty());
-        assert!(rows.row(LibraryId::CxxRuntime, "main").is_none());
+        assert_eq!(count("_Znwm"), Some(1));
+        assert!(rows.row(LibraryId::Itanium, "main").is_none());
     }
 
     /// Every `cxx-objects.txt` name parses, and its name leaves the object open.

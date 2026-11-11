@@ -23,8 +23,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use gimli::{AttributeValue, DwAt};
 use r2abi::{
     Arrival, CDataModel, DataObject, Declarations, FrameBase, Keyword, Local, Member, Parameter,
-    Prototype, Qualifiers, Record, RecordKind, Scalar, ScalarKind, Signature, Type, TypeGraph,
-    TypeId, Width,
+    Prototype, Qualifiers, Record, RecordKind, Scalar, ScalarKind, Signature, StatedConvention,
+    Type, TypeGraph, TypeId, Width,
 };
 
 type Slice<'a> = gimli::EndianSlice<'a, gimli::RunTimeEndian>;
@@ -700,10 +700,10 @@ impl Reader<'_, '_, '_> {
             // next function's rather than this one's.
             noreturn: self.flag(die, gimli::DW_AT_noreturn),
             // gimli reads the attribute as its own variant, which has no `udata_value`.
-            nocall: matches!(
-                self.attr(die, gimli::DW_AT_calling_convention),
-                Some((_, AttributeValue::CallingConvention(gimli::DW_CC_nocall)))
-            ),
+            convention: match self.attr(die, gimli::DW_AT_calling_convention) {
+                Some((_, AttributeValue::CallingConvention(code))) => StatedConvention::of(code.0),
+                _ => StatedConvention::Normal,
+            },
             frame_base,
             locals,
         };

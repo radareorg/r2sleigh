@@ -40,17 +40,20 @@ use crate::native::{NativeRefusal, NativeTarget, Prepared, Unassembled};
 use crate::query::Decoders;
 use crate::query::db::{Db, Inputs, Query, Retention};
 
-/// Everything a native request needs that is not the decoder itself.
+/// Everything a native request needs under one convention that is not the decoder itself.
 pub(super) struct Assembled {
     convention: r2abi::ConventionId,
     /// The specification the convention reads, under its prototype.
     compiler: r2sleigh_lift::profile::LanguageProfile,
-    /// The rows the program's C library states, and how each import binds one.
-    imports: crate::imports::Imports,
-    /// The C data model of the architecture under that C library.
-    data_model: Option<&'static r2abi::CDataModel>,
     /// The register a call returns through, in the coordinates the lift spells.
     link: Option<r2il::Varnode>,
+}
+
+/// The convention chosen for one function, and the program's own where a declaration chose
+/// another (doc/adr-call-boundary.md, "S20 as built").
+pub(super) struct Chosen<'a> {
+    pub(super) assembled: &'a Assembled,
+    pub(super) program: Option<&'a Assembled>,
 }
 
 /// The decoders for a program's instruction sets and what a native request needs of them.
@@ -67,6 +70,12 @@ struct Machines {
     go_abi0: Option<Result<Assembled, Unassembled>>,
     /// ABIInternal refusing, for a function under it whose ABI pclntab does not state.
     go_unstated: Option<Result<Assembled, Unassembled>>,
+    /// Each other convention a function's debug information states (`ms_abi`, `sysv_abi`).
+    stated: BTreeMap<r2abi::ConventionId, Result<Assembled, Unassembled>>,
+    /// The rows the program's C library states, and how each import binds one: read once.
+    imports: crate::imports::Imports,
+    /// The C data model of the architecture under that C library.
+    data_model: Option<&'static r2abi::CDataModel>,
 }
 
 /// The byte orders the container states, which select the machine's language.
@@ -125,6 +134,24 @@ impl Machines {
             .then(|| r2abi::ConventionId::go_unstated(&arch, bits))
             .flatten()
             .map(|id| assemble(&machine, container, id));
+        // One pass over the declarations: O(functions).
+        let default = assembled.as_ref().ok().map(|it| it.convention);
+        let mut stated = BTreeMap::new();
+        for (_, prototype) in container.declarations.functions() {
+            if let Ok(Some(id)) = stated_convention(&arch, bits, prototype.convention)
+                && Some(id) != default
+            {
+                (stated.entry(id)).or_insert_with(|| assemble(&machine, container, id));
+            }
+        }
+        // The C library the container states picks the rows (`__fgets_chk` is two interfaces
+        // under one name); the program's own declarations are read by address beside them.
+        let library = c_library(container);
+        let mut rows = r2abi::LibraryRows::embedded(library);
+        // A mangled import states its parameters in its name (doc/adr-call-boundary.md, S13).
+        let imports = container.symbols.iter().filter(|symbol| symbol.import);
+        rows.read_mangled(imports.map(|symbol| symbol.name.as_ref()));
+        let linkage = crate::imports::Linkage::of(container);
         Ok(Self {
             machine,
             thumb,
@@ -132,12 +159,26 @@ impl Machines {
             go,
             go_abi0,
             go_unstated,
+            stated,
+            imports: crate::imports::Imports::new(rows, library, linkage),
+            data_model: r2abi::CDataModel::of(&arch, bits, library),
         })
     }
 
-    /// What a native request needs for the function at `entry`, by its language: a Go function under
-    /// ABIInternal unless pclntab marks it assembly (ABI0), refusing where no table states which.
-    fn assembled_at(&self, container: &Container, entry: u64) -> Result<&Assembled, Unassembled> {
+    /// What a native request needs for the function at `entry`: the convention its declaration
+    /// states, else by its language: a Go function under ABIInternal unless pclntab marks it
+    /// assembly (ABI0), refusing where no table states which. O(log functions).
+    fn assembled_at(&self, container: &Container, entry: u64) -> Result<Chosen<'_>, Unassembled> {
+        let declared = container.declarations.function_at(entry);
+        let (arch, bits) = (&container.arch.name, container.arch.bits);
+        let stated = declared.map_or(Ok(None), |it| stated_convention(arch, bits, it.convention));
+        if let Some(id) = stated?
+            && let Some(held) = self.stated.get(&id)
+        {
+            let program = self.assembled.as_ref().ok();
+            let assembled = held.as_ref().map_err(Clone::clone)?;
+            return Ok(Chosen { assembled, program });
+        }
         let languages = &container.languages;
         let chosen = match (&self.go, &self.go_abi0, languages.at(entry)) {
             (Some(go), None, SourceLanguage::Go) => go,
@@ -148,7 +189,11 @@ impl Machines {
             },
             _ => &self.assembled,
         };
-        chosen.as_ref().map_err(Clone::clone)
+        let assembled = chosen.as_ref().map_err(Clone::clone)?;
+        Ok(Chosen {
+            assembled,
+            program: None,
+        })
     }
 
     /// What a native request needs under one convention, where the program assembled it.
@@ -156,7 +201,27 @@ impl Machines {
         let go = [&self.go, &self.go_abi0, &self.go_unstated];
         std::iter::once(&self.assembled)
             .chain(go.into_iter().flatten())
+            .chain(self.stated.values())
             .find(|assembled| assembled.as_ref().is_ok_and(|it| it.convention == id))
+    }
+}
+
+/// The convention a function's debug information states, where it names one other than the
+/// target's default; `Normal`, `Program` and `NoCall` keep the default, and placement refuses the
+/// last two. A code no model here has refuses the function (doc/adr-call-boundary.md, S20).
+fn stated_convention(
+    arch: &str,
+    bits: u32,
+    stated: r2abi::StatedConvention,
+) -> Result<Option<r2abi::ConventionId>, Unassembled> {
+    use r2abi::{ConventionId, StatedConvention};
+    match (stated, r2abi::family(arch), bits) {
+        (StatedConvention::Normal | StatedConvention::Program | StatedConvention::NoCall, ..) => {
+            Ok(None)
+        }
+        (StatedConvention::LlvmWin64, Some("x86"), 64) => Ok(Some(ConventionId::Win64)),
+        (StatedConvention::LlvmX8664SysV, Some("x86"), 64) => Ok(Some(ConventionId::SysVAmd64)),
+        (stated, ..) => Err(Unassembled::StatedConvention(stated)),
     }
 }
 
@@ -193,6 +258,40 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Convention {
             id.row(),
         );
         model.map(std::sync::Arc::new)
+    }
+}
+
+/// What a call from a function under one convention may run under: its own model, joined with
+/// every other the program's functions state, since no site states its callee's. Held; O(stated
+/// conventions x registers), and the convention's own model where none is stated.
+pub(super) struct AnyCall;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for AnyCall {
+    type Key = r2abi::ConventionId;
+    type Value = Result<std::sync::Arc<r2source::ConventionModel>, NativeRefusal>;
+    const NAME: &'static str = "any-call";
+    const RETENTION: Retention = Retention::Held;
+
+    fn compute(db: &Db<ProgramInputs<S>>, id: &r2abi::ConventionId) -> Self::Value {
+        let held = |id: &r2abi::ConventionId| {
+            let model = db.get::<Convention>(id);
+            let model = model.map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
+            (*model).clone()
+        };
+        let own = held(id)?;
+        let machines = db.inputs().machines();
+        let machines = machines.map_err(NativeRefusal::Unassembled)?;
+        if machines.stated.is_empty() {
+            return Ok(own);
+        }
+        let default = machines.assembled.as_ref().ok().map(|it| it.convention);
+        let stated = machines.stated.iter();
+        let stated = stated.filter_map(|(id, built)| built.is_ok().then_some(*id));
+        let mut joined = own;
+        for other in default.into_iter().chain(stated).filter(|it| it != id) {
+            joined = std::sync::Arc::new(joined.either(&*held(&other)?));
+        }
+        Ok(joined)
     }
 }
 
@@ -240,22 +339,9 @@ fn assemble(
                 size: register.size,
             })
     });
-    // Which C library's own declarations apply is what the container
-    // states of it, and nothing else: `_Exit` is each library's, and
-    // `__fgets_chk` is two interfaces under one name. The program's own
-    // declarations are read by address, beside these, not merged in.
-    let library = c_library(container);
-    let mut rows = r2abi::LibraryRows::embedded(library);
-    // A mangled import states its parameters in its name (doc/adr-call-boundary.md, S13).
-    let imports = container.symbols.iter().filter(|symbol| symbol.import);
-    rows.read_mangled(imports.map(|symbol| symbol.name.as_ref()));
-    let linkage = crate::imports::Linkage::of(container);
-    let data_model = r2abi::CDataModel::of(&container.arch.name, container.arch.bits, library);
     Ok(Assembled {
         convention: id,
         compiler,
-        imports: crate::imports::Imports::new(rows, library, linkage),
-        data_model,
         link,
     })
 }
@@ -737,7 +823,7 @@ impl<S: Source> ProgramInputs<S> {
     }
 
     /// What a native request needs for the function at `entry`.
-    fn assembled_at(&self, entry: u64) -> Result<&Assembled, Unassembled> {
+    fn assembled_at(&self, entry: u64) -> Result<Chosen<'_>, Unassembled> {
         self.machines()?
             .assembled_at(self.source.container(), entry)
     }

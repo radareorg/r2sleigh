@@ -252,3 +252,42 @@ fn a_result_lane_set_states_entries_pairs_and_its_completeness() {
     assert!(ConventionId::I386Cdecl.row().results.is_none());
     assert!(ConventionId::Aapcs32.row().results.is_none());
 }
+
+/// A call from an `ms_abi` function in an ELF reaches a callee under either convention, so it
+/// keeps only what both preserve and reads what either reads (doc/adr-call-boundary.md, S20).
+#[test]
+fn a_call_under_either_convention_keeps_only_what_both_preserve() {
+    let machine = r2sleigh_lift::embedded_machine("x86-64").expect("an embedded machine");
+    let register = |name: &str| {
+        let found = (machine.arch.registers.iter()).find(|it| it.name.eq_ignore_ascii_case(name));
+        let found = found.unwrap_or_else(|| panic!("{name}"));
+        r2source::CanonicalStorageId {
+            space: r2source::CanonicalStorageSpace::Register,
+            offset: found.offset,
+            size: found.size,
+        }
+    };
+    let win64 = model(
+        "x86-64",
+        Some("windows"),
+        ConventionId::Win64,
+        Kernel::Linux,
+    );
+    let own = win64.call_effect().expect("Microsoft x64's effect");
+    let either = win64.either(&model_of_sysv());
+    let either = either.call_effect().expect("the joined effect");
+    for name in ["rsi", "rdi", "xmm6"] {
+        assert!(
+            own.preserves(register(name)),
+            "{name}: Microsoft x64 keeps it"
+        );
+        assert!(either.clobbers(register(name)), "{name}: SysV may not");
+    }
+    for name in ["rbx", "rbp", "r12"] {
+        assert!(either.preserves(register(name)), "{name}");
+    }
+    let reads = either.reads().call();
+    for name in ["rcx", "rdx", "rdi", "rsi", "al"] {
+        assert!(reads.contains(&register(name)), "{name}");
+    }
+}

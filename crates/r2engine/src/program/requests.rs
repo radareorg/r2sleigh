@@ -872,7 +872,7 @@ fn claimed_by<S: Source + 'static>(
             program: view,
             endian: super::view::endian(view.source()),
         },
-        call_effect: target.convention.call_effect().ok(),
+        call_effect: target.call.call_effect().ok(),
         proved: None,
         body: Some(&body),
         holdings: false,

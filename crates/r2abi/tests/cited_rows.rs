@@ -11,12 +11,13 @@ const CITED: [(&str, usize); 5] = [
     ("types-kernel32.sdb.txt", 50),
     ("types-ucrt.sdb.txt", 1),
 ];
-const UNCITED: [&str; 5] = [
+const UNCITED: [&str; 6] = [
     "types.sdb.txt",
     "types-cxx.sdb.txt",
     "types-linux.sdb.txt",
     "types-android.sdb.txt",
     "types-darwin.sdb.txt",
+    "types-objc.sdb.txt",
 ];
 
 fn table(file: &str) -> String {

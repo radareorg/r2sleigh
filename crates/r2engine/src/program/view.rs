@@ -142,8 +142,13 @@ impl<'a, S: Source + 'static> View<'a, S> {
         machine: &'a Machine,
         entry: u64,
     ) -> Result<NativeTarget<'a>, crate::native::NativeRefusal> {
-        let assembled = self.db.inputs().assembled_at(entry);
-        self.target_under(machine, assembled.map_err(NativeRefusal::Unassembled)?)
+        let chosen = self.db.inputs().assembled_at(entry);
+        let chosen = chosen.map_err(NativeRefusal::Unassembled)?;
+        let mut target = self.target_under(machine, chosen.assembled)?;
+        if let Some(program) = chosen.program {
+            target.program = Some(self.convention_of(program)?);
+        }
+        Ok(target)
     }
 
     /// A decoder under the program's default convention, for a walk that reads no boundary.
@@ -154,13 +159,23 @@ impl<'a, S: Source + 'static> View<'a, S> {
             .map_err(|why| why.to_string())
     }
 
-    /// What a call does under the program's default convention: a view of its held model.
+    /// One convention's held model and the specification it reads.
+    fn convention_of(
+        &self,
+        assembled: &'a super::Assembled,
+    ) -> Result<crate::native::Assembly<'a>, NativeRefusal> {
+        let model = self.db.get::<super::Convention>(&assembled.convention);
+        let model = model.map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
+        Ok(crate::native::Assembly {
+            convention: (*model).clone()?,
+            compiler: &assembled.compiler,
+        })
+    }
+
+    /// What a call does under the program's default convention: a view of its held call model.
     pub(super) fn default_call_effect(&self) -> Option<r2ssa::SourceCallEffect> {
         let assembled = self.db.inputs().assembled()?;
-        let model = self
-            .db
-            .get::<super::Convention>(&assembled.convention)
-            .ok()?;
+        let model = self.db.get::<super::AnyCall>(&assembled.convention).ok()?;
         (*model).as_ref().ok()?.call_effect().ok()
     }
 
@@ -171,18 +186,22 @@ impl<'a, S: Source + 'static> View<'a, S> {
         assembled: &'a super::Assembled,
     ) -> Result<NativeTarget<'a>, NativeRefusal> {
         let inputs = self.db.inputs();
-        let model = self.db.get::<super::Convention>(&assembled.convention);
-        let model = model.map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
+        let machines = inputs.machines().map_err(NativeRefusal::Unassembled)?;
+        let assembly = self.convention_of(assembled)?;
+        let call = self.db.get::<super::AnyCall>(&assembled.convention);
+        let call = call.map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
         Ok(NativeTarget {
             arch: machine.tables(),
             disasm: &machine.disasm,
             cpu: machine.cpu,
-            convention: (*model).clone()?,
-            compiler: &assembled.compiler,
+            convention: assembly.convention,
+            call: (*call).clone()?,
+            compiler: assembly.compiler,
+            program: None,
             dwarf: &machine.dwarf,
-            imports: &assembled.imports,
+            imports: &machines.imports,
             declarations: &inputs.source.container().declarations,
-            data_model: assembled.data_model,
+            data_model: machines.data_model,
         })
     }
 

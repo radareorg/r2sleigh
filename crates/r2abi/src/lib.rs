@@ -34,7 +34,7 @@ pub use platform::{
     EntryStack, GuardRow, PlatformRegister, RegisterDuty, RegisterSaveArea, SaveAreaAnchor,
     StackGuard, architecture_registers, guard_row, platform_registers,
 };
-pub use prototypes::{Arrival, FrameBase, Local, Parameter, Prototype, Spelled};
+pub use prototypes::{Arrival, FrameBase, Local, Parameter, Prototype, Spelled, StatedConvention};
 pub use syscalls::Syscalls;
 pub use types::{
     Keyword, Member, Qualifiers, Record, RecordKind, Refusal, Scalar, ScalarKind, Signature, Type,

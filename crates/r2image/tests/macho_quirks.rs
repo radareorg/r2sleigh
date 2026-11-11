@@ -85,3 +85,17 @@ fn a_dsym_maps_only_the_section_bytes_it_holds() {
         .expect("__eh_frame's bytes are held");
     assert_eq!(&*frame, &[1, 2, 3, 4]);
 }
+
+/// A two-level namespace names each import's dylib by ordinal in `n_desc` (`data/macho_two_level.c`).
+#[test]
+fn a_two_level_import_names_its_dylib_by_ordinal() {
+    let image = image(include_bytes!("data/macho_two_level"));
+    let library = |name: &str| {
+        (image.symbols().iter())
+            .find(|symbol| symbol.import && &*symbol.name == name)
+            .map(|symbol| symbol.library.as_deref().map(str::to_owned))
+    };
+    let named = |dylib: &str| Some(Some(dylib.to_owned()));
+    assert_eq!(library("puts"), named("/usr/lib/libSystem.B.dylib"));
+    assert_eq!(library("zlibVersion"), named("/usr/lib/libz.1.dylib"));
+}

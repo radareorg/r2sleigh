@@ -34,7 +34,8 @@ syslog | void | POSIX.1-2017 <syslog.h>
 signal | void (*)(int) | C11 7.14.1.1: signal returns the previous handler or SIG_ERR; POSIX.1-2017 signal(3p)
 aligned_alloc | void * | C11 7.22.3.1
 
-# types-linux.sdb.txt, glibc's own; also types-darwin.sdb.txt and types-android.sdb.txt.
+# types-linux.sdb.txt, glibc's own; also types-darwin.sdb.txt, types-objc.sdb.txt and
+# types-android.sdb.txt.
 xalloc_die | void | gnulib lib/xalloc.h: _Noreturn void xalloc_die (void)
 _exit | void | POSIX.1-2017 <unistd.h> _exit (noreturn)
 _Exit | void | C11 7.22.4.5 (_Noreturn)

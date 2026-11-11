@@ -1,9 +1,10 @@
-//! Which library row an import binds: by its version, else at `Declared` where the container names
-//! one C library; never to a body by name (doc/adr-call-boundary.md, Refusals "A library row").
+//! Which library row an import binds: the library the container states for it, by its DLL, its
+//! two-level namespace dylib or its version need; never by a bare name, and never to a body
+//! (doc/adr-call-boundary.md, Refusals "A library row", "S20 as built").
 
 use std::collections::BTreeMap;
 
-use r2abi::statement::{Container, Format, SymbolVersion};
+use r2abi::statement::{Container, Format, Symbol, SymbolVersion};
 use r2abi::{CLibrary, LibraryId, LibraryRow, LibraryRows};
 
 /// The rows one program's C library states, and how its container says each import binds.
@@ -14,75 +15,127 @@ pub struct Imports {
     linkage: Linkage,
 }
 
-/// What the container states about how its imports bind.
-#[derive(Debug, Clone, Default)]
+/// What the container states about how its imports bind, read once per program.
+#[derive(Debug, Clone)]
 pub struct Linkage {
-    /// Each versioned import by linked name; an import absent here states no version.
-    versions: BTreeMap<Box<str>, Stated>,
-    /// Each PE import by name, and the DLL a cited table states for it; `None` where two
-    /// imports of the name name two DLLs.
-    dlls: BTreeMap<Box<str>, Option<r2abi::Dll>>,
-    /// Whether an unversioned import binds: `DT_NEEDED` names exactly one C library, or the
-    /// format is one library's (Mach-O's libSystem, a PE's Microsoft runtime).
-    one_c_library: bool,
+    /// Each import by linked name: what its identity binds, or why it binds nothing.
+    bindings: BTreeMap<Box<str>, Binding>,
+    /// What a name no import symbol states binds: an ELF slot's unversioned import, or nothing.
+    unlisted: Binding,
 }
 
-/// The version the container states for one import name.
+/// The library one import's identity names.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Stated {
-    Versioned(SymbolVersion),
-    /// Two symbols of the name state two versions.
-    Conflicting,
+enum Binding {
+    /// These tables' rows, the stated library's own first.
+    Scope(&'static [LibraryId]),
+    /// A C library's own version node: its rows where the program runs on it.
+    Versioned(CLibrary),
+    /// The program's C library, the one library `DT_NEEDED` names.
+    CLibrary,
+    /// Why the container states no library whose rows apply.
+    Unstated(&'static str),
 }
 
 impl Linkage {
-    /// What `container` states, read once per program: O(symbols + needed libraries).
+    /// What `container` states: O(imports × log imports + needed libraries).
     pub fn of(container: &Container) -> Self {
-        let mut versions: BTreeMap<Box<str>, Stated> = BTreeMap::new();
-        let imports = container.symbols.iter().filter(|symbol| symbol.import);
-        for (symbol, version) in imports.filter_map(|s| Some((s, s.version.clone()?))) {
-            let stated = Stated::Versioned(version);
-            let held = versions.entry(symbol.name.as_ref().into());
-            let held = held.or_insert_with(|| stated.clone());
-            if *held != stated {
-                *held = Stated::Conflicting;
+        let mut bindings: BTreeMap<Box<str>, Binding> = BTreeMap::new();
+        // An ELF import the loader binds is a dynamic symbol; `.symtab` repeats it unversioned.
+        let elf = container.format == Format::Elf;
+        let imports = (container.symbols.iter())
+            .filter(|symbol| symbol.import && (!elf || symbol.origin.dynamic.is_some()));
+        for symbol in imports {
+            let binding = binding(container, symbol);
+            let held = bindings.entry(symbol.name.as_ref().into());
+            let held = held.or_insert_with(|| binding.clone());
+            if *held != binding {
+                *held = Binding::Unstated("two imports of this name bind two libraries");
             }
         }
-        let mut dlls: BTreeMap<Box<str>, Option<r2abi::Dll>> = BTreeMap::new();
-        let pe = matches!(container.format, Format::Pe);
-        for symbol in container
-            .symbols
-            .iter()
-            .filter(|symbol| pe && symbol.import)
-        {
-            let dll = symbol.library.as_deref().and_then(r2abi::Dll::of);
-            let held = dlls.entry(symbol.name.as_ref().into()).or_insert(dll);
-            if *held != dll {
-                *held = None;
-            }
-        }
-        let one_c_library = match container.format {
-            Format::MachO | Format::Pe => true,
-            Format::Elf => {
-                let named = container.libraries.iter();
-                named.filter(|library| is_c_library(library)).count() == 1
-            }
-            _ => false,
+        let unlisted = match elf {
+            true => unversioned(container),
+            false => Binding::Unstated("the container states no import of this name"),
         };
-        Self {
-            versions,
-            dlls,
-            one_c_library,
-        }
+        Self { bindings, unlisted }
     }
 
-    /// No version stated and one C library named: every import binds at `Declared`.
+    /// Every import binds the program's C library at `Declared`: a test's linkage.
     pub fn one_c_library() -> Self {
         Self {
-            versions: BTreeMap::new(),
-            dlls: BTreeMap::new(),
-            one_c_library: true,
+            bindings: BTreeMap::new(),
+            unlisted: Binding::CLibrary,
         }
+    }
+}
+
+/// What one import's identity binds.
+fn binding(container: &Container, symbol: &Symbol) -> Binding {
+    let library = symbol.library.as_deref();
+    match container.format {
+        Format::Elf => match &symbol.version {
+            Some(SymbolVersion::Needed { library, version }) => {
+                versioned(container, library, version)
+            }
+            Some(SymbolVersion::Defined { .. }) | None => unversioned(container),
+        },
+        // A PE import names its DLL (doc/adr-call-boundary.md, S13).
+        Format::Pe => match library.and_then(r2abi::Dll::of) {
+            Some(r2abi::Dll::Kernel32) => Binding::Scope(KERNEL32),
+            Some(r2abi::Dll::Ucrt) => Binding::Scope(UCRT),
+            None => Binding::Unstated("it names a DLL no cited table states"),
+        },
+        // A two-level namespace names the dylib; a flat one names none.
+        Format::MachO => match library.map(dylib) {
+            Some(Dylib::LibSystem) => Binding::Scope(CLibrary::LibSystem.scope()),
+            Some(Dylib::CxxRuntime) => Binding::Scope(CXX_RUNTIME),
+            Some(Dylib::Objc) => Binding::Scope(OBJC),
+            Some(Dylib::Other) => Binding::Unstated("it names a dylib no table states"),
+            None => Binding::Unstated("no two-level namespace names its dylib"),
+        },
+        _ => Binding::Unstated("the format states no import binding"),
+    }
+}
+
+/// An ELF import bound to a version node of a library `DT_NEEDED` names.
+fn versioned(container: &Container, library: &str, version: &str) -> Binding {
+    if !container.libraries.iter().any(|needed| needed == library) {
+        return Binding::Unstated("its version need names a file DT_NEEDED does not");
+    }
+    if versioned_runtime(version) {
+        return Binding::Scope(CXX_RUNTIME);
+    }
+    match versioned_library(library, version) {
+        Some(named) => Binding::Versioned(named),
+        None => Binding::Unstated("its version names a library no table states"),
+    }
+}
+
+/// An unversioned ELF import binds only where `DT_NEEDED` names one library, a C library: any
+/// other library could define it.
+fn unversioned(container: &Container) -> Binding {
+    match container.libraries.as_slice() {
+        [only] if is_c_library(only) => Binding::CLibrary,
+        _ => Binding::Unstated("it is unversioned and DT_NEEDED names more than its C library"),
+    }
+}
+
+/// The dylibs a table states, by install name.
+enum Dylib {
+    LibSystem,
+    CxxRuntime,
+    Objc,
+    Other,
+}
+
+/// libSystem's umbrella, the C++ runtime's two dylibs and objc4's runtime, by the whole install
+/// name dyld loads: a same-named file elsewhere is another library.
+fn dylib(install: &str) -> Dylib {
+    match install {
+        "/usr/lib/libSystem.B.dylib" => Dylib::LibSystem,
+        "/usr/lib/libc++.1.dylib" | "/usr/lib/libc++abi.dylib" => Dylib::CxxRuntime,
+        "/usr/lib/libobjc.A.dylib" => Dylib::Objc,
+        _ => Dylib::Other,
     }
 }
 
@@ -114,6 +167,8 @@ fn versioned_runtime(version: &str) -> bool {
 }
 
 const CXX_RUNTIME: &[LibraryId] = &[LibraryId::CxxRuntime];
+/// objc4's own table: `objc_msgSend` and its kin.
+const OBJC: &[LibraryId] = &[LibraryId::Objc];
 const KERNEL32: &[LibraryId] = &[LibraryId::Dll(r2abi::Dll::Kernel32)];
 /// UCRT's own rows first, then the rows a PE import read before S13.
 const UCRT: &[LibraryId] = &[
@@ -161,10 +216,15 @@ impl Imports {
     }
 
     /// The row the import `name` binds, or why none: O(log imports + log rows). `name` is one
-    /// the container states as an import (`Program::import_at`); a body's name binds nothing.
+    /// the container states as an import (`Program::import_at`); a body's name binds nothing. A
+    /// mangled name's own row applies whatever library defines it (S13).
     pub fn bind(&self, name: &str) -> Result<&LibraryRow, &'static str> {
-        let scope = self.scope(name)?;
-        (self.rows.find(scope, name)).ok_or("no row of the library it binds states this name")
+        let mangled = || self.rows.row(LibraryId::Itanium, name);
+        match self.scope(name) {
+            Ok(scope) => (self.rows.find(scope, name).or_else(mangled))
+                .ok_or("no row of the library it binds states this name"),
+            Err(why) => mangled().ok_or(why),
+        }
     }
 
     /// The row the import binds, with the refusal stated as evidence.
@@ -175,30 +235,15 @@ impl Imports {
     }
 
     fn scope(&self, name: &str) -> Result<&'static [LibraryId], &'static str> {
-        // A PE import binds by the DLL it names (doc/adr-call-boundary.md, S13).
-        match self.linkage.dlls.get(name) {
-            Some(Some(r2abi::Dll::Kernel32)) => return Ok(KERNEL32),
-            Some(Some(r2abi::Dll::Ucrt)) => return Ok(UCRT),
-            Some(None) | None => {}
-        }
-        match self.linkage.versions.get(name) {
-            Some(Stated::Versioned(SymbolVersion::Needed { library, version })) => {
-                if versioned_runtime(version) {
-                    return Ok(CXX_RUNTIME);
-                }
-                match versioned_library(library, version) {
-                    Some(named) if named == self.library => Ok(named.scope()),
-                    Some(_) => Err("its version names a C library the program does not run on"),
-                    None => Err("its version names a library no table states"),
-                }
+        let linkage = &self.linkage;
+        match linkage.bindings.get(name).unwrap_or(&linkage.unlisted) {
+            Binding::Scope(scope) => Ok(scope),
+            Binding::Versioned(named) if *named == self.library => Ok(named.scope()),
+            Binding::Versioned(_) => {
+                Err("its version names a C library the program does not run on")
             }
-            Some(Stated::Conflicting) => Err("two symbols of this name state two versions"),
-            Some(Stated::Versioned(SymbolVersion::Defined { .. })) | None => {
-                match self.linkage.one_c_library {
-                    true => Ok(self.library.scope()),
-                    false => Err("it is unversioned and the container names no one C library"),
-                }
-            }
+            Binding::CLibrary => Ok(self.library.scope()),
+            Binding::Unstated(why) => Err(why),
         }
     }
 }
@@ -260,12 +305,22 @@ mod tests {
         assert_eq!(library("printf"), Ok(LibraryId::Portable));
         assert_eq!(library("__cxa_throw"), Ok(LibraryId::CxxRuntime));
         assert!(library("deflate").is_err());
-        // libc.so.6 is the one C library DT_NEEDED names, so an unversioned import binds.
-        assert!(library("compress").is_err(), "no row states it");
-        assert_eq!(library("puts"), Ok(LibraryId::Portable));
+        // Unversioned beside three libraries: any of them could define it, so no row applies.
+        assert!(library("compress").is_err());
+        assert!(library("puts").is_err());
+        // A version need on a file DT_NEEDED does not name states no library the loader binds.
+        let unneeded = elf(
+            &["libc.so.6"],
+            vec![import("printf", Some(("libc.so.7", "GLIBC_2.2.5")))],
+        );
+        assert!(
+            super::tests::imports(&unneeded, CLibrary::Glibc)
+                .bind("printf")
+                .is_err()
+        );
     }
 
-    /// A PE import binds the table of the DLL it names; a DLL no table states binds as before.
+    /// A PE import binds the table of the DLL it names; a DLL no cited table states binds nothing.
     #[test]
     fn a_pe_import_binds_the_dll_it_names() {
         let pe = |dll: &str, name: &str| Symbol {
@@ -280,6 +335,9 @@ mod tests {
                 pe("api-ms-win-crt-stdio-l1-1-0.dll", "__stdio_common_vfprintf"),
                 pe("api-ms-win-crt-stdio-l1-1-0.dll", "fputs"),
                 pe("msvcrt.dll", "strlen"),
+                pe("KERNEL32.dll", "Ordinal_123"),
+                pe("KERNEL32.dll", "GetTickCount"),
+                pe("msvcrt.dll", "GetTickCount"),
             ],
             ..Container::default()
         };
@@ -291,7 +349,53 @@ mod tests {
         let vfprintf = library("__stdio_common_vfprintf");
         assert_eq!(vfprintf, Ok(dll(r2abi::Dll::Ucrt)));
         assert_eq!(library("fputs"), Ok(LibraryId::Portable));
-        assert_eq!(library("strlen"), Ok(LibraryId::Portable));
+        // msvcrt.dll is no DLL a cited table states, whatever its exports are named.
+        assert!(library("strlen").is_err());
+        // By ordinal, the import states no name a row is keyed by.
+        assert!(library("Ordinal_123").is_err());
+        // One name from two DLLs: no one library is stated for it.
+        assert!(library("GetTickCount").is_err());
+    }
+
+    /// A Mach-O import binds the dylib its two-level namespace ordinal names; a flat namespace
+    /// names none, and a mangled name states its own parameters whatever defines it.
+    #[test]
+    fn a_mach_o_import_binds_the_dylib_its_ordinal_names() {
+        let macho = |dylib: Option<&str>, name: &str| Symbol {
+            library: dylib.map(Into::into),
+            ..import(name, None)
+        };
+        let container = Container {
+            format: Format::MachO,
+            symbols: vec![
+                macho(Some("/usr/lib/libSystem.B.dylib"), "puts"),
+                macho(Some("/usr/lib/libz.1.dylib"), "strlen"),
+                macho(None, "fputs"),
+                macho(Some("/usr/lib/libc++.1.dylib"), "__cxa_throw"),
+                macho(Some("/opt/lib/libfoo.dylib"), "_Z3bari"),
+                macho(Some("/opt/lib/libSystem.B.dylib"), "fgets"),
+                macho(Some("/usr/lib/libobjc.A.dylib"), "objc_msgSend"),
+                macho(Some("/usr/lib/libobjc.A.dylib"), "strcpy"),
+                macho(Some("/usr/lib/libSystem.B.dylib"), "objc_retain"),
+            ],
+            ..Container::default()
+        };
+        let mut rows = LibraryRows::embedded(CLibrary::LibSystem);
+        rows.read_mangled(["_Z3bari"]);
+        let imports = Imports::new(rows, CLibrary::LibSystem, Linkage::of(&container));
+        let library = |name| imports.bind(name).map(|row| row.library);
+        assert_eq!(library("puts"), Ok(LibraryId::Portable));
+        assert!(library("strlen").is_err(), "libz is no table's");
+        assert!(library("fputs").is_err(), "a flat namespace names no dylib");
+        assert_eq!(library("__cxa_throw"), Ok(LibraryId::CxxRuntime));
+        assert_eq!(library("_Z3bari"), Ok(LibraryId::Itanium));
+        assert!(
+            library("fgets").is_err(),
+            "another file of libSystem's name"
+        );
+        assert_eq!(library("objc_msgSend"), Ok(LibraryId::Objc));
+        assert!(library("strcpy").is_err(), "libobjc exports no strcpy");
+        assert!(library("objc_retain").is_err(), "libSystem exports none");
     }
 
     /// With no C library named, or two, an unversioned import binds to nothing.
@@ -299,6 +403,10 @@ mod tests {
     fn an_unversioned_import_binds_only_where_one_c_library_is_named() {
         let none = elf(&["libfoo.so"], vec![import("puts", None)]);
         assert!(imports(&none, CLibrary::Glibc).bind("puts").is_err());
+        let beside = elf(&["libz.so.1", "libc.so.6"], vec![import("puts", None)]);
+        assert!(imports(&beside, CLibrary::Glibc).bind("puts").is_err());
+        let only = elf(&["libc.so.6"], vec![import("puts", None)]);
+        assert!(imports(&only, CLibrary::Glibc).bind("puts").is_ok());
         let two = elf(&["libc.so.6", "libc.so"], vec![import("puts", None)]);
         assert!(imports(&two, CLibrary::Glibc).bind("puts").is_err());
         let musl = elf(&["libc.musl-x86_64.so.1"], vec![import("puts", None)]);

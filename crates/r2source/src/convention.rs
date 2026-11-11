@@ -326,6 +326,49 @@ impl ConventionModel {
         )
     }
 
+    /// A call whose callee runs under this convention or `other`, as no site states which: it reads
+    /// and writes what either does and preserves what both do (doc/adr-call-boundary.md, "S20 as
+    /// built"). Only its call effect is read; nothing is placed in it. O(locations + lanes).
+    pub fn either(&self, other: &Self) -> Self {
+        let union = |left: &[LaneSet], right: &[LaneSet]| {
+            let mut all = left.iter().chain(right).cloned().collect::<Vec<_>>();
+            all.sort();
+            all.dedup();
+            all.into_boxed_slice()
+        };
+        let mine = |lane: &ResultLane| self.results.iter().any(|it| it.storage == lane.storage);
+        let theirs = other.results.iter().filter(|lane| !mine(lane));
+        let results = (self.results.iter().copied())
+            .chain(theirs.map(|lane| ResultLane {
+                follows: None,
+                ..*lane
+            }))
+            .collect();
+        Self {
+            sections: self
+                .sections
+                .iter()
+                .chain(&other.sections)
+                .cloned()
+                .collect(),
+            hidden_return: self.hidden_return.or(other.hidden_return),
+            results,
+            results_complete: None,
+            preserved: (self.preserved.iter())
+                .filter(|lanes| other.preserved.contains(lanes))
+                .cloned()
+                .collect(),
+            killed: union(&self.killed, &other.killed),
+            likely_trash: union(&self.likely_trash, &other.likely_trash),
+            reserved: union(&self.reserved, &other.reserved),
+            forms: BoundaryForms {
+                count_register: self.forms.count_register.or(other.forms.count_register),
+                ..self.forms.clone()
+            },
+            ..self.clone()
+        }
+    }
+
     /// What a call does to the registers, a view of this model: clobbered is every location a call
     /// reads or writes, `killedbycall` and the return address, less what is preserved or reserved.
     pub fn call_effect(&self) -> Result<SourceCallEffect, SourceMachineRolesError> {

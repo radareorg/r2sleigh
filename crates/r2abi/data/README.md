@@ -31,6 +31,8 @@ is a merge that keeps them rather than a copy that drops them.
 - `cxx-objects.txt`: for a mangled member whose name does not say whether it
   takes `this`, the header that does (see "Mangled names").
 - `types-darwin.sdb.txt`: what Darwin's libSystem declares for itself.
+- `types-objc.sdb.txt`: what objc4's `libobjc.A.dylib` exports; read only for an import whose
+  two-level namespace ordinal names that dylib.
 - `void-rows.txt`: the source that states each `ret=void` row returns
   nothing, and the rows found spelled `void` that return a value.
   `scripts/audit_abi_rows.py` fails on an uncited `void` row (ROADMAP D204).
@@ -245,7 +247,7 @@ portable rows as every other PE import does.
   libSystem declare them alike. Without them a call to one has no arity
   but the stub's, a floor (ROADMAP P7).
 - The Objective-C runtime's records are objc4's (`objc/message.h`,
-  `objc/objc-internal.h`), in the Darwin table only (GNUstep's libobjc2
+  `objc/objc-internal.h`), in `types-objc.sdb.txt` only (GNUstep's libobjc2
   differs: its `objc_storeStrong` returns the object), where radare2's are not: `objc_msgSend` and
   `objc_msgSendSuper2` are variadic after `self` and `op`;
   `objc_storeStrong` is `void (id *location, id obj)`, not `(void *, int)`
