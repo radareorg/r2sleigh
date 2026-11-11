@@ -58,6 +58,7 @@
 #include <string.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -730,6 +731,12 @@ static void child_run(struct run_state *run, const struct job_vector *vec, uint6
     static uint8_t altstack[1 << 16];
     stack_t ss = { .ss_sp = altstack, .ss_size = sizeof altstack, .ss_flags = 0 };
     sigaltstack(&ss, NULL);
+
+    /* A child that dies of its signal dumps no core: a piped core_pattern (apport,
+       systemd-coredump) costs ~0.3 s a death, and a residual trap dies once a run. */
+    struct rlimit no_core = { 0, 0 };
+    setrlimit(RLIMIT_CORE, &no_core);
+    prctl(PR_SET_DUMPABLE, 0);
 
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
