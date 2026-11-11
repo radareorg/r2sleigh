@@ -623,6 +623,10 @@ impl<'c> CodeGenerator<'c> {
                 "struct "
             });
             self.output.push_str(&aggregate.name);
+            if aggregate.members.is_empty() {
+                self.output.push_str(";\n");
+                continue;
+            }
             self.output.push_str(" {\n");
             for (ty, name) in &aggregate.members {
                 self.output.push_str(&self.config.indent);

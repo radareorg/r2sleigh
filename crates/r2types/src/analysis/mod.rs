@@ -168,11 +168,16 @@ impl TypeAnalysis {
                     }
                 };
                 let width_bits = carrier_width.checked_mul(8)?;
-                Some(crate::admit_declaration_type(
-                    parameter.ty.clone()?,
-                    width_bits,
-                    ptr_bits,
-                ))
+                let ty = crate::admit_declaration_type(parameter.ty.clone()?, width_bits, ptr_bits);
+                // The header declares a body-read integer unsigned, as its own definition does
+                // (D156: no byte states the sign), so a caller's extern spells it alike (W46).
+                Some(match ty {
+                    CTypeLike::Int { bits, .. } if !prototype => CTypeLike::Int {
+                        bits,
+                        signedness: crate::Signedness::Unsigned,
+                    },
+                    ty => ty,
+                })
             })
             .collect::<Option<Vec<_>>>()?;
         let unproven = self.unproven_carrier_bits();

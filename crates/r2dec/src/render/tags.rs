@@ -66,6 +66,17 @@ impl Tags {
         (self.defined.get(name)).is_some_and(|(defined, _)| *defined == is_union)
     }
 
+    /// Whether a callee's projection may name tag `name` behind a pointer: the unit lays it out as
+    /// `graph` does, or defines no tag of that name, so a declaration of it names the callee's (W46).
+    pub(super) fn admits(
+        &self,
+        name: &str,
+        is_union: bool,
+        graph: Option<&r2ssa::SourceTypeGraph>,
+    ) -> bool {
+        self.agrees(name, is_union, graph) || !self.defined.contains_key(name)
+    }
+
     /// Whether `graph`, a callee's own, lays tag `name` out as the unit defines it.
     pub(super) fn agrees(
         &self,
@@ -84,6 +95,8 @@ impl Tags {
     /// a member holds by value stands before its holder, and ties go by name.
     pub(super) fn definitions(&self, c: &CFunction) -> Vec<CAggregateDef> {
         let mut spelled = BTreeMap::new();
+        // A tag only a callee's projection names, behind a pointer: declared, never laid out.
+        let mut declared = BTreeMap::new();
         let mut pending = Vec::new();
         c.visit_types(&mut |ty| pending.push(ty.clone()));
         pending.extend(
@@ -97,13 +110,21 @@ impl Tags {
             };
             if self.defines(&name, is_union)
                 && let Some((_, members)) = self.defined.get(&name)
-                && spelled.insert(name, is_union).is_none()
+                && spelled.insert(name.clone(), is_union).is_none()
             {
                 pending.extend(members.iter().map(|(ty, _)| ty.clone()));
+            } else if !self.defined.contains_key(&name) {
+                declared.insert(name, is_union);
             }
         }
         let mut placed = BTreeSet::new();
-        let mut ordered = Vec::with_capacity(spelled.len());
+        let mut ordered = (declared.into_iter())
+            .map(|(name, is_union)| CAggregateDef {
+                is_union,
+                name,
+                members: Vec::new(),
+            })
+            .collect::<Vec<_>>();
         for name in spelled.keys() {
             self.place(name, &spelled, &mut placed, &mut ordered);
         }

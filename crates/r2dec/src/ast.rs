@@ -2010,7 +2010,8 @@ pub struct CAggregateDef {
     /// `struct` or `union`, as the tag was introduced.
     pub is_union: bool,
     pub name: String,
-    /// Each member's declared type and name, in offset order.
+    /// Each member's declared type and name, in offset order; none declares the tag alone (C has
+    /// no empty aggregate), which a pointer to it needs.
     pub members: Vec<(CType, String)>,
 }
 

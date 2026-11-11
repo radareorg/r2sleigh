@@ -588,8 +588,9 @@ fn plan_calls(
             if signature.is_none() {
                 let (fixed, returns) = (plan.fixed, plan.result.is_some());
                 let projected = input.callee_projection(inst.id);
+                let admits = |tag: &str, is_union| tags.admits(tag, is_union, callee);
                 plan.declared = projected.and_then(|(signature, unproven)| {
-                    calls::Prototype::of_projection(signature, fixed, returns, unproven, &defines)
+                    calls::Prototype::of_projection(signature, fixed, returns, unproven, &admits)
                 });
             }
         }
