@@ -832,7 +832,7 @@ What the code said that this ADR did not, and the owner chosen:
 
 Gates, release, base `1e4a74a1a`:
 
-- The 14 x86-64 equivalence functions D208 moved (gcc and clang O1 and O2 of `and_chain_effect`, `shape_stash`, `total_add`, gcc's `inverted_void`) print `void` under `aa` with the premise. clang's `inverted_void` writes EAX on one path: `Unread`, as D202 says.
+- The 14 x86-64 equivalence functions D208 moved (gcc and clang O1 and O2 of `and_chain_effect`, `shape_stash`, `total_add`, gcc's `inverted_void`) print `void` under `aa` with the premise. clang's `inverted_void` writes EAX on one path: `Unread`, as D202 says. S31a's one-call minimum takes back the uncalled ones (`and_chain_effect` gcc-O1/O2, `total_add` clang and gcc -O1/O2 on x86-64, 7 on aarch64): nothing in the program calls them (doc/adr-result-side.md, "S31a as built").
 - Engine tests (`call_boundary.rs`): void through a caller that reads RAX and RDX, through a caller whose own caller kills the lane, and with nothing calling it; never void where a call reads XMM0, where a pointer enters, or where a written float lane is unread; an x87 read after the call is no evidence; two functions that forward to each other end.
 - `scripts/mutants_d213.py`: 19 mutants of the decision, the carrier fact, the padding and the byte liveness, each killed by a baseline-green test.
 - `scripts/void_soundness.py` (from d72, 332 builds): 1,858 read results, 23 rendered void at base and head. 20 are x87 st0 results recovery holds no lane for, named in `known.json`. 3 `f3.gcc.O1` forwarders base `1e4a74a1a` voids under `aa` (`20c1f7832` did not) are false voids, left out of `known.json` so the gate stays red until they are traced. 8 premised voids. 66 s compiling the builds on Linux.
