@@ -1,7 +1,7 @@
 {
  "totals": {
   "refused": {
-   "value": 91,
+   "value": 93,
    "void": 36
   },
   "unproven:EntryInput": {
@@ -13,15 +13,15 @@
    "void": 14
   },
   "unproven:Unread": {
-   "value": 9,
+   "value": 13,
    "void": 5
   },
   "unproven:Written": {
-   "value": 2060,
-   "void": 946
+   "value": 2056,
+   "void": 969
   },
   "unproven:unstated": {
-   "value": 1888,
+   "value": 1886,
    "void": 6
   },
   "void-closed": {
@@ -29,7 +29,7 @@
   },
   "void-open": {
    "value": 2,
-   "void": 272
+   "void": 249
   }
  },
  "builds": {
@@ -43,17 +43,16 @@
     },
     "unproven:Written": {
      "value": 12,
-     "void": 34
+     "void": 35
     },
     "unproven:unstated": {
      "value": 34
     },
     "void-open": {
-     "void": 6
+     "void": 5
     }
    },
    "voids": [
-    "BZ2_blockSort",
     "BZ2_bz__AssertH__fail",
     "applySavedTimeInfoToOutputFile",
     "compressStream",
@@ -66,26 +65,24 @@
   "O2-bzip2-bzip2": {
    "counts": {
     "refused": {
-     "value": 2
+     "value": 4
     },
     "unproven:EntryInput": {
      "void": 8
     },
     "unproven:Written": {
      "value": 12,
-     "void": 19
+     "void": 21
     },
     "unproven:unstated": {
-     "value": 14
+     "value": 12
     },
     "void-open": {
-     "void": 8
+     "void": 6
     }
    },
    "voids": [
-    "BZ2_blockSort",
     "BZ2_bz__AssertH__fail",
-    "compress",
     "compressStream",
     "mySIGSEGVorSIGBUScatcher",
     "mySignalCatcher",
@@ -157,14 +154,14 @@
     },
     "unproven:Written": {
      "value": 79,
-     "void": 51
+     "void": 57
     },
     "unproven:unstated": {
      "value": 92,
      "void": 1
     },
     "void-open": {
-     "void": 19
+     "void": 13
     }
    },
    "voids": [
@@ -173,14 +170,8 @@
     "install_for.constprop.0",
     "mbiter_multi_next.part.0",
     "perror_with_name",
-    "pr_context_hunk",
-    "pr_forward_ed_hunk",
-    "pr_unidiff_hunk",
     "print_context_number_range",
-    "print_ed_hunk",
     "print_ifdef_hunk",
-    "print_ifdef_script",
-    "print_normal_hunk",
     "print_sdiff_hunk",
     "print_unidiff_number_range",
     "stackoverflow_deinstall_handler",
@@ -266,14 +257,14 @@
     },
     "unproven:Written": {
      "value": 241,
-     "void": 47
+     "void": 49
     },
     "unproven:unstated": {
      "value": 155
     },
     "void-open": {
      "value": 1,
-     "void": 19
+     "void": 17
     }
    },
    "voids": [
@@ -282,7 +273,6 @@
     "argv_iter_free",
     "cdb_free.part.0",
     "checked_fprintf",
-    "complain_about_leaky_fds",
     "dbg_printf",
     "entry_free",
     "forget_non_cloexec_fds",
@@ -292,7 +282,6 @@
     "inside_dir.part.0",
     "nonfatal_nontarget_file_error",
     "print_list",
-    "remember_non_cloexec_fds",
     "sharefile_destroy",
     "version_etc",
     "version_etc_va"
@@ -316,7 +305,7 @@
     },
     "unproven:Written": {
      "value": 91,
-     "void": 51
+     "void": 52
     },
     "unproven:unstated": {
      "value": 127,
@@ -324,14 +313,13 @@
     },
     "void-open": {
      "value": 1,
-     "void": 21
+     "void": 20
     }
    },
    "voids": [
     "__argmatch_die",
     "addtok_wc",
     "argmatch_invalid",
-    "closure",
     "dfacomp",
     "dfamustfree",
     "dfawarn",
@@ -418,20 +406,18 @@
     },
     "unproven:Written": {
      "value": 12,
-     "void": 35
+     "void": 37
     },
     "unproven:unstated": {
      "value": 33
     },
     "void-open": {
-     "void": 7
+     "void": 5
     }
    },
    "voids": [
-    "BZ2_blockSort",
     "BZ2_bz__AssertH__fail",
     "applySavedTimeInfoToOutputFile.constprop.0",
-    "fallbackSort",
     "mainQSort3.constprop.0",
     "mySIGSEGVorSIGBUScatcher",
     "mySignalCatcher"
@@ -633,14 +619,14 @@
     },
     "unproven:Written": {
      "value": 295,
-     "void": 79
+     "void": 80
     },
     "unproven:unstated": {
      "value": 273,
      "void": 1
     },
     "void-open": {
-     "void": 21
+     "void": 20
     }
    },
    "voids": [
@@ -661,7 +647,6 @@
     "print_list",
     "process_debug_options",
     "process_optimisation_option",
-    "remember_non_cloexec_fds",
     "sharefile_destroy",
     "version_etc",
     "version_etc_va"
@@ -785,8 +770,11 @@
      "value": 2,
      "void": 1
     },
+    "unproven:Unread": {
+     "value": 1
+    },
     "unproven:Written": {
-     "value": 58,
+     "value": 57,
      "void": 27
     },
     "unproven:unstated": {
@@ -816,8 +804,11 @@
      "value": 2,
      "void": 1
     },
+    "unproven:Unread": {
+     "value": 1
+    },
     "unproven:Written": {
-     "value": 57,
+     "value": 56,
      "void": 27
     },
     "unproven:unstated": {
@@ -848,19 +839,15 @@
     },
     "unproven:Written": {
      "value": 1,
-     "void": 1
+     "void": 5
     },
     "void-open": {
-     "void": 8
+     "void": 4
     }
    },
    "voids": [
-    "test_deflate",
-    "test_dict_deflate",
     "test_dict_inflate",
-    "test_flush",
     "test_inflate",
-    "test_large_deflate",
     "test_large_inflate",
     "test_sync"
    ],
@@ -973,8 +960,11 @@
     "refused": {
      "value": 2
     },
+    "unproven:Unread": {
+     "value": 1
+    },
     "unproven:Written": {
-     "value": 56,
+     "value": 55,
      "void": 19
     },
     "unproven:unstated": {
@@ -1003,8 +993,11 @@
     "refused": {
      "value": 2
     },
+    "unproven:Unread": {
+     "value": 1
+    },
     "unproven:Written": {
-     "value": 55,
+     "value": 54,
      "void": 19
     },
     "unproven:unstated": {
@@ -1035,19 +1028,15 @@
     },
     "unproven:Written": {
      "value": 1,
-     "void": 1
+     "void": 5
     },
     "void-open": {
-     "void": 8
+     "void": 4
     }
    },
    "voids": [
-    "test_deflate",
-    "test_dict_deflate",
     "test_dict_inflate",
-    "test_flush",
     "test_inflate",
-    "test_large_deflate",
     "test_large_inflate",
     "test_sync"
    ],
@@ -1156,7 +1145,7 @@
   }
  },
  "floors": {
-  "open": 272,
-  "closed": 276
+  "open": 249,
+  "closed": 253
  }
 }

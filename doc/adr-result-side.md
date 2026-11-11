@@ -383,6 +383,36 @@ Every slice also holds: `void_soundness.py` at 0 false voids in headers and exte
 - D212 does not close by pass-through alone. `testf` tails to `setExit`, a leaf that leaves RAX and XMM0 alone. RAX is `Scratch`, so it is `None`. XMM0 is `Input`, so `testf` is `Unproven(EntryInput)` (D208), and `void` only where the closed world finds XMM0 dead at every call; `main` leaves it open. The gate names each record's outcome.
 - The as-built arm in which a closed-world `Read(Integer)` makes a handed-back argument the result (`recover_interface.rs:1685-1707`) contradicts the decision table. S16 counts its moves and reads each by hand. Deleting it waits for that count (Decided 2).
 
+### S36 as built (2026-11-11)
+
+What the code said that this ADR did not, and the owner chosen:
+
+- The lane set (D305). r2abi `ConventionRow.results: Option<ResultSet>` states the pairs (`follows`), the lanes empty at entry and the citation that states the set complete: SysV x86-64 (psABI 3.2.3, 3.2.1), Microsoft x64 ("Return values") and AAPCS64 (6.9; Apple arm64 inherits it). r2engine `convention_model` builds `ResultLane.entry` (`Empty` where the row says, `Input` where an argument register overlaps, else `Scratch`), `ResultLane.follows` (a position in `results`) and `ConventionModel.results_complete`. A set of more than `RESULT_LANES` (7) distinct lanes is refused by leaving `results_complete` none. `follows` is a position, not yet a `LaneId`: `LaneId` stays r2ssa's until S16 types the lattice.
+- The supply walk (D306) is r2ssa `unheld_lane_written`, one live-out walk per lane past copies and merges, run where the open result is `Void` or `Unproven`. It walks every lane outside the typed three whose entry is not `Input` and whose first lane holds something (st0, then st1). An `Input` lane outside the typed three (xmm1, q1 to q3) follows a typed lane, which decides it. It also walks the float lane for a call's bytes only: a forwarder of an unstated call's XMM0 (ldb.clang `p_ldb_forward_b`, `{long, double}` back in RAX and XMM0, RAX popped) was `void`; S16 folds the typed three into the walk. A body write gives `Written`, an unstated call's bytes `Returned`; either makes the result `Unproven`, and keeps the closed world from deciding `Void` over it (the `Void` arm needs no such cause). `known.json`'s cause, "the struct's long double comes back in x87 st0", was wrong for ldb: the struct is `{long, double}`.
+- The walk runs only where a `Void` is being decided: the open result is `Void`, or it is `Unproven` and the closed world decides `Void`. On the float lane a call's bytes count only where the callee's recovered carriers include the float lane, or it states none (an import with no cited result, an indirect call): scratch-result case 2 for the rest, until S16's per-lane supply.
+- `complete: None` gives `SourceResultCause::LanesUnbounded`, spelled `LanesUnbounded` on the proof line and in `afi`, below `Written` and `EntryInput`.
+- The fallback (D307): `convention_call_boundary`'s call, where the callee states no result (`CalleeStatement.result` none, or no statement), states `SourceCallBoundaryFact.unstated_lanes` (every result lane the call kills) and `unstated_carrier`, the carrier the result is spelled in: the callee header's seed (`CalleeStatement.seed`), else the convention's integer lane at its width (D201). A callee whose body proves `void` states every lane, so its extern stays `void`. r2dec spells a call nothing reads at the carrier r2ssa states (`unstated_carrier`, or a stated register's width), and `void` only where r2ssa states `Void`: it chooses no width of its own (PR #366 review). The field is S16's `unstated_lanes`, set here on the fallback and by S16 on minted calls.
+- The gate (D308): `void_soundness.py` renders every function of each stripped build and grades each caller's extern of a read function: `void` fails, a refused call counts, and more than a tenth of read functions with no extern row fails. `known.json` is empty and admits no extern. The `--min-premised 1` floor is replaced by a stronger check: every `ignored` producer forwards what a call wrote, so an unread result rendered `void` fails (D202). The 8 premised voids at s10-win64 were the x87 `ignored` producers: each rested on the x87 hole.
+
+Measured, release r2s on the 22 programs built by gcc 13.3 and clang 18.1 (166 builds, Linux, scored on the Mac with `--prebuilt`):
+
+| | base b86f65f97 | s10-win64 505319748 | S36 |
+|---|---|---|---|
+| Header false voids | 429 | 16 (all x87 `known.json`) | 0 |
+| Extern false voids | 1,199 | 799 | 0 |
+| Unread results rendered `void` | 0 | 8 | 0 |
+| Calls refused (counted) | | 292 | 292 |
+
+- `c_f3_chain_c` (f3.gcc.O1 `0x138f`): extern `void p_f3_chain_c(uint64_t)` at base and head; now `r2sleigh_result_u64 fcn_1379(uint64_t)`, the callee's header. Its XMM1 read stays a residual (`XMM1_QA_1` never assigned).
+- `p_cld_forward_re` (cld.clang.O1 `0x1420`, `call rax; fstp st(1); pop rax; ret`): `void` at base and head; now `r2sleigh_result_u64` with an unstated-call cause. The x87 result has no group carrier yet (S16).
+- 12 of the 799 extern voids were introduced by #355 (D200): clang `c_cld_chain_*` declared `uint64_t` at base. The other 787 were at base.
+- Every function of the 166 builds: 139 headers move. 24 are source values leaving `void`. 115 are source-void consumers whose return leaves XMM0 as an unstated call left it (`c_v2_chain_lo`: `call p; movsd [sink], xmm0; ret`); `double c(){ double v = p(); sink = v; return v; }` has those bytes, so `Unproven` is the sound header.
+- `scratch_void.py` over the 35 DecBench builds: `void-open` 272 to 249, `void-closed` 4 to 4; each of the 23 lost voids returns XMM0 as a call no contract states left it (zlib's `test_flush` ends `call deflateEnd@plt; ...; ret`, an import with no cited result: section 4, "Imports with an unstated result"). Each is named `moves` in `known.txt`, and the recorded floors fall to 249 and 253 by name.
+- Release cost, Mac `time -l`, median of 3, base `s37-view-lint`: 0pack `pdd @ 0x62ecf0` 15.41 to 15.43 G instructions; pumasim `aa; pdd @ 0x3b6b20` 66.39 to 66.48 G; pumasim `pdd @ 0x23fdf0` 19.91 to 24.45 G, peak 213 to 236 MB. The rise is the root's own result: `Gui::Gui` ends in a call to a mangled Qt import whose result no row states, so it is `Unproven`, not `void`, and demand now reads its return carriers through a 7,165-line body (5 more residuals). The walk itself is not it: restricting it to `Void` decisions left 24.45 G.
+- Certification (radare2 ELF bins, 24 binaries, 8 functions): 50 rendered, 30 refused, 0 invented, 0 undefined reads, the same as `s37-view-lint`. Coverage sweep: 560 of 562 rendered, no regression.
+- Census, every `afl` function of the 23 census fixtures: 1 line moves, `code_pointer_table_O0` `_main`'s extern `void _table_dispatch` to `r2sleigh_result_u64`, the callee's own header.
+
+
 ## Amendments
 
 - doc/adr-call-boundary.md, "The callee's boundary": `BoundaryResult` and the six presence rules are replaced by sections 2 and 3. `CallBoundary` holds the decision, and `disputes` with it.
