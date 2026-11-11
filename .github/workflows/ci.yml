@@ -300,6 +300,7 @@ jobs:
           python3 scripts/test_scratch_void.py
           python3 scripts/test_void_soundness.py
           python3 scripts/mutants_d213.py --check
+          python3 scripts/mutants_s31a.py --check
           python3 -m unittest tests/test_no_plugin.py
           python3 -m unittest discover -s tests/decbench -p 'test_*.py'
       - name: A rendering may not read what nothing wrote

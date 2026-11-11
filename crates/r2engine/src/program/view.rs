@@ -342,34 +342,21 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.db.inputs().places_function(vaddr)
     }
 
+    /// The result `CallBoundary` decided for the function at `entry` from the supply its seal states
+    /// (doc/adr-result-side.md, section 3).
     fn closed_result(
         &self,
         entry: u64,
         open: &r2source::SourceFunctionInterface,
     ) -> Option<r2source::SourceClosedResult> {
-        use super::fates::{CallBoundary, CalleeKey, World};
-        // A survey that is itself preparing this body is a cycle, which reads as no evidence.
-        let key = (CalleeKey::Entry(entry), World::Closed);
+        use super::fates::{CallBoundary, CalleeKey, Supply, World};
+        let supply = Supply::of(open);
+        let key = (CalleeKey::Entry(entry), World::Closed, Some(supply));
         let boundary = self.db.get::<CallBoundary>(&key).ok()?;
-        let boundary = (*boundary).as_ref()?;
-        let overwritten = |lane: r2ssa::site_boundary::LaneId| {
-            let summary = self
-                .db
-                .get::<super::fates::CalleeEntry>(&(entry, self.thumb_at(entry)));
-            (summary.ok().and_then(|summary| *summary))
-                .is_some_and(|summary| summary.overwrites.touches(usize::from(lane.0)))
-        };
-        for dispute in super::fates::disputes(open, boundary, overwritten) {
-            r2il::refusal_evidence!("call-boundary-dispute", "{entry:#x}: {dispute:?}");
+        match boundary.as_ref() {
+            Some(CallBoundary::Sites { result, .. }) => result.result,
+            _ => None,
         }
-        let decided = super::fates::decide(open, boundary, || {
-            super::fates::every_way_in(self.db, entry, boundary)
-        });
-        r2il::refusal_evidence!(
-            "call-boundary",
-            "{entry:#x}: closed world decides {decided:?}"
-        );
-        decided
     }
 
     fn frame_saves(&self, entry: u64) -> Vec<r2source::SourceFrameSave> {

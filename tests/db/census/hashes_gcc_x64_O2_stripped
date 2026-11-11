@@ -175,11 +175,11 @@ NAME=0x00401270
 FILE=tests/fixtures/hashes_gcc_x64_O2_stripped
 CMDS=aa; pdd @ 0x00401270
 EXPECT=<<EOF
-void fcn_401270(void)
+r2sleigh_result_u64 fcn_401270(void)
 {
-    /* r2dec proof: no individual construct is marked; 5 source obligations: 1 rendered, 4 elided, 0 refused; 1 statements rendered; no call reads the result (assuming closed-world) */
+    /* r2dec proof: 1 construct is marked below; 6 source obligations: 0 rendered, 4 elided, 0 refused, 2 residual; 1 statements rendered; the result is unproven (EntryInput): 0 unproven-return carried, 1 unproven-return residual */
     {
-        return;
+        return r2sleigh_residual_u64(1);
     }
 }
 

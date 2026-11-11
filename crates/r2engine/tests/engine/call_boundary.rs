@@ -327,22 +327,62 @@ fn forwarding_ring(k: u64) -> Literal {
     Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
 }
 
-/// The boundaries one request computes over a forwarding ring of `k`.
-fn ring_boundaries(k: u64) -> u64 {
+/// The forwarder-graph nodes and the boundaries one request computes over a forwarding ring of `k`.
+fn ring_work(k: u64) -> (u64, u64) {
     let mut open = OpenProgram::of(forwarding_ring(k));
     open.analyse_program().expect("it surveys");
-    let before = open.analysis_stats().call_boundaries.computed;
+    let before = open.analysis_stats();
     open.prepared(BASE).expect("it prepares");
-    open.analysis_stats().call_boundaries.computed - before
+    let after = open.analysis_stats();
+    (
+        after.direct_sites.computed - before.direct_sites.computed,
+        after.call_boundaries.computed - before.call_boundaries.computed,
+    )
 }
 
-/// A cut forwarding cycle is solved again per ask, each caller's boundary once per lane set: the
-/// work is linear in the ring, where asking per lane computed 3,282 boundaries for a ring of 8.
+/// A forwarding ring is one component solved once: each function's calls are joined once, where
+/// asking per lane computed 3,282 boundaries for a ring of 8.
 #[test]
 fn a_forwarding_ring_is_solved_once_per_caller() {
-    let (two, eight) = (ring_boundaries(2), ring_boundaries(8));
-    assert!(two <= 2 * (2 + 2), "ring 2: {two}");
-    assert!(eight <= 2 * (8 + 2), "ring 8: {eight}");
+    for k in [2, 8] {
+        let (nodes, boundaries) = ring_work(k);
+        assert!(nodes <= k + 2, "ring {k}: {nodes} joins");
+        assert!(
+            boundaries <= 2 * (k + 2),
+            "ring {k}: {boundaries} boundaries"
+        );
+    }
+}
+
+/// `h`: `mov eax, 7; ret`; `g`: `call h; ret`; `caller`: `call g; movsd [rsi], xmm0; ret`. No
+/// body writes XMM0, so the read is the caller's own bytes.
+const UNWRITTEN_FLOAT_READ: &[u8] = &[
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1000 mov eax, 7
+    0xc3, // 1005 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1006 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0xc3, // 1015 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1016 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1020 call 0x1010
+    0xf2, 0x0f, 0x11, 0x06, // 1025 movsd [rsi], xmm0
+    0xc3, // 1029 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 102a padding
+];
+
+/// A read of a lane no body writes proves no result: neither `h` nor `g` is a `double` (default-deny).
+#[test]
+fn a_read_of_a_lane_no_body_writes_decides_no_result() {
+    let functions = [
+        ("h", BASE, 0x06),
+        ("g", BASE + 0x10, 0x06),
+        ("caller", BASE + 0x20, 0x0a),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(UNWRITTEN_FLOAT_READ, &functions));
+    open.analyse_program().expect("it surveys");
+    for at in [BASE, BASE + 0x10] {
+        let text = (open.rendered(at).expect("it renders").response.output).into_text();
+        assert!(!text.contains("double "), "{text}");
+    }
 }
 
 /// `f`: `lea rax, [rdi + 1]; cvtsi2sd xmm0, rdi; ret`; `g`: `sub rsp, 0x28; call f; add rsp,
@@ -541,15 +581,165 @@ fn an_entry_input_lane_a_pointer_enters_is_never_void() {
     assert!(!text.starts_with("void f("), "{text}");
 }
 
-/// A function nothing enters has no call that reads its result.
+/// A function nothing calls keeps its open result: no call executes it, so no fact decides it
+/// (doc/adr-result-side.md, section 3, the one-call minimum).
 #[test]
-fn an_entry_input_lane_nothing_enters_is_void_under_the_closed_world() {
+fn an_entry_input_lane_nothing_calls_keeps_its_open_result() {
     let program = Literal::of_code(
         UNCALLED,
         &[("f", BASE, 0x01), ("caller", BASE + 0x10, 0x03)],
     );
     let text = analysed(program);
+    assert!(!text.starts_with("void f("), "{text}");
+    assert!(text.contains("EntryInput"), "{text}");
+    assert!(!text.contains("closed-world"), "{text}");
+}
+
+/// `HANDED_BACK`'s `f` and `caller`, then `other` at 0x1028 (`ret`, room for an 8-byte instruction),
+/// and 16 bytes at 0x1030 the tests map as data for a stored word.
+const WAYS_IN: &[u8] = &[
+    0xc3, // 1000 ret
+    0xf4, // 1001 hlt
+    0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, // 1002 nop word [rax + rax]
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1008 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x89, 0x06, // 1015 mov [rsi], eax
+    0x48, 0x89, 0x17, // 1017 mov [rdi], rdx
+    0x0f, 0x57, 0xc0, // 101a xorps xmm0, xmm0
+    0x0f, 0x57, 0xc9, // 101d xorps xmm1, xmm1
+    0xc3, // 1020 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1021 padding
+    0xc3, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1028 other: ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1030 data
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1038 data
+];
+
+/// `WAYS_IN` with its code ending at 0x1030 and the data after it.
+fn ways_in() -> Literal {
+    let functions = [
+        ("f", BASE, 0x08),
+        ("caller", BASE + 0x10, 0x11),
+        ("other", BASE + 0x28, 0x08),
+    ];
+    Literal::of_code(WAYS_IN, &functions).with_data_after(BASE + 0x30)
+}
+
+/// A word the loader writes at 0x1030.
+fn loader_word(kind: r2engine::program::WriteKind) -> r2engine::program::LoaderWrite {
+    r2engine::program::LoaderWrite {
+        place: BASE + 0x30,
+        width: 8,
+        kind,
+        encoding: r2abi::statement::Encoding::Word,
+    }
+}
+
+/// Every way into `f` the closed world reads (doc/adr-result-side.md, "The closed world"), each alone.
+fn each_way_in() -> Vec<(&'static str, Literal)> {
+    use r2engine::program::WriteKind;
+    let exported = ways_in().declaring(r2abi::statement::Symbol {
+        name: "f".into(),
+        vaddr: BASE,
+        size: 0x08,
+        kind: r2abi::statement::SymbolKind::Function,
+        defined: true,
+        origin: r2abi::statement::SymbolOrigin {
+            table: None,
+            dynamic: Some(1),
+            directory: None,
+        },
+        ..r2abi::statement::Symbol::default()
+    });
+    let entered = ways_in().entering(BASE, r2abi::statement::EntryKind::Init);
+    let mut named = ways_in();
+    // 1028 lea rdi, [rip - 0x2f] (0x1000); 102f ret
+    named.write(
+        BASE + 0x28,
+        &[0x48, 0x8d, 0x3d, 0xd1, 0xff, 0xff, 0xff, 0xc3],
+    );
+    let mut word = ways_in();
+    word.write(BASE + 0x30, &0x1000u64.to_le_bytes());
+    let mut half = ways_in();
+    // Four bytes name `f`; no eight-byte window holds it.
+    half.write(
+        BASE + 0x30,
+        &[0x00, 0x10, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff],
+    );
+    let mut thumb = ways_in();
+    thumb.write(BASE + 0x30, &0x1001u64.to_le_bytes());
+    let relative = ways_in().loader_written(loader_word(WriteKind::Relative(BASE)));
+    let resolver = ways_in().loader_written(loader_word(WriteKind::Resolver(BASE)));
+    let unknown = ways_in().loader_written(loader_word(WriteKind::Unknown));
+    let mut unaccounted = ways_in();
+    // 1021 mov eax, 1; 1026 ret: code in no function, which may call or name anything.
+    unaccounted.write(BASE + 0x21, &[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    let foreign = ways_in().in_language(r2engine::program::SourceLanguage::ObjectiveC);
+    // 1012 lost, inside `caller`'s call: `ff ff` decodes to nothing, so no walk reads its body.
+    let unwalked = ways_in().stating("lost", BASE + 0x12);
+    vec![
+        ("exported", exported),
+        ("an entry no symbol states", entered),
+        ("named by an instruction", named),
+        ("an 8-byte stored word", word),
+        ("a 4-byte stored word", half),
+        ("a stored word with the Thumb bit", thumb),
+        ("a relative loader write", relative),
+        ("a resolver loader write", resolver),
+        ("an unknown loader write", unknown),
+        ("code no body holds", unaccounted),
+        ("a language whose tables hold offsets", foreign),
+        ("a body no walk reads", unwalked),
+    ]
+}
+
+/// The program `each_way_in` varies: `f`'s lanes die at its one call, so it is void under `aa`.
+#[test]
+fn every_way_in_is_read_before_a_closed_world_void() {
+    let text = analysed(ways_in());
     assert!(text.starts_with("void f("), "{text}");
+    for (way, program) in each_way_in() {
+        let text = analysed(program);
+        assert!(!text.starts_with("void f("), "{way}: {text}");
+        assert!(!text.contains("closed-world"), "{way}: {text}");
+    }
+}
+
+/// A `CallBoundary` decides from the open read and its forwarder component alone: no decision reaches
+/// a function sealed in the closed world, nor another decision (doc/adr-result-side.md, section 5).
+#[test]
+fn a_call_boundary_reaches_no_closed_seal() {
+    let programs = [
+        Literal::of_code(
+            HANDED_BACK,
+            &[("f", BASE, 0x01), ("caller", BASE + 0x10, 0x11)],
+        ),
+        Literal::of_code(
+            FORWARDED,
+            &[
+                ("f", BASE, 0x01),
+                ("mid", BASE + 0x10, 0x06),
+                ("top", BASE + 0x20, 0x0c),
+            ],
+        ),
+        Literal::of_code(
+            FORWARDER_CYCLE,
+            &[
+                ("f", BASE, 0x01),
+                ("a", BASE + 0x10, 0x18),
+                ("b", BASE + 0x30, 0x13),
+            ],
+        ),
+        forwarding_ring(4),
+        ways_in(),
+    ];
+    for program in programs {
+        let mut open = OpenProgram::of(program);
+        open.analyse_program().expect("it surveys");
+        for entry in [BASE, BASE + 0x10, BASE + 0x20, BASE + 0x30] {
+            let _ = open.rendered(entry);
+        }
+        assert_eq!(open.analysis_stats().defects, 0);
+    }
 }
 
 /// `f` is `ret`. `a` and `b` each return early on a zero argument, else call the other and return

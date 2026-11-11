@@ -104,8 +104,8 @@ pub trait Program: crate::body::Program {
         Vec::new()
     }
 
-    /// What the closed world's `CallBoundary` decides of the result of the function at `entry`, given
-    /// what its body proves alone (`open`); none outside `aa` (doc/adr-call-boundary.md, D166).
+    /// What the closed world's `CallBoundary` decided of the result of the function at `entry`, from
+    /// the supply its own seal states (`open`); none outside `aa` (doc/adr-result-side.md, section 3).
     fn closed_result(
         &self,
         _entry: u64,
@@ -1589,7 +1589,7 @@ impl<'a> Native<'a> {
             ),
         };
         let mut first = seal_first(None)?;
-        // The closed world decides the result from the body's open interface (D166).
+        // The closed world's held decision, from the supply this seal states (doc/adr-result-side.md).
         let reads = (world == crate::program::World::Closed)
             .then(|| first.machine_context().function_interface().cloned())
             .flatten()

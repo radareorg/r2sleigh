@@ -1,5 +1,5 @@
-//! The callee's boundary (doc/adr-call-boundary.md, "The callee's boundary"): what every call the
-//! program makes does with a function's result lanes, joined once per callee and world.
+//! The callee's boundary (doc/adr-call-boundary.md, "The callee's boundary"; doc/adr-result-side.md,
+//! section 3): every call's fate on each result lane, joined once per callee, and its result decided once.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -9,6 +9,7 @@ use r2source::{
     CanonicalStorageId, SourceClosedResult, SourceConventionSlots, SourceReadLanes,
     SourceResultCause,
 };
+use r2ssa::dense::{Csr, DenseId, IdMap};
 use r2ssa::site_boundary::{
     ByteMask, CallEffect, CallEffects, CallerFlow, Counted, EntrySummary, LANES, LaneBytes,
     LaneFate, LaneId, Overwrites, ResultLanes, SiteBoundary, argument_registers, argument_takes,
@@ -20,7 +21,7 @@ use super::requests::SurveyQuery;
 use super::{ProgramInputs, Source, View};
 use crate::body::{Body, BodyBlock, UnresolvedReason};
 use crate::native::NativeTarget;
-use crate::query::db::{Db, Hold, Query, Retention};
+use crate::query::db::{Db, Query, Retention};
 
 /// Whether a boundary joins the program's calls: only under `aa`, which surveys every caller.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -63,39 +64,142 @@ pub struct JoinedLane {
     pub width: Option<Option<u32>>,
 }
 
-/// What one callee's boundary states (doc/adr-call-boundary.md, `CallBoundary`): under the closed
-/// world, the fate of each result lane over every call; for an import, the registers it reads.
+impl JoinedLane {
+    /// `other` joined in: each flag rises, `dead` falls, the bytes grow and two widths disagree.
+    fn merge(&mut self, other: &Self) {
+        self.read |= other.read;
+        self.unknown |= other.unknown;
+        self.cycle |= other.cycle;
+        self.dead &= other.dead;
+        self.bytes = ByteMask(self.bytes.0 | other.bytes.0);
+        self.width = match (self.width, other.width) {
+            (None, width) | (width, None) => width,
+            (Some(one), Some(other)) => Some(one.filter(|one| Some(*one) == other)),
+        };
+    }
+}
+
+/// What one callee's boundary states (doc/adr-result-side.md, section 3): under the closed world,
+/// each lane's fate over every call and the result decided from it; for an import, what it reads.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CallBoundary {
     Sites {
-        lanes: [JoinedLane; LANES],
-        calls: u32,
-        /// Some caller the survey names was not read, so these calls may not be every call.
-        unread: bool,
-        /// The callers a returned lane is dead in only if their own calls are every way in.
-        forwarders: Box<[u64]>,
-        /// Whether a forwarding cycle the database cut reached the answer, which then depends on
-        /// the function of the cycle asked first: such an answer is not held.
-        cut: bool,
+        forwarding: Box<Forwarding>,
+        result: BoundaryResult,
     },
     Import {
         reads: Option<crate::imports::ImportReads>,
     },
 }
 
+/// What the closed world decides of one function's result, once (doc/adr-result-side.md, section 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundaryResult {
+    /// Each lane's decision, by `LaneId`.
+    pub lanes: [LaneDecision; LANES],
+    /// What the seal applies as a stated input; none where the calls decide nothing.
+    pub result: Option<SourceClosedResult>,
+    /// What the decision assumes.
+    pub premises: Box<[r2source::Premise]>,
+    /// The sources the authority order overrules: refusal evidence, never a decision.
+    pub disputes: Box<[Dispute]>,
+}
+
+/// One result lane, decided over every call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneDecision {
+    /// The body holds no result here: no such lane, an unheld one, or one beside an undefined integer.
+    NoResult,
+    /// Some call reads it.
+    Read,
+    /// Every call leaves it dead, and the calls are every way in.
+    Dead,
+    /// A call returns it on through a cycle of forwarders, which proves no read.
+    Cycle,
+    /// Nothing decides it.
+    Open,
+}
+
+/// What a body's own seal states of its result, which the decision reads: the supply, handed in
+/// by the seal that asks (doc/adr-result-side.md, "S31a as built").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Supply {
+    /// A declaration states the result, which no call overrules.
+    pub declared: bool,
+    pub returns: Returns,
+    /// The registers an unproven or written result may be in.
+    pub carriers: Option<Carriers>,
+    /// Every cause of an unproven result is a handed-back input or no return.
+    pub handed_back: bool,
+}
+
+/// The shape of a body's own result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Returns {
+    Void,
+    Register,
+    Unproven,
+    Other,
+}
+
+/// Which carriers an unproven result names beside the integer register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Carriers {
+    pub float: bool,
+    pub second: bool,
+    /// No return defines a byte of the integer register (scratch-result cases 1 to 3).
+    pub integer_undefined: bool,
+}
+
+impl Supply {
+    /// The supply a sealed interface states. O(causes).
+    pub fn of(open: &r2source::SourceFunctionInterface) -> Self {
+        let returns = match open.return_kind() {
+            r2source::SourceFunctionReturn::Void => Returns::Void,
+            r2source::SourceFunctionReturn::Register { .. } => Returns::Register,
+            r2source::SourceFunctionReturn::Unproven => Returns::Unproven,
+            _ => Returns::Other,
+        };
+        let carriers = open.result_carriers().map(|carriers| Carriers {
+            float: carriers.float.is_some(),
+            second: carriers.second.is_some(),
+            integer_undefined: carriers.integer_undefined,
+        });
+        let causes = open
+            .unproven_result()
+            .map(r2source::SourceUnprovenResult::causes);
+        let handed_back = causes.unwrap_or_default().iter().all(|cause| {
+            matches!(
+                cause,
+                SourceResultCause::HandedBack | SourceResultCause::NoReturn
+            )
+        });
+        Self {
+            declared: open.types_are_declared(),
+            returns,
+            carriers,
+            handed_back,
+        }
+    }
+}
+
 impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
-    type Key = (CalleeKey, World);
+    /// The callee, the world, and for a function the supply its seal hands in (ADR section 3).
+    type Key = (CalleeKey, World, Option<Supply>);
     type Value = Option<CallBoundary>;
     const NAME: &'static str = "call-boundary";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: an import's placement; a function's held caller fates, one search per call and one
-    /// ask per forwarder. A cut answer is solved again per ask, over the forwarders it reaches.
-    fn compute(db: &Db<ProgramInputs<S>>, &(callee, world): &(CalleeKey, World)) -> Self::Value {
+    /// Work: an import's placement; a function's forwarding component, read once, and `O(LANES)`
+    /// to decide.
+    fn compute(
+        db: &Db<ProgramInputs<S>>,
+        &(callee, world, supply): &(CalleeKey, World, Option<Supply>),
+    ) -> Self::Value {
         let view = View::new(db, true);
-        let walker = super::returns::Walking::new(view.clone(), true).ok()?;
         match (callee, world) {
             (CalleeKey::Import(ImportId(at)), _) => {
+                let walker = super::returns::Walking::new(view.clone(), true).ok()?;
                 let name = crate::native::Program::import_at(&view, at)?;
                 let target = walker.target(view.thumb_at(at));
                 Some(CallBoundary::Import {
@@ -104,21 +208,73 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
             }
             // A cold `pdd` joins no sites.
             (CalleeKey::Entry(_), World::Open) => None,
-            (CalleeKey::Entry(entry), World::Closed) => sites_of(db, entry),
-        }
-    }
-
-    fn hold(value: &Self::Value) -> Hold {
-        match value {
-            Some(CallBoundary::Sites { cut: true, .. }) => Hold::Transient,
-            _ => Hold::Held,
+            (CalleeKey::Entry(entry), World::Closed) => {
+                // One decision reads another only through the forwarder component (ADR section 4).
+                if db.running("call-boundary") > 1 {
+                    db.defect(format_args!(
+                        "call-boundary {entry:#x} reached inside another"
+                    ));
+                }
+                let supply = supply?;
+                let forwarding = (*db.get::<ComponentForwarding>(&entry).ok()?).clone()?;
+                let thumb = view.thumb_at(entry);
+                let result = BoundaryResult::decided(db, (entry, thumb), &forwarding, supply);
+                r2il::refusal_evidence!(
+                    "call-boundary",
+                    "{entry:#x}: closed world decides {:?}",
+                    result.result
+                );
+                for dispute in &result.disputes {
+                    r2il::refusal_evidence!("call-boundary-dispute", "{entry:#x}: {dispute:?}");
+                }
+                Some(CallBoundary::Sites {
+                    forwarding: Box::new(forwarding),
+                    result,
+                })
+            }
         }
     }
 }
 
-/// The fates of every call to `callee`, joined, with each returned lane forwarded to its caller's
-/// own boundary; a function nothing calls joins no call.
-fn sites_of<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Option<CallBoundary> {
+/// The calls to one function joined, before any returned lane is forwarded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Direct {
+    lanes: [JoinedLane; LANES],
+    calls: u32,
+    /// The loader's own calls a cited row states read nothing (r2abi `loader_call`, D237).
+    loader_calls: u32,
+    /// Some caller the survey names was not read, so these calls may not be every call.
+    unread: bool,
+    /// Each lane a call returns on into its caller, which that caller's own calls decide.
+    returned: Box<[Returned]>,
+}
+
+/// A lane a call returns on: the caller, the lane and the bytes it hands back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Returned {
+    caller: u64,
+    at: usize,
+    bytes: ByteMask,
+}
+
+/// Every call to one function joined, with no returned lane forwarded: the forwarder graph's node.
+pub(super) struct DirectSites;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for DirectSites {
+    type Key = u64;
+    type Value = Option<Direct>;
+    const NAME: &'static str = "direct-sites";
+    const RETENTION: Retention = Retention::Held;
+
+    /// Work: each caller's held site fates, and a search per caller for its calls to `callee`.
+    fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> Self::Value {
+        direct_sites(db, callee)
+    }
+}
+
+/// The fates of every call to `callee`, joined; a returned lane is kept for its caller only where
+/// that could move the decision (doc/adr-result-side.md, "S31a as built").
+fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Option<Direct> {
     let survey = db.get::<SurveyQuery>(&()).ok()?;
     let survey = Arc::clone(&survey.as_ref().as_ref().ok()?.0);
     let held = held_lanes(db, callee)?;
@@ -132,9 +288,7 @@ fn sites_of<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Opti
     let mut unread = false;
     // A call two bodies hold (one walk enters the other's tail) is one call, read once.
     let mut seen = BTreeSet::new();
-    // Each returned lane, by caller, lane and bytes, forwarded after the direct fates are joined.
     let mut returned = BTreeSet::new();
-    let mut forwarders = BTreeSet::new();
     for &caller in survey.callers_of(callee) {
         let Some(Ok(thumb)) = survey.walked_in(caller) else {
             unread = true;
@@ -156,91 +310,308 @@ fn sites_of<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Opti
                     join(joined, fate.map(Forwarded::Fate));
                     continue;
                 };
-                returned.insert((caller, at, bytes));
+                returned.insert(Returned { caller, at, bytes });
             }
         }
     }
-    // A caller's boundary is asked only where its answer could move the decision: a lane no call
-    // reads, while every lane a body may hold is dead or returned (O(callers) asks, each held).
-    let mut cut = false;
-    // Each caller's boundary is asked once for all its lanes: a cut answer is not held.
-    let mut theirs = BTreeMap::new();
-    for (caller, at, bytes) in returned {
-        let open = lanes
-            .iter()
-            .any(|lane| lane.held && (lane.unknown || lane.cycle));
-        let fate = match (lanes[at].read, open) {
-            (true, _) => Some(Forwarded::Fate(LaneFate::Unknown)),
-            (false, true) if at >= 3 => Some(Forwarded::Fate(LaneFate::Unknown)),
-            _ => {
-                let key = (CalleeKey::Entry(caller), World::Closed);
-                let boundary = theirs
-                    .entry(caller)
-                    .or_insert_with(|| db.get::<CallBoundary>(&key).ok());
-                forwarded(boundary.as_deref(), at, bytes, &mut cut)
-            }
-        };
-        if let Some(Forwarded::DeadIfEveryWayIn) = fate {
-            forwarders.insert(caller);
+    // Decided from the direct calls alone, so the forwarder graph does not depend on its answers.
+    let open = lanes
+        .iter()
+        .any(|lane| lane.held && (lane.unknown || lane.cycle));
+    let kept = returned.into_iter().filter(|returned| {
+        let decided = lanes[returned.at].read || (open && returned.at >= 3);
+        if decided {
+            join(
+                &mut lanes[returned.at],
+                Some(Forwarded::Fate(LaneFate::Unknown)),
+            );
         }
-        join(&mut lanes[at], fate);
-    }
+        !decided
+    });
+    let returned = kept.collect::<Vec<_>>().into();
+    let container = db.inputs().source.container();
+    let loader_calls = (container.entries.iter())
+        .filter(|entry| entry.vaddr == callee)
+        .filter(|entry| {
+            r2abi::loader_call(container.format, entry.kind).is_some_and(|call| call.adds_no_read())
+        })
+        .count();
+    let loader_calls = u32::try_from(loader_calls).unwrap_or(u32::MAX);
     r2il::refusal_evidence!(
         "call-boundary",
         "{callee:#x}: {calls} calls, unread callers {unread}, lanes {lanes:?}"
     );
-    // No call at all is evidence too: the closed world decides only where nothing else enters.
-    Some(CallBoundary::Sites {
+    Some(Direct {
         lanes,
         calls,
+        loader_calls,
         unread,
-        forwarders: forwarders.into_iter().collect(),
-        cut,
+        returned,
     })
 }
 
-/// Whether the calls a boundary joined are every way the image enters `callee`, and each forwarder's
-/// too: asked only by a decision that rests on it. Each function is answered once per question.
-pub(crate) fn every_way_in<S: Source + 'static>(
-    db: &Db<ProgramInputs<S>>,
-    callee: u64,
-    boundary: &CallBoundary,
-) -> bool {
-    every_way_in_from(db, callee, boundary, &mut BTreeMap::new())
+/// One function's lanes once every returned lane is forwarded to its caller's own calls.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Forwarding {
+    pub lanes: [JoinedLane; LANES],
+    pub calls: u32,
+    pub loader_calls: u32,
+    pub unread: bool,
+    /// The callers a returned lane is dead in only if their own calls are every way in.
+    pub forwarders: Box<[u64]>,
 }
 
-/// `every_way_in`, with each function's answer so far: `None` while it is being asked.
-fn every_way_in_from<S: Source + 'static>(
-    db: &Db<ProgramInputs<S>>,
-    callee: u64,
-    boundary: &CallBoundary,
-    asked: &mut BTreeMap<u64, Option<bool>>,
-) -> bool {
-    let CallBoundary::Sites {
-        calls,
-        unread,
-        forwarders,
-        ..
-    } = boundary
-    else {
-        return false;
-    };
-    if let Some(answer) = asked.get(&callee) {
-        return answer.unwrap_or(false);
-    }
-    asked.insert(callee, None);
-    let mut answer = !unread && super::reads::only_called(db, callee, *calls);
-    for caller in forwarders.iter() {
-        if !answer {
-            break;
+/// A function's forwarding, solved with every member of its strongly connected component of the
+/// forwarder graph (doc/adr-result-side.md, section 4, "Forwarding and cycles").
+pub(super) struct ComponentForwarding;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for ComponentForwarding {
+    type Key = u64;
+    type Value = Option<Forwarding>;
+    const NAME: &'static str = "forwarded";
+    const RETENTION: Retention = Retention::Held;
+
+    /// Work: Tarjan's search over the callers a lane is returned to, `O(V + E)` over what it
+    /// reaches, then each component's fixpoint, `O(V + E × height)`; every member is deposited.
+    fn compute(db: &Db<ProgramInputs<S>>, &root: &u64) -> Self::Value {
+        let solved = |node: u64| {
+            (db.held::<ComponentForwarding>(&node).ok().flatten()).filter(|_| node != root)
+        };
+        let mut search = super::resolved::Search::default();
+        search.run(root, |node| match solved(node) {
+            Some(_) => Vec::new(),
+            None => callers_returned_to(db, node),
+        });
+        let mut answers = BTreeMap::new();
+        for members in &search.closed {
+            if members.iter().all(|member| solved(*member).is_some()) {
+                continue;
+            }
+            let outside = |caller: u64| match answers.get(&caller) {
+                Some(answer) => Some(Option::clone(answer)),
+                None => solved(caller).map(|held| (*held).clone()),
+            };
+            for (member, answer) in solve(db, members, outside) {
+                answers.insert(member, answer);
+            }
         }
-        let key = (CalleeKey::Entry(*caller), World::Closed);
-        let found = db.get::<CallBoundary>(&key).ok();
-        let theirs = found.as_deref().and_then(Option::as_ref);
-        answer = theirs.is_some_and(|theirs| every_way_in_from(db, *caller, theirs, asked));
+        let own = answers.remove(&root).flatten();
+        db.deposit::<ComponentForwarding>(answers);
+        own
     }
-    asked.insert(callee, Some(answer));
-    answer
+}
+
+/// The callers `node`'s calls return a lane on to, each once, ascending.
+fn callers_returned_to<S: Source + 'static>(db: &Db<ProgramInputs<S>>, node: u64) -> Vec<u64> {
+    let direct = db.get::<DirectSites>(&node).ok();
+    let returned = direct.as_deref().and_then(Option::as_ref);
+    let callers = returned
+        .into_iter()
+        .flat_map(|direct| direct.returned.iter());
+    let callers = callers.map(|returned| returned.caller);
+    callers.collect::<BTreeSet<_>>().into_iter().collect()
+}
+
+/// A member of one component, by its place in the sorted members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Member(u32);
+
+impl DenseId for Member {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+    fn from_index(index: usize) -> Self {
+        Self(u32::try_from(index).expect("fewer than 2^32 members"))
+    }
+}
+
+/// Each lane can move this often: four flags, 128 byte bits and two width steps.
+const LANE_HEIGHT: usize = 4 + 128 + 2;
+
+/// One component's members solved together: the least fixpoint of the reads a lane forwarded inside
+/// the component takes, then each inside edge that reaches no read is a cycle, never dead.
+fn solve<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    members: &[u64],
+    outside: impl Fn(u64) -> Option<Option<Forwarding>>,
+) -> Vec<(u64, Option<Forwarding>)> {
+    let directs = (members.iter())
+        .map(|member| (*db.get::<DirectSites>(member).ok()?).clone())
+        .collect::<Vec<_>>();
+    let component = Component { members, directs };
+    let mut forwarders = vec![BTreeSet::new(); members.len()];
+    let fixed = component.fixed(&outside, &mut forwarders);
+    let order = (0..members.len())
+        .map(Member::from_index)
+        .collect::<Vec<_>>();
+    let readers = Csr::from_pairs(
+        members.len(),
+        component.edges().map(|(from, to)| (to, from)),
+    );
+    let cells = r2ssa::fixpoint::sparse(
+        "forwarded",
+        LANES * LANE_HEIGHT,
+        &order,
+        &readers,
+        BOTTOM,
+        |member, cells: &IdMap<Member, [JoinedLane; LANES]>| {
+            let Some(mut lanes) = fixed[member.index()] else {
+                return BOTTOM;
+            };
+            for (lane, fate) in component.inside(member, cells) {
+                join(&mut lanes[lane], fate);
+            }
+            // Inflationary: what a cell held stays, so each cell only rises.
+            if let Some(held) = cells.get(member).filter(|held| **held != BOTTOM) {
+                lanes
+                    .iter_mut()
+                    .zip(held)
+                    .for_each(|(lane, held)| lane.merge(held));
+            }
+            lanes
+        },
+    );
+    let Ok(cells) = cells else {
+        return members.iter().map(|member| (*member, None)).collect();
+    };
+    let solved = (0..members.len()).map(|at| {
+        let direct = component.directs[at].as_ref()?;
+        let member = Member::from_index(at);
+        let mut lanes = cells.get(member).copied().unwrap_or(BOTTOM);
+        // A lane returned inside the component that reaches no read there proves none.
+        for (lane, fate) in component.inside(member, &cells) {
+            if fate.is_none() {
+                join(&mut lanes[lane], Some(Forwarded::Cycle));
+            }
+        }
+        Some(Forwarding {
+            lanes,
+            calls: direct.calls,
+            loader_calls: direct.loader_calls,
+            unread: direct.unread,
+            forwarders: std::mem::take(&mut forwarders[at]).into_iter().collect(),
+        })
+    });
+    let solved = solved.collect::<Vec<_>>();
+    members.iter().copied().zip(solved).collect()
+}
+
+/// Lanes no call reaches: the fixpoint's start.
+const BOTTOM: [JoinedLane; LANES] = [JoinedLane {
+    held: false,
+    read: false,
+    bytes: ByteMask(0),
+    unknown: false,
+    cycle: false,
+    dead: false,
+    width: None,
+}; LANES];
+
+/// One component of the forwarder graph: its members ascending, and each one's calls joined.
+struct Component<'m> {
+    members: &'m [u64],
+    directs: Vec<Option<Direct>>,
+}
+
+impl Component<'_> {
+    fn member(&self, caller: u64) -> Option<Member> {
+        self.members
+            .binary_search(&caller)
+            .ok()
+            .map(Member::from_index)
+    }
+
+    /// Each lane returned from one member into another: the returner and the caller.
+    fn edges(&self) -> impl Iterator<Item = (Member, Member)> + '_ {
+        (self.directs.iter().enumerate()).flat_map(move |(at, direct)| {
+            let returned = direct.iter().flat_map(|direct| direct.returned.iter());
+            returned.filter_map(move |returned| {
+                Some((Member::from_index(at), self.member(returned.caller)?))
+            })
+        })
+    }
+
+    /// Each member's own calls and its returns to callers outside the component: fixed during the
+    /// solve; a caller whose calls all leave the lane dead is a forwarder.
+    fn fixed(
+        &self,
+        outside: &impl Fn(u64) -> Option<Option<Forwarding>>,
+        forwarders: &mut [BTreeSet<u64>],
+    ) -> Vec<Option<[JoinedLane; LANES]>> {
+        let fixed = (self.directs.iter().zip(forwarders)).map(|(direct, forwarders)| {
+            let direct = direct.as_ref()?;
+            let mut lanes = direct.lanes;
+            let away = direct.returned.iter();
+            for returned in away.filter(|returned| self.member(returned.caller).is_none()) {
+                let theirs = outside(returned.caller).flatten();
+                let fate = forwarded(theirs.as_ref(), returned.at, returned.bytes);
+                let dead = matches!(fate, Some(Forwarded::DeadIfEveryWayIn));
+                forwarders.extend(dead.then_some(returned.caller));
+                join(&mut lanes[returned.at], fate);
+            }
+            Some(lanes)
+        });
+        fixed.collect()
+    }
+
+    /// Each lane `member` returns inside the component, with what the caller's cell takes of it.
+    fn inside<'c>(
+        &'c self,
+        member: Member,
+        cells: &'c IdMap<Member, [JoinedLane; LANES]>,
+    ) -> impl Iterator<Item = (usize, Option<Forwarded>)> + 'c {
+        let direct = self.directs[member.index()].iter();
+        let returned = direct.flat_map(|direct| direct.returned.iter());
+        returned.filter_map(move |returned| {
+            let caller = self.member(returned.caller)?;
+            let theirs = cells
+                .get(caller)
+                .map_or(BOTTOM[0], |lanes| lanes[returned.at]);
+            Some((returned.at, read_inside(theirs, returned.bytes)))
+        })
+    }
+}
+
+/// What a lane returned to a member of the same component takes from that member's calls: a read,
+/// or what it may do; nothing yet where it is dead or a cycle there.
+fn read_inside(theirs: JoinedLane, bytes: ByteMask) -> Option<Forwarded> {
+    let reached = ByteMask(theirs.bytes.0 & bytes.0);
+    let width = (theirs.width)
+        .map(|width| width.filter(|width| reached.low_run().is_some_and(|run| run >= *width)));
+    match theirs {
+        _ if reached.0 & 1 != 0 => Some(Forwarded::Read(reached, width)),
+        _ if reached.0 != 0 => Some(Forwarded::Fate(LaneFate::Unknown)),
+        lane if lane.unknown || lane.read => Some(Forwarded::Fate(LaneFate::Unknown)),
+        _ => None,
+    }
+}
+
+/// Whether the calls a forwarding joined are every way the image enters a function, and each
+/// forwarder's are too: a forwarder is in a later component, so the question ends.
+pub(super) struct EveryWayIn;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for EveryWayIn {
+    type Key = u64;
+    type Value = bool;
+    const NAME: &'static str = "every-way-in";
+    const RETENTION: Retention = Retention::Held;
+
+    /// Work: `only_called` once, and one ask per forwarder.
+    fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> bool {
+        let found = db.get::<ComponentForwarding>(&callee).ok();
+        let Some(forwarding) = found.as_deref().and_then(Option::as_ref) else {
+            return false;
+        };
+        let mut answer =
+            !forwarding.unread && super::reads::only_called(db, callee, forwarding.calls);
+        for caller in forwarding.forwarders.iter() {
+            if !answer {
+                break;
+            }
+            answer = db.get::<EveryWayIn>(caller).is_ok_and(|theirs| *theirs);
+        }
+        answer
+    }
 }
 
 /// Which result lanes of `callee`'s convention a body may leave a result in: the typed three, and
@@ -277,26 +648,12 @@ enum Forwarded {
     DeadIfEveryWayIn,
 }
 
-/// The caller's own boundary on lane `at` (`None` where the database cut a cycle): what its callers
-/// do with the `bytes` a call returns into it. A cut, here or in the caller's answer, sets `cut`.
-fn forwarded(
-    boundary: Option<&Option<CallBoundary>>,
-    at: usize,
-    bytes: ByteMask,
-    cut: &mut bool,
-) -> Option<Forwarded> {
-    let Some(boundary) = boundary else {
-        *cut = true;
-        return Some(Forwarded::Cycle);
-    };
-    let Some(CallBoundary::Sites {
-        lanes, cut: theirs, ..
-    }) = boundary
-    else {
+/// What a caller in a later component does, on lane `at`, with the `bytes` a call returns into it.
+fn forwarded(theirs: Option<&Forwarding>, at: usize, bytes: ByteMask) -> Option<Forwarded> {
+    let Some(theirs) = theirs else {
         return Some(Forwarded::Fate(LaneFate::Unknown));
     };
-    *cut |= *theirs;
-    let lane = lanes[at];
+    let lane = theirs.lanes[at];
     // A read takes the callee's bytes only where it reads them, from the lowest (`Live::fate`).
     let reached = ByteMask(lane.bytes.0 & bytes.0);
     // A width their reads agree on stands only where the callee's bytes fill it.
@@ -348,60 +705,118 @@ fn read(lane: &mut JoinedLane, bytes: ByteMask, width: Option<Option<u32>>) {
     }
 }
 
-/// What the closed world decides of a body's result from its open interface and its boundary (D202,
-/// D213); `every_way_in` is asked only where every call leaving the result dead decides it.
-pub(crate) fn decide(
-    open: &r2source::SourceFunctionInterface,
-    boundary: &CallBoundary,
-    every_way_in: impl FnOnce() -> bool,
-) -> Option<SourceClosedResult> {
-    let CallBoundary::Sites { lanes, calls, .. } = boundary else {
-        return None;
-    };
-    // A declaration states the result.
-    if open.types_are_declared() {
-        return None;
+impl BoundaryResult {
+    /// The decision from the supply the seal hands in and the calls' forwarding (the demand): every
+    /// way in is asked only where every lane is dead.
+    fn decided<S: Source + 'static>(
+        db: &Db<ProgramInputs<S>>,
+        (entry, thumb): (u64, bool),
+        forwarding: &Forwarding,
+        supply: Supply,
+    ) -> Self {
+        let lanes = &forwarding.lanes;
+        let mut asked = None;
+        let mut every_way_in =
+            || *asked.get_or_insert_with(|| db.get::<EveryWayIn>(&entry).is_ok_and(|all| *all));
+        let result = decided_result(supply, forwarding, &mut every_way_in);
+        let overwritten = |lane: LaneId| {
+            let summary = db.get::<CalleeEntry>(&(entry, thumb));
+            (summary.ok().and_then(|summary| *summary))
+                .is_some_and(|summary| summary.overwrites.touches(usize::from(lane.0)))
+        };
+        let disputes = disputes_of(supply, lanes, overwritten);
+        let holds = holds(supply, lanes);
+        let dead = asked == Some(true);
+        let decisions = std::array::from_fn(|at| match lanes[at] {
+            _ if !holds[at] => LaneDecision::NoResult,
+            lane if lane.read => LaneDecision::Read,
+            lane if lane.cycle => LaneDecision::Cycle,
+            lane if lane.dead && dead => LaneDecision::Dead,
+            _ => LaneDecision::Open,
+        });
+        let premises = match result {
+            Some(_) => vec![r2source::Premise::ClosedWorld],
+            None => Vec::new(),
+        };
+        Self {
+            lanes: decisions,
+            result,
+            premises: premises.into(),
+            disputes: disputes.into(),
+        }
     }
-    let carriers = open.result_carriers();
-    // An integer register no return defines holds no result, and the second one holds a result
-    // only beside it (SysV psABI 3.2.3, AAPCS64 6.9): a call reading either reads its own bytes.
+}
+
+/// Which lanes the body may hold a result in: an integer register no return defines holds none, and
+/// the second holds a result only beside it (SysV psABI 3.2.3, AAPCS64 6.9).
+fn holds(supply: Supply, lanes: &[JoinedLane; LANES]) -> [bool; LANES] {
+    let carriers = supply.carriers;
     let undefined = carriers.is_some_and(|carriers| carriers.integer_undefined);
-    let holds = |at: usize| {
+    std::array::from_fn(|at| {
         lanes[at].held
             && !(undefined
                 && (at == usize::from(LaneId::INTEGER.0) || at == usize::from(LaneId::SECOND.0)))
-    };
+    })
+}
+
+/// What the closed world decides of a body's result from its open interface and the calls' lanes
+/// (D202, D213); a function nothing calls keeps its open result (doc/adr-result-side.md, section 3).
+fn decided_result(
+    supply: Supply,
+    forwarding: &Forwarding,
+    every_way_in: &mut dyn FnMut() -> bool,
+) -> Option<SourceClosedResult> {
+    let Forwarding {
+        lanes,
+        calls,
+        loader_calls,
+        ..
+    } = forwarding;
+    // A declaration states the result.
+    if supply.declared {
+        return None;
+    }
+    let carriers = supply.carriers;
+    let holds = holds(supply, lanes);
     let lane = |id: LaneId| lanes[usize::from(id.0)];
     let (integer, float, second) = (
         lane(LaneId::INTEGER),
         lane(LaneId::FLOAT),
         lane(LaneId::SECOND),
     );
-    let integer_read = integer.read && !undefined;
-    // Every lane a body may hand back as its caller left it (d72 round 6) is dead at every call.
-    let all_dead = || (0..LANES).all(|at| lanes[at].dead || !holds(at)) && every_way_in();
-    let cycle = (0..LANES).any(|at| holds(at) && lanes[at].cycle);
-    match open.return_kind() {
-        r2source::SourceFunctionReturn::Register { .. } => {
-            let paired = carriers.is_some_and(|carriers| carriers.second.is_some());
+    // An integer register no return defines holds no result: a call reading it reads its own bytes.
+    let integer_read = integer.read && holds[usize::from(LaneId::INTEGER.0)];
+    // Every lane a body may hand back as its caller left it (d72 round 6) is dead at every one of
+    // `ways` calls, of which there is one or more.
+    let mut all_dead =
+        |ways: u32| ways > 0 && (0..LANES).all(|at| lanes[at].dead || !holds[at]) && every_way_in();
+    // A loader call a cited row states is a call (D237); a written result's `Unread` moves no C, so
+    // only the program's own calls ask every way in for it (doc/adr-call-boundary.md, "S7 cost").
+    let ways = match supply.handed_back && supply.returns == Returns::Unproven {
+        true => calls + loader_calls,
+        false => *calls,
+    };
+    let cycle = (0..LANES).any(|at| holds[at] && lanes[at].cycle);
+    match supply.returns {
+        Returns::Register => {
+            let paired = carriers.is_some_and(|carriers| carriers.second);
             if paired && second.read {
                 return Some(SourceClosedResult::Read(SourceReadLanes::Pair));
             }
             if integer.read {
                 return Some(SourceClosedResult::Read(SourceReadLanes::Integer));
             }
-            // Nothing calls it: only a void the reference index proves is worth building it for.
-            if *calls > 0 && all_dead() {
+            if all_dead(ways) {
                 return Some(SourceClosedResult::Unread);
             }
             cycle.then_some(SourceClosedResult::ForwardCycle)
         }
-        r2source::SourceFunctionReturn::Unproven => {
+        Returns::Unproven => {
             let carriers = carriers?;
-            if integer_read && (carriers.float.is_none() || !float.read) {
+            if integer_read && (!carriers.float || !float.read) {
                 return Some(SourceClosedResult::Read(SourceReadLanes::Integer));
             }
-            if carriers.float.is_some() && float.read && !integer_read {
+            if carriers.float && float.read && !integer_read {
                 let bytes = float
                     .width
                     .flatten()
@@ -410,24 +825,15 @@ pub(crate) fn decide(
                 return Some(SourceClosedResult::Read(SourceReadLanes::Float { bytes }));
             }
             // No defined byte reaches a return where the body only hands back an input.
-            let causes = (open.unproven_result())
-                .map(|unproven| unproven.causes().to_vec())
-                .unwrap_or_default();
-            let handed_back = causes.iter().all(|cause| {
-                matches!(
-                    cause,
-                    SourceResultCause::HandedBack | SourceResultCause::NoReturn
-                )
-            });
-            if (*calls > 0 || handed_back) && all_dead() {
-                return Some(match handed_back {
+            if all_dead(ways) {
+                return Some(match supply.handed_back {
                     true => SourceClosedResult::Void,
                     false => SourceClosedResult::Unread,
                 });
             }
             cycle.then_some(SourceClosedResult::ForwardCycle)
         }
-        _ => None,
+        Returns::Void | Returns::Other => None,
     }
 }
 
@@ -452,18 +858,15 @@ pub struct Dispute {
 
 /// A call reading a lane the callee overwrites on every path, where a declaration or the body says
 /// it returns nothing, loses; one it leaves alone hands the caller its own bytes. O(lanes).
-pub(crate) fn disputes(
-    open: &r2source::SourceFunctionInterface,
-    boundary: &CallBoundary,
+fn disputes_of(
+    supply: Supply,
+    lanes: &[JoinedLane; LANES],
     overwritten: impl Fn(LaneId) -> bool,
 ) -> Vec<Dispute> {
-    let CallBoundary::Sites { lanes, .. } = boundary else {
-        return Vec::new();
-    };
-    if open.return_kind() != r2source::SourceFunctionReturn::Void {
+    if supply.returns != Returns::Void {
         return Vec::new();
     }
-    let kept = match open.types_are_declared() {
+    let kept = match supply.declared {
         true => Authority::Declared,
         false => Authority::Body,
     };
@@ -741,9 +1144,11 @@ impl<S: Source + 'static> Reading<'_, S> {
     /// for a printf format, what a float-free format takes); an image function, what its body does.
     fn callee(&self, callee: u64) -> (CallEffect, Option<Formatted>) {
         if crate::native::Program::import_at(self.view, callee).is_some() {
-            let boundary = self
-                .db
-                .get::<CallBoundary>(&(CalleeKey::Import(ImportId(callee)), World::Open));
+            let boundary = self.db.get::<CallBoundary>(&(
+                CalleeKey::Import(ImportId(callee)),
+                World::Open,
+                None,
+            ));
             let reads = match boundary.ok().as_deref() {
                 Some(Some(CallBoundary::Import { reads })) => reads.clone(),
                 _ => None,
@@ -872,7 +1277,7 @@ impl CallEffects for Effects<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Authority, CallBoundary, Dispute, JoinedLane, LANES, LaneId, disputes};
+    use super::{Authority, Dispute, JoinedLane, LANES, LaneId, Supply, disputes_of};
     use r2source::confidence::{Basis, Confidence};
     use r2source::{ConventionId, SourceFunctionInterface, SourceFunctionReturn};
 
@@ -892,7 +1297,7 @@ mod tests {
     }
 
     /// Every call leaves every lane dead but the integer one, which one call reads.
-    fn read_integer() -> CallBoundary {
+    fn read_integer() -> [JoinedLane; LANES] {
         let mut lanes = [JoinedLane {
             held: true,
             dead: true,
@@ -903,31 +1308,25 @@ mod tests {
             read: true,
             ..JoinedLane::default()
         };
-        CallBoundary::Sites {
-            lanes,
-            calls: 1,
-            unread: false,
-            forwarders: Box::default(),
-            cut: false,
-        }
+        lanes
     }
 
     #[test]
     fn a_call_reading_a_lane_the_callee_overwrites_loses_to_the_declaration() {
-        let found = disputes(&void(true), &read_integer(), |_| true);
+        let found = disputes_of(Supply::of(&void(true)), &read_integer(), |_| true);
         let lost = Dispute {
             lane: LaneId::INTEGER,
             kept: Authority::Declared,
             lost: Authority::Calls,
         };
         assert_eq!(found, vec![lost]);
-        let found = disputes(&void(false), &read_integer(), |_| true);
+        let found = disputes_of(Supply::of(&void(false)), &read_integer(), |_| true);
         assert_eq!(found[0].kept, Authority::Body);
     }
 
     /// A callee that leaves the lane alone hands the caller its own bytes back: no dispute.
     #[test]
     fn a_call_reading_a_lane_the_callee_leaves_alone_disputes_nothing() {
-        assert!(disputes(&void(true), &read_integer(), |_| false).is_empty());
+        assert!(disputes_of(Supply::of(&void(true)), &read_integer(), |_| false).is_empty());
     }
 }

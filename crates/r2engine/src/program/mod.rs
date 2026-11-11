@@ -503,6 +503,8 @@ impl<S: Source + 'static> OpenProgram<S> {
             rendered: self.db.query_stats::<analysis::Rendered>(),
             references: self.db.query_stats::<requests::ReferenceIndex>(),
             call_boundaries: self.db.query_stats::<fates::CallBoundary>(),
+            direct_sites: self.db.query_stats::<fates::DirectSites>(),
+            defects: self.db.stats().defects,
         }
     }
 

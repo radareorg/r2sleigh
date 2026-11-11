@@ -797,6 +797,12 @@ impl Literal {
         self
     }
 
+    /// The same program, stated as written in `language`.
+    pub fn in_language(mut self, language: r2engine::program::SourceLanguage) -> Self {
+        self.container.languages.program = language;
+        self
+    }
+
     /// The same program as a Mach-O, which states Darwin by its format.
     pub fn mach_o(mut self) -> Self {
         self.container.format = Format::MachO;

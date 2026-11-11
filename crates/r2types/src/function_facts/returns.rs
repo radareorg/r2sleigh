@@ -260,14 +260,9 @@ impl ReturnTypeFact {
         // A body's integer result no declaration and no reading call decides is written, not proven;
         // the closed world names why where it decided (D202, D166).
         if let Some(bits) = interface.and_then(written_bits) {
-            let input = interface.is_some_and(r2ssa::SourceFunctionInterface::result_holds_input);
-            let cause = match interface.and_then(r2ssa::SourceFunctionInterface::closed_result) {
-                Some(r2source::SourceClosedResult::Unread) => UnprovenCause::Unread,
-                Some(r2source::SourceClosedResult::ForwardCycle) => UnprovenCause::ForwardCycle,
-                _ if input => UnprovenCause::EntryInput,
-                _ => UnprovenCause::Written,
-            };
-            return Self::unproven_at(source, Some(bits), Some(cause), true);
+            let cause = interface.map(r2ssa::SourceFunctionInterface::written_cause);
+            let cause = cause.and_then(|cause| UnprovenCause::of(&[cause]));
+            return Self::unproven_at(source, Some(bits), cause, true);
         }
         // A return whose result r2ssa left unproven hands back something no exit can type.
         let unproven = interface.map(r2ssa::SourceFunctionInterface::return_kind)

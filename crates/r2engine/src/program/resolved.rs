@@ -52,14 +52,16 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Component {
         let mut search = Search::default();
         search.run(root, |node| owners(db, &view, node, demand));
         let own = search.of[&root];
-        let answers = search.closed.iter().enumerate();
+        let closed = search.closed.into_iter().map(|members| Members { members });
+        let mut closed = closed.collect::<Vec<_>>();
+        let answers = closed.iter().enumerate();
         let answers = answers.filter(|(at, _)| *at != own);
         let answers = answers.flat_map(|(_, members)| {
             let each = members.members.iter();
             each.map(|node| ((*node, demand), members.clone()))
         });
         db.deposit::<Component>(answers.collect::<Vec<_>>());
-        search.closed.swap_remove(own)
+        closed.swap_remove(own)
     }
 }
 
@@ -150,6 +152,13 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Resolved {
     /// Work: one preparation per function whose result or arity an owner outside its component
     /// could prove, and a cycle's arity fixpoint (`least_fixpoint`).
     fn compute(db: &Db<ProgramInputs<S>>, &(node, demand): &(Node, Demand)) -> Shared<CalleeRead> {
+        // A closed seal may read a held decision; a decision never reads a closed seal.
+        if demand == Demand::Arity && db.running("call-boundary") > 0 {
+            db.defect(format_args!(
+                "call-boundary reached resolved {:#x} at arity",
+                node.0
+            ));
+        }
         let alone = db
             .get::<CalleeReads>(&node)
             .expect("a read asks for no resolution");
@@ -582,26 +591,40 @@ fn resolved<S: Source + 'static>(
 }
 
 /// One frame of the search: a function, its callees, and the next callee to visit.
-struct Frame {
-    node: Node,
-    callees: Vec<Node>,
+struct Frame<N> {
+    node: N,
+    callees: Vec<N>,
     next: usize,
 }
 
-#[derive(Default)]
-struct Search {
-    index: BTreeMap<Node, usize>,
-    low: BTreeMap<Node, usize>,
-    stack: Vec<Node>,
-    on_stack: BTreeSet<Node>,
+/// Tarjan's search over any graph, by an ordered node: components close callees first.
+pub(super) struct Search<N = Node> {
+    index: BTreeMap<N, usize>,
+    low: BTreeMap<N, usize>,
+    stack: Vec<N>,
+    on_stack: BTreeSet<N>,
     /// Which closed component each function is in.
-    of: BTreeMap<Node, usize>,
-    closed: Vec<Members>,
+    of: BTreeMap<N, usize>,
+    /// Each component in the order it closed, its members ascending.
+    pub(super) closed: Vec<std::rc::Rc<[N]>>,
 }
 
-impl Search {
+impl<N> Default for Search<N> {
+    fn default() -> Self {
+        Self {
+            index: BTreeMap::new(),
+            low: BTreeMap::new(),
+            stack: Vec::new(),
+            on_stack: BTreeSet::new(),
+            of: BTreeMap::new(),
+            closed: Vec::new(),
+        }
+    }
+}
+
+impl<N: Copy + Ord> Search<N> {
     /// The search terminates: each function is pushed once, and each frame advances over finitely many callees.
-    fn run(&mut self, root: Node, callees: impl Fn(Node) -> Vec<Node>) {
+    pub(super) fn run(&mut self, root: N, callees: impl Fn(N) -> Vec<N>) {
         let mut frames = vec![self.open(root, &callees)];
         while let Some(frame) = frames.last_mut() {
             let node = frame.node;
@@ -620,7 +643,7 @@ impl Search {
     }
 
     /// `node` has visited every callee: its caller's low link takes its own, and it may close a component.
-    fn finish(&mut self, node: Node, caller: Option<Node>) {
+    fn finish(&mut self, node: N, caller: Option<N>) {
         if let Some(caller) = caller {
             self.lower(caller, self.low[&node]);
         }
@@ -628,12 +651,12 @@ impl Search {
     }
 
     /// Lower `node`'s low link to `to` where that is lower.
-    fn lower(&mut self, node: Node, to: usize) {
+    fn lower(&mut self, node: N, to: usize) {
         let low = self.low[&node].min(to);
         self.low.insert(node, low);
     }
 
-    fn open(&mut self, node: Node, callees: &impl Fn(Node) -> Vec<Node>) -> Frame {
+    fn open(&mut self, node: N, callees: &impl Fn(N) -> Vec<N>) -> Frame<N> {
         let index = self.index.len();
         self.index.insert(node, index);
         self.low.insert(node, index);
@@ -648,7 +671,7 @@ impl Search {
     }
 
     /// Where `node` is the first of its component on the stack, pop the component.
-    fn close(&mut self, node: Node) {
+    fn close(&mut self, node: N) {
         if self.low[&node] != self.index[&node] {
             return;
         }
@@ -664,9 +687,7 @@ impl Search {
             self.on_stack.remove(member);
             self.of.insert(*member, id);
         }
-        self.closed.push(Members {
-            members: members.into(),
-        });
+        self.closed.push(members.into());
     }
 }
 
@@ -675,7 +696,7 @@ mod tests {
     use super::*;
 
     fn components(edges: &[(u64, u64)], root: u64) -> Vec<Vec<u64>> {
-        let mut search = Search::default();
+        let mut search = Search::<Node>::default();
         let callees = |(at, _): Node| {
             let out = edges.iter().filter(|(from, _)| *from == at);
             out.map(|(_, to)| (*to, false)).collect()
@@ -683,7 +704,7 @@ mod tests {
         search.run((root, false), callees);
         let closed = search.closed.iter();
         closed
-            .map(|closed| closed.members.iter().map(|(at, _)| *at).collect())
+            .map(|closed| closed.iter().map(|(at, _)| *at).collect())
             .collect()
     }
 

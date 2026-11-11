@@ -1959,6 +1959,19 @@ impl SourceFunctionInterface {
         self.closed_result
     }
 
+    /// Why a written result is unproven: the cause the closed world's decision names, else a
+    /// handed-back input or a written value (doc/adr-result-side.md, section 3).
+    pub const fn written_cause(&self) -> crate::SourceResultCause {
+        match (self.closed_result, self.result_holds_input) {
+            (Some(crate::SourceClosedResult::Unread), _) => crate::SourceResultCause::Unread,
+            (Some(crate::SourceClosedResult::ForwardCycle), _) => {
+                crate::SourceResultCause::ForwardCycle
+            }
+            (_, true) => crate::SourceResultCause::HandedBack,
+            (_, false) => crate::SourceResultCause::Written,
+        }
+    }
+
     /// Whether a closed-world call reads the result: a value at `Solved`, where the body alone
     /// proves only a written one (doc/adr-scratch-result.md, "Rendering of Unproven").
     pub const fn result_read_by_callers(&self) -> bool {

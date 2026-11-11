@@ -1887,42 +1887,29 @@ fn recover_interface_inner(
         result = RecoveredFunctionResult::Unproven;
         result_causes.insert(cause);
     }
-    // The closed world's decision (doc/adr-call-boundary.md, D166, D202): a read makes a written
-    // integer result a value, every call dead makes a result no byte defines void, a written one unread.
+    // The closed world's held decision, a stated input applied as stated (doc/adr-result-side.md).
     match closed {
-        Some(r2source::SourceClosedResult::Read(
-            r2source::SourceReadLanes::Integer | r2source::SourceReadLanes::Pair,
-        )) if matches!(result, RecoveredFunctionResult::Register(written) if !written.float())
-            || matches!(result, RecoveredFunctionResult::Pair { .. }) =>
-        {
-            applied = closed;
-        }
-        Some(r2source::SourceClosedResult::Void)
-            if result == RecoveredFunctionResult::Unproven && unheld.is_none() =>
-        {
+        Some(r2source::SourceClosedResult::Read(_)) => applied = closed,
+        Some(r2source::SourceClosedResult::Void) => {
             result = RecoveredFunctionResult::Void;
             live_out = crate::liveout::FunctionLiveOut::default();
             result_carriers = None;
             result_causes.clear();
             applied = closed;
         }
-        // A written register stays the body's carrier; the decision only names why it is unproven.
-        Some(r2source::SourceClosedResult::Unread | r2source::SourceClosedResult::ForwardCycle)
-            if matches!(result, RecoveredFunctionResult::Register(_)) =>
-        {
-            applied = closed;
-        }
         Some(
             cause @ (r2source::SourceClosedResult::Unread
             | r2source::SourceClosedResult::ForwardCycle),
-        ) if result == RecoveredFunctionResult::Unproven => {
-            result_causes.insert(match cause {
-                r2source::SourceClosedResult::Unread => SourceResultCause::Unread,
-                _ => SourceResultCause::ForwardCycle,
-            });
+        ) => {
+            if result == RecoveredFunctionResult::Unproven {
+                result_causes.insert(match cause {
+                    r2source::SourceClosedResult::Unread => SourceResultCause::Unread,
+                    _ => SourceResultCause::ForwardCycle,
+                });
+            }
             applied = closed;
         }
-        _ => {}
+        None => {}
     }
     r2il::refusal_evidence!(
         "interface-recovery",

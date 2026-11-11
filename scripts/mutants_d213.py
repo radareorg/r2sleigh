@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""D213's mutation target: each mutant of the closed world's result decision (r2engine `program/fates.rs`), the
+"""D213's mutation target: each mutant of the closed world's held result decision (r2engine `program/fates.rs`), the
 carrier fact it reads (r2ssa `integer_undefined`), the padding the every-way-in check accepts and the call
 boundary's byte liveness is applied to the tree, the tests that should kill it run, and the file is restored
 (doc/adr-call-boundary.md, "S7 as built").
@@ -36,19 +36,20 @@ MUTANTS = [
                                "let undefined = false;")], [BOUNDARY]),
     ("second-never-exempt", [(FATES, EXEMPT, "&& at == usize::from(LaneId::INTEGER.0))")], [BOUNDARY]),
     ("integer-only-exempt", [(FATES, EXEMPT, "&& at == usize::from(LaneId::SECOND.0))")], [BOUNDARY]),
-    ("an-integer-read-counts-though-undefined", [(FATES, "let integer_read = integer.read && !undefined;",
+    ("an-integer-read-counts-though-undefined", [(FATES, "let integer_read = integer.read && holds[usize::from(LaneId::INTEGER.0)];",
                                                   "let integer_read = integer.read;")], [BOUNDARY]),
     ("unheld-lanes-must-die", [(FATES, "lanes[at].held\n            && !(undefined", "true\n            && !(undefined")],
      [BOUNDARY, READS]),
     # Whether the calls are every way in.
-    ("every-way-in-assumed", [(FATES, "let mut answer = !unread && super::reads::only_called(db, callee, *calls);",
-                               "let mut answer = true;")], [BOUNDARY, READS]),
-    ("forwarders-assumed", [(FATES, "for caller in forwarders.iter() {", "for caller in forwarders.iter().take(0) {")],
-     [READS]),
+    ("every-way-in-assumed", [(FATES, "!forwarding.unread && super::reads::only_called(db, callee, forwarding.calls);",
+                               "true;")], [BOUNDARY, READS]),
+    ("forwarders-assumed", [(FATES, "for caller in forwarding.forwarders.iter() {",
+                             "for caller in forwarding.forwarders.iter().take(0) {")], [READS]),
     ("a-dead-forwarder-is-unknown", [(FATES, "lane if lane.dead => Forwarded::DeadIfEveryWayIn,",
                                       "lane if lane.dead => Forwarded::Fate(LaneFate::Unknown),")], [BOUNDARY]),
-    ("nothing-called-is-never-decided", [(FATES, "if (*calls > 0 || handed_back) && all_dead() {",
-                                          "if *calls > 0 && all_dead() {")], [BOUNDARY]),
+    # The one-call minimum (doc/adr-result-side.md, section 3): a function nothing calls keeps its open result.
+    ("nothing-called-is-decided", [(FATES, "ways > 0 && (0..LANES)", "(0..LANES)")], [BOUNDARY]),
+    ("a-loader-call-is-no-call", [(FATES, "true => calls + loader_calls,", "true => *calls,")], [BOUNDARY]),
     ("a-written-result-is-void", [(FATES, "true => SourceClosedResult::Void,\n                    false => SourceClosedResult::Unread,",
                                    "true | false => SourceClosedResult::Void,")], [BOUNDARY]),
     # The fact r2ssa states.

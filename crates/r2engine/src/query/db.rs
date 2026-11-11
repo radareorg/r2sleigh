@@ -139,6 +139,8 @@ pub struct DbStats {
     pub computed: u64,
     /// Recomputations whose value equalled the previous one.
     pub backdated: u64,
+    /// Dependencies the query graph forbids that a computation reached (`Db::defect`).
+    pub defects: u64,
 }
 
 /// A held answer found good, with what it depends on.
@@ -162,6 +164,8 @@ struct Frame {
     held: bool,
     /// The `Newest` entries this held frame read, kept until its answer is held or not.
     pending: Pending,
+    /// The query this frame runs.
+    query: &'static str,
 }
 
 #[derive(Clone)]
@@ -297,6 +301,19 @@ impl<I: Inputs + 'static> Db<I> {
         }
         frame.last_bytes = Some(frame.deps.len());
         frame.deps.push(Dep::Bytes(range));
+    }
+
+    /// How many computations of the query named `query` are running, this one included.
+    pub fn running(&self, query: &'static str) -> usize {
+        (self.frames.borrow().iter())
+            .filter(|frame| frame.query == query)
+            .count()
+    }
+
+    /// Count a dependency the query graph forbids (a defect, never a fallback), with its evidence.
+    pub fn defect(&self, what: std::fmt::Arguments<'_>) {
+        r2il::refusal_evidence!("query-defect", "{what}");
+        self.stats.borrow_mut().defects += 1;
     }
 
     /// The answer to `Q` at `key`, reused where nothing it read has moved.
@@ -603,6 +620,7 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
         }
         db.frames.borrow_mut().push(Frame {
             held: Q::RETENTION == Retention::Held,
+            query: Q::NAME,
             ..Frame::default()
         });
         let frame = Running {
