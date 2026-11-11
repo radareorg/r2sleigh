@@ -31,9 +31,7 @@ const ELF_TERMINATION: LoaderCall = LoaderCall {
 };
 
 /// The loader's call to a function the container names as `kind`, where a document states it.
-///
-/// ELF's initialisers have no row: the gABI states no type for them, and glibc passes
-/// `argc, argv, envp` where musl passes nothing.
+/// Initialisers have none: glibc passes `argc, argv, envp`, musl nothing (D240).
 pub fn loader_call(format: Format, kind: EntryKind) -> Option<&'static LoaderCall> {
     match (format, kind) {
         (Format::Elf, EntryKind::FiniHook | EntryKind::Fini) => Some(&ELF_TERMINATION),

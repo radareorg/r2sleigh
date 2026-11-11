@@ -266,9 +266,8 @@ fn exported(format: Format, symbol: &Symbol) -> bool {
         }
 }
 
-/// Each of `entries` some mapped file word names: pointer-wide at any offset, and on a 64-bit machine
-/// 32 bits wide too (an `imm32` or `.long` of a non-PIE address), with bit 0 cleared as Thumb sets it.
-/// A word starting in a pointer-wide slot at one of `stated` (ascending) is the loader's, not a way in.
+/// Each of `entries` a mapped word names, pointer-wide or (64-bit) 32 bits, bit 0 cleared as Thumb
+/// sets it; a word starting in a slot at one of `stated` (ascending) is the loader's (D237).
 fn stored_words<S: Source>(source: &S, entries: &[u64], stated: &[u64], escaped: &mut Vec<u64>) {
     let (Some(&low), Some(&high)) = (entries.first(), entries.last()) else {
         return;
