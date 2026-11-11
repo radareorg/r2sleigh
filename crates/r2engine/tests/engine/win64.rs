@@ -131,6 +131,40 @@ fn a_floating_variadic_operand_whose_registers_differ_is_no_argument() {
     assert!(text.contains("call to printf"), "{text}");
 }
 
+/// [`FLOATING`] with `r8` written from `xmm2` by `movq r8, xmm2`: both registers hold one
+/// value, so the operand is the double the float register carries (ADR "S17 as built").
+fn floating_from_one_value() -> Vec<u8> {
+    let mut code = FLOATING[..0x1f].to_vec();
+    code.extend([0x66, 0x49, 0x0f, 0x7e, 0xd0]); // 101f movq r8, xmm2
+    code.extend([0xe8, 0x67, 0x00, 0x00, 0x00]); // 1024 call 0x1090
+    code.extend([0x48, 0x83, 0xc4, 0x28, 0xc3]); // 1029 add rsp, 0x28; ret
+    code.resize(0x90, 0xcc);
+    code.extend(&FLOATING[0x90..]);
+    code
+}
+
+/// A floating operand at a shared position is an argument where SSA proves its integer
+/// duplicate equal to it: the call passes the double.
+#[test]
+fn a_floating_variadic_operand_both_registers_carry_is_the_double() {
+    let code: &'static [u8] = Box::leak(floating_from_one_value().into_boxed_slice());
+    let program = Literal::of_code(code, &[("caller", BASE, 0x2e)])
+        .with_data()
+        .importing_from("ucrtbase.dll", "printf")
+        .pe();
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(common::TEXT, b"%d %f\n\0");
+    let text = rendered(&mut open, BASE);
+    let arguments = common::call_arguments(&text, "printf").unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(arguments.len(), 3, "{text}");
+    // The operand is `xmm2`'s low lane read as a double: 2.5's bits, which `rax` was loaded with.
+    assert!(
+        arguments[2].starts_with("r2sleigh_float_from_bits_64("),
+        "{text}"
+    );
+    assert!(text.contains("0x4004000000000000"), "{text}");
+}
+
 /// The same body calling a DLL no cited table states: the home escapes to no `va_list` the
 /// container proves, so no tail is claimed and the call states no count.
 #[test]

@@ -96,10 +96,9 @@ pub(crate) fn variadic_callsite_argument_count(
         })?;
     let consumed = crate::printf::printf_consumed_arguments(format)
         .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
-    // A floating operand travels in the convention's floating sequence, which
-    // this recovery does not walk; where the whole tail is on the stack it
-    // sits in the same slots as any other operand.
-    if consumed.any_floating && !variadic_tail_on_stack(machine_context) {
+    // A floating operand travels in the floating sequence, which this recovery walks only where
+    // it shares positions with the integer one (Microsoft x64) or the tail is on the stack.
+    if consumed.any_floating && !floating_tail_placed(machine_context) {
         r2il::refusal_evidence!(
             "variadic-format-literal",
             "format argument {format_argument_index} at {format_literal_address:#x} consumes a floating operand, which this recovery cannot place"
@@ -107,6 +106,7 @@ pub(crate) fn variadic_callsite_argument_count(
         return Err(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument);
     }
     let format_consumed_argument_count = consumed.count;
+    let floating_operands = consumed.floating;
     let total_argument_count = interface
         .arguments()
         .len()
@@ -119,6 +119,7 @@ pub(crate) fn variadic_callsite_argument_count(
             format_argument_index,
             format_literal_address,
             format_consumed_argument_count,
+            floating_operands,
         }),
         total_argument_count,
     })
@@ -372,10 +373,11 @@ impl FormatForwardingLookup<'_> {
 
 /// Whether the convention puts every variadic operand on the stack, where a
 /// floating one is placed like any other.
-pub(crate) fn variadic_tail_on_stack(machine_context: &SourceMachineContext) -> bool {
+/// Whether the convention places a floating tail operand: on the stack, or at a shared position.
+fn floating_tail_placed(machine_context: &SourceMachineContext) -> bool {
     machine_context
         .convention_slots()
-        .is_some_and(r2source::SourceConventionSlots::variadic_tail_on_stack)
+        .is_some_and(|slots| slots.variadic_tail_on_stack() || slots.shared_positions())
 }
 
 /// Prove a merged variadic count from formats that agree.
@@ -399,6 +401,7 @@ pub(crate) fn merged_format_literal_argument_count(
         return Err(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral);
     }
     let mut agreed: Option<usize> = None;
+    let mut classes: Option<u64> = None;
     for address in &addresses {
         let Some(format) = machine_context.source_string_literal(*address) else {
             r2il::refusal_evidence!(
@@ -410,10 +413,18 @@ pub(crate) fn merged_format_literal_argument_count(
         };
         let consumed = crate::printf::printf_consumed_arguments(format)
             .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
-        if consumed.any_floating && !variadic_tail_on_stack(machine_context) {
+        if consumed.any_floating && !floating_tail_placed(machine_context) {
             r2il::refusal_evidence!(
                 "variadic-format-literal",
                 "merged format argument {format_argument_index} reaches {address:#x}, which consumes a floating operand"
+            );
+            return Err(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument);
+        }
+        // Formats whose floating operands differ pass different carriers on their paths.
+        if *classes.get_or_insert(consumed.floating) != consumed.floating {
+            r2il::refusal_evidence!(
+                "variadic-format-literal",
+                "merged format argument {format_argument_index} reaches formats whose floating operands differ"
             );
             return Err(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument);
         }
@@ -457,6 +468,7 @@ pub(crate) fn merged_format_literal_argument_count(
             format_argument_index,
             format_literal_address,
             format_consumed_argument_count,
+            floating_operands: classes.unwrap_or(0),
         }),
         total_argument_count,
     })
@@ -558,29 +570,102 @@ pub(crate) fn variadic_callsite_arguments(
             arguments.push(argument);
             continue;
         }
-        let value = reaching_abi_argument_in_block(
-            recovery.function,
-            recovery.prep,
-            recovery.graph,
-            recovery.machine_context,
-            recovery.entry_values,
-            recovery.block_addr,
-            recovery.op_index,
-            slot,
-        )
-        .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
+        let reaching = |storage| {
+            reaching_abi_argument_in_block(
+                recovery.function,
+                recovery.prep,
+                recovery.graph,
+                recovery.machine_context,
+                recovery.entry_values,
+                recovery.block_addr,
+                recovery.op_index,
+                storage,
+            )
+            .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)
+        };
         let index = u32::try_from(position)
             .map_err(|_| VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
+        let floating = position.checked_sub(fixed).is_some_and(|operand| {
+            (evidence.format()).is_some_and(|format| format.is_floating(operand))
+        });
+        let (storage, value) = match floating {
+            true => {
+                let float = shared_float_slot(convention, position)?;
+                let value = reaching(float)?;
+                let same = same_bits(recovery.graph, recovery.prep, reaching(slot)?, value);
+                if !same {
+                    r2il::refusal_evidence!(
+                        "variadic-callsite-arguments",
+                        "floating operand at position {position}: {slot:?} and {float:?} are not proven equal"
+                    );
+                    return Err(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument);
+                }
+                (float, value)
+            }
+            false => (slot, reaching(slot)?),
+        };
         arguments.push(SourceCallArgumentFact {
-            slot: CallBoundarySlot::Register {
-                index,
-                storage: slot,
-            },
+            slot: CallBoundarySlot::Register { index, storage },
             value,
             lane_of: None,
         });
     }
     Ok(arguments)
+}
+
+/// The float alternative of a shared position (Microsoft x64), whose low lane C's operand is.
+fn shared_float_slot(
+    convention: &r2source::SourceConventionSlots,
+    position: usize,
+) -> Result<CanonicalStorageId, VariadicCallsiteArgumentCountRefusal> {
+    (convention.shared_positions())
+        .then(|| convention.float_argument_slots().get(position).copied())
+        .flatten()
+        .ok_or(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument)
+}
+
+/// Whether two carriers hold the same bits in the narrower width: one root through copies, low
+/// pieces and zero extensions, or one constant (a variadic callee reads the integer register).
+fn same_bits(
+    graph: &SsaGraph,
+    prep: Option<&crate::DecompilePrepFacts>,
+    left: SourceCallArgumentValue,
+    right: SourceCallArgumentValue,
+) -> bool {
+    let (SourceCallArgumentValue::Value(left), SourceCallArgumentValue::Value(right)) =
+        (left, right)
+    else {
+        return false;
+    };
+    let size = |value: ValueId| graph.value(value).map_or(0, |value| value.var.size);
+    let width = size(left).min(size(right));
+    let (left, right) = (low_root(graph, left, width), low_root(graph, right, width));
+    if left == right {
+        return true;
+    }
+    let mask = u64::MAX >> (64 - 8 * width.clamp(1, 8));
+    let constant = |value| resolve_const_value(graph, prep, value).map(|bits| bits & mask);
+    width <= 8 && constant(left).is_some_and(|bits| constant(right) == Some(bits))
+}
+
+/// The value whose low `width` bytes `value`'s low `width` bytes are, through copies, low pieces
+/// and zero extensions of at least that width. O(`tail_count::COPIES`).
+fn low_root(graph: &SsaGraph, mut value: ValueId, width: u32) -> ValueId {
+    let size = |value: ValueId| graph.value(value).map_or(0, |value| value.var.size);
+    for _ in 0..crate::tail_count::COPIES {
+        let op = graph.def_inst(value).and_then(|inst| graph.inst(inst));
+        let next = match op.map(|inst| &inst.payload) {
+            Some(InstPayload::Op(SSAOp::Copy { src, .. }))
+            | Some(InstPayload::Op(SSAOp::Subpiece { src, offset: 0, .. }))
+            | Some(InstPayload::Op(SSAOp::IntZExt { src, .. })) => *src,
+            _ => break,
+        };
+        if size(next) < width {
+            break;
+        }
+        value = next;
+    }
+    value
 }
 
 /// What a call boundary carries when nothing knows the callee's signature.

@@ -653,6 +653,18 @@ pub struct FormatCountEvidence {
     pub format_argument_index: usize,
     pub format_literal_address: u64,
     pub format_consumed_argument_count: usize,
+    /// Bit `i` is set where tail operand `i` is a floating conversion's.
+    pub floating_operands: u64,
+}
+
+impl FormatCountEvidence {
+    /// Whether tail operand `operand` is a floating conversion's.
+    pub fn is_floating(&self, operand: usize) -> bool {
+        u32::try_from(operand)
+            .ok()
+            .and_then(|operand| self.floating_operands.checked_shr(operand))
+            .is_some_and(|bits| bits & 1 == 1)
+    }
 }
 
 /// The tail a callee's loop bound allows, read off the constant the call passes for it.

@@ -7,6 +7,8 @@ pub enum PrintfFormatRefusal {
     InvalidPosition,
     MixedPositionalAndSequential,
     CountOverflow,
+    /// One positional operand read by a floating and an integer conversion.
+    ConflictingOperandClass,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,12 +50,13 @@ fn positional_index(
         .ok_or(PrintfFormatRefusal::InvalidPosition)
 }
 
+/// Take one operand and answer its index in the tail.
 fn consume_argument(
     position: Option<usize>,
     mode: &mut ArgumentMode,
     sequential_count: &mut usize,
     largest_position: &mut Option<usize>,
-) -> Result<(), PrintfFormatRefusal> {
+) -> Result<usize, PrintfFormatRefusal> {
     match position {
         Some(position) => {
             if *mode == ArgumentMode::Sequential {
@@ -61,18 +64,46 @@ fn consume_argument(
             }
             *mode = ArgumentMode::Positional;
             *largest_position = Some(largest_position.map_or(position, |old| old.max(position)));
+            Ok(position)
         }
         None => {
             if *mode == ArgumentMode::Positional {
                 return Err(PrintfFormatRefusal::MixedPositionalAndSequential);
             }
             *mode = ArgumentMode::Sequential;
+            let index = *sequential_count;
             *sequential_count = sequential_count
                 .checked_add(1)
                 .ok_or(PrintfFormatRefusal::CountOverflow)?;
+            Ok(index)
         }
     }
-    Ok(())
+}
+
+/// The operand classes a format names, by tail index: one operand read as two classes refuses.
+#[derive(Default)]
+struct Classes {
+    floating: u64,
+    integer: u64,
+    any_floating: bool,
+}
+
+impl Classes {
+    fn note(&mut self, index: usize, floating: bool) -> Result<(), PrintfFormatRefusal> {
+        self.any_floating |= floating;
+        let Some(bit) = u32::try_from(index).ok().and_then(|i| 1u64.checked_shl(i)) else {
+            return Ok(());
+        };
+        let (own, other) = match floating {
+            true => (&mut self.floating, self.integer),
+            false => (&mut self.integer, self.floating),
+        };
+        *own |= bit;
+        match other & bit {
+            0 => Ok(()),
+            _ => Err(PrintfFormatRefusal::ConflictingOperandClass),
+        }
+    }
 }
 
 /// Count the arguments consumed by a complete printf-family format literal.
@@ -81,16 +112,14 @@ fn consume_argument(
 /// flags, widths, precisions, and length modifiers remain part of one
 /// conversion. POSIX positional operands are accepted only when every
 /// consuming operand is positional.
-/// What a printf-family format says about the arguments it consumes.
-///
-/// The count alone is not enough to place the arguments: a floating
-/// conversion's operand travels in the convention's floating sequence rather
-/// than its integer one, so a consumer that assigns carriers in order needs to
-/// know whether any operand is floating before it does so.
+/// What a printf-family format says about the arguments it consumes: how many, and which are a
+/// floating conversion's, whose operand travels in the convention's floating sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrintfConsumedArguments {
     pub count: usize,
     pub any_floating: bool,
+    /// Bit `i` is set where tail operand `i` is floating; an operand past 63 sets only `any_floating`.
+    pub floating: u64,
 }
 
 pub fn printf_consumed_arguments(
@@ -101,7 +130,7 @@ pub fn printf_consumed_arguments(
     let mut mode = ArgumentMode::Unknown;
     let mut sequential_count = 0usize;
     let mut largest_position = None;
-    let mut any_floating = false;
+    let mut classes = Classes::default();
 
     while cursor < bytes.len() {
         if bytes[cursor] != b'%' {
@@ -125,12 +154,13 @@ pub fn printf_consumed_arguments(
         if bytes.get(cursor) == Some(&b'*') {
             cursor += 1;
             let width_position = positional_index(bytes, &mut cursor)?;
-            consume_argument(
+            let index = consume_argument(
                 width_position,
                 &mut mode,
                 &mut sequential_count,
                 &mut largest_position,
             )?;
+            classes.note(index, false)?;
         } else {
             let _ = decimal(bytes, &mut cursor)?;
         }
@@ -140,12 +170,13 @@ pub fn printf_consumed_arguments(
             if bytes.get(cursor) == Some(&b'*') {
                 cursor += 1;
                 let precision_position = positional_index(bytes, &mut cursor)?;
-                consume_argument(
+                let index = consume_argument(
                     precision_position,
                     &mut mode,
                     &mut sequential_count,
                     &mut largest_position,
                 )?;
+                classes.note(index, false)?;
             } else {
                 let _ = decimal(bytes, &mut cursor)?;
             }
@@ -171,16 +202,17 @@ pub fn printf_consumed_arguments(
         match conversion {
             b'd' | b'i' | b'o' | b'u' | b'x' | b'X' | b'f' | b'F' | b'e' | b'E' | b'g' | b'G'
             | b'a' | b'A' | b'c' | b'C' | b's' | b'S' | b'p' | b'n' | b'b' | b'B' => {
-                any_floating |= matches!(
+                let floating = matches!(
                     conversion,
                     b'f' | b'F' | b'e' | b'E' | b'g' | b'G' | b'a' | b'A'
                 );
-                consume_argument(
+                let index = consume_argument(
                     conversion_position,
                     &mut mode,
                     &mut sequential_count,
                     &mut largest_position,
-                )?
+                )?;
+                classes.note(index, floating)?;
             }
             // GNU printf's strerror conversion consumes no operand.
             b'm' if conversion_position.is_none() => {}
@@ -196,7 +228,8 @@ pub fn printf_consumed_arguments(
     };
     Ok(PrintfConsumedArguments {
         count,
-        any_floating,
+        any_floating: classes.any_floating,
+        floating: classes.floating,
     })
 }
 
@@ -213,19 +246,31 @@ mod tests {
     #[test]
     fn floating_conversions_are_named_and_others_are_not() {
         for (format, count, floating) in [
-            ("%d items", 1, false),
-            ("%s took %6.3f seconds", 2, true),
-            ("%5.2f%% saved", 1, true),
-            ("%-12.4e", 1, true),
-            ("%a", 1, true),
-            ("100%% done", 0, false),
-            ("%*d", 2, false),
-            ("%.*f", 2, true),
+            ("%d items", 1, 0b0),
+            ("%s took %6.3f seconds", 2, 0b10),
+            ("%5.2f%% saved", 1, 0b1),
+            ("%-12.4e", 1, 0b1),
+            ("%a", 1, 0b1),
+            ("100%% done", 0, 0b0),
+            ("%*d", 2, 0b0),
+            ("%.*f", 2, 0b10),
+            ("%2$f %1$d", 2, 0b10),
         ] {
             let consumed = printf_consumed_arguments(format).expect("format parses");
             assert_eq!(consumed.count, count, "count for {format:?}");
-            assert_eq!(consumed.any_floating, floating, "floating for {format:?}");
+            assert_eq!(consumed.floating, floating, "floating for {format:?}");
+            assert_eq!(consumed.any_floating, floating != 0, "any for {format:?}");
         }
+    }
+
+    /// A positional operand two conversions read as different classes has no one carrier.
+    #[test]
+    fn an_operand_read_as_two_classes_refuses() {
+        assert_eq!(
+            printf_consumed_argument_count("%1$d %1$f"),
+            Err(PrintfFormatRefusal::ConflictingOperandClass)
+        );
+        assert_eq!(printf_consumed_argument_count("%1$d %1$x").unwrap(), 1);
     }
 
     #[test]
