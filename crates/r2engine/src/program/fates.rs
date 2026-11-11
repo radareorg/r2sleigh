@@ -723,7 +723,7 @@ impl<S: Source + 'static> Reading<'_, S> {
     ) -> Option<CallEffect> {
         let register = r2il::Varnode::register(format.register.offset, format.register.size);
         let address = origins.of(&register)?.constant()?;
-        let text = crate::native::text_at(self.view, address)?;
+        let text = crate::native::immutable_text_at(self.view, address)?;
         let consumed = r2ssa::printf::printf_consumed_arguments(&text).ok()?;
         (!consumed.any_floating).then_some(format.unfloated)
     }

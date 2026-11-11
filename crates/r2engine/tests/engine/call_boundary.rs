@@ -645,6 +645,11 @@ fn aarch64_with_printf(words: &[(u64, u32)]) -> &'static [u8] {
 /// `f` is `ret`: it hands back x0 and q0 to q3 as its caller left them. `caller` builds the format
 /// address in `held`, calls `f`, then `printf(format, 7)` with the format moved from `held`.
 fn printing(held: u32, format: &[u8]) -> String {
+    printing_from(held, format, false)
+}
+
+/// [`printing`], the format's bytes mapped writable where `writable`.
+fn printing_from(held: u32, format: &[u8], writable: bool) -> String {
     let code = aarch64_with_printf(&[
         (F, 0xd65f_03c0),                              // ret
         (BASE + 0x10, 0xa9bf_7bfd),                    // stp x29, x30, [sp, #-16]!
@@ -661,6 +666,10 @@ fn printing(held: u32, format: &[u8]) -> String {
         .in_aarch64()
         .with_data()
         .importing("printf");
+    let program = match writable {
+        true => program.writable_data_after(common::TEXT),
+        false => program,
+    };
     let mut open = OpenProgram::of(program);
     open.source_mut().write(common::TEXT, format);
     open.analyse_program().expect("it surveys");
@@ -689,6 +698,14 @@ fn an_aarch64_printf_whose_format_has_a_float_keeps_q0_read() {
 #[test]
 fn an_aarch64_printf_whose_format_a_call_may_change_reads_every_vector_register() {
     let text = printing(9, b"%d\n\0");
+    assert!(!text.starts_with("void f("), "{text}");
+}
+
+/// A format in writable data may change before the call (Codex review of #363): the call may read
+/// every vector argument register, so `f` is never void.
+#[test]
+fn an_aarch64_printf_whose_format_the_program_may_write_reads_every_vector_register() {
+    let text = printing_from(19, b"%d\n\0", true);
     assert!(!text.starts_with("void f("), "{text}");
 }
 

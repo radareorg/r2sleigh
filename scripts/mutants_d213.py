@@ -70,6 +70,8 @@ MUTANTS = [
                                   "if let Some(effect) = None::<&CallEffect> {")], [BOUNDARY]),
     ("a-float-conversion-reads-no-vector", [(FATES, "(!consumed.any_floating).then_some(format.unfloated)",
                                              "Some(format.unfloated)")], [BOUNDARY]),
+    ("a-writable-format-is-trusted", [(FATES, "crate::native::immutable_text_at(self.view, address)?",
+                                       "crate::native::text_at(self.view, address)?")], [BOUNDARY]),
     ("a-call-keeps-every-register", [(FATES, "origins.step_under(operation, self.call.as_ref());",
                                       "if !operation.is_call() {\n                    origins.step(operation);\n                }")],
      [BOUNDARY]),

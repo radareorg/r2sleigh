@@ -2377,6 +2377,14 @@ pub(crate) fn text_at(program: &dyn Program, address: u64) -> Option<String> {
     (!crate::stated::written(program, &(address..end))).then(|| text.to_owned())
 }
 
+/// [`text_at`] where no write reaches its bytes for the whole run: mapped read-only and untouched
+/// by the loader (`TableBytes::ReadOnly`), so a call reads the text the file holds.
+pub(crate) fn immutable_text_at(program: &dyn Program, address: u64) -> Option<String> {
+    let text = text_at(program, address)?;
+    let end = address.checked_add(text.len() as u64 + 1)?;
+    (TableBytes::of(program, address..end) == TableBytes::ReadOnly).then_some(text)
+}
+
 /// Whether an instruction decodes at an address, in a region where one can run.
 ///
 /// Data decodes as well as code on most machines, so the bytes alone cannot
