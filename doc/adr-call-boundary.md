@@ -1131,3 +1131,56 @@ What the code said that this ADR did not, and the owner chosen:
 - Census: 444 goldens pass after 14 move. Each moved line is a proof line only: an ELF canary function owes 3 fewer obligations (5 to 3 compiler-inserted, one fewer elided), since liveness no longer runs through the canary's inserted operations into their inputs. The rendered C is unchanged.
 - x86-64 and aarch64 equivalence: graded by CI's `full-ci` ratchets on the pull request (the shared build host was held by another run).
 - Hand-read, release r2s, hello_gs: `main` prints `fcn_140001090((uint64_t)0x14001d008U, rax_1); return 0;` as at base. `0x140003178`, `0x14000fc3c` and `0x1400095d4` render with no cookie load and no check call; `0x1400095d4` and 8 others refused at base. `0x140005f80` renders where base had 22 `UnsupportedInstruction` gaps, since `0x140006050` is now `noreturn`; its own cookie read is UCRT's pointer decode, kept.
+
+## S20 as built (2026-11-11)
+
+The container picks each function's convention and each import's library (D249 to D252). No score and no name decides either.
+
+The convention:
+
+- r2image reads `DW_AT_calling_convention` whole into `Prototype.convention` (`r2abi::StatedConvention`), replacing the `nocall` flag. It chooses nothing. `Normal`, `Program` and `NoCall` are DWARF 5's codes (3.3.1.1). `LlvmWin64` (0xc1) and `LlvmX8664SysV` (0xc2) are clang's `ms_abi` and `sysv_abi`, from `llvm/BinaryFormat/Dwarf.def`. Any other code is `Other(u8)`.
+- A producer that writes no attribute for `ms_abi` (gcc probably; not checked, no gcc on the build host) leaves the function under the target's default, as before. No fact in the container says otherwise.
+- r2engine chooses (`program::stated_convention`): on x86-64, `LlvmWin64` is `ConventionId::Win64` and `LlvmX8664SysV` is `ConventionId::SysVAmd64`. `Normal` keeps the target's default: a PE's Win64, a Mach-O arm64's AppleArm64, the kernel's otherwise. `Program` and `NoCall` keep it too, and `place` refuses their parameters (`PlacementRefusal::NoCall`).
+- Any other code refuses the whole function (`Unassembled::StatedConvention`), where `NoCall` refuses only the declaration. A `vectorcall` or `regcall` body read under the default would place its parameters in registers it does not use.
+- `Machines.stated` holds one `Assembled` per other convention a declaration states, built in one O(functions) pass at open. `assembled_at` is O(log functions). The imports and the data model moved from `Assembled` to `Machines`: one program has one of each.
+- `SYSTEM_V_AMD64` now names gcc's cspec outright. It read "the container's usual", which in a PE is Windows' and has no SysV prototype.
+- An import is placed under the program's convention, which its library runs under (`NativeTarget::importing`): `puts` called from an `ms_abi` function in an ELF still takes rdi.
+- `Declarations::same_interface` compares the stated convention, so two units stating one function under two conventions disagree.
+
+The call effect:
+
+- No call site states its callee's convention. In a program where a declaration states a second convention, a call may run under either. `ConventionModel::either` joins two models: reads, kills and likely-trash are the union, preserved is the intersection, `results_complete` is `None`. Only the call effect reads the join; nothing is placed in it.
+- `AnyCall(ConventionId)` holds the join of a convention with every other the program states, one per convention, O(conventions x registers). `NativeTarget.call` carries it and `machine`, `SiteFates`, `CalleeEntry` and the reference index read its effect. With nothing stated it is the convention's own `Arc`.
+- The join is per program, not per site. A direct call to a callee of the caller's own convention loses the registers only the caller's convention preserves (rsi, rdi, xmm6 to xmm15 in a PE that states one `sysv_abi` function). The precise form reads the callee's model at a direct site and the join at an indirect one. It needs a per-site effect in `NativeMachine`, which holds one per function.
+- A direct call's arguments were already the callee's: its boundary places them.
+
+The import binding (design review finding 6):
+
+- `Linkage` holds one `Binding` per import name, built once: O(imports x log imports), then O(log imports) per lookup. `Scope(tables)`, `Versioned(CLibrary)`, `CLibrary` or `Unstated(why)`. `Unstated` binds no row, so the call reads every location.
+- PE: the DLL the import directory names. `KERNEL32.dll` reads its table. A UCRT DLL reads its table, then the C++ and portable rows. Any other DLL is `Unstated`; before S20 it read the portable rows by name. An import by ordinal states no name a row is keyed by.
+- Mach-O: r2image reads the two-level namespace library ordinal from `n_desc` (`GET_LIBRARY_ORDINAL`, `<mach-o/nlist.h>`) into `Symbol::library`, the install name of load command `ordinal - 1`. Ordinals 0, 0xfe and 0xff, and a flat namespace (`MH_TWOLEVEL` clear), name none. `/usr/lib/libSystem.B.dylib` reads libSystem's scope, `/usr/lib/libc++.1.dylib` and `/usr/lib/libc++abi.dylib` the C++ runtime's, `/usr/lib/libobjc.A.dylib` objc4's. The whole install name is matched: another path's `libSystem.B.dylib` is another library.
+- objc4's 7 rows moved from `types-darwin.sdb.txt` to `types-objc.sdb.txt` under `LibraryId::Objc`. A libobjc import reads only them, and a libSystem import reads none of them.
+- ELF: a version need binds only where `DT_NEEDED` names its file. `GLIBC_*` is glibc, `LIBC` and `LIBC_*` on `libc.so`, `libm.so` or `libdl.so` bionic, `GLIBCXX_*`, `CXXABI_*` and `GCC_*` the C++ runtime. An unversioned import binds only where `DT_NEEDED` names one library and it is a C library. Only `.dynsym` imports count; `.symtab` repeats them unversioned.
+- Two imports of one name that bind two libraries are `Unstated`.
+- A mangled name's row moved to `LibraryId::Itanium`. It applies whatever library defines the import, because the mangling is the ABI's statement of the parameters. A table's row for the same name wins where the import binds that table.
+- `Symbol::library` now names a Mach-O dylib too. r2s `is` and `ii` print it only for a PE directory entry (`origin.directory`), as radare2 does.
+- `ucrtbased.dll`, the debug build of the UCRT, is `Dll::Ucrt` (Microsoft, "C runtime (CRT) and C++ standard library (STL) lib files").
+- `msvcrt.dll` and `VCRUNTIME140.dll` have no cited table, so their imports bind nothing. D281 owns their rows.
+
+Gates, release r2s, base `f961bfdaa` (S31a; `62a564fb9` changes only a doc and the coverage baseline):
+
+- `crates/r2image/tests/data/dwarf_ms_abi.elf` (clang, `diff` stated `DW_CC_LLVM_Win64`), `aa; pdd`, read by hand. `diff` is `mov rax, rcx; sub rax, rdx; ret`. Base prints `uint64_t diff(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2, uint64_t arg3)` returning `arg3 - arg2`, and `twice` calls `diff(0, 0, b, a)`. Head prints `int64_t diff(int64_t a, int64_t b)` returning `a - b`, and `twice` calls `diff(a, b)`.
+- Engine tests (`stated_convention.rs`): an `ms_abi` function in an ELF takes rcx and rdx, and rdi and rsi with nothing stated; its SysV caller passes `diff(arg1, arg0)`; `DW_CC_LLVM_vectorcall` refuses the function and not its neighbour; `puts` called from it still takes rdi; in a PE stating a `sysv_abi` function, `add rax, rsi` past a call through r8 reads `RSI_2`, never `arg0`, and reads `arg0` with nothing stated.
+- hello_gs and testapp, `aa; pdd` of every `afl` function: 0 of 259 and 0 of 181 functions move (26,076 and 14,155 lines). Callee prototypes supplied by the source: 103 and 103, 97 and 97.
+- `an_import_from_a_dll_no_table_states_stays_undeclared`: `printf` from `msvcrt.dll` in a PE is "the import has no declaration to state its arguments".
+- radare2 `test/bins/pe`, eleven more x86-64 PEs, each moved line read:
+  - `cobalt.exe` and `hex_search.exe` (mingw, msvcrt.dll): 237 and 263 lines. The thunks of `malloc`, `memcpy`, `fwrite`, `vfprintf` and the rest lose the portable row a bare name gave them, so each call to one is `CallNotRendered` with "its arity is only at least 0".
+  - `seh_x64.exe`, `testx64.exe`, `rarg_detection.dll` (2 lines each) and `plscrackme.exe` (6): the `VCRUNTIME140.dll` thunks of `memset`, `memcpy` and `memcmp` go from three parameters to `(void)` with a floor.
+  - `cpp_sample.exe`, 21 lines: `ucrtbased.dll`'s `__stdio_common_vfprintf` binds UCRT's cited row. Its caller goes from "the import has no declaration" to a rendered five-argument call, 20 residual obligations to 2.
+  - `WindowsUI-App.exe`, `exceptions.exe`, `normal64.exe` and `tls64.exe`: 0 lines.
+- radare2 `test/bins/mach0`, eight binaries (`cat-macos-arm64`, `hello-objc-osx`, `hello-objc`, `hello-macos-arm64-chained`, `ClassCpp.out`, `a.out`, `hello-osx-i386`, `dlang-hello` with 3,194 functions): 0 lines move. Each imports through a two-level namespace from libSystem, libc++ or libobjc. `macho_two_level` binds `puts` and leaves libz's `zlibVersion` undeclared.
+- ELF: ls-toybox `aa; pdd` of every function, 101,266 lines, 0 move. A 300-function sample of 0pack and of pumasim: 0 move.
+- Census: 444 goldens pass, 0 lines move.
+- Cost, release, instructions retired, one run each, base then head; output byte-identical: cold `pdd` 0pack `0x58e3d0` 18.85 to 18.81 G, `0x62ecf0` 15.46 to 15.48 G; pumasim `0x23fdf0` 24.45 to 24.42 G, `0x4baf30` 14.92 to 14.93 G; bash `0x2e630` `aa; pdd` 14.34 to 14.36 G. Peak footprint within 3%.
+- Touched crates' tests (r2abi, r2image, r2source, r2ssa, r2types, r2engine, r2s): 2,613 pass, 0 fail. Clippy `-D warnings` clean with `--tests`. Dylint 8, the baseline. `comment_runs` adds no run. Structure: no count rises; `long_comments` 2,484 to 2,483, blessed.
+- x86-64 and aarch64 equivalence: graded by CI's `full-ci` ratchets on the pull request.

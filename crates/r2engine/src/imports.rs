@@ -336,6 +336,7 @@ mod tests {
                 pe("KERNEL32.dll", "Ordinal_123"),
                 pe("KERNEL32.dll", "GetTickCount"),
                 pe("msvcrt.dll", "GetTickCount"),
+                pe("ucrtbased.dll", "exit"),
             ],
             ..Container::default()
         };
@@ -347,6 +348,7 @@ mod tests {
         let vfprintf = library("__stdio_common_vfprintf");
         assert_eq!(vfprintf, Ok(dll(r2abi::Dll::Ucrt)));
         assert_eq!(library("fputs"), Ok(LibraryId::Portable));
+        assert!(library("exit").is_ok(), "the debug UCRT is the UCRT");
         // msvcrt.dll is no DLL a cited table states, whatever its exports are named.
         assert!(library("strlen").is_err());
         // By ordinal, the import states no name a row is keyed by.

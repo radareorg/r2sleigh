@@ -2395,10 +2395,9 @@ impl Native<'_> {
                 };
                 let prototype = declared.prototype;
                 // The convention places each parameter: by class, or by position where shared.
-                let placed = placing_imports(self.target, Some(&self.machine), |placement| {
-                    placement.registers(declared)
-                })
-                .unwrap_or_default();
+                let registers = |placement: &Placement<'_>| placement.registers(declared);
+                let placed = placing_imports(self.target, Some(&self.machine), registers);
+                let placed = placed.unwrap_or_default();
                 for (index, (parameter, storage)) in
                     prototype.parameters.iter().zip(&placed).enumerate()
                 {

@@ -52,7 +52,8 @@ pub enum LibraryId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Dll {
     Kernel32,
-    /// The Universal C Runtime: `ucrtbase.dll` and the `api-ms-win-crt-*` sets that forward to it.
+    /// The Universal C Runtime: `ucrtbase.dll`, its debug build `ucrtbased.dll` (Microsoft, "C
+    /// runtime (CRT) and C++ standard library (STL) lib files") and the `api-ms-win-crt-*` sets.
     Ucrt,
 }
 
@@ -62,7 +63,7 @@ impl Dll {
         let module = module.to_ascii_lowercase();
         match module.as_str() {
             "kernel32.dll" => Some(Self::Kernel32),
-            "ucrtbase.dll" => Some(Self::Ucrt),
+            "ucrtbase.dll" | "ucrtbased.dll" => Some(Self::Ucrt),
             _ if module.starts_with("api-ms-win-crt-") && module.ends_with(".dll") => {
                 Some(Self::Ucrt)
             }
