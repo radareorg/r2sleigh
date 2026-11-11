@@ -20,7 +20,7 @@ use crate::{
     FunctionPresentation, MachineProfile, OwnedFunctionBlock, OwnedFunctionImage,
     OwnedFunctionSnapshot, SnapshotValidationError, SourceCallEffect, SourceCodePointerTable,
     SourceConventionSlots, SourceDataObject, SourceEndianness, SourceFunctionInterface,
-    SourceLoaderRole, SourceMachineRoles, SourceSignaturePresentation, SourceStackSlotName,
+    SourceMachineRoles, SourceSignaturePresentation, SourceStackSlotName,
 };
 
 /// The machine every function in one capture session runs on.
@@ -122,7 +122,6 @@ pub struct NativeFunction {
     /// says what the source called it, which is the only place a spelling like
     /// `size_t` or a parameter's own name survives.
     pub signature: Option<SourceSignaturePresentation>,
-    pub loader_role: Option<SourceLoaderRole>,
     /// What the program's calls to this function read of its result registers.
     pub closed_result: Option<crate::SourceClosedResult>,
     /// The register saves the container's call-frame information states for
@@ -219,7 +218,6 @@ pub fn capture(
         },
         FunctionIdentity {
             address: function.address,
-            loader_role: function.loader_role,
             closed_result: function.closed_result,
         },
         FunctionPresentation {
@@ -381,7 +379,6 @@ mod tests {
             parameter_names: Vec::new(),
             stack_slot_names: Vec::new(),
             signature: None,
-            loader_role: None,
             closed_result: None,
             frame_saves: Vec::new(),
         }

@@ -240,7 +240,6 @@ fn rendered_returning_object(declared: bool) -> String {
         parameter_names: Vec::new(),
         stack_slot_names: Vec::new(),
         signature: None,
-        loader_role: None,
         closed_result: None,
         frame_saves: Vec::new(),
     };

@@ -2139,7 +2139,6 @@ impl<'a> Native<'a> {
                 .collect(),
             signature,
             interface,
-            loader_role: None,
             closed_result,
             frame_saves: self.program.frame_saves(walked.body.entry),
         };

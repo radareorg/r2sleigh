@@ -1355,20 +1355,17 @@ fn written_bytes(
 pub(crate) fn recover_interface(
     func: &SSAFunction,
     slots: &SourceConventionSlots,
-    loader_role: Option<r2source::SourceLoaderRole>,
 ) -> Option<RecoveredInterface> {
     let stated = Stated {
-        loader_role,
         closed: None,
         unseen: false,
     };
     recover_interface_inner(func, None, slots, None, stated).expect("a test function settles")
 }
 
-/// What the program states about a function beside its body: the loader's hook, its callers' reads.
+/// What the program states about a function beside its body: its callers' reads.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Stated {
-    loader_role: Option<r2source::SourceLoaderRole>,
     closed: Option<r2source::SourceClosedResult>,
     /// Whether the walk left a transfer it did not follow: code no read sees may take more arguments.
     unseen: bool,
@@ -1378,7 +1375,6 @@ impl Stated {
     pub(crate) fn of(source: &r2source::OwnedFunctionSnapshot) -> Self {
         let function = source.function();
         Self {
-            loader_role: function.loader_role(),
             closed: function.closed_result(),
             unseen: (source.image().blocks().iter()).any(|block| block.transfer_unresolved()),
         }
@@ -1402,20 +1398,12 @@ pub(crate) fn recover_interface_with_context(
     recover_interface_inner(func, Some(prep), slots, Some(machine_context), stated)
 }
 
-/// `loader_role` is the source's record that the program loader calls this
-/// function as its init or fini hook. The loader discards the result carrier,
-/// so the result is void by the caller's contract whatever the body leaves in
-/// the register; parameters are still read off the body.
 fn recover_interface_inner(
     func: &SSAFunction,
     provisional: Option<&crate::function::Provisional>,
     slots: &SourceConventionSlots,
     machine_context: Option<&crate::SourceMachineContext>,
-    Stated {
-        loader_role,
-        closed,
-        unseen,
-    }: Stated,
+    Stated { closed, unseen }: Stated,
 ) -> Result<Option<RecoveredInterface>, crate::fixpoint::Exhausted> {
     // A convention with no argument registers still places its arguments: x86
     // cdecl puts every one on the stack. Only a convention that states neither
@@ -1458,19 +1446,9 @@ fn recover_interface_inner(
         return Ok(None);
     }
 
-    if let Some(role) = loader_role {
-        r2il::refusal_evidence!(
-            "interface-recovery",
-            "the loader invokes this function as its {role:?} hook and discards its result, \
-             so the result is void"
-        );
-    }
     let tail = match tail_result_storage(&facts) {
         TailResult::NoTailBoundary => TailResult::NoTailBoundary,
         TailResult::Exact(result) => TailResult::Exact(result),
-        // The loader discards whatever the tail callee returns, so an
-        // unproven tail result is not a question this boundary has to answer.
-        TailResult::Unproven if loader_role.is_some() => TailResult::NoTailBoundary,
         // The body hands control to a callee it names nothing about, and
         // that callee's result is this function's result on that path. A
         // register the body never wrote is not evidence of a void result
@@ -1522,14 +1500,13 @@ fn recover_interface_inner(
     };
     // Why the direct returns beside void tails leave the result unproven, where they do.
     let mut beside_void_tails = None;
-    // The loader's hook has a void result whatever its tail leaves behind.
     let mut result = match tail {
         TailResult::Unproven => RecoveredFunctionResult::Unproven,
         // The tail callee's value is this function's, at the width the callee states.
         TailResult::Exact(SourceCallResult::Register {
             storage: slot,
             width,
-        }) if loader_role.is_none() => {
+        }) => {
             let narrow = CanonicalStorageId {
                 size: u32::from(width.logical),
                 ..slot
@@ -1545,16 +1522,16 @@ fn recover_interface_inner(
                 float: false,
             })
         }
-        TailResult::Exact(SourceCallResult::Pair { low, high }) if loader_role.is_none() => {
+        TailResult::Exact(SourceCallResult::Pair { low, high }) => {
             RecoveredFunctionResult::Pair { low, high }
         }
         // A void tail leaves nothing; a direct return that defines a byte is still a result.
-        TailResult::Exact(SourceCallResult::Void) if loader_role.is_none() => {
+        TailResult::Exact(SourceCallResult::Void) => {
             let (result, cause) = direct_returns_beside_void_tails(func, graph, &facts, slots);
             beside_void_tails = cause;
             result
         }
-        TailResult::NoTailBoundary | TailResult::Exact(_) => RecoveredFunctionResult::Void,
+        TailResult::NoTailBoundary => RecoveredFunctionResult::Void,
     };
     let no_tail_boundary = matches!(tail, TailResult::NoTailBoundary);
     let tail_unproven = matches!(tail, TailResult::Unproven);
@@ -1572,10 +1549,7 @@ fn recover_interface_inner(
     // An exact tail-call interface owns this boundary. Looking at the value
     // present before the branch would instead mistake a call argument for the
     // value the callee returns into the same register.
-    if no_tail_boundary
-        && loader_role.is_none()
-        && let Some(candidate) = slots.result_slot()
-    {
+    if no_tail_boundary && let Some(candidate) = slots.result_slot() {
         let mut candidate_live_out =
             crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
         let (recovered, returned) =
@@ -1747,7 +1721,7 @@ fn recover_interface_inner(
     // register its name says. Only one carrier may qualify, or the body has
     // proven nothing about which of them a caller reads.
     // An unproven convention carrier may be what the caller reads, so no other carrier is the one result.
-    if no_tail_boundary && loader_role.is_none() && result == RecoveredFunctionResult::Void {
+    if no_tail_boundary && result == RecoveredFunctionResult::Void {
         let mut proven = body_proven_result(func, graph, &facts, machine_context, slots);
         if let Some((candidate, candidate_live_out)) = proven.take() {
             result = recovered_result(func, graph, &facts, &candidate_live_out, candidate);
@@ -1756,7 +1730,6 @@ fn recover_interface_inner(
     }
     // An entry byte of the float lane, an input, may be the result where the integer one holds none.
     if !tail_unproven
-        && loader_role.is_none()
         && result == RecoveredFunctionResult::Void
         && let Some(float) = slots.float_result_slot()
     {
@@ -3359,7 +3332,7 @@ mod tests {
         });
         let arch = arch();
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
-        recover_interface(&func, &candidates(), None).expect("recovery")
+        recover_interface(&func, &candidates()).expect("recovery")
     }
 
     /// A body writing x0 and x1 on every return, proven a pair by a call reading x1, is one register
@@ -3385,7 +3358,6 @@ mod tests {
             .with_second_result_slot(Some(register(8, 8)))
             .expect("x1 beside x0");
         let stated = Stated {
-            loader_role: None,
             closed: Some(r2source::SourceClosedResult::Read(
                 r2source::SourceReadLanes::Pair,
             )),
@@ -3562,10 +3534,7 @@ mod tests {
     }
 
     #[test]
-    fn a_loader_hook_has_a_void_result_whatever_the_body_leaves_in_the_register() {
-        // `_init` leaves the result register defined at its return, so live-out
-        // recovery observes a value there; the loader that calls the hook
-        // discards it, and the source says so.
+    fn a_result_register_defined_at_the_return_is_the_result() {
         let mut block = R2ILBlock::new(0x2000, 4);
         block.push(R2ILOp::Copy {
             dst: Varnode::register(0, 8),
@@ -3576,18 +3545,11 @@ mod tests {
         });
         let arch = arch();
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
-        let observed = recover_interface(&func, &candidates(), None).expect("recovery");
+        let observed = recover_interface(&func, &candidates()).expect("recovery");
         assert!(
             observed.result().register().is_some(),
             "the defined result register is live out"
         );
-        let hook = recover_interface(&func, &candidates(), Some(r2source::SourceLoaderRole::Init))
-            .expect("recovery");
-        assert!(
-            hook.result() == RecoveredFunctionResult::Void,
-            "the loader discards the hook's result"
-        );
-        assert!(hook.parameters().is_empty());
     }
 
     #[test]
@@ -3843,7 +3805,7 @@ mod tests {
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
         let empty =
             SourceConventionSlots::new(r2source::ConventionId::SysVAmd64, [], None).expect("empty");
-        assert!(recover_interface(&func, &empty, None).is_none());
+        assert!(recover_interface(&func, &empty).is_none());
     }
 
     #[test]
@@ -4009,7 +3971,7 @@ mod tests {
         block.push(R2ILOp::BranchInd { target });
         let arch = arch();
         let function = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
-        let recovered = recover_interface(&function, &candidates(), None).expect("recovery");
+        let recovered = recover_interface(&function, &candidates()).expect("recovery");
         assert_eq!(recovered.result(), RecoveredFunctionResult::Unproven);
     }
 }

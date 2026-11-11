@@ -71,18 +71,12 @@ impl MachineProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FunctionIdentity {
     address: u64,
-    loader_role: Option<SourceLoaderRole>,
     closed_result: Option<SourceClosedResult>,
 }
 
 impl FunctionIdentity {
     pub const fn address(&self) -> u64 {
         self.address
-    }
-
-    /// The hook the program's loader invokes this function as, if any.
-    pub const fn loader_role(&self) -> Option<SourceLoaderRole> {
-        self.loader_role
     }
 
     /// What the closed world decides of this function's result, where r2engine decided it.
@@ -115,20 +109,6 @@ pub enum SourceReadLanes {
     },
     /// The integer and second integer registers, one value.
     Pair,
-}
-
-/// A function the loader itself calls, recorded from the binary's dynamic
-/// entries (`DT_INIT`, `DT_FINI`) rather than from any prototype.
-///
-/// The loader invokes these hooks for their effects and discards whatever the
-/// machine result carrier holds afterwards, so their result is void by the
-/// caller's contract even though the instructions leave a value in the
-/// register. Their parameters are not asserted here: they stay whatever the
-/// body proves it reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SourceLoaderRole {
-    Init,
-    Fini,
 }
 
 /// Non-semantic presentation copied from the source owner.  It is deliberately
@@ -1181,7 +1161,6 @@ mod tests {
             },
             FunctionIdentity {
                 address: 0x1000,
-                loader_role: None,
                 closed_result: None,
             },
             FunctionPresentation {
@@ -1306,7 +1285,6 @@ mod tests {
                 valid.machine().clone(),
                 FunctionIdentity {
                     address: 0x2000,
-                    loader_role: None,
                     closed_result: None,
                 },
                 valid.presentation().clone(),
