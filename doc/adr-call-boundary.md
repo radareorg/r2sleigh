@@ -1052,3 +1052,5 @@ Gates, release r2s, base `505319748`:
 - Census: 2 goldens, 2 lines. x86-64 `fill` in `rv_O2` (`0x14c0`) and `rv_O0g_stripped` (`0x1391`) go from `unproven (Written)` to `unproven (Unread)`, "no call reads the result (assuming closed-world)": the cited `strlen` no longer takes RAX in `copy_name`. The C does not move.
 - Cost, release, instructions retired, median of three, base then head; output byte-identical: cold `pdd` 0pack `0x62ecf0` 15.37 to 15.37 G, pumasim `0x23fdf0` 19.86 to 19.85 G; bash `0x2e630` `aa; pdd` 14.30 to 14.33 G (+0.2%), under D153's 15.43 G. Peak footprint within run-to-run noise.
 - Dylint 8 warnings, the baseline. `comment_runs` adds no run. Structure counts equal the baseline.
+- On D217 (`d8487d42d`): the 15 records print as above and the census holds 444 goldens.
+- Equivalence, aarch64: the 13 records are blessed `equal`; the two clang -O0 records keep `residual-trap` with cause D221.

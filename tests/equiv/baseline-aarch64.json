@@ -56,12 +56,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::aarch64-clang-O0::inverted_void": {
-   "cause": "[D218] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. This void body leaves q0 to q3 untouched, and they reach main's printf, a variadic import AAPCS64 lets take every vector argument register though its format reads none. D218 states that call's reads from its format.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::aarch64-clang-O0::main": {
    "status": "equal"
@@ -168,12 +163,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::aarch64-clang-O1::inverted_void": {
-   "cause": "[D218] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. This void body leaves q0 to q3 untouched, and they reach main's printf, a variadic import AAPCS64 lets take every vector argument register though its format reads none. D218 states that call's reads from its format.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::aarch64-clang-O1::main": {
    "status": "equal"
@@ -277,12 +267,7 @@
    "status": "equal"
   },
   "tests/corpus/branchy.c::aarch64-clang-O2::inverted_void": {
-   "cause": "[D218] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. This void body leaves q0 to q3 untouched, and they reach main's printf, a variadic import AAPCS64 lets take every vector argument register though its format reads none. D218 states that call's reads from its format.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/branchy.c::aarch64-clang-O2::main": {
    "status": "equal"
@@ -645,12 +630,7 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::aarch64-clang-O0::crc32_init": {
-   "cause": "[D218] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. This void body leaves q0 to q3 untouched, and they reach main's printf, a variadic import AAPCS64 lets take every vector argument register though its format reads none. D218 states that call's reads from its format.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/hashes.c::aarch64-clang-O0::crc32_table": {
    "status": "equal"
@@ -701,12 +681,7 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::aarch64-clang-O1::crc32_init": {
-   "cause": "[D218] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. This void body leaves q0 to q3 untouched, and they reach main's printf, a variadic import AAPCS64 lets take every vector argument register though its format reads none. D218 states that call's reads from its format.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/hashes.c::aarch64-clang-O1::crc32_table": {
    "status": "equal"
@@ -983,7 +958,7 @@
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::mixed_touch": {
-   "cause": "[D219] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. q0 to q3 survive this void body and its caller's return into main's printf (D218), and with that fixed the caller, whose own result is read, still never asks whether its calls are every way in, so a lane it leaves dead forwards as unknown (D219).",
+   "cause": "[D221] D218 bounds printf's vector reads by its format, and D219 decides each lane forwarded through shape_call_chain or shape_struct_pointer, but clang -O0 main stores the format at [sp, #8] and reloads it before each printf. The raw site walk folds registers only (BlockOrigins), so the call takes q0 to q7 and the void body's q0 stays open. D221 proves the reload from the slot's escape.",
    "compared": "memory",
    "owner": "P7",
    "reason": "r2sleigh_residual_u64 unproven-return",
@@ -1049,7 +1024,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::shape_stash": {
-   "cause": "[D219] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. q0 to q3 survive this void body and its caller's return into main's printf (D218), and with that fixed the caller, whose own result is read, still never asks whether its calls are every way in, so a lane it leaves dead forwards as unknown (D219).",
+   "cause": "[D221] D218 bounds printf's vector reads by its format, and D219 decides each lane forwarded through shape_call_chain or shape_struct_pointer, but clang -O0 main stores the format at [sp, #8] and reloads it before each printf. The raw site walk folds registers only (BlockOrigins), so the call takes q0 to q7 and the void body's q0 stays open. D221 proves the reload from the slot's escape.",
    "compared": "memory",
    "owner": "P7",
    "reason": "r2sleigh_residual_u64 unproven-return",
@@ -1120,12 +1095,7 @@
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::mixed_touch": {
-   "cause": "[D219] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. q0 to q3 survive this void body and its caller's return into main's printf (D218), and with that fixed the caller, whose own result is read, still never asks whether its calls are every way in, so a lane it leaves dead forwards as unknown (D219).",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::op_add": {
    "status": "equal"
@@ -1186,12 +1156,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::shape_stash": {
-   "cause": "[D219] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. q0 to q3 survive this void body and its caller's return into main's printf (D218), and with that fixed the caller, whose own result is read, still never asks whether its calls are every way in, so a lane it leaves dead forwards as unknown (D219).",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O1::shape_step": {
    "status": "equal"
@@ -1229,12 +1194,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::indirect_store": {
-   "cause": "[D219] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. q0 to q3 survive this void body and its caller's return into main's printf (D218), and with that fixed the caller, whose own result is read, still never asks whether its calls are every way in, so a lane it leaves dead forwards as unknown (D219).",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::main": {
    "cause": "[P7, W14] The first trap is main's call to shape_variadic_local: that function hands its parameters only into vfold's variadic tail (vfold's va_start save area is its tail, W14), whose count no format literal proves, so its arity is a floor of 0 and this call, writing past it, is a counted Floor gap where it passed never-assigned residuals before. Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count, so vfold(1u, a) passes one (a summary, SM). The #264 floor the record carried before follows: table_dispatch or shape_function_pointer hands an argument slot to an indirect call of unstated arity, so a call to it writing past the floor is a counted residual too (closing fact: the indirect call's target-set prototype).",
@@ -1252,12 +1212,7 @@
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::mixed_touch": {
-   "cause": "[D219] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. q0 to q3 survive this void body and its caller's return into main's printf (D218), and with that fixed the caller, whose own result is read, still never asks whether its calls are every way in, so a lane it leaves dead forwards as unknown (D219).",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::op_add": {
    "status": "equal"
@@ -1318,12 +1273,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_stash": {
-   "cause": "[D219] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. q0 to q3 survive this void body and its caller's return into main's printf (D218), and with that fixed the caller, whose own result is read, still never asks whether its calls are every way in, so a lane it leaves dead forwards as unknown (D219).",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_step": {
    "status": "equal"
@@ -1559,12 +1509,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_stash": {
-   "cause": "[D219] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. q0 to q3 survive this void body and its caller's return into main's printf (D218), and with that fixed the caller, whose own result is read, still never asks whether its calls are every way in, so a lane it leaves dead forwards as unknown (D219).",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_step": {
    "status": "equal"
@@ -1676,12 +1621,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::shape_stash": {
-   "cause": "[D219] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. q0 to q3 survive this void body and its caller's return into main's printf (D218), and with that fixed the caller, whose own result is read, still never asks whether its calls are every way in, so a lane it leaves dead forwards as unknown (D219).",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::shape_step": {
    "status": "equal"
@@ -2636,12 +2576,7 @@
    "status": "equal"
   },
   "tests/gold/review.c::aarch64-clang-O1::fill": {
-   "cause": "[D218] Base's closed-world void read x0 alone; D166 needs every lane the body may hand back dead at every call. This void body leaves q0 to q3 untouched, and they reach main's printf, a variadic import AAPCS64 lets take every vector argument register though its format reads none. D218 states that call's reads from its format.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/review.c::aarch64-clang-O1::find": {
    "status": "equal"
