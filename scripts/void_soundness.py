@@ -11,6 +11,10 @@ level, with debug information (r2s must read its declarations: a build it does n
 and stripped (what the engine works from), and compares the return type r2s renders at the same
 address with the one the source states.
 
+A caller's extern is graded too: `void f(...)` in the function that calls `f` is the same claim of
+absence, made where the read happens, so an extern `void` for a function some caller reads is a false
+void wherever the header is not. A call the engine refuses declares nothing and is counted, not failed.
+
 A function no caller reads may be `void` (the closed world's premise, doc/adr-resolved-bodies.md)
 and is counted, not failed. A global function of a relocatable object is read by other objects.
 
@@ -42,6 +46,10 @@ SOURCES = ROOT / "tests/gold/void_soundness"
 sys.path.insert(0, str(ROOT / "tests/equiv"))
 
 RETURN = re.compile(r"^\s*(?:static\s+)?(.*?)\s*\b[A-Za-z_][\w:~<>.]*\s*\(")
+# A declaration inside a function body: `    void fcn_1379(uint64_t);`.
+EXTERN = re.compile(r"^\s+(?!return\b)(?P<ret>[A-Za-z_][^/=;(){}]*?[\s*]+)(?P<name>[A-Za-z_][\w.]*)\((?P<params>[^()]*)\);\s*$")
+# A call the engine refused: `/* r2dec gap: CallNotRendered at ... call to fcn_1218: ...`.
+GAP = re.compile(r"r2dec gap: \w+ at [^:]*?.*?call to (?P<name>[A-Za-z_][\w.]*):")
 
 
 def return_type(signature: str | None) -> str | None:
@@ -89,6 +97,46 @@ class Verdict:
         return (not self.read) and self.truth not in (None, "void") and self.rendered == "void"
 
 
+@dataclass(frozen=True)
+class Extern:
+    """What one caller declares of a callee some caller reads: its return type, or none where the call was refused."""
+    build: Build
+    caller: str
+    callee: str
+    rendered: str | None
+
+    @property
+    def false_void(self) -> bool:
+        return self.rendered == "void"
+
+
+def callee_name(spelled: str, named: dict[int, str]) -> str:
+    """The function a stripped build's `fcn_1379` names, by its address in the debug build."""
+    if spelled.startswith("fcn_"):
+        try:
+            return named.get(int(spelled[4:], 16), spelled)
+        except ValueError:
+            return spelled
+    return spelled
+
+
+def externs_of(build: Build, caller: str, code: str, named: dict[int, str],
+               read: set[str]) -> list[Extern]:
+    """Each extern and refused call in `code` (one function's C) that names a function of `read`."""
+    rows = []
+    for line in code.splitlines()[1:]:
+        declared = EXTERN.match(line)
+        if declared:
+            name = callee_name(declared.group("name"), named)
+            if name in read and name != caller:
+                rows.append(Extern(build, caller, name, re.sub(r"\s+\*", "*", declared.group("ret").strip())))
+        for gap in GAP.finditer(line):
+            name = callee_name(gap.group("name"), named)
+            if name in read and name != caller:
+                rows.append(Extern(build, caller, name, None))
+    return rows
+
+
 def judge(build: Build, manifest: dict[str, dict], truth: dict[str, str | None],
           rendered: dict[str, str | None]) -> list[Verdict]:
     """One verdict per function the manifest names that both builds list."""
@@ -131,15 +179,20 @@ def functions_of(r2s: str, binary: Path) -> dict[int, str]:
     return found
 
 
-def render(r2s: str, binary: Path, addresses: list[int]) -> dict[int, str | None]:
+def render_records(r2s: str, binary: Path, addresses: list[int]) -> dict[int, dict]:
     import r2s_batch  # tests/equiv
 
     report = r2s_batch.run_batch(r2s, str(binary), addresses, function_timeout=120, startup_timeout=900)
-    return {answer.address: return_type((answer.record or {}).get("signature")) for answer in report.answers}
+    return {answer.address: answer.record or {} for answer in report.answers}
+
+
+def render(r2s: str, binary: Path, addresses: list[int]) -> dict[int, str | None]:
+    return {address: return_type(record.get("signature"))
+            for address, record in render_records(r2s, binary, addresses).items()}
 
 
 def check_build(r2s: str, build: Build, manifest: dict[str, dict], debug: Path, stripped: Path,
-                relocatable: bool = False) -> list[Verdict] | str:
+                relocatable: bool = False) -> tuple[list[Verdict], list[Extern]] | str:
     """Verdicts for one build, or why it cannot be scored.
 
     The truth is the declaration the source states, which the manifest holds: the generator wrote
@@ -158,9 +211,13 @@ def check_build(r2s: str, build: Build, manifest: dict[str, dict], debug: Path, 
         if len(unread) * 2 > len(values):
             return f"{build}: the debug build's declarations did not load ({', '.join(sorted(unread)[:3])} are void there)"
     truth = {name: manifest[name]["returns"] for name in wanted.values()}
-    rendered_types = render(r2s, stripped, sorted(wanted))
-    rendered = {name: rendered_types.get(address) for address, name in wanted.items()}
-    return judge(build, manifest, truth, rendered)
+    # Every function is rendered, so every caller's externs are read.
+    records = render_records(r2s, stripped, sorted(named))
+    rendered = {name: return_type(records.get(address, {}).get("signature")) for address, name in wanted.items()}
+    read = {name for name, facts in manifest.items() if facts["read"] and facts["returns"] != "void"}
+    externs = [row for address, record in sorted(records.items())
+               for row in externs_of(build, named.get(address, hex(address)), record.get("code") or "", named, read)]
+    return judge(build, manifest, truth, rendered), externs
 
 
 def scored_builds(jobs: list[Build], problems: list[str]) -> list[Build]:
@@ -190,6 +247,28 @@ def floors(verdicts: list[Verdict], manifest: dict[str, dict], builds: list[Buil
     return short
 
 
+def extern_floors(externs: list[Extern], manifest: dict[str, dict], builds: list[Build]) -> list[str]:
+    """Too few extern rows: more than a tenth of the (build, read function) pairs with no extern and no
+    refused call. A caller r2s refuses whole declares nothing; a parse a renderer change blinds fails."""
+    seen = {(str(row.build), row.callee) for row in externs}
+    pairs = missing = 0
+    examples = []
+    for build in builds:
+        facts = manifest[f"{build.program}.c"]
+        if facts.get("__object__"):
+            continue  # a global function's caller is another object
+        for name, fact in sorted(facts.items()):
+            if name.startswith("__") or not fact["read"] or fact["returns"] == "void":
+                continue
+            pairs += 1
+            if (str(build), name) not in seen:
+                missing += 1
+                examples.append(f"{build}/{name}")
+    if missing * 10 > pairs:
+        return [f"externs: {missing} of {pairs} read functions have no extern and no refused call ({', '.join(examples[:3])})"]
+    return []
+
+
 def toolchain_exit(named: list[str], found: list[str], toolchain: bool, allow_missing: bool) -> int | None:
     """77 where the host builds no ELF, 2 where a compiler named is not found (unless allowed), else none."""
     if not found or not toolchain:
@@ -203,7 +282,7 @@ def toolchain_exit(named: list[str], found: list[str], toolchain: bool, allow_mi
 
 
 def outcome(verdicts: list[Verdict], problems: list[str], short: list[str], known: set[str],
-            min_premised: int) -> tuple[dict, int]:
+            min_premised: int, externs: list[Extern] = ()) -> tuple[dict, int]:
     """The report and the exit status: 1 for a new or stale false void, a build with a function unjudged,
     or more than a tenth of the judged rows unrendered; 2 for a build not scored; 1 for too few premised."""
     bad = [verdict for verdict in verdicts if verdict.false_void]
@@ -222,6 +301,10 @@ def outcome(verdicts: list[Verdict], problems: list[str], short: list[str], know
               f"a caller reads it, r2s renders void")
     for name in stale:
         print(f"STALE {name}: known.json lists it but its build renders it otherwise; delete the entry")
+    voided = [row for row in externs if row.false_void]
+    refused = [row for row in externs if row.rendered is None]
+    for row in voided:
+        print(f"FALSE VOID EXTERN {row.build} {row.caller} declares void {row.callee}, which a caller reads")
     for line in short:
         print(f"TOO FEW ROWS {line}")
     if too_many:
@@ -231,13 +314,16 @@ def outcome(verdicts: list[Verdict], problems: list[str], short: list[str], know
     summary = (f"{len(read)} read results, {len(bad)} rendered void, {len(bad) - len(new)} of them known; "
                f"{len(premised)} unread results rendered void under the closed world; "
                f"{len(unrendered)} of {len(judged)} judged rows not rendered (a refusal, not void); "
-               f"{len(problems)} builds not scored")
+               f"{len(problems)} builds not scored; "
+               f"{len(externs)} externs of read results, {len(voided)} void, {len(refused)} calls refused")
     report = {
         "summary": summary, "read": len(read), "false_void": [f"{v.build} {v.function}" for v in bad],
         "new": [f"{v.build} {v.function}" for v in new], "stale": stale,
         "premised_void": len(premised), "unrendered": len(unrendered), "judged": len(judged),
-        "too_few_rows": short, "not_scored": problems}
-    if new or stale or short or too_many:
+        "too_few_rows": short, "not_scored": problems,
+        "externs": len(externs), "extern_void": [f"{r.build} {r.caller} {r.callee}" for r in voided],
+        "extern_refused": len(refused)}
+    if new or stale or short or too_many or voided:
         return report, 1
     if problems:
         return report, 2
@@ -278,6 +364,7 @@ def main() -> int:
     programs = [name for name in sorted(manifest) if not only or Path(name).stem in only]
 
     verdicts: list[Verdict] = []
+    externs: list[Extern] = []
     problems: list[str] = []
     with tempfile.TemporaryDirectory() as work:
         jobs = []
@@ -290,7 +377,7 @@ def main() -> int:
                     for opt in filter(None, args.avx2_opts.split(",")):
                         jobs.append(Build(stem, compiler, opt, "avx2"))
 
-        def run(build: Build) -> list[Verdict] | str:
+        def run(build: Build) -> tuple[list[Verdict], list[Extern]] | str:
             relocatable = bool(manifest[f"{build.program}.c"].get("__object__"))
             built = compile_program(build.compiler, build.opt, args.sources / f"{build.program}.c",
                                     Path(work) / str(build), relocatable, args.prebuilt, build.flags())
@@ -304,11 +391,13 @@ def main() -> int:
                 if isinstance(result, str):
                     problems.append(result)
                 else:
-                    verdicts.extend(result)
+                    verdicts.extend(result[0])
+                    externs.extend(result[1])
 
     known = known_false_voids(args.sources / "known.json")
-    short = floors(verdicts, manifest, scored_builds(jobs, problems))
-    report, code = outcome(verdicts, problems, short, known, args.min_premised if not only else 0)
+    scored = scored_builds(jobs, problems)
+    short = floors(verdicts, manifest, scored) + extern_floors(externs, manifest, scored)
+    report, code = outcome(verdicts, problems, short, known, args.min_premised if not only else 0, externs)
     print(report["summary"])
     if args.json:
         args.json.write_text(json.dumps(report, indent=1) + "\n")

@@ -49,6 +49,50 @@ class Verdicts(unittest.TestCase):
         self.assertFalse(any(v.false_void for v in verdicts))
 
 
+class Externs(unittest.TestCase):
+    """A caller's declaration of a read function: `void` there is the false void the header gate misses."""
+    named = {0x1379: "p_f3_chain_c", 0x138F: "c_f3_chain_c", 0x1149: "p_f3_inner"}
+    code = """r2sleigh_result_u64 fcn_138f(uint64_t arg0)
+{
+    void fcn_1379(uint64_t);
+    double fcn_1149(uint64_t);
+    void* fcn_1379(uint64_t);
+
+    /* r2dec proof: ... */
+    {
+        fcn_1379(arg0);
+        return fcn_1379(arg0);
+        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x138f:15 covering 1 op (render::values): call to fcn_1149: why */
+    }
+}"""
+
+    def rows(self, read=("p_f3_chain_c", "p_f3_inner")) -> list[gate.Extern]:
+        return gate.externs_of(BUILD, "c_f3_chain_c", self.code, self.named, set(read))
+
+    def test_a_void_extern_of_a_read_function_is_a_false_void(self) -> None:
+        rows = self.rows()
+        self.assertEqual([(r.callee, r.rendered) for r in rows],
+                         [("p_f3_chain_c", "void"), ("p_f3_inner", "double"), ("p_f3_chain_c", "void*"),
+                          ("p_f3_inner", None)])
+        self.assertEqual([r.callee for r in rows if r.false_void], ["p_f3_chain_c"])
+
+    def test_a_function_no_caller_reads_is_not_graded(self) -> None:
+        self.assertEqual([r.callee for r in self.rows(read=("p_f3_inner",))], ["p_f3_inner", "p_f3_inner"])
+
+    def test_a_void_extern_fails_the_gate_and_a_refused_call_does_not(self) -> None:
+        verdict = gate.Verdict(BUILD, "p_f3_chain_c", "struct f3", "r2sleigh_result_u64", True)
+        void = gate.Extern(BUILD, "c_f3_chain_c", "p_f3_chain_c", "void")
+        refused = gate.Extern(BUILD, "c_f3_chain_c", "p_f3_chain_c", None)
+        self.assertEqual(gate.outcome([verdict], [], [], set(), 0, [void])[1], 1)
+        self.assertEqual(gate.outcome([verdict], [], [], set(), 0, [refused])[1], 0)
+
+    def test_too_few_extern_rows_fail(self) -> None:
+        manifest = {"d.c": {f"p_{n}": {"read": True, "returns": "double"} for n in range(10)}}
+        rows = [gate.Extern(BUILD, "c", f"p_{n}", "double") for n in range(9)]
+        self.assertEqual(gate.extern_floors(rows, manifest, [BUILD]), [])
+        self.assertEqual(len(gate.extern_floors(rows[:8], manifest, [BUILD])), 1)
+
+
 class Floors(unittest.TestCase):
     manifest = {"d.c": {"p_a": {"read": True}, "p_b": {"read": True}, "p_c": {"read": False}},
                 "f.c": {"p_f": {"read": True}}}
