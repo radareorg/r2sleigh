@@ -521,7 +521,7 @@ r2sleigh_result_u32 fcn_1391(uint32_t arg0)
     uint32_t tmp_lane_13cf_0_0_1;
     uint32_t tmp_lane_13d8_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 32 source obligations: 24 rendered, 8 elided, 0 refused; 8 statements rendered; the result's second register is open: no call read decides it; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 32 source obligations: 24 rendered, 8 elided, 0 refused; 8 statements rendered; no call reads the result (assuming closed-world); the result's second register is open: no call read decides it; the result is unproven (Unread): 1 unproven-return carried */
     {
         stack_m12_1 = 0;
         while ((uint8_t)((int32_t)stack_m12_1 <= (int32_t)15U)) {

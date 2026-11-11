@@ -692,7 +692,7 @@ r2sleigh_result_u64 fill(uint32_t arg0)
     uint32_t tmp_lane_14f4_3_2_1;
     uint32_t tmp_1501_0_1;
 
-    /* r2dec proof: 1 construct is marked below; 57 source obligations: 51 rendered, 4 elided, 0 refused, 2 residual; 37 statements rendered; 1 data object type refused; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
+    /* r2dec proof: 1 construct is marked below; 57 source obligations: 51 rendered, 4 elided, 0 refused, 2 residual; 37 statements rendered; 1 data object type refused; no call reads the result (assuming closed-world); the result is unproven (Unread): 0 unproven-return carried, 1 unproven-return residual */
     {
         xmm2_1 = r2sleigh_load_u128((void*)(uint64_t)0x2050U);
         rax_2 = 0x4040;
