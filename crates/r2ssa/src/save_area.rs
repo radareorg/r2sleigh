@@ -1,6 +1,7 @@
 //! A variadic prologue's register save area, proven from the machine (doc/adr-resolved-bodies.md,
 //! "Variadic tail").
 
+use r2source::convention::SlotClass;
 use std::collections::{BTreeMap, BTreeSet};
 
 use r2source::{
@@ -162,19 +163,20 @@ pub(crate) fn home_va_list(
     }
     // A tail from position 0 leaves no fixed parameter to name it, which C cannot declare.
     let named = named.filter(|named| *named > 0)?;
-    homed_tail((graph, prep), (slots, model), observations, named)
+    homed_tail((graph, prep), model, observations, named)
 }
 
 /// Microsoft x64's variadic body walking its own tail from the lowest home whose address it keeps;
 /// the area stands only beside a proven `tail_count`. O(insts + uses).
 pub(crate) fn home_cursor(
     (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
-    slots: &SourceConventionSlots,
     machine: &crate::SourceMachineContext,
     observations: &crate::deadphi::ProvenProgramObservations,
 ) -> Option<SaveArea> {
-    let model = machine.convention().filter(|_| slots.shared_positions())?;
-    let positions = slots.argument_slots().len();
+    let model = machine
+        .convention()
+        .filter(|model| model.shares_positions())?;
+    let positions = model.argument_registers(SlotClass::Integer).count();
     let homes = (0..positions)
         .map(|position| Some(model.home(u8::try_from(position).ok()?)?.start))
         .collect::<Option<Vec<_>>>()?;
@@ -203,18 +205,21 @@ pub(crate) fn home_cursor(
         .min()?;
     // A kept `&home[0]` is no tail a fixed parameter names.
     (named > 0).then_some(())?;
-    homed_tail((graph, prep), (slots, model), observations, named)
+    homed_tail((graph, prep), model, observations, named)
 }
 
 /// The save area of a Microsoft x64 tail from `named`: each later position's entry value read only
 /// by its home.
 fn homed_tail(
     (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
-    (slots, model): (&SourceConventionSlots, &r2source::ConventionModel),
+    model: &r2source::ConventionModel,
     observations: &crate::deadphi::ProvenProgramObservations,
     named: usize,
 ) -> Option<SaveArea> {
-    let arguments = slots.argument_slots();
+    let arguments = model
+        .argument_registers(SlotClass::Integer)
+        .collect::<Vec<_>>();
+    let arguments = arguments.as_slice();
     let at_entry = |value: ValueId| {
         prep.entry_stack_address_root_of(value)
             .filter(|root| root.base == StackAddressBase::StackPointer)

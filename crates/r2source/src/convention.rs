@@ -366,7 +366,6 @@ impl ConventionModel {
             .and_then(|effect| effect.with_system_reserved(reserved))
             .and_then(|effect| effect.with_stack_guard(self.forms.guard))
             .and_then(|effect| effect.with_stack_bound(self.forms.stack_bound))
-            .map(|effect| effect.with_security_cookie(self.forms.security_cookie))
     }
 }
 

@@ -1960,7 +1960,7 @@ fn recover_interface_inner(
         .or_else(|| {
             // A home the body walks itself is a tail only where its count is proven.
             let (prep, machine) = prep.zip(machine_context)?;
-            let area = crate::save_area::home_cursor((graph, prep), slots, machine, &observations)?;
+            let area = crate::save_area::home_cursor((graph, prep), machine, &observations)?;
             let tail = (&area, &observations);
             cursor_count = Some(crate::tail_count::tail_count(
                 func, graph, prep, slots, tail,

@@ -3953,8 +3953,6 @@ pub struct SourceCallEffect {
     stack_guard: Option<SourceStackGuard>,
     /// Where the convention keeps the lowest stack pointer a function may run with.
     stack_bound: Option<SourceStackGuard>,
-    /// The `/GS` cookie the load configuration names.
-    security_cookie: Option<SourceSecurityCookie>,
     reads: SourceBoundaryReads,
 }
 
@@ -4035,7 +4033,6 @@ impl SourceCallEffect {
             system_reserved: Box::default(),
             stack_guard: None,
             stack_bound: None,
-            security_cookie: None,
             reads,
         })
     }
@@ -4106,20 +4103,6 @@ impl SourceCallEffect {
     /// `g.stackguard0`), where it states one.
     pub const fn stack_bound(&self) -> Option<&SourceStackGuard> {
         self.stack_bound.as_ref()
-    }
-
-    /// The same effect, with the `/GS` cookie the container's load configuration names.
-    #[must_use]
-    pub fn with_security_cookie(self, cookie: Option<SourceSecurityCookie>) -> Self {
-        Self {
-            security_cookie: cookie,
-            ..self
-        }
-    }
-
-    /// The `/GS` cookie, where the C library's guard row and the container both state it.
-    pub const fn security_cookie(&self) -> Option<&SourceSecurityCookie> {
-        self.security_cookie.as_ref()
     }
 
     /// The registers the convention names as destroyed, sorted.

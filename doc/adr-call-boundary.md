@@ -1081,7 +1081,7 @@ S17 is the rest of Win64 after S10: `/GS` (D215), a Win64 equivalence target (D2
 
 What the code said that this ADR did not, and the owner chosen:
 
-- `GuardRow::LoadConfigCookie` is the row for `(x86, 64, Ucrt)`. The row says the C library checks a load-config cookie. The container says where: `convention_model` takes `Container::security_cookie` beside the kernel and the library, and `forms` sets `BoundaryForms::security_cookie` only where both state it. `SourceCallEffect::security_cookie` carries `SourceSecurityCookie { address, width }` to r2ssa. A PE is `Ucrt` by its format, so both radare2 test PEs take the row.
+- `GuardRow::LoadConfigCookie` is the row for `(x86, 64, Ucrt)`. The row says the C library checks a load-config cookie. The container says where: `convention_model` takes `Container::security_cookie` beside the kernel and the library, and `forms` sets `BoundaryForms::security_cookie` only where both state it. r2ssa reads `SourceSecurityCookie { address, width }` off the machine context's `ConventionModel::forms`, and the first integer argument and the result registers off the model: D309 admits no new reader of `SourceCallEffect` or `SourceConventionSlots`. D220's new readers (`home_cursor`, `homed_tail`, `floating_tail_placed`, `shared_float_slot`) read the model too. A PE is `Ucrt` by its format, so both radare2 test PEs take the row.
 - The callee is proven in r2ssa (`security_cookie::proves_check`), during interface recovery, and minted as `SourceFunctionInterface::security_check`. The proof:
   - one block's branch compares the entry value of the first integer argument register with a load of the cookie's address and width;
   - that block dominates every return;

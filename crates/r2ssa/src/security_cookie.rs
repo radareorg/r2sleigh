@@ -12,20 +12,12 @@ use crate::machine_context::SourceMachineContext;
 use crate::op::SSAOp;
 use crate::stack_protector::{SlotStores, equality};
 use crate::value_table::VarId;
+use r2source::convention::SlotClass;
 
 /// Whether `func` is a `/GS` check, as the ADR's "S17 as built" states the proof. O(blocks + ops),
 /// and only a body loading the cookie's address builds its definitions.
 pub(crate) fn proves_check(func: &SSAFunction, machine: &SourceMachineContext) -> bool {
-    let Some(cookie) = machine
-        .call_effect()
-        .and_then(r2source::SourceCallEffect::security_cookie)
-    else {
-        return false;
-    };
-    let Some(argument) = machine
-        .convention_slots()
-        .and_then(|slots| slots.argument_slots().first().copied())
-    else {
+    let Some((cookie, argument)) = cookie_and_argument(machine) else {
         return false;
     };
     // Only a body that loads the cookie's own address pays for the definitions below.
@@ -76,6 +68,15 @@ pub(crate) fn proves_check(func: &SSAFunction, machine: &SourceMachineContext) -
         func.get_block(*addr)
             .is_some_and(|block| block.sited().all(|(_, op)| inert(op)))
     })
+}
+
+/// The cookie the convention model's forms name, and the first integer argument register.
+fn cookie_and_argument(
+    machine: &SourceMachineContext,
+) -> Option<(r2source::SourceSecurityCookie, r2source::CanonicalStorageId)> {
+    let model = machine.convention()?;
+    let argument = model.argument_registers(SlotClass::Integer).next()?;
+    Some((model.forms.security_cookie?, argument))
 }
 
 /// The check one block ends in: the branch's two targets, by whether the values are equal.
@@ -204,15 +205,10 @@ pub(crate) fn decide(
     if checks.is_empty() || !machine.accepts(r2source::Premise::UbFreeSource) {
         return;
     }
-    let (Some(cookie), Some(argument), Some(stack_pointer)) = (
-        machine
-            .call_effect()
-            .and_then(r2source::SourceCallEffect::security_cookie)
-            .copied(),
-        machine
-            .convention_slots()
-            .and_then(|slots| slots.argument_slots().first().copied()),
+    let (Some((cookie, argument)), Some(stack_pointer), Some(model)) = (
+        cookie_and_argument(machine),
         machine.stack_pointer_carrier(),
+        machine.convention(),
     ) else {
         return;
     };
@@ -230,9 +226,9 @@ pub(crate) fn decide(
         readers: &readers,
         cookie,
         stack_pointer,
-        results: machine
-            .call_effect()
-            .map_or(&[], |effect| effect.reads().ret()),
+        results: (model.result_registers(SlotClass::Integer))
+            .chain(model.result_registers(SlotClass::Float))
+            .collect(),
     };
     let mut inserted = IdSet::default();
     for (call, handed) in calls {
@@ -357,7 +353,7 @@ struct Context<'f> {
     cookie: r2source::SourceSecurityCookie,
     stack_pointer: r2source::CanonicalStorageId,
     /// The convention's result carriers, which a return reads with no operation naming them.
-    results: &'f [r2source::CanonicalStorageId],
+    results: Vec<r2source::CanonicalStorageId>,
 }
 
 impl Context<'_> {

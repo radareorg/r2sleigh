@@ -371,11 +371,18 @@ impl FormatForwardingLookup<'_> {
     }
 }
 
-/// Whether the convention places a floating tail operand: on the stack, or at a shared position.
-fn floating_tail_placed(machine_context: &SourceMachineContext) -> bool {
+/// Whether the convention puts every variadic operand on the stack, where a floating one is placed
+/// like any other.
+fn variadic_tail_on_stack(machine_context: &SourceMachineContext) -> bool {
     machine_context
         .convention_slots()
-        .is_some_and(|slots| slots.variadic_tail_on_stack() || slots.shared_positions())
+        .is_some_and(r2source::SourceConventionSlots::variadic_tail_on_stack)
+}
+
+/// Whether the convention places a floating tail operand: on the stack, or at a shared position.
+fn floating_tail_placed(machine_context: &SourceMachineContext) -> bool {
+    variadic_tail_on_stack(machine_context)
+        || (machine_context.convention()).is_some_and(r2source::ConventionModel::shares_positions)
 }
 
 /// Prove a merged variadic count from formats that agree.
@@ -588,7 +595,7 @@ pub(crate) fn variadic_callsite_arguments(
         });
         let (storage, value) = match floating {
             true => {
-                let float = shared_float_slot(convention, position)?;
+                let float = shared_float_slot(recovery.machine_context, position)?;
                 let value = reaching(float)?;
                 let same = same_bits(recovery.graph, recovery.prep, reaching(slot)?, value);
                 if !same {
@@ -613,12 +620,16 @@ pub(crate) fn variadic_callsite_arguments(
 
 /// The float alternative of a shared position (Microsoft x64), whose low lane C's operand is.
 fn shared_float_slot(
-    convention: &r2source::SourceConventionSlots,
+    machine_context: &SourceMachineContext,
     position: usize,
 ) -> Result<CanonicalStorageId, VariadicCallsiteArgumentCountRefusal> {
-    (convention.shared_positions())
-        .then(|| convention.float_argument_slots().get(position).copied())
-        .flatten()
+    (machine_context.convention())
+        .filter(|model| model.shares_positions())
+        .and_then(|model| {
+            model
+                .argument_registers(r2source::convention::SlotClass::Float)
+                .nth(position)
+        })
         .ok_or(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument)
 }
 
