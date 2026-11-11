@@ -1604,7 +1604,12 @@ fn recover_interface_inner(
         return Ok(None);
     }
 
-    let tail = match tail_result_storage(func, &facts, slots) {
+    let lanes = r2source::convention::TypedResults {
+        integer: slots.result_slot(),
+        float: slots.float_result_slot(),
+        second: slots.second_result_slot(),
+    };
+    let tail = match tail_result_storage(func, &facts, lanes) {
         TailResult::NoTailBoundary => TailResult::NoTailBoundary,
         TailResult::Exact(result) => TailResult::Exact(result),
         // The body hands control to a callee it names nothing about, and
@@ -1620,7 +1625,9 @@ fn recover_interface_inner(
         // the other; the convention gives both the same result register, so
         // the arm that writes it says what the function returns. An import
         // thunk has no such arm and still refuses.
-        TailResult::Unproven if direct_return_result(func, graph, &facts, slots).is_some() => {
+        TailResult::Unproven
+            if direct_return_result(func, graph, &facts, lanes.integer).is_some() =>
+        {
             let slot = slots.result_slot();
             r2il::refusal_evidence!(
                 "interface-recovery",
@@ -2334,7 +2341,7 @@ fn recover_interface_inner(
     };
     let unproven_result = match result {
         RecoveredFunctionResult::Unproven => {
-            let calls = result_calls(func, graph, &facts, slots, tail_unproven);
+            let calls = result_calls(func, graph, &facts, lanes, tail_unproven);
             result_causes.extend(calls);
             if result_causes.is_empty() {
                 result_causes.insert(SourceResultCause::Undefined);
@@ -2626,7 +2633,7 @@ fn result_calls(
     func: &SSAFunction,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
-    slots: &SourceConventionSlots,
+    lanes: r2source::convention::TypedResults,
     tails_unproven: bool,
 ) -> BTreeSet<SourceResultCause> {
     let named = |call: &crate::semantic::CallSiteFact| {
@@ -2635,9 +2642,9 @@ fn result_calls(
     };
     let unstated = |call: &crate::semantic::CallSiteFact| {
         let boundary = facts.boundaries.calls.get(&call.id);
-        !boundary.is_some_and(|boundary| stated_result(boundary, slots).is_some())
+        !boundary.is_some_and(|boundary| stated_result(boundary, lanes.float).is_some())
     };
-    let tails = owned_tails(func, facts, slots);
+    let tails = owned_tails(func, facts, lanes);
     let mut causes: BTreeSet<SourceResultCause> = tails
         .filter(|call| unstated(call))
         .map(|call| SourceResultCause::Tailed(named(call)))
@@ -2645,8 +2652,7 @@ fn result_calls(
     if tails_unproven && causes.is_empty() {
         causes.insert(SourceResultCause::TailsDisagree);
     }
-    let lanes = [slots.result_slot(), slots.float_result_slot()];
-    for slot in lanes.into_iter().flatten() {
+    for slot in [lanes.integer, lanes.float].into_iter().flatten() {
         let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]);
         for value in live_out.iter() {
             if let ReturnedByCall::Unstated(id) | ReturnedByCall::Undecided(id) =
@@ -2717,9 +2723,9 @@ fn direct_return_result(
     func: &SSAFunction,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
-    slots: &SourceConventionSlots,
+    candidate: Option<CanonicalStorageId>,
 ) -> Option<CanonicalStorageId> {
-    let candidate = slots.result_slot()?;
+    let candidate = candidate?;
     let tail_blocks = owned_tail_blocks(func, graph, facts, candidate);
     if tail_blocks.is_empty() {
         return None;
@@ -2822,13 +2828,9 @@ fn direct_returns_beside_void_tails(
 fn owned_tails<'f>(
     func: &'f SSAFunction,
     facts: &'f crate::semantic::PreparedFunctionFacts,
-    slots: &'f SourceConventionSlots,
+    lanes: r2source::convention::TypedResults,
 ) -> impl Iterator<Item = &'f crate::semantic::CallSiteFact> + 'f {
-    let lanes = [
-        slots.result_slot(),
-        slots.float_result_slot(),
-        slots.second_result_slot(),
-    ];
+    let lanes = [lanes.integer, lanes.float, lanes.second];
     let passes = move |target: u64| {
         (lanes.iter().flatten()).all(|lane| func.call_passes(target, *lane))
             && lanes.iter().any(Option::is_some)
@@ -2856,14 +2858,14 @@ fn owned_tail_blocks(
 fn tail_result_storage(
     func: &SSAFunction,
     facts: &crate::semantic::PreparedFunctionFacts,
-    slots: &SourceConventionSlots,
+    lanes: r2source::convention::TypedResults,
 ) -> TailResult {
-    let mut results = owned_tails(func, facts, slots)
+    let mut results = owned_tails(func, facts, lanes)
         .map(|call| {
             // What the tail callee returns is the prototype's claim, and an
             // argument count the body cannot prove -- a variadic import thunk
             // forwards a tail it never sees -- says nothing about the result.
-            stated_result(facts.boundaries.calls.get(&call.id)?, slots)
+            stated_result(facts.boundaries.calls.get(&call.id)?, lanes.float)
         })
         .peekable();
     if results.peek().is_none() {
@@ -2896,9 +2898,8 @@ fn tail_result_storage(
 /// hold its result instead (D212).
 fn stated_result(
     boundary: &crate::semantic::SourceCallBoundaryFact,
-    slots: &SourceConventionSlots,
+    float: Option<CanonicalStorageId>,
 ) -> Option<SourceCallResult> {
-    let float = slots.float_result_slot();
     let open = (boundary.unstated_lanes.iter())
         .any(|lane| float.is_some_and(|float| overlaps(*lane, float)));
     let result = boundary.result_kind?;
