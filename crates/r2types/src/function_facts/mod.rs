@@ -803,6 +803,20 @@ pub(super) fn float_lane(
     })
 }
 
+/// The header's carrier word, which a call declares where it takes no lane of an unproven result
+/// (its header's `bits`) or takes a group (its integer register): D201, W46.
+fn carrier_word(result: Option<r2ssa::SourceCallResult>, bits: Option<u32>) -> Option<CTypeLike> {
+    let bits = match result? {
+        r2ssa::SourceCallResult::Void => bits?,
+        r2ssa::SourceCallResult::Unproven { integer, .. } => integer.size.checked_mul(8)?,
+        _ => return None,
+    };
+    Some(CTypeLike::Int {
+        bits,
+        signedness: crate::Signedness::Unsigned,
+    })
+}
+
 /// The type a call returns where its callee's result is one of two carriers: the float register's
 /// lane is a float of its width, the integer register a word (doc/adr-resolved-bodies.md).
 fn call_result_type(
@@ -1483,24 +1497,11 @@ impl FunctionFacts {
                 }
                 // A call that reads only a pair's first register takes that half alone.
                 (Some(result), _) if pair_callee => call_result_type(&signature.interface, result),
-                // A call that takes none of an unproven result's lanes still declares the callee's
-                // header: its carrier word, which the projection spells as the typedef (W46).
-                (Some(r2ssa::SourceCallResult::Void), CTypeLike::Unknown) => {
-                    (signature.unproven_bits).map(|bits| CTypeLike::Int {
-                        bits,
-                        signedness: crate::Signedness::Unsigned,
-                    })
-                }
-                // A group's carrier word, as the header spells it (D201).
-                (Some(r2ssa::SourceCallResult::Unproven { integer, .. }), CTypeLike::Unknown) => {
-                    Some(CTypeLike::Int {
-                        bits: integer.size.saturating_mul(8),
-                        signedness: crate::Signedness::Unsigned,
-                    })
-                }
-                (_, CTypeLike::Unknown) => {
-                    site_result.and_then(|result| call_result_type(&signature.interface, result))
-                }
+                (_, CTypeLike::Unknown) => carrier_word(site_result, signature.unproven_bits)
+                    .or_else(|| {
+                        site_result
+                            .and_then(|result| call_result_type(&signature.interface, result))
+                    }),
                 // The convention's float register read at a float's width is that float, whatever
                 // carrier-width integer the callee's body spells (doc/adr-resolved-bodies.md).
                 (
