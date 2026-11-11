@@ -304,14 +304,7 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
                 continue;
             }
             calls = calls.saturating_add(1);
-            let fates = lanes.iter_mut().zip(site.boundary.fates).enumerate();
-            for (at, (joined, fate)) in fates {
-                let Some(LaneFate::Returned(bytes)) = fate else {
-                    join(joined, fate.map(Forwarded::Fate));
-                    continue;
-                };
-                returned.insert(Returned { caller, at, bytes });
-            }
+            join_site(&mut lanes, caller, &site.boundary, &mut returned);
         }
     }
     // Decided from the direct calls alone, so the forwarder graph does not depend on its answers.
@@ -348,6 +341,23 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
         unread,
         returned,
     })
+}
+
+/// One call's fate on each lane joined into `lanes`; a lane it returns on waits for its caller.
+fn join_site(
+    lanes: &mut [JoinedLane; LANES],
+    caller: u64,
+    site: &SiteBoundary,
+    returned: &mut BTreeSet<Returned>,
+) {
+    for (at, (joined, fate)) in lanes.iter_mut().zip(site.fates).enumerate() {
+        match fate {
+            Some(LaneFate::Returned(bytes)) => {
+                returned.insert(Returned { caller, at, bytes });
+            }
+            fate => join(joined, fate.map(Forwarded::Fate)),
+        }
+    }
 }
 
 /// One function's lanes once every returned lane is forwarded to its caller's own calls.
