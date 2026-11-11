@@ -717,9 +717,9 @@
     "system_ls_3be94317::sym.imp.warnx": 2,
     "system_ls_3be94317::sym.imp.wcwidth": 2,
     "system_ls_3be94317::sym.imp.write": 2,
-    "pinned_branchy_gcc_x64_O0::sym._fini": 2,
-    "pinned_hashes_gcc_x64_O2::sym._fini": 2,
-    "pinned_shapes_gcc_x64_O0::sym._fini": 2,
+    "pinned_branchy_gcc_x64_O0::sym._dl_relocate_static_pie": 2,
+    "pinned_hashes_gcc_x64_O2::sym._dl_relocate_static_pie": 2,
+    "pinned_shapes_gcc_x64_O0::sym._dl_relocate_static_pie": 2,
     "branchy_x64_O1::sym._and_chain_effect": 2,
     "branchy_x64_O2::sym._and_chain_effect": 2
   }
