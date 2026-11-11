@@ -699,19 +699,34 @@ pub(crate) fn carrier(bits: u32) -> Option<Helper> {
     matches!(bits, 8 | 16 | 32 | 64).then_some(Helper::Carrier { bits })
 }
 
-/// How many returns hand back their value through the unproven result's carrier helper.
-pub(crate) fn count_carried(function: &CFunction) -> usize {
-    let mut carried = 0usize;
-    function.visit_body_exprs(&mut |expr| {
-        carried += usize::from(matches!(
-            expr,
-            CExpr::External {
-                kind: crate::symbol::ExternalKind::Helper(Helper::Carrier { .. }),
-                ..
+/// How the returns hand back an unproven result: through the carrier, or as a residual (D233).
+pub(crate) fn unproven_returns(function: &CFunction) -> (usize, usize) {
+    let (mut carried, mut residual) = (0usize, 0usize);
+    let mut count = |stmt: &CStmt| {
+        let CStmt::Return(Some(value)) = stmt else {
+            return;
+        };
+        match value.unobserved() {
+            CExpr::Call { func, .. }
+                if matches!(
+                    func.unobserved(),
+                    CExpr::External {
+                        kind: crate::symbol::ExternalKind::Helper(Helper::Carrier { .. }),
+                        ..
+                    }
+                ) =>
+            {
+                carried += 1;
             }
-        ));
-    });
-    carried
+            value if holds_residual(value) => residual += 1,
+            _ => {}
+        }
+    };
+    function
+        .body
+        .iter()
+        .for_each(|stmt| each_stmt(stmt, &mut count));
+    (carried, residual)
 }
 
 /// Whether this expression node is a residual call's callee.
@@ -785,22 +800,43 @@ fn stmt_holds_gap(stmt: &CStmt) -> bool {
 
 /// Marked gaps in a statement and the statements inside it.
 fn count_gaps(stmt: &CStmt) -> usize {
-    let each = |stmts: &[CStmt]| stmts.iter().map(count_gaps).sum::<usize>();
-    match stmt.unobserved() {
-        CStmt::Gap(_) => 1,
-        CStmt::Block(body) => each(body),
+    let mut gaps = 0usize;
+    each_stmt(stmt, &mut |stmt| {
+        gaps += usize::from(matches!(stmt, CStmt::Gap(_)))
+    });
+    gaps
+}
+
+/// `stmt` and every statement inside it, outermost first, each through its markers.
+fn each_stmt(stmt: &CStmt, f: &mut impl FnMut(&CStmt)) {
+    let stmt = stmt.unobserved();
+    f(stmt);
+    match stmt {
+        CStmt::Block(body) => body.iter().for_each(|inner| each_stmt(inner, f)),
         CStmt::If {
             then_body,
             else_body,
             ..
-        } => count_gaps(then_body) + else_body.as_deref().map_or(0, count_gaps),
-        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => count_gaps(body),
-        CStmt::For { init, body, .. } => init.as_deref().map_or(0, count_gaps) + count_gaps(body),
-        CStmt::Switch { cases, default, .. } => {
-            cases.iter().map(|case| each(&case.body)).sum::<usize>()
-                + default.as_deref().map_or(0, each)
+        } => {
+            each_stmt(then_body, f);
+            if let Some(inner) = else_body.as_deref() {
+                each_stmt(inner, f);
+            }
         }
-        _ => 0,
+        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => each_stmt(body, f),
+        CStmt::For { init, body, .. } => {
+            if let Some(inner) = init.as_deref() {
+                each_stmt(inner, f);
+            }
+            each_stmt(body, f);
+        }
+        CStmt::Switch { cases, default, .. } => {
+            let bodies = cases.iter().map(|case| case.body.as_slice());
+            for inner in bodies.chain(default.as_deref()).flatten() {
+                each_stmt(inner, f);
+            }
+        }
+        _ => {}
     }
 }
 

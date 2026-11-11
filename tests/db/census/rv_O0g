@@ -207,7 +207,7 @@ r2sleigh_result_u64 __do_global_dtors_aux(void)
     uint64_t tmp_116e_0_1;
     uint64_t rdi_1;
 
-    /* r2dec proof: 4 constructs are marked below; 42 source obligations: 16 rendered, 17 elided, 0 refused, 9 residual; 9 statements rendered; 1 never assigned, read as residuals (RAX_2); 2 data object types refused; 1 callee prototype supplied by the source; the parameters are a floor: at least 0 (a register past them reaches the call to 0x10f0); the result is unproven (Written): 0 unproven-return carried */
+    /* r2dec proof: 4 constructs are marked below; 42 source obligations: 16 rendered, 17 elided, 0 refused, 9 residual; 9 statements rendered; 1 never assigned, read as residuals (RAX_2); 2 data object types refused; 1 callee prototype supplied by the source; the parameters are a floor: at least 0 (a register past them reaches the call to 0x10f0); the result is unproven (Written): 0 unproven-return carried, 2 unproven-return residual */
     {
         tmp_1164_0_1 = r2sleigh_load_u8((void*)&__TMC_END__);
         if ((uint8_t)((uint8_t)tmp_1164_0_1 != (uint8_t)0U)) {
@@ -982,7 +982,7 @@ CMDS=aa; pdd @ 0x000017cc
 EXPECT=<<EOF
 r2sleigh_result_u64 _fini(void)
 {
-    /* r2dec proof: 1 construct is marked below; 8 source obligations: 0 rendered, 6 elided, 0 refused, 2 residual; 1 statements rendered; the result is unproven (EntryInput): 0 unproven-return carried */
+    /* r2dec proof: 1 construct is marked below; 8 source obligations: 0 rendered, 6 elided, 0 refused, 2 residual; 1 statements rendered; the result is unproven (EntryInput): 0 unproven-return carried, 1 unproven-return residual */
     {
         return r2sleigh_residual_u64(1);
     }

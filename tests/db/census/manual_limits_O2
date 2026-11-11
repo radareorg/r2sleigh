@@ -32,7 +32,7 @@ uint32_t _struct_nested_array(void* arg0, uint32_t arg1, uint32_t arg2)
     uint16_t tmp_1000004c8_8_1;
     uint32_t tmp_1000004d4_8_1;
 
-    /* r2dec proof: no individual construct is marked; 36 source obligations: 36 rendered, 0 elided, 0 refused, a call reads the result (assuming closed-world); 11 statements rendered */
+    /* r2dec proof: no individual construct is marked; 36 source obligations: 36 rendered, 0 elided, 0 refused; 11 statements rendered; a call reads the result (assuming closed-world) */
     {
         x8_2 = (uint64_t)((uint64_t)((uint64_t)(int32_t)arg1 * (uint64_t)40U) + (uint64_t)arg0);
         tmp_1000004b0_8_1 = r2sleigh_load_u32((void*)((uint64_t)x8_2 + (uint64_t)4U * 4U));
@@ -91,7 +91,7 @@ uint64_t _out_param_parse(uint8_t* arg0, struct fcn_1000004e0_arg1* arg1)
     uint32_t tmp_lane_100000568_0_0_1;
     uint8_t tmp_10000057c_18_1;
 
-    /* r2dec proof: no individual construct is marked; 98 source obligations: 98 rendered, 0 elided, 0 refused, a call reads the result (assuming closed-world); 37 statements rendered; 1 structure laid out from a parameter's accesses */
+    /* r2dec proof: no individual construct is marked; 98 source obligations: 98 rendered, 0 elided, 0 refused; 37 statements rendered; a call reads the result (assuming closed-world); 1 structure laid out from a parameter's accesses */
     {
         tmp_1000004f4_8_1 = r2sleigh_load_u8((void*)(uint64_t)arg0);
         x9_1 = (uint64_t)(uint8_t)tmp_1000004f4_8_1;
@@ -163,7 +163,7 @@ uint64_t _fnv_fold(uint64_t arg0, uint64_t arg1)
     uint64_t tmp_1000005d0_8_1;
     uint64_t x0_10;
 
-    /* r2dec proof: no individual construct is marked; 47 source obligations: 47 rendered, 0 elided, 0 refused, a call reads the result (assuming closed-world); 18 statements rendered */
+    /* r2dec proof: no individual construct is marked; 47 source obligations: 47 rendered, 0 elided, 0 refused; 18 statements rendered; a call reads the result (assuming closed-world) */
     {
         x8_1 = arg0;
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
@@ -208,7 +208,7 @@ uint64_t _sparse_switch(uint32_t arg0, uint32_t arg1, uint32_t arg2)
     uint32_t tmp_100000600_5_1;
     uint32_t tmp_100000600_9_1;
 
-    /* r2dec proof: 1 construct is marked below; 58 source obligations: 56 rendered, 0 elided, 0 refused, a call reads the result (assuming closed-world), 2 residual; 17 statements rendered */
+    /* r2dec proof: 1 construct is marked below; 58 source obligations: 56 rendered, 0 elided, 0 refused, 2 residual; 17 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)2U)) {
             if ((uint8_t)((uint32_t)((uint32_t)arg0 + (uint32_t)7U) == (uint32_t)0U)) {
@@ -278,7 +278,7 @@ uint32_t _table_walk(uint64_t arg0, uint64_t arg1)
     uint64_t x0_2;
     uint64_t x0_5;
 
-    /* r2dec proof: no individual construct is marked; 92 source obligations: 92 rendered, 0 elided, 0 refused, a call reads the result (assuming closed-world); 51 statements rendered */
+    /* r2dec proof: no individual construct is marked; 92 source obligations: 92 rendered, 0 elided, 0 refused; 51 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg0 == (uint64_t)0U)) {
             x0_5 = arg0;
@@ -394,7 +394,7 @@ uint64_t _state_machine(uint8_t* arg0)
     uint64_t x11_3;
     uint64_t x0_9;
 
-    /* r2dec proof: no individual construct is marked; 154 source obligations: 150 rendered, 4 elided, 0 refused, a call reads the result (assuming closed-world); 71 statements rendered */
+    /* r2dec proof: no individual construct is marked; 154 source obligations: 150 rendered, 4 elided, 0 refused; 71 statements rendered; a call reads the result (assuming closed-world) */
     {
         tmp_1000006c8_8_1 = r2sleigh_load_u8((void*)(uint64_t)arg0);
         x11_1 = (uint64_t)(uint8_t)tmp_1000006c8_8_1;
@@ -1695,7 +1695,7 @@ uint64_t _mem_scan2(uint64_t arg0, uint64_t arg1, uint32_t arg2, uint32_t arg3)
     uint64_t tmp_100000b28_8_1;
     uint64_t x8_16;
 
-    /* r2dec proof: no individual construct is marked; 1466 source obligations: 1463 rendered, 3 elided, 0 refused, a call reads the result (assuming closed-world); 1091 statements rendered */
+    /* r2dec proof: no individual construct is marked; 1466 source obligations: 1463 rendered, 3 elided, 0 refused; 1091 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return 0;

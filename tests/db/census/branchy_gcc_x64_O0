@@ -136,7 +136,7 @@ CMDS=aa; pdd @ 0x004010a0
 EXPECT=<<EOF
 void _dl_relocate_static_pie(void)
 {
-    /* r2dec proof: no individual construct is marked; 5 source obligations: 1 rendered, 4 elided, 0 refused, no call reads the result (assuming closed-world); 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 5 source obligations: 1 rendered, 4 elided, 0 refused; 1 statements rendered; no call reads the result (assuming closed-world) */
     {
         return;
     }
@@ -203,7 +203,7 @@ r2sleigh_result_u64 __do_global_dtors_aux(void)
     uint8_t tmp_401124_0_1;
     uint64_t rax_1;
 
-    /* r2dec proof: 1 construct is marked below; 26 source obligations: 12 rendered, 12 elided, 0 refused, 2 residual; 6 statements rendered; 1 data object type refused; the parameters are a floor: at least 0 (a register past them reaches the call to 0x4010b0); the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: 1 construct is marked below; 26 source obligations: 12 rendered, 12 elided, 0 refused, 2 residual; 6 statements rendered; 1 data object type refused; the parameters are a floor: at least 0 (a register past them reaches the call to 0x4010b0); the result is unproven (Written): 1 unproven-return carried, 1 unproven-return residual */
     {
         tmp_401124_0_1 = r2sleigh_load_u8((void*)&__TMC_END__);
         if ((uint8_t)((uint8_t)tmp_401124_0_1 != (uint8_t)0U)) {
@@ -248,7 +248,7 @@ uint64_t gate_one(uint32_t arg0)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 18 source obligations: 11 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 18 source obligations: 11 rendered, 7 elided, 0 refused; 5 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint32_t)arg0 != (uint32_t)0xbeefU)) {
             rax_3 = 0;
@@ -273,7 +273,7 @@ uint64_t gate_three(uint32_t arg0, uint32_t arg1, uint32_t arg2)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 28 source obligations: 21 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 28 source obligations: 21 rendered, 7 elided, 0 refused; 5 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint32_t)arg0 == (uint32_t)7U) && (uint8_t)((uint32_t)arg1 == (uint32_t)14U) && (uint8_t)((uint32_t)arg2 == (uint32_t)21U)) {
             rax_3 = 1;
@@ -300,7 +300,7 @@ uint64_t affine_probe(uint32_t arg0)
 {
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused; 5 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint32_t)((uint32_t)((uint32_t)arg0 + (uint32_t)arg0) + (uint32_t)arg0) != (uint32_t)45U)) {
             rax_7 = 0;
@@ -326,7 +326,7 @@ uint64_t paired_sum_diff(uint32_t arg0, uint32_t arg1)
     uint32_t tmp_lane_4011f3_7_0_1;
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 25 source obligations: 18 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 6 statements rendered */
+    /* r2dec proof: no individual construct is marked; 25 source obligations: 18 rendered, 7 elided, 0 refused; 6 statements rendered; a call reads the result (assuming closed-world) */
     {
         tmp_lane_4011f3_7_0_1 = (uint32_t)((uint32_t)arg0 - (uint32_t)arg1);
         if ((uint8_t)((uint32_t)((uint32_t)arg1 + (uint32_t)arg0) == (uint32_t)250U) && (uint8_t)((uint32_t)tmp_lane_4011f3_7_0_1 == (uint32_t)30U)) {
@@ -355,7 +355,7 @@ uint64_t mask_probe(uint8_t arg0)
     uint32_t tmp_lane_40121e_1_0_1;
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 6 statements rendered */
+    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused; 6 statements rendered; a call reads the result (assuming closed-world) */
     {
         tmp_lane_40121e_1_0_1 = (uint32_t)((uint64_t)(uint8_t)arg0 >> 0U);
         if ((uint8_t)((uint32_t)((uint32_t)tmp_lane_40121e_1_0_1 & (uint32_t)192U) == (uint32_t)64U) && (uint8_t)((uint32_t)((uint32_t)tmp_lane_40121e_1_0_1 & (uint32_t)7U) == (uint32_t)5U)) {
@@ -384,7 +384,7 @@ uint64_t bounded_fetch(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
     uint32_t tmp_401282_0_1;
     uint64_t rax_8;
 
-    /* r2dec proof: no individual construct is marked; 25 source obligations: 18 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 6 statements rendered */
+    /* r2dec proof: no individual construct is marked; 25 source obligations: 18 rendered, 7 elided, 0 refused; 6 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((int32_t)arg1 >= (int32_t)0U) && (uint8_t)((int32_t)arg1 < (int32_t)arg2)) {
             tmp_401282_0_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)(int32_t)arg1 * 4U));
@@ -410,7 +410,7 @@ CMDS=aa; pdd @ 0x00401286
 EXPECT=<<EOF
 uint64_t narrow64(uint64_t arg0)
 {
-    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
         return (uint64_t)arg0;
     }
@@ -427,7 +427,7 @@ CMDS=aa; pdd @ 0x00401298
 EXPECT=<<EOF
 uint64_t widen_pair(uint32_t arg0, uint32_t arg1)
 {
-    /* r2dec proof: no individual construct is marked; 13 source obligations: 6 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 13 source obligations: 6 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
         return (uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)(uint32_t)arg0 << (uint64_t)(uint32_t)32U)) | (uint64_t)(uint32_t)arg1);
     }
@@ -444,7 +444,7 @@ CMDS=aa; pdd @ 0x004012b8
 EXPECT=<<EOF
 uint32_t sign_xor(uint32_t arg0, uint32_t arg1)
 {
-    /* r2dec proof: no individual construct is marked; 14 source obligations: 7 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 14 source obligations: 7 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
         return (uint32_t)((uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg0) ^ (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg1));
     }
@@ -467,7 +467,7 @@ uint64_t opaque_self_xor(uint32_t arg0)
     uint32_t tmp_lane_4012f8_0_0_1;
     uint64_t rax_5;
 
-    /* r2dec proof: no individual construct is marked; 22 source obligations: 15 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 8 statements rendered; 1 data object type refused */
+    /* r2dec proof: no individual construct is marked; 22 source obligations: 15 rendered, 7 elided, 0 refused; 8 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u32((void*)&g_opaque, (uint32_t)arg0);
         tmp_lane_4012f2_0_0_1 = r2sleigh_load_u32((void*)&g_opaque);
@@ -493,7 +493,7 @@ CMDS=aa; pdd @ 0x00401310
 EXPECT=<<EOF
 uint64_t zero_of(void)
 {
-    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 1 statements rendered; the parameters are a floor: at least 0 (a register past them is only homed) */
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; the parameters are a floor: at least 0 (a register past them is only homed); a call reads the result (assuming closed-world) */
     {
         return 0;
     }
@@ -515,7 +515,7 @@ uint64_t pure_zero_guard(void)
     uint64_t rax_2;
     uint64_t rax_5;
 
-    /* r2dec proof: no individual construct is marked; 24 source obligations: 14 rendered, 10 elided, 0 refused, a call reads the result (assuming closed-world); 6 statements rendered */
+    /* r2dec proof: no individual construct is marked; 24 source obligations: 14 rendered, 10 elided, 0 refused; 6 statements rendered; a call reads the result (assuming closed-world) */
     {
         rax_2 = zero_of();
         if ((uint8_t)((uint32_t)((uint64_t)rax_2 >> 0U) == (uint32_t)0U)) {
@@ -544,7 +544,7 @@ uint64_t global_eq_guard(uint32_t arg0)
     uint32_t tmp_lane_401361_0_0_1;
     uint64_t rax_5;
 
-    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 7 statements rendered; 1 data object type refused */
+    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused; 7 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u32((void*)&g_opaque, (uint32_t)arg0);
         tmp_lane_401361_0_0_1 = r2sleigh_load_u32((void*)&g_opaque);
@@ -571,7 +571,7 @@ uint64_t slot_eq_guard(uint32_t arg0)
 {
     uint64_t rax_9;
 
-    /* r2dec proof: no individual construct is marked; 22 source obligations: 12 rendered, 7 elided, 0 refused, 3 compiler-inserted (assuming ub-free), a call reads the result (assuming closed-world); 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 22 source obligations: 12 rendered, 7 elided, 0 refused, 3 compiler-inserted (assuming ub-free); 2 statements rendered; a call reads the result (assuming closed-world) */
     {
         rax_9 = (uint8_t)((uint32_t)arg0 != (uint32_t)11U) ? 0 : 1;
         {
@@ -593,7 +593,7 @@ CMDS=aa; pdd @ 0x004013d3
 EXPECT=<<EOF
 uint32_t elem_at(uint32_t* arg0, uint32_t arg1)
 {
-    /* r2dec proof: no individual construct is marked; 14 source obligations: 7 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 14 source obligations: 7 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
         return (uint32_t)r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)(int32_t)arg1 * 4U));
     }
@@ -610,7 +610,7 @@ CMDS=aa; pdd @ 0x004013fa
 EXPECT=<<EOF
 uint32_t elem_before(uint32_t* arg0, uint32_t arg1)
 {
-    /* r2dec proof: no individual construct is marked; 15 source obligations: 8 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 15 source obligations: 8 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
         return (uint32_t)r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)((uint64_t)(int32_t)arg1 - (uint64_t)1U) * 4U));
     }
@@ -627,7 +627,7 @@ CMDS=aa; pdd @ 0x00401421
 EXPECT=<<EOF
 uint32_t narrow8(uint32_t arg0)
 {
-    /* r2dec proof: no individual construct is marked; 9 source obligations: 2 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 9 source obligations: 2 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
         return (uint32_t)arg0;
     }
@@ -644,7 +644,7 @@ CMDS=aa; pdd @ 0x00401431
 EXPECT=<<EOF
 uint32_t rec_write(uint32_t* arg0, uint32_t arg1)
 {
-    /* r2dec proof: no individual construct is marked; 14 source obligations: 7 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 14 source obligations: 7 rendered, 7 elided, 0 refused; 2 statements rendered; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u32((void*)((uint64_t)arg0 + (uint64_t)1U * 4U), (uint32_t)arg1);
         return (uint32_t)r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)1U * 4U));
@@ -664,7 +664,7 @@ uint32_t triple_temp(uint32_t arg0)
 {
     uint32_t tmp_lane_401461_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 12 source obligations: 5 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 12 source obligations: 5 rendered, 7 elided, 0 refused; 2 statements rendered; a call reads the result (assuming closed-world) */
     {
         tmp_lane_401461_6_0_1 = (uint32_t)((uint32_t)arg0 + (uint32_t)2U);
         return (uint32_t)((uint32_t)((uint32_t)tmp_lane_401461_6_0_1 + (uint32_t)tmp_lane_401461_6_0_1) + (uint32_t)tmp_lane_401461_6_0_1);
@@ -691,7 +691,7 @@ uint32_t rec_spread(struct fcn_401472_arg0* arg0, uint32_t arg1)
     uint64_t tmp_40149f_8_1;
     uint32_t tmp_4014a9_0_1;
 
-    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 5 statements rendered; 1 structure laid out from a parameter's accesses */
+    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused; 5 statements rendered; a call reads the result (assuming closed-world); 1 structure laid out from a parameter's accesses */
     {
         r2sleigh_store_u32((void*)&arg0->f_0, (uint32_t)arg1);
         r2sleigh_store_u64((void*)&arg0->f_8, (uint64_t)(int32_t)((uint32_t)arg1 + (uint32_t)9U));
@@ -714,7 +714,7 @@ uint32_t half_stride(uint16_t* arg0, uint32_t arg1)
 {
     uint16_t tmp_4014ce_0_1;
 
-    /* r2dec proof: no individual construct is marked; 15 source obligations: 8 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 15 source obligations: 8 rendered, 7 elided, 0 refused; 2 statements rendered; a call reads the result (assuming closed-world) */
     {
         tmp_4014ce_0_1 = r2sleigh_load_u16((void*)((uint64_t)arg0 + (uint64_t)(int32_t)arg1 * 2U));
         return (uint32_t)(uint16_t)tmp_4014ce_0_1;
@@ -735,7 +735,7 @@ uint32_t rec_index(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
     uint32_t tmp_401511_8_1;
     uint32_t tmp_401527_0_1;
 
-    /* r2dec proof: no individual construct is marked; 26 source obligations: 19 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 4 statements rendered */
+    /* r2dec proof: no individual construct is marked; 26 source obligations: 19 rendered, 7 elided, 0 refused; 4 statements rendered; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u32((void*)((uint64_t)arg0 + (uint64_t)((uint64_t)((uint64_t)(int32_t)arg1 * (uint64_t)4U) + (uint64_t)1U) * 4U), (uint32_t)arg2);
         tmp_401511_8_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)((uint64_t)((uint64_t)(int32_t)arg1 * (uint64_t)4U) + (uint64_t)1U) * 4U));
@@ -757,7 +757,7 @@ uint32_t wide_tail(uint32_t* arg0, uint32_t arg1)
 {
     uint32_t tmp_40154d_8_1;
 
-    /* r2dec proof: no individual construct is marked; 15 source obligations: 8 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 3 statements rendered */
+    /* r2dec proof: no individual construct is marked; 15 source obligations: 8 rendered, 7 elided, 0 refused; 3 statements rendered; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u32((void*)((uint64_t)arg0 + (uint64_t)96U * 4U), (uint32_t)arg1);
         tmp_40154d_8_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)96U * 4U));
@@ -778,7 +778,7 @@ uint32_t constant_branch(uint32_t arg0)
 {
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 13 source obligations: 6 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 13 source obligations: 6 rendered, 7 elided, 0 refused; 2 statements rendered; a call reads the result (assuming closed-world) */
     {
         {
             rax_7 = (uint64_t)(uint32_t)((uint32_t)arg0 + (uint32_t)25U);
@@ -802,7 +802,7 @@ uint64_t and_chain(uint32_t arg0, uint32_t arg1)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 19 source obligations: 12 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 5 statements rendered */
+    /* r2dec proof: no individual construct is marked; 19 source obligations: 12 rendered, 7 elided, 0 refused; 5 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint32_t)arg0 != (uint32_t)0U) && (uint8_t)((uint32_t)arg1 != (uint32_t)0U)) {
             rax_3 = 1;
@@ -833,7 +833,7 @@ uint64_t inverted_guard(uint32_t arg0)
     uint64_t rax_5;
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 8 statements rendered; 2 data object types refused */
+    /* r2dec proof: no individual construct is marked; 21 source obligations: 14 rendered, 7 elided, 0 refused; 8 statements rendered; 2 data object types refused; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)9U)) {
             rax_7 = (uint64_t)0xffffffffU;
@@ -864,7 +864,7 @@ r2sleigh_result_u32 and_chain_effect(uint32_t arg0, uint32_t arg1)
     uint32_t tmp_lane_401611_6_0_1;
     uint64_t rax_3;
 
-    /* r2dec proof: 2 constructs are marked below; 20 source obligations: 11 rendered, 8 elided, 0 refused, no call reads the result (assuming closed-world), 1 residual; 8 statements rendered; 1 held from entry, read as residuals (RAX_0); 1 data object type refused; the result is unproven (Unread): 1 unproven-return carried */
+    /* r2dec proof: 2 constructs are marked below; 20 source obligations: 11 rendered, 8 elided, 0 refused, 1 residual; 8 statements rendered; 1 held from entry, read as residuals (RAX_0); 1 data object type refused; no call reads the result (assuming closed-world); the result is unproven (Unread): 1 unproven-return carried */
     {
         if ((uint8_t)((uint32_t)arg0 == (uint32_t)0U)) {
             rax_3 = r2sleigh_residual_u64(1);
@@ -899,7 +899,7 @@ r2sleigh_result_u32 inverted_void(uint32_t arg0)
 
     uint64_t rax_4;
 
-    /* r2dec proof: 1 construct is marked below; 19 source obligations: 10 rendered, 8 elided, 0 refused, no call reads the result (assuming closed-world), 1 residual; 7 statements rendered; 1 held from entry, read as residuals (RAX_0); 2 data object types refused; the result is unproven (Unread): 2 unproven-return carried */
+    /* r2dec proof: 1 construct is marked below; 19 source obligations: 10 rendered, 8 elided, 0 refused, 1 residual; 7 statements rendered; 1 held from entry, read as residuals (RAX_0); 2 data object types refused; no call reads the result (assuming closed-world); the result is unproven (Unread): 2 unproven-return carried */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)9U)) {
             rax_4 = r2sleigh_residual_u64(1);
@@ -927,7 +927,7 @@ uint64_t inverted_goto(uint32_t arg0)
     extern char g_sink[];
     extern char g_note[];
 
-    /* r2dec proof: no individual construct is marked; 19 source obligations: 11 rendered, 8 elided, 0 refused, a call reads the result (assuming closed-world); 4 statements rendered; 2 data object types refused */
+    /* r2dec proof: no individual construct is marked; 19 source obligations: 11 rendered, 8 elided, 0 refused; 4 statements rendered; 2 data object types refused; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)9U)) {
         } else {
@@ -954,7 +954,7 @@ uint64_t tail_guard(uint32_t arg0)
     extern char g_sink[];
     extern char g_note[];
 
-    /* r2dec proof: no individual construct is marked; 18 source obligations: 11 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 4 statements rendered; 2 data object types refused */
+    /* r2dec proof: no individual construct is marked; 18 source obligations: 11 rendered, 7 elided, 0 refused; 4 statements rendered; 2 data object types refused; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)9U)) {
         } else {
@@ -978,7 +978,7 @@ CMDS=aa; pdd @ 0x004016ac
 EXPECT=<<EOF
 uint32_t addr_chain(void)
 {
-    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
         return 1;
     }
@@ -1001,7 +1001,7 @@ uint32_t typed_compete(uint32_t arg0)
     uint64_t rax_4;
     uint32_t tmp_lane_401705_0_0_1;
 
-    /* r2dec proof: no individual construct is marked; 18 source obligations: 11 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 5 statements rendered; 2 data object types refused */
+    /* r2dec proof: no individual construct is marked; 18 source obligations: 11 rendered, 7 elided, 0 refused; 5 statements rendered; 2 data object types refused; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u32((void*)&g_sink, (uint32_t)arg0);
         r2sleigh_store_u64((void*)&g_note, (uint64_t)(int32_t)arg0);
@@ -1026,7 +1026,7 @@ uint64_t bool_relay(uint32_t arg0, uint32_t arg1)
     uint32_t tmp_lane_401731_0_1_1;
     uint64_t rax_8;
 
-    /* r2dec proof: no individual construct is marked; 32 source obligations: 25 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 10 statements rendered */
+    /* r2dec proof: no individual construct is marked; 32 source obligations: 25 rendered, 7 elided, 0 refused; 10 statements rendered; a call reads the result (assuming closed-world) */
     {
         tmp_lane_401724_0_1_1 = (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg0);
         tmp_lane_401731_0_1_1 = (uint32_t)(uint8_t)((int32_t)0U < (int32_t)arg1);
@@ -1239,7 +1239,7 @@ CMDS=aa; pdd @ 0x00401b6c
 EXPECT=<<EOF
 r2sleigh_result_u64 _fini(void)
 {
-    /* r2dec proof: 1 construct is marked below; 8 source obligations: 0 rendered, 6 elided, 0 refused, 2 residual; 1 statements rendered; the result is unproven (EntryInput): 0 unproven-return carried */
+    /* r2dec proof: 1 construct is marked below; 8 source obligations: 0 rendered, 6 elided, 0 refused, 2 residual; 1 statements rendered; the result is unproven (EntryInput): 0 unproven-return carried, 1 unproven-return residual */
     {
         return r2sleigh_residual_u64(1);
     }

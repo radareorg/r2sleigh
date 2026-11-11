@@ -182,7 +182,7 @@ r2sleigh_result_u64 entry_fini0(void)
     uint64_t tmp_116e_0_1;
     uint64_t rdi_1;
 
-    /* r2dec proof: 4 constructs are marked below; 42 source obligations: 16 rendered, 17 elided, 0 refused, 9 residual; 9 statements rendered; 1 never assigned, read as residuals (RAX_2); 1 callee prototype supplied by the source; the parameters are a floor: at least 0 (a register past them reaches the call to 0x10f0); the result is unproven (Written): 0 unproven-return carried */
+    /* r2dec proof: 4 constructs are marked below; 42 source obligations: 16 rendered, 17 elided, 0 refused, 9 residual; 9 statements rendered; 1 never assigned, read as residuals (RAX_2); 1 callee prototype supplied by the source; the parameters are a floor: at least 0 (a register past them reaches the call to 0x10f0); the result is unproven (Written): 0 unproven-return carried, 2 unproven-return residual */
     {
         tmp_1164_0_1 = r2sleigh_load_u8((void*)(uint64_t)0x4020U);
         if ((uint8_t)((uint8_t)tmp_1164_0_1 != (uint8_t)0U)) {
@@ -239,7 +239,7 @@ CMDS=aa; pdd @ 0x000011a9
 EXPECT=<<EOF
 uint32_t fcn_11a9(uint32_t arg0, uint32_t arg1)
 {
-    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
         return (uint32_t)((uint32_t)arg1 + (uint32_t)arg0);
     }
@@ -260,7 +260,7 @@ uint32_t fcn_11c1(uint32_t* arg0, uint32_t arg1)
     uint32_t stack_m12_1;
     uint32_t tmp_11f4_0_1;
 
-    /* r2dec proof: no individual construct is marked; 31 source obligations: 24 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 7 statements rendered */
+    /* r2dec proof: no individual construct is marked; 31 source obligations: 24 rendered, 7 elided, 0 refused; 7 statements rendered; a call reads the result (assuming closed-world) */
     {
         stack_m16_1 = 0;
         stack_m12_1 = 0;
@@ -288,7 +288,7 @@ uint64_t fcn_120a(uint32_t arg0)
 {
     uint64_t rax_14;
 
-    /* r2dec proof: no individual construct is marked; 38 source obligations: 22 rendered, 16 elided, 0 refused, a call reads the result (assuming closed-world); 18 statements rendered */
+    /* r2dec proof: no individual construct is marked; 38 source obligations: 22 rendered, 16 elided, 0 refused; 18 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint32_t)7U < (uint32_t)arg0)) {
         } else {
@@ -356,7 +356,7 @@ uint32_t fcn_1277(uint64_t arg0)
     uint32_t stack_m12_1;
     uint64_t tmp_1294_8_1;
 
-    /* r2dec proof: no individual construct is marked; 28 source obligations: 21 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 7 statements rendered */
+    /* r2dec proof: no individual construct is marked; 28 source obligations: 21 rendered, 7 elided, 0 refused; 7 statements rendered; a call reads the result (assuming closed-world) */
     {
         stack_m32_1 = arg0;
         stack_m12_1 = 0;
@@ -403,7 +403,7 @@ uint64_t fcn_12a8(uint64_t arg0, uint64_t arg1)
     uint64_t rdx_5;
     uint64_t rax_10;
 
-    /* r2dec proof: 2 constructs are marked below; 41 source obligations: 31 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world), 3 residual; 26 statements rendered */
+    /* r2dec proof: 2 constructs are marked below; 41 source obligations: 31 rendered, 7 elided, 0 refused, 3 residual; 26 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 != (uint64_t)0U)) {
             rax_4 = (uint64_t)((uint64_t)((uint64_t)arg0 * (uint64_t)8U) - (uint64_t)arg0);
@@ -455,7 +455,7 @@ double fcn_12ef(uint64_t* arg0, uint32_t arg1)
     uint64_t tmp_1324_0_1;
     double tmp_lane_132d_0_2_1;
 
-    /* r2dec proof: no individual construct is marked; 41 source obligations: 34 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 14 statements rendered */
+    /* r2dec proof: no individual construct is marked; 41 source obligations: 34 rendered, 7 elided, 0 refused; 14 statements rendered; a call reads the result (assuming closed-world) */
     {
         stack_m20_1 = 0;
         stack_m16_1 = 0;
@@ -493,7 +493,7 @@ uint64_t fcn_1362(uint32_t arg0)
     uint64_t rax_3;
     uint64_t rax_6;
 
-    /* r2dec proof: no individual construct is marked; 29 source obligations: 19 rendered, 10 elided, 0 refused, a call reads the result (assuming closed-world); 6 statements rendered */
+    /* r2dec proof: no individual construct is marked; 29 source obligations: 19 rendered, 10 elided, 0 refused; 6 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)1U)) {
             rax_6 = 1;
@@ -555,7 +555,7 @@ uint64_t fcn_13e3(uint8_t* arg0, uint64_t arg1, uint64_t arg2)
     uint64_t stack_m16_2;
     uint64_t stack_m16_1;
 
-    /* r2dec proof: no individual construct is marked; 39 source obligations: 26 rendered, 13 elided, 0 refused, a call reads the result (assuming closed-world); 6 statements rendered; 2 callee prototypes supplied by the source */
+    /* r2dec proof: no individual construct is marked; 39 source obligations: 26 rendered, 13 elided, 0 refused; 6 statements rendered; 2 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
     {
         rax_2 = strlen((const char*)arg1);
         stack_m16_2 = rax_2;
@@ -583,7 +583,7 @@ uint32_t fcn_144c(uint32_t arg0)
     uint16_t tmp_lane_1459_2_0_1;
     uint64_t rax_2;
 
-    /* r2dec proof: no individual construct is marked; 17 source obligations: 10 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 4 statements rendered */
+    /* r2dec proof: no individual construct is marked; 17 source obligations: 10 rendered, 7 elided, 0 refused; 4 statements rendered; a call reads the result (assuming closed-world) */
     {
         rax_1 = (uint64_t)(uint32_t)arg0;
         tmp_lane_1459_2_0_1 = (uint16_t)(int8_t)((uint32_t)arg0 >> 0U);
@@ -605,7 +605,7 @@ uint32_t fcn_146d(uint32_t arg0, uint8_t arg1)
 {
     uint8_t tmp_1483_0_1;
 
-    /* r2dec proof: no individual construct is marked; 17 source obligations: 10 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 17 source obligations: 10 rendered, 7 elided, 0 refused; 2 statements rendered; a call reads the result (assuming closed-world) */
     {
         tmp_1483_0_1 = (uint8_t)((uint32_t)arg1 & (uint32_t)(uint8_t)31U);
         return (uint32_t)((uint32_t)((uint32_t)tmp_1483_0_1 >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)arg0 << (uint32_t)tmp_1483_0_1)) | (uint32_t)((uint32_t)(uint8_t)((uint32_t)(uint8_t)32U - (uint32_t)tmp_1483_0_1) >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)arg0 >> (uint32_t)(uint8_t)((uint32_t)(uint8_t)32U - (uint32_t)tmp_1483_0_1))));
@@ -626,7 +626,7 @@ uint32_t fcn_1489(uint32_t arg0)
     uint32_t stack_m28_1;
     uint32_t stack_m12_1;
 
-    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused, a call reads the result (assuming closed-world); 6 statements rendered */
+    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused; 6 statements rendered; a call reads the result (assuming closed-world) */
     {
         stack_m28_1 = arg0;
         stack_m12_1 = 0;
@@ -656,7 +656,7 @@ uint64_t fcn_14b5(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
     uint32_t tmp_1504_0_1;
     uint64_t rax_14;
 
-    /* r2dec proof: no individual construct is marked; 45 source obligations: 37 rendered, 8 elided, 0 refused, a call reads the result (assuming closed-world); 13 statements rendered */
+    /* r2dec proof: no individual construct is marked; 45 source obligations: 37 rendered, 8 elided, 0 refused; 13 statements rendered; a call reads the result (assuming closed-world) */
     {
         stack_m12_1 = 0;
         while ((uint8_t)((int32_t)stack_m12_1 < (int32_t)arg1)) {
@@ -692,7 +692,7 @@ CMDS=aa; pdd @ 0x00001521
 EXPECT=<<EOF
 r2sleigh_result_u64 fcn_1521(uint64_t arg0, uint32_t arg1)
 {
-    /* r2dec proof: 2 constructs are marked below; 24 source obligations: 0 rendered, 10 elided, 0 refused, 14 residual; 1 statements rendered; the result is unproven (Written): 0 unproven-return carried */
+    /* r2dec proof: 2 constructs are marked below; 24 source obligations: 0 rendered, 10 elided, 0 refused, 14 residual; 1 statements rendered; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
     {
         r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1521:51 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
         return r2sleigh_residual_u64(2);
@@ -865,7 +865,7 @@ CMDS=aa; pdd @ 0x000017cc
 EXPECT=<<EOF
 r2sleigh_result_u64 fcn_17cc(void)
 {
-    /* r2dec proof: 1 construct is marked below; 8 source obligations: 0 rendered, 6 elided, 0 refused, 2 residual; 1 statements rendered; the result is unproven (EntryInput): 0 unproven-return carried */
+    /* r2dec proof: 1 construct is marked below; 8 source obligations: 0 rendered, 6 elided, 0 refused, 2 residual; 1 statements rendered; the result is unproven (EntryInput): 0 unproven-return carried, 1 unproven-return residual */
     {
         return r2sleigh_residual_u64(1);
     }

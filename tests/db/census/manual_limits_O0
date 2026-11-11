@@ -34,7 +34,7 @@ uint32_t _struct_nested_array(void* arg0, uint32_t arg1, uint32_t arg2)
     uint16_t tmp_1000005bc_8_1;
     uint32_t stack_m4_1;
 
-    /* r2dec proof: no individual construct is marked; 47 source obligations: 44 rendered, 3 elided, 0 refused, a call reads the result (assuming closed-world); 13 statements rendered */
+    /* r2dec proof: no individual construct is marked; 47 source obligations: 44 rendered, 3 elided, 0 refused; 13 statements rendered; a call reads the result (assuming closed-world) */
     {
         tmp_100000568_8_1 = (uint64_t)((uint64_t)((uint64_t)(int32_t)arg1 * (uint64_t)40U) + (uint64_t)arg0);
         tmp_100000578_8_1 = r2sleigh_load_u32((void*)((uint64_t)tmp_100000568_8_1 + (uint64_t)4U * 4U));
@@ -91,7 +91,7 @@ uint32_t _out_param_parse(uint8_t* arg0, struct fcn_1000005d8_arg1* arg1)
     uint8_t tmp_100000738_18_1;
     uint32_t stack_m56_1;
 
-    /* r2dec proof: no individual construct is marked; 116 source obligations: 113 rendered, 3 elided, 0 refused, a call reads the result (assuming closed-world); 33 statements rendered; 1 structure laid out from a parameter's accesses */
+    /* r2dec proof: no individual construct is marked; 116 source obligations: 113 rendered, 3 elided, 0 refused; 33 statements rendered; a call reads the result (assuming closed-world); 1 structure laid out from a parameter's accesses */
     {
         tmp_10000060c_8_1 = r2sleigh_load_u8((void*)(uint64_t)arg0);
         if ((uint8_t)((uint32_t)(int8_t)tmp_10000060c_8_1 != (uint32_t)45U)) {
@@ -174,7 +174,7 @@ uint64_t _fnv_fold(uint8_t* arg0, uint64_t arg1)
     uint8_t stack_m33_1;
     uint64_t stack_m24_4;
 
-    /* r2dec proof: no individual construct is marked; 60 source obligations: 57 rendered, 3 elided, 0 refused, a call reads the result (assuming closed-world); 14 statements rendered */
+    /* r2dec proof: no individual construct is marked; 60 source obligations: 57 rendered, 3 elided, 0 refused; 14 statements rendered; a call reads the result (assuming closed-world) */
     {
         stack_m32_1 = 0;
         stack_m24_1 = (uint64_t)0x14650fb0739d0383U;
@@ -227,7 +227,7 @@ uint32_t _sparse_switch(uint32_t arg0, uint32_t arg1, uint32_t arg2)
     uint32_t stack_m24_1;
     uint32_t stack_m4_1;
 
-    /* r2dec proof: 1 construct is marked below; 64 source obligations: 59 rendered, 3 elided, 0 refused, a call reads the result (assuming closed-world), 2 residual; 23 statements rendered */
+    /* r2dec proof: 1 construct is marked below; 64 source obligations: 59 rendered, 3 elided, 0 refused, 2 residual; 23 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint32_t)((uint32_t)arg0 + (uint32_t)7U) == (uint32_t)0U)) {
             stack_m4_1 = (uint32_t)((uint32_t)arg1 - (uint32_t)arg2);
@@ -310,7 +310,7 @@ uint32_t _table_walk(uint64_t arg0, uint8_t* arg1)
     uint64_t x8_30;
     uint32_t stack_m4_1;
 
-    /* r2dec proof: no individual construct is marked; 120 source obligations: 117 rendered, 3 elided, 0 refused, a call reads the result (assuming closed-world); 37 statements rendered */
+    /* r2dec proof: no individual construct is marked; 120 source obligations: 117 rendered, 3 elided, 0 refused; 37 statements rendered; a call reads the result (assuming closed-world) */
     {
         stack_m40_1 = arg0;
         stack_m28_1 = 0;
@@ -427,7 +427,7 @@ uint32_t _state_machine(uint8_t* arg0)
     uint32_t stack_m20_7;
     uint32_t stack_m4_1;
 
-    /* r2dec proof: no individual construct is marked; 216 source obligations: 213 rendered, 3 elided, 0 refused, a call reads the result (assuming closed-world); 77 statements rendered */
+    /* r2dec proof: no individual construct is marked; 216 source obligations: 213 rendered, 3 elided, 0 refused; 77 statements rendered; a call reads the result (assuming closed-world) */
     {
         stack_m32_1 = 0;
         stack_m24_1 = 0;
@@ -624,7 +624,7 @@ uint64_t _mem_scan2(uint8_t* arg0, uint64_t arg1, uint8_t arg2, uint8_t arg3)
     uint8_t tmp_100000d8c_8_1;
     uint64_t stack_m32_2;
 
-    /* r2dec proof: no individual construct is marked; 49 source obligations: 46 rendered, 3 elided, 0 refused, a call reads the result (assuming closed-world); 12 statements rendered */
+    /* r2dec proof: no individual construct is marked; 49 source obligations: 46 rendered, 3 elided, 0 refused; 12 statements rendered; a call reads the result (assuming closed-world) */
     {
         stack_m40_1 = 0;
         stack_m32_1 = 0;

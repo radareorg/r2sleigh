@@ -1008,3 +1008,16 @@ Gates, release r2s, base `505319748`:
   - The counting builds' heap peak is 131.4 MB on every run of both.
   - No thread is spawned. RSS varies by up to 30 MB from run to run at one heap peak, and the gate takes the largest of 5 runs. No retained allocation was found.
 - Dylint: 8 warnings, the baseline. Structure counts do not rise.
+
+## S21 as built (2026-11-11)
+
+The proof line now counts what the text shows (D233, D234). Both changes are in r2dec's proof line, and no C moves.
+
+- D233: "the result is unproven (CAUSE): N unproven-return carried" counted only returns wrapped in `r2sleigh_carrier_uN`. A return whose value holds a residual is never wrapped (`carry`), so `_fini`'s `return r2sleigh_residual_u64(1)` stood beside "0 unproven-return carried". `prelude::unproven_returns` now counts each `return` statement of the body once: carried, where the value is the carrier call; residual, where the value holds a residual of any cause. The clause adds ", M unproven-return residual" where M is not zero. The fact is the returned expression itself, the one the text prints. The statement walk is one pass, `O(statements)`. `count_gaps` reads the same walker.
+- D234: the closed-world premise left the obligation list. "a call reads the result", "no call reads the result" and "a call returns the result on through a cycle", each "(assuming closed-world)", is now a `;` clause after the parameter floor and before the result's own clauses. It is printed wherever the ledger holds `Premise::ClosedWorld`. The old line printed it only beside a non-empty obligation list; no census line gains the clause.
+
+Gates, debug r2s on `s10-win64` `505319748`, census rerun on `d8487d42d` and `052de86bc` (`f26030869` drops one trace):
+
+- Census: 14 goldens, 157 line pairs, proof lines only. 130 move the premise clause (119 "a call reads", 11 "no call reads"). 29 gain "1 unproven-return residual" (23) or "2 unproven-return residual" (6). Two lines take both. A script applied both transforms to the base goldens and matched the re-record in every line. Each residual count equals the `return ... r2sleigh_residual_uN(...)` lines below it, counting the casted `(uint64_t)r2sleigh_residual_u64(4)` in `__do_global_dtors_aux`. The one line left at "0 unproven-return carried" is rv_O2 `dispatch`, "no return reached", which holds no return.
+- Engine: `a_closed_world_read_states_its_premise_and_a_cold_render_stays_unproven` asserts "; a call reads the result (assuming closed-world)" and no "refused, a call". `an_aarch64_keep_is_never_void` asserts "0 unproven-return carried, 1 unproven-return residual" beside `return r2sleigh_residual_u64(1);`. Both fail on the old line.
+- Not run here: equivalence and certification. No C changes, so CI's runs grade them.

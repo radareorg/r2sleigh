@@ -45,10 +45,12 @@ fn a_closed_world_read_states_its_premise_and_a_cold_render_stays_unproven() {
     );
     let text = analysed.response.output.into_text();
     assert!(text.starts_with("uint64_t f("), "{text}");
+    // The premise is its own clause, never a column of the obligation list (D234).
     assert!(
-        text.contains("a call reads the result (assuming closed-world)"),
+        text.contains("; a call reads the result (assuming closed-world)"),
         "{text}"
     );
+    assert!(!text.contains("refused, a call"), "{text}");
     assert!(!text.contains("no call reads the result"), "{text}");
 }
 
@@ -76,6 +78,12 @@ fn an_aarch64_keep_is_never_void() {
     let text = cold.response.output.into_text();
     assert!(!text.starts_with("void keep("), "{text}");
     assert!(text.contains("EntryInput"), "{text}");
+    // The return the text shows as a residual is counted, never "0 carried" alone (D233).
+    assert!(text.contains("return r2sleigh_residual_u64(1);"), "{text}");
+    assert!(
+        text.contains("0 unproven-return carried, 1 unproven-return residual"),
+        "{text}"
+    );
     let mut open = OpenProgram::of(program());
     open.analyse_program().expect("it surveys");
     let text = open
