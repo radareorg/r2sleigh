@@ -967,19 +967,44 @@ On S7b (`60208afbd`, 2026-11-11):
 
 ## D217 as built (2026-11-11)
 
-Slot promotion carried a frame address stored into an outgoing stack-argument slot to that slot's loads, as if only this function read it. The callee reads the slot, so the address escapes.
+Slot promotion carried a frame address stored into an outgoing stack-argument slot to that slot's loads, as if only this function read it. The callee reads the slot, so the address escapes. The rule listed escapes and allowed the rest, so each new way out (a stack argument here, a `StoreConditional` or `BlockTransfer` operand before) was a silent promotion. The fix inverts it.
 
-- Owner: `r2ssa` slot promotion (`StackArguments`). One dominator-tree walk carries the stack pointer to each call: `O(B + ops)`. Each classification round reads the slots each call takes: `O(calls x slots)`.
-- The slots a call reads are the boundary's: a complete call-site interface's stack slots; a callee statement's exact count past the registers; otherwise the run of slots this function stores to, from the first. The coordinates are the boundary's too: from the pointer a `CallRestore` records, or from the callee's pointer past what the transfer spends.
-- An address stored into such a slot escapes, and the slot keeps its store, so `FrameReach` still sees the address leave. A slot holding only a value still promotes, and the boundary reads its version.
-- A call at a pointer no offset places, or under no convention, may read any slot: every stored address escapes there.
-- Tests: `a_local_passed_as_the_fifth_argument_stays_in_memory` (Microsoft x64) and `a_local_passed_as_the_seventh_argument_stays_in_memory` (SysV) store 5 into a local, pass its address only through the stack slot, and read the local after the call. At base both print `return r2sleigh_carrier_u32(5)`, where the callee writes 9. At head the store stands before the call and the load after it.
-- The `va_list` fixture keeps all four homes and the outgoing slot in memory. `print_line` stores `arg0` into home 0 and reloads it for the format. The three tail homes are the save area of `...`, so the proof elides them, and the call stays a residual, since `&home[1]` has no C spelling. `a_home_handed_on_as_a_cited_va_list_is_a_variadic_tail` now asserts the home-0 store.
+The predicate, owned by `r2ssa` slot promotion (`Classifier::read`): a frame object is promoted only where every use of its address is proven local. A use is local when it is one of these:
+
+- a load or store through the address;
+- a value operation (`SSAOp::value_use` is not `Consumes`): copies and address arithmetic carry the point, a test yields a flag that carries nothing, and anything else makes a number whose own uses decide;
+- the condition of a branch;
+- the stored value of a store into a promoted place that no call's argument area holds.
+
+Every other use escapes the address and keeps the object in memory:
+
+- a register handed to a call (`CallUse`), unless the callee is proven to reach only upward;
+- a store into a place a call may read;
+- a return, a transfer target, an intrinsic;
+- any operation the list does not name: atomics, guarded or linked accesses, block transfers.
+
+The stack a call may read is one fact with one owner, `SourceMachineContext::call_argument_area`. `FrameReach` reads it as well.
+
+- The area is the space the convention reserves for the callee, plus the slots a complete, non-variadic call-site interface places.
+- Without such an interface, the call may read every place from its stack pointer up to the entry pointer. Its arguments lie in this frame, below the return address. `FrameReach` reads the same `None` as `Whole`.
+- Above the entry pointer, this function's own homes and stack parameters are no call's arguments. testapp `0x140007ff4` stores a `sete` byte into home 1, and RAX held `rsp` before the byte was inserted. The store made a number from a frame address, in a place no call reads.
+- The coordinates are the boundary's: from the pointer a `CallRestore` records, else the reaching pointer past what the transfer spends. One dominator-tree walk carries the pointer to each call, `O(B + ops)`. Each classification round tests the stored places against each call's area, `O(calls x stored places)`.
+- A call at a pointer no offset places may read any place.
+- A place holding an address a call may read keeps its store, so `FrameReach` still sees the address leave. A place holding only a value still promotes, and the boundary reads its version.
+
+Tests:
+
+- `a_local_passed_as_the_fifth_argument_stays_in_memory` (Microsoft x64) and `a_local_passed_as_the_seventh_argument_stays_in_memory` (SysV) store 5 into a local and pass its address only through the stack slot. Every argument register holds 0. Each reads the local after the call. At base both print `return r2sleigh_carrier_u32(5)`, where the callee writes 9. At head the store stands before the call and the load after it.
+- The `va_list` fixture keeps all four homes and the outgoing slot in memory. `print_line` stores `arg0` into home 0 and reloads it for the format. The three tail homes are the save area of `...`, so the proof elides them. The call stays a residual, since `&home[1]` has no C spelling. `a_home_handed_on_as_a_cited_va_list_is_a_variadic_tail` now asserts the home-0 store.
 
 Gates, release r2s, base `505319748`:
 
 - Census: 444 goldens pass, 0 lines move. Touched crates' tests: 1,488 pass (r2ssa, r2engine).
-- hello_gs 0 of 259 and testapp 0 of 181 functions move in `aa; pdd`. hello_gs `0x140001040` passes `arg3` as its fifth argument through `[rsp+0x20]`, a value, so its rendering is unchanged.
+- hello_gs 0 of 259 and testapp 0 of 181 functions move in `aa; pdd`. hello_gs `0x140001040` passes `arg3` as its fifth argument through `[rsp+0x20]`. That is a value, so its rendering is unchanged.
 - Certification, radare2 `test/bins/elf --limit 24 --functions 8`: base and head print 50 rendered, 30 refused, 0 invented, 0 dropped. Coverage: 560 of 562 rendered, no regressions.
-- Cost, instructions retired, median of three, base then head: cold `pdd` on pumasim `0x23fdf0` 19.88 to 19.92 G (+0.2%), 0pack `0x62ecf0` 15.396 to 15.404 G (+0.05%), output identical. Peak footprint moves within run-to-run noise.
-- Dylint: 8 warnings, the baseline.
+- Cost, instructions retired, median of three, base then head: cold `pdd` on pumasim `0x23fdf0` 19.87 to 19.92 G (+0.2%), 0pack `0x62ecf0` 15.38 to 15.43 G (+0.4%), output identical. Peak footprint is flat on the Mac: 0pack 228 to 232 MB at S7b `60208afbd`, S10 and head, over 7 runs each.
+- #360's Timing vs Base read 0pack `0x62ecf0` RSS 250 to 281 MB and 257 to 284 MB. On one Linux host, CI's own `r2s` artifacts give these numbers:
+  - Over 30 interleaved runs each, S7b reads 219 to 231 MB (median 225) and head 218 to 231 MB (median 226).
+  - The counting builds' heap peak is 131.4 MB on every run of both.
+  - No thread is spawned. RSS varies by up to 30 MB from run to run at one heap peak, and the gate takes the largest of 5 runs. No retained allocation was found.
+- Dylint: 8 warnings, the baseline. Structure counts do not rise.

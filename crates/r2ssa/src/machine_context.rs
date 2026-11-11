@@ -1290,6 +1290,26 @@ impl SourceMachineContext {
         &self.call_site_interfaces
     }
 
+    /// The stack a call may read, as ranges from its stack pointer before the transfer; none where
+    /// nothing bounds it (doc/adr-call-boundary.md, "D217 as built").
+    pub fn call_argument_area(&self, instruction: Option<u64>) -> Option<Vec<(i64, i64)>> {
+        let interface = instruction
+            .and_then(|instruction| self.raw_call_site_at(instruction))
+            .and_then(|identity| self.call_site_interface(identity))
+            .filter(|interface| interface.is_complete() && !interface.is_variadic())?;
+        let reserved = (self.convention_slots())
+            .and_then(r2source::SourceConventionSlots::stack_arguments)
+            .map_or(0, |placement| placement.first_offset().max(0));
+        let slots =
+            (interface.arguments().iter()).filter_map(|argument| match argument.location() {
+                r2source::SourceParameterLocation::Stack {
+                    offset, size_bytes, ..
+                } => Some((offset, offset.saturating_add(i64::from(size_bytes)))),
+                r2source::SourceParameterLocation::Register(_) => None,
+            });
+        Some(std::iter::once((0, reserved)).chain(slots).collect())
+    }
+
     pub fn call_site_interface(
         &self,
         identity: SourceCallSiteIdentity,
