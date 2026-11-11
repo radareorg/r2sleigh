@@ -419,7 +419,7 @@
   "tests/corpus/branchy.c::aarch64-gcc-O1::and_chain_effect": {
    "cause": "One-call minimum (D314, doc/adr-result-side.md section 3): nothing in the program calls `and_chain_effect`, which the harness reaches by its address, so no call decides its result and it keeps the open read's EntryInput: the source is void, the entry lane is handed back, and the return is a counted residual that traps where it would be read. D213's closed-world void here rested on no call at all, which the ADR rejects (\"A closed-world Void for a function nothing calls\"). A declaration states it.",
    "compared": "memory",
-   "owner": "D314",
+   "owner": "P7",
    "reason": "r2sleigh_residual_u64 unproven-return",
    "site": "crates/r2engine/src/program/fates.rs",
    "status": "residual-trap"
@@ -523,7 +523,7 @@
   "tests/corpus/branchy.c::aarch64-gcc-O2::and_chain_effect": {
    "cause": "One-call minimum (D314, doc/adr-result-side.md section 3): nothing in the program calls `and_chain_effect`, which the harness reaches by its address, so no call decides its result and it keeps the open read's EntryInput: the source is void, the entry lane is handed back, and the return is a counted residual that traps where it would be read. D213's closed-world void here rested on no call at all, which the ADR rejects (\"A closed-world Void for a function nothing calls\"). A declaration states it.",
    "compared": "memory",
-   "owner": "D314",
+   "owner": "P7",
    "reason": "r2sleigh_residual_u64 unproven-return",
    "site": "crates/r2engine/src/program/fates.rs",
    "status": "residual-trap"
@@ -1917,7 +1917,7 @@
   "tests/gold/atomics.c::aarch64-clang-O0::total_add": {
    "cause": "One-call minimum (D314, doc/adr-result-side.md section 3): nothing in the program calls `total_add`, which the harness reaches by its address, so no call decides its result and it keeps the open read's EntryInput: the source is void, the entry lane is handed back, and the return is a counted residual that traps where it would be read. D213's closed-world void here rested on no call at all, which the ADR rejects (\"A closed-world Void for a function nothing calls\"). A declaration states it.",
    "compared": "memory",
-   "owner": "D314",
+   "owner": "P7",
    "reason": "r2sleigh_residual_u64 unproven-return",
    "site": "crates/r2engine/src/program/fates.rs",
    "status": "residual-trap"
@@ -1952,7 +1952,7 @@
   "tests/gold/atomics.c::aarch64-clang-O1::total_add": {
    "cause": "One-call minimum (D314, doc/adr-result-side.md section 3): nothing in the program calls `total_add`, which the harness reaches by its address, so no call decides its result and it keeps the open read's EntryInput: the source is void, the entry lane is handed back, and the return is a counted residual that traps where it would be read. D213's closed-world void here rested on no call at all, which the ADR rejects (\"A closed-world Void for a function nothing calls\"). A declaration states it.",
    "compared": "memory",
-   "owner": "D314",
+   "owner": "P7",
    "reason": "r2sleigh_residual_u64 unproven-return",
    "site": "crates/r2engine/src/program/fates.rs",
    "status": "residual-trap"
@@ -1987,7 +1987,7 @@
   "tests/gold/atomics.c::aarch64-clang-O2::total_add": {
    "cause": "One-call minimum (D314, doc/adr-result-side.md section 3): nothing in the program calls `total_add`, which the harness reaches by its address, so no call decides its result and it keeps the open read's EntryInput: the source is void, the entry lane is handed back, and the return is a counted residual that traps where it would be read. D213's closed-world void here rested on no call at all, which the ADR rejects (\"A closed-world Void for a function nothing calls\"). A declaration states it.",
    "compared": "memory",
-   "owner": "D314",
+   "owner": "P7",
    "reason": "r2sleigh_residual_u64 unproven-return",
    "site": "crates/r2engine/src/program/fates.rs",
    "status": "residual-trap"
@@ -2052,7 +2052,7 @@
   "tests/gold/atomics.c::aarch64-gcc-O1::total_add": {
    "cause": "One-call minimum (D314, doc/adr-result-side.md section 3): nothing in the program calls `total_add`, which the harness reaches by its address, so no call decides its result and it keeps the open read's EntryInput: the source is void, the entry lane is handed back, and the return is a counted residual that traps where it would be read. D213's closed-world void here rested on no call at all, which the ADR rejects (\"A closed-world Void for a function nothing calls\"). A declaration states it.",
    "compared": "memory",
-   "owner": "D314",
+   "owner": "P7",
    "reason": "r2sleigh_residual_u64 unproven-return",
    "site": "crates/r2engine/src/program/fates.rs",
    "status": "residual-trap"
@@ -2087,7 +2087,7 @@
   "tests/gold/atomics.c::aarch64-gcc-O2::total_add": {
    "cause": "One-call minimum (D314, doc/adr-result-side.md section 3): nothing in the program calls `total_add`, which the harness reaches by its address, so no call decides its result and it keeps the open read's EntryInput: the source is void, the entry lane is handed back, and the return is a counted residual that traps where it would be read. D213's closed-world void here rested on no call at all, which the ADR rejects (\"A closed-world Void for a function nothing calls\"). A declaration states it.",
    "compared": "memory",
-   "owner": "D314",
+   "owner": "P7",
    "reason": "r2sleigh_residual_u64 unproven-return",
    "site": "crates/r2engine/src/program/fates.rs",
    "status": "residual-trap"
