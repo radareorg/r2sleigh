@@ -678,8 +678,11 @@ mod tests {
     #[test]
     fn only_a_cited_row_states_its_tail() {
         let glibc = LibraryRows::embedded(CLibrary::Glibc);
+        let gettext = (glibc.row(LibraryId::Portable, "dcgettext")).expect("dcgettext");
+        assert_eq!((gettext.tail, &*gettext.citation), (Tail::Unstated, ""));
         let puts = glibc.row(LibraryId::Portable, "puts").expect("puts");
-        assert_eq!((puts.tail, &*puts.citation), (Tail::Unstated, ""));
+        assert_eq!(puts.tail, Tail::None);
+        assert!(puts.citation.contains("ISO C17"), "{}", puts.citation);
         let printf = glibc.row(LibraryId::Portable, "printf").expect("printf");
         assert_eq!(printf.tail.printf_format(), Some(0));
         assert!(printf.citation.contains("ISO C17"), "{}", printf.citation);

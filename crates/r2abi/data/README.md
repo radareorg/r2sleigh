@@ -33,6 +33,8 @@ is a merge that keeps them rather than a copy that drops them.
 - `types-darwin.sdb.txt`: what Darwin's libSystem declares for itself.
 - `types-objc.sdb.txt`: what objc4's `libobjc.A.dylib` exports; read only for an import whose
   two-level namespace ordinal names that dylib.
+- `uncited-rows.txt`: why each row of `types.sdb.txt` and `types-linux.sdb.txt` is still
+  radare2's (see "Cited rows").
 - `void-rows.txt`: the source that states each `ret=void` row returns
   nothing, and the rows found spelled `void` that return a value.
   `scripts/audit_abi_rows.py` fails on an uncited `void` row (ROADMAP D204).
@@ -162,6 +164,14 @@ or `va_list(<index>)`, the index counting fixed parameters from zero. A row with
 (doc/adr-call-boundary.md, "Lower bounds and upper bounds"). `tests/cited_rows.rs` fails a cited
 row without its header, source or tail, a tail its prototype does not have, a `.tail=` in an
 uncited table, and a row declared in two tables.
+
+S18 (ROADMAP D242) moved 418 rows of `types.sdb.txt` and `types-linux.sdb.txt` that a glibc 2.39
+header declares into the cited tables, each respelled from the header's declaration under
+the mode its source names (`-std=c17`, `_POSIX_C_SOURCE=200809L`, `_XOPEN_SOURCE=700`,
+`_GNU_SOURCE`). A portable row keeps its scope in `types-posix.sdb.txt`, a glibc row in
+`types-glibc.sdb.txt`. `scripts/audit_abi_rows.py --cc gcc` compiles each cited row that names a
+header against it in CI; a row citing GCC's `builtins.def` is not compiled. `uncited-rows.txt`
+names each row left behind and why (61 of them glibc declares), and that list only falls.
 
 A Microsoft row states a handle its page names by what it refers to: `func.<name>.yields=current-process`
 where the result is the calling process's handle (`GetCurrentProcess`), and

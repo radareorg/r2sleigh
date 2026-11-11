@@ -459,3 +459,189 @@ func.__stack_chk_fail.args=0
 func.__stack_chk_fail.noreturn=true
 func.__stack_chk_fail.ret=void
 func.__stack_chk_fail.cite=LSB-Core-generic 5.0, libc: void __stack_chk_fail(void)
+
+# The rows below were radare2's glibc rows, or had no row, and are now read from glibc 2.39's
+# header under the mode their source names; `scripts/audit_abi_rows.py --cc gcc` compiles each
+# against it. An ISO C or POSIX function sits here, not in the portable table, where bionic's or
+# libSystem's table declares its own row: a scope states each name once.
+
+# signal.h: POSIX.1-2017.
+sigaction=func
+func.sigaction.args=3
+func.sigaction.arg.0=int,signum
+func.sigaction.arg.1=const struct sigaction *,act
+func.sigaction.arg.2=struct sigaction *,oldact
+func.sigaction.ret=int
+func.sigaction.include=signal.h
+
+
+# signal.h: glibc.
+ftruncate64=func
+func.ftruncate64.args=2
+func.ftruncate64.arg.0=int,fd
+func.ftruncate64.arg.1=off64_t,length
+func.ftruncate64.ret=int
+func.ftruncate64.include=signal.h
+
+lseek64=func
+func.lseek64.args=3
+func.lseek64.arg.0=int,fd
+func.lseek64.arg.1=off64_t,offset
+func.lseek64.arg.2=int,whence
+func.lseek64.ret=off64_t
+func.lseek64.include=signal.h
+
+pread64=func
+func.pread64.args=4
+func.pread64.arg.0=int,fd
+func.pread64.arg.1=void *,buf
+func.pread64.arg.2=size_t,nbytes
+func.pread64.arg.3=off64_t,offset
+func.pread64.ret=ssize_t
+func.pread64.include=signal.h
+
+pwrite64=func
+func.pwrite64.args=4
+func.pwrite64.arg.0=int,fd
+func.pwrite64.arg.1=const void *,buf
+func.pwrite64.arg.2=size_t,nbytes
+func.pwrite64.arg.3=off64_t,offset
+func.pwrite64.ret=ssize_t
+func.pwrite64.include=signal.h
+
+truncate64=func
+func.truncate64.args=2
+func.truncate64.arg.0=const char *,path
+func.truncate64.arg.1=off64_t,length
+func.truncate64.ret=int
+func.truncate64.include=signal.h
+
+
+# stdio.h: glibc.
+fopen64=func
+func.fopen64.args=2
+func.fopen64.arg.0=const char *,filename
+func.fopen64.arg.1=const char *,mode
+func.fopen64.ret=FILE *
+func.fopen64.include=stdio.h
+
+fseeko64=func
+func.fseeko64.args=3
+func.fseeko64.arg.0=FILE *,stream
+func.fseeko64.arg.1=off64_t,offset
+func.fseeko64.arg.2=int,whence
+func.fseeko64.ret=int
+func.fseeko64.include=stdio.h
+
+ftello64=func
+func.ftello64.args=1
+func.ftello64.arg.0=FILE *,stream
+func.ftello64.ret=off64_t
+func.ftello64.include=stdio.h
+
+
+# stdlib.h: ISO C17.
+_Exit=func
+func._Exit.args=1
+func._Exit.arg.0=int,status
+func._Exit.ret=void
+func._Exit.include=stdlib.h
+func._Exit.noreturn=true
+
+
+# sys/mman.h: glibc.
+mmap64=func
+func.mmap64.args=6
+func.mmap64.arg.0=void *,addr
+func.mmap64.arg.1=size_t,length
+func.mmap64.arg.2=int,prot
+func.mmap64.arg.3=int,flags
+func.mmap64.arg.4=int,fd
+func.mmap64.arg.5=off64_t,offset
+func.mmap64.ret=void *
+func.mmap64.include=sys/mman.h
+
+
+# sys/socket.h: POSIX.1-2017.
+getsockname=func
+func.getsockname.args=3
+func.getsockname.arg.0=int,sockfd
+func.getsockname.arg.1=struct sockaddr *,addr
+func.getsockname.arg.2=socklen_t *,addrlen
+func.getsockname.ret=int
+func.getsockname.include=sys/socket.h
+
+getsockopt=func
+func.getsockopt.args=5
+func.getsockopt.arg.0=int,sockfd
+func.getsockopt.arg.1=int,level
+func.getsockopt.arg.2=int,optname
+func.getsockopt.arg.3=void *,optval
+func.getsockopt.arg.4=socklen_t *,optlen
+func.getsockopt.ret=int
+func.getsockopt.include=sys/socket.h
+
+setsockopt=func
+func.setsockopt.args=5
+func.setsockopt.arg.0=int,sockfd
+func.setsockopt.arg.1=int,level
+func.setsockopt.arg.2=int,optname
+func.setsockopt.arg.3=const void *,optval
+func.setsockopt.arg.4=socklen_t,optlen
+func.setsockopt.ret=int
+func.setsockopt.include=sys/socket.h
+
+
+# sys/time.h: POSIX.1-2017.
+select=func
+func.select.args=5
+func.select.arg.0=int,nfds
+func.select.arg.1=fd_set *,readfds
+func.select.arg.2=fd_set *,writefds
+func.select.arg.3=fd_set *,exceptfds
+func.select.arg.4=struct timeval *,timeout
+func.select.ret=int
+func.select.include=sys/time.h
+
+
+# sys/wait.h: POSIX.1-2017.
+wait=func
+func.wait.args=1
+func.wait.arg.0=int *,wstatus
+func.wait.ret=pid_t
+func.wait.include=sys/wait.h
+
+waitid=func
+func.waitid.args=4
+func.waitid.arg.0=idtype_t,idtype
+func.waitid.arg.1=id_t,id
+func.waitid.arg.2=siginfo_t *,infop
+func.waitid.arg.3=int,options
+func.waitid.ret=int
+func.waitid.include=sys/wait.h
+
+waitpid=func
+func.waitpid.args=3
+func.waitpid.arg.0=pid_t,pid
+func.waitpid.arg.1=int *,wstatus
+func.waitpid.arg.2=int,options
+func.waitpid.ret=pid_t
+func.waitpid.include=sys/wait.h
+
+
+# time.h: POSIX.1-2017.
+nanosleep=func
+func.nanosleep.args=2
+func.nanosleep.arg.0=const struct timespec *,req
+func.nanosleep.arg.1=struct timespec *,rem
+func.nanosleep.ret=int
+func.nanosleep.include=time.h
+
+
+# unistd.h: POSIX.1-2017.
+access=func
+func.access.args=2
+func.access.arg.0=const char *,path
+func.access.arg.1=int,mode
+func.access.ret=int
+func.access.include=unistd.h

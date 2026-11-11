@@ -5,8 +5,8 @@ use r2abi::{CLibrary, Dll, Handle, LibraryId, LibraryRows, Tail};
 
 /// Each cited table and the fewest rows it holds.
 const CITED: [(&str, usize); 5] = [
-    ("types-posix.sdb.txt", 40),
-    ("types-glibc.sdb.txt", 40),
+    ("types-posix.sdb.txt", 500),
+    ("types-glibc.sdb.txt", 75),
     ("types-bionic.sdb.txt", 100),
     ("types-kernel32.sdb.txt", 50),
     ("types-ucrt.sdb.txt", 1),
@@ -84,6 +84,31 @@ fn every_row_cites_its_header() {
             );
         }
     }
+}
+
+/// The rows glibc's headers could speak for that are still radare2's, each with its reason; the
+/// list only falls (ROADMAP D242).
+#[test]
+fn every_uncited_glibc_facing_row_names_why() {
+    let listed = table("uncited-rows.txt")
+        .lines()
+        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+        .map(|line| {
+            let (name, why) = line.split_once(" | ").expect("`name | why`");
+            assert!(!why.trim().is_empty(), "`{name}` states no reason");
+            name.trim().to_owned()
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let uncited = ["types.sdb.txt", "types-linux.sdb.txt"]
+        .iter()
+        .flat_map(|file| rows(&table(file)))
+        .map(|row| row.0)
+        .collect::<std::collections::BTreeSet<_>>();
+    let unnamed = uncited.difference(&listed).collect::<Vec<_>>();
+    assert!(unnamed.is_empty(), "uncited with no reason: {unnamed:?}");
+    let stale = listed.difference(&uncited).collect::<Vec<_>>();
+    assert!(stale.is_empty(), "listed, but no uncited row: {stale:?}");
+    assert!(listed.len() <= 130, "{} uncited rows", listed.len());
 }
 
 /// An uncited table states no tail: its rows are radare2's, `Unstated` until cited.

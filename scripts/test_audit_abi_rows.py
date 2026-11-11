@@ -64,5 +64,80 @@ class Headers(unittest.TestCase):
         self.assertEqual(len(errors), 1, errors)
 
 
+CITED = """
+# stdio.h: ISO C17. A stream is `FILE *`.
+fputs=func
+func.fputs.args=2
+func.fputs.arg.0=const char *,s
+func.fputs.arg.1=FILE *,stream
+func.fputs.ret=int
+func.fputs.include=stdio.h
+
+# fcntl.h: POSIX.1-2017.
+open=func
+func.open.args=3
+func.open.arg.0=const char *,path
+func.open.arg.1=int,oflag
+func.open.arg.2=,...
+func.open.ret=int
+func.open.include=fcntl.h
+func.open.tail=variadic
+
+# string.h: GCC builtins.def.
+__memcpy_chk=func
+func.__memcpy_chk.args=0
+func.__memcpy_chk.ret=void *
+func.__memcpy_chk.include=string.h
+
+# error.h: glibc, error(3).
+error=func
+func.error.args=2
+func.error.arg.0=int,status
+func.error.arg.1=,...
+func.error.ret=void
+func.error.include=error.h
+
+# LSB 5.0, in the binary standard only.
+__stack_chk_fail=func
+func.__stack_chk_fail.args=0
+func.__stack_chk_fail.ret=void
+"""
+
+
+class Prototypes(unittest.TestCase):
+    def rows(self) -> dict[str, audit.CitedRow]:
+        return {row.name: row for row in audit.cited_rows(CITED)}
+
+    def test_a_row_spells_its_function_type(self) -> None:
+        rows = self.rows()
+        self.assertEqual(rows["fputs"].prototype(), "int (const char *, FILE *)")
+        self.assertEqual(rows["open"].prototype(), "int (const char *, int, ...)")
+
+    def test_a_row_is_compiled_under_the_mode_its_source_names(self) -> None:
+        rows = self.rows()
+        self.assertEqual(rows["fputs"].modes(), ["-std=c17"])
+        self.assertEqual(rows["open"].modes(), ["-std=c17 -D_POSIX_C_SOURCE=200809L"])
+        self.assertEqual(rows["error"].modes(), ["-std=gnu17 -D_GNU_SOURCE -O2 -D_FORTIFY_SOURCE=2"])
+        mixed = audit.CitedRow("getrlimit", " sys/resource.h: POSIX.1-2017. The selectors are glibc's enumerations. ")
+        self.assertEqual(len(mixed.modes()), 2)
+        self.assertEqual(mixed.modes()[0], "-std=c17 -D_POSIX_C_SOURCE=200809L")
+        self.assertIn("__typeof__(fputs)", audit.assertion(rows["fputs"]))
+
+    def test_a_row_citing_gccs_builtins_is_not_compiled(self) -> None:
+        self.assertNotIn("__memcpy_chk", self.rows())
+
+    def test_a_row_stands_for_the_pointer_const_and_noreturn_it_leaves_out(self) -> None:
+        forms = audit.spellings("int (const char *, char **)")
+        self.assertIn("int (const char *, char *const *)", forms)
+        self.assertIn("__attribute__((noreturn)) int (const char *, char **)", forms)
+        self.assertEqual(len(forms), 4)
+
+    def test_a_row_with_no_header_is_not_compiled(self) -> None:
+        self.assertNotIn("__stack_chk_fail", self.rows())
+
+    def test_the_moved_rows_stay_under_the_header_return_check(self) -> None:
+        self.assertTrue(set(audit.CITED_TABLES) <= set(audit.GLIBC_TABLES))
+
+
 if __name__ == "__main__":
     unittest.main()
