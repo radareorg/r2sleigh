@@ -171,10 +171,17 @@ impl DeadPhis {
         if !obligations.is_complete() {
             return Self::default();
         }
-        let mut roots = crate::dense::IdSet::from_iter(live_out.iter());
+        // A live merge an obligation names is read only on the in-edges the inventory found a
+        // path reads (ROADMAP D214); every other root is read however its block is entered.
+        let mut owed = crate::dense::IdSet::default();
         for obligation in obligations.obligations().values() {
-            roots.extend(obligation.inputs.iter().copied());
+            owed.extend(obligation.inputs.iter().copied());
         }
+        let read_under = |value: ValueId| match graph.def_inst(value) {
+            Some(inst) => obligations.read_under(inst),
+            None => crate::edge_fold::ALL,
+        };
+        let mut roots = crate::dense::IdSet::from_iter(live_out.iter());
         // Parameters are rendered program variables even when the body does
         // not read them, so their canonical entry values remain in the named
         // domain independently of effect liveness.
@@ -195,7 +202,12 @@ impl DeadPhis {
         }
         // Whatever an observation depends on is observed, transitively. The walk
         // is over the graph's own instruction inputs, so it visits each edge once.
-        let observed = crate::bytes::closure(graph, roots).values;
+        let owed = (owed.iter()).map(|value| (value, ByteMask::All, read_under(value)));
+        let roots = (roots.iter())
+            .map(|value| (value, ByteMask::All, crate::edge_fold::ALL))
+            .chain(owed);
+        let closure = crate::bytes::closure_under(graph, roots);
+        let observed = &closure.values;
 
         let unobserved_values = graph
             .values
@@ -213,6 +225,7 @@ impl DeadPhis {
             .collect();
         let mut dead = Self {
             unobserved_values,
+            unobserved_uses: closure.unread_arms(graph).collect(),
             ..Self::default()
         };
         for inst in &graph.insts {
@@ -252,7 +265,7 @@ impl DeadPhis {
             graph,
             live_out,
             obligations,
-            &observed,
+            observed,
         );
         dead
     }

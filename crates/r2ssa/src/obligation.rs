@@ -563,6 +563,9 @@ pub struct SemanticObligationInventory {
     /// Whether some graph instruction's obligations were not one run of the table, or named an
     /// instruction with no disposition: the inventory then does not close.
     split_runs: bool,
+    /// Each live instruction read under only some in-edges of its block, with those in-edges,
+    /// sorted (`crate::edge_fold`; ROADMAP D214): a merge's obligations name no other arm.
+    read_under: Vec<(InstId, crate::edge_fold::Edges)>,
     /// Whether the inventory closes, decided when it was built.
     ///
     /// Deciding it is a walk of every instruction and every obligation with a
@@ -585,8 +588,20 @@ impl SemanticObligationInventory {
             construction_failures: Vec::new(),
             unstructured_cycle_blocks: BTreeSet::new(),
             unmodelled: crate::dense::IdSet::default(),
+            read_under: Vec::new(),
             split_runs: false,
             complete: false,
+        }
+    }
+
+    /// The in-edges of its block `inst`'s value is read under: every one where nothing folds.
+    pub(crate) fn read_under(&self, inst: InstId) -> crate::edge_fold::Edges {
+        match self
+            .read_under
+            .binary_search_by_key(&inst, |(inst, _)| *inst)
+        {
+            Ok(at) => self.read_under[at].1,
+            Err(_) => crate::edge_fold::ALL,
         }
     }
 }
@@ -1027,7 +1042,16 @@ impl SemanticObligationInventory {
         // First close dependencies from observable effects and exact ABI boundaries. A loop
         // carrier is semantically live only when that independent root closure reaches its phi;
         // recognizer-retained facts must never decide source obligation liveness.
-        propagate_live_dependencies(graph, (&direct, &seeding.inserted), &mut required);
+        let mut read_under = crate::dense::IdMap::default();
+        let stops = (&direct, &seeding.inserted);
+        let stated = |inputs: &BTreeMap<_, Vec<ValueId>>| {
+            let values = inputs.values().flatten();
+            values
+                .filter_map(|value| graph.def_inst(*value))
+                .collect::<Vec<_>>()
+        };
+        let whole = stated(&explicit_inputs);
+        propagate_live_dependencies(graph, (stops, &whole), &mut required, &mut read_under);
         let live_before_loop_annotation = required.keys().collect::<crate::dense::IdSet<_>>();
         for fact in structured.loops.values() {
             for carrier in &fact.carriers {
@@ -1045,6 +1069,10 @@ impl SemanticObligationInventory {
                     .and_then(|inst| graph.inst(inst))
                     .and_then(|inst| graph.written_storage(inst));
                 for update in &carrier.updates {
+                    // An arm no path reads owes no transition.
+                    if !arm_read(&read_under, update.site.inst, update.site.input_idx) {
+                        continue;
+                    }
                     if let (Some(carrier_inst), Some(carrier)) = (carrier_inst, carrier_storage)
                         && update.site.inst == carrier_inst
                         && update.validate(graph)
@@ -1081,7 +1109,8 @@ impl SemanticObligationInventory {
                 }
             }
         }
-        propagate_live_dependencies(graph, (&direct, &seeding.inserted), &mut required);
+        let whole = stated(&explicit_inputs);
+        propagate_live_dependencies(graph, (stops, &whole), &mut required, &mut read_under);
         // A private read the walk reached owes its access; its inputs are already walked.
         for (inst, ordinal, address) in private_reads {
             if required.contains(inst) {
@@ -1151,7 +1180,7 @@ impl SemanticObligationInventory {
                     source: SemanticSourceSite::GraphInstruction(inst.id),
                     inputs: explicit_inputs
                         .remove(&(inst.id, kind, component))
-                        .unwrap_or_else(|| graph.inputs(inst.id).to_vec()),
+                        .unwrap_or_else(|| read_inputs(graph, inst, &read_under)),
                     edge_use: explicit_edge_uses.remove(&(inst.id, kind, component)),
                 });
             }
@@ -1163,6 +1192,10 @@ impl SemanticObligationInventory {
         }
         inventory.unmodelled = unsupported;
         inventory.obligations = ObligationTable::of(obligations);
+        inventory.read_under = (read_under.iter())
+            .filter(|(_, edges)| **edges != crate::edge_fold::ALL)
+            .map(|(inst, edges)| (inst, *edges))
+            .collect();
         inventory.index_runs();
         inventory.complete = inventory.derive_is_complete();
         inventory
@@ -2020,25 +2053,42 @@ fn seed_value_definition(
     }
 }
 
+/// Seed each definition a live instruction reads, and state the in-edges of its block each live
+/// instruction is read under (`crate::edge_fold`): a merge arm outside them is read by no path.
+/// An instruction is taken again only when its in-edges grow, at most 65 times.
 fn propagate_live_dependencies(
     graph: &SsaGraph,
-    (direct, inserted): (&crate::dense::IdSet<InstId>, &crate::dense::IdSet<InstId>),
+    ((direct, inserted), whole): (
+        (&crate::dense::IdSet<InstId>, &crate::dense::IdSet<InstId>),
+        &[InstId],
+    ),
     required: &mut ObligationSeeds,
+    under: &mut crate::dense::IdMap<InstId, crate::edge_fold::Edges>,
 ) {
+    // A seed no walk reached is a root, read however its block is entered; so is a definition
+    // an obligation names as its own input (`whole`), which no operand position bounds.
     let mut ready = required.keys().collect::<VecDeque<_>>();
-    let mut visited = crate::dense::IdSet::default();
+    for inst in &ready {
+        under.get_or_insert_with(*inst, || crate::edge_fold::ALL);
+    }
+    for inst in whole {
+        under.insert(*inst, crate::edge_fold::ALL);
+    }
+    let mut folds = crate::edge_fold::EdgeFolds::new(graph);
     while let Some(inst_id) = ready.pop_front() {
-        if !visited.insert(inst_id) {
-            continue;
-        }
         let stops = direct.contains(inst_id) || inserted.contains(inst_id);
         let Some(inst) = graph.inst(inst_id).filter(|_| !stops) else {
             continue;
         };
-        for input in graph.inputs(inst.id) {
+        let read_under = under.get(inst_id).copied().unwrap_or(crate::edge_fold::ALL);
+        for (index, input) in graph.inputs(inst.id).iter().enumerate() {
             let Some(definition) = graph.def_inst(*input) else {
                 continue;
             };
+            let read = folds.read_under(inst, index, *input, read_under);
+            if read == 0 {
+                continue;
+            }
             let was_live = required.contains(definition);
             seed_instruction(
                 definition,
@@ -2046,11 +2096,38 @@ fn propagate_live_dependencies(
                 SemanticObligationComponent::Whole,
                 required,
             );
-            if !was_live {
+            let edges = under.get_or_insert_with(definition, || 0);
+            if !was_live || *edges | read != *edges {
+                *edges |= read;
                 ready.push_back(definition);
             }
         }
     }
+}
+
+/// The values `inst` reads: every operand, less a merge's arms no path reads.
+fn read_inputs(
+    graph: &SsaGraph,
+    inst: &GraphInst,
+    under: &crate::dense::IdMap<InstId, crate::edge_fold::Edges>,
+) -> Vec<ValueId> {
+    let merge = matches!(inst.payload, InstPayload::Phi { .. });
+    let inputs = graph.inputs(inst.id).iter().enumerate();
+    inputs
+        .filter(|(arm, _)| !merge || arm_read(under, inst.id, *arm))
+        .map(|(_, input)| *input)
+        .collect()
+}
+
+/// Whether a path reads merge `inst`'s arm `arm`, given the in-edges each live instruction is
+/// read under.
+fn arm_read(
+    under: &crate::dense::IdMap<InstId, crate::edge_fold::Edges>,
+    inst: InstId,
+    arm: usize,
+) -> bool {
+    let edges = under.get(inst).copied().unwrap_or(crate::edge_fold::ALL);
+    arm >= crate::edge_fold::Edges::BITS as usize || edges & (1 << arm) != 0
 }
 
 fn instruction_is_structural(payload: &InstPayload) -> bool {
