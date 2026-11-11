@@ -764,7 +764,7 @@ fn only_arity_unproven(prepared: &SsaArtifact, instruction: crate::CanonicalInst
         .by_inst
         .get(inst)
         .and_then(|call_site| prepared.facts().boundaries.calls.get(call_site))
-        .is_some_and(|boundary| !boundary.arguments_complete && boundary.results_complete)
+        .is_some_and(|boundary| !boundary.arguments_proven && boundary.results_complete)
 }
 
 fn unknown_call_argument_state(

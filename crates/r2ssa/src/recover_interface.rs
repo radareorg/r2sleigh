@@ -2056,7 +2056,7 @@ fn recover_interface_inner(
             .filter(|(_, at)| at.block == used.block && at.ordinal > used.ordinal)
             .min_by_key(|(_, at)| at.ordinal)?
             .0;
-        (!call.arguments_complete).then(|| unproven_call(&facts, machine_context, call.call_site))
+        (!call.arguments_proven).then(|| unproven_call(&facts, machine_context, call.call_site))
     };
     // Each register's entry values and the lanes minted for them, found in one pass. O(V log V).
     let mut entry_values = BTreeMap::<_, Vec<crate::ValueId>>::new();
@@ -2386,8 +2386,7 @@ fn unproven_calls_reached(
     machine_context: Option<&crate::SourceMachineContext>,
     slot: CanonicalStorageId,
 ) -> Vec<SourceUnprovenCall> {
-    let unproven =
-        (facts.boundaries.calls.values()).filter(|boundary| !boundary.arguments_complete);
+    let unproven = (facts.boundaries.calls.values()).filter(|boundary| !boundary.arguments_proven);
     let kept = graph.values.iter().any(|value| {
         graph.caller_supplied(value.id)
             && value
