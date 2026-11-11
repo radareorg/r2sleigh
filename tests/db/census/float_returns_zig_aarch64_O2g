@@ -25,7 +25,7 @@ CMDS=aa; pdd @ 0x010104e8
 EXPECT=<<EOF
 void _start(uint64_t arg0)
 {
-    /* r2dec proof: 2 constructs are marked below; 22 source obligations: 0 rendered, 3 elided, 0 refused, 19 residual; 0 statements rendered; 1 callee prototype supplied by the source */
+    /* r2dec proof: 2 constructs are marked below; 22 source obligations: 0 rendered, 3 elided, 0 refused, 19 residual; 0 statements rendered; 1 callee prototype supplied by the source; the parameters are a floor: at least 1 (an address of the argument area escapes) */
     {
         r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x10104e8:24 covering 1 op (render::values): call to __libc_start_main: an argument has no C spelling */
         r2sleigh_residual_void(2); /* r2dec gap: TransferNotFollowed at 0x10104e8 (render::control) */

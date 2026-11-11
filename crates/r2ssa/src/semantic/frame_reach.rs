@@ -519,7 +519,11 @@ fn escaped_objects(
                         let known = origins.get_or_insert_with(out, BTreeSet::new);
                         let before = known.len();
                         known.extend(from.iter().copied());
-                        let rose = high && above.insert(out);
+                        // A value the frame places is where it is; only an unplaced one inherits.
+                        let rose = match entry_offset(facts, out) {
+                            Some(offset) => offset >= 0 && above.insert(out),
+                            None => high && above.insert(out),
+                        };
                         if tainted.insert(out) || known.len() != before || rose {
                             pending.push(out);
                         }
