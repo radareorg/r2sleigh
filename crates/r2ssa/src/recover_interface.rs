@@ -2328,8 +2328,6 @@ fn low_bytes(size: u32) -> crate::site_boundary::ByteMask {
     })
 }
 
-/// `slot`'s use where no observation reads it (rule 3; doc/adr-call-boundary.md, "S6 as built"):
-/// `Unknown` reaching an unproven call, `Homed` only copied, else `Unread`. O(values reached).
 /// The shared position a register is a location of (Microsoft x64), integer or float.
 fn shared_position(slots: &SourceConventionSlots, slot: CanonicalStorageId) -> Option<u8> {
     if !slots.shared_positions() {
@@ -2372,6 +2370,8 @@ fn homed_in_its_home(
             .all(|value| crate::save_area::read_only_by(graph, *value, &stores, observations))
 }
 
+/// `slot`'s use where no observation reads it (rule 3; doc/adr-call-boundary.md, "S6 as built"):
+/// `Unknown` reaching an unproven call, `Homed` only copied, else `Unread`. O(values reached).
 fn unobserved_use(
     graph: &SsaGraph,
     ignored: &BTreeSet<crate::graph::UseSite>,
