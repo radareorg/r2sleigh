@@ -1290,24 +1290,20 @@ impl SourceMachineContext {
         &self.call_site_interfaces
     }
 
-    /// The stack a call may read, as ranges from its stack pointer before the transfer; none where
-    /// nothing bounds it (doc/adr-call-boundary.md, "D217 as built").
-    pub fn call_argument_area(&self, instruction: Option<u64>) -> Option<Vec<(i64, i64)>> {
+    /// What the call at `instruction` may read (`CallReads`): the locations of its complete, fixed
+    /// interface, else every location; none where the machine names no convention.
+    pub fn call_reads(&self, instruction: Option<u64>) -> Option<crate::call_reads::CallReads> {
         let interface = instruction
             .and_then(|instruction| self.raw_call_site_at(instruction))
             .and_then(|identity| self.call_site_interface(identity))
-            .filter(|interface| interface.is_complete() && !interface.is_variadic())?;
-        let reserved = (self.convention())
-            .and_then(r2source::ConventionModel::stack_arguments)
-            .map_or(0, |placement| placement.first_offset().max(0));
-        let slots =
-            (interface.arguments().iter()).filter_map(|argument| match argument.location() {
-                r2source::SourceParameterLocation::Stack {
-                    offset, size_bytes, ..
-                } => Some((offset, offset.saturating_add(i64::from(size_bytes)))),
-                r2source::SourceParameterLocation::Register(_) => None,
-            });
-        Some(std::iter::once((0, reserved)).chain(slots).collect())
+            .filter(|interface| interface.is_complete() && !interface.is_variadic());
+        match interface {
+            Some(interface) => Some(crate::call_reads::CallReads::exact(
+                interface,
+                self.convention(),
+            )),
+            None => (self.convention()).map(crate::call_reads::CallReads::every_location),
+        }
     }
 
     pub fn call_site_interface(

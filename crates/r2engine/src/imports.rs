@@ -176,26 +176,6 @@ const UCRT: &[LibraryId] = &[
     LibraryId::Portable,
 ];
 
-/// The argument registers a call to an import may read (doc/adr-call-boundary.md, "Lower bounds
-/// and upper bounds"): an upper bound only where the row's citation states a fixed prototype.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ImportReads {
-    /// Each register, the fixed parameters' first, then the convention's later ones in its order.
-    pub registers: Vec<r2source::CanonicalStorageId>,
-    /// SysV `al`, read with a tail and bounding the vector registers it counts.
-    pub count_register: Option<r2source::CanonicalStorageId>,
-    /// A printf-format `...` in registers with no count register (AAPCS64): what bounds its vector reads.
-    pub format: Option<FormatTail>,
-}
-
-/// Where a printf-family call's format arrives, and the tail's vector registers, which only a
-/// floating conversion reads (doc/adr-call-boundary.md, "S15 as built").
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FormatTail {
-    pub format: r2source::CanonicalStorageId,
-    pub floats: Vec<r2source::CanonicalStorageId>,
-}
-
 impl Imports {
     pub fn new(rows: LibraryRows, library: CLibrary, linkage: Linkage) -> Self {
         Self {

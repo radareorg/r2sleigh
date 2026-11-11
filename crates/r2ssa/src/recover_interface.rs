@@ -2119,7 +2119,7 @@ fn recover_interface_inner(
             .filter(|(_, at)| at.block == used.block && at.ordinal > used.ordinal)
             .min_by_key(|(_, at)| at.ordinal)?
             .0;
-        (!call.arguments_proven).then(|| unproven_call(&facts, machine_context, call.call_site))
+        (call.may_read_unlisted()).then(|| unproven_call(&facts, machine_context, call.call_site))
     };
     // Each register's entry values and the lanes minted for them, found in one pass. O(V log V).
     let mut entry_values = BTreeMap::<_, Vec<crate::ValueId>>::new();
@@ -2134,9 +2134,12 @@ fn recover_interface_inner(
                 .push(value.id);
         }
     }
-    // An escaped address that may reach the homes or the argument area lets code outside read
-    // them (FrameReach); a body with no prep facts places no frame address (tests only).
-    let escapes_incoming = prep.is_some() && facts.objects.frame_reach.reaches_incoming();
+    // An escaped address that may reach a homed argument or the argument area lets code outside
+    // read them (FrameReach); a body with no prep facts places no frame address (tests only).
+    let escapes_incoming = prep.is_some_and(|prep| {
+        let model = machine_context.and_then(crate::SourceMachineContext::convention);
+        argument_place_escapes((graph, prep), &facts, model)
+    });
     // Each register slot's use (doc/adr-call-boundary.md, rule 3).
     let use_of = |slot: CanonicalStorageId| {
         // The prologue saves every vector register under the count it is handed, and the area
@@ -2159,7 +2162,7 @@ fn recover_interface_inner(
             .zip(shared_position(slots, slot))
             .and_then(|(model, position)| model.home(position));
         if let Some(home) = home.filter(|_| !saved)
-            && homed_in_its_home(graph, &facts, &observations, home, entries)
+            && homed_in_its_home(graph, &facts, &observations, home, (entries, &handed_to))
         {
             return SlotUse::Homed {
                 loaded: false,
@@ -2468,7 +2471,8 @@ fn unproven_calls_reached(
     machine_context: Option<&crate::SourceMachineContext>,
     slot: CanonicalStorageId,
 ) -> Vec<SourceUnprovenCall> {
-    let unproven = (facts.boundaries.calls.values()).filter(|boundary| !boundary.arguments_proven);
+    let unproven =
+        (facts.boundaries.calls.values()).filter(|boundary| boundary.may_read_unlisted());
     let kept = graph.values.iter().any(|value| {
         graph.caller_supplied(value.id)
             && value
@@ -2582,7 +2586,10 @@ fn homed_in_its_home(
     facts: &crate::semantic::PreparedFunctionFacts,
     observations: &crate::deadphi::ProvenProgramObservations,
     home: std::ops::Range<i64>,
-    entries: &[crate::ValueId],
+    (entries, handed): (
+        &[crate::ValueId],
+        &dyn Fn(crate::InstId) -> Option<SourceUnprovenCall>,
+    ),
 ) -> bool {
     let objects = (facts.objects.entry_stack_roots.iter())
         .filter(|(_, root)| {
@@ -2602,9 +2609,54 @@ fn homed_in_its_home(
         }
         stores.insert(access.id.inst);
     }
+    // A call that may read past its listed arguments may read the register, so it is no home only.
+    let taken = |call_use| handed(call_use).is_some();
     !stores.is_empty()
-        && (entries.iter())
-            .all(|value| crate::save_area::read_only_by(graph, *value, &stores, observations))
+        && (entries.iter()).all(|value| {
+            crate::save_area::read_only_by(graph, *value, &stores, (observations, &taken))
+        })
+}
+
+/// Whether an escaped address may point at an argument's place: a stack argument, a home holding
+/// its position's entry register, or no place known. A home the body keeps something else in is
+/// the body's own slot. O(escaped offsets x homes + stores).
+fn argument_place_escapes(
+    (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
+    facts: &crate::semantic::PreparedFunctionFacts,
+    model: Option<&r2source::ConventionModel>,
+) -> bool {
+    let Some(escaped) = facts.objects.frame_reach.escaped_incoming() else {
+        return true;
+    };
+    let homes = (0..=u8::MAX)
+        .map_while(|position| Some((position, model?.home(position)?)))
+        .collect::<Vec<_>>();
+    // Whether the home holds the entry value of a register passed at its position.
+    let homed = |position: u8, home: &std::ops::Range<i64>| {
+        let registers = [SlotClass::Integer, SlotClass::Float].map(|class| {
+            model.and_then(|model| model.argument_registers(class).nth(usize::from(position)))
+        });
+        let in_home = |object| {
+            (facts.objects.entry_stack_roots.get(&object)).is_some_and(|root| {
+                root.base == StackAddressBase::StackPointer && home.contains(&root.offset)
+            })
+        };
+        (facts.structured.memory_accesses.values())
+            .filter(|access| access.is_write && in_home(access.object))
+            .filter_map(|access| graph.value(prep.views.copy_root(access.value?)))
+            .any(|stored| {
+                stored.var.version == 0
+                    && graph.caller_supplied(stored.id)
+                    && registers.iter().flatten().any(|register| {
+                        (stored.canonical_storage)
+                            .is_some_and(|storage| storage.location() == register.location())
+                    })
+            })
+    };
+    escaped.iter().any(|offset| {
+        let home = homes.iter().find(|(_, home)| home.contains(offset));
+        home.is_none_or(|(position, home)| homed(*position, home))
+    })
 }
 
 /// `slot`'s use where no observation reads it (rule 3; doc/adr-result-side.md, "Parameter side"):

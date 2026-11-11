@@ -86,7 +86,7 @@ pub(crate) fn register_save_area(
         }
         let unread = saved
             .iter()
-            .find(|value| !read_only_by(graph, *value, &stores, observations));
+            .find(|value| !read_only_by(graph, *value, &stores, (observations, &TAIL_KEPT)));
         if let Some(value) = unread {
             r2il::refusal_evidence!(
                 "register-save-area",
@@ -246,7 +246,7 @@ fn homed_tail(
     }
     if let Some(value) = saved
         .iter()
-        .find(|value| !read_only_by(graph, *value, &stores, observations))
+        .find(|value| !read_only_by(graph, *value, &stores, (observations, &TAIL_KEPT)))
     {
         r2il::refusal_evidence!(
             "home-va-list",
@@ -264,6 +264,9 @@ fn homed_tail(
         stored_at: bound,
     })
 }
+
+/// A saved tail register a call is handed is a tail still: a variadic header drops no argument.
+const TAIL_KEPT: fn(InstId) -> bool = |_| false;
 
 /// Per argument slot, where its entry value is stored: the position, the value and the store.
 type Saves = Vec<Vec<(i64, ValueId, InstId)>>;
@@ -336,13 +339,16 @@ fn entry_slot(graph: &SsaGraph, value: ValueId, arguments: &[CanonicalStorageId]
     arguments.iter().position(|slot| *slot == storage)
 }
 
-/// Whether only `stores` read `value`, through merges and copies; a use nothing observes (`xor ecx,
-/// ecx`) or a call's implicit use reads nothing (ADR "Variadic tail"). Each value is taken once.
+/// Whether only `stores` read `value`, through merges and copies; a use proven unread (`xor ecx,
+/// ecx`) reads nothing, and a call's implicit use reads it where `taken` says the call may.
 pub(crate) fn read_only_by(
     graph: &SsaGraph,
     value: ValueId,
     stores: &crate::dense::IdSet<InstId>,
-    observations: &crate::deadphi::ProvenProgramObservations,
+    (observations, taken): (
+        &crate::deadphi::ProvenProgramObservations,
+        &dyn Fn(InstId) -> bool,
+    ),
 ) -> bool {
     let mut seen = crate::dense::IdSet::new(graph.values.len());
     let mut pending = vec![value];
@@ -358,8 +364,8 @@ pub(crate) fn read_only_by(
                 (InstPayload::Phi { .. } | InstPayload::Op(SSAOp::Copy { .. }), output) => {
                     pending.extend(output);
                 }
-                (InstPayload::Op(SSAOp::CallUse { .. }), _) => {}
-                (_, Some(output)) if !observations.contains(output) => {}
+                (InstPayload::Op(SSAOp::CallUse { .. }), _) if !taken(site.inst) => {}
+                (_, Some(output)) if observations.proven_unread(output) => {}
                 _ if stores.contains(site.inst) => {}
                 _ => return false,
             }

@@ -46,8 +46,10 @@ pub struct FrameReach {
     /// A frame address escaped that names no object, so every frame object is
     /// reachable.
     whole: bool,
-    /// An escaped address may point at or above the entry stack pointer, or nowhere known.
-    incoming: bool,
+    /// The entry offsets at or above the entry stack pointer that escaped addresses point at.
+    incoming: BTreeSet<i64>,
+    /// An escaped address may point at or above the entry stack pointer at no offset known.
+    incoming_unplaced: bool,
     by_call: crate::dense::IdMap<InstId, CallFrameReach>,
 }
 
@@ -69,10 +71,13 @@ impl FrameReach {
         self.whole
     }
 
-    /// Whether an escaped address may reach the caller's side of the frame, the homes and the
-    /// argument area at or above the entry stack pointer: code outside may then read them.
-    pub const fn reaches_incoming(&self) -> bool {
-        self.incoming
+    /// The entry offsets at or above the entry stack pointer (the homes and the argument area)
+    /// that escaped addresses point at; none where one may point there at no offset known.
+    pub const fn escaped_incoming(&self) -> Option<&BTreeSet<i64>> {
+        match self.incoming_unplaced {
+            true => None,
+            false => Some(&self.incoming),
+        }
     }
 
     /// Every call this fact bounds or does not, in instruction order.
@@ -98,12 +103,13 @@ impl FrameReach {
             // Nothing places a frame address, so nothing is proven private.
             return Self {
                 whole: true,
-                incoming: true,
+                incoming_unplaced: true,
                 ..Self::default()
             };
         };
         let frame = FrameIndex::of(model);
         let (mut escaped, whole, incoming) = escaped_objects(facts, graph, model, &frame);
+        let (incoming, incoming_unplaced) = incoming;
         let direct = escaped.clone();
         let barriers = compiler_slots(function, graph, model, machine_context);
         close_upward(&mut escaped, &frame, &barriers);
@@ -124,6 +130,7 @@ impl FrameReach {
             direct,
             whole,
             incoming,
+            incoming_unplaced,
             by_call,
         }
     }
@@ -444,14 +451,14 @@ fn entry_offset(facts: &DecompilePrepFacts, value: ValueId) -> Option<i64> {
         .map(|root| root.offset)
 }
 
-/// The frame objects whose addresses escape, whether one escaped that names none, and whether one
-/// that escaped may point at or above the entry stack pointer.
+/// The frame objects whose addresses escape, whether one escaped that names none, and where the
+/// escaped addresses at or above the entry stack pointer point (and whether one is unplaced).
 fn escaped_objects(
     facts: &DecompilePrepFacts,
     graph: &SsaGraph,
     model: &ObjectModel,
     frame: &FrameIndex,
-) -> (BTreeSet<ObjectId>, bool, bool) {
+) -> (BTreeSet<ObjectId>, bool, (BTreeSet<i64>, bool)) {
     let frame_address = |value: ValueId| {
         graph.value(value).is_some_and(|value| {
             facts.stack_address_root_of(value.id).is_some()
@@ -464,7 +471,7 @@ fn escaped_objects(
     let mut tainted = crate::dense::IdSet::default();
     // The tainted values not proven below the entry stack pointer; the set only grows.
     let mut above = crate::dense::IdSet::default();
-    let mut incoming = false;
+    let mut incoming = (BTreeSet::new(), false);
     let mut pending = Vec::new();
     for value in graph.values.iter().map(|value| value.id) {
         if frame_address(value) && tainted.insert(value) {
@@ -490,14 +497,22 @@ fn escaped_objects(
     while let Some(value) = pending.pop() {
         let from = origins.get(value).cloned().unwrap_or_default();
         let high = above.contains(value);
+        let mut leaves = || match entry_offset(facts, value) {
+            Some(offset) => drop(incoming.0.insert(offset)),
+            None => incoming.1 = true,
+        };
         for site in graph.use_sites(value) {
             let Some(inst) = graph.inst(site.inst) else {
                 whole = true;
-                incoming |= high;
+                if high {
+                    leaves();
+                }
                 continue;
             };
             let carried = carries(inst, site.input_idx, placed(value));
-            incoming |= high && matches!(carried, Carry::Escapes | Carry::Everything);
+            if high && matches!(carried, Carry::Escapes | Carry::Everything) {
+                leaves();
+            }
             match carried {
                 Carry::Escapes => match escaping_object(facts, graph, frame, value) {
                     Some(object) => {
@@ -650,7 +665,7 @@ fn call_reaches(
                     .and_then(|value| entry_offset(facts, value.id)),
                 _ => None,
             };
-            let area = machine_context.call_argument_area(instruction);
+            let area = (machine_context.call_reads(instruction)).and_then(|reads| reads.stack);
             let (Some(sp), Some(area)) = (sp, area) else {
                 out.insert(call, CallFrameReach::Whole);
                 continue;

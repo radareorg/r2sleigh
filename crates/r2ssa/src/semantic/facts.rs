@@ -807,6 +807,12 @@ pub struct SourceCallBoundaryFact {
 }
 
 impl SourceCallBoundaryFact {
+    /// Whether the call may read an argument location its listed arguments do not name: no
+    /// statement of its callee bounds what it reads (`CallReads`), or a stated one is unreached.
+    pub const fn may_read_unlisted(&self) -> bool {
+        !self.arguments_proven
+    }
+
     /// Whether `argument` is a slot the callee ignores (`ignored`).
     pub fn ignores(&self, argument: &SourceCallArgumentFact) -> bool {
         matches!(argument.slot, CallBoundarySlot::Register { index, .. } if self.ignored.contains(&index))

@@ -41,13 +41,6 @@ fn slot_uses(literal: Literal) -> Vec<SlotUse> {
         .collect()
 }
 
-/// The function at `root` rendered after the program is surveyed.
-fn surveyed(code: &'static [u8], functions: &[(&str, u64, u64)], root: u64) -> String {
-    let mut open = OpenProgram::of(Literal::of_code(code, functions));
-    open.analyse_program().expect("it surveys");
-    (open.rendered(root).expect("it renders").response.output).into_text()
-}
-
 /// The six integer registers written, `xmm0` stored, then a call through memory the program may
 /// write: the callee states nothing, and `xmm1` reaches it as the function was entered with it.
 const SIX_WRITTEN_THEN_THROUGH_MEMORY: [u8; 0x50] = padded([

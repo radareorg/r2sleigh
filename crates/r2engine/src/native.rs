@@ -1381,7 +1381,7 @@ pub(crate) fn declared_pointers(target: &NativeTarget<'_>, name: &str) -> Vec<Ca
 }
 
 /// The registers a call to the import `name` may read, where it binds a row (S7 reads it).
-pub fn import_reads(target: &NativeTarget<'_>, name: &str) -> Option<crate::imports::ImportReads> {
+pub fn import_reads(target: &NativeTarget<'_>, name: &str) -> Option<r2ssa::call_reads::CallReads> {
     let declared = Declared::import(target, name)?;
     placing_imports(target, None, |placement| placement.reads(declared))
 }

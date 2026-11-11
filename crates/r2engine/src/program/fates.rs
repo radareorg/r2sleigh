@@ -12,8 +12,7 @@ use r2source::{
 use r2ssa::dense::{Csr, DenseId, IdMap};
 use r2ssa::site_boundary::{
     ByteMask, CallEffect, CallEffects, CallerFlow, Counted, EntrySummary, LANES, LaneBytes,
-    LaneFate, LaneId, Overwrites, ResultLanes, SiteBoundary, argument_registers, argument_takes,
-    unknown_call_takes,
+    LaneFate, LaneId, Overwrites, ResultLanes, SiteBoundary, argument_registers,
 };
 
 use super::analysis::Walked;
@@ -88,7 +87,7 @@ pub enum CallBoundary {
         result: BoundaryResult,
     },
     Import {
-        reads: Option<crate::imports::ImportReads>,
+        reads: Option<r2ssa::call_reads::CallReads>,
     },
 }
 
@@ -939,6 +938,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
             view: &view,
             lanes: lanes_of(target, &slots),
             slots: &slots,
+            unstated: r2ssa::call_reads::CallReads::every_location(&target.convention),
             call: target.call.call_effect().ok(),
             depth: Depth::Deep,
         };
@@ -987,6 +987,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeEntry {
             view: &view,
             lanes: lanes_of(target, &slots),
             slots: &slots,
+            unstated: r2ssa::call_reads::CallReads::every_location(&target.convention),
             call: target.call.call_effect().ok(),
             depth: Depth::Shallow,
         };
@@ -1075,6 +1076,8 @@ struct Reading<'a, S: Source + 'static> {
     view: &'a View<'a, S>,
     lanes: ResultLanes,
     slots: &'a SourceConventionSlots,
+    /// What a call to a callee nothing states may read: the convention's every location.
+    unstated: r2ssa::call_reads::CallReads,
     /// What the convention says a call leaves standing: a format held in a preserved register.
     call: Option<r2source::SourceCallEffect>,
     depth: Depth,
@@ -1165,10 +1168,7 @@ impl<S: Source + 'static> Reading<'_, S> {
     /// What a call to a callee nothing is known of may take: a summary's own calls set the variadic
     /// count themselves, so only a caller counts it.
     fn unknown(&self) -> LaneBytes {
-        match self.depth {
-            Depth::Deep => unknown_call_takes(self.lanes, self.slots),
-            Depth::Shallow => argument_takes(self.lanes, self.slots),
-        }
+        self.unstated.takes(self.lanes, self.depth == Depth::Deep)
     }
 
     /// A call to `callee`: an import overwrites every result register and takes what it reads (and,
@@ -1233,7 +1233,7 @@ impl<S: Source + 'static> Reading<'_, S> {
     /// vector registers. An import no row binds takes what an unknown callee does.
     fn import_takes(
         &self,
-        reads: Option<crate::imports::ImportReads>,
+        reads: Option<r2ssa::call_reads::CallReads>,
     ) -> (LaneBytes, Option<Counted>) {
         let Some(reads) = reads else {
             return (self.unknown(), None);
