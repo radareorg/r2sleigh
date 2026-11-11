@@ -36,7 +36,7 @@ const ELF_TERMINATION: LoaderCall = LoaderCall {
 /// `argc, argv, envp` where musl passes nothing.
 pub fn loader_call(format: Format, kind: EntryKind) -> Option<&'static LoaderCall> {
     match (format, kind) {
-        (Format::Elf, EntryKind::FiniHook) => Some(&ELF_TERMINATION),
+        (Format::Elf, EntryKind::FiniHook | EntryKind::Fini) => Some(&ELF_TERMINATION),
         _ => None,
     }
 }
@@ -45,13 +45,14 @@ pub fn loader_call(format: Format, kind: EntryKind) -> Option<&'static LoaderCal
 mod tests {
     use super::*;
 
-    /// `DT_FINI`'s function is called as an `atexit` handler; an initialiser and a Mach-O
-    /// terminator are not stated by this row.
+    /// `DT_FINI`'s function and each fini array entry are called as `atexit` handlers; an
+    /// initialiser and a Mach-O terminator are not stated by this row.
     #[test]
     fn only_an_elf_termination_function_has_a_cited_loader_call() {
         let fini = loader_call(Format::Elf, EntryKind::FiniHook).expect("a row");
         assert!(fini.adds_no_read());
         assert!(fini.citation.contains("atexit"));
+        assert_eq!(loader_call(Format::Elf, EntryKind::Fini), Some(fini));
         assert_eq!(loader_call(Format::Elf, EntryKind::InitHook), None);
         assert_eq!(loader_call(Format::Elf, EntryKind::Init), None);
         assert_eq!(loader_call(Format::MachO, EntryKind::Fini), None);
