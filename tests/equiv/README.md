@@ -355,6 +355,7 @@ that does leaves the vector ungraded and the record `harness-error`).
   and one tick past it dropped; a rendering that raises `SIGPWR` or `SIGPROF`
   itself is not `slow`. One case has no fake: a rendering that spins is stopped
   by the CPU timer itself and is `slow`, not a hang and not a death by `SIGPROF`.
+  Under `instructions` a rendering finds no `SIGPROF` handler and no timer armed.
 
 *Object links on AArch64.* GNU ld for AArch64 (2.42, and gold) resolves the
 GOT entry of an absolute symbol a shared object defines as if it were

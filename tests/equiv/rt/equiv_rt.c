@@ -520,6 +520,7 @@ static uint64_t g_allowance;
 static int g_cost_fake;
 static uint64_t g_cost_fake_value;
 static uint64_t g_cpu_start;
+static volatile sig_atomic_t g_cpu_timed;  /* the CPU timer is this call's, from start to settle */
 static volatile sig_atomic_t g_budget_raised;
 
 static uint64_t cpu_now(void)
@@ -583,6 +584,7 @@ static void cost_start(void)
     }
     /* ITIMER_PROF counts the process's CPU time, so a loaded host does not move it. */
     g_cpu_start = cpu_now();
+    g_cpu_timed = 1;
     cpu_timer_arm(g_allowance);
 }
 
@@ -590,6 +592,7 @@ static void cost_settle(void)
 {
     uint64_t cost = 0;
     if (g_head.measure == MEASURE_TIME) {
+        g_cpu_timed = 0;
         struct itimerval off;
         memset(&off, 0, sizeof off);
         setitimer(ITIMER_PROF, &off, NULL);
@@ -626,10 +629,12 @@ static void child_cpu_timer(int sig, siginfo_t *info, void *context)
 {
     (void)info;
     (void)context;
+    if (!g_cpu_timed)
+        return;  /* an expiry that landed as settle disarmed the timer */
     struct itimerval left;
     int expired = getitimer(ITIMER_PROF, &left) == 0 && !left.it_value.tv_sec
                   && !left.it_value.tv_usec;
-    if (g_in_call && expired) {
+    if (expired) {
         uint64_t used = cpu_now() - g_cpu_start;
         if (used < g_allowance) {
             cpu_timer_arm(g_allowance - used);
@@ -816,9 +821,11 @@ static void child_run(struct run_state *run, const struct job_vector *vec, uint6
     on_budget.sa_flags = SA_SIGINFO | SA_RESETHAND | SA_ONSTACK;
     sigemptyset(&on_budget.sa_mask);
     sigaction(BUDGET_SIGNAL, &on_budget, NULL);
-    on_budget.sa_sigaction = child_cpu_timer;
-    on_budget.sa_flags = SA_SIGINFO | SA_ONSTACK;  /* it re-arms, so it stays installed */
-    sigaction(SIGPROF, &on_budget, NULL);
+    if (g_head.measure == MEASURE_TIME) {
+        on_budget.sa_sigaction = child_cpu_timer;
+        on_budget.sa_flags = SA_SIGINFO | SA_ONSTACK;  /* it re-arms, so it stays installed */
+        sigaction(SIGPROF, &on_budget, NULL);
+    }
     /* The signal mask is inherited, and a blocked SIGALRM arms a timer that never fires. */
     sigset_t none;
     sigemptyset(&none);
