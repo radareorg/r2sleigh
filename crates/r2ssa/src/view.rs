@@ -53,14 +53,13 @@
 //! the whole termination argument, and no pass is counted. Every lookup after
 //! the solve is `O(1)`.
 
-use std::collections::HashMap;
-
 use crate::dense::{DenseId, IdMap, IdVec};
 use crate::function::SSAFunction;
 use crate::graph::{SsaGraph, ValueId};
 use crate::op::{SSAOp, var_facts};
 use crate::value_table::VarId;
 use crate::var::SSAVar;
+use rustc_hash::FxHashMap;
 
 /// What the bits of a value above its view's prefix are.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -1024,7 +1023,7 @@ fn representatives<I: DenseId + std::hash::Hash>(
     let bits = |id: I| facts[id].0.saturating_mul(8);
     // The first value of each class, keyed by the class: its root, width,
     // prefix and extension. Only looked up, never iterated.
-    let mut first_of_class = HashMap::<(I, u32, u32, ViewExtension), I>::new();
+    let mut first_of_class = FxHashMap::<(I, u32, u32, ViewExtension), I>::default();
     let mut representatives = IdMap::new(facts.len());
     let mut low_lanes = LowLanes::<I>::new(facts.len());
     for id in order {

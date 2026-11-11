@@ -6,6 +6,7 @@ license.workspace = true
 description = "Certified canonicalising rewriter over r2ssa machine expressions"
 
 [dependencies]
+rustc-hash.workspace = true
 r2il = { path = "../r2il" }
 r2ssa = { path = "../r2ssa" }
 serde.workspace = true

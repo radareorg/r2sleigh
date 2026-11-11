@@ -7,14 +7,13 @@
 //! structural equality is id equality and every rule that asks "are these the
 //! same operand" asks it exactly.
 
-use std::collections::{HashMap, HashSet};
-
 use r2ssa::{
     MachineArithmeticFlagOp, MachineArithmeticOp, MachineBitVector, MachineBitwiseOp,
     MachineBooleanOp, MachineCastKind, MachineComparisonOp, MachineExprId, MachineFloatOp,
     MachineFloatUnaryOp, MachineOvershiftBehavior, MachineShiftKind, MachineSignedness,
     MachineType, ObjectId, StackAddressRoot,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::Serialize;
 
 /// Handle into a [`TermArena`]. Ids are issued in creation order and a term's
@@ -493,7 +492,7 @@ pub struct TermArena {
     nodes: Vec<Node>,
     /// Each distinct type once, in first-use order; `type_ids` finds one and is never iterated.
     types: Vec<MachineType>,
-    type_ids: HashMap<MachineType, u32>,
+    type_ids: FxHashMap<MachineType, u32>,
     /// By term: its size as a tree, fixed when it is minted, since a term never changes.
     sizes: Vec<u64>,
     /// Where each interned term sits in `nodes`, by hash.
@@ -508,19 +507,19 @@ pub struct TermArena {
     /// match through it -- in SSA a value is its definition -- without the
     /// leaf being expanded, so the rewritten term still reads the value by
     /// name and nothing new is discharged.
-    definitions: HashMap<TermId, TermId>,
+    definitions: FxHashMap<TermId, TermId>,
     /// Leaves the certificates type as pointers: a value with parameter
     /// address provenance, or one the machine arena types as an address at
     /// some use. Which operand of an address sum is the base is a question
     /// only they answer; the sum itself is integer arithmetic.
-    pointer_leaves: HashSet<TermId>,
+    pointer_leaves: FxHashSet<TermId>,
     /// The frame position a leaf's value holds, for a leaf that holds one.
-    stack_roots: HashMap<TermId, StackAddressRoot>,
+    stack_roots: FxHashMap<TermId, StackAddressRoot>,
     /// Where each object a load reaches is placed, when it is placed.
-    placements: HashMap<ObjectId, ObjectPlacement>,
+    placements: FxHashMap<ObjectId, ObjectPlacement>,
     /// The walk certificate of a leaf that reads a pointer carried round a
     /// loop.
-    walks: HashMap<TermId, PointerWalk>,
+    walks: FxHashMap<TermId, PointerWalk>,
     /// The first leaf minted for each value, by the value's base node. Occurrences differ; what
     /// they read does not, so every fact about a value is keyed on this one and every other
     /// occurrence is normalised to it before a lookup. `NO_LEAF` where none is minted.
@@ -800,7 +799,7 @@ impl TermArena {
         )
     )]
     pub fn reads_memory(&self, root: TermId) -> bool {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
             if !seen.insert(id) {
@@ -858,7 +857,7 @@ impl TermArena {
         )
     )]
     pub fn names_object_address(&self, root: TermId, object: ObjectId) -> bool {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
             if !seen.insert(id) {
@@ -881,7 +880,7 @@ impl TermArena {
     )]
     pub fn leaves(&self, root: TermId) -> Vec<MachineExprId> {
         let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
             if !seen.insert(id) {
@@ -918,7 +917,7 @@ impl TermArena {
     )]
     pub fn variables(&self, root: TermId) -> Vec<(u32, MachineType)> {
         let mut out = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
             if !seen.insert(id) {
@@ -946,7 +945,7 @@ impl TermArena {
         )
     )]
     pub fn contains(&self, root: TermId, needle: TermId) -> bool {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = rustc_hash::FxHashSet::default();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
             if id == needle {

@@ -239,7 +239,7 @@ pub(crate) fn applied_type_assumption_parameter_slots(
     usage: &r2ssa::AssumptionUsageReport,
     parsed_context: &ParsedExternalContext,
     registers: &crate::RegisterIdentity,
-) -> HashSet<usize> {
+) -> FxHashSet<usize> {
     usage
         .applied
         .iter()

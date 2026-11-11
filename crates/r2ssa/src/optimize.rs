@@ -3,7 +3,8 @@
 //! This module applies a sequence of lightweight, SSA-safe optimizations
 //! intended to simplify analysis and decompilation output.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
+use rustc_hash::FxHashSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use crate::control::{SsaExecutionStopReason, SsaWorkControl};
 use crate::dense::{Csr, IdMap, IdSet, IdVec};
@@ -174,7 +175,7 @@ pub(crate) fn optimize_function_with_return_and_control<C: SsaWorkControl + ?Siz
 type Op = SSAOp<VarId>;
 
 /// The constants proved, the edges found executable, and the blocks an operation with unstated effects can precede.
-type SccpResult = (IdMap<VarId, u64>, HashSet<(u64, u64)>, HashSet<u64>);
+type SccpResult = (IdMap<VarId, u64>, FxHashSet<(u64, u64)>, FxHashSet<u64>);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LatticeValue {
@@ -317,7 +318,7 @@ fn evaluate_op_sccp(
 
 fn evaluate_phi_sccp(
     phi: &PhiNode<VarId>,
-    executable: &HashSet<(u64, u64)>,
+    executable: &FxHashSet<(u64, u64)>,
     values: &Minting<'_>,
     lattice: &IdVec<VarId, LatticeValue>,
     block_addr: u64,
@@ -394,10 +395,10 @@ struct Sccp<'f> {
     func: &'f SSAFunction,
     values: Minting<'f>,
     lattice: IdVec<VarId, LatticeValue>,
-    executable: HashSet<(u64, u64)>,
-    block_visited: HashSet<u64>,
+    executable: FxHashSet<(u64, u64)>,
+    block_visited: FxHashSet<u64>,
     /// Blocks an operation with unstated effects can precede (`after_unmodelled_effects`).
-    unmodelled: HashSet<u64>,
+    unmodelled: FxHashSet<u64>,
     cfg_worklist: VecDeque<(u64, u64)>,
     ssa_worklist: VecDeque<VarId>,
 }
@@ -513,8 +514,8 @@ impl Sccp<'_> {
 
 /// The blocks an operation with unstated effects can precede, itself included: `syscall` writes
 /// `rax` with no SSA definition, so no register read there is a constant. `O(n + e)`.
-fn after_unmodelled_effects(func: &SSAFunction) -> HashSet<u64> {
-    let mut reached = HashSet::new();
+fn after_unmodelled_effects(func: &SSAFunction) -> FxHashSet<u64> {
+    let mut reached = FxHashSet::default();
     let mut pending = func
         .blocks()
         .iter()
@@ -549,8 +550,8 @@ fn sccp_with_control<C: SsaWorkControl + ?Sized>(
         func,
         values: Minting::new(func.values()),
         lattice: IdVec::filled(func.values().len(), LatticeValue::Top),
-        executable: HashSet::new(),
-        block_visited: HashSet::new(),
+        executable: FxHashSet::default(),
+        block_visited: FxHashSet::default(),
         unmodelled: after_unmodelled_effects(func),
         cfg_worklist: VecDeque::new(),
         ssa_worklist: VecDeque::new(),
@@ -918,7 +919,7 @@ fn apply_sccp_results(
     }
     func.apply_edits(unexecuted);
 
-    let mut reachable = HashSet::new();
+    let mut reachable = FxHashSet::default();
     let mut queue = VecDeque::new();
     queue.push_back(func.root());
     while let Some(addr) = queue.pop_front() {
@@ -1221,7 +1222,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
         links: Vec<u64>,
     }
     let mut fusions: Vec<Fusion> = Vec::new();
-    let mut claimed = HashSet::new();
+    let mut claimed = FxHashSet::default();
     for addr in func.block_addrs().to_vec() {
         if claimed.contains(&addr) {
             continue;
@@ -1292,7 +1293,7 @@ fn fuse_compare_chains_in_function(func: &mut SSAFunction, stats: &mut Optimizat
         let default = cur;
         let chain = std::iter::once(addr)
             .chain(links.iter().copied())
-            .collect::<HashSet<_>>();
+            .collect::<FxHashSet<_>>();
         let falls_through = cases.iter().any(|(_, target)| {
             !chain.contains(target)
                 && func

@@ -6,6 +6,7 @@ license.workspace = true
 description = "Intermediate Language types for r2sleigh"
 
 [dependencies]
+rustc-hash.workspace = true
 serde.workspace = true
 postcard.workspace = true
 thiserror.workspace = true

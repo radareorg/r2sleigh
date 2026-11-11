@@ -4,7 +4,7 @@
 //! into r2il, including register mappings and address space configuration.
 
 use r2il::{AddressSpace, ArchSpec, Endianness, RegisterDef, SpaceId};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 /// Context for translating a specific architecture.
 #[derive(Debug)]
@@ -13,7 +13,7 @@ pub struct LiftContext {
     pub arch: ArchSpec,
 
     /// Mapping from Sleigh space names to SpaceId
-    space_map: HashMap<String, SpaceId>,
+    space_map: FxHashMap<String, SpaceId>,
 
     /// Counter for unique space IDs
     next_custom_space: u32,
@@ -24,7 +24,7 @@ impl LiftContext {
     pub fn new(name: impl Into<String>) -> Self {
         let mut ctx = Self {
             arch: ArchSpec::new(name),
-            space_map: HashMap::new(),
+            space_map: FxHashMap::default(),
             next_custom_space: 0,
         };
 
@@ -39,7 +39,7 @@ impl LiftContext {
     /// This is used when we've already parsed a Sleigh spec and have
     /// an ArchSpec ready.
     pub fn from_arch_spec(arch: ArchSpec) -> Self {
-        let mut space_map = HashMap::new();
+        let mut space_map = FxHashMap::default();
 
         // Rebuild space map from the arch spec
         for space in &arch.spaces {

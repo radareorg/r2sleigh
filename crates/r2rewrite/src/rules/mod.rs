@@ -93,7 +93,7 @@ impl MeasureVector {
     )
 )]
 pub fn measure(arena: &TermArena, root: TermId) -> MeasureVector {
-    let mut memo = std::collections::HashMap::new();
+    let mut memo = rustc_hash::FxHashMap::default();
     measure_memo(arena, root, &mut memo)
 }
 
@@ -107,7 +107,7 @@ pub fn measure(arena: &TermArena, root: TermId) -> MeasureVector {
 fn measure_memo(
     arena: &TermArena,
     id: TermId,
-    memo: &mut std::collections::HashMap<TermId, MeasureVector>,
+    memo: &mut rustc_hash::FxHashMap<TermId, MeasureVector>,
 ) -> MeasureVector {
     if let Some(m) = memo.get(&id) {
         return *m;

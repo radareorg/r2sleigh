@@ -1,6 +1,5 @@
-use std::collections::HashMap;
-
 use crate::signature_infer::RecoveredSignatureParam;
+use rustc_hash::FxHashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TypeHintRank {
@@ -24,7 +23,7 @@ impl TypeHint {
     }
 }
 
-pub fn merge_type_hint(hints: &mut HashMap<String, TypeHint>, key: String, incoming: TypeHint) {
+pub fn merge_type_hint(hints: &mut FxHashMap<String, TypeHint>, key: String, incoming: TypeHint) {
     match hints.get(&key) {
         Some(current) if !incoming_hint_should_replace(current, &incoming) => {}
         _ => {

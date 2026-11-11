@@ -13,7 +13,7 @@
 //! kind of outside thing it is, so calling something external is a claim a
 //! reader can check rather than a string that arrived from somewhere.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use serde::{Deserialize, Serialize};
@@ -136,7 +136,7 @@ pub struct SymbolTable {
     id: TableId,
     symbols: Vec<Symbol>,
     /// Which identifiers are taken, so a second declaration cannot shadow a first.
-    by_name: HashMap<String, SymbolId>,
+    by_name: BTreeMap<String, SymbolId>,
 }
 
 /// Two tables are equal when they declare the same names.

@@ -55,7 +55,7 @@ pub(crate) struct TypeAnalysisDiagnostics {
 /// This detached projection is not certificate authority. Authoritative
 /// the analysis derives it internally from a retained [`SsaArtifact`] owner.
 pub(crate) struct LocalStructArtifacts {
-    pub slot_element_strides: HashMap<usize, u64>,
+    pub slot_element_strides: FxHashMap<usize, u64>,
     pub indexed_accesses: Vec<ScalarArrayRenderCandidate>,
 }
 

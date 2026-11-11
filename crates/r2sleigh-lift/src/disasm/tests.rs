@@ -697,7 +697,7 @@ fn genuine_lift_binds_full_bytes_to_one_opaque_session() {
         !function.authority().same_lift(independent.authority()),
         "a matching diagnostic manifest must not replay function-lift authority"
     );
-    let authorities = HashSet::from([
+    let authorities = FxHashSet::from_iter([
         function.authority().clone(),
         independent.authority().clone(),
     ]);

@@ -6,6 +6,7 @@ license.workspace = true
 description = "SSA (Static Single Assignment) form for r2il"
 
 [dependencies]
+rustc-hash.workspace = true
 r2il = { path = "../r2il" }
 r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false }
 r2source = { path = "../r2source" }

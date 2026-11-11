@@ -1,13 +1,12 @@
-use std::collections::HashMap;
-
 use r2il::{ArchSpec, SpaceId, Varnode, select_register_name};
+use rustc_hash::FxHashMap;
 
-pub type RegisterNameMap = HashMap<(u64, u32), String>;
+pub type RegisterNameMap = FxHashMap<(u64, u32), String>;
 
 /// Each register-space `(offset, size)` the file names, with the name it is spelled by.
 pub(crate) fn register_name_map(arch: &ArchSpec) -> RegisterNameMap {
-    let mut names_by_key: HashMap<(u64, u32), Vec<&str>> =
-        HashMap::with_capacity(arch.registers.len());
+    let mut names_by_key: FxHashMap<(u64, u32), Vec<&str>> =
+        FxHashMap::with_capacity_and_hasher(arch.registers.len(), Default::default());
     for reg in &arch.registers {
         names_by_key
             .entry((reg.offset, reg.size))
@@ -86,7 +85,7 @@ mod tests {
     #[test]
     fn test_varnode_to_name_with_map() {
         // Register with name map uses named register (no prefix)
-        let mut map = RegisterNameMap::new();
+        let mut map = RegisterNameMap::default();
         map.insert((0x10, 8), "rax".to_string());
 
         let vn = Varnode {
@@ -100,7 +99,7 @@ mod tests {
     #[test]
     fn test_varnode_to_name_map_miss() {
         // Register not in map falls back to hex
-        let mut map = RegisterNameMap::new();
+        let mut map = RegisterNameMap::default();
         map.insert((0x20, 8), "rbx".to_string());
 
         let vn = Varnode {

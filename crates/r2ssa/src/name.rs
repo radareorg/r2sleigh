@@ -16,7 +16,7 @@
 //! program contains, which is what a decompiler holds anyway, and a name that
 //! outlives the function it came from is what lets a variable be `'static`.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::{LazyLock, Mutex};
 
 use crate::var::SSAVarNameKind;
@@ -81,8 +81,8 @@ impl std::fmt::Debug for InternedName {
     }
 }
 
-static NAMES: LazyLock<Mutex<HashMap<&'static str, &'static InternedName>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+static NAMES: LazyLock<Mutex<FxHashMap<&'static str, &'static InternedName>>> =
+    LazyLock::new(|| Mutex::new(FxHashMap::default()));
 
 /// The single entry for a spelling, creating it the first time it is seen.
 pub fn intern(text: &str) -> &'static InternedName {

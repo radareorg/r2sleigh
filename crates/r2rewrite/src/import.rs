@@ -13,7 +13,8 @@
 //! rendering the resulting term renders those instructions here, and the
 //! accounting has to know.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use rustc_hash::FxHashSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use r2ssa::{
     CanonicalInstructionId, InductionStep, InstId, MachineArithmeticMode, MachineBitVector,
@@ -574,7 +575,7 @@ struct Importer<'a> {
     arena: &'a mut TermArena,
     policy: &'a ExpansionPolicy<'a>,
     roots: Completed,
-    in_progress: HashSet<MachineExprId>,
+    in_progress: FxHashSet<MachineExprId>,
     entry_never_redefined: BTreeSet<ValueId>,
     /// Values the machine arena types as an address at some use.
     address_typed: BTreeSet<ValueId>,
@@ -682,7 +683,7 @@ pub fn import_with(
         arena,
         policy,
         roots: Completed::with_roots(projection.arena().len()),
-        in_progress: HashSet::new(),
+        in_progress: FxHashSet::default(),
         entry_never_redefined,
         address_typed,
         pointer_parameters,

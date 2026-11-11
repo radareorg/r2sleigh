@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 use crate::CTypeLike;
 
@@ -36,9 +36,9 @@ pub enum ExternalAggregateKind {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExternalTypeDb {
-    pub structs: HashMap<String, ExternalStruct>,
-    pub unions: HashMap<String, ExternalUnion>,
-    pub enums: HashMap<String, ExternalEnum>,
+    pub structs: BTreeMap<String, ExternalStruct>,
+    pub unions: BTreeMap<String, ExternalUnion>,
+    pub enums: BTreeMap<String, ExternalEnum>,
     pub diagnostics: Vec<String>,
 }
 

@@ -9,7 +9,8 @@
 //! guarded poisons every run its branches guard. Cost: O(n + e) over operations
 //! and edges, one operation per edge term and one `BoolOr` per extra edge.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use r2il::{MemoryOrdering, OpMetadata, R2ILBlock, R2ILOp, SpaceId, Varnode};
 
@@ -257,7 +258,7 @@ fn if_converted(blocks: &[Block], allocator: &mut InstructionTempAllocator) -> V
         let mut predicated = Predicated {
             emitted: &mut region,
             allocator: &mut *allocator,
-            candidates: HashMap::new(),
+            candidates: FxHashMap::default(),
             preserved: Vec::new(),
             cond: None,
             value: None,
@@ -363,7 +364,7 @@ fn poison<'m>(emitted: &mut Vec<(R2ILOp, Meta)>, metas: impl Iterator<Item = &'m
 }
 
 /// What is live before `op`, from what is live after it.
-fn live_before(live: &mut HashSet<Varnode>, op: &R2ILOp) {
+fn live_before(live: &mut FxHashSet<Varnode>, op: &R2ILOp) {
     if let Some(output) = op.output() {
         live.remove(output);
     }
@@ -372,9 +373,9 @@ fn live_before(live: &mut HashSet<Varnode>, op: &R2ILOp) {
 
 /// What each block leaves read later. A predicated block reads a name only where it did not
 /// write it first (its own reads take candidates), and its select keeps a later-read name live.
-fn live_after(blocks: &[Block], predicates: &[Predicate]) -> Vec<HashSet<Varnode>> {
-    let mut live = HashSet::new();
-    let mut after = vec![HashSet::new(); blocks.len()];
+fn live_after(blocks: &[Block], predicates: &[Predicate]) -> Vec<FxHashSet<Varnode>> {
+    let mut live = FxHashSet::default();
+    let mut after = vec![FxHashSet::default(); blocks.len()];
     for (at, block) in blocks.iter().enumerate().rev() {
         after[at].clone_from(&live);
         let cond = block.exit.as_ref().and_then(|exit| exit.cond.as_ref());
@@ -389,7 +390,7 @@ fn live_after(blocks: &[Block], predicates: &[Predicate]) -> Vec<HashSet<Varnode
                     .for_each(|(op, _)| live_before(&mut live, op));
             }
             predicate => {
-                let mut written = HashSet::new();
+                let mut written = FxHashSet::default();
                 for (op, _) in &block.ops {
                     let exposed = op
                         .inputs()
@@ -411,7 +412,7 @@ fn live_after(blocks: &[Block], predicates: &[Predicate]) -> Vec<HashSet<Varnode
 struct Predicated<'a> {
     emitted: &'a mut Vec<(R2ILOp, Meta)>,
     allocator: &'a mut InstructionTempAllocator,
-    candidates: HashMap<Varnode, Varnode>,
+    candidates: FxHashMap<Varnode, Varnode>,
     /// What survives the block, in the order of each one's last write.
     preserved: Vec<(Varnode, Varnode, Meta)>,
     /// The varnode the block's predicate tests and whether the block runs when it holds; `None`
@@ -428,7 +429,7 @@ impl Predicated<'_> {
         block: &Block,
         predicate: &Predicate,
         terms: Vec<Varnode>,
-        live: &HashSet<Varnode>,
+        live: &FxHashSet<Varnode>,
     ) -> Option<()> {
         let first = block
             .ops

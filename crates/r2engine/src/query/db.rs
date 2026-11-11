@@ -26,9 +26,10 @@
 //! gets [`Cycle`] rather than recursing; a strongly connected set of facts is
 //! solved by one query over the set (P6).
 
+use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -230,7 +231,7 @@ trait AnyTable<I: Inputs> {
 /// The program's derived facts.
 pub struct Db<I: Inputs> {
     inputs: I,
-    tables: RefCell<HashMap<TypeId, Rc<dyn AnyTable<I>>>>,
+    tables: RefCell<FxHashMap<TypeId, Rc<dyn AnyTable<I>>>>,
     /// The dependencies of each query running, innermost last.
     frames: RefCell<Vec<Frame>>,
     stats: RefCell<DbStats>,
@@ -240,7 +241,7 @@ impl<I: Inputs + 'static> Db<I> {
     pub fn new(inputs: I) -> Self {
         Self {
             inputs,
-            tables: RefCell::new(HashMap::new()),
+            tables: RefCell::new(FxHashMap::default()),
             frames: RefCell::new(Vec::new()),
             stats: RefCell::new(DbStats::default()),
         }

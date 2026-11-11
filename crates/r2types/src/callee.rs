@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use rustc_hash::FxHashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use r2ssa::dense::IdMap;
 use r2ssa::{InstId, SSAVarNameKind};
@@ -109,8 +110,8 @@ impl CalleeTargetPolicyDecision {
 
 #[derive(Debug, Clone, Copy)]
 pub struct CalleeIdentityContext<'a> {
-    pub function_names: &'a HashMap<u64, String>,
-    pub symbols: &'a HashMap<u64, String>,
+    pub function_names: &'a FxHashMap<u64, String>,
+    pub symbols: &'a FxHashMap<u64, String>,
     pub callee_facts: &'a BTreeMap<u64, CalleeFact>,
 }
 
@@ -684,8 +685,8 @@ mod tests {
     use super::*;
 
     fn empty_identity_context<'a>(
-        function_names: &'a HashMap<u64, String>,
-        symbols: &'a HashMap<u64, String>,
+        function_names: &'a FxHashMap<u64, String>,
+        symbols: &'a FxHashMap<u64, String>,
         callee_facts: &'a BTreeMap<u64, CalleeFact>,
     ) -> CalleeIdentityContext<'a> {
         CalleeIdentityContext {
@@ -825,8 +826,8 @@ mod tests {
 
     #[test]
     fn direct_target_identity_uses_callee_fact_before_function_and_symbol_names() {
-        let function_names = HashMap::from([(0x401000, "sym.function_name".to_string())]);
-        let symbols = HashMap::from([(0x401000, "sym.symbol_name".to_string())]);
+        let function_names = FxHashMap::from_iter([(0x401000, "sym.function_name".to_string())]);
+        let symbols = FxHashMap::from_iter([(0x401000, "sym.symbol_name".to_string())]);
         let callee_facts =
             BTreeMap::from([(0x401000, imported_callee_fact(0x401000, "sym.imp.printf"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
@@ -860,8 +861,8 @@ mod tests {
 
     #[test]
     fn import_looking_callee_fact_name_without_linkage_is_not_an_import() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts = BTreeMap::from([(0x401020, callee_fact(0x401020, "sym.imp.printf"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
 
@@ -879,8 +880,8 @@ mod tests {
 
     #[test]
     fn explicit_import_linkage_authorizes_policy_without_import_name_shape() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts = BTreeMap::from([(0x401028, imported_callee_fact(0x401028, "printf"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
 
@@ -898,8 +899,8 @@ mod tests {
 
     #[test]
     fn internal_linkage_classifies_plain_callee_fact_as_internal() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts = BTreeMap::from([(
             0x40102c,
             callee_fact_with_linkage(0x40102c, "helper", CalleeLinkage::Internal),
@@ -919,8 +920,8 @@ mod tests {
 
     #[test]
     fn unknown_linkage_plain_callee_fact_remains_unknown() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts = BTreeMap::from([(0x40102d, callee_fact(0x40102d, "helper"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
 
@@ -932,9 +933,9 @@ mod tests {
 
     #[test]
     fn symbol_names_promote_only_unknown_callee_identities_to_external() {
-        let function_names = HashMap::new();
+        let function_names = FxHashMap::default();
         let callee_facts = BTreeMap::new();
-        let external_symbols = HashMap::from([(0x40102e, "external_helper".to_string())]);
+        let external_symbols = FxHashMap::from_iter([(0x40102e, "external_helper".to_string())]);
         let external_ctx =
             empty_identity_context(&function_names, &external_symbols, &callee_facts);
 
@@ -945,8 +946,8 @@ mod tests {
 
     #[test]
     fn direct_target_identity_prefers_typed_callee_fact_signature() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let mut fact = callee_fact(0x401000, "sym.imp.printf");
         fact.signature = Some(non_variadic_signature(2));
         fact.signature_callconv = Some("amd64".to_string());
@@ -1010,8 +1011,8 @@ mod tests {
 
     #[test]
     fn direct_target_identity_does_not_insert_empty_normalized_aliases() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts = BTreeMap::from([(0x401040, callee_fact(0x401040, "sym.imp."))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
 
@@ -1037,8 +1038,8 @@ mod tests {
 
     #[test]
     fn callee_target_policy_authorizes_import_from_typed_linkage() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts =
             BTreeMap::from([(0x401000, imported_callee_fact(0x401000, "sym.imp.printf"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
@@ -1082,8 +1083,8 @@ mod tests {
 
     #[test]
     fn callee_target_policy_does_not_model_from_callee_fact_presence_without_evidence() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts = BTreeMap::from([(0x401000, callee_fact(0x401000, "sym.memcpy"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
         let resolution = CalleeResolutionFacts::from_context(&ctx);
@@ -1099,8 +1100,8 @@ mod tests {
 
     #[test]
     fn callee_target_policy_models_from_explicit_callee_fact_evidence_through_resolution() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts =
             BTreeMap::from([(0x401000, modeled_callee_fact(0x401000, "sym.memcpy"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
@@ -1148,8 +1149,8 @@ mod tests {
 
     #[test]
     fn callee_resolution_policy_prefers_prepared_identity_over_callsite_resolution() {
-        let function_names = HashMap::from([(0x402000, "sym.local".to_string())]);
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::from_iter([(0x402000, "sym.local".to_string())]);
+        let symbols = FxHashMap::default();
         let callee_facts =
             BTreeMap::from([(0x401000, imported_callee_fact(0x401000, "sym.imp.printf"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
@@ -1184,8 +1185,8 @@ mod tests {
 
     #[test]
     fn callee_resolution_policy_prefers_callsite_identity_over_other_typed_inputs() {
-        let function_names = HashMap::from([(0x402000, "sym.local".to_string())]);
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::from_iter([(0x402000, "sym.local".to_string())]);
+        let symbols = FxHashMap::default();
         let callee_facts =
             BTreeMap::from([(0x401000, imported_callee_fact(0x401000, "sym.imp.printf"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
@@ -1217,8 +1218,8 @@ mod tests {
 
     #[test]
     fn callee_resolution_policy_keeps_imported_callsite_over_prepared_direct_target() {
-        let function_names = HashMap::from([(0x402000, "sym.local".to_string())]);
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::from_iter([(0x402000, "sym.local".to_string())]);
+        let symbols = FxHashMap::default();
         let callee_facts =
             BTreeMap::from([(0x401000, imported_callee_fact(0x401000, "sym.imp.printf"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
@@ -1253,8 +1254,8 @@ mod tests {
 
     #[test]
     fn callee_resolution_policy_uses_prepared_direct_target_without_display_fallback() {
-        let function_names = HashMap::from([(0x402000, "sym.local".to_string())]);
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::from_iter([(0x402000, "sym.local".to_string())]);
+        let symbols = FxHashMap::default();
         let callee_facts =
             BTreeMap::from([(0x401000, imported_callee_fact(0x401000, "sym.imp.printf"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
@@ -1282,8 +1283,8 @@ mod tests {
 
     #[test]
     fn callee_resolution_policy_fails_closed_after_typed_sources_fail() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts = BTreeMap::new();
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
         assert!(
@@ -1304,8 +1305,8 @@ mod tests {
 
     #[test]
     fn callee_resolution_policy_does_not_authorize_plain_rendered_names_for_unresolved_sites() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts = BTreeMap::new();
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
         let unresolved_site = r2ssa::InstId(0x10);
@@ -1327,8 +1328,8 @@ mod tests {
 
     #[test]
     fn callee_resolution_policy_allows_explicit_prepared_direct_targets() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts =
             BTreeMap::from([(0x401000, imported_callee_fact(0x401000, "sym.imp.printf"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
@@ -1359,8 +1360,8 @@ mod tests {
 
     #[test]
     fn callee_resolution_policy_unresolved_callsite_does_not_inherit_other_site_policy() {
-        let function_names = HashMap::from([(0x402000, "sym.local".to_string())]);
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::from_iter([(0x402000, "sym.local".to_string())]);
+        let symbols = FxHashMap::default();
         let callee_facts =
             BTreeMap::from([(0x401000, imported_callee_fact(0x401000, "sym.imp.printf"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
@@ -1387,8 +1388,8 @@ mod tests {
 
     #[test]
     fn callee_resolution_policy_preserves_modeled_callee_fact_through_callsite() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts =
             BTreeMap::from([(0x401000, modeled_callee_fact(0x401000, "sym.memcpy"))]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
@@ -1425,8 +1426,8 @@ mod tests {
 
     #[test]
     fn callee_resolution_policy_returns_none_without_any_identity_source() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts = BTreeMap::new();
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
 
@@ -1485,8 +1486,8 @@ mod tests {
 
     #[test]
     fn direct_target_identity_without_names_remains_address_keyed() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts = BTreeMap::new();
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
 
@@ -1506,8 +1507,8 @@ mod tests {
 
     #[test]
     fn callee_resolution_facts_index_direct_call_targets_deterministically() {
-        let function_names = HashMap::from([(0x401000, "sym.function_name".to_string())]);
-        let symbols = HashMap::from([(0x401000, "sym.symbol_name".to_string())]);
+        let function_names = FxHashMap::from_iter([(0x401000, "sym.function_name".to_string())]);
+        let symbols = FxHashMap::from_iter([(0x401000, "sym.symbol_name".to_string())]);
         let mut fact = imported_callee_fact(0x401000, "sym.imp.printf");
         fact.signature = Some(non_variadic_signature(2));
         let callee_facts = BTreeMap::from([(0x401000, fact)]);
@@ -1537,8 +1538,8 @@ mod tests {
 
     #[test]
     fn callee_resolution_facts_reject_conflicting_callsite_owner() {
-        let function_names = HashMap::new();
-        let symbols = HashMap::new();
+        let function_names = FxHashMap::default();
+        let symbols = FxHashMap::default();
         let callee_facts = BTreeMap::new();
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
         let callsite = r2ssa::InstId(0x402004);

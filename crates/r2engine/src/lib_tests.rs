@@ -1,6 +1,7 @@
 use super::*;
+use rustc_hash::FxHashMap;
 use std::cell::Cell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 fn register_assumption(id: &str, name: &str, value: u64) -> r2ssa::AnalysisAssumption {
     r2ssa::AnalysisAssumption {
@@ -274,7 +275,7 @@ fn authoritative_source_interface_reaches_prepared_ssa_through_request() {
                 semantic_metadata_enabled: false,
             },
             ptr_bits: Some(64),
-            reg_type_hints: HashMap::new(),
+            reg_type_hints: FxHashMap::default(),
             parsed_context: r2types::ParsedExternalContext::default(),
             include_interproc_summary_set: false,
         });
@@ -333,7 +334,7 @@ fn absent_source_snapshot_refuses_before_ssa_construction() {
                 semantic_metadata_enabled: false,
             },
             ptr_bits: Some(64),
-            reg_type_hints: HashMap::new(),
+            reg_type_hints: FxHashMap::default(),
             parsed_context: r2types::ParsedExternalContext::default(),
             include_interproc_summary_set: false,
         });
@@ -372,7 +373,7 @@ fn request_assumptions_produce_one_shared_semantic_artifact() {
             declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
-            reg_type_hints: HashMap::new(),
+            reg_type_hints: FxHashMap::default(),
             parsed_context,
             semantic_mode: EngineSemanticMode::Optional,
             include_interproc_summary_set: true,
@@ -468,7 +469,7 @@ fn analyze_request_builders_own_semantic_mode_selection() {
         source_snapshot: Some(test_source_snapshot("sym.builder/rev1")),
         ptr_bits: 64,
         semantic_metadata_enabled: false,
-        reg_type_hints: HashMap::new(),
+        reg_type_hints: FxHashMap::default(),
         parsed_context: r2types::ParsedExternalContext::default(),
         include_interproc_summary_set: true,
     };
@@ -501,7 +502,7 @@ fn analyze_request_input_builder_owns_parts_and_pointer_width() {
         source_snapshot: Some(test_source_snapshot("sym.input_builder/rev1")),
         ptr_bits: None,
         semantic_metadata_enabled: true,
-        reg_type_hints: HashMap::new(),
+        reg_type_hints: FxHashMap::default(),
         parsed_context: r2types::ParsedExternalContext::default(),
         include_interproc_summary_set: true,
     };
@@ -535,7 +536,7 @@ fn analyze_request_input_builder_owns_parts_and_pointer_width() {
                 semantic_metadata_enabled: false,
             },
             ptr_bits: Some(32),
-            reg_type_hints: HashMap::new(),
+            reg_type_hints: FxHashMap::default(),
             parsed_context: r2types::ParsedExternalContext::default(),
             include_interproc_summary_set: false,
         });
@@ -726,7 +727,7 @@ fn analyze_reports_planning_time() {
         declared_signatures: Vec::new(),
         ptr_bits: 64,
         semantic_metadata_enabled: false,
-        reg_type_hints: HashMap::new(),
+        reg_type_hints: FxHashMap::default(),
         parsed_context: r2types::ParsedExternalContext::default(),
         semantic_mode: EngineSemanticMode::Full,
         include_interproc_summary_set: true,
@@ -807,7 +808,7 @@ fn controlled_ssa_test_request(
             semantic_metadata_enabled: false,
         },
         ptr_bits: Some(64),
-        reg_type_hints: HashMap::new(),
+        reg_type_hints: FxHashMap::default(),
         parsed_context: r2types::ParsedExternalContext::default(),
         include_interproc_summary_set: false,
     })
@@ -946,8 +947,8 @@ fn first_stop_in_each_phase(
     request: &EngineDecompileRequest<'_>,
     total_polls: usize,
     phases: &[EnginePhase],
-) -> HashMap<EnginePhase, usize> {
-    let mut observed = HashMap::new();
+) -> FxHashMap<EnginePhase, usize> {
+    let mut observed = FxHashMap::default();
     for stop_at in 1..=total_polls {
         let stop = StopRenderAtPoll::new(stop_at, r2ssa::SsaExecutionStopReason::Cancelled);
         let response = session.decompile_with_r2dec_control(request.clone(), &stop);
@@ -1496,7 +1497,7 @@ fn analyze_checked_refuses_pre_cancelled_request_with_full_phase_report() {
                 semantic_metadata_enabled: false,
             },
             ptr_bits: Some(64),
-            reg_type_hints: HashMap::new(),
+            reg_type_hints: FxHashMap::default(),
             parsed_context: r2types::ParsedExternalContext::default(),
             include_interproc_summary_set: false,
         })
@@ -1650,7 +1651,7 @@ fn external_layout_names_rewrite_placeholder_field_certificates() {
     let type_facts = FunctionTypeFacts {
         merged_signature: Some(signature),
         external_type_db: r2types::ExternalTypeDb {
-            structs: HashMap::from([(
+            structs: BTreeMap::from([(
                 "demostruct".to_string(),
                 r2types::ExternalStruct {
                     name: "DemoStruct".to_string(),
@@ -1735,7 +1736,7 @@ fn decompile_function_uses_engine_summary_preprobe_without_plugin_policy() {
             declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
-            reg_type_hints: HashMap::new(),
+            reg_type_hints: FxHashMap::default(),
             parsed_context,
             semantic_mode: EngineSemanticMode::Full,
             include_interproc_summary_set: true,
@@ -2054,7 +2055,7 @@ fn decompile_function_refuses_incomplete_optional_input_quality() {
             declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
-            reg_type_hints: HashMap::new(),
+            reg_type_hints: FxHashMap::default(),
             parsed_context,
             semantic_mode: EngineSemanticMode::Full,
             include_interproc_summary_set: true,
@@ -2105,7 +2106,7 @@ fn decompile_function_uses_canonical_display_identity_without_raw_payloads() {
             declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
-            reg_type_hints: HashMap::new(),
+            reg_type_hints: FxHashMap::default(),
             parsed_context,
             semantic_mode: EngineSemanticMode::Full,
             include_interproc_summary_set: true,
@@ -2148,7 +2149,7 @@ fn decompile_function_does_not_invent_raw_payload_callee_names() {
             declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
-            reg_type_hints: HashMap::new(),
+            reg_type_hints: FxHashMap::default(),
             parsed_context,
             semantic_mode: EngineSemanticMode::Full,
             include_interproc_summary_set: true,
@@ -2182,7 +2183,7 @@ fn decompile_function_does_not_invent_raw_payload_strings() {
             declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
-            reg_type_hints: HashMap::new(),
+            reg_type_hints: FxHashMap::default(),
             parsed_context,
             semantic_mode: EngineSemanticMode::Full,
             include_interproc_summary_set: true,

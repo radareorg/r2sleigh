@@ -1155,12 +1155,12 @@ pub(crate) fn prepared_callee_resolution_facts(
         .functions()
         .iter()
         .map(|(addr, name)| (*addr, name.clone()))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
     let symbols = names
         .symbols()
         .iter()
         .map(|(addr, name)| (*addr, name.clone()))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
     // The linkage radare2 read off the symbol or relocation that named each
     // call target is the fact import policy rests on; a name's shape is not.
     for cert in prepared.certificates().callsites.values() {

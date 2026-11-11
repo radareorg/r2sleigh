@@ -14,7 +14,8 @@ mod rewrite;
 mod stack_roots;
 mod stage;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -1709,7 +1710,7 @@ impl SsaArtifact {
                 .filter(|(_, storage)| storage.space == CanonicalStorageSpace::Register)
                 .map(|(name, storage)| (name.as_str(), storage.offset, storage.size)),
         );
-        let mut entries_by_family = HashMap::<usize, usize>::new();
+        let mut entries_by_family = FxHashMap::<usize, usize>::default();
         for value in &self.graph().values {
             if value.var.version != 0 || self.graph().def_inst(value.id).is_some() {
                 continue;
@@ -4196,14 +4197,14 @@ struct RegisterFamilyMember {
 /// own register geometry rather than from a table of names.
 #[derive(Debug, Clone, Default)]
 pub struct RegisterFamilyInfo {
-    name_to_member: HashMap<String, RegisterFamilyMember>,
+    name_to_member: FxHashMap<String, RegisterFamilyMember>,
     /// Whether a 32-bit write to a general register clears the rest of it.
     /// Which family covers a register-space range, for storage the arch does not name.
     family_ranges: Vec<(u64, u64, usize)>,
-    family_slots: HashMap<usize, Vec<RegisterFamilySlot>>,
+    family_slots: FxHashMap<usize, Vec<RegisterFamilySlot>>,
     /// The narrowest declared slot of each family that contains every range
     /// one function touches of it; see [`Self::with_program_roots`].
-    program_roots: HashMap<usize, RegisterFamilySlot>,
+    program_roots: FxHashMap<usize, RegisterFamilySlot>,
     /// Whether a register's lowest address holds its most significant byte.
     big_endian: bool,
 }
@@ -4238,7 +4239,7 @@ impl RegisterFamilyInfo {
     /// of the whole carrier included, which is why those ranges are counted
     /// here too.
     pub fn with_program_roots(&self, used: impl IntoIterator<Item = (u64, u32)>) -> Self {
-        let mut extents = HashMap::<usize, (u64, u64)>::new();
+        let mut extents = FxHashMap::<usize, (u64, u64)>::default();
         for (offset, size) in used {
             let Some(member) = self.member_at_offset(offset, size) else {
                 continue;
@@ -4248,7 +4249,7 @@ impl RegisterFamilyInfo {
             extent.0 = extent.0.min(offset);
             extent.1 = extent.1.max(end);
         }
-        let mut program_roots = HashMap::new();
+        let mut program_roots = FxHashMap::default();
         for (family_id, (start, end)) in extents {
             let Some(slots) = self.family_slots.get(&family_id) else {
                 continue;
@@ -4346,10 +4347,10 @@ impl RegisterFamilyInfo {
             }
         }
 
-        let mut root_to_family = HashMap::new();
+        let mut root_to_family = FxHashMap::default();
         let mut next_family_id = 0usize;
-        let mut name_to_member = HashMap::new();
-        let mut family_width_sets: HashMap<(usize, u64), HashSet<u32>> = HashMap::new();
+        let mut name_to_member = FxHashMap::default();
+        let mut family_width_sets: FxHashMap<(usize, u64), FxHashSet<u32>> = FxHashMap::default();
 
         for (idx, reg) in regs.iter().enumerate() {
             let root = find(&mut parents, idx);
@@ -4372,7 +4373,7 @@ impl RegisterFamilyInfo {
                 .insert(reg.size);
         }
 
-        let family_widths_by_offset: HashMap<(usize, u64), Vec<u32>> = family_width_sets
+        let family_widths_by_offset: FxHashMap<(usize, u64), Vec<u32>> = family_width_sets
             .into_iter()
             .map(|(family_and_offset, mut widths)| {
                 let mut widths: Vec<u32> = widths.drain().collect();
@@ -4380,7 +4381,7 @@ impl RegisterFamilyInfo {
                 (family_and_offset, widths)
             })
             .collect();
-        let mut family_slots: HashMap<usize, Vec<RegisterFamilySlot>> = HashMap::new();
+        let mut family_slots: FxHashMap<usize, Vec<RegisterFamilySlot>> = FxHashMap::default();
         for (&(family_id, offset), widths) in &family_widths_by_offset {
             family_slots
                 .entry(family_id)
@@ -4415,7 +4416,7 @@ impl RegisterFamilyInfo {
             name_to_member,
             family_ranges: merged,
             family_slots,
-            program_roots: HashMap::new(),
+            program_roots: FxHashMap::default(),
             big_endian: false,
         }
     }

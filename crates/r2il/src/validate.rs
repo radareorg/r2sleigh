@@ -4,7 +4,8 @@
 //! specifications and lifted blocks. The checks are intentionally conservative
 //! and avoid deep semantic/type reasoning.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use rustc_hash::FxHashSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::opcode::{R2ILBlock, R2ILOp};
@@ -109,8 +110,8 @@ pub fn validate_archspec(arch: &ArchSpec) -> Result<(), ValidationError> {
         ));
     }
 
-    let mut seen_space_ids = HashSet::new();
-    let mut seen_space_names = HashSet::new();
+    let mut seen_space_ids = FxHashSet::default();
+    let mut seen_space_names = FxHashSet::default();
     for (i, space) in arch.spaces.iter().enumerate() {
         if !seen_space_ids.insert(space.id) {
             issues.push(ValidationIssue::new(
@@ -158,7 +159,7 @@ pub fn validate_archspec(arch: &ArchSpec) -> Result<(), ValidationError> {
         }
     }
 
-    let mut seen_reg_names = HashSet::new();
+    let mut seen_reg_names = FxHashSet::default();
     for (i, reg) in arch.registers.iter().enumerate() {
         if !seen_reg_names.insert(reg.name.clone()) {
             issues.push(ValidationIssue::new(
@@ -798,7 +799,7 @@ pub fn validate_block(block: &R2ILBlock) -> Result<(), ValidationError> {
     if let Some(sw) = &block.switch_info {
         // One case value per arm: two arms labelled the same would make the
         // selector name two targets, which is not a table.
-        let mut seen_case_values = HashSet::new();
+        let mut seen_case_values = FxHashSet::default();
         for (i, case) in sw.cases.iter().enumerate() {
             if !seen_case_values.insert(case.value) {
                 issues.push(ValidationIssue::new(

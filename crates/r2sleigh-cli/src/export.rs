@@ -2,9 +2,9 @@
 
 use r2il::{ArchSpec, R2ILBlock, R2ILOp, SpaceId, Varnode, validate_block_full};
 use r2sleigh_lift::{Disassembler, format_op};
+use rustc_hash::FxHashSet;
 use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashSet;
 use std::fmt;
 use thiserror::Error;
 
@@ -321,7 +321,7 @@ fn export_dec(
     }
 }
 
-fn sorted_set(values: &HashSet<String>) -> Vec<String> {
+fn sorted_set(values: &FxHashSet<String>) -> Vec<String> {
     let mut out: Vec<String> = values.iter().cloned().collect();
     out.sort();
     out

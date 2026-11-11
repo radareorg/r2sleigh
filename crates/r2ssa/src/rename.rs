@@ -3,7 +3,8 @@
 //! This module implements the SSA renaming pass that assigns version numbers
 //! to variables, following the algorithm from Cytron et al.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use rustc_hash::FxHashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use std::sync::Arc;
 
@@ -36,13 +37,13 @@ impl From<&RenameIdentity> for RenameProjection {
 pub struct RenameContext {
     /// Stack of versions for each exact semantic-name/width/storage identity.
     /// The top of the stack is the current version.
-    stacks: HashMap<RenameIdentity, Vec<u32>>,
+    stacks: FxHashMap<RenameIdentity, Vec<u32>>,
     /// Collision-free version namespace for the user-facing SSAVar projection.
-    counters: HashMap<RenameProjection, u32>,
+    counters: FxHashMap<RenameProjection, u32>,
     /// Dense deterministic discriminator for exact identities whose public
     /// name/width projection is otherwise identical.
-    disambiguators: HashMap<RenameIdentity, u32>,
-    next_disambiguator: HashMap<RenameProjection, u32>,
+    disambiguators: FxHashMap<RenameIdentity, u32>,
+    next_disambiguator: FxHashMap<RenameProjection, u32>,
     /// The register geometry: a lane renames as a projection of its family's
     /// root (doc/adr-register-identity.md). `None` keeps exact-varnode identities.
     families: Option<Arc<RegisterFamilyInfo>>,
@@ -212,10 +213,10 @@ impl RenameContext {
 
     pub fn with_families(families: Option<Arc<RegisterFamilyInfo>>) -> Self {
         Self {
-            stacks: HashMap::new(),
-            counters: HashMap::new(),
-            disambiguators: HashMap::new(),
-            next_disambiguator: HashMap::new(),
+            stacks: FxHashMap::default(),
+            counters: FxHashMap::default(),
+            disambiguators: FxHashMap::default(),
+            next_disambiguator: FxHashMap::default(),
             families,
             lanes: LaneState::default(),
             instruction: 0,
@@ -464,7 +465,7 @@ impl Default for RenameContext {
 )]
 pub struct RenamedFunction {
     /// SSA operations for each block (block addr -> ops).
-    pub blocks: HashMap<u64, Vec<SSAOp>>,
+    pub blocks: FxHashMap<u64, Vec<SSAOp>>,
     /// Where each of those operations came from, one entry per operation
     /// and in the same order.
     ///
@@ -475,7 +476,7 @@ pub struct RenamedFunction {
     /// an index into the lifted ones at the first insertion in a block. The
     /// function mints each operation's id from this
     /// (doc/adr-stable-identity.md).
-    pub origins: HashMap<u64, Vec<RenamedOrigin>>,
+    pub origins: FxHashMap<u64, Vec<RenamedOrigin>>,
     /// Block addresses in order.
     pub block_order: Vec<u64>,
     /// Lifted storage provenance for SSA values.
@@ -507,8 +508,8 @@ impl RenamedFunction {
     /// Create a new empty renamed function.
     pub fn new() -> Self {
         Self {
-            blocks: HashMap::new(),
-            origins: HashMap::new(),
+            blocks: FxHashMap::default(),
+            origins: FxHashMap::default(),
             block_order: Vec::new(),
             canonical_storage_by_var: BTreeMap::new(),
             ambiguous_storage_vars: BTreeSet::new(),
@@ -995,7 +996,7 @@ fn record_canonical_storage(
 }
 
 fn append_call_boundary_defs(
-    blocks: &mut HashMap<u64, Vec<SSAOp>>,
+    blocks: &mut FxHashMap<u64, Vec<SSAOp>>,
     block_addr: u64,
     ctx: &mut RenameContext,
     defined_vars: &mut Vec<RenameIdentity>,

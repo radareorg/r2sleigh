@@ -19,7 +19,8 @@
 //! up and never iterated. Two runs over one projection produce identical
 //! arenas, and the seal relies on that.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use r2ssa::{
     CanonicalInstructionId, MachineExprId, MachineExprKind, MachineProjection, SsaArtifact,
@@ -104,7 +105,7 @@ pub struct CanonicalRoots {
     import: Import,
     /// The rewrites that fired at each term, in firing order: each value's trace is walked from
     /// these on demand (`trace`), never stored per value.
-    rewrites_at: HashMap<TermId, Vec<Rewrite>>,
+    rewrites_at: FxHashMap<TermId, Vec<Rewrite>>,
     values: Box<[Option<CanonicalValue>]>,
     accesses: BTreeMap<StructuredAccessId, CanonicalAccess>,
     budget_failures: Vec<BudgetFailure>,
@@ -294,8 +295,8 @@ impl Budget {
 )]
 struct Driver<'a> {
     arena: &'a mut TermArena,
-    canonical: HashMap<TermId, TermId>,
-    rewrites_at: HashMap<TermId, Vec<Rewrite>>,
+    canonical: FxHashMap<TermId, TermId>,
+    rewrites_at: FxHashMap<TermId, Vec<Rewrite>>,
 }
 
 impl Driver<'_> {
@@ -407,8 +408,8 @@ pub fn canonicalize_with(
     let imported_len = arena.len();
     let mut driver = Driver {
         arena: &mut arena,
-        canonical: HashMap::new(),
-        rewrites_at: HashMap::new(),
+        canonical: FxHashMap::default(),
+        rewrites_at: FxHashMap::default(),
     };
     let mut budget_failures = Vec::new();
     for index in 0..imported_len {
@@ -506,11 +507,11 @@ pub fn canonicalize_with(
 )]
 fn collect_rewrites(
     arena: &TermArena,
-    rewrites_at: &HashMap<TermId, Vec<Rewrite>>,
+    rewrites_at: &FxHashMap<TermId, Vec<Rewrite>>,
     root: TermId,
 ) -> Vec<Rewrite> {
     let mut out = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = FxHashSet::default();
     let mut stack = vec![root];
     while let Some(id) = stack.pop() {
         if !seen.insert(id) {

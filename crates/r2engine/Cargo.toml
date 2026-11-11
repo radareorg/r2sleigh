@@ -6,6 +6,7 @@ license.workspace = true
 description = "Request planner and artifact orchestration for r2sleigh"
 
 [dependencies]
+rustc-hash.workspace = true
 r2abi = { path = "../r2abi" }
 r2il = { path = "../r2il" }
 r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false }

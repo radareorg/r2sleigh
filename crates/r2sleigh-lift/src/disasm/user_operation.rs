@@ -12,7 +12,7 @@
 //! not here: each means something only together with the load or store beside
 //! it, and `internal_control` recognises it as that idiom.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 
 /// A user operation whose meaning is exactly expressible in the ordinary
 /// vocabulary, and which the lift therefore expands.
@@ -441,7 +441,7 @@ pub(crate) fn modelled_user_operations()
 pub(crate) fn resolve_modelled_user_operations(
     user_ops: &[String],
 ) -> Vec<Option<ModelledUserOperation>> {
-    let table: HashMap<&str, ModelledUserOperation> = modelled_user_operations().collect();
+    let table: FxHashMap<&str, ModelledUserOperation> = modelled_user_operations().collect();
     user_ops
         .iter()
         .map(|name| table.get(name.as_str()).copied())

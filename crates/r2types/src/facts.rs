@@ -1043,7 +1043,7 @@ fn canonicalize_generic_param_names(
 }
 
 fn dedup_preserving_order(items: &mut Vec<String>) {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     items.retain(|item| seen.insert(item.clone()));
 }
 

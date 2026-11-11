@@ -4,7 +4,8 @@ use r2il::{
     ArchSpec, R2ILBlock, R2ILOp, RegisterBitSlice, RegisterDef, RegisterProjection,
     RegisterProjectionDisposition, RegisterStorage, SpaceId, Varnode,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use rustc_hash::FxHashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The instruction a fixture names by its block and its place in the block.
 fn inst_at(prepared: &r2ssa::SsaArtifact, block_addr: u64, index: usize) -> r2ssa::InstId {
@@ -777,8 +778,8 @@ fn function_facts_owns_input_quality_evidence() {
 #[test]
 fn function_facts_owns_canonical_callee_resolution() {
     let callsite = r2ssa::InstId(3);
-    let function_names = HashMap::from([(0x402000, "sym.helper".to_string())]);
-    let symbols = HashMap::new();
+    let function_names = FxHashMap::from_iter([(0x402000, "sym.helper".to_string())]);
+    let symbols = FxHashMap::default();
     let callee_facts = BTreeMap::new();
     let ctx = crate::CalleeIdentityContext {
         function_names: &function_names,

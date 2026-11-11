@@ -3,7 +3,8 @@
 //! This module implements the phi-node placement algorithm using the
 //! iterated dominance frontier, as described by Cytron et al.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use rustc_hash::FxHashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::cfg::CFG;
 use crate::control::{SsaExecutionStopReason, SsaWorkControl};
@@ -101,7 +102,7 @@ pub type DefinitionCollection = (DefinitionSitesByIdentity, CanonicalStorageById
 #[derive(Debug, Clone, Default)]
 pub struct PhiPlacement {
     /// Phi nodes to place at each block, keyed internally by exact rename identity.
-    pub phis: HashMap<u64, Vec<PhiInfo>>,
+    pub phis: FxHashMap<u64, Vec<PhiInfo>>,
 }
 
 /// Information about a single phi node.
@@ -420,7 +421,7 @@ pub fn live_in_by_block(
     let mut numbering = IdentityNumbers {
         naming,
         identities: Vec::new(),
-        numbers: HashMap::new(),
+        numbers: FxHashMap::default(),
         bases: Vec::new(),
         bits: 0,
     };
@@ -461,7 +462,7 @@ pub fn live_in_by_block(
 
     let words = (bits as usize).div_ceil(64).max(1);
     let mut live = vec![0u64; addrs.len() * words];
-    let mut position = HashMap::with_capacity(addrs.len());
+    let mut position = FxHashMap::with_capacity_and_hasher(addrs.len(), Default::default());
     for (index, addr) in addrs.iter().enumerate() {
         position.insert(*addr, index);
     }
@@ -541,8 +542,8 @@ pub fn live_in_by_block(
 pub struct LiveIn {
     live: Vec<u64>,
     words: usize,
-    position: HashMap<u64, usize>,
-    numbers: HashMap<RenameIdentity, u32>,
+    position: FxHashMap<u64, usize>,
+    numbers: FxHashMap<RenameIdentity, u32>,
     bases: Vec<std::ops::Range<u32>>,
 }
 
@@ -583,7 +584,7 @@ pub struct IdentityNaming<'a> {
 struct IdentityNumbers<'a> {
     naming: IdentityNaming<'a>,
     identities: Vec<RenameIdentity>,
-    numbers: HashMap<RenameIdentity, u32>,
+    numbers: FxHashMap<RenameIdentity, u32>,
     /// Each identity's bytes, as a range of bits.
     bases: Vec<std::ops::Range<u32>>,
     bits: u32,

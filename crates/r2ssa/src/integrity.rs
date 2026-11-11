@@ -5,7 +5,7 @@
 //! phi inputs stay aligned with CFG predecessors, and phi storage/width facts
 //! agree with the exact SSA value they describe.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::fmt;
 
 use crate::function::{DefSite, SSAFunction, SourceSite};
@@ -394,8 +394,8 @@ struct DefinitionLocation {
 struct BlockTopology {
     predecessors: Vec<u64>,
     successors: Vec<u64>,
-    predecessor_set: HashSet<u64>,
-    successor_set: HashSet<u64>,
+    predecessor_set: FxHashSet<u64>,
+    successor_set: FxHashSet<u64>,
 }
 
 /// Validate the structural and scalar-width invariants of one SSA function.
@@ -411,7 +411,7 @@ struct BlockTopology {
 )]
 pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityError> {
     let ordered = function.block_addrs();
-    let block_domain = ordered.iter().copied().collect::<HashSet<_>>();
+    let block_domain = ordered.iter().copied().collect::<FxHashSet<_>>();
     if ordered.len() != function.num_blocks()
         || block_domain.len() != ordered.len()
         || ordered
@@ -466,7 +466,7 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
                 },
             )
         })
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
 
     for block_addr in ordered {
         let block_topology = topology
@@ -572,7 +572,8 @@ pub fn validate_ssa_function(function: &SSAFunction) -> Result<(), SsaIntegrityE
                 .iter()
                 .map(|(predecessor, _)| *predecessor)
                 .collect::<Vec<_>>();
-            let mut seen_predecessors = HashSet::with_capacity(actual_predecessors.len());
+            let mut seen_predecessors =
+                FxHashSet::with_capacity_and_hasher(actual_predecessors.len(), Default::default());
             let has_duplicate = actual_predecessors
                 .iter()
                 .any(|predecessor| !seen_predecessors.insert(*predecessor));

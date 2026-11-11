@@ -26,7 +26,8 @@ mod tests;
 pub use prepared::*;
 pub use returns::{ReturnTypeEvidence, ReturnTypeFact, ReturnTypeRefusal, UnprovenCause};
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use rustc_hash::FxHashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};

@@ -1,8 +1,7 @@
 //! SSA block and conversion from r2il.
 
-use std::collections::HashMap;
-
 use r2il::{R2ILBlock, R2ILOp, SpaceId, Varnode};
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 
 use crate::arena::{OpArena, OpId, OpOrigin, Pass, local_id};
@@ -103,9 +102,9 @@ impl<V> Default for SSABlock<V> {
 #[derive(Debug, Default)]
 pub struct SSAContext {
     /// Current version for each variable name.
-    versions: HashMap<&'static InternedName, u32>,
+    versions: FxHashMap<&'static InternedName, u32>,
     /// Versions allocated by the current operation but not yet visible to reads.
-    pending_versions: HashMap<&'static InternedName, u32>,
+    pending_versions: FxHashMap<&'static InternedName, u32>,
     /// The instruction the operation being converted belongs to, whose temporaries it names.
     instruction: u64,
 }

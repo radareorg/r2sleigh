@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use r2ssa::{ObjectKind, SSAOp, SSAVar, SsaArtifact};
 
@@ -148,8 +149,8 @@ pub(crate) fn infer_signature_from_prepared_ssa(
     )
 }
 
-fn certified_parameter_memory_widths(prepared: &SsaArtifact) -> HashMap<usize, BTreeSet<u32>> {
-    let mut widths = HashMap::<usize, BTreeSet<u32>>::new();
+fn certified_parameter_memory_widths(prepared: &SsaArtifact) -> FxHashMap<usize, BTreeSet<u32>> {
+    let mut widths = FxHashMap::<usize, BTreeSet<u32>>::default();
     for access in prepared.certificates().memory_accesses.values() {
         let Some(index) = certified_memory_parameter(prepared, access) else {
             continue;
@@ -246,7 +247,8 @@ fn refine_parameter_signedness(
     params: &mut [SignatureParamCandidate],
 ) {
     let graph = prepared.graph();
-    let mut pointee_evidence = HashMap::<(usize, u32), BTreeSet<ScalarSignednessEvidence>>::new();
+    let mut pointee_evidence =
+        FxHashMap::<(usize, u32), BTreeSet<ScalarSignednessEvidence>>::default();
     for access in prepared.certificates().memory_accesses.values() {
         let Some(index) = certified_memory_parameter(prepared, access) else {
             continue;
@@ -341,7 +343,7 @@ fn certified_parameter_home_aliases(
     prepared: &SsaArtifact,
     recovered_params: &[RecoveredSignatureParam],
 ) -> Vec<(SSAVar, SSAVar)> {
-    let mut writes = HashMap::<r2ssa::ObjectId, Vec<&r2ssa::MemoryAccessCertificate>>::new();
+    let mut writes = FxHashMap::<r2ssa::ObjectId, Vec<&r2ssa::MemoryAccessCertificate>>::default();
     for access in prepared.certificates().memory_accesses.values() {
         if access.is_write
             && access.space == r2il::SpaceId::Ram
@@ -418,7 +420,7 @@ fn certified_parameter_home_aliases(
 )]
 fn transparent_same_width_source(prepared: &SsaArtifact, start: r2ssa::ValueId) -> Option<SSAVar> {
     let mut current = start;
-    let mut visited = HashSet::new();
+    let mut visited = FxHashSet::default();
     while visited.insert(current) {
         let current_var = prepared.value_var(current)?.clone();
         let Some(inst) = prepared
@@ -861,7 +863,7 @@ fn exact_signature_type_evidence(ty: &CTypeLike) -> SignatureTypeEvidence {
 
 use crate::context::sanitize_c_identifier;
 
-fn uniquify_name(base: String, used: &mut HashSet<String>) -> String {
+fn uniquify_name(base: String, used: &mut FxHashSet<String>) -> String {
     if used.insert(base.clone()) {
         return base;
     }
@@ -878,7 +880,7 @@ fn uniquify_name(base: String, used: &mut HashSet<String>) -> String {
 fn normalize_inferred_param_name(
     raw_name: &str,
     fallback_idx: usize,
-    used: &mut HashSet<String>,
+    used: &mut FxHashSet<String>,
 ) -> String {
     let fallback = r2source::positional_parameter_name(fallback_idx);
     let clean = sanitize_c_identifier(raw_name).unwrap_or_else(|| fallback.clone());
@@ -924,7 +926,7 @@ pub(crate) fn build_inferred_signature(
             .cmp(&b.arg_index)
             .then_with(|| a.name.cmp(&b.name))
     });
-    let mut used_param_names = HashSet::new();
+    let mut used_param_names = FxHashSet::default();
     let mut json_params = Vec::new();
     for param in &ordered {
         let slot = if param.arg_index == usize::MAX {

@@ -6,6 +6,7 @@ license.workspace = true
 description = "Sleigh to r2il translator"
 
 [dependencies]
+rustc-hash.workspace = true
 r2abi = { path = "../r2abi" }
 r2il = { path = "../r2il" }
 r2source = { path = "../r2source" }

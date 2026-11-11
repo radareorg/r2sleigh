@@ -1,9 +1,8 @@
 //! D2 to D1: what the values stage spells for every block, once, in the CFG's reverse postorder and
 //! before any block is placed (ROADMAP D58), so no write order can reach a verdict.
 
-use std::collections::HashMap;
-
 use r2ssa::cfg::BlockTerminator;
+use rustc_hash::FxHashMap;
 
 use super::RenderInput;
 use super::values::Values;
@@ -13,7 +12,7 @@ use crate::prelude::ResidualCause;
 
 /// Every placed block's text, taken once by the control that writes it.
 pub(super) struct Spelled {
-    blocks: HashMap<u64, BlockText>,
+    blocks: FxHashMap<u64, BlockText>,
 }
 
 /// What one block says: its statements, how it ends, and the text on each edge it leaves by.
@@ -105,7 +104,7 @@ pub(super) fn spell(
             .and_then(r2types::ReturnTypeFact::decided),
         carried: super::unproven_carrier_bits(input),
     };
-    let mut blocks = HashMap::with_capacity(order.len());
+    let mut blocks = FxHashMap::with_capacity_and_hasher(order.len(), Default::default());
     for addr in order.iter().copied() {
         work.poll()?;
         blocks.insert(addr, spelling.block(addr));

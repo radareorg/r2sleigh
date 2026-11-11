@@ -124,10 +124,10 @@ pub(crate) fn merge_local_structs_into_type_db(
             fields,
         };
         match db.structs.entry(key) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
+            std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(candidate);
             }
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
                 if decl.source == StructDeclSource::LocalInferred
                     && (is_generated_local_struct_name(&decl.name) || entry.get().fields.is_empty())
                 {

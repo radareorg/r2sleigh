@@ -22,9 +22,8 @@
 //! `converged` false and nobody reading it. None of those constraints had a
 //! producer, so they are gone rather than capped.
 
-use std::collections::HashMap;
-
 use r2ssa::SSAVar;
+use rustc_hash::FxHashMap;
 
 use crate::constraint::{Constraint, SolverNode};
 use crate::lattice::TypeLattice;
@@ -41,7 +40,7 @@ type VarId = usize;
 #[derive(Debug, Clone)]
 pub struct SolvedTypes<K = SSAVar> {
     pub arena: TypeArena,
-    pub var_types: HashMap<K, TypeId>,
+    pub var_types: FxHashMap<K, TypeId>,
 }
 
 /// Solve a constraint set: the constraints replayed through one [`IncrementalSolver`].
@@ -77,7 +76,7 @@ pub struct IncrementalSolver<K> {
     classes: NodeClasses,
     /// Each class's type, held at its root.
     types: Vec<Option<TypeId>>,
-    meets: HashMap<(TypeId, TypeId), TypeId>,
+    meets: FxHashMap<(TypeId, TypeId), TypeId>,
 }
 
 impl<K: SolverNode> IncrementalSolver<K> {
@@ -87,7 +86,7 @@ impl<K: SolverNode> IncrementalSolver<K> {
             nodes: NodeInterner::default(),
             classes: NodeClasses::default(),
             types: Vec::new(),
-            meets: HashMap::new(),
+            meets: FxHashMap::default(),
         }
     }
 
@@ -158,7 +157,7 @@ impl<K: SolverNode> IncrementalSolver<K> {
 
     /// Every node with a typed class, and its type.
     pub fn into_solved(mut self) -> SolvedTypes<K> {
-        let mut var_types = HashMap::new();
+        let mut var_types = FxHashMap::default();
         for (id, node) in std::mem::take(&mut self.nodes)
             .into_nodes()
             .into_iter()
@@ -195,14 +194,14 @@ impl<K: SolverNode> IncrementalSolver<K> {
 
 #[derive(Debug)]
 struct NodeInterner<K> {
-    ids: HashMap<K, VarId>,
+    ids: FxHashMap<K, VarId>,
     nodes: Vec<K>,
 }
 
 impl<K> Default for NodeInterner<K> {
     fn default() -> Self {
         Self {
-            ids: HashMap::new(),
+            ids: FxHashMap::default(),
             nodes: Vec::new(),
         }
     }

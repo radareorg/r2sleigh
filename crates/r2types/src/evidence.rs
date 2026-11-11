@@ -12,7 +12,8 @@
 //! rather than SSA variables, because the evidence lives there: a call result is
 //! a value, a stack home is an object, and the same solver runs over both.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::constraint::SolverNode;
 use crate::context::{ExternalStackBase, StackSlotKey};
@@ -106,7 +107,7 @@ struct EvidenceBuilder<'a> {
     /// Spellings asserted on a node, kept to name the solved type.
     spellings: Vec<(EvidenceNode, TypeId, CTypeLike)>,
     /// Bounds already asserted, so the pointer-base worklist can tell what is new.
-    asserted: HashSet<(EvidenceNode, TypeId)>,
+    asserted: FxHashSet<(EvidenceNode, TypeId)>,
 }
 
 impl<'a> EvidenceBuilder<'a> {
@@ -116,7 +117,7 @@ impl<'a> EvidenceBuilder<'a> {
             ptr_bits,
             solver: IncrementalSolver::new(TypeArena::default()),
             spellings: Vec::new(),
-            asserted: HashSet::new(),
+            asserted: FxHashSet::default(),
         }
     }
 
@@ -422,7 +423,7 @@ impl<'a> EvidenceBuilder<'a> {
             };
             sums.push((left, right, elem));
         }
-        let mut readers = HashMap::<usize, Vec<usize>>::new();
+        let mut readers = FxHashMap::<usize, Vec<usize>>::default();
         for (at, (left, right, _)) in sums.iter().enumerate() {
             for operand in [left, right] {
                 let class = self.solver.class_seeing(&EvidenceNode::Value(*operand));
@@ -477,7 +478,7 @@ impl<'a> EvidenceBuilder<'a> {
     ) -> Option<(r2ssa::ValueId, r2ssa::ValueId)> {
         let graph = self.source.graph();
         let mut current = address;
-        let mut seen = HashSet::new();
+        let mut seen = FxHashSet::default();
         while seen.insert(current) {
             let inst = graph.inst(graph.def_inst(current)?)?;
             match &inst.payload {
@@ -509,7 +510,7 @@ impl<'a> EvidenceBuilder<'a> {
     /// variable, so its type and the type of every value that passes through it
     /// are the same type. An object touched at more than one width, or narrower
     /// than itself, is an aggregate and is left alone.
-    fn scalar_memory_cells(&self) -> HashSet<r2ssa::ObjectId> {
+    fn scalar_memory_cells(&self) -> FxHashSet<r2ssa::ObjectId> {
         let certificates = self.source.certificates();
         let mut widths: BTreeMap<r2ssa::ObjectId, BTreeSet<u32>> = BTreeMap::new();
         for access in certificates.memory_accesses.values() {
@@ -522,7 +523,7 @@ impl<'a> EvidenceBuilder<'a> {
                 .insert(access.width);
         }
 
-        let mut cells = HashSet::new();
+        let mut cells = FxHashSet::default();
         for (object, widths) in widths {
             let [width] = widths.iter().copied().collect::<Vec<_>>()[..] else {
                 continue;
@@ -663,7 +664,7 @@ impl<'a> EvidenceBuilder<'a> {
     fn read_back(&mut self) -> EvidenceTypes {
         // A spelling names the solved type only when it is that type. The class
         // carries it because every member of an equality class is one variable.
-        let mut class_spellings: HashMap<usize, CTypeLike> = HashMap::new();
+        let mut class_spellings: FxHashMap<usize, CTypeLike> = FxHashMap::default();
         for (node, ty, spelling) in std::mem::take(&mut self.spellings) {
             if self.solver.type_of(&node) != Some(ty) {
                 continue;
@@ -685,7 +686,7 @@ impl<'a> EvidenceBuilder<'a> {
         }
 
         let mut types = EvidenceTypes::default();
-        let mut object_types: HashMap<r2ssa::ObjectId, CTypeLike> = HashMap::new();
+        let mut object_types: FxHashMap<r2ssa::ObjectId, CTypeLike> = FxHashMap::default();
         for (node, ty) in self.solver.typed() {
             let Some(resolved) = self.spell(&class_spellings, node, ty) else {
                 continue;
@@ -727,7 +728,7 @@ impl<'a> EvidenceBuilder<'a> {
 
     fn spell(
         &mut self,
-        class_spellings: &HashMap<usize, CTypeLike>,
+        class_spellings: &FxHashMap<usize, CTypeLike>,
         node: EvidenceNode,
         ty: TypeId,
     ) -> Option<CTypeLike> {

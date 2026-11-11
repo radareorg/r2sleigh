@@ -24,7 +24,8 @@ pub mod program;
 pub mod query;
 pub mod stated;
 
-use std::collections::{BTreeSet, HashMap};
+use rustc_hash::FxHashMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -621,7 +622,7 @@ pub struct EngineAnalyzeRequest {
     /// the source-owned signature that callers may consume.
     pub ptr_bits: u32,
     pub semantic_metadata_enabled: bool,
-    pub reg_type_hints: HashMap<String, r2types::TypeHint>,
+    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub semantic_mode: EngineSemanticMode,
     pub include_interproc_summary_set: bool,
@@ -637,7 +638,7 @@ pub struct EngineAnalyzeRequestParts {
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     pub ptr_bits: u32,
     pub semantic_metadata_enabled: bool,
-    pub reg_type_hints: HashMap<String, r2types::TypeHint>,
+    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub include_interproc_summary_set: bool,
 }
@@ -755,7 +756,7 @@ pub struct EngineAnalyzeRequestInput {
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     pub ptr_bits: Option<u32>,
     pub semantic_metadata_enabled: bool,
-    pub reg_type_hints: HashMap<String, r2types::TypeHint>,
+    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub include_interproc_summary_set: bool,
 }
@@ -764,7 +765,7 @@ pub struct EngineAnalyzeRequestInput {
 pub struct EngineAnalyzeFunctionRequestInput {
     pub function: EngineFunctionInput,
     pub ptr_bits: Option<u32>,
-    pub reg_type_hints: HashMap<String, r2types::TypeHint>,
+    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub include_interproc_summary_set: bool,
 }
@@ -1380,7 +1381,7 @@ impl EngineFunctionDecompileRequest {
                 EngineAnalyzeFunctionRequestInput {
                     function: input.function,
                     ptr_bits: input.ptr_bits,
-                    reg_type_hints: HashMap::new(),
+                    reg_type_hints: FxHashMap::default(),
                     parsed_context: input.parsed_context,
                     include_interproc_summary_set: true,
                 },
@@ -1412,7 +1413,7 @@ impl EngineFunctionAnalysisArtifactRequest {
                 EngineAnalyzeFunctionRequestInput {
                     function: input.function,
                     ptr_bits: input.ptr_bits,
-                    reg_type_hints: HashMap::new(),
+                    reg_type_hints: FxHashMap::default(),
                     parsed_context: input.parsed_context,
                     include_interproc_summary_set: true,
                 },

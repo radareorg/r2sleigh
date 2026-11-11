@@ -773,7 +773,7 @@ fn stack_local_type_assumption_does_not_claim_signature_authority() {
     });
     assert_eq!(
         applied_type_assumption_parameter_slots(&usage, &context, &x86_64_register_identity()),
-        HashSet::from([1])
+        FxHashSet::from_iter([1])
     );
 }
 

@@ -24,3 +24,11 @@ cognitive-complexity-threshold = 20
 # Long enough for a lowering with one match over an opcode set, short enough
 # that a second responsibility shows up as length.
 too-many-lines-threshold = 80
+
+# A per-run random hash seed changes iteration and allocation order, so peak RSS
+# differed run to run (D338): hashed collections take rustc-hash's fixed hasher.
+disallowed-types = [
+  { path = "std::collections::HashMap", reason = "use rustc_hash::FxHashMap: a fixed hasher (D338)" },
+  { path = "std::collections::HashSet", reason = "use rustc_hash::FxHashSet: a fixed hasher (D338)" },
+  { path = "std::hash::RandomState", reason = "a per-run seed; use rustc_hash::FxBuildHasher (D338)" },
+]
