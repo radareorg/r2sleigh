@@ -1053,4 +1053,4 @@ Gates, release r2s, base `505319748`:
 - Cost, release, instructions retired, median of three, base then head; output byte-identical: cold `pdd` 0pack `0x62ecf0` 15.37 to 15.37 G, pumasim `0x23fdf0` 19.86 to 19.85 G; bash `0x2e630` `aa; pdd` 14.30 to 14.33 G (+0.2%), under D153's 15.43 G. Peak footprint within run-to-run noise.
 - Dylint 8 warnings, the baseline. `comment_runs` adds no run. Structure counts equal the baseline.
 - On D217 (`d8487d42d`): the 15 records print as above and the census holds 444 goldens.
-- Equivalence, aarch64: the 13 records are blessed `equal`; the two clang -O0 records keep `residual-trap` with cause D221.
+- Equivalence, CI on #363: x86-64 holds every record. AArch64 moves 21 records from `residual-trap` to `equal`: the 13 above, and 8 more whose void body's lanes reached the same `printf` or `strlen` (`and_chain_effect` clang O0 to O2, `crc32_init` clang O2, `fill` clang O0 and O2, `indirect_store` clang O1, `mixed_touch` gcc O1). Hand-read `fill` clang O0 and O2: `void`, `return;`, bodies unchanged. All 21 are blessed. The two clang -O0 records keep `residual-trap` with cause D221.
