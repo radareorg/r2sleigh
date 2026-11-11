@@ -49,7 +49,7 @@ from dwarf import (  # noqa: E402
 )
 from r2s_batch import contract_problems, parse_pddj, run_batch  # noqa: E402
 from spec import CallSpec, call_spec  # noqa: E402
-from target import AARCH64, X86_64, Target  # noqa: E402
+from target import AARCH64, WIN64, X86_64, Target  # noqa: E402
 from vectors import JOB_MAGIC, Vector, encode_job  # noqa: E402
 
 STUB = HERE / "testdata" / "stub_r2s.py"
@@ -58,6 +58,9 @@ CAN_RUN = gate.environment_problem() is None and shutil.which("gcc") is not None
 CAN_BUILD_AARCH64 = (Path("/proc/self/exe").exists()
                      and shutil.which(AARCH64.rendering_cc) is not None)
 CAN_RUN_AARCH64 = AARCH64.environment_problem() is None
+# Win64 needs x86-64 Linux, clang, lld-link, llvm-strip and an xwin sysroot ($EQUIV_XWIN).
+CAN_RUN_WIN64 = WIN64.environment_problem() is None
+_WIN64_RUN = f"Win64 runtime equivalence: {WIN64.environment_problem()}"
 
 
 class _StubEnv:
@@ -853,6 +856,51 @@ class TargetTests(unittest.TestCase):
             without = encode_job(spec, [], [], [], cost.Cost(), abi=abi)
             self.assertEqual(len(with_vector) - len(without), size, target.name)
 
+    def test_win64_keeps_the_x86_64_job_layout_and_names_its_own_keys(self):
+        # call_win64.S reads four of the six GPR words and four of the eight XMMs.
+        spec = CallSpec(name="f", address=0x1000, params=[], ret_kind="int", ret_bytes=4,
+                        ret_spelling="int")
+        abi = WIN64.abi
+        self.assertEqual(abi.regs_format(), X86_64.abi.regs_format())
+        vector = Vector(index=0, seed=1, gpr=[0] * abi.int_slots(),
+                        fp=[bytes(16)] * abi.fp_slots(), count=0, stack=[])
+        with_vector = encode_job(spec, [], [], [vector], cost.Cost(), abi=abi)
+        without = encode_job(spec, [], [], [], cost.Cost(), abi=abi)
+        self.assertEqual(len(with_vector) - len(without), 336)
+        self.assertEqual(WIN64.config("clang-cl", "O1"), "win64-clang-cl-O1")
+        self.assertEqual(WIN64.directory("rt"), "rt-win64")
+        # No Microsoft x64 caller extends a narrow argument: every bit above it is garbage.
+        garbage = 0xDEADBEEF_CAFEBABE
+        self.assertEqual(abi.argument_word(0xFF, 1, True, garbage), 0xADBEEFCA_FEBABEFF)
+
+    def test_microsoft_x64_gives_each_position_one_register_of_its_class(self):
+        dwarf = fixture_dwarf("abi.gcc.O2.txt")
+        functions = [s for s in dwarf.subprograms() if s.name]
+        specs = {s.name: call_spec(dwarf, s, functions, WIN64.abi) for s in functions}
+        # `long fl_mid(long a, double d, long *p)`: d takes xmm1, so p takes r8, not rdx.
+        self.assertEqual(specs["fl_mid"].describe(),
+                         "long int fl_mid(long int a@rcx, double d@xmm1, long int* p@r8)")
+        self.assertEqual([p.register for p in specs["pick"].params],
+                         ["rcx", "rdx", "r8", "r9", "stack0"])
+        self.assertIn("Microsoft x64", specs["wide_ret"].unsupported or "")
+
+    def test_a_pe_runs_inside_the_host_program_the_runtime_maps_it_into(self):
+        runtime = Path("/w/rt-win64/equiv_rt.so")
+        self.assertEqual(WIN64.host_program(Path("/w/a.exe"), runtime),
+                         Path("/w/rt-win64/pe_host"))
+        self.assertEqual(WIN64.program_environment(Path("/w/a.exe")), ["EQUIV_PE=/w/a.exe"])
+        self.assertEqual(X86_64.host_program(Path("/w/a"), runtime), Path("/w/a"))
+        self.assertEqual(X86_64.program_environment(Path("/w/a")), [])
+
+    def test_a_pe_import_link_is_the_image_s_thunk_and_an_elf_one_binds_to_libc(self):
+        links = [{"ident": "fwrite", "kind": "import", "addr": 0x140003130},
+                 {"ident": "puts", "kind": "import", "addr": 0}]
+        win64, _ = link.shim_source(links, "sub_f", 0x140001000, WIN64)
+        self.assertIn("fwrite:\n    movabs $0x140003130, %r11\n", win64)
+        self.assertNotIn("puts:", win64)
+        elf, _ = link.shim_source(links, "sub_f", 0x401000, X86_64)
+        self.assertNotIn("fwrite:", elf)
+
     def test_the_job_header_carries_the_measure_and_a_64_bit_budget(self):
         # struct job_header in rt/equiv_rt.c: 88 bytes, the budget a u64 since
         # four times a billion instructions does not fit the u32 it replaced.
@@ -1629,6 +1677,61 @@ class SelfTestSuite(_SelfTestCases, unittest.TestCase):
 @unittest.skipUnless(CAN_RUN_AARCH64, _AARCH64_RUN)
 class AArch64SelfTestSuite(_SelfTestCases, unittest.TestCase):
     TARGET = AARCH64
+
+
+@unittest.skipUnless(CAN_RUN_WIN64, _WIN64_RUN)
+class Win64SelfTestSuite(_SelfTestCases, unittest.TestCase):
+    """The fixture as clang-cl's PE, mapped into the Linux runtime (rt/pe_win64.c)."""
+
+    TARGET = WIN64
+
+
+def _security_cookie(binary: Path) -> int | None:
+    """IMAGE_LOAD_CONFIG_DIRECTORY64.SecurityCookie (offset 0x58), where the PE states one."""
+    data = binary.read_bytes()
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    sections, optional_size = struct.unpack_from("<H", data, pe + 6)[0], struct.unpack_from(
+        "<H", data, pe + 20)[0]
+    optional = pe + 24
+    base = struct.unpack_from("<Q", data, optional + 24)[0]
+    rva, size = struct.unpack_from("<II", data, optional + 112 + 10 * 8)
+    if size < 0x60:
+        return None
+    for index in range(sections):
+        header = optional + optional_size + 40 * index
+        vsize, start, _, raw = struct.unpack_from("<IIII", data, header + 8)
+        if start <= rva + 0x58 < start + vsize:
+            cookie = struct.unpack_from("<Q", data, raw + rva + 0x58 - start)[0]
+            return cookie - base if cookie else None
+    return None
+
+
+@unittest.skipUnless(CAN_RUN_WIN64, _WIN64_RUN)
+class Win64BuildTests(unittest.TestCase):
+    def test_a_pe_imports_ucrt_carries_its_cookie_and_strips_to_the_same_addresses(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = build.build(HERE / "selftest" / "fixture.c", "clang-cl", "O1", Path(tmp),
+                                 WIN64)
+            self.assertIsNone(binary.error)
+            self.assertEqual(build.machine_of(binary.stripped, WIN64), "pei-x86-64")
+            headers = [subprocess.run(["objdump", "-h", str(path)], capture_output=True,
+                                      text=True, check=True).stdout
+                       for path in (binary.unstripped, binary.stripped)]
+            private = subprocess.run(["objdump", "-p", str(binary.unstripped)],
+                                     capture_output=True, text=True, check=True).stdout
+            dwarf = Dwarf.read(binary.unstripped, WIN64)
+            cookie = _security_cookie(binary.unstripped)
+        sections = [line.split()[1:4] for line in headers[1].splitlines()
+                    if line.strip()[:1].isdigit()]
+        self.assertTrue(sections)
+        for section in sections:
+            self.assertIn(" ".join(section), " ".join(headers[0].split()))
+        self.assertNotIn(".debug_", headers[1])
+        self.assertIn("api-ms-win-crt-stdio-l1-1-0.dll", private)
+        self.assertIn("__stdio_common_vfprintf", private)
+        self.assertIsNotNone(cookie)
+        functions = {s.name: s for s in dwarf.subprograms() if s.name}
+        self.assertGreater(functions["st_add"].size, 0)
 
 
 class _PipelineCases(_OnTarget):

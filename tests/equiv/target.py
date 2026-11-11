@@ -33,6 +33,7 @@ import os
 import re
 import shutil
 import signal
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -65,6 +66,13 @@ class Abi:
     # The width a _Bool argument is passed at, before the bits above it are
     # left unspecified.
     bool_bytes: int
+    # Microsoft x64 gives argument N register N of its class, so an integer
+    # and a double never share a position; System V and AAPCS64 count each class.
+    positional: bool = False
+    # The job's register words, where the thunk's layout holds more than the
+    # convention reads (0: the register count).
+    job_int_slots: int = 0
+    job_fp_slots: int = 0
 
     def argument_word(self, value: int, size: int, signed: bool, garbage: int) -> int:
         """The register (or stack word) a ``size``-byte integer argument arrives in.
@@ -84,10 +92,16 @@ class Abi:
             v = (v & ((1 << defined) - 1)) | ((garbage << defined) & MASK64)
         return v & MASK64
 
+    def int_slots(self) -> int:
+        return self.job_int_slots or len(self.int_registers)
+
+    def fp_slots(self) -> int:
+        return self.job_fp_slots or len(self.fp_registers)
+
     def regs_format(self) -> str:
         """``struct equiv_regs`` of this machine (``rt/equiv_rt.c``), for :mod:`struct`."""
         count = "Q" if self.count_register else ""
-        return f"{len(self.int_registers)}Q{len(self.fp_registers) * 16}s{count}Q16Q"
+        return f"{self.int_slots()}Q{self.fp_slots() * 16}s{count}Q16Q"
 
 
 SYSV_X86_64 = Abi(
@@ -106,6 +120,22 @@ AAPCS64 = Abi(
     count_register=False,
     extended_bits=0,
     bool_bytes=1,
+)
+
+
+# Microsoft x64: four positions, each rcx/xmm0 .. r9/xmm3, then 8-byte stack
+# words past the 32-byte home area. No caller extends a narrow argument. The
+# job keeps the x86-64 layout (call_win64.S reads its first four of each).
+MICROSOFT_X64 = Abi(
+    name="Microsoft x64",
+    int_registers=("rcx", "rdx", "r8", "r9"),
+    fp_registers=("xmm0", "xmm1", "xmm2", "xmm3"),
+    count_register=True,
+    extended_bits=0,
+    bool_bytes=1,
+    positional=True,
+    job_int_slots=6,
+    job_fp_slots=8,
 )
 
 
@@ -244,6 +274,14 @@ class Target:
     # object. There the object links are left to the dynamic loader instead,
     # which places an SHN_ABS definition at its value (link.loader_conflicts).
     objects_through_loader: bool = False
+    # A Windows target: its population is PE32+, mapped at its ImageBase into
+    # a Linux host program the runtime is preloaded into (rt/pe_win64.c).
+    windows: bool = False
+    runtime_flags: tuple[str, ...] = ()
+    runtime_sources: tuple[Path, ...] = ()
+    rendering_flags: tuple[str, ...] = ()
+    ubsan_flags: tuple[str, ...] = ()
+    rendering_sources: tuple[Path, ...] = ()
 
     # ----------------------------------------------------------- naming
 
@@ -280,7 +318,31 @@ class Target:
                 return str(candidate)
         return None
 
+    def debug_view(self, binary: Path) -> Path:
+        """The file ``readelf`` reads ``binary``'s DWARF and symbols from.
+
+        A PE's sections are copied into an ELF sibling (``objcopy -O
+        elf64-x86-64``), which keeps every address; an ELF is read as it is.
+        """
+        if not self.windows:
+            return binary
+        view = binary.with_name(binary.name + ".elf")
+        if not view.exists() or view.stat().st_mtime < binary.stat().st_mtime:
+            proc = subprocess.run([self.tool("objcopy"), "-O", "elf64-x86-64", str(binary),
+                                   str(view)], capture_output=True, text=True, check=False)
+            if proc.returncode != 0:
+                raise RuntimeError(f"objcopy cannot read {binary}: {proc.stderr.strip()[:300]}")
+        return view
+
     # ------------------------------------------------------------ runner
+
+    def host_program(self, binary: Path, runtime: Path) -> Path:
+        """The program the runtime is preloaded into: the binary, or for a PE the host beside it."""
+        return runtime.parent / "pe_host" if self.windows else binary
+
+    def program_environment(self, binary: Path) -> list[str]:
+        """What the runtime needs beyond the job: the PE it maps."""
+        return [f"EQUIV_PE={binary}"] if self.windows else []
 
     def emulated(self) -> bool:
         return os.uname().machine not in self.native_machines
@@ -318,6 +380,8 @@ class Target:
     def environment_problem(self) -> str | None:
         """Why this host cannot run the gate for this target, or None."""
         machine = os.uname().machine
+        if self.windows:
+            return windows_problem(self)
         if not self.emulated():
             if not Path("/proc/self/exe").exists():
                 return "runtime equivalence needs Linux"
@@ -381,7 +445,64 @@ AARCH64 = Target(
     objects_through_loader=True,
 )
 
-TARGETS = {target.name: target for target in (X86_64, AARCH64)}
+
+def first_on_path(*names: str) -> str:
+    """The first of ``names`` on PATH, or the first name (so a message can name it)."""
+    return next((name for name in names if shutil.which(name)), names[0])
+
+
+def xwin_root() -> Path | None:
+    """The MSVC CRT and Windows SDK an `xwin splat` wrote, from ``$EQUIV_XWIN``."""
+    root = os.environ.get("EQUIV_XWIN")
+    return Path(root) if root else None
+
+
+def windows_problem(target: Target) -> str | None:
+    """Why this host cannot build and run the Win64 population, or None (doc/testing.md)."""
+    if os.uname().machine not in target.native_machines or not Path("/proc/self/exe").exists():
+        return f"runtime equivalence for {target.name} needs x86-64 Linux"
+    root = xwin_root()
+    if root is None or not (root / "crt" / "lib" / "x86_64").is_dir():
+        return f"runtime equivalence for {target.name} needs $EQUIV_XWIN, an `xwin splat` output"
+    for tool in ("clang", first_on_path("lld-link", "lld-link-18"),
+                 first_on_path("llvm-strip", "llvm-strip-18"), "objcopy", target.rendering_cc):
+        if shutil.which(tool) is None:
+            return f"runtime equivalence for {target.name} needs {tool}"
+    return None
+
+
+_RT = HERE / "rt"
+
+WIN64 = Target(
+    name="win64",
+    qualifier="win64",
+    abi=MICROSOFT_X64,
+    elf_machine="pei-x86-64",
+    compilers={"clang-cl": ("clang", "--driver-mode=cl", "--target=x86_64-pc-windows-msvc")},
+    rendering_cc="gcc",
+    binutils_prefix="",
+    sysroot=None,
+    call_asm=_RT / "call_win64.S",
+    native_machines=("x86_64", "amd64"),
+    emulator=None,
+    emulator_args=(),
+    emulator_slowdown=1,
+    trap_signal=signal.SIGILL,  # ud2
+    asm=X86_64Assembly(),
+    # GNU ld turns an absolute symbol above 4 GiB into a load-base-relative GOT entry too.
+    objects_through_loader=True,
+    windows=True,
+    runtime_flags=("-DEQUIV_WIN64", "-lm"),
+    runtime_sources=(_RT / "pe_win64.c",),
+    # Every rendering calls into the image under Microsoft x64, and is called so. No builtin
+    # rewrites a call (printf to puts, to __printf_chk): every callee is the image's link.
+    rendering_flags=("-mabi=ms", "-fno-builtin", "-U_FORTIFY_SOURCE", "-D_FORTIFY_SOURCE=0"),
+    # The handlers forward to libubsan, which --as-needed would drop (rt/ms_support.c).
+    ubsan_flags=("-DEQUIV_UBSAN", "-Wl,--no-as-needed"),
+    rendering_sources=(_RT / "ms_support.c",),
+)
+
+TARGETS = {target.name: target for target in (X86_64, AARCH64, WIN64)}
 
 
 def by_name(name: str) -> Target:

@@ -54,7 +54,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import gate
-from build import elf_machine
+from build import machine_of, pe_argv
 from cost import RENDERING_FACTOR, Cost
 from dwarf import Dwarf, code_constants, function_symbols
 from r2s_batch import Answer
@@ -351,14 +351,18 @@ CASES = [
 
 def build_fixture(cc: str, out_dir: Path, target: Target = X86_64) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
-    binary = out_dir / "fixture"
-    proc = subprocess.run(
-        [cc, "-g", "-O2", "-no-pie", "-fno-pie", str(FIXTURE), "-o", str(binary), "-lm"],
-        capture_output=True, text=True, check=False,
-    )
+    if target.windows:
+        # The fixture is the population's kind of image: clang-cl's PE, as build.py makes one.
+        binary = out_dir / "fixture.exe"
+        compiler = next(iter(target.compilers.values()))
+        argv = pe_argv(list(compiler), [FIXTURE], binary, "O2")
+    else:
+        binary = out_dir / "fixture"
+        argv = [cc, "-g", "-O2", "-no-pie", "-fno-pie", str(FIXTURE), "-o", str(binary), "-lm"]
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     if proc.returncode != 0:
-        raise RuntimeError(f"cannot build the self-test fixture:\n{proc.stderr}")
-    machine = elf_machine(binary, target)
+        raise RuntimeError(f"cannot build the self-test fixture:\n{proc.stderr}{proc.stdout}")
+    machine = machine_of(binary, target)
     if machine != target.elf_machine:
         raise RuntimeError(f"{cc} built the self-test fixture for "
                            f"{machine or 'an unknown machine'}, not {target.elf_machine}")
@@ -403,16 +407,21 @@ def run_self_tests(config: gate.Config, workdir: Path,
     binary = build_fixture(config.cc, workdir, target)
     dwarf = Dwarf.read(binary, target)
     functions = [s for s in dwarf.subprograms() if s.name]
-    by_name = {s.name: s for s in functions}
     symbols = _all_symbols(binary, target)
     extents = function_symbols(binary, target)
+    # A compiler copy (clang's `st_first.specialized.1`) may carry the source's name in DWARF:
+    # the function the symbol of that name starts at wins.
+    by_name: dict = {}
+    for sub in functions:
+        if by_name.get(sub.name) is None or symbols.get(sub.name) != by_name[sub.name].low_pc:
+            by_name[sub.name] = sub
     outcomes: list[Outcome] = []
     for case in CASES:
         if only and case.name not in only:
             continue
         sub = by_name[case.function]
         spec = call_spec(dwarf, sub, functions, target.abi)
-        spec.extent = extents.get(sub.low_pc, ([], 0))[1]
+        spec.extent = extents.get(sub.low_pc, ([], 0))[1] or sub.size
         spec.constants = code_constants(binary, sub.low_pc, spec.extent, target=target)
         record = synthetic_pddj(case, sub.low_pc, symbols)
         if case.refused:

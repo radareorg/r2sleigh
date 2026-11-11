@@ -48,6 +48,7 @@ and `run_coverage.sh` builds and uses the release binary.
 | Where do discovery, naming and decoding disagree with radare2? | `python3 scripts/diff_r2.py --bins <radare2>/test/bins/elf --limit 30` |
 | How much of each corpus binary renders, against a baseline? | `./tests/coverage/run_coverage.sh [--accept-baseline]` |
 | Does the rendered C compute what the binary computes (x86-64 Linux)? | `tests/equiv/run_equiv.py --r2s target/debug/r2s --baseline tests/equiv/baseline.json` |
+| The same for Win64 PEs, built by clang-cl against UCRT? | `EQUIV_XWIN=<xwin> bash tests/equiv/run_win64.sh <r2s>` (x86-64 Linux; setup below) |
 | What does DecBench score, on its own protocol? | `tests/decbench/run_decbench.sh` (see its README) |
 | Did any rendering move, base against head? | `python3 scripts/census.py run --r2s <r2s> --out <dir>` per side, then `census.py diff <base> <head> --report <file>` (CI: Census + Timing vs Base) |
 | Did a large function get slower? | `python3 scripts/census.py time --r2s <base> --r2s <head> --bins <radare2>/test/bins/elf` (fails above 1.3x in CI) |
@@ -70,6 +71,23 @@ refuses fails the gate; one that now renders needs `--accept-baseline`.
 `tests/equiv/baseline.json` says what each rendering computes; every record
 that is not `equal` carries its cause, and `run_equiv.py` exits 3 until a
 baseline is blessed with `--write-baseline <path>`.
+
+`tests/equiv/baseline-win64.json` grades the same sources built by clang-cl as
+PE32+ images that import UCRT (`/MD`) and carry a `/GS` cookie, mapped into a
+Linux process ([tests/equiv/README.md](../tests/equiv/README.md), "Win64"). No
+CI job runs it: it needs an xwin sysroot (632 MB) that the runners do not hold,
+so it is held by `tests/equiv/run_win64.sh` on an x86-64 Linux build host.
+Setup, once per host (Ubuntu 24.04):
+
+```bash
+apt-get install -y clang lld-18 llvm-18 binutils gcc
+curl -sSL https://github.com/Jake-Shadle/xwin/releases/download/0.10.0/xwin-0.10.0-x86_64-unknown-linux-musl.tar.gz | tar xz
+./xwin-0.10.0-x86_64-unknown-linux-musl/xwin --accept-license --arch x86_64 splat --output <xwin>
+```
+
+Use `--cache-dir` on a disk with 1.5 GB free and delete it afterwards; xwin
+0.6.5 cannot find the current SDK's headers. The harness finds `lld-link` and
+`llvm-strip` with or without Ubuntu's `-18` suffix. No wine is needed.
 
 Re-bless a baseline only after reading the new output and judging it correct,
 never because it differs. Agreement with a recorded output is evidence that

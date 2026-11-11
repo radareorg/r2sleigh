@@ -91,7 +91,7 @@ def links_into_body(links: list[dict], guard: tuple[int, int]) -> list[str]:
     return found
 
 
-def _shim_entries(links: list[dict], definition: str
+def _shim_entries(links: list[dict], definition: str, target: Target = X86_64
                   ) -> tuple[list[tuple[str, str, int]], list[str]]:
     """``(ident, kind, address)`` of every function and object the shim defines,
     in identifier order; and what it skipped."""
@@ -108,8 +108,11 @@ def _shim_entries(links: list[dict], definition: str
         if not _IDENT.match(ident):
             skipped.append(f"{ident}: not a C identifier")
             continue
-        if kind == "import":
+        if kind == "import" and not (target.windows and isinstance(address, int) and address > 0):
             continue
+        if kind == "import":
+            # A PE import is the image's own thunk, which reaches the shim the loader bound.
+            kind = "function"
         if not isinstance(address, int) or address <= 0:
             skipped.append(f"{ident}: no address")
             continue
@@ -132,7 +135,7 @@ def shim_source(links: list[dict], definition: str, entry: int | None = None,
     ``definition``.
     """
     lines = ["    .text"]
-    entries, skipped = _shim_entries(links, definition)
+    entries, skipped = _shim_entries(links, definition, target)
     for ident, kind, address in entries:
         if kind == "function" and address == entry:
             lines += target.asm.jump_to_symbol(ident, definition)
@@ -227,10 +230,12 @@ def build_rendering(cc: str, workdir: Path, code: str, links: list[dict],
         (workdir / "objects.list").write_text(f"{{{listed} }};\n", encoding="utf-8")
         loader = ["-Wl,--dynamic-list=objects.list"]
     builds: dict[str, Built] = {}
+    support = [str(path) for path in target.rendering_sources]
     for variant, flags in VARIANTS.items():
         out = f"rendering-{variant}.so"
-        ok, diagnostics, ran = _compile(cc, [*COMMON, *loader, *flags, source, shim_path,
-                                             *needed, "-o", out], timeout, cwd=workdir)
+        extra = [*target.rendering_flags, *(target.ubsan_flags if variant == "ubsan" else ())]
+        ok, diagnostics, ran = _compile(cc, [*COMMON, *loader, *flags, *extra, source, shim_path,
+                                             *support, *needed, "-o", out], timeout, cwd=workdir)
         builds[variant] = Built(variant, ok, workdir / out, diagnostics, ran)
     ok, diagnostics, ran = _compile(cc, [*STRICT, source], timeout, cwd=workdir)
     strict = "ok" if ok else ("fail: " if ran else "not run: ") + _first_lines(diagnostics, 6)
@@ -259,6 +264,20 @@ def _dynamic(path: str, target: Target) -> tuple[dict[str, int], tuple[str, ...]
     return defined, needed
 
 
+def _library(soname: str, runtime: str, target: Target) -> str | None:
+    """The file a ``DT_NEEDED`` name maps to: the sysroot's, or on the host what ``ldd`` says."""
+    if target.sysroot is not None:
+        return target.library(soname)
+    return dict(_host_libraries(runtime)).get(soname)
+
+
+@functools.lru_cache(maxsize=None)
+def _host_libraries(path: str) -> tuple[tuple[str, str], ...]:
+    trace = subprocess.run(["ldd", path], capture_output=True, text=True, check=False).stdout
+    return tuple((found.group(1), found.group(2)) for line in trace.splitlines()
+                 if (found := re.match(r"\s*(\S+)\s+=>\s+(/\S+)", line)))
+
+
 def loader_conflicts(objects: list[tuple[str, int]], binary: str, runtime: str,
                      target: Target) -> list[str]:
     """Every object link the dynamic loader would not bind to its own address.
@@ -276,7 +295,7 @@ def loader_conflicts(objects: list[tuple[str, int]], binary: str, runtime: str,
     program, needed = _dynamic(binary, target)
     libraries: dict[str, str] = {}
     pending = [runtime, *(path for name in needed
-                          if (path := target.library(name)) is not None)]
+                          if (path := _library(name, runtime, target)) is not None)]
     exported: dict[str, str] = {}
     while pending:
         path = pending.pop(0)
@@ -287,7 +306,7 @@ def loader_conflicts(objects: list[tuple[str, int]], binary: str, runtime: str,
         for name in defined:
             exported.setdefault(name, Path(path).name)
         pending += [found for name in more if name not in libraries
-                    and (found := target.library(name)) is not None]
+                    and (found := _library(name, runtime, target)) is not None]
     conflicts = []
     for ident, address in objects:
         if ident in program and program[ident] != address:
@@ -341,15 +360,26 @@ def build_runtime(cc: str, rt_dir: Path, out_dir: Path, target: Target = X86_64)
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     out = out_dir / "equiv_rt.so"
+    host = out_dir / "pe_host"
     sources = [rt_dir / "equiv_rt.c", target.call_asm]
-    if out.exists() and all(out.stat().st_mtime >= s.stat().st_mtime for s in sources):
+    depends = [*sources, *target.runtime_sources]
+    built = out.exists() and (host.exists() or not target.windows)
+    if built and all(out.stat().st_mtime >= s.stat().st_mtime for s in depends):
         return out
     ok, diagnostics, _ = _compile(
         cc, ["-shared", "-fPIC", "-O2", "-Wall", "-Wextra", "-Werror", "-std=gnu11",
-             *map(str, sources), "-ldl", "-o", str(out)]
+             *map(str, sources), "-ldl", *target.runtime_flags, "-o", str(out)]
     )
     if not ok:
         raise RuntimeError(f"cannot build the equivalence runtime:\n{diagnostics}")
+    if target.windows:
+        # The program the runtime is preloaded into: it maps the PE and never reaches main.
+        stub = out_dir / "pe_host.c"
+        stub.write_text("int main(void) { return 0; }\n", encoding="utf-8")
+        ok, diagnostics, _ = _compile(cc, ["-O2", "-no-pie", "-fno-pie", str(stub), "-o",
+                                           str(host)])
+        if not ok:
+            raise RuntimeError(f"cannot build the PE host program:\n{diagnostics}")
     return out
 
 

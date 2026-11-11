@@ -235,6 +235,9 @@ class Subprogram:
     instance: bool
     # `DW_AT_noreturn` on the DIE or an origin: the source says no call returns.
     noreturn: bool = False
+    # The code's length from `DW_AT_high_pc`, 0 where it states none: a COFF
+    # symbol carries no size, so a PE's extent is read here.
+    size: int = 0
 
 
 @dataclass(frozen=True)
@@ -246,6 +249,18 @@ class Unplaced:
     why: str
     # False only for an entry shown to lie outside the loaded code: the default counts in the floor.
     code: bool = True
+
+
+def _extent(die: Die, low_pc: int) -> int:
+    """``DW_AT_high_pc`` as a length: DWARF 4 writes it as one, DWARF 3 as an address."""
+    length = die.number("DW_AT_high_pc")
+    if length is not None:
+        return length
+    try:
+        high = int(die.text("DW_AT_high_pc") or "", 16)
+    except ValueError:
+        return 0
+    return high - low_pc if die.forms.get("DW_AT_high_pc", "").startswith("addr") else 0
 
 
 class Dwarf:
@@ -261,7 +276,8 @@ class Dwarf:
     def read(cls, binary: Path, target: Target = X86_64) -> "Dwarf":
         proc = subprocess.run(
             # No `--debug-dump=no-follow-links`: binutils 2.42 then reads every `strx` string from the wrong table.
-            [target.tool("readelf"), "--wide", "--debug-dump=info", "--debug-dump=Ranges", str(binary)],
+            [target.tool("readelf"), "--wide", "--debug-dump=info", "--debug-dump=Ranges",
+             str(target.debug_view(binary))],
             capture_output=True,
             text=True,
             check=False,
@@ -384,6 +400,7 @@ class Dwarf:
             prototyped=die.flag("DW_AT_prototyped"),
             instance=not {"DW_AT_abstract_origin", "DW_AT_specification"}.isdisjoint(die.attrs),
             noreturn=noreturn_die.flag("DW_AT_noreturn"),
+            size=_extent(die, low_pc),
         )
 
     def _formals(self, die: Die) -> tuple[list[Parameter], bool]:
@@ -618,7 +635,7 @@ def _walk(die: Die):
 def function_symbols(binary: Path, target: Target = X86_64) -> dict[int, tuple[list[str], int]]:
     """``address -> (names, size)`` of every defined FUNC symbol in the binary's ``.symtab``: an import is not one."""
     proc = subprocess.run(
-        [target.tool("readelf"), "--wide", "--syms", str(binary)],
+        [target.tool("readelf"), "--wide", "--syms", str(target.debug_view(binary))],
         capture_output=True,
         text=True,
         check=False,

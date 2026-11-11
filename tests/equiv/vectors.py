@@ -215,8 +215,8 @@ def build_vectors(spec: CallSpec, dwarf: Dwarf, count: int, seed_text: str,
     for index in range(count):
         seed = _seed(f"{seed_text}/{index}")
         rng = random.Random(seed)
-        gpr = [rng.getrandbits(64) for _ in abi.int_registers]
-        fp = [rng.getrandbits(128).to_bytes(16, "little") for _ in abi.fp_registers]
+        gpr = [rng.getrandbits(64) for _ in range(abi.int_slots())]
+        fp = [rng.getrandbits(128).to_bytes(16, "little") for _ in range(abi.fp_slots())]
         stack: list[int] = []
         patches: list[tuple[int, bytes]] = []
         shown: list[str] = []

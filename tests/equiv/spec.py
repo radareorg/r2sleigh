@@ -9,10 +9,12 @@ definition, a function pointer with no function of its type to point at -- is
 rather than calling it wrongly.
 
 The convention is a :class:`target.Abi`: SysV x86-64 (six integer registers,
-eight vector registers, then stack words) or AAPCS64 (eight of each, then
-stack words). Both give a scalar argument past the registers one 8-byte stack
-word, and both return an integer in the first one or two integer registers and
-a float in the first vector register, so the rest of the spec is shared.
+eight vector registers, then stack words), AAPCS64 (eight of each, then
+stack words) or Microsoft x64 (four positions, each an integer or a vector
+register by its class, then stack words). All give a scalar argument past the
+registers one 8-byte stack word, and all return an integer in the first one or
+two integer registers and a float in the first vector register, so the rest of
+the spec is shared.
 """
 
 from __future__ import annotations
@@ -119,6 +121,9 @@ def call_spec(dwarf: Dwarf, sub: Subprogram, functions: list[Subprogram],
         spec.ret_kind, spec.ret_bytes = "void", 0
     elif ret.kind in ("int", "bool", "pointer"):
         size = ret.size or 8
+        if size == 16 and abi.positional:
+            spec.unsupported = "a 16-byte integer return, which Microsoft x64 does not place"
+            return spec
         if size == 16:
             spec.ret_kind, spec.ret_bytes = "int128", 16
         elif size in (1, 2, 4, 8):
@@ -182,13 +187,18 @@ def call_spec(dwarf: Dwarf, sub: Subprogram, functions: list[Subprogram],
             spec.unsupported = f"parameter {name}: {info.reason or info.kind}"
             return spec
 
-        if sse and used_sse < len(abi.fp_registers):
+        if abi.positional:
+            # Microsoft x64: the position picks the register, and the class which of its two.
+            positional = abi.fp_registers if sse else abi.int_registers
+            if index < len(positional):
+                param.register = positional[index]
+        elif sse and used_sse < len(abi.fp_registers):
             param.register = abi.fp_registers[used_sse]
             used_sse += 1
         elif not sse and used_int < len(abi.int_registers):
             param.register = abi.int_registers[used_int]
             used_int += 1
-        else:
+        if not param.register:
             if used_stack >= MAX_STACK_WORDS:
                 spec.unsupported = f"more than {MAX_STACK_WORDS} stack argument words"
                 return spec

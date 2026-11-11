@@ -199,7 +199,8 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
         return record
     target = config.target
     if target.objects_through_loader:
-        conflicts = link.loader_conflicts(link.shim_objects(links, definition), str(binary),
+        program = target.host_program(binary, config.runtime)
+        conflicts = link.loader_conflicts(link.shim_objects(links, definition), str(program),
                                           str(config.runtime), target)
         if conflicts:
             # The rendering cannot be run against the objects it names here.
@@ -304,8 +305,10 @@ def run_driver(binary: Path, job: Path, out: Path, config: Config,
         f"EQUIV_JOB={job}",
         f"EQUIV_OUT={out}",
         "UBSAN_OPTIONS=print_stacktrace=0:halt_on_error=1:exitcode=86",
+        *config.target.program_environment(binary),
     ]
-    argv = [*fixed_layout_prefix(), *config.target.run_argv(binary, assignments)]
+    program = config.target.host_program(binary, config.runtime)
+    argv = [*fixed_layout_prefix(), *config.target.run_argv(program, assignments)]
     budget = config.driver_ceiling(vector_count)
     out.unlink(missing_ok=True)
     try:

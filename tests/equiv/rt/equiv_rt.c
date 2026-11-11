@@ -104,10 +104,14 @@ static uint64_t context_sp(const ucontext_t *uc)
     return (uint64_t)uc->uc_mcontext.gregs[REG_RSP];
 }
 
-/* The first integer argument register. */
+/* The first integer argument register: rcx under Microsoft x64 (EQUIV_WIN64). */
 static uint64_t context_arg0(const ucontext_t *uc)
 {
+#if defined(EQUIV_WIN64)
+    return (uint64_t)uc->uc_mcontext.gregs[REG_RCX];
+#else
     return (uint64_t)uc->uc_mcontext.gregs[REG_RDI];
+#endif
 }
 
 /* int3 reports the byte after it. */
@@ -454,6 +458,9 @@ static void *read_file(const char *path, size_t *length)
     return buffer;
 }
 
+#if defined(EQUIV_WIN64)
+#include "pe_win64.c"
+#else
 /* The main program's writable PT_LOAD segments: its .data, .bss and GOT. */
 static int collect_segments(struct dl_phdr_info *info, size_t size, void *data)
 {
@@ -474,6 +481,7 @@ static int collect_segments(struct dl_phdr_info *info, size_t size, void *data)
     }
     return 1;
 }
+#endif
 
 /* ------------------------------------------------------------ child side */
 
@@ -1192,7 +1200,13 @@ static int equiv_main(int argc, char **argv, char **envp)
         g_counter = -1;
     }
 
+#if defined(EQUIV_WIN64)
+    const char *pe_problem = pe_load(getenv("EQUIV_PE") ? getenv("EQUIV_PE") : "");
+    if (pe_problem)
+        return die(pe_problem);
+#else
     dl_iterate_phdr(collect_segments, NULL);
+#endif
     /* backtrace() loads its unwinder on first use: do it here, never in a handler. */
     void *warm[1];
     backtrace(warm, 1);
@@ -1246,7 +1260,12 @@ static int equiv_main(int argc, char **argv, char **envp)
         fprintf(g_out, "%s[\"0x%llx\",%llu]", i ? "," : "",
                 (unsigned long long)g_segments[i].start,
                 (unsigned long long)g_segments[i].length);
-    fprintf(g_out, "]}\n");
+    fprintf(g_out, "]");
+#if defined(EQUIV_WIN64)
+    fputs(",\"unbound\":", g_out);
+    json_string(g_out, g_unbound, g_unbound_len);
+#endif
+    fprintf(g_out, "}\n");
     fflush(g_out);
 
     for (uint32_t v = 0; v < g_head.n_vectors; v++) {

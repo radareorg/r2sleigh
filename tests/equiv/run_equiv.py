@@ -29,8 +29,11 @@ before the ratchet accepts it.
 ``--target`` picks the machine (``target.py``): ``x86-64``, the default, runs
 natively on x86-64 Linux; ``aarch64`` builds with the AArch64 cross compilers
 and runs under qemu-user. An aarch64 record's configuration says so
-(``aarch64-gcc-O0``), and its baseline is ``baseline-aarch64.json``. Where the
-target cannot run, the gate says so and exits 3.
+(``aarch64-gcc-O0``), and its baseline is ``baseline-aarch64.json``. ``win64``
+builds PE32+ images with clang-cl against an xwin sysroot (``$EQUIV_XWIN``) and
+maps them into the Linux runtime (``win64-clang-cl-O0``,
+``baseline-win64.json``). Where the target cannot run, the gate says so and
+exits 3.
 """
 
 from __future__ import annotations
@@ -67,7 +70,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="the machine the population is built for and run on")
     parser.add_argument("--sources", type=Path, nargs="+", default=None,
                         help="C sources to build (default: tests/corpus/*.c tests/gold/*.c)")
-    parser.add_argument("--compilers", default=",".join(build.COMPILERS))
+    parser.add_argument("--compilers", default=None,
+                        help="population compilers (default: the target's, gcc,clang on ELF)")
     parser.add_argument("--opts", default=",".join(build.OPT_LEVELS))
     parser.add_argument("--only", default=None,
                         help="grade only record keys matching this regular expression")
@@ -166,6 +170,7 @@ def grade_binary(binary: build.Binary, args: argparse.Namespace, config: gate.Co
     for key, sub in wanted:
         spec = call_spec(dwarf, sub, all_functions, target.abi)
         names, size = symbols.get(sub.low_pc, ([], 0))
+        size = size or sub.size
         if names and sub.name not in names and not spec.unsupported:
             spec.unsupported = (
                 f"the symbol at 0x{sub.low_pc:x} is {names[0]}, a compiler copy whose "
@@ -246,6 +251,8 @@ def main(argv: list[str] | None = None) -> int:
     args.out = args.out.resolve()
     args.r2s = args.r2s.resolve()
     target = by_name(args.target)
+    if args.compilers is None:
+        args.compilers = ",".join(target.compilers)
     if args.cc is None:
         args.cc = target.rendering_cc
     problem = gate.environment_problem(target)

@@ -12,6 +12,8 @@ tests/equiv/run_equiv.py --r2s target/debug/r2s \
     --baseline tests/equiv/baseline.json                         # gate (ratchet)
 tests/equiv/run_equiv.py --r2s target/debug/r2s --target aarch64 \
     --baseline tests/equiv/baseline-aarch64.json                 # the same, for arm64
+EQUIV_XWIN=/path/to/xwin tests/equiv/run_equiv.py --r2s target/debug/r2s --target win64 \
+    --baseline tests/equiv/baseline-win64.json                   # the same, for Win64 PEs
 tests/equiv/run_equiv.py --r2s target/debug/r2s --measure instructions   # cost counted, not timed
 python3 -m unittest discover -s tests/equiv -p 'test_*.py'       # the gate's own tests
 ```
@@ -20,8 +22,10 @@ For x86-64 (the default target) it needs x86-64 Linux, `gcc`, `clang` (for the
 Clang cells), and binutils. For aarch64 it needs Linux, `qemu-aarch64`
 (qemu-user), `aarch64-linux-gnu-gcc` with its binutils and its sysroot in
 `/usr/aarch64-linux-gnu` (Ubuntu: `gcc-aarch64-linux-gnu`,
-`qemu-user`), and a `clang` that can target it with that sysroot. It uses
-only the Python standard library.
+`qemu-user`), and a `clang` that can target it with that sysroot. For win64 it
+needs x86-64 Linux, `clang` (run as clang-cl), `lld-link`, `llvm-strip`, `gcc`
+and binutils, and `$EQUIV_XWIN`, the MSVC CRT and Windows SDK that `xwin
+splat` writes (Win64, below). It uses only the Python standard library.
 
 What it does
 ------------
@@ -189,9 +193,9 @@ for every function.
 The ratchet
 -----------
 
-`tests/equiv/baseline.json` (x86-64) and `tests/equiv/baseline-aarch64.json`
-name the measure and budget they were blessed under (`cost`), and hold, per
-key, a status and -- for every record
+`tests/equiv/baseline.json` (x86-64), `tests/equiv/baseline-aarch64.json` and
+`tests/equiv/baseline-win64.json` name the measure and budget they were
+blessed under (`cost`), and hold, per key, a status and -- for every record
 that is not `equal` -- the person's recorded `cause`, its `owner` (the
 ROADMAP.md item that owns the fix) and `site` (the repository path where it
 lands, or that states the limitation), and the machine's `reason`
@@ -224,7 +228,9 @@ CI runs this on every push (`equivalence` in `.github/workflows/ci.yml`) for
 x86-64. No CI job runs the aarch64 target yet: its baseline was blessed from a
 full run on an x86-64 Linux host under qemu-user, and is held by running
 `run_equiv.py --target aarch64 --baseline tests/equiv/baseline-aarch64.json`
-there.
+there. Nor does one run win64, whose xwin sysroot the runners do not hold:
+`baseline-win64.json` is held by `run_win64.sh` on an x86-64 Linux host
+(doc/testing.md has its setup).
 The baseline is written only with `--write-baseline PATH`, which keeps any
 cause, owner and site already recorded for an unchanged status and reason,
 records each reason, what each trap compared and the toolchain, and leaves the
@@ -241,18 +247,19 @@ the signal `__builtin_trap` raises. What a compiler built is read back
 (`readelf -h`), so a compiler that built for the wrong machine is a failed
 build, never a binary graded under the wrong ABI.
 
-| | x86-64 | aarch64 |
-|---|---|---|
-| arguments | rdi..r9, xmm0..7, then 8-byte stack words; AL counts vector registers | x0..x7, v0..v7, then 8-byte stack words |
-| a narrow integer argument | extended to 32 bits by its type, bits 32..63 arbitrary | every bit above the type arbitrary (AAPCS64) |
-| results | rax (rdx), xmm0 | x0 (x1), v0 |
-| a function link | `movabs $addr, %r11; jmp *%r11` | `movz/movk x16, addr; br x16` |
-| an object link | `.set name, addr` | the same, bound by the loader (below) |
-| guard, residual trap | `int3`, `ud2` (SIGILL) | `brk #0`, `brk` (SIGTRAP) |
-| runner | `setarch -R env VAR=... prog` | `setarch -R qemu-aarch64 -L /usr/aarch64-linux-gnu -seed 1 -E VAR=... prog` |
-| per-call budget | `--budget-instructions`, or `--timeout-ms` under `--measure time` (four times it for a rendering) | `--measure time` only, five times `--timeout-ms` |
-| `DT_NEEDED` libraries | as `ldd` resolves them | the files in the sysroot |
-| keys, baseline | `gcc-O0`, `baseline.json` | `aarch64-gcc-O0`, `baseline-aarch64.json` |
+| | x86-64 | aarch64 | win64 |
+|---|---|---|---|
+| population | `gcc`, `clang`; ELF | the same, cross; ELF | `clang-cl` (`/MD /GS`, DWARF); PE32+ |
+| arguments | rdi..r9, xmm0..7, then 8-byte stack words; AL counts vector registers | x0..x7, v0..v7, then 8-byte stack words | position N in rcx/rdx/r8/r9 or xmm0..3 by its class, then 8-byte stack words past the 32-byte home area |
+| a narrow integer argument | extended to 32 bits by its type, bits 32..63 arbitrary | every bit above the type arbitrary (AAPCS64) | every bit above the type arbitrary |
+| results | rax (rdx), xmm0 | x0 (x1), v0 | rax, xmm0 |
+| a function link | `movabs $addr, %r11; jmp *%r11` | `movz/movk x16, addr; br x16` | as x86-64; a PE import is its thunk |
+| an object link | `.set name, addr` | the same, bound by the loader (below) | the same, bound by the loader (below) |
+| guard, residual trap | `int3`, `ud2` (SIGILL) | `brk #0`, `brk` (SIGTRAP) | as x86-64 |
+| runner | `setarch -R env VAR=... prog` | `setarch -R qemu-aarch64 -L /usr/aarch64-linux-gnu -seed 1 -E VAR=... prog` | `setarch -R env VAR=... EQUIV_PE=a.exe pe_host` |
+| per-call budget | `--budget-instructions`, or `--timeout-ms` under `--measure time` (four times it for a rendering) | `--measure time` only, five times `--timeout-ms` | as x86-64 |
+| `DT_NEEDED` libraries | as `ldd` resolves them | the files in the sysroot | none: imports bind to the runtime's shims |
+| keys, baseline | `gcc-O0`, `baseline.json` | `aarch64-gcc-O0`, `baseline-aarch64.json` | `win64-clang-cl-O0`, `baseline-win64.json` |
 
 x86-64's keys predate the target axis and carry no target name, so its
 baseline is unchanged; every other target's keys and work directories carry
@@ -344,11 +351,45 @@ object link one of those would capture (a name the program exports at another
 address, or one a library exports) is `harness-error` with the conflict named,
 never graded against an object it did not name (`link.loader_conflicts`).
 
+*Win64.* A PE is graded the way an ELF is, in one Linux process through
+fork, without Windows or wine (`rt/pe_win64.c`, built into the runtime with
+`-DEQUIV_WIN64`):
+
+- `build.py` runs clang-cl against the xwin sysroot with `/MD` (UCRT's DLLs,
+  so `printf` reaches `api-ms-win-crt-stdio`'s `__stdio_common_vfprintf`),
+  `/GS` (the load configuration names `__security_cookie`), `/Od`, `/O1` or
+  `/O2`, and DWARF in the image (`/Z7 /clang:-gdwarf`, `lld-link
+  /debug:dwarf`). `llvm-strip --strip-all` makes the shown copy and keeps
+  every section's address. `readelf` reads the DWARF and symbols from an
+  `objcopy -O elf64-x86-64` copy; a COFF symbol has no size, so a function's
+  extent is its `DW_AT_high_pc`.
+- The runtime is preloaded into `pe_host`, an empty non-PIE program. Before the
+  job runs it maps the PE at its own ImageBase (so no relocation applies),
+  binds every import to a Microsoft x64 shim over glibc (`printf`'s
+  `va_list` of 8-byte slots is read as a System V list whose registers are
+  spent), and compares the PE's writable sections where an ELF's writable
+  segments are. An import with no shim binds to an `abort`: the original
+  then lies outside the vector's domain. The header line names those imports
+  (`unbound`); none of them is a call the corpus's functions make.
+- `rt/call_win64.S` enters the function with rcx, rdx, r8, r9, xmm0..xmm3 and
+  the stack words past a 32-byte home area.
+- A rendering is built with `gcc -mabi=ms`, since the image calls it and it
+  calls the image under Microsoft x64, with `-fno-builtin` and no
+  `_FORTIFY_SOURCE`, so every call stays the link it names. The compiler's
+  own memory calls, a C library call the image holds no import of, and in the
+  `ubsan` variant libubsan's handlers go through `rt/ms_support.c`, weak and
+  hidden, each forwarded to glibc's System V function.
+- GNU ld also misplaces an absolute symbol above 4 GiB in a shared object's
+  GOT, so object links go through the loader as on AArch64.
+
 Limits, stated
 --------------
 
-- Linux ELF for x86-64 and AArch64 only (`target.py`); aarch64 runs under
-  qemu-user unless the host is AArch64.
+- Linux ELF for x86-64 and AArch64, and Win64 PE32+ mapped into an x86-64
+  Linux process (`target.py`); aarch64 runs under qemu-user unless the host is
+  AArch64. Win64 runs no Windows code but the image's: a UCRT, KERNEL32 or
+  VCRUNTIME import is a shim over glibc, so a function whose result depends
+  on what Windows' own library does differently is graded against glibc's.
 - Non-PIE only: a rendering may spell image addresses as integers, which are
   run-time addresses only when the link address is the load address.
 - A parameter's pointee is built from its DWARF type: bytes, a NUL-terminated
