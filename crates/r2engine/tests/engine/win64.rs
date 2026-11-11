@@ -240,9 +240,8 @@ fn a_local_passed_as_the_fifth_argument_stays_in_memory() {
     common::assert_local_stays_in_memory(&caller);
 }
 
-/// clang -O0 `int sum(int n, ...)` for `x86_64-pc-windows-msvc`: it homes `rdx`, `r8` and `r9`,
-/// keeps `va_list ap = &home[1]` in a frame cell and adds `*(int *)ap` `n` times, stepping `ap`
-/// by `step`; `caller` calls `sum(3, 1, 2, 3)`.
+/// clang -O0 `int sum(int n, ...)` (x86_64-pc-windows-msvc), `ap = &home[1]` stepping by `step`,
+/// and `caller` calling `sum(3, 1, 2, 3)`.
 fn summing(step: u8) -> &'static [u8] {
     let mut code = vec![
         0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18

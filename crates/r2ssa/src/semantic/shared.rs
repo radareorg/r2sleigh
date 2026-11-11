@@ -755,24 +755,8 @@ fn terminal_past_call_boundary<'o, V: Ord + 'o>(
     })
 }
 
-/// Convention-clobbered registers this body leaves exactly as it found them
-/// at every exit.
-///
-/// A register is preserved when no instruction anywhere in the body defines a
-/// storage overlapping it. A call's own clobbers are the `CallDefine`s that
-/// follow it, so a body that calls something it knows nothing more about
-/// preserves nothing that call may touch, and the answer composes through
-/// exactly the callees whose own bodies were read. This is the set a compiler
-/// computes for the same purpose: GCC's `-fipa-ra` keeps a caller's value in
-/// an argument register across a call to a callee it has seen never write it,
-/// and the caller then reads that register after the call as its own.
-///
-/// Only blocks a return is reached from count: a write on a path that never returns is unseen.
-/// Every exit has to be a return for the claim to hold. A block that leaves by
-/// any other transfer hands control to a body not read here, so nothing is
-/// claimed for the function; a call that ends its block with no successor is
-/// one the source marked noreturn, which never comes back and constrains
-/// nothing.
+/// Convention-clobbered registers no block a return is reached from writes, every exit a return
+/// (GCC's `-fipa-ra` set; doc/adr-call-boundary.md, "S17 as built").
 pub(crate) fn preserved_call_carriers(
     function: &SSAFunction,
     graph: &SsaGraph,

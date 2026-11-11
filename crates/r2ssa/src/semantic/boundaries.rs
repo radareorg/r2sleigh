@@ -371,8 +371,6 @@ impl FormatForwardingLookup<'_> {
     }
 }
 
-/// Whether the convention puts every variadic operand on the stack, where a
-/// floating one is placed like any other.
 /// Whether the convention places a floating tail operand: on the stack, or at a shared position.
 fn floating_tail_placed(machine_context: &SourceMachineContext) -> bool {
     machine_context

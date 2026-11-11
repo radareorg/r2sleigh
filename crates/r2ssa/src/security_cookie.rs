@@ -1,9 +1,5 @@
-//! The `/GS` check, decided under `Premise::UbFreeSource` (doc/adr-call-boundary.md, "S17 as built").
-//!
-//! The cookie is the word the PE load configuration names. A protected caller saves
-//! `[cookie] ^ sp` in a frame slot and hands `slot ^ sp` to a callee whose own body proves it
-//! compares that argument with the cookie and, where they differ, reaches only calls that do not
-//! return. A UB-free source writes neither the slot nor the cookie, so the check returns.
+//! The `/GS` check, decided under `Premise::UbFreeSource`: a UB-free source writes neither the
+//! saved `[cookie] ^ sp` nor the cookie (doc/adr-call-boundary.md, "S17 as built").
 
 use std::collections::BTreeSet;
 
@@ -17,10 +13,8 @@ use crate::op::SSAOp;
 use crate::stack_protector::{SlotStores, equality};
 use crate::value_table::VarId;
 
-/// Whether `func` is a `/GS` check: one comparison of its first integer argument's entry value
-/// with a read of the cookie dominates every return; its failing edge reaches only calls that do
-/// not return; and no block a return is reached from stores, calls or enters the machine.
-/// O(blocks + ops).
+/// Whether `func` is a `/GS` check, as the ADR's "S17 as built" states the proof. O(blocks + ops),
+/// and only a body loading the cookie's address builds its definitions.
 pub(crate) fn proves_check(func: &SSAFunction, machine: &SourceMachineContext) -> bool {
     let Some(cookie) = machine
         .call_effect()
@@ -196,14 +190,12 @@ fn inert(op: &SSAOp<VarId>) -> bool {
                 | SSAOp::StoreConditional { .. }
                 | SSAOp::CallOther { .. }
                 | SSAOp::Unimplemented
-                | SSAOp::CallInd { .. }
-                | SSAOp::BranchInd { .. }
-        ))
+        )
+        || op.transfer().is_some_and(|transfer| !transfer.direct))
 }
 
-/// Decide every call to a proven check in `func` whose argument is the frame slot a prologue
-/// filled with `[cookie] ^ sp`, read back and xored with the same `sp`; the operations each one
-/// inserted are recorded for the certificate that elides them. O(ops).
+/// Record compiler-inserted each call to a proven check handed the prologue's saved
+/// `[cookie] ^ sp`, xored again with the same `sp`, and what computed it. O(ops).
 pub(crate) fn decide(
     func: &mut SSAFunction,
     machine: &SourceMachineContext,
@@ -272,25 +264,23 @@ fn check_calls(
     for block in (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr)) {
         let mut handed = None;
         for (id, op) in block.sited() {
-            match op {
-                SSAOp::CallUse { src } if func.storage_of(*src) == Some(argument) => {
-                    handed = Some(*src);
-                }
-                SSAOp::Call { target, .. } => {
-                    // A direct call names its callee as the RAM address it transfers to.
-                    let callee = (func.storage_of(*target))
-                        .filter(|storage| storage.space == crate::CanonicalStorageSpace::Ram)
-                        .map(|storage| storage.offset)
-                        .or_else(|| func.var(*target).constant_bits());
-                    if let (Some(callee), Some(handed)) = (callee, handed)
-                        && checks.contains(&callee)
-                    {
-                        calls.push((id, handed));
-                    }
-                    handed = None;
-                }
-                _ if op.is_call() => handed = None,
-                _ => {}
+            if let SSAOp::CallUse { src } = op
+                && func.storage_of(*src) == Some(argument)
+            {
+                handed = Some(*src);
+                continue;
+            }
+            let Some(call) = op.call() else {
+                continue;
+            };
+            // A direct call names its callee as the RAM address it transfers to.
+            let callee = (func.storage_of(*call.target))
+                .filter(|storage| call.direct && storage.space == crate::CanonicalStorageSpace::Ram)
+                .map(|storage| storage.offset);
+            if let (Some(callee), Some(handed)) = (callee, handed.take())
+                && checks.contains(&callee)
+            {
+                calls.push((id, handed));
             }
         }
     }
@@ -416,7 +406,8 @@ impl Context<'_> {
         if clobber_read {
             return Err("a register the check clobbers is read after it");
         }
-        let sinks = ops.iter().copied().collect::<BTreeSet<_>>();
+        let mut sinks = IdSet::new(func.id_limit());
+        sinks.extend(ops.iter().copied());
         // What the inserted values reach: only each other, or flags nothing reads.
         let mut dead = Vec::new();
         for op in &ops {
@@ -524,7 +515,7 @@ impl Context<'_> {
 
     /// Whether `var` is read only by `sinks`, or by operations whose own results nothing else
     /// reads (an xor's flags); those are added to `dead`. Bounded by the readers walked.
-    fn unread_but_by(&self, var: VarId, sinks: &BTreeSet<OpId>, dead: &mut Vec<OpId>) -> bool {
+    fn unread_but_by(&self, var: VarId, sinks: &IdSet<OpId>, dead: &mut Vec<OpId>) -> bool {
         const BUDGET: usize = 64;
         let mut work = vec![var];
         let mut walked = 0;
@@ -533,7 +524,7 @@ impl Context<'_> {
                 return false;
             }
             for reader in self.readers.of_var(var) {
-                if sinks.contains(reader) || dead.contains(reader) {
+                if sinks.contains(*reader) || dead.contains(reader) {
                     continue;
                 }
                 walked += 1;

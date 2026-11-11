@@ -1,6 +1,5 @@
-//! Microsoft `/GS` (doc/adr-call-boundary.md, S17): the cookie is the word the load
-//! configuration names, and a check is a body proven to compare its argument with it and to
-//! reach only a call that never returns otherwise. The callee's name decides nothing.
+//! Microsoft `/GS` (doc/adr-call-boundary.md, "S17 as built"): the load configuration's cookie,
+//! a check proven from its body, and the non-returning facts its failure rests on.
 
 use crate::common;
 
