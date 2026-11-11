@@ -22,6 +22,7 @@ CYCLE = "cargo test -p r2engine --test engine call_boundary::a_call_boundary_rea
 READS = "crates/r2engine/src/program/reads.rs"
 INDEX = "crates/r2engine/src/query/references.rs"
 FATES = "crates/r2engine/src/program/fates.rs"
+RECOVER = "crates/r2ssa/src/recover_interface.rs"
 
 MUTANTS = [
     ("an-export-is-no-way-in", [(READS, ".filter(|symbol| exported(container.format, symbol))", ".filter(|_| false)")],
@@ -48,6 +49,10 @@ MUTANTS = [
     ("a-call-count-one-short-is-every-call", [(READS, "usize::try_from(calls).is_ok_and(|calls| calls == claimed)",
                                                "usize::try_from(calls).is_ok_and(|calls| calls + 1 >= claimed)")],
      [COUNT]),
+    # Default-deny: a decided void never overrules a lane the seal's walk finds written (S36).
+    ("a-closed-void-overrules-a-written-lane", [(RECOVER, "Some(r2source::SourceClosedResult::Void) if unheld.is_some() => {",
+                                                 "Some(r2source::SourceClosedResult::Void) if false => {")],
+     ["cargo test -p r2engine --test engine call_boundary::a_written_x87"]),
     # A decision that reads a closed seal: the database's cycle the ADR traced none of.
     ("a-boundary-reads-a-closed-seal", [(FATES, "                let forwarding = (*db.get::<ComponentForwarding>(&entry).ok()?).clone()?;",
                                          "                let _ = db.get::<super::resolved::Resolved>(&((entry, view.thumb_at(entry)), super::resolved::Demand::Arity));\n                let forwarding = (*db.get::<ComponentForwarding>(&entry).ok()?).clone()?;")],

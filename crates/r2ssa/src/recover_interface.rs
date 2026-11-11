@@ -1890,6 +1890,13 @@ fn recover_interface_inner(
     // The closed world's held decision, a stated input applied as stated (doc/adr-result-side.md).
     match closed {
         Some(r2source::SourceClosedResult::Read(_)) => applied = closed,
+        // A decided `void` yields to a lane the walk finds written: no `Void` unless every lane holds none.
+        Some(r2source::SourceClosedResult::Void) if unheld.is_some() => {
+            r2il::refusal_evidence!(
+                "interface-recovery",
+                "a closed-world void yields to {unheld:?}"
+            );
+        }
         Some(r2source::SourceClosedResult::Void) => {
             result = RecoveredFunctionResult::Void;
             live_out = crate::liveout::FunctionLiveOut::default();
