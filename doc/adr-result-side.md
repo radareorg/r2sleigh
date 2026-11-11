@@ -217,7 +217,39 @@ Two gaps stay named: AArch64's large code model (`movz`/`movk`, doc/adr-resolved
 
 S31a's gate adds one mutant per way in: an export, a non-symbol entry, a non-call reference, an 8-byte and a 4-byte stored word, a Thumb bit, a relative loader write, a resolver write, an unknown write, an unread body, an unaccounted code byte, a language, a call count one short. Each mutant drops one way in from `Escapes` or `only_called`, and an engine test that passes on the base must fail on it.
 
-The closed world's yield is 4 of 102 class C functions on the 35 DecBench builds (D203). What caps it (uncited imports, unread lanes) is unmeasured; S18 measures the split.
+##### What caps the closed world's yield (S18, D241)
+
+Measured at `19ff0d899` (S36), release r2s under `aa`, on the 102 source-void class C functions of the 35 DecBench builds ([scratch-result](adr-scratch-result.md), "Evidence"). 29 are `void` in the open world (D200 took them). The closed world decides 0. 73 stay undecided: 50 `Unproven(EntryInput)`, 16 `Unproven(Written)`, 7 refused. The gate's 4 `void-closed` at that base are `mbiter_multi_reloc` and `mbuiter_multi_reloc` in cmp and sdiff (O2-noinline). No call reaches them, they are outside class C, and S31a's one-call minimum moves them to `Unproven`. At S31a `c183bdf75` the count is 0 of 102.
+
+Each of the 73 was traced from its supply cause, its way in and the fate of the result lanes (RAX, XMM0) at every call the engine holds. A function counts under every cause it has; "sole" counts a function with one cause.
+
+| Cause | Functions | Sole | What it is |
+|---|---|---|---|
+| A way in is unknown | 71 | 5 | `Escapes` refuses the image for 62 (`code no body holds`, 12 builds); 8 a forwarder or an unread caller, 6 a call the engine misses, 5 no call, 1 a stored word |
+| An unread lane | 45 | 0 | a callee read at `Depth::Shallow` (41), a lane the walk loses (22), a callee's tail call (17), an indirect call (6) |
+| An uncited library row | 41 | 1 | the lane crosses a call to an import whose row is `Tail::Unstated`, here or in a callee |
+| Forwarding | 39 | 0 | the lane is returned into the caller (20), a tail call forwards it (9), the supply is a direct call's result (15) |
+| The supply is written | 8 | 0 | `Register` or `Written`, no demand question |
+| A callee reads the lane | 7 | 0 | a cited import or an image callee reads it |
+| Refused | 7 | 0 | the function renders nothing |
+| An import with no row | 5 | 0 | 31 names at the class C callers' sites: `__overflow` (25 sites), `fchdir`, `__ctype_get_mb_cur_max`, `fork`, `sysconf`, `dup2`, `wcwidth` |
+| A cycle | 0 | 0 | |
+
+Two switches in the engine bound what removing a cause can yield. `MEASURE_CITE` reads every `Unstated` row as `Tail::None`, which is more than any citation can state (it also fixes `open` and `ioctl`). `MEASURE_GO_ON` skips the two whole-image refusals of `Escapes`. Both are upper bounds.
+
+| Run | `void-closed` at `19ff0d899` | at S31a `c183bdf75` | Which, at S31a |
+|---|---|---|---|
+| base | 0 | 0 | |
+| every row cited | 1 | 1 | sdiff `checksigs` |
+| the image refusals skipped | 5 | 1 | bzip2 `uInt64_toAscii` |
+| both | 9 | 6 | those two, diff `check_color_output` and `print_message_queue`, find `set_option_defaults`, diff3 `output_diff3` |
+
+At `19ff0d899` four of the five skipped-refusal voids were diff `set_color_palette` and `finish_output` (O2 and O2-noinline) with 0 calls held: `main`'s unwalked case blocks call them, so those voids were the refusal's own reason. S31a's one-call minimum decides none of them.
+
+- The causes are a conjunction. No single cause holds more than 5 functions alone. At S31a, with the rows cited and the image refusals gone, 67 of 73 still wait on an unread lane (45 at `19ff0d899`) or forwarding (42).
+- `code no body holds` has two causes. In 9 builds (41 functions) a table jump's index has no bound in r2ssa `values`, so its case blocks are in no body: gzip `main` (`0x3b9a`) reaches its dispatch from two guarded predecessors (`ja` at `0x3b98`, `jbe` at `0x3c15`), and a branch assumption holds only where its edge dominates; `printf_fetchargs` (`0x10f89`) tests `cmp [rax], 0x16` and reloads the word. Both read `4294967296 entries`. The other ranges of those builds, untraced, sit in `quotearg_buffer_restyled` (8 builds), diff `main` and `diff_2_files`, find `pred_newerXY`, `get_expr` and `do_fprintf`, grep `grepdesc` and `grepdirent`. Owner: r2ssa `values` and `indirect` (D244). In the 3 bzip2 builds (21 functions) the bytes follow a call to `BZ2_bz__AssertH__fail` (`0x5f80`, `afi`: `noreturn: true`), whose callers were compiled without knowing it: 17 ranges of 4 to 81 bytes in `BZ2_decompress`, `BZ2_compressBlock`, `sendMTFValues`, `mainSort` and `BZ2_hbMakeCodeLengths`. Owner: r2engine `reads::padding` (D244).
+- The unread lanes and forwarding are S16's (the per-lane supply and the minted call) and S31b's (the register effect replaces the shallow read).
+- The cited rows are this slice's (D242). Their measured bound is 1 function alone and 4 more once the image is closed. `Escapes` stays as it is: skipping its refusals alone yields 1 function, and a sound replacement has to escape everything the unheld bytes name.
 
 #### The variadic read bound
 
@@ -493,6 +525,39 @@ Gates, parent S17 (`d4a8999e3`; tests, census, structure and mutants again on th
 - Equivalence: 13 records leave `equal` for `residual-trap`, every one a function nothing in the program calls (the harness reaches it by address; traced `0 calls` on `total_add` and `and_chain_effect` gcc-O1): x86-64 `and_chain_effect` gcc-O1/O2 and `total_add` clang-O1/O2 and gcc-O1/O2; aarch64 `and_chain_effect` gcc-O1/O2 and `total_add` clang-O0/O1/O2 and gcc-O1/O2. D213 made them `void` from no call at all, which section 3 rejects; they return to the residual they had at #355, owner P7 (the result proof; the ratchet takes ROADMAP items, not rows). No other record moves on either target. Source-gold (`void_soundness` 0 false voids in headers and externs, `scratch_void`), certification, the radare2 differential and CI's timing gate pass.
 - Mutants: `mutants_s31a.py` 15 of 15 killed (the 13 ways in, the closed-seal read, a decided void over a written lane); `mutants_d213.py` 20 of 20, its decision mutants retargeted at the held decision, `nothing-called-is-never-decided` inverted to the one-call minimum and `a-loader-call-is-no-call` added. Below 4 GiB a 4-byte window holds every 8-byte word's entry, so the 8-byte way in is tested on an image above it (`a_pointer_wide_word_above_four_gib_names_its_function`).
 - Cost: release, median of three, instructions retired on the Mac, parent S17 `d4a8999e3` against this slice; every output byte-identical: bash `0x2e630` `aa; pdd` 14.357 to 14.347 G (D153 bound 15.43 G); pumasim `0x3b6b20` `aa; pdd` 66.357 to 66.356 G (head bound 66.40 G); pumasim `0x23fdf0` `pdd` 24.375 to 24.385 G; 0pack `0x62ecf0` `pdd` 15.37 to 15.38 G. Peak footprint: bash 65.1 MB both, pumasim `aa` 205.4 to 204.5 MB, 0pack 220.3 to 224.3 MB (+1.8%); pumasim cold spreads 215 to 238 MB run to run on both sides. A cold `pdd` asks no `CallBoundary`, so the held decision moves nothing there: `outside_resolved`'s second preparation of a function whose result owner now states a result is a supply change, which S16 measures (D226). The bound per cold `pdd` is two preparations of each function the `Demand::Result` closure reaches (`CalleeReads`, then `outside_resolved` where an owner outside its component states a result), plus a cycle's fixpoint rounds.
+
+## S18 as built (2026-11-11)
+
+What the measurement said that the slice's plan did not, and the owner chosen. Rows D241 to D244.
+
+- The plan named uncited rows as the cap. The split (section 4, "What caps the closed world's yield") says otherwise: of the 73 undecided class C functions, an unknown way in touches 71, an unread lane 45, an uncited row 41 and forwarding 39, and no cause holds more than 5 alone. Citing every row has a measured bound of 1 function at the parent S31a `c183bdf75`. The rows are built because they are this slice's and r2abi's, and their yield is that 1.
+- The 4 `void-closed` the plan counted are not class C. They are `mbiter_multi_reloc` and `mbuiter_multi_reloc` in cmp and sdiff (O2-noinline), which no call reaches. S31a's one-call minimum moves them to `Unproven`, so the parent's count is 0 of 102.
+- `Escapes` is not changed. Skipping its image refusals yields 1 function at the parent (bzip2 `uInt64_toAscii`). At `19ff0d899` it yielded 5, and 4 of those were diff's `set_color_palette` and `finish_output`, called only from `main`'s unwalked case blocks: the refusal was right. The two causes of `code no body holds` go to their owners as D244.
+- The rows (D242). 398 rows of `types.sdb.txt` and 20 of `types-linux.sdb.txt` move to `types-posix.sdb.txt` and `types-glibc.sdb.txt`. Each is respelled from the declaration glibc 2.39's header gives under the mode its source names: 351 under `-std=c17` (ISO C17), 54 with `_POSIX_C_SOURCE=200809L`, 4 with `_XOPEN_SOURCE=700`, 9 with `_GNU_SOURCE`. A row keeps its scope: `a_scope_states_each_name_once` holds, so a glibc row that ISO C or POSIX states (`_Exit`, `waitpid`, `sigaction`) stays glibc's where libSystem's or bionic's table has its own.
+- The respelling changed 91 of the 418 prototypes radare2 stated (`long int` read as `long`). On each of glibc, bionic and libSystem 56 rows gain a sized type (`arithmetic`, `floating_point` and `func` were radare2's spellings). 5 change a width on glibc and bionic (`readlink` returns `ssize_t`, `strndup` takes `size_t`, `random` returns `long`, `wcstoimax`, `wcstoumax`) and 8 on libSystem, where `chmod`, `fchmod` and `umask` take its 16-bit `mode_t`. `fwscanf` and `swscanf` state their format, and `quick_exit` is noreturn. No row loses a size on any of the three.
+- 130 rows stay radare2's, each named with its reason in `data/uncited-rows.txt`, which a test lets only fall. 69 no glibc header declares (BSD, Darwin, Swift, gnulib, the `<math.h>` macros). 22 glibc declares only under `_GNU_SOURCE` while every library reads the portable table (`dcgettext`, 287 sites in the class C callers, `getopt_long`, `bzero`). 7 take or return a record or an array typedef by value. 5 take a function pointer the row reader does not spell (`qsort`, `bsearch`, `signal`, `atexit`, `at_quick_exit`). `basename` has two declarations.
+- 26 of the 130 were moved and taken back after the census over the 35 DecBench builds (420 functions moved, residuals up in 20 builds, find 1,199 to 1,266). `open`, `open64`, `openat` and `prctl` are variadic with no format, and r2dec renders a `Tail::Variadic` call as `CallNotRendered` (`missing_format_parameter`): 52 `open` and 11 `openat` sites, and the wrappers that forward to them. 22 rows name a record through a pointer where radare2 said `void *` (`stat`, `fstat`, `lstat`, `sigprocmask`, `utime`, `localtime`, `connect`), and a prototype naming one renders every parameter `uint64_t` (D151): 31 `stat`, 28 `fstat` and 10 `lstat` declarations. Their citations are right and their renderers are not ready, so they wait on those owners.
+- `scripts/audit_abi_rows.py --cc gcc`, which CI runs, compiles each cited row of the two tables that names a header against it: `__builtin_types_compatible_p(__typeof__(name), row)` under a mode the row's comment names. A row citing GCC's `builtins.def` (`__sprintf_chk`) names no header that declares it and is not compiled. The moved rows stay under the script's return check too.
+- A second witness for the portable move: Apple clang with libSystem's headers, under the same modes, declares 499 of the 502 compiled portable rows as spelled. The 3: `setstate` takes `const char *` there, and `mkdtemp` and `nl_langinfo_l` sit behind other macros.
+- `mode_t` (D243). `Width::KernelMode` reads `CDataModel::kernel_mode_bits`: 16 on i386 and 32-bit Arm, 32 on x86-64, AArch64 and RV64 (Linux `asm-generic/posix_types.h` and the two overrides; bionic `sys/types.h` types `mode_t` as `__kernel_mode_t`). bionic's `mknod`, `mknodat`, `mkdirat`, `fchmodat` and `__umask_chk` place their mode.
+- The bionic guard rows (D243). `guard_row` states bionic's x86 canary slot, `%fs:0x28` and `%gs:0x14`, from bionic's `tls_defines.h` (`TLS_SLOT_STACK_GUARD 5`) and LLVM's `getIRStackGuard` (Android from API 17). bionic's `__stack_chk_fail` moves from radare2's `types-android.sdb.txt` to the cited table, from `private/bionic_ssp.h` and its definition's one call to `async_safe_fatal`.
+
+Gates, measured against S31a `c183bdf75` on the Mac with release r2s; the branch was then rebased onto S20 `ccacf5df3`, where the touched crates' tests and the class C grade were run again:
+
+| | parent | S18 |
+|---|---|---|
+| `void-closed`, 102 class C source voids | 0 | 1 (sdiff `checksigs`) |
+| `scratch_void.py`, 35 builds: `void-closed` source void, source value | 0, 0 | 1, 0 |
+| `scratch_void.py`: `void-open` source void, source value | 247, 2 | 247, 2 |
+| `scratch_void.py`: `VOID LOST` against the recorded baseline | 25 | the same 25 |
+| `void_soundness.py`, 166 builds: header false voids, extern false voids | 0, 0 of 2,166 | 0, 0 of 2,166 |
+| Census, 444 goldens | | 0 move |
+| Census, every function of the 35 DecBench builds | | 152 functions move, residuals 7 fewer, refusals unmoved |
+| Release `pdd`, instructions retired, median of 3: pumasim `0x23fdf0`, 0pack `0x62ecf0` | 24.403 G, 15.403 G | 24.412 G, 15.408 G, output identical |
+
+- `scratch_void.py` exits 1 at the parent and here on the same lines: 25 lost voids and the floors (open 247 under 272). They moved between s10-win64 `505319748` and S36 `19ff0d899` (bzip2 -O0 `BZ2_blockSort` is `void` at the first and `Unproven(Written)` at the second), and `decbench_baseline.json` and `known.txt` were not updated there. This slice does not rebless them.
+- The 152 moved DecBench functions, each kind read: `memchr` takes `const void *` (ISO C17 7.24.5.1; 32 declarations), `write` takes `const void *` (22) and a record field read through it follows, `mmap`'s offset is signed `off_t` (12), `fchmod` takes unsigned `mode_t` (5), `strtoull` returns `unsigned long long`, `readlink` takes `size_t` and returns `ssize_t`, `strndup` takes `size_t`, and gzip's 2 `modf` calls render where radare2's `floating_point` row stated no prototype. sdiff `checksigs` (`0x4b20`) is `void` and its `return r2sleigh_residual_u64(1)` is `return;`: the import calls after its 4 call sites state fixed prototypes, so three result lanes go from unknown to dead.
+- The moved causes on the 35 builds: `Unproven(Written)` 985 to 978 source void, `Unread` 5 to 12, `EntryInput` 137 to 136. A cited fixed prototype stops a call reading lanes past it, so a closed-world read reaches further before it stops. No source value becomes `void`.
 
 ## Open questions
 
