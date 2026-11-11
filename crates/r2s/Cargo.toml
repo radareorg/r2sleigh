@@ -17,6 +17,8 @@ clap.workspace = true
 reedline.workspace = true
 serde_json.workspace = true
 mimalloc = { version = "0.1", default-features = false }
+# `mi_collect` and `mi_option_set`; pinned because `allocator.rs` names a v3 option by number.
+libmimalloc-sys = { version = "=0.1.49", default-features = false, features = ["extended"] }
 dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]

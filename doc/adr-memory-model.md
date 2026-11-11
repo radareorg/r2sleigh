@@ -75,9 +75,11 @@ stays alive until the response is built.
    O(functions asked), and dropping costs O(log n) per compute (2026-10-13).
    Then `R` is the program-wide facts and the last function's answers,
    whatever the session's length.
-3. **The allocator returns phase garbage at phase boundaries**: one forced
-   collect after the analysis and after the render, measured on the four
-   large functions, before any change of purge delay (D26).
+3. **The allocator returns garbage on a byte count, not a clock** (D338,
+   "Deterministic memory" below): r2s's allocator forces a collect after
+   every 64 MiB freed, and mimalloc's purge timer never fires. Collects at
+   query and analysis-phase ends were measured first and left more garbage
+   resident: the peak sits inside one long phase.
 4. **No structure grows with a product.** The audit (2026-10-12) found five:
    memory SSA's per-block location maps `O(B·L)`, control-domain guard sets
    `O(B·D)`, per-call memory facts `O(C·F)`, per-block assumption and
@@ -118,13 +120,74 @@ stays alive until the response is built.
 | #189 | The image maps its file rather than copying it into the heap | heap peak pumasim `afl` 95.4 to 86.4 MB, 0pack `afl` 57.5 to 50.0, session 163.4 to 154.3 |
 | #191 | A relocation boxes its symbol; a symbol's name is one string shared by the name table and its seeks | `F` (pumasim's stub) 28.46 to 25.00 MB of heap |
 
+## Deterministic memory (D338, 2026-11-11)
+
+Peak RSS of one command was a mixture of two modes run to run, with the
+same output and the same live-heap peak (131.4 MiB counted): CI's timing
+gate failed PR #360 on 0pack `pdd @ 0x62ecf0` at 1.10 to 1.12 of its base
+with a 1.1 budget. Two inputs differed per run. Measured on contabo with
+#360's CI binary (MiB, 12 runs each) and an `LD_PRELOAD` that fixes chosen
+`getrandom` calls:
+
+| Run | Peak RSS |
+|---|---|
+| default | 208.1 to 241.5, two modes |
+| purge off (`MIMALLOC_PURGE_DELAY=-1`) | 234.6 to 267.5, two modes |
+| purge off, std's 16-byte hash key fixed | 267.0 to 267.7 |
+| purge off, mimalloc's 32-byte key fixed | 235.7 to 267.4, two modes |
+| both keys fixed, default purge | 218.6 to 245.4 |
+| purge at once (`0`) | 188.6 to 189.1, about 18% more CPU |
+
+- **The hash seed.** std's `RandomState` keys every `HashMap` and `HashSet`
+  from one `getrandom` per thread, so iteration and growth order, and with
+  them which mimalloc pages fill, differed per run. Every hashed collection
+  is now rustc-hash's `FxHashMap`/`FxHashSet`, and `clippy.toml`'s
+  `disallowed-types` refuses std's `HashMap`, `HashSet` and `RandomState`.
+  With purging off the Fx build peaks at 235.8 to 236.2 MiB over 8 runs, so
+  the workspace's maps were the whole hash cause. A fixed seed is public;
+  maps keyed by names a binary or type database chooses (r2dec's symbols,
+  r2types' external aggregates) are `BTreeMap`s, `O(log n)` whatever the keys.
+- **The purge clock.** mimalloc v3 purges a freed page 1 s after it frees,
+  checked when it next looks, so whether a phase's garbage is resident at
+  the next peak depended on wall time and load. r2s now sets the delay past
+  any run and forces `mi_collect(true)` after every 64 MiB freed: a function
+  of the allocation sequence alone, a load and a store per free and one heap
+  walk per collect.
+
+The cadence trades resident garbage for purge work (system time: the
+purge's `madvise` and the faults that touch a purged page again). Measured
+on the PR's base, MiB peak and median system seconds, 0pack `0x62ecf0` /
+pumasim `0x23fdf0`, 5 to 10 runs each:
+
+| Policy | Peak RSS | System s |
+|---|---|---|
+| base (std hasher, 1 s clock) | 224.7 to 237.2 / 225.4 to 245.7 | 0.76 / 1.02 |
+| collect every 16 MiB freed | 200.9 to 201.2 / 205.3 to 205.9 | 1.47 / 1.83 |
+| every 32 MiB | 207.2 to 207.9 / 207.7 to 209.3 | 1.41 / 1.76 |
+| every 64 MiB | 212.4 to 212.6 / 216.9 to 218.2 | 1.25 / 1.40 |
+| every 256 MiB | 225.2 to 234.6 / not run | 0.85 |
+| at each 4 MiB fall below the high mark | 204.4 to 204.6 / 209.3 to 209.6 | 1.42 / 1.84 |
+| at each 16 MiB fall below the high mark | 227.2 to 227.5 / 225.8 to 226.1 | 1.10 / 1.11 |
+| at each query end, each analysis phase | 226.6 / 219.7, 222.2 | |
+
+64 MiB is the largest cadence whose peak stays under the base's lowest on
+both functions; the constant is r2s's `PURGE_EVERY`. A fall below the high
+mark purges no churn but misses garbage left among live pages, and a phase
+end comes too late inside one long phase.
+
+What the rest of the peak is, sampled from `/proc/pid/smaps` at 0pack's
+peak with purging at once: mimalloc 130.9 MiB (the live heap), glibc's heap
+32.1 MiB (libsla's C++ objects, 27.6 MiB live at exit: audit P27), r2s's
+text 15.7 MiB, the mapped binary 5.8 MiB, shared libraries 3.3 MiB. The C++
+heap and the text have no owner here that can shrink them.
+
 ## Left
 
 The phases now peak within a few MB of each other, so a cut in one moves
 the peak. 0pack's (177.6 MB) is render's: one numbering (MM.6, the
 function, table and graph), the machine projection and render structures
-(MM.8), compact identities (MM.7). Then the fixed cost (MM.4, 29.8 MB) and
-the allocator's collect (MM.9). The facts only sealing reads (MM.3) are
+(MM.8), compact identities (MM.7). Then the fixed cost (MM.4, 29.8 MB); the
+allocator's collect is D338's. The facts only sealing reads (MM.3) are
 5.3 MB of memory SSA at the render peak, and dropping them needs the
 analysis and its sealing as one query: conditional. ROADMAP item MM
 orders them.
