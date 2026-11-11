@@ -2618,8 +2618,7 @@ fn homed_in_its_home(
 }
 
 /// Whether an escaped address may point at an argument's place: a stack argument, a home holding
-/// its position's entry register, or no place known. A home the body keeps something else in is
-/// the body's own slot. O(escaped offsets x homes + stores).
+/// its position's entry register, or no place known. O(escaped offsets x homes + stores).
 fn argument_place_escapes(
     (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
     facts: &crate::semantic::PreparedFunctionFacts,
