@@ -6,7 +6,8 @@
 `aa`, then `pddj` of every function `afl` lists. Each extern a rendering declares for a function the
 same run renders is compared with that function's header: the result type and the parameter types,
 names dropped. Without binaries, the census binaries (doc/adr-call-boundary.md, "S16 as built").
-Exit 1 where more than `--max` pairs differ.
+Exit 1 where more than `--max` pairs differ, 2 where analysis failed: `aa; afl` exits nonzero or
+lists no function, or a function's `pddj` crashed, so no comparison stands in for it.
 """
 
 from __future__ import annotations
@@ -80,11 +81,21 @@ def shape(ret: str, params: str) -> tuple[str, tuple[str, ...]]:
     return re.sub(r"\s+", "", ret), tuple(unnamed(param) for param in found)
 
 
+class AnalysisFailed(Exception):
+    """A binary or function the comparison could not read; exit 2."""
+
+
 def pairs(r2s: str, binary: str) -> tuple[int, list[dict]]:
-    """How many extern pairs `binary` holds, and those that differ."""
+    """How many extern pairs `binary` holds, and those that differ; raises where analysis failed."""
     run = subprocess.run([r2s, "-q", "-c", "aa; afl", binary], capture_output=True, text=True, timeout=3600)
     addrs = sorted({int(line.split()[0], 16) for line in run.stdout.splitlines() if line.startswith("0x")})
+    if run.returncode != 0 or not addrs:
+        raise AnalysisFailed(f"{binary}: `aa; afl` exited {run.returncode} with {len(addrs)} functions")
     report = r2s_batch.run_batch(r2s, binary, addrs, function_timeout=300, startup_timeout=3600)
+    crashed = [answer for answer in report.answers if answer.kind == "crash"]
+    if crashed:
+        first = crashed[0]
+        raise AnalysisFailed(f"{binary}: {len(crashed)} functions crashed, first {first.address:#x}: {first.cause[:200]}")
     headers, externs = {}, []
     for answer in report.answers:
         record = answer.record or {}
@@ -120,7 +131,11 @@ def main() -> int:
     args = parser.parse_args()
     total, report = 0, {}
     for binary in args.binaries or [str(ROOT / path) for path in CENSUS]:
-        count, differ = pairs(args.r2s, binary)
+        try:
+            count, differ = pairs(args.r2s, binary)
+        except AnalysisFailed as failed:
+            print(f"analysis failed: {failed}", file=sys.stderr)
+            return 2
         total += count
         if differ:
             report[Path(binary).name] = differ
