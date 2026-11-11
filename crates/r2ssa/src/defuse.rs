@@ -1,7 +1,6 @@
 //! Def-use chain analysis for SSA blocks.
 
-use std::collections::{HashMap, HashSet};
-
+use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
 use crate::SSABlock;
@@ -21,32 +20,32 @@ pub struct DefUseInfo {
     ///
     /// A displayed name that identifies multiple exact variables is retained
     /// with no definition instead of selecting one of them as authoritative.
-    pub definitions: HashMap<String, Option<usize>>,
+    pub definitions: FxHashMap<String, Option<usize>>,
 
     /// Presentation-only map from displayed variable names to use sites.
-    pub uses: HashMap<String, Vec<usize>>,
+    pub uses: FxHashMap<String, Vec<usize>>,
 
     /// Presentation names of variables that are inputs.
-    pub inputs: HashSet<String>,
+    pub inputs: FxHashSet<String>,
 
     /// Presentation names of variables that are outputs.
-    pub outputs: HashSet<String>,
+    pub outputs: FxHashSet<String>,
 
     /// Presentation names of variables that are live.
-    pub live: HashSet<String>,
+    pub live: FxHashSet<String>,
 
     /// Exact semantic def-use state. These fields are rebuilt by [`def_use`]
     /// and intentionally excluded from the legacy presentation serialization.
     #[serde(skip)]
-    exact_definitions: HashMap<SSAVar, Option<usize>>,
+    exact_definitions: FxHashMap<SSAVar, Option<usize>>,
     #[serde(skip)]
-    exact_uses: HashMap<SSAVar, Vec<usize>>,
+    exact_uses: FxHashMap<SSAVar, Vec<usize>>,
     #[serde(skip)]
-    exact_inputs: HashSet<SSAVar>,
+    exact_inputs: FxHashSet<SSAVar>,
     #[serde(skip)]
-    exact_outputs: HashSet<SSAVar>,
+    exact_outputs: FxHashSet<SSAVar>,
     #[serde(skip)]
-    exact_live: HashSet<SSAVar>,
+    exact_live: FxHashSet<SSAVar>,
 }
 
 impl DefUseInfo {

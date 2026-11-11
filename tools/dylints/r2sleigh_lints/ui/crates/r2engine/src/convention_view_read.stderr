@@ -1,0 +1,59 @@
+error: ("$DIR/convention_view_read.rs", "Context") reads `SourceConventionSlots`, a view `ConventionModel` replaces; read the model (doc/adr-call-boundary.md, D309)
+  --> $DIR/convention_view_read.rs:21:23
+   |
+LL |         slots: Option<SourceConventionSlots>,
+   |                       ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[deny(convention_view_read)]` on by default
+
+error: ("$DIR/convention_view_read.rs", "Context::convention_slots") reads `SourceConventionSlots`, a view `ConventionModel` replaces; read the model (doc/adr-call-boundary.md, D309)
+  --> $DIR/convention_view_read.rs:25:51
+   |
+LL |         pub fn convention_slots(&self) -> Option<&SourceConventionSlots> {
+   |                                                   ^^^^^^^^^^^^^^^^^^^^^
+
+error: ("$DIR/convention_view_read.rs", "RegisterIdentity::argument_registers") reads `RegisterIdentity::argument_registers`, a view `ConventionModel` replaces; read the model (doc/adr-call-boundary.md, D309)
+  --> $DIR/convention_view_read.rs:40:14
+   |
+LL |             &self.argument_registers
+   |              ^^^^^^^^^^^^^^^^^^^^^^^
+
+error: ("$DIR/convention_view_read.rs", "Holder") reads `SourceConventionSlots`, a view `ConventionModel` replaces; read the model (doc/adr-call-boundary.md, D309)
+  --> $DIR/convention_view_read.rs:47:20
+   |
+LL |         pub slots: SourceConventionSlots,
+   |                    ^^^^^^^^^^^^^^^^^^^^^
+
+error: ("$DIR/convention_view_read.rs", "count") reads `SourceConventionSlots`, a view `ConventionModel` replaces; read the model (doc/adr-call-boundary.md, D309)
+  --> $DIR/convention_view_read.rs:64:5
+   |
+LL | /     context
+LL | |         .convention_slots()
+   | |___________________________^
+
+error: ("$DIR/convention_view_read.rs", "spelled") reads `FunctionTypeFacts::callconv`, a view `ConventionModel` replaces; read the model (doc/adr-call-boundary.md, D309)
+  --> $DIR/convention_view_read.rs:70:5
+   |
+LL |     facts.callconv.clone()
+   |     ^^^^^^^^^^^^^^
+
+error: ("$DIR/convention_view_read.rs", "built") reads `FunctionTypeFacts::callconv`, a view `ConventionModel` replaces; read the model (doc/adr-call-boundary.md, D309)
+  --> $DIR/convention_view_read.rs:74:5
+   |
+LL |     FunctionTypeFacts { callconv: None }
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: ("$DIR/convention_view_read.rs", "unpacked") reads `FunctionTypeFacts::callconv`, a view `ConventionModel` replaces; read the model (doc/adr-call-boundary.md, D309)
+  --> $DIR/convention_view_read.rs:78:9
+   |
+LL |     let FunctionTypeFacts { callconv } = facts;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: ("$DIR/convention_view_read.rs", "first_argument") reads `RegisterIdentity::argument_registers`, a view `ConventionModel` replaces; read the model (doc/adr-call-boundary.md, D309)
+  --> $DIR/convention_view_read.rs:83:5
+   |
+LL |     identity.argument_registers().first()
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 9 previous errors
+

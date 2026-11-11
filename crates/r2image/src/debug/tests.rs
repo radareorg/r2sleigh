@@ -14,6 +14,10 @@ const REVIEW: &[u8] = include_bytes!("../../../../tests/fixtures/rv_O0g");
 const GRAPH: &[u8] = include_bytes!("../../tests/data/dwarf_graph.elf");
 /// `tests/fixtures/src/two_units_{a,b}.c` at GCC 13.3.0 `-O0 -g`, one binary.
 const TWO_UNITS: &[u8] = include_bytes!("../../../../tests/fixtures/two_units_O0g");
+/// `tests/data/dwarf_nocall.c`; see its header.
+const NOCALL: &[u8] = include_bytes!("../../tests/data/dwarf_nocall.elf");
+/// `tests/data/dwarf_ms_abi.c`; see its header.
+const MS_ABI: &[u8] = include_bytes!("../../tests/data/dwarf_ms_abi.elf");
 
 fn declarations(bytes: &[u8]) -> Declarations {
     read(&object::File::parse(bytes).expect("the fixture parses"))
@@ -66,7 +70,7 @@ fn local<'a>(prototype: &'a Prototype, name: &str) -> &'a Local {
         .unwrap_or_else(|| panic!("no local {name}"))
 }
 
-const LP64: DataModel = DataModel::unix(64);
+const LP64: CDataModel = CDataModel::unix(64);
 
 #[test]
 fn a_declared_signature_is_read_with_its_own_spellings() {
@@ -409,4 +413,22 @@ fn a_binary_with_no_debug_information_states_nothing() {
     // and nothing left to read any of them from.
     const GRAPH_STRIPPED: &[u8] = include_bytes!("../../tests/data/dwarf_graph_stripped.elf");
     assert!(declarations(GRAPH_STRIPPED).is_empty());
+}
+
+/// Dead-argument elimination moves `add3`'s `c` into esi and states `DW_CC_nocall`, so the
+/// declaration says no convention places it; `entry` keeps the default.
+#[test]
+fn a_nocall_function_says_no_convention_places_it() {
+    let found = declarations(NOCALL);
+    assert_eq!(only(&found, "add3").convention, StatedConvention::NoCall);
+    assert_eq!(only(&found, "entry").convention, StatedConvention::Normal);
+}
+
+/// clang states `ms_abi` on the subprogram as `DW_CC_LLVM_Win64`; r2image reads the code and
+/// chooses nothing, so the engine owns which convention it names (S20).
+#[test]
+fn an_ms_abi_function_states_its_convention() {
+    let found = declarations(MS_ABI);
+    assert_eq!(only(&found, "diff").convention, StatedConvention::LlvmWin64);
+    assert_eq!(only(&found, "twice").convention, StatedConvention::Normal);
 }

@@ -14,7 +14,6 @@ pub(crate) fn infer_interproc_return_type(
     summary: &FunctionSemanticSummary,
     merged_signature: Option<&FunctionSignatureSpec>,
     inferred_signature: &InferredSignature,
-    ptr_bits: u32,
 ) -> Option<CTypeLike> {
     match summary.return_relation {
         SummaryReturnRelation::Void => Some(CTypeLike::Void),
@@ -27,7 +26,7 @@ pub(crate) fn infer_interproc_return_type(
                 inferred_signature
                     .params
                     .get(idx)
-                    .and_then(|param| parse_c_type_like(&param.param_type, ptr_bits))
+                    .map(|param| param.ty.clone())
                     .filter(|ty| !is_generic_signature_type(Some(ty)))
             }),
         _ => None,
@@ -59,11 +58,13 @@ pub(crate) fn maybe_upgrade_param_to_pointer(
         let merged_param = signature.params.get_mut(idx);
         let inferred_param = inferred_signature.params.get_mut(idx);
 
-        if merged_param.as_ref().is_some_and(|param| {
-            param_has_authoritative_named_scalar_role(param, ptr_bits, type_db)
-        }) || inferred_param.as_ref().is_some_and(|param| {
-            inferred_param_has_authoritative_named_scalar_role(param, ptr_bits, type_db)
-        }) {
+        if merged_param
+            .as_ref()
+            .is_some_and(|param| param_has_authoritative_named_scalar_role(param, type_db))
+            || inferred_param.as_ref().is_some_and(|param| {
+                inferred_param_has_authoritative_named_scalar_role(param, ptr_bits, type_db)
+            })
+        {
             continue;
         }
 
@@ -82,24 +83,15 @@ pub(crate) fn maybe_upgrade_param_to_pointer(
             })
         });
 
-        let inferred_is_generic = inferred_param.as_ref().is_some_and(|param| {
-            type_name_is_generic(&param.param_type)
-                || matches!(
-                    parse_c_type_like(&param.param_type, ptr_bits),
-                    Some(CTypeLike::Int {
-                        bits,
-                        signedness: Signedness::Signed
-                            | Signedness::Unsigned
-                            | Signedness::Unknown,
-                    }) if bits == ptr_bits
-                )
-        });
+        let inferred_is_generic = inferred_param
+            .as_ref()
+            .is_some_and(|param| inferred_type_is_word(Some(&param.ty), ptr_bits));
 
         if merged_is_generic && let Some(param) = merged_param {
             param.ty = Some(pointer_ty.clone());
         }
         if inferred_is_generic && let Some(param) = inferred_param {
-            param.param_type = render_signature_type(&pointer_ty, ptr_bits);
+            param.ty = pointer_ty.clone();
         }
     }
 }
@@ -125,11 +117,13 @@ pub(crate) fn upgrade_param_indices_to_pointer(
         let merged_param = signature.params.get_mut(idx);
         let inferred_param = inferred_signature.params.get_mut(idx);
 
-        if merged_param.as_ref().is_some_and(|param| {
-            param_has_authoritative_named_scalar_role(param, ptr_bits, type_db)
-        }) || inferred_param.as_ref().is_some_and(|param| {
-            inferred_param_has_authoritative_named_scalar_role(param, ptr_bits, type_db)
-        }) {
+        if merged_param
+            .as_ref()
+            .is_some_and(|param| param_has_authoritative_named_scalar_role(param, type_db))
+            || inferred_param.as_ref().is_some_and(|param| {
+                inferred_param_has_authoritative_named_scalar_role(param, ptr_bits, type_db)
+            })
+        {
             continue;
         }
 
@@ -148,24 +142,15 @@ pub(crate) fn upgrade_param_indices_to_pointer(
             })
         });
 
-        let inferred_is_generic = inferred_param.as_ref().is_some_and(|param| {
-            type_name_is_generic(&param.param_type)
-                || matches!(
-                    parse_c_type_like(&param.param_type, ptr_bits),
-                    Some(CTypeLike::Int {
-                        bits,
-                        signedness: Signedness::Signed
-                            | Signedness::Unsigned
-                            | Signedness::Unknown,
-                    }) if bits == ptr_bits
-                )
-        });
+        let inferred_is_generic = inferred_param
+            .as_ref()
+            .is_some_and(|param| inferred_type_is_word(Some(&param.ty), ptr_bits));
 
         if merged_is_generic && let Some(param) = merged_param {
             param.ty = Some(pointer_ty.clone());
         }
         if inferred_is_generic && let Some(param) = inferred_param {
-            param.param_type = render_signature_type(&pointer_ty, ptr_bits);
+            param.ty = pointer_ty.clone();
         }
     }
 }
@@ -173,25 +158,23 @@ pub(crate) fn upgrade_param_indices_to_pointer(
 pub(crate) fn type_is_authoritative_named_scalar_role(
     ty: &CTypeLike,
     type_db: &ExternalTypeDb,
-    ptr_bits: u32,
 ) -> bool {
     match ty {
         CTypeLike::Bool | CTypeLike::Enum(_) => true,
-        CTypeLike::Typedef { name, .. } => type_db_resolves_type_name(type_db, name, ptr_bits),
+        CTypeLike::Typedef { name, ty } => type_db_resolves_type_name(type_db, name, ty),
         _ => false,
     }
 }
 
 pub(crate) fn param_has_authoritative_named_scalar_role(
     param: &FunctionParamSpec,
-    ptr_bits: u32,
     type_db: &ExternalTypeDb,
 ) -> bool {
     !semantic_role_param_name_is_weak(&param.name)
         && param
             .ty
             .as_ref()
-            .is_some_and(|ty| type_is_authoritative_named_scalar_role(ty, type_db, ptr_bits))
+            .is_some_and(|ty| type_is_authoritative_named_scalar_role(ty, type_db))
 }
 
 pub(crate) fn inferred_param_has_authoritative_named_scalar_role(
@@ -202,9 +185,7 @@ pub(crate) fn inferred_param_has_authoritative_named_scalar_role(
     if semantic_role_param_name_is_weak(&param.name) {
         return false;
     }
-    parse_signature_type_preserving_c_typedefs(&param.param_type, ptr_bits)
-        .as_ref()
-        .is_some_and(|ty| type_is_authoritative_named_scalar_role(ty, type_db, ptr_bits))
+    type_is_authoritative_named_scalar_role(&preserving_c_typedefs(&param.ty, ptr_bits), type_db)
 }
 
 pub(crate) fn summary_hint_can_replace_weak_existing(
@@ -245,13 +226,10 @@ pub(crate) fn upgrade_param_type_hints(
 
     for (idx, hint) in hints {
         if let Some(param) = inferred_signature.params.get_mut(*idx) {
-            let existing_ty = parse_c_type_like(&param.param_type, ptr_bits);
-            let should_replace = type_name_is_generic(&param.param_type)
-                || existing_ty.as_ref().is_some_and(|existing| {
-                    summary_hint_can_replace_weak_existing(existing, hint, ptr_bits, type_db)
-                });
+            let should_replace = inferred_type_is_generic(Some(&param.ty), ptr_bits)
+                || summary_hint_can_replace_weak_existing(&param.ty, hint, ptr_bits, type_db);
             if should_replace {
-                param.param_type = render_signature_type(hint, ptr_bits);
+                param.ty = hint.clone();
             }
         }
     }
@@ -289,8 +267,8 @@ pub(crate) fn upgrade_return_type_hint(
         }
     }
 
-    let existing_ty = parse_c_type_like(&inferred_signature.ret_type, ptr_bits);
-    let should_replace = type_name_is_generic(&inferred_signature.ret_type)
+    let existing_ty = inferred_signature.ret_type.clone();
+    let should_replace = inferred_type_is_generic(existing_ty.as_ref(), ptr_bits)
         || existing_ty.as_ref().is_some_and(|existing| {
             summary_hint_can_replace_weak_existing(existing, hint, ptr_bits, type_db)
                 || matches!(hint, CTypeLike::Void)
@@ -301,18 +279,16 @@ pub(crate) fn upgrade_return_type_hint(
                         type_db,
                     )
         });
-    if should_replace {
-        let rendered = render_signature_type(hint, ptr_bits);
-        if inferred_signature.ret_type != rendered {
-            inferred_signature.ret_type = rendered;
-            changed = true;
-        }
+    if should_replace && inferred_signature.ret_type.as_ref() != Some(hint) {
+        inferred_signature.ret_type = Some(hint.clone());
+        changed = true;
     }
     if changed {
         inferred_signature.signature = format_signature(
             &inferred_signature.function_name,
-            &inferred_signature.ret_type,
+            inferred_signature.ret_type.as_ref(),
             &inferred_signature.params,
+            ptr_bits,
         );
     }
     changed
@@ -348,8 +324,9 @@ pub(crate) fn upgrade_param_name_hints(
     }
     inferred_signature.signature = format_signature(
         &inferred_signature.function_name,
-        &inferred_signature.ret_type,
+        inferred_signature.ret_type.as_ref(),
         &inferred_signature.params,
+        ptr_bits,
     );
 }
 
@@ -445,12 +422,9 @@ pub(crate) fn apply_interproc_summary_to_signature(
             type_db,
         );
     }
-    let Some(ret_ty) = infer_interproc_return_type(
-        summary,
-        merged_signature.as_ref(),
-        inferred_signature,
-        ptr_bits,
-    ) else {
+    let Some(ret_ty) =
+        infer_interproc_return_type(summary, merged_signature.as_ref(), inferred_signature)
+    else {
         return;
     };
 
@@ -506,32 +480,27 @@ pub(crate) fn apply_interproc_summary_to_signature(
         signature.ret_type = Some(ret_ty.clone());
     }
 
-    if type_name_is_generic(&inferred_signature.ret_type)
-        || parse_c_type_like(&inferred_signature.ret_type, ptr_bits).is_some_and(|ty| {
-            summary_hint_can_replace_weak_existing(&ty, &ret_ty, ptr_bits, type_db)
+    let existing = inferred_signature.ret_type.as_ref();
+    if inferred_type_is_generic(existing, ptr_bits)
+        || existing.is_some_and(|ty| {
+            summary_hint_can_replace_weak_existing(ty, &ret_ty, ptr_bits, type_db)
         })
         || matches!(summary.return_relation, SummaryReturnRelation::HeapAlloc)
-            && parse_c_type_like(&inferred_signature.ret_type, ptr_bits).is_some_and(|ty| {
-                crate::signature_hint_can_replace_existing(&ty, Some(&ret_ty), ptr_bits, type_db)
+            && existing.is_some_and(|ty| {
+                crate::signature_hint_can_replace_existing(ty, Some(&ret_ty), ptr_bits, type_db)
             })
         || matches!(ret_ty, CTypeLike::Void)
-            && parse_c_type_like(&inferred_signature.ret_type, ptr_bits).is_some_and(|ty| {
+            && existing.is_some_and(|ty| {
                 crate::signature_return_hint_can_replace_existing(
-                    &ty,
+                    ty,
                     Some(&ret_ty),
                     ptr_bits,
                     type_db,
                 )
             })
-        || matches!(
-            parse_c_type_like(&inferred_signature.ret_type, ptr_bits),
-            Some(CTypeLike::Int {
-                bits,
-                signedness: Signedness::Signed | Signedness::Unsigned | Signedness::Unknown,
-            }) if bits == ptr_bits
-        )
+        || inferred_type_is_word(existing, ptr_bits)
     {
-        inferred_signature.ret_type = render_signature_type(&ret_ty, ptr_bits);
+        inferred_signature.ret_type = Some(ret_ty);
     }
 }
 
@@ -584,7 +553,7 @@ pub(crate) fn merge_local_signature_into_merged_signature(
                 }
                 let target = &mut external.params[idx];
                 if target.name.is_empty() {
-                    target.name = format!("arg{}", idx + 1);
+                    target.name = r2source::positional_parameter_name(idx);
                 }
                 if !is_generic_arg_name(&local_param.name) && is_generic_arg_name(&target.name) {
                     target.name = local_param.name.clone();
@@ -703,34 +672,30 @@ pub(crate) fn apply_signature_context_overrides(
 
     while signature_out.params.len() < signature.params.len() {
         let idx = signature_out.params.len();
-        let param_type = signature
+        let ty = signature
             .params
             .get(idx)
-            .and_then(|param| param.ty.as_ref())
-            .map(|ty| render_signature_type(ty, ptr_bits))
-            .unwrap_or_else(|| "void *".to_string());
+            .and_then(|param| param.ty.clone())
+            .unwrap_or_else(|| CTypeLike::Pointer(Box::new(CTypeLike::Void)));
         signature_out.params.push(InferredSignatureParam {
-            name: format!("arg{}", idx + 1),
-            param_type,
+            name: r2source::positional_parameter_name(idx),
+            ty,
         });
     }
 
-    if let Some(ret_ty) = signature.ret_type.as_ref() {
-        let ret_ty = render_signature_type(ret_ty, ptr_bits);
-        if !is_generic_signature_type(signature.ret_type.as_ref()) {
-            signature_out.ret_type = ret_ty;
-        }
+    if let Some(ret_ty) = signature.ret_type.as_ref()
+        && !is_generic_signature_type(signature.ret_type.as_ref())
+    {
+        signature_out.ret_type = Some(ret_ty.clone());
     }
 
     for (idx, param) in signature.params.iter().enumerate() {
-        if let Some(ty) = param.ty.as_ref() {
-            let ty_str = render_signature_type(ty, ptr_bits);
-            if (!type_name_is_generic(&ty_str)
-                || param_has_authoritative_named_scalar_role(param, ptr_bits, type_db))
-                && let Some(inferred_param) = signature_out.params.get_mut(idx)
-            {
-                inferred_param.param_type = ty_str;
-            }
+        if let Some(ty) = param.ty.as_ref()
+            && (!inferred_type_is_generic(Some(ty), ptr_bits)
+                || param_has_authoritative_named_scalar_role(param, type_db))
+            && let Some(inferred_param) = signature_out.params.get_mut(idx)
+        {
+            inferred_param.ty = ty.clone();
         }
         if !is_generic_arg_name(&param.name)
             && let Some(inferred_param) = signature_out.params.get_mut(idx)
@@ -741,8 +706,9 @@ pub(crate) fn apply_signature_context_overrides(
 
     signature_out.signature = format_signature(
         &signature_out.function_name,
-        &signature_out.ret_type,
+        signature_out.ret_type.as_ref(),
         &signature_out.params,
+        ptr_bits,
     );
 }
 
@@ -752,8 +718,22 @@ pub(crate) fn signature_param_count_is_authoritative(signature: &FunctionSignatu
 
 pub(crate) fn format_signature(
     function_name: &str,
-    ret_type: &str,
+    ret_type: Option<&CTypeLike>,
     params: &[InferredSignatureParam],
+    ptr_bits: u32,
 ) -> String {
-    crate::format_signature_prototype(function_name, ret_type, params)
+    crate::format_signature_prototype(function_name, ret_type, params, ptr_bits)
+}
+
+/// Whether an inferred type says nothing: none, or one whose spelling is generic.
+pub(crate) fn inferred_type_is_generic(ty: Option<&CTypeLike>, ptr_bits: u32) -> bool {
+    ty.is_none_or(|ty| type_name_is_generic(&render_signature_type(ty, ptr_bits)))
+}
+
+/// Whether an inferred type is generic or a bare machine word.
+fn inferred_type_is_word(ty: Option<&CTypeLike>, ptr_bits: u32) -> bool {
+    inferred_type_is_generic(ty, ptr_bits)
+        || ty.is_some_and(
+            |ty| matches!(ty.unaliased(), CTypeLike::Int { bits, .. } if *bits == ptr_bits),
+        )
 }

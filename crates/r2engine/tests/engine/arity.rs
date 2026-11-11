@@ -5,6 +5,7 @@ use crate::common;
 
 use common::{BASE, GLIBC, Literal};
 use r2engine::program::{Libc, OpenProgram, PlatformEvidence};
+use r2ssa::body_boundary::SlotUse;
 use r2ssa::{SourceFloorCause, SourceUnprovenCall};
 
 /// `f` writes both result registers and reads no argument (`xor eax, eax; pxor xmm0, xmm0`): its
@@ -289,7 +290,9 @@ fn a_load_of_a_sealed_word_folds_only_where_an_interpreter_seals_the_image() {
 /// a gap naming the import and why, never an unsupported instruction (audit M3, RF's W10 case).
 #[test]
 fn a_variadic_call_with_no_count_is_a_gap_naming_its_callee() {
-    let darwin = Literal::of_code(CALL_THROUGH_A_SLOT, &[("caller", BASE, 0x11)]).mach_o();
+    let darwin = Literal::of_code(CALL_THROUGH_A_SLOT, &[("caller", BASE, 0x11)])
+        .mach_o()
+        .with_dylib("objc_msgSend", "/usr/lib/libobjc.A.dylib");
     let text = slot_caller_in(darwin, "objc_msgSend", true);
     assert!(
         text.contains(
@@ -335,18 +338,46 @@ fn an_undeclared_import_is_a_gap_naming_its_missing_declaration() {
     assert!(!text.contains("_ZN3Foo3barEv(16"), "{text}");
 }
 
-/// glibc declares `__libc_start_main` with seven arguments, and x86-64 passes six in registers:
-/// a declaration this convention does not place states nothing, and the gap says so.
+/// glibc declares `__libc_start_main` with seven arguments: `place` puts the seventh in the
+/// first stack slot, so a caller that stores none leaves that argument a gap naming it (D163).
 #[test]
-fn an_import_whose_declaration_is_not_placed_is_a_gap_saying_so() {
+fn an_import_s_seventh_argument_is_placed_on_the_stack() {
     let text = plt_caller("__libc_start_main");
     assert!(
-        text.contains(
-            "call to __libc_start_main: the import's declaration has an argument this convention \
-             does not place */"
-        ),
+        text.contains("call to __libc_start_main: no value reaches its declared argument 6 */"),
         "{text}"
     );
+}
+
+/// After `.plt`: six register arguments, the seventh stored at `[rsp]`, then the call.
+const SEVENTH_ON_THE_STACK: [u8; 0x56] = common::plt_then(&[
+    0x48, 0x83, 0xec, 0x08, // 1020 sub rsp, 8
+    0x48, 0xc7, 0x04, 0x24, 0x77, 0x00, 0x00, 0x00, // 1024 mov qword [rsp], 0x77
+    0xbf, 0x01, 0x00, 0x00, 0x00, // 102c mov edi, 1
+    0xbe, 0x02, 0x00, 0x00, 0x00, // 1031 mov esi, 2
+    0xba, 0x03, 0x00, 0x00, 0x00, // 1036 mov edx, 3
+    0xb9, 0x04, 0x00, 0x00, 0x00, // 103b mov ecx, 4
+    0x41, 0xb8, 0x05, 0x00, 0x00, 0x00, // 1040 mov r8d, 5
+    0x41, 0xb9, 0x06, 0x00, 0x00, 0x00, // 1046 mov r9d, 6
+    0xe8, 0xbf, 0xff, 0xff, 0xff, // 104c call stub
+    0x48, 0x83, 0xc4, 0x08, // 1051 add rsp, 8
+    0xc3, // 1055 ret
+]);
+
+/// The declared seventh argument sits at entry + 8, past the return address the call pushes,
+/// so the call reads the caller's `[rsp]` (D163, PR 352 review).
+#[test]
+fn a_declared_stack_argument_is_the_callers_outgoing_slot() {
+    let literal = Literal::plt_wrapped("__libc_start_main", &SEVENTH_ON_THE_STACK);
+    let text = OpenProgram::of(literal)
+        .rendered(common::PLT_CALLER)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    let arguments = common::call_arguments(&text, "__libc_start_main").unwrap_or_default();
+    assert_eq!(arguments.len(), 7, "{text}");
+    assert!(arguments[6].ends_with("119U"), "{text}");
 }
 
 /// `f`: `test edi, edi; je ret; sub edi, 1; call f; ret`, a self-recursive function that never
@@ -576,12 +607,61 @@ fn an_unfollowed_transfer_is_a_floor_of_that_cause() {
     assert_eq!(cause, [SourceFloorCause::UnresolvedTransfer]);
 }
 
-/// `mov eax, esi; ret`: `rsi` is read and `rdi` is not, so the prefix stops short of it.
+/// `mov eax, esi; ret`, and a caller that hands it `5` in `esi`.
+const HOLE: &[u8] = &[
+    0x89, 0xf0, 0xc3, // 1000 mov eax, esi; ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // padding
+    0x6b, 0xff, 0x07, // 1010 imul edi, edi, 7
+    0xbe, 0x05, 0x00, 0x00, 0x00, // 1013 mov esi, 5
+    0xe8, 0xe3, 0xff, 0xff, 0xff, // 1018 call 0x1000
+    0xc3, // 101d ret
+];
+
+/// An unread `rdi` below a read `rsi` is a hole: two parameters, the first spelled as the slot's
+/// typedef, and no floor (W12; the prefix rule made `rsi` a floor and dropped it).
 #[test]
-fn a_register_read_past_the_prefix_is_a_floor_of_that_cause() {
-    const CODE: &[u8] = &[0x89, 0xf0, 0xc3];
-    let cause = floor_cause(Literal::of_code(CODE, &[("f", BASE, 3)]));
-    assert_eq!(cause, [SourceFloorCause::RegisterRead]);
+fn an_unread_slot_below_a_read_one_is_a_hole_spelled_as_its_typedef() {
+    let functions = [("f", BASE, 3), ("caller", BASE + 0x10, 0x0e)];
+    let mut open = OpenProgram::of(Literal::of_code(HOLE, &functions));
+    let prepared = open.prepared(BASE).expect("it prepares");
+    let shared = prepared.artifact().shared_artifact();
+    let interface = (shared.machine_context().function_interface()).expect("an interface");
+    assert_eq!(interface.arity_floor(), None);
+    let bases = (interface.parameters().iter())
+        .map(|parameter| parameter.basis())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        bases,
+        [
+            Some(r2source::Basis::Convention),
+            Some(r2source::Basis::Decoded)
+        ]
+    );
+    // The evidence travels with the sealed artifact.
+    let boundary = (shared.facts().body_boundary.as_ref()).expect("a recovered body states it");
+    let uses = boundary.slots.iter().map(|(_, used)| used).take(2);
+    assert!(matches!(
+        uses.collect::<Vec<_>>()[..],
+        [SlotUse::Unread, SlotUse::Read { .. }]
+    ));
+    let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
+    let header = (text.lines())
+        .find(|line| line.contains("f("))
+        .unwrap_or_default();
+    assert!(
+        header.contains("(r2sleigh_unread_u64 arg0, uint32_t arg1)"),
+        "{text}"
+    );
+}
+
+/// The caller passes the hole its typed residual: the `edi` it computed reaches no parameter, so
+/// no value of it is shown (doc/adr-call-boundary.md, Refusals).
+#[test]
+fn a_caller_passes_a_hole_its_typed_residual_and_no_value() {
+    let functions = [("f", BASE, 3), ("caller", BASE + 0x10, 0x0e)];
+    let text = surveyed(HOLE, &functions, BASE + 0x10);
+    assert!(text.contains("f((r2sleigh_unread_u64)0, 5)"), "{text}");
+    assert!(!text.contains("* 7"), "{text}");
 }
 
 /// `mov eax, [rsp + 8]; ret`: the first argument-area slot is read, and no register slot is.
@@ -590,6 +670,45 @@ fn an_argument_area_read_past_the_prefix_is_a_floor_of_that_cause() {
     const CODE: &[u8] = &[0x8b, 0x44, 0x24, 0x08, 0xc3];
     let cause = floor_cause(Literal::of_code(CODE, &[("f", BASE, 5)]));
     assert_eq!(cause, [SourceFloorCause::ArgumentAreaRead]);
+}
+
+/// `mov eax, [rsp + 0x40000000]; ret`: one load names slot 0x7fffffff of the argument area.
+#[test]
+fn a_read_far_up_the_argument_area_is_a_floor_past_the_hole_budget() {
+    const CODE: &[u8] = &[0x8b, 0x84, 0x24, 0x00, 0x00, 0x00, 0x40, 0xc3];
+    let cause = floor_cause(Literal::of_code(CODE, &[("f", BASE, 8)]));
+    assert_eq!(
+        cause,
+        [
+            SourceFloorCause::ArgumentAreaRead,
+            SourceFloorCause::ArgumentAreaPastBudget
+        ]
+    );
+}
+
+/// The six integer registers summed, then `add rax, [rsp + 0x210]`: slot 65 of the argument area
+/// is read behind a full section, so the 64 holes below it stand and the list is a floor.
+#[test]
+fn holes_past_the_budget_stop_the_stack_parameters_as_a_floor() {
+    const CODE: &[u8] = &[
+        0x48, 0x89, 0xf8, // mov rax, rdi
+        0x48, 0x01, 0xf0, // add rax, rsi
+        0x48, 0x01, 0xd0, // add rax, rdx
+        0x48, 0x01, 0xc8, // add rax, rcx
+        0x4c, 0x01, 0xc0, // add rax, r8
+        0x4c, 0x01, 0xc8, // add rax, r9
+        0x48, 0x03, 0x84, 0x24, 0x10, 0x02, 0x00, 0x00, // add rax, [rsp + 0x210]
+        0xc3, // ret
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+        0xcc,
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(CODE, &[("f", BASE, 0x1b)]));
+    let prepared = open.prepared(BASE).expect("it prepares");
+    let shared = prepared.artifact().shared_artifact();
+    let interface = (shared.machine_context().function_interface()).expect("an interface");
+    let floor = interface.arity_floor().expect("its arity is a floor");
+    assert_eq!(floor.causes(), [SourceFloorCause::ArgumentAreaPastBudget]);
+    assert_eq!(interface.parameters().len(), 6 + 64);
 }
 
 /// All six argument registers stored, then `ud2`: no exit places the argument area.
@@ -627,15 +746,16 @@ fn a_call_to_a_callee_nothing_states_is_a_floor_handed_to_it() {
     assert_eq!(cause, handed_to(SourceUnprovenCall::Unstated(BASE)));
 }
 
-/// `f`: `call g; ret`; `g`: `mov eax, esi; ret`, a floor of its own.
+/// `f`: `call g; ret`; `g`: `mov eax, [rsp + 8]; ret`, a floor of its own (D37's
+/// `ArgumentAreaRead`).
 #[test]
 fn a_call_to_a_callee_that_is_a_floor_is_a_floor_handed_to_it() {
     const CODE: &[u8] = &[
         0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3, // 1000 call 0x1010; ret
         0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1006 padding
-        0x89, 0xf0, 0xc3, // 1010 mov eax, esi; ret
+        0x8b, 0x44, 0x24, 0x08, 0xc3, // 1010 mov eax, [rsp + 8]; ret
     ];
-    let functions = [("f", BASE, 6), ("g", BASE + 0x10, 3)];
+    let functions = [("f", BASE, 6), ("g", BASE + 0x10, 5)];
     let cause = floor_cause(Literal::of_code(CODE, &functions));
     assert_eq!(cause, handed_to(SourceUnprovenCall::Floor(BASE + 0x10)));
 }
@@ -658,4 +778,129 @@ fn a_call_whose_stated_argument_is_unreached_is_a_floor_handed_to_it() {
     let functions = [("f", BASE, 6), ("g", BASE + 0x20, 14)];
     let cause = floor_cause(Literal::of_code(CODE, &functions));
     assert_eq!(cause, handed_to(SourceUnprovenCall::Stated(BASE + 0x20)));
+}
+
+/// bash's `sh_unset_nodelay_mode` after `.plt`: the body moves `edi`, and two `fcntl` calls read `fd`.
+const DECLARED_INT_MOVED: [u8; 0x42] = common::plt_then(&[
+    0x53, // 1020 push rbx
+    0x31, 0xd2, // 1021 xor edx, edx
+    0x31, 0xc0, // 1023 xor eax, eax
+    0x89, 0xfb, // 1025 mov ebx, edi
+    0xbe, 0x03, 0x00, 0x00, 0x00, // 1027 mov esi, 3
+    0xe8, 0xdf, 0xff, 0xff, 0xff, // 102c call stub
+    0x89, 0xdf, // 1031 mov edi, ebx
+    0xbe, 0x04, 0x00, 0x00, 0x00, // 1033 mov esi, 4
+    0x89, 0xc2, // 1038 mov edx, eax
+    0x31, 0xc0, // 103a xor eax, eax
+    0x5b, // 103c pop rbx
+    0xe9, 0xce, 0xff, 0xff, 0xff, // 103d jmp stub
+]);
+
+/// `return fcntl(fd, F_GETFL) & 4;` after `.plt`: `fd` is handed on untouched.
+const DECLARED_INT: [u8; 0x38] = common::plt_then(&[
+    0x48, 0x83, 0xec, 0x08, // 1020 sub rsp, 8
+    0xbe, 0x03, 0x00, 0x00, 0x00, // 1024 mov esi, 3
+    0x31, 0xc0, // 1029 xor eax, eax
+    0xe8, 0xe0, 0xff, 0xff, 0xff, // 102b call stub
+    0x48, 0x83, 0xc4, 0x08, // 1030 add rsp, 8
+    0x83, 0xe0, 0x04, // 1034 and eax, 4
+    0xc3, // 1037 ret
+]);
+
+/// The caller of `fcntl` at `code`'s one parameter type.
+fn fcntl_caller_parameters(code: &'static [u8]) -> (String, Vec<(String, String)>) {
+    let text = OpenProgram::of(Literal::plt_wrapped("fcntl", code))
+        .rendered(common::PLT_CALLER)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    let header = (text.lines())
+        .find(|line| line.contains("fcn_1020(") && !line.ends_with(';'))
+        .unwrap_or_default();
+    let parameters = common::parameters(header);
+    (text, parameters)
+}
+
+/// A declared integer is read at its own width, never the register's: the call's argument is
+/// the `edi` lane the body read, so `int fd` is a 32-bit parameter (ROADMAP D105).
+#[test]
+fn a_declared_integer_is_read_at_its_width_not_the_registers() {
+    let (text, parameters) = fcntl_caller_parameters(&DECLARED_INT_MOVED);
+    assert_eq!(parameters.len(), 1, "{text}");
+    assert_eq!(parameters[0].0, "uint32_t", "{text}");
+}
+
+/// A declared integer handed on untouched is the lane its callee holds (ROADMAP D105).
+#[test]
+fn a_declared_integer_handed_on_is_a_parameter_at_its_width() {
+    let (text, parameters) = fcntl_caller_parameters(&DECLARED_INT);
+    assert_eq!(parameters.len(), 1, "{text}");
+    assert_eq!(parameters[0].0, "uint32_t", "{text}");
+}
+
+/// `int p_fcntl2(int fd, int flags) { return fcntl(fd, F_SETFL, flags); }` at clang -O0, after
+/// `.plt`: `flags` reaches only `fcntl`'s uncounted tail.
+const UNCOUNTED_TAIL: [u8; 0x46] = common::plt_then(&[
+    0x55, // 1020 push rbp
+    0x48, 0x89, 0xe5, // 1021 mov rbp, rsp
+    0x48, 0x83, 0xec, 0x10, // 1024 sub rsp, 0x10
+    0x89, 0x7d, 0xfc, // 1028 mov [rbp - 4], edi
+    0x89, 0x75, 0xf8, // 102b mov [rbp - 8], esi
+    0x8b, 0x7d, 0xfc, // 102e mov edi, [rbp - 4]
+    0x8b, 0x55, 0xf8, // 1031 mov edx, [rbp - 8]
+    0xbe, 0x04, 0x00, 0x00, 0x00, // 1034 mov esi, 4
+    0xb0, 0x00, // 1039 mov al, 0
+    0xe8, 0xd0, 0xff, 0xff, 0xff, // 103b call stub
+    0x48, 0x83, 0xc4, 0x10, // 1040 add rsp, 0x10
+    0x5d, // 1044 pop rbp
+    0xc3, // 1045 ret
+]);
+
+/// A header whose parameters are only a floor says so on its proof line (ROADMAP D100): the
+/// proven prefix is not the whole interface.
+#[test]
+fn a_floor_of_parameters_is_named_on_the_proof_line() {
+    let (text, parameters) = fcntl_caller_parameters(&UNCOUNTED_TAIL);
+    let proof = (text.lines())
+        .find(|line| line.contains("r2dec proof"))
+        .unwrap_or_default();
+    assert!(
+        proof.contains(&format!(
+            "the parameters are a floor: at least {}",
+            parameters.len()
+        )),
+        "{text}"
+    );
+}
+
+/// gcc -O0 `int zero_of(int x) { return 0; }`: `x` is homed and never loaded. `caller` is
+/// `mov edi, 5; call zero_of; ret`.
+const HOMED_ONLY: &[u8] = &[
+    0xf3, 0x0f, 0x1e, 0xfa, // 1000 endbr64
+    0x55, // 1004 push rbp
+    0x48, 0x89, 0xe5, // 1005 mov rbp, rsp
+    0x89, 0x7d, 0xfc, // 1008 mov [rbp - 4], edi
+    0xb8, 0x00, 0x00, 0x00, 0x00, // 100b mov eax, 0
+    0x5d, // 1010 pop rbp
+    0xc3, // 1011 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1012
+    0xbf, 0x05, 0x00, 0x00, 0x00, // 1020 mov edi, 5
+    0xe8, 0xd6, 0xff, 0xff, 0xff, // 1025 call 0x1000
+    0xc3, // 102a ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 102b padding
+];
+
+/// A floor whose only cause is a home nothing loads reads no slot past the parameters: the call
+/// passes exactly them, and the register it wrote reaches nothing (D165).
+#[test]
+fn a_call_past_a_homed_only_floor_passes_exactly_the_parameters() {
+    let functions = [("zero_of", BASE, 0x12), ("caller", BASE + 0x20, 0x0b)];
+    let callee = floor_cause(Literal::of_code(HOMED_ONLY, &functions));
+    assert_eq!(callee, [SourceFloorCause::Homed]);
+    let text = surveyed(HOMED_ONLY, &functions, BASE + 0x20);
+    assert!(text.contains("zero_of()"), "{text}");
+    assert!(!text.contains("a floor), and this call writes"), "{text}");
 }

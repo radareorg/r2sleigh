@@ -37,22 +37,22 @@ NAME=0x00401000
 FILE=tests/fixtures/hashes_gcc_x64_O2_stripped
 CMDS=aa; pdd @ 0x00401000
 EXPECT=<<EOF
-uint64_t fcn_401000(void)
+r2sleigh_result_u64 fcn_401000(void)
 {
     uint64_t rax_1;
     uint64_t rax_3;
 
-    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2) */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2); the parameters are a floor: at least 0 (a register past them reaches an indirect call); the result is unproven (Written): 2 unproven-return carried */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x403fe0U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
             rax_3 = rax_1;
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         } else {
             r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
             r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x401014:11 covering 1 op (render::values) */
             rax_3 = r2sleigh_residual_u64(3);
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         }
     }
 }
@@ -78,7 +78,7 @@ NAME=0x00401050
 FILE=tests/fixtures/hashes_gcc_x64_O2_stripped
 CMDS=aa; pdd @ 0x00401050
 EXPECT=<<EOF
-uint32_t fcn_401050(void)
+r2sleigh_result_u32 fcn_401050(void)
 {
     int32_t __printf_chk(int32_t, const char*, ...);
     uint64_t fcn_401330(uint64_t, uint64_t);
@@ -88,11 +88,11 @@ uint32_t fcn_401050(void)
     uint64_t fcn_401420(uint64_t, uint64_t);
     uint64_t fcn_4014a0(uint64_t, uint64_t);
     uint32_t fcn_401530(uint64_t, uint64_t);
-    uint64_t fcn_401580(void);
+    r2sleigh_result_u64 fcn_401580(void);
     uint32_t fcn_401630(uint64_t, uint64_t);
-    uint32_t fcn_401680(uint64_t, uint64_t, uint32_t);
+    uint32_t fcn_401680(uint8_t*, uint64_t, uint32_t);
     uint32_t fcn_401750(uint64_t, uint64_t, uint32_t);
-    uint64_t fcn_4018b0(uint64_t, uint64_t, uint64_t, uint64_t);
+    uint64_t fcn_4018b0(uint8_t*, uint64_t, uint64_t, uint64_t);
     uint32_t fcn_401b10(uint64_t, uint64_t);
     uint64_t fcn_401b50(uint64_t, uint64_t);
 
@@ -110,7 +110,7 @@ uint32_t fcn_401050(void)
     uint64_t rax_35;
     uint64_t rax_38;
 
-    /* r2dec proof: no individual construct is marked; 320 source obligations: 233 rendered, 87 elided, 0 refused; 28 statements rendered; 13 callee prototypes supplied by the source */
+    /* r2dec proof: no individual construct is marked; 320 source obligations: 233 rendered, 87 elided, 0 refused; 28 statements rendered; 13 callee prototypes supplied by the source; the result is unproven (Written): 1 unproven-return carried */
     {
         fcn_401580();
         rax_2 = fcn_401330(0x402060, 61);
@@ -129,17 +129,17 @@ uint32_t fcn_401050(void)
         __printf_chk(2, "crc32_bit   %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_20 >> 0U));
         rax_23 = (uint64_t)fcn_401630(0x402060, 61);
         __printf_chk(2, "crc32_tab   %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_23 >> 0U));
-        rax_26 = (uint64_t)fcn_401680(0x402060, 61, (uint32_t)0x9747b28cU);
+        rax_26 = (uint64_t)fcn_401680((uint8_t*)(uint64_t)0x402060U, 61, (uint32_t)0x9747b28cU);
         __printf_chk(2, "murmur3_32  %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_26 >> 0U));
         rax_29 = (uint64_t)fcn_401750(0x402060, 61, 0);
         __printf_chk(2, "xxhash32    %08x\n", (uint64_t)(uint32_t)((uint64_t)rax_29 >> 0U));
-        rax_32 = fcn_4018b0(0x402060, 61, (uint64_t)0x706050403020100U, (uint64_t)0xf0e0d0c0b0a0908U);
+        rax_32 = fcn_4018b0((uint8_t*)(uint64_t)0x402060U, 61, (uint64_t)0x706050403020100U, (uint64_t)0xf0e0d0c0b0a0908U);
         __printf_chk(2, "siphash24   %016llx\n", rax_32);
         rax_35 = (uint64_t)fcn_401b10(0x402060, 61);
         __printf_chk(2, "pearson     %02x\n", (uint64_t)(uint8_t)((uint64_t)rax_35 >> 0U));
         rax_38 = fcn_401b50(0x402060, 61);
         __printf_chk(2, "combined    %016llx\n", rax_38);
-        return 0;
+        return r2sleigh_carrier_u32(0);
     }
 }
 
@@ -152,16 +152,16 @@ NAME=0x00401240
 FILE=tests/fixtures/hashes_gcc_x64_O2_stripped
 CMDS=aa; pdd @ 0x00401240
 EXPECT=<<EOF
-void entry0(void)
+void entry0(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
 {
     uint64_t tmp_401249_0_2;
 
-    /* r2dec proof: 5 constructs are marked below; 28 source obligations: 0 rendered, 6 elided, 0 refused, 22 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0) */
+    /* r2dec proof: 5 constructs are marked below; 29 source obligations: 0 rendered, 6 elided, 0 refused, 23 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0); 1 callee prototype supplied by the source */
     {
         tmp_401249_0_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x401240:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x401240:32 covering 1 op (render::values) */
-        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x401240:68 covering 1 op (render::values): call to __libc_start_main: the import's declaration has an argument this convention does not place */
+        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x401240:68 covering 1 op (render::values): call to __libc_start_main: an argument has no C spelling */
         r2sleigh_residual_void(5); /* r2dec gap: TransferNotFollowed at 0x401240 (render::control) */
     }
 }
@@ -175,11 +175,11 @@ NAME=0x00401270
 FILE=tests/fixtures/hashes_gcc_x64_O2_stripped
 CMDS=aa; pdd @ 0x00401270
 EXPECT=<<EOF
-void fcn_401270(void)
+r2sleigh_result_u64 fcn_401270(void)
 {
-    /* r2dec proof: no individual construct is marked; 5 source obligations: 1 rendered, 4 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: 1 construct is marked below; 6 source obligations: 0 rendered, 4 elided, 0 refused, 2 residual; 1 statements rendered; the result is unproven (EntryInput): 0 unproven-return carried, 1 unproven-return residual */
     {
-        return;
+        return r2sleigh_residual_u64(1);
     }
 }
 
@@ -192,15 +192,15 @@ NAME=0x00401280
 FILE=tests/fixtures/hashes_gcc_x64_O2_stripped
 CMDS=aa; pdd @ 0x00401280
 EXPECT=<<EOF
-uint64_t fcn_401280(void)
+r2sleigh_result_u64 fcn_401280(void)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered; the parameters are a floor: at least 0 (a transfer is unresolved); no call reads the result (assuming closed-world); the result is unproven (Unread): 1 unproven-return carried */
     {
         rax_3 = 0x404018;
         {
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         }
     }
 }
@@ -214,21 +214,22 @@ NAME=0x004012f0
 FILE=tests/fixtures/hashes_gcc_x64_O2_stripped
 CMDS=aa; pdd @ 0x004012f0
 EXPECT=<<EOF
-uint64_t entry_fini0(void)
+r2sleigh_result_u64 entry_fini0(void)
 {
-    void fcn_401280(void);
+    uint64_t fcn_401280(void);
 
     uint8_t tmp_4012f4_0_1;
+    uint64_t rax_1;
 
-    /* r2dec proof: 2 constructs are marked below; 24 source obligations: 8 rendered, 12 elided, 0 refused, 4 residual; 6 statements rendered */
+    /* r2dec proof: 1 construct is marked below; 26 source obligations: 12 rendered, 12 elided, 0 refused, 2 residual; 6 statements rendered; the parameters are a floor: at least 0 (a register past them reaches the call to 0x401280); the result is unproven (Written): 1 unproven-return carried, 1 unproven-return residual */
     {
         tmp_4012f4_0_1 = r2sleigh_load_u8((void*)(uint64_t)0x404020U);
         if ((uint8_t)((uint8_t)tmp_4012f4_0_1 != (uint8_t)0U)) {
             return r2sleigh_residual_u64(1);
         } else {
-            fcn_401280();
+            rax_1 = fcn_401280();
             r2sleigh_store_u8((void*)(uint64_t)0x404020U, (uint8_t)1U);
-            return r2sleigh_residual_u64(2);
+            return r2sleigh_carrier_u64((uint64_t)rax_1);
         }
     }
 }
@@ -242,16 +243,16 @@ NAME=0x00401320
 FILE=tests/fixtures/hashes_gcc_x64_O2_stripped
 CMDS=aa; pdd @ 0x00401320
 EXPECT=<<EOF
-uint64_t entry_init0(void)
+r2sleigh_result_u64 entry_init0(void)
 {
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 12 source obligations: 8 rendered, 4 elided, 0 refused; 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 12 source obligations: 8 rendered, 4 elided, 0 refused; 2 statements rendered; the parameters are a floor: at least 0 (a transfer is unresolved); the result is unproven (Written): 1 unproven-return carried */
     {
         {
             rax_4 = 0;
             {
-                return (uint64_t)rax_4;
+                return r2sleigh_carrier_u64((uint64_t)rax_4);
             }
         }
     }
@@ -275,7 +276,7 @@ uint64_t fcn_401330(uint64_t arg0, uint64_t arg1)
     uint64_t rdi_2;
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 40 source obligations: 32 rendered, 8 elided, 0 refused; 12 statements rendered */
+    /* r2dec proof: no individual construct is marked; 40 source obligations: 32 rendered, 8 elided, 0 refused; 12 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return (uint64_t)0x811c9dc5U;
@@ -316,7 +317,7 @@ uint64_t fcn_401370(uint64_t arg0, uint64_t arg1)
     uint64_t rax_4;
     uint64_t rax_5;
 
-    /* r2dec proof: no individual construct is marked; 32 source obligations: 28 rendered, 4 elided, 0 refused; 15 statements rendered */
+    /* r2dec proof: no individual construct is marked; 32 source obligations: 28 rendered, 4 elided, 0 refused; 15 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             rax_5 = (uint64_t)0xcbf29ce484222325U;
@@ -361,7 +362,7 @@ uint64_t fcn_4013b0(uint64_t arg0, uint64_t arg1)
     uint8_t tmp_4013d3_8_1;
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 41 source obligations: 33 rendered, 8 elided, 0 refused; 12 statements rendered */
+    /* r2dec proof: no individual construct is marked; 41 source obligations: 33 rendered, 8 elided, 0 refused; 12 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return 0x1505;
@@ -401,7 +402,7 @@ uint32_t fcn_4013f0(uint64_t arg0, uint64_t arg1)
     uint64_t rdi_2;
     uint32_t tmp_lane_40140d_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 40 source obligations: 32 rendered, 8 elided, 0 refused; 12 statements rendered */
+    /* r2dec proof: no individual construct is marked; 40 source obligations: 32 rendered, 8 elided, 0 refused; 12 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return 0;
@@ -445,7 +446,7 @@ uint64_t fcn_401420(uint64_t arg0, uint64_t arg1)
     uint64_t rax_4;
     uint32_t tmp_lane_401478_5_0_1;
 
-    /* r2dec proof: no individual construct is marked; 66 source obligations: 58 rendered, 8 elided, 0 refused; 17 statements rendered */
+    /* r2dec proof: no individual construct is marked; 66 source obligations: 58 rendered, 8 elided, 0 refused; 17 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return 1;
@@ -496,7 +497,7 @@ uint64_t fcn_4014a0(uint64_t arg0, uint64_t arg1)
     uint64_t rax_8;
     uint32_t tmp_lane_401517_5_0_1;
 
-    /* r2dec proof: no individual construct is marked; 73 source obligations: 66 rendered, 7 elided, 0 refused; 19 statements rendered */
+    /* r2dec proof: no individual construct is marked; 73 source obligations: 66 rendered, 7 elided, 0 refused; 19 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return (uint64_t)0xffffffffU;
@@ -547,7 +548,7 @@ uint32_t fcn_401530(uint64_t arg0, uint64_t arg1)
     uint32_t tmp_lane_401568_5_0_1;
     uint64_t rdi_2;
 
-    /* r2dec proof: no individual construct is marked; 60 source obligations: 52 rendered, 8 elided, 0 refused; 19 statements rendered */
+    /* r2dec proof: no individual construct is marked; 60 source obligations: 52 rendered, 8 elided, 0 refused; 19 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return 0;
@@ -586,7 +587,7 @@ NAME=0x00401580
 FILE=tests/fixtures/hashes_gcc_x64_O2_stripped
 CMDS=aa; pdd @ 0x00401580
 EXPECT=<<EOF
-uint64_t fcn_401580(void)
+r2sleigh_result_u64 fcn_401580(void)
 {
     __uint128_t xmm3_1;
     __uint128_t xmm5_1;
@@ -763,7 +764,7 @@ uint64_t fcn_401580(void)
     uint32_t tmp_lane_401618_5_0_1;
     uint64_t rdx_3;
 
-    /* r2dec proof: 1 construct is marked below; 208 source obligations: 201 rendered, 5 elided, 0 refused, 2 residual; 182 statements rendered */
+    /* r2dec proof: 1 construct is marked below; 208 source obligations: 201 rendered, 5 elided, 0 refused, 2 residual; 182 statements rendered; no call reads the result (assuming closed-world); the result is unproven (Unread): 0 unproven-return carried, 1 unproven-return residual */
     {
         xmm3_1 = r2sleigh_load_u128((void*)(uint64_t)0x4022b0U);
         xmm5_1 = r2sleigh_load_u128((void*)(uint64_t)0x4022c0U);
@@ -973,7 +974,7 @@ uint32_t fcn_401630(uint64_t arg0, uint64_t arg1)
     uint32_t tmp_401657_10_1;
     uint32_t tmp_lane_401657_5_1_1;
 
-    /* r2dec proof: no individual construct is marked; 48 source obligations: 40 rendered, 8 elided, 0 refused; 13 statements rendered */
+    /* r2dec proof: no individual construct is marked; 48 source obligations: 40 rendered, 8 elided, 0 refused; 13 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return 0;
@@ -1032,7 +1033,7 @@ uint32_t fcn_401680(uint8_t* arg0, uint64_t arg1, uint32_t arg2)
     uint32_t tmp_lane_401708_3_0_1;
     uint32_t tmp_lane_401715_3_0_1;
 
-    /* r2dec proof: no individual construct is marked; 121 source obligations: 116 rendered, 5 elided, 0 refused; 44 statements rendered; the result's second register is open: no call read decides it */
+    /* r2dec proof: no individual construct is marked; 121 source obligations: 116 rendered, 5 elided, 0 refused; 44 statements rendered; a call reads the result (assuming closed-world) */
     {
         rcx_1 = (uint64_t)(uint32_t)arg2;
         rax_2 = (uint64_t)(uint32_t)2U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)arg1 >> (uint64_t)(uint32_t)2U);
@@ -1156,7 +1157,7 @@ uint32_t fcn_401750(uint64_t arg0, uint64_t arg1, uint32_t arg2)
     uint32_t tmp_lane_401884_3_0_1;
     uint32_t tmp_lane_401891_3_0_1;
 
-    /* r2dec proof: no individual construct is marked; 227 source obligations: 220 rendered, 7 elided, 0 refused; 65 statements rendered */
+    /* r2dec proof: no individual construct is marked; 227 source obligations: 220 rendered, 7 elided, 0 refused; 65 statements rendered; a call reads the result (assuming closed-world) */
     {
         rdx_1 = (uint64_t)(uint32_t)arg2;
         rsi_1 = (uint64_t)((uint64_t)arg1 + (uint64_t)arg0);
@@ -1358,7 +1359,7 @@ uint64_t fcn_4018b0(uint8_t* arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3)
     uint64_t rax_36;
     uint64_t rdx_27;
 
-    /* r2dec proof: no individual construct is marked; 323 source obligations: 312 rendered, 11 elided, 0 refused; 135 statements rendered */
+    /* r2dec proof: no individual construct is marked; 323 source obligations: 312 rendered, 11 elided, 0 refused; 135 statements rendered; a call reads the result (assuming closed-world) */
     {
         rax_2 = (uint64_t)((uint64_t)arg2 ^ (uint64_t)0x736f6d6570736575U);
         rdx_1 = (uint64_t)((uint64_t)arg2 ^ (uint64_t)0x6c7967656e657261U);
@@ -1549,7 +1550,7 @@ uint32_t fcn_401b10(uint64_t arg0, uint64_t arg1)
     uint8_t tmp_401b29_8_1;
     uint32_t tmp_lane_401b29_2_0_1;
 
-    /* r2dec proof: no individual construct is marked; 42 source obligations: 34 rendered, 8 elided, 0 refused; 13 statements rendered */
+    /* r2dec proof: no individual construct is marked; 42 source obligations: 34 rendered, 8 elided, 0 refused; 13 statements rendered; a call reads the result (assuming closed-world) */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
             return 0;
@@ -1586,7 +1587,7 @@ uint64_t fcn_401b50(uint64_t arg0, uint64_t arg1)
     uint64_t fcn_401370(uint64_t, uint64_t);
     uint64_t fcn_4013b0(uint64_t, uint64_t);
     uint32_t fcn_401530(uint64_t, uint64_t);
-    uint32_t fcn_401680(uint64_t, uint64_t, uint32_t);
+    uint32_t fcn_401680(uint8_t*, uint64_t, uint32_t);
 
     uint64_t rax_1;
     uint64_t rax_2;
@@ -1595,14 +1596,14 @@ uint64_t fcn_401b50(uint64_t arg0, uint64_t arg1)
     uint64_t r9_3;
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 58 source obligations: 42 rendered, 16 elided, 0 refused; 7 statements rendered */
+    /* r2dec proof: no individual construct is marked; 57 source obligations: 41 rendered, 16 elided, 0 refused; 7 statements rendered; a call reads the result (assuming closed-world) */
     {
         rax_1 = fcn_401370(arg0, arg1);
         rax_2 = fcn_4013b0(arg0, arg1);
         rax_3 = (uint64_t)fcn_401530(arg0, arg1);
         r9_2 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_2 << (uint64_t)(uint32_t)32U)) ^ (uint64_t)rax_1) + (uint64_t)(uint32_t)((uint64_t)rax_3 >> 0U));
         r9_3 = (uint64_t)((uint64_t)((uint64_t)(uint32_t)7U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r9_2 << (uint64_t)(uint32_t)7U)) | (uint64_t)((uint64_t)(uint32_t)57U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r9_2 >> (uint64_t)(uint32_t)57U)));
-        rax_4 = (uint64_t)fcn_401680(arg0, arg1, (uint32_t)((uint64_t)r9_3 >> 0U));
+        rax_4 = (uint64_t)fcn_401680((uint8_t*)arg0, arg1, (uint32_t)((uint64_t)r9_3 >> 0U));
         return (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_4 >> 0U) ^ (uint64_t)r9_3);
     }
 }
@@ -1618,7 +1619,7 @@ CMDS=aa; pdd @ 0x00401ba0
 EXPECT=<<EOF
 void fcn_401ba0(void)
 {
-    /* r2dec proof: no individual construct is marked; 7 source obligations: 1 rendered, 6 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 7 source obligations: 1 rendered, 6 elided, 0 refused; 1 statements rendered; no call reads the result (assuming closed-world) */
     {
         return;
     }

@@ -60,6 +60,8 @@ pub(super) struct Values<'a> {
     frame: Option<super::frame::Frame>,
     /// The frame array, once a spelled term names an object in it.
     frame_array: RefCell<Option<SymbolId>>,
+    /// Each stack formal: its index, name, class, and whether it is declared other than its class.
+    frame_formals: Vec<(u32, SymbolId, MachineType, bool)>,
     symbols: Rc<RefCell<SymbolTable>>,
     params: Vec<CParam>,
     locals: RefCell<Vec<CLocal>>,
@@ -157,7 +159,8 @@ fn extern_decl(plan: &CallPlan, mut types: Vec<CType>, ret_type: CType) -> Optio
         return None;
     };
     if let Some(declared) = &plan.declared {
-        for (ty, to) in types.iter_mut().zip(&declared.params) {
+        let declared = types.iter_mut().zip(&declared.params);
+        for (ty, to) in declared.filter(|(ty, _)| !crate::prelude::is_unread_slot(ty)) {
             *ty = to.clone();
         }
     }
@@ -411,8 +414,8 @@ impl Demand<'_> {
             }
             _ if op.is_call() || matches!(op, SSAOp::Branch { .. }) => {
                 let plan = planned.get(inst.id);
-                for (argument, _) in plan.map_or(&[][..], |plan| &plan.arguments[..]) {
-                    self.operand(*argument, inst.id);
+                for argument in plan.into_iter().flat_map(CallPlan::passed_values) {
+                    self.operand(argument, inst.id);
                 }
             }
             SSAOp::CBranch { cond, .. } => self.operand(*cond, inst.id),
@@ -431,8 +434,8 @@ impl Demand<'_> {
             // A tail transfer reads its arguments, and its target where it goes through one.
             SSAOp::BranchInd { target, .. } if planned.get(inst.id).is_some() => {
                 let plan = planned.get(inst.id).expect("planned above");
-                for (argument, _) in &plan.arguments {
-                    self.operand(*argument, inst.id);
+                for argument in plan.passed_values() {
+                    self.operand(argument, inst.id);
                 }
                 if matches!(plan.callee, calls::Callee::Through(_)) {
                     self.operand(*target, inst.id);
@@ -581,12 +584,14 @@ fn plan_calls(
             if let (Some(signature), None) = (signature, &plan.declared) {
                 r2il::refusal_evidence!("staged-call-prototype", "{:?}: {signature:?}", inst.id);
             }
-            // No declaration: the callee body's carriers, which r2ssa matched to this call.
+            // No declaration: the callee's own projection, as its header spells it (W46).
             if signature.is_none() {
-                let (fixed, returns, bits) = (plan.fixed, plan.result.is_some(), input.ptr_bits());
-                let carriers = input.callee_carrier_signature(inst.id);
-                plan.declared =
-                    carriers.and_then(|c| calls::Prototype::of_widths(c, fixed, returns, bits));
+                let (fixed, returns) = (plan.fixed, plan.result.is_some());
+                let projected = input.callee_projection(inst.id);
+                let admits = |tag: &str, is_union| tags.admits(tag, is_union, callee);
+                plan.declared = projected.and_then(|(signature, unproven)| {
+                    calls::Prototype::of_projection(signature, fixed, returns, unproven, &admits)
+                });
             }
         }
         for result in plan.result.iter().flat_map(calls::CallResult::values) {
@@ -801,11 +806,8 @@ impl<'a> Values<'a> {
         let (planned, unplanned, results) = plan_calls(input, tags);
         let elisions = crate::certified::Elisions::of(artifact);
         let mut dispatch = r2ssa::dense::IdSet::new(graph.insts.len());
-        for switch in artifact.certificates().switches.values() {
-            for inst in &switch.dispatch {
-                dispatch.insert(*inst);
-            }
-        }
+        let switches = artifact.certificates().switches.values();
+        dispatch.extend(switches.flat_map(|switch| switch.dispatch.iter().copied()));
         let bound = Demand {
             artifact,
             graph,
@@ -834,6 +836,7 @@ impl<'a> Values<'a> {
             bound,
             frame: super::frame::Frame::of(artifact),
             frame_array: RefCell::new(None),
+            frame_formals: Vec::new(),
             symbols,
             params: Vec::new(),
             locals: RefCell::new(Vec::new()),
@@ -934,10 +937,10 @@ impl<'a> Values<'a> {
         &mut self,
         input: &RenderInput<'_>,
         tags: &super::tags::Tags,
-        parameters: Option<Vec<(u32, ValueId, MachineType)>>,
+        parameters: Option<Vec<(u32, r2ssa::FormalHome, MachineType)>>,
     ) {
         let mut pointing = Vec::new();
-        for (index, value, ty) in parameters.into_iter().flatten() {
+        for (index, home, ty) in parameters.into_iter().flatten() {
             let class = terms::c_type(&ty).expect("a classed parameter has a C type");
             // A declared type is spelled as stated; an analysed one only where it is a pointer.
             let analysed = (input.parameter_declaration(index as usize, ty.width_bits()))
@@ -948,23 +951,30 @@ impl<'a> Values<'a> {
                     calls::spellable(&declared, &|tag, union| tags.defines(tag, union))
                 })
                 .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
-            let c = match declared {
-                Some(declared) => {
-                    self.declared[value.0 as usize] = declared != class;
-                    declared
-                }
-                None => class,
-            };
-            let declared_name = (input.declared_parameter_name(index as usize))
-                .map(crate::ast::c_identifier)
-                .filter(|name| spells_an_identifier(name));
+            let differs = declared.as_ref().is_some_and(|declared| *declared != class);
+            // A hole states no type: r2types spells its class's typedef, which claims none (D165).
+            let hole = (input.parameter_declaration(index as usize, ty.width_bits()))
+                .filter(crate::prelude::is_unread_slot);
+            let differs = differs && hole.is_none();
+            let c = hole.or(declared).unwrap_or(class);
+            let named = crate::ast::c_identifier(&input.parameter_name(index as usize));
             let name = self.symbols.borrow_mut().declare(
-                declared_name.unwrap_or_else(|| format!("arg{index}")),
+                Some(named)
+                    .filter(|name| spells_an_identifier(name))
+                    .unwrap_or_else(|| r2source::positional_parameter_name(index as usize)),
                 c.clone(),
                 SymbolRole::Parameter(index),
             );
-            self.names[value.0 as usize] = Some((name, ty));
-            self.owed.get_mut()[value.0 as usize] = 0;
+            match home {
+                r2ssa::FormalHome::Register { value, .. } => {
+                    self.declared[value.0 as usize] = differs;
+                    self.names[value.0 as usize] = Some((name, ty));
+                    self.owed.get_mut()[value.0 as usize] = 0;
+                }
+                r2ssa::FormalHome::Frame { .. } => {
+                    self.frame_formals.push((index, name, ty, differs))
+                }
+            }
             if let CType::Pointer(pointee) = &c
                 && let CType::Struct(tag) = pointee.as_ref()
             {
@@ -1234,9 +1244,19 @@ impl<'a> Values<'a> {
                 .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
         });
         // A variadic body's tail: an argument slot past its parameters, or the vector count.
+        // The integer section's own parameters: a float one takes no integer slot.
+        let integers = |interface: &r2ssa::SourceFunctionInterface| {
+            (interface.parameters().iter())
+                .filter_map(r2source::SourceAbiParameterSpec::register_storage)
+                .filter(|storage| {
+                    (slots.into_iter().flat_map(|slots| slots.argument_slots()))
+                        .any(|slot| slot.space == storage.space && slot.offset == storage.offset)
+                })
+                .count()
+        };
         let tail = context.function_interface().is_some_and(|interface| {
             interface.is_variadic()
-                && (position.is_some_and(|slot| slot >= interface.parameters().len())
+                && (position.is_some_and(|slot| slot >= integers(interface))
                     || storage
                         .zip(slots.and_then(r2ssa::SourceConventionSlots::variadic_count_register))
                         .is_some_and(|(storage, count)| {
@@ -1276,10 +1296,23 @@ impl<'a> Values<'a> {
                 super::proof::UnassignedCause::Held,
                 crate::prelude::ResidualCause::HeldFromEntry,
             ),
+            r2ssa::CallerSlotSupply::Formal(index) => return self.frame_formal(index, ty),
         };
         let read = crate::prelude::residual(&terms::c_type(ty)?, residual)?;
         self.unassigned_named(r2ssa::frame_object_name(slot.entry_offset), cause, ty);
         Some(read)
+    }
+
+    /// A whole read of stack formal `index` at its home: the parameter, at the class `ty` reads.
+    fn frame_formal(&self, index: u32, ty: &MachineType) -> Option<CExpr> {
+        let (_, name, held, differs) =
+            self.frame_formals.iter().find(|formal| formal.0 == index)?;
+        let var = CExpr::var(*name);
+        let var = match differs {
+            true => CExpr::cast(terms::c_type(held)?, var),
+            false => var,
+        };
+        terms::reclass(var, held, ty)
     }
 
     /// Record a read the proof line names once its text is kept; the name is declared, as the value
@@ -1649,7 +1682,8 @@ impl<'a> Values<'a> {
         texts: Vec<Option<&str>>,
         fixed: usize,
     ) {
-        for (argument, ty) in arguments.iter_mut().zip(types).take(fixed) {
+        let passed = arguments.iter_mut().zip(types).take(fixed);
+        for (argument, ty) in passed.filter(|(_, ty)| !crate::prelude::is_unread_slot(ty)) {
             *argument = terms::at_sink(ty, std::mem::replace(argument, CExpr::IntLit(0)));
         }
         for ((argument, ty), text) in arguments.iter_mut().zip(types).zip(texts) {
@@ -1669,8 +1703,20 @@ impl<'a> Values<'a> {
     ) -> Result<(Vec<CExpr>, Vec<CType>), CallRefusal> {
         let mut arguments = Vec::with_capacity(plan.arguments.len());
         let mut types = Vec::with_capacity(plan.arguments.len());
-        for ((argument, class), stacked) in plan.arguments.iter().zip(&plan.stacked) {
+        for (position, ((argument, class), stacked)) in
+            plan.arguments.iter().zip(&plan.stacked).enumerate()
+        {
             let (held, ty) = self.argument_type(inst, *argument, class, *stacked)?;
+            // A slot the callee ignores passes its typed residual: no caller value reaches it.
+            if let Some(hole) = plan
+                .ignored(position)
+                .then(|| crate::prelude::unread_slot(&ty))
+            {
+                let hole = needed(hole, inst, CallRefusal::ArgumentType)?;
+                arguments.push(CExpr::cast(hole.clone(), CExpr::IntLit(0)));
+                types.push(hole);
+                continue;
+            }
             let operand = self.operand(*argument, inst);
             let operand = needed(operand, inst, CallRefusal::ArgumentOperand)?;
             let fitted = fit(operand, &held, class);
@@ -1699,9 +1745,10 @@ impl<'a> Values<'a> {
 
     /// The C type the call returns: its declared prototype's, else its result's class, else `void`.
     fn return_type(&self, inst: InstId, plan: &CallPlan) -> Result<CType, CallRefusal> {
-        let ret = match plan.returns() {
-            Some(class) => needed(terms::c_type(class), inst, CallRefusal::ResultNotSpelled)?,
-            None => CType::Void,
+        let ret = match (plan.returns(), plan.unread) {
+            (Some(class), _) => needed(terms::c_type(class), inst, CallRefusal::ResultNotSpelled)?,
+            (None, Some(bits)) if plan.tail.is_none() => crate::prelude::result_carrier(bits),
+            (None, _) => CType::Void,
         };
         Ok(plan
             .declared
@@ -1720,8 +1767,18 @@ impl<'a> Values<'a> {
             return Ok(None);
         };
         let mut types = Vec::with_capacity(plan.arguments.len());
-        for ((argument, class), stacked) in plan.arguments.iter().zip(&plan.stacked) {
-            types.push(self.argument_type(inst, *argument, class, *stacked)?.1);
+        for (position, ((argument, class), stacked)) in
+            plan.arguments.iter().zip(&plan.stacked).enumerate()
+        {
+            let ty = self.argument_type(inst, *argument, class, *stacked)?.1;
+            types.push(match plan.ignored(position) {
+                true => needed(
+                    crate::prelude::unread_slot(&ty),
+                    inst,
+                    CallRefusal::ArgumentType,
+                )?,
+                false => ty,
+            });
         }
         let ret_type = self.return_type(inst, plan)?;
         Ok(extern_decl(plan, types, ret_type))
@@ -1762,7 +1819,9 @@ impl<'a> Values<'a> {
         let ret_type = self.return_type(inst, plan)?;
         // A declared prototype passes and returns at the types the source states.
         if let Some(declared) = &plan.declared {
-            for ((argument, ty), to) in arguments.iter_mut().zip(&mut types).zip(&declared.params) {
+            let passed = (arguments.iter_mut().zip(&mut types).zip(&declared.params))
+                .filter(|((_, ty), _)| !crate::prelude::is_unread_slot(ty));
+            for ((argument, ty), to) in passed {
                 let taken = std::mem::replace(argument, CExpr::IntLit(0));
                 *argument = match self.declared_variable(&taken, to) {
                     Some(variable) => variable,
@@ -1856,7 +1915,7 @@ impl<'a> Values<'a> {
             (r2source::SourceFunctionReturn::Register { storage }, Some((carried, class)))
                 if storage == *carried =>
             {
-                let carrier = carrier_class(self.artifact, storage, storage.size * 8);
+                let carrier = located_class(self.artifact, storage, storage.size * 8);
                 let own = match decided {
                     Some(CType::Void) => return None,
                     Some(decided) => agreed(class_of(decided, storage.size * 8), carrier)?,
@@ -1887,6 +1946,21 @@ impl<'a> Values<'a> {
                     Ok(call) | Err(call) => CExpr::cast(ty.clone(), call),
                 };
                 vec![CStmt::Return(Some(returned))]
+            }
+            // A void tail callee leaves an unproven or written result nothing: the return traps.
+            (
+                r2source::SourceFunctionReturn::Register { .. }
+                | r2source::SourceFunctionReturn::Unproven,
+                None,
+            ) if plan
+                .declared
+                .as_ref()
+                .is_some_and(|declared| declared.ret == CType::Void) =>
+            {
+                let call = self.call_expr(inst, plan).ok()?;
+                let undefined =
+                    crate::prelude::residual(ty, crate::prelude::ResidualCause::UnprovenReturn)?;
+                vec![CStmt::Expr(call), CStmt::Return(Some(undefined))]
             }
             _ => return None,
         };
@@ -1998,7 +2072,12 @@ impl<'a> Values<'a> {
             return None;
         }
         let mut arguments = Vec::with_capacity(params.len());
-        for ((argument, _), class) in plan.arguments.iter().zip(params) {
+        for (position, ((argument, _), class)) in plan.arguments.iter().zip(params).enumerate() {
+            if plan.ignored(position) {
+                let hole = crate::prelude::unread_slot(&terms::c_type(class)?)?;
+                arguments.push(CExpr::cast(hole, CExpr::IntLit(0)));
+                continue;
+            }
             let held = self.value_type(*argument)?;
             arguments.push(fit(self.operand(*argument, inst)?, &held, class)?);
         }
@@ -2239,7 +2318,7 @@ impl<'a> Values<'a> {
                     SemanticObligationComponent::RegisterSlot { storage, .. }
                         if o.id.kind == SemanticObligationKind::ReturnValue =>
                     {
-                        carrier_class(self.artifact, storage, storage.size * 8)
+                        located_class(self.artifact, storage, storage.size * 8)
                     }
                     _ => None,
                 });
@@ -2651,33 +2730,27 @@ pub(super) fn class_of(ty: &r2types::CTypeLike, width_bits: u32) -> Option<Machi
     }
 }
 
-/// The class a value `width_bits` wide passes in, held in `storage`: its slot says general or
-/// float register, `storage`'s size the width (a float's lane); `None` outside every slot.
-pub(super) fn carrier_class(
+/// The type a value `width_bits` wide spells in `storage`, of the class the convention gives it
+/// (`SourceConventionSlots::class_of`); `None` outside every slot.
+pub(super) fn located_class(
     artifact: &SsaArtifact,
     storage: r2source::CanonicalStorageId,
     width_bits: u32,
 ) -> Option<MachineType> {
-    let slots = artifact.machine_context().convention_slots()?;
-    let within = |slot: &r2source::CanonicalStorageId| {
-        slot.space == storage.space
-            && slot.offset <= storage.offset
-            && storage.offset + u64::from(storage.size) <= slot.offset + u64::from(slot.size)
-    };
-    let general = slots
-        .argument_slots()
-        .iter()
-        .chain(&slots.result_slot())
-        .any(within);
-    let float = (slots.float_argument_slots().iter())
-        .chain(&slots.float_result_slot())
-        .any(within);
-    match (general, float) {
-        (true, false) if matches!(width_bits, 8 | 16 | 32 | 64) => Some(MachineType::Integer {
-            width_bits,
-            signedness: r2ssa::MachineSignedness::Unsigned,
-        }),
-        (false, true) if matches!(width_bits, 32 | 64) => Some(MachineType::Float { width_bits }),
+    let class = artifact
+        .machine_context()
+        .convention_slots()?
+        .class_of(storage)?;
+    match class {
+        r2source::convention::SlotClass::Integer if matches!(width_bits, 8 | 16 | 32 | 64) => {
+            Some(MachineType::Integer {
+                width_bits,
+                signedness: r2ssa::MachineSignedness::Unsigned,
+            })
+        }
+        r2source::convention::SlotClass::Float if matches!(width_bits, 32 | 64) => {
+            Some(MachineType::Float { width_bits })
+        }
         _ => None,
     }
 }
@@ -2717,29 +2790,37 @@ fn spells_an_identifier(name: &str) -> bool {
 fn parameters(
     input: &RenderInput<'_>,
     artifact: &SsaArtifact,
-) -> Option<Vec<(u32, ValueId, MachineType)>> {
-    let graph = artifact.graph();
+) -> Option<Vec<(u32, r2ssa::FormalHome, MachineType)>> {
     artifact
         .facts()
         .boundaries
         .parameters
         .values()
         .map(|parameter| {
-            let width_bits = graph.var(parameter.value).size * 8;
+            let width_bits = parameter.bytes() * 8;
             let declared = input
                 .parameter_declaration(parameter.index as usize, width_bits)
                 .map(|declared| class_of(&declared, width_bits));
-            let carrier = carrier_class(artifact, parameter.abi_storage, width_bits);
-            let class = match declared {
-                Some(None) => return None,
-                Some(Some(declared)) => agreed(Some(declared), carrier)?,
-                None => carrier?,
+            // A register's class is the convention's; a stack slot carries any, so its declaration
+            // decides and the machine word is the class only where none is declared.
+            let register = parameter.register();
+            let class = match (declared, register) {
+                (Some(None), _) => return None,
+                (Some(Some(declared)), Some((abi_storage, _))) => agreed(
+                    Some(declared),
+                    located_class(artifact, abi_storage, width_bits),
+                )?,
+                (Some(Some(declared)), None) => declared,
+                (None, Some((abi_storage, _))) => located_class(artifact, abi_storage, width_bits)?,
+                (None, None) => {
+                    class_of(&r2types::CTypeLike::machine_bits(width_bits), width_bits)?
+                }
             };
             // A parameter is declared at its value's own width: a lane of it is read by name.
             if class.width_bits() != width_bits {
                 return None;
             }
-            Some((parameter.index, parameter.value, class))
+            Some((parameter.index, parameter.home, class))
         })
         .collect()
 }

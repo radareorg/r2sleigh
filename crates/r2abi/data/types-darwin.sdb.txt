@@ -1,12 +1,3 @@
-assert_fail=func
-func.assert_fail.args=4
-func.assert_fail.arg.0=const char *,assertion
-func.assert_fail.arg.1=const char *,file
-func.assert_fail.arg.2=unsigned int,line
-func.assert_fail.arg.3=const char *,function
-func.assert_fail.noreturn=true
-func.assert_fail.ret=void
-
 tputs=func
 func.tputs.args=3
 func.tputs.arg.0=const char *,str
@@ -26,47 +17,6 @@ func._Exit.arg.0=int,status
 func._Exit.noreturn=true
 func._Exit.ret=void
 
-libc_init=func
-func.libc_init.args=3
-func.libc_init.arg.0=int,argc
-func.libc_init.arg.1=char **,argv
-func.libc_init.arg.2=char **,envp
-func.libc_init.noreturn=true
-func.libc_init.ret=void
-
-libc_init_array=func
-func.libc_init_array.args=0
-func.libc_init_array.ret=void
-
-libc_start_main=func
-func.libc_start_main.args=7
-func.libc_start_main.arg.0=func,main
-func.libc_start_main.arg.1=int,argc
-func.libc_start_main.arg.2=char **,ubp_av
-func.libc_start_main.arg.3=func,init
-func.libc_start_main.arg.4=func,fini
-func.libc_start_main.arg.5=func,rtld_fini
-func.libc_start_main.arg.6=void *,stack_end
-func.libc_start_main.noreturn=true
-func.libc_start_main.ret=int
-
-uClibc_main=func
-func.uClibc_main.args=7
-func.uClibc_main.arg.0=func,main
-func.uClibc_main.arg.1=int,argc
-func.uClibc_main.arg.2=char **,argv
-func.uClibc_main.arg.3=func,app_init
-func.uClibc_main.arg.4=func,app_fini
-func.uClibc_main.arg.5=func,rtld_fini
-func.uClibc_main.arg.6=void *,stack_end
-func.uClibc_main.noreturn=true
-func.uClibc_main.ret=int
-
-abort=func
-func.abort.args=0
-func.abort.noreturn=true
-func.abort.ret=void
-
 xalloc_die=func
 func.xalloc_die.args=0
 func.xalloc_die.noreturn=true
@@ -76,12 +26,6 @@ atexit=func
 func.atexit.args=1
 func.atexit.arg.0=func,function
 func.atexit.ret=int
-
-exit=func
-func.exit.args=1
-func.exit.arg.0=int,status
-func.exit.noreturn=true
-func.exit.ret=void
 
 access=func
 func.access.args=2
@@ -199,46 +143,6 @@ struct.NSString.len=int,0,0
 struct.NSString.len.meta=4
 struct.NSString.str=char *,0,0
 struct.NSString.str.meta=4
-
-objc_msgSend=func
-func.objc_msgSend.args=3
-func.objc_msgSend.arg.0=void *,self
-func.objc_msgSend.arg.1=char *,op
-func.objc_msgSend.arg.2=,...
-func.objc_msgSend.ret=void *
-
-objc_msgSendSuper2=func
-func.objc_msgSendSuper2.args=3
-func.objc_msgSendSuper2.arg.0=void *,super
-func.objc_msgSendSuper2.arg.1=char *,op
-func.objc_msgSendSuper2.arg.2=,...
-func.objc_msgSendSuper2.ret=void *
-
-objc_storeStrong=func
-func.objc_storeStrong.args=2
-func.objc_storeStrong.arg.0=void **,location
-func.objc_storeStrong.arg.1=void *,obj
-func.objc_storeStrong.ret=void
-
-objc_release=func
-func.objc_release.args=1
-func.objc_release.arg.0=void *,instance
-func.objc_release.ret=void
-
-objc_retain=func
-func.objc_retain.args=1
-func.objc_retain.arg.0=void *,obj
-func.objc_retain.ret=void *
-
-objc_retainAutoreleasedReturnValue=func
-func.objc_retainAutoreleasedReturnValue.args=1
-func.objc_retainAutoreleasedReturnValue.arg.0=void *,obj
-func.objc_retainAutoreleasedReturnValue.ret=void *
-
-objc_enumerationMutation=func
-func.objc_enumerationMutation.args=1
-func.objc_enumerationMutation.arg.0=void *,instance
-func.objc_enumerationMutation.ret=void
 
 # assert.h: `assert` calls `__assert_rtn(__func__, __FILE__, __LINE__, #e)`, declared in
 # _assert.h as `void __assert_rtn(const char *, const char *, int, const char *) __dead2`.

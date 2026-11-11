@@ -1,6 +1,7 @@
 //! What an operator's assumption does to the analysis.
 
 use super::super::*;
+use super::{parse_test_type, spelled};
 
 #[test]
 fn user_type_hint_assumptions_apply_without_semantic_corroboration() {
@@ -19,10 +20,10 @@ fn user_type_hint_assumptions_apply_without_semantic_corroboration() {
     let mut inferred_signature = InferredSignature {
         function_name: "sym.demo".to_string(),
         signature: "void sym.demo(void *)".to_string(),
-        ret_type: "void".to_string(),
+        ret_type: Some(parse_test_type("void", 64)),
         params: vec![InferredSignatureParam {
             name: "arg1".to_string(),
-            param_type: "void *".to_string(),
+            ty: parse_test_type("void *", 64),
         }],
         callconv: "amd64".to_string(),
         arch: "x86-64".to_string(),
@@ -39,7 +40,7 @@ fn user_type_hint_assumptions_apply_without_semantic_corroboration() {
     assert_eq!(usage.applied.len(), 1);
     assert!(usage.ignored.is_empty());
     assert!(usage.conflicts.is_empty());
-    assert_eq!(inferred_signature.params[0].param_type, "int8_t*");
+    assert_eq!(spelled(&inferred_signature.params[0].ty), "int8_t*");
     assert_eq!(
         render_signature_type(
             parsed_context
@@ -73,10 +74,10 @@ fn derived_type_hint_assumptions_still_require_corroboration() {
     let mut inferred_signature = InferredSignature {
         function_name: "sym.demo".to_string(),
         signature: "void sym.demo(void *)".to_string(),
-        ret_type: "void".to_string(),
+        ret_type: Some(parse_test_type("void", 64)),
         params: vec![InferredSignatureParam {
             name: "arg1".to_string(),
-            param_type: "void *".to_string(),
+            ty: parse_test_type("void *", 64),
         }],
         callconv: "amd64".to_string(),
         arch: "x86-64".to_string(),
@@ -93,7 +94,10 @@ fn derived_type_hint_assumptions_still_require_corroboration() {
     assert!(usage.applied.is_empty());
     assert_eq!(usage.ignored.len(), 1);
     assert!(usage.conflicts.is_empty());
-    assert_eq!(inferred_signature.params[0].param_type, "void *");
+    assert_eq!(
+        inferred_signature.params[0].ty,
+        parse_test_type("void *", 64)
+    );
     assert!(parsed_context.merged_signature.is_none());
 }
 
@@ -114,10 +118,10 @@ fn corroborated_type_hint_assumptions_update_signature_and_usage() {
     let mut inferred_signature = InferredSignature {
         function_name: "sym.demo".to_string(),
         signature: "void sym.demo(void *)".to_string(),
-        ret_type: "void".to_string(),
+        ret_type: Some(parse_test_type("void", 64)),
         params: vec![InferredSignatureParam {
             name: "arg1".to_string(),
-            param_type: "void *".to_string(),
+            ty: parse_test_type("void *", 64),
         }],
         callconv: "amd64".to_string(),
         arch: "x86-64".to_string(),
@@ -175,7 +179,7 @@ fn corroborated_type_hint_assumptions_update_signature_and_usage() {
     assert_eq!(usage.applied.len(), 1);
     assert!(usage.ignored.is_empty());
     assert!(usage.conflicts.is_empty());
-    assert_eq!(inferred_signature.params[0].param_type, "int8_t*");
+    assert_eq!(spelled(&inferred_signature.params[0].ty), "int8_t*");
     assert_eq!(
         render_signature_type(
             parsed_context
@@ -211,10 +215,10 @@ fn user_type_hint_can_replace_narrow_generic_scalar_inference() {
     let mut signature = InferredSignature {
         function_name: "sym.demo".to_string(),
         signature: "uint32_t sym.demo(uint32_t)".to_string(),
-        ret_type: "uint32_t".to_string(),
+        ret_type: Some(parse_test_type("uint32_t", 64)),
         params: vec![InferredSignatureParam {
             name: "arg0".to_string(),
-            param_type: "uint32_t".to_string(),
+            ty: parse_test_type("uint32_t", 64),
         }],
         callconv: "amd64".to_string(),
         arch: "x86-64".to_string(),
@@ -229,7 +233,7 @@ fn user_type_hint_can_replace_narrow_generic_scalar_inference() {
     );
 
     assert_eq!(usage.applied.len(), 1);
-    assert_eq!(signature.params[0].param_type, "int32_t");
+    assert_eq!(spelled(&signature.params[0].ty), "int32_t");
     assert!(
         x86_64_register_identity().same_parameter_storage(&context.register_params[0].reg, "rdi")
     );
@@ -245,10 +249,10 @@ fn explicit_role_type_hint_blocks_generic_pointer_upgrade() {
     let mut signature = InferredSignature {
         function_name: "dbg.main".to_string(),
         signature: "int dbg.main (int argc)".to_string(),
-        ret_type: "int".to_string(),
+        ret_type: Some(c_int_type()),
         params: vec![InferredSignatureParam {
             name: "argc".to_string(),
-            param_type: "int".to_string(),
+            ty: c_int_type(),
         }],
         callconv: "amd64".to_string(),
         arch: "x86-64".to_string(),
@@ -263,7 +267,7 @@ fn explicit_role_type_hint_blocks_generic_pointer_upgrade() {
         &ExternalTypeDb::default(),
     );
 
-    assert_eq!(signature.params[0].param_type, "int");
+    assert_eq!(spelled(&signature.params[0].ty), "int");
     assert_eq!(
         merged
             .as_ref()
@@ -291,5 +295,5 @@ fn explicit_role_type_hint_blocks_generic_pointer_upgrade() {
         &ExternalTypeDb::default(),
     );
 
-    assert_eq!(signature.params[0].param_type, "int");
+    assert_eq!(spelled(&signature.params[0].ty), "int");
 }

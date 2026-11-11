@@ -12,7 +12,8 @@
 //! rather than SSA variables, because the evidence lives there: a call result is
 //! a value, a stack home is an object, and the same solver runs over both.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::constraint::SolverNode;
 use crate::context::{ExternalStackBase, StackSlotKey};
@@ -106,7 +107,7 @@ struct EvidenceBuilder<'a> {
     /// Spellings asserted on a node, kept to name the solved type.
     spellings: Vec<(EvidenceNode, TypeId, CTypeLike)>,
     /// Bounds already asserted, so the pointer-base worklist can tell what is new.
-    asserted: HashSet<(EvidenceNode, TypeId)>,
+    asserted: FxHashSet<(EvidenceNode, TypeId)>,
 }
 
 impl<'a> EvidenceBuilder<'a> {
@@ -116,7 +117,7 @@ impl<'a> EvidenceBuilder<'a> {
             ptr_bits,
             solver: IncrementalSolver::new(TypeArena::default()),
             spellings: Vec::new(),
-            asserted: HashSet::new(),
+            asserted: FxHashSet::default(),
         }
     }
 
@@ -345,10 +346,11 @@ impl<'a> EvidenceBuilder<'a> {
             .parameter_expression(access.address)?;
         let slot = u32::try_from(address.parameter).ok()?;
         let parameter = self.source.facts().boundaries.parameters.get(&slot)?;
+        let (_, graph_storage) = parameter.register()?;
         (parameter.index == slot
             && parameter.index as usize == address.parameter
-            && address.parameter_storage == Some(parameter.graph_storage))
-        .then_some(parameter.value)
+            && address.parameter_storage == Some(graph_storage))
+        .then_some(parameter.value()?)
     }
 
     /// The element width of a block the function allocated.
@@ -421,7 +423,7 @@ impl<'a> EvidenceBuilder<'a> {
             };
             sums.push((left, right, elem));
         }
-        let mut readers = HashMap::<usize, Vec<usize>>::new();
+        let mut readers = FxHashMap::<usize, Vec<usize>>::default();
         for (at, (left, right, _)) in sums.iter().enumerate() {
             for operand in [left, right] {
                 let class = self.solver.class_seeing(&EvidenceNode::Value(*operand));
@@ -476,7 +478,7 @@ impl<'a> EvidenceBuilder<'a> {
     ) -> Option<(r2ssa::ValueId, r2ssa::ValueId)> {
         let graph = self.source.graph();
         let mut current = address;
-        let mut seen = HashSet::new();
+        let mut seen = FxHashSet::default();
         while seen.insert(current) {
             let inst = graph.inst(graph.def_inst(current)?)?;
             match &inst.payload {
@@ -508,7 +510,7 @@ impl<'a> EvidenceBuilder<'a> {
     /// variable, so its type and the type of every value that passes through it
     /// are the same type. An object touched at more than one width, or narrower
     /// than itself, is an aggregate and is left alone.
-    fn scalar_memory_cells(&self) -> HashSet<r2ssa::ObjectId> {
+    fn scalar_memory_cells(&self) -> FxHashSet<r2ssa::ObjectId> {
         let certificates = self.source.certificates();
         let mut widths: BTreeMap<r2ssa::ObjectId, BTreeSet<u32>> = BTreeMap::new();
         for access in certificates.memory_accesses.values() {
@@ -521,7 +523,7 @@ impl<'a> EvidenceBuilder<'a> {
                 .insert(access.width);
         }
 
-        let mut cells = HashSet::new();
+        let mut cells = FxHashSet::default();
         for (object, widths) in widths {
             let [width] = widths.iter().copied().collect::<Vec<_>>()[..] else {
                 continue;
@@ -646,20 +648,23 @@ impl<'a> EvidenceBuilder<'a> {
                     .arena_mut()
                     .unknown_alias(format!("enum {name}")),
             ),
-            CTypeLike::Typedef { name, .. } => {
-                let resolved = crate::parse_c_type_like(name, self.ptr_bits)?;
-                if matches!(resolved, CTypeLike::Typedef { .. }) {
-                    return Some(self.solver.arena_mut().unknown_alias(name.clone()));
+            CTypeLike::Typedef { name, ty } => match ty.unaliased() {
+                CTypeLike::Unknown => match crate::convert::standard_type(name, self.ptr_bits) {
+                    Some(standard) => self.intern_structural(&standard),
+                    None => Some(self.solver.arena_mut().unknown_alias(name.clone())),
+                },
+                target => {
+                    let target = target.clone();
+                    self.intern_structural(&target)
                 }
-                self.intern_structural(&resolved)
-            }
+            },
         }
     }
 
     fn read_back(&mut self) -> EvidenceTypes {
         // A spelling names the solved type only when it is that type. The class
         // carries it because every member of an equality class is one variable.
-        let mut class_spellings: HashMap<usize, CTypeLike> = HashMap::new();
+        let mut class_spellings: FxHashMap<usize, CTypeLike> = FxHashMap::default();
         for (node, ty, spelling) in std::mem::take(&mut self.spellings) {
             if self.solver.type_of(&node) != Some(ty) {
                 continue;
@@ -681,7 +686,7 @@ impl<'a> EvidenceBuilder<'a> {
         }
 
         let mut types = EvidenceTypes::default();
-        let mut object_types: HashMap<r2ssa::ObjectId, CTypeLike> = HashMap::new();
+        let mut object_types: FxHashMap<r2ssa::ObjectId, CTypeLike> = FxHashMap::default();
         for (node, ty) in self.solver.typed() {
             let Some(resolved) = self.spell(&class_spellings, node, ty) else {
                 continue;
@@ -723,7 +728,7 @@ impl<'a> EvidenceBuilder<'a> {
 
     fn spell(
         &mut self,
-        class_spellings: &HashMap<usize, CTypeLike>,
+        class_spellings: &FxHashMap<usize, CTypeLike>,
         node: EvidenceNode,
         ty: TypeId,
     ) -> Option<CTypeLike> {
@@ -972,7 +977,7 @@ mod tests {
         };
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"evidence-without-callee-signatures".to_vec(),
-            "sysv64",
+            r2source::ConventionId::SysVAmd64,
             [r2ssa::SourceAbiParameterSpec::new(0, register(0))],
             r2ssa::SourceFunctionReturn::Void,
             [],
@@ -1002,7 +1007,8 @@ mod tests {
             .parameters
             .get(&0)
             .expect("exact parameter")
-            .value;
+            .value()
+            .expect("a register formal");
         let address = source
             .certificates()
             .memory_accesses
@@ -1039,7 +1045,7 @@ mod tests {
         };
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"indexed-parameter-evidence".to_vec(),
-            "sysv64",
+            r2source::ConventionId::SysVAmd64,
             [
                 r2ssa::SourceAbiParameterSpec::new(0, register(0)),
                 r2ssa::SourceAbiParameterSpec::new(1, register(8)),
@@ -1072,8 +1078,12 @@ mod tests {
             interface,
         )
         .expect("prepared source");
-        let parameter = source.facts().boundaries.parameters[&0].value;
-        let index = source.facts().boundaries.parameters[&1].value;
+        let parameter = source.facts().boundaries.parameters[&0]
+            .value()
+            .expect("a register formal");
+        let index = source.facts().boundaries.parameters[&1]
+            .value()
+            .expect("a register formal");
         let access = source
             .certificates()
             .memory_accesses
@@ -1117,7 +1127,7 @@ mod tests {
         };
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"unobserved-merge-evidence".to_vec(),
-            "sysv64",
+            r2source::ConventionId::SysVAmd64,
             [
                 r2ssa::SourceAbiParameterSpec::new(0, register(0)),
                 r2ssa::SourceAbiParameterSpec::new(1, register(8)),
@@ -1198,7 +1208,9 @@ mod tests {
             source.unobserved_merges().contains(merged),
             "the merge is read only by an increment nothing observes"
         );
-        let index = source.facts().boundaries.parameters[&1].value;
+        let index = source.facts().boundaries.parameters[&1]
+            .value()
+            .expect("a register formal");
         let solved =
             crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
         assert!(
@@ -1222,7 +1234,7 @@ mod tests {
         };
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"signed-parameter-evidence".to_vec(),
-            "sysv64",
+            r2source::ConventionId::SysVAmd64,
             [
                 r2ssa::SourceAbiParameterSpec::new(0, register(0)),
                 r2ssa::SourceAbiParameterSpec::new(1, register(8)),
@@ -1261,8 +1273,12 @@ mod tests {
             interface,
         )
         .expect("prepared source");
-        let signed = source.facts().boundaries.parameters[&0].value;
-        let untouched = source.facts().boundaries.parameters[&1].value;
+        let signed = source.facts().boundaries.parameters[&0]
+            .value()
+            .expect("a register formal");
+        let untouched = source.facts().boundaries.parameters[&1]
+            .value()
+            .expect("a register formal");
 
         let solved =
             crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
@@ -1327,7 +1343,7 @@ mod tests {
         };
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"unsigned-spilled-parameter".to_vec(),
-            "aapcs64",
+            r2source::ConventionId::Aapcs64,
             [r2ssa::SourceAbiParameterSpec::new(0, register(8))],
             r2ssa::SourceFunctionReturn::Void,
             [r2ssa::SourceStackSlotSpec::new_local(
@@ -1374,7 +1390,9 @@ mod tests {
             interface,
         )
         .expect("prepared source");
-        let parameter = source.facts().boundaries.parameters[&0].value;
+        let parameter = source.facts().boundaries.parameters[&0]
+            .value()
+            .expect("a register formal");
         let solved =
             crate::function_facts::SolvedFunction::of(&source, &BTreeMap::new(), 64).evidence;
         let unsigned = CTypeLike::Int {

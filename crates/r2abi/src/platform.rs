@@ -11,7 +11,8 @@
 //! Registers are spelled as radare2 spells them (`fs_base`, `cwd`, `mxcsr`);
 //! placing a spelling in the lifted architecture is the lifter's job.
 
-use crate::Platform;
+use crate::convention::RegName;
+use crate::{CLibrary, Kernel};
 
 /// What a call does to a register the platform ABI speaks for.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -119,15 +120,15 @@ const AARCH64_DARWIN: [PlatformRegister; 1] = [PlatformRegister {
 /// beside the register its convention fixes (Go's `g.stackguard0`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StackGuard {
-    /// The reserved register, spelled as radare2 spells it.
-    pub register: &'static str,
+    /// The reserved register.
+    pub register: RegName,
     pub offset: u64,
     pub width: u32,
     pub citation: &'static str,
 }
 
 const X86_64_LINUX_GUARD: StackGuard = StackGuard {
-    register: "fs_base",
+    register: RegName("fs_base"),
     offset: 0x28,
     width: 8,
     citation: "glibc sysdeps/x86_64/nptl/tls.h, tcbhead_t: stack_guard at %fs:0x28; GCC \
@@ -135,56 +136,52 @@ const X86_64_LINUX_GUARD: StackGuard = StackGuard {
 };
 
 const I386_LINUX_GUARD: StackGuard = StackGuard {
-    register: "gs_base",
+    register: RegName("gs_base"),
     offset: 0x14,
     width: 4,
     citation: "glibc sysdeps/i386/nptl/tls.h, tcbhead_t: stack_guard at %gs:0x14; GCC \
                gcc/config/i386/gnu-user.h: TARGET_THREAD_SSP_OFFSET 0x14",
 };
 
-/// Where the platform keeps the stack guard, if it addresses it from a reserved register.
-///
-/// AArch64 Linux keeps it in the global `__stack_chk_guard`, which no register addresses.
-pub fn stack_guard(arch: &str, bits: u32, platform: Platform) -> Option<&'static StackGuard> {
-    match (crate::family(arch), bits, platform) {
-        (Some("x86"), 64, Platform::Linux) => Some(&X86_64_LINUX_GUARD),
-        (Some("x86"), 32, Platform::Linux) => Some(&I386_LINUX_GUARD),
-        _ => None,
-    }
+/// Where a C library keeps the stack protector's canary (doc/adr-call-boundary.md, `GuardRow`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GuardRow {
+    /// A word at a constant offset from the thread pointer.
+    ThreadSlot(StackGuard),
+    /// The word the PE load configuration's `SecurityCookie` names (Microsoft PE format,
+    /// "Load Configuration Layout"); its address is the container's.
+    LoadConfigCookie,
 }
 
-/// What a platform's ABI says of its default calling convention that no
-/// compiler specification in the Sleigh bundle states.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CallingConvention {
-    /// The convention's name as radare2 spells it, which is what `afi`
-    /// prints and what radare2's output is diffed against.
-    pub name: &'static str,
-    /// How many bytes past the stack pointer a function may use without
-    /// moving it.
-    pub red_zone_bytes: u32,
-    /// The register a call passes a variadic callee's count of vector
-    /// arguments in, which every call may therefore read.
-    pub variadic_count_register: Option<&'static str>,
-    /// Where a variadic prologue saves argument register `i`, at area + slot width * i, and what
-    /// its `va_list` holds of that area; `None` where the convention has no area.
-    pub register_save_area: Option<RegisterSaveArea>,
-    /// The register a frame-keeping function holds its frame base in.
-    pub frame_pointer: Option<&'static str>,
-    /// The compiler specification and the prototype in it, where the convention is not the
-    /// platform toolchain's default.
-    pub prototype: Option<(&'static str, &'static str)>,
-    /// What its boundaries carry that no call boundary states, which refuses every function
-    /// under it.
-    pub refused: Option<&'static str>,
-    /// The entry stack pointer's residue modulo an alignment, which a frame that keeps the
-    /// machine's alignment reproduces; `None` where the convention states none.
-    pub entry_stack: Option<EntryStack>,
-    /// The lowest stack pointer a function may run with, where the runtime keeps one a prologue
-    /// compares against; `None` where the convention states none.
-    pub stack_bound: Option<StackGuard>,
-    /// The documents that state these.
-    pub citation: &'static str,
+const X86_64_GLIBC_GUARD: GuardRow = GuardRow::ThreadSlot(X86_64_LINUX_GUARD);
+const I386_GLIBC_GUARD: GuardRow = GuardRow::ThreadSlot(I386_LINUX_GUARD);
+
+/// Bionic's x86 canary: slot 5 of the thread's TLS words, one pointer each from the segment base.
+const BIONIC_GUARD_CITATION: &str = "bionic libc/platform/bionic/tls_defines.h: \
+    `TLS_SLOT_STACK_GUARD 5` on x86, used for -fstack-protector, a slot one pointer wide from \
+    %fs:0 or %gs:0; LLVM X86ISelLoweringCall.cpp, getIRStackGuard: %fs:0x28, gs:0x14 on i386, \
+    for Android from API 17 (hasStackGuardSlotTLS)";
+const X86_64_BIONIC_GUARD: GuardRow = GuardRow::ThreadSlot(StackGuard {
+    citation: BIONIC_GUARD_CITATION,
+    ..X86_64_LINUX_GUARD
+});
+const I386_BIONIC_GUARD: GuardRow = GuardRow::ThreadSlot(StackGuard {
+    citation: BIONIC_GUARD_CITATION,
+    ..I386_LINUX_GUARD
+});
+const UCRT_GUARD: GuardRow = GuardRow::LoadConfigCookie;
+
+/// The C library's guard row for an architecture. AArch64 glibc and bionic keep it in the global
+/// `__stack_chk_guard`, which no register addresses; a library no row cites states none.
+pub fn guard_row(arch: &str, bits: u32, library: CLibrary) -> Option<&'static GuardRow> {
+    match (crate::family(arch), bits, library) {
+        (Some("x86"), 64, CLibrary::Glibc | CLibrary::Musl) => Some(&X86_64_GLIBC_GUARD),
+        (Some("x86"), 32, CLibrary::Glibc) => Some(&I386_GLIBC_GUARD),
+        (Some("x86"), 64, CLibrary::Bionic) => Some(&X86_64_BIONIC_GUARD),
+        (Some("x86"), 32, CLibrary::Bionic) => Some(&I386_BIONIC_GUARD),
+        (Some("x86"), 64, CLibrary::Ucrt) => Some(&UCRT_GUARD),
+        _ => None,
+    }
 }
 
 /// What a `va_list` holds of the general register save area (doc/adr-resolved-bodies.md, "Variadic
@@ -217,268 +214,6 @@ pub struct EntryStack {
     pub residue: u32,
 }
 
-const SYSTEM_V_AMD64: CallingConvention = CallingConvention {
-    name: "amd64",
-    red_zone_bytes: 128,
-    frame_pointer: Some("rbp"),
-    variadic_count_register: Some("al"),
-    register_save_area: Some(RegisterSaveArea {
-        anchor: SaveAreaAnchor::Base,
-        offset_field: -16,
-        offset_width: 4,
-        stack_field: -8,
-    }),
-    prototype: None,
-    refused: None,
-    entry_stack: Some(EntryStack {
-        alignment: 16,
-        residue: 8,
-    }),
-    stack_bound: None,
-    citation: "System V AMD64 psABI 1.0, section 3.2.2: \"The 128-byte area beyond the \
-               location pointed to by %rsp is considered to be reserved and shall not be \
-               modified by signal or interrupt handlers\"; section 3.5.7: \"%al is used as \
-               hidden argument to specify the number of vector registers used\"; Figure 3.4: %rbp \"callee-saved register; optionally used as frame pointer\"; section 3.2.2: \"the value (%rsp + 8) is always a multiple of 16 when control is transferred to the function entry point\"; section 3.5.7, Figure 3.33: the register save area holds %rdi at offset 0 to %r9 at 40, and \"reg_save_area: The element points to the start of the register save area\"; Figure 3.34: the va_list is {unsigned int gp_offset; unsigned int fp_offset; void *overflow_arg_area; void *reg_save_area;} (overflow_arg_area at offset 8, reg_save_area at 16), and \"gp_offset: The element holds the offset in bytes from reg_save_area to the place where the next available general purpose argument register is saved\"",
-};
-
-const MICROSOFT_X64: CallingConvention = CallingConvention {
-    name: "ms",
-    red_zone_bytes: 0,
-    frame_pointer: Some("rbp"),
-    variadic_count_register: None,
-    register_save_area: None,
-    prototype: None,
-    refused: None,
-    entry_stack: Some(EntryStack {
-        alignment: 16,
-        residue: 8,
-    }),
-    stack_bound: None,
-    citation: "Microsoft x64 software conventions, \"Stack usage\": the convention \
-               defines no red zone; its register usage table lists RBP as nonvolatile and usable as a frame pointer; \"Stack allocation\": \"The stack will always be maintained 16-byte aligned, except within the prolog (for example, after the return address is pushed)\"",
-};
-
-const I386_CDECL: CallingConvention = CallingConvention {
-    name: "cdecl",
-    red_zone_bytes: 0,
-    frame_pointer: Some("ebp"),
-    variadic_count_register: None,
-    register_save_area: None,
-    prototype: None,
-    refused: None,
-    entry_stack: Some(EntryStack {
-        alignment: 16,
-        residue: 12,
-    }),
-    stack_bound: None,
-    citation: "System V i386 ABI 1.1, \"Function Calling Sequence\": the convention \
-               defines no red zone; its register table gives %ebp the frame pointer role; \"The end of the input argument area shall be aligned on a 16 byte boundary\", so %esp + 4 is a multiple of 16 at entry",
-};
-
-const AAPCS64: CallingConvention = CallingConvention {
-    name: "arm64",
-    red_zone_bytes: 0,
-    frame_pointer: Some("x29"),
-    variadic_count_register: None,
-    register_save_area: Some(RegisterSaveArea {
-        anchor: SaveAreaAnchor::End,
-        offset_field: 16,
-        offset_width: 4,
-        stack_field: -8,
-    }),
-    prototype: None,
-    refused: None,
-    entry_stack: Some(EntryStack {
-        alignment: 16,
-        residue: 0,
-    }),
-    stack_bound: None,
-    citation: "AAPCS64, \"Universal stack constraints\": \"A process may only access \
-               (for reading or writing) the closed interval of the entire stack delimited \
-               by [SP, stack-base - 1]\"; its general-purpose register table names r29 FP, the frame pointer; \"Universal stack constraints\": \"SP mod 16 = 0\"; Appendix \"Variable argument lists\": the general register save area holds x0 to x7 in order, and \"__gr_top: set to the address of the byte immediately following the general register argument save area\"; the va_list is {void *__stack; void *__gr_top; void *__vr_top; int __gr_offs; int __vr_offs;} (__stack at offset 0, __gr_top at 8), and \"__gr_offs: set to 0 - ((8 - named_gr) * 8)\"",
-};
-
-const AAPCS64_DARWIN: CallingConvention = CallingConvention {
-    variadic_count_register: None,
-    register_save_area: None,
-    citation: "Apple, \"Writing ARM64 code for Apple platforms\": \"the caller places \
-               the arguments for the variadic portion of a function on the stack\", so the \
-               prologue saves no register area; where the tail goes is AARCH64_apple.cspec's",
-    ..AAPCS64
-};
-
-const AAPCS32: CallingConvention = CallingConvention {
-    name: "arm32",
-    red_zone_bytes: 0,
-    frame_pointer: Some("r11"),
-    variadic_count_register: None,
-    register_save_area: None,
-    prototype: None,
-    refused: None,
-    entry_stack: Some(EntryStack {
-        alignment: 8,
-        residue: 0,
-    }),
-    stack_bound: None,
-    citation: "AAPCS32, \"Universal stack constraints\": \"A process may only access \
-               (for reading or writing) the closed interval of the entire stack delimited \
-               by [SP, stack-base - 1]\"; AAPCS32 leaves the frame pointer to the platform, and GCC in ARM state keeps it in r11, the APCS fp; \"Public interfaces\": \"SP mod 8 = 0\"",
-};
-
-const RISCV_LP64: CallingConvention = CallingConvention {
-    name: "rvg",
-    red_zone_bytes: 0,
-    frame_pointer: Some("s0"),
-    variadic_count_register: None,
-    register_save_area: None,
-    prototype: None,
-    refused: None,
-    entry_stack: Some(EntryStack {
-        alignment: 16,
-        residue: 0,
-    }),
-    stack_bound: None,
-    citation: "RISC-V ELF psABI, \"Integer Calling Convention\": the convention defines \
-               no red zone; \"Register Convention\": x8 \"s0/fp Saved register/frame pointer\"; \"the stack pointer shall be aligned to a 128-bit boundary upon procedure entry\"",
-};
-
-const GO_AMD64: CallingConvention = CallingConvention {
-    name: "golang",
-    red_zone_bytes: 0,
-    variadic_count_register: None,
-    register_save_area: None,
-    frame_pointer: Some("rbp"),
-    prototype: Some(("golang", "abi-internal")),
-    refused: None,
-    entry_stack: Some(EntryStack {
-        alignment: 8,
-        residue: 0,
-    }),
-    stack_bound: Some(StackGuard {
-        register: "r14",
-        offset: 16,
-        width: 8,
-        citation: "Go internal ABI (src/cmd/compile/abi-internal.md), amd64: \"R14 | Current \
-                   goroutine | Same | Same\"; runtime/runtime2.go: `type g struct { stack stack; \
-                   stackguard0 uintptr` after `type stack struct { lo, hi uintptr }`, so 16 bytes in",
-    }),
-    citation: "Go internal ABI (src/cmd/compile/abi-internal.md), amd64: \"RBP | Frame pointer \
-               | Same | Same\"; it defines no red zone; amd64: \"The stack pointer, RSP, grows down and is always aligned to 8 bytes\"",
-};
-
-const GO_ARM64: CallingConvention = CallingConvention {
-    frame_pointer: Some("x29"),
-    entry_stack: Some(EntryStack {
-        alignment: 16,
-        residue: 0,
-    }),
-    stack_bound: Some(StackGuard {
-        register: "x28",
-        offset: 16,
-        width: 8,
-        citation: "Go internal ABI (src/cmd/compile/abi-internal.md), arm64: \"R28 | Current \
-                   goroutine | Same | Same\"; runtime/runtime2.go: `stackguard0` 16 bytes into `g`",
-    }),
-    citation: "Go internal ABI (src/cmd/compile/abi-internal.md), arm64: \"R29 | Frame pointer \
-               | Same | Same\"; it defines no red zone; arm64: \"The stack pointer, RSP, grows down and is always aligned to 16 bytes\"",
-    ..GO_AMD64
-};
-
-/// Go's stack-based ABI0: results come back in the caller's frame, where no boundary reads them.
-const GO_ABI0_REFUSED: &str = "Go ABI0 returns results on the stack, which no call boundary states";
-
-const GO_AMD64_ABI0: CallingConvention = CallingConvention {
-    name: "golang_abi0",
-    prototype: Some(("golang", "abi0")),
-    refused: Some(GO_ABI0_REFUSED),
-    ..GO_AMD64
-};
-
-const GO_ARM64_ABI0: CallingConvention = CallingConvention {
-    name: "golang_abi0",
-    prototype: Some(("golang", "abi0")),
-    refused: Some(GO_ABI0_REFUSED),
-    ..GO_ARM64
-};
-
-/// The convention a Go function uses, by the toolchain's version (`None` where the program
-/// states none: build information predates Go 1.13, so ABI0).
-///
-/// Go 1.17 release notes: register-based arguments and results "enabled for Linux, macOS, and
-/// Windows on the 64-bit x86 architecture"; Go 1.18: "64-bit ARM (`GOARCH=arm64`) [...] as
-/// well as 64-bit x86 architecture (`GOARCH=amd64`) on all operating systems".
-pub fn go_calling_convention(
-    arch: &str,
-    bits: u32,
-    platform: Platform,
-    version: Option<(u32, u32)>,
-) -> Option<&'static CallingConvention> {
-    let at_least = |minor: u32| version.is_some_and(|version| version >= (1, minor));
-    let first_systems = matches!(
-        platform,
-        Platform::Linux | Platform::Darwin | Platform::Windows
-    );
-    match (crate::family(arch), bits) {
-        (Some("x86"), 64) if at_least(18) || at_least(17) && first_systems => Some(&GO_AMD64),
-        (Some("x86"), 64) => Some(&GO_AMD64_ABI0),
-        (Some("arm"), 64) if at_least(18) => Some(&GO_ARM64),
-        (Some("arm"), 64) => Some(&GO_ARM64_ABI0),
-        _ => None,
-    }
-}
-
-const GO_UNSTATED_REFUSED: &str = "the toolchain states no function's ABI: an assembly body keeps ABI0, which pclntab marks from Go 1.18";
-
-/// A Go function under a register-based toolchain whose pclntab marks no function as assembly:
-/// it runs ABIInternal or ABI0, and nothing the container holds says which.
-const GO_AMD64_UNSTATED: CallingConvention = CallingConvention {
-    refused: Some(GO_UNSTATED_REFUSED),
-    ..GO_AMD64
-};
-
-const GO_ARM64_UNSTATED: CallingConvention = CallingConvention {
-    refused: Some(GO_UNSTATED_REFUSED),
-    ..GO_ARM64
-};
-
-/// The register-based Go convention, refusing: for a function whose ABI the toolchain does not state.
-pub fn go_unstated_convention(arch: &str, bits: u32) -> Option<&'static CallingConvention> {
-    match (crate::family(arch), bits) {
-        (Some("x86"), 64) => Some(&GO_AMD64_UNSTATED),
-        (Some("arm"), 64) => Some(&GO_ARM64_UNSTATED),
-        _ => None,
-    }
-}
-
-/// Go's stack-based ABI0 on this architecture: what an assembly function keeps under a toolchain
-/// whose compiled functions use ABIInternal.
-pub fn go_abi0_convention(arch: &str, bits: u32) -> Option<&'static CallingConvention> {
-    match (crate::family(arch), bits) {
-        (Some("x86"), 64) => Some(&GO_AMD64_ABI0),
-        (Some("arm"), 64) => Some(&GO_ARM64_ABI0),
-        _ => None,
-    }
-}
-
-/// The default calling convention a program for this architecture and
-/// platform runs under.
-pub fn calling_convention(
-    arch: &str,
-    bits: u32,
-    platform: Platform,
-) -> Option<&'static CallingConvention> {
-    match (crate::family(arch), bits, platform) {
-        (Some("x86"), 64, Platform::Windows) => Some(&MICROSOFT_X64),
-        (Some("x86"), 64, _) => Some(&SYSTEM_V_AMD64),
-        (Some("x86"), 32, _) => Some(&I386_CDECL),
-        (Some("arm"), 64, Platform::Darwin) => Some(&AAPCS64_DARWIN),
-        (Some("arm"), 64, _) => Some(&AAPCS64),
-        (Some("arm"), 32, _) => Some(&AAPCS32),
-        (Some("riscv"), 64, _) => Some(&RISCV_LP64),
-        _ => None,
-    }
-}
-
 /// The direction flag, which every x86 psABI requires clear on entry to and
 /// return from a function: a conforming callee hands it back as it found it.
 const X86_DIRECTION_FLAG: [PlatformRegister; 1] = [PlatformRegister {
@@ -507,19 +242,15 @@ pub fn architecture_registers(arch: &str) -> &'static [PlatformRegister] {
 /// program runs at. A platform the table does not know gets nothing, which
 /// costs precision -- a reserved register reads as clobbered by every call --
 /// and never soundness.
-pub fn platform_registers(
-    arch: &str,
-    bits: u32,
-    platform: Platform,
-) -> &'static [PlatformRegister] {
-    match (crate::family(arch), bits, platform) {
-        (Some("x86"), 64, Platform::Linux) => &X86_64_SYSV_LINUX,
+pub fn platform_registers(arch: &str, bits: u32, kernel: Kernel) -> &'static [PlatformRegister] {
+    match (crate::family(arch), bits, kernel) {
+        (Some("x86"), 64, Kernel::Linux) => &X86_64_SYSV_LINUX,
         // Darwin follows the psABI for x86-64 but keeps its thread pointer in
         // %gs, which no document this table can cite states.
-        (Some("x86"), 64, Platform::Darwin) => &X86_64_SYSV_CONTROL,
-        (Some("x86"), 32, Platform::Linux) => &I386_SYSV_LINUX,
-        (Some("arm"), 64, Platform::Linux) => &AARCH64_ELF,
-        (Some("arm"), 64, Platform::Darwin) => &AARCH64_DARWIN,
+        (Some("x86"), 64, Kernel::Darwin) => &X86_64_SYSV_CONTROL,
+        (Some("x86"), 32, Kernel::Linux) => &I386_SYSV_LINUX,
+        (Some("arm"), 64, Kernel::Linux) => &AARCH64_ELF,
+        (Some("arm"), 64, Kernel::Darwin) => &AARCH64_DARWIN,
         _ => &[],
     }
 }
@@ -528,137 +259,75 @@ pub fn platform_registers(
 mod tests {
     use super::*;
 
-    /// x86-64's call pushes a return address onto a 16-byte-aligned stack; AArch64's pushes none.
-    #[test]
-    fn a_convention_states_the_entry_stack_pointer_s_alignment() {
-        let entry = |arch, bits, platform| {
-            calling_convention(arch, bits, platform).and_then(|row| row.entry_stack)
-        };
-        let stack = |alignment, residue| Some(EntryStack { alignment, residue });
-        assert_eq!(entry("x86", 64, Platform::Linux), stack(16, 8));
-        assert_eq!(entry("x86", 64, Platform::Windows), stack(16, 8));
-        assert_eq!(entry("arm", 64, Platform::Linux), stack(16, 0));
-        assert_eq!(
-            go_calling_convention("x86", 64, Platform::Linux, Some((1, 20)))
-                .and_then(|row| row.entry_stack),
-            stack(8, 0)
-        );
-    }
-
-    /// The register ABI arrived in Go 1.17 on three amd64 ports and in 1.18 everywhere else.
-    #[test]
-    fn a_go_function_s_convention_follows_its_toolchain() {
-        let name = |arch, platform, version| {
-            go_calling_convention(arch, 64, platform, version).map(|row| row.name)
-        };
-        assert_eq!(name("x86", Platform::Linux, Some((1, 17))), Some("golang"));
-        assert_eq!(
-            name("x86", Platform::Unknown, Some((1, 17))),
-            Some("golang_abi0")
-        );
-        assert_eq!(
-            name("x86", Platform::Unknown, Some((1, 18))),
-            Some("golang")
-        );
-        assert_eq!(
-            name("x86", Platform::Linux, Some((1, 14))),
-            Some("golang_abi0")
-        );
-        assert_eq!(name("x86", Platform::Linux, None), Some("golang_abi0"));
-        assert_eq!(
-            name("arm", Platform::Darwin, Some((1, 17))),
-            Some("golang_abi0")
-        );
-        assert_eq!(name("arm", Platform::Darwin, Some((1, 21))), Some("golang"));
-        assert_eq!(name("riscv", Platform::Linux, Some((1, 21))), None);
-        let abi0 = go_calling_convention("x86", 64, Platform::Linux, None).expect("ABI0");
-        assert!(abi0.refused.is_some());
-    }
-
-    fn duty(arch: &str, bits: u32, platform: Platform, register: &str) -> Option<RegisterDuty> {
-        platform_registers(arch, bits, platform)
+    fn duty(arch: &str, bits: u32, kernel: Kernel, register: &str) -> Option<RegisterDuty> {
+        platform_registers(arch, bits, kernel)
             .iter()
             .find(|row| row.register == register)
             .map(|row| row.duty)
-    }
-
-    /// What no compiler specification states is the platform's: the red
-    /// zone is System V's alone among x86-64 ABIs, and only Apple's arm64 ABI
-    /// passes a variadic tail on the stack from its first argument.
-    #[test]
-    fn each_platform_states_its_own_convention() {
-        let x64 = |platform| calling_convention("x86-64", 64, platform).expect("a convention");
-        assert_eq!(x64(Platform::Linux).name, "amd64");
-        assert_eq!(x64(Platform::Linux).red_zone_bytes, 128);
-        assert_eq!(x64(Platform::Darwin).red_zone_bytes, 128);
-        assert_eq!(x64(Platform::Windows).name, "ms");
-        assert_eq!(x64(Platform::Windows).red_zone_bytes, 0);
-        let arm64 = |platform| calling_convention("aarch64", 64, platform).expect("a convention");
-        assert_eq!(
-            arm64(Platform::Linux).register_save_area,
-            Some(RegisterSaveArea {
-                anchor: SaveAreaAnchor::End,
-                offset_field: 16,
-                offset_width: 4,
-                stack_field: -8,
-            })
-        );
-        assert_eq!(arm64(Platform::Darwin).register_save_area, None);
-        assert_eq!(
-            x64(Platform::Linux).register_save_area,
-            Some(RegisterSaveArea {
-                anchor: SaveAreaAnchor::Base,
-                offset_field: -16,
-                offset_width: 4,
-                stack_field: -8,
-            })
-        );
-        assert_eq!(x64(Platform::Windows).register_save_area, None);
-        assert_eq!(arm64(Platform::Darwin).name, "arm64");
-        assert!(calling_convention("mips", 32, Platform::Linux).is_none());
     }
 
     /// Each platform names the register its thread pointer lives in, and no other platform's.
     #[test]
     fn each_platform_reserves_its_own_thread_pointer() {
         assert_eq!(
-            duty("x86-64", 64, Platform::Linux, "fs_base"),
+            duty("x86-64", 64, Kernel::Linux, "fs_base"),
             Some(RegisterDuty::SystemReserved)
         );
         assert_eq!(
-            duty("x86", 32, Platform::Linux, "gs_base"),
+            duty("x86", 32, Kernel::Linux, "gs_base"),
             Some(RegisterDuty::SystemReserved)
         );
         assert_eq!(
-            duty("aarch64", 64, Platform::Linux, "tpidr_el0"),
+            duty("aarch64", 64, Kernel::Linux, "tpidr_el0"),
             Some(RegisterDuty::SystemReserved)
         );
         assert_eq!(
-            duty("arm64", 64, Platform::Darwin, "x18"),
+            duty("arm64", 64, Kernel::Darwin, "x18"),
             Some(RegisterDuty::SystemReserved)
         );
         // x18 is an ordinary temporary on Linux, and fs means nothing on i386.
-        assert_eq!(duty("aarch64", 64, Platform::Linux, "x18"), None);
-        assert_eq!(duty("x86", 32, Platform::Linux, "fs_base"), None);
-        assert!(platform_registers("x86-64", 64, Platform::Unknown).is_empty());
+        assert_eq!(duty("aarch64", 64, Kernel::Linux, "x18"), None);
+        assert_eq!(duty("x86", 32, Kernel::Linux, "fs_base"), None);
+        assert!(platform_registers("x86-64", 64, Kernel::Unknown).is_empty());
         assert!(
-            platform_registers("x86-64", 64, Platform::Linux)
+            platform_registers("x86-64", 64, Kernel::Linux)
                 .iter()
                 .all(|row| !row.citation.is_empty())
         );
+    }
+
+    /// Bionic's x86 canary sits where glibc's does, under its own citation; its AArch64 one is a global.
+    #[test]
+    fn bionic_states_its_x86_guard_slot() {
+        let slot = |arch: &str, bits: u32| match guard_row(arch, bits, CLibrary::Bionic) {
+            Some(GuardRow::ThreadSlot(guard)) => Some(*guard),
+            _ => None,
+        };
+        let wide = slot("x86-64", 64).expect("bionic x86-64 states a slot");
+        assert_eq!(
+            (wide.register.0, wide.offset, wide.width),
+            ("fs_base", 0x28, 8)
+        );
+        let narrow = slot("x86", 32).expect("bionic i386 states a slot");
+        assert_eq!(
+            (narrow.register.0, narrow.offset, narrow.width),
+            ("gs_base", 0x14, 4)
+        );
+        assert!(wide.citation.contains("bionic") && narrow.citation.contains("bionic"));
+        assert_eq!(slot("aarch64", 64), None);
     }
 
     /// MXCSR's control bits are callee-saved and its status bits are not, so of
     /// its four bytes only the one holding nothing but control bits is claimed.
     #[test]
     fn a_partly_callee_saved_register_claims_only_its_whole_bytes() {
-        let mxcsr = platform_registers("x86-64", 64, Platform::Linux)
+        let mxcsr = platform_registers("x86-64", 64, Kernel::Linux)
             .iter()
             .find(|row| row.register == "mxcsr")
             .expect("mxcsr row");
         assert_eq!(mxcsr.duty, RegisterDuty::CalleeSaved);
         assert_eq!(mxcsr.covered_bytes(4).collect::<Vec<_>>(), [1]);
-        let cwd = platform_registers("x86-64", 64, Platform::Linux)
+        let cwd = platform_registers("x86-64", 64, Kernel::Linux)
             .iter()
             .find(|row| row.register == "cwd")
             .expect("cwd row");

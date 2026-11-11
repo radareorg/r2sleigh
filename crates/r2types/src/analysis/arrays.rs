@@ -12,7 +12,7 @@ pub(crate) struct ScalarArrayAccessCertificates {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ExternalLayoutFieldAccess {
     pub(crate) name: String,
-    pub(crate) ty: Option<String>,
+    pub(crate) ty: Option<CTypeLike>,
 }
 
 pub(crate) fn external_layout_field_access_for_offset(
@@ -77,11 +77,8 @@ pub(crate) fn external_field_access_for_offset(
         return None;
     }
     let rel = offset - field.offset;
-    let field_ty = field.ty.as_deref();
-    if let Some(CTypeLike::Array(inner, len)) =
-        field_ty.and_then(|ty| parse_c_type_like(ty, ptr_bits))
-    {
-        let elem_size = estimate_type_like_size_bytes(&inner, ptr_bits)?;
+    if let Some(CTypeLike::Array(inner, len)) = field.ty.as_ref().map(CTypeLike::unaliased) {
+        let elem_size = estimate_type_like_size_bytes(inner, ptr_bits)?;
         if elem_size == 0 || !rel.is_multiple_of(elem_size) || access_width > elem_size {
             return None;
         }
@@ -91,7 +88,7 @@ pub(crate) fn external_field_access_for_offset(
         }
         return Some(ExternalLayoutFieldAccess {
             name: format!("{}[{index}]", field.name),
-            ty: Some(render_signature_type(&inner, ptr_bits)),
+            ty: Some(inner.as_ref().clone()),
         });
     }
 
@@ -128,14 +125,13 @@ pub(crate) fn scalar_element_stride(ty: &CTypeLike, ptr_bits: u32) -> Option<u64
         CTypeLike::Bool | CTypeLike::Int { .. } | CTypeLike::Float(_) => {
             estimate_type_like_size_bytes(ty, ptr_bits).filter(|size| *size > 0)
         }
-        CTypeLike::Typedef { name, .. } => {
-            let normalized = normalize_external_type_name(name);
-            parse_c_type_like(&normalized, ptr_bits).and_then(|parsed| match parsed {
-                CTypeLike::Bool | CTypeLike::Int { .. } | CTypeLike::Float(_) => {
-                    estimate_type_like_size_bytes(&parsed, ptr_bits).filter(|size| *size > 0)
+        CTypeLike::Typedef { name, ty } => {
+            match crate::convert::typedef_target(name, ty, ptr_bits) {
+                Some(target @ (CTypeLike::Bool | CTypeLike::Int { .. } | CTypeLike::Float(_))) => {
+                    estimate_type_like_size_bytes(&target, ptr_bits).filter(|size| *size > 0)
                 }
                 _ => None,
-            })
+            }
         }
         CTypeLike::Void
         | CTypeLike::Unknown
@@ -209,7 +205,7 @@ pub(crate) fn external_aggregate_size(
                 .filter_map(|field| {
                     field
                         .ty
-                        .as_deref()
+                        .as_ref()
                         .map(|ty| estimate_c_type_size_bytes(ty, ptr_bits))
                 })
                 .max()
@@ -224,8 +220,10 @@ pub(crate) fn external_struct_size(st: &ExternalStruct, ptr_bits: u32) -> Option
     st.fields
         .values()
         .filter_map(|field| {
-            let ty = field.ty.as_deref().unwrap_or("uint8_t");
-            let width = estimate_c_type_size_bytes(ty, ptr_bits).max(1);
+            let width = field
+                .ty
+                .as_ref()
+                .map_or(1, |ty| estimate_c_type_size_bytes(ty, ptr_bits));
             field.offset.checked_add(width)
         })
         .max()

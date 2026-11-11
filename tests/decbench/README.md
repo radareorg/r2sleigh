@@ -150,7 +150,8 @@ into the tree (the scores it adds to a checkpoint).
   better/worse/newly-perfect counts (`--paired`), the goto/residual split.
 * `type_causes.py`: one verdict per DWARF variable from DecBench's own matcher
   (asserted equal to the stored `type_match`), grouped by cause with the number of
-  functions each cause alone keeps imperfect; `universe` says why a function has no row.
+  functions each cause alone keeps imperfect; `universe` says why a function has no row;
+  `widths rows.jsonl` splits `fp:integer_width` and `fp:pointer_as_integer` between parameters and locals.
 * `ged_causes.py`, `counterfactual_ged.py`: block-graph deltas of the not-GED-perfect
   functions, and a re-score after a respelling, to bound what a renderer change gains.
 * `mined_set.py`: the mined-set comparison of two r2s builds (next section).

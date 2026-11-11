@@ -168,6 +168,7 @@ PDDJ_FIELDS = {
     "variables": list,
     "lines": list,
     "links": list,
+    "residuals": list,
 }
 PROOF_COUNTERS = ("rendered", "elided", "refused", "residual", "split",
                   "compiler_inserted", "assumed")
@@ -202,7 +203,7 @@ def contract_problems(record: dict, address: int | None = None) -> list[str]:
     proof = record.get("proof")
     if isinstance(proof, dict) and not refused:
         for counter in PROOF_COUNTERS:
-            if not isinstance(proof.get(counter), int):
+            if not _count(proof.get(counter)):
                 problems.append(f"proof.{counter} is not a count")
     for link in record.get("links") or []:
         if not isinstance(link, dict) or not isinstance(link.get("ident"), str):
@@ -221,6 +222,11 @@ def contract_problems(record: dict, address: int | None = None) -> list[str]:
                 and all(_count(a) for a in entry["addrs"])):
             problems.append(f"`lines` entry {entry!r:.80} is not a line of `code` with its "
                             "addresses")
+            break
+    residuals = record.get("residuals")
+    for entry in residuals if isinstance(residuals, list) else []:
+        if not (isinstance(entry, dict) and _count(entry.get("site")) and isinstance(entry.get("cause"), str)):
+            problems.append(f"`residuals` entry {entry!r:.80} is not a site with a cause")
             break
     variables = record.get("variables")
     for entry in variables if isinstance(variables, list) else []:

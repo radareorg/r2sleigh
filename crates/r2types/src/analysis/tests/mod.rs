@@ -13,30 +13,24 @@ pub(super) fn spelled_signature(analysis: &DerivedTypeAnalysis) -> InferredSigna
         return InferredSignature {
             function_name: String::new(),
             signature: String::new(),
-            ret_type: "void".to_string(),
+            ret_type: Some(parse_test_type("void", 64)),
             params: Vec::new(),
             callconv: String::new(),
             arch: String::new(),
         };
     };
-    let spelled = |ty: &CTypeLike| crate::render_signature_type(ty, 64);
     InferredSignature {
         function_name: String::new(),
         signature: String::new(),
-        ret_type: signature
-            .ret_type
-            .as_ref()
-            .map_or_else(|| "void".to_string(), spelled),
+        ret_type: Some(signature.ret_type.clone().unwrap_or(CTypeLike::Void)),
         params: (signature.params.iter().enumerate())
             .map(|(index, param)| InferredSignatureParam {
                 name: match param.name.trim().is_empty() {
                     true => format!("arg{}", index + 1),
                     false => param.name.clone(),
                 },
-                param_type: param
-                    .ty
-                    .as_ref()
-                    .map_or_else(|| "void *".to_string(), spelled),
+                ty: (param.ty.clone())
+                    .unwrap_or_else(|| CTypeLike::Pointer(Box::new(CTypeLike::Void))),
             })
             .collect(),
         callconv: String::new(),
@@ -53,7 +47,17 @@ pub(super) fn system_v_argument_registers() -> Vec<String> {
 }
 
 fn parse_test_type(spelling: &str, ptr_bits: u32) -> CTypeLike {
-    parse_c_type_like(spelling, ptr_bits).expect("test type spelling should parse")
+    crate::convert::parse_c_type_like(spelling, ptr_bits).expect("test type spelling should parse")
+}
+
+/// How an inferred signature's type spells.
+fn spelled(ty: &CTypeLike) -> String {
+    render_signature_type(ty, 64)
+}
+
+/// How an inferred signature's result spells: nothing where undecided.
+fn spelled_ret(ty: &Option<CTypeLike>) -> String {
+    ty.as_ref().map(spelled).unwrap_or_default()
 }
 
 #[test]
@@ -117,9 +121,9 @@ fn storage_of_every_width_is_a_type_c_spells() {
         (32, Signedness::Signed, "struct r2sleigh_bits_256"),
     ] {
         let ty = CTypeLike::machine_storage(bytes * 8, signedness);
-        assert_eq!(render_c_type_like(&ty), spelling);
+        assert_eq!(crate::convert::render_c_type_like(&ty), spelling);
         assert_eq!(render_signature_type(&ty, 64), spelling);
-        assert_eq!(parse_c_type_like(spelling, 64), Some(ty));
+        assert_eq!(crate::convert::parse_c_type_like(spelling, 64), Some(ty));
     }
     // A carrier states a width and nothing else, so any type outranks it. A
     // 128-bit integer is an integer, like the narrower ones.

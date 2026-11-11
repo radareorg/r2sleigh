@@ -48,30 +48,6 @@ fn tail_slot_identity_unifies_direct_ram_and_loaded_register_targets() {
     assert!(identity_of(&[R2ILBlock::new(0x2000, 0x14)], &tail,).is_none());
 }
 
-#[test]
-fn a_format_parameter_is_named_and_is_a_char_pointer() {
-    use r2source::SourceSignatureParameter as Parameter;
-    // radare2 spells the role `format` for the printf family and `fmt` for
-    // err/warn, and both count conversion specifiers the same way.
-    for name in ["format", "fmt", "__format", "format_string", "fmtstr"] {
-        assert!(parameter_names_a_format_string(&Parameter::new(
-            Some(name),
-            Some("const char *")
-        )));
-    }
-    // `execl(const char *path, const char *arg, ...)` is the reason the
-    // name is required: nothing counts specifiers from its last parameter.
-    assert!(!parameter_names_a_format_string(&Parameter::new(
-        Some("arg"),
-        Some("const char *")
-    )));
-    // And the type is the guard on the name: `ioctl`'s request is not one.
-    assert!(!parameter_names_a_format_string(&Parameter::new(
-        Some("fmt"),
-        Some("unsigned long")
-    )));
-}
-
 /// One call, two calls, three: the stack pointer is where it started.
 ///
 /// Sleigh lifts an x86-64 `call` as `RSP = RSP - 8` and the store of the
@@ -139,7 +115,7 @@ fn a_call_leaves_the_stack_pointer_where_the_convention_says_it_found_it() {
 
     let interface = SourceFunctionInterface::new_exact(
         b"call-chain-stack-pointer".to_vec(),
-        "sysv",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [],
@@ -392,7 +368,7 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
     blocks[0].stamp_instruction(0, 0x1600);
     let function_interface = SourceFunctionInterface::new_exact(
         revision.to_vec(),
-        "aapcs64",
+        r2source::ConventionId::Aapcs64,
         [SourceAbiParameterSpec::new(0, argument_storage)],
         SourceFunctionReturn::Void,
         [],
@@ -404,13 +380,11 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
         revision.to_vec(),
         SourceCallSiteIdentity::new(0x1600, CanonicalStorageId::from_varnode(&target)),
         true,
-        "aapcs64",
+        r2source::ConventionId::Aapcs64,
         [SourceCallArgumentSpec::new(0, argument_storage)],
         false,
         false,
-        SourceCallResult::Register {
-            storage: argument_storage,
-        },
+        SourceCallResult::register(argument_storage),
     )
     .expect("exact callsite interface");
 
@@ -433,12 +407,16 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
         .parameters
         .get(&0)
         .expect("source formal parameter fact");
-    assert_eq!(parameter.graph_storage, argument_storage);
-    assert_eq!(prepared.graph().def_inst(parameter.value), None);
+    assert_eq!(
+        parameter.register().map(|(_, lane)| lane),
+        Some(argument_storage)
+    );
+    let parameter_value = parameter.value().expect("a register formal");
+    assert_eq!(prepared.graph().def_inst(parameter_value), None);
     assert_eq!(
         prepared
             .graph()
-            .value(parameter.value)
+            .value(parameter_value)
             .and_then(|value| prepared
                 .decompile_prep_facts()
                 .formal_parameter_of(value.id)),
@@ -459,23 +437,23 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
                 index: 0,
                 storage: argument_storage,
             },
-            value: SourceCallArgumentValue::Value(parameter.value),
+            value: SourceCallArgumentValue::Value(parameter_value),
             lane_of: None,
         }]
     );
     let certificate = prepared
         .sole_callsite_certificate_in_block(0x1600)
         .expect("prepared callsite certificate");
-    assert_eq!(certificate.argument_values, [parameter.value]);
+    assert_eq!(certificate.argument_values, [parameter_value]);
     assert_eq!(certificate.argument_certificates.len(), 1);
-    assert_eq!(certificate.argument_certificates[0].value, parameter.value);
+    assert_eq!(certificate.argument_certificates[0].value, parameter_value);
     assert_eq!(certificate.argument_certificates[0].source_inst, None);
     let obligation = prepared
         .obligations()
         .obligations_for_inst(certificate.at)
         .find(|obligation| obligation.id.kind == crate::SemanticObligationKind::CallArgument)
         .expect("call argument obligation");
-    assert_eq!(obligation.inputs, [parameter.value]);
+    assert_eq!(obligation.inputs, [parameter_value]);
 }
 
 #[test]
@@ -526,7 +504,7 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
             },
         ),
         true,
-        "aapcs64",
+        r2source::ConventionId::Aapcs64,
         [SourceCallArgumentSpec::new(0, argument_storage)],
         false,
         false,
@@ -652,9 +630,12 @@ fn a_register_an_earlier_call_clobbered_is_not_an_argument_of_the_next_call() {
             target: make_const(0, 8),
         },
     ]);
-    let convention =
-        SourceConventionSlots::new("amd64", vec![slot(8), slot(16), slot(24)], Some(slot(0)))
-            .expect("convention slots");
+    let convention = SourceConventionSlots::new(
+        r2source::ConventionId::SysVAmd64,
+        vec![slot(8), slot(16), slot(24)],
+        Some(slot(0)),
+    )
+    .expect("convention slots");
     let machine_context = SourceMachineContext::from_blocks_with_interfaces(
         std::slice::from_ref(&block),
         Some(&arch),
@@ -766,7 +747,7 @@ fn a_convention_with_no_argument_registers_reads_the_area_it_passes_on() {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"convention-stack-argument".to_vec(),
-        "test-stack-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [],
@@ -774,9 +755,10 @@ fn a_convention_with_no_argument_registers_reads_the_area_it_passes_on() {
     .and_then(|interface| interface.with_return_address_storage(storage(16, 8)))
     .and_then(|interface| interface.with_stack_pointer_storage(storage(32, 8)))
     .expect("caller interface");
-    let convention = SourceConventionSlots::new("test-stack-abi", [], Some(storage(0, 8)))
-        .expect("stack-only convention")
-        .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(0, 8));
+    let convention =
+        SourceConventionSlots::new(r2source::ConventionId::SysVAmd64, [], Some(storage(0, 8)))
+            .expect("stack-only convention")
+            .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(0, 8));
     let artifact = SsaArtifact::for_decompile_with(
         &[block],
         DecompileInputs {
@@ -851,7 +833,7 @@ fn a_narrow_formal_is_the_callers_lane_and_the_whole_register_keeps_the_callers_
     }
     let interface = SourceFunctionInterface::new_exact(
         b"narrow-formal".to_vec(),
-        "aapcs64",
+        r2source::ConventionId::Aapcs64,
         [SourceAbiParameterSpec::new(0, lane)],
         SourceFunctionReturn::Void,
         [],

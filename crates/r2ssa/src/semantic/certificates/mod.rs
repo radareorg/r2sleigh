@@ -256,6 +256,8 @@ pub enum CallerSlotSupply {
     /// Caller storage outside a placed argument area: the return address, or any slot while the
     /// return address's place, and so the area's, is unproven.
     HeldFromEntry,
+    /// The stack formal at this index, read whole at its home (`FormalHome::Frame`).
+    Formal(u32),
 }
 
 /// A caller's stack slot this body reads and never writes (doc/adr-frame-model.md, "Caller slots").
@@ -915,6 +917,9 @@ pub(crate) fn collect_prepared_function_certificates(
         collect_machine_return_control_certificates(
             boundaries, graph, objects, structured, unobserved,
         );
+    let inserted = (function.compiler_inserted().iter())
+        .filter_map(|op| graph.inst_for_op(op))
+        .collect::<crate::dense::IdSet<_>>();
     let stack_geometry = collect_stack_geometry_certificate(
         boundaries,
         prep,
@@ -927,6 +932,7 @@ pub(crate) fn collect_prepared_function_certificates(
             unobserved,
             machine_context,
             declared_slots,
+            inserted: &inserted,
         },
     );
     let unbounded_index = unbounded_index_objects(values, objects, structured);
@@ -1433,12 +1439,18 @@ pub(crate) fn exact_register_call_arguments(
         let Ok(index) = usize::try_from(index) else {
             give_up!("slot index {} is out of range", index);
         };
-        // A lane value stands for the wider root write the slot holds, where the views prove it.
+        // A lane value stands for the wider root write the slot holds, where the views prove it;
+        // the lane is the value's own width (the slot's, or the one its callee holds).
         let carrier = argument.lane_of.unwrap_or(value);
+        let lane = CanonicalStorageId {
+            size: graph.var(value).size,
+            ..storage
+        };
         if argument.lane_of.is_some()
             && views.and_then(|views| {
-                crate::semantic::shared::proven_low_lane(views, graph, carrier, storage)
+                crate::semantic::shared::proven_low_lane(views, graph, carrier, lane)
             }) != Some(value)
+            && !crate::semantic::shared::is_entry_lane_of(graph, value, carrier)
         {
             give_up!(
                 "slot {} value {:?} is not the low lane of {:?}",
@@ -1522,8 +1534,24 @@ fn unobserved_compiler_inserted(
         .iter()
         .filter_map(|op| graph.inst_for_op(op))
         .collect::<crate::dense::IdSet<_>>();
+    // A return past a decided check's passing edge reads its difference as 0 (ADR 3.8.4).
+    let zero = |certificate: &&ReturnValueCertificate| {
+        let block = graph
+            .inst(certificate.at)
+            .and_then(|at| graph.block(at.block));
+        let returned = crate::constant::root_of(graph, certificate.value);
+        certificate.high.is_none()
+            && block.is_some_and(|block| {
+                (function.passing_differences().iter()).any(|(difference, pass)| {
+                    graph.value_of(*difference) == Some(returned)
+                        && function.dominates(*pass, block.addr)
+                })
+            })
+    };
+    let reading = returns.iter().filter(|certificate| !zero(certificate));
+    let returns = reading.cloned().collect::<Vec<_>>();
     loop {
-        let observed = observed_values(graph, returns, &inserted);
+        let observed = observed_values(graph, &returns, &inserted);
         let released = inserted
             .iter()
             .filter(|inst| {

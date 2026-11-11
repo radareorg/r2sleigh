@@ -8,7 +8,8 @@ use r2il::{
     ArchSpec, Endianness, RegisterBitSlice, RegisterProjection, RegisterProjectionDisposition,
     RegisterProjectionRefusal, RegisterStorage, SpaceId,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::BTreeMap;
 
 use crate::LiftError;
 use crate::context::LiftContext;
@@ -278,8 +279,8 @@ pub(crate) fn extract_address_space_map(
     default_space: AddressSpaceId,
 ) -> Result<SpaceMap, LiftError> {
     let mut saw_default_space = false;
-    let mut source_ids = HashSet::new();
-    let mut target_ids = HashSet::new();
+    let mut source_ids = FxHashSet::default();
+    let mut target_ids = FxHashSet::default();
     let mut space_map = SpaceMap::default();
 
     for space in spaces {
@@ -370,7 +371,7 @@ pub(crate) fn extract_architecture(
     let register_endianness_by_source_space = spaces
         .iter()
         .map(|space| (space.id, space.big_endian))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
     let mut register_geometry = Vec::new();
     for (varnode, name) in sleigh.register_name_map() {
         let size = u32::try_from(varnode.size).map_err(|_| {
@@ -488,7 +489,7 @@ pub fn build_arch_spec(
 pub(crate) fn apply_processor_spec(arch: &mut ArchSpec, pspec_data: &str) {
     arch.program_counter = processor_spec_program_counter(pspec_data);
     arch.tracked_entry_values = processor_spec_tracked_values(pspec_data);
-    let hidden: HashSet<String> = processor_spec_hidden_registers(pspec_data)
+    let hidden: FxHashSet<String> = processor_spec_hidden_registers(pspec_data)
         .into_iter()
         .map(|name| name.to_ascii_lowercase())
         .collect();

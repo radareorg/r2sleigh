@@ -92,6 +92,8 @@ pub struct RenderedCall {
     /// Where the callee resolves in the program, where a declaration states it.
     pub addr: Option<u64>,
     pub arguments: usize,
+    /// How many arguments are slots the callee ignores, each its typed residual (D165).
+    pub ignored: usize,
     /// Whether the declaration the call is checked against takes a variadic tail.
     pub variadic: bool,
 }
@@ -113,6 +115,7 @@ pub(crate) fn calls(func: &CFunction) -> Vec<RenderedCall> {
                 callee: callee.map(str::to_owned),
                 addr: declared.and_then(|declaration| declaration.address),
                 arguments: args.len(),
+                ignored: args.iter().filter(|arg| is_ignored_slot(arg)).count(),
                 variadic: declared.is_some_and(|declaration| declaration.variadic),
             };
         match callee.unobserved() {
@@ -130,6 +133,11 @@ pub(crate) fn calls(func: &CFunction) -> Vec<RenderedCall> {
         }
     });
     found
+}
+
+/// Whether an argument is the typed residual of a slot its callee ignores.
+fn is_ignored_slot(arg: &CExpr) -> bool {
+    matches!(arg.unobserved(), CExpr::Cast { ty, .. } if crate::prelude::is_unread_slot(ty))
 }
 
 /// Every name the function declares: its parameters in order, then each

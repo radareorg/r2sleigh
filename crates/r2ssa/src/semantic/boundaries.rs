@@ -96,10 +96,9 @@ pub(crate) fn variadic_callsite_argument_count(
         })?;
     let consumed = crate::printf::printf_consumed_arguments(format)
         .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
-    // A floating operand travels in the convention's floating sequence, which
-    // this recovery does not walk; where the whole tail is on the stack it
-    // sits in the same slots as any other operand.
-    if consumed.any_floating && !variadic_tail_on_stack(machine_context) {
+    // A floating operand travels in the floating sequence, which this recovery walks only where
+    // it shares positions with the integer one (Microsoft x64) or the tail is on the stack.
+    if consumed.any_floating && !floating_tail_placed(machine_context) {
         r2il::refusal_evidence!(
             "variadic-format-literal",
             "format argument {format_argument_index} at {format_literal_address:#x} consumes a floating operand, which this recovery cannot place"
@@ -107,6 +106,7 @@ pub(crate) fn variadic_callsite_argument_count(
         return Err(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument);
     }
     let format_consumed_argument_count = consumed.count;
+    let floating_operands = consumed.floating;
     let total_argument_count = interface
         .arguments()
         .len()
@@ -119,6 +119,7 @@ pub(crate) fn variadic_callsite_argument_count(
             format_argument_index,
             format_literal_address,
             format_consumed_argument_count,
+            floating_operands,
         }),
         total_argument_count,
     })
@@ -370,12 +371,18 @@ impl FormatForwardingLookup<'_> {
     }
 }
 
-/// Whether the convention puts every variadic operand on the stack, where a
-/// floating one is placed like any other.
-pub(crate) fn variadic_tail_on_stack(machine_context: &SourceMachineContext) -> bool {
+/// Whether the convention puts every variadic operand on the stack, where a floating one is placed
+/// like any other.
+fn variadic_tail_on_stack(machine_context: &SourceMachineContext) -> bool {
     machine_context
         .convention_slots()
         .is_some_and(r2source::SourceConventionSlots::variadic_tail_on_stack)
+}
+
+/// Whether the convention places a floating tail operand: on the stack, or at a shared position.
+fn floating_tail_placed(machine_context: &SourceMachineContext) -> bool {
+    variadic_tail_on_stack(machine_context)
+        || (machine_context.convention()).is_some_and(r2source::ConventionModel::shares_positions)
 }
 
 /// Prove a merged variadic count from formats that agree.
@@ -399,6 +406,7 @@ pub(crate) fn merged_format_literal_argument_count(
         return Err(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral);
     }
     let mut agreed: Option<usize> = None;
+    let mut classes: Option<u64> = None;
     for address in &addresses {
         let Some(format) = machine_context.source_string_literal(*address) else {
             r2il::refusal_evidence!(
@@ -410,10 +418,18 @@ pub(crate) fn merged_format_literal_argument_count(
         };
         let consumed = crate::printf::printf_consumed_arguments(format)
             .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
-        if consumed.any_floating && !variadic_tail_on_stack(machine_context) {
+        if consumed.any_floating && !floating_tail_placed(machine_context) {
             r2il::refusal_evidence!(
                 "variadic-format-literal",
                 "merged format argument {format_argument_index} reaches {address:#x}, which consumes a floating operand"
+            );
+            return Err(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument);
+        }
+        // Formats whose floating operands differ pass different carriers on their paths.
+        if *classes.get_or_insert(consumed.floating) != consumed.floating {
+            r2il::refusal_evidence!(
+                "variadic-format-literal",
+                "merged format argument {format_argument_index} reaches formats whose floating operands differ"
             );
             return Err(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument);
         }
@@ -457,6 +473,7 @@ pub(crate) fn merged_format_literal_argument_count(
             format_argument_index,
             format_literal_address,
             format_consumed_argument_count,
+            floating_operands: classes.unwrap_or(0),
         }),
         total_argument_count,
     })
@@ -485,7 +502,7 @@ pub(crate) fn variadic_callsite_arguments(
         .convention_slots()
         .ok_or(VariadicCallsiteArgumentCountRefusal::CallingConventionMismatch)?;
     let slots = convention.argument_slots();
-    if convention.calling_convention() != interface.calling_convention()
+    if convention.convention() != interface.convention()
         || interface.arguments().len() > slots.len()
         || interface
             .arguments()
@@ -558,24 +575,42 @@ pub(crate) fn variadic_callsite_arguments(
             arguments.push(argument);
             continue;
         }
-        let value = reaching_abi_argument_in_block(
-            recovery.function,
-            recovery.prep,
-            recovery.graph,
-            recovery.machine_context,
-            recovery.entry_values,
-            recovery.block_addr,
-            recovery.op_index,
-            slot,
-        )
-        .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
+        let reaching = |storage| {
+            reaching_abi_argument_in_block(
+                recovery.function,
+                recovery.prep,
+                recovery.graph,
+                recovery.machine_context,
+                recovery.entry_values,
+                recovery.block_addr,
+                recovery.op_index,
+                storage,
+            )
+            .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)
+        };
         let index = u32::try_from(position)
             .map_err(|_| VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
+        let floating = position.checked_sub(fixed).is_some_and(|operand| {
+            (evidence.format()).is_some_and(|format| format.is_floating(operand))
+        });
+        let (storage, value) = match floating {
+            true => {
+                let float = shared_float_slot(recovery.machine_context, position)?;
+                let value = reaching(float)?;
+                let same = same_bits(recovery.graph, recovery.prep, reaching(slot)?, value);
+                if !same {
+                    r2il::refusal_evidence!(
+                        "variadic-callsite-arguments",
+                        "floating operand at position {position}: {slot:?} and {float:?} are not proven equal"
+                    );
+                    return Err(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument);
+                }
+                (float, value)
+            }
+            false => (slot, reaching(slot)?),
+        };
         arguments.push(SourceCallArgumentFact {
-            slot: CallBoundarySlot::Register {
-                index,
-                storage: slot,
-            },
+            slot: CallBoundarySlot::Register { index, storage },
             value,
             lane_of: None,
         });
@@ -583,9 +618,68 @@ pub(crate) fn variadic_callsite_arguments(
     Ok(arguments)
 }
 
+/// The float alternative of a shared position (Microsoft x64), whose low lane C's operand is.
+fn shared_float_slot(
+    machine_context: &SourceMachineContext,
+    position: usize,
+) -> Result<CanonicalStorageId, VariadicCallsiteArgumentCountRefusal> {
+    (machine_context.convention())
+        .filter(|model| model.shares_positions())
+        .and_then(|model| {
+            model
+                .argument_registers(r2source::convention::SlotClass::Float)
+                .nth(position)
+        })
+        .ok_or(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument)
+}
+
+/// Whether two carriers hold the same bits in the narrower width: one root through copies, low
+/// pieces and zero extensions, or one constant (a variadic callee reads the integer register).
+fn same_bits(
+    graph: &SsaGraph,
+    prep: Option<&crate::DecompilePrepFacts>,
+    left: SourceCallArgumentValue,
+    right: SourceCallArgumentValue,
+) -> bool {
+    let (SourceCallArgumentValue::Value(left), SourceCallArgumentValue::Value(right)) =
+        (left, right)
+    else {
+        return false;
+    };
+    let size = |value: ValueId| graph.value(value).map_or(0, |value| value.var.size);
+    let width = size(left).min(size(right));
+    let (left, right) = (low_root(graph, left, width), low_root(graph, right, width));
+    if left == right {
+        return true;
+    }
+    let mask = u64::MAX >> (64 - 8 * width.clamp(1, 8));
+    let constant = |value| resolve_const_value(graph, prep, value).map(|bits| bits & mask);
+    width <= 8 && constant(left).is_some_and(|bits| constant(right) == Some(bits))
+}
+
+/// The value whose low `width` bytes `value`'s low `width` bytes are, through copies, low pieces
+/// and zero extensions of at least that width. O(`tail_count::COPIES`).
+fn low_root(graph: &SsaGraph, mut value: ValueId, width: u32) -> ValueId {
+    let size = |value: ValueId| graph.value(value).map_or(0, |value| value.var.size);
+    for _ in 0..crate::tail_count::COPIES {
+        let op = graph.def_inst(value).and_then(|inst| graph.inst(inst));
+        let next = match op.map(|inst| &inst.payload) {
+            Some(InstPayload::Op(SSAOp::Copy { src, .. }))
+            | Some(InstPayload::Op(SSAOp::Subpiece { src, offset: 0, .. }))
+            | Some(InstPayload::Op(SSAOp::IntZExt { src, .. })) => *src,
+            _ => break,
+        };
+        if size(next) < width {
+            break;
+        }
+        value = next;
+    }
+    value
+}
+
 /// What a call boundary carries when nothing knows the callee's signature.
 pub(crate) struct ConventionCallBoundary {
-    pub(crate) calling_convention: String,
+    pub(crate) convention: r2source::ConventionId,
     pub(crate) arguments: Vec<SourceCallArgumentFact>,
     /// Why the registers do not prove how many arguments the call takes; the results stand either way.
     pub(crate) unproven: Option<CallBoundaryRefusal>,
@@ -893,7 +987,7 @@ pub(crate) fn convention_call_boundary(
         let (arguments, arguments_proven) =
             stated_call_arguments(at, machine_context, count, entry_values, stack_pointer);
         return Ok(ConventionCallBoundary {
-            calling_convention: convention.calling_convention().to_string(),
+            convention: convention.convention(),
             arguments,
             unproven: (!arguments_proven).then_some(CallBoundaryRefusal::StatedArgumentUnreached {
                 count: position(count),
@@ -904,14 +998,9 @@ pub(crate) fn convention_call_boundary(
     let at_least = arity.map_or(0, crate::SourceArity::floor);
     // Whether a call returns its result in `slot`: what a call leaves there is a value, elsewhere garbage.
     let result_slot = |slot: CanonicalStorageId| {
-        machine_context
-            .abi_model()
-            .return_registers()
-            .iter()
-            .any(|register| {
-                let storage = register.storage();
-                storage.space == slot.space && storage.offset == slot.offset
-            })
+        (machine_context.function_interface().into_iter())
+            .flat_map(|interface| interface.return_kind().storages())
+            .any(|storage| storage.space == slot.space && storage.offset == slot.offset)
     };
     // Whether this function itself may take `slot` as a parameter: its interface says, and while
     // recovery has none yet, any slot the body did not write may be one it hands on.
@@ -1150,7 +1239,7 @@ pub(crate) fn convention_call_boundary(
         });
     }
     Ok(ConventionCallBoundary {
-        calling_convention: convention.calling_convention().to_string(),
+        convention: convention.convention(),
         arguments,
         unproven,
         results: results(convention),
@@ -1244,6 +1333,63 @@ fn stated_call_arguments(
     (arguments, true)
 }
 
+/// Where the callee states no result, every result lane the call kills is unstated, carried as the
+/// callee's header carries it, else in the integer lane (D201, D307; doc/adr-result-side.md).
+fn state_unstated_result(
+    boundary: &mut SourceCallBoundaryFact,
+    machine_context: &SourceMachineContext,
+    stated: Option<&crate::machine_context::CalleeStatement>,
+) {
+    if stated.is_some_and(|statement| statement.result.is_some()) {
+        return;
+    }
+    let Some(model) = machine_context.convention() else {
+        return;
+    };
+    let clobbered = machine_context.call_clobbered_carriers();
+    let shares = |one: CanonicalStorageId, other: CanonicalStorageId| {
+        one.space == other.space
+            && one.offset < other.offset + u64::from(other.size)
+            && other.offset < one.offset + u64::from(one.size)
+    };
+    boundary.unstated_lanes = (model.results.iter())
+        .map(|lane| lane.storage)
+        .filter(|lane| clobbered.iter().any(|killed| shares(*killed, *lane)))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let integer = model
+        .typed_results()
+        .integer
+        .map(|slot| r2source::SourceResultSeed {
+            slot,
+            bits: slot.size.saturating_mul(8),
+            signed: false,
+        });
+    boundary.unstated_carrier = (!boundary.unstated_lanes.is_empty())
+        .then(|| stated.and_then(|statement| statement.seed).or(integer))
+        .flatten();
+}
+
+/// The lanes a call to an unproven callee leaves `Unproven` (`recover_interface::call_lanes`).
+fn unproven_lanes(
+    machine_context: &SourceMachineContext,
+    call_site: &CallSiteFact,
+    interface: &r2source::SourceCallSiteInterface,
+) -> Box<[crate::CanonicalStorageId]> {
+    let Some(callee) = interface.exact_callee_interface() else {
+        return Box::default();
+    };
+    if callee.return_kind() != r2source::SourceFunctionReturn::Unproven {
+        return Box::default();
+    }
+    let passes =
+        (call_site.direct_target).and_then(|target| machine_context.callee_preserved(target));
+    let results = crate::recover_interface::convention_results(machine_context.convention());
+    let lanes = crate::recover_interface::call_lanes(callee, passes, &results);
+    lanes.map_or_else(Box::default, |lanes| lanes.unproven.into())
+}
+
 /// The boundary a convention built for a callee that mints no contract, beside what the callee's
 /// body `stated`, where it states anything (CalleeStatement), or why an import states nothing.
 fn adopt_convention(
@@ -1252,7 +1398,7 @@ fn adopt_convention(
     stated: Option<&crate::machine_context::CalleeStatement>,
     unstated: Option<crate::UnstatedImport>,
 ) {
-    boundary.calling_convention = Some(convention.calling_convention);
+    boundary.convention = Some(convention.convention);
     // Nothing said this callee is variadic, and the count came from the machine rather than from a
     // prototype, so every argument found is a fixed one as far as anything here can tell.
     boundary.variadic = Some(false);
@@ -1285,6 +1431,7 @@ pub(crate) fn collect_source_boundary_facts(
     body: Body<'_>,
     call_sites: &CallSiteFacts,
     live_out: &crate::liveout::FunctionLiveOut,
+    objects: &ObjectModel,
 ) -> SourceBoundaryFacts {
     let Body {
         function,
@@ -1303,23 +1450,41 @@ pub(crate) fn collect_source_boundary_facts(
         .map(|stack_pointer| ReachingStorage::new(function, graph, stack_pointer));
     let mut facts = SourceBoundaryFacts {
         parameters: machine_context
-            .map(|machine_context| collect_source_formal_parameter_facts(graph, machine_context))
+            .map(|machine_context| {
+                collect_source_formal_parameter_facts(graph, machine_context, Some(objects))
+            })
             .unwrap_or_default(),
         ..SourceBoundaryFacts::default()
     };
 
+    let formals = (facts.parameters.values())
+        .filter_map(SourceFormalParameterFact::value)
+        .collect::<Vec<_>>();
     // Whether the body writes each argument register an unseen slot asks of, found once per register.
     let mut written_anywhere = BTreeMap::new();
     let arrival_merges = merges_of_arrivals(graph);
+    // Each entry carrier's widest read, found once for every boundary that asks (D105).
+    let held_widths = std::cell::OnceCell::new();
+    let inserted = function.compiler_inserted();
     for call_site in call_sites.by_id.values() {
+        // A call the compiler inserted (a `/GS` check) is no C call: it has no boundary to render.
+        if graph
+            .op_for_inst(call_site.at)
+            .is_some_and(|op| inserted.contains(op))
+        {
+            continue;
+        }
         let mut boundary = SourceCallBoundaryFact {
             call_site: call_site.id,
             at: call_site.at,
-            calling_convention: None,
+            convention: None,
             variadic: None,
             noreturn: None,
             result_kind: None,
+            unstated_lanes: Box::default(),
+            unstated_carrier: None,
             arguments: Vec::new(),
+            ignored: Box::default(),
             fixed_argument_count: None,
             variadic_argument_count_evidence: None,
             variadic_argument_count_refusal: None,
@@ -1338,11 +1503,17 @@ pub(crate) fn collect_source_boundary_facts(
                 .and_then(|identity| context.call_site_interface(identity))
                 .map(|interface| (context, interface))
         }) {
-            boundary.calling_convention = Some(interface.calling_convention().to_string());
+            boundary.convention = Some(interface.convention());
             boundary.variadic = Some(interface.is_variadic());
             boundary.noreturn = Some(interface.is_noreturn());
             boundary.result_kind = Some(interface.result());
+            boundary.unstated_lanes = unproven_lanes(machine_context, call_site, interface);
             boundary.refusal = Some(CallBoundaryRefusal::InterfaceIncomplete);
+            boundary.ignored = (interface.exact_callee_interface().into_iter())
+                .flat_map(|callee| callee.parameters())
+                .filter(|parameter| parameter.is_hole())
+                .map(r2source::SourceAbiParameterSpec::index)
+                .collect();
             if interface.is_complete()
                 && let Some((block_addr, op_index)) = graph.walk_start(call_site.at)
             {
@@ -1374,8 +1545,38 @@ pub(crate) fn collect_source_boundary_facts(
                                     storage
                                 );
                             }
+                            // A callee holding only a low lane reads that lane of the carrier.
+                            let held = super::shared::callee_held_lane(
+                                interface,
+                                argument.index(),
+                                storage,
+                            );
                             found.map(|value| {
-                                let (value, lane_of) = super::shared::narrowed_argument(
+                                // A lane that is this function's formal is admitted; else default-deny.
+                                let formal = |lane: &CanonicalStorageId| {
+                                    entry_values.get(lane).copied().flatten()
+                                        .is_some_and(|own| formals.contains(&own))
+                                };
+                                let held = held.filter(|lane| match value {
+                                    _ if formal(lane) => true,
+                                    SourceCallArgumentValue::Value(carrier) => {
+                                        held_widths
+                                            .get_or_init(|| {
+                                                super::shared::HeldLaneWidths::of(
+                                                    graph,
+                                                    machine_context,
+                                                )
+                                            })
+                                            .admits(
+                                                graph,
+                                                prep.map(|prep| &prep.views),
+                                                carrier,
+                                                lane.size,
+                                            )
+                                    }
+                                    SourceCallArgumentValue::PreservedEntry => true,
+                                });
+                                let (mut value, mut lane_of) = super::shared::narrowed_argument(
                                     &CallPosition {
                                         function,
                                         prep,
@@ -1384,8 +1585,18 @@ pub(crate) fn collect_source_boundary_facts(
                                         op_index,
                                     },
                                     value,
-                                    storage,
+                                    held.unwrap_or(storage),
                                 );
+                                // The entry carrier handed on whole passes the formal of that lane.
+                                if let (None, Some(lane), SourceCallArgumentValue::Value(carrier)) =
+                                    (lane_of, held, value)
+                                    && let Some(own) = entry_values.get(&lane).copied().flatten()
+                                    && formals.contains(&own)
+                                    && super::shared::is_entry_lane_of(graph, own, carrier)
+                                {
+                                    (value, lane_of) =
+                                        (SourceCallArgumentValue::Value(own), Some(carrier));
+                                }
                                 SourceCallArgumentFact {
                                     slot: CallBoundarySlot::Register {
                                         index: argument.index(),
@@ -1435,15 +1646,20 @@ pub(crate) fn collect_source_boundary_facts(
                     (CallSiteTransfer::TailCall, _) | (_, SourceCallResult::Void) => {
                         Some(Vec::new())
                     }
-                    (CallSiteTransfer::Call, SourceCallResult::Register { storage }) => {
-                        call_result_values_after_call(
-                            graph,
-                            machine_context,
-                            block_addr,
-                            op_index,
-                            storage,
-                        )
-                    }
+                    // A group's value is its integer carrier, as the callee's header spells it (D201).
+                    (
+                        CallSiteTransfer::Call,
+                        SourceCallResult::Register { storage, .. }
+                        | SourceCallResult::Unproven {
+                            integer: storage, ..
+                        },
+                    ) => call_result_values_after_call(
+                        graph,
+                        machine_context,
+                        block_addr,
+                        op_index,
+                        storage,
+                    ),
                     // Each half is the value the call leaves in its register, low first.
                     (CallSiteTransfer::Call, SourceCallResult::Pair { low, high }) => [low, high]
                         .into_iter()
@@ -1575,7 +1791,7 @@ pub(crate) fn collect_source_boundary_facts(
         // A callee that mints no contract (a floor of parameters, or an unproven result) is called
         // with what this body provably wrote, at least what the callee reads (CalleeStatement).
         if !boundary.complete
-            && boundary.calling_convention.is_none()
+            && boundary.convention.is_none()
             && let Some(machine_context) = machine_context
             && let Some((block_addr, op_index)) = graph.walk_start(call_site.at)
         {
@@ -1619,6 +1835,7 @@ pub(crate) fn collect_source_boundary_facts(
                         .direct_target
                         .and_then(|target| machine_context.unstated_import(target));
                     adopt_convention(&mut boundary, convention, stated, unstated);
+                    state_unstated_result(&mut boundary, machine_context, stated);
                 }
             }
         }
@@ -1654,6 +1871,7 @@ pub(crate) fn collect_source_boundary_facts(
             let mut exit_stack_pointer = None;
             let mut complete = false;
             let mut machine_state_complete = false;
+            let mut undefined = false;
             // Machine exit state and return values are separate questions. The
             // carriers holding the return address and the stack pointer come
             // from the machine, so they are recoverable for any function; the
@@ -1667,7 +1885,10 @@ pub(crate) fn collect_source_boundary_facts(
                     && machine_context.abi_model().return_boundary_is_coherent();
                 let stack_pointer_storage = machine_context.stack_pointer_carrier();
                 let return_address_storage = machine_context.return_address_carrier();
-                let return_slots = machine_context.abi_model().return_registers();
+                let return_slots = (machine_context.function_interface().into_iter())
+                    .flat_map(|interface| interface.return_kind().storages())
+                    .zip(0u32..)
+                    .collect::<Vec<_>>();
                 // A void return carries no values, so nothing about it is an
                 // ABI question: there is no carrier to resolve and no
                 // convention to be coherent about. Only a returned value is.
@@ -1683,27 +1904,39 @@ pub(crate) fn collect_source_boundary_facts(
                         SourceFunctionReturn::Register { .. } | SourceFunctionReturn::Pair { .. },
                     ) if abi_is_coherent => {
                         if let Some((block_addr, op_index)) = graph.walk_start(inst.id) {
-                            for slot in return_slots {
-                                if let Some(value) = reaching_source_return_register_in_block(
+                            for &(storage, index) in &return_slots {
+                                let reached = reaching_source_return_register_in_block(
                                     function,
                                     prep,
                                     graph,
                                     machine_context,
                                     block_addr,
                                     op_index,
-                                    slot.storage(),
-                                ) {
-                                    values.push(CallBoundaryValueFact {
-                                        slot: CallBoundarySlot::Register {
-                                            index: slot.index(),
-                                            storage: slot.storage(),
-                                        },
-                                        value,
-                                    });
+                                    storage,
+                                );
+                                let input = carries_input(machine_context, storage);
+                                match reached {
+                                    Some(value) if input || !entry_of(graph, value, storage) => {
+                                        values.push(CallBoundaryValueFact {
+                                            slot: CallBoundarySlot::Register { index, storage },
+                                            value,
+                                        });
+                                    }
+                                    // A non-input carrier's entry byte defines no result
+                                    // (doc/adr-scratch-result.md, case 1): this return hands back none.
+                                    Some(_) => undefined = true,
+                                    None => {
+                                        undefined |= !input
+                                            && left_undefined(
+                                                (function, prep, graph, machine_context),
+                                                (block_addr, op_index),
+                                                storage,
+                                            );
+                                    }
                                 }
                             }
-                            complete =
-                                !return_slots.is_empty() && values.len() == return_slots.len();
+                            complete = undefined
+                                || (!return_slots.is_empty() && values.len() == return_slots.len());
                         }
                     }
                     _ => {}
@@ -1745,16 +1978,19 @@ pub(crate) fn collect_source_boundary_facts(
                         machine_context
                             .function_interface()
                             .map(|interface| interface.return_kind()),
-                        machine_context.abi_model().return_registers().len(),
+                        return_slots.len(),
                         values.len(),
                         exit_stack_pointer.is_some(),
                         return_address.is_some()
                     );
                 }
             }
-            let result_unproven = machine_context
-                .and_then(SourceMachineContext::function_interface)
-                .is_some_and(|interface| interface.return_kind() == SourceFunctionReturn::Unproven);
+            let result_unproven = undefined
+                || machine_context
+                    .and_then(SourceMachineContext::function_interface)
+                    .is_some_and(|interface| {
+                        interface.return_kind() == SourceFunctionReturn::Unproven
+                    });
             facts.returns.insert(
                 inst.id,
                 SourceReturnBoundaryFact {
@@ -1772,12 +2008,77 @@ pub(crate) fn collect_source_boundary_facts(
     facts
 }
 
+/// Whether `storage` still holds its entry byte at a return, on every path that reaches it.
+fn left_undefined(
+    (function, prep, graph, machine_context): (
+        &SSAFunction,
+        Option<&crate::DecompilePrepFacts>,
+        &SsaGraph,
+        &SourceMachineContext,
+    ),
+    (block_addr, op_index): (u64, usize),
+    storage: CanonicalStorageId,
+) -> bool {
+    matches!(
+        reaching_preserved_abi_value_in_block(
+            function,
+            prep,
+            graph,
+            machine_context,
+            block_addr,
+            op_index,
+            storage,
+        ),
+        Some(ReachingAbiState::PreservedEntry)
+    )
+}
+
+/// Whether the convention passes an argument in `storage`, or states no convention.
+fn carries_input(machine_context: &SourceMachineContext, storage: CanonicalStorageId) -> bool {
+    (machine_context.convention_slots()).is_none_or(|slots| {
+        (slots.argument_slots().iter()).any(|slot| slot.location() == storage.location())
+    })
+}
+
+/// Whether `value` is `storage`'s own entry value.
+fn entry_of(graph: &SsaGraph, value: ValueId, storage: CanonicalStorageId) -> bool {
+    graph.def_inst(value).is_none()
+        && graph.var(value).constant_bits().is_none()
+        && (graph.value(value).and_then(|held| held.canonical_storage))
+            .is_some_and(|held| held.location() == storage.location())
+}
+
+/// Where a projected formal arrives: a register lane, or an argument-area slot.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProjectedHome {
+    Register {
+        abi_storage: CanonicalStorageId,
+        graph_storage: CanonicalStorageId,
+    },
+    Stack {
+        offset: i64,
+        bytes: u32,
+    },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SourceFormalParameterProjection {
     pub(crate) index: u32,
-    pub(crate) abi_storage: CanonicalStorageId,
-    pub(crate) graph_storage: CanonicalStorageId,
+    pub(crate) home: ProjectedHome,
     pub(crate) logical_value: Option<SourceLogicalValue>,
+}
+
+impl SourceFormalParameterProjection {
+    /// The convention's carrier and the declared lane, for a register formal.
+    pub(crate) const fn register(&self) -> Option<(CanonicalStorageId, CanonicalStorageId)> {
+        match self.home {
+            ProjectedHome::Register {
+                abi_storage,
+                graph_storage,
+            } => Some((abi_storage, graph_storage)),
+            ProjectedHome::Stack { .. } => None,
+        }
+    }
 }
 
 /// Validate and project the source's ABI parameter slots once.
@@ -1818,29 +2119,25 @@ pub(crate) fn source_formal_parameter_projections(
         .iter()
         .enumerate()
         .filter_map(|(parameter_position, parameter)| {
-            // A parameter the convention passes on the stack is a frame
-            // object rather than an entry register; the object model owns it.
-            let abi_storage = parameter.register_storage()?;
-            if machine_context
-                .abi_model()
-                .argument_registers()
-                .iter()
-                .filter(|slot| slot.index() == parameter.index() && slot.storage() == abi_storage)
-                .count()
-                != 1
-            {
-                r2il::refusal_evidence!(
-                    "formal-projections",
-                    "parameter {} storage {:?} is not exactly one argument register of the ABI model",
-                    parameter.index(),
-                    abi_storage
-                );
-                return None;
-            }
+            let logical_value = interface.parameter_logical_value(parameter_position);
+            let abi_storage = match parameter.location() {
+                r2source::SourceParameterLocation::Register(storage) => storage,
+                r2source::SourceParameterLocation::Stack {
+                    offset, size_bytes, ..
+                } => {
+                    let bytes = logical_value
+                        .and_then(|logical| low_stack_lane(machine_context, logical, size_bytes))
+                        .unwrap_or(size_bytes);
+                    return Some(SourceFormalParameterProjection {
+                        index: parameter.index(),
+                        home: ProjectedHome::Stack { offset, bytes },
+                        logical_value,
+                    });
+                }
+            };
             // A parameter the capture could not place keeps its ABI storage
             // and no exact type, which is what a function with no graph at all
             // already gets. It is not a reason to refuse the parameter.
-            let logical_value = interface.parameter_logical_value(parameter_position);
             let graph_storage = match (logical_value, interface.type_graph()) {
                 (Some(logical_value), Some(type_graph)) => {
                     projected_logical_register_storage(abi_storage, logical_value, type_graph)?
@@ -1850,12 +2147,34 @@ pub(crate) fn source_formal_parameter_projections(
             };
             Some(SourceFormalParameterProjection {
                 index: parameter.index(),
-                abi_storage,
-                graph_storage,
+                home: ProjectedHome::Register {
+                    abi_storage,
+                    graph_storage,
+                },
                 logical_value,
             })
         })
         .collect()
+}
+
+/// The low lane of a stack slot a logical value states, at the slot's own address where memory
+/// is little-endian.
+fn low_stack_lane(
+    machine_context: &SourceMachineContext,
+    logical: SourceLogicalValue,
+    size_bytes: u32,
+) -> Option<u32> {
+    let carrier = logical.carrier();
+    let little = machine_context.memory_model().default_endianness()
+        == crate::MachineMemoryEndianness::Little;
+    let bytes = u32::try_from(carrier.size_bits() / 8).ok()?;
+    (little
+        && carrier.kind() == SourceCarrierKind::LowBits
+        && carrier.offset_bits() == 0
+        && carrier.size_bits().is_multiple_of(8)
+        && bytes > 0
+        && bytes < size_bytes)
+        .then_some(bytes)
 }
 
 /// Index the exact entry values by source storage in one graph pass.
@@ -1890,31 +2209,48 @@ pub(crate) fn unique_entry_values_by_storage(
     values
 }
 
-/// The single authoritative projection from source ABI parameter slots to
-/// entry SSA values. Preparation and published boundary facts consume this
-/// same answer; register spelling is never an identity input.
+/// Each formal at its home: a register's entry value, a stack slot's argument-area object (the
+/// latter only with `objects`, which preparation does not pass).
 pub(crate) fn collect_source_formal_parameter_facts(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
+    objects: Option<&ObjectModel>,
 ) -> BTreeMap<u32, SourceFormalParameterFact> {
     let entry_values = unique_entry_values_by_storage(graph);
     let mut facts = BTreeMap::new();
     for parameter in source_formal_parameter_projections(machine_context) {
-        let Some(value) = entry_values
-            .get(&parameter.graph_storage)
-            .copied()
-            .flatten()
-        else {
-            continue;
+        let home = match parameter.home {
+            ProjectedHome::Register {
+                abi_storage,
+                graph_storage,
+            } => {
+                let Some(value) = entry_values.get(&graph_storage).copied().flatten() else {
+                    continue;
+                };
+                FormalHome::Register {
+                    abi_storage,
+                    graph_storage,
+                    value,
+                }
+            }
+            ProjectedHome::Stack { offset, bytes } => {
+                let Some(object) = objects.and_then(|objects| objects.argument_object(offset))
+                else {
+                    continue;
+                };
+                FormalHome::Frame {
+                    object,
+                    offset,
+                    bytes,
+                }
+            }
         };
         facts.insert(
             parameter.index,
             SourceFormalParameterFact {
                 index: parameter.index,
-                abi_storage: parameter.abi_storage,
-                graph_storage: parameter.graph_storage,
                 logical_value: parameter.logical_value,
-                value,
+                home,
             },
         );
     }

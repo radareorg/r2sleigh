@@ -6,23 +6,23 @@ use super::*;
 #[test]
 fn signature_type_parser_preserves_source_width_typedefs() {
     assert_eq!(
-        parse_signature_type_preserving_c_typedefs("long", 64),
+        crate::convert::operator_type_hint("long", 64),
         Some(typedef_type("long"))
     );
     assert_eq!(
-        parse_signature_type_preserving_c_typedefs("unsigned long int", 64),
+        crate::convert::operator_type_hint("unsigned long int", 64),
         Some(typedef_type("unsigned long"))
     );
     assert_eq!(
-        parse_signature_type_preserving_c_typedefs("short", 64),
+        crate::convert::operator_type_hint("short", 64),
         Some(typedef_type("short"))
     );
     assert_eq!(
-        parse_signature_type_preserving_c_typedefs("size_t", 64),
+        crate::convert::operator_type_hint("size_t", 64),
         Some(typedef_type("size_t"))
     );
     assert_eq!(
-        parse_signature_type_preserving_c_typedefs("ptrdiff_t", 64),
+        crate::convert::operator_type_hint("ptrdiff_t", 64),
         Some(typedef_type("ptrdiff_t"))
     );
 }
@@ -84,10 +84,10 @@ fn imported_size_t_type_hint_matches_preserved_source_typedef() {
     let mut inferred_signature = InferredSignature {
         function_name: "sym.scan_example".to_string(),
         signature: "size_t sym.scan_example(size_t n)".to_string(),
-        ret_type: "size_t".to_string(),
+        ret_type: Some(parse_test_type("size_t", 64)),
         params: vec![InferredSignatureParam {
             name: "n".to_string(),
-            param_type: "size_t".to_string(),
+            ty: parse_test_type("size_t", 64),
         }],
         callconv: "amd64".to_string(),
         arch: "x86-64".to_string(),
@@ -139,14 +139,20 @@ fn buffer_then_undeclared_pointer() -> (r2il::ArchSpec, r2ssa::SourceFunctionInt
             r2ssa::SourceType::new(1, r2ssa::SourceTypeKind::UnsignedInteger, 64, 64),
             r2ssa::SourceType::new(
                 2,
-                r2ssa::SourceTypeKind::Pointer { target_type_id: 0 },
+                r2ssa::SourceTypeKind::Pointer {
+                    target_type_id: 0,
+                    const_target: false,
+                },
                 64,
                 64,
             ),
             r2ssa::SourceType::new(3, r2ssa::SourceTypeKind::Void, 0, 0),
             r2ssa::SourceType::new(
                 4,
-                r2ssa::SourceTypeKind::Pointer { target_type_id: 3 },
+                r2ssa::SourceTypeKind::Pointer {
+                    target_type_id: 3,
+                    const_target: false,
+                },
                 64,
                 64,
             ),
@@ -166,7 +172,7 @@ fn buffer_then_undeclared_pointer() -> (r2il::ArchSpec, r2ssa::SourceFunctionInt
     .expect("Buffer graph");
     let interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
         b"member-names-by-parameter".to_vec(),
-        "aarch64",
+        r2source::ConventionId::Aapcs64,
         [
             r2ssa::SourceAbiParameterSpec::new(0, storage(0)),
             r2ssa::SourceAbiParameterSpec::new(1, storage(8)),

@@ -17,7 +17,7 @@ NAME=0x00401000
 FILE=tests/fixtures/loop_exits_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401000
 EXPECT=<<EOF
-uint32_t fcn_401000(void)
+r2sleigh_result_u32 fcn_401000(void)
 {
     uint64_t find_then_choose(uint64_t, uint32_t, uint32_t);
     uint64_t skip_then_find(uint64_t, uint32_t, uint32_t);
@@ -25,12 +25,12 @@ uint32_t fcn_401000(void)
     uint64_t rax_1;
     uint64_t rax_2;
 
-    /* r2dec proof: no individual construct is marked; 33 source obligations: 23 rendered, 10 elided, 0 refused; 3 statements rendered */
+    /* r2dec proof: no individual construct is marked; 33 source obligations: 23 rendered, 10 elided, 0 refused; 3 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     /* symbol `main`; C allows that name no other prototype */
     {
         rax_1 = find_then_choose(0x402000, 98, 1);
         rax_2 = skip_then_find(0x402004, 120, 4);
-        return (uint32_t)((uint32_t)((uint64_t)rax_1 >> 0U) + (uint32_t)((uint64_t)rax_2 >> 0U));
+        return r2sleigh_carrier_u32((uint32_t)((uint32_t)((uint64_t)rax_1 >> 0U) + (uint32_t)((uint64_t)rax_2 >> 0U)));
     }
 }
 
@@ -51,7 +51,7 @@ uint64_t find_then_choose(uint64_t arg0, uint32_t arg1, uint32_t arg2)
     uint8_t tmp_40105e_0_1;
     uint32_t tmp_lane_40105e_1_0_1;
 
-    /* r2dec proof: no individual construct is marked; 44 source obligations: 34 rendered, 10 elided, 0 refused; 16 statements rendered; 1 data object type refused */
+    /* r2dec proof: no individual construct is marked; 44 source obligations: 34 rendered, 10 elided, 0 refused; 16 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
     {
         rdi_1 = arg0;
         for (; ; ) {
@@ -104,7 +104,7 @@ uint64_t skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
     uint8_t tmp_4010d0_8_1;
     uint32_t tmp_lane_4010b0_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 79 source obligations: 69 rendered, 10 elided, 0 refused; 26 statements rendered; 1 data object type refused */
+    /* r2dec proof: no individual construct is marked; 79 source obligations: 69 rendered, 10 elided, 0 refused; 26 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
     {
         rcx_2 = 0;
         rdi_1 = arg0;

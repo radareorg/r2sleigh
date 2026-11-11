@@ -22,9 +22,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use gimli::{AttributeValue, DwAt};
 use r2abi::{
-    Arrival, DataModel, DataObject, Declarations, FrameBase, Keyword, Local, Member, Parameter,
-    Prototype, Qualifiers, Record, RecordKind, Scalar, ScalarKind, Signature, Type, TypeGraph,
-    TypeId, Width,
+    Arrival, CDataModel, DataObject, Declarations, FrameBase, Keyword, Local, Member, Parameter,
+    Prototype, Qualifiers, Record, RecordKind, Scalar, ScalarKind, Signature, StatedConvention,
+    Type, TypeGraph, TypeId, Width,
 };
 
 type Slice<'a> = gimli::EndianSlice<'a, gimli::RunTimeEndian>;
@@ -208,12 +208,12 @@ impl<'d, 'a> Units<'d, 'a> {
     }
 
     /// What pointers are in this unit: its address size.
-    fn model(&self, unit: usize) -> DataModel {
+    fn model(&self, unit: usize) -> CDataModel {
         let bits = self
             .units
             .get(unit)
             .map_or(64, |unit| u32::from(unit.header.address_size()) * 8);
-        DataModel::unix(bits)
+        CDataModel::unix(bits)
     }
 }
 
@@ -699,6 +699,11 @@ impl Reader<'_, '_, '_> {
             // one of these ends the block, because the bytes after it are the
             // next function's rather than this one's.
             noreturn: self.flag(die, gimli::DW_AT_noreturn),
+            // gimli reads the attribute as its own variant, which has no `udata_value`.
+            convention: match self.attr(die, gimli::DW_AT_calling_convention) {
+                Some((_, AttributeValue::CallingConvention(code))) => StatedConvention::of(code.0),
+                _ => StatedConvention::Normal,
+            },
             frame_base,
             locals,
         };

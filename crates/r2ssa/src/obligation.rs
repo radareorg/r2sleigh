@@ -604,6 +604,8 @@ pub(crate) struct SeedingFacts<'a> {
         crate::semantic::MemoryRoundTripCertificate,
     >,
     pub(crate) meeting_arms: &'a BTreeSet<u64>,
+    /// The compiler-inserted operations, whose inputs no C statement reads through them.
+    pub(crate) inserted: crate::dense::IdSet<InstId>,
 }
 
 impl<'a> SeedingFacts<'a> {
@@ -614,11 +616,13 @@ impl<'a> SeedingFacts<'a> {
             crate::semantic::MemoryRoundTripCertificate,
         >,
         meeting_arms: &'a BTreeSet<u64>,
+        inserted: crate::dense::IdSet<InstId>,
     ) -> Self {
         Self {
             private_stack_objects,
             memory_round_trips,
             meeting_arms,
+            inserted,
         }
     }
 
@@ -927,10 +931,10 @@ impl SemanticObligationInventory {
                         SemanticObligationComponent::StackOffset(offset)
                     }
                 };
-                // A preserved-entry argument names no value in this function,
-                // so it has no producer to keep live. The argument obligation
-                // still exists: the call reads that carrier either way.
+                // A preserved-entry argument, or a slot the callee ignores (D165), keeps no producer
+                // live; the argument obligation stands, since the call reads that carrier.
                 let inputs = match argument.value {
+                    _ if boundary.ignores(argument) => Vec::new(),
                     crate::semantic::SourceCallArgumentValue::Value(value) => vec![value],
                     crate::semantic::SourceCallArgumentValue::PreservedEntry => Vec::new(),
                 };
@@ -943,7 +947,9 @@ impl SemanticObligationInventory {
                     &mut explicit_inputs,
                     &mut duplicate_seeds,
                 );
-                if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value {
+                if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value
+                    && !boundary.ignores(argument)
+                {
                     seed_value_definition(
                         graph,
                         value,
@@ -1014,7 +1020,7 @@ impl SemanticObligationInventory {
         // First close dependencies from observable effects and exact ABI boundaries. A loop
         // carrier is semantically live only when that independent root closure reaches its phi;
         // recognizer-retained facts must never decide source obligation liveness.
-        propagate_live_dependencies(graph, &direct, &mut required);
+        propagate_live_dependencies(graph, (&direct, &seeding.inserted), &mut required);
         let live_before_loop_annotation = required.keys().collect::<crate::dense::IdSet<_>>();
         for fact in structured.loops.values() {
             for carrier in &fact.carriers {
@@ -1068,7 +1074,7 @@ impl SemanticObligationInventory {
                 }
             }
         }
-        propagate_live_dependencies(graph, &direct, &mut required);
+        propagate_live_dependencies(graph, (&direct, &seeding.inserted), &mut required);
         // A private read the walk reached owes its access; its inputs are already walked.
         for (inst, ordinal, address) in private_reads {
             if required.contains(inst) {
@@ -2003,7 +2009,7 @@ fn seed_value_definition(
 
 fn propagate_live_dependencies(
     graph: &SsaGraph,
-    direct: &crate::dense::IdSet<InstId>,
+    (direct, inserted): (&crate::dense::IdSet<InstId>, &crate::dense::IdSet<InstId>),
     required: &mut ObligationSeeds,
 ) {
     let mut ready = required.keys().collect::<VecDeque<_>>();
@@ -2012,7 +2018,8 @@ fn propagate_live_dependencies(
         if !visited.insert(inst_id) {
             continue;
         }
-        let Some(inst) = graph.inst(inst_id).filter(|_| !direct.contains(inst_id)) else {
+        let stops = direct.contains(inst_id) || inserted.contains(inst_id);
+        let Some(inst) = graph.inst(inst_id).filter(|_| !stops) else {
             continue;
         };
         for input in graph.inputs(inst.id) {
@@ -2375,7 +2382,7 @@ mod tests {
             revision.to_vec(),
             identity,
             complete,
-            "test-call-abi",
+            r2source::ConventionId::SysVAmd64,
             arguments,
             variadic,
             noreturn,
@@ -2573,7 +2580,7 @@ mod tests {
             .get(&crate::semantic::CallSiteId(0))
             .expect("missing call boundary");
         assert!(!missing_call.complete);
-        assert_eq!(missing_call.calling_convention, None);
+        assert_eq!(missing_call.convention, None);
         assert_eq!(missing_call.variadic, None);
         assert_eq!(missing_call.noreturn, None);
         assert_eq!(missing_call.result_kind, None);
@@ -2604,8 +2611,8 @@ mod tests {
             .expect("explicit call boundary");
         assert!(explicit_call.complete);
         assert_eq!(
-            explicit_call.calling_convention.as_deref(),
-            Some("test-call-abi")
+            explicit_call.convention,
+            Some(r2source::ConventionId::SysVAmd64)
         );
         assert_eq!(explicit_call.variadic, Some(false));
         assert_eq!(explicit_call.noreturn, Some(true));
@@ -2660,9 +2667,7 @@ mod tests {
             [SourceCallArgumentSpec::new(0, argument_storage)],
             false,
             false,
-            SourceCallResult::Register {
-                storage: result_storage,
-            },
+            SourceCallResult::register(result_storage),
         );
         let artifact = crate::testing::prepared_under(
             &[block],
@@ -2684,9 +2689,7 @@ mod tests {
         assert_eq!(boundary.noreturn, Some(false));
         assert_eq!(
             boundary.result_kind,
-            Some(SourceCallResult::Register {
-                storage: result_storage,
-            })
+            Some(SourceCallResult::register(result_storage))
         );
         assert_eq!(boundary.arguments.len(), 1);
         assert_eq!(
@@ -2939,7 +2942,7 @@ mod tests {
         });
         let function_interface = SourceFunctionInterface::new(
             b"function-revision".to_vec(),
-            "test-call-abi",
+            r2source::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [],
@@ -3038,7 +3041,7 @@ mod tests {
         };
         let interface = SourceFunctionInterface::new(
             b"fixture-revision-1".to_vec(),
-            "sysv-amd64",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, parameter_storage)],
             SourceFunctionReturn::Register {
                 storage: return_storage,
@@ -3057,14 +3060,9 @@ mod tests {
             .values()
             .next()
             .expect("return boundary");
-        let parameter = artifact
-            .facts()
-            .boundaries
-            .parameters
-            .get(&0)
-            .expect("exact ABI parameter identity");
-        assert_eq!(parameter.abi_storage, parameter_storage);
-        assert_eq!(parameter.graph_storage, parameter_storage);
+        let parameter = artifact.facts().boundaries.parameters[&0];
+        let lanes = Some((parameter_storage, parameter_storage));
+        assert_eq!(parameter.register(), lanes, "exact ABI parameter identity");
         assert_eq!(parameter.logical_value, None);
         // A plain interface's slot roles are not exact, which used to make the
         // whole model incoherent and empty the return boundary. The return
@@ -3221,10 +3219,13 @@ mod tests {
             crate::semantic::SourceCallBoundaryFact {
                 call_site,
                 at: call_inst,
-                calling_convention: Some("test-abi".to_string()),
+                convention: Some(r2source::ConventionId::SysVAmd64),
                 variadic: Some(false),
                 noreturn: Some(false),
                 result_kind: Some(crate::SourceCallResult::Void),
+                unstated_lanes: Box::default(),
+                unstated_carrier: None,
+                ignored: Box::default(),
                 arguments: vec![
                     crate::semantic::SourceCallArgumentFact {
                         slot,
@@ -3253,7 +3254,12 @@ mod tests {
             artifact.structured(),
             &boundaries,
             None,
-            &SeedingFacts::new(&BTreeSet::new(), &BTreeMap::new(), &BTreeSet::new()),
+            &SeedingFacts::new(
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                crate::dense::IdSet::default(),
+            ),
         );
 
         assert!(!inventory.is_complete());
@@ -3476,7 +3482,12 @@ mod tests {
             artifact.structured(),
             &artifact.facts().boundaries,
             None,
-            &SeedingFacts::new(&BTreeSet::new(), &BTreeMap::new(), &BTreeSet::new()),
+            &SeedingFacts::new(
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                crate::dense::IdSet::default(),
+            ),
         );
         assert!(!inventory.is_complete());
         assert!(inventory.construction_failures.iter().any(|failure| {
@@ -3514,7 +3525,12 @@ mod tests {
             artifact.structured(),
             &artifact.facts().boundaries,
             None,
-            &SeedingFacts::new(&BTreeSet::new(), &BTreeMap::new(), &BTreeSet::new()),
+            &SeedingFacts::new(
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                crate::dense::IdSet::default(),
+            ),
         );
         assert_eq!(inventory.source_instruction_count(), 0);
         assert!(!inventory.unstructured_cycle_blocks().is_empty());
@@ -3598,7 +3614,12 @@ mod tests {
             &structured,
             &artifact.facts().boundaries,
             None,
-            &SeedingFacts::new(&BTreeSet::new(), &BTreeMap::new(), &BTreeSet::new()),
+            &SeedingFacts::new(
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                crate::dense::IdSet::default(),
+            ),
         );
         assert!(
             inventory

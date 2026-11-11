@@ -20,7 +20,7 @@ use crate::{
     FunctionPresentation, MachineProfile, OwnedFunctionBlock, OwnedFunctionImage,
     OwnedFunctionSnapshot, SnapshotValidationError, SourceCallEffect, SourceCodePointerTable,
     SourceConventionSlots, SourceDataObject, SourceEndianness, SourceFunctionInterface,
-    SourceLoaderRole, SourceMachineRoles, SourceSignaturePresentation, SourceStackSlotName,
+    SourceMachineRoles, SourceSignaturePresentation, SourceStackSlotName,
 };
 
 /// The machine every function in one capture session runs on.
@@ -34,6 +34,8 @@ pub struct NativeMachine {
     pub slots: SourceConventionSlots,
     /// What the convention says a call does to the registers, where it says.
     pub call_effect: Option<SourceCallEffect>,
+    /// The convention the slots are a view of; `place` reads its sections.
+    pub convention: Option<std::sync::Arc<crate::ConventionModel>>,
 }
 
 /// One basic block, as bytes and where control goes from it.
@@ -92,6 +94,8 @@ pub struct NativeFunction {
     pub read_only: Vec<(u64, Vec<u8>)>,
     /// Program data the body points at, named.
     pub data_symbols: Vec<SourceDataObject>,
+    /// The graph each data object's type is a node of.
+    pub data_types: Option<crate::SourceTypeGraph>,
     /// Tables of code pointers the body dispatches through, as read.
     ///
     /// Empty on a first capture: finding one needs the value analysis to say
@@ -118,9 +122,8 @@ pub struct NativeFunction {
     /// says what the source called it, which is the only place a spelling like
     /// `size_t` or a parameter's own name survives.
     pub signature: Option<SourceSignaturePresentation>,
-    pub loader_role: Option<SourceLoaderRole>,
     /// What the program's calls to this function read of its result registers.
-    pub result_reads: Option<crate::SourceResultReads>,
+    pub closed_result: Option<crate::SourceClosedResult>,
     /// The register saves the container's call-frame information states for
     /// this function.
     pub frame_saves: Vec<crate::SourceFrameSave>,
@@ -215,8 +218,7 @@ pub fn capture(
         },
         FunctionIdentity {
             address: function.address,
-            loader_role: function.loader_role,
-            result_reads: function.result_reads,
+            closed_result: function.closed_result,
         },
         FunctionPresentation {
             display_name: function.name.as_str().into(),
@@ -227,7 +229,6 @@ pub fn capture(
                 .collect(),
             stack_slot_names: function.stack_slot_names.into_boxed_slice(),
             signature: function.signature,
-            callee_signatures: Box::from([]),
         },
         OwnedFunctionImage {
             entry_address: function.address,
@@ -236,6 +237,7 @@ pub fn capture(
             string_literals: function.string_literals.into_boxed_slice(),
             read_only: function.read_only.into_boxed_slice(),
             data_symbols: function.data_symbols.into_boxed_slice(),
+            data_types: function.data_types,
             code_pointer_tables: function.code_pointer_tables.into_boxed_slice(),
             frame_saves: {
                 let mut saves = function.frame_saves;
@@ -269,6 +271,10 @@ pub fn capture(
         },
         DiagnosticIdentity(0),
     )
+    .map(|snapshot| match &machine.convention {
+        Some(model) => snapshot.with_convention(std::sync::Arc::clone(model)),
+        None => snapshot,
+    })
 }
 
 /// What an interface says about itself, or false where there is none.
@@ -325,8 +331,12 @@ mod tests {
     fn machine() -> NativeMachine {
         let roles = SourceMachineRoles::new(Some(storage(0x288, 8)), Some(storage(0x20, 8)))
             .expect("machine roles");
-        let slots = SourceConventionSlots::new("amd64", [storage(0x38, 8)], Some(storage(0x0, 8)))
-            .expect("convention slots");
+        let slots = SourceConventionSlots::new(
+            crate::ConventionId::SysVAmd64,
+            [storage(0x38, 8)],
+            Some(storage(0x0, 8)),
+        )
+        .expect("convention slots");
         NativeMachine {
             arch_id: "x86".to_owned(),
             cpu_id: "x86-64".to_owned(),
@@ -335,6 +345,7 @@ mod tests {
             roles,
             slots,
             call_effect: None,
+            convention: None,
         }
     }
 
@@ -362,13 +373,13 @@ mod tests {
             string_literals: Vec::new(),
             read_only: Vec::new(),
             data_symbols: Vec::new(),
+            data_types: None,
             code_pointer_tables: Vec::new(),
             interface: None,
             parameter_names: Vec::new(),
             stack_slot_names: Vec::new(),
             signature: None,
-            loader_role: None,
-            result_reads: None,
+            closed_result: None,
             frame_saves: Vec::new(),
         }
     }
@@ -383,7 +394,10 @@ mod tests {
         // No prototype is claimed; the artifact builder reads the ABI off the
         // instructions instead.
         assert!(snapshot.function_interface().is_none());
-        assert_eq!(snapshot.convention_slots().calling_convention(), "amd64");
+        assert_eq!(
+            snapshot.convention_slots().convention(),
+            crate::ConventionId::SysVAmd64
+        );
     }
 
     #[test]

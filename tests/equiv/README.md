@@ -12,6 +12,8 @@ tests/equiv/run_equiv.py --r2s target/debug/r2s \
     --baseline tests/equiv/baseline.json                         # gate (ratchet)
 tests/equiv/run_equiv.py --r2s target/debug/r2s --target aarch64 \
     --baseline tests/equiv/baseline-aarch64.json                 # the same, for arm64
+EQUIV_XWIN=/path/to/xwin tests/equiv/run_equiv.py --r2s target/debug/r2s --target win64 \
+    --baseline tests/equiv/baseline-win64.json                   # the same, for Win64 PEs
 tests/equiv/run_equiv.py --r2s target/debug/r2s --measure instructions   # cost counted, not timed
 python3 -m unittest discover -s tests/equiv -p 'test_*.py'       # the gate's own tests
 ```
@@ -20,8 +22,10 @@ For x86-64 (the default target) it needs x86-64 Linux, `gcc`, `clang` (for the
 Clang cells), and binutils. For aarch64 it needs Linux, `qemu-aarch64`
 (qemu-user), `aarch64-linux-gnu-gcc` with its binutils and its sysroot in
 `/usr/aarch64-linux-gnu` (Ubuntu: `gcc-aarch64-linux-gnu`,
-`qemu-user`), and a `clang` that can target it with that sysroot. It uses
-only the Python standard library.
+`qemu-user`), and a `clang` that can target it with that sysroot. For win64 it
+needs x86-64 Linux, `clang` (run as clang-cl), `lld-link`, `llvm-strip`, `gcc`
+and binutils, and `$EQUIV_XWIN`, the MSVC CRT and Windows SDK that `xwin
+splat` writes (Win64, below). It uses only the Python standard library.
 
 What it does
 ------------
@@ -128,7 +132,7 @@ target (`aarch64-gcc-O0`):
 | status | graded by | meaning |
 |---|---|---|
 | `equal` | engine | every surviving vector agreed |
-| `slow` | engine | agreed wherever it finished; a rendering ran past its budget (below), which is a cost and not an answer |
+| `slow` | engine | agreed wherever it finished; a rendering ran past its allowance against the original (below), which is a cost and not an answer |
 | `residual-trap` | engine | agreed wherever it ran; some vector reached a counted residual, and the state before it agreed |
 | `differs` | engine | a vector returned, wrote, printed or ended differently, or had written or printed differently by a residual trap |
 | `uninit` | engine | the rendering read a value nothing wrote |
@@ -189,9 +193,9 @@ for every function.
 The ratchet
 -----------
 
-`tests/equiv/baseline.json` (x86-64) and `tests/equiv/baseline-aarch64.json`
-name the measure and budget they were blessed under (`cost`), and hold, per
-key, a status and -- for every record
+`tests/equiv/baseline.json` (x86-64), `tests/equiv/baseline-aarch64.json` and
+`tests/equiv/baseline-win64.json` name the measure and budget they were
+blessed under (`cost`), and hold, per key, a status and -- for every record
 that is not `equal` -- the person's recorded `cause`, its `owner` (the
 ROADMAP.md item that owns the fix) and `site` (the repository path where it
 lands, or that states the limitation), and the machine's `reason`
@@ -224,7 +228,9 @@ CI runs this on every push (`equivalence` in `.github/workflows/ci.yml`) for
 x86-64. No CI job runs the aarch64 target yet: its baseline was blessed from a
 full run on an x86-64 Linux host under qemu-user, and is held by running
 `run_equiv.py --target aarch64 --baseline tests/equiv/baseline-aarch64.json`
-there.
+there. Nor does one run win64, whose xwin sysroot the runners do not hold:
+`baseline-win64.json` is held by `run_win64.sh` on an x86-64 Linux host
+(doc/testing.md has its setup).
 The baseline is written only with `--write-baseline PATH`, which keeps any
 cause, owner and site already recorded for an unchanged status and reason,
 records each reason, what each trap compared and the toolchain, and leaves the
@@ -241,18 +247,19 @@ the signal `__builtin_trap` raises. What a compiler built is read back
 (`readelf -h`), so a compiler that built for the wrong machine is a failed
 build, never a binary graded under the wrong ABI.
 
-| | x86-64 | aarch64 |
-|---|---|---|
-| arguments | rdi..r9, xmm0..7, then 8-byte stack words; AL counts vector registers | x0..x7, v0..v7, then 8-byte stack words |
-| a narrow integer argument | extended to 32 bits by its type, bits 32..63 arbitrary | every bit above the type arbitrary (AAPCS64) |
-| results | rax (rdx), xmm0 | x0 (x1), v0 |
-| a function link | `movabs $addr, %r11; jmp *%r11` | `movz/movk x16, addr; br x16` |
-| an object link | `.set name, addr` | the same, bound by the loader (below) |
-| guard, residual trap | `int3`, `ud2` (SIGILL) | `brk #0`, `brk` (SIGTRAP) |
-| runner | `setarch -R env VAR=... prog` | `setarch -R qemu-aarch64 -L /usr/aarch64-linux-gnu -seed 1 -E VAR=... prog` |
-| per-call budget | `--budget-instructions`, or `--timeout-ms` under `--measure time` (four times it for a rendering) | `--measure time` only, five times `--timeout-ms` |
-| `DT_NEEDED` libraries | as `ldd` resolves them | the files in the sysroot |
-| keys, baseline | `gcc-O0`, `baseline.json` | `aarch64-gcc-O0`, `baseline-aarch64.json` |
+| | x86-64 | aarch64 | win64 |
+|---|---|---|---|
+| population | `gcc`, `clang`; ELF | the same, cross; ELF | `clang-cl` (`/MD /GS`, DWARF); PE32+ |
+| arguments | rdi..r9, xmm0..7, then 8-byte stack words; AL counts vector registers | x0..x7, v0..v7, then 8-byte stack words | position N in rcx/rdx/r8/r9 or xmm0..3 by its class, then 8-byte stack words past the 32-byte home area |
+| a narrow integer argument | extended to 32 bits by its type, bits 32..63 arbitrary | every bit above the type arbitrary (AAPCS64) | every bit above the type arbitrary |
+| results | rax (rdx), xmm0 | x0 (x1), v0 | rax, xmm0 |
+| a function link | `movabs $addr, %r11; jmp *%r11` | `movz/movk x16, addr; br x16` | as x86-64; a PE import is its thunk |
+| an object link | `.set name, addr` | the same, bound by the loader (below) | the same, bound by the loader (below) |
+| guard, residual trap | `int3`, `ud2` (SIGILL) | `brk #0`, `brk` (SIGTRAP) | as x86-64 |
+| runner | `setarch -R env VAR=... prog` | `setarch -R qemu-aarch64 -L /usr/aarch64-linux-gnu -seed 1 -E VAR=... prog` | `setarch -R env VAR=... EQUIV_PE=a.exe pe_host` |
+| per-call budget | `--budget-instructions`, or `--timeout-ms` of CPU under `--measure time` (each run's allowance against its original: Cost, below) | `--measure time` only, five times `--timeout-ms` | as x86-64 |
+| `DT_NEEDED` libraries | as `ldd` resolves them | the files in the sysroot | none: imports bind to the runtime's shims |
+| keys, baseline | `gcc-O0`, `baseline.json` | `aarch64-gcc-O0`, `baseline-aarch64.json` | `win64-clang-cl-O0`, `baseline-win64.json` |
 
 x86-64's keys predate the target axis and carry no target name, so its
 baseline is unchanged; every other target's keys and work directories carry
@@ -273,65 +280,82 @@ between two x86-64 runs.) The runtime's variables go to the guest with `-E`,
 never into qemu's own environment, where the host loader would try to preload
 a foreign object.
 
-*Cost.* A budget counts one measure, and every record and baseline says which
-(`cost.measure` and `cost.budget`; `config.cost` in `records.json`). The
-original gets the budget and a rendering four times it; a call past it is
-stopped, and a rendering stopped is `slow`, an original stopped lies outside
-the domain and is dropped (`cost.py`, ADR D38).
+*Cost.* A cost counts one measure, and every record and baseline says which
+(`cost.measure`, `cost.budget` and `cost.factor`; `config.cost` in
+`records.json`). A rendering is graded against its original on the same
+vector, in the same runtime, on the same runner (`cost.py`, ADR D38 and D339).
+With `k` = 4 and the budget `B`:
+
+- the original may cost `k*k*B`; a call past that is stopped, and the vector
+  lies outside the domain and is dropped;
+- the identity and the rendering's `-O2` build may cost `k * max(c, B/(k*k))`,
+  `c` the original's cost on that vector, and the `-O0`, pattern and UBSan
+  builds `k` times that, since `-O0` code is the compiler's cost, not the
+  rendering's. A rendering stopped past its allowance is `slow`, and the
+  record names the `-O2` build when it is among them.
+
+Above `B/(k*k)` the verdict is a ratio of two costs taken seconds apart on one
+machine, so a faster or slower runner moves both. Below it a cost is too small
+to compare, so `B/k` (`-O2`) and `B` (unoptimised) are floors. The runtime writes each run's cost as `cost` to `result.jsonl`
+(kept by `--keep`), never into a record, since a cost varies in its last
+digits. Wall-clock time (`--hang-ms`, 120 s, plus four times the allowance
+under `time`) only ends a run that does not run, a blocked call: that run is
+`hang`, which grades nothing (an original that hangs is dropped, a rendering
+that does leaves the vector ungraded and the record `harness-error`).
 
 - `--measure instructions` counts the user-space instructions the call
   retires. The child opens `perf_event_open` (`HW_INSTRUCTIONS`,
-  `exclude_kernel`, `exclude_hv`) with the budget plus one as its sample
-  period, so the counter overflows once, at the first instruction past the
-  budget, and raises `SIGPWR`, whose default action ends the run (outcome
-  `budget`). A call that retires more than the
-  budget before the signal lands ends the same way, so the verdict is the
-  count and never the skid. The runtime also writes each run's count as
-  `insns` to `result.jsonl` (kept by `--keep`) and never into a record, since
-  the last digits of a count vary. Wall-clock time (`--hang-ms`, 120 s) only
-  ends a run that retires nothing, a blocked call: that run is `hang`, which
-  grades nothing (an original that hangs is dropped, a rendering that does
-  leaves the vector ungraded and the record `harness-error`).
-- The default budget, `--budget-instructions` 4 billion, is about the second
-  the time measure gave on the host it was measured on (x86-64, AMD EPYC under
-  KVM). review.c's clang `fact` retires 2.5, 3.3 and 4.5 billion on its three
-  largest vectors and every other original in review.c and hashes.c under 3
-  million, so no vector lies within 12 % of the budget (the 4.5 billion one is
-  12.5 % over and dropped, the 3.3 billion one 18 % under). The `-O0` rendering retires 51 and 67 billion on the other two (20
-  times the original), so `fact` stays `slow`. Load barely moves a count
-  (839 runs beside four busy loops differed by at most 163 instructions in 3.3
-  billion); a CPU model does (libc picks its string routines by CPU feature),
-  so a baseline is blessed on the kind of runner that grades it. A `time`
-  budget is wall milliseconds on the runner it was blessed on: a native
-  aarch64 host, which does not scale, is refused against `baseline-aarch64.json`'s
-  5000 until given `--timeout-ms 5000`.
-- `--measure time` (the default) counts wall-clock milliseconds, `--timeout-ms`
-  in native time, five times that on an emulated target
+  `exclude_kernel`, `exclude_hv`) with the allowance plus one as its sample
+  period, so the counter overflows once, at the first instruction past it, and
+  raises `SIGPWR`, whose default action ends the run (outcome `budget`). A call
+  that retires more than the allowance before the signal lands ends the same
+  way, so the verdict is the count and never the skid. Load barely moves a
+  count (839 runs beside four busy loops differed by at most 163 instructions
+  in 3.3 billion); a CPU model does (libc picks its string routines by CPU
+  feature), so a baseline is blessed on the kind of runner that grades it.
+  `--budget-instructions` is 4 billion.
+- `--measure time` (the default) counts the CPU time of the call
+  (`CLOCK_PROCESS_CPUTIME_ID`, stopped by `ITIMER_PROF`, which counts by the
+  kernel's ticks and is re-armed for the rest when it expires short of the
+  allowance), `--timeout-ms` in native milliseconds, five times that on an
+  emulated target
   (`Target.time_scale`: qemu-aarch64 ran a bitwise CRC 3.5 to 5 times slower than
-  x86-64). It is what a host without a counter can do, and it depends on load:
-  on a loaded host the `-O0` build of a clang `-O2` crc32_bitwise needed 1.6 to
-  4 s of its 4 s, and a vector whose original needs about its whole budget
-  (review.c's clang `fact` at n near 2^31, 3 to 5 s under qemu and about 1 s
-  natively) can be graded in one run and dropped in the next, so the vector
-  counts of such a record differ between two runs while its status does not.
-  Two full aarch64 runs side by side wrote 754 of 756 records byte for byte and
-  the other two with the same status.
+  x86-64). Other jobs on the host move wall time and barely the process's CPU:
+  on contabo at load 7, gcc `-O2` `fact`'s `-O0` build took 3.07 and 2.52 times
+  its original's wall time on one vector and 3.09 and 3.13 times its CPU time.
+  A native aarch64 host, which does not scale, is refused against
+  `baseline-aarch64.json`'s 5000 until given `--timeout-ms 5000`.
+- The population, counted on x86-64 (contabo, EPYC under KVM): every original
+  in review.c and hashes.c retires under 12 million instructions (3 ms of
+  CPU), except `fact`'s at n near 2^31, 2.5 to 10.7 billion (0.34 to 2.8 s).
+  Against those, `fact`'s renderings cost 20.3 times (`-O0`, pattern), 8.55
+  (`-O2`) and 21.1 (UBSan) at clang `-O2`, so it is `slow` by its `-O2` build;
+  4.25 and 1.00 at clang `-O1`, and 3.00 and 1.00 at gcc `-O2`, so those are
+  `equal`. The ratio edge `B/(k*k)` (62.5 ms, 250 million instructions) lies 20
+  times above the small originals and at least 1.6 times below `fact`'s big
+  ones on a runner twice contabo's speed. Every other rendering run on those
+  two files stays under 25 million instructions (6 ms), 40 times below the
+  `-O2` floor.
 - The gate refuses rather than fall back. `--measure instructions` on a host
   without a working counter (`perf_event_open` denied by
   `kernel.perf_event_paranoid`, no virtual PMU, or a counter that reads zero)
   exits 3 and names the cause. It is refused on an emulated target: the guest
   cannot call `perf_event_open` (qemu-user answers `ENOSYS`) and the packaged
   qemu-user 8.2 has no `-plugin`, so its guest instructions are not countable
-  there yet. A run whose measure or budget differs from `--baseline`'s is
-  refused before anything is graded (exit 1), and `merge_shards.py` refuses
+  there yet. A run whose measure, budget or factor differs from `--baseline`'s
+  is refused before anything is graded (exit 1), and `merge_shards.py` refuses
   shards that counted differently.
-- The self-tests include three cases under a fake counter (`Cost.fake`, a count
-  the runtime reports for every rendering run in place of the counter): one
-  retires one instruction more than four times the budget and must be `slow`,
-  one exactly that and must be `equal`, and one raises `SIGPWR` (the budget's
-  signal) itself and must not be `slow`: only the counter's overflow is the
-  budget. They need no performance counter, so
-  they run on every host and target and pin the verdict path.
+- The self-tests run under fake costs (`Cost.fake_original` and
+  `Cost.fake_rendering`, which the runtime reports in place of the measure), so
+  they need no counter and run on every host and target: a rendering one tick
+  past its allowance is `slow` and names `-O2`, one at it `equal`, at four times
+  the original, at the floor, just above and just below `B/(k*k)`, and by CPU
+  time;
+  one twenty times its original is `slow`; an original at `k*k*B` is graded
+  and one tick past it dropped; a rendering that raises `SIGPWR` or `SIGPROF`
+  itself is not `slow`. One case has no fake: a rendering that spins is stopped
+  by the CPU timer itself and is `slow`, not a hang and not a death by `SIGPROF`.
+  Under `instructions` a rendering finds no `SIGPROF` handler and no timer armed.
 
 *Object links on AArch64.* GNU ld for AArch64 (2.42, and gold) resolves the
 GOT entry of an absolute symbol a shared object defines as if it were
@@ -344,11 +368,45 @@ object link one of those would capture (a name the program exports at another
 address, or one a library exports) is `harness-error` with the conflict named,
 never graded against an object it did not name (`link.loader_conflicts`).
 
+*Win64.* A PE is graded the way an ELF is, in one Linux process through
+fork, without Windows or wine (`rt/pe_win64.c`, built into the runtime with
+`-DEQUIV_WIN64`):
+
+- `build.py` runs clang-cl against the xwin sysroot with `/MD` (UCRT's DLLs,
+  so `printf` reaches `api-ms-win-crt-stdio`'s `__stdio_common_vfprintf`),
+  `/GS` (the load configuration names `__security_cookie`), `/Od`, `/O1` or
+  `/O2`, and DWARF in the image (`/Z7 /clang:-gdwarf`, `lld-link
+  /debug:dwarf`). `llvm-strip --strip-all` makes the shown copy and keeps
+  every section's address. `readelf` reads the DWARF and symbols from an
+  `objcopy -O elf64-x86-64` copy; a COFF symbol has no size, so a function's
+  extent is its `DW_AT_high_pc`.
+- The runtime is preloaded into `pe_host`, an empty non-PIE program. Before the
+  job runs it maps the PE at its own ImageBase (so no relocation applies),
+  binds every import to a Microsoft x64 shim over glibc (`printf`'s
+  `va_list` of 8-byte slots is read as a System V list whose registers are
+  spent), and compares the PE's writable sections where an ELF's writable
+  segments are. An import with no shim binds to an `abort`: the original
+  then lies outside the vector's domain. The header line names those imports
+  (`unbound`); none of them is a call the corpus's functions make.
+- `rt/call_win64.S` enters the function with rcx, rdx, r8, r9, xmm0..xmm3 and
+  the stack words past a 32-byte home area.
+- A rendering is built with `gcc -mabi=ms`, since the image calls it and it
+  calls the image under Microsoft x64, with `-fno-builtin` and no
+  `_FORTIFY_SOURCE`, so every call stays the link it names. The compiler's
+  own memory calls, a C library call the image holds no import of, and in the
+  `ubsan` variant libubsan's handlers go through `rt/ms_support.c`, weak and
+  hidden, each forwarded to glibc's System V function.
+- GNU ld also misplaces an absolute symbol above 4 GiB in a shared object's
+  GOT, so object links go through the loader as on AArch64.
+
 Limits, stated
 --------------
 
-- Linux ELF for x86-64 and AArch64 only (`target.py`); aarch64 runs under
-  qemu-user unless the host is AArch64.
+- Linux ELF for x86-64 and AArch64, and Win64 PE32+ mapped into an x86-64
+  Linux process (`target.py`); aarch64 runs under qemu-user unless the host is
+  AArch64. Win64 runs no Windows code but the image's: a UCRT, KERNEL32 or
+  VCRUNTIME import is a shim over glibc, so a function whose result depends
+  on what Windows' own library does differently is graded against glibc's.
 - Non-PIE only: a rendering may spell image addresses as integers, which are
   run-time addresses only when the link address is the load address.
 - A parameter's pointee is built from its DWARF type: bytes, a NUL-terminated

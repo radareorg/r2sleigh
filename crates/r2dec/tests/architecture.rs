@@ -108,6 +108,158 @@ fn control_writes_only_what_was_spelled_and_the_spelling_reads_no_placement() {
     );
 }
 
+/// Whether a call never returns is a fact of its callee alone (ROADMAP D75): a function deciding it
+/// names no expression and nothing a call carries, and `callee_of` binds the call's `func` alone.
+#[test]
+fn a_noreturn_decision_reads_the_callee_and_nothing_the_call_passes() {
+    let source_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    collect_rust_files(&source_dir, &mut files);
+    files.sort();
+    let (mut deciders, mut violations) = (0, Vec::new());
+    for file in files {
+        let text = fs::read_to_string(&file).expect("r2dec source file should be UTF-8");
+        let production = production_lines(&text)
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect::<Vec<_>>()
+            .join("\n");
+        let code = code_of(&production);
+        let decides = |(name, body): &(&str, &str)| {
+            *name == "callee_of" || (*name != "never_returns" && body.contains(".never_returns("))
+        };
+        for (name, body) in functions(&code).into_iter().filter(decides) {
+            deciders += 1;
+            let read = past_the_callee(name, body);
+            violations.extend(read.map(|read| format!("{}: fn {name} {read}", file.display())));
+        }
+    }
+    assert!(
+        deciders >= 6,
+        "the predicate's readers were not found: {deciders}"
+    );
+    assert!(
+        violations.is_empty(),
+        "a noreturn decision reads what the call passes:\n{}",
+        violations.join("\n")
+    );
+}
+
+/// What a noreturn decision's `body` reads past the callee: `callee_of` binds a call's `func` alone,
+/// and a reader binds no expression, so a statement reaches it only through `callee_of`.
+fn past_the_callee(name: &str, body: &str) -> Option<String> {
+    let extracts = name == "callee_of";
+    let mut words = vec!["args", "site", "format", "Debug"];
+    if !extracts {
+        words.extend(["CExpr", "Call"]);
+    }
+    let read = (words.into_iter())
+        .filter(|word| mentions(body, word))
+        .collect::<Vec<_>>();
+    let binds = !extracts && body.replace("Expr(_)", "").contains("Expr(");
+    let func_alone = !extracts || body.contains("Call { func, .. }");
+    (!read.is_empty() || binds || !func_alone)
+        .then(|| format!("reads {read:?}, binds an expression {binds}, func alone {func_alone}"))
+}
+
+/// Whether `word` occurs in `code` as a whole identifier.
+fn mentions(code: &str, word: &str) -> bool {
+    code.match_indices(word).any(|(at, _)| {
+        !code[..at].ends_with(identifier) && !code[at + word.len()..].starts_with(identifier)
+    })
+}
+
+fn identifier(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Each `fn` item of `code` with its body, the text between its braces.
+fn functions(code: &str) -> Vec<(&str, &str)> {
+    let mut out = Vec::new();
+    for (at, _) in code.match_indices("fn ") {
+        if code[..at].ends_with(identifier) {
+            continue;
+        }
+        let rest = &code[at + 3..];
+        let name_end = rest.find(|c| !identifier(c)).unwrap_or(rest.len());
+        if let Some(open) = signature_end(rest).filter(|end| rest[*end..].starts_with('{')) {
+            out.push((&rest[..name_end], body_at(&rest[open..])));
+        }
+    }
+    out
+}
+
+/// Where a signature ends: its first `{` or `;` outside parentheses and brackets.
+fn signature_end(code: &str) -> Option<usize> {
+    let mut depth = 0isize;
+    code.char_indices().find_map(|(at, c)| {
+        depth += match c {
+            '(' | '[' => 1,
+            ')' | ']' => -1,
+            _ => 0,
+        };
+        (depth == 0 && matches!(c, '{' | ';')).then_some(at)
+    })
+}
+
+/// The text of the brace group `code` opens with.
+fn body_at(code: &str) -> &str {
+    let mut depth = 0usize;
+    for (at, c) in code.char_indices() {
+        depth = match c {
+            '{' => depth + 1,
+            '}' if depth == 1 => return &code[..=at],
+            '}' => depth - 1,
+            _ => depth,
+        };
+    }
+    code
+}
+
+/// `text` with every comment, string and character literal blanked, so a brace in one is no brace.
+fn code_of(text: &str) -> String {
+    let chars = text.chars().collect::<Vec<_>>();
+    let mut out = String::with_capacity(text.len());
+    let mut at = 0;
+    while at < chars.len() {
+        let end = literal_end(&chars, at).unwrap_or(at + 1);
+        let blank = end > at + 1;
+        let kept = chars[at..end].iter();
+        out.extend(kept.map(|c| if blank && *c != '\n' { ' ' } else { *c }));
+        at = end;
+    }
+    out
+}
+
+/// Where the comment or literal starting at `at` ends, or `None` when none starts there.
+fn literal_end(chars: &[char], at: usize) -> Option<usize> {
+    let ahead = |n: usize| chars.get(at + n).copied();
+    let until = |from: usize, close: &[char]| {
+        (from..chars.len())
+            .find(|end| chars[*end..].starts_with(close))
+            .map_or(chars.len(), |end| end + close.len())
+    };
+    match (chars[at], ahead(1), ahead(2)) {
+        ('/', Some('/'), _) => Some(until(at, &['\n'])),
+        ('/', Some('*'), _) => Some(until(at + 2, &['*', '/'])),
+        ('"', ..) => Some(escaped_end(chars, at + 1, '"')),
+        ('r', Some('"'), _) => Some(until(at + 2, &['"'])),
+        ('r', Some('#'), Some('"')) => Some(until(at + 3, &['"', '#'])),
+        ('\'', Some('\\'), _) => Some(escaped_end(chars, at + 1, '\'')),
+        ('\'', _, Some('\'')) => Some(at + 3),
+        _ => None,
+    }
+}
+
+/// The end of a literal closed by `close` from `from`, a backslash escaping the character after it.
+fn escaped_end(chars: &[char], from: usize, close: char) -> usize {
+    let mut at = from;
+    while at < chars.len() && chars[at] != close {
+        at += 1 + usize::from(chars[at] == '\\');
+    }
+    (at + 1).min(chars.len())
+}
+
 /// Lines outside `#[cfg(test)]` items, retaining zero-based source line numbers.
 /// Test items are skipped rather than treated as EOF so a production item
 /// placed after one cannot hide from an architecture interlock.

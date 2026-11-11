@@ -3,8 +3,8 @@
 //! A place every access to which is a load or store of one width at one entry offset, that no
 //! escaped frame address reaches and no declaration names, is a variable: a store becomes a copy
 //! into a new version of `stack:mN`, a load a copy out of the version that reaches it, a merge a
-//! phi. Escape is FrameReach's rule over the raw SSA: a frame address that reaches a call, a store's
-//! value or an unmodelled operation reaches every place on either side of it, out to a save slot.
+//! phi. Escape is default deny (doc/adr-call-boundary.md, "D217 as built"); an escape reaches every
+//! place on either side of it, out to a save slot.
 //! `O(V + E)` to classify, `O(places x blocks)` to rename.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -58,6 +58,8 @@ struct Reach {
     whole: bool,
     both: BTreeSet<i64>,
     up: BTreeSet<i64>,
+    /// Places holding a frame address a call reads as a stack argument: the store stays.
+    handed: BTreeSet<i64>,
 }
 
 /// Promote every eligible frame place of `func`; the loads and stores rewritten.
@@ -139,10 +141,12 @@ pub(crate) fn promote(
             .and_then(|reach| reach.get(&position))
             .is_some_and(crate::interproc::ArgumentReach::is_upward)
     };
+    let stack_arguments = StackArguments::of(func, machine, stack_pointer, entry_sp);
     let sinks = Sinks {
         calls_refund_stack,
         read_by_calls: &read_by_calls,
         upward_at: &upward_at,
+        stack_arguments: &stack_arguments,
     };
     // Assume every place may carry an address stored into it; withdraw the places promotion
     // refuses until the assumption holds. The set only shrinks: at most one round per place.
@@ -188,6 +192,132 @@ struct Sinks<'a> {
     /// Whether the `CallUse` at this block and index hands its value to a callee that reaches
     /// only upward through it.
     upward_at: &'a dyn Fn(u64, usize, VarId) -> bool,
+    stack_arguments: &'a StackArguments,
+}
+
+/// The stack each call may read: a frame address stored there leaves the body
+/// (doc/adr-call-boundary.md, "D217 as built").
+struct StackArguments {
+    calls: Vec<CallArguments>,
+}
+
+/// One call's argument area, from the stack pointer it is measured at.
+struct CallArguments {
+    pointer: VarId,
+    /// What the transfer spends where no restore records the pointer entering it.
+    shift: i64,
+    /// `SourceMachineContext::call_argument_area`; none reads every place from the pointer to entry.
+    area: Option<Vec<(i64, i64)>>,
+}
+
+impl StackArguments {
+    /// One dominator-tree walk carries the stack pointer to every call: `O(B + ops)`.
+    fn of(
+        func: &SSAFunction,
+        machine: &SourceMachineContext,
+        stack_pointer: crate::CanonicalStorageId,
+        entry_sp: VarId,
+    ) -> Self {
+        let site = Site {
+            func,
+            machine,
+            spent: machine.return_mechanism().map_or(0, |mechanism| {
+                i64::from(mechanism.stack_pointer_delta_bytes())
+            }),
+            stack_pointer,
+        };
+        let mut calls = Vec::new();
+        let mut steps = vec![(func.root(), entry_sp)];
+        let mut seen = BTreeSet::new();
+        while let Some((address, mut pointer)) = steps.pop() {
+            let Some(block) = func.get_block(address).filter(|_| seen.insert(address)) else {
+                continue;
+            };
+            if let Some((_, phi)) = block.sited_phis().find(|(_, phi)| site.is_pointer(phi.dst)) {
+                pointer = phi.dst;
+            }
+            pointer = site.calls(block.ops(), pointer, &mut calls);
+            let children = func.domtree().children(address);
+            steps.extend(children.iter().rev().map(|child| (*child, pointer)));
+        }
+        Self { calls }
+    }
+
+    /// The places of `stored` some call may read, given each place's widest access.
+    fn read(&self, points: &IdMap<VarId, Point>, stored: &BTreeMap<i64, u32>) -> BTreeSet<i64> {
+        let mut read = BTreeSet::new();
+        for call in &self.calls {
+            let Some(Point::Exact(base)) = points.get(call.pointer).copied() else {
+                // A call at a pointer no offset places may read any place.
+                return stored.keys().copied().collect();
+            };
+            let base = base.wrapping_add(call.shift);
+            let within = |place: i64, width: u32| match &call.area {
+                Some(area) => area.iter().any(|(low, high)| {
+                    base.wrapping_add(*low) < place.saturating_add(i64::from(width))
+                        && place < base.wrapping_add(*high)
+                }),
+                // Unbounded, it is still this frame's: it ends at the entry pointer.
+                None => place.saturating_add(i64::from(width)) > base && place < 0,
+            };
+            read.extend(
+                (stored.iter())
+                    .filter(|(place, width)| within(**place, **width))
+                    .map(|(place, _)| *place),
+            );
+        }
+        read
+    }
+}
+
+/// What every call of one function shares: the machine, and what a transfer spends.
+struct Site<'a> {
+    func: &'a SSAFunction,
+    machine: &'a SourceMachineContext,
+    spent: i64,
+    stack_pointer: crate::CanonicalStorageId,
+}
+
+impl Site<'_> {
+    fn is_pointer(&self, var: VarId) -> bool {
+        self.func.storage_of(var) == Some(self.stack_pointer)
+    }
+
+    /// Each call of a block's `ops`, entered at the stack `pointer`; the pointer leaving it.
+    fn calls(
+        &self,
+        ops: &[SSAOp<VarId>],
+        mut pointer: VarId,
+        out: &mut Vec<CallArguments>,
+    ) -> VarId {
+        for (index, op) in ops.iter().enumerate() {
+            out.extend(self.call(&ops[index..], pointer));
+            pointer = op
+                .dst()
+                .copied()
+                .filter(|dst| self.is_pointer(*dst))
+                .unwrap_or(pointer);
+        }
+        pointer
+    }
+
+    /// The call `ops` starts with, in the boundary's coordinates: the pointer a restore records
+    /// entering the transfer, else the one reaching it past what the transfer spends.
+    fn call(&self, ops: &[SSAOp<VarId>], pointer: VarId) -> Option<CallArguments> {
+        let call = ops.first()?.call()?;
+        let entering = (ops[1..].iter())
+            .take_while(|op| matches!(op, SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. }))
+            .find_map(|op| match op {
+                SSAOp::CallRestore { dst, src } if self.is_pointer(*dst) => Some(*src),
+                _ => None,
+            });
+        let (pointer, shift) = entering.map_or((pointer, self.spent), |src| (src, 0));
+        Some(CallArguments {
+            pointer,
+            shift,
+            area: self.machine.call_argument_area(call.instruction),
+        })
+    }
 }
 
 /// Every exact access to the frame, by entry offset, what the frame's escapes reach, and the
@@ -244,6 +374,8 @@ struct Classifier<'a> {
     carriers: BTreeSet<i64>,
     /// Stores of an address whose place is not yet known: they escape if it never is.
     deferred: Vec<(VarId, VarId)>,
+    /// Each exact place a frame address is stored into, with the address.
+    stored: BTreeMap<i64, Point>,
 }
 
 impl<'a> Classifier<'a> {
@@ -289,11 +421,13 @@ impl<'a> Classifier<'a> {
                 whole: false,
                 both: BTreeSet::new(),
                 up: BTreeSet::new(),
+                handed: BTreeSet::new(),
             },
             held: BTreeMap::new(),
             loaded: BTreeMap::new(),
             carriers: BTreeSet::new(),
             deferred: Vec::new(),
+            stored: BTreeMap::new(),
         }
     }
 
@@ -426,21 +560,19 @@ impl<'a> Classifier<'a> {
             SSAOp::CallUse { src } if (self.sinks.upward_at)(block, index, *src) => {
                 self.escape_up(point);
             }
-            SSAOp::CallUse { .. } => self.escape(point),
-            // A frame address used as code, or as a value an unmodelled operation reads.
-            _ if op.is_call()
-                || op.jump().is_some()
-                || matches!(op, SSAOp::Return { .. } | SSAOp::CallOther { .. }) =>
-            {
-                self.reach.whole = true
-            }
+            // A truth value or a count: the address is only tested, and nothing of it is carried.
+            SSAOp::CBranch { target, .. } if *target != var => {}
+            _ if op.value_use() == r2il::ValueUse::Tests => {}
             // Compared, masked or measured, it is a number: it is an address again only if what
             // it makes reaches an access or a sink, which its own uses decide.
-            _ => {
+            _ if op.value_use() != r2il::ValueUse::Consumes => {
                 if let Some(dst) = op.dst() {
                     self.set(*dst, Point::Unknown);
                 }
             }
+            // Default deny: every other use hands the address on.
+            SSAOp::CallUse { .. } => self.escape(point),
+            _ => self.reach.whole = true,
         }
     }
 
@@ -450,6 +582,10 @@ impl<'a> Classifier<'a> {
             return;
         };
         let carries = |place: i64| self.carried.is_none_or(|carried| carried.contains(&place));
+        if let Some(Point::Exact(place)) = self.points.get(addr).copied() {
+            let joined = (self.stored.get(&place)).map_or(address, |known| known.join(address));
+            self.stored.insert(place, joined);
+        }
         match self.points.get(addr).copied() {
             Some(Point::Exact(place)) if carries(place) => {
                 self.carriers.insert(place);
@@ -517,6 +653,24 @@ impl<'a> Classifier<'a> {
                 self.escape(address);
             }
         }
+        // An address in a slot a call reads is handed to the callee: it escapes, and the slot
+        // keeps its store.
+        let widths = (self.stored.keys())
+            .map(|place| {
+                let widest = self
+                    .accesses
+                    .get(place)
+                    .into_iter()
+                    .flatten()
+                    .map(|access| access.width);
+                (*place, widest.max().unwrap_or(1))
+            })
+            .collect();
+        let handed = (self.sinks.stack_arguments).read(&self.points, &widths);
+        for place in &handed {
+            self.escape(self.stored[place]);
+        }
+        self.reach.handed = handed;
         (self.accesses, self.reach, self.carriers)
     }
 }
@@ -603,36 +757,28 @@ fn non_negative(func: &SSAFunction, defs: &Definitions, var: VarId) -> bool {
     }
 }
 
-/// The places a register the convention preserves is saved into at its entry value; they bound
-/// what an escaped address reaches.
+/// The places a register lane the convention preserves is saved into at its entry value
+/// (`saved_register`); they bound what an escaped address reaches.
 fn saves(
     func: &SSAFunction,
     defs: &Definitions,
     accesses: &BTreeMap<i64, Vec<Access>>,
     machine: &SourceMachineContext,
 ) -> BTreeSet<i64> {
-    // With no convention nothing says which register a callee may keep, so every one is saved.
-    let effect = machine.call_effect();
+    let (effect, stack_pointer) = (machine.call_effect(), machine.stack_pointer_carrier());
+    let saved = |access: &Access| {
+        let val = match func.get_block(access.block)?.ops().get(access.index)? {
+            SSAOp::Store { val, .. } => *val,
+            _ => return None,
+        };
+        crate::saved_register::entry_lane_of_var(func, defs, val)
+            .filter(|lane| crate::saved_register::preserved(effect, stack_pointer, *lane))
+    };
     accesses
         .iter()
         .filter(|(_, list)| {
-            list.iter().any(|access| {
-                access.store
-                    && access.block == func.root()
-                    && func
-                        .get_block(access.block)
-                        .and_then(|block| match block.ops().get(access.index) {
-                            Some(SSAOp::Store { val, .. }) => Some(defs.copied(*val)),
-                            _ => None,
-                        })
-                        .is_some_and(|val| {
-                            // A register the convention preserves: the compiler's save, not a variable.
-                            func.var(val).version == 0
-                                && func.storage_of(val).is_some_and(|storage| {
-                                    storage.space == crate::CanonicalStorageSpace::Register
-                                        && effect.is_none_or(|effect| effect.preserves(storage))
-                                })
-                        })
+            (list.iter()).any(|access| {
+                access.store && access.block == func.root() && saved(access).is_some()
             })
         })
         .map(|(offset, _)| *offset)
@@ -673,8 +819,8 @@ fn eligible(
     let mut promotable = BTreeMap::new();
     let overlapped = overlapped_places(accesses);
     for (offset, list) in accesses {
-        // At or above the entry stack pointer is the caller's: the return address, stack arguments.
-        if *offset >= 0 {
+        // The caller's storage stays in memory: the return address, stack arguments.
+        if !machine.stack_owner(*offset).callee_owned() {
             continue;
         }
         let widths = list
@@ -698,10 +844,11 @@ fn eligible(
         let is_declared = declared_covers(*offset, width) && !read_only_home;
         // A save read back stays in memory: the frame round-trip certificate answers for it.
         let is_save = saves.contains(offset) && list.iter().any(|access| !access.store);
-        if overlaps || is_save || is_declared || reachable(*offset) {
+        let handed = reach.handed.contains(offset);
+        if overlaps || is_save || is_declared || handed || reachable(*offset) {
             r2il::refusal_evidence!(
                 "promote-stack-slot",
-                "{:#x}: slot at {offset} stays in memory: overlap {overlaps}, save {is_save}, declared {is_declared}, reached {}",
+                "{:#x}: slot at {offset} stays in memory: overlap {overlaps}, save {is_save}, declared {is_declared}, handed {handed}, reached {}",
                 func.entry,
                 reachable(*offset)
             );

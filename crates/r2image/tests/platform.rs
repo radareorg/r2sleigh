@@ -39,3 +39,41 @@ fn an_elf_names_its_c_library_by_its_dynamic_linker_and_its_start_files_notes() 
         BTreeSet::new()
     );
 }
+
+/// `readelf -VW`: the needs `.gnu.version_r` states, and the version `.gnu.version` gives each import.
+#[test]
+fn an_elf_states_the_versions_it_needs_and_each_import_binds() {
+    use r2image::{SymbolVersion, VersionNeed};
+    let image = Image::parse(include_bytes!("data/fortified_glibc.elf").to_vec()).expect("parses");
+    let container = image.container();
+    assert_eq!(
+        container.version_needs,
+        [VersionNeed {
+            library: "libc.so.6".into(),
+            versions: vec![
+                "GLIBC_2.4".into(),
+                "GLIBC_2.2.5".into(),
+                "GLIBC_2.34".into()
+            ],
+        }]
+    );
+    let version = |name: &str| {
+        let import = container
+            .symbols
+            .iter()
+            .find(|symbol| symbol.import && &*symbol.name == name);
+        import.and_then(|symbol| symbol.version.clone())
+    };
+    assert_eq!(
+        version("__fgets_chk"),
+        Some(SymbolVersion::Needed {
+            library: "libc.so.6".into(),
+            version: "GLIBC_2.4".into(),
+        })
+    );
+    // A weak reference the linker left unversioned states none.
+    assert_eq!(version("__gmon_start__"), None);
+    // A shared object that needs no library states no need.
+    let library = Image::parse(include_bytes!("data/loader_values.so").to_vec()).expect("parses");
+    assert!(library.container().version_needs.is_empty());
+}

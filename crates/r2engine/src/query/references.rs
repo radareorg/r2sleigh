@@ -151,10 +151,30 @@ impl Indexing {
     /// relative one, a definition's, or a definition another image may
     /// replace, which the word still names until one does. A word belongs to
     /// no function, so it has no owner.
-    pub(crate) fn read_words(&mut self, writes: &[crate::program::LoaderWrite]) {
+    pub(crate) fn read_words(
+        &mut self,
+        writes: &[crate::program::LoaderWrite],
+        holds_code: impl Fn(u64) -> bool,
+        coverage: &mut Coverage,
+    ) {
+        use r2abi::statement::{Encoding, WriteKind};
         for write in writes {
-            let Some(value) = write.stated_address() else {
-                continue;
+            // The loader calls a resolver; a word whose value no record states may name any code.
+            let value = match (write.encoding, &write.kind) {
+                (_, WriteKind::Resolver(resolver)) => *resolver,
+                (_, WriteKind::Unknown) => {
+                    coverage.unstated.push(write.place);
+                    continue;
+                }
+                (Encoding::Word, _) => match write.stated_address() {
+                    Some(value) => value,
+                    None => continue,
+                },
+                (Encoding::FromPlace | Encoding::Typed, _) => {
+                    let code = write.target().filter(|target| holds_code(*target));
+                    coverage.unstated.extend(code.map(|_| write.place));
+                    continue;
+                }
             };
             let line = Line {
                 address: write.place,
@@ -216,6 +236,9 @@ pub struct Coverage {
     /// Per function, every place its walk stopped without knowing where
     /// control went; code past those is in no body.
     pub unresolved: BTreeMap<u64, Vec<Unresolved>>,
+    /// Each place the loader writes a value the index cannot read: a word no record states, or a
+    /// field forming an address of code (doc/adr-result-side.md, "The closed world").
+    pub unstated: Vec<u64>,
 }
 
 /// Why one function contributed nothing to the index.

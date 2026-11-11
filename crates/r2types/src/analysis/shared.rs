@@ -11,14 +11,15 @@ pub(crate) enum StructDeclSource {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct InferredSignatureParam {
     pub name: String,
-    pub param_type: String,
+    pub ty: CTypeLike,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InferredSignature {
     pub function_name: String,
     pub signature: String,
-    pub ret_type: String,
+    /// `None` until something decides the result.
+    pub ret_type: Option<CTypeLike>,
     pub params: Vec<InferredSignatureParam>,
     pub callconv: String,
     pub arch: String,
@@ -54,7 +55,7 @@ pub(crate) struct TypeAnalysisDiagnostics {
 /// This detached projection is not certificate authority. Authoritative
 /// the analysis derives it internally from a retained [`SsaArtifact`] owner.
 pub(crate) struct LocalStructArtifacts {
-    pub slot_element_strides: HashMap<usize, u64>,
+    pub slot_element_strides: FxHashMap<usize, u64>,
     pub indexed_accesses: Vec<ScalarArrayRenderCandidate>,
 }
 
@@ -290,27 +291,25 @@ pub(crate) fn aggregate_lookup_keys(name: &str) -> Vec<String> {
     out
 }
 
-pub(crate) fn parse_signature_type_preserving_c_typedefs(
-    ty: &str,
-    ptr_bits: u32,
-) -> Option<CTypeLike> {
-    match normalize_external_type_name(ty)
+/// An inferred type with C's own integer names kept as names, so a declared
+/// `int` or `size_t` is not mistaken for a width the body can refine.
+pub(crate) fn preserving_c_typedefs(ty: &CTypeLike, ptr_bits: u32) -> CTypeLike {
+    let rendered = render_signature_type(ty, ptr_bits);
+    match normalize_external_type_name(&rendered)
         .trim()
         .to_ascii_lowercase()
         .as_str()
     {
-        "int" => Some(c_int_type()),
-        "unsigned int" => Some(c_uint_type()),
-        "short" | "short int" => Some(typedef_type("short")),
-        "unsigned short" | "unsigned short int" => Some(typedef_type("unsigned short")),
-        "long" | "long int" => Some(typedef_type("long")),
-        "unsigned long" | "unsigned long int" => Some(typedef_type("unsigned long")),
-        "size_t" => Some(typedef_type("size_t")),
-        "ssize_t" => Some(typedef_type("ssize_t")),
-        "ptrdiff_t" => Some(typedef_type("ptrdiff_t")),
-        "uintptr_t" => Some(typedef_type("uintptr_t")),
-        "intptr_t" => Some(typedef_type("intptr_t")),
-        _ => parse_c_type_like(ty, ptr_bits),
+        "int" => c_int_type(),
+        "unsigned int" => c_uint_type(),
+        "short" | "short int" => typedef_type("short"),
+        "unsigned short" | "unsigned short int" => typedef_type("unsigned short"),
+        "long" | "long int" => typedef_type("long"),
+        "unsigned long" | "unsigned long int" => typedef_type("unsigned long"),
+        name @ ("size_t" | "ssize_t" | "ptrdiff_t" | "uintptr_t" | "intptr_t") => {
+            CTypeLike::named(name, ty.unaliased().clone())
+        }
+        _ => ty.clone(),
     }
 }
 
@@ -318,16 +317,19 @@ pub(crate) fn inferred_signature_to_spec(
     signature: &InferredSignature,
     ptr_bits: u32,
 ) -> Option<FunctionSignatureSpec> {
-    let ret_type = parse_signature_type_preserving_c_typedefs(&signature.ret_type, ptr_bits);
+    let ret_type = signature
+        .ret_type
+        .as_ref()
+        .map(|ty| preserving_c_typedefs(ty, ptr_bits));
     let params = signature
         .params
         .iter()
         .map(|param| FunctionParamSpec {
             name: param.name.clone(),
-            ty: parse_signature_type_preserving_c_typedefs(&param.param_type, ptr_bits),
+            ty: Some(preserving_c_typedefs(&param.ty, ptr_bits)),
         })
         .collect::<Vec<_>>();
-    if ret_type.is_none() && params.iter().all(|param| param.ty.is_none()) {
+    if ret_type.is_none() && params.is_empty() {
         return None;
     }
     Some(FunctionSignatureSpec { ret_type, params })
@@ -337,81 +339,43 @@ pub(crate) fn is_generic_signature_type(ty: Option<&CTypeLike>) -> bool {
     crate::is_generic_signature_type(ty)
 }
 
-/// Whether a type name denotes something we can actually resolve.
-///
-/// This replaces `role_registry::semantic_typedef_is_authoritative`, a
-/// hardcoded list of about two hundred spellings -- most of them private to GNU
-/// coreutils and gnulib -- which decided whether a typedef was concrete enough
-/// to keep rather than replace. A name on the list was authoritative for every
-/// binary and a name off it for none, whatever the binary actually said.
-///
-/// The question is answerable from evidence. A name resolves if the C language
-/// resolves it, which `parse_c_type_like` already answers for the builtin and
-/// stdint spellings; or if the external type database holds a real layout for
-/// it; or if the database holds a typedef entry that eventually names one.
-/// Unlike the list, that says the same thing about a coreutils typedef and
-/// about anybody else's, and it says it from what the binary carries.
+/// Whether a typedef resolves: a stated target, a name C or `<stdint.h>` defines,
+/// a layout the type database holds, or a name this decompiler mints.
 pub(crate) fn type_db_resolves_type_name(
     type_db: &ExternalTypeDb,
     name: &str,
-    ptr_bits: u32,
+    target: &CTypeLike,
 ) -> bool {
-    // Typedefs this decompiler mints itself. These are resolvable because we
-    // define them in the emitted prelude, not because some binary declared
-    // them, so no evidence from the binary is required or possible.
-    if matches!(name.trim(), "allocation_ptr" | "memory_ptr") {
-        return true;
-    }
-    if parse_c_type_like(name, ptr_bits).is_some_and(|ty| !matches!(ty, CTypeLike::Typedef { .. }))
-    {
-        return true;
-    }
-    if external_named_aggregate_has_real_layout(type_db, name) {
-        return true;
-    }
-    aggregate_lookup_keys(name)
-        .iter()
-        .any(|key| type_db.typedefs.contains_key(key))
+    !matches!(target, CTypeLike::Unknown)
+        || matches!(name.trim(), "allocation_ptr" | "memory_ptr")
+        || crate::convert::names_a_standard_type(name)
+        || external_named_aggregate_has_real_layout(type_db, name)
 }
 
 pub(crate) fn external_named_aggregate_has_real_layout(
     type_db: &ExternalTypeDb,
     name: &str,
 ) -> bool {
-    type_db.typedef_chain_keys(name).any(|keys| {
-        keys.iter().any(|key| {
-            type_db
-                .structs
+    ExternalTypeDb::lookup_keys(name).iter().any(|key| {
+        type_db
+            .structs
+            .get(key)
+            .is_some_and(|st| !st.fields.is_empty())
+            || type_db
+                .unions
                 .get(key)
-                .is_some_and(|st| !st.fields.is_empty())
-                || type_db
-                    .unions
-                    .get(key)
-                    .is_some_and(|un| !un.fields.is_empty())
-                || type_db
-                    .enums
-                    .get(key)
-                    .is_some_and(|en| !en.variants.is_empty())
-        })
+                .is_some_and(|un| !un.fields.is_empty())
+            || type_db
+                .enums
+                .get(key)
+                .is_some_and(|en| !en.variants.is_empty())
     })
 }
 
-pub(crate) fn estimate_c_type_size_bytes(ty: &str, ptr_bits: u32) -> u64 {
-    if let Some(parsed) = parse_c_type_like(ty, ptr_bits)
-        && let Some(size) = estimate_type_like_size_bytes(&parsed, ptr_bits)
-        && size > 0
-    {
-        return size;
-    }
-
-    let lower = normalize_external_type_name(ty).trim().to_ascii_lowercase();
-    if lower.contains('*') {
-        return (ptr_bits / 8).max(1) as u64;
-    }
-    if lower == "double" || lower == "long double" {
-        return 8;
-    }
-    1
+pub(crate) fn estimate_c_type_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> u64 {
+    estimate_type_like_size_bytes(ty, ptr_bits)
+        .filter(|size| *size > 0)
+        .unwrap_or(1)
 }
 
 pub(crate) fn estimate_type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64> {

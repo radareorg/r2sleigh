@@ -1,89 +1,22 @@
-//! What the program's calls to a function read of its result registers (doc/adr-resolved-bodies.md,
-//! "Caller reads"): each caller is read as `Walked` holds it, so no answer waits on its own function.
+//! Whether the program's calls to a function are every way in (doc/adr-resolved-bodies.md, "Closed
+//! world"), which a closed-world boundary needs before it reads every call dead.
 
 use std::sync::Arc;
 
 use r2abi::statement::{Binding, EntryKind, Format, SectionRole, SourceLanguage, Symbol};
-use r2source::SourceResultReads;
 
 use super::requests::{ReferenceIndex, SurveyQuery};
 use super::{ProgramInputs, Source, View};
 use crate::query::db::{Db, Query, Retention};
 use crate::query::references::Role;
 
-/// The reads at every call to one function, by its entry: what each read or overwrote of the result
-/// registers; `None` where the program makes no call to it the walk can read.
-pub(super) struct ResultReads;
-
-impl<S: Source + 'static> Query<ProgramInputs<S>> for ResultReads {
-    type Key = u64;
-    type Value = Option<SourceResultReads>;
-    const NAME: &'static str = "result-reads";
-    const RETENTION: Retention = Retention::Held;
-
-    /// Work: one walk per caller discovery found, each read from each call the walk found to `callee`
-    /// to its block's end.
-    fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> Self::Value {
-        let survey = db.get::<SurveyQuery>(&()).ok()?;
-        let survey = Arc::clone(&survey.as_ref().as_ref().ok()?.0);
-        let view = View::new(db, true);
-        let walker = super::returns::Walking::new(view.clone(), true).ok()?;
-        let mut reads = SourceResultReads::default();
-        // A caller that is not read may read the result: the calls read are then not every call.
-        let mut unread = false;
-        // A call two bodies hold (one walk enters the other's tail) is one call, read once.
-        let mut read = std::collections::BTreeSet::new();
-        for &caller in survey.callers_of(callee) {
-            let Some(Ok(thumb)) = survey.walked_in(caller) else {
-                unread = true;
-                continue;
-            };
-            let target = walker.target(thumb);
-            let Ok(slots) = crate::native::convention_slots(target) else {
-                unread = true;
-                continue;
-            };
-            // The caller's body is the one `pdf` and the reference index read, its dispatches followed.
-            let Ok(walking) = db.get::<super::analysis::Walked>(&(caller, thumb)) else {
-                unread = true;
-                continue;
-            };
-            let Ok(walk) = &walking.0 else {
-                unread = true;
-                continue;
-            };
-            let calls = walk.body().blocks.iter().flat_map(|block| {
-                (block.transfers.iter())
-                    .filter(|transfer| {
-                        transfer.target == callee
-                            && transfer.kind == r2source::AdvisoryCallTransfer::Call
-                    })
-                    .map(move |transfer| (&block.lifted, transfer.op))
-            });
-            for (lifted, index) in calls {
-                if !read.insert(lifted.instruction_of(index)) {
-                    continue;
-                }
-                reads = reads.and(r2ssa::caller_reads::reads_after_call(
-                    lifted,
-                    index,
-                    slots.result_slot(),
-                    slots.float_result_slot(),
-                    slots.second_result_slot(),
-                ));
-            }
-        }
-        // Only a result no call reads asks whether the calls are every way in: the reference index
-        // that answers reads every body.
-        reads.exhaustive =
-            !unread && reads.all_overwrite(false, false) && only_called(db, callee, reads.calls);
-        (reads.calls > 0).then_some(reads)
-    }
-}
-
 /// Whether the program enters `callee` only by the `calls` read: no other way in it shows, and every
 /// call the reference index claims is one of them (doc/adr-resolved-bodies.md, "Closed world").
-fn only_called<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64, calls: u32) -> bool {
+pub(super) fn only_called<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    callee: u64,
+    calls: u32,
+) -> bool {
     let language = db.inputs().source.container().languages.at(callee);
     // Swift, Objective-C, Go and .NET reach functions through tables of relative offsets no word holds.
     if !matches!(
@@ -111,7 +44,7 @@ fn only_called<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64, call
     let claimed = (index.0.to(callee))
         .filter(|(fact, _)| fact.role == Role::Call)
         .count();
-    let all = usize::try_from(calls).is_ok_and(|calls| calls == claimed);
+    let all = every_call_read(calls, claimed);
     if !all {
         r2il::refusal_evidence!(
             "closed-world",
@@ -119,6 +52,11 @@ fn only_called<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64, call
         );
     }
     all
+}
+
+/// Whether the calls a boundary read are every call the index claims: one short is a call unread.
+fn every_call_read(calls: u32, claimed: usize) -> bool {
+    usize::try_from(calls).is_ok_and(|calls| calls == claimed)
 }
 
 /// The functions the program enters other than by a direct call, by entry, ascending; `None` where
@@ -145,6 +83,13 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
         }
         let survey = db.get::<SurveyQuery>(&()).ok()?;
         let survey = Arc::clone(&survey.as_ref().as_ref().ok()?.0);
+        // Code no walk decoded may call or name anything; a code byte no body, stub section or padding
+        // accounts for refuses before the index is built (doc/adr-call-boundary.md, "S7 cost").
+        let mut escaped = Vec::new();
+        if let Some(at) = unaccounted_code(db, &survey, &mut escaped) {
+            r2il::refusal_evidence!("closed-world", "{at:#x}: code no body holds");
+            return None;
+        }
         let index = db.get::<ReferenceIndex>(&()).ok()?;
         let index = Arc::clone(&index.as_ref().as_ref().ok()?.0);
         // A body not read may hold any reference.
@@ -156,12 +101,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
             );
             return None;
         }
-        // Code no walk decoded (past an unresolved transfer, or never reached) may call or name
-        // anything; a code byte no body, stub section or padding accounts for refuses.
-        // A direct transfer in filler is a way in the index does not see: its target escapes.
-        let mut escaped = Vec::new();
-        if let Some(at) = unaccounted_code(db, &survey, &mut escaped) {
-            r2il::refusal_evidence!("closed-world", "{at:#x}: code no body holds");
+        // A loader write the index cannot read may name any function.
+        if let Some(at) = index.coverage.unstated.first() {
+            r2il::refusal_evidence!("closed-world", "{at:#x}: a loader write no record states");
             return None;
         }
         for (fact, claimant) in index.claimed() {
@@ -171,17 +113,32 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
                 escaped.push(fact.to);
             }
         }
-        escaped.extend(
-            (container.entries.iter())
-                .filter(|entry| !matches!(entry.kind, EntryKind::Symbol | EntryKind::Declared))
-                .map(|entry| entry.vaddr),
-        );
+        // A loader call a cited row states passes nothing and reads nothing, so it is no way in a
+        // caller's read must count; the slot stating it names no other (D237).
+        let mut stated = Vec::new();
+        for entry in &container.entries {
+            match r2abi::loader_call(container.format, entry.kind) {
+                Some(call) if call.adds_no_read() => {
+                    r2il::refusal_evidence!(
+                        "closed-world",
+                        "{:#x}: the loader's {:?} call reads nothing ({})",
+                        entry.vaddr,
+                        entry.kind,
+                        call.citation
+                    );
+                    stated.extend(entry.stated_at.and_then(|at| at.vaddr));
+                }
+                _ if matches!(entry.kind, EntryKind::Symbol | EntryKind::Declared) => {}
+                _ => escaped.push(entry.vaddr),
+            }
+        }
+        stated.sort_unstable();
         escaped.extend(
             (container.symbols.iter())
                 .filter(|symbol| exported(container.format, symbol))
                 .map(|symbol| symbol.vaddr),
         );
-        stored_words(source, &survey.entries(), &mut escaped);
+        stored_words(source, &survey.entries(), &stated, &mut escaped);
         escaped.sort_unstable();
         escaped.dedup();
         Some(escaped.into())
@@ -272,12 +229,17 @@ fn padding<S: Source + 'static>(
                 .iter()
                 .filter(|op| op.is_control_flow())
                 .peekable();
-            lifted.ops.is_empty()
+            // A multi-byte `nop` forms an address into a temporary and drops it.
+            let none = |op: &r2il::R2ILOp| !op.is_control_flow() && op.writes_only_temporaries();
+            lifted.ops.iter().all(none)
                 || (transfers.peek().is_some()
                     && transfers.all(|op| {
                         matches!(op, r2il::R2ILOp::Breakpoint)
                             || (op.transfer()).is_some_and(|transfer| {
-                                transfer.direct && known(transfer.target.offset)
+                                // `hlt` lifts to a branch to itself, which reaches no other code.
+                                transfer.direct
+                                    && (known(transfer.target.offset)
+                                        || (!transfer.call && transfer.target.offset == address))
                             })
                     }))
         };
@@ -293,7 +255,7 @@ fn padding<S: Source + 'static>(
                 targets.extend(
                     (lifted.ops.iter())
                         .filter_map(r2il::R2ILOp::transfer)
-                        .filter(|transfer| transfer.direct)
+                        .filter(|transfer| transfer.direct && transfer.target.offset != address)
                         .map(|transfer| transfer.target.offset),
                 );
                 at += lifted.size as usize;
@@ -314,13 +276,14 @@ fn exported(format: Format, symbol: &Symbol) -> bool {
         }
 }
 
-/// Each of `entries` some mapped file word names: pointer-wide at any offset, and on a 64-bit machine
-/// 32 bits wide too (an `imm32` or `.long` of a non-PIE address), with bit 0 cleared as Thumb sets it.
-fn stored_words<S: Source>(source: &S, entries: &[u64], escaped: &mut Vec<u64>) {
+/// Each of `entries` a mapped word names, pointer-wide or (64-bit) 32 bits, bit 0 cleared as Thumb
+/// sets it; a word starting in a slot at one of `stated` (ascending) is the loader's (D237).
+fn stored_words<S: Source>(source: &S, entries: &[u64], stated: &[u64], escaped: &mut Vec<u64>) {
     let (Some(&low), Some(&high)) = (entries.first(), entries.last()) else {
         return;
     };
     let little = super::view::endian(source) == r2il::Endianness::Little;
+    let pointer = u64::from(source.container().arch.bits / 8);
     let widths: &[usize] = match source.container().arch.bits {
         64 => &[8, 4],
         _ => &[4],
@@ -334,7 +297,7 @@ fn stored_words<S: Source>(source: &S, entries: &[u64], escaped: &mut Vec<u64>) 
             continue;
         };
         for &width in widths {
-            for window in bytes.windows(width) {
+            for (at, window) in bytes.windows(width).enumerate() {
                 let mut word = [0u8; 8];
                 let word = if little {
                     word[..width].copy_from_slice(window);
@@ -344,11 +307,93 @@ fn stored_words<S: Source>(source: &S, entries: &[u64], escaped: &mut Vec<u64>) 
                     u64::from_be_bytes(word)
                 };
                 for value in [word, word & !1] {
-                    if (low..=high).contains(&value) && entries.binary_search(&value).is_ok() {
+                    if (low..=high).contains(&value)
+                        && entries.binary_search(&value).is_ok()
+                        && !in_slot(stated, segment.vaddr + at as u64, pointer)
+                    {
                         escaped.push(value);
                     }
                 }
             }
         }
+    }
+}
+
+/// Whether `at` lies in a `pointer`-byte slot starting at one of `slots` (ascending): `O(log slots)`.
+fn in_slot(slots: &[u64], at: u64, pointer: u64) -> bool {
+    let below = slots.partition_point(|slot| *slot <= at);
+    below > 0 && at < slots[below - 1].saturating_add(pointer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{every_call_read, stored_words};
+    use crate::program::{Arch, Container, Endian, Segment, Source};
+
+    /// A 64-bit image of one segment at `vaddr` holding `bytes`.
+    struct Image {
+        vaddr: u64,
+        bytes: Vec<u8>,
+        container: Container,
+    }
+
+    impl Source for Image {
+        fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+            let at = usize::try_from(vaddr.checked_sub(self.vaddr)?).ok()?;
+            let rest = self.bytes.get(at..).filter(|rest| !rest.is_empty())?;
+            Some(rest.iter().take(max).copied().collect())
+        }
+        fn container(&self) -> &Container {
+            &self.container
+        }
+        fn identity(&self) -> u64 {
+            0
+        }
+        fn byte_revision(&self) -> u64 {
+            0
+        }
+        fn written_since(&self, _: u64, _: &std::ops::Range<u64>) -> bool {
+            false
+        }
+    }
+
+    /// An image above 4 GiB, as a Mach-O is linked: only a pointer-wide word names an entry there.
+    #[test]
+    fn a_pointer_wide_word_above_four_gib_names_its_function() {
+        let vaddr: u64 = 0x1_0000_0000;
+        let mut bytes = vec![0u8; 16];
+        bytes[8..].copy_from_slice(&vaddr.to_le_bytes());
+        let segment = Segment {
+            vaddr,
+            vsize: 16,
+            file_size: 16,
+            ..Segment::default()
+        };
+        let container = Container {
+            arch: Arch {
+                name: "x86-64".to_owned(),
+                bits: 64,
+                endian: Endian::Little,
+                instructions: None,
+            },
+            segments: vec![segment],
+            ..Container::default()
+        };
+        let image = Image {
+            vaddr,
+            bytes,
+            container,
+        };
+        let mut escaped = Vec::new();
+        stored_words(&image, &[vaddr], &[], &mut escaped);
+        assert!(escaped.contains(&vaddr), "{escaped:?}");
+    }
+
+    /// A call the index claims that no boundary read may read the result: one short refuses.
+    #[test]
+    fn a_call_count_one_short_of_the_index_is_not_every_call() {
+        assert!(every_call_read(2, 2));
+        assert!(!every_call_read(1, 2));
+        assert!(!every_call_read(2, 1));
     }
 }

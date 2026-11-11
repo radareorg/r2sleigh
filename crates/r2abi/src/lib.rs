@@ -1,10 +1,15 @@
 //! What a platform's ABI and its C library state, read natively: library
-//! prototypes, system calls, types and the cited ABI rows (`platform`). Where a
+//! rows by linked name (`library`), system calls, types and the cited ABI rows (`platform`). Where a
 //! call's arguments arrive is the compiler specification's (`r2sleigh_lift::profile`).
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
 
+pub mod convention;
+pub mod data_model;
 pub mod declarations;
 pub mod frames;
+pub mod library;
+pub mod loader;
+pub mod mangled;
 pub mod platform;
 pub mod prototypes;
 pub mod runtime;
@@ -13,19 +18,27 @@ pub mod statement;
 pub mod syscalls;
 pub mod types;
 
+pub use convention::{
+    ConventionId, ConventionRow, Cspec, Extension, HomeArea, RegName, ResultSet, Side, SlotClass,
+    SpecOverride, Toolchain,
+};
+pub use data_model::{CDataModel, KERNEL_MODE_CITATION};
 pub use declarations::{DataObject, Declarations};
+pub use library::{
+    CLibrary, Dll, FormatKind, Handle, Kernel, LibraryId, LibraryRow, LibraryRows, PrototypeId,
+    Tail,
+};
+pub use loader::{LoaderCall, loader_call};
+pub use mangled::Passing;
 pub use platform::{
-    CallingConvention, EntryStack, PlatformRegister, RegisterDuty, RegisterSaveArea,
-    SaveAreaAnchor, StackGuard, architecture_registers, calling_convention, go_abi0_convention,
-    go_calling_convention, go_unstated_convention, platform_registers, stack_guard,
+    EntryStack, GuardRow, PlatformRegister, RegisterDuty, RegisterSaveArea, SaveAreaAnchor,
+    StackGuard, architecture_registers, guard_row, platform_registers,
 };
-pub use prototypes::{
-    Arrival, FrameBase, Local, Parameter, Platform, Prototype, Prototypes, Spelled,
-};
+pub use prototypes::{Arrival, FrameBase, Local, Parameter, Prototype, Spelled, StatedConvention};
 pub use syscalls::Syscalls;
 pub use types::{
-    DataModel, Keyword, Member, Qualifiers, Record, RecordKind, Refusal, Scalar, ScalarKind,
-    Signature, Type, TypeGraph, TypeId, Width,
+    Keyword, Member, Qualifiers, Record, RecordKind, Refusal, Scalar, ScalarKind, Signature, Type,
+    TypeGraph, TypeId, Width,
 };
 
 /// The file family an architecture name belongs to.

@@ -6,11 +6,41 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::TABLE_SWITCH;
 
-use r2abi::{CallingConvention, Platform, Prototypes, calling_convention};
+use r2abi::{CLibrary, ConventionId, Kernel, LibraryRows};
+use r2engine::imports::{Imports, Linkage};
+
+/// A test program's kernel and C library, as one container states both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Platform {
+    Linux,
+    Darwin,
+    Windows,
+    Unknown,
+}
+
+impl Platform {
+    pub(crate) fn kernel(self) -> Kernel {
+        match self {
+            Self::Linux => Kernel::Linux,
+            Self::Darwin => Kernel::Darwin,
+            Self::Windows => Kernel::Windows,
+            Self::Unknown => Kernel::Unknown,
+        }
+    }
+
+    pub(crate) fn library(self) -> CLibrary {
+        match self {
+            Self::Linux => CLibrary::Glibc,
+            Self::Darwin => CLibrary::LibSystem,
+            Self::Windows => CLibrary::Ucrt,
+            Self::Unknown => CLibrary::Unknown,
+        }
+    }
+}
 use r2engine::machine::Machine as Embedded;
-use r2engine::native::{NativeTarget, Program, call_effect, decompile};
+use r2engine::native::{NativeTarget, Program, convention_model, decompile};
 use r2sleigh_lift::profile::{LanguageProfile, SpecStorage};
-use r2source::{CanonicalStorageId, CanonicalStorageSpace, SourceCallEffect};
+use r2source::{CanonicalStorageId, CanonicalStorageSpace, ConventionModel};
 use r2ssa::{InstPayload, SSAOp};
 
 const BASE: u64 = 0x1000;
@@ -66,15 +96,14 @@ struct Machine {
     /// the default, and Microsoft x64 under the Windows toolchain's
     /// specification where the language has one and it differs.
     conventions: BTreeMap<&'static str, Under>,
-    prototypes: Prototypes,
+    imports: Imports,
     declarations: r2abi::Declarations,
 }
 
-/// One convention and what the engine reads beside it.
+/// One convention's model and the specification it reads.
 struct Under {
-    convention: &'static CallingConvention,
+    convention: std::sync::Arc<ConventionModel>,
     compiler: LanguageProfile,
-    effect: Option<SourceCallEffect>,
 }
 
 impl Machine {
@@ -88,10 +117,18 @@ impl Machine {
             Embedded::new(r2sleigh_lift::embedded_machine(sleigh).expect("embedded machine"));
         let under = |platform: Platform, specification: &str| {
             let compiler = LanguageProfile::parse(specification).expect("parses");
-            let convention = calling_convention(family, bits, platform).expect("a convention");
+            let id =
+                ConventionId::default_for(family, bits, platform.kernel()).expect("a convention");
+            let (kernel, library) = (platform.kernel(), platform.library());
+            let model = convention_model(
+                &embedded.arch,
+                bits,
+                (kernel, library, None),
+                &compiler,
+                id.row(),
+            );
             Under {
-                convention,
-                effect: call_effect(&embedded.arch, bits, platform, &compiler, Some(convention)),
+                convention: std::sync::Arc::new(model.expect("the convention's model")),
                 compiler,
             }
         };
@@ -103,19 +140,23 @@ impl Machine {
             _ => embedded.compiler_spec,
         };
         let default = under(platform, toolchain);
-        let name = default.convention.name;
+        let name = default.convention.id.radare2_name();
         let mut conventions = BTreeMap::from([(name, default)]);
         if let Some(windows) = embedded.compiler_spec_of("windows") {
             let ms = under(Platform::Windows, windows);
-            if ms.convention.name != name {
-                conventions.insert(ms.convention.name, ms);
+            if ms.convention.id.radare2_name() != name {
+                conventions.insert(ms.convention.id.radare2_name(), ms);
             }
         }
         Self {
             embedded,
             default: name,
             conventions,
-            prototypes: Prototypes::embedded(),
+            imports: Imports::new(
+                LibraryRows::embedded(platform.library()),
+                platform.library(),
+                Linkage::one_c_library(),
+            ),
             declarations: r2abi::Declarations::default(),
         }
     }
@@ -132,12 +173,14 @@ impl Machine {
             arch: self.embedded.tables(),
             disasm: &self.embedded.disasm,
             cpu: self.embedded.cpu,
-            convention: under.convention,
-            call_effect: under.effect.as_ref(),
+            convention: std::sync::Arc::clone(&under.convention),
+            call: std::sync::Arc::clone(&under.convention),
             compiler: &under.compiler,
+            program: None,
             dwarf: &self.embedded.dwarf,
-            prototypes: &self.prototypes,
+            imports: &self.imports,
             declarations: &self.declarations,
+            data_model: None,
         }
     }
 
@@ -317,7 +360,7 @@ fn a_call_is_rendered_from_the_callee_body() {
         response
             .output
             .text()
-            .contains("uint32_t fcn_100a(uint32_t, uint32_t)"),
+            .contains("r2sleigh_result_u32 fcn_100a(uint32_t, uint32_t)"),
         "{}",
         response.output
     );
@@ -445,11 +488,11 @@ fn each_line_names_its_instructions_and_each_outside_name_its_address() {
     let emission = emission(&response);
     let unit = emission.unit();
 
+    assert!(named_by(emission, "rax_1 = ").contains(&0x1000), "{unit}");
     assert!(
-        named_by(emission, "fcn_100a((uint32_t)").contains(&0x1000),
+        named_by(emission, "return r2sleigh_carrier").contains(&0x1005),
         "{unit}"
     );
-    assert!(named_by(emission, "return").contains(&0x1005), "{unit}");
     let lines = unit.lines().count();
     for line in emission.lines() {
         assert!((1..=lines).contains(&line.line), "{line:?}\n{unit}");
@@ -536,8 +579,16 @@ const A64_EMPTY_FRAME: &[u8] = &[
 /// function returned the caller's frame pointer, which its source never does.
 #[test]
 fn a_frame_pointer_the_body_restores_is_no_result() {
+    // RAX defines nothing; XMM0 still holds its entry byte, an input, so the result is unproven (D208).
     let text = rendered(EMPTY_FRAME, "empty_frame");
-    assert!(text.contains("void empty_frame(void)"), "{text}");
+    assert!(
+        text.contains("r2sleigh_result_u64 empty_frame(void)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("the result is unproven (EntryInput)"),
+        "{text}"
+    );
     assert!(!text.to_lowercase().contains("rbp_"), "{text}");
     // AArch64's untouched x0 may be an argument handed back, so the result is unproven, not x29.
     let a64 = Machine::new("aarch64", "aarch64", 64);
@@ -588,8 +639,8 @@ impl Program for Importing {
     }
 }
 
-/// Staged declares a callee the program carries at the widths its body reads and writes: `add_two`
-/// reads EDI and ESI and writes EAX. The interface states no zero above EAX, so RAX's upper half is a residual.
+/// Staged declares a carried callee at its carriers' widths (`add_two` reads EDI and ESI, writes
+/// EAX); the caller returns the call's four bytes, so it is `uint32_t` and reads none above (D161).
 #[test]
 fn a_staged_call_to_a_carried_callee_is_declared_at_its_carriers_widths() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -601,15 +652,15 @@ fn a_staged_call_to_a_carried_callee_is_declared_at_its_carriers_widths() {
     let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text();
     assert!(
-        text.contains("uint32_t fcn_100a(uint32_t, uint32_t);"),
+        text.contains("r2sleigh_result_u32 fcn_100a(uint32_t, uint32_t);"),
         "{text}"
     );
+    assert!(text.contains("r2sleigh_result_u32 caller("), "{text}");
     assert!(
-        text.contains(
-            "= (uint64_t)fcn_100a((uint32_t)arg0, (uint32_t)arg1) | r2sleigh_residual_u64(1) << 32;"
-        ),
+        text.contains("= (uint64_t)fcn_100a((uint32_t)arg0, (uint32_t)arg1);"),
         "{text}"
     );
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
     // Widths only: the body states no sign, so no `int32_t` is read into the declaration.
     assert!(
         !text
@@ -631,11 +682,12 @@ fn a_staged_return_line_names_the_return_instruction() {
     let response = decompile(&target, &program, BASE).expect("decompile");
     let emission = emission(&response);
     let unit = emission.unit();
-    assert_eq!(named_by(emission, "return"), vec![0x1005], "{unit}");
-    assert!(
-        named_by(emission, "fcn_100a((uint32_t)").contains(&0x1000),
+    assert_eq!(
+        named_by(emission, "return r2sleigh_carrier"),
+        vec![0x1005],
         "{unit}"
     );
+    assert!(named_by(emission, "rax_1 = ").contains(&0x1000), "{unit}");
 }
 
 /// Staged declares the import as its prototype states and passes the argument at that type.
@@ -922,6 +974,167 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
         "{}",
         response.output
     );
+}
+
+/// `Importing`, with the import a mangled C++ member template: `std::ostream::_M_insert<unsigned long>`.
+struct MangledImporting;
+
+impl r2engine::body::Program for MangledImporting {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        Importing.read(vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        Importing.region(vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        Importing.is_entry(vaddr)
+    }
+}
+
+impl Program for MangledImporting {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == 0x100a).then(|| "_ZNSo9_M_insertImEERSoT_".to_owned())
+    }
+}
+
+/// A mangled import's row comes from its name and libstdc++'s `<ostream>`: `this` and an
+/// `unsigned long`, two arguments; its encoded result is a reference (doc/adr-call-boundary.md, S13).
+#[test]
+fn a_mangled_import_takes_the_parameters_its_name_states() {
+    let mut machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let base = decompile(&target, &MangledImporting, BASE).expect("decompile");
+    let base = base.output.text().to_owned();
+    assert!(base.contains("the import has no declaration"), "{base}");
+    let mut rows = LibraryRows::embedded(CLibrary::Glibc);
+    rows.read_mangled(["_ZNSo9_M_insertImEERSoT_"]);
+    machine.imports = Imports::new(rows, CLibrary::Glibc, Linkage::one_c_library());
+    let target = machine.target();
+    let response = decompile(&target, &MangledImporting, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("the import has no declaration"), "{text}");
+    let insert = "_ZNSo9_M_insertImEERSoT_";
+    let arguments = common::call_arguments(text, insert).expect("a call to _M_insert");
+    assert_eq!(arguments.len(), 2, "{text}");
+}
+
+/// `sub rsp, 0x28; mov rdi, rsp; mov esi, 7; call 0x1020; add rsp, 0x28; ret`: what GCC emits
+/// for `Big foo(int)`, the hidden result pointer in RDI and the `int` in ESI.
+const HIDDEN_RESULT_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 0x1000 sub rsp, 0x28
+    0x48, 0x89, 0xe7, // 0x1004 mov rdi, rsp
+    0xbe, 0x07, 0x00, 0x00, 0x00, // 0x1007 mov esi, 7
+    0xe8, 0x0f, 0x00, 0x00, 0x00, // 0x100c call 0x1020
+    0x48, 0x83, 0xc4, 0x28, // 0x1011 add rsp, 0x28
+    0xc3, // 0x1015 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 0x1016 padding
+    0xc3, // 0x1020 the import's stub
+];
+
+/// `sub rsp, 0x28; mov rdi, rsp; mov esi, 0x2000; mov edx, 7; call 0x1020; ...`: GCC's call of
+/// `B::B(int)`'s base-object variant for `B : virtual A`, `this`, the VTT, then the `int`.
+const VTT_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 0x1000 sub rsp, 0x28
+    0x48, 0x89, 0xe7, // 0x1004 mov rdi, rsp
+    0xbe, 0x00, 0x20, 0x00, 0x00, // 0x1007 mov esi, 0x2000
+    0xba, 0x07, 0x00, 0x00, 0x00, // 0x100c mov edx, 7
+    0xe8, 0x0a, 0x00, 0x00, 0x00, // 0x1011 call 0x1020
+    0x48, 0x83, 0xc4, 0x28, // 0x1016 add rsp, 0x28
+    0xc3, // 0x101a ret
+    0x90, 0x90, 0x90, 0x90, 0x90, // 0x101b padding
+    0xc3, // 0x1020 the import's stub
+];
+
+/// A caller whose call at 0x1020 is the import `name`.
+struct CallsImport {
+    bytes: &'static [u8],
+    name: &'static str,
+}
+
+impl r2engine::body::Program for CallsImport {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = self.bytes.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        code_region(self.bytes.len(), vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x1020)
+    }
+}
+
+impl Program for CallsImport {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "caller".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == 0x1020).then(|| self.name.to_owned())
+    }
+}
+
+/// The rendered caller of `name` under rows read from its mangled name.
+fn rendered_calling(bytes: &'static [u8], name: &'static str) -> String {
+    let mut machine = Machine::new("x86-64", "x86-64", 64);
+    let mut rows = LibraryRows::embedded(CLibrary::Glibc);
+    rows.read_mangled([name]);
+    machine.imports = Imports::new(rows, CLibrary::Glibc, Linkage::one_c_library());
+    let target = machine.target();
+    let program = CallsImport { bytes, name };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    response.output.text().to_owned()
+}
+
+/// `_Z3fooi` may be `Big foo(int)`: its name states no result, so a SysV call may pass a hidden
+/// result pointer in RDI first, and no argument is placed (PR #349 review, Itanium C++ ABI 3.1.3).
+#[test]
+fn a_mangled_import_whose_result_is_unstated_places_no_argument() {
+    let text = rendered_calling(HIDDEN_RESULT_CALL, "_Z3fooi");
+    assert_eq!(common::call_arguments(&text, "_Z3fooi"), None, "{text}");
+    assert!(text.contains("does not place"), "{text}");
+    // A complete-object constructor returns nothing and takes no VTT: `this`, then the `int`.
+    let text = rendered_calling(HIDDEN_RESULT_CALL, "_ZN1BC1Ei");
+    let arguments = common::call_arguments(&text, "_ZN1BC1Ei").expect("a call to B::B");
+    assert_eq!(arguments.len(), 2, "{text}");
+}
+
+/// `_ZN1BC2Ei` takes a VTT after `this` where `B` has a virtual base, so the `int` is in EDX, not
+/// ESI: the base-object variant places nothing (PR #349 review, Itanium C++ ABI 2.6.2).
+#[test]
+fn a_base_object_constructor_places_no_argument() {
+    let text = rendered_calling(VTT_CALL, "_ZN1BC2Ei");
+    assert_eq!(common::call_arguments(&text, "_ZN1BC2Ei"), None, "{text}");
+    assert!(text.contains("does not place"), "{text}");
 }
 
 /// `total = counter + *(uint32_t*)0x2008`, each a 32-bit access at a literal address.
@@ -1280,7 +1493,8 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
     // Every arm, with the value the source case returned, in order.
     for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
         assert!(output.contains(&format!("case {case}:")), "{output}");
-        assert!(output.contains(&format!("return {returns};")), "{output}");
+        let carried = format!("return r2sleigh_carrier_u64({returns});");
+        assert!(output.contains(&carried), "{output}");
     }
     let labels = output
         .match_indices("case ")
@@ -1362,7 +1576,7 @@ fn a_guard_on_an_escaped_slot_bounds_the_dispatch_that_reloads_it() {
     assert!(output.contains("switch ("), "{output}");
     for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
         assert!(output.contains(&format!("case {case}:")), "{output}");
-        assert!(output.contains(&format!("{returns};")), "{output}");
+        assert!(output.contains(&format!("({returns});")), "{output}");
     }
     assert!(!output.contains("residual"), "{output}");
 }
@@ -1383,7 +1597,7 @@ fn a_guard_on_a_parameters_home_bounds_the_dispatch_that_reloads_it() {
     assert!(output.contains("switch ("), "{output}");
     for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
         assert!(output.contains(&format!("case {case}:")), "{output}");
-        assert!(output.contains(&format!("{returns};")), "{output}");
+        assert!(output.contains(&format!("({returns});")), "{output}");
     }
     assert!(!output.contains("residual"), "{output}");
 }
@@ -1587,7 +1801,8 @@ fn what_a_function_returns_is_read_off_the_arms_its_dispatch_reaches() {
     assert!(response.output.function().is_some(), "{output}");
     assert!(!output.starts_with("void "), "{output}");
     for returns in ["10", "20", "30"] {
-        assert!(output.contains(&format!("return {returns};")), "{output}");
+        let carried = format!("return r2sleigh_carrier_u64({returns});");
+        assert!(output.contains(&carried), "{output}");
     }
 }
 
@@ -1693,7 +1908,7 @@ fn an_aarch64_exclusive_loop_returns_the_value_it_loaded() {
             })
             .unwrap_or_else(|| panic!("{ordered}: the loaded value is assigned: {output}"));
         assert!(
-            output.contains(&format!("return (uint32_t){loaded};")),
+            output.contains(&format!("return r2sleigh_carrier_u32((uint32_t){loaded});")),
             "{ordered}: {output}"
         );
         for absent in [
@@ -1905,7 +2120,7 @@ fn a_barrier_writes_no_register_so_the_value_before_it_is_returned() {
 /// result carrier a caller reads, and the return hands back a residual of it,
 /// which traps if it is ever reached. Nothing else in the text claims a value.
 fn marks_an_unproven_return(output: &str) -> bool {
-    output.starts_with("uint64_t ") && output.contains("return r2sleigh_residual_u64(")
+    output.starts_with("r2sleigh_result_u64 ") && output.contains("return r2sleigh_residual_u64(")
 }
 
 /// A field of an element of a struct array, through a pointer the certified
@@ -1985,7 +2200,14 @@ fn a_result_written_on_one_path_only_is_a_marked_gap() {
     let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(response.output.function().is_some(), "{output}");
-    assert!(marks_an_unproven_return(output), "{output}");
+    // The written arm is carried; the skipped arm holds RAX's entry byte, a residual (D200).
+    assert!(output.starts_with("r2sleigh_result_u32 half("), "{output}");
+    assert!(
+        output.contains("the result is unproven (Written)"),
+        "{output}"
+    );
+    assert!(output.contains("return r2sleigh_carrier_u32("), "{output}");
+    assert!(output.contains("r2sleigh_residual_u"), "{output}");
 }
 
 /// The kernel writes x0 and no declared contract says so, so the result is neither `void` nor the
@@ -2035,7 +2257,7 @@ fn an_untouched_result_register_is_unproven_where_it_is_also_the_first_argument(
     assert!(response.output.function().is_some(), "{output}");
     assert!(marks_an_unproven_return(output), "{output}");
 
-    // On x86-64 rax is no argument, so a caller never filled it and nothing is returned.
+    // On x86-64 rax is no argument, so it defines nothing; XMM0's entry byte, an input, still may (D208).
     const STORE: &[u8] = &[
         0xc7, 0x07, 0x01, 0x00, 0x00, 0x00, // mov dword [rdi], 1
         0xc3, // ret
@@ -2048,12 +2270,15 @@ fn an_untouched_result_register_is_unproven_where_it_is_also_the_first_argument(
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(output.starts_with("void store("), "{output}");
+    assert!(output.starts_with("r2sleigh_result_u64 store("), "{output}");
+    assert!(
+        output.contains("the result is unproven (EntryInput)"),
+        "{output}"
+    );
 }
 
 /// `lea rax, [rbx + rsi]; ret`: one register the function entered holding, and
-/// one argument slot whose parameter recovery does not admit, because the slot
-/// before it is never read.
+/// one argument slot read past an unread one, which makes that one a hole (D165).
 const ENTRY_AND_ARGUMENT: &[u8] = &[
     0x48, 0x8d, 0x04, 0x33, // 1000 lea rax, [rbx + rsi]
     0xc3, // 1004 ret
@@ -2083,16 +2308,16 @@ fn a_value_no_statement_assigns_is_named_on_the_proof_line() {
         proof.contains("; 1 held from entry, read as residuals (rbx_0)"),
         "{text}"
     );
-    // rsi is an argument slot with no parameter, so the rendering reads a value
-    // its own signature says it was never given. It is not excused as held.
+    // rsi is the second parameter, read by name, and rdi below it a hole: no
+    // argument slot is read without a parameter (D165's rule 2).
     assert!(
-        proof.contains("; 1 argument slot read with no parameter, read as residuals (rsi_0)"),
+        text.contains("entry_and_argument(r2sleigh_unread_u64 arg0, uint64_t arg1)"),
         "{text}"
     );
-    // Neither is declared as an object nothing assigns: each read traps.
-    assert!(!lower.contains("uint64_t rsi_0;"), "{text}");
+    assert!(!proof.contains("argument slot"), "{text}");
+    // rbx is not declared as an object nothing assigns: its read traps.
     assert!(!lower.contains("uint64_t rbx_0;"), "{text}");
-    assert_eq!(text.matches("r2sleigh_residual_u64(").count(), 2, "{text}");
+    assert_eq!(text.matches("r2sleigh_residual_u64(").count(), 1, "{text}");
 
     // The first stack argument is an argument slot too: above the return
     // address, where the caller placed it. It was counted as held from entry.
@@ -2385,6 +2610,118 @@ fn a_tail_transfer_returning_a_declared_int_reads_no_bits_above_it() {
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 
+/// Stripped, the wrapper's result is its tail callee's: `rand` states four bytes and nothing above
+/// them, so the wrapper returns four bytes and the tail holds no residual (D161, diff `0x9e70`).
+#[test]
+fn a_tail_transfer_to_a_declared_int_returns_the_callees_width() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let text = decompile(&machine.target(), &TailToRand, BASE)
+        .expect("decompile")
+        .output
+        .text()
+        .to_owned();
+    assert!(text.contains("r2sleigh_result_u32 wrapper(void)"), "{text}");
+    assert!(
+        text.contains("return r2sleigh_carrier_u32((uint32_t)rand());"),
+        "{text}"
+    );
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
+/// `if (edi == 0) jmp rand; else return 0x1122334455667788;`.
+const TAILS_NARROW_BESIDE_A_WIDE_RETURN: &[u8] = &[
+    0x85, 0xff, // 0x1000 test edi, edi
+    0x74, 0x0c, // 0x1002 je 0x1010
+    0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, // 0x1004 movabs rax, imm64
+    0xc3, // 0x100e ret
+    0x90, // 0x100f padding
+    0xe9, 0x0b, 0x00, 0x00, 0x00, // 0x1010 jmp 0x1020
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 0x1015 padding
+    0x89, 0xf8, // 0x1020 mov eax, edi
+    0xc3, // 0x1022 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// `TAILS_NARROW_BESIDE_A_WIDE_RETURN`, with `rand` an import's stub at 0x1020.
+struct WideOrTail;
+
+impl r2engine::body::Program for WideOrTail {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
+        let slice = TAILS_NARROW_BESIDE_A_WIDE_RETURN.get(offset..)?;
+        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        code_region(TAILS_NARROW_BESIDE_A_WIDE_RETURN.len(), vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        matches!(vaddr, BASE | 0x1020)
+    }
+}
+
+impl Program for WideOrTail {
+    fn holds_static_data(&self, _vaddr: u64) -> bool {
+        false
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
+        NONE
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.import_at(vaddr)
+            .or_else(|| (vaddr == BASE).then(|| "wide_or_tail".to_owned()))
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        (vaddr == 0x1020).then(|| "rand".to_owned())
+    }
+}
+
+/// A tail into `int rand(void)` does not narrow a function whose direct return writes eight bytes:
+/// every return path's width joins, so the result stays 64-bit (D161, PR #350 review).
+#[test]
+fn a_narrow_tail_beside_a_wide_return_keeps_the_wide_result() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let text = decompile(&machine.target(), &WideOrTail, BASE)
+        .expect("decompile")
+        .output
+        .text()
+        .to_owned();
+    assert!(text.contains("rand()"), "{text}");
+    assert!(text.contains("r2sleigh_result_u64 wide_or_tail("), "{text}");
+    assert!(text.contains("0x1122334455667788"), "{text}");
+}
+
+/// `call f; mov edi, eax; jmp g` over `int f(void)` and `int g(int)`, as gzip's `rpl_fseeko`
+/// hands `fileno`'s result on and tails into `fseeko` on another path.
+const TAILS_AFTER_A_DECLARED_INT: &[u8] = &[
+    0xe8, 0x0b, 0x00, 0x00, 0x00, // 0x1000 call 0x1010
+    0x89, 0xc7, // 0x1005 mov edi, eax
+    0xe9, 0x14, 0x00, 0x00, 0x00, // 0x1007 jmp 0x1020
+    0x90, 0x90, 0x90, 0x90, // 0x100c padding
+    0x6a, 0xff, // 0x1010 push -1
+    0x58, // 0x1012 pop rax
+    0xc3, // 0x1013 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 0x1014 padding
+    0x89, 0xf8, // 0x1020 mov eax, edi
+    0xc3, // 0x1022 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// A tail into `int g(int)` reads its argument and four bytes of the result lane, so `f`'s `int`
+/// handed on holds no residual above it: the tail exit is named for demand (D161).
+#[test]
+fn a_tail_exit_reads_the_tail_callees_width() {
+    let machine = declaring_each(&[(0x1010, "f", "int", &[]), (0x1020, "g", "int", &["int"])]);
+    let text = rendered_on(&machine, TAILS_AFTER_A_DECLARED_INT, "tails_on");
+    assert!(text.contains("fcn_1010()"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
 /// `STORES_A_DECLARED_INT_WHOLE` with the store `mov [rbx], eax`: the caller reads only EAX.
 const STORES_A_DECLARED_INT: &[u8] = &[
     0x53, // 0x1000 push rbx
@@ -2461,6 +2798,8 @@ fn run_rendered(name: &str, units: &[&Rendered], harness: &str) {
             "#define _POSIX_C_SOURCE 200809L\n#include <stdint.h>\n#include <string.h>\n\
              #include <unistd.h>\n\
              __attribute__((constructor)) static void r2engine_watchdog(void) {{ alarm(30); }}\n\
+             typedef uint8_t r2sleigh_result_u8; typedef uint16_t r2sleigh_result_u16;\n\
+             typedef uint32_t r2sleigh_result_u32; typedef uint64_t r2sleigh_result_u64;\n\
              {prototypes}\n{harness}\n"
         ),
     )
@@ -2766,7 +3105,7 @@ const CLEAR_LOW_BIT: &[u8] = &[
 fn an_and_that_clears_one_bit_takes_the_whole_argument() {
     let text = rendered(CLEAR_LOW_BIT, "clear_low_bit");
     assert!(
-        text.starts_with("uint64_t clear_low_bit(uint64_t "),
+        text.starts_with("r2sleigh_result_u64 clear_low_bit(uint64_t "),
         "{text}"
     );
     run_rendered(
@@ -2813,7 +3152,7 @@ const AARCH64_MASK_24_OF_W0: &[u8] = &[
 fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
     let text = rendered(MASK_24_OF_EDI, "mask24_of_edi");
     assert!(
-        text.starts_with("uint32_t mask24_of_edi(uint32_t "),
+        text.starts_with("r2sleigh_result_u32 mask24_of_edi(uint32_t "),
         "{text}"
     );
     run_rendered(
@@ -2835,7 +3174,7 @@ fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
 
     let text = rendered(MASK_24_OF_RDI, "mask24_of_rdi");
     assert!(
-        text.starts_with("uint64_t mask24_of_rdi(uint32_t "),
+        text.starts_with("r2sleigh_result_u64 mask24_of_rdi(uint32_t "),
         "{text}"
     );
     run_rendered(
@@ -2860,7 +3199,7 @@ fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
         "mask24_of_w0",
     );
     assert!(
-        text.starts_with("uint32_t mask24_of_w0(uint32_t "),
+        text.starts_with("r2sleigh_result_u32 mask24_of_w0(uint32_t "),
         "{text}"
     );
     run_rendered(
@@ -3064,7 +3403,7 @@ fn an_and_that_keeps_six_or_seven_bytes_takes_the_whole_register() {
     ] {
         let text = rendered_on(&machine, bytes, name);
         assert!(
-            text.starts_with(&format!("uint64_t {name}(uint64_t ")),
+            text.starts_with(&format!("r2sleigh_result_u64 {name}(uint64_t ")),
             "{text}"
         );
         run_rendered(
@@ -3235,18 +3574,30 @@ fn a_packed_extension_from_memory_renders_every_lane() {
 fn a_packed_extension_of_an_argument_takes_the_argument() {
     let text = rendered(PACKED_SIGN_EXTEND_ARGUMENT, "sign_extend_argument");
     assert_packed_extension_rendered(&text);
+    // The packed result is left in XMM0, a written float lane no reading call decides (D200).
     assert!(
-        text.starts_with("void sign_extend_argument(uint32_t "),
+        text.starts_with("r2sleigh_result_u64 sign_extend_argument(uint32_t "),
         "{text}"
     );
     run_rendered(
         "sign_extend_argument",
         &[&text],
-        r#"int main(void) {
+        r#"#include <setjmp.h>
+#include <signal.h>
+/* The result is unproven, so each return traps once the body ran; the harness resumes after it. */
+static sigjmp_buf resumed;
+static void returned(int sig) { (void)sig; siglongjmp(resumed, 1); }
+#define UNPROVEN(call) do { if (!sigsetjmp(resumed, 1)) { call; } } while (0)
+int main(void) {
+    /* sigaction keeps the handler: under -std=c11 glibc's signal() resets it after one trap. */
+    struct sigaction on = {0};
+    on.sa_handler = returned;
+    sigaction(SIGILL, &on, 0);
+    sigaction(SIGTRAP, &on, 0);
     const uint32_t want[4] = {0x00000001u, 0xffffff80u, 0x0000007fu, 0xfffffffeu};
-    uint32_t got[4];
+    static uint32_t got[4];
     memset(got, 0xa5, sizeof got);
-    sign_extend_argument(0xfe7f8001u, (void*)got);
+    UNPROVEN(sign_extend_argument(0xfe7f8001u, (void*)got));
     return memcmp(got, want, sizeof want) != 0;
 }"#,
     );
@@ -3929,10 +4280,10 @@ fn every_register_a_default_prototype_names_is_one_of_its_machine() {
             .default_prototype()
             .expect("a default prototype");
         let named = prototype
-            .inputs
+            .input
             .iter()
-            .chain(&prototype.outputs)
-            .map(|entry| &entry.storage)
+            .chain(&prototype.output)
+            .map(|entry| &entry.at)
             .chain(&prototype.killed_by_call)
             .chain(&prototype.unaffected)
             .filter_map(|storage| match storage {
@@ -3941,9 +4292,8 @@ fn every_register_a_default_prototype_names_is_one_of_its_machine() {
             })
             .collect::<Vec<_>>();
         assert!(!named.is_empty(), "{sleigh}");
-        let effect = machine.conventions[machine.default]
-            .effect
-            .as_ref()
+        let effect = (machine.conventions[machine.default].convention)
+            .call_effect()
             .expect("the default prototype states a call effect");
         for register in named {
             let placed = machine
@@ -3999,11 +4349,22 @@ fn a_repeated_move_walks_the_way_the_specification_says() {
     run_rendered(
         "copy",
         &[&rendered],
-        r#"int main(void) {
+        r#"#include <setjmp.h>
+#include <signal.h>
+/* The result is unproven, so each return traps once the body ran; the harness resumes after it. */
+static sigjmp_buf resumed;
+static void returned(int sig) { (void)sig; siglongjmp(resumed, 1); }
+#define UNPROVEN(call) do { if (!sigsetjmp(resumed, 1)) { call; } } while (0)
+int main(void) {
+    /* sigaction keeps the handler: under -std=c11 glibc's signal() resets it after one trap. */
+    struct sigaction on = {0};
+    on.sa_handler = returned;
+    sigaction(SIGILL, &on, 0);
+    sigaction(SIGTRAP, &on, 0);
     uint64_t words[8] = {1, 2, 3, 4, 5, 6, 7, 8};
-    copy((uint64_t)(uintptr_t)&words[0], (uint64_t)(uintptr_t)&words[4], 3);
+    UNPROVEN(copy((uint64_t)(uintptr_t)&words[0], (uint64_t)(uintptr_t)&words[4], 3));
     /* Ascending one element at a time, as the machine walks. */
-    copy((uint64_t)(uintptr_t)&words[5], (uint64_t)(uintptr_t)&words[4], 3);
+    UNPROVEN(copy((uint64_t)(uintptr_t)&words[5], (uint64_t)(uintptr_t)&words[4], 3));
     const uint64_t want[8] = {5, 6, 7, 4, 5, 5, 5, 5};
     return memcmp(words, want, sizeof want) != 0;
 }"#,
@@ -4800,7 +5161,10 @@ fn a_parameter_every_read_of_which_is_rewritten_away_is_still_declared() {
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     assert!(response.output.function().is_some(), "{}", response.output);
     let output = response.output.text();
-    assert!(output.contains("return 0;"), "{output}");
+    assert!(
+        output.contains("return r2sleigh_carrier_u32(0);"),
+        "{output}"
+    );
 }
 
 /// A stack-protector check around a call: the canary is read through the
@@ -4894,7 +5258,10 @@ fn a_stack_protector_check_is_compiler_inserted_under_a_ub_free_source() {
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(thread_pointer_versions(output).is_empty(), "{output}");
-    assert!(output.contains("return 0;"), "{output}");
+    assert!(
+        output.contains("return r2sleigh_carrier_u32(0);"),
+        "{output}"
+    );
     assert!(!output.contains("fcn_1030"), "{output}");
     assert!(
         output.contains("compiler-inserted (assuming ub-free)"),
@@ -5016,10 +5383,10 @@ fn a_thread_local_read_twice_is_no_stack_guard() {
     assert!(!output.contains("compiler-inserted"), "{output}");
 }
 
-/// The canary is still in RAX at `ret`, so the function returns the guard: that read is the
-/// program's and keeps its residual, while the check and the slot are still the compiler's.
+/// The canary is still in RAX at `ret`: a compiler-inserted write defines no result byte (D200 case
+/// 3), so no guard is returned; XMM0's entry byte leaves the result unproven (D208).
 #[test]
-fn a_canary_the_function_returns_keeps_its_read() {
+fn a_canary_left_in_the_result_register_is_no_value() {
     let mut bytes = CANARY_CHECKED.to_vec();
     bytes[0x12..0x14].copy_from_slice(&[0x90, 0x90]); // 1012 no `xor eax, eax`
     let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
@@ -5032,9 +5399,196 @@ fn a_canary_the_function_returns_keeps_its_read() {
     };
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("FS_OFFSET_0"), "{output}");
+    assert!(
+        output.contains("the result is unproven (EntryInput)"),
+        "{output}"
+    );
     assert!(!output.contains("fcn_1030"), "{output}");
     assert!(output.contains("compiler-inserted"), "{output}");
+}
+
+/// gcc -O0's check in the result register: `rax` holds `reload - guard`, which no C expression
+/// defines, so no `return 0` is claimed (D200 case 3; bzip2 -O0 `mainQSort3`).
+#[test]
+fn a_check_whose_difference_is_returned_reads_no_guard() {
+    let mut bytes = CANARY_CHECKED.to_vec();
+    bytes[0x16] = 0x44; // 1014 mov rax, [rsp+8]
+    bytes[0x1c] = 0x04; // 1019 sub rax, fs:[0x28]
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "canary_difference_returned",
+        },
+        halts: 0x1030,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(thread_pointer_versions(output).is_empty(), "{output}");
+    assert!(!output.contains("return 0;"), "{output}");
+    assert!(
+        output.contains("the result is unproven (EntryInput)"),
+        "{output}"
+    );
+    assert!(output.contains("compiler-inserted"), "{output}");
+}
+
+/// gcc's prologue in a function that never returns: the guard is stored and never checked, and
+/// no UB-free code reads it or the slot (bzip2 -O0 `cleanUpAndFail`, hand audit 3.8.4).
+#[test]
+fn an_unchecked_canary_in_a_function_that_never_returns_is_compiler_inserted() {
+    let mut bytes = CANARY_CHECKED[..0x14].to_vec();
+    bytes.extend([0xe8, 0x17, 0x00, 0x00, 0x00]); // 1014 call 0x1030
+    bytes.resize(0x30, 0x90);
+    bytes.extend([0xeb, 0xfe]); // 1030 jmp 0x1030
+    bytes.resize(0x40, 0x90);
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "canary_unchecked",
+        },
+        halts: 0x1030,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(thread_pointer_versions(output).is_empty(), "{output}");
+    assert!(output.contains("compiler-inserted"), "{output}");
+}
+
+/// `rax = rdx + 1` is computed off the passing edge, so the return still reads the guard. Its
+/// `return 1` is base's: the rereads are copies of the first read (doc/adr-frame-model.md, P4.4).
+#[test]
+fn a_value_computed_from_the_difference_before_the_branch_is_not_zeroed() {
+    let mut bytes = CANARY_CHECKED[..0x22].to_vec(); // through 1019 sub rdx, fs:[0x28]
+    bytes.extend([0x48, 0x8d, 0x42, 0x01]); // 1022 lea rax, [rdx + 1]
+    bytes.extend([0x75, 0x05]); // 1026 jne 0x102d
+    bytes.extend([0x48, 0x83, 0xc4, 0x18, 0xc3]); // 1028 add rsp, 0x18; ret
+    bytes.extend([0xe8, 0x02, 0x00, 0x00, 0x00, 0x90, 0x90, 0xeb, 0xfe]); // 102d call 0x1034
+    bytes.resize(0x50, 0x90);
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "canary_difference_used_early",
+        },
+        halts: 0x1034,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+}
+
+/// The slot's address goes to a callee that may read the stored guard, so the store stays (PR 354).
+#[test]
+fn an_unchecked_canary_whose_slot_address_escapes_stays() {
+    let mut bytes = CANARY_CHECKED[..0x14].to_vec();
+    bytes.extend([0x48, 0x8d, 0x7c, 0x24, 0x08]); // 1014 lea rdi, [rsp + 8]
+    bytes.extend([0xe8, 0x12, 0x00, 0x00, 0x00]); // 1019 call 0x1030
+    bytes.resize(0x30, 0x90);
+    bytes.extend([0xeb, 0xfe]); // 1030 jmp 0x1030
+    bytes.resize(0x40, 0x90);
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes,
+            name: "canary_slot_escapes",
+        },
+        halts: 0x1030,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("FS_OFFSET_0"), "{output}");
+    assert!(!output.contains("compiler-inserted"), "{output}");
+    assert!(response.premises.is_empty(), "{:?}", response.premises);
+}
+
+/// A body that returns and stores the guard without checking it is no prologue the bytes prove.
+#[test]
+fn an_unchecked_canary_in_a_function_that_returns_stays() {
+    let mut bytes = CANARY_CHECKED[..0x14].to_vec();
+    bytes.extend([0x48, 0x83, 0xc4, 0x18, 0xc3]); // 1014 add rsp, 0x18; ret
+    bytes.resize(0x30, 0x90);
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes,
+        name: "canary_unchecked_returning",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(!output.contains("compiler-inserted"), "{output}");
+    assert!(response.premises.is_empty(), "{:?}", response.premises);
+}
+
+/// gcc -O0's `rbx` save, reloaded through the frame base before `leave` (bzip2 -O0 `mapSuffix`):
+/// no `rsp` phi meets the reload, and each edge hands it one offset (hand audit 3.8.5).
+const SAVE_RELOADED_THROUGH_THE_FRAME_BASE: &[u8] = &[
+    0x55, // 1000 push rbp
+    0x48, 0x89, 0xe5, // 1001 mov rbp, rsp
+    0x53, // 1004 push rbx
+    0x48, 0x83, 0xec, 0x18, // 1005 sub rsp, 0x18
+    0x89, 0xfb, // 1009 mov ebx, edi
+    0x85, 0xff, // 100b test edi, edi
+    0x74, 0x05, // 100d je 0x1014
+    0xe8, 0x1c, 0x00, 0x00, 0x00, // 100f call 0x1030
+    0x89, 0xd8, // 1014 mov eax, ebx
+    0x48, 0x8b, 0x5d, 0xf8, // 1016 mov rbx, [rbp - 8]
+    0xc9, // 101a leave
+    0xc3, // 101b ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 101c padding
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1026 padding
+    0xc3, // 1030 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+];
+
+#[test]
+fn a_save_reloaded_through_the_frame_base_is_the_frames() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: SAVE_RELOADED_THROUGH_THE_FRAME_BASE.to_vec(),
+        name: "save_through_frame_base",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(!output.contains("RBX_0"), "{output}");
+    assert!(!output.contains("held from entry"), "{output}");
+    assert!(!output.contains("r2sleigh_store"), "{output}");
+}
+
+/// AAPCS64 6.1.2 keeps `v8` bytes 0..8: `str d8` and `ldr d8` around a call handed a frame address
+/// are a lane's save and restore, which bound what the address reaches (hand audit 3.8.6).
+const LANE_SAVED: &[u8] = &[
+    0xfd, 0x7b, 0xbd, 0xa9, // 1000 stp x29, x30, [sp, #-48]!
+    0xfd, 0x03, 0x00, 0x91, // 1004 mov x29, sp
+    0xe8, 0x0b, 0x00, 0xfd, // 1008 str d8, [sp, #16]
+    0x28, 0x40, 0x60, 0x1e, // 100c fmov d8, d1
+    0xe0, 0x63, 0x00, 0x91, // 1010 add x0, sp, #24
+    0x04, 0x00, 0x00, 0x94, // 1014 bl 0x1024
+    0xe8, 0x0b, 0x40, 0xfd, // 1018 ldr d8, [sp, #16]
+    0xfd, 0x7b, 0xc3, 0xa8, // 101c ldp x29, x30, [sp], #48
+    0xc0, 0x03, 0x5f, 0xd6, // 1020 ret
+    0x1f, 0x00, 0x00, 0xf9, // 1024 str xzr, [x0]
+    0x20, 0x00, 0x80, 0x52, // 1028 mov w0, #1
+    0xc0, 0x03, 0x5f, 0xd6, // 102c ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 1030 nop; nop
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 1038 nop; nop
+];
+
+#[test]
+fn a_saved_vector_lane_is_the_frames() {
+    let machine = Machine::on("aarch64", "aarch64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: LANE_SAVED.to_vec(),
+        name: "lane_saved",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let output = response.output.text();
+    let proof = (output.lines())
+        .find(|line| line.contains("r2dec proof:"))
+        .unwrap_or_else(|| panic!("a proof line: {output}"));
+    assert!(!proof.contains("residual"), "{output}");
+    assert!(!output.contains("r2sleigh_store"), "{output}");
 }
 
 /// The failure path calls a function that returns, so nothing proves the check is a protector.
@@ -5124,7 +5678,10 @@ fn a_stack_protector_check_whose_failure_calls_through_a_slot_is_decided() {
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let output = response.output.text();
     assert!(thread_pointer_versions(output).is_empty(), "{output}");
-    assert!(output.contains("return 0;"), "{output}");
+    assert!(
+        output.contains("return r2sleigh_carrier_u32(0);"),
+        "{output}"
+    );
     assert!(
         output.contains("compiler-inserted (assuming ub-free)"),
         "{output}"
@@ -5185,8 +5742,17 @@ fn a_call_through_a_halting_slot_has_no_edge_to_the_join_after_it() {
     };
     let response = decompile(&machine.target(), &program, BASE).expect("decompile");
     let output = response.output.text();
-    assert!(!output.contains("residual_u64"), "{output}");
-    assert_eq!(output.matches("return").count(), 1, "{output}");
+    // One return: XMM0's entry byte reaches it, so its value is the one residual (D208).
+    let returns = (output.lines())
+        .filter(|line| line.trim_start().starts_with("return"))
+        .collect::<Vec<_>>();
+    assert_eq!(returns.len(), 1, "{output}");
+    assert!(returns[0].contains("r2sleigh_residual_u64("), "{output}");
+    assert_eq!(output.matches("residual_u64(").count(), 1, "{output}");
+    assert!(
+        output.contains("the result is unproven (EntryInput)"),
+        "{output}"
+    );
 }
 
 /// `mul_div` from `tests/gold/review.c` at gcc -O0: `a * 7 / b + a % b`, with
@@ -5604,7 +6170,7 @@ fn an_unseen_argument_below_a_written_one_leaves_the_call_unrendered() {
 }
 
 /// `f` hands `rdi` on unchanged to a call through memory and adds `rsi` to its
-/// result; `main` calls it with `edi = 3, esi = 5`.
+/// result; `main` calls it with `edi = 3, esi = 5, edx = 7`.
 const READS_PAST_ITS_PARAMETERS: &[u8] = &[
     0x53, // 0x1000 push rbx
     0x48, 0x89, 0xf3, // 0x1001 mov rbx, rsi
@@ -5614,13 +6180,14 @@ const READS_PAST_ITS_PARAMETERS: &[u8] = &[
     0xc3, // 0x100f ret
     0xbf, 0x03, 0x00, 0x00, 0x00, // 0x1010 mov edi, 3
     0xbe, 0x05, 0x00, 0x00, 0x00, // 0x1015 mov esi, 5
-    0xe8, 0xe1, 0xff, 0xff, 0xff, // 0x101a call 0x1000
-    0xc3, // 0x101f ret
+    0xba, 0x07, 0x00, 0x00, 0x00, // 0x101a mov edx, 7
+    0xe8, 0xdc, 0xff, 0xff, 0xff, // 0x101f call 0x1000
+    0xc3, // 0x1024 ret
 ];
 
 /// A callee whose parameters are a floor mints no contract, and what its caller wrote past the floor
-/// is no argument the callee is shown to take: `past(3, 5)` was the caller's registers, so the call
-/// is a residual (audit W7; `past` reads `rsi` and hands `rdi` to a call nothing describes).
+/// is no argument the callee is shown to take: `past` reads `rsi` and hands `rdi` and maybe `rdx` to
+/// a call nothing describes, a floor of two, so `past(3, 5, 7)` would invent `7` (audit W7).
 #[test]
 fn a_call_past_its_callees_floor_is_a_residual() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -5631,7 +6198,7 @@ fn a_call_past_its_callees_floor_is_a_residual() {
     };
     let response = decompile(&target, &program, BASE + 0x10).expect("decompile");
     let text = response.output.text();
-    assert!(!text.contains("past(3, 5)"), "{text}");
+    assert!(!text.contains("past(3, 5"), "{text}");
     assert!(text.contains("r2sleigh_residual"), "{text}");
 }
 
@@ -6588,8 +7155,7 @@ fn go_machine() -> Machine {
 
 fn go_machine_on(arch: &str) -> Machine {
     let mut machine = Machine::on(arch, arch, 64, Platform::Linux);
-    let convention = r2abi::go_calling_convention(arch, 64, Platform::Linux, Some((1, 21)))
-        .expect("ABIInternal");
+    let id = ConventionId::go(arch, 64, Kernel::Linux, Some((1, 21))).expect("ABIInternal");
     let compiler = LanguageProfile::parse(
         machine
             .embedded
@@ -6599,25 +7165,24 @@ fn go_machine_on(arch: &str) -> Machine {
     .expect("parses")
     .under("abi-internal")
     .expect("ABIInternal's prototype");
-    let effect = call_effect(
+    let model = convention_model(
         &machine.embedded.arch,
         64,
-        Platform::Linux,
+        (Kernel::Linux, CLibrary::Glibc, None),
         &compiler,
-        Some(convention),
-    );
+        id.row(),
+    )
+    .expect("ABIInternal's model");
     assert!(
-        effect
-            .as_ref()
-            .and_then(|effect| effect.stack_bound())
+        (model.call_effect().ok())
+            .and_then(|effect| effect.stack_bound().copied())
             .is_some(),
         "the convention states g.stackguard0"
     );
     machine.conventions.insert(
         "golang",
         Under {
-            convention,
-            effect,
+            convention: std::sync::Arc::new(model),
             compiler,
         },
     );
@@ -7002,7 +7567,8 @@ fn a_stack_pointer_merged_past_a_call_to_nowhere_is_the_frame_argument_it_is() {
     );
     assert!(!rendered.contains("r2sleigh refused"), "{rendered}");
     assert!(
-        rendered.contains("fcn_1030(0x1000, (uint64_t)(frame + 16U))"),
+        // The extern is the callee's header, whose second parameter is the pointer it loads through.
+        rendered.contains("fcn_1030(0x1000, (uint64_t*)(uint64_t)(frame + 16U))"),
         "{rendered}"
     );
 }
@@ -7252,16 +7818,15 @@ impl Program for CallsAFunction {
     }
 }
 
-/// Two calls of `release` disagree about a result; the layouts write them in opposite orders, the
-/// declaration and the call left as a residual must not differ.
+/// `release` hands XMM0 back (D208) and its arity is a floor, so its call states no result: its
+/// extern is the carrier, never `void` (S36), and `scan`'s result is unproven in either layout.
 #[test]
-fn a_callee_is_declared_by_its_first_call_in_address_order_whichever_block_is_written_first() {
+fn a_call_to_a_void_callee_leaves_the_exit_returning_it_no_value_in_either_layout() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
-    // The higher exit is written in the loop in the first, after it in the second.
-    for (code, callee, higher) in [
-        (RELEASE_AT_BOTH_EXITS, 0x1030, 0x1015),
-        (RELEASE_AFTER_A_SECOND_WAY_IN, 0x1034, 0x101a),
+    for (code, callee) in [
+        (RELEASE_AT_BOTH_EXITS, 0x1030),
+        (RELEASE_AFTER_A_SECOND_WAY_IN, 0x1034),
     ] {
         let program = CallsAFunction {
             code,
@@ -7270,12 +7835,18 @@ fn a_callee_is_declared_by_its_first_call_in_address_order_whichever_block_is_wr
         };
         let response = decompile(&target, &program, BASE).expect("decompile");
         let text = response.output.text();
-        let declaration = format!("uint64_t fcn_{callee:x}(uint64_t, uint64_t);");
-        assert!(text.contains(&declaration), "{declaration}:\n{text}");
-        let disagrees = "another call disagrees with its declaration";
-        assert_eq!(text.matches(disagrees).count(), 1, "{text}");
-        let gap = format!("CallNotRendered at {higher:#x}:");
-        assert!(text.contains(&gap), "{gap}:\n{text}");
+        let declaration = format!("r2sleigh_result_u64 fcn_{callee:x}(uint64_t, uint64_t);");
+        assert_eq!(
+            text.matches(&declaration).count(),
+            1,
+            "{declaration}:\n{text}"
+        );
+        assert!(text.contains("the result is unproven (Written)"), "{text}");
+        assert_eq!(
+            text.matches("return r2sleigh_residual_u64(").count(),
+            2,
+            "{text}"
+        );
     }
 }
 
@@ -7340,3 +7911,49 @@ const RELEASE_AFTER_A_SECOND_WAY_IN: &[u8] = &[
     0xeb, 0x00, // +28 jmp +30
     0xc3, // +30 free's stub
 ];
+
+/// Only a row citing a fixed prototype bounds an import's reads; a tail reads every other argument
+/// register (SysV `al`; Apple arm64 on the stack). doc/adr-call-boundary.md, "Lower bounds".
+#[test]
+fn an_import_reads_past_its_fixed_parameters_unless_its_citation_fixes_them() {
+    let names = |machine: &Machine, target: &r2engine::native::NativeTarget<'_>, import: &str| {
+        let reads = r2engine::native::import_reads(target, import).expect(import);
+        let name = |storage: CanonicalStorageId| {
+            let registers = machine.embedded.arch.registers.iter();
+            let named = registers
+                .filter(|r| r.offset == storage.offset && r.size == storage.size)
+                .map(|r| r.name.to_ascii_lowercase())
+                .min_by_key(String::len);
+            named.unwrap_or_else(|| format!("{storage:?}"))
+        };
+        let registers = reads.registers.into_iter().map(name).collect::<Vec<_>>();
+        (registers, reads.count_register.map(name))
+    };
+    let sysv = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let (fixed, count) = names(&sysv, &sysv.target(), "__assert_fail");
+    assert_eq!(
+        (fixed, count),
+        (
+            ["rdi", "rsi", "rdx", "rcx"].map(str::to_owned).to_vec(),
+            None
+        )
+    );
+    let (error, count) = names(&sysv, &sysv.target(), "error");
+    assert_eq!(error.len(), 6 + 8, "{error:?}");
+    assert_eq!(count.as_deref(), Some("al"));
+    // radare2's `dcgettext` row is uncited, so a call may read past it; `puts` cites ISO C17.
+    assert_eq!(names(&sysv, &sysv.target(), "dcgettext").0.len(), 6 + 8);
+    assert_eq!(
+        names(&sysv, &sysv.target(), "puts").0,
+        vec!["rdi".to_owned()]
+    );
+    let aapcs64 = Machine::on("aarch64", "aarch64", 64, Platform::Linux);
+    let (error, count) = names(&aapcs64, &aapcs64.target(), "error");
+    assert_eq!((error.len(), count), (8 + 8, None), "{error:?}");
+    let apple = Machine::on("aarch64", "aarch64", 64, Platform::Darwin);
+    let (printf, count) = names(&apple, &apple.target(), "printf");
+    assert_eq!((printf, count), (vec!["x0".to_owned()], None));
+    let microsoft = Machine::new("x86-64", "x86-64", 64);
+    let (printf, _) = names(&microsoft, &microsoft.under("ms"), "printf");
+    assert_eq!(printf.len(), 4 + 4, "{printf:?}");
+}

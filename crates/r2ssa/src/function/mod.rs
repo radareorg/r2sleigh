@@ -14,7 +14,8 @@ mod rewrite;
 mod stack_roots;
 mod stage;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Deref;
 use std::sync::Arc;
 
@@ -360,6 +361,8 @@ struct Finish {
     /// Each native instruction of a genuine lift, which the obligations are
     /// bound to; absent where the function was not lifted from one.
     native_spans: Option<Vec<crate::GenuineNativeInstructionSpan>>,
+    /// The boundary recovery read off the body, where the interface was recovered.
+    body_boundary: Option<Arc<crate::body_boundary::BodyBoundary>>,
 }
 
 impl Finish {
@@ -369,6 +372,7 @@ impl Finish {
             provenance: SsaArtifactProvenance::Manual,
             spellings: ArtifactSpellings::default(),
             native_spans: None,
+            body_boundary: None,
         }
     }
 }
@@ -621,11 +625,8 @@ fn release_undemanded_bytes(
     if !inserts {
         return EditPlan::new();
     }
-    let return_storages = machine_context
-        .abi_model()
-        .return_registers()
-        .iter()
-        .map(|slot| slot.storage())
+    let return_storages = (machine_context.function_interface().into_iter())
+        .flat_map(|interface| interface.return_kind().storages())
         .collect::<Vec<_>>();
     let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
     if !crate::demand::exits_are_named(function, &live_out) {
@@ -1094,8 +1095,8 @@ impl SsaArtifact {
     ///
     /// Derived from the machine context the snapshot carried, so it is the
     /// source's account of the ABI rather than a guess made from a name.
-    pub fn abi(&self) -> Option<crate::abi::AbiProfile> {
-        crate::abi::AbiProfile::from_machine_context(&self.machine_context)
+    pub fn abi(&self) -> Option<crate::abi::Formals<'_>> {
+        crate::abi::Formals::of(&self.machine_context)
     }
 
     /// The value liveness and storage spans the build computed and dropped, computed again the
@@ -1226,7 +1227,7 @@ impl SsaArtifact {
     }
 
     pub fn with_assumptions(&self, assumptions: &AssumptionSet) -> Self {
-        let facts = PreparedFunctionFacts::collect_with_context(
+        let mut facts = PreparedFunctionFacts::collect_with_context(
             self.function(),
             Some(self.decompile_prep_facts()),
             self.graph(),
@@ -1235,6 +1236,7 @@ impl SsaArtifact {
             "assume",
         )
         .expect("assumptions reach no fixpoint, and this function's collection settled");
+        facts.body_boundary.clone_from(&self.facts.body_boundary);
         let aggregate_accesses = collect_aggregate_access_projections(
             self.graph(),
             &facts.addresses,
@@ -1512,20 +1514,17 @@ impl SsaArtifact {
         }
     }
 
-    /// Whether this stack object is the caller's storage rather than this body's.
-    ///
-    /// The frame grows down from the entry stack pointer, so an object at or above
-    /// it is the caller's storage: the return address, a stack-passed argument, or
-    /// -- at a process entry -- what the loader left there. Nothing in this body
-    /// assigns it, and requiring a definition asks for one that cannot exist.
+    /// Whether this stack object is the caller's storage rather than this body's: the return
+    /// address, a stack-passed argument, or what the loader left at a process entry.
     pub fn caller_stack_object(&self, object: crate::ObjectId) -> bool {
         self.entry_stack_offset(object)
-            .is_some_and(Self::caller_frame_offset)
+            .is_some_and(|offset| self.caller_frame_offset(offset))
     }
 
-    /// Whether an offset from the entry stack pointer lies in the caller's storage.
-    pub const fn caller_frame_offset(offset: i64) -> bool {
-        offset >= 0
+    /// Whether an offset from the entry stack pointer lies in the caller's storage, by the
+    /// convention's one rule (`ConventionModel::owner`): a Microsoft x64 home is the callee's.
+    pub fn caller_frame_offset(&self, offset: i64) -> bool {
+        !self.machine_context().stack_owner(offset).callee_owned()
     }
 
     /// Whether this object is the slot the caller pushed the return address into.
@@ -1711,7 +1710,7 @@ impl SsaArtifact {
                 .filter(|(_, storage)| storage.space == CanonicalStorageSpace::Register)
                 .map(|(name, storage)| (name.as_str(), storage.offset, storage.size)),
         );
-        let mut entries_by_family = HashMap::<usize, usize>::new();
+        let mut entries_by_family = FxHashMap::<usize, usize>::default();
         for value in &self.graph().values {
             if value.var.version != 0 || self.graph().def_inst(value.id).is_some() {
                 continue;
@@ -1877,64 +1876,16 @@ fn unique_call_site_identity(
     matches.next().is_none().then_some(identity)
 }
 
-/// What the code after every call to `identity`'s callee in this body reads of the result
-/// registers `callee` leaves, so one prototype holds at each (doc/adr-resolved-bodies.md, "Caller reads").
-fn reads_after(
-    (blocks, calls): (&[R2ILBlock], &CallOperations),
-    identity: SourceCallSiteIdentity,
-    callee: &SourceFunctionInterface,
-    entry: u64,
-) -> Option<r2source::SourceResultReads> {
-    let carriers = callee.result_carriers()?;
-    let read = |&(block, op): &(usize, usize)| {
-        let (integer, float, second) = (Some(carriers.integer), carriers.float, carriers.second);
-        crate::caller_reads::reads_after_call(&blocks[block], op, integer, float, second)
-    };
-    // Every direct call to `entry` is read once per body and carrier set, however many sites ask.
-    let key = (entry, carriers.integer, carriers.float, carriers.second);
-    let direct = *calls
-        .direct_reads
-        .borrow_mut()
-        .entry(key)
-        .or_insert_with(|| {
-            calls
-                .calling(entry)
-                .iter()
-                .map(read)
-                .reduce(r2source::SourceResultReads::and)
-        });
-    let indirect = (calls.at(identity.instruction()).iter())
-        .filter(|&&(block, op)| matches!(blocks[block].ops[op], R2ILOp::CallInd { .. }))
-        .map(read);
-    direct
-        .into_iter()
-        .chain(indirect)
-        .reduce(r2source::SourceResultReads::and)
-}
-
-/// A callee's entry and the integer, float and second carriers its calls are read for.
-type DirectReadsKey = (
-    u64,
-    CanonicalStorageId,
-    Option<CanonicalStorageId>,
-    Option<CanonicalStorageId>,
-);
-
-/// Each control-flow operation of the lifted body by the instruction holding it, and each direct
-/// call by its target: built once, so finding a site is O(log n) and no site rescans the body.
+/// Each control-flow operation of the lifted body by the instruction holding it: built once, so
+/// finding a site is O(log n) and no site rescans the body.
 struct CallOperations {
     by_instruction: BTreeMap<u64, Vec<(usize, usize)>>,
-    by_target: BTreeMap<u64, Vec<(usize, usize)>>,
-    /// What the direct calls to each callee read of its carriers, once asked.
-    direct_reads: std::cell::RefCell<BTreeMap<DirectReadsKey, Option<r2source::SourceResultReads>>>,
 }
 
 impl CallOperations {
     fn of(blocks: &[R2ILBlock]) -> Self {
         let mut index = Self {
             by_instruction: BTreeMap::new(),
-            by_target: BTreeMap::new(),
-            direct_reads: std::cell::RefCell::default(),
         };
         for (at, block) in blocks.iter().enumerate() {
             for (op, operation) in block.ops.iter().enumerate() {
@@ -1948,13 +1899,6 @@ impl CallOperations {
                         .or_default()
                         .push((at, op));
                 }
-                if let R2ILOp::Call { target } = operation {
-                    index
-                        .by_target
-                        .entry(target.offset)
-                        .or_default()
-                        .push((at, op));
-                }
             }
         }
         index
@@ -1963,11 +1907,6 @@ impl CallOperations {
     /// The control-flow operations of the instruction at `address`, in order.
     fn at(&self, address: u64) -> &[(usize, usize)] {
         self.by_instruction.get(&address).map_or(&[], Vec::as_slice)
-    }
-
-    /// The direct calls to `target`, in order.
-    fn calling(&self, target: u64) -> &[(usize, usize)] {
-        self.by_target.get(&target).map_or(&[], Vec::as_slice)
     }
 }
 
@@ -1987,6 +1926,7 @@ fn correlate_call_site_interfaces(
     source: &OwnedFunctionSnapshot,
     (blocks, calls): (&[R2ILBlock], &CallOperations),
     callee_interfaces: &BTreeMap<u64, SourceFunctionInterface>,
+    callees: &CalleeBoundaries,
 ) -> CorrelatedCallSites {
     let mut tail_calls = Vec::new();
     let mut interfaces = Vec::new();
@@ -2043,9 +1983,10 @@ fn correlate_call_site_interfaces(
             if let Some(mut interface) =
                 crate::recover_interface::mint_recovered_call_site_interface(
                     callee,
+                    callees.preserved().get(&call.target_address()),
+                    &crate::recover_interface::convention_results(source.convention()),
                     identity,
                     source.source_revision_identity(),
-                    reads_after((blocks, calls), identity, callee, call.target_address()),
                 )
             {
                 // The gettext family is named, not prototyped, so the rule
@@ -2066,7 +2007,7 @@ fn correlate_call_site_interfaces(
             source.source_revision_identity().to_vec(),
             identity,
             true,
-            prototype.calling_convention.clone(),
+            prototype.convention,
             prototype.arguments.iter().copied(),
             prototype.variadic,
             prototype.noreturn,
@@ -2083,37 +2024,6 @@ fn correlate_call_site_interfaces(
                 .with_exact_callee_interface(callee.clone())
         {
             interface = with_callee;
-        }
-        // The exact target identity correlates this call with the prototype
-        // radare2 recovered for that target. Parameter names are otherwise
-        // presentation-only; promote precisely one `format` name into the
-        // checked callsite contract, where it serves as provenance for literal
-        // format counting at a variadic call and, at a `va_list` call, says
-        // which argument a caller's body forwards as its own format.
-        if let Some(target_name) = call.target_name() {
-            let mut signatures =
-                source
-                    .presentation()
-                    .callee_signatures()
-                    .iter()
-                    .filter(|(name, signature)| {
-                        name.as_ref() == target_name
-                            && signature.is_variadic() == prototype.variadic
-                            && signature.named_parameters().len() == prototype.arguments.len()
-                    });
-            if let (Some((_, signature)), None) = (signatures.next(), signatures.next()) {
-                let mut formats = signature
-                    .named_parameters()
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, parameter)| parameter_names_a_format_string(parameter));
-                if let (Some((index, _)), None) = (formats.next(), formats.next())
-                    && let Ok(index) = u32::try_from(index)
-                    && let Ok(bound) = interface.clone().with_radare2_format_parameter(index)
-                {
-                    interface = bound;
-                }
-            }
         }
         // A call to the gettext family hands back a translation of one of its
         // own arguments, so a caller whose format came from here counts from
@@ -2147,26 +2057,6 @@ fn correlate_call_site_interfaces(
         callee_names,
         slot_targets,
     }
-}
-
-/// Whether a prototype's parameter is the format string of a variadic call.
-///
-/// The name is the evidence and the type is the guard. radare2 spells the role
-/// `format` for the printf family and `fmt` for the err/warn family, and both
-/// are the same role; `execl(const char *path, const char *arg, ...)` is why
-/// the name is still required, because its last named parameter is a `char *`
-/// that no conversion specifier is counted from.
-fn parameter_names_a_format_string(parameter: &r2source::SourceSignatureParameter) -> bool {
-    let named = parameter.name().is_some_and(|name| {
-        matches!(
-            name.trim_start_matches('_'),
-            "format" | "fmt" | "format_string" | "fmtstr"
-        )
-    });
-    named
-        && parameter
-            .type_spelling()
-            .is_some_and(|spelling| spelling.contains("char") && spelling.contains('*'))
 }
 
 /// Which of this function's own parameters its body forwards as a format.
@@ -2267,7 +2157,7 @@ fn forwarded_parameter_index(
     if let Some((index, _)) = boundaries
         .parameters
         .iter()
-        .find(|(_, parameter)| parameter.value == value)
+        .find(|(_, parameter)| parameter.value() == Some(value))
     {
         return Some(*index);
     }
@@ -2505,8 +2395,6 @@ impl TrustedSsaArtifact {
         // coherence. Refusing here instead would suppress the whole function
         // for a fact the pipeline is built to carry.
         let calls = CallOperations::of(&blocks);
-        let correlated_call_sites =
-            correlate_call_site_interfaces(&source, (&blocks, &calls), callee_interfaces);
         // What each callee said about its own boundary, read once for every
         // pass that asks what a call to it does to the registers.
         let callees = CalleeBoundaries::from_interfaces(
@@ -2514,6 +2402,8 @@ impl TrustedSsaArtifact {
             callee_preserved_carriers,
             callee_interfaces,
         );
+        let correlated_call_sites =
+            correlate_call_site_interfaces(&source, (&blocks, &calls), callee_interfaces, &callees);
         // Every call target the source named, whether or not a prototype was
         // recovered for it: a name and a prototype are independent facts.
         let mut display_names = r2source::DisplayNames::new();
@@ -2565,9 +2455,9 @@ impl TrustedSsaArtifact {
         // nothing construction reads differs between the two contexts.
         let stated_interface = source.function_interface().is_some();
         let mut built = None;
-        let mut result_ambiguous = false;
         // Whether the recovered result is void on the premise that no caller outside the image reads it.
         let mut closed_world = false;
+        let mut body_boundary = None;
         let function_interface = match source.function_interface().cloned() {
             Some(interface) => Some(interface),
             None if recovery == Recovery::Convention => None,
@@ -2610,6 +2500,7 @@ impl TrustedSsaArtifact {
                 provisional_machine_context.set_unstated_imports(unstated_imports.clone());
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
+                provisional_machine_context.set_convention(source.shared_convention());
                 let Ok(preliminary) =
                     SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                         &blocks,
@@ -2663,13 +2554,14 @@ impl TrustedSsaArtifact {
                         break 'recovered None;
                     }
                 };
-                result_ambiguous = recovered.result_ambiguous();
                 closed_world = recovered.assumes_closed_world();
+                body_boundary = Some(Arc::new(recovered.boundary().clone()));
                 let minted = crate::recover_interface::mint_recovered_interface(
                     &recovered,
                     source.machine_roles(),
                     source.source_revision_identity(),
-                    source.convention_slots().calling_convention(),
+                    source.convention_slots().convention(),
+                    source.convention(),
                 );
                 if minted.is_none() {
                     r2il::refusal_evidence!(
@@ -2678,7 +2570,7 @@ impl TrustedSsaArtifact {
                          parameters={} result={:?} convention={:?}",
                         recovered.parameters().len(),
                         recovered.result(),
-                        source.convention_slots().calling_convention()
+                        source.convention_slots().convention()
                     );
                 }
                 minted
@@ -2703,9 +2595,10 @@ impl TrustedSsaArtifact {
                 if let Some(interface) =
                     crate::recover_interface::mint_recovered_call_site_interface(
                         own,
+                        None,
+                        &crate::recover_interface::convention_results(source.convention()),
                         identity,
                         source.source_revision_identity(),
-                        reads_after((&blocks, &calls), identity, own, call.target_address()),
                     )
                 {
                     call_interfaces.push(interface);
@@ -2731,7 +2624,6 @@ impl TrustedSsaArtifact {
         machine_context.set_reentering_callees(reentering.clone());
         machine_context.set_unstated_imports(unstated_imports.clone());
         machine_context.set_callee_preserved(callees.preserved().clone());
-        machine_context.set_result_ambiguous(result_ambiguous);
         // A call to this function itself is stated by the interface just settled, where it mints none.
         let mut callee_statements = callee_statements;
         let entry = source.image().entry_address();
@@ -2745,6 +2637,7 @@ impl TrustedSsaArtifact {
         machine_context.set_slot_targets(correlated_call_sites.slot_targets);
         machine_context.set_frame_saves(source.image().frame_saves());
         machine_context.set_accepted_premises(premises.clone());
+        machine_context.set_convention(source.shared_convention());
         // What each entry of a captured code pointer table names, recorded
         // before the facts are collected: a load of such a slot is proven
         // from this, and the collection is what proves it.
@@ -2820,6 +2713,7 @@ impl TrustedSsaArtifact {
                     user_operations: Arc::from(arch.user_ops.clone()),
                 },
                 native_spans: Some(native_spans),
+                body_boundary,
             },
             source_block_count: blocks.len(),
             arch,
@@ -2960,6 +2854,8 @@ pub struct SSAFunction {
     call_preserved_carriers: Option<SourceCallPreservedCarriers>,
     /// The user operations that enter the supervisor, as the lift names them.
     supervisor_calls: BTreeSet<u32>,
+    /// What each direct callee proves it leaves as found, less its result: a call to it passes those (D212).
+    callee_passes: Arc<CalleePreservedCarriers>,
     /// The lifted memory operations promotion took out of memory.
     ///
     /// A promoted slot access is a copy of a variable in the prepared
@@ -2973,6 +2869,10 @@ pub struct SSAFunction {
     compiler_inserted_blocks: BTreeMap<u64, u32>,
     /// The edges those checks removed, (from, to): the source's successors the graph no longer holds.
     compiler_removed_edges: BTreeSet<(u64, u64)>,
+    /// Each decided canary check's `reload - guard` and the block its passing edge alone enters.
+    passing_differences: Vec<(crate::value_table::VarId, u64)>,
+    /// Every decided canary check's difference, sorted: a write no C expression defines.
+    checked_differences: Vec<crate::value_table::VarId>,
     /// The blocks SCCP dropped as unreachable after deciding a branch, by address and byte size; they owe no obligation.
     decided_dead_blocks: BTreeMap<u64, u32>,
     /// The edges SCCP dropped with them, (from, to).
@@ -3130,7 +3030,9 @@ pub(crate) fn uncertified_call_reads(
     let mut passed = std::collections::BTreeSet::new();
     for boundary in boundaries.calls.values() {
         for argument in &boundary.arguments {
-            if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value {
+            if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value
+                && !boundary.ignores(argument)
+            {
                 passed.insert(class_of(value).unwrap_or(value));
             }
         }
@@ -3184,7 +3086,10 @@ impl SSAFunction {
     pub fn written_or_captured(&self) -> std::borrow::Cow<'_, crate::lanes::Written> {
         match self.written.is_empty() && !self.blocks.is_sealed() {
             false => std::borrow::Cow::Borrowed(&self.written),
-            true => std::borrow::Cow::Owned(crate::lanes::Written::capture(self)),
+            true => std::borrow::Cow::Owned(crate::lanes::Written::capture(
+                self,
+                &crate::lanes::CallResults::default(),
+            )),
         }
     }
 
@@ -3200,8 +3105,8 @@ impl SSAFunction {
     }
 
     /// Record what each operation writes, before anything rewrites one.
-    pub(crate) fn capture_written(&mut self) {
-        self.written = crate::lanes::Written::capture(self);
+    pub(crate) fn capture_written(&mut self, calls: &crate::lanes::CallResults) {
+        self.written = crate::lanes::Written::capture(self, calls);
     }
 
     /// The seal's last step: the graph owns each operation, its origin and each value from here
@@ -3371,10 +3276,13 @@ impl Clone for SSAFunction {
         Self {
             call_preserved_carriers: self.call_preserved_carriers,
             supervisor_calls: self.supervisor_calls.clone(),
+            callee_passes: Arc::clone(&self.callee_passes),
             promoted_slots: self.promoted_slots.clone(),
             compiler_inserted: self.compiler_inserted.clone(),
             compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
             compiler_removed_edges: self.compiler_removed_edges.clone(),
+            passing_differences: self.passing_differences.clone(),
+            checked_differences: self.checked_differences.clone(),
             decided_dead_blocks: self.decided_dead_blocks.clone(),
             decided_dead_edges: self.decided_dead_edges.clone(),
             premises: self.premises.clone(),
@@ -3756,6 +3664,8 @@ pub(crate) struct CalleeBoundaries {
     results: BTreeMap<u64, CallBoundaryDef>,
     /// Callees whose body proves the result carrier holds the return address.
     return_addresses: BTreeMap<u64, CanonicalStorageId>,
+    /// Callees whose body is a proven `/GS` check, which returns no result.
+    security_checks: BTreeSet<u64>,
 }
 
 impl CalleeBoundaries {
@@ -3769,7 +3679,13 @@ impl CalleeBoundaries {
         let mut preserved = preserved.clone();
         let mut results = BTreeMap::new();
         let mut return_addresses = BTreeMap::new();
+        let mut security_checks = BTreeSet::new();
         for (address, interface) in interfaces {
+            // A check's call is the compiler's; what it leaves in the result carrier is no result.
+            if interface.security_check() {
+                security_checks.insert(*address);
+                continue;
+            }
             // The same boundary cannot both hand a register back untouched and name it as what it
             // returns: a pair's two registers alike.
             let returned = interface.return_kind().storages().collect::<Vec<_>>();
@@ -3806,7 +3722,13 @@ impl CalleeBoundaries {
             preserved,
             results,
             return_addresses,
+            security_checks,
         }
+    }
+
+    /// The callees whose body is a proven `/GS` check.
+    pub(crate) const fn security_checks(&self) -> &BTreeSet<u64> {
+        &self.security_checks
     }
 
     /// What each callee proves it leaves alone, less its own result carrier.
@@ -3893,6 +3815,11 @@ impl SSAFunction {
     }
 
     /// Whether this user operation enters the supervisor, whose kernel-written result no contract names.
+    /// Whether the direct callee at `target` leaves every byte of `storage` as it found it.
+    pub(crate) fn call_passes(&self, target: u64, storage: CanonicalStorageId) -> bool {
+        (self.callee_passes.get(&target)).is_some_and(|kept| crate::semantic::covers(kept, storage))
+    }
+
     pub fn enters_supervisor<V>(&self, op: &SSAOp<V>) -> bool {
         matches!(op, SSAOp::CallOther { userop, .. } if self.supervisor_calls.contains(userop))
     }
@@ -3928,6 +3855,32 @@ impl SSAFunction {
         self.compiler_inserted.extend(ops.iter());
         self.compiler_inserted_blocks.extend(blocks);
         self.compiler_removed_edges.extend(edges);
+    }
+
+    pub(crate) fn record_passing_differences(
+        &mut self,
+        differences: impl IntoIterator<Item = (crate::value_table::VarId, u64)>,
+    ) {
+        self.passing_differences.extend(differences);
+    }
+
+    pub(crate) fn record_checked_differences(
+        &mut self,
+        differences: impl IntoIterator<Item = crate::value_table::VarId>,
+    ) {
+        self.checked_differences.extend(differences);
+        self.checked_differences.sort_unstable();
+        self.checked_differences.dedup();
+    }
+
+    /// Whether `var` is a decided canary check's difference (doc/adr-scratch-result.md, case 3).
+    pub(crate) fn is_checked_difference(&self, var: crate::value_table::VarId) -> bool {
+        self.checked_differences.binary_search(&var).is_ok()
+    }
+
+    /// A decided canary check's difference, 0 past its passing edge, and the block that edge enters.
+    pub(crate) fn passing_differences(&self) -> &[(crate::value_table::VarId, u64)] {
+        &self.passing_differences
     }
 
     /// Record a premise a rewrite relied on.
@@ -4244,14 +4197,14 @@ struct RegisterFamilyMember {
 /// own register geometry rather than from a table of names.
 #[derive(Debug, Clone, Default)]
 pub struct RegisterFamilyInfo {
-    name_to_member: HashMap<String, RegisterFamilyMember>,
+    name_to_member: FxHashMap<String, RegisterFamilyMember>,
     /// Whether a 32-bit write to a general register clears the rest of it.
     /// Which family covers a register-space range, for storage the arch does not name.
     family_ranges: Vec<(u64, u64, usize)>,
-    family_slots: HashMap<usize, Vec<RegisterFamilySlot>>,
+    family_slots: FxHashMap<usize, Vec<RegisterFamilySlot>>,
     /// The narrowest declared slot of each family that contains every range
     /// one function touches of it; see [`Self::with_program_roots`].
-    program_roots: HashMap<usize, RegisterFamilySlot>,
+    program_roots: FxHashMap<usize, RegisterFamilySlot>,
     /// Whether a register's lowest address holds its most significant byte.
     big_endian: bool,
 }
@@ -4286,7 +4239,7 @@ impl RegisterFamilyInfo {
     /// of the whole carrier included, which is why those ranges are counted
     /// here too.
     pub fn with_program_roots(&self, used: impl IntoIterator<Item = (u64, u32)>) -> Self {
-        let mut extents = HashMap::<usize, (u64, u64)>::new();
+        let mut extents = FxHashMap::<usize, (u64, u64)>::default();
         for (offset, size) in used {
             let Some(member) = self.member_at_offset(offset, size) else {
                 continue;
@@ -4296,7 +4249,7 @@ impl RegisterFamilyInfo {
             extent.0 = extent.0.min(offset);
             extent.1 = extent.1.max(end);
         }
-        let mut program_roots = HashMap::new();
+        let mut program_roots = FxHashMap::default();
         for (family_id, (start, end)) in extents {
             let Some(slots) = self.family_slots.get(&family_id) else {
                 continue;
@@ -4394,10 +4347,10 @@ impl RegisterFamilyInfo {
             }
         }
 
-        let mut root_to_family = HashMap::new();
+        let mut root_to_family = FxHashMap::default();
         let mut next_family_id = 0usize;
-        let mut name_to_member = HashMap::new();
-        let mut family_width_sets: HashMap<(usize, u64), HashSet<u32>> = HashMap::new();
+        let mut name_to_member = FxHashMap::default();
+        let mut family_width_sets: FxHashMap<(usize, u64), FxHashSet<u32>> = FxHashMap::default();
 
         for (idx, reg) in regs.iter().enumerate() {
             let root = find(&mut parents, idx);
@@ -4420,7 +4373,7 @@ impl RegisterFamilyInfo {
                 .insert(reg.size);
         }
 
-        let family_widths_by_offset: HashMap<(usize, u64), Vec<u32>> = family_width_sets
+        let family_widths_by_offset: FxHashMap<(usize, u64), Vec<u32>> = family_width_sets
             .into_iter()
             .map(|(family_and_offset, mut widths)| {
                 let mut widths: Vec<u32> = widths.drain().collect();
@@ -4428,7 +4381,7 @@ impl RegisterFamilyInfo {
                 (family_and_offset, widths)
             })
             .collect();
-        let mut family_slots: HashMap<usize, Vec<RegisterFamilySlot>> = HashMap::new();
+        let mut family_slots: FxHashMap<usize, Vec<RegisterFamilySlot>> = FxHashMap::default();
         for (&(family_id, offset), widths) in &family_widths_by_offset {
             family_slots
                 .entry(family_id)
@@ -4463,7 +4416,7 @@ impl RegisterFamilyInfo {
             name_to_member,
             family_ranges: merged,
             family_slots,
-            program_roots: HashMap::new(),
+            program_roots: FxHashMap::default(),
             big_endian: false,
         }
     }

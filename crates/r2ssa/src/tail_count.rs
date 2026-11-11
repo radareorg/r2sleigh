@@ -60,11 +60,20 @@ struct Tally {
     moved: bool,
 }
 
-/// The `va_list` cells the convention names, from the bound `va_start` stored.
+/// The `va_list` cells the convention names, from the bound `va_start` stored. A Microsoft x64
+/// `va_list` is the overflow pointer alone, kept in a cell or only in registers.
 pub(crate) struct List {
-    pub(crate) base: Cell,
-    pub(crate) offset: Cell,
-    pub(crate) overflow: Cell,
+    pub(crate) base: Option<Cell>,
+    pub(crate) offset: Option<Cell>,
+    pub(crate) overflow: Option<Cell>,
+}
+
+impl List {
+    pub(crate) fn cells(&self) -> impl Iterator<Item = Cell> + '_ {
+        [self.base, self.offset, self.overflow]
+            .into_iter()
+            .flatten()
+    }
 }
 
 /// The counter and the count the loop's header compares.
@@ -122,8 +131,10 @@ struct Found {
 }
 
 impl Found {
-    fn into_stores(self, counting: bool) -> Result<Stores, String> {
-        if self.base_inits != 1 || self.offset_inits != 1 || self.overflow_inits != 1 {
+    fn into_stores(self, list: &List, counting: bool) -> Result<Stores, String> {
+        let once = |cell: Option<Cell>| usize::from(cell.is_some());
+        let expected = (once(list.base), once(list.offset), once(list.overflow));
+        if (self.base_inits, self.offset_inits, self.overflow_inits) != expected {
             return Err("the va_list's cells are not set exactly once".into());
         }
         if !counting {
@@ -260,7 +271,8 @@ pub(crate) struct Prover<'a> {
     pub(crate) area: &'a SaveArea,
     pub(crate) observations: &'a crate::deadphi::ProvenProgramObservations,
     pub(crate) slots: &'a SourceConventionSlots,
-    pub(crate) row: SourceRegisterSaveArea,
+    /// The register save area's row; none for a Microsoft x64 home `va_list`.
+    pub(crate) row: Option<SourceRegisterSaveArea>,
     /// The slot width: what a cursor steps by.
     pub(crate) width: u32,
 }
@@ -274,7 +286,10 @@ pub(crate) fn tail_count(
     slots: &SourceConventionSlots,
     (area, observations): (&SaveArea, &crate::deadphi::ProvenProgramObservations),
 ) -> Option<SourceTailCount> {
-    let row = slots.register_save_area()?;
+    let row = slots.register_save_area();
+    if row.is_none() && !slots.shared_positions() {
+        return None;
+    }
     let prover = Prover {
         function,
         graph,
@@ -410,21 +425,28 @@ impl Prover<'_> {
 
     fn list(&self) -> Result<List, String> {
         let bound = self.area.stored_at;
+        let Some(row) = self.row else {
+            return Ok(List {
+                base: None,
+                offset: None,
+                overflow: self.home_cell(),
+            });
+        };
         let list = List {
-            base: Cell {
+            base: Some(Cell {
                 at: bound,
                 size: self.width,
-            },
-            offset: Cell {
-                at: bound + self.row.offset_field,
-                size: self.row.offset_width,
-            },
-            overflow: Cell {
-                at: bound + self.row.stack_field,
+            }),
+            offset: Some(Cell {
+                at: bound + row.offset_field,
+                size: row.offset_width,
+            }),
+            overflow: Some(Cell {
+                at: bound + row.stack_field,
                 size: self.width,
-            },
+            }),
         };
-        let cells = [list.base, list.offset, list.overflow];
+        let cells = list.cells().collect::<Vec<_>>();
         for (index, one) in cells.iter().enumerate() {
             if cells[index + 1..]
                 .iter()
@@ -436,12 +458,33 @@ impl Prover<'_> {
         Ok(list)
     }
 
+    /// The frame cell a home `va_list` is kept in: the one cell `&home[named]` is stored to whole.
+    fn home_cell(&self) -> Option<Cell> {
+        let mut cells = (self.graph.insts.iter()).filter_map(|inst| match &inst.payload {
+            InstPayload::Op(SSAOp::Store { addr, val, .. })
+                if self.root(*val) == Some(self.area.bound) && self.size(*val) == self.width =>
+            {
+                Some(Cell {
+                    at: self.root(*addr)?,
+                    size: self.width,
+                })
+            }
+            _ => None,
+        });
+        let first = cells.next()?;
+        cells.all(|cell| cell == first).then_some(first)
+    }
+
     /// The address `va_start` stores in the overflow pointer, stored once.
     fn overflow_init(&self, list: &List) -> Result<i64, String> {
+        // A home `va_list` held only in registers starts at `&home[named]`.
+        let Some(overflow) = list.overflow else {
+            return Ok(self.area.bound);
+        };
         let mut firsts = (self.graph.insts.iter())
             .filter_map(|inst| match &inst.payload {
                 InstPayload::Op(SSAOp::Store { addr, val, .. }) => {
-                    (self.root(*addr) == Some(list.overflow.at)).then_some(self.root(*val)?)
+                    (self.root(*addr) == Some(overflow.at)).then_some(self.root(*val)?)
                 }
                 _ => None,
             })
@@ -686,7 +729,7 @@ impl Prover<'_> {
         events: &mut [Vec<(usize, Event)>],
     ) -> Result<Stores, String> {
         let saved = self.saved();
-        let tracked = [list.base, list.offset, list.overflow, saved];
+        let tracked = list.cells().chain([saved]).collect::<Vec<_>>();
         let inside = |cell: &Cell| tracked.iter().any(|t| t.overlaps(cell.at, cell.size));
         if bound.is_some_and(|bound| [bound.counter, bound.count].iter().any(inside)) {
             return Err("the counter or the count sits in the va_list or its area".into());
@@ -720,7 +763,7 @@ impl Prover<'_> {
                 Write::CountStore => found.count_stores.push((inst.id, *val)),
             }
         }
-        found.into_stores(bound.is_some())
+        found.into_stores(list, bound.is_some())
     }
 
     /// What a store of `val` at `at` is to the cells.
@@ -731,15 +774,16 @@ impl Prover<'_> {
         if cells.saved.overlaps(at, size) {
             return self.save(val, at);
         }
-        if list.base.overlaps(at, size) {
-            return self.base_write(val, whole(list.base));
+        let hit = |cell: Option<Cell>| cell.filter(|cell| cell.overlaps(at, size));
+        if let Some(base) = hit(list.base) {
+            return self.base_write(val, whole(base));
         }
-        if list.overflow.overlaps(at, size) {
-            return self.overflow_write(cells, val, whole(list.overflow));
+        if let Some(overflow) = hit(list.overflow) {
+            return self.overflow_write(cells, val, whole(overflow));
         }
-        if list.offset.overlaps(at, size) {
-            let wide = at == list.offset.at && size > list.offset.size;
-            return self.offset_write(cells, val, (whole(list.offset), wide));
+        if let Some(offset) = hit(list.offset) {
+            let wide = at == offset.at && size > offset.size;
+            return self.offset_write(cells, val, (whole(offset), wide), offset);
         }
         let Some(bound) = cells.bound else {
             return Ok(Write::Other);
@@ -792,8 +836,9 @@ impl Prover<'_> {
         cells: &Cells,
         val: ValueId,
         (whole, wide): (bool, bool),
+        offset: Cell,
     ) -> Result<Write, String> {
-        if (whole || wide) && self.sets_offset(val, cells.list.offset) {
+        if (whole || wide) && self.sets_offset(val, offset) {
             return Ok(Write::OffsetInit);
         }
         match whole && cells.kinds.get(val) == Some(Kind::Offset) {
@@ -833,7 +878,7 @@ impl Prover<'_> {
         overflow_init: i64,
         kinds: &Kinds,
     ) -> Result<(), String> {
-        let mut spans = vec![list.base, list.offset, list.overflow, self.saved()];
+        let mut spans = list.cells().chain([self.saved()]).collect::<Vec<_>>();
         spans.extend(
             bound
                 .into_iter()
@@ -875,8 +920,12 @@ impl Prover<'_> {
             InstPayload::Op(SSAOp::Store { addr, val, .. }) => {
                 *addr == value
                     || (*val == value
-                        && (self.root(*addr))
-                            .is_some_and(|to| to == list.base.at || to == list.overflow.at))
+                        && (self.root(*addr)).is_some_and(|to| {
+                            [list.base, list.overflow]
+                                .into_iter()
+                                .flatten()
+                                .any(|cell| cell.at == to)
+                        }))
             }
             InstPayload::Op(SSAOp::Copy { .. } | SSAOp::IntAdd { .. } | SSAOp::IntSub { .. }) => {
                 inst.output.is_some_and(|out| self.root(out).is_some())
@@ -900,10 +949,8 @@ impl Prover<'_> {
             if in_area || at >= overflow_init {
                 return Err(format!("the tail is read at {at:#x} without a cursor"));
             }
-            let whole = [list.base, list.offset, list.overflow].contains(&cell);
-            let apart = [list.base, list.offset, list.overflow]
-                .iter()
-                .any(|part| part.overlaps(at, size));
+            let whole = list.cells().any(|part| part == cell);
+            let apart = list.cells().any(|part| part.overlaps(at, size));
             if apart && !whole {
                 return Err("a cursor is read in part".into());
             }

@@ -9,7 +9,9 @@ pub fn bit_vector_tag(bits: u32) -> String {
     format!("{BIT_VECTOR_TAG_PREFIX}{bits}")
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
 pub enum CTypeLike {
     Void,
     Bool,
@@ -188,12 +190,13 @@ impl CTypeLike {
         }
     }
 
-    /// Plain `char`, spelled as itself over the byte it is.
-    pub fn plain_char(signed: bool) -> Self {
-        let signedness = if signed {
-            Signedness::Signed
-        } else {
-            Signedness::Unsigned
+    /// Plain `char`, spelled as itself over the byte it is, signed where the
+    /// target states it.
+    pub fn plain_char(signed: Option<bool>) -> Self {
+        let signedness = match signed {
+            Some(true) => Signedness::Signed,
+            Some(false) => Signedness::Unsigned,
+            None => Signedness::Unknown,
         };
         Self::named(
             "char",
@@ -528,19 +531,163 @@ pub fn c_object_declaration(ty: &CTypeLike, name: &str) -> String {
     }
 }
 
-/// Parse a C type spelling into the model.
-///
-/// This is the partial inverse of `render_c_type_like`. A spelling is data
-/// arriving from radare2's type database, from DWARF, or from our own renderer,
-/// so the parser accepts more spellings than the renderer emits -- `unsigned
-/// int` as well as `uint32_t`, `char *` as well as `char*`. It still refuses a
-/// spelling it cannot place instead of minting a plausible typedef from
-/// malformed text.
-///
-/// `ptr_bits` is a parameter rather than an assumption because the width of
-/// `long` and `size_t` is a property of the target, and guessing it is how two
-/// of the previous parsers came to disagree.
-pub fn parse_c_type_like(spelling: &str, ptr_bits: u32) -> Option<CTypeLike> {
+/// A `SourceTypeGraph` node as the type layer states it: the one converter (ADR
+/// call-boundary, Types on the wire). An alias names its node.
+pub fn source_type_like(graph: &r2source::SourceTypeGraph, type_id: u32) -> Option<CTypeLike> {
+    SourceConversion {
+        graph,
+        visiting: std::collections::BTreeSet::new(),
+    }
+    .node(type_id)
+}
+
+struct SourceConversion<'a> {
+    graph: &'a r2source::SourceTypeGraph,
+    /// Nodes being converted: a node reached again describes itself and states nothing.
+    visiting: std::collections::BTreeSet<u32>,
+}
+
+impl SourceConversion<'_> {
+    fn node(&mut self, type_id: u32) -> Option<CTypeLike> {
+        use r2source::SourceTypeKind;
+        if !self.visiting.insert(type_id) {
+            return None;
+        }
+        let graph = self.graph;
+        let source_type = graph
+            .types()
+            .get(usize::try_from(type_id).ok()?)
+            .filter(|source_type| source_type.id() == type_id)?;
+        let bits = u32::try_from(source_type.size_bits()).ok()?;
+        let aggregate = |aggregate_id: u32| {
+            graph
+                .aggregates()
+                .get(usize::try_from(aggregate_id).ok()?)
+                .filter(|aggregate| {
+                    aggregate.id() == aggregate_id && aggregate.type_id() == type_id
+                })
+                .map(|aggregate| aggregate.name().to_owned())
+        };
+        let ty = match source_type.kind() {
+            SourceTypeKind::SignedInteger => CTypeLike::Int {
+                bits,
+                signedness: Signedness::Signed,
+            },
+            SourceTypeKind::UnsignedInteger => CTypeLike::Int {
+                bits,
+                signedness: Signedness::Unsigned,
+            },
+            SourceTypeKind::Char { signed } => CTypeLike::plain_char(signed),
+            SourceTypeKind::Pointer {
+                target_type_id,
+                const_target,
+            } => self.pointer(target_type_id, const_target),
+            SourceTypeKind::Struct { aggregate_id } => CTypeLike::Struct(aggregate(aggregate_id)?),
+            SourceTypeKind::Union { aggregate_id } => CTypeLike::Union(aggregate(aggregate_id)?),
+            SourceTypeKind::Array {
+                element_type_id,
+                count,
+            } => CTypeLike::Array(
+                Box::new(self.node(element_type_id)?),
+                match count {
+                    Some(count) => Some(usize::try_from(count).ok()?),
+                    None => None,
+                },
+            ),
+            SourceTypeKind::Float => CTypeLike::Float(bits),
+            SourceTypeKind::Void => CTypeLike::Void,
+            SourceTypeKind::Code { signature_id } => self.code(signature_id)?,
+            SourceTypeKind::Opaque { tag_id } => self.opaque(tag_id)?,
+        };
+        self.visiting.remove(&type_id);
+        Some(
+            match graph
+                .aliases()
+                .iter()
+                .find(|alias| alias.type_id() == type_id)
+            {
+                Some(alias) => CTypeLike::named(alias.name(), ty),
+                None => ty,
+            },
+        )
+    }
+
+    fn pointer(&mut self, target_type_id: u32, const_target: bool) -> CTypeLike {
+        match self.node(target_type_id) {
+            // `Function` already spells a pointer to code, a named one (`callback *`) too.
+            Some(code)
+                if matches!(
+                    code.unaliased(),
+                    CTypeLike::Function { .. } | CTypeLike::UnprototypedFunction(_)
+                ) =>
+            {
+                code.unaliased().clone()
+            }
+            Some(target) if const_target => {
+                CTypeLike::Pointer(Box::new(CTypeLike::Const(Box::new(target))))
+            }
+            Some(target) => CTypeLike::Pointer(Box::new(target)),
+            // A pointer to code the type layer cannot spell is still a pointer.
+            None => CTypeLike::Pointer(Box::new(CTypeLike::Unknown)),
+        }
+    }
+
+    /// A tag the graph names and does not lay out.
+    fn opaque(&self, tag_id: u32) -> Option<CTypeLike> {
+        use r2source::SourceTagKeyword;
+        let tag = self
+            .graph
+            .opaque_tags()
+            .get(usize::try_from(tag_id).ok()?)?;
+        let name = tag.name().to_owned();
+        Some(match tag.keyword() {
+            SourceTagKeyword::Struct => CTypeLike::Struct(name),
+            SourceTagKeyword::Union => CTypeLike::Union(name),
+            SourceTagKeyword::Enum => CTypeLike::Enum(name),
+            SourceTagKeyword::Typedef => CTypeLike::typedef(name),
+        })
+    }
+
+    /// Code of one signature. A variadic one has no spelling here.
+    fn code(&mut self, signature_id: u32) -> Option<CTypeLike> {
+        let signature = self
+            .graph
+            .signatures()
+            .get(usize::try_from(signature_id).ok()?)
+            .filter(|signature| !signature.variadic())?;
+        let ret = Box::new(self.node(signature.return_type_id())?);
+        if !signature.prototyped() {
+            return Some(CTypeLike::UnprototypedFunction(ret));
+        }
+        let params = signature
+            .parameter_type_ids()
+            .iter()
+            .map(|parameter| self.node(*parameter))
+            .collect::<Option<Box<[_]>>>()?;
+        Some(CTypeLike::Function { ret, params })
+    }
+}
+
+/// An operator's `TypeHint` assumption, the one type that arrives as text; C's
+/// integer names stay names. It has no production producer yet (ADR call-boundary, S9 as built).
+pub(crate) fn operator_type_hint(text: &str, ptr_bits: u32) -> Option<CTypeLike> {
+    let name = crate::external::normalize_external_type_name(text).to_ascii_lowercase();
+    let named = match name.trim() {
+        "int" => "int",
+        "unsigned int" => "unsigned int",
+        "short" | "short int" => "short",
+        "unsigned short" | "unsigned short int" => "unsigned short",
+        "long" | "long int" => "long",
+        "unsigned long" | "unsigned long int" => "unsigned long",
+        name @ ("size_t" | "ssize_t" | "ptrdiff_t" | "uintptr_t" | "intptr_t") => name,
+        _ => return parse_c_type_like(text, ptr_bits),
+    };
+    Some(CTypeLike::typedef(named))
+}
+
+/// A spelling read back as a type: the operator's hint and test fixtures. Production types
+/// arrive as `SourceTypeGraph` (ADR call-boundary, Types on the wire).
+pub(crate) fn parse_c_type_like(spelling: &str, ptr_bits: u32) -> Option<CTypeLike> {
     // A pointer level is peeled before the qualifiers go, because the
     // qualifier of what it points at is part of the pointer's type. What
     // follows the star qualifies the pointer itself and is dropped with the
@@ -643,6 +790,41 @@ fn parse_normalized(spelling: &str, ptr_bits: u32) -> Option<CTypeLike> {
             .map(|(bits, signedness)| CTypeLike::Int { bits, signedness })
             .or_else(|| is_c_type_identifier(&collapsed).then(|| CTypeLike::typedef(collapsed))),
     }
+}
+
+/// What a name stands for: its stated target, or what C defines the name as.
+pub(crate) fn typedef_target(name: &str, ty: &CTypeLike, ptr_bits: u32) -> Option<CTypeLike> {
+    match ty.unaliased() {
+        CTypeLike::Unknown => standard_type(name, ptr_bits),
+        target => Some(target.clone()),
+    }
+}
+
+/// Whether C, `<stddef.h>` or `<stdint.h>` defines this name for a scalar.
+pub(crate) fn names_a_standard_type(name: &str) -> bool {
+    name.trim() == "char" || standard_type(name, 64).is_some()
+}
+
+/// The scalar C, `<stddef.h>` or `<stdint.h>` defines a name as. Plain `char`
+/// has no sign without the target's model, so it is not one.
+pub(crate) fn standard_type(name: &str, ptr_bits: u32) -> Option<CTypeLike> {
+    let name = name.split_whitespace().collect::<Vec<_>>().join(" ");
+    match name.as_str() {
+        "char" => None,
+        "void" => Some(CTypeLike::Void),
+        "bool" | "_Bool" => Some(CTypeLike::Bool),
+        "float" => Some(CTypeLike::Float(32)),
+        "double" | "long double" => Some(CTypeLike::Float(64)),
+        _ => fixed_width_integer(&name).or_else(|| {
+            named_integer_bits(&name, ptr_bits)
+                .map(|(bits, signedness)| CTypeLike::Int { bits, signedness })
+        }),
+    }
+}
+
+/// Whether a name is one the type layer gives a structure anyway (`uint64_t`), so it names nothing more.
+pub fn spells_its_structure(name: &str) -> bool {
+    fixed_width_integer(name.trim()).is_some()
 }
 
 /// Whether a spelling *names* a type rather than being a way of writing one.
@@ -753,6 +935,41 @@ fn named_integer_bits(spelling: &str, ptr_bits: u32) -> Option<(u32, Signedness)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `typedef int callback(int);` and a `callback *`: one pointer, to the code.
+    #[test]
+    fn a_pointer_to_a_named_function_type_is_one_pointer() {
+        use r2source::{
+            SourceCodeSignature, SourceType, SourceTypeAlias, SourceTypeGraph,
+            SourceTypeGraphParts, SourceTypeKind,
+        };
+        let parts = SourceTypeGraphParts {
+            types: vec![
+                SourceType::new(0, SourceTypeKind::SignedInteger, 32, 32),
+                SourceType::new(1, SourceTypeKind::Code { signature_id: 0 }, 0, 0),
+                SourceType::new(
+                    2,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 1,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
+            ],
+            signatures: vec![SourceCodeSignature::new(0, 0, [0], false, true)],
+            aliases: vec![SourceTypeAlias::new("callback".to_owned(), 1)],
+            ..SourceTypeGraphParts::default()
+        };
+        let graph = SourceTypeGraph::from_parts(parts).expect("the graph states");
+        assert_eq!(
+            source_type_like(&graph, 2),
+            Some(CTypeLike::Function {
+                ret: Box::new(CTypeLike::i32()),
+                params: Box::new([CTypeLike::i32()]),
+            })
+        );
+    }
 
     /// `p[i]` needs a complete element: through `void *` it is not C, and a
     /// recovered pointer whose accesses read several widths is `void *`.

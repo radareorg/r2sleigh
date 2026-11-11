@@ -1,0 +1,493 @@
+# Rows that cite the Microsoft API reference page they are read from: what KERNEL32.dll exports,
+# bound only to a PE import that names KERNEL32.dll (doc/adr-call-boundary.md, Decided
+# 2026-11-09). None of it is radare2's. Each row's `.include=` is the header the page names and
+# `.cite=` the page and the minimum supported client it states ("None" where the page names
+# none). The Windows type names are read as Microsoft's "Windows Data Types" defines them
+# (spelling.rs). A pointer's own qualifiers and SAL annotations are left out.
+
+# Microsoft, CloseHandle: handleapi.h, minimum supported client Windows 2000 Professional.
+CloseHandle=func
+func.CloseHandle.args=1
+func.CloseHandle.arg.0=HANDLE,hObject
+func.CloseHandle.ret=BOOL
+func.CloseHandle.include=handleapi.h
+func.CloseHandle.cite=https://learn.microsoft.com/en-us/windows/win32/api/handleapi/nf-handleapi-closehandle (Windows 2000 Professional)
+
+# Microsoft, CompareStringW: stringapiset.h, minimum supported client Windows 2000 Professional.
+CompareStringW=func
+func.CompareStringW.args=6
+func.CompareStringW.arg.0=LCID,Locale
+func.CompareStringW.arg.1=DWORD,dwCmpFlags
+func.CompareStringW.arg.2=PCNZWCH,lpString1
+func.CompareStringW.arg.3=int,cchCount1
+func.CompareStringW.arg.4=PCNZWCH,lpString2
+func.CompareStringW.arg.5=int,cchCount2
+func.CompareStringW.ret=int
+func.CompareStringW.include=stringapiset.h
+func.CompareStringW.cite=https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-comparestringw (Windows 2000 Professional)
+
+# Microsoft, CreateFileW: fileapi.h, minimum supported client Windows XP.
+CreateFileW=func
+func.CreateFileW.args=7
+func.CreateFileW.arg.0=LPCWSTR,lpFileName
+func.CreateFileW.arg.1=DWORD,dwDesiredAccess
+func.CreateFileW.arg.2=DWORD,dwShareMode
+func.CreateFileW.arg.3=LPSECURITY_ATTRIBUTES,lpSecurityAttributes
+func.CreateFileW.arg.4=DWORD,dwCreationDisposition
+func.CreateFileW.arg.5=DWORD,dwFlagsAndAttributes
+func.CreateFileW.arg.6=HANDLE,hTemplateFile
+func.CreateFileW.ret=HANDLE
+func.CreateFileW.include=fileapi.h
+func.CreateFileW.cite=https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew (Windows XP)
+
+# Microsoft, DeleteCriticalSection: synchapi.h, minimum supported client Windows XP.
+DeleteCriticalSection=func
+func.DeleteCriticalSection.args=1
+func.DeleteCriticalSection.arg.0=LPCRITICAL_SECTION,lpCriticalSection
+func.DeleteCriticalSection.ret=void
+func.DeleteCriticalSection.include=synchapi.h
+func.DeleteCriticalSection.cite=https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-deletecriticalsection (Windows XP)
+
+# Microsoft, ExitProcess: processthreadsapi.h, minimum supported client Windows XP.
+ExitProcess=func
+func.ExitProcess.args=1
+func.ExitProcess.arg.0=UINT,uExitCode
+func.ExitProcess.ret=void
+func.ExitProcess.include=processthreadsapi.h
+func.ExitProcess.cite=https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-exitprocess (Windows XP)
+func.ExitProcess.noreturn=true
+
+# Microsoft, FlushFileBuffers: fileapi.h, minimum supported client Windows XP.
+FlushFileBuffers=func
+func.FlushFileBuffers.args=1
+func.FlushFileBuffers.arg.0=HANDLE,hFile
+func.FlushFileBuffers.ret=BOOL
+func.FlushFileBuffers.include=fileapi.h
+func.FlushFileBuffers.cite=https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers (Windows XP)
+
+# Microsoft, FreeEnvironmentStringsW: processenv.h, minimum supported client Windows XP.
+FreeEnvironmentStringsW=func
+func.FreeEnvironmentStringsW.args=1
+func.FreeEnvironmentStringsW.arg.0=LPWCH,penv
+func.FreeEnvironmentStringsW.ret=BOOL
+func.FreeEnvironmentStringsW.include=processenv.h
+func.FreeEnvironmentStringsW.cite=https://learn.microsoft.com/en-us/windows/win32/api/processenv/nf-processenv-freeenvironmentstringsw (Windows XP)
+
+# Microsoft, FreeLibrary: libloaderapi.h, minimum supported client Windows XP.
+FreeLibrary=func
+func.FreeLibrary.args=1
+func.FreeLibrary.arg.0=HMODULE,hLibModule
+func.FreeLibrary.ret=BOOL
+func.FreeLibrary.include=libloaderapi.h
+func.FreeLibrary.cite=https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-freelibrary (Windows XP)
+
+# Microsoft, GetACP: winnls.h, minimum supported client Windows 2000 Professional.
+GetACP=func
+func.GetACP.args=0
+func.GetACP.ret=UINT
+func.GetACP.include=winnls.h
+func.GetACP.cite=https://learn.microsoft.com/en-us/windows/win32/api/winnls/nf-winnls-getacp (Windows 2000 Professional)
+
+# Microsoft, GetConsoleCP: ConsoleApi.h, minimum supported client Windows 2000 Professional.
+GetConsoleCP=func
+func.GetConsoleCP.args=0
+func.GetConsoleCP.ret=UINT
+func.GetConsoleCP.include=ConsoleApi.h
+func.GetConsoleCP.cite=https://learn.microsoft.com/en-us/windows/console/getconsolecp (Windows 2000 Professional)
+
+# Microsoft, GetConsoleMode: ConsoleApi.h, minimum supported client Windows 2000 Professional.
+GetConsoleMode=func
+func.GetConsoleMode.args=2
+func.GetConsoleMode.arg.0=HANDLE,hConsoleHandle
+func.GetConsoleMode.arg.1=LPDWORD,lpMode
+func.GetConsoleMode.ret=BOOL
+func.GetConsoleMode.include=ConsoleApi.h
+func.GetConsoleMode.cite=https://learn.microsoft.com/en-us/windows/console/getconsolemode (Windows 2000 Professional)
+
+# Microsoft, GetConsoleOutputCP: ConsoleApi.h, minimum supported client Windows 2000 Professional.
+GetConsoleOutputCP=func
+func.GetConsoleOutputCP.args=0
+func.GetConsoleOutputCP.ret=UINT
+func.GetConsoleOutputCP.include=ConsoleApi.h
+func.GetConsoleOutputCP.cite=https://learn.microsoft.com/en-us/windows/console/getconsoleoutputcp (Windows 2000 Professional)
+
+# Microsoft, GetCPInfo: winnls.h, minimum supported client Windows 2000 Professional.
+GetCPInfo=func
+func.GetCPInfo.args=2
+func.GetCPInfo.arg.0=UINT,CodePage
+func.GetCPInfo.arg.1=LPCPINFO,lpCPInfo
+func.GetCPInfo.ret=BOOL
+func.GetCPInfo.include=winnls.h
+func.GetCPInfo.cite=https://learn.microsoft.com/en-us/windows/win32/api/winnls/nf-winnls-getcpinfo (Windows 2000 Professional)
+
+# Microsoft, GetCurrentProcess: processthreadsapi.h, minimum supported client Windows XP.
+GetCurrentProcess=func
+func.GetCurrentProcess.args=0
+func.GetCurrentProcess.ret=HANDLE
+func.GetCurrentProcess.include=processthreadsapi.h
+func.GetCurrentProcess.cite=https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentprocess (Windows XP)
+func.GetCurrentProcess.yields=current-process
+
+# Microsoft, GetCurrentProcessId: processthreadsapi.h, minimum supported client Windows XP.
+GetCurrentProcessId=func
+func.GetCurrentProcessId.args=0
+func.GetCurrentProcessId.ret=DWORD
+func.GetCurrentProcessId.include=processthreadsapi.h
+func.GetCurrentProcessId.cite=https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentprocessid (Windows XP)
+
+# Microsoft, GetCurrentThreadId: processthreadsapi.h, minimum supported client Windows XP.
+GetCurrentThreadId=func
+func.GetCurrentThreadId.args=0
+func.GetCurrentThreadId.ret=DWORD
+func.GetCurrentThreadId.include=processthreadsapi.h
+func.GetCurrentThreadId.cite=https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentthreadid (Windows XP)
+
+# Microsoft, GetEnvironmentStringsW: processenv.h, minimum supported client Windows XP.
+GetEnvironmentStringsW=func
+func.GetEnvironmentStringsW.args=0
+func.GetEnvironmentStringsW.ret=LPWCH
+func.GetEnvironmentStringsW.include=processenv.h
+func.GetEnvironmentStringsW.cite=https://learn.microsoft.com/en-us/windows/win32/api/processenv/nf-processenv-getenvironmentstringsw (Windows XP)
+
+# Microsoft, GetFileSizeEx: fileapi.h, minimum supported client Windows XP.
+GetFileSizeEx=func
+func.GetFileSizeEx.args=2
+func.GetFileSizeEx.arg.0=HANDLE,hFile
+func.GetFileSizeEx.arg.1=PLARGE_INTEGER,lpFileSize
+func.GetFileSizeEx.ret=BOOL
+func.GetFileSizeEx.include=fileapi.h
+func.GetFileSizeEx.cite=https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfilesizeex (Windows XP)
+
+# Microsoft, GetLastError: errhandlingapi.h, minimum supported client Windows XP.
+GetLastError=func
+func.GetLastError.args=0
+func.GetLastError.ret=DWORD
+func.GetLastError.include=errhandlingapi.h
+func.GetLastError.cite=https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-getlasterror (Windows XP)
+
+# Microsoft, GetModuleHandleExW: libloaderapi.h, minimum supported client Windows XP.
+GetModuleHandleExW=func
+func.GetModuleHandleExW.args=3
+func.GetModuleHandleExW.arg.0=DWORD,dwFlags
+func.GetModuleHandleExW.arg.1=LPCWSTR,lpModuleName
+func.GetModuleHandleExW.arg.2=HMODULE *,phModule
+func.GetModuleHandleExW.ret=BOOL
+func.GetModuleHandleExW.include=libloaderapi.h
+func.GetModuleHandleExW.cite=https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandleexw (Windows XP)
+
+# Microsoft, GetModuleHandleW: libloaderapi.h, minimum supported client Windows XP.
+GetModuleHandleW=func
+func.GetModuleHandleW.args=1
+func.GetModuleHandleW.arg.0=LPCWSTR,lpModuleName
+func.GetModuleHandleW.ret=HMODULE
+func.GetModuleHandleW.include=libloaderapi.h
+func.GetModuleHandleW.cite=https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getmodulehandlew (Windows XP)
+
+# Microsoft, GetOEMCP: winnls.h, minimum supported client Windows 2000 Professional.
+GetOEMCP=func
+func.GetOEMCP.args=0
+func.GetOEMCP.ret=UINT
+func.GetOEMCP.include=winnls.h
+func.GetOEMCP.cite=https://learn.microsoft.com/en-us/windows/win32/api/winnls/nf-winnls-getoemcp (Windows 2000 Professional)
+
+# Microsoft, GetProcAddress: libloaderapi.h, minimum supported client Windows XP.
+GetProcAddress=func
+func.GetProcAddress.args=2
+func.GetProcAddress.arg.0=HMODULE,hModule
+func.GetProcAddress.arg.1=LPCSTR,lpProcName
+func.GetProcAddress.ret=FARPROC
+func.GetProcAddress.include=libloaderapi.h
+func.GetProcAddress.cite=https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-getprocaddress (Windows XP)
+
+# Microsoft, GetSystemTimeAsFileTime: sysinfoapi.h, minimum supported client Windows 2000 Professional.
+GetSystemTimeAsFileTime=func
+func.GetSystemTimeAsFileTime.args=1
+func.GetSystemTimeAsFileTime.arg.0=LPFILETIME,lpSystemTimeAsFileTime
+func.GetSystemTimeAsFileTime.ret=void
+func.GetSystemTimeAsFileTime.include=sysinfoapi.h
+func.GetSystemTimeAsFileTime.cite=https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-getsystemtimeasfiletime (Windows 2000 Professional)
+
+# Microsoft, HeapAlloc: heapapi.h, minimum supported client Windows XP.
+HeapAlloc=func
+func.HeapAlloc.args=3
+func.HeapAlloc.arg.0=HANDLE,hHeap
+func.HeapAlloc.arg.1=DWORD,dwFlags
+func.HeapAlloc.arg.2=SIZE_T,dwBytes
+func.HeapAlloc.ret=LPVOID
+func.HeapAlloc.include=heapapi.h
+func.HeapAlloc.cite=https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapalloc (Windows XP)
+
+# Microsoft, HeapFree: heapapi.h, minimum supported client Windows XP.
+HeapFree=func
+func.HeapFree.args=3
+func.HeapFree.arg.0=HANDLE,hHeap
+func.HeapFree.arg.1=DWORD,dwFlags
+func.HeapFree.arg.2=LPVOID,lpMem
+func.HeapFree.ret=BOOL
+func.HeapFree.include=heapapi.h
+func.HeapFree.cite=https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heapfree (Windows XP)
+
+# Microsoft, HeapReAlloc: heapapi.h, minimum supported client Windows XP.
+HeapReAlloc=func
+func.HeapReAlloc.args=4
+func.HeapReAlloc.arg.0=HANDLE,hHeap
+func.HeapReAlloc.arg.1=DWORD,dwFlags
+func.HeapReAlloc.arg.2=LPVOID,lpMem
+func.HeapReAlloc.arg.3=SIZE_T,dwBytes
+func.HeapReAlloc.ret=LPVOID
+func.HeapReAlloc.include=heapapi.h
+func.HeapReAlloc.cite=https://learn.microsoft.com/en-us/windows/win32/api/heapapi/nf-heapapi-heaprealloc (Windows XP)
+
+# Microsoft, InitializeCriticalSectionAndSpinCount: synchapi.h, minimum supported client Windows XP.
+InitializeCriticalSectionAndSpinCount=func
+func.InitializeCriticalSectionAndSpinCount.args=2
+func.InitializeCriticalSectionAndSpinCount.arg.0=LPCRITICAL_SECTION,lpCriticalSection
+func.InitializeCriticalSectionAndSpinCount.arg.1=DWORD,dwSpinCount
+func.InitializeCriticalSectionAndSpinCount.ret=BOOL
+func.InitializeCriticalSectionAndSpinCount.include=synchapi.h
+func.InitializeCriticalSectionAndSpinCount.cite=https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-initializecriticalsectionandspincount (Windows XP)
+
+# Microsoft, IsDebuggerPresent: debugapi.h, minimum supported client Windows NT Workstation 4.0.
+IsDebuggerPresent=func
+func.IsDebuggerPresent.args=0
+func.IsDebuggerPresent.ret=BOOL
+func.IsDebuggerPresent.include=debugapi.h
+func.IsDebuggerPresent.cite=https://learn.microsoft.com/en-us/windows/win32/api/debugapi/nf-debugapi-isdebuggerpresent (Windows NT Workstation 4.0)
+
+# Microsoft, IsProcessorFeaturePresent: processthreadsapi.h, minimum supported client Windows 2000 Professional.
+IsProcessorFeaturePresent=func
+func.IsProcessorFeaturePresent.args=1
+func.IsProcessorFeaturePresent.arg.0=DWORD,ProcessorFeature
+func.IsProcessorFeaturePresent.ret=BOOL
+func.IsProcessorFeaturePresent.include=processthreadsapi.h
+func.IsProcessorFeaturePresent.cite=https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-isprocessorfeaturepresent (Windows 2000 Professional)
+
+# Microsoft, IsValidCodePage: winnls.h, minimum supported client Windows 2000 Professional.
+IsValidCodePage=func
+func.IsValidCodePage.args=1
+func.IsValidCodePage.arg.0=UINT,CodePage
+func.IsValidCodePage.ret=BOOL
+func.IsValidCodePage.include=winnls.h
+func.IsValidCodePage.cite=https://learn.microsoft.com/en-us/windows/win32/api/winnls/nf-winnls-isvalidcodepage (Windows 2000 Professional)
+
+# Microsoft, LCMapStringW: winnls.h, minimum supported client Windows 2000 Professional.
+LCMapStringW=func
+func.LCMapStringW.args=6
+func.LCMapStringW.arg.0=LCID,Locale
+func.LCMapStringW.arg.1=DWORD,dwMapFlags
+func.LCMapStringW.arg.2=LPCWSTR,lpSrcStr
+func.LCMapStringW.arg.3=int,cchSrc
+func.LCMapStringW.arg.4=LPWSTR,lpDestStr
+func.LCMapStringW.arg.5=int,cchDest
+func.LCMapStringW.ret=int
+func.LCMapStringW.include=winnls.h
+func.LCMapStringW.cite=https://learn.microsoft.com/en-us/windows/win32/api/winnls/nf-winnls-lcmapstringw (Windows 2000 Professional)
+
+# Microsoft, LoadLibraryExW: libloaderapi.h, minimum supported client Windows XP.
+LoadLibraryExW=func
+func.LoadLibraryExW.args=3
+func.LoadLibraryExW.arg.0=LPCWSTR,lpLibFileName
+func.LoadLibraryExW.arg.1=HANDLE,hFile
+func.LoadLibraryExW.arg.2=DWORD,dwFlags
+func.LoadLibraryExW.ret=HMODULE
+func.LoadLibraryExW.include=libloaderapi.h
+func.LoadLibraryExW.cite=https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-loadlibraryexw (Windows XP)
+
+# Microsoft, MultiByteToWideChar: stringapiset.h, minimum supported client Windows 2000 Professional.
+MultiByteToWideChar=func
+func.MultiByteToWideChar.args=6
+func.MultiByteToWideChar.arg.0=UINT,CodePage
+func.MultiByteToWideChar.arg.1=DWORD,dwFlags
+func.MultiByteToWideChar.arg.2=LPCCH,lpMultiByteStr
+func.MultiByteToWideChar.arg.3=int,cbMultiByte
+func.MultiByteToWideChar.arg.4=LPWSTR,lpWideCharStr
+func.MultiByteToWideChar.arg.5=int,cchWideChar
+func.MultiByteToWideChar.ret=int
+func.MultiByteToWideChar.include=stringapiset.h
+func.MultiByteToWideChar.cite=https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar (Windows 2000 Professional)
+
+# Microsoft, QueryPerformanceCounter: profileapi.h, minimum supported client Windows 2000 Professional.
+QueryPerformanceCounter=func
+func.QueryPerformanceCounter.args=1
+func.QueryPerformanceCounter.arg.0=LARGE_INTEGER *,lpPerformanceCount
+func.QueryPerformanceCounter.ret=BOOL
+func.QueryPerformanceCounter.include=profileapi.h
+func.QueryPerformanceCounter.cite=https://learn.microsoft.com/en-us/windows/win32/api/profileapi/nf-profileapi-queryperformancecounter (Windows 2000 Professional)
+
+# Microsoft, RaiseException: errhandlingapi.h, minimum supported client Windows XP.
+RaiseException=func
+func.RaiseException.args=4
+func.RaiseException.arg.0=DWORD,dwExceptionCode
+func.RaiseException.arg.1=DWORD,dwExceptionFlags
+func.RaiseException.arg.2=DWORD,nNumberOfArguments
+func.RaiseException.arg.3=const ULONG_PTR *,lpArguments
+func.RaiseException.ret=void
+func.RaiseException.include=errhandlingapi.h
+func.RaiseException.cite=https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-raiseexception (Windows XP)
+
+# Microsoft, RtlCaptureContext: winnt.h, minimum supported client Windows XP.
+RtlCaptureContext=func
+func.RtlCaptureContext.args=1
+func.RtlCaptureContext.arg.0=PCONTEXT,ContextRecord
+func.RtlCaptureContext.ret=void
+func.RtlCaptureContext.include=winnt.h
+func.RtlCaptureContext.cite=https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-rtlcapturecontext (Windows XP)
+
+# Microsoft, RtlLookupFunctionEntry: winnt.h, minimum supported client None.
+RtlLookupFunctionEntry=func
+func.RtlLookupFunctionEntry.args=3
+func.RtlLookupFunctionEntry.arg.0=DWORD64,ControlPc
+func.RtlLookupFunctionEntry.arg.1=PDWORD64,ImageBase
+func.RtlLookupFunctionEntry.arg.2=PUNWIND_HISTORY_TABLE,HistoryTable
+func.RtlLookupFunctionEntry.ret=PRUNTIME_FUNCTION
+func.RtlLookupFunctionEntry.include=winnt.h
+func.RtlLookupFunctionEntry.cite=https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-rtllookupfunctionentry (None)
+
+# Microsoft, RtlVirtualUnwind: winnt.h, minimum supported client None.
+RtlVirtualUnwind=func
+func.RtlVirtualUnwind.args=8
+func.RtlVirtualUnwind.arg.0=DWORD,HandlerType
+func.RtlVirtualUnwind.arg.1=DWORD64,ImageBase
+func.RtlVirtualUnwind.arg.2=DWORD64,ControlPc
+func.RtlVirtualUnwind.arg.3=PRUNTIME_FUNCTION,FunctionEntry
+func.RtlVirtualUnwind.arg.4=PCONTEXT,ContextRecord
+func.RtlVirtualUnwind.arg.5=PVOID *,HandlerData
+func.RtlVirtualUnwind.arg.6=PDWORD64,EstablisherFrame
+func.RtlVirtualUnwind.arg.7=PKNONVOLATILE_CONTEXT_POINTERS,ContextPointers
+func.RtlVirtualUnwind.ret=PEXCEPTION_ROUTINE
+func.RtlVirtualUnwind.include=winnt.h
+func.RtlVirtualUnwind.cite=https://learn.microsoft.com/en-us/windows/win32/api/winnt/nf-winnt-rtlvirtualunwind (None)
+
+# Microsoft, SetEnvironmentVariableA: processenv.h, minimum supported client Windows XP.
+SetEnvironmentVariableA=func
+func.SetEnvironmentVariableA.args=2
+func.SetEnvironmentVariableA.arg.0=LPCSTR,lpName
+func.SetEnvironmentVariableA.arg.1=LPCSTR,lpValue
+func.SetEnvironmentVariableA.ret=BOOL
+func.SetEnvironmentVariableA.include=processenv.h
+func.SetEnvironmentVariableA.cite=https://learn.microsoft.com/en-us/windows/win32/api/processenv/nf-processenv-setenvironmentvariablea (Windows XP)
+
+# Microsoft, SetEnvironmentVariableW: processenv.h, minimum supported client Windows XP.
+SetEnvironmentVariableW=func
+func.SetEnvironmentVariableW.args=2
+func.SetEnvironmentVariableW.arg.0=LPCWSTR,lpName
+func.SetEnvironmentVariableW.arg.1=LPCWSTR,lpValue
+func.SetEnvironmentVariableW.ret=BOOL
+func.SetEnvironmentVariableW.include=processenv.h
+func.SetEnvironmentVariableW.cite=https://learn.microsoft.com/en-us/windows/win32/api/processenv/nf-processenv-setenvironmentvariablew (Windows XP)
+
+# Microsoft, SetFilePointerEx: fileapi.h, minimum supported client Windows XP.
+SetFilePointerEx=func
+func.SetFilePointerEx.args=4
+func.SetFilePointerEx.arg.0=HANDLE,hFile
+func.SetFilePointerEx.arg.1=LARGE_INTEGER,liDistanceToMove
+func.SetFilePointerEx.arg.2=PLARGE_INTEGER,lpNewFilePointer
+func.SetFilePointerEx.arg.3=DWORD,dwMoveMethod
+func.SetFilePointerEx.ret=BOOL
+func.SetFilePointerEx.include=fileapi.h
+func.SetFilePointerEx.cite=https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfilepointerex (Windows XP)
+
+# Microsoft, SetLastError: errhandlingapi.h, minimum supported client Windows XP.
+SetLastError=func
+func.SetLastError.args=1
+func.SetLastError.arg.0=DWORD,dwErrCode
+func.SetLastError.ret=void
+func.SetLastError.include=errhandlingapi.h
+func.SetLastError.cite=https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-setlasterror (Windows XP)
+
+# Microsoft, SetUnhandledExceptionFilter: errhandlingapi.h, minimum supported client Windows XP.
+SetUnhandledExceptionFilter=func
+func.SetUnhandledExceptionFilter.args=1
+func.SetUnhandledExceptionFilter.arg.0=LPTOP_LEVEL_EXCEPTION_FILTER,lpTopLevelExceptionFilter
+func.SetUnhandledExceptionFilter.ret=LPTOP_LEVEL_EXCEPTION_FILTER
+func.SetUnhandledExceptionFilter.include=errhandlingapi.h
+func.SetUnhandledExceptionFilter.cite=https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-setunhandledexceptionfilter (Windows XP)
+
+# Microsoft, TerminateProcess: processthreadsapi.h, minimum supported client Windows XP.
+TerminateProcess=func
+func.TerminateProcess.args=2
+func.TerminateProcess.arg.0=HANDLE,hProcess
+func.TerminateProcess.arg.1=UINT,uExitCode
+func.TerminateProcess.ret=BOOL
+func.TerminateProcess.include=processthreadsapi.h
+func.TerminateProcess.cite=https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess (Windows XP)
+func.TerminateProcess.halts_on=0,current-process
+
+# Microsoft, TlsAlloc: processthreadsapi.h, minimum supported client Windows XP.
+TlsAlloc=func
+func.TlsAlloc.args=0
+func.TlsAlloc.ret=DWORD
+func.TlsAlloc.include=processthreadsapi.h
+func.TlsAlloc.cite=https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-tlsalloc (Windows XP)
+
+# Microsoft, TlsFree: processthreadsapi.h, minimum supported client Windows XP.
+TlsFree=func
+func.TlsFree.args=1
+func.TlsFree.arg.0=DWORD,dwTlsIndex
+func.TlsFree.ret=BOOL
+func.TlsFree.include=processthreadsapi.h
+func.TlsFree.cite=https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-tlsfree (Windows XP)
+
+# Microsoft, TlsGetValue: processthreadsapi.h, minimum supported client Windows XP.
+TlsGetValue=func
+func.TlsGetValue.args=1
+func.TlsGetValue.arg.0=DWORD,dwTlsIndex
+func.TlsGetValue.ret=LPVOID
+func.TlsGetValue.include=processthreadsapi.h
+func.TlsGetValue.cite=https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-tlsgetvalue (Windows XP)
+
+# Microsoft, TlsSetValue: processthreadsapi.h, minimum supported client Windows XP.
+TlsSetValue=func
+func.TlsSetValue.args=2
+func.TlsSetValue.arg.0=DWORD,dwTlsIndex
+func.TlsSetValue.arg.1=LPVOID,lpTlsValue
+func.TlsSetValue.ret=BOOL
+func.TlsSetValue.include=processthreadsapi.h
+func.TlsSetValue.cite=https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-tlssetvalue (Windows XP)
+
+# Microsoft, UnhandledExceptionFilter: errhandlingapi.h, minimum supported client Windows XP.
+UnhandledExceptionFilter=func
+func.UnhandledExceptionFilter.args=1
+func.UnhandledExceptionFilter.arg.0=struct _EXCEPTION_POINTERS *,ExceptionInfo
+func.UnhandledExceptionFilter.ret=LONG
+func.UnhandledExceptionFilter.include=errhandlingapi.h
+func.UnhandledExceptionFilter.cite=https://learn.microsoft.com/en-us/windows/win32/api/errhandlingapi/nf-errhandlingapi-unhandledexceptionfilter (Windows XP)
+
+# Microsoft, WideCharToMultiByte: stringapiset.h, minimum supported client Windows 2000 Professional.
+WideCharToMultiByte=func
+func.WideCharToMultiByte.args=8
+func.WideCharToMultiByte.arg.0=UINT,CodePage
+func.WideCharToMultiByte.arg.1=DWORD,dwFlags
+func.WideCharToMultiByte.arg.2=LPCWCH,lpWideCharStr
+func.WideCharToMultiByte.arg.3=int,cchWideChar
+func.WideCharToMultiByte.arg.4=LPSTR,lpMultiByteStr
+func.WideCharToMultiByte.arg.5=int,cbMultiByte
+func.WideCharToMultiByte.arg.6=LPCCH,lpDefaultChar
+func.WideCharToMultiByte.arg.7=LPBOOL,lpUsedDefaultChar
+func.WideCharToMultiByte.ret=int
+func.WideCharToMultiByte.include=stringapiset.h
+func.WideCharToMultiByte.cite=https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte (Windows 2000 Professional)
+
+# Microsoft, WriteConsoleW: ConsoleApi.h, minimum supported client Windows 2000 Professional.
+WriteConsoleW=func
+func.WriteConsoleW.args=5
+func.WriteConsoleW.arg.0=HANDLE,hConsoleOutput
+func.WriteConsoleW.arg.1=const void *,lpBuffer
+func.WriteConsoleW.arg.2=DWORD,nNumberOfCharsToWrite
+func.WriteConsoleW.arg.3=LPDWORD,lpNumberOfCharsWritten
+func.WriteConsoleW.arg.4=LPVOID,lpReserved
+func.WriteConsoleW.ret=BOOL
+func.WriteConsoleW.include=ConsoleApi.h
+func.WriteConsoleW.cite=https://learn.microsoft.com/en-us/windows/console/writeconsole (Windows 2000 Professional)
+
+# Microsoft, WriteFile: fileapi.h, minimum supported client Windows XP.
+WriteFile=func
+func.WriteFile.args=5
+func.WriteFile.arg.0=HANDLE,hFile
+func.WriteFile.arg.1=LPCVOID,lpBuffer
+func.WriteFile.arg.2=DWORD,nNumberOfBytesToWrite
+func.WriteFile.arg.3=LPDWORD,lpNumberOfBytesWritten
+func.WriteFile.arg.4=LPOVERLAPPED,lpOverlapped
+func.WriteFile.ret=BOOL
+func.WriteFile.include=fileapi.h
+func.WriteFile.cite=https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-writefile (Windows XP)

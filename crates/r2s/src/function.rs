@@ -37,6 +37,13 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         format!("edges: {}", info.edges()),
     ]);
     out.extend(signature(&info, name.as_deref()));
+    // An unproven result names where a caller reads it and why it is not proven (D201).
+    out.extend(info.unproven.map(|unproven| {
+        let carrier = (unproven.carrier)
+            .and_then(|storage| session.program.spell_storage(entry, storage))
+            .unwrap_or_else(|| "?".to_owned());
+        format!("result: unproven ({carrier}, {})", unproven.cause_name())
+    }));
     out.extend([
         format!("minaddr: {:#010x}", info.min_addr()),
         format!("maxaddr: {:#010x}", info.max_addr()),
@@ -95,7 +102,10 @@ fn signature(info: &r2engine::program::info::FunctionInfo, name: Option<&str>) -
     // the unproven value it is; with no carrier, the mark alone keeps the arity showing.
     let returns = info.returns.as_ref()?;
     let assumed = returns.grade() == r2engine::discovery::Grade::Assumed;
+    // An unproven result is spelled as `pdd`'s header spells it: the carrier typedef (D201).
+    let carrier = info.unproven.and_then(|unproven| unproven.bits);
     let returns = match (&returns.value, assumed) {
+        (Some(_), true) if let Some(bits) = carrier => format!("r2sleigh_result_u{bits}"),
         (Some(returns), false) => returns.to_string(),
         (Some(carrier), true) => format!("/* unproven */ {carrier}"),
         (None, true) => "/* unproven */".to_owned(),
@@ -104,7 +114,7 @@ fn signature(info: &r2engine::program::info::FunctionInfo, name: Option<&str>) -
     let mut parameters = info
         .arguments
         .iter()
-        .map(|argument| argument.declared_as(&argument_name(argument)))
+        .map(|argument| argument.declared_as(&argument.name))
         .collect::<Vec<_>>();
     // A tail with no named parameter has no C spelling: the list stays unspecified, as `pdd`'s.
     if info.variadic && !parameters.is_empty() {
@@ -115,14 +125,6 @@ fn signature(info: &r2engine::program::info::FunctionInfo, name: Option<&str>) -
         name?,
         parameters.join(", ")
     ))
-}
-
-/// What the source calls a parameter, or `argN` numbered from one as radare2 numbers them.
-fn argument_name(argument: &Argument) -> String {
-    argument
-        .name
-        .clone()
-        .unwrap_or_else(|| format!("arg{}", argument.slot + 1))
 }
 
 /// `afv`: the function's arguments, then its locals.
@@ -147,7 +149,7 @@ fn spell_argument(session: &Session, entry: u64, argument: &Argument) -> String 
         .and_then(|storage| session.program.spell_storage(entry, storage))
         .map(|register| format!(" @ {register}"))
         .unwrap_or_default();
-    format!("arg {} {}{at}", argument.ty.value, argument_name(argument))
+    format!("arg {} {}{at}", argument.ty.value, argument.name)
 }
 
 /// `var <type> <name> @ <base><offset>`, named as the decompiler names it.

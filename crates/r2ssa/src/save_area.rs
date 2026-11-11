@@ -1,6 +1,7 @@
 //! A variadic prologue's register save area, proven from the machine (doc/adr-resolved-bodies.md,
 //! "Variadic tail").
 
+use r2source::convention::SlotClass;
 use std::collections::{BTreeMap, BTreeSet};
 
 use r2source::{
@@ -112,6 +113,158 @@ pub(crate) fn register_save_area(
     None
 }
 
+/// Microsoft x64's variadic prologue (doc/adr-call-boundary.md, rule 6): `&home[named]` is a declared
+/// callee's `va_list` argument, and each later position is read only by its home. O(insts + calls).
+pub(crate) fn home_va_list(
+    (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
+    facts: &crate::semantic::PreparedFunctionFacts,
+    slots: &SourceConventionSlots,
+    machine: &crate::SourceMachineContext,
+    observations: &crate::deadphi::ProvenProgramObservations,
+) -> Option<SaveArea> {
+    let model = machine.convention().filter(|_| slots.shared_positions())?;
+    let arguments = slots.argument_slots();
+    let at_entry = |value: ValueId| {
+        prep.entry_stack_address_root_of(value)
+            .filter(|root| root.base == StackAddressBase::StackPointer)
+            .map(|root| root.offset)
+    };
+    let home_of = |position: usize| Some(model.home(u8::try_from(position).ok()?)?.start);
+    let mut named = None::<usize>;
+    for boundary in facts.boundaries.calls.values() {
+        let callee = (facts.call_sites.by_id.get(&boundary.call_site))
+            .and_then(|site| site.raw_identity)
+            .and_then(|identity| machine.call_site_interface(identity))
+            .and_then(r2source::SourceCallSiteInterface::exact_callee_interface);
+        let Some(index) = callee
+            .and_then(r2source::SourceFunctionInterface::va_list_parameter)
+            .and_then(|index| usize::try_from(index).ok())
+        else {
+            continue;
+        };
+        let address = (boundary.arguments.get(index)).and_then(|argument| match argument.value {
+            crate::semantic::SourceCallArgumentValue::Value(value) => at_entry(value),
+            crate::semantic::SourceCallArgumentValue::PreservedEntry => None,
+        });
+        let handed =
+            address.and_then(|offset| (0..arguments.len()).find(|p| home_of(*p) == Some(offset)));
+        r2il::refusal_evidence!(
+            "home-va-list",
+            "{:?} hands its va_list argument {index} the entry offset {address:?} of {} arguments",
+            boundary.call_site,
+            boundary.arguments.len()
+        );
+        match (named, handed) {
+            (_, None) => {}
+            (None, Some(position)) => named = Some(position),
+            (Some(known), Some(position)) if known == position => {}
+            (Some(_), Some(_)) => return None,
+        }
+    }
+    // A tail from position 0 leaves no fixed parameter to name it, which C cannot declare.
+    let named = named.filter(|named| *named > 0)?;
+    homed_tail((graph, prep), model, observations, named)
+}
+
+/// Microsoft x64's variadic body walking its own tail from the lowest home whose address it keeps;
+/// the area stands only beside a proven `tail_count`. O(insts + uses).
+pub(crate) fn home_cursor(
+    (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
+    machine: &crate::SourceMachineContext,
+    observations: &crate::deadphi::ProvenProgramObservations,
+) -> Option<SaveArea> {
+    let model = machine
+        .convention()
+        .filter(|model| model.shares_positions())?;
+    let positions = model.argument_registers(SlotClass::Integer).count();
+    let homes = (0..positions)
+        .map(|position| Some(model.home(u8::try_from(position).ok()?)?.start))
+        .collect::<Option<Vec<_>>>()?;
+    // The lowest home whose address is kept: used other than as the address of an access.
+    let kept = |value: ValueId| {
+        graph.use_sites(value).iter().any(|site| {
+            let Some(inst) = graph.inst(site.inst) else {
+                return true;
+            };
+            let unobserved = inst.output.is_some_and(|out| !observations.contains(out));
+            match &inst.payload {
+                InstPayload::Op(SSAOp::Load { addr, .. }) => *addr != value,
+                InstPayload::Op(SSAOp::Store { addr, val, .. }) => *addr != value || *val == value,
+                _ => !unobserved,
+            }
+        })
+    };
+    let named = (graph.values.iter())
+        .filter(|value| graph.def_inst(value.id).is_some())
+        .filter_map(|value| {
+            let root = prep.entry_stack_address_root_of(value.id)?;
+            let at = (root.base == StackAddressBase::StackPointer).then_some(root.offset)?;
+            let position = homes.iter().position(|home| *home == at)?;
+            kept(value.id).then_some(position)
+        })
+        .min()?;
+    // A kept `&home[0]` is no tail a fixed parameter names.
+    (named > 0).then_some(())?;
+    homed_tail((graph, prep), model, observations, named)
+}
+
+/// The save area of a Microsoft x64 tail from `named`: each later position's entry value read only
+/// by its home.
+fn homed_tail(
+    (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
+    model: &r2source::ConventionModel,
+    observations: &crate::deadphi::ProvenProgramObservations,
+    named: usize,
+) -> Option<SaveArea> {
+    let arguments = model
+        .argument_registers(SlotClass::Integer)
+        .collect::<Vec<_>>();
+    let arguments = arguments.as_slice();
+    let at_entry = |value: ValueId| {
+        prep.entry_stack_address_root_of(value)
+            .filter(|root| root.base == StackAddressBase::StackPointer)
+            .map(|root| root.offset)
+    };
+    let home_of = |position: usize| Some(model.home(u8::try_from(position).ok()?)?.start);
+    // Each tail position's entry value is read only by its home: a store there, or the copy a
+    // promoted home left that nothing reads.
+    let (saves, _) = entry_saves((graph, prep), arguments, &at_entry);
+    let mut saved = crate::dense::IdSet::new(graph.values.len());
+    let mut stores = crate::dense::IdSet::new(graph.insts.len());
+    for (position, homed) in saves.iter().enumerate().skip(named) {
+        let home = home_of(position)?;
+        for (_, _, store) in homed.iter().filter(|(at, ..)| *at == home) {
+            stores.insert(*store);
+        }
+    }
+    for value in &graph.values {
+        if graph.def_inst(value.id).is_none()
+            && entry_slot(graph, value.id, arguments).is_some_and(|slot| slot >= named)
+        {
+            saved.insert(value.id);
+        }
+    }
+    if let Some(value) = saved
+        .iter()
+        .find(|value| !read_only_by(graph, *value, &stores, observations))
+    {
+        r2il::refusal_evidence!(
+            "home-va-list",
+            "the homed {value:?} is read beyond its home"
+        );
+        return None;
+    }
+    let base = home_of(0)?;
+    let bound = home_of(named)?;
+    Some(SaveArea {
+        named,
+        saved,
+        base,
+        bound,
+        stored_at: bound,
+    })
+}
+
 /// Per argument slot, where its entry value is stored: the position, the value and the store.
 type Saves = Vec<Vec<(i64, ValueId, InstId)>>;
 
@@ -185,7 +338,7 @@ fn entry_slot(graph: &SsaGraph, value: ValueId, arguments: &[CanonicalStorageId]
 
 /// Whether only `stores` read `value`, through merges and copies; a use nothing observes (`xor ecx,
 /// ecx`) or a call's implicit use reads nothing (ADR "Variadic tail"). Each value is taken once.
-fn read_only_by(
+pub(crate) fn read_only_by(
     graph: &SsaGraph,
     value: ValueId,
     stores: &crate::dense::IdSet<InstId>,
@@ -238,14 +391,18 @@ mod tests {
     /// Three argument slots `x0`..`x2`, a `va_list` holding the byte past the area and, 16 bytes
     /// on, the first unnamed slot's distance from it.
     fn slots() -> SourceConventionSlots {
-        SourceConventionSlots::new("test", [register(0), register(8), register(16)], None)
-            .expect("slots")
-            .with_register_save_area(Some(SourceRegisterSaveArea {
-                anchor: SourceSaveAreaAnchor::End,
-                offset_field: 16,
-                offset_width: 4,
-                stack_field: -8,
-            }))
+        SourceConventionSlots::new(
+            r2source::ConventionId::SysVAmd64,
+            [register(0), register(8), register(16)],
+            None,
+        )
+        .expect("slots")
+        .with_register_save_area(Some(SourceRegisterSaveArea {
+            anchor: SourceSaveAreaAnchor::End,
+            offset_field: 16,
+            offset_width: 4,
+            stack_field: -8,
+        }))
     }
 
     /// The `va_list` offset field of `named == 1` beside a bound stored at `sp + 0x28`.
@@ -337,7 +494,7 @@ mod tests {
         }
         let interface = SourceFunctionInterface::new_exact(
             b"save-area".to_vec(),
-            "test",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, register(0))],
             SourceFunctionReturn::Void,
             [],

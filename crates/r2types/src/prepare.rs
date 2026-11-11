@@ -1,8 +1,5 @@
-use std::collections::{BTreeMap, HashMap};
-
-use r2ssa::SSAVar;
-
 use crate::signature_infer::RecoveredSignatureParam;
+use rustc_hash::FxHashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TypeHintRank {
@@ -26,7 +23,7 @@ impl TypeHint {
     }
 }
 
-pub fn merge_type_hint(hints: &mut HashMap<String, TypeHint>, key: String, incoming: TypeHint) {
+pub fn merge_type_hint(hints: &mut FxHashMap<String, TypeHint>, key: String, incoming: TypeHint) {
     match hints.get(&key) {
         Some(current) if !incoming_hint_should_replace(current, &incoming) => {}
         _ => {
@@ -35,43 +32,31 @@ pub fn merge_type_hint(hints: &mut HashMap<String, TypeHint>, key: String, incom
     }
 }
 
-/// The variable each formal enters in.
-///
-/// This is the inverse of the identity relation, not a second copy of it: the
-/// forward map answers which formal a value is, and once it holds every value
-/// that is a formal it can no longer name the one variable a signature
-/// parameter is declared from. The boundary facts state that directly.
-fn prepared_formal_parameters(prepared: &r2ssa::SsaArtifact) -> BTreeMap<usize, SSAVar> {
+/// Each formal parameter of the boundary facts, in slot order: register and stack alike.
+pub(crate) fn recover_signature_params_from_prepared_ssa(
+    prepared: &r2ssa::SsaArtifact,
+    ptr_bits: u32,
+) -> Vec<RecoveredSignatureParam> {
     prepared
         .facts()
         .boundaries
         .parameters
         .iter()
         .filter(|(index, fact)| fact.index == **index)
-        .filter_map(|(index, fact)| {
-            Some((*index as usize, prepared.value_var(fact.value)?.clone()))
-        })
-        .collect()
-}
-
-pub(crate) fn recover_signature_params_from_prepared_ssa(
-    prepared: &r2ssa::SsaArtifact,
-    ptr_bits: u32,
-) -> Vec<RecoveredSignatureParam> {
-    prepared_formal_parameters(prepared)
-        .into_iter()
-        .map(|(index, var)| {
+        .map(|(index, fact)| {
+            let index = *index as usize;
             let initial_ty = if source_parameter_is_logical_pointer(prepared, index, ptr_bits)
                 || source_parameter_has_certified_memory_use(prepared, index)
             {
                 crate::CTypeLike::Pointer(Box::new(crate::CTypeLike::Void))
             } else {
-                size_to_neutral_int_type_like(var.size)
+                size_to_neutral_int_type_like(fact.bytes())
             };
             RecoveredSignatureParam {
-                name: format!("arg{index}"),
+                name: r2source::positional_parameter_name(index),
                 arg_index: index,
-                ssa_var: var,
+                value: fact.value(),
+                size_bytes: fact.bytes(),
                 initial_ty: if matches!(initial_ty, crate::CTypeLike::Unknown) && ptr_bits > 0 {
                     crate::CTypeLike::Int {
                         bits: ptr_bits,
@@ -186,7 +171,10 @@ mod tests {
                     r2ssa::SourceType::new(0, r2ssa::SourceTypeKind::UnsignedInteger, 8, 8),
                     r2ssa::SourceType::new(
                         1,
-                        r2ssa::SourceTypeKind::Pointer { target_type_id: 0 },
+                        r2ssa::SourceTypeKind::Pointer {
+                            target_type_id: 0,
+                            const_target: false,
+                        },
                         64,
                         64,
                     ),
@@ -196,7 +184,7 @@ mod tests {
             .expect("pointer type graph");
             r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
                 b"prepare-source-pointer".to_vec(),
-                "aarch64",
+                r2source::ConventionId::Aapcs64,
                 [r2ssa::SourceAbiParameterSpec::new(0, storage(0))],
                 r2ssa::SourceFunctionReturn::Void,
                 [],
@@ -210,7 +198,7 @@ mod tests {
         } else {
             r2ssa::SourceFunctionInterface::new_exact(
                 b"prepare-source-scalar".to_vec(),
-                "aarch64",
+                r2source::ConventionId::Aapcs64,
                 [r2ssa::SourceAbiParameterSpec::new(0, storage(0))],
                 r2ssa::SourceFunctionReturn::Void,
                 [],

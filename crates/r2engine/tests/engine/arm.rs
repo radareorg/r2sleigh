@@ -289,17 +289,18 @@ fn a_thumb_pointer_handed_to_a_declared_handler_is_a_thumb_function() {
     // The pointer's low bit says Thumb, so the function is at the even
     // address and decodes as Thumb; the ARM decoder rejects its bytes.
     let mut mixed = arm_only(&HANDS_THUMB, Endian::Little);
-    // `atexit` is declared by each C library: this program is glibc's.
+    // `atexit` is glibc's import, through the stub the format declares at 0x1010: a row applies
+    // to an import only (doc/adr-call-boundary.md, S8).
     mixed.container.platform = [PlatformEvidence::Interpreter(Libc::Glibc)].into();
-    mixed.container.symbols.push(Symbol {
-        name: "atexit".into(),
-        vaddr: ARM + 0x10,
-        size: 4,
-        kind: SymbolKind::Function,
-        defined: true,
-        thumb: false,
-        ..Symbol::default()
-    });
+    mixed.container.libraries = vec!["libc.so.6".to_owned()];
+    mixed
+        .container
+        .import_stubs
+        .push(r2engine::program::ImportStub {
+            vaddr: ARM + 0x10,
+            size: 4,
+            symbol: "atexit".to_owned(),
+        });
     let found = OpenProgram::of(mixed)
         .functions()
         .expect("discovery runs")
@@ -314,6 +315,29 @@ fn a_thumb_pointer_handed_to_a_declared_handler_is_a_thumb_function() {
             (ARM + 0x14, Basis::Handed, true),
         ]
     );
+}
+
+/// The same call to a body the program defines and names `atexit`: no row applies to a body by its
+/// name (AGENTS rule 6), so nothing is handed and the Thumb word is no function.
+#[test]
+fn a_body_named_as_a_library_function_hands_nothing() {
+    let mut mixed = arm_only(&HANDS_THUMB, Endian::Little);
+    mixed.container.platform = [PlatformEvidence::Interpreter(Libc::Glibc)].into();
+    mixed.container.libraries = vec!["libc.so.6".to_owned()];
+    mixed.container.symbols.push(Symbol {
+        name: "atexit".into(),
+        vaddr: ARM + 0x10,
+        size: 4,
+        kind: SymbolKind::Function,
+        defined: true,
+        thumb: false,
+        ..Symbol::default()
+    });
+    let found = OpenProgram::of(mixed).functions().expect("discovery runs");
+    let handed = found
+        .iter()
+        .filter(|one| one.confidence.basis == Basis::Handed);
+    assert_eq!(handed.count(), 0, "{found:?}");
 }
 
 /// Thumb: `cmp r0, #0; it eq; moveq r0, #1; bx lr`.

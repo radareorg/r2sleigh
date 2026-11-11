@@ -196,6 +196,7 @@ pub(crate) fn collect_aggregate_access_projections(
         };
         let SourceTypeKind::Pointer {
             target_type_id: struct_type_id,
+            ..
         } = pointer_type.kind()
         else {
             continue;
@@ -340,7 +341,15 @@ mod tests {
             [
                 SourceType::new(0, SourceTypeKind::Struct { aggregate_id: 0 }, 56 * 8, 32),
                 SourceType::new(1, SourceTypeKind::SignedInteger, 32, 32),
-                SourceType::new(2, SourceTypeKind::Pointer { target_type_id: 0 }, 64, 64),
+                SourceType::new(
+                    2,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 0,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
             ],
             [SourceAggregateLayout::new(
                 0,
@@ -370,7 +379,7 @@ mod tests {
         if !exact_graph {
             return SourceFunctionInterface::new(
                 REVISION.to_vec(),
-                "aapcs64",
+                r2source::ConventionId::Aapcs64,
                 parameters,
                 SourceFunctionReturn::Void,
                 [],
@@ -380,7 +389,7 @@ mod tests {
         let scalar_carrier = SourceCarrierProjection::new(SourceCarrierKind::LowBits, 0, 32);
         SourceFunctionInterface::new_with_logical_types(
             REVISION.to_vec(),
-            "aapcs64",
+            r2source::ConventionId::Aapcs64,
             parameters,
             SourceFunctionReturn::Void,
             [],

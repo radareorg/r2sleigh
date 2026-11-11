@@ -338,9 +338,31 @@ else arm took, in the same order, and the machine's edges are the same (the then
 `render::structured` (after loop rotation, so it reads what the counterfactual measured and no earlier stage sees a
 changed tree). Evidence: `Evidence::never_returns`, the predicate the tails and the certificate already read, which is
 the callee's declaration (r2abi's prototype, or r2engine's walk finding no fall-through after the call), never its name.
+It takes the callee alone (`Option<&str>`, read off a call statement by `shape::callee_of`), so no decision can read a
+call's arguments or site; `tests/architecture.rs` fails a function deciding it that names one.
+`Evidence` holds the set of declared callees once (`Evidence::new`) and `never_returns` is its only reader. The stage
+runs for every function: a skip for an empty set (`declares_noreturn`, gone in the fifth review) was a second reader that
+a name-keyed mutant could change unseen. `render::structured` ends in the stage as an expression with no early `return`.
 The stage is kept only while the control certificate holds and is reverted whole otherwise (section 5); the checker
 reads the arm's end through the same predicate, so a guard on a call the machine returns from leaves an edge the
 block does not have, which section 3 (ii) refuses (`a_guard_the_machine_does_not_have_fails_the_certificate`).
+The certificate reads transfers and the test's polarity, never the order of plain statements (`plain_statement_opens`,
+ROADMAP D80): a guard that wrote what it frees before its test certifies, and kept wrong text in 45 of 134 changed
+functions in the fourth review's mutant run. The order of the freed statements is held by the unit tests in `guard.rs`
+and by the engine tests `a_call_passing_a_register_declared_never_to_return_is_a_guard`, which `scripts/mutants_d75.py`
+sees fail first, and `a_test_with_nothing_in_its_then_arm_keeps_its_else_and_the_exit_under_it_is_the_guard`, whose
+store the mutant writes before the guard's test with the certificate holding.
+The decision reads the callee alone, never what the call passes. `support::exit_calls` builds calls of none to sixteen
+arguments with each `CExpr` form at each position (a match with no wildcard lists the forms, so a new one must join)
+and every ordered pair of forms. Those vary the top-level form only, so a reader keyed to a value, a symbol, a site or
+a nested form passed them (the sixth review: 50 of 58 such mutants lived, 8 of them moving real output, `exit(0)` and
+`errx(1, fmt, x2_1, x3_2)` among them). `exit_calls` also draws 2,048 calls from a fixed xorshift seed (`Draw`): none
+to twenty arguments, each a tree of every form to depth eight, with the literal values (zero, one, the extremes, a raw
+draw), six symbols, the sites, operators, cast types and roles, and the callee as a function or an import drawn;
+`the_drawn_calls_reach_twenty_arguments_depth_eight_and_both_sites` holds that reach. The predicate and its five
+readers run over all of them, and `scripts/mutants_d75.py` carries the review's 58 mutants as source edits. A reader
+keyed to one value no draw holds, or to a depth past eight, is untested. `scripts/mutants_d75.py` runs each test
+command on the unmutated tree first and stops if one fails, and a mutant dies only by a test that passed there.
 O(statements) and no recursion (below): the statements a guard frees join the sequence the `if` sits in, where they
 are visited in their turn.
 
@@ -348,7 +370,9 @@ are visited in their turn.
 case) and rebuilds each sequence once: a statement is taken from the sequence, a guard puts the statements it frees
 back at the front of what is left, and the rest of the chain is read as part of the same sequence. Each pop pushes only
 places inside the one it took, so the tree's height ends it, and each statement is moved twice at most whatever the
-depth of the chain; `ends_in_never_return` reads only the blocks nested at an arm's end. An arm is judged as it was
+depth of the chain; `ends_in_never_return` reads only the blocks nested at an arm's end: through observations and the last
+statement of each block that is not an `Empty` or a `Comment`, to any depth, and a statement or a label after the call at
+any level (a `goto` enters there) is a way out of the arm by its end. An arm is judged as it was
 written and not after the guards inside it are rewritten, which gives the same answer: the last statement of a
 rewritten sequence is the last statement of the arm its last guard frees, and an `if` ends in no call either way. The
 first build rewrote the arms first, recursed once per level and moved the whole tail of an `else` chain at every
@@ -434,8 +458,11 @@ total 117,742 to 117,595 (-147), 80 functions better and 33 worse (by 1 to 4); n
 Release `pdd` with `aa` on Apple M5, instructions retired, base then head, two runs each: 0pack `0x62ecf0` 71.97G and 71.87G
 against 72.09G and 71.91G (+0.11% on the means; the rendering is class A, 21 fewer `else` and 21 fewer lines, 15 gotos
 before and after), pumasim `0x23fdf0` 85.18G and 85.18G against 85.14G and 85.16G (byte-identical); peak footprint 250 to 269
-MB in both. The stage's own cost is one clone of the body (the cost every stage pays) and one walk, and it does not
-run at all where no callee is declared never to return (`Evidence::declares_noreturn`).
+MB in both (the third review measured 115 to 140 MB of run-to-run variation in one build's peak on a bash function, so only the instruction counts carry a claim). The stage's own cost is one clone of the body (the cost every stage pays) and one walk, in every function since the fifth
+review. That review's run, release `aa` then `pdd` on Apple M5, instructions retired, base `14d384c3b` then the stage
+in every function, two runs each: 0pack `0x62ecf0` 71.96G and 71.99G against 71.88G and 71.95G, pumasim `0x23fdf0`
+85.21G and 85.16G against 85.15G and 85.23G, every function of pigz (222) in one session 50.87G and 50.87G against
+50.85G and 50.91G, of ls-toybox (1,148) 210.64G and 210.62G against 210.71G and 210.77G (+0.05%); every output equal.
 
 ## 2026-10-22: the recoveries together
 

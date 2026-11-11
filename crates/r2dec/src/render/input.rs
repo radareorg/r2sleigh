@@ -65,15 +65,9 @@ impl<'a> RenderInput<'a> {
             .flatten()
     }
 
-    /// The name the source gives parameter `slot`: its certified signature's, else the one its
-    /// debug information or symbols state; a positional placeholder is no name.
-    pub fn declared_parameter_name(&self, slot: usize) -> Option<&'a str> {
-        let report = self.facts.report();
-        (report.type_facts().render_authorized_signature())
-            .and_then(|signature| signature.params.get(slot))
-            .map(|parameter| parameter.name.as_str())
-            .filter(|name| !r2types::is_generic_arg_name(name))
-            .or_else(|| report.display_names().parameter(slot))
+    /// The one name of parameter `slot` (r2types `FunctionFacts::parameter_name`).
+    pub fn parameter_name(&self, slot: usize) -> String {
+        self.facts.report().parameter_name(slot)
     }
 
     /// The structures the function's parameter accesses lay out, by tag (doc/adr-aggregates.md).
@@ -105,6 +99,14 @@ impl<'a> RenderInput<'a> {
         (self.facts.source().call_site_interface(site))?
             .exact_callee_interface()?
             .type_graph()
+    }
+
+    /// How many parameters the function takes at least, where its interface states only a floor
+    /// (D37), with the causes it names; the proof line carries it to the header (D100).
+    pub fn arity_floor(&self) -> Option<(usize, &'a r2source::SourceArityFloor)> {
+        let interface = self.artifact().machine_context().function_interface()?;
+        let floor = interface.arity_floor()?;
+        Some((interface.arity().floor(), floor))
     }
 
     /// Whether arguments continue past the parameters, as the function's interface states.
@@ -161,19 +163,19 @@ impl<'a> RenderInput<'a> {
         graded.or(identity)
     }
 
-    /// The prototype r2types projects for the call at `inst` from a callee body the capture holds,
-    /// whose carriers r2ssa matched to the call site; its types are only those carriers' widths.
-    pub fn callee_carrier_signature(
+    /// The callee's own projection for the call at `inst`, from a callee body the capture holds,
+    /// whose carriers r2ssa matched to the call site: its header's types, and its unproven carrier.
+    pub fn callee_projection(
         &self,
         inst: r2ssa::InstId,
-    ) -> Option<&'a r2types::FunctionType> {
-        (self.facts.report().callsites())
+    ) -> Option<(&'a r2types::FunctionType, Option<u32>)> {
+        let facts = (self.facts.report().callsites())
             .and_then(|callsites| callsites.by_callsite.get(inst))
             .filter(|facts| {
                 (facts.callee_signature_types.as_ref())
                     .is_some_and(|types| types.basis == r2source::Basis::CarrierWidth)
-            })
-            .and_then(|facts| facts.callee_signature.as_ref())
+            })?;
+        Some((facts.callee_signature.as_ref()?, facts.callee_unproven_bits))
     }
 
     /// The text at each address the capture proves holds it: static data the program never writes,

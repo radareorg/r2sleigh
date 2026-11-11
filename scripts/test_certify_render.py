@@ -131,6 +131,11 @@ class DeclarationTests(unittest.TestCase):
         # The object is defined elsewhere and assigned there (rv_O0g's `g_table`).
         self.assertIsNone(gate.DECLARATION.match("        extern int32_t g_table;"))
 
+    def test_a_tag_declaration_declares_no_object(self) -> None:
+        # S16 declares a tag a pointer names (`struct Foo;`); dwarf3_line_cl's `new_foo` read `Foo`.
+        self.assertIsNone(gate.DECLARATION.match("struct Foo;"))
+        self.assertIsNone(gate.DECLARATION.match("union u;"))
+
     def test_a_declaration_is_one(self) -> None:
         self.assertEqual(
             gate.DECLARATION.match("        const int8_t* name;").group(1), "name"

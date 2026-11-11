@@ -140,8 +140,7 @@ fn natural_member(
     graph: &r2ssa::SourceTypeGraph,
     member: &r2ssa::SourceAggregateMember,
 ) -> Option<(CTypeLike, u64, u64)> {
-    let mut visiting = std::collections::BTreeSet::<u32>::new();
-    let ty = crate::analysis::source_type_like(graph, member.type_id(), &mut visiting)?;
+    let ty = crate::convert::source_type_like(graph, member.type_id())?;
     let width = u64::from(declaration_type_width_bits(&ty, 64)?);
     let align = natural_alignment(&ty)?;
     let ty = match member.size_bits() {
@@ -178,6 +177,10 @@ pub(crate) fn function_type_matches_source_interface(
         return false;
     }
     let parameter_widths_match = signature.params.iter().enumerate().all(|(index, ty)| {
+        // A parameter the declaration types as nothing the layer holds states no width (D151).
+        if *ty == CTypeLike::Unknown {
+            return true;
+        }
         let Some(actual_bits) = declaration_type_width_bits(ty, ptr_bits).map(u64::from) else {
             return false;
         };
@@ -224,9 +227,8 @@ pub(crate) fn field_certificate_width_matches(
     ptr_bits: u32,
 ) -> bool {
     cert.field_type
-        .as_deref()
-        .and_then(|field_type| parse_c_type_like(field_type, ptr_bits))
-        .and_then(|ty| type_like_size_bytes(&ty, ptr_bits))
+        .as_ref()
+        .and_then(|ty| type_like_size_bytes(ty, ptr_bits))
         .is_none_or(|width| width == u64::from(access_width))
 }
 
@@ -594,6 +596,8 @@ pub struct CallsiteArgumentFacts {
     /// What that signature's types are read from: a declaration, or a
     /// recovery of the callee's body.
     pub callee_signature_types: Option<r2source::Confidence>,
+    /// The carrier's bits where the callee's own header is an unproven result.
+    pub callee_unproven_bits: Option<u32>,
     /// Per-callsite argument-count proof for a variadic call. This is absent
     /// for fixed calls and never inferred from live argument registers.
     pub variadic_argument_count_evidence: Option<r2ssa::VariadicCallsiteArgumentCountEvidence>,
@@ -887,7 +891,7 @@ pub fn exact_source_return_type(source: &r2ssa::SsaArtifact) -> Option<CTypeLike
         return None;
     }
 
-    crate::analysis::source_type_like(graph, logical.type_id(), &mut BTreeSet::new())
+    crate::convert::source_type_like(graph, logical.type_id())
 }
 
 /// A pair's logical type, one integer of both halves' width, where a pair certificate licenses
@@ -926,7 +930,7 @@ fn exact_pair_return_type(
     if returns == 0 || tails || source.certificates().returns.len() != returns {
         return None;
     }
-    crate::analysis::source_type_like(graph, logical.type_id(), &mut BTreeSet::new())
+    crate::convert::source_type_like(graph, logical.type_id())
 }
 
 pub(crate) fn exact_return_certificate_matches(
@@ -955,10 +959,10 @@ pub(crate) fn exact_tail_return_certificate_matches(
         && boundary.call_site == call_site.id
         && boundary.at == call_site.at
         && boundary.complete
-        && boundary.result_kind
-            == Some(r2ssa::SourceCallResult::Register {
-                storage: expected_storage,
-            })
+        && matches!(
+            boundary.result_kind,
+            Some(r2ssa::SourceCallResult::Register { storage, .. }) if storage == expected_storage
+        )
 }
 
 /// The aggregate a type node names, when it names one.
@@ -982,7 +986,7 @@ pub(crate) fn parameter_pointee_type(
         .types()
         .get(usize::try_from(logical.type_id()).ok()?)?;
     match ty.kind() {
-        r2ssa::SourceTypeKind::Pointer { target_type_id } => Some(target_type_id),
+        r2ssa::SourceTypeKind::Pointer { target_type_id, .. } => Some(target_type_id),
         _ => None,
     }
 }
@@ -1113,7 +1117,8 @@ pub(crate) fn recovered_scalar_signedness_outranks(
 ) -> bool {
     let scalar = |ty: &CTypeLike| match ty {
         CTypeLike::Int { bits, signedness } => Some((*bits, *signedness)),
-        CTypeLike::Typedef { name, .. } => match crate::parse_c_type_like(name, ptr_bits) {
+        CTypeLike::Typedef { name, ty } => match crate::convert::typedef_target(name, ty, ptr_bits)
+        {
             Some(CTypeLike::Int { bits, signedness }) => Some((bits, signedness)),
             _ => None,
         },
@@ -1142,7 +1147,6 @@ pub(crate) fn struct_name_from_pointer_type(ty: Option<&CTypeLike>) -> Option<&s
 pub(crate) fn prepared_callee_resolution_facts(
     prepared: &r2ssa::SsaArtifact,
     names: &crate::DisplayNames,
-    known_function_signatures: &HashMap<String, crate::FunctionType>,
     mut callee_facts: BTreeMap<u64, CalleeFact>,
 ) -> CalleeResolutionFacts {
     // These were empty maps, so every direct call resolved to nothing and
@@ -1151,16 +1155,12 @@ pub(crate) fn prepared_callee_resolution_facts(
         .functions()
         .iter()
         .map(|(addr, name)| (*addr, name.clone()))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
     let symbols = names
         .symbols()
         .iter()
         .map(|(addr, name)| (*addr, name.clone()))
-        .collect::<HashMap<_, _>>();
-    let known_function_signatures = known_function_signatures
-        .iter()
-        .map(|(name, ty)| (crate::normalize_callee_name(name), ty.clone()))
-        .collect::<HashMap<_, _>>();
+        .collect::<FxHashMap<_, _>>();
     // The linkage radare2 read off the symbol or relocation that named each
     // call target is the fact import policy rests on; a name's shape is not.
     for cert in prepared.certificates().callsites.values() {
@@ -1183,7 +1183,6 @@ pub(crate) fn prepared_callee_resolution_facts(
         function_names: &function_names,
         symbols: &symbols,
         callee_facts: &callee_facts,
-        known_function_signatures: &known_function_signatures,
     };
 
     let mut resolution = CalleeResolutionFacts::from_direct_call_targets(
@@ -1274,6 +1273,7 @@ pub(crate) fn prepared_callsite_argument_facts(
                     // source-owned callee analysis fills this only after its
                     // exact retained interface matches this call site.
                     callee_signature: None,
+                    callee_unproven_bits: None,
                     callee_signature_types: None,
                     variadic_argument_count_evidence: cert.variadic_argument_count_evidence,
                     variadic_argument_count_refusal: cert.variadic_argument_count_refusal,
@@ -1365,7 +1365,8 @@ pub(crate) fn prepared_call_render_facts(prepared: &r2ssa::SsaArtifact) -> Funct
                     }
                     Some(
                         r2ssa::SourceCallResult::Register { .. }
-                        | r2ssa::SourceCallResult::Pair { .. },
+                        | r2ssa::SourceCallResult::Pair { .. }
+                        | r2ssa::SourceCallResult::Unproven { .. },
                     ) => CallsiteRenderDisposition::TerminalReturn,
                     Some(r2ssa::SourceCallResult::Void) => {
                         CallsiteRenderDisposition::TerminalVoidReturn
@@ -1962,7 +1963,7 @@ pub(crate) fn prepared_render_facts(prepared: &r2ssa::SsaArtifact) -> FunctionRe
                                 .machine_context()
                                 .function_interface()?
                                 .type_graph()?;
-                            crate::analysis::source_type_like(graph, type_id, &mut BTreeSet::new())
+                            crate::convert::source_type_like(graph, type_id)
                         }),
                 },
             )

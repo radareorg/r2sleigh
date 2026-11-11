@@ -22,8 +22,65 @@ pub enum ReturnTypeFact {
     /// convention names a carrier C can declare.
     Unproven {
         carrier: Option<CTypeLike>,
+        cause: Option<UnprovenCause>,
+        /// Whether the returns spell their values through the carrier: r2ssa states a register.
+        spelled: bool,
     },
     Refused(ReturnTypeRefusal),
+}
+
+/// Why a result is unproven, as the proof line and `afi` name it (doc/adr-scratch-result.md,
+/// "Rendering of Unproven"); `None` where no return is reached.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum UnprovenCause {
+    /// A defined value reaches a return, and no declaration and no reading caller decide it.
+    Written,
+    /// A return hands back the entry byte of an input location.
+    EntryInput,
+    /// No call reads the result, under the closed world.
+    Unread,
+    /// The result forwards through a cycle of callees that state none.
+    ForwardCycle,
+    /// The convention states no complete set of result lanes, so none is proven empty.
+    LanesUnbounded,
+}
+
+impl UnprovenCause {
+    /// The cause as the proof line and `afi` spell it.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Written => "Written",
+            Self::EntryInput => "EntryInput",
+            Self::Unread => "Unread",
+            Self::ForwardCycle => "ForwardCycle",
+            Self::LanesUnbounded => "LanesUnbounded",
+        }
+    }
+
+    /// The cause r2ssa's evidence names: the closed world's decision outranks the body's evidence,
+    /// and a value reaching a return outranks a handed-back input.
+    fn of(causes: &[r2ssa::SourceResultCause]) -> Option<Self> {
+        use r2ssa::SourceResultCause as Cause;
+        if causes.contains(&Cause::ForwardCycle) {
+            return Some(Self::ForwardCycle);
+        }
+        if causes.contains(&Cause::Unread) {
+            return Some(Self::Unread);
+        }
+        let written = causes.iter().any(|cause| {
+            !matches!(
+                cause,
+                Cause::HandedBack | Cause::NoReturn | Cause::LanesUnbounded
+            )
+        });
+        if written {
+            return Some(Self::Written);
+        }
+        if causes.contains(&Cause::HandedBack) {
+            return Some(Self::EntryInput);
+        }
+        (causes.contains(&Cause::LanesUnbounded)).then_some(Self::LanesUnbounded)
+    }
 }
 
 /// What decided a return type.
@@ -78,7 +135,7 @@ impl ReturnTypeFact {
     pub const fn declared(&self) -> Option<&CTypeLike> {
         match self {
             Self::Decided { ty, .. } => Some(ty),
-            Self::Unproven { carrier } => carrier.as_ref(),
+            Self::Unproven { carrier, .. } => carrier.as_ref(),
             Self::Refused(_) => None,
         }
     }
@@ -88,17 +145,60 @@ impl ReturnTypeFact {
         matches!(self, Self::Unproven { .. })
     }
 
-    /// An unproven result, declared as the carrier a caller reads after the
-    /// call: the convention's result slot where the interface proves nothing,
-    /// at its storage word, where C has an integer that wide.
+    /// The result type a caller's declaration states: the decided type, or a spelled unproven
+    /// result's carrier, the typedef's target (doc/adr-scratch-result.md, "S1 and S2 as built").
+    pub fn signature_type(&self) -> Option<&CTypeLike> {
+        match self {
+            Self::Decided { ty, .. } => Some(ty),
+            Self::Unproven {
+                carrier,
+                spelled: true,
+                ..
+            } => carrier.as_ref(),
+            Self::Unproven { .. } | Self::Refused(_) => None,
+        }
+    }
+
+    /// Why the result is unproven, where it is and a cause is named.
+    pub const fn unproven_cause(&self) -> Option<UnprovenCause> {
+        match self {
+            Self::Unproven { cause, .. } => *cause,
+            Self::Decided { .. } | Self::Refused(_) => None,
+        }
+    }
+
+    /// An unproven result, declared at the width the body's own returns write (r2ssa's seed), else
+    /// at the convention's result slot's storage word, where C has an integer that wide.
     fn unproven(source: &r2ssa::SsaArtifact) -> Self {
-        let carrier = source
-            .machine_context()
-            .return_value_carrier()
-            .map(|storage| storage.size.saturating_mul(8))
+        let context = source.machine_context();
+        let unproven = (context.function_interface())
+            .and_then(r2ssa::SourceFunctionInterface::unproven_result);
+        let seed = unproven
+            .and_then(r2ssa::SourceUnprovenResult::seed)
+            .map(|seed| seed.bits);
+        let cause = unproven.and_then(|result| UnprovenCause::of(result.causes()));
+        Self::unproven_at(source, seed, cause, false)
+    }
+
+    /// An unproven result at `bits`, else at the convention's storage word.
+    fn unproven_at(
+        source: &r2ssa::SsaArtifact,
+        bits: Option<u32>,
+        cause: Option<UnprovenCause>,
+        spelled: bool,
+    ) -> Self {
+        let context = source.machine_context();
+        let carrier = bits
+            .or_else(|| {
+                (context.return_value_carrier()).map(|storage| storage.size.saturating_mul(8))
+            })
             .filter(|bits| CTypeLike::is_integer_width(*bits))
             .map(CTypeLike::uint);
-        Self::Unproven { carrier }
+        Self::Unproven {
+            carrier,
+            cause,
+            spelled,
+        }
     }
 
     /// What this return type rests on (doc/adr-provenance.md, C2); none where it is refused. A type
@@ -157,13 +257,18 @@ impl ReturnTypeFact {
         {
             return Self::decided_by(CTypeLike::Void, ReturnTypeEvidence::VoidBoundary);
         }
+        // A body's integer result no declaration and no reading call decides is written, not proven;
+        // the closed world names why where it decided (D202, D166).
+        if let Some(bits) = interface.and_then(written_bits) {
+            let cause = interface.map(r2ssa::SourceFunctionInterface::written_cause);
+            let cause = cause.and_then(|cause| UnprovenCause::of(&[cause]));
+            return Self::unproven_at(source, Some(bits), cause, true);
+        }
         // A return whose result r2ssa left unproven hands back something no exit can type.
-        if source
-            .facts()
-            .boundaries
-            .returns
-            .values()
-            .any(|boundary| boundary.result_unproven)
+        let unproven = interface.map(r2ssa::SourceFunctionInterface::return_kind)
+            == Some(r2ssa::SourceFunctionReturn::Unproven);
+        if unproven
+            || (source.facts().boundaries.returns.values()).any(|boundary| boundary.result_unproven)
         {
             return Self::unproven(source);
         }
@@ -182,14 +287,34 @@ impl ReturnTypeFact {
     }
 }
 
-/// The return type the program's declaration of this function spells, where it spells one.
+/// The return type the program's declaration of this function states, from its interface's graph.
 fn declared(source: &r2ssa::SsaArtifact) -> Option<CTypeLike> {
-    let spelling = source.source_signature()?.return_type()?;
-    let ptr_bits = source
-        .machine_context()
-        .memory_model()
-        .default_address_bits();
-    crate::parse_c_type_like(spelling, ptr_bits).filter(|ty| *ty != CTypeLike::Unknown)
+    let interface = source.machine_context().function_interface()?;
+    if !interface.types_are_declared() {
+        return None;
+    }
+    match interface.return_kind() {
+        r2ssa::SourceFunctionReturn::Void => Some(CTypeLike::Void),
+        _ => crate::convert::source_type_like(
+            interface.type_graph()?,
+            interface.return_logical_value()?.type_id(),
+        ),
+    }
+}
+
+/// The width a body's own integer result is written at, where nothing else states it: a float or a
+/// pair a reading call decided stays a value (doc/adr-scratch-result.md, "Rendering of Unproven").
+fn written_bits(interface: &r2ssa::SourceFunctionInterface) -> Option<u32> {
+    let r2ssa::SourceFunctionReturn::Register { storage } = interface.return_kind() else {
+        return None;
+    };
+    if interface.result_read_by_callers() {
+        return None;
+    }
+    let whole = storage.size.saturating_mul(8);
+    let logical = (interface.return_logical_value())
+        .and_then(|value| u32::try_from(value.carrier().size_bits()).ok());
+    Some(logical.map_or(whole, |bits| bits.min(whole)))
 }
 
 /// What each value-carrying return hands back, then each tail call's result.
@@ -228,14 +353,14 @@ fn tail_result(
         .ok_or(ReturnTypeRefusal::UnreadTailCall)?;
     match interface.result() {
         r2ssa::SourceCallResult::Void => Ok(Exit::Typed(CTypeLike::Void)),
-        r2ssa::SourceCallResult::Register { .. } | r2ssa::SourceCallResult::Pair { .. } => {
-            signatures
-                .get(&call_site)
-                .map(|signature| signature.return_type.clone())
-                .filter(|ty| *ty != CTypeLike::Unknown)
-                .map(Exit::Typed)
-                .ok_or(ReturnTypeRefusal::UntypedTailCall)
-        }
+        r2ssa::SourceCallResult::Register { .. }
+        | r2ssa::SourceCallResult::Pair { .. }
+        | r2ssa::SourceCallResult::Unproven { .. } => signatures
+            .get(&call_site)
+            .map(|signature| signature.return_type.clone())
+            .filter(|ty| *ty != CTypeLike::Unknown)
+            .map(Exit::Typed)
+            .ok_or(ReturnTypeRefusal::UntypedTailCall),
     }
 }
 

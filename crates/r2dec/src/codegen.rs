@@ -162,7 +162,19 @@ impl EmissionReadyFunction {
 /// reference meant cloning all of it and throwing the original away. Every
 /// caller owns the function it hands over, so the tree is moved through instead
 /// and the expressions inside it are never copied.
-pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFunction {
+pub(crate) fn prepare_function_for_emission(mut func: CFunction) -> EmissionReadyFunction {
+    // The unproven result's carrier keeps its name: the prelude declares it (D201).
+    let ret = std::mem::replace(&mut func.ret_type, CType::Unknown);
+    func.visit_types_mut(&mut spell_scalar_names);
+    func.ret_type = ret;
+    if crate::prelude::result_typedef(&func.ret_type).is_none() {
+        spell_scalar_names(&mut func.ret_type);
+    }
+    for object in &mut func.extern_objects {
+        if let Some(fact) = object.type_fact.as_mut() {
+            spell_scalar_names(&mut fact.ty);
+        }
+    }
     EmissionReadyFunction {
         function: CFunction {
             body: prepare_stmt_sequence_for_emission(func.body),
@@ -181,6 +193,37 @@ pub(crate) fn prepare_function_for_emission(func: CFunction) -> EmissionReadyFun
             declaration_only: func.declaration_only,
         },
         locations: None,
+    }
+}
+
+/// A name over an arithmetic type (`size_t`) as its target, since the unit declares no such
+/// typedef; plain `char` is C's own and stays (D168).
+fn spell_scalar_names(ty: &mut CType) {
+    // An unproven result's carrier keeps its name wherever it is spelled: the prelude declares it.
+    if crate::prelude::result_typedef(ty).is_some() {
+        return;
+    }
+    match ty {
+        CType::Typedef { name, ty: inner }
+            if name != "char"
+                && matches!(
+                    inner.unaliased(),
+                    CType::Int { .. } | CType::Float(_) | CType::Bool
+                ) =>
+        {
+            *ty = std::mem::replace(inner.as_mut(), CType::Unknown);
+            spell_scalar_names(ty);
+        }
+        CType::Typedef { ty: inner, .. }
+        | CType::Pointer(inner)
+        | CType::Array(inner, _)
+        | CType::Const(inner)
+        | CType::UnprototypedFunction(inner) => spell_scalar_names(inner),
+        CType::Function { ret, params } => {
+            spell_scalar_names(ret);
+            params.iter_mut().for_each(spell_scalar_names);
+        }
+        _ => {}
     }
 }
 
@@ -452,6 +495,15 @@ impl<'c> CodeGenerator<'c> {
             prelude.push('\n');
         }
         prelude.push('\n');
+        // Each unproven result's carrier typedef the header, the externs and the helpers spell (D201).
+        let mut typedefs = std::collections::BTreeSet::new();
+        func.visit_types(&mut |ty| {
+            typedefs.extend(crate::prelude::result_typedef(ty));
+        });
+        for typedef in typedefs {
+            prelude.push_str(&typedef);
+            prelude.push('\n');
+        }
         if defines {
             for helper in crate::prelude::helpers_called(func) {
                 prelude.push_str(&helper.definition());
@@ -571,6 +623,10 @@ impl<'c> CodeGenerator<'c> {
                 "struct "
             });
             self.output.push_str(&aggregate.name);
+            if aggregate.members.is_empty() {
+                self.output.push_str(";\n");
+                continue;
+            }
             self.output.push_str(" {\n");
             for (ty, name) in &aggregate.members {
                 self.output.push_str(&self.config.indent);

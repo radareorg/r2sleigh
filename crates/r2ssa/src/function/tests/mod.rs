@@ -60,7 +60,7 @@ fn tail_jump_is_a_terminal_callsite_without_call_clobbers() {
         b"tail-jump".to_vec(),
         identity,
         true,
-        "aapcs64",
+        r2source::ConventionId::Aapcs64,
         [],
         false,
         false,
@@ -1070,7 +1070,7 @@ fn variadic_format_call_artifact_formed(
             },
         ),
         true,
-        "amd64",
+        r2source::ConventionId::SysVAmd64,
         [
             SourceCallArgumentSpec::new(0, slot(0)),
             SourceCallArgumentSpec::new(1, slot(1)),
@@ -1085,9 +1085,12 @@ fn variadic_format_call_artifact_formed(
             .with_radare2_format_parameter(index)
             .expect("format parameter belongs to the fixed prefix");
     }
-    let convention =
-        SourceConventionSlots::new("amd64", (0..4).map(slot).collect::<Vec<_>>(), None)
-            .expect("convention slots");
+    let convention = SourceConventionSlots::new(
+        r2source::ConventionId::SysVAmd64,
+        (0..4).map(slot).collect::<Vec<_>>(),
+        None,
+    )
+    .expect("convention slots");
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         &blocks,
         Some(&crate::Arch::from(arch.clone())),
@@ -1201,7 +1204,7 @@ fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
             },
         ),
         true,
-        "amd64",
+        r2source::ConventionId::SysVAmd64,
         [
             SourceCallArgumentSpec::new(0, slot(0)),
             SourceCallArgumentSpec::new(1, slot(1)),
@@ -1213,9 +1216,12 @@ fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
     .expect("exact callsite interface")
     .with_radare2_format_parameter(1)
     .expect("format parameter belongs to the fixed prefix");
-    let convention =
-        SourceConventionSlots::new("amd64", (0..4).map(slot).collect::<Vec<_>>(), None)
-            .expect("convention slots");
+    let convention = SourceConventionSlots::new(
+        r2source::ConventionId::SysVAmd64,
+        (0..4).map(slot).collect::<Vec<_>>(),
+        None,
+    )
+    .expect("convention slots");
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         &blocks,
         Some(&crate::Arch::from(arch.clone())),
@@ -1369,7 +1375,7 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
                 CanonicalStorageId::from_varnode(&target),
             ),
             true,
-            "amd64",
+            r2source::ConventionId::SysVAmd64,
             [
                 SourceCallArgumentSpec::new(0, slot(0)),
                 SourceCallArgumentSpec::new(1, slot(1)),
@@ -1381,9 +1387,12 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
         .and_then(|interface| interface.with_radare2_format_parameter(1))
         .expect("exact variadic callsite interface")
     };
-    let convention =
-        SourceConventionSlots::new("amd64", (0..4).map(slot).collect::<Vec<_>>(), None)
-            .expect("convention slots");
+    let convention = SourceConventionSlots::new(
+        r2source::ConventionId::SysVAmd64,
+        (0..4).map(slot).collect::<Vec<_>>(),
+        None,
+    )
+    .expect("convention slots");
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         &blocks,
         Some(&crate::Arch::from(arch.clone())),
@@ -2529,7 +2538,7 @@ fn promotion_fixture(ops: Vec<R2ILOp>) -> BTreeSet<(u64, usize)> {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"promotion-test".to_vec(),
-        "test-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [],
@@ -2568,7 +2577,7 @@ fn promotion_fixture_with_argument(
     };
     let interface = SourceFunctionInterface::new_exact(
         b"promotion-test".to_vec(),
-        "test-abi",
+        r2source::ConventionId::SysVAmd64,
         [SourceAbiParameterSpec::new(0, argument)],
         SourceFunctionReturn::Void,
         [],

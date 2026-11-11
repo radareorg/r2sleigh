@@ -1,0 +1,4 @@
+{
+ "_": "Functions rendered void that a caller reads, as `build/function` (`program.compiler.opt[.isa]`), each with its cause. Empty since S36: `void` is default-deny, so no entry is admitted, and the gate fails on any false void, in a header or a caller's extern, and on an entry its build renders otherwise (scripts/void_soundness.py).",
+ "functions": {}
+}

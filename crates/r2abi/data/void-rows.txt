@@ -1,0 +1,137 @@
+# What each row that returns `void` in these tables is cited by, and the rows
+# an audit found spelled `void` that return a value. scripts/audit_abi_rows.py
+# fails on a `void` row with no line here and on a line whose return is not
+# `void` while its row is (ROADMAP D204, doc/adr-scratch-result.md S0).
+#
+# name | return the source states | source
+
+# types.sdb.txt, the portable table.
+srandomdev | void | FreeBSD random(3): void srandomdev(void)
+free | void | C11 7.22.3.3
+longjmp | void | C11 7.13.2.1 (_Noreturn)
+srand | void | C11 7.22.2.2
+srandom | void | POSIX.1-2017 <stdlib.h> srandom; glibc, bionic and Darwin <stdlib.h>
+quick_exit | void | C11 7.22.4.7 (_Noreturn)
+bzero | void | POSIX.1-2001 <strings.h> bzero (removed in POSIX.1-2008); glibc <strings.h>
+setbuf | void | C11 7.21.5.5
+rewind | void | C11 7.21.9.5
+clearerr | void | C11 7.21.10.1
+perror | void | C11 7.21.10.4
+strmode | void | FreeBSD strmode(3), <string.h>
+error | void | glibc error(3), <error.h>
+swift_bridgeObjectRelease | void | Swift include/swift/Runtime/HeapObject.h
+swift_endAccess | void | Swift include/swift/Runtime/Exclusivity.h
+swift_release | void | Swift include/swift/Runtime/HeapObject.h
+swift_unexpectedError | void | Swift stdlib/public/core/ErrorType.swift, @_silgen_name("swift_unexpectedError") _unexpectedError returns Void
+swift_beginAccess | void | Swift include/swift/Runtime/Exclusivity.h
+err | void | 4.4BSD err(3); glibc <err.h> (noreturn)
+errx | void | 4.4BSD err(3); glibc <err.h> (noreturn)
+errc | void | FreeBSD err(3), <err.h> (noreturn)
+warn | void | 4.4BSD err(3); glibc <err.h>
+warnx | void | 4.4BSD err(3); glibc <err.h>
+warnc | void | FreeBSD err(3), <err.h>
+syslog | void | POSIX.1-2017 <syslog.h>
+signal | void (*)(int) | C11 7.14.1.1: signal returns the previous handler or SIG_ERR; POSIX.1-2017 signal(3p)
+aligned_alloc | void * | C11 7.22.3.1
+
+# types-linux.sdb.txt, glibc's own; also types-darwin.sdb.txt, types-objc.sdb.txt and
+# types-android.sdb.txt.
+xalloc_die | void | gnulib lib/xalloc.h: _Noreturn void xalloc_die (void)
+_exit | void | POSIX.1-2017 <unistd.h> _exit (noreturn)
+_Exit | void | C11 7.22.4.5 (_Noreturn)
+abort | void | C11 7.22.4.1 (_Noreturn)
+exit | void | C11 7.22.4.4 (_Noreturn)
+__stack_chk_fail | void | LSB 5.0 Core, generic: void __stack_chk_fail(void) (noreturn)
+__longjmp_chk | void | LSB 5.0 Core, generic: void __longjmp_chk(jmp_buf, int) (noreturn)
+__bzero | void | libsystem_platform's bzero under a second name (README.md); <strings.h> bzero
+objc_storeStrong | void | objc4 runtime/objc-internal.h
+objc_release | void | objc4 runtime/objc-internal.h
+objc_enumerationMutation | void | objc4 runtime/runtime.h
+__assert_rtn | void | macOS SDK <assert.h>: void __assert_rtn(const char *, const char *, int, const char *) __dead2
+uuid_unparse_upper | void | macOS SDK <uuid/uuid.h>
+
+# types-cxx.sdb.txt: operator delete, [new.delete.single] and [new.delete.array].
+_ZdlPv | void | C++17 [new.delete.single]
+_ZdlPvRKSt9nothrow_t | void | C++17 [new.delete.single]
+_ZdlPvSt11align_val_t | void | C++17 [new.delete.single]
+_ZdlPvSt11align_val_tRKSt9nothrow_t | void | C++17 [new.delete.single]
+_ZdlPvm | void | C++17 [new.delete.single]
+_ZdlPvmSt11align_val_t | void | C++17 [new.delete.single]
+_ZdlPvj | void | C++17 [new.delete.single]
+_ZdlPvjSt11align_val_t | void | C++17 [new.delete.single]
+_ZdaPv | void | C++17 [new.delete.array]
+_ZdaPvRKSt9nothrow_t | void | C++17 [new.delete.array]
+_ZdaPvSt11align_val_t | void | C++17 [new.delete.array]
+_ZdaPvSt11align_val_tRKSt9nothrow_t | void | C++17 [new.delete.array]
+_ZdaPvm | void | C++17 [new.delete.array]
+_ZdaPvmSt11align_val_t | void | C++17 [new.delete.array]
+_ZdaPvj | void | C++17 [new.delete.array]
+_ZdaPvjSt11align_val_t | void | C++17 [new.delete.array]
+
+# The Itanium C++ ABI and <cxxabi.h>.
+__cxa_finalize | void | Itanium C++ ABI 3.3.5.3
+__cxa_guard_release | void | Itanium C++ ABI 3.3.3
+__cxa_guard_abort | void | Itanium C++ ABI 3.3.3
+__cxa_pure_virtual | void | Itanium C++ ABI 3.2.6 (noreturn)
+__cxa_deleted_virtual | void | Itanium C++ ABI 3.2.6 (noreturn)
+__cxa_bad_cast | void | <cxxabi.h>, libsupc++ and libc++abi (noreturn)
+__cxa_bad_typeid | void | <cxxabi.h>, libsupc++ and libc++abi (noreturn)
+__cxa_throw_bad_array_new_length | void | <cxxabi.h>, libsupc++ and libc++abi (noreturn)
+__cxa_free_exception | void | Itanium C++ ABI EH 2.4.2
+__cxa_throw | void | Itanium C++ ABI EH 2.4.3 (noreturn)
+__cxa_end_catch | void | Itanium C++ ABI EH 2.5.3
+__cxa_rethrow | void | Itanium C++ ABI EH 2.5.4 (noreturn)
+__cxa_call_unexpected | void | Itanium C++ ABI EH 2.5.5 (noreturn)
+_Unwind_Resume | void | Itanium C++ ABI EH 1.4.3 (noreturn)
+
+# std::terminate, [except.terminate]; libstdc++'s bits/functexcept.h, each noreturn.
+_ZSt9terminatev | void | C++11 [except.terminate]
+_ZSt21__throw_bad_exceptionv | void | libstdc++ bits/functexcept.h
+_ZSt17__throw_bad_allocv | void | libstdc++ bits/functexcept.h
+_ZSt28__throw_bad_array_new_lengthv | void | libstdc++ bits/functexcept.h
+_ZSt16__throw_bad_castv | void | libstdc++ bits/functexcept.h
+_ZSt18__throw_bad_typeidv | void | libstdc++ bits/functexcept.h
+_ZSt19__throw_logic_errorPKc | void | libstdc++ bits/functexcept.h
+_ZSt20__throw_domain_errorPKc | void | libstdc++ bits/functexcept.h
+_ZSt24__throw_invalid_argumentPKc | void | libstdc++ bits/functexcept.h
+_ZSt20__throw_length_errorPKc | void | libstdc++ bits/functexcept.h
+_ZSt20__throw_out_of_rangePKc | void | libstdc++ bits/functexcept.h
+_ZSt24__throw_out_of_range_fmtPKcz | void | libstdc++ bits/functexcept.h
+_ZSt21__throw_runtime_errorPKc | void | libstdc++ bits/functexcept.h
+_ZSt19__throw_range_errorPKc | void | libstdc++ bits/functexcept.h
+_ZSt22__throw_overflow_errorPKc | void | libstdc++ bits/functexcept.h
+_ZSt23__throw_underflow_errorPKc | void | libstdc++ bits/functexcept.h
+_ZSt19__throw_ios_failurePKc | void | libstdc++ bits/functexcept.h
+_ZSt19__throw_ios_failurePKci | void | libstdc++ bits/functexcept.h
+_ZSt20__throw_system_errori | void | libstdc++ bits/functexcept.h
+_ZSt20__throw_future_errori | void | libstdc++ bits/functexcept.h
+_ZSt25__throw_bad_function_callv | void | libstdc++ bits/functexcept.h
+
+# The glibc and POSIX tables S8 cites (D167).
+__assert_fail | void | glibc <assert.h>: void __assert_fail(const char *, const char *, unsigned int, const char *), noreturn
+__fpurge | void | glibc <stdio_ext.h>: void __fpurge(FILE *); __fpurge(3)
+clearerr_unlocked | void | glibc <stdio.h>: void clearerr_unlocked(FILE *); unlocked_stdio(3)
+error_at_line | void | glibc <error.h>: void error_at_line(int, int, const char *, unsigned int, const char *, ...); error(3)
+freeaddrinfo | void | POSIX.1-2017 <netdb.h>: void freeaddrinfo(struct addrinfo *)
+regfree | void | POSIX.1-2017 <regex.h>: void regfree(regex_t *)
+
+# types-bionic.sdb.txt, bionic's cited rows (S13, D210).
+sync | void | bionic <unistd.h> void sync(void)
+setbuffer | void | bionic <stdio.h> void setbuffer(FILE*, char*, int)
+tzset | void | bionic <time.h> void tzset(void)
+cfmakeraw | void | bionic <termios.h> void cfmakeraw(struct termios*)
+siglongjmp | void | bionic <setjmp.h> __noreturn void siglongjmp(sigjmp_buf, int)
+setutent | void | bionic <utmp.h> void setutent(void)
+endutent | void | bionic <utmp.h> void endutent(void)
+openlog | void | bionic <syslog.h> void openlog(const char*, int, int)
+closelog | void | bionic <syslog.h> void closelog(void)
+
+# types-kernel32.sdb.txt, Microsoft's API reference pages (S13, D210).
+DeleteCriticalSection | void | Microsoft synchapi.h VOID DeleteCriticalSection(LPCRITICAL_SECTION)
+ExitProcess | void | Microsoft processthreadsapi.h VOID ExitProcess(UINT)
+GetSystemTimeAsFileTime | void | Microsoft sysinfoapi.h VOID GetSystemTimeAsFileTime(LPFILETIME)
+RaiseException | void | Microsoft errhandlingapi.h VOID RaiseException(DWORD, DWORD, DWORD, const ULONG_PTR *)
+RtlCaptureContext | void | Microsoft winnt.h VOID RtlCaptureContext(PCONTEXT)
+SetLastError | void | Microsoft errhandlingapi.h VOID SetLastError(DWORD)
+endgrent | void | POSIX.1-2017 <grp.h> endgrent (XSI)
+endpwent | void | POSIX.1-2017 (XSI) endpwent, in the user database header

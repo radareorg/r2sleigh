@@ -69,22 +69,19 @@ pub(crate) fn collect_external_struct_candidates_from_db(
     keys.sort();
 
     let mut out = Vec::new();
-    'structs: for key in keys {
+    for key in keys {
         let Some(st) = db.structs.get(&key) else {
             continue;
         };
-        if type_name_is_opaque_placeholder(&st.name)
-            || st.fields.is_empty()
-            || db.is_aggregate_typedef(&st.name)
-        {
+        if type_name_is_opaque_placeholder(&st.name) || st.fields.is_empty() {
             continue;
         }
         let mut fields = Vec::new();
         for (offset, field) in &st.fields {
-            let raw_ty = field.ty.clone().unwrap_or_else(|| "uint8_t".to_string());
-            let Some(field_type) = parse_c_type_like(&raw_ty, ptr_bits) else {
-                continue 'structs;
-            };
+            let field_type = field.ty.clone().unwrap_or(CTypeLike::Int {
+                bits: 8,
+                signedness: Signedness::Unsigned,
+            });
             fields.push(StructFieldCandidate {
                 name: field.name.clone(),
                 offset: *offset,
@@ -108,7 +105,6 @@ pub(crate) fn collect_external_struct_candidates_from_db(
 pub(crate) fn merge_local_structs_into_type_db(
     db: &mut ExternalTypeDb,
     struct_decls: &[StructDeclCandidate],
-    ptr_bits: u32,
 ) {
     for decl in struct_decls {
         let key = decl.name.to_ascii_lowercase();
@@ -119,7 +115,7 @@ pub(crate) fn merge_local_structs_into_type_db(
                 ExternalField {
                     name: field.name.clone(),
                     offset: field.offset,
-                    ty: Some(render_signature_type(&field.field_type, ptr_bits)),
+                    ty: Some(field.field_type.clone()),
                 },
             );
         }
@@ -128,10 +124,10 @@ pub(crate) fn merge_local_structs_into_type_db(
             fields,
         };
         match db.structs.entry(key) {
-            std::collections::hash_map::Entry::Vacant(entry) => {
+            std::collections::btree_map::Entry::Vacant(entry) => {
                 entry.insert(candidate);
             }
-            std::collections::hash_map::Entry::Occupied(mut entry) => {
+            std::collections::btree_map::Entry::Occupied(mut entry) => {
                 if decl.source == StructDeclSource::LocalInferred
                     && (is_generated_local_struct_name(&decl.name) || entry.get().fields.is_empty())
                 {
@@ -173,7 +169,7 @@ pub(crate) fn build_struct_decl_with_size(
 
         let field_type = render_signature_type(&field.field_type, ptr_bits);
         lines.push(format!("    {} {};", field_type, field.name));
-        cursor = cursor.saturating_add(estimate_c_type_size_bytes(&field_type, ptr_bits));
+        cursor = cursor.saturating_add(estimate_c_type_size_bytes(&field.field_type, ptr_bits));
     }
     if let Some(exact_size) = exact_size {
         if cursor > exact_size {

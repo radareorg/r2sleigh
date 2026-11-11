@@ -1,12 +1,33 @@
 mod prepared;
 mod returns;
+/// The type a hole spells: `r2sleigh_unread_uN` or `_fN` over its class at `width_bits`, a typedef
+/// the renderer's prelude declares and that claims no C type (doc/adr-call-boundary.md, Refusals).
+pub fn unread_slot(
+    class: Option<r2source::convention::SlotClass>,
+    width_bits: u32,
+) -> Option<CTypeLike> {
+    let (tag, ty) = match class {
+        Some(r2source::convention::SlotClass::Float) if matches!(width_bits, 32 | 64) => {
+            ('f', CTypeLike::Float(width_bits))
+        }
+        Some(r2source::convention::SlotClass::Float) => return None,
+        _ if matches!(width_bits, 8 | 16 | 32 | 64) => ('u', CTypeLike::machine_bits(width_bits)),
+        _ => return None,
+    };
+    Some(CTypeLike::Typedef {
+        name: format!("r2sleigh_unread_{tag}{width_bits}"),
+        ty: Box::new(ty),
+    })
+}
+
 #[cfg(test)]
 mod tests;
 
 pub use prepared::*;
-pub use returns::{ReturnTypeEvidence, ReturnTypeFact, ReturnTypeRefusal};
+pub use returns::{ReturnTypeEvidence, ReturnTypeFact, ReturnTypeRefusal, UnprovenCause};
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use rustc_hash::FxHashMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -16,7 +37,7 @@ use crate::facts::{
     CalleeFact, CalleeLinkage, FunctionTypeFacts, OutParamCertificateEvidence,
     OutParamCertificateSource, SignatureCertificateSource,
 };
-use crate::{CTypeLike, normalize_external_type_name, parse_c_type_like};
+use crate::{CTypeLike, normalize_external_type_name};
 use r2ssa::InstId;
 use r2ssa::dense::IdMap;
 
@@ -580,14 +601,11 @@ pub fn declaration_type_width_bits(ty: &CTypeLike, ptr_bits: u32) -> Option<u32>
         // declared `BitVector(96)` by the rule that names it and had no width
         // at all to the rule that checks it.
         CTypeLike::BitVector(bits) => Some(*bits),
-        // A name is as wide as what it stands for. The target is asked first
-        // because it is evidence -- the capture resolved it -- and the name
-        // text is only a fallback for a spelling C itself defines.
+        // A name is as wide as what it stands for, or, unstated, as C defines it.
         CTypeLike::Const(inner) => declaration_type_width_bits(inner, ptr_bits),
         CTypeLike::Typedef { name, ty } => {
             declaration_type_width_bits(ty, ptr_bits).or_else(|| {
-                crate::parse_external_type_like_spec(name, ptr_bits)
-                    .and_then(|parsed| parsed.bits(ptr_bits))
+                crate::convert::standard_type(name, ptr_bits).and_then(|ty| ty.bits(ptr_bits))
             })
         }
         _ => None,
@@ -768,6 +786,9 @@ pub struct SourceOwnedCalleeSignature {
     address: u64,
     interface: r2ssa::SourceFunctionInterface,
     signature: crate::FunctionType,
+    /// The carrier's bits where the callee's own header is an unproven result (D201): its callers
+    /// declare it as the header does (W46).
+    unproven_bits: Option<u32>,
 }
 
 /// Whether `storage` is a float's width at the low end of the float result register `slot`, the
@@ -780,6 +801,20 @@ pub(super) fn float_lane(
         matches!(storage.size, 4 | 8)
             && storage.size <= slot.size
             && (storage.space, storage.offset) == (slot.space, slot.offset)
+    })
+}
+
+/// The header's carrier word, which a call declares where it takes no lane of an unproven result
+/// (its header's `bits`) or takes a group (its integer register): D201, W46.
+fn carrier_word(result: Option<r2ssa::SourceCallResult>, bits: Option<u32>) -> Option<CTypeLike> {
+    let bits = match result? {
+        r2ssa::SourceCallResult::Void => bits?,
+        r2ssa::SourceCallResult::Unproven { integer, .. } => integer.size.checked_mul(8)?,
+        _ => return None,
+    };
+    Some(CTypeLike::Int {
+        bits,
+        signedness: crate::Signedness::Unsigned,
     })
 }
 
@@ -802,7 +837,7 @@ fn call_result_type(
     }
     if let (
         r2ssa::SourceFunctionReturn::Pair { low, .. },
-        r2ssa::SourceCallResult::Register { storage },
+        r2ssa::SourceCallResult::Register { storage, .. },
     ) = (callee.return_kind(), result)
     {
         return (low == storage).then_some(CTypeLike::Int {
@@ -811,7 +846,7 @@ fn call_result_type(
         });
     }
     let carriers = callee.result_carriers()?;
-    let r2ssa::SourceCallResult::Register { storage } = result else {
+    let r2ssa::SourceCallResult::Register { storage, .. } = result else {
         return None;
     };
     let bits = storage.size.checked_mul(8)?;
@@ -858,7 +893,15 @@ impl SourceOwnedCalleeSignature {
             address: source.function().entry,
             interface,
             signature,
+            unproven_bits: None,
         })
+    }
+
+    /// The same signature, its result the unproven carrier of `bits` its own header spells.
+    #[must_use]
+    pub(crate) const fn with_unproven_bits(mut self, bits: Option<u32>) -> Self {
+        self.unproven_bits = bits;
+        self
     }
 
     /// A signature the program's own declarations state, for a callee whose
@@ -890,6 +933,7 @@ impl SourceOwnedCalleeSignature {
             address,
             interface,
             signature,
+            unproven_bits: None,
         })
     }
 
@@ -971,99 +1015,6 @@ impl SourceOwnedFunctionFacts {
         self.report.return_type()
     }
 
-    /// The interface's formals as `(slot, width in bytes)`: the stated low lane, else the declared one, else the carrier.
-    pub fn interface_parameter_widths(&self) -> Vec<(u32, u32)> {
-        let Some(interface) = self.source.machine_context().function_interface() else {
-            return Vec::new();
-        };
-        interface
-            .parameters()
-            .iter()
-            .enumerate()
-            .map(|(position, parameter)| {
-                let carrier_bytes = parameter.location().size_bytes();
-                let lane = interface
-                    .parameter_logical_value(position)
-                    .and_then(|logical| match logical.carrier().kind() {
-                        r2ssa::SourceCarrierKind::LowBits => {
-                            u32::try_from(logical.carrier().size_bits() / 8).ok()
-                        }
-                        r2ssa::SourceCarrierKind::Full => None,
-                    });
-                let width = lane
-                    .or_else(|| {
-                        self.declared_parameter_width_bytes(parameter.index(), carrier_bytes)
-                    })
-                    .unwrap_or(carrier_bytes);
-                (parameter.index(), width)
-            })
-            .collect()
-    }
-
-    /// A declared width narrower than the carrier, where the declaration and the parameter's one frame home agree on it.
-    pub fn declared_parameter_width_bytes(&self, slot: u32, carrier_bytes: u32) -> Option<u32> {
-        let ptr_bits = self
-            .source
-            .machine_context()
-            .memory_model()
-            .default_address_bits();
-        let bits =
-            crate::declaration_type_width_bits(self.declared_parameter_type(slot)?, ptr_bits)?;
-        let bytes = (bits % 8 == 0).then_some(bits / 8)?;
-        if bytes == 0 || bytes >= carrier_bytes {
-            return None;
-        }
-        (self.parameter_home_width_bytes(slot) == Some(bytes)).then_some(bytes)
-    }
-
-    /// The width of the parameter's one home slot; two homes of different widths answer nothing.
-    fn parameter_home_width_bytes(&self, slot: u32) -> Option<u32> {
-        let mut homes = self
-            .report
-            .render()?
-            .certified_entities
-            .values()
-            .filter_map(|entity| match entity {
-                CertifiedEntity::StackSlot { size, role, .. } => role
-                    .filter(|role| {
-                        matches!(
-                            role,
-                            r2ssa::SourceStackSlotRole::ParameterHome { parameter_index, .. }
-                                if *parameter_index == slot
-                        )
-                    })
-                    .and(*size),
-                _ => None,
-            });
-        let first = homes.next()?;
-        homes.all(|other| other == first).then_some(first)
-    }
-
-    /// What the parameter's declaration says it is, the certified entity's first.
-    fn declared_parameter_type(&self, slot: u32) -> Option<&CTypeLike> {
-        let exact = self
-            .report
-            .render()
-            .and_then(|render| {
-                render
-                    .certified_entities
-                    .get(&r2ssa::SemanticId::Parameter(slot))
-            })
-            .and_then(|entity| match entity {
-                CertifiedEntity::Parameter { ty, .. } => ty.as_ref(),
-                _ => None,
-            });
-        exact.or_else(|| {
-            self.report
-                .type_facts()
-                .render_authorized_signature()?
-                .params
-                .get(usize::try_from(slot).ok()?)?
-                .ty
-                .as_ref()
-        })
-    }
-
     /// The type parameter `slot` is declared with at this width: the signature's where it fits, else the certified entity's.
     pub fn parameter_declaration(&self, slot: usize, width_bits: u32) -> Option<CTypeLike> {
         self.parameter_declaration_fact(slot, width_bits)
@@ -1083,6 +1034,14 @@ impl SourceOwnedFunctionFacts {
             .machine_context()
             .memory_model()
             .default_address_bits();
+        // A hole states no type: its class's typedef at its width, which claims none (D165).
+        let hole = (self.source.machine_context().function_interface())
+            .and_then(|interface| interface.parameters().get(slot))
+            .filter(|parameter| parameter.is_hole())
+            .and_then(|parameter| unread_slot(parameter.class(), width_bits));
+        if let Some(hole) = hole {
+            return Some(Fact::new(hole, Confidence::of(Basis::Convention)));
+        }
         let types = (self.source.machine_context().function_interface()).map_or_else(
             || Confidence::of(Basis::Convention),
             |interface| interface.types().clone(),
@@ -1170,13 +1129,8 @@ impl SourceOwnedFunctionFacts {
     ) {
         let mut names = report.display_names.clone();
         names.absorb(source.display_names());
-        let calls = CallFacts::project(
-            source,
-            &names,
-            &report.types.known_function_signatures,
-            &report.types.callee_facts,
-            &BTreeMap::new(),
-        );
+        let calls =
+            CallFacts::project(source, &names, &report.types.callee_facts, &BTreeMap::new());
         let solved = calls.solve(source);
         let projected =
             Self::enrich_report_from_source(source, std::mem::take(report), calls, &solved);
@@ -1255,32 +1209,32 @@ fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<Param
     }
     let mut resolver = ParamSlotResolver::default();
     for (index, parameter) in &source.facts().boundaries.parameters {
+        // A stack formal has no entry value to resolve (`FormalHome::Frame`).
+        let Some((abi_storage, graph_storage)) = parameter.register() else {
+            continue;
+        };
+        let parameter_value = parameter.value()?;
         let slot = usize::try_from(*index).ok()?;
         let source_parameter = interface
             .parameters()
             .iter()
             .find(|candidate| candidate.index() == *index)?;
-        let abi_slot = abi
-            .argument_registers()
-            .iter()
-            .find(|candidate| candidate.index() == *index)?;
-        let graph_value = source.graph().value(parameter.value)?;
+        let graph_value = source.graph().value(parameter_value)?;
         // The formal's value is the carrier's entry value, or the projection
         // minted for a lane of it (doc/adr-register-identity.md §6).
-        let entry_value = graph_value.canonical_storage == Some(parameter.graph_storage)
-            && graph_value.var.size == parameter.graph_storage.size
+        let entry_value = graph_value.canonical_storage == Some(graph_storage)
+            && graph_value.var.size == graph_storage.size
             && graph_value.var.version == 0
-            && source.graph().def_inst(parameter.value).is_none();
-        let projection = source.graph().formal_projection_storage(parameter.value)
-            == Some(parameter.graph_storage)
-            && graph_value.var.size == parameter.graph_storage.size;
+            && source.graph().def_inst(parameter_value).is_none();
+        let projection = source.graph().formal_projection_storage(parameter_value)
+            == Some(graph_storage)
+            && graph_value.var.size == graph_storage.size;
         if parameter.index != *index
-            || Some(parameter.abi_storage) != source_parameter.register_storage()
-            || parameter.abi_storage != abi_slot.storage()
+            || Some(abi_storage) != source_parameter.register_storage()
             || !(entry_value || projection)
             || resolver
                 .slots_by_value
-                .insert(parameter.value, slot)
+                .insert(parameter_value, slot)
                 .is_some()
         {
             return None;
@@ -1301,7 +1255,6 @@ impl CallFacts {
     pub(crate) fn project(
         source: &r2ssa::SsaArtifact,
         names: &crate::DisplayNames,
-        known_function_signatures: &HashMap<String, crate::FunctionType>,
         callee_facts: &BTreeMap<u64, CalleeFact>,
         callee_signatures: &BTreeMap<u64, SourceOwnedCalleeSignature>,
     ) -> Self {
@@ -1324,8 +1277,7 @@ impl CallFacts {
         }
         let mut resolved = callee_facts.clone();
         resolved.extend(code_pointer_callees.clone());
-        let resolution =
-            prepared_callee_resolution_facts(source, names, known_function_signatures, resolved);
+        let resolution = prepared_callee_resolution_facts(source, names, resolved);
         let mut callsites = prepared_callsite_argument_facts(source);
         FunctionFacts::apply_callsite_callee_signatures(source, &mut callsites, callee_signatures);
         Self {
@@ -1546,13 +1498,15 @@ impl FunctionFacts {
                 }
                 // A call that reads only a pair's first register takes that half alone.
                 (Some(result), _) if pair_callee => call_result_type(&signature.interface, result),
-                (_, CTypeLike::Unknown) => {
-                    site_result.and_then(|result| call_result_type(&signature.interface, result))
-                }
+                (_, CTypeLike::Unknown) => carrier_word(site_result, signature.unproven_bits)
+                    .or_else(|| {
+                        site_result
+                            .and_then(|result| call_result_type(&signature.interface, result))
+                    }),
                 // The convention's float register read at a float's width is that float, whatever
                 // carrier-width integer the callee's body spells (doc/adr-resolved-bodies.md).
                 (
-                    Some(r2ssa::SourceCallResult::Register { storage }),
+                    Some(r2ssa::SourceCallResult::Register { storage, .. }),
                     CTypeLike::Int { bits, .. },
                 ) if float_lane(float_slot, storage) && *bits == storage.size * 8 => {
                     Some(CTypeLike::Float(*bits))
@@ -1568,6 +1522,7 @@ impl FunctionFacts {
                 logical_signature.variadic = arguments.variadic;
                 arguments.callee_signature = Some(logical_signature);
                 arguments.callee_signature_types = Some(signature.interface.types().clone());
+                arguments.callee_unproven_bits = signature.unproven_bits;
             } else {
                 let site = source
                     .call_site_interface(arguments.call_site_id)
@@ -1646,6 +1601,16 @@ impl FunctionFacts {
     /// starts inventing semantics from symbol strings.
     pub fn display_names(&self) -> &crate::DisplayNames {
         &self.display_names
+    }
+
+    /// The one name of parameter `slot` that `pdd`, `afv` and `afi` spell: the certified
+    /// signature's, else the source's, else its position from `arg0`.
+    pub fn parameter_name(&self, slot: usize) -> String {
+        (self.type_facts().render_authorized_signature())
+            .and_then(|signature| signature.params.get(slot))
+            .map(|parameter| parameter.name.as_str())
+            .filter(|name| !crate::is_generic_arg_name(name))
+            .map_or_else(|| self.display_names.parameter_name(slot), str::to_owned)
     }
 
     /// Attach the spellings radare2 already holds.
@@ -1877,11 +1842,7 @@ impl FunctionFacts {
                 is_write: memory.is_write,
                 field_offset: offset_bits / 8,
                 field_name: member.name().to_string(),
-                field_type: crate::analysis::source_type_like(
-                    graph,
-                    member.type_id(),
-                    &mut BTreeSet::new(),
-                ),
+                field_type: crate::convert::source_type_like(graph, member.type_id()),
                 access_width: memory.width,
                 base: pointer_base.and_then(r2ssa::SemanticId::parameter),
                 source: MemberAccessSource::DeclaredType,
@@ -2025,10 +1986,7 @@ impl FunctionFacts {
                 is_write: memory.is_write,
                 field_offset,
                 field_name: cert.field_name.clone(),
-                field_type: cert
-                    .field_type
-                    .as_deref()
-                    .and_then(|ty| parse_c_type_like(ty, ptr_bits)),
+                field_type: cert.field_type.clone(),
                 access_width: memory.width,
                 base: u32::try_from(cert.slot)
                     .ok()
@@ -2211,7 +2169,6 @@ impl FunctionFacts {
         let calls = CallFacts::project(
             prepared,
             &self.display_names,
-            &self.types.known_function_signatures,
             &self.types.callee_facts,
             &BTreeMap::new(),
         );
@@ -2378,29 +2335,7 @@ impl FunctionFacts {
                 .and_then(|interface| {
                     let graph = interface.type_graph()?;
                     let logical = interface.parameter_logical_value(slot as usize)?;
-                    let ty = crate::analysis::source_type_like(
-                        graph,
-                        logical.type_id(),
-                        &mut BTreeSet::new(),
-                    )?;
-                    // The graph has no qualifier; the prototype's own spelling does.
-                    let spelled = prepared
-                        .source_signature()
-                        .and_then(|signature| signature.named_parameters().get(slot as usize))
-                        .and_then(r2source::SourceSignatureParameter::type_spelling)
-                        .and_then(|spelling| {
-                            crate::parse_c_type_like(
-                                spelling,
-                                prepared
-                                    .machine_context()
-                                    .memory_model()
-                                    .default_address_bits(),
-                            )
-                        });
-                    Some(match spelled {
-                        Some(spelled) => crate::analysis::requalify(ty, &spelled),
-                        None => ty,
-                    })
+                    crate::convert::source_type_like(graph, logical.type_id())
                 });
             self.render.certified_entities.insert(
                 id,
@@ -2605,41 +2540,7 @@ impl FunctionFacts {
                     .map(|param| param.name.clone())
                     .collect::<Vec<_>>()
             });
-        // The graph carries no qualifier; the spelling does, and a `const`
-        // pointee is part of the declared type.
         let ptr_bits = context.memory_model().default_address_bits();
-        let spelled_types = spelled
-            .as_ref()
-            .filter(|signature| signature.params.len() == logical.len())
-            .map(|signature| {
-                signature
-                    .params
-                    .iter()
-                    .map(|param| param.ty.clone())
-                    .collect::<Vec<_>>()
-            })
-            .or_else(|| {
-                let signature = source.source_signature()?;
-                let parameters = signature.named_parameters();
-                (parameters.len() == logical.len()).then(|| {
-                    parameters
-                        .iter()
-                        .map(|parameter| {
-                            parameter
-                                .type_spelling()
-                                .and_then(|spelling| crate::parse_c_type_like(spelling, ptr_bits))
-                        })
-                        .collect::<Vec<_>>()
-                })
-            });
-        r2il::refusal_evidence!(
-            "exact-source-signature",
-            "{:#x}: spelled={} presentation={} spelled_types={:?}",
-            source.function().entry,
-            spelled.is_some(),
-            source.source_signature().is_some(),
-            spelled_types
-        );
         let mut params = Vec::with_capacity(logical.len());
         let mut bases = BTreeMap::new();
         for (index, value) in logical.iter().enumerate() {
@@ -2654,22 +2555,12 @@ impl FunctionFacts {
                 );
                 return false;
             };
-            let Some(ty) =
-                crate::analysis::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
-            else {
+            let Some(ty) = crate::convert::source_type_like(graph, value.type_id()) else {
                 r2il::refusal_evidence!(
                     "exact-source-signature",
                     "parameter {index}'s logical type is not in the graph"
                 );
                 return false;
-            };
-            let ty = match spelled_types
-                .as_ref()
-                .and_then(|types| types.get(index))
-                .and_then(Option::as_ref)
-            {
-                Some(spelled) => crate::analysis::requalify(ty, spelled),
-                None => ty,
             };
             let ty = match certified_pointers
                 .as_ref()
@@ -2688,18 +2579,16 @@ impl FunctionFacts {
                 .as_ref()
                 .and_then(|names| names.get(index).cloned())
                 .filter(|name| !name.is_empty())
-                .unwrap_or_else(|| format!("arg{index}"));
+                .unwrap_or_else(|| r2source::positional_parameter_name(index));
             params.push(crate::FunctionParamSpec { name, ty: Some(ty) });
         }
         let ret_type = match interface.return_kind() {
             r2ssa::SourceFunctionReturn::Void => Some(CTypeLike::Void),
             // A pair's logical value is the one integer of both halves' width.
             r2ssa::SourceFunctionReturn::Register { .. }
-            | r2ssa::SourceFunctionReturn::Pair { .. } => {
-                interface.return_logical_value().and_then(|value| {
-                    crate::analysis::source_type_like(graph, value.type_id(), &mut BTreeSet::new())
-                })
-            }
+            | r2ssa::SourceFunctionReturn::Pair { .. } => interface
+                .return_logical_value()
+                .and_then(|value| crate::convert::source_type_like(graph, value.type_id())),
             // Nothing proved a result, so no return type can be spelled.
             r2ssa::SourceFunctionReturn::Unproven => None,
         };
@@ -2741,7 +2630,7 @@ impl FunctionFacts {
         );
         if let Some(signature) = self.types.merged_signature.as_mut() {
             let previous = signature.clone();
-            signature.ret_type = fact.decided().cloned();
+            signature.ret_type = fact.signature_type().cloned();
             let mut sources = self
                 .types
                 .signature_certificate
@@ -2820,7 +2709,10 @@ impl FunctionFacts {
             let Ok(index) = usize::try_from(*slot) else {
                 continue;
             };
-            let Some(candidate) = recovered.value_type(parameter.value) else {
+            let Some(candidate) = parameter
+                .value()
+                .and_then(|value| recovered.value_type(value))
+            else {
                 continue;
             };
             let Some(param) = signature.params.get_mut(index) else {

@@ -2,7 +2,7 @@
 //! the arms the other way round `if (!c) { f(); } rest`: `doc/adr-structure-dominator-tree.md`, "the noreturn guard".
 
 use super::condition::{Marks, as_atoms, negated};
-use super::shape::Evidence;
+use super::shape::{Evidence, callee_of};
 use crate::ast::{CExpr, CStmt};
 
 /// A place the pass has still to visit, borrowed from the tree.
@@ -165,7 +165,7 @@ fn ends_in_never_return(mut stmt: &CStmt, ev: &Evidence<'_>) -> bool {
                     None => return false,
                 }
             }
-            CStmt::Expr(_) => return (ev.never_returns)(stmt),
+            CStmt::Expr(_) => return ev.never_returns(callee_of(stmt)),
             _ => return false,
         }
     }
@@ -177,21 +177,15 @@ mod tests {
     use crate::ast::{BinaryOp, CExpr, UnaryOp, test_render_observation_id};
     use crate::structure::certify::{StatementRole, Violation, certify};
     use crate::structure::support::{
-        Fixture, at, branch, cfg, cond, cond_branch, exit, expr, never_returns,
+        Fixture, at, branch, cfg, cond, cond_branch, declared, exit, exit_calls, expr,
+        never_returns,
     };
     use r2ssa::cfg::{BlockTerminator, CFG};
     use r2ssa::domtree::DomTree;
+    use std::collections::BTreeSet;
 
-    fn evidence<'a>(never_returns: &'a dyn Fn(&CStmt) -> bool) -> Evidence<'a> {
-        Evidence {
-            never_returns,
-            declares_noreturn: true,
-            distinct_return: &|_| false,
-        }
-    }
-
-    fn guarded(body: &mut CStmt, never_returns: &dyn Fn(&CStmt) -> bool) -> usize {
-        guard(body, &evidence(never_returns), &mut Fixture)
+    fn guarded(body: &mut CStmt, declared: &BTreeSet<String>) -> usize {
+        guard(body, &Evidence::new(declared, &|_| false), &mut Fixture)
     }
 
     fn ret() -> CStmt {
@@ -318,7 +312,7 @@ mod tests {
             CStmt::Block(vec![at(0x20, expr()), at(0x20, exit())]),
             vec![at(0x30, expr()), at(0x40, ret())],
         )]);
-        assert_eq!(guarded(&mut body, &never_returns), 1);
+        assert_eq!(guarded(&mut body, &declared()), 1);
         let CStmt::Block(stmts) = &body else {
             panic!("a block");
         };
@@ -346,7 +340,7 @@ mod tests {
         ])]);
         let (mut before, mut after) = (Vec::new(), Vec::new());
         trace(&body, &mut before);
-        assert_eq!(guarded(&mut body, &never_returns), 2);
+        assert_eq!(guarded(&mut body, &declared()), 2);
         trace(&body, &mut after);
         // The same leaves in the same order; no else arm holds anything now.
         assert_eq!(before, after);
@@ -360,7 +354,7 @@ mod tests {
             vec![at(0x30, expr()), at(0x40, ret())],
         )]);
         let kept = body.clone();
-        assert_eq!(guarded(&mut body, &|_| false), 0);
+        assert_eq!(guarded(&mut body, &BTreeSet::new()), 0);
         assert_eq!(body, kept);
     }
 
@@ -389,7 +383,7 @@ mod tests {
             at(0x40, ret()),
         ]);
         assert!(certified(&body, &cfg));
-        assert_eq!(guarded(&mut body, &never_returns), 1);
+        assert_eq!(guarded(&mut body, &declared()), 1);
         assert_eq!(count_elses(&body), 0);
         let certificate = certificate(&body, &cfg);
         assert!(certificate.ok(), "{certificate}");
@@ -441,7 +435,7 @@ mod tests {
                 Some(CStmt::Block(vec![at(0x40, exit())])),
             ),
         )]);
-        assert_eq!(guarded(&mut body, &never_returns), 1);
+        assert_eq!(guarded(&mut body, &declared()), 1);
         let CStmt::Block(stmts) = &body else {
             panic!("a block");
         };
@@ -463,7 +457,7 @@ mod tests {
             Some(CStmt::Block(vec![at(0x30, exit())])),
         )]);
         let kept = body.clone();
-        assert_eq!(guarded(&mut body, &never_returns), 0);
+        assert_eq!(guarded(&mut body, &declared()), 0);
         assert_eq!(body, kept);
     }
 
@@ -475,7 +469,7 @@ mod tests {
             vec![at(0x30, expr()), at(0x30, exit())],
         )]);
         let kept = body.clone();
-        assert_eq!(guarded(&mut body, &never_returns), 0);
+        assert_eq!(guarded(&mut body, &declared()), 0);
         assert_eq!(body, kept);
     }
 
@@ -492,13 +486,20 @@ mod tests {
                 (0x40, BlockTerminator::Return),
             ],
         );
-        let call = || CStmt::Expr(CExpr::IntLit(99));
+        // A callee the evidence declares and the certificate's role does not, as `exit` is the role's alone.
+        let call = || {
+            let callee = CExpr::External {
+                name: "halt".to_owned(),
+                kind: crate::symbol::ExternalKind::Function,
+            };
+            CStmt::Expr(CExpr::call(callee, Vec::new()))
+        };
         let mut body = CStmt::Block(vec![
             branching(CStmt::Block(vec![at(0x20, call())]), vec![at(0x30, expr())]),
             at(0x40, ret()),
         ]);
         assert!(certified(&body, &cfg));
-        assert_eq!(guarded(&mut body, &|stmt| *stmt == call()), 1);
+        assert_eq!(guarded(&mut body, &BTreeSet::from(["halt".to_owned()])), 1);
         assert!(!certified(&body, &cfg));
     }
 
@@ -523,7 +524,7 @@ mod tests {
                 Some(CStmt::Block(vec![inner(0x30)])),
             ),
         )]);
-        assert_eq!(guarded(&mut body, &never_returns), 2);
+        assert_eq!(guarded(&mut body, &declared()), 2);
         assert_eq!(count_elses(&body), 1);
         let (then_body, else_body) = arms_of(&top(&body)[0]);
         // The rest each guard frees stands after it, inside the arm it was in.
@@ -548,7 +549,7 @@ mod tests {
                 ),
             )]);
             let kept = body.clone();
-            assert_eq!(guarded(&mut body, &never_returns), 0);
+            assert_eq!(guarded(&mut body, &declared()), 0);
             assert_eq!(body, kept);
         }
     }
@@ -576,7 +577,7 @@ mod tests {
             at(0x40, ret()),
         ]);
         assert!(certified(&body, &cfg));
-        assert_eq!(guarded(&mut body, &never_returns), 1);
+        assert_eq!(guarded(&mut body, &declared()), 1);
         let (then_body, else_body) = arms_of(&top(&body)[0]);
         assert_eq!((top(then_body).len(), else_body), (2, None));
         let certificate = certificate(&body, &cfg);
@@ -590,7 +591,7 @@ mod tests {
                 CStmt::Block(vec![at(0x20, exit()), after]),
                 vec![at(0x30, expr())],
             )]);
-            assert_eq!(guarded(&mut body, &never_returns), 1);
+            assert_eq!(guarded(&mut body, &declared()), 1);
             assert_eq!(count_elses(&body), 0);
         }
     }
@@ -603,8 +604,117 @@ mod tests {
             vec![at(0x30, expr())],
         )]);
         let kept = body.clone();
-        assert_eq!(guarded(&mut body, &never_returns), 0);
+        assert_eq!(guarded(&mut body, &declared()), 0);
         assert_eq!(body, kept);
+    }
+
+    /// `leaf` ending `depth + 1` nested blocks (inner ones observed or not), with `after(level)` following the leaf
+    /// or the inner block in the block at `level`.
+    fn blocks_ending_in(
+        leaf: CStmt,
+        depth: usize,
+        observed: bool,
+        after: &dyn Fn(usize) -> Vec<CStmt>,
+    ) -> CStmt {
+        let mut arm = CStmt::Block([vec![leaf], after(0)].concat());
+        for level in 1..=depth {
+            if observed {
+                arm = at(0x60 + level as u64, arm);
+            }
+            arm = CStmt::Block([vec![at(0x50, expr()), arm], after(level)].concat());
+        }
+        arm
+    }
+
+    /// The depths of nested blocks to try, with the inner blocks observed or not.
+    fn nestings() -> impl Iterator<Item = (usize, bool)> {
+        (0..8).flat_map(|depth| [false, true].map(|observed| (depth, observed)))
+    }
+
+    /// `if (c) { <taken> } else { <other> }` observed, so that a guard on the else arm has a test to negate.
+    fn diamond(taken: CStmt, other: CStmt) -> CStmt {
+        at(0x10, CStmt::if_stmt(cond(), taken, Some(other)))
+    }
+
+    /// Whether the guard rewrites `arm` standing as the then arm and as the else arm of an `if`: it does either both
+    /// times or neither, as the rule reads an arm and not its place.
+    fn rewrites(arm: &CStmt) -> bool {
+        let rest = || CStmt::Block(vec![at(0x30, expr()), at(0x40, ret())]);
+        // The then arm is the guard's body; the else arm, with the test negated, is too and the then arm is its rest.
+        let mut then = CStmt::Block(vec![diamond(arm.clone(), rest())]);
+        let mut other = CStmt::Block(vec![diamond(CStmt::Block(Vec::new()), arm.clone())]);
+        let (then_rewrites, other_rewrites) = (
+            guarded(&mut then, &declared()),
+            guarded(&mut other, &declared()),
+        );
+        assert_eq!(then_rewrites, other_rewrites, "{arm:?}");
+        assert_eq!(count_elses(&then), count_elses(&other), "{arm:?}");
+        then_rewrites == 1 && count_elses(&then) == 0
+    }
+
+    /// The calls to end an arm with, with none to three arguments, each with a blank to put after it. Blanks write
+    /// nothing, so none is a statement control could pass the call by: bare or observed.
+    fn calls_and_blanks() -> Vec<(CStmt, CStmt)> {
+        let blanks = [
+            CStmt::Empty,
+            CStmt::Comment("c".into()),
+            at(0x60, CStmt::Empty),
+            at(0x60, CStmt::Comment("c".into())),
+        ];
+        exit_calls()
+            .flat_map(|call| [call.clone(), at(0x20, call)])
+            .flat_map(|call| blanks.clone().map(|blank| (call.clone(), blank)))
+            .collect()
+    }
+
+    /// A level of `depth` blocks, with a statement a `goto` could enter by, or one that runs, to put after the call.
+    fn levels_and_spoilers(depth: usize) -> impl Iterator<Item = (usize, CStmt)> {
+        let spoilers = [expr(), at(0x60, expr()), CStmt::Label("L".into()), ret()];
+        (0..=depth).flat_map(move |level| spoilers.clone().map(|spoiler| (level, spoiler)))
+    }
+
+    #[test]
+    fn a_call_ends_an_arm_through_any_depth_of_blocks_and_any_blanks_after_it() {
+        for (depth, observed) in nestings() {
+            for (call, blank) in calls_and_blanks() {
+                let arm = blocks_ending_in(call, depth, observed, &|_| vec![blank.clone()]);
+                assert!(rewrites(&arm), "depth {depth}, blank {blank:?}: {arm:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_statement_after_the_call_at_any_depth_of_blocks_leaves_the_arm_by_its_end() {
+        for (depth, observed) in nestings() {
+            for (level, spoiler) in levels_and_spoilers(depth) {
+                let after = |at: usize| match at == level {
+                    true => vec![spoiler.clone()],
+                    false => Vec::new(),
+                };
+                let arm = blocks_ending_in(exit(), depth, observed, &after);
+                assert!(!rewrites(&arm), "level {level}, {spoiler:?}: {arm:?}");
+            }
+            // Nothing that is not such a call ends an arm either, whatever surrounds it.
+            let arm = blocks_ending_in(expr(), depth, observed, &|_| Vec::new());
+            assert!(!rewrites(&arm), "depth {depth}: {arm:?}");
+        }
+    }
+
+    #[test]
+    fn a_then_arm_that_never_returns_is_a_guard_whether_or_not_its_if_is_observed() {
+        // The then arm's rewrite keeps the test as it is, so it needs no marker to negate over; the else arm does.
+        let mut body = CStmt::Block(vec![CStmt::if_stmt(
+            cond(),
+            CStmt::Block(vec![at(0x20, exit())]),
+            Some(CStmt::Block(vec![at(0x30, expr()), at(0x40, ret())])),
+        )]);
+        assert_eq!(guarded(&mut body, &declared()), 1);
+        assert_eq!(count_elses(&body), 0);
+        assert_eq!(top(&body).len(), 3);
+        let CStmt::If { cond: test, .. } = top(&body)[0].unobserved() else {
+            panic!("an if: {body:?}");
+        };
+        assert_eq!(*test, cond());
     }
 
     #[test]
@@ -622,7 +732,7 @@ mod tests {
             0x10,
             CStmt::if_stmt(cond(), CStmt::Block(vec![at(0x20, expr())]), Some(inner)),
         )]);
-        assert_eq!(guarded(&mut body, &never_returns), 1);
+        assert_eq!(guarded(&mut body, &declared()), 1);
         let (_, else_body) = arms_of(&top(&body)[0]);
         let arm = top(else_body.expect("the else"));
         // `if (d) { exit }` and the statement it freed, in a block of their own.
@@ -664,7 +774,7 @@ mod tests {
             0x10,
             CStmt::if_stmt(cond(), CStmt::Block(vec![at(0x20, expr())]), Some(inner)),
         )]);
-        assert_eq!(guarded(&mut body, &never_returns), 1);
+        assert_eq!(guarded(&mut body, &declared()), 1);
         assert_eq!(count_elses(&body), 2);
     }
 
@@ -691,7 +801,7 @@ mod tests {
             0x10,
             CStmt::if_stmt(cond(), CStmt::Block(vec![at(0x20, expr())]), Some(inner)),
         )]);
-        assert_eq!(guarded(&mut body, &never_returns), 2);
+        assert_eq!(guarded(&mut body, &declared()), 2);
         assert_eq!(count_elses(&body), 2);
     }
 
@@ -710,7 +820,7 @@ mod tests {
             0x10,
             CStmt::if_stmt(cond(), inner, Some(CStmt::Block(vec![at(0x30, expr())]))),
         )]);
-        assert_eq!(guarded(&mut body, &never_returns), 1);
+        assert_eq!(guarded(&mut body, &declared()), 1);
         let (then_body, _) = arms_of(&top(&body)[0]);
         assert_eq!(top(then_body).len(), 2);
         assert_eq!(count_elses(&body), 1);
@@ -735,7 +845,7 @@ mod tests {
             // A body that is a block, and a body that is the bare `if`.
             for body in [CStmt::Block(vec![a_guard()]), a_guard()] {
                 let mut tree = CStmt::Block(vec![make(body)]);
-                assert_eq!(guarded(&mut tree, &never_returns), 1, "{tree:?}");
+                assert_eq!(guarded(&mut tree, &declared()), 1, "{tree:?}");
                 assert_eq!(count_elses(&tree), 0, "{tree:?}");
             }
         }
@@ -758,7 +868,7 @@ mod tests {
                 cases,
                 default,
             }]);
-            assert_eq!(guarded(&mut tree, &never_returns), guards, "{tree:?}");
+            assert_eq!(guarded(&mut tree, &declared()), guards, "{tree:?}");
             assert_eq!(count_elses(&tree), 0, "{tree:?}");
         }
     }
@@ -770,7 +880,7 @@ mod tests {
                 0x10,
                 CStmt::if_stmt(cond(), CStmt::Block(vec![at(0x20, exit())]), Some(empty)),
             )]);
-            assert_eq!(guarded(&mut body, &never_returns), 1);
+            assert_eq!(guarded(&mut body, &declared()), 1);
             assert_eq!(top(&body).len(), 1);
             assert_eq!(count_elses(&body), 0);
         }
@@ -823,7 +933,7 @@ mod tests {
                 );
             }
             let mut body = CStmt::Block(vec![next]);
-            assert_eq!(guarded(&mut body, &never_returns), DEEP);
+            assert_eq!(guarded(&mut body, &declared()), DEEP);
             // Each level's test, its exit, then the statement it freed, ending in the return.
             assert!(flat_chain(top(&body)));
         });
@@ -844,7 +954,7 @@ mod tests {
                 );
             }
             let mut body = CStmt::Block(vec![next]);
-            assert_eq!(guarded(&mut body, &never_returns), DEEP);
+            assert_eq!(guarded(&mut body, &declared()), DEEP);
             assert!(flat_chain(top(&body)));
         });
     }
@@ -860,7 +970,7 @@ mod tests {
                 );
             }
             let mut body = CStmt::Block(vec![next]);
-            assert_eq!(guarded(&mut body, &never_returns), 0);
+            assert_eq!(guarded(&mut body, &declared()), 0);
             // Dropping the chain recurses to its depth, which is the tree's own and not this pass's.
             std::mem::forget(body);
         });
@@ -1027,11 +1137,11 @@ mod tests {
                 continue;
             }
             let before = body.clone();
-            rewrites += guarded(&mut body, &never_returns);
+            rewrites += guarded(&mut body, &declared());
             trees += 1;
             let alike = run_alike(&before, &body, rng.ifs);
             assert_eq!(alike, Ok(()), "seed {seed}\n{before:#?}\n{body:#?}");
-            let again = guarded(&mut body, &never_returns);
+            let again = guarded(&mut body, &declared());
             assert_eq!(again, 0, "seed {seed}: {body:#?}");
         }
         assert!(

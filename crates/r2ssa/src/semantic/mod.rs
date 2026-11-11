@@ -91,6 +91,9 @@ pub struct PreparedFunctionFacts {
     pub assumptions: AssumptionSet,
     pub applied_assumption_bindings: Vec<PreparedAssumptionBinding>,
     pub assumption_usage: AssumptionUsageReport,
+    /// What the body states at its boundary, where its interface was recovered from it: the slot
+    /// uses its parameters were minted from and its result lanes' bytes (doc/adr-call-boundary.md).
+    pub body_boundary: Option<std::sync::Arc<crate::body_boundary::BodyBoundary>>,
 }
 
 /// What one collection reads, so the phases take one name rather than six.
@@ -257,10 +260,9 @@ impl PreparedFunctionFacts {
                 control.poll()?;
             }};
         }
-        let return_storages = machine_context
+        let return_storages = (machine_context.and_then(SourceMachineContext::function_interface))
             .into_iter()
-            .flat_map(|context| context.abi_model().return_registers())
-            .map(|slot| slot.storage())
+            .flat_map(|interface| interface.return_kind().storages())
             .collect::<Vec<_>>();
         let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
         let boundaries = collect_source_boundary_facts(
@@ -272,6 +274,7 @@ impl PreparedFunctionFacts {
             },
             &call_sites,
             &live_out,
+            &objects,
         );
         phase!("boundaries", boundaries.calls.len());
         // The one liveness of this function. A call's conventional read of a
@@ -338,6 +341,9 @@ impl PreparedFunctionFacts {
                 &private_stack_objects,
                 &memory_round_trips,
                 &meeting_arms(function),
+                (function.compiler_inserted().iter())
+                    .filter_map(|op| graph.inst_for_op(op))
+                    .collect(),
             ),
         );
         phase!("obligations", obligations.obligations().len());
@@ -383,6 +389,7 @@ impl PreparedFunctionFacts {
             machine_context,
         );
         phase!("assumptions", 0);
+        let demanded = demanded(body, (&call_sites, &boundaries), &live_out, &ignored_reads);
         let facts = Self {
             addresses,
             values,
@@ -395,11 +402,12 @@ impl PreparedFunctionFacts {
             control_domains,
             private_stack_objects,
             certificates,
-            demanded: demanded(body, &live_out, &ignored_reads),
+            demanded,
             obligations,
             assumptions: assumptions.clone(),
             applied_assumption_bindings,
             assumption_usage,
+            body_boundary: None,
         };
         Ok((
             facts,
@@ -414,14 +422,90 @@ impl PreparedFunctionFacts {
 /// What `DemandedBytes` says of `body`, where every exit is named.
 fn demanded(
     body: Body<'_>,
+    calls: (&CallSiteFacts, &SourceBoundaryFacts),
     live_out: &crate::liveout::FunctionLiveOut,
     ignored: &BTreeSet<crate::graph::UseSite>,
 ) -> Option<crate::demand::DemandedBytes> {
-    let result = (body.machine_context)
-        .and_then(SourceMachineContext::function_interface)
-        .and_then(returned_bytes);
-    crate::demand::exits_are_named(body.function, live_out)
-        .then(|| crate::demand::DemandedBytes::of_returning(body.graph, live_out, result, ignored))
+    let interface = (body.machine_context).and_then(SourceMachineContext::function_interface);
+    let result = interface.and_then(returned_bytes);
+    // A void function's return reads no register, so no return block is left unnamed.
+    let void = interface.map(r2source::SourceFunctionInterface::return_kind)
+        == Some(r2source::SourceFunctionReturn::Void);
+    // A return a written result leaves undefined (case 1) reads no register either.
+    let undefined = (calls.1.returns.values())
+        .filter(|boundary| boundary.result_unproven && result.is_some())
+        .filter_map(|boundary| body.graph.block_addr_of(boundary.at))
+        .collect::<BTreeSet<_>>();
+    let without = match void {
+        true => crate::liveout::FunctionLiveOut::default(),
+        false => live_out.without(&undefined),
+    };
+    let live_out = &without;
+    let (tails, reads) = tail_reads(body, calls).unwrap_or_default();
+    crate::demand::exits_are_named_beside(body.function, live_out, &tails).then(|| {
+        crate::demand::DemandedBytes::of_returning(body.graph, live_out, (result, &reads), ignored)
+    })
+}
+
+/// Blocks that leave by a tail transfer, and the bytes of each value their callees read.
+type TailReads = (BTreeSet<u64>, Vec<(ValueId, crate::bytes::ByteMask)>);
+
+/// Tail-transfer exits and what their callees read: each argument and the result lane's `logical`
+/// bytes; `None` where a tail states no narrower width (doc/adr-call-boundary.md, "S2 as built").
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "the tail exits of one body: a few blocks, where a dense index costs O(blocks)"
+    )
+)]
+fn tail_reads(
+    body: Body<'_>,
+    (call_sites, boundaries): (&CallSiteFacts, &SourceBoundaryFacts),
+) -> Option<TailReads> {
+    let mut tails = BTreeSet::new();
+    let mut reads = Vec::new();
+    let tail_calls =
+        (call_sites.by_id.values()).filter(|call| call.transfer == CallSiteTransfer::TailCall);
+    for call in tail_calls {
+        let boundary = boundaries.calls.get(&call.id)?;
+        let named =
+            boundary.complete && boundary.arguments_complete && boundary.variadic == Some(false);
+        let Some(SourceCallResult::Register { storage, width }) = boundary.result_kind else {
+            return None;
+        };
+        if !named || width.fills(storage) {
+            return None;
+        }
+        let block = body
+            .graph
+            .inst(call.at)
+            .and_then(|inst| body.graph.block(inst.block))?;
+        tails.insert(block.addr);
+        for argument in &boundary.arguments {
+            if let SourceCallArgumentValue::Value(value) = argument.value {
+                reads.push((value, crate::bytes::ByteMask::All));
+            }
+        }
+        let lane = crate::liveout::FunctionLiveOut::reaching(
+            body.function,
+            body.graph,
+            storage,
+            block.addr,
+        );
+        for value in lane.iter() {
+            let held = body
+                .graph
+                .value(value)
+                .and_then(|held| held.canonical_storage);
+            let mask = match held.is_some_and(|held| held.offset == storage.offset) {
+                true => crate::bytes::ByteMask::whole(u32::from(width.logical)),
+                false => crate::bytes::ByteMask::All,
+            };
+            reads.push((value, mask));
+        }
+    }
+    Some((tails, reads))
 }
 
 /// The bytes of its result register a function's caller reads: the low bytes the declared type
@@ -491,8 +575,11 @@ pub(crate) fn ensure_source_formal_parameter_values(
             existing.insert(storage, Some(value));
         }
     };
-    for parameter in source_formal_parameter_projections(machine_context) {
-        materialize(graph, &mut existing, parameter.graph_storage);
+    for (_, graph_storage) in source_formal_parameter_projections(machine_context)
+        .iter()
+        .filter_map(|parameter| parameter.register())
+    {
+        materialize(graph, &mut existing, graph_storage);
     }
     // The convention's own argument slots, not the interface's parameter list:
     // what a call may read implicitly is fixed by the calling convention, and

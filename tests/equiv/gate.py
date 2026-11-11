@@ -19,7 +19,7 @@ status is one of:
 ``ub``                    UBSan reported, or the ``-O0`` and ``-O2`` builds
                           disagree on a vector both finished
 ``slow``                  every finished run agreed, but a rendering build ran
-                          past its budget on some vector (:mod:`cost`): not
+                          past its allowance on some vector (:mod:`cost`): not
                           evidence of a wrong answer, and not ``equal`` either
 ``compile-error``         the compiler or the loader rejected a build; the
                           diagnostic is kept (a compiler that timed out or
@@ -100,8 +100,7 @@ class Config:
     def driver_ceiling(self, vector_count: int) -> float:
         """Seconds the runtime may take for these vectors before it is presumed stuck:
         every run of every vector ending at its guard."""
-        per_vector_ms = (self.cost.budget * 22 if self.cost.measure == "time"
-                         else self.cost.hang_ms * 6)
+        per_vector_ms = self.cost.worst_vector_ms(len(RUN_LABELS))
         return max(120.0, vector_count * per_vector_ms / 1000.0 + 60.0)
 
     def floor(self) -> int:
@@ -199,7 +198,8 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
         return record
     target = config.target
     if target.objects_through_loader:
-        conflicts = link.loader_conflicts(link.shim_objects(links, definition), str(binary),
+        program = target.host_program(binary, config.runtime)
+        conflicts = link.loader_conflicts(link.shim_objects(links, definition), str(program),
                                           str(config.runtime), target)
         if conflicts:
             # The rendering cannot be run against the objects it names here.
@@ -209,7 +209,8 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
     identity = link.build_trampoline(config.cc, workdir, spec.address, target)
     builds, strict, skipped = link.build_rendering(config.cc, workdir, code, links, definition,
                                                    link.needed_libraries(str(binary), target),
-                                                   spec.address, config.compile_timeout, target)
+                                                   spec.address, config.compile_timeout, target,
+                                                   target.import_slots(binary))
     record.strict = strict
     if not identity.ok:
         record.status = "harness-error"
@@ -232,8 +233,10 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
 
     runs = [
         Run("original", address=spec.address),
-        Run("identity", so_path=str(identity.path), symbol="equiv_identity"),
-        *(Run(variant, so_path=str(builds[variant].path), symbol=definition, replaces=True)
+        Run("identity", so_path=str(identity.path), symbol="equiv_identity",
+            factor=Cost.factor(True)),
+        *(Run(variant, so_path=str(builds[variant].path), symbol=definition, replaces=True,
+              factor=Cost.factor(variant == "O2"))
           for variant in ("O0", "pattern", "O2", "ubsan")),
     ]
     vectors = build_vectors(spec, dwarf, config.vectors, record.key, target.abi)
@@ -304,8 +307,10 @@ def run_driver(binary: Path, job: Path, out: Path, config: Config,
         f"EQUIV_JOB={job}",
         f"EQUIV_OUT={out}",
         "UBSAN_OPTIONS=print_stacktrace=0:halt_on_error=1:exitcode=86",
+        *config.target.program_environment(binary),
     ]
-    argv = [*fixed_layout_prefix(), *config.target.run_argv(binary, assignments)]
+    program = config.target.host_program(binary, config.runtime)
+    argv = [*fixed_layout_prefix(), *config.target.run_argv(program, assignments)]
     budget = config.driver_ceiling(vector_count)
     out.unlink(missing_ok=True)
     try:
@@ -370,6 +375,9 @@ class ResidualHelpers:
 # A residual of this cause is a whole return statement (r2dec render/control.rs), so the
 # state at its trap is the state the original returns with.
 RETURN_POSITION = frozenset({"unproven-return"})
+# The builds a `slow` names, the like-for-like one first so the name does not follow an
+# unoptimised build that sits near its own allowance (ADR D339); UBSan grades no cost.
+_COST_GRADED = (O2, O0, PATTERN)
 # The statuses that rest on a floor of vectors compared with the original.
 _FLOORED = ("equal", "residual-trap")
 
@@ -435,11 +443,7 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
                 found[verdict] = at_trap
                 counts["trap_compared"] += bool(compared)
                 counts["trap_memory"] += compared == "memory"
-            elif _over_budget(o0):
-                # Running past the budget is a cost, not an answer: nothing it
-                # computed can be compared.
-                found["slow"] = {"build": "O0", "original": _run_evidence(runs[ORIGINAL])}
-            else:
+            elif not _over_budget(o0):
                 found["differs"] = {**_pair_evidence(primary),
                                     "original": _run_evidence(runs[ORIGINAL]),
                                     "rendering": _run_evidence(o0)}
@@ -453,21 +457,16 @@ def classify(vector_lines: list[dict], vectors: list, residual: int,
                     found["differs"]["cause"] = (
                         f"control reached the original function's body at {o0.get('fault_pc')}")
         uninit = pairs.get((O0, PATTERN))
-        if uninit is not None and not uninit.get("equal"):
-            late = [RUN_LABELS[i] for i in (O0, PATTERN) if len(runs) > i and _over_budget(runs[i])]
-            if late:
-                found.setdefault("slow", {"build": ", ".join(late)})
-            else:
-                found["uninit"] = {"detector": "auto-var-init zero vs pattern",
-                                   **_pair_evidence(uninit)}
+        # A run stopped past its allowance is a cost, not an answer: nothing it computed is compared.
+        late = [i for i in _COST_GRADED if len(runs) > i and _over_budget(runs[i])]
+        if uninit is not None and not uninit.get("equal") and not {O0, PATTERN} & set(late):
+            found["uninit"] = {"detector": "auto-var-init zero vs pattern", **_pair_evidence(uninit)}
         optimised = pairs.get((O0, O2))
-        if optimised is not None and not optimised.get("equal") and "ub" not in found:
-            late = [RUN_LABELS[i] for i in (O0, O2) if len(runs) > i and _over_budget(runs[i])]
-            if late:
-                found.setdefault("slow", {"build": ", ".join(late)})
-            else:
-                found["ub"] = {"detector": "-O0 and -O2 builds disagree",
-                               **_pair_evidence(optimised)}
+        if (optimised is not None and not optimised.get("equal") and "ub" not in found
+                and not {O0, O2} & set(late)):
+            found["ub"] = {"detector": "-O0 and -O2 builds disagree", **_pair_evidence(optimised)}
+        if late:
+            found["slow"] = {"build": RUN_LABELS[late[0]], "original": _run_evidence(runs[ORIGINAL])}
         status = next((s for s in _VECTOR_SEVERITY if s in found), "equal")
         counts[status] += 1
         if status == "equal" or (status == "residual-trap" and primary.get("pre_trap")):
@@ -560,9 +559,9 @@ def trap_comparison(status: str, counts: dict) -> str | None:
 
 def _run_evidence(run: dict) -> dict:
     """A run as a record keeps it: a fault as an offset into its object."""
-    # `insns` is a count the counter may vary in its last digits: no record keeps it.
+    # A cost varies from run to run (a count in its last digits, CPU time more): no record keeps it.
     kept = {key: value for key, value in run.items()
-            if key not in ("fault_pc", "fault_base", "insns")}
+            if key not in ("fault_pc", "fault_base", "cost")}
     try:
         kept["fault_offset"] = hex(int(str(run["fault_pc"]), 16) - int(str(run["fault_base"]), 16))
     except (KeyError, ValueError):
@@ -579,7 +578,7 @@ def _stack_exhausted(runs: list[dict]) -> bool:
 
 
 def _over_budget(run: dict) -> bool:
-    """Only a run the budget stopped is slow; ``hang`` is the wall-clock guard, which
+    """Only a run its allowance stopped is slow; ``hang`` is the wall-clock guard, which
     load moves and which therefore never grades cost."""
     return run.get("outcome") == "budget"
 

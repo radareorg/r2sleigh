@@ -1,10 +1,12 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::BTreeMap;
+
+use crate::CTypeLike;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalField {
     pub name: String,
     pub offset: u64,
-    pub ty: Option<String>,
+    pub ty: Option<CTypeLike>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -25,12 +27,6 @@ pub struct ExternalEnum {
     pub variants: BTreeMap<i64, String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ExternalTypedef {
-    pub name: String,
-    pub target: String,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalAggregateKind {
     Struct,
@@ -40,10 +36,9 @@ pub enum ExternalAggregateKind {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExternalTypeDb {
-    pub structs: HashMap<String, ExternalStruct>,
-    pub unions: HashMap<String, ExternalUnion>,
-    pub enums: HashMap<String, ExternalEnum>,
-    pub typedefs: BTreeMap<String, ExternalTypedef>,
+    pub structs: BTreeMap<String, ExternalStruct>,
+    pub unions: BTreeMap<String, ExternalUnion>,
+    pub enums: BTreeMap<String, ExternalEnum>,
     pub diagnostics: Vec<String>,
 }
 
@@ -261,42 +256,7 @@ fn aggregate_lookup_keys(name: &str) -> Vec<String> {
     out
 }
 
-fn normalize_typedef_name(name: &str) -> String {
-    let trimmed = name.trim();
-    trimmed
-        .strip_prefix("typedef.")
-        .unwrap_or(trimmed)
-        .trim()
-        .to_string()
-}
-
 impl ExternalTypeDb {
-    pub fn insert_typedef(&mut self, name: impl Into<String>, target: impl Into<String>) {
-        let name = normalize_typedef_name(&name.into());
-        let target = target.into().trim().to_string();
-        if name.is_empty() || target.is_empty() {
-            return;
-        }
-        self.typedefs
-            .insert(name.to_ascii_lowercase(), ExternalTypedef { name, target });
-    }
-
-    pub fn is_aggregate_typedef(&self, name: &str) -> bool {
-        aggregate_lookup_keys(name)
-            .iter()
-            .any(|key| self.typedefs.contains_key(key))
-            && self.resolve_typedef_aggregate(name).is_some()
-    }
-
-    /// Whether the source type database actually declares this typedef name.
-    /// Parsing an identifier is not enough: callers use this to avoid minting
-    /// a more-specific type from an otherwise unplaceable spelling.
-    pub fn declares_typedef(&self, name: &str) -> bool {
-        aggregate_lookup_keys(name)
-            .iter()
-            .any(|key| self.typedefs.contains_key(key))
-    }
-
     pub fn resolve_aggregate_kind(&self, name: &str) -> Option<ExternalAggregateKind> {
         for key in aggregate_lookup_keys(name) {
             if self.structs.contains_key(&key) {
@@ -309,41 +269,12 @@ impl ExternalTypeDb {
                 return Some(ExternalAggregateKind::Enum);
             }
         }
-        self.resolve_typedef_aggregate(name).map(|(kind, _)| kind)
+        None
     }
 
-    fn resolve_typedef_aggregate(&self, name: &str) -> Option<(ExternalAggregateKind, String)> {
-        self.typedef_chain_keys(name).find_map(|keys| {
-            keys.into_iter().find_map(|key| {
-                if self.structs.contains_key(&key) {
-                    Some((ExternalAggregateKind::Struct, key))
-                } else if self.unions.contains_key(&key) {
-                    Some((ExternalAggregateKind::Union, key))
-                } else if self.enums.contains_key(&key) {
-                    Some((ExternalAggregateKind::Enum, key))
-                } else {
-                    None
-                }
-            })
-        })
-    }
-
-    /// The lookup keys of `name`, then of each target along its typedef chain.
-    ///
-    /// Each step follows the typedef entry the current keys name, and only an
-    /// entry this walk has not followed before, so the chain is read to its
-    /// end whatever its length and stops where a cycle closes: at most
-    /// `typedefs.len() + 1` key sets, each built once.
-    pub(crate) fn typedef_chain_keys(&self, name: &str) -> impl Iterator<Item = Vec<String>> + '_ {
-        let mut followed = BTreeSet::new();
-        std::iter::successors(Some(aggregate_lookup_keys(name)), move |keys| {
-            let (key, typedef) = keys
-                .iter()
-                .find_map(|key| self.typedefs.get_key_value(key))?;
-            followed
-                .insert(key.clone())
-                .then(|| aggregate_lookup_keys(&typedef.target))
-        })
+    /// The lookup keys of `name`.
+    pub(crate) fn lookup_keys(name: &str) -> Vec<String> {
+        aggregate_lookup_keys(name)
     }
 }
 
@@ -366,57 +297,5 @@ mod tests {
             normalize_external_type_name("type.IOCPU_VTable.setCPUNumber"),
             "void *"
         );
-    }
-
-    /// A struct reached through `links` typedefs, and a cycle of two beside it.
-    fn typedef_chain_db(links: usize) -> ExternalTypeDb {
-        let mut db = ExternalTypeDb::default();
-        db.structs.insert(
-            "payload".to_string(),
-            ExternalStruct {
-                name: "payload".to_string(),
-                fields: BTreeMap::from([(
-                    0,
-                    ExternalField {
-                        name: "first".to_string(),
-                        offset: 0,
-                        ty: Some("int".to_string()),
-                    },
-                )]),
-            },
-        );
-        for link in 0..links {
-            let target = if link + 1 == links {
-                "payload".to_string()
-            } else {
-                format!("Link{}", link + 1)
-            };
-            db.insert_typedef(format!("Link{link}"), target);
-        }
-        db.insert_typedef("Ping", "Pong");
-        db.insert_typedef("Pong", "Ping");
-        db
-    }
-
-    #[test]
-    fn a_typedef_chain_resolves_to_its_aggregate_at_any_length() {
-        for links in [1, 40] {
-            let db = typedef_chain_db(links);
-            assert_eq!(
-                db.resolve_aggregate_kind("Link0"),
-                Some(ExternalAggregateKind::Struct),
-                "a chain of {links} typedefs ends at a struct"
-            );
-            assert!(db.is_aggregate_typedef("Link0"));
-            assert!(
-                crate::analysis::external_named_aggregate_has_real_layout(&db, "Link0"),
-                "a chain of {links} typedefs ends at a struct with members"
-            );
-            // A cycle is a typedef naming no aggregate, and the walk ends there.
-            assert_eq!(db.resolve_aggregate_kind("Ping"), None);
-            assert!(!crate::analysis::external_named_aggregate_has_real_layout(
-                &db, "Ping"
-            ));
-        }
     }
 }

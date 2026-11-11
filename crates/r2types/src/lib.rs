@@ -21,10 +21,6 @@ pub(crate) mod signature_infer;
 mod signedness;
 pub(crate) mod solver;
 
-pub fn parse_external_type_like_spec(spec: &str, ptr_bits: u32) -> Option<CTypeLike> {
-    convert::parse_c_type_like(spec, ptr_bits)
-}
-
 pub(crate) use external::ExternalAggregateKind;
 pub(crate) use facts::{
     SignatureCertificate, is_generic_signature_type, signature_hint_can_replace_existing,
@@ -50,8 +46,8 @@ pub use context::{
     sanitize_c_identifier,
 };
 pub use convert::{
-    CTypeLike, bit_vector_tag, c_object_declaration, parse_c_type_like, spellable_c_type_like,
-    spelling_names_a_type,
+    CTypeLike, bit_vector_tag, c_object_declaration, source_type_like, spellable_c_type_like,
+    spelling_names_a_type, spells_its_structure,
 };
 pub use data_object::{
     DataObjectTypeFact, DataObjectTypeProvenance, DataObjectTypeRefusal, ProgramDataObjectTypeFacts,
@@ -73,8 +69,9 @@ pub use function_facts::{
     InterprocSummaryView, MemberAccessRenderFact, MemberAccessSource, MemoryAccessRenderFact,
     PredicateComparisonFact, RegisterCallArgumentLocationFact, ReturnTypeEvidence, ReturnTypeFact,
     ReturnTypeRefusal, ReturnValueRenderFact, SourceOwnedCalleeSignature, SourceOwnedFunctionFacts,
-    StackCallArgumentLocationFact, admissible_declaration_type, admit_declaration_type,
-    aggregate_is_definable, aggregate_members, declaration_type_width_bits,
+    StackCallArgumentLocationFact, UnprovenCause, admissible_declaration_type,
+    admit_declaration_type, aggregate_is_definable, aggregate_members, declaration_type_width_bits,
+    unread_slot,
 };
 
 pub use model::{Signedness, Type};
@@ -84,53 +81,7 @@ pub use r2ssa::AssumptionUsageReport;
 
 pub use analysis::{
     DecompileFinalization, FinalizationRefused, TypeAnalysis, TypeAnalysisError,
-    TypeAnalysisRequest, build_source_owned_type_analysis, source_type_like,
+    TypeAnalysisRequest, build_source_owned_type_analysis,
 };
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn signed_type(bits: u32) -> CTypeLike {
-        CTypeLike::Int {
-            bits,
-            signedness: Signedness::Signed,
-        }
-    }
-
-    fn unsigned_type(bits: u32) -> CTypeLike {
-        CTypeLike::Int {
-            bits,
-            signedness: Signedness::Unsigned,
-        }
-    }
-
-    fn ptr_type(inner: CTypeLike) -> CTypeLike {
-        CTypeLike::Pointer(Box::new(inner))
-    }
-
-    #[test]
-    fn parse_external_type_like_spec_normalizes_radare2_type_names() {
-        assert_eq!(
-            parse_external_type_like_spec("type.int", 64),
-            Some(signed_type(32))
-        );
-        assert_eq!(
-            parse_external_type_like_spec("type.uint16_t *", 64),
-            Some(ptr_type(unsigned_type(16)))
-        );
-        assert_eq!(
-            parse_external_type_like_spec("struct.sla_node *", 64),
-            Some(ptr_type(CTypeLike::Struct("sla_node".to_string())))
-        );
-        assert_eq!(
-            parse_external_type_like_spec("type.IOCPU_VTable.setCPUNumber", 64),
-            None
-        );
-        assert_eq!(
-            parse_external_type_like_spec("type.intptr_t", 64),
-            Some(signed_type(64))
-        );
-    }
-}
 mod data_object;

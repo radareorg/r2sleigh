@@ -29,8 +29,11 @@ before the ratchet accepts it.
 ``--target`` picks the machine (``target.py``): ``x86-64``, the default, runs
 natively on x86-64 Linux; ``aarch64`` builds with the AArch64 cross compilers
 and runs under qemu-user. An aarch64 record's configuration says so
-(``aarch64-gcc-O0``), and its baseline is ``baseline-aarch64.json``. Where the
-target cannot run, the gate says so and exits 3.
+(``aarch64-gcc-O0``), and its baseline is ``baseline-aarch64.json``. ``win64``
+builds PE32+ images with clang-cl against an xwin sysroot (``$EQUIV_XWIN``) and
+maps them into the Linux runtime (``win64-clang-cl-O0``,
+``baseline-win64.json``). Where the target cannot run, the gate says so and
+exits 3.
 """
 
 from __future__ import annotations
@@ -67,7 +70,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="the machine the population is built for and run on")
     parser.add_argument("--sources", type=Path, nargs="+", default=None,
                         help="C sources to build (default: tests/corpus/*.c tests/gold/*.c)")
-    parser.add_argument("--compilers", default=",".join(build.COMPILERS))
+    parser.add_argument("--compilers", default=None,
+                        help="population compilers (default: the target's, gcc,clang on ELF)")
     parser.add_argument("--opts", default=",".join(build.OPT_LEVELS))
     parser.add_argument("--only", default=None,
                         help="grade only record keys matching this regular expression")
@@ -76,20 +80,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="compiler for the renderings (default: the target's gcc)")
     parser.add_argument("--vectors", type=int, default=48)
     parser.add_argument("--measure", choices=cost.MEASURES, default="time",
-                        help="what a call's budget counts: wall-clock milliseconds, which a "
-                             "loaded host moves, or retired instructions (perf_event_open, "
-                             "native runs only), which it does not")
+                        help="what a call's cost counts: CPU time, or retired instructions "
+                             "(perf_event_open, native runs only); each run is graded against "
+                             "its original on the same vector (cost.Cost, ADR D339)")
     parser.add_argument("--timeout-ms", type=int, default=cost.DEFAULT_TIME_MS,
-                        help="with --measure time, the original's budget per call, in native "
-                             "time (an emulated target scales it); a rendering gets four "
-                             "times it")
+                        help="with --measure time, the budget B in CPU milliseconds, native "
+                             "(an emulated target scales it)")
     parser.add_argument("--budget-instructions", type=int, default=cost.DEFAULT_INSTRUCTIONS,
-                        help="with --measure instructions, the original's budget per call; a "
-                             "rendering gets four times it")
+                        help="with --measure instructions, the budget B")
     parser.add_argument("--hang-ms", type=int, default=cost.DEFAULT_HANG_MS,
-                        help="with --measure instructions, the wall-clock guard per call, "
-                             "which ends a run that retires nothing (a blocked call) and "
-                             "never grades cost")
+                        help="the wall-clock guard per call, which ends a run that does not run "
+                             "(a blocked call) and never grades cost")
     parser.add_argument("--function-timeout", type=float, default=300.0,
                         help="seconds r2s may spend on one function before it is restarted")
     parser.add_argument("--startup-timeout", type=float, default=600.0,
@@ -166,6 +167,7 @@ def grade_binary(binary: build.Binary, args: argparse.Namespace, config: gate.Co
     for key, sub in wanted:
         spec = call_spec(dwarf, sub, all_functions, target.abi)
         names, size = symbols.get(sub.low_pc, ([], 0))
+        size = size or sub.size
         if names and sub.name not in names and not spec.unsupported:
             spec.unsupported = (
                 f"the symbol at 0x{sub.low_pc:x} is {names[0]}, a compiler copy whose "
@@ -246,6 +248,8 @@ def main(argv: list[str] | None = None) -> int:
     args.out = args.out.resolve()
     args.r2s = args.r2s.resolve()
     target = by_name(args.target)
+    if args.compilers is None:
+        args.compilers = ",".join(target.compilers)
     if args.cc is None:
         args.cc = target.rendering_cc
     problem = gate.environment_problem(target)

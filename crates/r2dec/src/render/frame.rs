@@ -17,11 +17,12 @@ pub(super) struct Frame {
 }
 
 impl Frame {
-    /// The layout of `objects` (entry offset, size) under `sp % alignment == residue` at entry; an
-    /// object reaching offset 0 or above is the caller's and left out. `None` where none is left.
+    /// The layout of `objects` (entry offset, size) under `sp % alignment == residue` at entry, less
+    /// any with a byte `callee` does not own; the array reaches entry, or a home past it.
     pub(super) fn lay_out(
         objects: impl IntoIterator<Item = (ObjectId, i64, u32)>,
         (alignment, residue): (u32, u32),
+        callee: impl Fn(i64) -> bool,
     ) -> Option<Self> {
         if alignment == 0 || residue >= alignment {
             return None;
@@ -30,16 +31,20 @@ impl Frame {
             .into_iter()
             .filter(|(_, offset, size)| {
                 *size > 0
+                    && callee(*offset)
                     && offset
-                        .checked_add(i64::from(*size))
-                        .is_some_and(|end| end <= 0)
+                        .checked_add(i64::from(*size) - 1)
+                        .is_some_and(&callee)
             })
             .map(|(object, offset, size)| (object, (offset, size)))
             .collect::<BTreeMap<_, _>>();
         let low = objects.values().map(|(offset, _)| *offset).min()?;
+        let high = (objects.values())
+            .map(|(offset, size)| offset + i64::from(*size))
+            .fold(0, i64::max);
         // `frame + pad` must sit where `entry_sp + low` does, modulo the alignment.
         let pad = (i64::from(residue) + low).rem_euclid(i64::from(alignment));
-        let bytes = u32::try_from(pad.checked_sub(low)?).ok()?;
+        let bytes = u32::try_from(pad.checked_add(high)?.checked_sub(low)?).ok()?;
         Some(Self {
             low,
             pad: u32::try_from(pad).ok()?,
@@ -70,7 +75,8 @@ impl Frame {
                     .filter(|root| root.base == r2source::StackAddressBase::StackPointer)?;
                 Some((*object, root.offset, slot.size?))
             });
-        Self::lay_out(placed, (entry.alignment, entry.residue))
+        let callee = |offset: i64| !artifact.caller_frame_offset(offset);
+        Self::lay_out(placed, (entry.alignment, entry.residue), callee)
     }
 
     /// The array's byte index of `object`'s first byte, and the object's size.
@@ -95,19 +101,23 @@ mod tests {
 
     use super::Frame;
 
+    fn below(offset: i64) -> bool {
+        offset < 0
+    }
+
     /// x86-64: `%rsp + 8` is 16-aligned at entry, so an object at entry offset -24 sits at an
     /// address that is 0 modulo 16 and keeps that place in the array.
     #[test]
     fn the_frame_keeps_the_machine_s_alignment() {
         let objects = [(ObjectId(1), -24, 8), (ObjectId(2), -8, 8)];
-        let frame = Frame::lay_out(objects, (16, 8)).expect("a frame");
+        let frame = Frame::lay_out(objects, (16, 8), below).expect("a frame");
         assert_eq!(frame.alignment(), 16);
         let (first, _) = frame.at(ObjectId(1)).expect("laid out");
         assert_eq!(first % 16, 0, "{frame:?}");
         assert_eq!(frame.at(ObjectId(2)), Some((first + 16, 8)));
         assert_eq!(frame.bytes(), first + 24);
         // AArch64: SP is 16-aligned at entry, so -24 is 8 modulo 16.
-        let frame = Frame::lay_out(objects, (16, 0)).expect("a frame");
+        let frame = Frame::lay_out(objects, (16, 0), below).expect("a frame");
         assert_eq!(frame.at(ObjectId(1)).map(|(at, _)| at % 16), Some(8));
     }
 
@@ -119,10 +129,26 @@ mod tests {
             (ObjectId(2), 8, 8),
             (ObjectId(3), -16, 8),
         ];
-        let frame = Frame::lay_out(objects, (16, 8)).expect("the callee's slot");
+        let frame = Frame::lay_out(objects, (16, 8), below).expect("the callee's slot");
         assert_eq!(frame.at(ObjectId(1)), None);
         assert_eq!(frame.at(ObjectId(2)), None);
         assert!(frame.at(ObjectId(3)).is_some());
-        assert_eq!(Frame::lay_out([(ObjectId(2), 8, 8)], (16, 8)), None);
+        assert_eq!(Frame::lay_out([(ObjectId(2), 8, 8)], (16, 8), below), None);
+    }
+
+    /// A Microsoft x64 home the callee owns lies in the array past the return address: entry + 16
+    /// is 8 modulo 16, and the array reaches the home's last byte.
+    #[test]
+    fn a_home_the_callee_owns_extends_the_frame_past_the_return_address() {
+        let owned = |offset: i64| offset < 0 || (8..40).contains(&offset);
+        let objects = [(ObjectId(1), -8, 8), (ObjectId(2), 16, 8)];
+        let frame = Frame::lay_out(objects, (16, 8), owned).expect("a frame");
+        let (local, _) = frame.at(ObjectId(1)).expect("the local");
+        let (home, size) = frame.at(ObjectId(2)).expect("the home");
+        assert_eq!((home - local, size), (24, 8));
+        assert_eq!(home % 16, 8, "{frame:?}");
+        assert_eq!(frame.bytes(), home + 8);
+        let return_address = [(ObjectId(3), 0, 8)];
+        assert_eq!(Frame::lay_out(return_address, (16, 8), owned), None);
     }
 }

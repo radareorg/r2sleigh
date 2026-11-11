@@ -7,7 +7,7 @@ use crate::machine::Machine;
 
 use super::starts::{Stated, StatedStarts};
 use super::{Imports, NameDb, Names, ProgramInputs, Source, naming};
-use crate::native::NativeTarget;
+use crate::native::{NativeRefusal, NativeTarget};
 use crate::query::db::Db;
 
 /// Which instruction set the code the survey found is in.
@@ -55,6 +55,20 @@ impl<S: Source + 'static> Clone for View<'_, S> {
 }
 
 impl<'a, S: Source + 'static> View<'a, S> {
+    /// What the row of the import sealed at `slot` states through `pick`, and the convention it
+    /// is called under; `None` where no row binds it or the row states nothing there.
+    fn import_through<T>(
+        &self,
+        slot: u64,
+        pick: impl Fn(&r2abi::LibraryRow) -> Option<T>,
+    ) -> Option<(T, std::sync::Arc<r2source::ConventionModel>)> {
+        let name = crate::stated::sealed_import(self, slot)?;
+        let walker = super::returns::Walking::new(self.clone(), false).ok()?;
+        let target = walker.target(false);
+        let picked = target.imports.bind(name).ok().and_then(pick)?;
+        Some((picked, std::sync::Arc::clone(&target.convention)))
+    }
+
     /// The view a query reads through; the names, the stubs, the stated starts and, where asked, the modes are asked once.
     pub(super) fn new(db: &'a Db<ProgramInputs<S>>, with_modes: bool) -> Self {
         let imports = db.get::<Imports>(&()).expect("the imports ask for nothing");
@@ -127,33 +141,68 @@ impl<'a, S: Source + 'static> View<'a, S> {
         &self,
         machine: &'a Machine,
         entry: u64,
-    ) -> Result<NativeTarget<'a>, crate::native::Unassembled> {
-        Ok(self.target_under(machine, self.db.inputs().assembled_at(entry)?))
+    ) -> Result<NativeTarget<'a>, crate::native::NativeRefusal> {
+        let chosen = self.db.inputs().assembled_at(entry);
+        let chosen = chosen.map_err(NativeRefusal::Unassembled)?;
+        let mut target = self.target_under(machine, chosen.assembled)?;
+        if let Some(program) = chosen.program {
+            target.program = Some(self.convention_of(program)?);
+        }
+        Ok(target)
     }
 
     /// A decoder under the program's default convention, for a walk that reads no boundary.
     pub(super) fn decoder_of(&self, machine: &'a Machine) -> Result<NativeTarget<'a>, String> {
         let assembled = self.db.inputs().assembled();
-        Ok(self.target_under(machine, assembled.ok_or("the program was not assembled")?))
+        let assembled = assembled.ok_or("the program was not assembled")?;
+        self.target_under(machine, assembled)
+            .map_err(|why| why.to_string())
     }
 
+    /// One convention's held model and the specification it reads.
+    fn convention_of(
+        &self,
+        assembled: &'a super::Assembled,
+    ) -> Result<crate::native::Assembly<'a>, NativeRefusal> {
+        let model = self.db.get::<super::Convention>(&assembled.convention);
+        let model = model.map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
+        Ok(crate::native::Assembly {
+            convention: (*model).clone()?,
+            compiler: &assembled.compiler,
+        })
+    }
+
+    /// What a call does under the program's default convention: a view of its held call model.
+    pub(super) fn default_call_effect(&self) -> Option<r2ssa::SourceCallEffect> {
+        let assembled = self.db.inputs().assembled()?;
+        let model = self.db.get::<super::AnyCall>(&assembled.convention).ok()?;
+        (*model).as_ref().ok()?.call_effect().ok()
+    }
+
+    /// The machine under one convention, its model the program's held one.
     fn target_under(
         &self,
         machine: &'a Machine,
         assembled: &'a super::Assembled,
-    ) -> NativeTarget<'a> {
+    ) -> Result<NativeTarget<'a>, NativeRefusal> {
         let inputs = self.db.inputs();
-        NativeTarget {
+        let machines = inputs.machines().map_err(NativeRefusal::Unassembled)?;
+        let assembly = self.convention_of(assembled)?;
+        let call = self.db.get::<super::AnyCall>(&assembled.convention);
+        let call = call.map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
+        Ok(NativeTarget {
             arch: machine.tables(),
             disasm: &machine.disasm,
             cpu: machine.cpu,
-            convention: assembled.convention,
-            call_effect: assembled.call_effect.as_ref(),
-            compiler: &assembled.compiler,
+            convention: assembly.convention,
+            call: (*call).clone()?,
+            compiler: assembly.compiler,
+            program: None,
             dwarf: &machine.dwarf,
-            prototypes: &assembled.prototypes,
+            imports: &machines.imports,
             declarations: &inputs.source.container().declarations,
-        }
+            data_model: machines.data_model,
+        })
     }
 
     pub(super) fn target(&self, addr: u64) -> Result<NativeTarget<'a>, String> {
@@ -243,6 +292,24 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
                 .is_none_or(|answer| answer.comes())
     }
 
+    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+        let ((index, handle), model) = self.import_through(slot, |row| row.halts_on)?;
+        let register = model
+            .argument_registers(r2abi::SlotClass::Integer)
+            .nth(index.into());
+        register.map(|register| (register, handle))
+    }
+
+    fn binds_handles(&self) -> bool {
+        self.source().container().format == r2abi::statement::Format::Pe
+    }
+
+    fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+        let (handle, model) = self.import_through(slot, |row| row.yields)?;
+        let register = model.result_registers(r2abi::SlotClass::Integer).next();
+        register.map(|register| (register, handle))
+    }
+
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         let assembled = self.db.inputs().assembled();
         assembled.and_then(|held| held.link.clone())
@@ -259,13 +326,13 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
     fn read_callee(
         &self,
         address: u64,
-        callers: super::Callers,
+        callers: super::World,
         _read: &mut dyn FnMut() -> crate::native::CalleeRead,
     ) -> std::sync::Arc<crate::native::CalleeRead> {
         let thumb = self.thumb_at(address);
         let demand = match callers {
-            super::Callers::Read => super::resolved::Demand::Arity,
-            super::Callers::Unread => super::resolved::Demand::Result,
+            super::World::Closed => super::resolved::Demand::Arity,
+            super::World::Open => super::resolved::Demand::Result,
         };
         let read = self
             .db
@@ -294,10 +361,16 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.db.inputs().places_function(vaddr)
     }
 
-    fn result_reads(&self, entry: u64) -> Option<r2source::SourceResultReads> {
-        // A survey that is itself preparing this body is a cycle, which reads as no evidence.
-        let reads = self.db.get::<super::reads::ResultReads>(&entry).ok()?;
-        *reads
+    /// The result `CallBoundary` decided for the function at `entry` from its open read's supply
+    /// (doc/adr-result-side.md, section 3; D317).
+    fn closed_result(&self, entry: u64) -> Option<r2source::SourceClosedResult> {
+        use super::fates::{CallBoundary, CalleeKey, World};
+        let key = (CalleeKey::Entry(entry), World::Closed);
+        let boundary = self.db.get::<CallBoundary>(&key).ok()?;
+        match boundary.as_ref() {
+            Some(CallBoundary::Sites { result, .. }) => result.result,
+            _ => None,
+        }
     }
 
     fn frame_saves(&self, entry: u64) -> Vec<r2source::SourceFrameSave> {

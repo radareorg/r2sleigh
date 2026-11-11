@@ -1,7 +1,8 @@
 //! Dominator-tree placement, `doc/adr-structure-dominator-tree.md` §4: every block is written once,
 //! and every edge once; the certificate in `certify.rs` says the text is the machine's graph.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::BTreeSet;
 
 use r2ssa::domtree::DomTree;
 use r2ssa::natural_loops::NaturalLoop;
@@ -14,18 +15,18 @@ pub(crate) struct Placement<'f> {
     entry: u64,
     /// The function's own dominator tree; placement computes none.
     dom: &'f DomTree,
-    rpo: HashMap<u64, usize>,
+    rpo: FxHashMap<u64, usize>,
     /// The function's natural loops, outermost first.
     loops: Vec<&'f NaturalLoop>,
     /// The loops containing each block, outermost first.
-    loops_of: HashMap<u64, Vec<usize>>,
-    header_of: HashMap<u64, usize>,
+    loops_of: FxHashMap<u64, Vec<usize>>,
+    header_of: FxHashMap<u64, usize>,
     /// Blocks with two or more forward in-edges.
     merge: BTreeSet<u64>,
     /// Merge blocks written in each block's region, in reverse postorder.
-    merge_children: HashMap<u64, Vec<u64>>,
+    merge_children: FxHashMap<u64, Vec<u64>>,
     /// Blocks written after each loop, in reverse postorder.
-    exits: HashMap<usize, Vec<u64>>,
+    exits: FxHashMap<usize, Vec<u64>>,
     /// Exit blocks written where their one edge leaves the loop, not after it.
     inlined: BTreeSet<u64>,
     /// Blocks some edge reaches by `goto`.
@@ -40,7 +41,7 @@ impl<'f> Placement<'f> {
         natural_loops: &'f r2ssa::natural_loops::NaturalLoops,
         entry: u64,
     ) -> Self {
-        let rpo: HashMap<u64, usize> = cfg
+        let rpo: FxHashMap<u64, usize> = cfg
             .reverse_postorder()
             .into_iter()
             .enumerate()
@@ -55,12 +56,12 @@ impl<'f> Placement<'f> {
         let placed = |addr: u64| placed_set.contains(&addr);
 
         let loops = natural_loops.outermost_first();
-        let header_of: HashMap<u64, usize> = loops
+        let header_of: FxHashMap<u64, usize> = loops
             .iter()
             .enumerate()
             .map(|(index, l)| (l.header, index))
             .collect();
-        let mut loops_of = HashMap::<u64, Vec<usize>>::new();
+        let mut loops_of = FxHashMap::<u64, Vec<usize>>::default();
         for (index, natural) in loops.iter().enumerate() {
             for block in &natural.body {
                 loops_of.entry(*block).or_default().push(index);
@@ -90,8 +91,8 @@ impl<'f> Placement<'f> {
             loops_of,
             header_of,
             merge,
-            merge_children: HashMap::new(),
-            exits: HashMap::new(),
+            merge_children: FxHashMap::default(),
+            exits: FxHashMap::default(),
             inlined: BTreeSet::new(),
             labelled: BTreeSet::new(),
         };
@@ -209,7 +210,7 @@ impl<'f> Placement<'f> {
 
     /// An exit with one way in and a closed subtree goes where its edge leaves, unless `break`
     /// reaches it as the first exit of one loop (ADR §4). `O(exits)`.
-    fn inline_exits(&mut self, closed: &HashSet<u64>) {
+    fn inline_exits(&mut self, closed: &FxHashSet<u64>) {
         let loops = self.exits.keys().copied().collect::<Vec<_>>();
         for index in loops {
             let mut broken_to = false;
@@ -227,7 +228,7 @@ impl<'f> Placement<'f> {
         &self,
         index: usize,
         exit: u64,
-        closed: &HashSet<u64>,
+        closed: &FxHashSet<u64>,
         broken: &mut bool,
     ) -> bool {
         let sole = !self.merge.contains(&exit) && closed.contains(&exit);
@@ -264,9 +265,10 @@ pub(crate) fn placed_in_order(function: &r2ssa::SSAFunction) -> Vec<u64> {
 
 /// The blocks whose dominator subtree no edge leaves: the extremes of the successors' preorder
 /// positions over the subtree lie in its interval. `O(B + E)`.
-fn closed_subtrees(cfg: &r2ssa::cfg::CFG, dom: &DomTree, placed: &BTreeSet<u64>) -> HashSet<u64> {
+fn closed_subtrees(cfg: &r2ssa::cfg::CFG, dom: &DomTree, placed: &BTreeSet<u64>) -> FxHashSet<u64> {
     let order = dom.preorder();
-    let position: HashMap<u64, usize> = order.iter().enumerate().map(|(at, b)| (*b, at)).collect();
+    let position: FxHashMap<u64, usize> =
+        order.iter().enumerate().map(|(at, b)| (*b, at)).collect();
     let mut last = (0..order.len()).collect::<Vec<_>>();
     let mut lowest = last.clone();
     let mut highest = last.clone();

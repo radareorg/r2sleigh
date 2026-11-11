@@ -40,6 +40,26 @@ pub struct FunctionLiveOut {
     clobbered: BTreeSet<u64>,
 }
 
+/// Whether `last` is a direct tail transfer out of the body to a callee that leaves every one of
+/// `storages` as it found it (D212): its block hands back what reaches it, as a return does.
+fn passing_tail(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    last: &crate::op::SSAOp<ValueId>,
+    storages: &[CanonicalStorageId],
+) -> bool {
+    let crate::op::SSAOp::Branch { target, .. } = last else {
+        return false;
+    };
+    let Some(target) = (graph.value(*target)).and_then(|value| value.canonical_storage) else {
+        return false;
+    };
+    target.space == crate::CanonicalStorageSpace::Ram
+        && graph.block_id_for_addr(target.offset).is_none()
+        && !storages.is_empty()
+        && (storages.iter()).all(|storage| func.call_passes(target.offset, *storage))
+}
+
 /// Whether a write puts some of the returned bytes in place.
 ///
 /// A `CanonicalLocation` is the register; a `CanonicalStorageId`'s size is only
@@ -75,14 +95,13 @@ impl FunctionLiveOut {
         for block in &graph.blocks {
             // A predicated return (`bxeq lr`) ends its block in a return the terminator does not name.
             let last = graph.op_insts(block.id).last();
+            let last = last.and_then(|inst| graph.op(*inst));
             let returns = func
                 .cfg()
                 .get_block(block.addr)
                 .is_some_and(|cfg| cfg.is_return())
-                || matches!(
-                    last.and_then(|inst| graph.op(*inst)),
-                    Some(crate::op::SSAOp::Return { .. })
-                );
+                || matches!(last, Some(crate::op::SSAOp::Return { .. }))
+                || last.is_some_and(|last| passing_tail(func, graph, last, return_storages));
             if !returns {
                 continue;
             }
@@ -97,7 +116,7 @@ impl FunctionLiveOut {
             let mut here = BTreeSet::new();
             for storage in return_storages {
                 let (found, clobbered_here) =
-                    live.collect_reaching(func, graph, *storage, block.addr, &mut here);
+                    live.collect_reaching(func, graph, *storage, block.addr, Some(&mut here));
                 complete &= found && !clobbered_here;
                 clobbered |= clobbered_here;
             }
@@ -135,7 +154,7 @@ impl FunctionLiveOut {
         graph: &SsaGraph,
         return_storage: CanonicalStorageId,
         from: u64,
-        here: &mut BTreeSet<ValueId>,
+        mut here: Option<&mut BTreeSet<ValueId>>,
     ) -> (bool, bool) {
         let mut found = false;
         let mut clobbered_any = false;
@@ -174,7 +193,7 @@ impl FunctionLiveOut {
                 // the register before it -- for a function whose final act is
                 // `warnx(fmt, ...)`, the format string -- as the value
                 // returned.
-                if crate::reaching_rules::op_ends_reaching_walk(func, op) {
+                if crate::reaching_rules::op_ends_reaching_walk(func, graph, op, return_storage) {
                     clobbered = true;
                     break;
                 }
@@ -188,8 +207,8 @@ impl FunctionLiveOut {
                     continue;
                 }
                 written = true;
-                self.values.insert(*dst);
-                found |= here.insert(*dst);
+                let new = self.values.insert(*dst);
+                found |= here.as_deref_mut().map_or(new, |here| here.insert(*dst));
                 if covers_fully(storage, return_storage) {
                     defined_here = true;
                     break;
@@ -215,8 +234,8 @@ impl FunctionLiveOut {
                 }
                 written = true;
                 defined_here |= covers_fully(storage, return_storage);
-                self.values.insert(phi);
-                found |= here.insert(phi);
+                let new = self.values.insert(phi);
+                found |= here.as_deref_mut().map_or(new, |here| here.insert(phi));
             }
             if clobbered {
                 // The path answers with the callee's value, which is not one of
@@ -235,6 +254,32 @@ impl FunctionLiveOut {
             }
         }
         (found && !reaches_entry, clobbered_any)
+    }
+
+    /// The same, with the returning `blocks` set aside.
+    pub(crate) fn without(&self, blocks: &BTreeSet<u64>) -> Self {
+        let mut kept = Self::default();
+        for (addr, values) in (self.by_return.iter()).filter(|(addr, _)| !blocks.contains(addr)) {
+            values.iter().for_each(|value| {
+                kept.values.insert(*value);
+            });
+            kept.by_return.insert(*addr, values.clone());
+        }
+        kept.unresolved = self.unresolved.difference(blocks).copied().collect();
+        kept.clobbered = self.clobbered.difference(blocks).copied().collect();
+        kept
+    }
+
+    /// The values this body defines that reach the end of block `from` in `storage`.
+    pub(crate) fn reaching(
+        func: &SSAFunction,
+        graph: &SsaGraph,
+        storage: CanonicalStorageId,
+        from: u64,
+    ) -> crate::dense::IdSet<ValueId> {
+        let mut live = Self::default();
+        live.collect_reaching(func, graph, storage, from, None);
+        live.values
     }
 
     /// Whether the caller reads this value once the function returns.

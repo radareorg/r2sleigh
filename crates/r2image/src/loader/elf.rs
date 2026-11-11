@@ -131,7 +131,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
         // Stable: within one phase, table order is application order.
         records.sort_by_key(|(phase, _)| *phase);
         let relocations: Vec<Relocation> = records.into_iter().map(|(_, record)| record).collect();
-        let writes = relocations
+        let writes: Vec<LoaderWrite> = relocations
             .iter()
             .map(|record| LoaderWrite {
                 place: record.vaddr,
@@ -140,7 +140,28 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                 encoding: record.encoding,
             })
             .collect();
-        (relocations, writes, self.reserved().into_iter().collect())
+        // The loader's own words come first, so a record naming one stands over it.
+        let (mut stated, ranges) = match self.reserved() {
+            Some(Reserved::Loader(range)) => (self.loader_words(range), Vec::new()),
+            Some(Reserved::Table(range)) => (Vec::new(), vec![range]),
+            None => (Vec::new(), Vec::new()),
+        };
+        stated.extend(writes);
+        (relocations, stated, ranges)
+    }
+
+    /// One `Reserved` word per pointer of `range`.
+    fn loader_words(&self, range: Range<u64>) -> Vec<LoaderWrite> {
+        let pointer = self.pointer.max(1);
+        let words = (range.end.saturating_sub(range.start)) / pointer;
+        (0..words)
+            .map(|word| LoaderWrite {
+                place: range.start + word * pointer,
+                width: pointer,
+                kind: WriteKind::Reserved,
+                encoding: Encoding::Word,
+            })
+            .collect()
     }
 
     /// What one record writes, in the coordinates the image is linked at.
@@ -160,8 +181,8 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
             Applies::Resolver => addend().map_or(WriteKind::Unknown, WriteKind::Resolver),
             Applies::ThreadLocal => WriteKind::NotAnAddress,
             // A field of an instruction or a word less its place, which a dynamic table states only for text relocations.
-            Applies::Copy
-            | Applies::Unknown
+            Applies::Copy => WriteKind::Copy,
+            Applies::Unknown
             | Applies::PcRelative
             | Applies::PltRelative
             | Applies::GotRelative
@@ -497,29 +518,38 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
     }
 
     /// The words of the global offset table the loader fills with no relocation naming them, as each psABI reserves them.
-    fn reserved(&self) -> Option<Range<u64>> {
+    fn reserved(&self) -> Option<Reserved> {
         use object::Architecture as A;
         let pointer = self.pointer;
         let got = self.tag(elf::DT_PLTGOT)?;
-        let (first, count) = match self.file.architecture() {
+        match self.file.architecture() {
             // The link map and the lazy resolver, after the word that holds `_DYNAMIC`.
-            A::X86_64 | A::X86_64_X32 | A::I386 | A::Arm | A::Aarch64 | A::Aarch64_Ilp32 => (1, 2),
-            A::Riscv32 | A::Riscv64 | A::LoongArch64 => (0, 2),
+            A::X86_64 | A::X86_64_X32 | A::I386 | A::Arm | A::Aarch64 | A::Aarch64_Ilp32 => {
+                let start = got.wrapping_add(pointer);
+                Some(Reserved::Loader(written(start, 2 * pointer)))
+            }
+            A::Riscv32 | A::Riscv64 | A::LoongArch64 => {
+                Some(Reserved::Loader(written(got, 2 * pointer)))
+            }
             // The whole table: its local words are rebased and its global ones bound, all without relocations.
             A::Mips | A::Mips64 | A::Mips64_N32 => {
                 let local = self.tag(elf::DT_MIPS_LOCAL_GOTNO)?;
                 let symbols = self.tag(elf::DT_MIPS_SYMTABNO)?;
                 let first_global = self.tag(elf::DT_MIPS_GOTSYM)?;
-                (
-                    0,
-                    local.saturating_add(symbols.saturating_sub(first_global)),
-                )
+                let count = local.saturating_add(symbols.saturating_sub(first_global));
+                Some(Reserved::Table(written(got, count.saturating_mul(pointer))))
             }
-            _ => return None,
-        };
-        let start = got.wrapping_add(first * pointer);
-        Some(written(start, count.saturating_mul(pointer)))
+            _ => None,
+        }
     }
+}
+
+/// What a psABI reserves of the global offset table.
+enum Reserved {
+    /// The loader's link map and lazy resolver: words that name no function of this image.
+    Loader(Range<u64>),
+    /// MIPS's whole table, whose words the loader rebases and binds with no record: any address.
+    Table(Range<u64>),
 }
 
 /// What a relocatable object's records state once its sections are placed.

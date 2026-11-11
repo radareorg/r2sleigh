@@ -626,7 +626,7 @@ fn a_calls_return_address_push_is_refunded_by_the_callee() {
     };
     let interface = SourceFunctionInterface::new_exact(
         b"promotion-test".to_vec(),
-        "test-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [],
@@ -753,7 +753,7 @@ fn a_declared_stack_argument_is_the_store_the_call_finds_above_its_stack_pointer
     };
     let interface = SourceFunctionInterface::new_exact(
         b"stack-argument".to_vec(),
-        "test-stack-abi",
+        r2source::ConventionId::SysVAmd64,
         [SourceAbiParameterSpec::new(0, storage(8, 8))],
         SourceFunctionReturn::Void,
         [],
@@ -768,7 +768,7 @@ fn a_declared_stack_argument_is_the_store_the_call_finds_above_its_stack_pointer
         b"stack-argument".to_vec(),
         identity,
         true,
-        "test-stack-abi",
+        r2source::ConventionId::SysVAmd64,
         [SourceCallArgumentSpec::on_stack(0, 0, 8)],
         false,
         false,
@@ -874,7 +874,7 @@ fn reads_of_the_same_bytes_under_the_same_memory_are_one_content_in_any_block() 
     };
     let interface = crate::SourceFunctionInterface::new_exact(
         b"same-content-reads".to_vec(),
-        "aarch64-test",
+        r2source::ConventionId::Aapcs64,
         [SourceAbiParameterSpec::new(0, parameter)],
         SourceFunctionReturn::Void,
         [],

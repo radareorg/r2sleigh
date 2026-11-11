@@ -383,7 +383,7 @@ pub(crate) fn libraries(file: &object::File<'_>) -> Vec<String> {
         object::File::MachO64(macho) => macho_needed(macho),
         _ => elf_needed(file),
     };
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     libraries.retain(|library| seen.insert(library.clone()));
     libraries
 }

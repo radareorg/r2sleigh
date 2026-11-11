@@ -1,50 +1,94 @@
 {
-  "functions_in_truth": 20,
-  "functions_recovered": 20,
-  "facts": {
-    "correct": 35,
-    "missing": 0,
-    "marked_wrong": 5,
-    "silently_wrong": 17
-  },
-  "recovery_rate": 0.614,
-  "soundness_rate": 0.6731,
-  "silent": [
-    "sym.fnv1a32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
-    "sym.fnv1a64 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
-    "sym.djb2 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
-    "sym.sdbm parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
-    "sym.adler32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
-    "sym.fletcher32 parameter 0: expected 'const uint16_t*', said 'uint16_t*'",
-    "sym.crc32_bitwise parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
-    "sym.crc32_table parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
-    "sym.rotl32 parameter 1: expected 'int8_t', said 'uint8_t'",
-    "sym.murmur3_32 parameter 0: expected 'const uint8_t*', said 'void*'",
-    "sym.xxhash32 parameter 0: expected 'const uint8_t*', said 'size_t'",
-    "sym.siphash24 parameter 0: expected 'const uint8_t*', said 'size_t'",
-    "sym.pearson return: expected 'uint8_t', said 'uint32_t'",
-    "sym.pearson parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
-    "sym.combined parameter 0: expected 'const uint8_t*', said 'size_t'",
-    "sym.unaligned_words parameter 0: expected 'const uint8_t*', said 'void*'",
-    "sym.main return: expected 'int', said 'size_t'"
+  "functions_in_dwarf": 17,
+  "functions_in_truth": 17,
+  "functions_recovered": 17,
+  "ungradable": {},
+  "without_dwarf": [
+    "sym.__do_global_dtors_aux",
+    "sym._fini",
+    "sym._init",
+    "sym._start",
+    "sym.deregister_tm_clones",
+    "sym.frame_dummy",
+    "sym.imp.__cxa_finalize",
+    "sym.imp.__stack_chk_fail",
+    "sym.imp.printf",
+    "sym.register_tm_clones"
   ],
+  "facts": {
+    "correct": 19,
+    "missing": 0,
+    "marked_wrong": 18,
+    "silently_wrong": 14
+  },
+  "recovery_rate": 0.3725,
+  "soundness_rate": 0.5758,
+  "soundness_without_qualifier": 0.7917,
+  "silent": [
+    "fnv1a32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
+    "fnv1a64 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
+    "djb2 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
+    "sdbm parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
+    "adler32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
+    "fletcher32 parameter 0: expected 'const uint16_t*', said 'uint16_t*'",
+    "crc32_bitwise parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
+    "crc32_table parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
+    "rotl32 parameter 1: expected 'int8_t', said 'uint8_t'",
+    "murmur3_32 parameter 0: expected 'const uint8_t*', said 'void*'",
+    "xxhash32 parameter 0: expected 'const uint8_t*', said 'uint64_t'",
+    "siphash24 parameter 0: expected 'const uint8_t*', said 'uint64_t'",
+    "pearson parameter 0: expected 'const uint8_t*', said 'uint8_t*'",
+    "unaligned_words parameter 0: expected 'const uint8_t*', said 'void*'"
+  ],
+  "silent_buckets": {
+    "parameter": {
+      "pointee": 2,
+      "pointer_as_integer": 2,
+      "qualifier": 9,
+      "sign": 1
+    }
+  },
+  "marked_buckets": {
+    "parameter": {
+      "pointer_as_integer": 1
+    },
+    "return": {
+      "other": 16,
+      "void_vs_value": 1
+    }
+  },
+  "return_presence": {
+    "void_to_void": {
+      "total": 0,
+      "silent": 0
+    },
+    "void_to_value": {
+      "total": 1,
+      "silent": 0
+    },
+    "value_to_void": {
+      "total": 0,
+      "silent": 0
+    },
+    "value_to_value": {
+      "total": 16,
+      "silent": 0
+    }
+  },
   "why": {
-    "sym.fnv1a32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
-    "sym.fnv1a64 parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
-    "sym.djb2 parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
-    "sym.sdbm parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
-    "sym.adler32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
-    "sym.fletcher32 parameter 0: expected 'const uint16_t*', said 'uint16_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
-    "sym.crc32_bitwise parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
-    "sym.crc32_table parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
-    "sym.rotl32 parameter 1: expected 'int8_t', said 'uint8_t'": "only the low byte is read, and the body never sign-extends it, so no signedness is proven",
-    "sym.murmur3_32 parameter 0: expected 'const uint8_t*', said 'void*'": "the parameter is certified a pointer, but its accesses read several widths, so no one pointee is proven",
-    "sym.xxhash32 parameter 0: expected 'const uint8_t*', said 'size_t'": "no certified memory access is attributed to this parameter (reads through memcpy or a pointer advanced in a loop), so it keeps its carrier width",
-    "sym.siphash24 parameter 0: expected 'const uint8_t*', said 'size_t'": "no certified memory access is attributed to this parameter (reads through memcpy or a pointer advanced in a loop), so it keeps its carrier width",
-    "sym.pearson return: expected 'uint8_t', said 'uint32_t'": "the result is zero-extended into eax, and the carrier width is what the body proves",
-    "sym.pearson parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
-    "sym.combined parameter 0: expected 'const uint8_t*', said 'size_t'": "no certified memory access is attributed to this parameter (reads through memcpy or a pointer advanced in a loop), so it keeps its carrier width",
-    "sym.unaligned_words parameter 0: expected 'const uint8_t*', said 'void*'": "the parameter is certified a pointer, but its accesses read several widths, so no one pointee is proven",
-    "sym.main return: expected 'int', said 'size_t'": "xor eax, eax folds to a 64-bit constant before interface recovery, which erases the 32-bit write that would narrow the result"
+    "fnv1a32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
+    "fnv1a64 parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
+    "djb2 parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
+    "sdbm parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
+    "adler32 parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
+    "fletcher32 parameter 0: expected 'const uint16_t*', said 'uint16_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
+    "crc32_bitwise parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
+    "crc32_table parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
+    "rotl32 parameter 1: expected 'int8_t', said 'uint8_t'": "only the low byte is read, and the body never sign-extends it, so no signedness is proven",
+    "murmur3_32 parameter 0: expected 'const uint8_t*', said 'void*'": "the parameter is certified a pointer, but its accesses read several widths, so no one pointee is proven",
+    "xxhash32 parameter 0: expected 'const uint8_t*', said 'uint64_t'": "no certified memory access is attributed to this parameter (reads through memcpy or a pointer advanced in a loop), so it keeps its carrier width",
+    "siphash24 parameter 0: expected 'const uint8_t*', said 'uint64_t'": "no certified memory access is attributed to this parameter (reads through memcpy or a pointer advanced in a loop), so it keeps its carrier width",
+    "pearson parameter 0: expected 'const uint8_t*', said 'uint8_t*'": "pointee const: a qualifier the machine code does not carry; the pointer and its pointee width are certified",
+    "unaligned_words parameter 0: expected 'const uint8_t*', said 'void*'": "the parameter is certified a pointer, but its accesses read several widths, so no one pointee is proven"
   }
 }

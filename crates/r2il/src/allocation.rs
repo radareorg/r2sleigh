@@ -38,8 +38,8 @@ pub fn allocations_by_size() -> [usize; SIZE_CLASSES] {
 
 thread_local! {
     /// Where the sampled allocations came from, by captured stack.
-    static SAMPLED: std::cell::RefCell<std::collections::HashMap<String, usize>> =
-        std::cell::RefCell::new(std::collections::HashMap::new());
+    static SAMPLED: std::cell::RefCell<rustc_hash::FxHashMap<String, usize>> =
+        std::cell::RefCell::new(rustc_hash::FxHashMap::default());
 }
 
 static SAMPLING_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);

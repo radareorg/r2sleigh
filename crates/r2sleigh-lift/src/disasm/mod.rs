@@ -21,8 +21,9 @@ use r2source::{
     AdvisorySuccessorKind, CanonicalStorageId, CanonicalStorageSpace, MachineProfile,
     OwnedFunctionSnapshot, SourceFunctionInterface,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -58,7 +59,7 @@ struct LoadedSpecification {
     /// its address-keyed decode state before admitting another byte source.
     sleigh: RefCell<GhidraSleigh>,
     /// Canonical register names by (offset, size)
-    reg_name_map: HashMap<(u64, u32), String>,
+    reg_name_map: FxHashMap<(u64, u32), String>,
     /// Every name the specification gives any register, lower-cased: an
     /// operand body may spell an alias the canonical map does not keep.
     register_names: std::collections::BTreeSet<String>,
@@ -1158,7 +1159,7 @@ fn validate_genuine_function_cfg(
         .blocks
         .iter()
         .map(|block| block.addr)
-        .collect::<HashSet<_>>();
+        .collect::<FxHashSet<_>>();
     // A successor that is not one of this function's block starts leaves the
     // function. What must never happen is a target landing part-way into a
     // block, because that would mean the lift decoded an instruction boundary
@@ -1173,7 +1174,7 @@ fn validate_genuine_function_cfg(
                     && target < block.addr().saturating_add(u64::from(block.size()))
             })
     };
-    let mut internal_successors = HashMap::<u64, Vec<u64>>::new();
+    let mut internal_successors = FxHashMap::<u64, Vec<u64>>::default();
     let mut successor_manifest = Vec::with_capacity(blocks.len());
     for block in blocks {
         let successors = genuine_block_successors(block)?;
@@ -1200,7 +1201,7 @@ fn validate_genuine_function_cfg(
         internal_successors.insert(block.block.addr, internal);
         successor_manifest.push(successors);
     }
-    let mut reached = HashSet::new();
+    let mut reached = FxHashSet::default();
     let mut queue = VecDeque::from([layout.entry_addr]);
     while let Some(block) = queue.pop_front() {
         if !reached.insert(block) {
@@ -1590,15 +1591,15 @@ fn translate_err(e: translate::TranslateError) -> LiftError {
     }
 }
 
-fn build_register_name_map(sleigh: &GhidraSleigh) -> HashMap<(u64, u32), String> {
-    let mut candidates: HashMap<(u64, u32), Vec<String>> = HashMap::new();
+fn build_register_name_map(sleigh: &GhidraSleigh) -> FxHashMap<(u64, u32), String> {
+    let mut candidates: FxHashMap<(u64, u32), Vec<String>> = FxHashMap::default();
 
     for (varnode, name) in sleigh.register_name_map() {
         let key = (varnode.address.offset, varnode.size as u32);
         candidates.entry(key).or_default().push(name);
     }
 
-    let mut map = HashMap::new();
+    let mut map = FxHashMap::default();
     for (key, names) in candidates {
         if let Some(name) = select_register_name(names.iter().map(String::as_str)) {
             map.insert(key, name);
@@ -2087,8 +2088,8 @@ impl Disassembler {
     /// is cleared once at every public byte-source boundary before reuse.
     fn shared_loaded_profile(profile: TrustedSleighProfile) -> Result<Rc<LoadedSpecification>> {
         thread_local! {
-            static LOADED: RefCell<HashMap<TrustedSleighProfile, Rc<LoadedSpecification>>> =
-                RefCell::new(HashMap::new());
+            static LOADED: RefCell<FxHashMap<TrustedSleighProfile, Rc<LoadedSpecification>>> =
+                RefCell::new(FxHashMap::default());
         }
 
         if let Some(spec) = LOADED.with(|loaded| loaded.borrow().get(&profile).map(Rc::clone)) {
@@ -2679,6 +2680,14 @@ impl Disassembler {
             continuation,
             targets,
         })
+    }
+
+    /// Spell one instruction as `decode` does, from a fresh context, without lifting it.
+    pub fn spell(&self, bytes: &[u8], addr: u64) -> Result<syntax::Syntax> {
+        let (mnemonic, body, size) = self.disasm_parts(bytes, addr)?;
+        let mut syntax = syntax::radare2(&mnemonic, &body, size, &self.arch_name, bytes);
+        syntax.registers = syntax::register_spans(&syntax.body, &self.spec.register_names);
+        Ok(syntax)
     }
 
     /// One instruction's operation and operands, as Sleigh itself spells them.

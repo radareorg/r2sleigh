@@ -1,61 +1,70 @@
-//! Which C library's declarations apply is the platform's to say.
+//! Which C library's rows apply is the program's to say.
 //!
-//! `_Exit` is declared by each library rather than by the table every target
-//! shares, and a name two libraries export can be two interfaces, so a call
-//! to one has the prototype of the library the program runs against or none.
+//! `_Exit` is declared by each library rather than by the table every target shares, and a name
+//! two libraries export can be two interfaces, so a call to one has the row of the library the
+//! program runs against or none.
 
-use r2abi::{Platform, Prototypes};
+use r2abi::{CLibrary, LibraryRows};
 
-/// Each parameter's type, as the declaration writes it.
-fn parameters(platform: Platform, name: &str) -> Option<Vec<String>> {
-    let prototypes = Prototypes::embedded_for(platform);
-    let prototype = prototypes.get(name)?;
+/// Each parameter's type, as the row writes it.
+fn parameters(library: CLibrary, name: &str) -> Option<Vec<String>> {
+    let rows = LibraryRows::embedded(library);
+    let row = rows.find(library.scope(), name)?;
+    let parameters = rows.prototype(row).parameters.iter();
     Some(
-        prototype
-            .parameters
-            .iter()
+        parameters
             .map(|parameter| parameter.spelling.as_written().to_owned())
             .collect(),
     )
 }
 
-#[test]
-fn the_portable_table_does_not_declare_a_platform_function() {
-    let portable = Prototypes::embedded_for(Platform::Unknown);
-    assert!(portable.get("_Exit").is_none());
+fn declares(library: CLibrary, name: &str) -> bool {
+    LibraryRows::embedded(library)
+        .find(library.scope(), name)
+        .is_some()
 }
 
 #[test]
-fn linux_declares_its_own() {
-    let linux = Prototypes::embedded_for(Platform::Linux);
-    let exit = linux.get("_Exit").expect("_Exit is declared on linux");
-    assert_eq!(exit.parameters.len(), 1);
+fn the_portable_table_does_not_declare_a_library_function() {
+    assert!(!declares(CLibrary::Unknown, "_Exit"));
+    assert!(!declares(CLibrary::Musl, "_Exit"));
+}
+
+#[test]
+fn glibc_declares_its_own() {
+    assert_eq!(
+        parameters(CLibrary::Glibc, "_Exit").map(|types| types.len()),
+        Some(1)
+    );
     assert!(
-        linux.get("printf").is_some(),
+        declares(CLibrary::Glibc, "printf"),
         "the portable table still applies"
     );
+    // error(3) is GNU's, and no other library's table states it.
+    assert!(declares(CLibrary::Glibc, "error"));
+    assert!(!declares(CLibrary::LibSystem, "error"));
+    assert!(!declares(CLibrary::Bionic, "error"));
 }
 
 #[test]
-fn darwin_declares_its_own() {
-    let darwin = Prototypes::embedded_for(Platform::Darwin);
+fn libsystem_declares_its_own() {
     assert!(
-        darwin.get("printf").is_some(),
+        declares(CLibrary::LibSystem, "printf"),
         "the portable table still applies"
     );
     // libSystem's second name for `bzero`, which clang calls on x86-64.
     assert_eq!(
-        parameters(Platform::Darwin, "__bzero"),
+        parameters(CLibrary::LibSystem, "__bzero"),
         Some(vec!["void *".into(), "size_t".into()])
     );
-    assert_eq!(parameters(Platform::Linux, "__bzero"), None);
+    assert_eq!(parameters(CLibrary::Glibc, "__bzero"), None);
 }
 
 /// The libSystem imports `ls` calls that no declaration stated (ROADMAP B2), each as the SDK's
-/// header declares it, and none of them on a platform whose C library is another.
+/// header declares it, and none of them on a program whose C library is another.
 #[test]
-fn darwin_declares_the_libsystem_imports_ls_calls() {
-    let declared = |name: &str| parameters(Platform::Darwin, name);
+fn libsystem_declares_the_imports_ls_calls() {
+    let declared = |name: &str| parameters(CLibrary::LibSystem, name);
     assert_eq!(
         declared("__assert_rtn"),
         Some(vec![
@@ -65,10 +74,11 @@ fn darwin_declares_the_libsystem_imports_ls_calls() {
             "const char *".into()
         ])
     );
+    let rows = LibraryRows::embedded(CLibrary::LibSystem);
+    let scope = CLibrary::LibSystem.scope();
     assert!(
-        Prototypes::embedded_for(Platform::Darwin)
-            .get("__assert_rtn")
-            .is_some_and(|prototype| prototype.noreturn)
+        rows.find(scope, "__assert_rtn")
+            .is_some_and(|row| row.noreturn)
     );
     assert_eq!(declared("__maskrune").map(|types| types.len()), Some(2));
     assert_eq!(declared("__error"), Some(vec![]));
@@ -82,19 +92,17 @@ fn darwin_declares_the_libsystem_imports_ls_calls() {
     assert_eq!(declared("getxattr").map(|types| types.len()), Some(6));
     assert_eq!(declared("fflagstostr"), Some(vec!["unsigned long".into()]));
     for name in ["__assert_rtn", "fts_read", "acl_get_entry", "getxattr"] {
-        assert_eq!(parameters(Platform::Linux, name), None, "{name}");
+        assert_eq!(parameters(CLibrary::Glibc, name), None, "{name}");
     }
-    // radare2's undecorated key names no symbol a Mach-O binds.
     assert_eq!(declared("assert_rtn"), None);
 }
 
 #[test]
 fn each_c_library_declares_its_own_fgets_chk_and_no_other_library_does() {
-    // glibc puts the buffer's size second and the stream last; bionic takes
-    // the stream third and the size last. Darwin exports none, and with no
-    // library named there is no order to read a call in.
+    // glibc puts the buffer's size second and the stream last; bionic takes the stream third and
+    // the size last. libSystem exports none, and with no library named there is no order to read.
     assert_eq!(
-        parameters(Platform::Linux, "__fgets_chk"),
+        parameters(CLibrary::Glibc, "__fgets_chk"),
         Some(vec![
             "char *".into(),
             "size_t".into(),
@@ -103,7 +111,7 @@ fn each_c_library_declares_its_own_fgets_chk_and_no_other_library_does() {
         ])
     );
     assert_eq!(
-        parameters(Platform::Android, "__fgets_chk"),
+        parameters(CLibrary::Bionic, "__fgets_chk"),
         Some(vec![
             "char *".into(),
             "int".into(),
@@ -111,35 +119,51 @@ fn each_c_library_declares_its_own_fgets_chk_and_no_other_library_does() {
             "size_t".into()
         ])
     );
-    assert_eq!(parameters(Platform::Darwin, "__fgets_chk"), None);
-    assert_eq!(parameters(Platform::Unknown, "__fgets_chk"), None);
-    // `__fread_chk` likewise: glibc's buffer size is second, bionic's last.
+    assert_eq!(parameters(CLibrary::LibSystem, "__fgets_chk"), None);
+    assert_eq!(parameters(CLibrary::Unknown, "__fgets_chk"), None);
     assert_eq!(
-        parameters(Platform::Android, "__fread_chk").map(|types| types[4].clone()),
+        parameters(CLibrary::Bionic, "__fread_chk").map(|types| types[4].clone()),
         Some("size_t".to_owned())
     );
     assert_eq!(
-        parameters(Platform::Linux, "__fread_chk").map(|types| types[4].clone()),
+        parameters(CLibrary::Glibc, "__fread_chk").map(|types| types[4].clone()),
         Some("FILE *".to_owned())
     );
 }
 
 #[test]
 fn a_fortified_function_every_library_declares_alike_is_portable() {
-    for platform in [
-        Platform::Linux,
-        Platform::Android,
-        Platform::Darwin,
-        Platform::Unknown,
+    for library in [
+        CLibrary::Glibc,
+        CLibrary::Bionic,
+        CLibrary::LibSystem,
+        CLibrary::Unknown,
     ] {
         assert_eq!(
-            parameters(platform, "__memcpy_chk").map(|types| types.len()),
+            parameters(library, "__memcpy_chk").map(|types| types.len()),
             Some(4),
-            "{platform:?}"
+            "{library:?}"
         );
     }
     // glibc's own fortified `printf` is glibc's alone.
-    assert!(parameters(Platform::Linux, "__printf_chk").is_some());
-    assert!(parameters(Platform::Android, "__printf_chk").is_none());
-    assert!(parameters(Platform::Darwin, "__printf_chk").is_none());
+    assert!(declares(CLibrary::Glibc, "__printf_chk"));
+    assert!(!declares(CLibrary::Bionic, "__printf_chk"));
+    assert!(!declares(CLibrary::LibSystem, "__printf_chk"));
+}
+
+/// Within one library's scope no name has two rows, so the scope's order decides nothing.
+#[test]
+fn a_scope_states_each_name_once() {
+    for library in [CLibrary::Glibc, CLibrary::Bionic, CLibrary::LibSystem] {
+        let rows = LibraryRows::embedded(library);
+        let mut seen = std::collections::BTreeMap::new();
+        for row in rows.rows() {
+            if let Some(other) = seen.insert(row.linked_name.clone(), row.library) {
+                panic!(
+                    "{library:?}: `{}` in {other:?} and {:?}",
+                    row.linked_name, row.library
+                );
+            }
+        }
+    }
 }

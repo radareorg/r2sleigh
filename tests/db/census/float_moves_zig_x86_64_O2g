@@ -20,16 +20,16 @@ NAME=0x010014b0
 FILE=tests/fixtures/float_moves_zig_x86_64_O2g
 CMDS=aa; pdd @ 0x010014b0
 EXPECT=<<EOF
-void _start(void)
+void _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
 {
     uint64_t tmp_10014b5_0_2;
 
-    /* r2dec proof: 5 constructs are marked below; 27 source obligations: 0 rendered, 5 elided, 0 refused, 22 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0) */
+    /* r2dec proof: 5 constructs are marked below; 28 source obligations: 0 rendered, 5 elided, 0 refused, 23 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0); 1 callee prototype supplied by the source */
     {
         tmp_10014b5_0_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x10014b0:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x10014b0:32 covering 1 op (render::values) */
-        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x10014b0:46 covering 1 op (render::values): call to __libc_start_main: the import's declaration has an argument this convention does not place */
+        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x10014b0:46 covering 1 op (render::values): call to __libc_start_main: an argument has no C spelling */
         r2sleigh_residual_void(5); /* r2dec gap: TransferNotFollowed at 0x10014b0 (render::control) */
     }
 }

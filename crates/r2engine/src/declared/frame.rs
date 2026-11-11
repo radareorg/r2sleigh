@@ -64,8 +64,7 @@ impl Placement<'_> {
             FrameBase::Register(number) => {
                 // Only the convention's frame pointer: the stack pointer moves inside the body.
                 let name = self.target.dwarf.name_of(number)?;
-                let frame_pointer = self.target.convention.frame_pointer?;
-                let placed = storage(self.target.arch, frame_pointer).ok()?;
+                let placed = self.target.convention.forms.frame_pointer?;
                 let storage = storage(self.target.arch, name).ok()?;
                 if placed != storage {
                     return None;
@@ -86,7 +85,7 @@ impl Placement<'_> {
     pub(super) fn frame(
         &self,
         declared: Declared<'_>,
-        placed: &[CanonicalStorageId],
+        placed: &[Option<CanonicalStorageId>],
         parameters: &[Option<SourceLogicalValue>],
         interned: &mut Interned<'_>,
     ) -> DeclaredFrame {
@@ -101,7 +100,10 @@ impl Placement<'_> {
             .zip(placed)
             .zip(parameters);
         for (index, ((parameter, arrived), value)) in homes.enumerate() {
-            let (Some(offset), Some(value)) = (parameter.frame_offset, value) else {
+            // A stack parameter's home is its own argument slot, stated with the interface.
+            let (Some(offset), Some(value), Some(arrived)) =
+                (parameter.frame_offset, value, arrived)
+            else {
                 continue;
             };
             let Ok(size) = u32::try_from(value.carrier().size_bits() / 8) else {
@@ -128,8 +130,7 @@ impl Placement<'_> {
                 Some(ty) => slot.with_logical_type(ty),
                 None => slot,
             };
-            let name = SourceStackSlotName::new(origin.base, offset, local.name.clone())
-                .with_type_spelling(local.spelling.as_ref().map(|s| s.as_written().to_owned()));
+            let name = SourceStackSlotName::new(origin.base, offset, local.name.clone());
             candidates.push((slot, Some(name)));
         }
         let mut frame = disjoint(&declared.prototype.name, candidates);
@@ -241,8 +242,7 @@ pub(crate) fn rebased(
                     StackAddressBase::StackPointer,
                     name.offset().saturating_add(shift),
                     name.name(),
-                )
-                .with_type_spelling(name.type_spelling()),
+                ),
             })
             .collect(),
     }

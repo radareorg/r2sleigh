@@ -1,0 +1,19 @@
+# Rows that cite the Microsoft header they are read from: what the Universal C Runtime exports
+# (ucrtbase.dll, and the api-ms-win-crt-* sets that forward to it), bound only to a PE import
+# that names one of those DLLs (doc/adr-call-boundary.md, Decided 2026-11-09). None of it is
+# radare2's. `.cite=` names the reference page, or says Microsoft publishes none.
+
+# Microsoft, Windows 10 SDK UCRT <corecrt_stdio.h>: the function every inline printf of
+# <stdio.h> calls (printf is _vfprintf_l, which passes _CRT_INTERNAL_LOCAL_PRINTF_OPTIONS,
+# stdout, the format, a NULL locale and the va_list). Its format is printf's.
+__stdio_common_vfprintf=func
+func.__stdio_common_vfprintf.args=5
+func.__stdio_common_vfprintf.arg.0=unsigned long long,options
+func.__stdio_common_vfprintf.arg.1=FILE *,stream
+func.__stdio_common_vfprintf.arg.2=const char *,format
+func.__stdio_common_vfprintf.arg.3=struct __crt_locale_pointers *,locale
+func.__stdio_common_vfprintf.arg.4=va_list,arg_list
+func.__stdio_common_vfprintf.ret=int
+func.__stdio_common_vfprintf.include=corecrt_stdio.h
+func.__stdio_common_vfprintf.cite=no reference page; Windows 10 SDK, ucrt\corecrt_stdio.h (Windows 10)
+func.__stdio_common_vfprintf.tail=va_list(4,printf,2)

@@ -19,11 +19,11 @@ NAME=0x1000003c0
 FILE=tests/fixtures/code_pointer_table_O0
 CMDS=aa; pdd @ 0x1000003c0
 EXPECT=<<EOF
-uint64_t _table_op_add(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u64 _table_op_add(uint64_t arg0, uint64_t arg1)
 {
-    /* r2dec proof: no individual construct is marked; 7 source obligations: 4 rendered, 3 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 7 source obligations: 4 rendered, 3 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
-        return (uint64_t)((uint64_t)arg0 + (uint64_t)arg1);
+        return r2sleigh_carrier_u64((uint64_t)((uint64_t)arg0 + (uint64_t)arg1));
     }
 }
 
@@ -36,11 +36,11 @@ NAME=0x1000003e0
 FILE=tests/fixtures/code_pointer_table_O0
 CMDS=aa; pdd @ 0x1000003e0
 EXPECT=<<EOF
-uint64_t _table_op_xor(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u64 _table_op_xor(uint64_t arg0, uint64_t arg1)
 {
-    /* r2dec proof: no individual construct is marked; 6 source obligations: 3 rendered, 3 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 6 source obligations: 3 rendered, 3 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
-        return (uint64_t)((uint64_t)arg0 ^ (uint64_t)arg1);
+        return r2sleigh_carrier_u64((uint64_t)((uint64_t)arg0 ^ (uint64_t)arg1));
     }
 }
 
@@ -53,11 +53,11 @@ NAME=0x100000400
 FILE=tests/fixtures/code_pointer_table_O0
 CMDS=aa; pdd @ 0x100000400
 EXPECT=<<EOF
-uint64_t _table_op_mul(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u64 _table_op_mul(uint64_t arg0, uint64_t arg1)
 {
-    /* r2dec proof: no individual construct is marked; 6 source obligations: 3 rendered, 3 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 6 source obligations: 3 rendered, 3 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
-        return (uint64_t)((uint64_t)arg0 * (uint64_t)arg1);
+        return r2sleigh_carrier_u64((uint64_t)((uint64_t)arg0 * (uint64_t)arg1));
     }
 }
 
@@ -70,12 +70,12 @@ NAME=0x100000420
 FILE=tests/fixtures/code_pointer_table_O0
 CMDS=aa; pdd @ 0x100000420
 EXPECT=<<EOF
-uint64_t _table_dispatch(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u64 _table_dispatch(uint64_t arg0, uint64_t arg1)
 {
     uint32_t stack_m76_1;
     _Alignas(16) uint8_t frame[64];
 
-    /* r2dec proof: 3 constructs are marked below; 59 source obligations: 21 rendered, 11 elided, 0 refused, 27 residual; 8 statements rendered */
+    /* r2dec proof: 3 constructs are marked below; 59 source obligations: 21 rendered, 11 elided, 0 refused, 27 residual; 8 statements rendered; the parameters are a floor: at least 2 (a register past them reaches an indirect call); the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 32U), (uint64_t)arg1);
@@ -106,11 +106,11 @@ NAME=0x1000004b8
 FILE=tests/fixtures/code_pointer_table_O0
 CMDS=aa; pdd @ 0x1000004b8
 EXPECT=<<EOF
-uint64_t _main(void)
+r2sleigh_result_u64 _main(void)
 {
-    void _table_dispatch(uint64_t, uint64_t);
+    r2sleigh_result_u64 _table_dispatch(uint64_t, uint64_t);
 
-    /* r2dec proof: 1 construct is marked below; 12 source obligations: 5 rendered, 5 elided, 0 refused, 2 residual; 2 statements rendered */
+    /* r2dec proof: 1 construct is marked below; 12 source obligations: 5 rendered, 5 elided, 0 refused, 2 residual; 2 statements rendered; the result's second register is open: no call read decides it; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
     {
         _table_dispatch(3, 5);
         return r2sleigh_residual_u64(1);

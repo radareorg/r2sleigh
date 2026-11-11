@@ -9,11 +9,10 @@
 //! same paper's walk from each predecessor of a merge up to the merge's
 //! immediate dominator.
 
-use std::collections::{HashMap, HashSet};
-
 use crate::cfg::CFG;
 use crate::control::{SsaExecutionStopReason, SsaWorkControl, UncheckedSsaWorkControl};
 use crate::dense::{Csr, DenseId};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// A block the entry reaches, by its place in reverse postorder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -42,7 +41,7 @@ pub struct DomTree {
     /// The entry block address.
     pub entry: u64,
     /// Each reachable block's number.
-    number: HashMap<u64, Rpo>,
+    number: FxHashMap<u64, Rpo>,
     /// The reachable blocks, in reverse postorder.
     blocks: Vec<u64>,
     /// Each reachable block's immediate dominator; the entry's is itself.
@@ -59,7 +58,7 @@ pub struct DomTree {
     /// Each block's dominance frontier, in address order. A block the entry
     /// does not reach has the merges it feeds directly: what it defines
     /// arrives there along that edge.
-    frontier: HashMap<u64, Vec<u64>>,
+    frontier: FxHashMap<u64, Vec<u64>>,
 }
 
 impl DomTree {
@@ -99,7 +98,7 @@ impl DomTree {
             .iter()
             .enumerate()
             .map(|(index, &block)| (block, Rpo::from_index(index)))
-            .collect::<HashMap<_, _>>();
+            .collect::<FxHashMap<_, _>>();
         // Read once: the rounds below revisit every edge.
         let mut preds_of = Vec::with_capacity(every_block.len());
         for block in every_block {
@@ -254,7 +253,7 @@ impl DomTree {
     ///
     /// This is used for phi-node placement: we need to place phi nodes
     /// at all blocks in the iterated dominance frontier of the definition sites.
-    pub fn iterated_frontier(&self, blocks: &[u64]) -> HashSet<u64> {
+    pub fn iterated_frontier(&self, blocks: &[u64]) -> FxHashSet<u64> {
         self.iterated_frontier_with_control(blocks, &UncheckedSsaWorkControl)
             .expect("unchecked dominance-frontier construction cannot stop")
     }
@@ -264,11 +263,11 @@ impl DomTree {
         &self,
         blocks: &[u64],
         control: &C,
-    ) -> Result<HashSet<u64>, SsaExecutionStopReason> {
-        let mut result = HashSet::new();
+    ) -> Result<FxHashSet<u64>, SsaExecutionStopReason> {
+        let mut result = FxHashSet::default();
         let mut worklist: Vec<u64> = blocks.to_vec();
         worklist.sort_unstable_by(|a, b| b.cmp(a));
-        let mut processed = HashSet::new();
+        let mut processed = FxHashSet::default();
 
         while let Some(block) = worklist.pop() {
             control.poll()?;
@@ -327,13 +326,13 @@ fn number_the_tree<C: SsaWorkControl + ?Sized>(
 /// Cytron et al.'s frontiers, by the walk from each predecessor of a merge
 /// up to the merge's immediate dominator, each in address order.
 fn frontiers<C: SsaWorkControl + ?Sized>(
-    number: &HashMap<u64, Rpo>,
+    number: &FxHashMap<u64, Rpo>,
     blocks: &[u64],
     idom: &[Rpo],
     preds_of: &[(u64, Vec<u64>)],
     control: &C,
-) -> Result<HashMap<u64, Vec<u64>>, SsaExecutionStopReason> {
-    let mut frontier = HashMap::<u64, Vec<u64>>::new();
+) -> Result<FxHashMap<u64, Vec<u64>>, SsaExecutionStopReason> {
+    let mut frontier = FxHashMap::<u64, Vec<u64>>::default();
     for (merge, preds) in preds_of {
         if preds.len() < 2 {
             continue;

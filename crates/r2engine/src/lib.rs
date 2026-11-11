@@ -15,6 +15,7 @@ mod tests;
 pub mod body;
 mod declared;
 pub mod discovery;
+pub mod imports;
 pub mod isolation;
 pub mod machine;
 pub mod names;
@@ -23,7 +24,8 @@ pub mod program;
 pub mod query;
 pub mod stated;
 
-use std::collections::{BTreeSet, HashMap};
+use rustc_hash::FxHashMap;
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -620,7 +622,7 @@ pub struct EngineAnalyzeRequest {
     /// the source-owned signature that callers may consume.
     pub ptr_bits: u32,
     pub semantic_metadata_enabled: bool,
-    pub reg_type_hints: HashMap<String, r2types::TypeHint>,
+    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub semantic_mode: EngineSemanticMode,
     pub include_interproc_summary_set: bool,
@@ -636,7 +638,7 @@ pub struct EngineAnalyzeRequestParts {
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     pub ptr_bits: u32,
     pub semantic_metadata_enabled: bool,
-    pub reg_type_hints: HashMap<String, r2types::TypeHint>,
+    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub include_interproc_summary_set: bool,
 }
@@ -754,7 +756,7 @@ pub struct EngineAnalyzeRequestInput {
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     pub ptr_bits: Option<u32>,
     pub semantic_metadata_enabled: bool,
-    pub reg_type_hints: HashMap<String, r2types::TypeHint>,
+    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub include_interproc_summary_set: bool,
 }
@@ -763,97 +765,9 @@ pub struct EngineAnalyzeRequestInput {
 pub struct EngineAnalyzeFunctionRequestInput {
     pub function: EngineFunctionInput,
     pub ptr_bits: Option<u32>,
-    pub reg_type_hints: HashMap<String, r2types::TypeHint>,
+    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub include_interproc_summary_set: bool,
-}
-
-/// Names the source gave its stack slots, keyed the way the renderer looks them up.
-///
-/// These are presentation only: the role comes from the interface so a home or a
-/// saved carrier is not offered as a local, and a name that matches no slot is
-/// not carried at all.
-/// A source type rendered as the source spells it.
-///
-/// The shared parser canonicalises a spelling to structure, which is right for
-/// analysis and wrong for a name: it turns `char` into an eight-bit integer and
-/// `size_t` into an unsigned word, so the rendered C says `int8_t *` where the
-/// source said `char *`. Structure is already carried by the type graph, so the
-/// spelling is what this has to preserve.
-fn source_spelled_type(spelling: &str, ptr_bits: u32) -> Option<r2types::CTypeLike> {
-    let mut rest = spelling.trim();
-    if rest.is_empty() {
-        return None;
-    }
-    let mut array_len = None;
-    if let Some(start) = rest.rfind('[')
-        && rest.ends_with(']')
-    {
-        let len = &rest[start + 1..rest.len() - 1];
-        array_len = Some(len.trim().parse::<usize>().ok());
-        rest = rest[..start].trim_end();
-    }
-    let mut pointers = 0usize;
-    while let Some(stripped) = rest.strip_suffix('*') {
-        pointers += 1;
-        rest = stripped.trim_end();
-    }
-    // A qualifier on the pointee is part of the pointer's type; on the value it is not.
-    let const_pointee = pointers > 0
-        && rest.split_whitespace().any(|word| {
-            matches!(
-                word.to_ascii_lowercase().as_str(),
-                "const" | "__const" | "__const__"
-            )
-        });
-    let base_words = rest
-        .split_whitespace()
-        .filter(|word| {
-            !matches!(
-                word.to_ascii_lowercase().as_str(),
-                "const"
-                    | "volatile"
-                    | "restrict"
-                    | "__restrict"
-                    | "__restrict__"
-                    | "__const"
-                    | "__const__"
-            )
-        })
-        .collect::<Vec<_>>();
-    let base_spelling = base_words.join(" ");
-    if base_spelling.is_empty() {
-        return None;
-    }
-    // A structural spelling stays structural so width-aware analysis keeps
-    // working; a named one is carried by name so it renders as itself.
-    let mut ty = match r2types::parse_c_type_like(&base_spelling, ptr_bits) {
-        Some(r2types::CTypeLike::Void) => r2types::CTypeLike::Void,
-        Some(
-            structural @ (r2types::CTypeLike::Struct(_)
-            | r2types::CTypeLike::Union(_)
-            | r2types::CTypeLike::Enum(_)),
-        ) => structural,
-        // The name is what renders and the parse is what it stands for, so
-        // width-aware analysis keeps working through the name instead of
-        // having to re-read the text. A spelling that parses to nothing more
-        // than itself carries no target, and a spelling that is the type
-        // written out rather than a name for one carries no name.
-        Some(r2types::CTypeLike::Typedef { .. }) => r2types::CTypeLike::typedef(base_spelling),
-        Some(parsed) if !r2types::spelling_names_a_type(&base_spelling) => parsed,
-        Some(parsed) => r2types::CTypeLike::named(base_spelling, parsed),
-        None => return None,
-    };
-    if const_pointee {
-        ty = r2types::CTypeLike::Const(Box::new(ty));
-    }
-    for _ in 0..pointers {
-        ty = r2types::CTypeLike::Pointer(Box::new(ty));
-    }
-    if let Some(len) = array_len {
-        ty = r2types::CTypeLike::Array(Box::new(ty), len);
-    }
-    Some(ty)
 }
 
 /// The struct layouts radare2 captured alongside the function, as the external
@@ -951,7 +865,7 @@ fn external_struct_fields(
                         r2types::ExternalField {
                             name: path,
                             offset,
-                            ty: source_member_type_spelling(graph, member),
+                            ty: source_member_type(graph, member),
                         },
                     );
                 }
@@ -961,44 +875,23 @@ fn external_struct_fields(
     fields
 }
 
-/// How a captured aggregate member's type spells in C, so the width check that
-/// gates a field certificate has something exact to measure against.
-fn source_member_type_spelling(
+/// A captured aggregate member's type: an array of its element where its width repeats one.
+fn source_member_type(
     graph: &r2ssa::SourceTypeGraph,
     member: &r2ssa::SourceAggregateMember,
-) -> Option<String> {
-    let source_type = usize::try_from(member.type_id())
-        .ok()
-        .and_then(|id| graph.types().get(id))?;
-    let bits = source_type.size_bits();
-    let element = match source_type.kind() {
-        r2ssa::SourceTypeKind::SignedInteger => format!("int{bits}_t"),
-        r2ssa::SourceTypeKind::UnsignedInteger => format!("uint{bits}_t"),
-        r2ssa::SourceTypeKind::Char { .. } => "char".to_string(),
-        r2ssa::SourceTypeKind::Pointer { .. } => "void *".to_string(),
-        r2ssa::SourceTypeKind::Float if bits == 32 => "float".to_string(),
-        r2ssa::SourceTypeKind::Float if bits == 64 => "double".to_string(),
-        r2ssa::SourceTypeKind::Float => "long double".to_string(),
-        // An inline aggregate member has no scalar width to check an access
-        // against, and an opaque kind is never a member at all.
-        r2ssa::SourceTypeKind::Struct { .. }
-        | r2ssa::SourceTypeKind::Union { .. }
-        | r2ssa::SourceTypeKind::Array { .. }
-        | r2ssa::SourceTypeKind::Void
-        | r2ssa::SourceTypeKind::Code { .. }
-        | r2ssa::SourceTypeKind::Opaque { .. } => return None,
-    };
-    // A member wider than one element repeats it. The capture states the repeat
-    // count, but the Rust contract for a member does not carry it, so the
-    // member's own width against the element width recovers the length. Without
-    // the length only the first element could be named, and every later one fell
-    // back to an offset placeholder: `st->r[2]` rendered as `st->f_8`.
-    let count = source_member_element_count(member, bits)?;
-    Some(if count > 1 {
-        format!("{element}[{count}]")
-    } else {
-        element
-    })
+) -> Option<r2types::CTypeLike> {
+    let ty = r2types::source_type_like(graph, member.type_id())?;
+    let bits = graph
+        .types()
+        .get(usize::try_from(member.type_id()).ok()?)?
+        .size_bits();
+    match source_member_element_count(member, bits)? {
+        1 => Some(ty),
+        count => Some(r2types::CTypeLike::Array(
+            Box::new(ty),
+            Some(usize::try_from(count).ok()?),
+        )),
+    }
 }
 
 /// How many elements a captured member holds, from its own width against the
@@ -1020,114 +913,39 @@ fn source_member_element_count(
         .then(|| total_bits / element_bits)
 }
 
-/// The prototype the source recovered, spelled as the source spells it.
-///
-/// The type graph carries structure and the interface carries storage; only
-/// this says `size_t` rather than `uint64_t`, or `char *` rather than a pointer
-/// to an eight-bit integer.
+/// The prototype the program declares: names from the presentation, types
+/// from the declared interface's graph (ADR call-boundary, Types on the wire).
 fn trusted_source_signature(
     trusted: &r2ssa::TrustedSsaArtifact,
-    ptr_bits: u32,
 ) -> Option<(r2types::FunctionSignatureSpec, Option<String>, bool)> {
     let signature = trusted.source().presentation().signature()?;
-    // The ellipsis is not a parameter: carried as one, with no type, it left
-    // a variadic thunk with a signature no caller could be matched against.
-    let params = signature
-        .named_parameters()
-        .iter()
-        .enumerate()
+    let interface =
+        (trusted.source().function_interface()).filter(|interface| interface.types_are_declared());
+    let graph = interface.and_then(r2ssa::SourceFunctionInterface::type_graph);
+    let typed = |value: Option<r2ssa::SourceLogicalValue>| {
+        r2types::source_type_like(graph?, value?.type_id())
+    };
+    let params = (signature.named_parameters().iter().enumerate())
         .map(|(index, parameter)| r2types::FunctionParamSpec {
-            name: parameter
-                .name()
+            name: (parameter.name())
                 .filter(|name| !name.is_empty())
-                .map_or_else(|| format!("arg{index}"), str::to_string),
-            ty: parameter
-                .type_spelling()
-                .and_then(|spelling| source_spelled_type(spelling, ptr_bits)),
+                .map_or_else(
+                    || r2source::positional_parameter_name(index),
+                    str::to_string,
+                ),
+            ty: typed(interface.and_then(|interface| interface.parameter_logical_value(index))),
         })
         .collect();
-    let spec = r2types::FunctionSignatureSpec {
-        ret_type: signature
-            .return_type()
-            .and_then(|spelling| source_spelled_type(spelling, ptr_bits)),
-        params,
+    let ret_type = match interface.map(r2ssa::SourceFunctionInterface::return_kind) {
+        Some(r2ssa::SourceFunctionReturn::Void) => Some(r2types::CTypeLike::Void),
+        _ => typed(interface.and_then(r2ssa::SourceFunctionInterface::return_logical_value)),
     };
+    let spec = r2types::FunctionSignatureSpec { ret_type, params };
     let callconv = signature
         .calling_convention()
         .filter(|convention| !convention.is_empty())
         .map(str::to_string);
     Some((spec, callconv, signature.noreturn()))
-}
-
-/// The prototype of each callee, keyed by the name the call renders with.
-///
-/// Without these an argument is typed by how wide its register is, so a call
-/// to `malloc` takes whatever fits rather than the `size_t` it declares.
-fn trusted_callee_signatures(
-    trusted: &r2ssa::TrustedSsaArtifact,
-    ptr_bits: u32,
-) -> std::collections::HashMap<String, r2types::FunctionType> {
-    trusted
-        .source()
-        .presentation()
-        .callee_signatures()
-        .iter()
-        // A prototype with no parameters and no result is what radare2 writes
-        // for a callee it knows nothing about. Carrying it would say the callee
-        // takes no arguments, which is a claim, and would truncate the ones the
-        // lift recovered.
-        .filter(|(_, signature)| {
-            !signature.parameters().is_empty()
-                || signature
-                    .return_type()
-                    .is_some_and(|spelling| spelling.trim() != "void" && !spelling.is_empty())
-        })
-        .map(|(name, signature)| {
-            (
-                name.to_string(),
-                r2types::FunctionType {
-                    return_type: signature
-                        .return_type()
-                        .and_then(|spelling| source_spelled_type(spelling, ptr_bits))
-                        .unwrap_or(r2types::CTypeLike::Unknown),
-                    // The ellipsis is not a parameter and has no type. Copying
-                    // it in as one, and then calling the whole prototype
-                    // non-variadic, said `fprintf` takes exactly three
-                    // arguments -- so every call to it was cut to three,
-                    // whatever the machine passed.
-                    params: signature
-                        .named_parameters()
-                        .iter()
-                        .map(|parameter| {
-                            parameter
-                                .type_spelling()
-                                .and_then(|spelling| source_spelled_type(spelling, ptr_bits))
-                                .unwrap_or(r2types::CTypeLike::Unknown)
-                        })
-                        .collect(),
-                    variadic: signature.is_variadic(),
-                },
-            )
-        })
-        .collect()
-}
-
-/// The register a body proves it returns in, or None when it proves none.
-///
-/// Every returning block must name a definition reaching the return register:
-/// one that does not leaves the block unresolved, which is what a genuinely
-/// void function looks like.
-fn body_proven_return(shared: &r2ssa::SsaArtifact) -> Option<r2ssa::CanonicalStorageId> {
-    let live_out = shared.live_out();
-    if live_out.is_empty() || live_out.unresolved_blocks().next().is_some() {
-        return None;
-    }
-    shared
-        .machine_context()
-        .abi_model()
-        .return_registers()
-        .first()
-        .map(|slot| slot.storage())
 }
 
 /// Everything one callee contributes to a caller's request.
@@ -1154,22 +972,15 @@ pub struct CalleeFacts {
 impl CalleeFacts {
     /// Derive a callee's contribution from the body that owns it. The body is
     /// read here and not retained.
-    pub fn derive(callee: &Arc<r2ssa::TrustedSsaArtifact>, ptr_bits: u32) -> Option<Self> {
+    pub fn derive(callee: &Arc<r2ssa::TrustedSsaArtifact>) -> Option<Self> {
         let shared = callee.shared_artifact();
         let address = shared.function().entry;
         let interface = shared.machine_context().function_interface()?.clone();
-        // radare2 defaults a function with no recovered prototype to void, and
-        // a body that fills the return register on every return path says
-        // otherwise; the body is the stronger claim about what it does.
-        let interface = match body_proven_return(&shared) {
-            Some(storage) => interface.with_body_proven_return(storage).ok()?,
-            None => interface,
-        };
         let preserved_carriers = shared.facts().boundaries.preserved_call_carriers.clone();
         let summary =
             r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared)
                 .ok()?;
-        let context = trusted_parsed_context(callee, ptr_bits);
+        let context = trusted_parsed_context(callee);
         let signature = r2types::build_source_owned_type_analysis(
             r2types::TypeAnalysisRequest::new(Arc::clone(&shared), context).ok()?,
         )
@@ -1208,25 +1019,20 @@ impl CalleeFacts {
     }
 }
 
-fn trusted_parsed_context(
-    trusted: &r2ssa::TrustedSsaArtifact,
-    ptr_bits: u32,
-) -> r2types::ParsedExternalContext {
-    let signature = trusted_source_signature(trusted, ptr_bits);
+fn trusted_parsed_context(trusted: &r2ssa::TrustedSsaArtifact) -> r2types::ParsedExternalContext {
+    let signature = trusted_source_signature(trusted);
     let external_type_db = trusted_external_type_db(trusted);
     // What this function's own capture states: an object's type is the program's, so no other request can add to it.
+    let image = trusted.source().image();
     let program_data_objects = r2types::ProgramDataObjectTypeFacts::from_source(
-        trusted
-            .source()
-            .image()
-            .data_symbols()
-            .iter()
-            .map(|object| (object.address(), object.type_spelling())),
-        ptr_bits,
+        (image.data_symbols().iter()).map(|object| {
+            let ty = (image.data_types().zip(object.type_id()))
+                .and_then(|(graph, id)| r2types::source_type_like(graph, id));
+            (object.address(), ty)
+        }),
         &external_type_db,
     );
     r2types::ParsedExternalContext {
-        known_function_signatures: trusted_callee_signatures(trusted, ptr_bits),
         callconv: signature
             .as_ref()
             .and_then(|(_, callconv, _)| callconv.clone()),
@@ -1326,7 +1132,7 @@ impl EngineAnalyzeRequest {
         self.reg_type_hints.clear();
         // Where the program's sections lie is the caller's to state; the artifact knows one function.
         let program_extents = std::mem::take(&mut self.parsed_context.program_extents);
-        self.parsed_context = trusted_parsed_context(&trusted, self.ptr_bits);
+        self.parsed_context = trusted_parsed_context(&trusted);
         self.parsed_context.program_extents = program_extents;
         self.semantic_mode = EngineSemanticMode::Full;
         self.trusted_ssa = Some(trusted);
@@ -1575,7 +1381,7 @@ impl EngineFunctionDecompileRequest {
                 EngineAnalyzeFunctionRequestInput {
                     function: input.function,
                     ptr_bits: input.ptr_bits,
-                    reg_type_hints: HashMap::new(),
+                    reg_type_hints: FxHashMap::default(),
                     parsed_context: input.parsed_context,
                     include_interproc_summary_set: true,
                 },
@@ -1607,7 +1413,7 @@ impl EngineFunctionAnalysisArtifactRequest {
                 EngineAnalyzeFunctionRequestInput {
                     function: input.function,
                     ptr_bits: input.ptr_bits,
-                    reg_type_hints: HashMap::new(),
+                    reg_type_hints: FxHashMap::default(),
                     parsed_context: input.parsed_context,
                     include_interproc_summary_set: true,
                 },

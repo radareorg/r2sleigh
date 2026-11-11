@@ -1238,7 +1238,7 @@ pub(crate) fn symbols(session: &Session) -> Result<Table, String> {
                 binding(symbol.binding),
                 symbol_type(symbol),
                 symbol.size,
-                symbol.library.as_deref().unwrap_or("   "),
+                pe_library(symbol),
                 symbol.name
             ),
         );
@@ -1269,12 +1269,7 @@ fn import_rows(session: &Session, table: &mut Table) {
         .filter(|symbol| symbol.import && index(symbol).is_some())
         .collect();
     // A PE import is listed in its directory's order, which is its slot's.
-    imports.sort_by_key(|symbol| {
-        (
-            symbol.library.is_some().then_some(symbol.vaddr),
-            index(symbol),
-        )
-    });
+    imports.sort_by_key(|symbol| (symbol.origin.directory.map(|_| symbol.vaddr), index(symbol)));
     let linkage = session.program.imports();
     // The first stub naming each import, as the stubs are ordered.
     let mut stubs = std::collections::BTreeMap::new();
@@ -1284,7 +1279,7 @@ fn import_rows(session: &Session, table: &mut Table) {
     for symbol in imports {
         let stub = stubs.get(&*symbol.name).copied();
         // A PE import is its slot, which a call reads; no stub stands for it.
-        let at = match symbol.library {
+        let at = match symbol.origin.directory {
             Some(_) => Some(symbol.vaddr),
             None => stub.map(|(at, _)| *at),
         };
@@ -1299,11 +1294,17 @@ fn import_rows(session: &Session, table: &mut Table) {
                 symbol_type(symbol),
                 // An import's size is the stub's, which is what a call to it reaches.
                 stub.map_or(symbol.size, |(_, stub)| stub.size),
-                symbol.library.as_deref().unwrap_or("   "),
+                pe_library(symbol),
                 symbol.name
             ),
         );
     }
+}
+
+/// The DLL a PE directory names beside a symbol; radare2 prints no Mach-O dylib there.
+fn pe_library(symbol: &r2image::Symbol) -> &str {
+    let named = symbol.origin.directory.and(symbol.library.as_deref());
+    named.unwrap_or("   ")
 }
 
 /// A symbol's binding, as radare2 spells it.

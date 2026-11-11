@@ -28,22 +28,22 @@ NAME=0x00001000
 FILE=tests/fixtures/two_units_O0g
 CMDS=aa; pdd @ 0x00001000
 EXPECT=<<EOF
-uint64_t _init(void)
+r2sleigh_result_u64 _init(void)
 {
     uint64_t rax_1;
     uint64_t rax_3;
 
-    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2) */
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 8 rendered, 10 elided, 0 refused, 4 residual; 6 statements rendered; 1 never assigned, read as residuals (RAX_2); the parameters are a floor: at least 0 (a register past them reaches an indirect call); the result is unproven (Written): 2 unproven-return carried */
     {
         rax_1 = r2sleigh_load_u64((void*)(uint64_t)0x3fe8U);
         if ((uint8_t)((uint64_t)rax_1 == (uint64_t)0U)) {
             rax_3 = rax_1;
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         } else {
             r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1014:4 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
             r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x1014:11 covering 1 op (render::values) */
             rax_3 = r2sleigh_residual_u64(3);
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         }
     }
 }
@@ -81,16 +81,16 @@ NAME=0x00001060
 FILE=tests/fixtures/two_units_O0g
 CMDS=aa; pdd @ 0x00001060
 EXPECT=<<EOF
-void _start(void)
+void _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
 {
     uint64_t tmp_1069_0_2;
 
-    /* r2dec proof: 5 constructs are marked below; 28 source obligations: 0 rendered, 6 elided, 0 refused, 22 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0) */
+    /* r2dec proof: 5 constructs are marked below; 29 source obligations: 0 rendered, 6 elided, 0 refused, 23 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0); 1 callee prototype supplied by the source */
     {
         tmp_1069_0_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x1060:29 covering 1 op (render::values) */
         r2sleigh_residual_void(3); /* r2dec gap: StoreNotSpelled at 0x1060:32 covering 1 op (render::values) */
-        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x1060:68 covering 1 op (render::values): call to __libc_start_main: the import's declaration has an argument this convention does not place */
+        r2sleigh_residual_void(4); /* r2dec gap: CallNotRendered at 0x1060:68 covering 1 op (render::values): call to __libc_start_main: an argument has no C spelling */
         r2sleigh_residual_void(5); /* r2dec gap: TransferNotFollowed at 0x1060 (render::control) */
     }
 }
@@ -104,15 +104,15 @@ NAME=0x00001090
 FILE=tests/fixtures/two_units_O0g
 CMDS=aa; pdd @ 0x00001090
 EXPECT=<<EOF
-uint64_t deregister_tm_clones(void)
+r2sleigh_result_u64 deregister_tm_clones(void)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered; the parameters are a floor: at least 0 (a transfer is unresolved); the result is unproven (Written): 1 unproven-return carried */
     {
         rax_3 = 0x4010;
         {
-            return (uint64_t)rax_3;
+            return r2sleigh_carrier_u64((uint64_t)rax_3);
         }
     }
 }
@@ -126,15 +126,15 @@ NAME=0x000010c0
 FILE=tests/fixtures/two_units_O0g
 CMDS=aa; pdd @ 0x000010c0
 EXPECT=<<EOF
-uint64_t register_tm_clones(void)
+r2sleigh_result_u64 register_tm_clones(void)
 {
     uint64_t rax_4;
 
-    /* r2dec proof: no individual construct is marked; 11 source obligations: 8 rendered, 3 elided, 0 refused; 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 11 source obligations: 8 rendered, 3 elided, 0 refused; 2 statements rendered; the parameters are a floor: at least 0 (a transfer is unresolved); the result is unproven (Written): 1 unproven-return carried */
     {
         rax_4 = 0;
         {
-            return (uint64_t)rax_4;
+            return r2sleigh_carrier_u64((uint64_t)rax_4);
         }
     }
 }
@@ -148,7 +148,7 @@ NAME=0x00001100
 FILE=tests/fixtures/two_units_O0g
 CMDS=aa; pdd @ 0x00001100
 EXPECT=<<EOF
-uint64_t __do_global_dtors_aux(void)
+r2sleigh_result_u64 __do_global_dtors_aux(void)
 {
     void __cxa_finalize(void*);
     extern char __dso_handle[];
@@ -158,7 +158,7 @@ uint64_t __do_global_dtors_aux(void)
     uint64_t tmp_110e_0_1;
     uint64_t rdi_1;
 
-    /* r2dec proof: 3 constructs are marked below; 40 source obligations: 16 rendered, 17 elided, 0 refused, 7 residual; 9 statements rendered; 2 data object types refused; 1 callee prototype supplied by the source */
+    /* r2dec proof: 4 constructs are marked below; 42 source obligations: 16 rendered, 17 elided, 0 refused, 9 residual; 9 statements rendered; 1 never assigned, read as residuals (RAX_2); 2 data object types refused; 1 callee prototype supplied by the source; the parameters are a floor: at least 0 (a register past them reaches the call to 0x1090); the result is unproven (Written): 0 unproven-return carried, 2 unproven-return residual */
     {
         tmp_1104_0_1 = r2sleigh_load_u8((void*)&__TMC_END__);
         if ((uint8_t)((uint8_t)tmp_1104_0_1 != (uint8_t)0U)) {
@@ -172,8 +172,9 @@ uint64_t __do_global_dtors_aux(void)
             }
             {
                 r2sleigh_residual_void(2); /* r2dec gap: CallNotRendered at 0x1127:17 covering 1 op (render::values): call to deregister_tm_clones: argument slot 0 may hand on what this function was passed */
+                r2sleigh_residual_void(3); /* r2dec gap: ValueNotComputed at 0x1127:22 covering 1 op (render::values) */
                 r2sleigh_store_u8((void*)&__TMC_END__, (uint8_t)1U);
-                return r2sleigh_residual_u64(3);
+                return (uint64_t)r2sleigh_residual_u64(4);
             }
         }
     }
@@ -188,13 +189,13 @@ NAME=0x00001140
 FILE=tests/fixtures/two_units_O0g
 CMDS=aa; pdd @ 0x00001140
 EXPECT=<<EOF
-uint64_t frame_dummy(void)
+r2sleigh_result_u64 frame_dummy(void)
 {
     uint64_t register_tm_clones(void);
 
-    /* r2dec proof: no individual construct is marked; 3 source obligations: 2 rendered, 1 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 3 source obligations: 2 rendered, 1 elided, 0 refused; 1 statements rendered; the parameters are a floor: at least 0 (a register past them reaches the call to 0x10c0); the result is unproven (Written): 1 unproven-return carried */
     {
-        return register_tm_clones();
+        return r2sleigh_carrier_u64(register_tm_clones());
     }
 }
 
@@ -233,7 +234,7 @@ int32_t from_a(int32_t value)
 
     uint64_t rax_2;
 
-    /* r2dec proof: no individual construct is marked; 17 source obligations: 7 rendered, 10 elided, 0 refused; 2 statements rendered; 1 callee prototype supplied by the source */
+    /* r2dec proof: no individual construct is marked; 16 source obligations: 6 rendered, 10 elided, 0 refused; 2 statements rendered; 1 callee prototype supplied by the source */
     {
         rax_2 = (uint64_t)(uint32_t)helper((int32_t)value);
         return (int32_t)rax_2;
@@ -328,7 +329,7 @@ int32_t main(int32_t argc, char** argv)
     uint32_t tmp_lane_1262_6_0_1;
     _Alignas(16) uint8_t frame[88];
 
-    /* r2dec proof: 1 construct is marked below; 67 source obligations: 42 rendered, 19 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 1 residual; 14 statements rendered; 2 callee prototypes supplied by the source */
+    /* r2dec proof: 1 construct is marked below; 63 source obligations: 41 rendered, 18 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 1 residual; 14 statements rendered; 2 callee prototypes supplied by the source */
     {
         r2sleigh_store_u32((void*)(uint64_t)(frame + 28U), (uint32_t)argc);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)argv);
@@ -360,7 +361,7 @@ CMDS=aa; pdd @ 0x00001280
 EXPECT=<<EOF
 void _fini(void)
 {
-    /* r2dec proof: no individual construct is marked; 7 source obligations: 1 rendered, 6 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 7 source obligations: 1 rendered, 6 elided, 0 refused; 1 statements rendered; no call reads the result (assuming closed-world) */
     {
         return;
     }

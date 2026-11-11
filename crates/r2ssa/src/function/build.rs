@@ -31,9 +31,12 @@ impl SSAFunction {
         Self {
             call_preserved_carriers: None,
             supervisor_calls: BTreeSet::new(),
+            callee_passes: Arc::default(),
             promoted_slots: std::collections::BTreeSet::new(),
             compiler_inserted: crate::dense::IdSet::default(),
             compiler_inserted_blocks: BTreeMap::new(),
+            passing_differences: Vec::new(),
+            checked_differences: Vec::new(),
             compiler_removed_edges: BTreeSet::new(),
             decided_dead_blocks: BTreeMap::new(),
             decided_dead_edges: BTreeSet::new(),
@@ -199,6 +202,7 @@ impl SSAFunction {
         )?;
         phase("raw", func.num_blocks());
         func.call_preserved_carriers = call_preserved_carriers;
+        func.callee_passes = Arc::new(callees.preserved().clone());
         func.stack_pointer_carrier = stack_pointer_carrier;
         // Before preparation, so the arithmetic above the constant folds with it.
         func.forward_proven_call_return_addresses(callees);
@@ -212,13 +216,17 @@ impl SSAFunction {
         crate::read_only::fold_loads(&mut func, machine_context);
         // Before preparation, so the comparison a decided check leaves unread folds away.
         crate::stack_protector::decide(&mut func, machine_context);
+        crate::security_cookie::decide(&mut func, machine_context, callees.security_checks());
         crate::stack_bound::decide(&mut func, machine_context);
         // Preparation reads the interface for the return projection only;
         // the prep facts, collected when the function is sealed, read it for
         // the declared stack bases.
         let prepared = Lifted::new(func).prepare(
             &crate::optimize::DecompilePrepConfig::default(),
-            &questions.return_carriers(),
+            (
+                &questions.return_carriers(),
+                &crate::lanes::CallResults::of(machine_context),
+            ),
             control,
         )?;
         phase("prepared", prepared.num_blocks());
@@ -566,9 +574,12 @@ impl SSAFunction {
             supervisor_calls: arch
                 .map(|arch| arch.supervisor_calls.iter().copied().collect())
                 .unwrap_or_default(),
+            callee_passes: Arc::default(),
             promoted_slots: std::collections::BTreeSet::new(),
             compiler_inserted: crate::dense::IdSet::default(),
             compiler_inserted_blocks: BTreeMap::new(),
+            passing_differences: Vec::new(),
+            checked_differences: Vec::new(),
             compiler_removed_edges: BTreeSet::new(),
             decided_dead_blocks: BTreeMap::new(),
             decided_dead_edges: BTreeSet::new(),
@@ -630,21 +641,28 @@ impl DecompilePrepFacts {
             let Ok(index) = usize::try_from(*slot) else {
                 continue;
             };
-            let Some(value) = graph.value(parameter.value) else {
+            let crate::semantic::FormalHome::Register {
+                abi_storage,
+                graph_storage,
+                value: id,
+            } = parameter.home
+            else {
                 continue;
             };
-            let entry_value = graph.def_inst(parameter.value).is_none()
+            let Some(value) = graph.value(id) else {
+                continue;
+            };
+            let entry_value = graph.def_inst(id).is_none()
                 && value.var.version == 0
-                && value.var.size == parameter.graph_storage.size
-                && value.canonical_storage == Some(parameter.graph_storage);
-            let projection =
-                graph.formal_projection_storage(parameter.value) == Some(parameter.graph_storage);
+                && value.var.size == graph_storage.size
+                && value.canonical_storage == Some(graph_storage);
+            let projection = graph.formal_projection_storage(id) == Some(graph_storage);
             if parameter.index != *slot || !(entry_value || projection) {
                 continue;
             }
-            prep.formal_parameters.insert(parameter.value, index);
-            if parameter.graph_storage == parameter.abi_storage {
-                prep.formal_parameter_bases.insert(parameter.value, index);
+            prep.formal_parameters.insert(id, index);
+            if graph_storage == abi_storage {
+                prep.formal_parameter_bases.insert(id, index);
             }
         }
     }

@@ -143,10 +143,17 @@ fn afi_and_the_header_declare_an_unproven_return_alike() {
     );
     let declared = returns.value.as_ref().expect("the carrier is declared");
     assert_eq!(declared.to_string(), "uint64_t", "{rendered}");
+    // The header spells the same carrier through the prelude typedef, which claims no C type (D201).
     let header = rendered.lines().next().expect("a header");
     assert!(
-        header.starts_with(&format!("{declared} forward(")),
+        header.starts_with("r2sleigh_result_u64 forward("),
         "{header}"
+    );
+    let unproven = info.unproven.expect("afi names the unproven result");
+    assert_eq!(unproven.cause_name(), "Written", "{rendered}");
+    assert!(
+        rendered.contains("the result is unproven (Written)"),
+        "{rendered}"
     );
     assert!(
         rendered.contains("return r2sleigh_residual_u64("),
@@ -167,4 +174,147 @@ fn a_parameter_the_body_reads_through_rests_on_the_dereference() {
     assert_eq!(declared, ["uint32_t* _"]);
     let bases = (info.arguments.iter()).map(|argument| argument.ty.confidence.basis);
     assert_eq!(bases.collect::<Vec<_>>(), [Basis::Dereferenced]);
+}
+
+/// AArch64: `caller` is `x0 = import(x0) + 1` through a stub at 0x1020 whose slot is 0x1040
+/// (a lone stub without glibc's `add x16`, which would start its cell at the `br`).
+const A64_CALLS_THROUGH_A_STUB: &[u8] = &[
+    0xfd, 0x7b, 0xbf, 0xa9, // 1000 stp x29, x30, [sp, #-16]!
+    0xfd, 0x03, 0x00, 0x91, // 1004 mov x29, sp
+    0x06, 0x00, 0x00, 0x94, // 1008 bl 0x1020
+    0x00, 0x04, 0x00, 0x91, // 100c add x0, x0, #1
+    0xfd, 0x7b, 0xc1, 0xa8, // 1010 ldp x29, x30, [sp], #16
+    0xc0, 0x03, 0x5f, 0xd6, // 1014 ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 1018 nop; nop
+    0x10, 0x00, 0x00, 0x90, // 1020 adrp x16, 0x1000
+    0x11, 0x22, 0x40, 0xf9, // 1024 ldr x17, [x16, #0x40]
+    0x20, 0x02, 0x1f, 0xd6, // 1028 br x17
+    0x1f, 0x20, 0x03, 0xd5, // 102c nop
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03,
+    0xd5, // 1030 padding
+    0, 0, 0, 0, 0, 0, 0, 0, // 1040 the slot
+];
+
+/// The callee's declaration as `caller`'s rendering states it, on glibc or on no stated library.
+fn a64_declared(import: &str, glibc: bool) -> String {
+    let program = Literal::of_code(A64_CALLS_THROUGH_A_STUB, &[("caller", BASE, 0x18)])
+        .in_aarch64()
+        .importing_through(BASE + 0x20..BASE + 0x30, BASE + 0x40, import);
+    let program = match glibc {
+        true => program.running_on(common::GLIBC),
+        false => program,
+    };
+    let text = OpenProgram::of(program)
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    let declared = text
+        .lines()
+        .find(|line| line.contains(&format!(" {import}(")) && line.ends_with(");"));
+    declared.map(str::trim).unwrap_or(&text).to_owned()
+}
+
+/// `x0 = import(x0) + 1` on x86-64 glibc: `call` the stub, `add rax, 1`, `ret`.
+fn x86_64_declared(import: &str) -> String {
+    let mut program = OpenProgram::of(Literal::new().importing(import).running_on(common::GLIBC));
+    let call = i32::try_from(common::STUB as i64 - (common::TWO + 5) as i64).expect("near");
+    let mut code = vec![0xe8];
+    code.extend_from_slice(&call.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x83, 0xc0, 0x01, 0xc3]);
+    program.source_mut().write(common::TWO, &code);
+    let text = (program
+        .rendered(common::TWO)
+        .expect("it renders")
+        .response
+        .output)
+        .into_text();
+    let declared = text
+        .lines()
+        .find(|line| line.contains(&format!(" {import}(")) && line.ends_with(");"));
+    declared.map(str::trim).unwrap_or(&text).to_owned()
+}
+
+/// A row's `wchar_t` and `char` take the target's sign: unsigned under AAPCS64 glibc, signed
+/// under SysV x86-64; with no C library stated, nothing states `wchar_t` and it renders as base.
+#[test]
+fn a_rows_wchar_t_and_char_are_the_targets() {
+    assert_eq!(
+        a64_declared("wcslen", true),
+        "uint64_t wcslen(const uint32_t*);"
+    );
+    assert_eq!(
+        a64_declared("strlen", true),
+        "uint64_t strlen(const char*);"
+    );
+    assert_eq!(
+        x86_64_declared("wcslen"),
+        "uint64_t wcslen(const int32_t*);"
+    );
+    assert_eq!(x86_64_declared("strlen"), "uint64_t strlen(const char*);");
+    assert_eq!(
+        [a64_declared("wcslen", false), a64_declared("strlen", false)],
+        [
+            "uint64_t wcslen(uint64_t);",
+            "uint64_t strlen(const char*);"
+        ]
+    );
+}
+
+/// `movsd xmm0, [rsp + 8]; movsd [rdi], xmm0; ret`: the ninth double stored through the pointer.
+const STORES_THE_NINTH_DOUBLE: &[u8] = &[
+    0xf2, 0x0f, 0x10, 0x44, 0x24, 0x08, // movsd xmm0, [rsp + 8]
+    0xf2, 0x0f, 0x11, 0x07, // movsd [rdi], xmm0
+    0xc3, // ret
+];
+
+/// `void ninth(double *out, double a, ..., double i)`: under SysV `a` to `h` are in the vector
+/// registers and `i` is on the stack.
+fn ninth() -> r2abi::Declarations {
+    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Type, TypeGraph, Width};
+    let mut graph = TypeGraph::new();
+    let double = graph.add(Type::Scalar(Scalar {
+        kind: ScalarKind::Float,
+        width: Width::Bits(64),
+        name: Some("double".to_owned()),
+    }));
+    let pointer = graph.add(Type::Pointer { target: double });
+    let void = graph.add(Type::Void);
+    let names = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+    let doubles = names.map(|name| Parameter::new(double, "double", Some(name)));
+    let prototype = Prototype {
+        name: "ninth".to_owned(),
+        parameters: [Parameter::new(pointer, "double *", Some("out"))]
+            .into_iter()
+            .chain(doubles)
+            .collect(),
+        returns: "void".into(),
+        return_type: void,
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(BASE, prototype);
+    declarations
+}
+
+/// A stack slot carries any class: the declared double there is a parameter beside the register
+/// ones, never an integer whose disagreement refuses the whole list.
+#[test]
+fn a_declared_double_on_the_stack_is_declared_beside_the_register_ones() {
+    let code = STORES_THE_NINTH_DOUBLE;
+    let literal = Literal::of_code(code, &[("ninth", BASE, code.len() as u64)]);
+    let text = (OpenProgram::of(literal.with_declarations(ninth())).rendered(BASE))
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    let header = text.lines().next().unwrap_or_default();
+    let parameters = common::parameters(header);
+    assert_eq!(parameters.len(), 10, "{text}");
+    assert_eq!(
+        parameters[9],
+        ("double".to_owned(), "i".to_owned()),
+        "{text}"
+    );
 }

@@ -24,7 +24,7 @@ use crate::codegen::{
 use crate::control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
 use crate::ledger::{ObligationLedger, Outcome};
 use crate::structure::certify::StatementRole;
-use crate::structure::shape::{Evidence, Occurrences};
+use crate::structure::shape::{Evidence, Occurrences, callee_of};
 
 /// One function the staged pipeline rendered, and what became of each obligation.
 pub struct Rendered {
@@ -99,18 +99,13 @@ pub fn render(
         .as_ref()
         .map(values::Values::never_returning)
         .unwrap_or_default();
-    let never_returns = |stmt: &CStmt| calls_never_returning(stmt, &never_return);
     let distinct_return =
         |addr: u64| (values.as_ref()).is_some_and(|values| values.returns_distinct_merge(addr));
-    let evidence = Evidence {
-        never_returns: &never_returns,
-        declares_noreturn: !never_return.is_empty(),
-        distinct_return: &distinct_return,
-    };
+    let evidence = Evidence::new(&never_return, &distinct_return);
     let mut occurrences = Occurrences::new(blocks, addresses);
     let mut body = structured(input, body, &labels, &evidence, &mut occurrences);
     let selections = select(&c, &mut body, &|id| occurrences.block_of(id));
-    let role = |stmt: &CStmt| statement_role(stmt, &never_returns, &selections);
+    let role = |stmt: &CStmt| statement_role(stmt, &evidence, &selections);
     certify_control(input, &body, &occurrences, &labels, &role)?;
     crate::structure::condition::respell_negations(&mut body);
     // What remains is linear emission of a certified body, so a stop here keeps what was reached.
@@ -136,6 +131,10 @@ pub fn render(
             input.open_second_result(),
             input.inferred_aggregates().len(),
         ),
+        (input.return_type())
+            .filter(|fact| fact.is_unproven())
+            .map(r2types::ReturnTypeFact::unproven_cause),
+        input.arity_floor(),
     );
     let mut ready = ready_with_carriers(c, &tags);
     // Each marker names the instruction its statement was written for, so each line names its own.
@@ -162,7 +161,8 @@ fn spell_function<'a>(
 ) -> Result<(CFunction, Option<values::Values<'a>>, spelled::Spelled), DecompileExecutionStop> {
     let mut forced = r2ssa::dense::IdSet::new(input.graph().values.len());
     loop {
-        let c = CFunction::new(name.to_owned(), result_type(input));
+        let mut c = CFunction::new(name.to_owned(), result_type(input));
+        spell_unproven_carrier(&mut c, input);
         let values = values::Values::new(input, tags, std::rc::Rc::clone(&c.symbols), &forced);
         let spelled = spelled::spell(input, values.as_ref(), order, work)?;
         let broken = values
@@ -236,7 +236,7 @@ fn structured(
 ) -> CStmt {
     let unselected = std::collections::BTreeSet::new();
     let certified = |stmt: &CStmt, marks: &Occurrences| {
-        let role = |stmt: &CStmt| statement_role(stmt, evidence.never_returns, &unselected);
+        let role = |stmt: &CStmt| statement_role(stmt, evidence, &unselected);
         let certificate = control_certificate(input, stmt, marks, labels, &role);
         match certificate.ok() {
             true => Ok(()),
@@ -264,10 +264,6 @@ fn structured(
     let body = stage("loop rotation", body, marks, &certified, |body, marks| {
         crate::structure::rotate::rotate(body, marks) != 0
     });
-    // With no callee declared never to return the guard has no arm to find, and a stage clones the body.
-    if !evidence.declares_noreturn {
-        return body;
-    }
     stage("noreturn guards", body, marks, &certified, |body, marks| {
         crate::structure::guard::guard(body, evidence, marks) != 0
     })
@@ -367,7 +363,7 @@ fn select(
 /// What the certificate reads a statement as: a selection the stage recorded, or one ending control.
 fn statement_role(
     stmt: &CStmt,
-    never_returns: &dyn Fn(&CStmt) -> bool,
+    evidence: &Evidence<'_>,
     selections: &std::collections::BTreeSet<RenderObservationId>,
 ) -> StatementRole {
     match stmt
@@ -376,7 +372,7 @@ fn statement_role(
         .any(|id| selections.contains(id))
     {
         true => StatementRole::Selects,
-        false => (traps(stmt) || never_returns(stmt)).into(),
+        false => (traps(stmt) || evidence.never_returns(callee_of(stmt))).into(),
     }
 }
 
@@ -413,19 +409,30 @@ fn traps(stmt: &CStmt) -> bool {
         || matches!(stmt, CStmt::Expr(CExpr::Call { func, .. }) if crate::prelude::is_residual_callee(func).is_some())
 }
 
-/// Whether a statement is a call to a callee declared never to return, which ends control there.
-fn calls_never_returning(stmt: &CStmt, never_return: &std::collections::BTreeSet<String>) -> bool {
-    matches!(stmt, CStmt::Expr(CExpr::Call { func, .. })
-        if matches!(&**func, CExpr::External { name, .. } if never_return.contains(name)))
-}
-
 /// The function's result type: what the analysis decided, else the machine word.
 fn result_type(input: &RenderInput<'_>) -> CType {
     input
         .return_type()
-        .and_then(r2types::ReturnTypeFact::decided)
+        .and_then(r2types::ReturnTypeFact::declared)
         .cloned()
         .unwrap_or_else(|| word(input))
+}
+
+/// The bits of an unproven result's carrier, where it is an integer C names.
+fn unproven_carrier_bits(input: &RenderInput<'_>) -> Option<u32> {
+    let fact = input.return_type().filter(|fact| fact.is_unproven())?;
+    match fact.declared()? {
+        CType::Int { bits, .. } if crate::prelude::carrier(*bits).is_some() => Some(*bits),
+        _ => None,
+    }
+}
+
+/// An unproven result's header states only where the machine leaves a value: the prelude typedef
+/// `r2sleigh_result_uN`, which claims no C type (doc/adr-scratch-result.md, "Rendering of Unproven").
+fn spell_unproven_carrier(c: &mut CFunction, input: &RenderInput<'_>) {
+    if let Some(bits) = unproven_carrier_bits(input) {
+        c.ret_type = crate::prelude::result_carrier(bits);
+    }
 }
 
 /// The machine word, unsigned: the storage a result carrier holds.
@@ -496,6 +503,8 @@ pub(crate) fn residual_function_for_render_boundary(func_name: &str, reason: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::test_render_observation_id;
+    use std::collections::BTreeSet;
 
     fn id(index: usize) -> RenderObservationId {
         RenderObservationId::from_dense_index(index)
@@ -538,5 +547,32 @@ mod tests {
         let kept = stage("copies", body, &mut marks, &accept, copies);
         assert_eq!(kept.observation_ids().into_owned(), [id(2)]);
         assert_eq!(marks.issued(), 4);
+    }
+
+    #[test]
+    fn a_call_ends_control_by_its_callee_s_declaration_whatever_it_passes() {
+        let declared = crate::structure::support::declared();
+        let none = BTreeSet::new();
+        for (set, role) in [
+            (&declared, StatementRole::Ends),
+            (&none, StatementRole::Plain),
+        ] {
+            let evidence = Evidence::new(set, &|_| false);
+            // A selection the call does not carry leaves its role to the declaration.
+            let selected = [
+                BTreeSet::new(),
+                BTreeSet::from([test_render_observation_id(9)]),
+            ];
+            let calls = crate::structure::support::exit_calls();
+            for (call, selections) in
+                calls.flat_map(|call| selected.iter().map(move |s| (call.clone(), s)))
+            {
+                assert_eq!(
+                    statement_role(&call, &evidence, selections),
+                    role,
+                    "{call:?} {selections:?}"
+                );
+            }
+        }
     }
 }

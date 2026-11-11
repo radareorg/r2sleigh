@@ -36,10 +36,6 @@ fn proof_columns(
             premises.collect::<Vec<_>>().join(", ")
         );
     }
-    // A void result no call reads holds only where those calls are every way in.
-    if ledger.premises().contains(&r2source::Premise::ClosedWorld) {
-        line.push_str(", no call reads the result (assuming closed-world)");
-    }
     if closure.assumed > 0 {
         let _ = write!(
             &mut line,
@@ -74,6 +70,8 @@ pub(crate) fn note_unproven_constructs(
     radare2_prototypes: usize,
     radare2_local_names: usize,
     (unassigned, open_second_result, laid_out): (&[UnassignedRead], bool, usize),
+    unproven: Option<Option<r2types::UnprovenCause>>,
+    floor: Option<(usize, &r2source::SourceArityFloor)>,
 ) {
     let rendered_nothing = func.body.is_empty();
     // Each residual is a construct the rendering says it did not prove, and
@@ -160,8 +158,15 @@ pub(crate) fn note_unproven_constructs(
             "; {radare2_prototypes} {noun} supplied by the source"
         );
     }
+    note_floor(&mut detail, floor);
+    if ledger.is_some_and(|ledger| ledger.premises().contains(&r2source::Premise::ClosedWorld)) {
+        detail.push_str(closed_world(func, unproven));
+    }
     if open_second_result {
         detail.push_str("; the result's second register is open: no call read decides it");
+    }
+    if let Some(cause) = unproven {
+        note_unproven(&mut detail, func, cause);
     }
     // A layout the accesses prove, spelled as a structure no declaration states (doc/adr-aggregates.md).
     match laid_out {
@@ -193,6 +198,69 @@ pub(crate) fn note_unproven_constructs(
         })
     };
     func.body.insert(0, CStmt::comment(text));
+}
+
+/// A premise is its own clause: what the closed world decided of the result (D166, D234).
+fn closed_world(
+    func: &CFunction,
+    unproven: Option<Option<r2types::UnprovenCause>>,
+) -> &'static str {
+    match unproven {
+        Some(Some(r2types::UnprovenCause::ForwardCycle)) => {
+            "; a call returns the result on through a cycle (assuming closed-world)"
+        }
+        // A value no body proves, decided only by its reading calls.
+        None if func.ret_type != crate::ast::CType::Void => {
+            "; a call reads the result (assuming closed-world)"
+        }
+        _ => "; no call reads the result (assuming closed-world)",
+    }
+}
+
+/// Every return of the unproven result, counted once: carried, or a residual (D233).
+fn note_unproven(detail: &mut String, func: &CFunction, cause: Option<r2types::UnprovenCause>) {
+    let (carried, residual) = crate::prelude::unproven_returns(func);
+    let cause = cause.map_or("no return reached", r2types::UnprovenCause::name);
+    let _ = write!(
+        detail,
+        "; the result is unproven ({cause}): {carried} unproven-return carried"
+    );
+    if residual > 0 {
+        let _ = write!(detail, ", {residual} unproven-return residual");
+    }
+}
+
+/// The header lists what is proven; a floor says more may be passed (D100).
+fn note_floor(detail: &mut String, floor: Option<(usize, &r2source::SourceArityFloor)>) {
+    if let Some((count, floor)) = floor {
+        let causes = floor.causes().iter().map(floor_cause).collect::<Vec<_>>();
+        let _ = write!(
+            detail,
+            "; the parameters are a floor: at least {count} ({})",
+            causes.join(", ")
+        );
+    }
+}
+
+/// Why the parameters are only a floor, as the proof line words it (D37).
+fn floor_cause(cause: &r2source::SourceFloorCause) -> String {
+    use r2source::{SourceFloorCause as C, SourceUnprovenCall as U};
+    match cause {
+        C::UnresolvedTransfer => "a transfer is unresolved".into(),
+        C::SupervisorEntry => "a supervisor entry".into(),
+        C::ArgumentAreaUnplaced => "the argument area is unplaced".into(),
+        C::ArgumentAreaRead => "the argument area is read past an unfull register section".into(),
+        C::ArgumentAreaPastBudget => {
+            "the argument area is read past the slots recovery holds".into()
+        }
+        C::RegisterRead => "a register past them is read".into(),
+        C::Homed => "a register past them is only homed".into(),
+        C::HandedOn(U::Indirect) => "a register past them reaches an indirect call".into(),
+        C::HandedOn(U::Unstated(at) | U::Floor(at) | U::Stated(at)) => {
+            format!("a register past them reaches the call to {at:#x}")
+        }
+        C::Unplaced(_) => "a declared parameter has no location".into(),
+    }
 }
 
 /// Why a read the rendering spells as a residual has no value C can name.

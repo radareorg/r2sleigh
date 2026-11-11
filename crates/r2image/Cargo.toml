@@ -6,6 +6,7 @@ license.workspace = true
 description = "Program image: binary format parsing and virtual address mapping"
 
 [dependencies]
+rustc-hash.workspace = true
 gimli = { version = "0.34.0", default-features = false, features = ["read", "std"] }
 memmap2 = "0.9.5"
 object.workspace = true

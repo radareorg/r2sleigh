@@ -159,7 +159,9 @@ impl Prover<'_> {
     pub(crate) fn infeasible(&self, cursors: &Cursors, predicates: &PredicateFacts) -> Infeasible {
         let mut found = Infeasible::default();
         let slot = i64::from(self.width);
-        let up_to_zero = self.row.offset_width == 4 && self.next() <= 0 && self.next() % slot == 0;
+        let up_to_zero = self.row.is_some_and(|row| row.offset_width == 4)
+            && self.next() <= 0
+            && self.next() % slot == 0;
         if !up_to_zero {
             return found;
         }

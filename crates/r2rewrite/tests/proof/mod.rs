@@ -15,28 +15,27 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
-
 use r2rewrite::{ObjectPlacement, TermArena, TermId, TermKind};
 use r2ssa::{
     MachineArithmeticFlagOp, MachineArithmeticOp, MachineBitwiseOp, MachineBooleanOp,
     MachineCastKind, MachineComparisonOp, MachineOvershiftBehavior, MachineShiftKind,
     MachineSignedness, MachineType, ObjectId, StackAddressBase,
 };
+use rustc_hash::FxHashMap;
 use z3::Sort;
 use z3::ast::{Array, BV, Bool};
 
 pub struct Encoder<'a> {
     arena: &'a TermArena,
-    variables: HashMap<(u32, MachineType), BV>,
-    memo: HashMap<TermId, BV>,
+    variables: FxHashMap<(u32, MachineType), BV>,
+    memo: FxHashMap<TermId, BV>,
     /// `leaf == definition` for every defined leaf the encoding met, and the
     /// certificate equations of every stack-rooted or walked leaf: the
     /// hypotheses under which a certificate-aware rule is an equivalence, to
     /// be asserted beside the negated equation.
     hypotheses: Vec<Bool>,
-    memories: HashMap<(u32, u32), Array>,
-    frames: HashMap<(StackAddressBase, u32), BV>,
+    memories: FxHashMap<(u32, u32), Array>,
+    frames: FxHashMap<(StackAddressBase, u32), BV>,
 }
 
 fn zero(width: u32) -> BV {
@@ -70,11 +69,11 @@ impl<'a> Encoder<'a> {
     pub fn new(arena: &'a TermArena) -> Self {
         Self {
             arena,
-            variables: HashMap::new(),
-            memo: HashMap::new(),
+            variables: FxHashMap::default(),
+            memo: FxHashMap::default(),
             hypotheses: Vec::new(),
-            memories: HashMap::new(),
-            frames: HashMap::new(),
+            memories: FxHashMap::default(),
+            frames: FxHashMap::default(),
         }
     }
 
@@ -124,7 +123,7 @@ impl<'a> Encoder<'a> {
         &self.hypotheses
     }
 
-    pub fn variables(&self) -> &HashMap<(u32, MachineType), BV> {
+    pub fn variables(&self) -> &FxHashMap<(u32, MachineType), BV> {
         &self.variables
     }
 

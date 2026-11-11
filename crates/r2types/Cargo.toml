@@ -6,6 +6,7 @@ license.workspace = true
 description = "Constraint-based type inference primitives for r2sleigh"
 
 [dependencies]
+rustc-hash.workspace = true
 r2il = { path = "../r2il" }
 r2source = { path = "../r2source" }
 r2ssa = { path = "../r2ssa" }

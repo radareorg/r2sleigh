@@ -3,7 +3,8 @@
 //! This module provides a CFG data structure built from r2il blocks,
 //! which is the foundation for inter-procedural SSA analysis.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use petgraph::Direction;
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -503,7 +504,7 @@ pub struct CFG {
     /// The underlying directed graph.
     graph: DiGraph<BasicBlock, CFGEdge>,
     /// Map from block address to node index.
-    addr_to_node: HashMap<u64, NodeIndex>,
+    addr_to_node: FxHashMap<u64, NodeIndex>,
     /// The root: the block control enters the graph by, which no edge
     /// reaches. It is the block at `entered_at`, or [`ENTRY_EDGE`] where a
     /// branch in the body also targets that address.
@@ -558,7 +559,7 @@ impl CFG {
     pub fn new(entry: u64) -> Self {
         Self {
             graph: DiGraph::new(),
-            addr_to_node: HashMap::new(),
+            addr_to_node: FxHashMap::default(),
             entry,
             entered_at: entry,
         }
@@ -732,7 +733,7 @@ impl CFG {
                 // that many times, and the SSA integrity check refused the
                 // whole function -- so a switch with a shared arm could not
                 // be decompiled at all.
-                let mut linked = std::collections::HashSet::new();
+                let mut linked = rustc_hash::FxHashSet::default();
                 for (_, target) in cases {
                     if let Some(&target_idx) = self.addr_to_node.get(target)
                         && linked.insert(*target)
@@ -839,7 +840,7 @@ impl CFG {
             return vec![];
         };
 
-        let mut visited = HashSet::new();
+        let mut visited = FxHashSet::default();
         let mut postorder = Vec::new();
 
         self.dfs_postorder(entry_idx, &mut visited, &mut postorder);
@@ -852,7 +853,7 @@ impl CFG {
     fn dfs_postorder(
         &self,
         node: NodeIndex,
-        visited: &mut HashSet<NodeIndex>,
+        visited: &mut FxHashSet<NodeIndex>,
         postorder: &mut Vec<u64>,
     ) {
         let mut stack = vec![(node, false)];
@@ -910,10 +911,10 @@ impl CFG {
     }
 
     /// Group every back edge under the loop header it re-enters.
-    pub(crate) fn collect_back_edges(&self) -> HashMap<u64, Vec<u64>> {
-        let mut visited = HashSet::new();
-        let mut in_stack = HashSet::new();
-        let mut back_edges = HashMap::new();
+    pub(crate) fn collect_back_edges(&self) -> FxHashMap<u64, Vec<u64>> {
+        let mut visited = FxHashSet::default();
+        let mut in_stack = FxHashSet::default();
+        let mut back_edges = FxHashMap::default();
         self.dfs_back_edges(self.entry, &mut visited, &mut in_stack, &mut back_edges);
         back_edges
     }
@@ -921,9 +922,9 @@ impl CFG {
     fn dfs_back_edges(
         &self,
         block: u64,
-        visited: &mut HashSet<u64>,
-        in_stack: &mut HashSet<u64>,
-        back_edges: &mut HashMap<u64, Vec<u64>>,
+        visited: &mut FxHashSet<u64>,
+        in_stack: &mut FxHashSet<u64>,
+        back_edges: &mut FxHashMap<u64, Vec<u64>>,
     ) {
         enum DfsStep {
             Enter(u64),

@@ -1,6 +1,7 @@
 //! D2's calls: one written from its callsite certificate, to the callee r2types resolved or
 //! through the value an indirect call reaches (doc/adr-decompiler-rewrite.md); any other is a gap.
 
+use r2source::{SourceAbove, SourceResultWidth};
 use r2ssa::{
     CallSiteTransfer, CanonicalStorageId, InstId, InstPayload, MachineType, SSAOp,
     SemanticObligationInventory, SemanticObligationKind, SsaArtifact, ValueId,
@@ -35,15 +36,34 @@ pub(super) struct CallPlan {
     pub(super) variadic: bool,
     /// What the call leaves its caller: one value, or a pair's halves.
     pub(super) result: Option<CallResult>,
+    /// How many low bytes of its one result register r2ssa states the callee's value fills.
+    pub(super) width: Option<SourceResultWidth>,
+    /// The carrier's bits where the call reads no result and its boundary does not state `void`:
+    /// a result no contract states is still one (S36), so its extern is never `void`.
+    pub(super) unread: Option<u32>,
     pub(super) noreturn: bool,
     /// For a tail transfer, the register and class its callee returns in; `Some(None)` where the
     /// facts state no result.
     pub(super) tail: Option<Option<(CanonicalStorageId, MachineType)>>,
     /// The callee's declared prototype, where C spells every type in it with no definition.
     pub(super) declared: Option<Prototype>,
+    /// Each argument the callee's interface states it ignores: a hole below a read slot (D165).
+    pub(super) holes: Vec<bool>,
 }
 
 impl CallPlan {
+    /// Whether the argument at `position` is a slot the callee ignores.
+    pub(super) fn ignored(&self, position: usize) -> bool {
+        self.holes.get(position).copied().unwrap_or(false)
+    }
+
+    /// The values the call reads: every argument but the slots its callee ignores.
+    pub(super) fn passed_values(&self) -> impl Iterator<Item = ValueId> + '_ {
+        (self.arguments.iter().enumerate())
+            .filter(|(position, _)| !self.ignored(*position))
+            .map(|(_, (value, _))| *value)
+    }
+
     /// The class the call returns in: its callee's for a tail transfer, else the result it leaves.
     pub(super) fn returns(&self) -> Option<&MachineType> {
         match &self.tail {
@@ -108,36 +128,23 @@ impl Prototype {
         Some(Self { params, ret })
     }
 
-    /// `signature` at its carriers' widths alone, where it names `fixed` parameters and has a
-    /// result exactly where the call defines one: a sign, a pointee or a name it states is unproven.
-    pub(super) fn of_widths(
+    /// The callee's projection as its own header spells it: its types, its unproven result as the
+    /// carrier typedef, and a result exactly where the call defines one.
+    pub(super) fn of_projection(
         signature: &r2types::FunctionType,
         fixed: usize,
         returns: bool,
-        ptr_bits: u32,
+        unproven: Option<u32>,
+        defines: &dyn Fn(&str, bool) -> bool,
     ) -> Option<Self> {
-        if signature.params.len() != fixed {
-            return None;
+        let mut prototype = Self::of(signature, fixed, defines)?;
+        if let Some(bits) = unproven.filter(|bits| crate::prelude::carrier(*bits).is_some()) {
+            prototype.ret = crate::prelude::result_carrier(bits);
         }
-        let width = |ty: &CType| match ty.unaliased() {
-            CType::Int { bits, .. } if matches!(bits, 8 | 16 | 32 | 64) => Some(CType::uint(*bits)),
-            CType::Pointer(_) | CType::Function { .. } | CType::UnprototypedFunction(_) => {
-                Some(CType::uint(ptr_bits))
-            }
-            CType::Float(bits @ (32 | 64)) => Some(CType::Float(*bits)),
-            _ => None,
-        };
-        let params = signature
-            .params
-            .iter()
-            .map(width)
-            .collect::<Option<Vec<_>>>()?;
-        let ret = match (&signature.return_type, returns) {
-            (CType::Void, false) => CType::Void,
-            (CType::Void, true) => return None,
-            (ty, _) => width(ty)?,
-        };
-        Some(Self { params, ret })
+        match (&prototype.ret, returns) {
+            (CType::Void, true) => None,
+            _ => Some(prototype),
+        }
     }
 }
 
@@ -178,46 +185,84 @@ pub(super) fn text_as(text: &str, to: &CType) -> CExpr {
 }
 
 /// What the call `plan` describes returns, read at `class`, of which the program reads the bytes
-/// in `demanded`.
+/// in `demanded`: the low bytes r2ssa states the callee's value fills, spelled at the declared type.
 pub(super) fn read_result(
     plan: &CallPlan,
     call: CExpr,
     class: &MachineType,
     demanded: u64,
 ) -> Option<CExpr> {
-    match &plan.declared {
-        Some(declared) => from_declared(call, &declared.ret, class, demanded),
-        None => Some(call),
-    }
+    let ty = plan.declared.as_ref().map(|declared| &declared.ret);
+    let width = plan.width.unwrap_or(SourceResultWidth {
+        logical: u8::try_from(class.width_bits() / 8).ok()?,
+        above: SourceAbove::Undefined,
+    });
+    at_width(call, ty, width, class, demanded)
 }
 
-/// A result of the declared type read at `class`. The ABI leaves the bits above a narrower declared
+/// A value of the declared type read at `class`. The ABI leaves the bits above a narrower declared
 /// integer undefined: unread (r2ssa's `demanded`), any extension is unobservable; read, a residual.
 pub(super) fn from_declared(
-    call: CExpr,
+    value: CExpr,
     declared: &CType,
     class: &MachineType,
     demanded: u64,
 ) -> Option<CExpr> {
+    let width = SourceResultWidth {
+        logical: u8::try_from(class.width_bits() / 8).ok()?,
+        above: SourceAbove::Undefined,
+    };
+    at_width(value, Some(declared), width, class, demanded)
+}
+
+/// `value`, of C type `ty` (the class's where none), read at `class`: the low `width.logical` bytes
+/// are the value, as far as `ty` holds them, and the bytes above hold what `width.above` states.
+fn at_width(
+    value: CExpr,
+    ty: Option<&CType>,
+    width: SourceResultWidth,
+    class: &MachineType,
+    demanded: u64,
+) -> Option<CExpr> {
     let target = super::terms::c_type(class)?;
-    if *declared == target {
-        return Some(call);
-    }
-    let (bits, signed) = match declared.unaliased() {
+    let ty = ty.unwrap_or(&target);
+    // An unproven result's carrier typedef is its integer: assigning it converts nothing.
+    let same = *ty == target
+        || (crate::prelude::result_typedef(ty).is_some() && *ty.unaliased() == target);
+    let (held, signed) = match ty.unaliased() {
         CType::Int { bits, signedness } => (*bits, *signedness == r2types::Signedness::Signed),
         CType::Bool => (8, false),
-        _ => return Some(CExpr::cast(target, call)),
+        _ if same => return Some(value),
+        _ => return Some(CExpr::cast(target, value)),
     };
+    // C computes no bit past its type, so a declaration narrower than the width holds the rest.
+    let stated = u32::from(width.logical).saturating_mul(8);
+    let bits = stated.min(held);
     if bits >= class.width_bits() {
-        return Some(CExpr::cast(target, call));
+        return Some(match same {
+            true => value,
+            false => CExpr::cast(target, value),
+        });
     }
-    // C widens a signed result by its sign: through its unsigned type, the low bits alone.
-    let low = match signed {
-        true => CExpr::cast(target.clone(), CExpr::cast(CType::uint(bits), call)),
-        false => CExpr::cast(target.clone(), call),
+    let above = match held < stated {
+        true => SourceAbove::Undefined,
+        false => width.above,
+    };
+    // C widens a signed value by its sign: through the unsigned type of its low bits, those alone.
+    let low = match signed || held > bits {
+        true => CExpr::cast(target.clone(), CExpr::cast(CType::uint(bits), value)),
+        false => CExpr::cast(target.clone(), value),
     };
     if demanded >> (bits / 8) == 0 {
         return Some(low);
+    }
+    match above {
+        SourceAbove::Zero => return Some(low),
+        SourceAbove::Sign => {
+            let low = CExpr::cast(CType::int(bits), CExpr::cast(CType::uint(bits), low));
+            return Some(CExpr::cast(target, low));
+        }
+        SourceAbove::Undefined => {}
     }
     if super::terms::wide(class.width_bits()) {
         return None;
@@ -348,12 +393,16 @@ fn planned(
     let graph = artifact.graph();
     let identity = resolution.and_then(|resolution| resolution.identity_for_callsite(inst));
     let callee = callee(certificate, identity, graph, inst).ok_or(CallRefusal::NoCallee)?;
-    let pair = (artifact.facts().boundaries.calls.get(site)).and_then(|boundary| {
-        match boundary.result_kind {
-            Some(r2source::SourceCallResult::Pair { low, high }) => Some((low, high)),
-            _ => None,
-        }
-    });
+    let result_kind =
+        (artifact.facts().boundaries.calls.get(site)).and_then(|boundary| boundary.result_kind);
+    let pair = match result_kind {
+        Some(r2source::SourceCallResult::Pair { low, high }) => Some((low, high)),
+        _ => None,
+    };
+    let width = match result_kind {
+        Some(r2source::SourceCallResult::Register { width, .. }) => Some(width),
+        _ => None,
+    };
     let pair = match pair {
         Some(registers) => {
             Some(pair_values(inventory, graph, inst, registers).ok_or(CallRefusal::ResultUnclear)?)
@@ -415,13 +464,28 @@ fn planned(
             )
         })
         .collect();
+    // The callee's own interface says which of its parameters are holes.
+    let holes = (artifact.call_site_interface(*site))
+        .and_then(r2source::SourceCallSiteInterface::exact_callee_interface)
+        .map(|callee| {
+            (0..arguments.len())
+                .map(|position| {
+                    (callee.parameters().get(position))
+                        .is_some_and(r2source::SourceAbiParameterSpec::is_hole)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(CallPlan {
+        holes,
         callee,
         arguments,
         stacked,
         fixed,
         variadic: certificate.variadic,
+        unread: unread_result(artifact, *site, result.is_none()),
         result,
+        width,
         // C may drop what follows a call it believes never returns, so only the source says so.
         noreturn: artifact
             .facts()
@@ -434,6 +498,17 @@ fn planned(
         tail,
         declared: None,
     })
+}
+
+/// The carrier bits of a result nothing reads: the stated register's width, or the carrier r2ssa
+/// states where no contract states the result (D307); none where r2ssa states `void`.
+fn unread_result(artifact: &SsaArtifact, site: r2ssa::CallSiteId, unread: bool) -> Option<u32> {
+    let boundary = artifact.facts().boundaries.calls.get(&site)?;
+    let bits = match boundary.result_kind {
+        Some(r2source::SourceCallResult::Register { width, .. }) => u32::from(width.logical) * 8,
+        _ => boundary.unstated_carrier?.bits,
+    };
+    (unread && crate::prelude::carrier(bits).is_some()).then_some(bits)
 }
 
 /// Whether the CFG gives the block the call at `inst` ends no successor: the source's block graph
@@ -481,10 +556,10 @@ fn tail_result(
     declared: Option<&r2types::CTypeLike>,
 ) -> Option<(CanonicalStorageId, MachineType)> {
     let boundary = artifact.facts().boundaries.calls.get(&site)?;
-    let Some(r2source::SourceCallResult::Register { storage }) = boundary.result_kind else {
+    let Some(r2source::SourceCallResult::Register { storage, .. }) = boundary.result_kind else {
         return None;
     };
-    let carrier = super::values::carrier_class(artifact, storage, storage.size * 8);
+    let carrier = super::values::located_class(artifact, storage, storage.size * 8);
     let declared = match declared {
         Some(r2types::CTypeLike::Void) => return None,
         Some(ty) => Some(super::values::class_of(ty, storage.size * 8)?),
@@ -623,7 +698,7 @@ fn arguments(
     // A register says its class; an outgoing stack slot carries the value's integer bits.
     let located = |value: ValueId| match location(certificate, value)? {
         r2ssa::CallArgumentLocation::Register { storage } => {
-            super::values::carrier_class(artifact, *storage, storage.size * 8)
+            super::values::located_class(artifact, *storage, storage.size * 8)
         }
         r2ssa::CallArgumentLocation::Stack { .. }
         | r2ssa::CallArgumentLocation::Variable { .. } => matches!(width(value), 8 | 16 | 32 | 64)
@@ -670,8 +745,8 @@ fn result_class(
         .get(&site)
         .and_then(|boundary| boundary.result_kind)
     {
-        Some(r2source::SourceCallResult::Register { storage }) => {
-            super::values::carrier_class(artifact, storage, storage.size * 8)
+        Some(r2source::SourceCallResult::Register { storage, .. }) => {
+            super::values::located_class(artifact, storage, storage.size * 8)
         }
         // Undescribed: the slot the result obligation names, at its own width.
         _ => inventory
@@ -680,7 +755,7 @@ fn result_class(
                 r2ssa::SemanticObligationComponent::RegisterSlot { storage, .. }
                     if o.id.kind == SemanticObligationKind::CallResult =>
                 {
-                    super::values::carrier_class(artifact, storage, storage.size * 8)
+                    super::values::located_class(artifact, storage, storage.size * 8)
                 }
                 _ => None,
             }),
@@ -763,41 +838,36 @@ mod tests {
         assert_eq!(spelled(&to_declared(widened, &uint32, &int32)), "7");
     }
 
-    /// A callee body's prototype is spelled at its carriers' widths alone: the sign and pointee
-    /// r2types read there are no declaration, and a `void` result where the call defines one is
-    /// no prototype.
+    /// A callee body's prototype is its header's projection (W46): its types, an unproven result's
+    /// carrier typedef, and no prototype where a `void` header meets a call defining a result.
     #[test]
-    fn a_prototype_from_a_callee_body_is_its_widths() {
+    fn a_prototype_from_a_callee_body_is_its_header() {
+        let int32 = CType::Int {
+            bits: 32,
+            signedness: r2types::Signedness::Signed,
+        };
         let signature = r2types::FunctionType {
-            return_type: CType::Int {
-                bits: 32,
-                signedness: r2types::Signedness::Signed,
-            },
-            params: vec![
-                CType::Pointer(Box::new(CType::Struct("node".to_string()))),
-                CType::Int {
-                    bits: 16,
-                    signedness: r2types::Signedness::Signed,
-                },
-                CType::Float(64),
-            ],
+            return_type: CType::uint(64),
+            params: vec![int32.clone(), CType::Float(64)],
             variadic: false,
         };
-        let widths = Prototype::of_widths(&signature, 3, true, 64).expect("every type has a width");
+        let none = |_: &str, _: bool| false;
+        let header = Prototype::of_projection(&signature, 2, true, None, &none).expect("spelled");
+        assert_eq!(header.params, vec![int32, CType::Float(64)]);
+        assert_eq!(header.ret, CType::uint(64));
+        let unproven = Prototype::of_projection(&signature, 2, true, Some(64), &none);
+        let unproven = unproven.expect("spelled");
+        assert_eq!(unproven.ret, crate::prelude::result_carrier(64));
         assert_eq!(
-            widths,
-            Prototype {
-                params: vec![CType::uint(64), CType::uint(16), CType::Float(64)],
-                ret: CType::uint(32),
-            }
+            Prototype::of_projection(&signature, 1, true, None, &none),
+            None
         );
-        assert_eq!(Prototype::of_widths(&signature, 2, true, 64), None);
         let void = r2types::FunctionType {
             return_type: CType::Void,
             ..signature
         };
-        assert_eq!(Prototype::of_widths(&void, 3, true, 64), None);
-        assert!(Prototype::of_widths(&void, 3, false, 64).is_some());
+        assert_eq!(Prototype::of_projection(&void, 2, true, None, &none), None);
+        assert!(Prototype::of_projection(&void, 2, false, None, &none).is_some());
     }
 
     /// A tag is spelled behind a pointer only where the unit defines it, and a function pointer

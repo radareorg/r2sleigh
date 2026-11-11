@@ -9,7 +9,8 @@
 
 mod proof;
 
-use std::collections::{BTreeSet, HashMap};
+use rustc_hash::FxHashMap;
+use std::collections::BTreeSet;
 
 use proof::Encoder;
 use r2rewrite::{LeafRef, RULES, TermArena, TermKind, canon, eval, mask, measure};
@@ -103,7 +104,7 @@ fn exhaustive_agrees(
             ty => (0..=mask(ty.width_bits())).collect(),
         })
         .collect();
-    let mut assignment: HashMap<(u32, MachineType), u128> = HashMap::new();
+    let mut assignment: FxHashMap<(u32, MachineType), u128> = FxHashMap::default();
     let total: usize = domains.iter().map(Vec::len).product();
     for index in 0..total {
         let mut rest = index;
@@ -112,7 +113,7 @@ fn exhaustive_agrees(
             assignment.insert(*variable, domain[rest % domain.len()]);
             rest /= domain.len();
         }
-        let variable_terms: HashMap<(u32, MachineType), r2rewrite::TermId> = variables
+        let variable_terms: FxHashMap<(u32, MachineType), r2rewrite::TermId> = variables
             .iter()
             .filter_map(|(index, ty)| {
                 arena
@@ -123,8 +124,8 @@ fn exhaustive_agrees(
             .collect();
         fn value_of(
             arena: &TermArena,
-            variable_terms: &HashMap<(u32, MachineType), r2rewrite::TermId>,
-            assignment: &HashMap<(u32, MachineType), u128>,
+            variable_terms: &FxHashMap<(u32, MachineType), r2rewrite::TermId>,
+            assignment: &FxHashMap<(u32, MachineType), u128>,
             leaf: LeafRef,
             ty: &MachineType,
         ) -> u128 {

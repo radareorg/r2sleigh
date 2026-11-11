@@ -288,9 +288,19 @@ jobs:
           python3 scripts/test_check_shards.py
           python3 scripts/test_stack_tip.py
           python3 scripts/test_census.py
+          python3 scripts/test_audit_abi_rows.py
+          python3 scripts/audit_abi_rows.py --cc gcc
+          python3 scripts/test_compile_check.py
           python3 scripts/test_diff_r2.py
+          python3 scripts/test_c_types.py
+          python3 scripts/test_differential_truth.py
           python3 scripts/test_spec_evidence.py
           python3 scripts/test_upstream_drift.py
+          python3 scripts/test_mutants_d75.py
+          python3 scripts/test_scratch_void.py
+          python3 scripts/test_void_soundness.py
+          python3 scripts/mutants_d213.py --check
+          python3 scripts/mutants_s31a.py --check
           python3 -m unittest tests/test_no_plugin.py
           python3 -m unittest discover -s tests/decbench -p 'test_*.py'
       - name: A rendering may not read what nothing wrote
@@ -486,12 +496,150 @@ jobs:
             --r2s target/ci/r2s \
             --baseline tests/gold/source_gold_baseline.json \
             --json target/source-gold/report.json
+      # Whether a function returns a value at all: static helpers that leave scratch in the
+      # result register, results no caller reads, a tail forwarder, an exported function.
+      - name: Grade the return of each function against the source
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          mkdir -p target/source-gold
+          gcc -g -O2 -o target/source-gold/returns_debug tests/gold/source_gold/returns.c
+          strip -o target/source-gold/returns_stripped target/source-gold/returns_debug
+          python3 scripts/differential_truth.py \
+            --debug-build target/source-gold/returns_debug \
+            --stripped-build target/source-gold/returns_stripped \
+            --r2s target/ci/r2s \
+            --baseline tests/gold/source_gold/returns_baseline.json \
+            --json target/source-gold/returns.json
+      # D203: a source-value function renders `void` only where tests/gold/scratch_void/known.txt names it, and a
+      # void the baseline records stays void (doc/adr-scratch-result.md, S4).
+      - name: Grade what each return leaves in the result register
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          mkdir -p target/source-gold
+          gcc -g -O2 -fstack-protector-strong -o target/source-gold/scratch_debug tests/gold/source_gold/scratch.c
+          gcc -g -O2 -o target/source-gold/returns_debug tests/gold/source_gold/returns.c
+          gcc -g -O2 -o target/source-gold/clones_debug tests/gold/source_gold/clones.c
+          for shape in scratch returns clones; do
+            strip -o "target/source-gold/${shape}_stripped" "target/source-gold/${shape}_debug"
+          done
+          python3 scripts/scratch_void.py --r2s target/ci/r2s \
+            --build scratch target/source-gold/scratch_debug target/source-gold/scratch_stripped \
+            --build returns target/source-gold/returns_debug target/source-gold/returns_stripped \
+            --build clones target/source-gold/clones_debug target/source-gold/clones_stripped \
+            --known tests/gold/scratch_void/known.txt \
+            --baseline tests/gold/scratch_void/ci_baseline.json \
+            --json target/source-gold/scratch_void.json
+      # A function whose result a caller reads is `void` only where tests/gold/void_soundness/known.json names its
+      # build and a cause, each void at the base; every function of every build is judged (ROADMAP D213).
+      - name: A read result is void only where the base renders it so, per build
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          mkdir -p target/source-gold
+          python3 scripts/gen_void_adversaries.py --check
+          python3 scripts/void_soundness.py --r2s target/ci/r2s --json target/source-gold/void_soundness.json
+      # Shapes the gate once refused whole (exit 2): a function split by a cold abort(), a result that is a
+      # function pointer, seven parameters, code the linker dropped. Clones and types whose ABI class the gate does
+      # not state are named in the report and graded as nothing. Exit 1 is the engine's silent errors.
+      - name: Read the shapes a real compiler makes
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          mkdir -p target/source-gold
+          for shape in cold odd seven gcsect gclib clones abi enums krt statics; do
+            flags="-g -O2"
+            case "$shape" in gcsect|gclib) flags="$flags -ffunction-sections -Wl,--gc-sections" ;; esac
+            case "$shape" in abi|krt) flags="$flags -std=gnu17" ;; esac
+            gcc $flags -o "target/source-gold/${shape}_debug" "tests/gold/source_gold/${shape}.c"
+            strip -o "target/source-gold/${shape}_stripped" "target/source-gold/${shape}_debug"
+            status=0
+            python3 scripts/differential_truth.py \
+              --debug-build "target/source-gold/${shape}_debug" \
+              --stripped-build "target/source-gold/${shape}_stripped" \
+              --r2s target/ci/r2s \
+              --json "target/source-gold/${shape}.json" > /dev/null || status=$?
+            echo "$shape: exit $status"
+            test "$status" -le 1
+          done
+      # -Wl,-x drops the FUNC symbols of static functions whose code stays loaded (fdat.c: in a section without X):
+      # they count in the floor ungraded, so under a third is gradable. Exit 2 is the answer; 0 or 1 grades a sliver.
+      - name: Refuse a build whose static functions lost their symbols
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          mkdir -p target/source-gold
+          for shape in returns statics fdat; do
+            gcc -g -O2 -Wl,-x -o "target/source-gold/${shape}_x" "tests/gold/source_gold/${shape}.c"
+            strip -o "target/source-gold/${shape}_x_stripped" "target/source-gold/${shape}_x"
+            status=0
+            python3 scripts/differential_truth.py \
+              --debug-build "target/source-gold/${shape}_x" \
+              --stripped-build "target/source-gold/${shape}_x_stripped" \
+              --r2s target/ci/r2s > /dev/null 2> "target/source-gold/${shape}_x.err" || status=$?
+            cat "target/source-gold/${shape}_x.err"
+            echo "$shape -Wl,-x: exit $status"
+            test "$status" -eq 2
+            grep -q "functions are gradable, under one in 3" "target/source-gold/${shape}_x.err"
+          done
+      # gcc -g1 keeps no prototype, type or parameter: the gate has no truth, and a guess that every function is
+      # `void f(void)` is what it once graded. Exit 2 is the answer; exit 0, 1 or a crash (also 1) is the bug.
+      - name: Refuse a debug build that states no signature
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          mkdir -p target/source-gold
+          gcc -g1 -O2 -o target/source-gold/g1_debug tests/gold/source_gold/cold.c
+          strip -o target/source-gold/g1_stripped target/source-gold/g1_debug
+          status=0
+          python3 scripts/differential_truth.py \
+            --debug-build target/source-gold/g1_debug \
+            --stripped-build target/source-gold/g1_stripped \
+            --r2s target/ci/r2s > /dev/null 2> target/source-gold/g1.err || status=$?
+          cat target/source-gold/g1.err
+          echo "-g1: exit $status"
+          test "$status" -eq 2
+          grep -q "no function of the debug build is gradable" target/source-gold/g1.err
+      # -fdebug-types-section moves types into type units: DWARF 4 numbers them in the offsets of .debug_info,
+      # DWARF 5 leaves stubs. The reader refuses either build whole; exit 1 or 0 is the bug.
+      - name: Refuse a debug build with type units
+        if: ${{ !cancelled() }}
+        run: |
+          set -eu
+          mkdir -p target/source-gold
+          for build in "odd -gdwarf-4" "abi -gdwarf-5"; do
+            set -- $build
+            gcc -g -O2 -std=gnu17 "$2" -fdebug-types-section -o "target/source-gold/$1_types" "tests/gold/source_gold/$1.c"
+            strip -o "target/source-gold/$1_types_stripped" "target/source-gold/$1_types"
+            status=0
+            python3 scripts/differential_truth.py \
+              --debug-build "target/source-gold/$1_types" \
+              --stripped-build "target/source-gold/$1_types_stripped" \
+              --r2s target/ci/r2s > /dev/null 2> "target/source-gold/$1_types.err" || status=$?
+            cat "target/source-gold/$1_types.err"
+            echo "$1 $2 type units: exit $status"
+            test "$status" -eq 2
+            grep -q "a type unit (-fdebug-types-section)" "target/source-gold/$1_types.err"
+          done
       - name: Archive the source-gold report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: source-gold-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/source-gold/report.json
+          path: |
+            target/source-gold/report.json
+            target/source-gold/void_soundness.json
+            target/source-gold/returns.json
+            target/source-gold/cold.json
+            target/source-gold/odd.json
+            target/source-gold/seven.json
+            target/source-gold/gcsect.json
+            target/source-gold/gclib.json
+            target/source-gold/clones.json
+            target/source-gold/abi.json
+            target/source-gold/enums.json
+            target/source-gold/krt.json
           if-no-files-found: warn
 
   # ── Equivalence: the harness's own tests ────────────────────────────
@@ -509,8 +657,9 @@ jobs:
           tests/equiv/bounded.sh 300 \
             test_equiv.AnswerStatusTests test_equiv.BatchTests test_equiv.BuildTests \
             test_equiv.ClassifyTests test_equiv.CompilerVerdictTests \
-            test_equiv.ContractTests test_equiv.CostTests test_equiv.DwarfTests \
-            test_equiv.RatchetTests
+            test_equiv.ContractTests test_equiv.CostTests test_equiv.DwarfTests test_equiv.LoadedCodeTests \
+            test_equiv.FunctionSymbolTests test_equiv.PlacementTests test_equiv.RangesTests \
+            test_equiv.ReferenceTests test_equiv.RatchetTests
 
   # ── Equivalence ratchet ─────────────────────────────────────────────
   #

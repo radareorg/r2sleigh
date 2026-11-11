@@ -65,7 +65,7 @@ fn the_exit_only_the_chain_reaches_is_the_if_s_body() {
     assert_eq!(tests.len(), 1, "{c}");
     assert_eq!(tests[0].matches("== (uint32_t)0U").count(), 2, "{c}");
     assert!(tests[0].contains(" && "), "{c}");
-    assert!(c.contains("return 0;"), "{c}");
+    assert!(c.contains("return r2sleigh_carrier_u64(0);"), "{c}");
 }
 
 #[test]
@@ -182,7 +182,7 @@ fn what_the_code_after_a_loop_reads_is_not_what_the_hoisted_copy_writes() {
     let copied = lines[end - 1].split(" = ").next().expect("a copy");
     let returned = lines
         .iter()
-        .find(|line| line.starts_with("return (uint32_t)"))
+        .find(|line| line.starts_with("return r2sleigh_carrier_u32((uint32_t)"))
         .expect("a return of the loop's value");
     assert!(!returned.contains(copied), "{c}");
 }
@@ -452,7 +452,10 @@ fn a_merge_whose_forward_copies_all_render_reads_as_a_variable_in_every_order() 
         let c = c_under(order, BOTH_COPIES_RENDER);
         assert_eq!(verdicts_of(&c), natural, "{order:?}\n{c}");
         assert!(!c.contains("r2sleigh_residual_"), "{order:?}\n{c}");
-        assert!(c.contains("return (uint64_t)rax_3;"), "{order:?}\n{c}");
+        assert!(
+            c.contains("return r2sleigh_carrier_u64((uint64_t)rax_3);"),
+            "{order:?}\n{c}"
+        );
     }
 }
 
@@ -760,23 +763,28 @@ fn a_lane_the_facts_name_on_the_other_arm_refuses_the_function_while_r2ssa_check
     }
 }
 
-/// `code` written at `TWO` over a program importing `import`, with the rel32 of each `call` in `calls`
-/// (offsets into `code`, the opcode byte) pointed at the import's stub.
-fn c_calling(import: &str, code: &[u8], calls: &[usize]) -> String {
+/// `code` written at `TWO` over `literal`, with the rel32 of each `(offset into code, stub)` in `calls` (the
+/// opcode byte of a `call`) pointed at the stub.
+fn c_over(literal: Literal, code: &[u8], calls: &[(usize, u64)]) -> String {
     let mut code = code.to_vec();
-    for &at in calls {
+    for &(at, stub) in calls {
         assert_eq!(code[at], 0xe8, "a call at {at:#x}");
-        let rel = i32::try_from(common::STUB as i64 - (common::TWO + at as u64 + 5) as i64)
-            .expect("near");
+        let rel = i32::try_from(stub as i64 - (common::TWO + at as u64 + 5) as i64).expect("near");
         code[at + 1..at + 5].copy_from_slice(&rel.to_le_bytes());
     }
-    let mut program = OpenProgram::of(Literal::new().importing(import).running_on(common::GLIBC));
+    let mut program = OpenProgram::of(literal.running_on(common::GLIBC));
     program.source_mut().write(common::TWO, &code);
     (program.rendered(common::TWO))
         .expect("it renders")
         .response
         .output
         .into_text()
+}
+
+/// `code` over a program importing `import`, with each call in `calls` pointed at the import's stub.
+fn c_calling(import: &str, code: &[u8], calls: &[usize]) -> String {
+    let calls: Vec<_> = calls.iter().map(|&at| (at, common::STUB)).collect();
+    c_over(Literal::new().importing(import), code, &calls)
 }
 
 /// `test edi, edi; jne cold; mov eax, 7; ret; cold: mov edi, 1; call <import>`: the arm taken calls out.
@@ -798,6 +806,38 @@ const JOINED_CALL: &[u8] = &[
 /// The same with `call rax` for the call: nothing states that it does not return.
 const JOINED_INDIRECT: &[u8] = &[
     0x85, 0xff, 0x75, 0x08, 0xc7, 0x06, 0x07, 0, 0, 0, 0xeb, 0x02, 0xff, 0xd0, 0x31, 0xc0, 0xc3,
+];
+
+/// `test edi, edi; jne cold; mov eax, 7; ret; cold: mov edi, 1; lea rsi, [rip + 0x2a]; xor eax, eax; call <import>`:
+/// a call with two arguments, the second the string at `FORMAT`, as `err(1, "bad")` is.
+const COLD_CALL_TWO_ARGUMENTS: &[u8] = &[
+    0x85, 0xff, 0x75, 0x06, 0xb8, 0x07, 0, 0, 0, 0xc3, 0xbf, 1, 0, 0, 0, 0x48, 0x8d, 0x35, 0x2a, 0,
+    0, 0, 0x31, 0xc0, 0xe8, 0, 0, 0, 0,
+];
+
+/// `test edi, edi; jne a; mov eax, 7; ret; a: mov edi, 1; lea rsi, [fmt]; mov edx, 2; mov ecx, 3; mov r8d, 4;
+/// mov r9d, 5; xor eax, eax; call <err>`: `err(1, fmt, 2, 3, 4, 5)` fills every argument register.
+const COLD_CALL_SIX_ARGUMENTS: &[u8] = &[
+    0x85, 0xff, 0x75, 0x06, 0xb8, 7, 0, 0, 0, 0xc3, 0xbf, 1, 0, 0, 0, 0x48, 0x8d, 0x35, 0x2a, 0, 0,
+    0, 0xba, 2, 0, 0, 0, 0xb9, 3, 0, 0, 0, 0x41, 0xb8, 4, 0, 0, 0, 0x41, 0xb9, 5, 0, 0, 0, 0x31,
+    0xc0, 0xe8, 0, 0, 0, 0,
+];
+
+/// `test edi, edi; jne a; mov eax, 7; ret; a: lea rsi, [fmt]; xor eax, eax; call <err>`: `err(value, fmt)`, the
+/// first argument the register the test read.
+const COLD_CALL_REGISTER_ARGUMENT: &[u8] = &[
+    0x85, 0xff, 0x75, 0x06, 0xb8, 7, 0, 0, 0, 0xc3, 0x48, 0x8d, 0x35, 0x2f, 0, 0, 0, 0x31, 0xc0,
+    0xe8, 0, 0, 0, 0,
+];
+
+/// Where [`COLD_CALL_TWO_ARGUMENTS`]'s `lea` points, in a data section from there to the stub.
+const FORMAT: u64 = common::BASE + 0x60;
+
+/// `test edi, edi; jne a; mov [rdx], 5; test esi, esi; jne b; mov eax, 7; ret; a: mov edi, 1; call <exit>;
+/// b: call <abort>`: two different callees, each declared never to return, in one function.
+const EXIT_AND_ABORT: &[u8] = &[
+    0x85, 0xff, 0x75, 0x10, 0xc7, 0x02, 0x05, 0, 0, 0, 0x85, 0xf6, 0x75, 0x10, 0xb8, 0x07, 0, 0, 0,
+    0xc3, 0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xe8, 0, 0, 0, 0,
 ];
 
 /// `test edi, edi; jne a; mov [rdx], 5; test esi, esi; jne b; mov eax, 7; ret; a: mov edi, 1; call exit;
@@ -834,10 +874,11 @@ const EXIT_IN_THEN_ARM: &[u8] = &[
     0xbf, 1, 0, 0, 0, 0xe8, 0, 0, 0, 0, 0xc7, 0x02, 0x05, 0, 0, 0, 0xb8, 0x01, 0, 0, 0, 0xc3,
 ];
 
-/// The indent of the first line holding `needle`, and its position among the lines.
+/// The indent of the first line holding `needle`, and its position among the lines; `return 7` also
+/// finds an unproven result's `return r2sleigh_carrier_uN(7)` (D201).
 fn line_of(c: &str, needle: &str) -> (usize, usize) {
     let (at, line) = (c.lines().enumerate())
-        .find(|(_, line)| line.contains(needle))
+        .find(|(_, line)| common::uncarried(line).contains(needle))
         .unwrap_or_else(|| panic!("a line with {needle}: {c}"));
     (at, line.len() - line.trim_start().len())
 }
@@ -879,6 +920,86 @@ fn what_the_machine_runs_after_the_test_is_written_after_the_guard_in_the_machin
         tests[0].0 < order[0] && order[1] < tests[1].0 && tests[1].0 < order[2],
         "{c}"
     );
+}
+
+#[test]
+fn a_function_calling_two_different_callees_that_never_return_has_a_guard_for_each() {
+    // What is declared is each callee, so one stub for `exit` and one for `abort` make two declarations in
+    // one function, and neither the count nor the name of the callees decides whether the guards are written.
+    let mut literal = Literal::new().importing("exit").importing_through(
+        common::STUB2..common::STUB2 + 6,
+        common::SLOT2,
+        "abort",
+    );
+    literal.write(common::STUB2, &common::JUMP_STUB);
+    let calls = [(0x19, common::STUB), (0x1e, common::STUB2)];
+    let c = c_over(literal, EXIT_AND_ABORT, &calls);
+    assert!(!c.contains("r2sleigh refused"), "{c}");
+    assert_eq!(tests_of(&c).len(), 2, "{c}");
+    assert!(!c.contains("else"), "{c}");
+    let at = |needle: &str| line_of(&c, needle).0;
+    let order = [at("exit(1)"), at("5U)"), at("abort()"), at("return 7")];
+    assert!(order.windows(2).all(|pair| pair[0] < pair[1]), "{c}");
+}
+
+#[test]
+fn a_call_with_two_arguments_declared_never_to_return_is_a_guard() {
+    // `err(1, "bad")`: the callee's declaration decides that the call does not return, whatever its arguments.
+    let mut literal = Literal::new().importing("err").with_data_after(FORMAT);
+    literal.write(FORMAT, b"bad\0");
+    let c = c_over(literal, COLD_CALL_TWO_ARGUMENTS, &[(0x18, common::STUB)]);
+    assert!(
+        !c.contains("r2sleigh refused") && !c.contains("else"),
+        "{c}"
+    );
+    let (test, call, rest) = (
+        line_of(&c, "if ("),
+        line_of(&c, "err(1, "),
+        line_of(&c, "return 7"),
+    );
+    assert!(test.0 < call.0 && call.0 < rest.0, "{c}");
+    assert_eq!((call.1 > test.1, rest.1), (true, test.1), "{c}");
+}
+
+#[test]
+fn a_call_with_six_arguments_declared_never_to_return_is_a_guard() {
+    let mut literal = Literal::new().importing("err").with_data_after(FORMAT);
+    literal.write(FORMAT, b"%d %d %d %d\0");
+    let c = c_over(literal, COLD_CALL_SIX_ARGUMENTS, &[(0x2e, common::STUB)]);
+    assert!(
+        !c.contains("r2sleigh refused") && !c.contains("else"),
+        "{c}"
+    );
+    let (test, call, rest) = (
+        line_of(&c, "if ("),
+        line_of(&c, "err(1, "),
+        line_of(&c, "return 7"),
+    );
+    assert!(test.0 < call.0 && call.0 < rest.0, "{c}");
+    assert_eq!((call.1 > test.1, rest.1), (true, test.1), "{c}");
+}
+
+#[test]
+fn a_call_passing_a_register_declared_never_to_return_is_a_guard() {
+    // What the call passes is a value, not a literal; the callee's declaration alone decides.
+    let mut literal = Literal::new().importing("err").with_data_after(FORMAT);
+    literal.write(FORMAT, b"bad\0");
+    let c = c_over(
+        literal,
+        COLD_CALL_REGISTER_ARGUMENT,
+        &[(0x13, common::STUB)],
+    );
+    assert!(
+        !c.contains("r2sleigh refused") && !c.contains("else"),
+        "{c}"
+    );
+    let (test, call, rest) = (
+        line_of(&c, "if ("),
+        line_of(&c, "arg0, \"bad\")"),
+        line_of(&c, "return 7"),
+    );
+    assert!(test.0 < call.0 && call.0 < rest.0, "{c}");
+    assert_eq!((call.1 > test.1, rest.1), (true, test.1), "{c}");
 }
 
 #[test]
@@ -993,7 +1114,8 @@ fn a_test_with_nothing_in_its_then_arm_keeps_its_else_and_the_exit_under_it_is_t
         ),
         "{c}"
     );
-    // The store the exit's else held follows the `if` on its own level.
+    // The store the exit's else held follows the `if` on its own level: the certificate does not read this order
+    // (ROADMAP D80), so a guard that wrote the store before its test certifies and only this assertion fails.
     assert_eq!((store.0, store.1 + 4), (exit.0 + 2, exit.1), "{c}");
 }
 

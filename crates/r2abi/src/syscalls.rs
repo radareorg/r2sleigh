@@ -11,7 +11,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::Platform;
+use crate::Kernel;
 
 /// One platform's system calls.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -21,14 +21,14 @@ pub struct Syscalls {
 }
 
 impl Syscalls {
-    /// The table for a platform's kernel on an architecture, where r2abi
-    /// keeps one. Android runs the Linux kernel, so it reads Linux's.
-    pub fn for_platform(platform: Platform, arch: &str, bits: u32) -> Option<Self> {
+    /// The table for a kernel on an architecture, where r2abi keeps one. Android runs the
+    /// Linux kernel, so it reads Linux's.
+    pub fn for_kernel(kernel: Kernel, arch: &str, bits: u32) -> Option<Self> {
         let family = crate::family(arch)?;
-        let (number_register, text) = match (platform, family, bits) {
-            (Platform::Linux | Platform::Android, "x86", 64) => ("rax", LINUX_X86_64),
-            (Platform::Linux | Platform::Android, "x86", 32) => ("eax", LINUX_X86_32),
-            (Platform::Linux | Platform::Android, "arm", 64) => ("x8", LINUX_ARM_64),
+        let (number_register, text) = match (kernel, family, bits) {
+            (Kernel::Linux, "x86", 64) => ("rax", LINUX_X86_64),
+            (Kernel::Linux, "x86", 32) => ("eax", LINUX_X86_32),
+            (Kernel::Linux, "arm", 64) => ("x8", LINUX_ARM_64),
             // Linux arm (EABI) reads r7, but its table is
             // arch/arm/tools/syscall.tbl, which no installed header carries;
             // radare2's is the obsolete OABI numbering. No table, rather than
@@ -81,9 +81,9 @@ mod tests {
 
     #[test]
     fn one_number_names_different_calls_on_different_architectures() {
-        let x86_64 = Syscalls::for_platform(Platform::Linux, "x86-64", 64).expect("a table");
-        let arm64 = Syscalls::for_platform(Platform::Linux, "aarch64", 64).expect("a table");
-        let i386 = Syscalls::for_platform(Platform::Android, "x86", 32).expect("a table");
+        let x86_64 = Syscalls::for_kernel(Kernel::Linux, "x86-64", 64).expect("a table");
+        let arm64 = Syscalls::for_kernel(Kernel::Linux, "aarch64", 64).expect("a table");
+        let i386 = Syscalls::for_kernel(Kernel::Linux, "x86", 32).expect("a table");
         assert_eq!(
             (x86_64.name(1), x86_64.name(60)),
             (Some("write"), Some("exit"))
@@ -112,11 +112,8 @@ mod tests {
 
     #[test]
     fn a_platform_without_a_kernel_table_has_none() {
-        assert_eq!(Syscalls::for_platform(Platform::Darwin, "x86-64", 64), None);
-        assert_eq!(
-            Syscalls::for_platform(Platform::Unknown, "x86-64", 64),
-            None
-        );
-        assert_eq!(Syscalls::for_platform(Platform::Linux, "arm", 32), None);
+        assert_eq!(Syscalls::for_kernel(Kernel::Darwin, "x86-64", 64), None);
+        assert_eq!(Syscalls::for_kernel(Kernel::Unknown, "x86-64", 64), None);
+        assert_eq!(Syscalls::for_kernel(Kernel::Linux, "arm", 32), None);
     }
 }

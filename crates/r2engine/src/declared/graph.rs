@@ -1,4 +1,4 @@
-//! A declaration's types, as the graph an interface carries.
+//! A declaration's types, as the graph an interface carries (the one conversion, D168).
 //!
 //! Each node is placed on its own. A node the interface contract cannot state
 //! -- a record with no name to define it by, a signature that names such a
@@ -8,20 +8,20 @@
 //! type. The graph is interned per item, and the interface closes it over
 //! what it names, so an item that is dropped later strands nothing.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use r2abi::{DataModel, Keyword, Member, Record, RecordKind, Scalar, ScalarKind, Signature, Type};
-use r2abi::{TypeGraph, TypeId};
+use r2abi::{CDataModel, Keyword, Member, Qualifiers, Record, RecordKind, Scalar, ScalarKind};
+use r2abi::{Signature, Type, TypeGraph, TypeId};
 use r2source::{
     SourceAggregateLayout, SourceAggregateMember, SourceCarrierKind, SourceCarrierProjection,
     SourceCodeSignature, SourceLogicalValue, SourceOpaqueTag, SourceTagKeyword, SourceType,
-    SourceTypeGraph, SourceTypeGraphParts, SourceTypeKind,
+    SourceTypeAlias, SourceTypeGraph, SourceTypeGraphParts, SourceTypeKind,
 };
 
 /// The interface's graph, built one declared node at a time.
 pub(crate) struct Interned<'a> {
     graph: &'a TypeGraph,
-    model: DataModel,
+    model: CDataModel,
     parts: SourceTypeGraphParts,
     /// Each declared node's place, or nothing where it has none.
     nodes: BTreeMap<TypeId, Option<u32>>,
@@ -32,10 +32,18 @@ pub(crate) struct Interned<'a> {
     /// Which declared record each aggregate name stands for: a consumer finds
     /// a layout by its name, so one name has one layout.
     names: BTreeMap<String, TypeId>,
+    /// The node each typedef or scalar name stands at: the first binding of a name wins.
+    named: BTreeMap<String, u32>,
+    /// Nodes carrying an alias, so a record keeps its first name.
+    aliased: BTreeSet<u32>,
+    /// A named copy of a pointer still being placed, resynced at `finish`.
+    copies: Vec<(u32, u32)>,
+    /// Every record's node, which a name binds to even while its layout is placed.
+    records: BTreeSet<u32>,
 }
 
 impl<'a> Interned<'a> {
-    pub(crate) fn new(graph: &'a TypeGraph, model: DataModel) -> Self {
+    pub(crate) fn new(graph: &'a TypeGraph, model: CDataModel) -> Self {
         Self {
             graph,
             model,
@@ -44,6 +52,10 @@ impl<'a> Interned<'a> {
             leaves: BTreeMap::new(),
             tags: BTreeMap::new(),
             names: BTreeMap::new(),
+            named: BTreeMap::new(),
+            aliased: BTreeSet::new(),
+            copies: Vec::new(),
+            records: BTreeSet::new(),
         }
     }
 
@@ -65,6 +77,17 @@ impl<'a> Interned<'a> {
         ))
     }
 
+    /// A prototype's parameter or result: sized, `void`, or a tag or name the
+    /// declaration leaves incomplete.
+    pub(crate) fn declared(&mut self, ty: TypeId) -> Option<u32> {
+        let id = self.node(ty)?;
+        let source = &self.parts.types[id as usize];
+        let stated = source.size_bits() > 0
+            || matches!(source.kind(), SourceTypeKind::Opaque { .. })
+            || self.graph.peel(ty).0 == TypeId::VOID;
+        stated.then_some(id)
+    }
+
     /// The node of a type something can be declared as: one with a size.
     pub(crate) fn object(&mut self, ty: TypeId) -> Option<u32> {
         let id = self.node(ty)?;
@@ -73,7 +96,15 @@ impl<'a> Interned<'a> {
     }
 
     /// Every node interned so far, as a graph.
-    pub(crate) fn finish(self) -> Option<SourceTypeGraph> {
+    pub(crate) fn finish(mut self) -> Option<SourceTypeGraph> {
+        for (copy, structure) in std::mem::take(&mut self.copies) {
+            let kind = self.parts.types[structure as usize].kind();
+            let (size, align) = (
+                self.size(copy),
+                self.parts.types[copy as usize].align_bits(),
+            );
+            self.set(copy, kind, size, align);
+        }
         SourceTypeGraph::from_parts(self.parts)
             .inspect_err(|error| {
                 r2il::refusal_evidence!("declared-types", "the interned graph refused: {error:?}");
@@ -81,10 +112,88 @@ impl<'a> Interned<'a> {
             .ok()
     }
 
-    /// One declared node's place, read through its names and qualifiers:
-    /// neither changes a layout or a register class, and the spelling that
-    /// keeps a name readable travels beside the graph.
+    /// One declared node's place: its structure, under the name it is declared by.
     pub(crate) fn node(&mut self, ty: TypeId) -> Option<u32> {
+        let structure = self.structure(ty)?;
+        match self.alias(ty) {
+            Some(name) => Some(self.named(name, structure)),
+            None => Some(structure),
+        }
+    }
+
+    /// The outermost typedef name `ty` is declared by, or a scalar's own name (`size_t`); C's
+    /// keywords and the `<stdint.h>` names the structure already spells are none.
+    fn alias(&self, ty: TypeId) -> Option<String> {
+        let mut at = ty;
+        for _ in 0..self.graph.len() {
+            match self.graph.get(at)? {
+                Type::Qualified { target, .. } => at = *target,
+                Type::Typedef { name, .. } => {
+                    let named = is_identifier(name) && !r2types::spells_its_structure(name);
+                    return named.then(|| name.clone());
+                }
+                Type::Scalar(Scalar {
+                    name: Some(name), ..
+                }) => {
+                    let named = r2types::spelling_names_a_type(name)
+                        && !r2types::spells_its_structure(name);
+                    return named.then(|| name.clone());
+                }
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// The node `name` stands at over `structure`. A record carries the name
+    /// itself; any other node is copied, so its structure stays unnamed.
+    fn named(&mut self, name: String, structure: u32) -> u32 {
+        if let Some(found) = self.named.get(&name) {
+            return *found;
+        }
+        let source = &self.parts.types[structure as usize];
+        let (kind, size, align) = (source.kind(), source.size_bits(), source.align_bits());
+        let id = match kind {
+            // A name the target's model leaves unstated is already its own tag.
+            SourceTypeKind::Opaque { tag_id }
+                if self.parts.opaque_tags[tag_id as usize].keyword()
+                    == SourceTagKeyword::Typedef =>
+            {
+                return structure;
+            }
+            _ if self.records.contains(&structure) => {
+                if !self.aliased.insert(structure) {
+                    return structure;
+                }
+                structure
+            }
+            SourceTypeKind::Struct { .. } | SourceTypeKind::Union { .. } => {
+                if !self.aliased.insert(structure) {
+                    return structure;
+                }
+                structure
+            }
+            _ => {
+                let copy = self.push(kind, size, align);
+                self.copies.push((copy, structure));
+                self.aliased.insert(copy);
+                copy
+            }
+        };
+        self.parts
+            .aliases
+            .push(SourceTypeAlias::new(name.clone(), id));
+        self.named.insert(name, id);
+        id
+    }
+
+    fn size(&self, id: u32) -> u64 {
+        self.parts.types[id as usize].size_bits()
+    }
+
+    /// One declared node's structure, read through its names and qualifiers:
+    /// neither changes a layout or a register class.
+    fn structure(&mut self, ty: TypeId) -> Option<u32> {
         let (id, _) = self.graph.peel(ty);
         if let Some(found) = self.nodes.get(&id) {
             return *found;
@@ -92,7 +201,11 @@ impl<'a> Interned<'a> {
         let graph = self.graph;
         let placed = match graph.get(id)? {
             Type::Void => Some(self.leaf(SourceTypeKind::Void, 0, 0)),
-            Type::Scalar(scalar) => self.scalar(scalar),
+            // A name over a scalar the target's model leaves unstated is that name alone.
+            Type::Scalar(scalar) => (self.scalar(scalar)).or_else(|| {
+                self.name_of(ty)
+                    .map(|name| self.opaque(Keyword::Typedef, &name))
+            }),
             Type::Enum { underlying, .. } => self.node(*underlying),
             Type::Pointer { target } => Some(self.pointer(id, *target)),
             Type::Array { element, count } => self.array(*element, *count),
@@ -103,6 +216,22 @@ impl<'a> Interned<'a> {
         };
         self.nodes.insert(id, placed);
         placed
+    }
+
+    /// The innermost typedef name `ty` reaches through names and qualifiers.
+    fn name_of(&self, ty: TypeId) -> Option<String> {
+        let (mut at, mut name) = (ty, None);
+        for _ in 0..self.graph.len() {
+            match self.graph.get(at)? {
+                Type::Typedef {
+                    name: named,
+                    target,
+                } => (name, at) = (Some(named.clone()), *target),
+                Type::Qualified { target, .. } => at = *target,
+                _ => break,
+            }
+        }
+        name
     }
 
     fn push(&mut self, kind: SourceTypeKind, size: u64, align: u64) -> u32 {
@@ -122,8 +251,11 @@ impl<'a> Interned<'a> {
             SourceTypeKind::SignedInteger => 0,
             SourceTypeKind::UnsignedInteger => 1,
             SourceTypeKind::Float => 2,
-            SourceTypeKind::Char { signed: true } => 4,
-            SourceTypeKind::Char { signed: false } => 5,
+            SourceTypeKind::Char { signed: Some(true) } => 4,
+            SourceTypeKind::Char {
+                signed: Some(false),
+            } => 5,
+            SourceTypeKind::Char { signed: None } => 6,
             _ => 3,
         };
         if let Some(found) = self.leaves.get(&(shape, size)) {
@@ -136,13 +268,14 @@ impl<'a> Interned<'a> {
 
     fn scalar(&mut self, scalar: &Scalar) -> Option<u32> {
         let bits = u64::from(self.model.bits(scalar.width)?);
-        let (kind, stated) = match scalar.kind {
-            _ if super::is_plain_char(scalar, bits) => (
-                SourceTypeKind::Char {
-                    signed: scalar.kind == ScalarKind::Signed,
-                },
-                true,
-            ),
+        if let Some(signed) = super::plain_char(scalar, &self.model) {
+            return Some(self.leaf(
+                SourceTypeKind::Char { signed },
+                bits,
+                natural_alignment(bits),
+            ));
+        }
+        let (kind, stated) = match self.model.kind(scalar.kind)? {
             ScalarKind::Signed => (SourceTypeKind::SignedInteger, integer_width(bits)),
             ScalarKind::Unsigned | ScalarKind::Bool => {
                 (SourceTypeKind::UnsignedInteger, integer_width(bits))
@@ -151,6 +284,8 @@ impl<'a> Interned<'a> {
                 SourceTypeKind::Float,
                 matches!(bits, 16 | 32 | 64 | 80 | 96 | 128),
             ),
+            // The model resolves both to a sign.
+            ScalarKind::PlainChar | ScalarKind::WideChar => return None,
         };
         stated.then(|| self.leaf(kind, bits, natural_alignment(bits)))
     }
@@ -160,21 +295,22 @@ impl<'a> Interned<'a> {
     /// `void`: the pointer is still a pointer.
     fn pointer(&mut self, id: TypeId, target: TypeId) -> u32 {
         let bits = u64::from(self.model.pointer_bits);
-        let placeholder = SourceTypeKind::Pointer { target_type_id: 0 };
+        let const_target = self.graph.peel(target).1.contains(Qualifiers::CONST);
+        let placeholder = SourceTypeKind::Pointer {
+            target_type_id: 0,
+            const_target,
+        };
         let pointer = self.push(placeholder, bits, bits);
         self.nodes.insert(id, Some(pointer));
         let target = match self.node(target) {
             Some(target) => target,
             None => self.leaf(SourceTypeKind::Void, 0, 0),
         };
-        self.set(
-            pointer,
-            SourceTypeKind::Pointer {
-                target_type_id: target,
-            },
-            bits,
-            bits,
-        );
+        let kind = SourceTypeKind::Pointer {
+            target_type_id: target,
+            const_target,
+        };
+        self.set(pointer, kind, bits, bits);
         pointer
     }
 
@@ -218,13 +354,9 @@ impl<'a> Interned<'a> {
         self.push(SourceTypeKind::Opaque { tag_id: row }, 0, 0)
     }
 
-    /// Code with a stated signature whose every part has a place. Anything
-    /// less is code this graph cannot describe, and a pointer to it points at
-    /// `void`.
+    /// Code whose every stated part has a place. Anything less is code this
+    /// graph cannot describe, and a pointer to it points at `void`.
     fn code(&mut self, signature: &Signature) -> Option<u32> {
-        if !signature.prototyped {
-            return None;
-        }
         let returns = match self.graph.peel(signature.returns).0 {
             TypeId::VOID => self.leaf(SourceTypeKind::Void, 0, 0),
             returns => self.object(returns)?,
@@ -240,7 +372,7 @@ impl<'a> Interned<'a> {
             returns,
             parameters,
             signature.variadic,
-            true,
+            signature.prototyped,
         ));
         Some(self.push(SourceTypeKind::Code { signature_id: row }, 0, 0))
     }
@@ -255,6 +387,7 @@ impl Interned<'_> {
     fn record(&mut self, id: TypeId, record: &Record) -> u32 {
         let slot = self.push(SourceTypeKind::Void, 0, 0);
         self.nodes.insert(id, Some(slot));
+        self.records.insert(slot);
         let Some(tag) = record.tag.clone().filter(|tag| is_identifier(tag)) else {
             r2il::refusal_evidence!(
                 "declared-types",
@@ -441,11 +574,11 @@ mod tests {
         });
         let parameter = graph.add(Type::Pointer { target: constant });
 
-        let mut interned = Interned::new(&graph, DataModel::unix(64));
+        let mut interned = Interned::new(&graph, CDataModel::unix(64));
         let value = interned.value(parameter, 8).expect("a pointer is placed");
         let local = interned.object(int).expect("an int is placed");
         let placed = interned.finish().expect("the graph states");
-        let SourceTypeKind::Pointer { target_type_id } =
+        let SourceTypeKind::Pointer { target_type_id, .. } =
             placed.types()[value.type_id() as usize].kind()
         else {
             panic!("{placed:?}");
@@ -467,8 +600,19 @@ mod tests {
         // `next` points back at the node the parameter points at.
         assert_eq!(
             placed.types()[layout.members()[1].type_id() as usize].kind(),
-            SourceTypeKind::Pointer { target_type_id }
+            SourceTypeKind::Pointer {
+                target_type_id,
+                const_target: false
+            }
         );
+        // The parameter's pointee is `const`; `next`'s is not.
+        assert!(matches!(
+            placed.types()[value.type_id() as usize].kind(),
+            SourceTypeKind::Pointer {
+                const_target: true,
+                ..
+            }
+        ));
         assert_eq!(
             placed.types()[local as usize].kind(),
             SourceTypeKind::SignedInteger
@@ -489,12 +633,12 @@ mod tests {
             members: vec![],
         }));
         let pointer = graph.add(Type::Pointer { target: anonymous });
-        let mut interned = Interned::new(&graph, DataModel::unix(64));
+        let mut interned = Interned::new(&graph, CDataModel::unix(64));
         let pointer = interned.value(pointer, 8).expect("the pointer is placed");
         assert!(interned.object(anonymous).is_none());
         let int = interned.value(int, 8).expect("the int is placed");
         let placed = interned.finish().expect("the graph states");
-        let SourceTypeKind::Pointer { target_type_id } =
+        let SourceTypeKind::Pointer { target_type_id, .. } =
             placed.types()[pointer.type_id() as usize].kind()
         else {
             panic!("{placed:?}");
@@ -504,5 +648,120 @@ mod tests {
             SourceTypeKind::Void
         );
         assert_eq!(int.carrier().kind(), SourceCarrierKind::LowBits);
+    }
+
+    /// One declared node through the graph and the one converter.
+    fn converted(graph: &TypeGraph, ty: TypeId, model: CDataModel) -> r2types::CTypeLike {
+        let mut interned = Interned::new(graph, model);
+        let id = interned.node(ty).expect("the node is placed");
+        let placed = interned.finish().expect("the graph states");
+        r2types::source_type_like(&placed, id).expect("the type converts")
+    }
+
+    fn char_pointer(signedness: r2types::Signedness) -> r2types::CTypeLike {
+        use r2types::CTypeLike;
+        let char_ = CTypeLike::named(
+            "char",
+            CTypeLike::Int {
+                bits: 8,
+                signedness,
+            },
+        );
+        CTypeLike::Pointer(Box::new(CTypeLike::Const(Box::new(char_))))
+    }
+
+    /// `strlen`'s `const char *`: the byte's sign is the model's, or none; DWARF's own `char`
+    /// states its sign, which no model overrides.
+    #[test]
+    fn a_rows_plain_char_takes_the_models_sign_and_debug_information_keeps_its_own() {
+        use r2abi::{CLibrary, LibraryRows};
+        use r2types::Signedness;
+        let rows = LibraryRows::embedded(CLibrary::Glibc);
+        let strlen = rows
+            .find(CLibrary::Glibc.scope(), "strlen")
+            .expect("strlen");
+        let parameter = rows.prototype(strlen).parameters[0].ty;
+        let aarch64 = *CDataModel::of("aarch64", 64, CLibrary::Glibc).expect("AAPCS64 glibc");
+        let x86_64 = *CDataModel::of("x86-64", 64, CLibrary::Glibc).expect("SysV glibc");
+        let unix = CDataModel::unix(64);
+        let of = |model| converted(rows.graph(), parameter, model);
+        assert_eq!(of(aarch64), char_pointer(Signedness::Unsigned));
+        assert_eq!(of(x86_64), char_pointer(Signedness::Signed));
+        assert_eq!(of(unix), char_pointer(Signedness::Unknown));
+        let mut graph = TypeGraph::new();
+        let stated = graph.add(Type::Scalar(Scalar {
+            kind: ScalarKind::Signed,
+            width: Width::Bits(8),
+            name: Some("char".to_owned()),
+        }));
+        assert_eq!(
+            converted(&graph, stated, aarch64),
+            r2types::CTypeLike::plain_char(Some(true))
+        );
+    }
+
+    /// glibc's `FILE` keeps its name over its tag, `size_t` over its width, and `va_list` over
+    /// the pointer it is passed as.
+    #[test]
+    fn a_name_stands_over_its_structure() {
+        use r2abi::{CLibrary, LibraryRows};
+        use r2types::{CTypeLike, Signedness};
+        let rows = LibraryRows::embedded(CLibrary::Glibc);
+        let model = *CDataModel::of("x86-64", 64, CLibrary::Glibc).expect("SysV glibc");
+        let parameter = |name: &str, index: usize| {
+            let row = rows.find(CLibrary::Glibc.scope(), name).expect("a row");
+            converted(
+                rows.graph(),
+                rows.prototype(row).parameters[index].ty,
+                model,
+            )
+        };
+        let file = CTypeLike::named("FILE", CTypeLike::Struct("_IO_FILE".to_owned()));
+        assert_eq!(parameter("fclose", 0), CTypeLike::Pointer(Box::new(file)));
+        let size = CTypeLike::Int {
+            bits: 64,
+            signedness: Signedness::Unsigned,
+        };
+        assert_eq!(parameter("malloc", 0), CTypeLike::named("size_t", size));
+        let list = parameter("vfprintf", 2);
+        assert!(
+            matches!(&list, CTypeLike::Typedef { name, ty } if name == "va_list" && ty.is_pointer()),
+            "{list:?}"
+        );
+    }
+
+    /// `typedef struct node node; struct node { node *next; };`: the alias reached while the
+    /// record is still being placed names the record, and the graph states.
+    #[test]
+    fn a_typedef_a_record_reaches_through_itself_names_the_record() {
+        use r2types::CTypeLike;
+        let mut graph = TypeGraph::new();
+        let record = graph.reserve();
+        let node = graph.add(Type::Typedef {
+            name: "node".to_owned(),
+            target: record,
+        });
+        let next = graph.add(Type::Pointer { target: node });
+        graph.define(
+            record,
+            Type::Record(Record {
+                kind: RecordKind::Struct,
+                tag: Some("node".to_owned()),
+                size_bytes: 8,
+                members: vec![Member {
+                    name: Some("next".to_owned()),
+                    ty: next,
+                    offset_bits: 0,
+                    bit_size: None,
+                }],
+            }),
+        );
+        // `struct node *` reaches the record first, and `next` names it while it is placed.
+        let parameter = graph.add(Type::Pointer { target: record });
+        let named = CTypeLike::named("node", CTypeLike::Struct("node".to_owned()));
+        assert_eq!(
+            converted(&graph, parameter, CDataModel::unix(64)),
+            CTypeLike::Pointer(Box::new(named))
+        );
     }
 }

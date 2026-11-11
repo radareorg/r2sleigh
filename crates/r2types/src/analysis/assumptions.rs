@@ -9,7 +9,7 @@ pub(crate) fn assumption_type_hint(
     let r2ssa::AssumptionValue::TypeHint { ty } = &assumption.value else {
         return None;
     };
-    parse_signature_type_preserving_c_typedefs(ty, ptr_bits)
+    crate::convert::operator_type_hint(ty, ptr_bits)
 }
 
 pub(crate) fn type_hint_conflicts(existing: &CTypeLike, hint: &CTypeLike, ptr_bits: u32) -> bool {
@@ -101,18 +101,15 @@ pub(crate) fn apply_type_hint_to_signature_param(
     }
 
     if let Some(param) = inferred_signature.params.get_mut(index) {
-        let existing_ty = parse_c_type_like(&param.param_type, ptr_bits);
-        let can_replace = type_name_is_generic(&param.param_type)
-            || existing_ty.as_ref().is_some_and(|existing| {
-                type_hint_can_replace_weak_existing(
-                    assumption,
-                    existing,
-                    Some(&param.name),
-                    ptr_bits,
-                )
-            });
+        let can_replace = inferred_type_is_generic(Some(&param.ty), ptr_bits)
+            || type_hint_can_replace_weak_existing(
+                assumption,
+                &param.ty,
+                Some(&param.name),
+                ptr_bits,
+            );
         if can_replace {
-            param.param_type = render_signature_type(hint, ptr_bits);
+            param.ty = hint.clone();
             applied = true;
         }
     }
@@ -128,11 +125,8 @@ pub(crate) fn apply_type_hint_assumptions_to_context(
     registers: &crate::RegisterIdentity,
 ) -> r2ssa::AssumptionUsageReport {
     let mut usage = r2ssa::AssumptionUsageReport::default();
-    let inferred_register_params = inferred_signature_abi_register_params(
-        inferred_signature,
-        registers.argument_registers(),
-        ptr_bits,
-    );
+    let inferred_register_params =
+        inferred_signature_abi_register_params(inferred_signature, registers.argument_registers());
     if inferred_register_params.len() > parsed_context.register_params.len() {
         parsed_context
             .register_params
@@ -245,7 +239,7 @@ pub(crate) fn applied_type_assumption_parameter_slots(
     usage: &r2ssa::AssumptionUsageReport,
     parsed_context: &ParsedExternalContext,
     registers: &crate::RegisterIdentity,
-) -> HashSet<usize> {
+) -> FxHashSet<usize> {
     usage
         .applied
         .iter()
@@ -269,7 +263,6 @@ pub(crate) fn applied_type_assumption_parameter_slots(
 pub(crate) fn inferred_signature_abi_register_params(
     signature: &InferredSignature,
     argument_registers: &[String],
-    ptr_bits: u32,
 ) -> Vec<ExternalRegisterParamSpec> {
     signature
         .params
@@ -277,7 +270,7 @@ pub(crate) fn inferred_signature_abi_register_params(
         .zip(argument_registers)
         .map(|(param, reg)| ExternalRegisterParamSpec {
             name: param.name.clone(),
-            ty: parse_c_type_like(&param.param_type, ptr_bits),
+            ty: Some(param.ty.clone()),
             reg: reg.clone(),
         })
         .collect()

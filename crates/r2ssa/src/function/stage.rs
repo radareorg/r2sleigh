@@ -61,12 +61,12 @@ impl Lifted {
     pub(crate) fn prepare<C: SsaWorkControl + ?Sized>(
         mut self,
         config: &crate::optimize::DecompilePrepConfig,
-        return_carriers: &[r2source::CanonicalStorageId],
+        (return_carriers, calls): (&[r2source::CanonicalStorageId], &crate::lanes::CallResults),
         control: &C,
     ) -> Result<Prepared, SsaPrepareError> {
         control.poll()?;
         // What each operation wrote, before an optimisation folds it away.
-        self.ir.capture_written();
+        self.ir.capture_written(calls);
         let config: crate::optimize::OptimizationConfig = config.into();
         crate::optimize::optimize_function_with_return_and_control(
             &mut self.ir,
@@ -84,7 +84,8 @@ impl Lifted {
         control: &C,
     ) -> Result<Prepared, SsaPrepareError> {
         // As `prepare`: what each operation wrote, before an optimisation folds it away.
-        self.ir.capture_written();
+        self.ir
+            .capture_written(&crate::lanes::CallResults::default());
         crate::optimize::optimize_function_with_control(&mut self.ir, config, control)?;
         self.validate().map_err(super::integrity_refusal)
     }
@@ -242,7 +243,7 @@ impl Prepared {
         crate::semantic::ensure_source_formal_parameter_values(&mut graph, machine_context);
         graph.shrink_to_fit();
         let formal_parameters =
-            crate::semantic::collect_source_formal_parameter_facts(&graph, machine_context);
+            crate::semantic::collect_source_formal_parameter_facts(&graph, machine_context, None);
         prep.install_exact_formal_parameters(&graph, &formal_parameters);
         validate_ssa_function(&ir).map_err(super::integrity_refusal)?;
         ir.drop_operations();
@@ -378,6 +379,7 @@ impl Sealed {
             live_out,
             ignored_reads,
         } = liveness;
+        facts.body_boundary = finish.body_boundary;
         let unobserved_merges = crate::deadphi::DeadPhis::find(&self.graph, &live_out, &facts);
         let aggregate_accesses = crate::aggregate_access::collect_aggregate_access_projections(
             &self.graph,

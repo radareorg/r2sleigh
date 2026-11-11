@@ -42,6 +42,13 @@ pub const STUB: u64 = BASE + 0x90;
 pub const SLOT: u64 = BASE + 0x98;
 /// Where the program keeps a string, where it has one.
 pub const TEXT: u64 = BASE + 0xa0;
+/// Where a second import's stub is, in the room `TEXT` takes when the program has no string: `JUMP_STUB` bytes
+/// are written there by the test, and the slot is the last eight bytes of the code.
+pub const STUB2: u64 = BASE + 0xa0;
+/// The slot [`STUB2`] reads.
+pub const SLOT2: u64 = BASE + 0xa8;
+/// `jmp qword [rip + 2]`, the linkage stub at [`STUB`] and at [`STUB2`].
+pub const JUMP_STUB: [u8; 6] = [0xff, 0x25, 0x02, 0x00, 0x00, 0x00];
 
 /// Copy `bytes` into `code` at `at`.
 const fn place<const N: usize>(mut code: [u8; 0xb0], at: usize, bytes: [u8; N]) -> [u8; 0xb0] {
@@ -177,7 +184,7 @@ const PLT_PASSING: [u8; 0x2b] = [
 ];
 
 /// [`PLT`]'s `.plt` and then `text`, a function of the program's own that reaches the stub at [`PLT_STUB`].
-const fn plt_then<const N: usize>(text: &[u8]) -> [u8; N] {
+pub const fn plt_then<const N: usize>(text: &[u8]) -> [u8; N] {
     let mut bytes = [0; N];
     let mut at = 0;
     while at < 0x20 {
@@ -538,6 +545,8 @@ impl Literal {
                     function("passes", PASSES, 0xd),
                     function("stepped", STEPPED, 0xc),
                 ],
+                // The one C library an unversioned import binds to (doc/adr-call-boundary.md, S8).
+                libraries: vec!["libc.so.6".to_owned()],
                 ..Container::default()
             },
         }
@@ -688,7 +697,7 @@ impl Literal {
     }
 
     /// A `.plt` whose stub is for `import`, then `code`: a function of the program's own that reaches it.
-    fn plt_wrapped(import: &str, code: &'static [u8]) -> Self {
+    pub fn plt_wrapped(import: &str, code: &'static [u8]) -> Self {
         let mut program = Self::plt_importing(import).running_on(GLIBC);
         program.code = code;
         program.container.segments = vec![code_segment(BASE, code.len() as u64)];
@@ -701,9 +710,9 @@ impl Literal {
         Self::plt_wrapped("free", &PLT_GUARDED_WRAPPER)
     }
 
-    /// [`Self::plt_wrapped`] with a function that is one jump to the stub.
-    pub fn plt_forwarding_wrapper() -> Self {
-        Self::plt_wrapped("free", &PLT_FORWARDING_WRAPPER)
+    /// [`Self::plt_wrapped`] with a function that is one jump to the stub for `import`.
+    pub fn plt_forwarding_to(import: &str) -> Self {
+        Self::plt_wrapped(import, &PLT_FORWARDING_WRAPPER)
     }
 
     /// [`Self::plt_wrapped`] with a wrapper that computes the stub's argument.
@@ -788,9 +797,39 @@ impl Literal {
         self
     }
 
+    /// The same program, stated as written in `language`.
+    pub fn in_language(mut self, language: r2engine::program::SourceLanguage) -> Self {
+        self.container.languages.program = language;
+        self
+    }
+
     /// The same program as a Mach-O, which states Darwin by its format.
     pub fn mach_o(mut self) -> Self {
         self.container.format = Format::MachO;
+        self
+    }
+
+    /// The same program as a PE, which states Windows and Microsoft x64 by its format.
+    pub fn pe(mut self) -> Self {
+        self.container.format = Format::Pe;
+        self.container.libraries.clear();
+        self
+    }
+
+    /// The same program, its `DT_NEEDED` naming these libraries.
+    pub fn needing(mut self, libraries: &[&str]) -> Self {
+        self.container.libraries = libraries.iter().map(|name| (*name).to_owned()).collect();
+        self
+    }
+
+    /// The same program, its `.gnu.version_r` needing these versions of `library`.
+    pub fn needing_versions(mut self, library: &str, versions: &[&str]) -> Self {
+        self.container
+            .version_needs
+            .push(r2engine::program::VersionNeed {
+                library: library.into(),
+                versions: versions.iter().map(|version| (*version).into()).collect(),
+            });
         self
     }
 
@@ -875,6 +914,27 @@ impl Literal {
         self
     }
 
+    /// The same program entering `vaddr` as `kind`, from the word the container states at `slot`.
+    pub fn entering_from(mut self, vaddr: u64, kind: EntryKind, slot: u64) -> Self {
+        self.container.entries.push(Entry {
+            vaddr,
+            kind,
+            thumb: false,
+            stated_at: Some(r2abi::statement::StatedAt {
+                offset: slot - BASE,
+                vaddr: Some(slot),
+            }),
+        });
+        self
+    }
+
+    /// The same program, its code section ending at `end`: what follows is no code.
+    pub fn text_ending(mut self, end: u64) -> Self {
+        self.container.sections[0].vsize = end - BASE;
+        self.container.sections[0].file_size = end - BASE;
+        self
+    }
+
     /// The same program with one more symbol in the container.
     pub fn declaring(mut self, symbol: Symbol) -> Self {
         self.container.symbols.push(symbol);
@@ -888,7 +948,12 @@ impl Literal {
     }
 
     /// The same program with an import: a linkage stub, and the slot it reads.
-    pub fn importing(mut self, import: &str) -> Self {
+    pub fn importing(self, import: &str) -> Self {
+        self.importing_through(STUB..STUB + 6, SLOT, import)
+    }
+
+    /// [`Self::importing`] with the stub over `stub` and the slot at `slot`.
+    pub fn importing_through(mut self, stub: Range<u64>, slot: u64, import: &str) -> Self {
         let section = |name: &str, vaddr, vsize, is_code| Section {
             name: name.to_owned(),
             vaddr,
@@ -903,16 +968,47 @@ impl Literal {
         };
         // The code before the stub is the program's own; the stub and its slot are the loader's.
         let code = &mut self.container.sections[0];
-        code.vsize = code.vsize.min(STUB - code.vaddr);
+        code.vsize = code.vsize.min(stub.start - code.vaddr);
         self.container.sections.extend([
-            section(".plt", STUB, 6, true),
-            section(".got", SLOT, 8, false),
+            section(".plt", stub.start, stub.end - stub.start, true),
+            section(".got", slot, 8, false),
         ]);
-        self.container.relocations.push(import_slot(SLOT, import));
+        self.container.relocations.push(import_slot(slot, import));
         // The loader writes the import's address into the slot, as the container states for every relocation.
         self.container
             .loader_writes
-            .push(import_write(SLOT, 8, import));
+            .push(import_write(slot, 8, import));
+        self
+    }
+
+    /// [`Self::importing`], the container naming the DLL that defines the import, as a PE's
+    /// import directory does.
+    pub fn importing_from(self, dll: &str, import: &str) -> Self {
+        let mut program = self.importing(import);
+        program.container.symbols.push(Symbol {
+            name: import.into(),
+            vaddr: SLOT,
+            import: true,
+            library: Some(dll.into()),
+            ..Symbol::default()
+        });
+        program
+    }
+
+    /// The same program, its PE load configuration naming the `/GS` cookie at `address`.
+    pub fn with_security_cookie(mut self, address: u64) -> Self {
+        self.container.security_cookie = Some(address);
+        self
+    }
+
+    /// The same program stating `import` from `dylib`, as a two-level namespace's ordinal names it.
+    pub fn with_dylib(mut self, import: &str, dylib: &str) -> Self {
+        self.container.symbols.push(Symbol {
+            name: import.into(),
+            import: true,
+            library: Some(dylib.into()),
+            ..Symbol::default()
+        });
         self
     }
 
@@ -1114,6 +1210,22 @@ fn parenthesized(text: &str, open: usize) -> Option<&str> {
     None
 }
 
+/// A line with an unproven result's carrier identity taken off its returned value (D201):
+/// `return r2sleigh_carrier_u32(x);` reads `return x;`.
+pub fn uncarried(line: &str) -> String {
+    let Some(at) = line.find("r2sleigh_carrier_u") else {
+        return line.to_owned();
+    };
+    let Some(open) = line[at..].find('(').map(|open| at + open) else {
+        return line.to_owned();
+    };
+    let Some(inner) = parenthesized(line, open) else {
+        return line.to_owned();
+    };
+    let close = open + 1 + inner.len();
+    format!("{}{inner}{}", &line[..at], &line[close + 1..])
+}
+
 /// The rendered function's parameters, as `(type, name)`, read off its signature line.
 ///
 /// Each pipeline spells a parameter its own way, so a test compares the
@@ -1131,6 +1243,16 @@ pub fn parameters(c: &str) -> Vec<(String, String)> {
             (ty.trim().to_owned(), name.to_owned())
         })
         .collect()
+}
+
+/// `caller` stores 5 into `local` before its call to `store_through` and reads `local` after it: the
+/// callee's write through the stack argument is not folded away as 5 (D217).
+pub fn assert_local_stays_in_memory(caller: &str) {
+    let call = caller.find("call to store_through").expect(caller);
+    let stored = caller.find("(uint32_t)5U);").expect(caller);
+    let read = caller.rfind("r2sleigh_load_u32(").expect(caller);
+    assert!(stored < call && call < read, "{caller}");
+    assert!(!caller.contains("r2sleigh_carrier_u32(5)"), "{caller}");
 }
 
 /// The arguments of the first call to `callee` in the body (past the signature

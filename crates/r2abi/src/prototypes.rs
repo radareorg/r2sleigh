@@ -1,15 +1,7 @@
-//! What a library function takes and returns.
-//!
-//! An import has no body to read an interface off, so a call to one renders
-//! with no arguments at all unless something states its prototype. These
-//! tables state it for two thousand library functions, as `sdb` text that
-//! began as radare2's and is now r2abi's own: keyed by C identifier, and
-//! scoped per C library where the libraries disagree. `data/README.md` lists
-//! every way they differ from radare2's.
+//! What a declaration says a function takes and returns: a library row's (`crate::library`) or
+//! the binary's own debug information's (`crate::declarations`), in one shape.
 
-use std::collections::BTreeMap;
-
-use crate::types::{TypeGraph, TypeId};
+use crate::types::TypeId;
 
 /// What a declaration says about one function.
 ///
@@ -32,17 +24,47 @@ pub struct Prototype {
     pub return_type: TypeId,
     /// Whether arguments continue past the fixed ones.
     pub variadic: bool,
-    /// Whether control never returns from this function.
-    ///
-    /// `err`, `abort`, `exit` and twenty-four others in the shipped tables say
-    /// so, and a call to one ends the block: the bytes after it belong to
-    /// whatever comes next, not to the caller. Reading it is what stops a body
-    /// walk running through the function that follows.
+    /// DWARF's `DW_AT_noreturn`; a library row states its own on `LibraryRow::noreturn`.
     pub noreturn: bool,
+    /// DWARF's `DW_AT_calling_convention`; the engine chooses the convention from it (S20).
+    pub convention: StatedConvention,
     /// What the offsets in `locals` are measured from.
     pub frame_base: Option<FrameBase>,
     /// Each named variable the declaration places in the frame.
     pub locals: Vec<Local>,
+}
+
+/// A subprogram's `DW_AT_calling_convention` as its producer writes it (DWARF 5 3.3.1.1; LLVM's
+/// vendor codes are `llvm/BinaryFormat/Dwarf.def`'s `HANDLE_DW_CC`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum StatedConvention {
+    /// No attribute, or `DW_CC_normal`.
+    #[default]
+    Normal,
+    /// `DW_CC_program`: a main program, not callable by the ordinary convention.
+    Program,
+    /// `DW_CC_nocall`: the compiler passes the arguments its own way.
+    NoCall,
+    /// `DW_CC_LLVM_Win64` (0xc1), clang's `ms_abi`.
+    LlvmWin64,
+    /// `DW_CC_LLVM_X86_64SysV` (0xc2), clang's `sysv_abi`.
+    LlvmX8664SysV,
+    /// Any other code.
+    Other(u8),
+}
+
+impl StatedConvention {
+    /// The attribute's constant.
+    pub const fn of(code: u8) -> Self {
+        match code {
+            0x01 => Self::Normal,
+            0x02 => Self::Program,
+            0x03 => Self::NoCall,
+            0xc1 => Self::LlvmWin64,
+            0xc2 => Self::LlvmX8664SysV,
+            code => Self::Other(code),
+        }
+    }
 }
 
 /// One C type, as the declaration writes it and as the language reads it.
@@ -180,347 +202,5 @@ impl Parameter {
     pub fn at_frame_offset(mut self, frame_offset: Option<i64>) -> Self {
         self.frame_offset = frame_offset;
         self
-    }
-}
-
-/// Every prototype the data declares, and the graph its types are nodes of.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Prototypes {
-    graph: TypeGraph,
-    by_name: BTreeMap<String, Prototype>,
-}
-
-const EMBEDDED: &str = include_str!("../data/types.sdb.txt");
-/// The C++ runtime's, portable too: a mangled key states its parameters (`data/README.md`).
-const EMBEDDED_CXX: &str = include_str!("../data/types-cxx.sdb.txt");
-const EMBEDDED_LINUX: &str = include_str!("../data/types-linux.sdb.txt");
-const EMBEDDED_ANDROID: &str = include_str!("../data/types-android.sdb.txt");
-const EMBEDDED_DARWIN: &str = include_str!("../data/types-darwin.sdb.txt");
-
-/// Which C library's own declarations apply on top of the portable ones.
-///
-/// A name two libraries both export is not one interface: glibc's
-/// `__fgets_chk` takes the buffer's size second and the stream last, and
-/// bionic's takes the stream third and the size last. So a record one
-/// library states is read only for a program the container says runs on it,
-/// and with no such statement only the portable table applies -- a call with
-/// no prototype, rather than one read in another library's order.
-///
-/// The platform also says what its own names for
-/// integers are: `mode_t` is sixteen bits on one and thirty-two on the other.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Platform {
-    /// Linux with the GNU C library.
-    Linux,
-    /// Android, whose C library is bionic.
-    Android,
-    /// Apple's platforms, whose C library is libSystem's.
-    Darwin,
-    /// Windows, whose ABI is Microsoft's; no C library here declares its own.
-    Windows,
-    /// Nothing the container states names one.
-    Unknown,
-}
-
-impl Prototypes {
-    /// The prototypes every C library declares alike, and the C++ runtime's.
-    pub fn embedded() -> Self {
-        Self::embedded_for(Platform::Unknown)
-    }
-
-    /// Those, with the ones this platform's C library declares itself layered over them.
-    pub fn embedded_for(platform: Platform) -> Self {
-        let own = match platform {
-            Platform::Linux => Some(EMBEDDED_LINUX),
-            Platform::Android => Some(EMBEDDED_ANDROID),
-            Platform::Darwin => Some(EMBEDDED_DARWIN),
-            Platform::Windows | Platform::Unknown => None,
-        };
-        Self::parse_all([EMBEDDED, EMBEDDED_CXX].into_iter().chain(own), platform)
-    }
-
-    pub fn parse(text: &str) -> Self {
-        Self::parse_all([text], Platform::Unknown)
-    }
-
-    /// Several tables into one graph, a later declaration of a name replacing
-    /// an earlier one.
-    fn parse_all<'a>(texts: impl IntoIterator<Item = &'a str>, platform: Platform) -> Self {
-        let mut prototypes = Self::default();
-        for text in texts {
-            let table = Table::read(text);
-            for (name, declared) in table.functions {
-                let prototype = prototypes.typed(name.clone(), declared, platform);
-                prototypes.by_name.insert(name, prototype);
-            }
-        }
-        prototypes
-    }
-
-    /// One declaration's spellings, read into this table's graph.
-    fn typed(&mut self, name: String, declared: Declared, platform: Platform) -> Prototype {
-        let mut read = |spelling: &str| crate::spelling::read(spelling, &mut self.graph, platform);
-        let returns = declared.returns.unwrap_or_else(|| "void".to_owned());
-        let return_type = read(&returns);
-        let mut parameters = Vec::new();
-        let mut variadic = false;
-        for (spelling, called) in declared.parameters.into_values() {
-            // An empty spelling is the ellipsis: everything after it is
-            // whatever the caller passes.
-            if spelling.is_empty() {
-                variadic = true;
-                break;
-            }
-            parameters.push(Parameter::new(
-                read(&spelling),
-                spelling,
-                called.filter(|called| !called.is_empty()),
-            ));
-        }
-        Prototype {
-            name,
-            parameters,
-            returns: Spelled::from(returns),
-            return_type,
-            variadic,
-            noreturn: declared.noreturn,
-            ..Prototype::default()
-        }
-    }
-
-    /// The prototype declared for exactly this C identifier.
-    ///
-    /// Exact, because a name that differs is a different function: `__memcpy_chk`
-    /// takes one argument more than `memcpy`, and a program's own `_strlen` is
-    /// not the library's `strlen`. A linked name's decoration is the loader's
-    /// to drop, once, when it states the import -- Mach-O's `___strcpy_chk` is
-    /// stated as `__strcpy_chk` -- so nothing is stripped here to make a
-    /// lookup succeed.
-    pub fn get(&self, name: &str) -> Option<&Prototype> {
-        self.by_name.get(name)
-    }
-
-    /// The graph every prototype here names its types in.
-    pub fn graph(&self) -> &TypeGraph {
-        &self.graph
-    }
-
-    pub fn len(&self) -> usize {
-        self.by_name.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.by_name.is_empty()
-    }
-}
-
-/// One function as the table spells it, before its types are read.
-#[derive(Debug, Default)]
-struct Declared {
-    parameters: BTreeMap<usize, (String, Option<String>)>,
-    returns: Option<String>,
-    noreturn: bool,
-}
-
-/// The functions one `sdb` dump declares.
-#[derive(Debug, Default)]
-struct Table {
-    functions: BTreeMap<String, Declared>,
-}
-
-impl Table {
-    fn read(text: &str) -> Self {
-        let mut table = Self::default();
-        for line in text.lines() {
-            let Some((key, value)) = line.trim().split_once('=') else {
-                continue;
-            };
-            let Some(rest) = key.strip_prefix("func.") else {
-                continue;
-            };
-            let Some((name, what)) = rest.rsplit_once('.') else {
-                continue;
-            };
-            table.take(name, what, value.trim());
-        }
-        table
-    }
-
-    fn take(&mut self, name: &str, what: &str, value: &str) {
-        // `func.<name>.arg.<index>=<type>,<parameter name>`, where the
-        // parameter name is presentation and the type decides how the call is
-        // read.
-        if let Some(name) = name.strip_suffix(".arg") {
-            let Ok(index) = what.parse::<usize>() else {
-                return;
-            };
-            let (spelling, called) = match value.split_once(',') {
-                Some((spelling, called)) => (spelling.trim(), Some(called.trim().to_owned())),
-                None => (value, None),
-            };
-            self.declare(name)
-                .parameters
-                .insert(index, (spelling.to_owned(), called));
-            return;
-        }
-        match what {
-            "args" => {
-                self.declare(name);
-            }
-            "ret" => self.declare(name).returns = Some(value.to_owned()),
-            "noreturn" => self.declare(name).noreturn = value == "true",
-            _ => {}
-        }
-    }
-
-    fn declare(&mut self, name: &str) -> &mut Declared {
-        self.functions.entry(name.to_owned()).or_default()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::{DataModel, Type};
-
-    fn spelled(prototypes: &Prototypes, parameter: &Parameter) -> Option<String> {
-        prototypes
-            .graph()
-            .spelled(parameter.ty)
-            .map(|spelled| spelled.declared)
-    }
-
-    #[test]
-    fn a_fixed_prototype_reads_whole() {
-        let prototypes = Prototypes::embedded();
-        let puts = prototypes.get("puts").expect("puts");
-        assert_eq!(puts.parameters.len(), 1);
-        assert_eq!(puts.parameters[0].name.as_deref(), Some("s"));
-        assert_eq!(
-            spelled(&prototypes, &puts.parameters[0]).as_deref(),
-            Some("const char *")
-        );
-        assert_eq!(puts.returns.as_written(), "int");
-        assert!(!puts.variadic);
-    }
-
-    #[test]
-    fn the_ellipsis_is_variadic_rather_than_a_parameter() {
-        let prototypes = Prototypes::embedded();
-        let printf = prototypes.get("printf").expect("printf");
-        assert_eq!(printf.parameters.len(), 1);
-        assert_eq!(printf.parameters[0].name.as_deref(), Some("format"));
-        assert!(printf.variadic);
-    }
-
-    /// objc4, Darwin's runtime: a message send passes whatever the method takes after `self` and
-    /// `op`, and `objc_storeStrong` stores through a pointer (audit W10); no other platform has it.
-    #[test]
-    fn the_objective_c_runtime_is_declared_as_objc4_declares_it() {
-        let linux = Prototypes::embedded_for(Platform::Linux);
-        assert!(linux.get("objc_storeStrong").is_none());
-        let prototypes = Prototypes::embedded_for(Platform::Darwin);
-        let send = prototypes.get("objc_msgSend").expect("objc_msgSend");
-        assert_eq!(send.parameters.len(), 2);
-        assert!(send.variadic);
-        let store = prototypes
-            .get("objc_storeStrong")
-            .expect("objc_storeStrong");
-        let spellings: Vec<_> = (store.parameters.iter())
-            .map(|parameter| spelled(&prototypes, parameter))
-            .collect();
-        assert_eq!(
-            spellings,
-            [Some("void **".to_owned()), Some("void *".to_owned())]
-        );
-        assert_eq!(store.returns.as_written(), "void");
-        let retain = prototypes.get("objc_retain").expect("objc_retain");
-        assert_eq!(retain.returns.as_written(), "void *");
-    }
-
-    /// The C++ runtime's rows (`types-cxx.sdb.txt`): operator new takes the width its mangling
-    /// states, the ABI's throws never return, and a `z` in a mangling is the ellipsis.
-    #[test]
-    fn the_cxx_runtime_is_declared_as_its_mangling_and_the_abi_state() {
-        let prototypes = Prototypes::embedded();
-        let graph = prototypes.graph();
-        let model = DataModel::unix(64);
-        let size = |name: &str| {
-            let prototype = prototypes.get(name).expect(name);
-            let [size] = prototype.parameters.as_slice() else {
-                panic!("{name}: {:?}", prototype.parameters);
-            };
-            (
-                graph.size_bits(size.ty, &model),
-                prototype.returns.as_written().to_owned(),
-            )
-        };
-        assert_eq!(size("_Znwm"), (Some(64), "void *".to_owned()));
-        assert_eq!(size("_Znaj"), (Some(32), "void *".to_owned()));
-        let sized = prototypes.get("_ZdlPvm").expect("sized delete");
-        assert_eq!((sized.parameters.len(), sized.noreturn), (2, false));
-        let atexit = prototypes.get("__cxa_atexit").expect("__cxa_atexit");
-        assert_eq!(atexit.parameters.len(), 3);
-        assert!(atexit.parameters[0].is_function());
-        for name in [
-            "__cxa_throw",
-            "__cxa_rethrow",
-            "_Unwind_Resume",
-            "__cxa_pure_virtual",
-            "_ZSt9terminatev",
-            "_ZSt19__throw_logic_errorPKc",
-        ] {
-            assert!(prototypes.get(name).expect(name).noreturn, "{name}");
-        }
-        assert!(!prototypes.get("__cxa_begin_catch").expect("catch").noreturn);
-        let format = prototypes
-            .get("_ZSt24__throw_out_of_range_fmtPKcz")
-            .expect("the formatted throw");
-        assert_eq!((format.parameters.len(), format.variadic), (1, true));
-        // Every type the C++ table spells is one the reader states.
-        let cxx = Prototypes::parse(EMBEDDED_CXX);
-        assert!(cxx.len() > 70, "{}", cxx.len());
-        for prototype in cxx.by_name.values() {
-            for parameter in &prototype.parameters {
-                let ty = cxx.graph().get(parameter.ty);
-                assert!(!matches!(ty, Some(Type::Refused(_))), "{}", prototype.name);
-            }
-        }
-    }
-
-    #[test]
-    fn a_name_is_looked_up_exactly_as_it_is_spelled() {
-        let prototypes = Prototypes::embedded();
-        assert_eq!(
-            prototypes.get("__strcpy_chk").map(|p| p.parameters.len()),
-            Some(3)
-        );
-        // A name with one more underscore is another function: a program's
-        // own `_strlen`, or a decoration the loader should have dropped.
-        assert!(prototypes.get("_strlen").is_none());
-        assert!(prototypes.get("___strcpy_chk").is_none());
-    }
-
-    #[test]
-    fn the_data_declares_a_few_thousand_functions() {
-        let count = Prototypes::embedded().len();
-        assert!(count > 500, "{count}");
-    }
-
-    /// The table's spellings are read once, into the same graph a binary's
-    /// debug information is read into: `size_t` is an unsigned integer as
-    /// wide as an address, and `FILE` is a tag the table never completes.
-    #[test]
-    fn every_spelling_is_a_node_of_one_graph() {
-        let prototypes = Prototypes::embedded_for(Platform::Linux);
-        let graph = prototypes.graph();
-        let fwrite = prototypes.get("fwrite").expect("fwrite");
-        let model = DataModel::unix(64);
-        assert_eq!(graph.size_bits(fwrite.return_type, &model), Some(64));
-        let stream = fwrite.parameters.last().expect("a stream");
-        let Some(Type::Pointer { target }) = graph.resolved(stream.ty) else {
-            panic!("{:?}", graph.get(stream.ty));
-        };
-        assert!(matches!(graph.get(*target), Some(Type::Opaque { .. })));
     }
 }

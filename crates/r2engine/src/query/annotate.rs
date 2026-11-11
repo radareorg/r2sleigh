@@ -28,6 +28,8 @@ const PAGE: u64 = 0x1000;
 pub(super) struct Run<'a> {
     pub lifts: &'a [Option<r2il::R2ILBlock>],
     pub windows: &'a [Option<Vec<u8>>],
+    /// Whether the lines are unspelled until a claim or a computed number reads the operands.
+    pub spell: bool,
 }
 
 /// Say what each line's own lift says: an address it forms, transfers to or accesses is claimed where formed (doc/adr-query-database.md, "Formed addresses").
@@ -43,10 +45,16 @@ pub(super) fn over_run(
         return;
     }
     let memory = &answered.memory;
-    let call_effect = answered.call_effect;
+    let call_effect = answered.call_effect.as_ref();
     let body = (work >= Work::Function).then_some(answered.body).flatten();
     let fresh = fresh_over(lines, body);
     let mut named = named_over(run.lifts, &fresh, call_effect);
+    if run.spell {
+        let computes = |index: usize| named.get(index).is_some_and(|one| computed(one).is_some());
+        (0..lines.len())
+            .filter(|index| computes(*index))
+            .for_each(|index| spell(answered, run, lines, index));
+    }
     let spelled = spelled_over(answered, lines);
     for (one, spelled) in named.iter_mut().zip(&spelled) {
         if let Some(one) = one {
@@ -54,7 +62,8 @@ pub(super) fn over_run(
         }
     }
     let relative = relative_over(answered, run, lines, &named, &fresh);
-    for (index, line) in lines.iter_mut().enumerate() {
+    for index in 0..lines.len() {
+        let address = lines[index].address;
         let (Some(lift), Some(Some(named))) = (
             run.lifts.get(index).and_then(Option::as_ref),
             named.get(index),
@@ -91,10 +100,7 @@ pub(super) fn over_run(
                 claims.push((kind, support));
             }
         }
-        claims.extend(
-            body.into_iter()
-                .flat_map(|body| arms_of(body, line.address)),
-        );
+        claims.extend(body.into_iter().flat_map(|body| arms_of(body, address)));
         // What the bytes hold is for a reader; the reference index reads only what the lines claim.
         if answered.holdings {
             let revision = revision_at(memory, &claims);
@@ -102,9 +108,24 @@ pub(super) fn over_run(
         }
         if work >= Work::Function {
             let folded = |storage| named.left(storage);
-            claims.extend(super::proved::proved_about(answered, line.address, &folded));
+            claims.extend(super::proved::proved_about(answered, address, &folded));
         }
+        if run.spell && !claims.is_empty() {
+            spell(answered, run, lines, index);
+        }
+        let line = &mut lines[index];
         line.annotations = annotated(claims, line.syntax.as_ref(), memory);
+    }
+}
+
+/// Spell one line of a run from its own window, as its listing would; once.
+fn spell(answered: &Answered<'_>, run: &Run<'_>, lines: &mut [Line], index: usize) {
+    let line = &mut lines[index];
+    let window = run.windows.get(index).and_then(Option::as_deref);
+    if line.syntax.is_none()
+        && let Some((machine, window)) = answered.decoders.at(line.address).zip(window)
+    {
+        line.syntax = machine.disasm.spell(window, line.address).ok();
     }
 }
 
@@ -315,7 +336,7 @@ fn relative_over(
         return vec![false; lines.len()];
     };
     let shifted = super::decode::lift_run(answered, &lines[..=last], &run.windows[..=last], PAGE);
-    let there = named_over(&shifted, fresh, answered.call_effect);
+    let there = named_over(&shifted, fresh, answered.call_effect.as_ref());
     lines
         .iter()
         .enumerate()

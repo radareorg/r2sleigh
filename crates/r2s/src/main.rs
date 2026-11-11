@@ -44,6 +44,7 @@ struct Cli {
 }
 
 fn main() {
+    allocator::install();
     let profile = allocator::profile();
     let cli = Cli::parse();
     let mut session = match session::Session::open(&cli.file) {

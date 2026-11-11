@@ -234,6 +234,9 @@ pub enum Helper {
     LeadingZeros { bits: u32 },
     /// A construct the rendering could not prove: it traps if executed.
     Residual(ResidualType),
+    /// The identity over an unproven result's carrier of `bits`: the value a return leaves there,
+    /// claimed as no C result (doc/adr-scratch-result.md, "Rendering of Unproven").
+    Carrier { bits: u32 },
     /// A read of a scalar of this type from memory whose declared type is not
     /// it -- the bytes of a frame object the partition merged. C defines the
     /// read only through a byte copy, so it is one.
@@ -296,6 +299,7 @@ impl Helper {
             Self::FloatToBits { bits } => format!("r2sleigh_float_to_bits_{bits}"),
             Self::LeadingZeros { bits } => format!("r2sleigh_lzcount_{bits}"),
             Self::Residual(ty) => format!("r2sleigh_residual_{}", ty.tag()),
+            Self::Carrier { bits } => format!("r2sleigh_carrier_u{bits}"),
             Self::Load(ty) => format!("r2sleigh_load_{}", ty.tag()),
             Self::Store(ty) => format!("r2sleigh_store_{}", ty.tag()),
             Self::Atomic { op, bits, order } => {
@@ -356,6 +360,12 @@ impl Helper {
                  \x20   return x == 0 ? {bits}u : (uint32_t)__builtin_clzll(x) - {}u;\n\
                  }}\n",
                 64 - bits
+            ),
+            Self::Carrier { bits } => format!(
+                "static inline uint{bits}_t {name}(uint{bits}_t x)\n\
+                 {{\n\
+                 \x20   return x;\n\
+                 }}\n"
             ),
             Self::Residual(ty) => format!(
                 "static inline {} {name}(uint32_t site)\n\
@@ -637,6 +647,88 @@ pub(crate) fn guarded_truncation(x: CExpr, float_bits: u32, int_bits: u32) -> Op
     })
 }
 
+/// The prelude typedef's name for an unproven result's carrier of `bits`.
+const RESULT_TYPEDEF: &str = "r2sleigh_result_u";
+
+/// An unproven result's header type: the prelude typedef over the carrier, which claims no C type.
+pub(crate) fn result_carrier(bits: u32) -> CType {
+    CType::Typedef {
+        name: format!("{RESULT_TYPEDEF}{bits}"),
+        ty: Box::new(CType::uint(bits)),
+    }
+}
+
+/// The prelude typedef's name for a slot the callee ignores: a hole below a read slot (D165).
+const UNREAD_TYPEDEF: &str = "r2sleigh_unread_";
+
+/// A hole's type at a call: r2types' typedef over the argument's class (`r2types::unread_slot`).
+pub(crate) fn unread_slot(class: &CType) -> Option<CType> {
+    match class {
+        CType::Int { bits, .. } => r2types::unread_slot(None, *bits),
+        CType::Float(bits) => {
+            r2types::unread_slot(Some(r2source::convention::SlotClass::Float), *bits)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `ty` is a hole's typedef.
+pub(crate) fn is_unread_slot(ty: &CType) -> bool {
+    matches!(ty, CType::Typedef { name, .. } if name.starts_with(UNREAD_TYPEDEF))
+}
+
+/// The prelude's declaration of `ty`, where it is an unproven result's carrier typedef or a hole's.
+pub(crate) fn result_typedef(ty: &CType) -> Option<String> {
+    match ty {
+        CType::Typedef { name, ty } if name.starts_with(RESULT_TYPEDEF) => match ty.as_ref() {
+            CType::Int { bits, .. } => Some(format!("typedef uint{bits}_t {name};\n")),
+            _ => None,
+        },
+        CType::Typedef { name, ty } if name.starts_with(UNREAD_TYPEDEF) => match ty.as_ref() {
+            CType::Int { bits, .. } => Some(format!("typedef uint{bits}_t {name};\n")),
+            CType::Float(32) => Some(format!("typedef float {name};\n")),
+            CType::Float(64) => Some(format!("typedef double {name};\n")),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// The carrier helper of an unproven result at `bits`, where C has an unsigned integer that wide.
+pub(crate) fn carrier(bits: u32) -> Option<Helper> {
+    matches!(bits, 8 | 16 | 32 | 64).then_some(Helper::Carrier { bits })
+}
+
+/// How the returns hand back an unproven result: through the carrier, or as a residual (D233).
+pub(crate) fn unproven_returns(function: &CFunction) -> (usize, usize) {
+    let (mut carried, mut residual) = (0usize, 0usize);
+    let mut count = |stmt: &CStmt| {
+        let CStmt::Return(Some(value)) = stmt else {
+            return;
+        };
+        match value.unobserved() {
+            CExpr::Call { func, .. }
+                if matches!(
+                    func.unobserved(),
+                    CExpr::External {
+                        kind: crate::symbol::ExternalKind::Helper(Helper::Carrier { .. }),
+                        ..
+                    }
+                ) =>
+            {
+                carried += 1;
+            }
+            value if holds_residual(value) => residual += 1,
+            _ => {}
+        }
+    };
+    function
+        .body
+        .iter()
+        .for_each(|stmt| each_stmt(stmt, &mut count));
+    (carried, residual)
+}
+
 /// Whether this expression node is a residual call's callee.
 pub(crate) fn is_residual_callee(expr: &CExpr) -> Option<ResidualType> {
     residual_callee(expr).map(|(ty, _)| ty)
@@ -708,22 +800,43 @@ fn stmt_holds_gap(stmt: &CStmt) -> bool {
 
 /// Marked gaps in a statement and the statements inside it.
 fn count_gaps(stmt: &CStmt) -> usize {
-    let each = |stmts: &[CStmt]| stmts.iter().map(count_gaps).sum::<usize>();
-    match stmt.unobserved() {
-        CStmt::Gap(_) => 1,
-        CStmt::Block(body) => each(body),
+    let mut gaps = 0usize;
+    each_stmt(stmt, &mut |stmt| {
+        gaps += usize::from(matches!(stmt, CStmt::Gap(_)))
+    });
+    gaps
+}
+
+/// `stmt` and every statement inside it, outermost first, each through its markers.
+fn each_stmt(stmt: &CStmt, f: &mut impl FnMut(&CStmt)) {
+    let stmt = stmt.unobserved();
+    f(stmt);
+    match stmt {
+        CStmt::Block(body) => body.iter().for_each(|inner| each_stmt(inner, f)),
         CStmt::If {
             then_body,
             else_body,
             ..
-        } => count_gaps(then_body) + else_body.as_deref().map_or(0, count_gaps),
-        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => count_gaps(body),
-        CStmt::For { init, body, .. } => init.as_deref().map_or(0, count_gaps) + count_gaps(body),
-        CStmt::Switch { cases, default, .. } => {
-            cases.iter().map(|case| each(&case.body)).sum::<usize>()
-                + default.as_deref().map_or(0, each)
+        } => {
+            each_stmt(then_body, f);
+            if let Some(inner) = else_body.as_deref() {
+                each_stmt(inner, f);
+            }
         }
-        _ => 0,
+        CStmt::While { body, .. } | CStmt::DoWhile { body, .. } => each_stmt(body, f),
+        CStmt::For { init, body, .. } => {
+            if let Some(inner) = init.as_deref() {
+                each_stmt(inner, f);
+            }
+            each_stmt(body, f);
+        }
+        CStmt::Switch { cases, default, .. } => {
+            let bodies = cases.iter().map(|case| case.body.as_slice());
+            for inner in bodies.chain(default.as_deref()).flatten() {
+                each_stmt(inner, f);
+            }
+        }
+        _ => {}
     }
 }
 

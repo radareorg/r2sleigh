@@ -56,6 +56,11 @@ impl FrameReach {
         self.whole || self.escaped.contains(&object)
     }
 
+    /// Whether the object's own address escapes, before the closure reaches any neighbour.
+    pub fn escapes_directly(&self, object: ObjectId) -> bool {
+        self.whole || self.direct.contains(&object)
+    }
+
     /// Whether an escaping frame address named no object, so every frame
     /// object is reachable.
     pub const fn whole(&self) -> bool {
@@ -604,11 +609,6 @@ fn call_reaches(
     let Some(stack_pointer) = machine_context.stack_pointer_carrier() else {
         return out;
     };
-    // The callee's own space below its first argument, which it may write.
-    let reserved = machine_context
-        .convention_slots()
-        .and_then(r2source::SourceConventionSlots::stack_arguments)
-        .map_or(0, |placement| placement.first_offset().max(0));
     let mut states = ReachingStorage::new(function, graph, stack_pointer);
     for block in &graph.blocks {
         for &call in graph.op_insts(block.id) {
@@ -625,29 +625,13 @@ fn call_reaches(
                     .and_then(|value| entry_offset(facts, value.id)),
                 _ => None,
             };
-            let interface = instruction
-                .and_then(|instruction| machine_context.raw_call_site_at(instruction))
-                .and_then(|identity| machine_context.call_site_interface(identity))
-                .filter(|interface| interface.is_complete() && !interface.is_variadic());
-            let (Some(sp), Some(interface)) = (sp, interface) else {
+            let area = machine_context.call_argument_area(instruction);
+            let (Some(sp), Some(area)) = (sp, area) else {
                 out.insert(call, CallFrameReach::Whole);
                 continue;
             };
-            let slots =
-                interface
-                    .arguments()
-                    .iter()
-                    .filter_map(|argument| match argument.location() {
-                        r2source::SourceParameterLocation::Stack {
-                            offset, size_bytes, ..
-                        } => {
-                            let start = sp.saturating_add(offset);
-                            Some((start, start.saturating_add(i64::from(size_bytes))))
-                        }
-                        r2source::SourceParameterLocation::Register(_) => None,
-                    });
-            let area = std::iter::once((sp, sp.saturating_add(reserved)))
-                .chain(slots)
+            let area = (area.iter())
+                .map(|(low, high)| (sp.saturating_add(*low), sp.saturating_add(*high)))
                 .collect::<Vec<_>>();
             out.insert(call, CallFrameReach::Objects(objects_in(frame, &area)));
         }

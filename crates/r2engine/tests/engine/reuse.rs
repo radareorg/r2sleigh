@@ -191,7 +191,7 @@ fn amd64(embedded: &r2sleigh_lift::EmbeddedMachine) -> r2source::native::NativeM
             None,
         ));
     let slots = r2source::SourceConventionSlots::new(
-        "amd64",
+        r2source::ConventionId::SysVAmd64,
         ["RDI", "RSI", "RDX", "RCX", "R8", "R9"].map(register),
         Some(register("RAX")),
     )
@@ -204,11 +204,12 @@ fn amd64(embedded: &r2sleigh_lift::EmbeddedMachine) -> r2source::native::NativeM
         roles,
         slots,
         call_effect: None,
+        convention: None,
     }
 }
 
-/// The C for that function in a program whose object at 0x2000 has this declared type.
-fn rendered_returning_object(declared: Option<&str>) -> String {
+/// The C for that function in a program whose object at 0x2000 is, where `declared`, an `int32_t`.
+fn rendered_returning_object(declared: bool) -> String {
     use r2source::native::{NativeBlock, NativeFunction};
     let embedded = r2sleigh_lift::embedded_machine("x86-64").expect("an x86-64 machine");
     let machine = amd64(&embedded);
@@ -228,15 +229,18 @@ fn rendered_returning_object(declared: Option<&str>) -> String {
         data_symbols: vec![r2source::SourceDataObject::new(
             0x2000,
             "obj.counter",
-            declared,
+            declared.then_some(0),
         )],
+        data_types: declared.then(|| {
+            let int = r2source::SourceType::new(0, r2source::SourceTypeKind::SignedInteger, 32, 32);
+            r2source::SourceTypeGraph::new([int], []).expect("an int32_t graph")
+        }),
         code_pointer_tables: Vec::new(),
         interface: None,
         parameter_names: Vec::new(),
         stack_slot_names: Vec::new(),
         signature: None,
-        loader_role: None,
-        result_reads: None,
+        closed_result: None,
         frame_saves: Vec::new(),
     };
     let snapshot = r2source::native::capture(&machine, function).expect("a capture");
@@ -267,11 +271,11 @@ fn rendered_returning_object(declared: Option<&str>) -> String {
 
 #[test]
 fn a_data_object_type_stays_with_the_program_that_stated_it() {
-    let fresh = rendered_returning_object(None);
-    let typed = rendered_returning_object(Some("int32_t"));
+    let fresh = rendered_returning_object(false);
+    let typed = rendered_returning_object(true);
     assert!(typed.contains("int32_t counter"), "{typed}");
     assert_eq!(
-        rendered_returning_object(None),
+        rendered_returning_object(false),
         fresh,
         "a type another program stated reached this one"
     );
@@ -477,9 +481,8 @@ proptest::proptest! {
 
 #[test]
 fn a_tail_thunk_returns_what_its_target_returns_once_the_target_is_resolved() {
-    // `bump` returns its argument plus one; `thunk` sets an unrelated register and tail-jumps to
-    // it; `root` calls the thunk. Alone, the thunk proves no result: its target owns it. Resolved
-    // against `bump`, it returns `bump`'s result and passes its own first argument through.
+    // `thunk` tail-jumps to `bump` (`lea eax, [rdi + 1]`), so resolved it returns `bump`'s four bytes
+    // and passes on the `edi` lane `bump` holds (ROADMAP D105).
     let mut code = [0xcc_u8; 0x40];
     code[0x00..0x04].copy_from_slice(&[0x8d, 0x47, 0x01, 0xc3]); // lea eax, [rdi + 1]; ret
     code[0x10..0x1a].copy_from_slice(&[0xba, 0xff, 0xff, 0xff, 0xff, 0xe9, 0xe6, 0xff, 0xff, 0xff]); // mov edx, -1; jmp bump
@@ -493,8 +496,11 @@ fn a_tail_thunk_returns_what_its_target_returns_once_the_target_is_resolved() {
     let mut program = OpenProgram::of(Literal::of_code(code.to_vec().leak(), &functions));
     let rendering = program.rendered(base + 0x20).expect("it renders");
     let text = rendering.response.output.into_text();
-    assert!(text.contains("uint64_t thunk(uint64_t);"), "{text}");
-    assert!(text.contains("= thunk(5);"), "{text}");
+    assert!(
+        text.contains("r2sleigh_result_u32 thunk(uint32_t);"),
+        "{text}"
+    );
+    assert!(text.contains("= (uint64_t)thunk(5);"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 

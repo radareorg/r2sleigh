@@ -3,7 +3,7 @@
 
 use crate::common;
 
-use common::{BASE, Literal};
+use common::{BASE, Literal, PLT_CALLER, plt_then};
 use r2engine::program::OpenProgram;
 use r2ssa::{SourceResultCause, SourceUnstatedCall};
 
@@ -246,7 +246,10 @@ fn under_aa_a_pair_returning_each_others_result_proves_it() {
     }
     let text = surveyed(MUTUAL_U64, &U64, BASE);
     assert!(text.contains("rax_6 = odd("), "{text}");
-    assert!(text.contains("return (uint64_t)rax_6;"), "{text}");
+    assert!(
+        text.contains("return r2sleigh_carrier_u64((uint64_t)rax_6);"),
+        "{text}"
+    );
 }
 
 /// The paths of their own write `eax` alone, and the pair is proven all the same.
@@ -272,7 +275,7 @@ fn a_cold_request_proves_a_cycle_through_a_floor_its_result() {
     }
 }
 
-/// The base path returns whatever the caller left in `rax`, which is no value the pair produces:
+/// The base path returns whatever the caller left in `rax`, which defines nothing (D200 case 1):
 /// nothing seeds the fixpoint, and both results stay a visible residual.
 #[test]
 fn a_pair_with_no_path_of_its_own_stays_unproven() {
@@ -282,7 +285,7 @@ fn a_pair_with_no_path_of_its_own_stays_unproven() {
     }
     let cause = result_cause(Literal::of_code(MUTUAL_UNTOUCHED_BASE, &UNTOUCHED), BASE);
     let partner = SourceResultCause::Returned(SourceUnstatedCall::Direct(BASE + 0x17));
-    assert_eq!(cause, Some(vec![partner, SourceResultCause::HandedBack]));
+    assert_eq!(cause, Some(vec![partner]));
 }
 
 /// `odd` returns what an indirect call returns, which no statement of a callee can prove: it
@@ -357,36 +360,22 @@ fn a_call_through_memory_is_a_result_returned_by_no_callee() {
     );
 }
 
-/// `test edi, edi; je g2; jmp g1; g2: jmp g2'`: `g1` returns in `rax`, `g2` returns nothing.
+/// `test edi, edi; je L; jmp g1; L: jmp free`: `g1` returns in `rax`, `free` returns nothing.
+const TAILS_DISAGREE: [u8; 0x36] = plt_then(&[
+    0x85, 0xff, // 1020 test edi, edi
+    0x74, 0x05, // 1022 je 0x1029
+    0xe9, 0x07, 0x00, 0x00, 0x00, // 1024 jmp 0x1030 (g1)
+    0xe9, 0xe2, 0xff, 0xff, 0xff, // 1029 jmp stub (free)
+    0xcc, 0xcc, // 102e padding
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1030 g1: mov eax, 1
+    0xc3, // 1035 ret
+]);
+
 #[test]
 fn tail_jumps_stating_different_results_are_a_cause_of_that_name() {
-    const CODE: [u8; 0x30] = {
-        let mut bytes = [0xcc; 0x30];
-        let jumps = [
-            0x85, 0xff, // 1000 test edi, edi
-            0x74, 0x05, // 1002 je 0x1009
-            0xe9, 0x0c, 0x00, 0x00, 0x00, // 1004 jmp 0x1015
-            0xe9, 0x12, 0x00, 0x00, 0x00, // 1009 jmp 0x1020
-        ];
-        let g1 = [0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]; // 1015 mov eax, 1; ret
-        let (mut at, mut other) = (0, 0);
-        while at < jumps.len() {
-            bytes[at] = jumps[at];
-            at += 1;
-        }
-        while other < g1.len() {
-            bytes[0x15 + other] = g1[other];
-            other += 1;
-        }
-        bytes[0x20] = 0xc3; // 1020 ret
-        bytes
-    };
-    let functions = [
-        ("f", BASE, 0x0e),
-        ("g1", BASE + 0x15, 6),
-        ("g2", BASE + 0x20, 1),
-    ];
-    let cause = result_cause(Literal::of_code(&CODE, &functions), BASE);
+    // A bare `ret` states no result since D208 (XMM0's entry byte), so `free` is the void tail.
+    let literal = Literal::plt_wrapped("free", &TAILS_DISAGREE).stating("g1", PLT_CALLER + 0x10);
+    let cause = result_cause(literal, PLT_CALLER);
     assert_eq!(cause, Some(vec![SourceResultCause::TailsDisagree]));
 }
 
@@ -485,4 +474,24 @@ fn under_aa_a_member_stating_its_result_keeps_it_while_its_arity_is_open() {
         let text = surveyed(PROVEN_RESULT_OPEN_ARITY, &functions, at);
         assert!(!text.contains("residual"), "{text}");
     }
+}
+
+/// `jmp signal@plt`: `signal` returns the previous handler (C11 7.14.1.1), so a function that
+/// tails to it returns a value. r2abi's row said `void`, which certified the wrapper void (D204).
+#[test]
+fn a_tail_jump_to_signal_returns_the_previous_handler() {
+    let mut program = OpenProgram::of(Literal::plt_forwarding_to("signal"));
+    let info = program.function_info(PLT_CALLER).expect("it is described");
+    let rendered = program
+        .rendered(PLT_CALLER)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    let returns = info.returns.as_ref().expect("a return is stated");
+    assert!(
+        matches!(&returns.value, Some(ty) if *ty != r2types::CTypeLike::Void),
+        "{info:?}\n{rendered}"
+    );
+    assert!(rendered.contains("return "), "{rendered}");
 }

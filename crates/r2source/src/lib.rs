@@ -13,10 +13,14 @@
 #![deny(unsafe_code)]
 
 pub mod confidence;
+pub mod convention;
 pub mod display_names;
 pub mod native;
 pub use confidence::{Basis, Confidence, Fact, Grade, Premise};
-pub use display_names::{DisplayNames, unnamed_function, unnamed_identifier};
+pub use convention::{ConventionId, ConventionModel};
+pub use display_names::{
+    DisplayNames, positional_parameter_name, unnamed_function, unnamed_identifier,
+};
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -67,8 +71,7 @@ impl MachineProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FunctionIdentity {
     address: u64,
-    loader_role: Option<SourceLoaderRole>,
-    result_reads: Option<SourceResultReads>,
+    closed_result: Option<SourceClosedResult>,
 }
 
 impl FunctionIdentity {
@@ -76,118 +79,36 @@ impl FunctionIdentity {
         self.address
     }
 
-    /// The hook the program's loader invokes this function as, if any.
-    pub const fn loader_role(&self) -> Option<SourceLoaderRole> {
-        self.loader_role
-    }
-
-    /// What the program's calls to this function read of its result registers, where r2engine read them.
-    pub const fn result_reads(&self) -> Option<SourceResultReads> {
-        self.result_reads
+    /// What the closed world decides of this function's result, where r2engine decided it.
+    pub const fn closed_result(&self) -> Option<SourceClosedResult> {
+        self.closed_result
     }
 }
 
-/// What the program's own calls to a function read of its result registers as each call leaves
-/// them, read off the callers' code (doc/adr-resolved-bodies.md, "Caller reads").
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct SourceResultReads {
-    /// Calls whose first touch of the integer result register after the call is a read.
-    pub integer: u32,
-    /// Calls whose first touch of the float result register after the call is a read.
-    pub float: u32,
-    /// The width those float reads take.
-    pub float_width: SourceFloatReadWidth,
-    /// Calls that write every byte of the integer result register before reading any, in the call's
-    /// own block.
-    pub integer_overwritten: u32,
-    /// Calls that write every byte of the float result register before reading any, likewise.
-    pub float_overwritten: u32,
-    /// Calls whose first touch of the second integer result register after the call is a read.
-    pub second: u32,
-    /// Calls that write every byte of the second integer result register before reading any.
-    pub second_overwritten: u32,
-    /// Calls read.
-    pub calls: u32,
-    /// Whether these calls are every way the image enters the function: each caller read, and no
-    /// export, entry, jump, computed or stored address reaches it (`Premise::ClosedWorld`).
-    pub exhaustive: bool,
+/// What r2engine's closed-world `CallBoundary` decides of a function's result from every call the
+/// program makes to it (doc/adr-call-boundary.md, "The callee's boundary"); stated into its seal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SourceClosedResult {
+    /// Every call leaves every result lane dead, and the body defines no result byte.
+    Void,
+    /// Every call leaves every result lane dead, but a written lane holds a defined byte (D202).
+    Unread,
+    /// A call returns it on through a cycle of forwarders, which proves no read.
+    ForwardCycle,
+    /// A call reads these lanes as the call leaves them: a value at `Solved` under the closed world.
+    Read(SourceReadLanes),
 }
 
-impl SourceResultReads {
-    /// These calls' reads and `other`'s together.
-    #[must_use]
-    pub fn and(self, other: Self) -> Self {
-        Self {
-            integer: self.integer.saturating_add(other.integer),
-            float: self.float.saturating_add(other.float),
-            float_width: self.float_width.and(other.float_width),
-            integer_overwritten: (self.integer_overwritten)
-                .saturating_add(other.integer_overwritten),
-            float_overwritten: self
-                .float_overwritten
-                .saturating_add(other.float_overwritten),
-            second: self.second.saturating_add(other.second),
-            second_overwritten: (self.second_overwritten).saturating_add(other.second_overwritten),
-            calls: self.calls.saturating_add(other.calls),
-            exhaustive: self.exhaustive && other.exhaustive,
-        }
-    }
-
-    /// Whether no call reads a result register and every call writes the integer one before reading
-    /// it, the float one too where `float`, and the second integer one where `second`.
-    pub const fn all_overwrite(&self, float: bool, second: bool) -> bool {
-        self.calls > 0
-            && self.integer == 0
-            && self.float == 0
-            && self.second == 0
-            && self.integer_overwritten == self.calls
-            && (!float || self.float_overwritten == self.calls)
-            && (!second || self.second_overwritten == self.calls)
-    }
-
-    /// Whether, besides, these calls are every way in: under a closed world, the program reads no
-    /// result of the function.
-    pub const fn none_read(&self, float: bool, second: bool) -> bool {
-        self.exhaustive && self.all_overwrite(float, second)
-    }
-}
-
-/// The width a set of float result reads takes: two reads at different widths state none.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum SourceFloatReadWidth {
-    /// No read states a width: there is none, or each reads the whole register.
-    #[default]
-    Unstated,
-    /// Every read that states a width states this one, in bytes.
-    Bytes(u32),
-    /// Two reads state different widths.
-    Disagree,
-}
-
-impl SourceFloatReadWidth {
-    /// The width these reads and `other`'s take together.
-    #[must_use]
-    pub const fn and(self, other: Self) -> Self {
-        match (self, other) {
-            (Self::Unstated, width) | (width, Self::Unstated) => width,
-            (Self::Bytes(a), Self::Bytes(b)) if a == b => Self::Bytes(a),
-            _ => Self::Disagree,
-        }
-    }
-}
-
-/// A function the loader itself calls, recorded from the binary's dynamic
-/// entries (`DT_INIT`, `DT_FINI`) rather than from any prototype.
-///
-/// The loader invokes these hooks for their effects and discards whatever the
-/// machine result carrier holds afterwards, so their result is void by the
-/// caller's contract even though the instructions leave a value in the
-/// register. Their parameters are not asserted here: they stay whatever the
-/// body proves it reads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SourceLoaderRole {
-    Init,
-    Fini,
+/// The result lanes a reading call takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SourceReadLanes {
+    Integer,
+    /// The float register's low bytes, as wide as every read that states a width.
+    Float {
+        bytes: u8,
+    },
+    /// The integer and second integer registers, one value.
+    Pair,
 }
 
 /// Non-semantic presentation copied from the source owner.  It is deliberately
@@ -199,7 +120,6 @@ pub struct FunctionPresentation {
     parameter_names: Box<[Box<str>]>,
     stack_slot_names: Box<[SourceStackSlotName]>,
     signature: Option<SourceSignaturePresentation>,
-    callee_signatures: Box<[(Box<str>, SourceSignaturePresentation)]>,
 }
 
 impl FunctionPresentation {
@@ -218,25 +138,13 @@ impl FunctionPresentation {
     pub const fn signature(&self) -> Option<&SourceSignaturePresentation> {
         self.signature.as_ref()
     }
-
-    /// The prototype of each function this one calls, keyed by the name the
-    /// call renders with.
-    pub fn callee_signatures(&self) -> &[(Box<str>, SourceSignaturePresentation)] {
-        &self.callee_signatures
-    }
 }
 
-/// The prototype the source recovered, spelled the way the source spells it.
+/// What a declaration calls a function's parameters, and its ellipsis.
 ///
-/// The interface says where each value lives; this says what it is called and
-/// what it is called *as*, which is the only place a spelling like `size_t`
-/// survives. It remains presentation unless trusted snapshot preparation
-/// promotes one uniquely named `format` parameter into the exact callsite
-/// interface. That narrow promotion is recorded as radare2 provenance; the
-/// presentation's arity remains independent of the ABI interface.
+/// Types travel on the interface's `SourceTypeGraph` (ADR call-boundary, Types on the wire).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSignaturePresentation {
-    return_type: Option<Box<str>>,
     calling_convention: Option<Box<str>>,
     noreturn: bool,
     parameters: Box<[SourceSignatureParameter]>,
@@ -244,21 +152,15 @@ pub struct SourceSignaturePresentation {
 
 impl SourceSignaturePresentation {
     pub fn new(
-        return_type: Option<impl Into<Box<str>>>,
         calling_convention: Option<impl Into<Box<str>>>,
         noreturn: bool,
         parameters: impl IntoIterator<Item = SourceSignatureParameter>,
     ) -> Self {
         Self {
-            return_type: return_type.map(Into::into),
             calling_convention: calling_convention.map(Into::into),
             noreturn,
             parameters: parameters.into_iter().collect(),
         }
-    }
-
-    pub fn return_type(&self) -> Option<&str> {
-        self.return_type.as_deref()
     }
 
     pub fn calling_convention(&self) -> Option<&str> {
@@ -273,12 +175,7 @@ impl SourceSignaturePresentation {
         &self.parameters
     }
 
-    /// The parameters the prototype names, without the variadic tail.
-    ///
-    /// A prototype that ends in an ellipsis carries it as a trailing
-    /// parameter, so the parameter list on its own over-counts what the callee
-    /// is declared to take by one, and every caller that treated its length as
-    /// the arity said so for every call site of a variadic callee alike.
+    /// The parameters the prototype names, without the trailing ellipsis.
     pub fn named_parameters(&self) -> &[SourceSignatureParameter] {
         match self.parameters.split_last() {
             Some((last, rest)) if last.is_variadic_tail() => rest,
@@ -294,21 +191,16 @@ impl SourceSignaturePresentation {
     }
 }
 
-/// One parameter of a recovered prototype: what it is called and its spelling.
+/// One parameter of a declaration: what it is called.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSignatureParameter {
     name: Option<Box<str>>,
-    type_spelling: Option<Box<str>>,
 }
 
 impl SourceSignatureParameter {
-    pub fn new(
-        name: Option<impl Into<Box<str>>>,
-        type_spelling: Option<impl Into<Box<str>>>,
-    ) -> Self {
+    pub fn new(name: Option<impl Into<Box<str>>>) -> Self {
         Self {
             name: name.map(Into::into),
-            type_spelling: type_spelling.map(Into::into),
         }
     }
 
@@ -316,22 +208,9 @@ impl SourceSignatureParameter {
         self.name.as_deref()
     }
 
-    pub fn type_spelling(&self) -> Option<&str> {
-        self.type_spelling.as_deref()
-    }
-
-    /// Whether this entry is the ellipsis rather than a parameter.
-    ///
-    /// This is how the source spells a variadic tail: a trailing entry called
-    /// `...`, which names no storage and stands for however many arguments a
-    /// call chooses to pass. Older captures put the ellipsis in the type half
-    /// instead, so both spellings are recognised -- the same two the source's
-    /// own `r_type_arg_is_vararg` accepts.
+    /// Whether this entry is the ellipsis, a trailing entry named `...`.
     pub fn is_variadic_tail(&self) -> bool {
-        [self.name(), self.type_spelling()]
-            .into_iter()
-            .flatten()
-            .any(|spelling| spelling.trim() == "...")
+        self.name().is_some_and(|name| name.trim() == "...")
     }
 }
 
@@ -344,7 +223,6 @@ pub struct SourceStackSlotName {
     base: StackAddressBase,
     offset: i64,
     name: Box<str>,
-    type_spelling: Option<Box<str>>,
 }
 
 impl SourceStackSlotName {
@@ -353,17 +231,7 @@ impl SourceStackSlotName {
             base,
             offset,
             name: name.into(),
-            type_spelling: None,
         }
-    }
-
-    pub fn with_type_spelling(mut self, type_spelling: Option<impl Into<Box<str>>>) -> Self {
-        self.type_spelling = type_spelling.map(Into::into);
-        self
-    }
-
-    pub fn type_spelling(&self) -> Option<&str> {
-        self.type_spelling.as_deref()
     }
 
     pub const fn base(&self) -> StackAddressBase {
@@ -468,12 +336,10 @@ pub struct OwnedFunctionImage {
     /// Bytes the container states read-only and the loader leaves alone, at each address the
     /// function loads from: semantic evidence, since a load there reads them (ROADMAP P5).
     read_only: Box<[(u64, Vec<u8>)]>,
-    /// Data objects radare2 already knows this function points at.
-    ///
-    /// The name is display data. An optional type spelling is a source-owned
-    /// analysis fact linked to the object's structural address; consumers must
-    /// still refuse a spelling their canonical type context cannot place.
+    /// Named data objects this function points at. The name is display data.
     data_symbols: Box<[SourceDataObject]>,
+    /// The graph each data object's `type_id` is a node of.
+    data_types: Option<SourceTypeGraph>,
     /// Tables of function pointers the function indexes, with the addresses
     /// each table holds.
     ///
@@ -502,25 +368,21 @@ pub struct SourceFrameSave {
 
 /// One program data object referenced by a captured function.
 ///
-/// Address is identity. Name is presentation. The optional spelling is the
-/// exact address-linked type radare2 supplied and is not machine-derived.
+/// Address is identity and name is presentation. `type_id` is a node of the
+/// image's `data_types`, the type the binary's debug information declares there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceDataObject {
     address: u64,
     name: Box<str>,
-    type_spelling: Option<Box<str>>,
+    type_id: Option<u32>,
 }
 
 impl SourceDataObject {
-    pub fn new(
-        address: u64,
-        name: impl Into<Box<str>>,
-        type_spelling: Option<impl Into<Box<str>>>,
-    ) -> Self {
+    pub fn new(address: u64, name: impl Into<Box<str>>, type_id: Option<u32>) -> Self {
         Self {
             address,
             name: name.into(),
-            type_spelling: type_spelling.map(Into::into),
+            type_id,
         }
     }
 
@@ -532,8 +394,8 @@ impl SourceDataObject {
         &self.name
     }
 
-    pub fn type_spelling(&self) -> Option<&str> {
-        self.type_spelling.as_deref()
+    pub const fn type_id(&self) -> Option<u32> {
+        self.type_id
     }
 }
 
@@ -596,6 +458,11 @@ impl OwnedFunctionImage {
 
     pub fn data_symbols(&self) -> &[SourceDataObject] {
         &self.data_symbols
+    }
+
+    /// The graph the data objects' types are nodes of.
+    pub const fn data_types(&self) -> Option<&SourceTypeGraph> {
+        self.data_types.as_ref()
     }
 
     pub fn string_literals(&self) -> &[(u64, String)] {
@@ -857,7 +724,7 @@ pub struct AdvisoryCallSite {
 /// function has been lifted, so the correlation happens there rather than here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AdvisoryCallPrototype {
-    pub calling_convention: String,
+    pub convention: ConventionId,
     pub arguments: Box<[SourceCallArgumentSpec]>,
     pub variadic: bool,
     pub noreturn: bool,
@@ -998,6 +865,8 @@ struct SnapshotState {
     convention_slots: SourceConventionSlots,
     /// What the convention says a call does to the registers, where it says.
     call_effect: Option<SourceCallEffect>,
+    /// The model `convention_slots` is a view of, where the capture holds one.
+    convention: Option<Arc<ConventionModel>>,
     captured_fields: CapturedSourceFields,
     diagnostics: DiagnosticIdentity,
 }
@@ -1148,6 +1017,7 @@ impl OwnedFunctionSnapshot {
             machine_roles,
             convention_slots,
             call_effect,
+            convention: None,
             captured_fields,
             diagnostics,
         })))
@@ -1226,6 +1096,24 @@ impl OwnedFunctionSnapshot {
         self.0.call_effect.as_ref()
     }
 
+    /// The convention model the slots are a view of, where the capture holds one.
+    pub fn convention(&self) -> Option<&ConventionModel> {
+        self.0.convention.as_deref()
+    }
+
+    /// The model, shared with whatever keeps it beside the capture.
+    pub fn shared_convention(&self) -> Option<Arc<ConventionModel>> {
+        self.0.convention.clone()
+    }
+
+    /// The same capture with the model its slots view; a model of another convention is ignored.
+    pub(crate) fn with_convention(mut self, model: Arc<ConventionModel>) -> Self {
+        if model.id == self.0.convention_slots.convention() {
+            Arc::make_mut(&mut self.0).convention = Some(model);
+        }
+        self
+    }
+
     pub fn captured_fields(&self) -> CapturedSourceFields {
         self.0.captured_fields
     }
@@ -1263,16 +1151,6 @@ impl Eq for OwnedFunctionSnapshot {}
 mod tests {
     use super::*;
 
-    /// Float reads at 4 and 8 bytes state no width, whatever else joins them.
-    #[test]
-    fn float_reads_at_two_widths_state_none() {
-        use SourceFloatReadWidth::{Bytes, Disagree, Unstated};
-        assert_eq!(Bytes(4).and(Unstated), Bytes(4));
-        assert_eq!(Bytes(8).and(Bytes(8)), Bytes(8));
-        assert_eq!(Bytes(4).and(Bytes(8)), Disagree);
-        assert_eq!(Disagree.and(Bytes(4)).and(Unstated), Disagree);
-    }
-
     fn snapshot() -> OwnedFunctionSnapshot {
         OwnedFunctionSnapshot::from_captured_parts(
             MachineProfile {
@@ -1283,20 +1161,19 @@ mod tests {
             },
             FunctionIdentity {
                 address: 0x1000,
-                loader_role: None,
-                result_reads: None,
+                closed_result: None,
             },
             FunctionPresentation {
                 display_name: "fixture".into(),
                 parameter_names: Box::new([]),
                 stack_slot_names: Box::new([]),
                 signature: None,
-                callee_signatures: Box::new([]),
             },
             OwnedFunctionImage {
                 string_literals: Box::new([]),
                 read_only: Box::new([]),
                 data_symbols: Box::new([]),
+                data_types: None,
                 code_pointer_tables: Box::new([]),
                 frame_saves: Box::new([]),
                 entry_address: 0x1000,
@@ -1315,7 +1192,8 @@ mod tests {
             Box::from([7]),
             None,
             SourceMachineRoles::default(),
-            SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+            SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                .expect("empty convention slots"),
             None,
             CapturedSourceFields {
                 bounded_function_image: true,
@@ -1344,7 +1222,7 @@ mod tests {
     fn exact_interface() -> SourceFunctionInterface {
         SourceFunctionInterface::new_exact(
             [7],
-            "sysv",
+            crate::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, register(0))],
             SourceFunctionReturn::Register {
                 storage: register(8),
@@ -1407,8 +1285,7 @@ mod tests {
                 valid.machine().clone(),
                 FunctionIdentity {
                     address: 0x2000,
-                    loader_role: None,
-                    result_reads: None,
+                    closed_result: None,
                 },
                 valid.presentation().clone(),
                 valid.image().clone(),
@@ -1451,7 +1328,8 @@ mod tests {
             Box::from([7]),
             Some(interface.clone()),
             exact_machine_roles(),
-            SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+            SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                .expect("empty convention slots"),
             None,
             captured_fields,
             valid.diagnostic_identity(),
@@ -1472,11 +1350,16 @@ mod tests {
             offset,
             size: 4,
         };
-        let wrong_machine_width =
-            SourceFunctionInterface::new_exact([7], "sysv", [], SourceFunctionReturn::Void, [])
-                .and_then(|interface| interface.with_stack_pointer_storage(narrow(24)))
-                .and_then(|interface| interface.with_frame_pointer_storage(narrow(32)))
-                .expect("internally width-coherent narrow interface");
+        let wrong_machine_width = SourceFunctionInterface::new_exact(
+            [7],
+            crate::ConventionId::SysVAmd64,
+            [],
+            SourceFunctionReturn::Void,
+            [],
+        )
+        .and_then(|interface| interface.with_stack_pointer_storage(narrow(24)))
+        .and_then(|interface| interface.with_frame_pointer_storage(narrow(32)))
+        .expect("internally width-coherent narrow interface");
         let narrow_fields = CapturedSourceFields {
             bounded_function_image: true,
             function_interface: true,
@@ -1498,7 +1381,8 @@ mod tests {
                 Box::from([7]),
                 Some(wrong_machine_width),
                 exact_machine_roles(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 narrow_fields,
                 valid.diagnostic_identity()
@@ -1518,7 +1402,8 @@ mod tests {
                 Box::from([7]),
                 Some(interface.clone()),
                 exact_machine_roles(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 missing_frame_pointer,
                 valid.diagnostic_identity()
@@ -1538,7 +1423,8 @@ mod tests {
                 Box::from([7]),
                 Some(interface.clone()),
                 exact_machine_roles(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 missing_stack_allocation_contract,
                 valid.diagnostic_identity()
@@ -1548,7 +1434,7 @@ mod tests {
 
         let interface_without_frame_pointer = SourceFunctionInterface::new_exact(
             [7],
-            "sysv",
+            crate::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, register(0))],
             SourceFunctionReturn::Register {
                 storage: register(8),
@@ -1578,7 +1464,8 @@ mod tests {
                 Box::from([7]),
                 Some(interface_without_frame_pointer.clone()),
                 exact_machine_roles(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 captured_fields,
                 valid.diagnostic_identity()
@@ -1596,7 +1483,8 @@ mod tests {
             Box::from([7]),
             Some(interface_without_frame_pointer),
             exact_machine_roles(),
-            SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+            SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                .expect("empty convention slots"),
             None,
             fields_without_frame_pointer,
             valid.diagnostic_identity(),
@@ -1621,7 +1509,8 @@ mod tests {
                 Box::from([7]),
                 Some(interface),
                 exact_machine_roles(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 missing_return_mechanism,
                 valid.diagnostic_identity()
@@ -1641,7 +1530,8 @@ mod tests {
                 Box::from([7]),
                 None,
                 SourceMachineRoles::default(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 mechanism_without_interface,
                 valid.diagnostic_identity()
@@ -1661,7 +1551,8 @@ mod tests {
                 Box::from([7]),
                 None,
                 SourceMachineRoles::default(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 frame_pointer_without_interface,
                 valid.diagnostic_identity()
@@ -1671,7 +1562,7 @@ mod tests {
 
         let wrong_revision = SourceFunctionInterface::new_exact(
             [8],
-            "sysv",
+            crate::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, register(0))],
             SourceFunctionReturn::Register {
                 storage: register(8),
@@ -1692,7 +1583,8 @@ mod tests {
                 Box::from([7]),
                 Some(wrong_revision),
                 exact_machine_roles(),
-                SourceConventionSlots::new("", [], None).expect("empty convention slots"),
+                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
+                    .expect("empty convention slots"),
                 None,
                 captured_fields,
                 valid.diagnostic_identity()

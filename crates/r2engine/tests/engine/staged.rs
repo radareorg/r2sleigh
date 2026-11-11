@@ -19,7 +19,7 @@ fn the_staged_pipeline_renders_a_leaf_function_s_values() {
         "{text}"
     );
     assert!(
-        text.contains("return (uint64_t)((uint64_t)rax_3 + (uint64_t)8U);"),
+        text.contains("return r2sleigh_carrier_u64((uint64_t)((uint64_t)rax_3 + (uint64_t)8U));"),
         "{text}"
     );
     assert!(!text.contains("r2sleigh_residual"), "{text}");
@@ -60,9 +60,12 @@ fn a_described_call_is_written_from_the_callsite_facts() {
         .expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
     // `call one; ret`: the result register the call leaves is what `caller` returns.
-    assert!(text.contains("uint64_t one(void);"), "{text}");
+    assert!(text.contains("r2sleigh_result_u64 one(void);"), "{text}");
     assert!(text.contains("rax_1 = one();"), "{text}");
-    assert!(text.contains("return (uint64_t)rax_1;"), "{text}");
+    assert!(
+        text.contains("return r2sleigh_carrier_u64((uint64_t)rax_1);"),
+        "{text}"
+    );
     // `one` returns, so nothing may tell C otherwise; its return push writes nothing.
     assert!(!text.contains("noreturn"), "{text}");
     assert!(!text.contains("r2sleigh_store"), "{text}");
@@ -185,14 +188,22 @@ fn a_wrapper_that_computes_the_stub_s_argument_is_a_body_not_the_stub() {
         .output
         .into_text();
     assert!(!text.contains("import stub at"), "{text}");
-    assert!(text.contains("malloc(") && text.contains(") * ("), "{text}");
+    // zlib's `zcalloc(opaque, items, size)`: `opaque` is a hole, the product its two read slots.
+    assert!(
+        text.contains("(r2sleigh_unread_u64 arg0, uint32_t arg1, uint32_t arg2)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("malloc(") && text.contains("arg1 * "),
+        "{text}"
+    );
 }
 
 /// One jump to the stub, with nothing else, is still a jump to another function: only the stub
 /// itself jumps through the loader's slot, so this one is a body that calls the import.
 #[test]
 fn a_function_that_only_jumps_to_a_stub_is_a_body_not_the_stub() {
-    let mut program = OpenProgram::of(Literal::plt_forwarding_wrapper());
+    let mut program = OpenProgram::of(Literal::plt_forwarding_to("free"));
     let text = program
         .rendered(PLT_CALLER)
         .expect("it renders")

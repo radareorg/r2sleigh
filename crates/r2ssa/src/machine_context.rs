@@ -16,7 +16,7 @@ use crate::arch::Arch;
 use crate::origin::BlockOrigins;
 pub use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
-    SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass,
+    SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION,
     SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceArity,
     SourceArityFloor, SourceBoundaryReads, SourceCallArgumentSpec, SourceCallEffect,
     SourceCallPreservedCarriers, SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
@@ -24,30 +24,13 @@ pub use r2source::{
     SourceConventionSlots, SourceFloorCause, SourceFormatParameterRule, SourceFunctionInterface,
     SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
     SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation, SourceResultCause,
-    SourceResultSeed, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
-    SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure,
-    SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
+    SourceResultSeed, SourceResultWidth, SourceStackAllocationContract, SourceStackGrowth,
+    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
+    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
     SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, StackAddressBase,
 };
 
-pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 27;
-
-/// One canonical register carrier in the immutable ABI snapshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-pub struct MachineAbiRegisterSlot {
-    index: u32,
-    storage: CanonicalStorageId,
-}
-
-impl MachineAbiRegisterSlot {
-    pub const fn index(&self) -> u32 {
-        self.index
-    }
-
-    pub const fn storage(&self) -> CanonicalStorageId {
-        self.storage
-    }
-}
+pub const MACHINE_CONTEXT_SCHEMA_VERSION: u32 = 28;
 
 /// Typed calling-convention carrier snapshot injected with the function.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -62,8 +45,6 @@ pub struct MachineAbiModel {
     frame_geometry_coherent: bool,
     /// Whether the return-address, stack- and frame-pointer carriers hold.
     machine_carriers_coherent: bool,
-    argument_registers: Box<[MachineAbiRegisterSlot]>,
-    return_registers: Box<[MachineAbiRegisterSlot]>,
     frame_pointer_storage: Option<CanonicalStorageId>,
 }
 
@@ -76,8 +57,6 @@ impl MachineAbiModel {
             argument_placement_coherent: false,
             frame_geometry_coherent: false,
             machine_carriers_coherent: false,
-            argument_registers: Box::new([]),
-            return_registers: Box::new([]),
             frame_pointer_storage: None,
         }
     }
@@ -86,27 +65,9 @@ impl MachineAbiModel {
         interface: Option<&SourceFunctionInterface>,
         frame_pointer_storage: Option<CanonicalStorageId>,
     ) -> Self {
-        let Some(interface) = interface else {
+        if interface.is_none() {
             return Self::unavailable();
-        };
-        // The register slots only: a parameter the convention passes on the
-        // stack is a frame object, and the object model answers for it.
-        let argument_registers = interface
-            .parameters()
-            .iter()
-            .filter_map(|parameter| {
-                parameter
-                    .register_storage()
-                    .map(|storage| MachineAbiRegisterSlot {
-                        index: parameter.index(),
-                        storage,
-                    })
-            })
-            .collect::<Vec<_>>();
-        let return_registers = (interface.return_kind().storages())
-            .zip(0..)
-            .map(|(storage, index)| MachineAbiRegisterSlot { index, storage })
-            .collect::<Vec<_>>();
+        }
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
             available: true,
@@ -114,8 +75,6 @@ impl MachineAbiModel {
             argument_placement_coherent: true,
             frame_geometry_coherent: true,
             machine_carriers_coherent: true,
-            argument_registers: argument_registers.into_boxed_slice(),
-            return_registers: return_registers.into_boxed_slice(),
             frame_pointer_storage,
         }
     }
@@ -150,14 +109,6 @@ impl MachineAbiModel {
     /// Whether the return-address, stack- and frame-pointer carriers hold.
     pub const fn machine_carriers_are_coherent(&self) -> bool {
         self.machine_carriers_coherent
-    }
-
-    pub const fn argument_registers(&self) -> &[MachineAbiRegisterSlot] {
-        &self.argument_registers
-    }
-
-    pub const fn return_registers(&self) -> &[MachineAbiRegisterSlot] {
-        &self.return_registers
     }
 
     pub const fn frame_pointer_storage(&self) -> Option<CanonicalStorageId> {
@@ -470,8 +421,6 @@ pub struct SourceMachineContext {
     call_universe: Box<[CanonicalStorageId]>,
     /// What each direct callee's own body proves it leaves alone, by entry.
     callee_preserved: crate::function::CalleePreservedCarriers,
-    /// Whether the result is unproven because the body writes both result registers.
-    result_ambiguous: bool,
     /// How many arguments each callee whose result is unproven reads at least.
     callee_statements: BTreeMap<u64, CalleeStatement>,
     /// The projections of what this body writes that the register file does not declare, sorted.
@@ -502,6 +451,8 @@ pub struct SourceMachineContext {
     frame_saves: Vec<r2source::SourceFrameSave>,
     /// The premises the engine grants its derivations (`r2engine::premises`).
     accepted_premises: BTreeSet<r2source::Premise>,
+    /// The convention model the slots and the call effect view, where the capture holds one.
+    convention: Option<std::sync::Arc<r2source::ConventionModel>>,
     /// The function each captured code pointer table entry names, by the
     /// address of the entry. A slot a relocation fills holds no address the
     /// file states, so what it becomes is a fact about the program rather
@@ -874,7 +825,6 @@ impl SourceMachineContext {
                 .map(|(effect, arch)| call_universe(effect, arch))
                 .unwrap_or_default(),
             callee_preserved: BTreeMap::new(),
-            result_ambiguous: false,
             callee_statements: BTreeMap::new(),
             call_effect,
             observed_projections,
@@ -889,6 +839,7 @@ impl SourceMachineContext {
             unstated_imports: BTreeMap::new(),
             frame_saves: Vec::new(),
             accepted_premises: BTreeSet::new(),
+            convention: None,
             code_pointer_entries: BTreeMap::new(),
             code_pointer_tables: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
@@ -1068,16 +1019,6 @@ impl SourceMachineContext {
         self.callee_preserved = preserved;
     }
 
-    /// Whether recovery left the result unproven because the body writes both result registers,
-    /// which what the program's calls read can decide (doc/adr-resolved-bodies.md, "Caller reads").
-    pub const fn result_ambiguous(&self) -> bool {
-        self.result_ambiguous
-    }
-
-    pub(crate) const fn set_result_ambiguous(&mut self, ambiguous: bool) {
-        self.result_ambiguous = ambiguous;
-    }
-
     /// What the callee at `target` states, where its unproven result mints no call contract.
     pub(crate) fn callee_statement(&self, target: u64) -> Option<&CalleeStatement> {
         self.callee_statements.get(&target)
@@ -1248,6 +1189,25 @@ impl SourceMachineContext {
         self.accepted_premises = premises;
     }
 
+    pub(crate) fn set_convention(
+        &mut self,
+        convention: Option<std::sync::Arc<r2source::ConventionModel>>,
+    ) {
+        self.convention = convention;
+    }
+
+    pub fn convention(&self) -> Option<&r2source::ConventionModel> {
+        self.convention.as_deref()
+    }
+
+    /// Who owns the stack byte at an entry-relative offset: the model's rule, else growing down.
+    pub fn stack_owner(&self, offset: i64) -> r2source::convention::StackOwner {
+        self.convention().map_or(
+            r2source::convention::StackOwner::growing_down(offset),
+            |model| model.owner(offset),
+        )
+    }
+
     /// Whether the engine grants this premise to what it derives here.
     pub fn accepts(&self, premise: r2source::Premise) -> bool {
         self.accepted_premises.contains(&premise)
@@ -1328,6 +1288,26 @@ impl SourceMachineContext {
         &self,
     ) -> &BTreeMap<SourceCallSiteIdentity, SourceCallSiteInterface> {
         &self.call_site_interfaces
+    }
+
+    /// The stack a call may read, as ranges from its stack pointer before the transfer; none where
+    /// nothing bounds it (doc/adr-call-boundary.md, "D217 as built").
+    pub fn call_argument_area(&self, instruction: Option<u64>) -> Option<Vec<(i64, i64)>> {
+        let interface = instruction
+            .and_then(|instruction| self.raw_call_site_at(instruction))
+            .and_then(|identity| self.call_site_interface(identity))
+            .filter(|interface| interface.is_complete() && !interface.is_variadic())?;
+        let reserved = (self.convention())
+            .and_then(r2source::ConventionModel::stack_arguments)
+            .map_or(0, |placement| placement.first_offset().max(0));
+        let slots =
+            (interface.arguments().iter()).filter_map(|argument| match argument.location() {
+                r2source::SourceParameterLocation::Stack {
+                    offset, size_bytes, ..
+                } => Some((offset, offset.saturating_add(i64::from(size_bytes)))),
+                r2source::SourceParameterLocation::Register(_) => None,
+            });
+        Some(std::iter::once((0, reserved)).chain(slots).collect())
     }
 
     pub fn call_site_interface(
@@ -1779,7 +1759,7 @@ mod tests {
             arch.add_register(RegisterDef::new(name, index as u64 * 8, 8));
         }
         let slots = SourceConventionSlots::new(
-            "aapcs64",
+            r2source::ConventionId::Aapcs64,
             [
                 register_storage(0, 8),
                 register_storage(8, 8),
@@ -1818,7 +1798,7 @@ mod tests {
         assert_eq!(
             SourceFunctionInterface::new(
                 b"overlapping-register-interface".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [
                     SourceAbiParameterSpec::new(0, register_storage(0, 8)),
                     SourceAbiParameterSpec::new(1, register_storage(4, 4)),
@@ -1836,7 +1816,7 @@ mod tests {
         let base_storage = register_storage(64, 8);
         let interface = SourceFunctionInterface::new_exact(
             b"exact-stack-slot-roles".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, parameter_storage)],
             SourceFunctionReturn::Void,
             [
@@ -1884,7 +1864,7 @@ mod tests {
 
         let compatibility = SourceFunctionInterface::new(
             b"compatibility-stack-slot".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, parameter_storage)],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new(
@@ -1912,7 +1892,7 @@ mod tests {
         let unbound = |slots| {
             SourceFunctionInterface::new_exact(
                 b"typed-stack-pointer".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [SourceAbiParameterSpec::new(0, parameter)],
                 SourceFunctionReturn::Register { storage: result },
                 slots,
@@ -2011,7 +1991,7 @@ mod tests {
         let make = || {
             SourceFunctionInterface::new_exact(
                 b"exact-machine-roles".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [],
                 SourceFunctionReturn::Void,
                 [],
@@ -2071,7 +2051,7 @@ mod tests {
             Some(
                 SourceFunctionInterface::new(
                     b"compatibility-machine-roles".to_vec(),
-                    "test-abi",
+                    r2source::ConventionId::SysVAmd64,
                     [],
                     SourceFunctionReturn::Void,
                     [],
@@ -2156,7 +2136,7 @@ mod tests {
         let make = || {
             SourceFunctionInterface::new_exact(
                 b"exact-stacked-return".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [],
                 SourceFunctionReturn::Void,
                 [],
@@ -2268,7 +2248,7 @@ mod tests {
         let make_explicit = |frame_pointer| {
             SourceFunctionInterface::new_exact(
                 b"exact-machine-frame-pointer".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [],
                 SourceFunctionReturn::Void,
                 [],
@@ -2281,7 +2261,7 @@ mod tests {
         let make_slot_derived = |frame_pointer, stack_pointer, return_address| {
             SourceFunctionInterface::new_exact(
                 b"slot-derived-machine-frame-pointer".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [],
                 SourceFunctionReturn::Void,
                 [SourceStackSlotSpec::new_local(
@@ -2337,7 +2317,7 @@ mod tests {
 
         let absent = SourceFunctionInterface::new_exact(
             b"absent-machine-frame-pointer".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [],
@@ -2377,7 +2357,7 @@ mod tests {
         ));
         let narrow_interface = SourceFunctionInterface::new_exact(
             b"narrow-machine-frame-pointer".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
@@ -2437,7 +2417,7 @@ mod tests {
 
         let overlapping = SourceFunctionInterface::new_exact(
             b"overlapping-machine-frame-pointer".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, frame_pointer)],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
@@ -2472,7 +2452,7 @@ mod tests {
         let build = |slots| {
             SourceFunctionInterface::new_exact(
                 b"malformed-stack-slot-role".to_vec(),
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [SourceAbiParameterSpec::new(0, parameter_storage)],
                 SourceFunctionReturn::Void,
                 slots,
@@ -2547,7 +2527,15 @@ mod tests {
             [
                 SourceType::new(0, SourceTypeKind::Struct { aggregate_id: 0 }, 56 * 8, 32),
                 SourceType::new(1, SourceTypeKind::SignedInteger, 32, 32),
-                SourceType::new(2, SourceTypeKind::Pointer { target_type_id: 0 }, 64, 64),
+                SourceType::new(
+                    2,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 0,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
             ],
             [SourceAggregateLayout::new(
                 0,
@@ -2583,7 +2571,15 @@ mod tests {
             [
                 SourceType::new(0, SourceTypeKind::Struct { aggregate_id: 0 }, 32, 32),
                 SourceType::new(1, SourceTypeKind::SignedInteger, 32, 32),
-                SourceType::new(2, SourceTypeKind::Pointer { target_type_id: 0 }, 32, 32),
+                SourceType::new(
+                    2,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 0,
+                        const_target: false,
+                    },
+                    32,
+                    32,
+                ),
             ],
             [SourceAggregateLayout::new(
                 0,
@@ -2605,7 +2601,7 @@ mod tests {
         let low_i32 = SourceCarrierProjection::new(SourceCarrierKind::LowBits, 0, 32);
         let interface = SourceFunctionInterface::new_with_logical_types(
             b"exact-type-layout".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             parameters,
             SourceFunctionReturn::Register {
                 storage: register_storage(24, 8),
@@ -2652,7 +2648,7 @@ mod tests {
 
         let invalid = SourceFunctionInterface::new_with_logical_types(
             b"exact-type-layout".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             parameters,
             SourceFunctionReturn::Register {
                 storage: register_storage(24, 8),
@@ -2683,7 +2679,15 @@ mod tests {
         let graph = SourceTypeGraph::new(
             [
                 SourceType::new(0, SourceTypeKind::UnsignedInteger, 8, 8),
-                SourceType::new(1, SourceTypeKind::Pointer { target_type_id: 0 }, 64, 64),
+                SourceType::new(
+                    1,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 0,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
                 SourceType::new(2, SourceTypeKind::UnsignedInteger, 64, 64),
             ],
             [],
@@ -2692,7 +2696,7 @@ mod tests {
         let full64 = SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64);
         let interface = SourceFunctionInterface::new_exact_with_logical_types(
             b"fnv-u8-pointer-revision".to_vec(),
-            "aapcs64",
+            r2source::ConventionId::Aapcs64,
             [
                 SourceAbiParameterSpec::new(0, register_storage(0, 8)),
                 SourceAbiParameterSpec::new(1, register_storage(8, 8)),
@@ -2713,7 +2717,10 @@ mod tests {
         let graph = interface.type_graph().expect("logical graph");
         assert_eq!(
             graph.types()[1].kind(),
-            SourceTypeKind::Pointer { target_type_id: 0 }
+            SourceTypeKind::Pointer {
+                target_type_id: 0,
+                const_target: false
+            }
         );
         assert_eq!(graph.types()[0].kind(), SourceTypeKind::UnsignedInteger);
     }
@@ -2723,15 +2730,34 @@ mod tests {
         let graph = SourceTypeGraph::new(
             [
                 SourceType::new(0, SourceTypeKind::SignedInteger, 8, 8),
-                SourceType::new(1, SourceTypeKind::Pointer { target_type_id: 0 }, 64, 64),
-                SourceType::new(2, SourceTypeKind::Pointer { target_type_id: 1 }, 64, 64),
+                SourceType::new(
+                    1,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 0,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
+                SourceType::new(
+                    2,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 1,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
             ],
             [],
         )
         .expect("char ** is a well formed source type");
         assert_eq!(
             graph.types()[2].kind(),
-            SourceTypeKind::Pointer { target_type_id: 1 }
+            SourceTypeKind::Pointer {
+                target_type_id: 1,
+                const_target: false
+            }
         );
         assert!(graph.validates_pointer_width(64));
     }
@@ -2742,7 +2768,10 @@ mod tests {
             SourceTypeGraph::new(
                 [SourceType::new(
                     0,
-                    SourceTypeKind::Pointer { target_type_id: 1 },
+                    SourceTypeKind::Pointer {
+                        target_type_id: 1,
+                        const_target: false
+                    },
                     64,
                     64,
                 )],
@@ -2767,7 +2796,7 @@ mod tests {
                 b"call-revision".to_vec(),
                 identity,
                 true,
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [SourceCallArgumentSpec::new(1, register_storage(0, 8))],
                 false,
                 false,
@@ -2780,7 +2809,7 @@ mod tests {
                 b"call-revision".to_vec(),
                 identity,
                 true,
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [
                     SourceCallArgumentSpec::new(0, register_storage(0, 8)),
                     SourceCallArgumentSpec::new(1, register_storage(4, 8)),
@@ -2796,13 +2825,11 @@ mod tests {
                 b"call-revision".to_vec(),
                 identity,
                 true,
-                "test-abi",
+                r2source::ConventionId::SysVAmd64,
                 [],
                 false,
                 true,
-                SourceCallResult::Register {
-                    storage: register_storage(0, 8),
-                },
+                SourceCallResult::register(register_storage(0, 8)),
             ),
             Err(SourceCallSiteInterfaceError::NoreturnWithResult)
         );
@@ -2919,7 +2946,7 @@ mod tests {
     fn interface_registers_missing_from_architecture_are_incoherent() {
         let interface = SourceFunctionInterface::new(
             b"missing-register-interface".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, register_storage(0, 8))],
             SourceFunctionReturn::Void,
             [],
@@ -2942,7 +2969,7 @@ mod tests {
     fn stack_base_storage_missing_from_architecture_is_incoherent() {
         let interface = SourceFunctionInterface::new(
             b"missing-stack-base-interface".to_vec(),
-            "test-abi",
+            r2source::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new(
@@ -3046,6 +3073,10 @@ pub(crate) struct CalleeStatement {
     pub(crate) arity: crate::SourceArity,
     /// Its result, where the body proves it: an unproven result leaves an exact arity exact.
     pub(crate) result: Option<crate::SourceCallResult>,
+    /// The carrier its header spells an unproven result in.
+    pub(crate) seed: Option<r2source::SourceResultSeed>,
+    /// The typed lanes its body writes a result byte in, where its result is unproven.
+    pub(crate) carriers: Option<r2source::SourceResultCarriers>,
 }
 
 impl CalleeStatement {
@@ -3065,18 +3096,33 @@ impl CalleeStatement {
                     // A statement counts no call's variadic tail, so its parameters are only a floor.
                     arity: match interface.is_variadic() {
                         true => crate::SourceArity::AtLeast(interface.parameters().len()),
+                        false
+                            if !interface
+                                .arity_floor()
+                                .is_some_and(|floor| floor.reads_past()) =>
+                        {
+                            crate::SourceArity::Exact(interface.parameters().len())
+                        }
                         false => interface.arity(),
                     },
                     result: match interface.return_kind() {
                         crate::SourceFunctionReturn::Void => Some(crate::SourceCallResult::Void),
                         crate::SourceFunctionReturn::Register { storage } => {
-                            Some(crate::SourceCallResult::Register { storage })
+                            Some(crate::SourceCallResult::Register {
+                                storage,
+                                width: (interface.result_width())
+                                    .unwrap_or(crate::SourceResultWidth::whole(storage)),
+                            })
                         }
                         crate::SourceFunctionReturn::Pair { low, high } => {
                             Some(crate::SourceCallResult::Pair { low, high })
                         }
                         crate::SourceFunctionReturn::Unproven => None,
                     },
+                    seed: interface
+                        .unproven_result()
+                        .and_then(r2source::SourceUnprovenResult::seed),
+                    carriers: interface.result_carriers(),
                 },
             )
         });

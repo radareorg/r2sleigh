@@ -10,7 +10,8 @@ pub(crate) use shared::*;
 pub(crate) use signature::*;
 pub(crate) use structs::*;
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use std::sync::Arc;
 
@@ -23,7 +24,7 @@ use crate::context::{
     ExternalRegisterParamSpec, ParsedExternalContext, apply_main_signature_override,
     is_generic_arg_name,
 };
-use crate::convert::{CTypeLike, parse_c_type_like, render_c_type_like};
+use crate::convert::CTypeLike;
 use crate::external::{
     ExternalField, ExternalStruct, ExternalTypeDb, ExternalUnion, normalize_external_type_name,
 };
@@ -84,6 +85,15 @@ impl TypeAnalysis {
                 params: Vec::new(),
             })
         })
+    }
+
+    /// The header's own unproven carrier, which every caller's extern spells as the header does.
+    fn unproven_carrier_bits(&self) -> Option<u32> {
+        let fact = self.function_facts.report().return_type()?;
+        match fact.declared().filter(|_| fact.is_unproven())? {
+            CTypeLike::Int { bits, .. } => Some(*bits),
+            _ => None,
+        }
     }
 
     /// Export the signature this exact retained body proves for its callers.
@@ -159,13 +169,19 @@ impl TypeAnalysis {
                     }
                 };
                 let width_bits = carrier_width.checked_mul(8)?;
-                Some(crate::admit_declaration_type(
-                    parameter.ty.clone()?,
-                    width_bits,
-                    ptr_bits,
-                ))
+                let ty = crate::admit_declaration_type(parameter.ty.clone()?, width_bits, ptr_bits);
+                // The header declares a body-read integer unsigned, as its own definition does
+                // (D156: no byte states the sign), so a caller's extern spells it alike (W46).
+                Some(match ty {
+                    CTypeLike::Int { bits, .. } if !prototype => CTypeLike::Int {
+                        bits,
+                        signedness: crate::Signedness::Unsigned,
+                    },
+                    ty => ty,
+                })
             })
             .collect::<Option<Vec<_>>>()?;
+        let unproven = self.unproven_carrier_bits();
         crate::SourceOwnedCalleeSignature::new(
             &self.source,
             crate::FunctionType {
@@ -176,6 +192,7 @@ impl TypeAnalysis {
                 variadic: false,
             },
         )
+        .map(|signature| signature.with_unproven_bits(unproven))
     }
 
     pub fn type_facts(&self) -> &FunctionTypeFacts {
@@ -745,7 +762,7 @@ fn build_type_analysis_inner(
     let local_structs = input.local_structs;
     let struct_decls = dedup_struct_decls(external_structs);
     let mut type_db = input.parsed_context.external_type_db.clone();
-    merge_local_structs_into_type_db(&mut type_db, &struct_decls, input.ptr_bits);
+    merge_local_structs_into_type_db(&mut type_db, &struct_decls);
     let mut array_index_certificates = Vec::new();
     let mut exact_indexed_access_certificates =
         exact_indexed_access_certificates_from_local_artifacts(
@@ -786,7 +803,6 @@ fn build_type_analysis_inner(
         parameter_structures: BTreeMap::new(),
         callconv: input.parsed_context.callconv.clone(),
         noreturn: input.parsed_context.noreturn,
-        known_function_signatures: input.parsed_context.known_function_signatures.clone(),
         register_params: input.parsed_context.register_params.clone(),
         callee_facts,
         external_type_db: type_db,
@@ -923,7 +939,6 @@ pub fn build_source_owned_type_analysis(
     let calls = crate::function_facts::CallFacts::project(
         source.as_ref(),
         source.display_names(),
-        &parsed_context.known_function_signatures,
         &callee_facts,
         &callee_signatures,
     );
@@ -992,158 +1007,6 @@ fn require_current_interproc_report_for_source_owned(
         .map_err(TypeAnalysisError::InterprocSummarySchema)
 }
 
-/// One source type as the C model spells it.
-///
-/// Public because a rendering that declares a value of an aggregate has to
-/// define that aggregate, and the definition's member types come from the same
-/// graph the declaration did.
-/// The graph's type wearing the qualifiers the declaration spelled.
-///
-/// The graph carries structure and no qualifier; the prototype text carries
-/// both. Where the two agree on shape, a `const` the text puts on a pointee
-/// goes onto the graph's pointee, and nothing else moves.
-pub(crate) fn requalify(graph: CTypeLike, spelled: &CTypeLike) -> CTypeLike {
-    match (graph, spelled) {
-        (CTypeLike::Const(inner), spelled) => {
-            CTypeLike::Const(Box::new(requalify(*inner, spelled)))
-        }
-        (inner, CTypeLike::Const(spelled)) => CTypeLike::Const(Box::new(requalify(inner, spelled))),
-        (CTypeLike::Pointer(inner), CTypeLike::Pointer(spelled)) => {
-            CTypeLike::Pointer(Box::new(requalify(*inner, spelled)))
-        }
-        (CTypeLike::Array(inner, count), CTypeLike::Array(spelled, _)) => {
-            CTypeLike::Array(Box::new(requalify(*inner, spelled)), count)
-        }
-        (CTypeLike::Typedef { name, ty }, spelled) => CTypeLike::Typedef {
-            name,
-            ty: Box::new(requalify(*ty, spelled)),
-        },
-        (graph, CTypeLike::Typedef { ty: spelled, .. }) => requalify(graph, spelled),
-        (graph, _) => graph,
-    }
-}
-
-/// Code of one of the graph's signatures, as the type layer states it.
-///
-/// A signature that states no parameters is not one that takes none, and the
-/// type layer has no spelling for the difference, so it is not spelled.
-fn source_code_like(
-    graph: &r2ssa::SourceTypeGraph,
-    signature_id: u32,
-    visiting: &mut BTreeSet<u32>,
-) -> Option<CTypeLike> {
-    let signature = graph
-        .signatures()
-        .get(usize::try_from(signature_id).ok()?)
-        .filter(|signature| signature.prototyped() && !signature.variadic())?;
-    let ret = source_type_like(graph, signature.return_type_id(), visiting)?;
-    let params = signature
-        .parameter_type_ids()
-        .iter()
-        .map(|parameter| source_type_like(graph, *parameter, visiting))
-        .collect::<Option<Box<[_]>>>()?;
-    Some(CTypeLike::Function {
-        ret: Box::new(ret),
-        params,
-    })
-}
-
-pub fn source_type_like(
-    graph: &r2ssa::SourceTypeGraph,
-    type_id: u32,
-    visiting: &mut BTreeSet<u32>,
-) -> Option<CTypeLike> {
-    if !visiting.insert(type_id) {
-        return None;
-    }
-    let source_type = graph
-        .types()
-        .get(usize::try_from(type_id).ok()?)
-        .filter(|source_type| source_type.id() == type_id)?;
-    let bits = u32::try_from(source_type.size_bits()).ok()?;
-    // What the source called this type, when it called it anything. The name
-    // renders and the structure stands behind it, so a rendering keeps the
-    // spelling the program was written with without any consumer losing the
-    // width. Compilation destroys names; this is the only place one survives.
-    let named = |ty: CTypeLike| match graph
-        .aliases()
-        .iter()
-        .find(|alias| alias.type_id() == type_id)
-    {
-        Some(alias) => CTypeLike::named(alias.name(), ty),
-        None => ty,
-    };
-    let ty = match source_type.kind() {
-        r2ssa::SourceTypeKind::SignedInteger => CTypeLike::Int {
-            bits,
-            signedness: Signedness::Signed,
-        },
-        r2ssa::SourceTypeKind::UnsignedInteger => CTypeLike::Int {
-            bits,
-            signedness: Signedness::Unsigned,
-        },
-        r2ssa::SourceTypeKind::Char { signed } => CTypeLike::plain_char(signed),
-        r2ssa::SourceTypeKind::Pointer { target_type_id } => {
-            let target = source_type_like(graph, target_type_id, visiting)?;
-            // `CTypeLike::Function` already spells a pointer to function,
-            // `ret(*)(params)`, so wrapping it adds an indirection the program
-            // does not have and spells `void(*)(void)*`, which is not C.
-            if matches!(target, CTypeLike::Function { .. }) {
-                target
-            } else {
-                CTypeLike::Pointer(Box::new(target))
-            }
-        }
-        r2ssa::SourceTypeKind::Struct { aggregate_id } => {
-            let aggregate = graph
-                .aggregates()
-                .get(usize::try_from(aggregate_id).ok()?)
-                .filter(|aggregate| {
-                    aggregate.id() == aggregate_id && aggregate.type_id() == type_id
-                })?;
-            CTypeLike::Struct(aggregate.name().to_string())
-        }
-        r2ssa::SourceTypeKind::Union { aggregate_id } => {
-            let aggregate = graph
-                .aggregates()
-                .get(usize::try_from(aggregate_id).ok()?)
-                .filter(|aggregate| {
-                    aggregate.id() == aggregate_id && aggregate.type_id() == type_id
-                })?;
-            CTypeLike::Union(aggregate.name().to_string())
-        }
-        r2ssa::SourceTypeKind::Array {
-            element_type_id,
-            count,
-        } => CTypeLike::Array(
-            Box::new(source_type_like(graph, element_type_id, visiting)?),
-            match count {
-                Some(count) => Some(usize::try_from(count).ok()?),
-                None => None,
-            },
-        ),
-        r2ssa::SourceTypeKind::Float => CTypeLike::Float(bits),
-        r2ssa::SourceTypeKind::Void => CTypeLike::Void,
-        r2ssa::SourceTypeKind::Code { signature_id } => {
-            source_code_like(graph, signature_id, visiting)?
-        }
-        // A tag the source never completes keeps its name, which is all a
-        // pointer to it needs.
-        r2ssa::SourceTypeKind::Opaque { tag_id } => {
-            let tag = graph.opaque_tags().get(usize::try_from(tag_id).ok()?)?;
-            let name = tag.name().to_owned();
-            match tag.keyword() {
-                r2ssa::SourceTagKeyword::Struct => CTypeLike::Struct(name),
-                r2ssa::SourceTagKeyword::Union => CTypeLike::Union(name),
-                r2ssa::SourceTagKeyword::Enum => CTypeLike::Enum(name),
-                r2ssa::SourceTagKeyword::Typedef => CTypeLike::typedef(name),
-            }
-        }
-    };
-    visiting.remove(&type_id);
-    Some(named(ty))
-}
-
 /// Project exact, revision-bound source aggregate accesses into the canonical
 /// type certificate keyed by ABI parameter slot and byte offset.
 ///
@@ -1175,8 +1038,7 @@ fn field_access_certificates_from_source_aggregate_accesses(
         let Ok(slot) = usize::try_from(projection.source_parameter_index) else {
             continue;
         };
-        let Some(field_type) =
-            source_type_like(graph, projection.member_type_id, &mut BTreeSet::new())
+        let Some(field_type) = crate::convert::source_type_like(graph, projection.member_type_id)
         else {
             continue;
         };
@@ -1189,7 +1051,7 @@ fn field_access_certificates_from_source_aggregate_accesses(
             slot,
             field_offset: projection.byte_offset,
             field_name: projection.member_name.to_string(),
-            field_type: Some(render_c_type_like(&field_type)),
+            field_type: Some(field_type),
         };
         let key = (slot, projection.byte_offset);
         match by_location.entry(key) {
@@ -1320,7 +1182,7 @@ fn out_param_certificates_from_projection(
             let param_name = param
                 .map(|param| param.name.clone())
                 .filter(|name| !name.trim().is_empty())
-                .unwrap_or_else(|| format!("arg{}", param_index + 1));
+                .unwrap_or_else(|| r2source::positional_parameter_name(*param_index));
             let pointee_type = param
                 .and_then(|param| param.ty.as_ref())
                 .and_then(|ty| match ty {

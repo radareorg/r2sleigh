@@ -30,12 +30,31 @@ pub struct FunctionInfo {
     /// the result carrier a caller reads, on the convention alone, where the value is unproven
     /// (none where C has no carrier that wide). Absent where r2types refuses a type.
     pub returns: Option<Fact<Option<CTypeLike>>>,
+    /// Where the result is unproven: the convention's carrier and why (doc/adr-scratch-result.md).
+    pub unproven: Option<UnprovenResult>,
     /// Whether control never comes back from it, and what that takes for granted: nothing where
     /// the whole program proves it, a premise where a runtime model says it. `None` where it may.
     pub noreturn: Option<std::collections::BTreeSet<r2source::Premise>>,
     /// Why there is no analysis, where there is none: the blocks are then the walk's, and
     /// the calls, convention, parameters, locals and return are unknown, not empty (ROADMAP D29).
     pub refused: Option<crate::native::NativeRefusal>,
+}
+
+/// An unproven result: the register a caller reads it from, and the cause the proof line names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnprovenResult {
+    pub carrier: Option<r2ssa::CanonicalStorageId>,
+    pub cause: Option<r2types::UnprovenCause>,
+    /// The carrier's width, where the header spells it `r2sleigh_result_uN`.
+    pub bits: Option<u32>,
+}
+
+impl UnprovenResult {
+    /// The cause as the proof line spells it.
+    pub fn cause_name(self) -> &'static str {
+        self.cause
+            .map_or("no return reached", r2types::UnprovenCause::name)
+    }
 }
 
 /// One basic block.
@@ -56,8 +75,8 @@ pub struct Argument {
     /// Its type, and what that rests on: the interface's types, the body's solve, or only the
     /// width of the carrier it arrives in.
     pub ty: Fact<CTypeLike>,
-    /// What the source calls it, where the source names it.
-    pub name: Option<String>,
+    /// Its one name (r2types `FunctionFacts::parameter_name`).
+    pub name: String,
 }
 
 /// One stack object in the function's own frame, frame management excluded.
@@ -101,10 +120,20 @@ impl FunctionInfo {
                 .map(|site| site.direct_target)
                 .collect(),
             convention: facts.type_facts().callconv.clone(),
-            arguments: arguments(artifact, sealed, &entities),
+            arguments: arguments(artifact, sealed),
             variadic: (artifact.machine_context().function_interface())
                 .is_some_and(r2source::SourceFunctionInterface::is_variadic),
             returns: returns(artifact, sealed),
+            unproven: (sealed.return_type())
+                .filter(|fact| fact.is_unproven())
+                .map(|fact| UnprovenResult {
+                    carrier: artifact.machine_context().return_value_carrier(),
+                    cause: fact.unproven_cause(),
+                    bits: match fact.declared() {
+                        Some(CTypeLike::Int { bits, .. }) => Some(*bits),
+                        _ => None,
+                    },
+                }),
             locals: locals(artifact, sealed, &entities),
             noreturn,
             refused: None,
@@ -135,6 +164,7 @@ impl FunctionInfo {
             variadic: false,
             locals: Vec::new(),
             returns: None,
+            unproven: None,
             noreturn,
             refused: Some(refusal),
         }
@@ -229,69 +259,22 @@ fn blocks(artifact: &r2ssa::SsaArtifact) -> Vec<Block> {
     blocks
 }
 
-/// Every certified parameter, typed as r2types declares that slot, else as storage of its width.
-fn arguments(
-    artifact: &r2ssa::SsaArtifact,
-    sealed: &SourceOwnedFunctionFacts,
-    entities: &[&CertifiedEntity],
-) -> Vec<Argument> {
-    let graph = artifact.graph();
-    let mut arguments = entities
-        .iter()
-        .filter_map(|entity| {
-            let CertifiedEntity::Parameter {
-                slot,
-                entry_values,
-                carrier_width,
-                ..
-            } = entity
-            else {
-                return None;
-            };
-            // A declared lane of a wider register is a formal of its own, with its own storage.
-            let storage = entry_values.iter().find_map(|value| {
-                graph
-                    .formal_projection_storage(*value)
-                    .or(graph.value(*value)?.canonical_storage)
-            });
-            let width_bits = storage.map_or(*carrier_width, |storage| storage.size) * 8;
-            Some(Argument {
-                slot: *slot,
-                storage,
-                name: sealed
-                    .report()
-                    .display_names()
-                    .parameter(*slot as usize)
-                    .map(str::to_owned),
-                ty: (sealed.parameter_declaration_fact(*slot as usize, width_bits))
+/// Every formal parameter of the one list `pdd` declares (r2ssa's formal facts), named by the one
+/// name owner and typed as r2types declares that slot, else as storage of its width.
+fn arguments(artifact: &r2ssa::SsaArtifact, sealed: &SourceOwnedFunctionFacts) -> Vec<Argument> {
+    (artifact.facts().boundaries.parameters.values())
+        .map(|formal| {
+            let width_bits = formal.bytes() * 8;
+            let slot = formal.index as usize;
+            Argument {
+                slot: formal.index,
+                storage: formal.register().map(|(_, lane)| lane),
+                name: sealed.report().parameter_name(slot),
+                ty: (sealed.parameter_declaration_fact(slot, width_bits))
                     .unwrap_or_else(|| carrier_typed(width_bits)),
-            })
+            }
         })
-        .collect::<Vec<_>>();
-    // The interface owns arity: a formal the body never reads is still one of its parameters.
-    let interface = artifact.machine_context().function_interface();
-    for (slot, width_bytes) in sealed.interface_parameter_widths() {
-        if arguments.iter().any(|argument| argument.slot == slot) {
-            continue;
-        }
-        let width_bits = width_bytes * 8;
-        let storage = interface
-            .and_then(|interface| interface.parameters().iter().find(|p| p.index() == slot))
-            .and_then(|parameter| parameter.register_storage());
-        arguments.push(Argument {
-            slot,
-            storage,
-            name: sealed
-                .report()
-                .display_names()
-                .parameter(slot as usize)
-                .map(str::to_owned),
-            ty: (sealed.parameter_declaration_fact(slot as usize, width_bits))
-                .unwrap_or_else(|| carrier_typed(width_bits)),
-        });
-    }
-    arguments.sort_unstable_by_key(|argument| argument.slot);
-    arguments
+        .collect()
 }
 
 /// A type that is only the width of the carrier a value arrives in.
@@ -354,7 +337,7 @@ fn locals(
         .filter(|value| !saves_return_address(value.id))
         .filter_map(|value| value.canonical_storage)
         .filter_map(|storage| Some((r2ssa::promoted_slot_offset(&storage)?, storage.size)))
-        .filter(|(offset, _)| !r2ssa::SsaArtifact::caller_frame_offset(*offset))
+        .filter(|(offset, _)| !artifact.caller_frame_offset(*offset))
         .filter(|(offset, _)| !held.contains(offset))
         .collect::<BTreeSet<_>>()
         .into_iter()

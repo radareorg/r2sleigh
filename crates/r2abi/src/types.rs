@@ -16,6 +16,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::CDataModel;
+
 /// One node of one [`TypeGraph`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct TypeId(u32);
@@ -33,7 +35,7 @@ impl TypeId {
 ///
 /// Debug information states a width in bytes. The shipped table spells C
 /// types, and how wide `long` is belongs to the target rather than to the
-/// spelling, so it stays a question the [`DataModel`] answers.
+/// spelling, so it stays a question the [`CDataModel`] answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Width {
     Bits(u32),
@@ -43,6 +45,10 @@ pub enum Width {
     Pointer,
     /// `long double`, whose storage the target decides.
     LongDouble,
+    /// `wchar_t`'s, which the target's [`CDataModel`] states.
+    WideChar,
+    /// The Linux kernel's `__kernel_mode_t`, bionic's `mode_t`: the target's [`CDataModel`] states it.
+    KernelMode,
 }
 
 /// What one scalar's bits mean.
@@ -53,6 +59,10 @@ pub enum ScalarKind {
     Bool,
     /// An IEEE binary floating-point value.
     Float,
+    /// Plain `char`, whose sign the target's [`CDataModel`] states.
+    PlainChar,
+    /// `wchar_t`, whose sign the target's [`CDataModel`] states.
+    WideChar,
 }
 
 /// A value the language operates on directly.
@@ -192,37 +202,6 @@ pub enum Type {
     Refused(Refusal),
 }
 
-/// How wide the target makes the widths a C spelling leaves to it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DataModel {
-    pub pointer_bits: u32,
-    pub long_bits: u32,
-    /// The storage a `long double` occupies, where this model states it.
-    pub long_double_bits: Option<u32>,
-}
-
-impl DataModel {
-    /// `long` and pointers as wide as each other, which is every Unix target
-    /// this engine lifts. Nothing here states `long double`: its format and
-    /// its class are the convention's to say.
-    pub const fn unix(pointer_bits: u32) -> Self {
-        Self {
-            pointer_bits,
-            long_bits: pointer_bits,
-            long_double_bits: None,
-        }
-    }
-
-    pub fn bits(&self, width: Width) -> Option<u32> {
-        match width {
-            Width::Bits(bits) => Some(bits),
-            Width::Long => Some(self.long_bits),
-            Width::Pointer => Some(self.pointer_bits),
-            Width::LongDouble => self.long_double_bits,
-        }
-    }
-}
-
 /// Every type one source declares, by node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeGraph {
@@ -336,14 +315,14 @@ impl TypeGraph {
     /// An object has a size only if the declaration completes it: `void`,
     /// code, an opaque tag, an array with no bound and a refused node have
     /// none.
-    pub fn size_bits(&self, id: TypeId, model: &DataModel) -> Option<u64> {
+    pub fn size_bits(&self, id: TypeId, model: &CDataModel) -> Option<u64> {
         self.size_through(id, model, &mut BTreeSet::new())
     }
 
     fn size_through(
         &self,
         id: TypeId,
-        model: &DataModel,
+        model: &CDataModel,
         visiting: &mut BTreeSet<TypeId>,
     ) -> Option<u64> {
         // A record holding itself by value has no size in any language.
@@ -548,6 +527,8 @@ fn scalar_spelling(scalar: &Scalar) -> String {
     }
     match (scalar.kind, scalar.width) {
         (ScalarKind::Bool, _) => "_Bool".to_owned(),
+        (ScalarKind::PlainChar, _) => "char".to_owned(),
+        (ScalarKind::WideChar, _) => "wchar_t".to_owned(),
         (ScalarKind::Float, Width::Bits(32)) => "float".to_owned(),
         (ScalarKind::Float, Width::Bits(64)) => "double".to_owned(),
         (ScalarKind::Float, _) => "long double".to_owned(),
@@ -563,7 +544,7 @@ fn scalar_spelling(scalar: &Scalar) -> String {
 fn bits_of(width: Width) -> u32 {
     match width {
         Width::Bits(bits) => bits,
-        Width::Long | Width::Pointer | Width::LongDouble => 0,
+        Width::Long | Width::Pointer | Width::LongDouble | Width::WideChar | Width::KernelMode => 0,
     }
 }
 
@@ -642,7 +623,7 @@ mod tests {
                 ],
             }),
         );
-        let model = DataModel::unix(64);
+        let model = CDataModel::unix(64);
         assert_eq!(graph.size_bits(node, &model), Some(128));
         assert_eq!(graph.size_bits(next, &model), Some(64));
         assert_eq!(
@@ -659,7 +640,7 @@ mod tests {
             tag: "FILE".to_owned(),
         });
         let pointer = graph.add(Type::Pointer { target: file });
-        let model = DataModel::unix(64);
+        let model = CDataModel::unix(64);
         assert_eq!(graph.size_bits(file, &model), None);
         assert_eq!(graph.size_bits(pointer, &model), Some(64));
         assert_eq!(
@@ -679,7 +660,7 @@ mod tests {
                 target: loop_,
             },
         );
-        assert_eq!(graph.size_bits(loop_, &DataModel::unix(64)), None);
+        assert_eq!(graph.size_bits(loop_, &CDataModel::unix(64)), None);
         assert_eq!(
             graph.spelled(loop_).map(|s| s.resolved),
             Some(None),

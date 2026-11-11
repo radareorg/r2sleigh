@@ -56,9 +56,10 @@ fn afi_states_the_signature_pdd_declares() {
         .lines()
         .find_map(|line| line.strip_prefix("signature: "))
         .unwrap_or_else(|| panic!("afi states no signature:\n{info}"));
+    // The written result's carrier, spelled as `pdd`'s header spells it (D201).
     assert_eq!(
         signature,
-        "uint64_t sym.fnv1a32 (uint64_t arg1, uint64_t arg2);"
+        "r2sleigh_result_u64 sym.fnv1a32 (uint64_t arg0, uint64_t arg1);"
     );
     let rendered = r2s("pdd @ 0x401330");
     let header = rendered.lines().next().expect("a header");

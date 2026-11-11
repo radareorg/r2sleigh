@@ -755,23 +755,8 @@ fn terminal_past_call_boundary<'o, V: Ord + 'o>(
     })
 }
 
-/// Convention-clobbered registers this body leaves exactly as it found them
-/// at every exit.
-///
-/// A register is preserved when no instruction anywhere in the body defines a
-/// storage overlapping it. A call's own clobbers are the `CallDefine`s that
-/// follow it, so a body that calls something it knows nothing more about
-/// preserves nothing that call may touch, and the answer composes through
-/// exactly the callees whose own bodies were read. This is the set a compiler
-/// computes for the same purpose: GCC's `-fipa-ra` keeps a caller's value in
-/// an argument register across a call to a callee it has seen never write it,
-/// and the caller then reads that register after the call as its own.
-///
-/// Every exit has to be a return for the claim to hold. A block that leaves by
-/// any other transfer hands control to a body not read here, so nothing is
-/// claimed for the function; a call that ends its block with no successor is
-/// one the source marked noreturn, which never comes back and constrains
-/// nothing.
+/// Convention-clobbered registers no block a return is reached from writes, every exit a return
+/// (GCC's `-fipa-ra` set; doc/adr-call-boundary.md, "S17 as built").
 pub(crate) fn preserved_call_carriers(
     function: &SSAFunction,
     graph: &SsaGraph,
@@ -784,7 +769,7 @@ pub(crate) fn preserved_call_carriers(
     if candidates.is_empty() {
         return BTreeSet::new();
     }
-    let mut saw_return = false;
+    let mut returning = Vec::new();
     for block in &graph.blocks {
         if !function.successors(block.addr).is_empty() {
             continue;
@@ -794,20 +779,28 @@ pub(crate) fn preserved_call_carriers(
             .iter()
             .filter_map(|inst| graph.op(*inst));
         match terminal_past_call_boundary(ops) {
-            Some(SSAOp::Return { .. }) => saw_return = true,
+            Some(SSAOp::Return { .. }) => returning.push(block.addr),
             Some(op) if op.is_call() => {}
             _ => return BTreeSet::new(),
         }
     }
-    if !saw_return {
+    if returning.is_empty() {
         return BTreeSet::new();
     }
+    // Only a block a return is reached from writes what a caller sees: O(blocks + edges).
+    let mut reaching = BTreeSet::new();
+    while let Some(addr) = returning.pop() {
+        if reaching.insert(addr) {
+            returning.extend(function.predecessors(addr).iter().copied());
+        }
+    }
+    let returns_from = |block: &&crate::graph::GraphBlock| reaching.contains(&block.addr);
     let mut preserved = candidates.iter().copied().collect::<BTreeSet<_>>();
     // A call inside this body leaves alone only what its own callee proves
     // it does. The call defines only the registers this body touches, so the
     // rest of the universe is answered here: a register no instruction
     // writes survives an inner call only when that callee's body says so.
-    let ops = (graph.blocks.iter())
+    let ops = (graph.blocks.iter().filter(returns_from))
         .flat_map(|block| graph.op_insts(block.id))
         .filter_map(|inst| graph.op(*inst));
     for op in ops {
@@ -830,9 +823,13 @@ pub(crate) fn preserved_call_carriers(
     // The distinct storages written, once each: the universe is the whole
     // register file, so matching it per instruction would cost `O(I * U)`
     // where `O(I log w + w * U)` answers the same question.
+    let seen = |inst: &&crate::graph::GraphInst| {
+        (graph.block(inst.block)).is_none_or(|block| reaching.contains(&block.addr))
+    };
     let written = graph
         .insts
         .iter()
+        .filter(seen)
         .filter(|inst| inst.output.is_some())
         .filter_map(|inst| graph.written_storage(inst))
         .collect::<BTreeSet<_>>();
@@ -1003,6 +1000,135 @@ pub(crate) fn proven_low_lane(
     views
         .low_lane_value(view.root, bits)
         .filter(|lane| *lane != value)
+}
+
+/// The low lane of register `storage` that a callee's declaration holds for argument `index`, where
+/// it holds less than the register: `int fd` in `rdi` is `edi` (ROADMAP D105).
+pub(crate) fn callee_held_lane(
+    interface: &crate::SourceCallSiteInterface,
+    index: u32,
+    storage: CanonicalStorageId,
+) -> Option<CanonicalStorageId> {
+    let callee = interface.exact_callee_interface()?;
+    let position = (callee.parameters().iter()).position(|parameter| {
+        parameter.index() == index && parameter.register_storage() == Some(storage)
+    })?;
+    let carrier = callee.parameter_logical_value(position)?.carrier();
+    let bytes = u32::try_from(carrier.size_bits() / 8).ok()?;
+    (storage.space == CanonicalStorageSpace::Register
+        && carrier.kind() == crate::SourceCarrierKind::LowBits
+        && carrier.offset_bits() == 0
+        && carrier.size_bits().is_multiple_of(8)
+        && bytes > 0
+        && bytes < storage.size)
+        .then_some(CanonicalStorageId {
+            size: bytes,
+            ..storage
+        })
+}
+
+/// The widest low run each entry register value's uses read (ROADMAP D105): a subpiece's end, or
+/// the narrowest lane a call's callee holds of it; `None` where a use reads past every lane.
+pub(crate) struct HeldLaneWidths(crate::dense::IdMap<ValueId, Option<u32>>);
+
+impl HeldLaneWidths {
+    /// Work: one pass over the entry values' uses, each call's interface found in `O(arguments)`.
+    pub(crate) fn of(graph: &SsaGraph, machine_context: &SourceMachineContext) -> Self {
+        let mut widths = crate::dense::IdMap::new(graph.values.len());
+        for value in &graph.values {
+            let Some(storage) = value.canonical_storage.filter(|storage| {
+                storage.space == CanonicalStorageSpace::Register
+                    && value.var.version == 0
+                    && graph.def_inst(value.id).is_none()
+            }) else {
+                continue;
+            };
+            let widest = (graph.use_sites(value.id).iter()).try_fold(0, |widest, site| {
+                read_width(graph, machine_context, storage, site.inst).map(|read| widest.max(read))
+            });
+            widths.insert(value.id, widest);
+        }
+        Self(widths)
+    }
+
+    /// Whether a callee's held lane `bytes` wide may narrow `carrier`, by default-deny: where the
+    /// carrier is this function's entry value of a wider register, every use reads within `bytes`.
+    pub(crate) fn admits(
+        &self,
+        graph: &SsaGraph,
+        views: Option<&crate::view::ValueViews<ValueId>>,
+        carrier: ValueId,
+        bytes: u32,
+    ) -> bool {
+        let root = views.map_or(carrier, |views| views.view(carrier).root);
+        let wider = graph.value(root).and_then(|value| value.canonical_storage);
+        match self.0.get(root) {
+            Some(widest) if wider.is_some_and(|storage| storage.size > bytes) => {
+                widest.is_some_and(|widest| widest <= bytes)
+            }
+            _ => true,
+        }
+    }
+}
+
+/// The low bytes of entry register `storage` one use reads: a subpiece's end, or the narrowest lane
+/// a call's callee holds of it; `None` where the use may read the whole register.
+fn read_width(
+    graph: &SsaGraph,
+    machine_context: &SourceMachineContext,
+    storage: CanonicalStorageId,
+    reader: crate::graph::InstId,
+) -> Option<u32> {
+    match graph.op(reader)? {
+        SSAOp::Subpiece { dst, offset, .. } => Some(offset.saturating_add(graph.var(*dst).size)),
+        SSAOp::CallUse { .. } => {
+            let interface = call_after(graph, reader, machine_context)?;
+            (interface.arguments().iter())
+                .filter(|argument| argument.register_storage() == Some(storage))
+                .filter_map(|argument| callee_held_lane(interface, argument.index(), storage))
+                .map(|lane| lane.size)
+                .min()
+        }
+        _ => None,
+    }
+}
+
+/// The interface of the call a `CallUse` precedes in its block: the reads run up to the call.
+fn call_after<'a>(
+    graph: &SsaGraph,
+    read: crate::graph::InstId,
+    machine_context: &'a SourceMachineContext,
+) -> Option<&'a crate::SourceCallSiteInterface> {
+    let inst = graph.inst(read)?;
+    let block = graph.block(inst.block)?;
+    let instruction = (block.insts.get(inst.ordinal..)?.iter())
+        .find_map(|inst| graph.op(*inst)?.transfer().filter(|flow| flow.call))?
+        .instruction?;
+    machine_context.call_site_interface(machine_context.raw_call_site_at(instruction)?)
+}
+
+/// Whether `lane` is this function's own entry value of the low lane of `carrier`, its entry
+/// value of a wider register: the formal a callee holding only that lane is passed (ROADMAP D105).
+pub(crate) fn is_entry_lane_of(graph: &SsaGraph, lane: ValueId, carrier: ValueId) -> bool {
+    let entry = |value: ValueId| {
+        let held = graph.value(value)?;
+        (graph.def_inst(value).is_none() && held.var.version == 0).then_some(held)
+    };
+    let (Some(root), Some(held)) = (entry(carrier), entry(lane)) else {
+        return false;
+    };
+    let lane_storage = graph
+        .formal_projection_storage(lane)
+        .or(held.canonical_storage);
+    match (root.canonical_storage, lane_storage) {
+        (Some(root), Some(lane)) => {
+            root.space == CanonicalStorageSpace::Register
+                && lane.space == root.space
+                && lane.offset == root.offset
+                && lane.size < root.size
+        }
+        _ => false,
+    }
 }
 
 /// A register argument narrowed to the lane its slot's bits are (`value`, with the carrier as `lane_of`),
@@ -1664,8 +1790,8 @@ impl FrameBoundaries {
         };
         let stack_pointer = machine_context.stack_pointer_carrier();
         let saves = graph.insts.iter().filter_map(|inst| match &inst.payload {
-            InstPayload::Op(op) => structural_save(facts, graph, op, |storage| {
-                Some(storage) != stack_pointer && effect.preserves(storage)
+            InstPayload::Op(op) => crate::saved_register::frame_slot(facts, graph, op, |lane| {
+                crate::saved_register::preserved(Some(effect), stack_pointer, lane)
             }),
             InstPayload::Phi { .. } => None,
         });
@@ -1744,36 +1870,6 @@ fn clipped(boundaries: &FrameBoundaries, start: StackAddressRoot, end: i64) -> i
         }
         _ => end,
     }
-}
-
-/// A frame store of a preserved register's value on entry: the slot it
-/// saves to and its width. No local holds the caller's register, so such a
-/// store is the frame's bookkeeping.
-fn structural_save(
-    facts: &DecompilePrepFacts,
-    graph: &SsaGraph,
-    op: &SSAOp<ValueId>,
-    preserved: impl Fn(CanonicalStorageId) -> bool,
-) -> Option<(StackAddressRoot, i64)> {
-    let SSAOp::Store {
-        space: SpaceId::Ram,
-        addr,
-        val,
-    } = *op
-    else {
-        return None;
-    };
-    let root = resolve_stack_root(Some(facts), addr)?;
-    let size = graph.var(val).size;
-    let (storage, ..) = super::certificates::exact_copy_chain_to_entry_storage(graph, val, size)?;
-    if !preserved(storage) {
-        return None;
-    }
-    r2il::refusal_evidence!(
-        "frame-boundary",
-        "{root:?} saves {storage:?}, preserved across calls"
-    );
-    Some((root, i64::from(size)))
 }
 
 pub(crate) fn evidenced_stack_roots(

@@ -1,0 +1,132 @@
+# Why each row of `types.sdb.txt` and `types-linux.sdb.txt` is still radare2's and `Tail::Unstated`
+# (ROADMAP D242). `tests/cited_rows.rs` fails on a row of those tables with no line here, on a line
+# naming no row, and on a count above the one it records: the list only falls.
+#
+# name | why it is uncited
+
+# types.sdb.txt, the portable table.
+arc4random | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+srandomdev | no glibc 2.39 header declares it
+strtonum | no glibc 2.39 header declares it
+ioctl | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+main | the program's own function, no library's
+xmalloc | no glibc 2.39 header declares it
+reallocf | no glibc 2.39 header declares it
+user_from_uid | no glibc 2.39 header declares it
+group_from_gid | no glibc 2.39 header declares it
+dcgettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+dcngettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+dgettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+dngettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+gettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+ngettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+compat_mode | no glibc 2.39 header declares it
+getprogname | no glibc 2.39 header declares it
+strlcpy | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+usleep | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+bind | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+open | variadic with no format: a `Tail::Variadic` call renders as a residual, where radare2's fixed list renders
+openat | variadic with no format: a `Tail::Variadic` call renders as a residual, where radare2's fixed list renders
+imaxdiv | a record or an array typedef by value, which the row reader does not spell
+maskrune | no glibc 2.39 header declares it
+fesetexceptflag | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+fesetenv | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+feupdateenv | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+localeconv | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+signbit | a macro of ISO C17 <math.h>, no function
+fpclassify | a macro of ISO C17 <math.h>, no function
+isfinite | a macro of ISO C17 <math.h>, no function
+isinf | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+isnan | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+isnormal | a macro of ISO C17 <math.h>, no function
+isgreater | a macro of ISO C17 <math.h>, no function
+isgreaterequal | a macro of ISO C17 <math.h>, no function
+isless | a macro of ISO C17 <math.h>, no function
+islessequal | a macro of ISO C17 <math.h>, no function
+islessgreater | a macro of ISO C17 <math.h>, no function
+isunordered | a macro of ISO C17 <math.h>, no function
+longjmp | a record or an array typedef by value, which the row reader does not spell
+bsearch | a function pointer parameter, which the row reader does not spell
+qsort | a function pointer parameter, which the row reader does not spell
+div | a record or an array typedef by value, which the row reader does not spell
+ldiv | a record or an array typedef by value, which the row reader does not spell
+lldiv | a record or an array typedef by value, which the row reader does not spell
+at_quick_exit | a function pointer parameter, which the row reader does not spell
+bzero | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+memmem | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+fts_open_INODE64 | no glibc 2.39 header declares it
+fts_read_INODE64 | no glibc 2.39 header declares it
+fts_close_INODE64 | no glibc 2.39 header declares it
+fts_set_INODE64 | no glibc 2.39 header declares it
+fts_children_INODE64 | no glibc 2.39 header declares it
+fstat | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+mktime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+asctime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+gmtime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+localtime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+strftime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+wcsftime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+lstat | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+gets | ISO C11 removed it, and no mode of glibc 2.39's <stdio.h> declares it
+signal | a function pointer parameter, which the row reader does not spell
+inet_aton | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+inet_ntoa | a record or an array typedef by value, which the row reader does not spell
+connect | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+strmode | no glibc 2.39 header declares it
+tgoto | no glibc 2.39 header declares it
+basename | POSIX <libgen.h> and GNU <string.h> declare two functions of this name
+humanize_number | no glibc 2.39 header declares it
+pututxline | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+mktemp | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+bindtextdomain | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+textdomain | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+setjmp | a record or an array typedef by value, which the row reader does not spell
+ptrace | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+swift_bridgeObjectRelease | no glibc 2.39 header declares it
+swift_endAccess | no glibc 2.39 header declares it
+swift_release | no glibc 2.39 header declares it
+objc_allocWithZone | no glibc 2.39 header declares it
+swift_unexpectedError | no glibc 2.39 header declares it
+objc_opt_self | no glibc 2.39 header declares it
+_sSS10FoundationE19_bridgeToObjectiveCSo8NSStringCyF | no glibc 2.39 header declares it
+swift_bridgeObjectRetain | no glibc 2.39 header declares it
+swift_getObjCClassFromMetadata | no glibc 2.39 header declares it
+swift_initStackObject | no glibc 2.39 header declares it
+swift_beginAccess | no glibc 2.39 header declares it
+errc | no glibc 2.39 header declares it
+warnc | no glibc 2.39 header declares it
+sysctlbyname | no glibc 2.39 header declares it
+sysctl | no glibc 2.39 header declares it
+sysctlnametomib | no glibc 2.39 header declares it
+tgetent | no glibc 2.39 header declares it
+tgetflag | no glibc 2.39 header declares it
+tgetstr | no glibc 2.39 header declares it
+tgetnum | no glibc 2.39 header declares it
+listxattr | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+getopt_long | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+getbsize | no glibc 2.39 header declares it
+fflagtostr | no glibc 2.39 header declares it
+sigprocmask | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+fflush_unlocked | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
+stat | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+utime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+utimes | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+
+# types-linux.sdb.txt, glibc's own.
+xalloc_die | no glibc 2.39 header declares it
+__libc_start_main | glibc's start-up entry, which no installed header declares
+atexit | a function pointer parameter, which the row reader does not spell
+prctl | variadic with no format: a `Tail::Variadic` call renders as a residual, where radare2's fixed list renders
+ctype_b_loc | no glibc 2.39 header declares it
+ctype_toupper_loc | no glibc 2.39 header declares it
+ctype_tolower_loc | no glibc 2.39 header declares it
+open64 | variadic with no format: a `Tail::Variadic` call renders as a residual, where radare2's fixed list renders
+stat64 | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+lstat64 | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+fstat64 | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
+__fgets_chk | glibc declares it only inside its fortify headers
+__fread_chk | glibc declares it only inside its fortify headers
+__read_chk | glibc declares it only inside its fortify headers
+__realpath_chk | glibc declares it only inside its fortify headers
+__longjmp_chk | glibc declares it only inside its fortify headers
+__fdelt_chk | glibc declares it only inside its fortify headers

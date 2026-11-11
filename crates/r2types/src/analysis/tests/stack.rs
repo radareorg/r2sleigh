@@ -11,15 +11,15 @@ fn interproc_summary_name_does_not_prune_generated_surplus_slots() {
         inferred_signature: InferredSignature {
             function_name: "dbg.or".to_string(),
             signature: "bool dbg.or(void *arg1, struct sla_struct_deadbeef *arg2)".to_string(),
-            ret_type: "bool".to_string(),
+            ret_type: Some(parse_test_type("bool", 64)),
             params: vec![
                 InferredSignatureParam {
                     name: "arg1".to_string(),
-                    param_type: "void *".to_string(),
+                    ty: parse_test_type("void *", 64),
                 },
                 InferredSignatureParam {
                     name: "arg2".to_string(),
-                    param_type: "struct sla_struct_deadbeef *".to_string(),
+                    ty: parse_test_type("struct sla_struct_deadbeef *", 64),
                 },
             ],
             callconv: "amd64".to_string(),
@@ -33,6 +33,6 @@ fn interproc_summary_name_does_not_prune_generated_surplus_slots() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(spelled_signature(&analysis).ret_type, "bool");
+    assert_eq!(spelled_ret(&spelled_signature(&analysis).ret_type), "bool");
     assert_eq!(spelled_signature(&analysis).params.len(), 2);
 }

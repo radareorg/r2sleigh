@@ -349,6 +349,19 @@ impl ObjectModel {
         self.objects.get(&id)
     }
 
+    /// The caller's argument-area object at `offset` from the entry stack pointer.
+    pub fn argument_object(&self, offset: i64) -> Option<ObjectId> {
+        let root = StackAddressRoot {
+            base: StackAddressBase::StackPointer,
+            offset,
+        };
+        let key = StackObjectKey {
+            root,
+            space: SpaceId::Ram,
+        };
+        self.stack_objects.get(&key).copied()
+    }
+
     pub fn escaped_unknown_object(&self, space: SpaceId) -> Option<ObjectId> {
         self.escaped_unknown.get(&ObjectSpaceId(space)).copied()
     }
@@ -640,6 +653,18 @@ pub struct FormatCountEvidence {
     pub format_argument_index: usize,
     pub format_literal_address: u64,
     pub format_consumed_argument_count: usize,
+    /// Bit `i` is set where tail operand `i` is a floating conversion's.
+    pub floating_operands: u64,
+}
+
+impl FormatCountEvidence {
+    /// Whether tail operand `operand` is a floating conversion's.
+    pub fn is_floating(&self, operand: usize) -> bool {
+        u32::try_from(operand)
+            .ok()
+            .and_then(|operand| self.floating_operands.checked_shr(operand))
+            .is_some_and(|bits| bits & 1 == 1)
+    }
 }
 
 /// The tail a callee's loop bound allows, read off the constant the call passes for it.
@@ -736,11 +761,20 @@ pub enum UnstatedImport {
 pub struct SourceCallBoundaryFact {
     pub call_site: CallSiteId,
     pub at: InstId,
-    pub calling_convention: Option<String>,
+    pub convention: Option<r2source::ConventionId>,
     pub variadic: Option<bool>,
     pub noreturn: Option<bool>,
     pub result_kind: Option<SourceCallResult>,
+    /// Result lanes the call may change that no contract states (S36), or that a minted contract leaves
+    /// `Unproven` (D212): what the call leaves there is a result no one states, never no value.
+    pub unstated_lanes: Box<[crate::CanonicalStorageId]>,
+    /// The carrier an unstated result is spelled in: the callee header's, else the convention's
+    /// integer lane (D201). None where no lane is unstated.
+    pub unstated_carrier: Option<r2source::SourceResultSeed>,
     pub arguments: Vec<SourceCallArgumentFact>,
+    /// The argument positions the callee's interface states it ignores (holes, D165): each is
+    /// passed as a typed residual, so the value reaching it is no read and holds nothing live.
+    pub ignored: Box<[u32]>,
     /// How many leading entries of `arguments` the callee's prototype names.
     ///
     /// The rest are the tail a variadic call passes and no prototype can
@@ -771,6 +805,13 @@ pub struct SourceCallBoundaryFact {
     pub arguments_proven: bool,
     /// Why `complete` or `arguments_proven` is false; `None` exactly where both hold.
     pub refusal: Option<CallBoundaryRefusal>,
+}
+
+impl SourceCallBoundaryFact {
+    /// Whether `argument` is a slot the callee ignores (`ignored`).
+    pub fn ignores(&self, argument: &SourceCallArgumentFact) -> bool {
+        matches!(argument.slot, CallBoundarySlot::Register { index, .. } if self.ignored.contains(&index))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -834,21 +875,69 @@ impl SourceReturnStackPointerFact {
     }
 }
 
-/// One exact source-declared ABI parameter and its canonical graph carrier.
-///
-/// `abi_storage` is the source calling-convention carrier. `graph_storage`
-/// is the exact, source-declared logical projection used by SSA; it is never
-/// inferred from a register name or an overlapping storage range.
+/// Where a formal parameter arrives (doc/adr-call-boundary.md, "The function's parameters").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormalHome {
+    /// An entry register: `abi_storage` the convention's carrier, `graph_storage` the declared lane
+    /// SSA reads, `value` its one entry value or lane projection.
+    Register {
+        abi_storage: CanonicalStorageId,
+        graph_storage: CanonicalStorageId,
+        value: ValueId,
+    },
+    /// A caller's argument-area slot `bytes` wide at `offset` from the entry stack pointer.
+    Frame {
+        object: ObjectId,
+        offset: i64,
+        bytes: u32,
+    },
+}
+
+/// One formal parameter of the source interface, at its home.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SourceFormalParameterFact {
     pub index: u32,
-    pub abi_storage: CanonicalStorageId,
-    pub graph_storage: CanonicalStorageId,
-    /// Exact logical projection when the source supplied one. A full-width
-    /// physical ABI parameter remains authoritative without a type graph; in
-    /// that case `graph_storage == abi_storage` and this field is absent.
+    /// Exact logical projection when the source supplied one.
     pub logical_value: Option<SourceLogicalValue>,
-    pub value: ValueId,
+    pub home: FormalHome,
+}
+
+impl SourceFormalParameterFact {
+    /// The entry value of a register formal.
+    pub const fn value(&self) -> Option<ValueId> {
+        match self.home {
+            FormalHome::Register { value, .. } => Some(value),
+            FormalHome::Frame { .. } => None,
+        }
+    }
+
+    /// The convention's carrier and the declared lane of a register formal.
+    pub const fn register(&self) -> Option<(CanonicalStorageId, CanonicalStorageId)> {
+        match self.home {
+            FormalHome::Register {
+                abi_storage,
+                graph_storage,
+                ..
+            } => Some((abi_storage, graph_storage)),
+            FormalHome::Frame { .. } => None,
+        }
+    }
+
+    /// The argument-area object of a stack formal.
+    pub const fn object(&self) -> Option<ObjectId> {
+        match self.home {
+            FormalHome::Frame { object, .. } => Some(object),
+            FormalHome::Register { .. } => None,
+        }
+    }
+
+    /// The formal's width in bytes.
+    pub const fn bytes(&self) -> u32 {
+        match self.home {
+            FormalHome::Register { graph_storage, .. } => graph_storage.size,
+            FormalHome::Frame { bytes, .. } => bytes,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -1758,6 +1847,19 @@ impl<'a> ObjectModelBuilder<'a> {
             }
         }
 
+        // Each stack formal is an argument-area object, read or not (doc/adr-call-boundary.md, S5).
+        let stack_formals = (self.machine_context)
+            .and_then(SourceMachineContext::function_interface)
+            .map(|interface| interface.parameters())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|parameter| parameter.location().stack());
+        for (offset, _) in stack_formals {
+            self.ensure_stack_object(StackAddressRoot {
+                base: StackAddressBase::StackPointer,
+                offset,
+            });
+        }
         let callee_write_reach = self
             .stack_objects
             .iter()

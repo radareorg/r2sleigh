@@ -276,6 +276,19 @@ pub(crate) fn collect_callee_stack_allocation_certificates<'a>(
                 .unwrap_or((element_width, false)),
         };
 
+        // A home the convention gives the callee is its own at every access, wherever the
+        // stack pointer stands: its callees' homes lie below the stack pointer it passes.
+        let home = |offset: i64| {
+            matches!(
+                machine_context.stack_owner(offset),
+                r2source::convention::StackOwner::Home { .. }
+            )
+        };
+        let in_home = home(entry_root.offset)
+            && entry_root
+                .offset
+                .checked_add(i64::from(size_bytes) - 1)
+                .is_some_and(home);
         let mut active_sp_offsets = BTreeSet::new();
         let mut uses_implicit_area = false;
         let mut complete = true;
@@ -289,6 +302,19 @@ pub(crate) fn collect_callee_stack_allocation_certificates<'a>(
                 boundary.map(|boundary| boundary.instruction_end),
             ]
             .map(|state| state.and_then(|state| exact_stack_pointer_offset(prep, graph, state)));
+            // A merge keeps no phi of a stack pointer nothing reads there (`mov rbx, [rbp - 8]; leave`):
+            // every edge hands it the same offset.
+            let offsets = match offsets {
+                [None, None, None] => {
+                    let arriving = active_stack_pointer_states.arriving(access.id.inst);
+                    let mut agreed = (arriving.into_iter())
+                        .map(|state| exact_stack_pointer_offset(prep, graph, state));
+                    let first = agreed.next().flatten();
+                    let one = first.filter(|first| agreed.all(|other| other == Some(*first)));
+                    [one, None, None]
+                }
+                known => known,
+            };
             let owned_by = |contract: &SourceStackAllocationContract| {
                 offsets.into_iter().flatten().find(|offset| {
                     contract.owns_entry_relative_range(*offset, entry_root.offset, size_bytes)
@@ -299,6 +325,10 @@ pub(crate) fn collect_callee_stack_allocation_certificates<'a>(
                 (None, Some(offset)) => {
                     uses_implicit_area = true;
                     offset
+                }
+                (None, None) if in_home => {
+                    active_sp_offsets.extend(offsets.into_iter().flatten().next());
+                    continue;
                 }
                 (None, None) => {
                     complete = false;
@@ -384,53 +414,6 @@ pub(crate) fn collect_callee_stack_allocation_certificates<'a>(
     candidates
 }
 
-#[cfg_attr(
-    dylint_lib = "r2sleigh_lints",
-    allow(
-        entity_keyed_map,
-        reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
-    )
-)]
-pub(crate) fn exact_copy_chain_to_storage(
-    graph: &SsaGraph,
-    start: ValueId,
-    storage: CanonicalStorageId,
-) -> Option<(BTreeSet<InstId>, BTreeSet<ValueId>)> {
-    let mut insts = BTreeSet::new();
-    let mut values = BTreeSet::from([start]);
-    let mut current = start;
-    loop {
-        let value = graph.value(current)?;
-        if value.canonical_storage == Some(storage) {
-            if !graph.use_sites(current).is_empty() {
-                return None;
-            }
-            return Some((insts, values));
-        }
-        let uses = graph.use_sites(current);
-        let [site] = uses else {
-            return None;
-        };
-        let definition = graph.inst(site.inst)?;
-        let InstPayload::Op(SSAOp::Copy { dst, src }) = &definition.payload else {
-            return None;
-        };
-        let output = definition.output?;
-        if site.input_idx != 0
-            || graph.inputs(definition.id) != [current]
-            || *src != current
-            || *dst != output
-            || graph.var(*src).size != storage.size
-            || graph.var(*dst).size != storage.size
-            || !insts.insert(site.inst)
-            || !values.insert(output)
-        {
-            return None;
-        }
-        current = output;
-    }
-}
-
 pub(crate) fn instruction_strictly_precedes(
     function: &SSAFunction,
     graph: &SsaGraph,
@@ -509,8 +492,9 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
             );
             continue;
         };
-        if reads.is_empty()
-            || accesses.len() != reads.len().saturating_add(1)
+        // A save no load reads (a function that never returns) is restored by nothing, and no
+        // UB-free code reads outside its objects, so nothing observes it either.
+        if accesses.len() != reads.len().saturating_add(1)
             || accesses.iter().any(|access| {
                 !access.provenance_complete
                     || access.space != SpaceId::Ram
@@ -565,8 +549,12 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
             );
             continue;
         }
-        let Some((storage, entry_value, save_insts, save_values)) =
-            exact_copy_chain_to_entry_storage(graph, stored_value, allocation.size_bytes)
+        let Some(crate::saved_register::EntryLane {
+            lane: storage,
+            entry: entry_value,
+            insts: save_insts,
+            values: save_values,
+        }) = crate::saved_register::entry_lane(graph, stored_value, allocation.size_bytes)
         else {
             r2il::refusal_evidence!(
                 "frame-round-trip",
@@ -582,9 +570,11 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
                 .chain(roles.return_address_storage())
                 .any(|reserved| register_storages_overlap(storage, reserved))
         }) || boundaries.parameters.values().any(|parameter| {
-            parameter.value == entry_value
-                || register_storages_overlap(storage, parameter.graph_storage)
-                || register_storages_overlap(storage, parameter.abi_storage)
+            parameter.value() == Some(entry_value)
+                || parameter.register().is_some_and(|(abi, lane)| {
+                    register_storages_overlap(storage, lane)
+                        || register_storages_overlap(storage, abi)
+                })
         }) || boundaries.calls.values().any(|boundary| {
             boundary.arguments.iter().any(|argument| {
                 matches!(argument.value, SourceCallArgumentValue::Value(value) if value == entry_value)
@@ -644,7 +634,7 @@ pub(crate) fn collect_stack_frame_round_trip_certificates(
                 break;
             }
             let Some((restore_insts, restore_values)) =
-                exact_copy_chain_to_storage(graph, loaded_value, storage)
+                crate::saved_register::restore(graph, loaded_value, storage)
             else {
                 r2il::refusal_evidence!(
                     "frame-round-trip",
@@ -741,6 +731,8 @@ pub(crate) struct StackGeometryContext<'a> {
     pub(crate) unobserved: &'a crate::deadphi::DeadPhis,
     pub(crate) machine_context: Option<&'a SourceMachineContext>,
     pub(crate) declared_slots: &'a DeclaredStackSlots,
+    /// The compiler-inserted operations: a read by one is no program reader of the frame.
+    pub(crate) inserted: &'a crate::dense::IdSet<InstId>,
 }
 
 #[cfg_attr(
@@ -764,6 +756,7 @@ pub(crate) fn collect_stack_geometry_certificate(
         unobserved,
         machine_context,
         declared_slots,
+        inserted,
     } = answered;
     let Some(prep) = prep else {
         return StackGeometryCertificate::default();
@@ -938,7 +931,7 @@ pub(crate) fn collect_stack_geometry_certificate(
     let mut program_values = boundaries
         .parameters
         .values()
-        .map(|parameter| parameter.value)
+        .filter_map(|parameter| parameter.value())
         .collect::<crate::dense::IdSet<_>>();
     for boundary in boundaries.calls.values() {
         program_values.extend(boundary.arguments.iter().filter_map(
@@ -974,6 +967,7 @@ pub(crate) fn collect_stack_geometry_certificate(
             || return_control_uses.contains(site)
             || stack_address_uses.contains(site)
             || unobserved.unobserved_uses().contains(site)
+            || inserted.contains(site.inst)
     };
     let candidates = values.clone();
     let values = greatest_closed(graph, &geometry_outputs, values, inside, |value, site| {
@@ -987,6 +981,11 @@ pub(crate) fn collect_stack_geometry_certificate(
     });
     // Frame setup also admits a read naming an object below the entry stack pointer, where the
     // source states the stack grows down: C names it. Another growth admits nothing.
+    let callee_owned = |offset: i64| {
+        machine_context.map_or(offset < 0, |machine| {
+            machine.stack_owner(offset).callee_owned()
+        })
+    };
     let names_own_object = |site: &UseSite| {
         grows_down(*machine_context)
             && geometry_outputs.get(site.inst).is_some_and(|output| {
@@ -1000,7 +999,7 @@ pub(crate) fn collect_stack_geometry_certificate(
                     })
                     .and_then(|object| objects.entry_stack_roots.get(&object))
                     .is_some_and(|root| {
-                        root.base == StackAddressBase::StackPointer && root.offset < 0
+                        root.base == StackAddressBase::StackPointer && callee_owned(root.offset)
                     })
             })
     };

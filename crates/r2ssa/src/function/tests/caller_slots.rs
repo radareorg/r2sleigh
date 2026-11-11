@@ -90,7 +90,7 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
     }
     let interface = SourceFunctionInterface::new_exact(
         b"caller-slots".to_vec(),
-        "test-stack-abi",
+        r2source::ConventionId::SysVAmd64,
         [SourceAbiParameterSpec::on_stack(0, 16, 8)],
         SourceFunctionReturn::Register {
             storage: storage(0),
@@ -101,9 +101,10 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
     .and_then(|interface| interface.with_stack_pointer_storage(storage(SP)))
     .and_then(|interface| interface.with_exact_stacked_return(0, 8, 8, 8))
     .expect("stacked-return interface");
-    let convention = SourceConventionSlots::new("test-stack-abi", [], Some(storage(0)))
-        .expect("stack-only convention")
-        .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(8, 8));
+    let convention =
+        SourceConventionSlots::new(r2source::ConventionId::SysVAmd64, [], Some(storage(0)))
+            .expect("stack-only convention")
+            .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(8, 8));
     let artifact = SsaArtifact::for_decompile_with(
         &[block],
         DecompileInputs {
@@ -117,6 +118,23 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
         },
     )
     .expect("artifact");
+    let formal = artifact
+        .facts()
+        .boundaries
+        .parameters
+        .get(&0)
+        .expect("the stack formal");
+    assert!(
+        matches!(
+            formal.home,
+            crate::semantic::FormalHome::Frame {
+                offset: 16,
+                bytes: 8,
+                ..
+            }
+        ),
+        "{formal:?}"
+    );
     (artifact.certificates().caller_stack_slots.values())
         .map(
             |CallerStackSlotCertificate {
@@ -128,7 +146,7 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
 }
 
 #[test]
-fn caller_slots_name_the_unadmitted_argument_and_the_return_address_only() {
+fn caller_slots_name_the_unadmitted_argument_the_formal_and_the_return_address() {
     let slots = caller_slots();
     // +8: the argument area, at no parameter the interface admits.
     assert_eq!(
@@ -142,7 +160,11 @@ fn caller_slots_name_the_unadmitted_argument_and_the_return_address_only() {
         Some(&CallerSlotSupply::HeldFromEntry),
         "{slots:?}"
     );
-    // +16: an admitted stack parameter; +24: written before it is read.
-    assert!(!slots.contains_key(&16), "{slots:?}");
+    // +16: the admitted stack parameter, its formal read whole; +24: written before it is read.
+    assert_eq!(
+        slots.get(&16),
+        Some(&CallerSlotSupply::Formal(0)),
+        "{slots:?}"
+    );
     assert!(!slots.contains_key(&24), "{slots:?}");
 }

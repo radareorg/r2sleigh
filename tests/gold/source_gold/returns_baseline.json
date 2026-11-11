@@ -1,0 +1,81 @@
+{
+  "functions_in_dwarf": 12,
+  "functions_in_truth": 12,
+  "functions_recovered": 12,
+  "ungradable": {},
+  "without_dwarf": [
+    "sym.__do_global_dtors_aux",
+    "sym._fini",
+    "sym._init",
+    "sym._start",
+    "sym.deregister_tm_clones",
+    "sym.frame_dummy",
+    "sym.imp.__cxa_finalize",
+    "sym.imp.__stack_chk_fail",
+    "sym.register_tm_clones"
+  ],
+  "facts": {
+    "correct": 2,
+    "missing": 0,
+    "marked_wrong": 12,
+    "silently_wrong": 10
+  },
+  "recovery_rate": 0.0833,
+  "soundness_rate": 0.1667,
+  "soundness_without_qualifier": 0.1667,
+  "silent": [
+    "total_into parameter 0: expected 'int32_t*', said 'uint32_t*'",
+    "total_into parameter 1: expected 'const int32_t*', said 'uint64_t'",
+    "total_into parameter 2: expected 'int32_t', said 'uint32_t'",
+    "twice parameter 0: expected 'int32_t', said 'uint32_t'",
+    "discard_twice parameter 0: expected 'int32_t', said 'uint32_t'",
+    "ignored parameter 0: expected 'int32_t', said 'uint32_t'",
+    "forward_read parameter 0: expected 'int32_t', said 'uint32_t'",
+    "forward_ignored parameter 0: expected 'int32_t', said 'uint32_t'",
+    "used parameter 0: expected 'int32_t', said 'uint32_t'",
+    "exported_value parameter 0: expected 'int32_t', said 'uint32_t'"
+  ],
+  "silent_buckets": {
+    "parameter": {
+      "pointee": 1,
+      "pointer_as_integer": 1,
+      "sign": 8
+    }
+  },
+  "marked_buckets": {
+    "return": {
+      "other": 8,
+      "void_vs_value": 4
+    }
+  },
+  "return_presence": {
+    "void_to_void": {
+      "total": 0,
+      "silent": 0
+    },
+    "void_to_value": {
+      "total": 4,
+      "silent": 0
+    },
+    "value_to_void": {
+      "total": 0,
+      "silent": 0
+    },
+    "value_to_value": {
+      "total": 8,
+      "silent": 0
+    }
+  },
+  "why": {
+    "total_into parameter 0: expected 'int32_t*', said 'uint32_t*'": "the pointee is only added to or stored through: no byte states its sign, and the certified width is unsigned",
+    "total_into parameter 1: expected 'const int32_t*', said 'uint64_t'": "no certified memory access is attributed to this parameter (it is read through a pointer advanced in a loop), so it keeps its carrier width",
+    "total_into parameter 2: expected 'int32_t', said 'uint32_t'": "the body compares the count as int32_t (`jle` after `test edx, edx`) and the header declares uint32_t: the signed compare does not reach the declaration (W49)",
+    "twice parameter 0: expected 'int32_t', said 'uint32_t'": "the argument is only stored or added to: no byte states a sign, so it keeps its unsigned carrier width",
+    "discard_twice parameter 0: expected 'int32_t', said 'uint32_t'": "the argument is only handed on to `twice(int)` by a tail jump: D105 narrows the carrier handed on whole to the 32-bit lane the callee holds, so the width is right, and no byte states a sign, so it keeps the unsigned lane (D156). At s13 the function returned `uint64_t` with `residual_u64(1) << 32`, so the fact was marked; S2 (D161) gives the tail call's result its callee's 32-bit width and the marker goes",
+    "ignored parameter 0: expected 'int32_t', said 'uint32_t'": "the argument is only stored or added to: no byte states a sign, so it keeps its unsigned carrier width",
+    "forward_read parameter 0: expected 'int32_t', said 'uint32_t'": "the argument is only handed on to `twice(int)` by a tail jump: D105 narrows the carrier handed on whole to the 32-bit lane the callee holds, so the width is right, and no byte states a sign, so it keeps the unsigned lane (D156). At s13 the function returned `uint64_t` with `residual_u64(1) << 32`, so the fact was marked; S2 (D161) gives the tail call's result its callee's 32-bit width and the marker goes",
+    "forward_ignored parameter 0: expected 'int32_t', said 'uint32_t'": "the argument is only incremented and handed on: no byte states a sign, so it keeps its unsigned carrier width (D156). At s13 the function returned `uint64_t` with `residual_u64(1) << 32`, so the fact was marked; S2 (D161) gives the tail call's result its callee's 32-bit width and the marker goes",
+    "used parameter 0: expected 'int32_t', said 'uint32_t'": "the argument is only stored or added to: no byte states a sign, so it keeps its unsigned carrier width",
+    "exported_value parameter 0: expected 'int32_t', said 'uint32_t'": "the argument is only stored or added to: no byte states a sign, so it keeps its unsigned carrier width"
+  }
+}

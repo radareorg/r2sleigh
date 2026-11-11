@@ -1,12 +1,15 @@
 //! What a Sleigh language's compiler specification states about the machine
-//! (doc/adr-machine-profile.md, M0).
+//! (doc/adr-machine-profile.md, M0; doc/adr-call-boundary.md, "What the cspec states").
 //!
-//! The `.cspec` names the stack pointer and which way it grows, where a call
-//! leaves the return address, the pointer size, and the prototype models: the
-//! storage each argument and result takes, what a call kills and what it
-//! leaves as it found it, and the storage the whole program shares. The
-//! lifter owns the specification bundle, so it owns this reading of it, and
-//! no crate below it names an architecture to answer these questions.
+//! Every element under `compiler_spec` is read into a field or refused by name
+//! ([`LanguageProfile::refused`]); one this reading does not know is listed in
+//! [`LanguageProfile::unknown`], which the every-element test holds empty for each
+//! specification a convention selects.
+
+use std::collections::BTreeSet;
+use std::ops::RangeInclusive;
+
+pub use r2abi::{Extension, SlotClass};
 
 /// Which way the stack grows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,73 +34,83 @@ pub enum SpecStorage {
     },
 }
 
-/// How an entry's value is classed by the prototype.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EntryClass {
-    /// No class stated: an integer or pointer.
-    General,
-    /// `float`.
-    Float,
-    /// Any other class, such as the hidden return pointer.
-    Other,
-}
-
 /// One `pentry`: where a prototype puts one argument or result.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PrototypeEntry {
-    pub class: EntryClass,
-    pub storage: SpecStorage,
-    pub min_size: Option<u32>,
-    pub max_size: Option<u32>,
+pub struct ParamEntry {
+    pub class: SlotClass,
+    pub at: SpecStorage,
+    /// `minsize` to `maxsize`, in bytes.
+    pub size: RangeInclusive<u32>,
     pub align: Option<u32>,
-    /// `extension`: how a narrower value fills the storage (`zero`, `sign`,
-    /// `inttype`), where the specification says.
-    pub extension: Option<String>,
-    /// The argument position the entry fills: entries of one `<group>` share it, so a call
-    /// that fills one alternative consumes the others.
-    pub position: u32,
+    /// How a narrower value fills the location; `Unspecified` where the entry states none.
+    pub extension: Extension,
+    /// The argument position the entry fills: entries of one `<group>` share it.
+    pub group: u16,
 }
 
-/// One prototype model.
+/// `extrapop`: the bytes the callee pops on return beyond the call's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExtraPop {
+    Bytes(u32),
+    Unknown,
+}
+
+/// An inclusive range of stack offsets from the stack pointer at the callee's entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StackRange {
+    pub first: i64,
+    pub last: i64,
+}
+
+/// One `<prototype>` model.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Prototype {
-    pub name: String,
-    /// The bytes the transfer spends on the return address before the
-    /// callee's first instruction.
-    pub stack_shift: Option<i64>,
-    /// The bytes the callee pops on return, beyond what the call pushed.
-    pub extra_pop: Option<String>,
-    pub inputs: Vec<PrototypeEntry>,
-    pub outputs: Vec<PrototypeEntry>,
-    /// Storage a call to a function of this model leaves undefined.
-    pub killed_by_call: Vec<SpecStorage>,
-    /// Storage a call leaves as it found it.
-    pub unaffected: Vec<SpecStorage>,
-    /// Where its first stack argument sits, from the stack pointer entering the call, and the
-    /// step to the next.
-    pub stack_arguments: Option<(i64, u32)>,
-    /// Whether a `<varargs first="0">` rule sends every variadic argument to the stack, whatever
-    /// registers the fixed ones leave free (Apple's arm64).
+pub struct ProtoModel {
+    /// The model's name in the specification (`__stdcall`, `abi-internal`).
+    pub name: Box<str>,
+    /// In `pentry` order.
+    pub input: Box<[ParamEntry]>,
+    pub output: Box<[ParamEntry]>,
+    pub unaffected: Box<[SpecStorage]>,
+    pub killed_by_call: Box<[SpecStorage]>,
+    pub likely_trash: Box<[SpecStorage]>,
+    /// `localrange`: where the callee's own stack data may lie (Win64's home area 8..39).
+    pub local_range: Box<[StackRange]>,
+    pub param_range: Box<[StackRange]>,
+    /// The bytes the transfer spends on the return address before the callee's first instruction.
+    pub stack_shift: u32,
+    pub extrapop: ExtraPop,
+    /// `<varargs first="0">` with `<goto_stack>`: every variadic argument on the stack (Apple arm64).
     pub variadic_on_stack: bool,
 }
 
-impl Prototype {
+impl ProtoModel {
     /// Whether every register input position holds one integer and one float alternative, so
     /// the nth argument of either class takes position n, as Microsoft x64 has it.
     pub fn shares_positions(&self) -> bool {
-        let registers = || {
-            (self.inputs.iter()).filter(|entry| matches!(entry.storage, SpecStorage::Register(_)))
-        };
-        let count = |position, class| {
+        let registers =
+            || (self.input.iter()).filter(|entry| matches!(entry.at, SpecStorage::Register(_)));
+        let count = |group, class| {
             registers()
-                .filter(|entry| entry.position == position && entry.class == class)
+                .filter(|entry| entry.group == group && entry.class == class)
                 .count()
         };
         registers().next().is_some()
             && registers().all(|entry| {
-                count(entry.position, EntryClass::General) == 1
-                    && count(entry.position, EntryClass::Float) == 1
+                count(entry.group, SlotClass::Integer) == 1
+                    && count(entry.group, SlotClass::Float) == 1
             })
+    }
+
+    /// Where the first stack argument sits, from the stack pointer entering the call, and the
+    /// step to the next: the stack entry's address less the `stackshift` the transfer spent.
+    pub fn stack_arguments(&self) -> Option<(i64, u32)> {
+        self.input.iter().find_map(|entry| match &entry.at {
+            SpecStorage::Address { space, offset, .. } if space == "stack" => Some((
+                offset.checked_sub(i64::from(self.stack_shift))?,
+                entry.align?,
+            )),
+            _ => None,
+        })
     }
 }
 
@@ -117,14 +130,75 @@ pub struct LanguageProfile {
     /// `data_organization`'s pointer size in bytes, where stated.
     pub pointer_size: Option<u32>,
     /// The default prototype first, then the others in document order.
-    pub prototypes: Vec<Prototype>,
+    pub prototypes: Vec<ProtoModel>,
     /// Storage every function of the program shares (`global`).
     pub global: Vec<SpecStorage>,
+    /// What the specification states that this reading names and does not read, as paths
+    /// (`prototype/input/rule/join_dual_class`, `data_organization/wchar_size`).
+    pub refused: BTreeSet<Box<str>>,
+    /// What it states that this reading does not know.
+    pub unknown: BTreeSet<Box<str>>,
 }
 
 /// A specification that does not parse as XML.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfileError(pub String);
+
+/// Top-level elements no field reads: fix-ups, pointer and split hints, aliases.
+const REFUSED_TOP: &[&str] = &[
+    "callfixup",
+    "callotherfixup",
+    "funcptr",
+    "prefersplit",
+    "modelalias",
+    "spacebase",
+    "context_data",
+    "nohighptr",
+    "readonly",
+    "aggressivetrim",
+    "deadcodedelay",
+    "segmentop",
+    "resolveprototype",
+    "eval_current_prototype",
+    "eval_called_prototype",
+    "properties",
+    "inferptrbounds",
+];
+
+/// What one reading of a specification read, refused and did not know.
+#[derive(Default)]
+struct Audit {
+    refused: BTreeSet<Box<str>>,
+    unknown: BTreeSet<Box<str>>,
+}
+
+type Node<'a, 'input> = roxmltree::Node<'a, 'input>;
+
+impl Audit {
+    fn refuse(&mut self, path: impl Into<Box<str>>) {
+        self.refused.insert(path.into());
+    }
+
+    fn unknown(&mut self, path: impl Into<Box<str>>) {
+        self.unknown.insert(path.into());
+    }
+
+    /// Every attribute of `node` is one it reads or refuses by name; any other is unknown.
+    fn attributes(&mut self, node: Node<'_, '_>, path: &str, read: &[&str], refused: &[&str]) {
+        for attribute in node.attributes() {
+            let name = attribute.name();
+            if refused.contains(&name) {
+                self.refuse(format!("{path}@{name}"));
+            } else if !read.contains(&name) {
+                self.unknown(format!("{path}@{name}"));
+            }
+        }
+    }
+}
+
+fn elements<'a, 'input>(node: Node<'a, 'input>) -> impl Iterator<Item = Node<'a, 'input>> {
+    node.children().filter(Node::is_element)
+}
 
 impl LanguageProfile {
     pub fn parse(text: &str) -> Result<Self, ProfileError> {
@@ -139,72 +213,91 @@ impl LanguageProfile {
                     .map_err(|error| ProfileError(error.to_string()))?
             }
         };
+        let mut audit = Audit::default();
+        let mut profile = Self {
+            stack_pointer: None,
+            stack_growth: StackGrowth::Lower,
+            return_address: None,
+            return_address_slot: None,
+            pointer_size: None,
+            prototypes: Vec::new(),
+            global: Vec::new(),
+            refused: BTreeSet::new(),
+            unknown: BTreeSet::new(),
+        };
+        let mut default = None;
+        let mut others = Vec::new();
+        // A fragment of one element parses as a document whose root is that element.
         let root = document.root_element();
-        let first = |name: &str| root.descendants().find(|node| node.has_tag_name(name));
-        let pointer = first("stackpointer");
-        let returns = first("returnaddress");
-        let default = first("default_proto").and_then(|default| {
-            default
-                .children()
-                .find(|node| node.has_tag_name("prototype"))
-        });
-        let mut prototypes = default.into_iter().map(prototype).collect::<Vec<_>>();
-        prototypes.extend(
-            root.descendants()
-                .filter(|node| {
-                    node.has_tag_name("prototype")
-                        && !node
-                            .parent_element()
-                            .is_some_and(|parent| parent.has_tag_name("default_proto"))
-                })
-                .map(prototype),
-        );
-        Ok(Self {
-            stack_pointer: pointer
-                .and_then(|node| node.attribute("register"))
-                .map(str::to_owned),
-            stack_growth: match pointer.and_then(|node| node.attribute("growth")) {
-                Some("positive") => StackGrowth::Higher,
-                _ => StackGrowth::Lower,
-            },
-            return_address: returns
-                .and_then(|node| {
-                    node.descendants()
-                        .find(|node| node.has_tag_name("register"))
-                })
-                .and_then(|node| node.attribute("name"))
-                .map(str::to_owned),
-            return_address_slot: returns
-                .and_then(|node| node.descendants().find(|node| node.has_tag_name("varnode")))
-                .filter(|node| node.attribute("space") == Some("stack"))
-                .and_then(|node| {
-                    Some((
-                        node.attribute("offset")?.parse().ok()?,
-                        node.attribute("size")?.parse().ok()?,
-                    ))
-                }),
-            pointer_size: first("pointer_size")
-                .and_then(|node| node.attribute("value"))
-                .and_then(|value| value.parse().ok()),
-            prototypes,
-            global: first("global").map(storage_list).unwrap_or_default(),
-        })
+        let tops = match root.tag_name().name() {
+            "compiler_spec" | "spec" => elements(root).collect::<Vec<_>>(),
+            _ => vec![root],
+        };
+        for child in tops {
+            match child.tag_name().name() {
+                "stackpointer" => {
+                    audit.attributes(child, "stackpointer", &["register", "growth"], &["space"]);
+                    profile.stack_pointer = child.attribute("register").map(str::to_owned);
+                    profile.stack_growth = match child.attribute("growth") {
+                        Some("positive") => StackGrowth::Higher,
+                        _ => StackGrowth::Lower,
+                    };
+                }
+                "returnaddress" => profile.read_return_address(child, &mut audit),
+                "data_organization" => profile.read_data_organization(child, &mut audit),
+                "default_proto" => default = default_prototype(child, &mut audit),
+                "prototype" => others.push(prototype(child, &mut audit)),
+                "global" => profile.global = storage_list(child, "global", &mut audit),
+                name if REFUSED_TOP.contains(&name) => audit.refuse(name),
+                name => audit.unknown(name),
+            }
+        }
+        profile.prototypes = default.into_iter().chain(others).collect();
+        profile.refused = audit.refused;
+        profile.unknown = audit.unknown;
+        Ok(profile)
+    }
+
+    /// The pointer size; the rest of the data model is S14's (`CDataModel`), refused here.
+    fn read_data_organization(&mut self, node: Node<'_, '_>, audit: &mut Audit) {
+        for item in elements(node) {
+            match item.tag_name().name() {
+                "pointer_size" => {
+                    self.pointer_size = item.attribute("value").and_then(|v| v.parse().ok());
+                }
+                name => audit.refuse(format!("data_organization/{name}")),
+            }
+        }
+    }
+
+    fn read_return_address(&mut self, node: Node<'_, '_>, audit: &mut Audit) {
+        for item in elements(node) {
+            match item.tag_name().name() {
+                "register" => self.return_address = item.attribute("name").map(str::to_owned),
+                "varnode" if item.attribute("space") == Some("stack") => {
+                    let offset = item.attribute("offset").and_then(|v| v.parse().ok());
+                    let size = item.attribute("size").and_then(|v| v.parse().ok());
+                    self.return_address_slot = offset.zip(size);
+                }
+                name => audit.unknown(format!("returnaddress/{name}")),
+            }
+        }
     }
 
     /// The default prototype, where the specification states one.
-    pub fn default_prototype(&self) -> Option<&Prototype> {
+    pub fn default_prototype(&self) -> Option<&ProtoModel> {
         self.prototypes.first()
     }
 
     /// Where the default prototype puts its first stack argument, and the step to the next.
     pub fn stack_arguments(&self) -> Option<(i64, u32)> {
-        self.default_prototype()?.stack_arguments
+        self.default_prototype()?.stack_arguments()
     }
 
     /// The same specification with the named prototype as its default: a program whose
     /// functions use one of its other models, as Go's ABI0 is beside its ABIInternal.
     pub fn under(&self, prototype: &str) -> Option<Self> {
-        let at = self.prototypes.iter().position(|p| p.name == prototype)?;
+        let at = self.prototypes.iter().position(|p| &*p.name == prototype)?;
         let mut profile = self.clone();
         let chosen = profile.prototypes.remove(at);
         profile.prototypes.insert(0, chosen);
@@ -212,15 +305,6 @@ impl LanguageProfile {
     }
 }
 
-/// Where the default prototype's first stack argument sits, and the step to
-/// the next.
-///
-/// A stack `pentry` states its own address and alignment, so a convention
-/// that passes everything on the stack -- x86 cdecl -- describes its
-/// arguments as exactly as a register convention does. The address is in the
-/// callee's own coordinates, where the transfer has already spent
-/// `stackshift` bytes on the return address, so that much is taken off to
-/// name the slot from the stack pointer entering the call.
 /// One `<language>` of a `.ldefs` file: the files that make it up, by name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LanguageDefinition {
@@ -338,110 +422,214 @@ fn run(number: u16, name: &str, count: Option<u16>) -> Vec<(u16, String)> {
         .collect()
 }
 
-fn stack_arguments(prototype: roxmltree::Node<'_, '_>) -> Option<(i64, u32)> {
-    let shift = prototype.attribute("stackshift")?.parse::<i64>().ok()?;
-    let input = prototype
-        .children()
-        .find(|node| node.has_tag_name("input"))?;
-    let entry = input
-        .children()
-        .filter(|node| node.has_tag_name("pentry"))
-        .find(|entry| {
-            entry
-                .children()
-                .find(|node| node.has_tag_name("addr"))
-                .is_some_and(|addr| addr.attribute("space") == Some("stack"))
-        })?;
-    let addr = entry.children().find(|node| node.has_tag_name("addr"))?;
-    let offset = addr.attribute("offset")?.parse::<i64>().ok()?;
-    let align = entry.attribute("align")?.parse().ok()?;
-    Some((offset.checked_sub(shift)?, align))
+fn default_prototype(node: Node<'_, '_>, audit: &mut Audit) -> Option<ProtoModel> {
+    let mut default = None;
+    for item in elements(node) {
+        match item.tag_name().name() {
+            "prototype" => default = Some(prototype(item, audit)),
+            name => audit.unknown(format!("default_proto/{name}")),
+        }
+    }
+    default
 }
 
-fn prototype(node: roxmltree::Node<'_, '_>) -> Prototype {
-    let entries = |name: &str| {
-        node.children()
-            .find(|child| child.has_tag_name(name))
-            .map(|list| {
-                let slots = list
-                    .children()
-                    .filter(|child| child.has_tag_name("pentry") || child.has_tag_name("group"));
-                // Each direct `pentry` or `group` is one position; a group's pentries share it.
-                (0..)
-                    .zip(slots)
-                    .flat_map(|(position, slot)| {
-                        let alternatives = slot.descendants().filter(|n| n.has_tag_name("pentry"));
-                        alternatives.filter_map(move |entry| pentry(entry, position))
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    let storages = |name: &str| {
-        node.children()
-            .find(|child| child.has_tag_name(name))
-            .map(storage_list)
-            .unwrap_or_default()
-    };
-    Prototype {
-        name: node.attribute("name").unwrap_or_default().to_owned(),
+fn prototype(node: Node<'_, '_>, audit: &mut Audit) -> ProtoModel {
+    audit.attributes(node, "prototype", &["name", "extrapop", "stackshift"], &[]);
+    let mut model = ProtoModel {
+        name: node.attribute("name").unwrap_or_default().into(),
+        input: Box::default(),
+        output: Box::default(),
+        unaffected: Box::default(),
+        killed_by_call: Box::default(),
+        likely_trash: Box::default(),
+        local_range: Box::default(),
+        param_range: Box::default(),
         stack_shift: node
             .attribute("stackshift")
-            .and_then(|value| value.parse().ok()),
-        extra_pop: node.attribute("extrapop").map(str::to_owned),
-        inputs: entries("input"),
-        outputs: entries("output"),
-        killed_by_call: storages("killedbycall"),
-        unaffected: storages("unaffected"),
-        stack_arguments: stack_arguments(node),
-        variadic_on_stack: variadic_on_stack(node),
-    }
-}
-
-fn variadic_on_stack(prototype: roxmltree::Node<'_, '_>) -> bool {
-    let child = |node: roxmltree::Node<'_, '_>, name: &str| {
-        node.children().any(|child| child.has_tag_name(name))
-    };
-    let from_first = |rule: roxmltree::Node<'_, '_>| {
-        (rule.children())
-            .any(|node| node.has_tag_name("varargs") && node.attribute("first") == Some("0"))
-    };
-    prototype
-        .children()
-        .filter(|node| node.has_tag_name("input"))
-        .flat_map(|input| input.children().filter(|node| node.has_tag_name("rule")))
-        .any(|rule| from_first(rule) && child(rule, "goto_stack"))
-}
-
-fn pentry(node: roxmltree::Node<'_, '_>, position: u32) -> Option<PrototypeEntry> {
-    let number = |name: &str| node.attribute(name).and_then(|value| value.parse().ok());
-    Some(PrototypeEntry {
-        // Older specifications class an entry with `metatype`, newer ones
-        // with `storage`; both say `float`, and `hiddenret` is the latter's
-        // hidden return pointer.
-        class: match node
-            .attribute("metatype")
-            .or_else(|| node.attribute("storage"))
-        {
-            None | Some("general") => EntryClass::General,
-            Some("float") => EntryClass::Float,
-            Some(_) => EntryClass::Other,
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        extrapop: match node.attribute("extrapop").map(str::parse) {
+            Some(Ok(bytes)) => ExtraPop::Bytes(bytes),
+            _ => ExtraPop::Unknown,
         },
-        storage: node.children().find_map(storage)?,
-        min_size: number("minsize"),
-        max_size: number("maxsize"),
+        variadic_on_stack: false,
+    };
+    for child in elements(node) {
+        let name = child.tag_name().name();
+        let path = format!("prototype/{name}");
+        match name {
+            "input" => {
+                audit.attributes(child, &path, &[], &["pointermax", "thisbeforeretpointer"]);
+                let (entries, on_stack) = entries(child, &path, true, audit);
+                model.input = entries;
+                model.variadic_on_stack = on_stack;
+            }
+            "output" => {
+                audit.attributes(child, &path, &[], &["killedbycall"]);
+                model.output = entries(child, &path, false, audit).0;
+            }
+            "unaffected" => model.unaffected = storage_list(child, &path, audit).into(),
+            "killedbycall" => model.killed_by_call = storage_list(child, &path, audit).into(),
+            "likelytrash" => model.likely_trash = storage_list(child, &path, audit).into(),
+            "localrange" => model.local_range = ranges(child, &path, audit),
+            "paramrange" => model.param_range = ranges(child, &path, audit),
+            "returnaddress" | "pcode" | "sharestack" => audit.refuse(path),
+            _ => audit.unknown(path),
+        }
+    }
+    model
+}
+
+/// An `<input>` or `<output>`: each direct `pentry` or `group` is one position, a group's entries
+/// sharing it; and whether a rule sends every variadic argument to the stack.
+fn entries(
+    list: Node<'_, '_>,
+    path: &str,
+    input: bool,
+    audit: &mut Audit,
+) -> (Box<[ParamEntry]>, bool) {
+    let mut entries = Vec::new();
+    let mut on_stack = false;
+    let mut group = 0u16;
+    for child in elements(list) {
+        let name = child.tag_name().name();
+        match name {
+            "pentry" => {
+                entries.extend(pentry(child, group, path, audit));
+                group += 1;
+            }
+            "group" => {
+                for alternative in elements(child) {
+                    match alternative.tag_name().name() {
+                        "pentry" => entries.extend(pentry(alternative, group, path, audit)),
+                        other => audit.unknown(format!("{path}/group/{other}")),
+                    }
+                }
+                group += 1;
+            }
+            "rule" => on_stack |= rule(child, path, input, audit),
+            "sharestack" => audit.refuse(format!("{path}/{name}")),
+            _ => audit.unknown(format!("{path}/{name}")),
+        }
+    }
+    (entries.into(), on_stack)
+}
+
+/// Whether a `<rule>` is `<varargs first="0">` with `<goto_stack>`, the one rule read (Apple's
+/// variadic tail on the stack); every other rule's actions are refused by name.
+fn rule(node: Node<'_, '_>, path: &str, input: bool, audit: &mut Audit) -> bool {
+    let has = |name: &str| elements(node).any(|child| child.has_tag_name(name));
+    let from_first = elements(node)
+        .any(|child| child.has_tag_name("varargs") && child.attribute("first") == Some("0"));
+    if input && from_first && has("goto_stack") {
+        return true;
+    }
+    for child in elements(node) {
+        audit.refuse(format!("{path}/rule/{}", child.tag_name().name()));
+    }
+    false
+}
+
+fn pentry(node: Node<'_, '_>, group: u16, path: &str, audit: &mut Audit) -> Option<ParamEntry> {
+    let path = format!("{path}/pentry");
+    let read = [
+        "minsize",
+        "maxsize",
+        "align",
+        "metatype",
+        "storage",
+        "extension",
+    ];
+    audit.attributes(node, &path, &read, &[]);
+    let number = |name: &str| node.attribute(name).and_then(|value| value.parse().ok());
+    // Older specifications class an entry with `metatype`, newer ones with `storage`.
+    let class = match node
+        .attribute("metatype")
+        .or_else(|| node.attribute("storage"))
+    {
+        None | Some("general") => SlotClass::Integer,
+        Some("float") => SlotClass::Float,
+        Some("hiddenret") => SlotClass::HiddenReturn,
+        Some(other) => {
+            audit.refuse(format!("{path}@storage={other}"));
+            return None;
+        }
+    };
+    let extension = match node.attribute("extension") {
+        None => Extension::Unspecified,
+        Some("zero") => Extension::Zero,
+        Some("sign") => Extension::Sign,
+        Some("inttype") => Extension::IntType,
+        Some("float") => Extension::Float,
+        Some(other) => {
+            audit.unknown(format!("{path}@extension={other}"));
+            Extension::Unspecified
+        }
+    };
+    let at = elements(node).find_map(|child| located(child, &path, audit))?;
+    let (Some(min), Some(max)) = (number("minsize"), number("maxsize")) else {
+        audit.unknown(format!("{path} without a size"));
+        return None;
+    };
+    let on_stack = matches!(&at, SpecStorage::Address { space, .. } if space == "stack");
+    Some(ParamEntry {
+        class: if on_stack { SlotClass::Stack } else { class },
+        at,
+        size: min..=max,
         align: number("align"),
-        extension: node.attribute("extension").map(str::to_owned),
-        position,
+        extension,
+        group,
     })
 }
 
-fn storage_list(node: roxmltree::Node<'_, '_>) -> Vec<SpecStorage> {
-    node.children().filter_map(storage).collect()
+/// A `pentry`'s location; a `join` of pieces is refused by name.
+fn located(node: Node<'_, '_>, path: &str, audit: &mut Audit) -> Option<SpecStorage> {
+    let pieces = node.attributes().any(|a| a.name().starts_with("piece"));
+    if pieces {
+        audit.refuse(format!("{path}/{}@piece", node.tag_name().name()));
+        return None;
+    }
+    let located = storage(node);
+    if located.is_none() {
+        audit.unknown(format!("{path}/{}", node.tag_name().name()));
+    }
+    located
+}
+
+fn ranges(node: Node<'_, '_>, path: &str, audit: &mut Audit) -> Box<[StackRange]> {
+    let number = |range: Node<'_, '_>, name: &str| {
+        let text = range.attribute(name)?;
+        let value = match text.strip_prefix("0x") {
+            Some(hex) => u64::from_str_radix(hex, 16).ok()?,
+            None => text.parse::<u64>().ok()?,
+        };
+        // Ghidra spells a negative stack offset as its 64-bit two's complement.
+        Some(value as i64)
+    };
+    let mut ranges = Vec::new();
+    for range in elements(node) {
+        let stack = range.has_tag_name("range") && range.attribute("space") == Some("stack");
+        match (stack, number(range, "first"), number(range, "last")) {
+            (true, Some(first), Some(last)) => ranges.push(StackRange { first, last }),
+            _ => audit.unknown(format!("{path}/{}", range.tag_name().name())),
+        }
+    }
+    ranges.into()
+}
+
+fn storage_list(node: Node<'_, '_>, path: &str, audit: &mut Audit) -> Vec<SpecStorage> {
+    let mut list = Vec::new();
+    for child in elements(node) {
+        match storage(child) {
+            Some(storage) => list.push(storage),
+            None => audit.unknown(format!("{path}/{}", child.tag_name().name())),
+        }
+    }
+    list
 }
 
 /// One `register`, `addr`, `varnode` or `range` element as storage.
-fn storage(node: roxmltree::Node<'_, '_>) -> Option<SpecStorage> {
+fn storage(node: Node<'_, '_>) -> Option<SpecStorage> {
     let offset = |name: &str| {
         node.attribute(name)
             .and_then(|value| value.parse::<i64>().ok())
@@ -564,10 +752,10 @@ mod tests {
         assert_eq!(spec.pointer_size, Some(8));
         let default = spec.default_prototype().expect("a default prototype");
         let general = default
-            .inputs
+            .input
             .iter()
-            .filter(|entry| entry.class == EntryClass::General)
-            .filter_map(|entry| match &entry.storage {
+            .filter(|entry| entry.class == SlotClass::Integer)
+            .filter_map(|entry| match &entry.at {
                 SpecStorage::Register(name) => Some(name.as_str()),
                 SpecStorage::Address { .. } => None,
             })
@@ -598,10 +786,10 @@ mod tests {
         assert_eq!(spec.return_address.as_deref(), Some("x30"));
         let default = spec.default_prototype().expect("a default prototype");
         let general = default
-            .inputs
+            .input
             .iter()
-            .filter(|entry| entry.class == EntryClass::General)
-            .filter_map(|entry| match &entry.storage {
+            .filter(|entry| entry.class == SlotClass::Integer)
+            .filter_map(|entry| match &entry.at {
                 SpecStorage::Register(name) => Some(name.as_str()),
                 SpecStorage::Address { .. } => None,
             })
@@ -635,21 +823,21 @@ mod tests {
         let default = spec.default_prototype().expect("a default prototype");
         let registers = |class| {
             default
-                .inputs
+                .input
                 .iter()
                 .filter(|entry| entry.class == class)
-                .filter_map(|entry| match &entry.storage {
-                    SpecStorage::Register(name) => Some((entry.position, name.as_str())),
+                .filter_map(|entry| match &entry.at {
+                    SpecStorage::Register(name) => Some((entry.group, name.as_str())),
                     SpecStorage::Address { .. } => None,
                 })
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            registers(EntryClass::General),
+            registers(SlotClass::Integer),
             [(0, "RCX"), (1, "RDX"), (2, "R8"), (3, "R9")]
         );
         assert_eq!(
-            registers(EntryClass::Float),
+            registers(SlotClass::Float),
             [
                 (0, "XMM0_Qa"),
                 (1, "XMM1_Qa"),
@@ -659,7 +847,119 @@ mod tests {
         );
         assert!(default.shares_positions());
         // The stack entry is the fifth position, past the 32-byte home area.
-        assert_eq!(default.inputs.last().map(|entry| entry.position), Some(4));
+        assert_eq!(default.input.last().map(|entry| entry.group), Some(4));
         assert_eq!(spec.stack_arguments(), Some((32, 8)));
+    }
+    /// The vendored specifications of the graded processors, by file name.
+    #[cfg(all(feature = "x86", feature = "arm"))]
+    fn vendored() -> impl Iterator<Item = (&'static str, &'static str)> {
+        (sleigh_config::processor_x86::FILES.iter())
+            .chain(sleigh_config::processor_aarch64::FILES)
+            .filter(|(name, _)| name.ends_with(".cspec"))
+            .copied()
+    }
+
+    /// Every element and attribute of each specification a convention selects is read or
+    /// refused by name; one no convention selects is named here, so a new one fails.
+    #[cfg(all(feature = "x86", feature = "arm"))]
+    #[test]
+    fn every_element_of_a_selected_specification_is_read_or_refused_by_name() {
+        // The four the ADR grades, then those r2abi's other ids select (i386, Go, a PE's).
+        let selected = [
+            "AARCH64.cspec",
+            "AARCH64_apple.cspec",
+            "x86-64-gcc.cspec",
+            "x86-64-win.cspec",
+            "AARCH64_golang.cspec",
+            "AARCH64_win.cspec",
+            "x86-64-golang.cspec",
+            "x86gcc.cspec",
+            "x86win.cspec",
+        ];
+        let unselected = [
+            "AARCH64_ilp32.cspec",
+            "x86-16.cspec",
+            "x86-32-golang.cspec",
+            "x86borland.cspec",
+            "x86delphi.cspec",
+        ];
+        let mut seen = Vec::new();
+        for (name, text) in vendored() {
+            seen.push(name);
+            let profile = parse(text);
+            if selected.contains(&name) {
+                assert!(profile.unknown.is_empty(), "{name}: {:?}", profile.unknown);
+            } else {
+                assert!(
+                    unselected.contains(&name),
+                    "{name} is neither selected nor named"
+                );
+            }
+        }
+        seen.sort_unstable();
+        let mut named = selected
+            .iter()
+            .chain(&unselected)
+            .copied()
+            .collect::<Vec<_>>();
+        named.sort_unstable();
+        assert_eq!(seen, named);
+    }
+
+    /// The `<rule>` actions no slice reads yet are refused by name, not dropped unseen.
+    #[cfg(feature = "arm")]
+    #[test]
+    fn the_aarch64_rules_no_slice_reads_are_refused_by_name() {
+        let spec = parse(sleigh_config::processor_aarch64::CSPEC_AARCH64);
+        for path in [
+            "prototype/output/rule/join_per_primitive",
+            "prototype/output/rule/hidden_return",
+            "prototype/input/rule/convert_to_ptr",
+            "prototype/input/rule/join",
+            "callfixup",
+        ] {
+            assert!(spec.refused.contains(path), "{path} in {:?}", spec.refused);
+        }
+        let default = spec.default_prototype().expect("a default prototype");
+        let hidden = default
+            .input
+            .iter()
+            .find(|e| e.class == SlotClass::HiddenReturn);
+        assert_eq!(
+            hidden.map(|entry| &entry.at),
+            Some(&SpecStorage::Register("x8".into()))
+        );
+        // The specification's own claim; r2abi's AAPCS64 row overrides it (C.16).
+        let x0 = default.input.iter().find(|e| e.class == SlotClass::Integer);
+        assert_eq!(x0.map(|entry| entry.extension), Some(Extension::Zero));
+    }
+
+    /// Microsoft x64's callee owns the 32-byte home area above the return address.
+    #[cfg(feature = "x86")]
+    #[test]
+    fn the_x86_64_windows_specification_states_the_home_area() {
+        let spec = parse(sleigh_config::processor_x86::CSPEC_X86_64_WIN);
+        let default = spec.default_prototype().expect("a default prototype");
+        assert!(
+            default
+                .local_range
+                .contains(&StackRange { first: 8, last: 39 })
+        );
+        assert_eq!(default.extrapop, ExtraPop::Bytes(8));
+        assert_eq!(default.stack_shift, 8);
+        assert!(spec.refused.contains("prototype/input@pointermax"));
+    }
+
+    /// i386 gcc states EAX likely trash, and a joined EDX:EAX result it does not place.
+    #[cfg(feature = "x86")]
+    #[test]
+    fn the_i386_gcc_specification_states_likely_trash() {
+        let spec = parse(sleigh_config::processor_x86::CSPEC_X86GCC);
+        let default = spec.default_prototype().expect("a default prototype");
+        assert_eq!(
+            &*default.likely_trash,
+            [SpecStorage::Register("EAX".into())]
+        );
+        assert!(spec.refused.iter().any(|path| path.ends_with("@piece")));
     }
 }

@@ -8,6 +8,9 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 
+use crate::ConventionId;
+use crate::convention::SlotClass;
+
 use crate::type_graph::{
     SourceCarrierKind, SourceCarrierProjection, SourceLogicalValue, SourceType, SourceTypeGraph,
     SourceTypeKind,
@@ -97,71 +100,6 @@ pub enum StackAddressBase {
 pub const SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION: u32 = 12;
 pub const SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION: u32 = 3;
 
-/// Typed classification of one source-owned calling-convention spelling.
-///
-/// The source spelling remains available for presentation, but semantic
-/// consumers use this closed value. Classification happens once when a source
-/// contract is constructed; consumers must not parse the spelling again.
-#[derive(
-    Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-pub enum SourceAbiClass {
-    /// The source supplied no convention, or explicitly marked it unknown.
-    #[default]
-    Unknown,
-    /// The source supplied a convention outside the closed vocabulary below.
-    Other,
-    Microsoft,
-    MicrosoftX64,
-    SystemV,
-    SystemVAMD64,
-    Aapcs,
-    Aapcs64,
-    RiscV32,
-    RiscV64,
-    Cdecl,
-    Stdcall,
-    Fastcall,
-    Thiscall,
-    Vectorcall,
-}
-
-impl SourceAbiClass {
-    /// Classify an exact source spelling without architecture or symbol hints.
-    pub fn from_source_spelling(spelling: &str) -> Self {
-        let mut normalized = String::with_capacity(spelling.len());
-        for ch in spelling.trim().chars() {
-            if ch.is_ascii_alphanumeric() {
-                normalized.push(ch.to_ascii_lowercase());
-            } else if ch.is_ascii_whitespace() || matches!(ch, '-' | '_' | ':' | '.' | '/') {
-                continue;
-            } else {
-                return Self::Other;
-            }
-        }
-        match normalized.as_str() {
-            "" | "unknown" | "unspecified" | "default" | "none" => Self::Unknown,
-            "ms" | "msvc" | "microsoft" => Self::Microsoft,
-            "ms64" | "msx64" | "win64" | "windowsx64" | "microsoftx64" | "x64windows"
-            | "amd64windows" => Self::MicrosoftX64,
-            "sysv" | "systemv" => Self::SystemV,
-            "amd64" | "sysv64" | "sysvamd64" | "systemvamd64" | "amd64sysv" | "x8664sysv" => {
-                Self::SystemVAMD64
-            }
-            "aapcs" => Self::Aapcs,
-            "aapcs64" => Self::Aapcs64,
-            "riscv32" | "rv32" => Self::RiscV32,
-            "riscv64" | "rv64" => Self::RiscV64,
-            "cdecl" => Self::Cdecl,
-            "stdcall" => Self::Stdcall,
-            "fastcall" => Self::Fastcall,
-            "thiscall" => Self::Thiscall,
-            "vectorcall" => Self::Vectorcall,
-            _ => Self::Other,
-        }
-    }
-}
-
 /// Where one parameter or argument lives at a call boundary.
 ///
 /// A convention places its first arguments in registers and the rest in the
@@ -246,6 +184,9 @@ impl SourceParameterLocation {
 pub struct SourceAbiParameterSpec {
     index: u32,
     location: SourceParameterLocation,
+    /// The section the slot belongs to and where the parameter comes from, where its producer
+    /// states them (doc/adr-call-boundary.md, "The function's parameters").
+    slot: Option<(crate::convention::SlotClass, crate::Basis)>,
 }
 
 impl SourceAbiParameterSpec {
@@ -254,6 +195,7 @@ impl SourceAbiParameterSpec {
         Self {
             index,
             location: SourceParameterLocation::Register(storage),
+            slot: None,
         }
     }
 
@@ -269,11 +211,41 @@ impl SourceAbiParameterSpec {
                 size_bytes,
                 callee_offset: offset,
             },
+            slot: None,
         }
     }
 
     pub const fn with_location(index: u32, location: SourceParameterLocation) -> Self {
-        Self { index, location }
+        Self {
+            index,
+            location,
+            slot: None,
+        }
+    }
+
+    /// The same parameter, stated in `class`'s section on `basis`.
+    pub const fn in_section(
+        mut self,
+        class: crate::convention::SlotClass,
+        basis: crate::Basis,
+    ) -> Self {
+        self.slot = Some((class, basis));
+        self
+    }
+
+    /// The section's class, where the producer states it.
+    pub fn class(&self) -> Option<crate::convention::SlotClass> {
+        self.slot.map(|(class, _)| class)
+    }
+
+    /// Where the parameter comes from: `Convention` for a hole below a read slot.
+    pub fn basis(&self) -> Option<crate::Basis> {
+        self.slot.map(|(_, basis)| basis)
+    }
+
+    /// An unread slot below a read one: a parameter only by the convention's order.
+    pub fn is_hole(&self) -> bool {
+        self.basis() == Some(crate::Basis::Convention)
     }
 
     pub const fn index(&self) -> u32 {
@@ -336,10 +308,31 @@ pub enum SourceFloorCause {
     ArgumentAreaUnplaced,
     /// The argument area is read past register slots not all of which are parameters.
     ArgumentAreaRead,
-    /// A register slot past the parameters is read.
+    /// The argument area is read past more unread slots than recovery holds: the slots below stand.
+    ArgumentAreaPastBudget,
+    /// A register slot past the parameters is read by a kind of read no rule proves.
     RegisterRead,
+    /// A slot past the parameters is only stored to its home: -O0 homes parameters it never uses.
+    Homed,
     /// The first slot past the parameters may be handed to this call.
     HandedOn(SourceUnprovenCall),
+    /// A declared parameter of a class the convention places nowhere here; it and the rest drop.
+    Unplaced(SourceUnplacedClass),
+}
+
+/// A declared class no location takes here (doc/adr-call-boundary.md, Refusals).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum SourceUnplacedClass {
+    /// A float of this many bits that is no `float` or `double` (`long double`).
+    Float(u32),
+    /// An integer wider than one register (`__int128`).
+    WideInteger(u32),
+    /// A record or array passed by value.
+    Aggregate,
+    /// A type the declaration does not size.
+    Unsized,
+    /// A stack slot this convention packs by size (Apple arm64).
+    PackedStack,
 }
 
 /// Every cause a function's parameters are only a floor, sorted; never empty.
@@ -359,6 +352,15 @@ impl SourceArityFloor {
 
     pub fn causes(&self) -> &[SourceFloorCause] {
         &self.causes
+    }
+
+    /// Whether a slot past the parameters may be read: not where every cause is a home nothing
+    /// loads, so a call passes exactly the parameters (D165).
+    pub fn reads_past(&self) -> bool {
+        !self
+            .causes
+            .iter()
+            .all(|cause| *cause == SourceFloorCause::Homed)
     }
 }
 
@@ -390,6 +392,14 @@ pub enum SourceResultCause {
     Ambiguous,
     /// A return path's value lies outside the carrier or is wider than it.
     Undefined,
+    /// The body writes a result lane that no declaration and no reading call decides.
+    Written,
+    /// Under the closed world no call reads a written result (D202): unread, never void.
+    Unread,
+    /// A call returns the result on through a cycle of forwarders.
+    ForwardCycle,
+    /// No citation states the convention's result lanes complete, so no lane is proven empty (S36).
+    LanesUnbounded,
 }
 
 /// What the direct paths of a body prove of an unproven result: the convention's carrier, at the
@@ -473,13 +483,68 @@ fn storage_or(kind: SourceFunctionReturn, fallback: CanonicalStorageId) -> Canon
     }
 }
 
+/// What the bytes of a result register above its value hold (doc/adr-call-boundary.md, "Result
+/// width follows five rules").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize)]
+pub enum SourceAbove {
+    /// Zero on every path.
+    Zero,
+    /// The value's sign on every path.
+    Sign,
+    /// Nothing the callee states: a read of them is a residual.
+    Undefined,
+}
+
+/// How many low bytes of a result register the value occupies, and what lies above them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
+pub struct SourceResultWidth {
+    pub logical: u8,
+    pub above: SourceAbove,
+}
+
+impl SourceResultWidth {
+    /// The whole of `storage`, which leaves nothing above.
+    pub fn whole(storage: CanonicalStorageId) -> Self {
+        Self {
+            logical: u8::try_from(storage.size).unwrap_or(u8::MAX),
+            above: SourceAbove::Undefined,
+        }
+    }
+
+    /// Whether the value fills all of `storage`.
+    pub fn fills(self, storage: CanonicalStorageId) -> bool {
+        u32::from(self.logical) >= storage.size
+    }
+
+    /// The width either of two paths may leave: the wider value, and a fill both state.
+    #[must_use]
+    pub fn join(self, other: Self) -> Self {
+        Self {
+            logical: self.logical.max(other.logical),
+            above: match self.above == other.above {
+                true => self.above,
+                false => SourceAbove::Undefined,
+            },
+        }
+    }
+}
+
 impl SourceCallResult {
+    /// The whole of one register.
+    pub fn register(storage: CanonicalStorageId) -> Self {
+        Self::Register {
+            storage,
+            width: SourceResultWidth::whole(storage),
+        }
+    }
+
     /// The registers the call's result occupies, low first.
     pub fn storages(self) -> impl Iterator<Item = CanonicalStorageId> {
         let (first, second) = match self {
             Self::Void => (None, None),
-            Self::Register { storage } => (Some(storage), None),
+            Self::Register { storage, .. } => (Some(storage), None),
             Self::Pair { low, high } => (Some(low), Some(high)),
+            Self::Unproven { integer, float } => (Some(integer), Some(float)),
         };
         first.into_iter().chain(second)
     }
@@ -915,6 +980,9 @@ pub struct SourceResultCarriers {
     /// The high half's register, beside a proven or unproven integer result: a call that reads it
     /// takes the pair (doc/adr-language-profile.md, item 1).
     pub second: Option<CanonicalStorageId>,
+    /// No return leaves in the integer register a byte the body defines or an input's entry byte
+    /// (doc/adr-scratch-result.md, cases 1 to 3), so neither it nor the second register holds a result.
+    pub integer_undefined: bool,
 }
 
 impl SourceResultCarriers {
@@ -964,8 +1032,7 @@ impl SourceTailCount {
 pub struct SourceFunctionInterface {
     schema_version: u32,
     revision_identity: Box<[u8]>,
-    calling_convention: String,
-    abi_class: SourceAbiClass,
+    convention: ConventionId,
     parameters: Box<[SourceAbiParameterSpec]>,
     return_kind: SourceFunctionReturn,
     return_address_storage: Option<CanonicalStorageId>,
@@ -1007,9 +1074,14 @@ pub struct SourceFunctionInterface {
     variadic: bool,
     /// The fixed parameter the body's loop bounds its tail by, where it proves one.
     tail_count: Option<SourceTailCount>,
+    /// The fixed parameter a declaration states carries a `va_list` (`Tail::VaList`).
+    va_list_parameter: Option<u32>,
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
+    /// Whether the body is a `/GS` check: it returns only past its first argument equalling the
+    /// load-config cookie, with no memory effect, and otherwise reaches a call that never returns.
+    security_check: bool,
     /// Why the parameters are a floor, where a slot past them may be read or handed on.
     arity_floor: Option<SourceArityFloor>,
     /// Why the result is unproven, where recovery states it.
@@ -1017,6 +1089,10 @@ pub struct SourceFunctionInterface {
     /// Where the result is unproven, the registers it may be in: each call takes the one its
     /// caller reads.
     result_carriers: Option<SourceResultCarriers>,
+    /// What the closed world decided of the result (doc/adr-call-boundary.md, D166).
+    closed_result: Option<crate::SourceClosedResult>,
+    /// Whether a return hands back a parameter through a merge: its cause is an entry input.
+    result_holds_input: bool,
     /// What the logical types are read from (doc/adr-provenance.md):
     /// `DebugInfo` where the binary declares the body, `Declared` where a
     /// library's prototype was found by an import's name, `CarrierWidth`
@@ -1031,7 +1107,6 @@ pub enum SourceFunctionInterfaceError {
     InvalidFormatParameterIndex,
     InvalidTailCount,
     EmptyRevisionIdentity,
-    EmptyCallingConvention,
     InvalidParameterOrder,
     InvalidRegisterStorage,
     InvalidReturnAddressStorage,
@@ -1061,7 +1136,6 @@ impl std::fmt::Display for SourceFunctionInterfaceError {
                 "its tail count is not one of its parameters of a variadic body"
             }
             Self::EmptyRevisionIdentity => "it names no source revision",
-            Self::EmptyCallingConvention => "it names no calling convention",
             Self::InvalidParameterOrder => "its parameters are out of order",
             Self::InvalidRegisterStorage => "a register it names is not a register storage",
             Self::InvalidReturnAddressStorage => "its return address storage is malformed",
@@ -1207,14 +1281,14 @@ impl LogicalTypes {
 impl SourceFunctionInterface {
     pub fn new(
         revision_identity: impl Into<Vec<u8>>,
-        calling_convention: impl Into<String>,
+        convention: ConventionId,
         parameters: impl IntoIterator<Item = SourceAbiParameterSpec>,
         return_kind: SourceFunctionReturn,
         stack_slots: impl IntoIterator<Item = SourceStackSlotSpec>,
     ) -> Result<Self, SourceFunctionInterfaceError> {
         Self::new_with_logical_types_internal(
             revision_identity,
-            calling_convention,
+            convention,
             parameters,
             return_kind,
             stack_slots,
@@ -1227,14 +1301,14 @@ impl SourceFunctionInterface {
 
     pub fn new_exact(
         revision_identity: impl Into<Vec<u8>>,
-        calling_convention: impl Into<String>,
+        convention: ConventionId,
         parameters: impl IntoIterator<Item = SourceAbiParameterSpec>,
         return_kind: SourceFunctionReturn,
         stack_slots: impl IntoIterator<Item = SourceStackSlotSpec>,
     ) -> Result<Self, SourceFunctionInterfaceError> {
         Self::new_with_logical_types_internal(
             revision_identity,
-            calling_convention,
+            convention,
             parameters,
             return_kind,
             stack_slots,
@@ -1248,7 +1322,7 @@ impl SourceFunctionInterface {
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_logical_types(
         revision_identity: impl Into<Vec<u8>>,
-        calling_convention: impl Into<String>,
+        convention: ConventionId,
         parameters: impl IntoIterator<Item = SourceAbiParameterSpec>,
         return_kind: SourceFunctionReturn,
         stack_slots: impl IntoIterator<Item = SourceStackSlotSpec>,
@@ -1258,7 +1332,7 @@ impl SourceFunctionInterface {
     ) -> Result<Self, SourceFunctionInterfaceError> {
         Self::new_with_logical_types_internal(
             revision_identity,
-            calling_convention,
+            convention,
             parameters,
             return_kind,
             stack_slots,
@@ -1272,7 +1346,7 @@ impl SourceFunctionInterface {
     #[allow(clippy::too_many_arguments)]
     pub fn new_exact_with_logical_types(
         revision_identity: impl Into<Vec<u8>>,
-        calling_convention: impl Into<String>,
+        convention: ConventionId,
         parameters: impl IntoIterator<Item = SourceAbiParameterSpec>,
         return_kind: SourceFunctionReturn,
         stack_slots: impl IntoIterator<Item = SourceStackSlotSpec>,
@@ -1282,7 +1356,7 @@ impl SourceFunctionInterface {
     ) -> Result<Self, SourceFunctionInterfaceError> {
         Self::new_with_logical_types_internal(
             revision_identity,
-            calling_convention,
+            convention,
             parameters,
             return_kind,
             stack_slots,
@@ -1296,7 +1370,7 @@ impl SourceFunctionInterface {
     #[allow(clippy::too_many_arguments)]
     fn new_with_logical_types_internal(
         revision_identity: impl Into<Vec<u8>>,
-        calling_convention: impl Into<String>,
+        convention: ConventionId,
         parameters: impl IntoIterator<Item = SourceAbiParameterSpec>,
         return_kind: SourceFunctionReturn,
         stack_slots: impl IntoIterator<Item = SourceStackSlotSpec>,
@@ -1309,11 +1383,6 @@ impl SourceFunctionInterface {
         if revision_identity.is_empty() {
             return Err(SourceFunctionInterfaceError::EmptyRevisionIdentity);
         }
-        let calling_convention = calling_convention.into();
-        if calling_convention.trim().is_empty() {
-            return Err(SourceFunctionInterfaceError::EmptyCallingConvention);
-        }
-        let abi_class = SourceAbiClass::from_source_spelling(&calling_convention);
         let parameters = parameters.into_iter().collect::<Vec<_>>();
         if parameters
             .iter()
@@ -1480,8 +1549,7 @@ impl SourceFunctionInterface {
         Ok(Self {
             schema_version: SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION,
             revision_identity: revision_identity.into_boxed_slice(),
-            calling_convention,
-            abi_class,
+            convention,
             parameters: parameters.into_boxed_slice(),
             return_kind,
             return_address_storage: None,
@@ -1497,10 +1565,14 @@ impl SourceFunctionInterface {
             format_parameter: None,
             variadic: false,
             tail_count: None,
+            va_list_parameter: None,
             body_proven_return_address: false,
+            security_check: false,
             arity_floor: None,
             unproven_result: None,
             result_carriers: None,
+            closed_result: None,
+            result_holds_input: false,
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
     }
@@ -1521,7 +1593,7 @@ impl SourceFunctionInterface {
     ) -> Result<Self, SourceFunctionInterfaceError> {
         let mut rebuilt = Self::new_exact_with_logical_types(
             revision_identity,
-            self.calling_convention.clone(),
+            self.convention,
             self.parameters.iter().cloned(),
             self.return_kind,
             stack_slots,
@@ -1551,10 +1623,14 @@ impl SourceFunctionInterface {
             format_parameter: self.format_parameter.clone(),
             variadic: self.variadic,
             tail_count: self.tail_count,
+            va_list_parameter: self.va_list_parameter,
             body_proven_return_address: self.body_proven_return_address,
+            security_check: self.security_check,
             arity_floor: self.arity_floor.clone(),
             unproven_result: self.unproven_result.clone(),
             result_carriers: self.result_carriers,
+            closed_result: self.closed_result,
+            result_holds_input: self.result_holds_input,
             types: self.types.clone(),
             ..rebuilt
         })
@@ -1568,12 +1644,8 @@ impl SourceFunctionInterface {
         &self.revision_identity
     }
 
-    pub fn calling_convention(&self) -> &str {
-        &self.calling_convention
-    }
-
-    pub const fn abi_class(&self) -> SourceAbiClass {
-        self.abi_class
+    pub const fn convention(&self) -> ConventionId {
+        self.convention
     }
 
     /// Whether a call site's argument location names the same carrier as one
@@ -1618,33 +1690,6 @@ impl SourceFunctionInterface {
 
     pub const fn return_kind(&self) -> SourceFunctionReturn {
         self.return_kind
-    }
-
-    /// The same interface with a return register the callee's body proved.
-    ///
-    /// Only a return that claims no carrier is replaced: an absent prototype
-    /// defaults to void and an unproven boundary claims nothing, while a body
-    /// that fills the return register on every return path outranks both. A
-    /// stated return is never overridden.
-    pub fn with_body_proven_return(
-        mut self,
-        storage: CanonicalStorageId,
-    ) -> Result<Self, SourceFunctionInterfaceError> {
-        if self.return_kind.storages().next().is_some() {
-            return Ok(self);
-        }
-        if !valid_register_storage(storage) {
-            return Err(SourceFunctionInterfaceError::InvalidRegisterStorage);
-        }
-        if self.parameters.iter().any(|parameter| {
-            parameter
-                .location
-                .overlaps(SourceParameterLocation::Register(storage))
-        }) {
-            return Err(SourceFunctionInterfaceError::OverlappingRegisterStorages);
-        }
-        self.return_kind = SourceFunctionReturn::Register { storage };
-        Ok(self)
     }
 
     /// Record which parameter this function's body forwards as a format
@@ -1700,6 +1745,45 @@ impl SourceFunctionInterface {
         self.format_parameter =
             format_parameter.map(|index| crate::confidence::Fact::new(index, self.types.clone()));
         Ok(self)
+    }
+
+    /// Record the fixed parameter a declaration names as the format of a `va_list` tail
+    /// (`vfprintf`'s): the call takes no `...`, and a caller forwarding a format is seen through it.
+    pub fn with_declared_format_parameter(
+        mut self,
+        parameter_index: u32,
+    ) -> Result<Self, SourceFunctionInterfaceError> {
+        if usize::try_from(parameter_index)
+            .ok()
+            .is_none_or(|index| index >= self.parameters.len())
+        {
+            return Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex);
+        }
+        self.format_parameter = Some(crate::confidence::Fact::new(
+            parameter_index,
+            self.types.clone(),
+        ));
+        Ok(self)
+    }
+
+    /// Record the fixed parameter a declaration states carries the caller's `va_list`.
+    pub fn with_declared_va_list_parameter(
+        mut self,
+        parameter_index: u32,
+    ) -> Result<Self, SourceFunctionInterfaceError> {
+        if usize::try_from(parameter_index)
+            .ok()
+            .is_none_or(|index| index >= self.parameters.len())
+        {
+            return Err(SourceFunctionInterfaceError::InvalidFormatParameterIndex);
+        }
+        self.va_list_parameter = Some(parameter_index);
+        Ok(self)
+    }
+
+    /// The fixed parameter a declaration states carries a `va_list`, where it states one.
+    pub const fn va_list_parameter(&self) -> Option<u32> {
+        self.va_list_parameter
     }
 
     /// Record that arguments continue past the parameters, as a body's register save area proves.
@@ -1852,6 +1936,49 @@ impl SourceFunctionInterface {
         self.result_carriers
     }
 
+    /// Record what r2engine's closed-world boundary decided of the result.
+    #[must_use]
+    pub const fn with_closed_result(mut self, closed: crate::SourceClosedResult) -> Self {
+        self.closed_result = Some(closed);
+        self
+    }
+
+    /// Record that a return hands back a parameter through a merge.
+    #[must_use]
+    pub const fn with_result_holding_input(mut self) -> Self {
+        self.result_holds_input = true;
+        self
+    }
+
+    /// Whether a return hands back a parameter: the result is an entry input, not a written value.
+    pub const fn result_holds_input(&self) -> bool {
+        self.result_holds_input
+    }
+
+    /// What the closed world decided of the result, where a `CallBoundary` decided it.
+    pub const fn closed_result(&self) -> Option<crate::SourceClosedResult> {
+        self.closed_result
+    }
+
+    /// Why a written result is unproven: the cause the closed world's decision names, else a
+    /// handed-back input or a written value (doc/adr-result-side.md, section 3).
+    pub const fn written_cause(&self) -> crate::SourceResultCause {
+        match (self.closed_result, self.result_holds_input) {
+            (Some(crate::SourceClosedResult::Unread), _) => crate::SourceResultCause::Unread,
+            (Some(crate::SourceClosedResult::ForwardCycle), _) => {
+                crate::SourceResultCause::ForwardCycle
+            }
+            (_, true) => crate::SourceResultCause::HandedBack,
+            (_, false) => crate::SourceResultCause::Written,
+        }
+    }
+
+    /// Whether a closed-world call reads the result: a value at `Solved`, where the body alone
+    /// proves only a written one (doc/adr-scratch-result.md, "Rendering of Unproven").
+    pub const fn result_read_by_callers(&self) -> bool {
+        matches!(self.closed_result, Some(crate::SourceClosedResult::Read(_)))
+    }
+
     /// Whether arguments continue past the fixed ones, which `arity` does not count.
     pub const fn is_variadic(&self) -> bool {
         self.variadic
@@ -1879,6 +2006,18 @@ impl SourceFunctionInterface {
     /// Whether the result is the return address the caller pushed.
     pub const fn body_proven_return_address(&self) -> bool {
         self.body_proven_return_address
+    }
+
+    /// Record that the body is a proven `/GS` check (r2ssa `security_cookie::proves_check`).
+    #[must_use]
+    pub const fn with_security_check(mut self) -> Self {
+        self.security_check = true;
+        self
+    }
+
+    /// Whether the body is a proven `/GS` check, whose call a caller elides with its cookie.
+    pub const fn security_check(&self) -> bool {
+        self.security_check
     }
 
     /// The same interface, its logical types read from `types`.
@@ -2228,6 +2367,41 @@ impl SourceFunctionInterface {
         self.return_logical_value
     }
 
+    /// The bytes of the result register the stated integer result occupies: its logical value's
+    /// low bytes, with nothing stated above them; the whole register where no integer is stated.
+    pub fn result_width(&self) -> Option<SourceResultWidth> {
+        let SourceFunctionReturn::Register { storage } = self.return_kind else {
+            return None;
+        };
+        let whole = SourceResultWidth::whole(storage);
+        let Some(logical) = self.return_logical_value else {
+            return Some(whole);
+        };
+        let integer = (self.type_graph.as_ref())
+            .and_then(|graph| graph.types().get(usize::try_from(logical.type_id()).ok()?))
+            .is_some_and(|held| {
+                matches!(
+                    held.kind(),
+                    SourceTypeKind::SignedInteger
+                        | SourceTypeKind::UnsignedInteger
+                        | SourceTypeKind::Char { .. }
+                )
+            });
+        let carrier = logical.carrier();
+        let bits = carrier.size_bits();
+        let narrower = carrier.offset_bits() == 0
+            && bits % 8 == 0
+            && bits > 0
+            && bits < u64::from(storage.size) * 8;
+        Some(match (integer && narrower, u8::try_from(bits / 8)) {
+            (true, Ok(logical)) => SourceResultWidth {
+                logical,
+                above: SourceAbove::Undefined,
+            },
+            _ => whole,
+        })
+    }
+
     pub const fn type_graph(&self) -> Option<&SourceTypeGraph> {
         self.type_graph.as_ref()
     }
@@ -2350,13 +2524,21 @@ impl SourceCallArgumentSpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SourceCallResult {
     Void,
+    /// One register, of which the low `width.logical` bytes are the callee's result.
     Register {
         storage: CanonicalStorageId,
+        width: SourceResultWidth,
     },
     /// One value in two registers, its low half in the first.
     Pair {
         low: CanonicalStorageId,
         high: CanonicalStorageId,
+    },
+    /// An unproven result whose callee writes both the integer and the float register: one group,
+    /// no lane decided (D212, W46). The integer register is the carrier the callee's header spells.
+    Unproven {
+        integer: CanonicalStorageId,
+        float: CanonicalStorageId,
     },
 }
 
@@ -2452,8 +2634,7 @@ pub struct SourceCallSiteInterface {
     revision_identity: Box<[u8]>,
     identity: SourceCallSiteIdentity,
     complete: bool,
-    calling_convention: String,
-    abi_class: SourceAbiClass,
+    convention: ConventionId,
     arguments: Box<[SourceCallArgumentSpec]>,
     variadic: bool,
     format_parameter_rule: Option<SourceFormatParameterRule>,
@@ -2476,7 +2657,6 @@ pub struct SourceCallSiteInterface {
 pub enum SourceCallSiteInterfaceError {
     EmptyRevisionIdentity,
     InvalidTargetStorage,
-    EmptyCallingConvention,
     InvalidArgumentOrder,
     InvalidRegisterStorage,
     OverlappingRegisterStorages,
@@ -2490,7 +2670,6 @@ impl std::fmt::Display for SourceCallSiteInterfaceError {
         let why = match self {
             Self::EmptyRevisionIdentity => "it names no source revision",
             Self::InvalidTargetStorage => "its target storage is malformed",
-            Self::EmptyCallingConvention => "it names no calling convention",
             Self::InvalidArgumentOrder => "its arguments are out of order",
             Self::InvalidRegisterStorage => "a register it names is not a register storage",
             Self::OverlappingRegisterStorages => "two of its registers overlap",
@@ -2510,7 +2689,7 @@ impl SourceCallSiteInterface {
         revision_identity: impl Into<Vec<u8>>,
         identity: SourceCallSiteIdentity,
         complete: bool,
-        calling_convention: impl Into<String>,
+        convention: ConventionId,
         arguments: impl IntoIterator<Item = SourceCallArgumentSpec>,
         variadic: bool,
         noreturn: bool,
@@ -2523,11 +2702,6 @@ impl SourceCallSiteInterface {
         if !valid_call_target_storage(identity.target) {
             return Err(SourceCallSiteInterfaceError::InvalidTargetStorage);
         }
-        let calling_convention = calling_convention.into();
-        if calling_convention.trim().is_empty() {
-            return Err(SourceCallSiteInterfaceError::EmptyCallingConvention);
-        }
-        let abi_class = SourceAbiClass::from_source_spelling(&calling_convention);
         let arguments = arguments.into_iter().collect::<Vec<_>>();
         if arguments
             .iter()
@@ -2560,8 +2734,7 @@ impl SourceCallSiteInterface {
             revision_identity: revision_identity.into_boxed_slice(),
             identity,
             complete,
-            calling_convention,
-            abi_class,
+            convention,
             arguments: arguments.into_boxed_slice(),
             variadic,
             format_parameter_rule: None,
@@ -2597,25 +2770,34 @@ impl SourceCallSiteInterface {
             {
                 SourceCallResult::Pair { low, high }
             }
-            (SourceFunctionReturn::Register { storage }, ..) => {
-                SourceCallResult::Register { storage }
-            }
+            (SourceFunctionReturn::Register { storage }, ..) => SourceCallResult::Register {
+                storage,
+                width: (callee.result_width()).unwrap_or(SourceResultWidth::whole(storage)),
+            },
             // A call that reads only the pair's first register takes that register.
-            (SourceFunctionReturn::Pair { low, .. }, _, SourceCallResult::Register { storage })
-                if storage == low =>
-            {
-                SourceCallResult::Register { storage }
-            }
+            (
+                SourceFunctionReturn::Pair { low, .. },
+                _,
+                SourceCallResult::Register { storage, width },
+            ) if storage == low => SourceCallResult::Register { storage, width },
             (SourceFunctionReturn::Pair { low, high }, ..) => SourceCallResult::Pair { low, high },
             // A carrier the unproven result may be in: its parameters are still the call's.
             (
                 SourceFunctionReturn::Unproven,
                 Some(carriers),
-                SourceCallResult::Register { storage },
-            ) if carriers.holds(storage) => SourceCallResult::Register { storage },
+                SourceCallResult::Register { storage, width },
+            ) if carriers.holds(storage) => SourceCallResult::Register { storage, width },
             // A call that reads no result of an unproven one is a statement.
             (SourceFunctionReturn::Unproven, Some(_), SourceCallResult::Void) => {
                 SourceCallResult::Void
+            }
+            // Both written carriers, as one group.
+            (
+                SourceFunctionReturn::Unproven,
+                Some(carriers),
+                SourceCallResult::Unproven { integer, float },
+            ) if carriers.integer == integer && carriers.float == Some(float) => {
+                SourceCallResult::Unproven { integer, float }
             }
             // An unproven result is no claim, so no exact contract holds it.
             (SourceFunctionReturn::Unproven, ..) => {
@@ -2624,7 +2806,7 @@ impl SourceCallSiteInterface {
         };
         let carriers_match = self.complete
             && !self.noreturn
-            && self.abi_class == callee.abi_class()
+            && self.convention == callee.convention()
             && self.result == expected_result
             && self.arguments.len() == callee.parameters().len()
             && self
@@ -2661,12 +2843,8 @@ impl SourceCallSiteInterface {
         self.complete
     }
 
-    pub fn calling_convention(&self) -> &str {
-        &self.calling_convention
-    }
-
-    pub const fn abi_class(&self) -> SourceAbiClass {
-        self.abi_class
+    pub const fn convention(&self) -> ConventionId {
+        self.convention
     }
 
     pub const fn arguments(&self) -> &[SourceCallArgumentSpec] {
@@ -2785,12 +2963,12 @@ mod tests {
 
     fn exact_return_interface(
         revision: &[u8],
-        calling_convention: &str,
+        convention: ConventionId,
         stack_slots: impl IntoIterator<Item = SourceStackSlotSpec>,
     ) -> SourceFunctionInterface {
         SourceFunctionInterface::new_exact(
             revision.to_vec(),
-            calling_convention,
+            convention,
             [],
             SourceFunctionReturn::Void,
             stack_slots,
@@ -2800,7 +2978,7 @@ mod tests {
         .expect("exact return carriers")
     }
 
-    fn test_call_site(calling_convention: &str) -> SourceCallSiteInterface {
+    fn test_call_site(convention: ConventionId) -> SourceCallSiteInterface {
         SourceCallSiteInterface::new(
             b"abi-class-callsite".to_vec(),
             SourceCallSiteIdentity::new(
@@ -2812,7 +2990,7 @@ mod tests {
                 },
             ),
             true,
-            calling_convention,
+            convention,
             [],
             false,
             false,
@@ -2821,55 +2999,24 @@ mod tests {
         .expect("test callsite")
     }
 
+    /// Each contract carries the convention it was built under, as an id; no spelling is parsed.
     #[test]
-    fn abi_class_synonyms_are_classified_once_on_each_source_contract() {
-        let slots = SourceConventionSlots::new("windows_x64", [], None).expect("slots");
-        assert_eq!(slots.abi_class(), SourceAbiClass::MicrosoftX64);
-        assert_eq!(slots.calling_convention(), "windows_x64");
-
+    fn each_source_contract_carries_its_convention_id() {
+        let slots = SourceConventionSlots::new(ConventionId::Win64, [], None).expect("slots");
+        assert_eq!(slots.convention(), ConventionId::Win64);
         let function = SourceFunctionInterface::new_exact(
-            b"abi-class-function".to_vec(),
-            "sysv-amd64",
+            b"convention-function".to_vec(),
+            ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [],
         )
         .expect("function interface");
-        assert_eq!(function.abi_class(), SourceAbiClass::SystemVAMD64);
-        assert_eq!(function.calling_convention(), "sysv-amd64");
-
-        let callsite = test_call_site("microsoft-x64");
-        assert_eq!(callsite.abi_class(), SourceAbiClass::MicrosoftX64);
-        assert_eq!(callsite.calling_convention(), "microsoft-x64");
-
+        assert_eq!(function.convention(), ConventionId::SysVAmd64);
         assert_eq!(
-            SourceAbiClass::from_source_spelling("ms"),
-            SourceAbiClass::Microsoft
+            test_call_site(ConventionId::Aapcs64).convention(),
+            ConventionId::Aapcs64
         );
-
-        for spelling in ["win64", "windows-x64", "MS_X64"] {
-            assert_eq!(
-                SourceAbiClass::from_source_spelling(spelling),
-                SourceAbiClass::MicrosoftX64
-            );
-        }
-        for spelling in ["sysv64", "system-v-amd64", "x86_64_sysv"] {
-            assert_eq!(
-                SourceAbiClass::from_source_spelling(spelling),
-                SourceAbiClass::SystemVAMD64
-            );
-        }
-    }
-
-    #[test]
-    fn abi_class_preserves_renamed_other_spellings_as_presentation_only() {
-        let first = SourceConventionSlots::new("vendor-abi-a", [], None).expect("first slots");
-        let renamed =
-            SourceConventionSlots::new("renamed-vendor-abi", [], None).expect("renamed slots");
-
-        assert_eq!(first.abi_class(), SourceAbiClass::Other);
-        assert_eq!(renamed.abi_class(), SourceAbiClass::Other);
-        assert_ne!(first.calling_convention(), renamed.calling_convention());
     }
 
     #[test]
@@ -2890,7 +3037,7 @@ mod tests {
             b"format-rule".to_vec(),
             identity,
             true,
-            "sysv-amd64",
+            crate::ConventionId::SysVAmd64,
             arguments,
             true,
             false,
@@ -2912,7 +3059,7 @@ mod tests {
             b"fixed-format-rule".to_vec(),
             identity,
             true,
-            "sysv-amd64",
+            crate::ConventionId::SysVAmd64,
             arguments,
             false,
             false,
@@ -2988,7 +3135,7 @@ mod tests {
                 b"body-format-rule".to_vec(),
                 identity,
                 true,
-                "sysv-amd64",
+                crate::ConventionId::SysVAmd64,
                 arguments,
                 true,
                 false,
@@ -3036,7 +3183,7 @@ mod tests {
     fn a_restated_interface_keeps_every_fact_but_its_slots() {
         let interface = SourceFunctionInterface::new_exact(
             b"variadic-function".to_vec(),
-            "sysv-amd64",
+            crate::ConventionId::SysVAmd64,
             [
                 SourceAbiParameterSpec::new(0, register_storage(0x38, 8)),
                 SourceAbiParameterSpec::new(1, register_storage(0x30, 8)),
@@ -3073,7 +3220,7 @@ mod tests {
     fn a_body_proven_format_parameter_must_name_a_parameter_the_function_has() {
         let interface = SourceFunctionInterface::new_exact(
             b"body-format-function".to_vec(),
-            "sysv-amd64",
+            crate::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [],
@@ -3087,41 +3234,6 @@ mod tests {
     }
 
     #[test]
-    fn abi_class_keeps_unknown_and_source_specific_spellings_honest() {
-        let absent = SourceConventionSlots::new("", [], None).expect("absent convention slots");
-        assert_eq!(absent.abi_class(), SourceAbiClass::Unknown);
-        assert_eq!(
-            SourceFunctionInterface::new_exact(
-                b"unknown-function-abi".to_vec(),
-                "unknown",
-                [],
-                SourceFunctionReturn::Void,
-                [],
-            )
-            .expect("unknown function convention")
-            .abi_class(),
-            SourceAbiClass::Unknown
-        );
-        assert_eq!(
-            test_call_site("default").abi_class(),
-            SourceAbiClass::Unknown
-        );
-        assert_eq!(
-            SourceAbiClass::from_source_spelling("amd64"),
-            SourceAbiClass::SystemVAMD64,
-            "radare2's exact callconv field uses amd64 for System V AMD64"
-        );
-        assert_eq!(
-            SourceAbiClass::from_source_spelling("aapcs64"),
-            SourceAbiClass::Aapcs64
-        );
-        assert_eq!(
-            SourceAbiClass::from_source_spelling("riscv64"),
-            SourceAbiClass::RiscV64
-        );
-    }
-
-    #[test]
     fn slot_of_unestablished_extent_is_kept_without_an_exact_role_claim() {
         let stack_pointer = register_storage(72, 8);
         let slots = [
@@ -3130,7 +3242,7 @@ mod tests {
         ];
         let interface = SourceFunctionInterface::new(
             b"revision".to_vec(),
-            "amd64",
+            crate::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             slots,
@@ -3146,7 +3258,7 @@ mod tests {
         assert_eq!(
             SourceFunctionInterface::new_exact(
                 b"revision".to_vec(),
-                "amd64",
+                crate::ConventionId::SysVAmd64,
                 [],
                 SourceFunctionReturn::Void,
                 [SourceStackSlotSpec::new_local(
@@ -3167,7 +3279,7 @@ mod tests {
             SourceStackSlotSpec::new_local(StackAddressBase::StackPointer, stack_pointer, -8, 8),
             SourceStackSlotSpec::new_local(StackAddressBase::StackPointer, stack_pointer, 8, 8),
         ];
-        let exact = exact_return_interface(b"stacked-revision-a", "abi-display-a", slots)
+        let exact = exact_return_interface(b"stacked-revision-a", ConventionId::SysVAmd64, slots)
             .with_exact_stacked_return(0, 8, 8, 8)
             .expect("exact stacked return");
         assert_eq!(
@@ -3190,19 +3302,19 @@ mod tests {
         assert_eq!(mechanism.stack_pointer_delta_bytes(), 8);
         assert_eq!(mechanism.address_size_bytes(), 8);
 
-        let renamed = exact_return_interface(b"stacked-revision-b", "abi-display-b", slots)
+        let renamed = exact_return_interface(b"stacked-revision-b", ConventionId::Win64, slots)
             .with_exact_stacked_return(0, 8, 8, 8)
             .expect("renamed exact stacked return");
         assert_eq!(renamed.return_mechanism(), exact.return_mechanism());
         assert_ne!(renamed.revision_identity(), exact.revision_identity());
-        assert_ne!(renamed.calling_convention(), exact.calling_convention());
+        assert_ne!(renamed.convention(), exact.convention());
     }
 
     #[test]
     fn exact_stacked_return_rejects_missing_or_incoherent_carriers() {
         let unbound = SourceFunctionInterface::new_exact(
             b"stacked-unbound".to_vec(),
-            "test-abi",
+            crate::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [],
@@ -3228,7 +3340,7 @@ mod tests {
             Err(SourceFunctionInterfaceError::InvalidReturnMechanism)
         );
 
-        let exact = exact_return_interface(b"stacked-carriers", "test-abi", []);
+        let exact = exact_return_interface(b"stacked-carriers", ConventionId::SysVAmd64, []);
         let mut invalid_return_address = exact.clone();
         invalid_return_address.return_address_storage = Some(CanonicalStorageId {
             space: CanonicalStorageSpace::Ram,
@@ -3255,7 +3367,7 @@ mod tests {
 
     #[test]
     fn exact_stacked_return_rejects_inexact_geometry_and_stack_overlap() {
-        let exact = exact_return_interface(b"stacked-geometry", "test-abi", []);
+        let exact = exact_return_interface(b"stacked-geometry", ConventionId::SysVAmd64, []);
         for geometry in [(1, 8, 8, 8), (0, 0, 0, 0), (0, 8, 4, 8), (0, 8, 8, 4)] {
             assert_eq!(
                 exact
@@ -3269,7 +3381,7 @@ mod tests {
         for (offset, size) in [(0, 8), (-4, 8), (4, 8)] {
             let overlapping = exact_return_interface(
                 b"stacked-overlap",
-                "test-abi",
+                ConventionId::SysVAmd64,
                 [SourceStackSlotSpec::new_local(
                     StackAddressBase::StackPointer,
                     stack_pointer,
@@ -3286,7 +3398,7 @@ mod tests {
 
     #[test]
     fn exact_stacked_return_cannot_be_invalidated_by_carrier_rebinding() {
-        let exact = exact_return_interface(b"stacked-sealed", "test-abi", [])
+        let exact = exact_return_interface(b"stacked-sealed", ConventionId::SysVAmd64, [])
             .with_exact_stacked_return(0, 8, 8, 8)
             .expect("exact stacked return");
         assert!(
@@ -3328,7 +3440,7 @@ mod tests {
         let return_address = register_storage(80, 8);
         let exact = SourceFunctionInterface::new_exact(
             b"exact-frame-pointer".to_vec(),
-            "test-abi",
+            crate::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, parameter)],
             SourceFunctionReturn::Register { storage: result },
             [
@@ -3356,7 +3468,7 @@ mod tests {
 
         let unbound = SourceFunctionInterface::new_exact(
             b"unbound-frame-pointer".to_vec(),
-            "test-abi",
+            crate::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
@@ -3386,7 +3498,7 @@ mod tests {
 
         let inexact = SourceFunctionInterface::new(
             b"advisory-frame-pointer".to_vec(),
-            "test-abi",
+            crate::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new(
@@ -3401,7 +3513,7 @@ mod tests {
 
         let stack_only = SourceFunctionInterface::new_exact(
             b"stack-only".to_vec(),
-            "test-abi",
+            crate::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
@@ -3416,7 +3528,7 @@ mod tests {
 
         let parameter_overlap = SourceFunctionInterface::new_exact(
             b"frame-parameter-overlap".to_vec(),
-            "test-abi",
+            crate::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, frame_pointer)],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
@@ -3433,7 +3545,7 @@ mod tests {
 
         let result_overlap = SourceFunctionInterface::new_exact(
             b"frame-result-overlap".to_vec(),
-            "test-abi",
+            crate::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Register {
                 storage: frame_pointer,
@@ -3453,7 +3565,7 @@ mod tests {
         let narrow_frame_pointer = register_storage(88, 4);
         let width_mismatch = SourceFunctionInterface::new_exact(
             b"frame-stack-width-mismatch".to_vec(),
-            "test-abi",
+            crate::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
@@ -3470,7 +3582,7 @@ mod tests {
 
         let stack_overlap = SourceFunctionInterface::new_exact(
             b"frame-stack-overlap".to_vec(),
-            "test-abi",
+            crate::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [
@@ -3492,10 +3604,10 @@ mod tests {
         let frame_pointer = register_storage(64, 8);
         let stack_pointer = register_storage(72, 8);
         let return_address = register_storage(80, 8);
-        let build = |revision: &[u8], calling_convention: &str| {
+        let build = |revision: &[u8], convention: ConventionId| {
             SourceFunctionInterface::new_exact(
                 revision.to_vec(),
-                calling_convention,
+                convention,
                 [],
                 SourceFunctionReturn::Void,
                 [],
@@ -3504,11 +3616,12 @@ mod tests {
             .and_then(|interface| interface.with_stack_pointer_storage(stack_pointer))
             .and_then(|interface| interface.with_frame_pointer_storage(frame_pointer))
         };
-        let explicit = build(b"explicit-frame-a", "abi-display-a").expect("explicit frame fact");
+        let explicit =
+            build(b"explicit-frame-a", ConventionId::SysVAmd64).expect("explicit frame fact");
         assert_eq!(explicit.frame_pointer_storage(), Some(frame_pointer));
         assert_eq!(explicit.exact_frame_pointer_storage(), Some(frame_pointer));
 
-        let renamed = build(b"explicit-frame-b", "abi-display-b").expect("renamed frame fact");
+        let renamed = build(b"explicit-frame-b", ConventionId::Win64).expect("renamed frame fact");
         assert_eq!(
             renamed.frame_pointer_storage(),
             explicit.frame_pointer_storage()
@@ -3518,7 +3631,7 @@ mod tests {
             explicit.exact_frame_pointer_storage()
         );
         assert_ne!(renamed.revision_identity(), explicit.revision_identity());
-        assert_ne!(renamed.calling_convention(), explicit.calling_convention());
+        assert_ne!(renamed.convention(), explicit.convention());
     }
 
     #[test]
@@ -3530,7 +3643,7 @@ mod tests {
         let return_address = register_storage(80, 8);
         let no_stack_pointer = SourceFunctionInterface::new_exact(
             b"explicit-frame-no-sp".to_vec(),
-            "test-abi",
+            crate::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [],
@@ -3542,7 +3655,7 @@ mod tests {
         );
         let base = SourceFunctionInterface::new_exact(
             b"explicit-frame-validation".to_vec(),
-            "test-abi",
+            crate::ConventionId::SysVAmd64,
             [SourceAbiParameterSpec::new(0, parameter)],
             SourceFunctionReturn::Register { storage: result },
             [],
@@ -3596,7 +3709,7 @@ mod tests {
         let other_frame_pointer = register_storage(88, 8);
         let interface = SourceFunctionInterface::new_exact(
             b"explicit-frame-slots".to_vec(),
-            "test-abi",
+            crate::ConventionId::SysVAmd64,
             [],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
@@ -3871,6 +3984,13 @@ pub struct SourceCallEffect {
     reads: SourceBoundaryReads,
 }
 
+/// The word a PE's load configuration names as its `/GS` cookie, at an absolute address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SourceSecurityCookie {
+    pub address: u64,
+    pub width: u32,
+}
+
 /// Memory at a constant offset from a register's entry value: a stack protector's guard, or a
 /// convention's stack bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -4113,8 +4233,7 @@ fn covers_every_byte(ranges: &[CanonicalStorageId], storage: CanonicalStorageId)
 /// importing a guessed prototype instead would defeat the purpose.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SourceConventionSlots {
-    calling_convention: String,
-    abi_class: SourceAbiClass,
+    convention: ConventionId,
     argument_slots: Box<[CanonicalStorageId]>,
     result_slot: Option<CanonicalStorageId>,
     /// The floating-point argument registers, in order: counted apart from the integer
@@ -4254,6 +4373,27 @@ impl SourceConventionSlots {
         self.float_result_slot
     }
 
+    /// The class of the argument or result register holding `storage`; `None` where no
+    /// register of exactly one class holds it.
+    pub fn class_of(&self, storage: CanonicalStorageId) -> Option<SlotClass> {
+        let within = |slot: &CanonicalStorageId| {
+            slot.space == storage.space
+                && slot.offset <= storage.offset
+                && storage.offset + u64::from(storage.size) <= slot.offset + u64::from(slot.size)
+        };
+        let integer = (self.argument_slots.iter())
+            .chain(&self.result_slot)
+            .any(within);
+        let float = (self.float_argument_slots.iter())
+            .chain(&self.float_result_slot)
+            .any(within);
+        match (integer, float) {
+            (true, false) => Some(SlotClass::Integer),
+            (false, true) => Some(SlotClass::Float),
+            _ => None,
+        }
+    }
+
     /// Record the second integer result register, refusing one that is no register, is the first,
     /// or is not as wide as it.
     pub fn with_second_result_slot(
@@ -4336,12 +4476,10 @@ impl SourceConventionSlots {
     /// Build the candidate slots, rejecting anything that is not a well-formed
     /// register location or that names the same register twice.
     pub fn new(
-        calling_convention: impl Into<String>,
+        convention: ConventionId,
         argument_slots: impl IntoIterator<Item = CanonicalStorageId>,
         result_slot: Option<CanonicalStorageId>,
     ) -> Result<Self, SourceMachineRolesError> {
-        let calling_convention = calling_convention.into();
-        let abi_class = SourceAbiClass::from_source_spelling(&calling_convention);
         let argument_slots = argument_slots.into_iter().collect::<Vec<_>>();
         if argument_slots
             .iter()
@@ -4358,8 +4496,7 @@ impl SourceConventionSlots {
             }
         }
         Ok(Self {
-            calling_convention,
-            abi_class,
+            convention,
             argument_slots: argument_slots.into_boxed_slice(),
             result_slot,
             float_argument_slots: Box::default(),
@@ -4376,12 +4513,8 @@ impl SourceConventionSlots {
 
     /// Convention these candidates belong to, named even when no prototype was
     /// recovered.
-    pub fn calling_convention(&self) -> &str {
-        &self.calling_convention
-    }
-
-    pub const fn abi_class(&self) -> SourceAbiClass {
-        self.abi_class
+    pub const fn convention(&self) -> ConventionId {
+        self.convention
     }
 
     pub const fn argument_slots(&self) -> &[CanonicalStorageId] {

@@ -109,6 +109,15 @@ pub(crate) fn has_effect(inst: &GraphInst) -> bool {
 /// the walk could not end hands the registers to code whose reads are not in
 /// the graph, so none of their bytes may be called free.
 pub(crate) fn exits_are_named(function: &SSAFunction, live_out: &FunctionLiveOut) -> bool {
+    exits_are_named_beside(function, live_out, &BTreeSet::new())
+}
+
+/// The same, where a block in `tails` leaves by a tail transfer whose reads are named.
+pub(crate) fn exits_are_named_beside(
+    function: &SSAFunction,
+    live_out: &FunctionLiveOut,
+    tails: &BTreeSet<u64>,
+) -> bool {
     if live_out.unresolved_blocks().next().is_some() {
         return false;
     }
@@ -117,6 +126,9 @@ pub(crate) fn exits_are_named(function: &SSAFunction, live_out: &FunctionLiveOut
         let successors = block.successors();
         let leaves =
             successors.is_empty() || successors.iter().any(|next| cfg.get_block(*next).is_none());
+        if tails.contains(&block.addr) {
+            return true;
+        }
         match &block.terminator {
             BlockTerminator::Return => true,
             BlockTerminator::ConditionalExit { .. } => false,
@@ -138,15 +150,15 @@ pub struct DemandedBytes {
 
 impl DemandedBytes {
     pub(crate) fn of(graph: &SsaGraph, live_out: &FunctionLiveOut) -> Self {
-        Self::of_returning(graph, live_out, None, &BTreeSet::new())
+        Self::of_returning(graph, live_out, (None, &[]), &BTreeSet::new())
     }
 
-    /// The same, where a return reads of its values only the bytes in `result`, the result
-    /// carrier the function's interface states (`None` reads them whole), and no `ignored` read.
+    /// The same, where a return reads only the `result` bytes its interface states (`None`: whole),
+    /// a tail exit reads the bytes `tails` names, and no `ignored` read counts.
     pub(crate) fn of_returning(
         graph: &SsaGraph,
         live_out: &FunctionLiveOut,
-        result: Option<CanonicalStorageId>,
+        (result, tails): (Option<CanonicalStorageId>, &[(ValueId, ByteMask)]),
         ignored: &BTreeSet<UseSite>,
     ) -> Self {
         let returned = live_out.iter().map(|value| {
@@ -174,8 +186,9 @@ impl DemandedBytes {
                     .filter(read)
                     .map(|(_, input)| (*input, ByteMask::All))
             });
+        let roots = returned.chain(tails.iter().copied()).chain(effects);
         Self {
-            bytes: crate::bytes::closure_of(graph, returned.chain(effects)).bytes,
+            bytes: crate::bytes::closure_of(graph, roots).bytes,
         }
     }
 

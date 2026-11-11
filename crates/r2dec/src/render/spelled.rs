@@ -1,9 +1,8 @@
 //! D2 to D1: what the values stage spells for every block, once, in the CFG's reverse postorder and
 //! before any block is placed (ROADMAP D58), so no write order can reach a verdict.
 
-use std::collections::HashMap;
-
 use r2ssa::cfg::BlockTerminator;
+use rustc_hash::FxHashMap;
 
 use super::RenderInput;
 use super::values::Values;
@@ -13,7 +12,7 @@ use crate::prelude::ResidualCause;
 
 /// Every placed block's text, taken once by the control that writes it.
 pub(super) struct Spelled {
-    blocks: HashMap<u64, BlockText>,
+    blocks: FxHashMap<u64, BlockText>,
 }
 
 /// What one block says: its statements, how it ends, and the text on each edge it leaves by.
@@ -103,8 +102,9 @@ pub(super) fn spell(
         decided: input
             .return_type()
             .and_then(r2types::ReturnTypeFact::decided),
+        carried: super::unproven_carrier_bits(input),
     };
-    let mut blocks = HashMap::with_capacity(order.len());
+    let mut blocks = FxHashMap::with_capacity_and_hasher(order.len(), Default::default());
     for addr in order.iter().copied() {
         work.poll()?;
         blocks.insert(addr, spelling.block(addr));
@@ -118,6 +118,8 @@ struct Spelling<'s, 'i> {
     /// The function's result type, and the one the analysis decided, if it did.
     ty: CType,
     decided: Option<&'s CType>,
+    /// An unproven result's carrier width: a spelled return hands its value through the identity.
+    carried: Option<u32>,
 }
 
 impl<'i> Spelling<'_, 'i> {
@@ -284,7 +286,11 @@ impl<'i> Spelling<'_, 'i> {
         // transfer the text cannot make, so it traps rather than return.
         let tail = (self.values).and_then(|values| values.tail_call(from, &self.ty, self.decided));
         if let Some(stmts) = tail {
-            return (to, EdgeText::Leaves(stmts));
+            let stmts = stmts.into_iter().map(|stmt| match stmt {
+                CStmt::Return(value) => CStmt::Return(self.carry(value)),
+                stmt => stmt,
+            });
+            return (to, EdgeText::Leaves(stmts.collect()));
         }
         let resolution = self.input.callee_resolution();
         let call = (self.values).and_then(|values| values.tail_gap(from, resolution));
@@ -294,11 +300,12 @@ impl<'i> Spelling<'_, 'i> {
 
     /// A return hands back what D2 spelled, else a residual of the result type, or nothing for `void`.
     fn return_stmt(&self, addr: u64) -> CStmt {
+        let carried = self.carried.map(|_| &self.ty);
         let spelled = self
             .values
-            .and_then(|values| Some((values.returned(addr, self.decided)?, values)));
+            .and_then(|values| Some((values.returned(addr, self.decided.or(carried))?, values)));
         if let Some((value, values)) = spelled {
-            let stmt = CStmt::Return(value);
+            let stmt = CStmt::Return(self.carry(value));
             values.spelled_terminator(addr, &stmt);
             return stmt;
         }
@@ -317,6 +324,18 @@ impl<'i> Spelling<'_, 'i> {
                     .unwrap_or_else(|| self.residual(ty)),
             )),
             ty => CStmt::Return(Some(self.residual(ty))),
+        }
+    }
+
+    /// An unproven result's returned value through the carrier identity, which claims no type; a
+    /// value spelled as a residual traps already and is no carried value.
+    fn carry(&self, value: Option<CExpr>) -> Option<CExpr> {
+        let helper = self.carried.and_then(crate::prelude::carrier);
+        match (value, helper) {
+            (Some(value), Some(helper)) if !crate::prelude::holds_residual(&value) => {
+                Some(helper.call(vec![value]))
+            }
+            (value, _) => value,
         }
     }
 

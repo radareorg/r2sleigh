@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -19,7 +19,7 @@ pub struct FieldAccessCertificate {
     pub slot: usize,
     pub field_offset: u64,
     pub field_name: String,
-    pub field_type: Option<String>,
+    pub field_type: Option<CTypeLike>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -488,7 +488,6 @@ pub struct FunctionTypeFacts {
     pub parameter_structures: BTreeMap<usize, ParameterStructure>,
     pub callconv: Option<String>,
     pub noreturn: bool,
-    pub known_function_signatures: HashMap<String, FunctionType>,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub external_type_db: ExternalTypeDb,
@@ -512,7 +511,6 @@ pub struct FunctionTypeFactInputs {
     pub parameter_structures: BTreeMap<usize, ParameterStructure>,
     pub callconv: Option<String>,
     pub noreturn: bool,
-    pub known_function_signatures: HashMap<String, FunctionType>,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub external_type_db: ExternalTypeDb,
@@ -536,13 +534,11 @@ impl FunctionTypeFacts {
         self.merged_signature.is_none()
             && self.callconv.is_none()
             && !self.noreturn
-            && self.known_function_signatures.is_empty()
             && self.register_params.is_empty()
             && self.callee_facts.is_empty()
             && self.external_type_db.structs.is_empty()
             && self.external_type_db.unions.is_empty()
             && self.external_type_db.enums.is_empty()
-            && self.external_type_db.typedefs.is_empty()
             && self.external_type_db.diagnostics.is_empty()
             && self.program_data_objects == crate::ProgramDataObjectTypeFacts::default()
             && self.field_access_certificates.is_empty()
@@ -562,7 +558,6 @@ impl FunctionTypeFacts {
             parameter_structures: self.parameter_structures,
             callconv: self.callconv,
             noreturn: self.noreturn,
-            known_function_signatures: self.known_function_signatures,
             register_params: self.register_params,
             callee_facts: self.callee_facts,
             external_type_db: self.external_type_db,
@@ -701,7 +696,7 @@ pub fn signature_hint_can_replace_existing(
         return false;
     }
     if type_is_generated_local_struct_pointer(existing)
-        && pointer_hint_is_authoritative(hint, ptr_bits, type_db)
+        && pointer_hint_is_authoritative(hint, type_db)
     {
         return true;
     }
@@ -711,10 +706,10 @@ pub fn signature_hint_can_replace_existing(
                 bits,
                 signedness: Signedness::Signed | Signedness::Unsigned | Signedness::Unknown,
             },
-            CTypeLike::Typedef { name, .. },
+            CTypeLike::Typedef { name, ty },
         ) => {
             let normalized = name.trim().to_ascii_lowercase();
-            crate::analysis::type_db_resolves_type_name(type_db, &normalized, ptr_bits)
+            crate::analysis::type_db_resolves_type_name(type_db, &normalized, ty)
                 || matches!(normalized.as_str(), "int" | "unsigned int")
                 || (normalized == "uintptr_t" && *bits == ptr_bits)
         }
@@ -783,11 +778,12 @@ pub fn signature_hint_can_replace_existing(
                 ..
             },
             CTypeLike::Typedef {
-                name: hint_name, ..
+                name: hint_name,
+                ty: hint_target,
             },
         ) => {
             is_weak_storage_scalar_typedef(existing_name, ptr_bits)
-                && crate::analysis::type_db_resolves_type_name(type_db, hint_name, ptr_bits)
+                && crate::analysis::type_db_resolves_type_name(type_db, hint_name, hint_target)
         }
         (
             CTypeLike::Typedef {
@@ -849,11 +845,12 @@ pub fn summary_hint_can_replace_weak_existing(
                 ..
             },
             CTypeLike::Typedef {
-                name: hint_name, ..
+                name: hint_name,
+                ty: hint_target,
             },
         ) => {
             is_weak_storage_scalar_typedef(existing_name, ptr_bits)
-                && crate::analysis::type_db_resolves_type_name(type_db, hint_name, ptr_bits)
+                && crate::analysis::type_db_resolves_type_name(type_db, hint_name, hint_target)
         }
         (
             CTypeLike::Typedef {
@@ -925,11 +922,7 @@ pub fn is_weak_pointer_sized_storage_typedef(name: &str, ptr_bits: u32) -> bool 
             ))
 }
 
-fn pointer_hint_is_authoritative(
-    hint: &CTypeLike,
-    ptr_bits: u32,
-    type_db: &crate::ExternalTypeDb,
-) -> bool {
+fn pointer_hint_is_authoritative(hint: &CTypeLike, type_db: &crate::ExternalTypeDb) -> bool {
     let CTypeLike::Pointer(inner) = hint else {
         return false;
     };
@@ -940,8 +933,8 @@ fn pointer_hint_is_authoritative(
         | CTypeLike::Union(_)
         | CTypeLike::Enum(_)
         | CTypeLike::Pointer(_) => true,
-        CTypeLike::Typedef { name, .. } => {
-            crate::analysis::type_db_resolves_type_name(type_db, name, ptr_bits)
+        CTypeLike::Typedef { name, ty } => {
+            crate::analysis::type_db_resolves_type_name(type_db, name, ty)
         }
         _ => false,
     }
@@ -977,7 +970,6 @@ impl FunctionTypeFactsBuilder {
             parameter_structures,
             callconv,
             noreturn,
-            known_function_signatures,
             mut register_params,
             callee_facts,
             external_type_db,
@@ -1005,7 +997,6 @@ impl FunctionTypeFactsBuilder {
             parameter_structures,
             callconv,
             noreturn,
-            known_function_signatures,
             register_params,
             callee_facts,
             external_type_db,
@@ -1023,7 +1014,7 @@ impl FunctionTypeFactsBuilder {
 
 fn canonical_generic_param_name(index: usize, name: &str) -> String {
     if crate::context::is_generic_arg_name(name) {
-        format!("arg{index}")
+        r2source::positional_parameter_name(index)
     } else {
         name.to_string()
     }
@@ -1052,7 +1043,7 @@ fn canonicalize_generic_param_names(
 }
 
 fn dedup_preserving_order(items: &mut Vec<String>) {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = rustc_hash::FxHashSet::default();
     items.retain(|item| seen.insert(item.clone()));
 }
 

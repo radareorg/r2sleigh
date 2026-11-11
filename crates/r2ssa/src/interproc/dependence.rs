@@ -45,7 +45,7 @@ use std::collections::BTreeMap;
 
 use r2il::SpaceId;
 
-use crate::abi::AbiProfile;
+use crate::abi::Formals;
 use crate::function::SsaArtifact;
 use crate::graph::{InstId, ValueId};
 use crate::op::SSAOp;
@@ -78,7 +78,7 @@ pub(crate) struct FormalDependence {
 }
 
 impl FormalDependence {
-    pub(crate) fn of(prepared: &SsaArtifact, abi: &AbiProfile) -> Self {
+    pub(crate) fn of(prepared: &SsaArtifact, abi: &Formals<'_>) -> Self {
         let graph = prepared.graph();
         let mut bits = vec![0u64; graph.values.len()];
         for (value, formal) in formal_values(prepared, abi) {
@@ -516,7 +516,7 @@ fn is_frame_object(objects: &ObjectModel, object: ObjectId) -> bool {
 /// Numbered the way the summary's `Arg { index }` regions are: by the ABI's
 /// argument slot for the formal's storage, and by the preparation's own index
 /// where the storage is a lane of a slot rather than the slot.
-fn formal_values(prepared: &SsaArtifact, abi: &AbiProfile) -> Vec<(ValueId, usize)> {
+fn formal_values(prepared: &SsaArtifact, abi: &Formals<'_>) -> Vec<(ValueId, usize)> {
     let prep = prepared.decompile_prep_facts();
     let graph = prepared.graph();
     // Only the values a formal arrives as: an entry register, or the lane

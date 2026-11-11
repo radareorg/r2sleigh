@@ -76,7 +76,7 @@ pub fn artifact_with_parameters(ops: Vec<R2ILOp>, parameters: &[u64]) -> SsaArti
     };
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         b"r2rewrite-fixture".to_vec(),
-        "sysv64",
+        r2ssa::ConventionId::SysVAmd64,
         parameters.iter().enumerate().map(|(index, offset)| {
             r2ssa::SourceAbiParameterSpec::new(index as u32, storage(*offset))
         }),

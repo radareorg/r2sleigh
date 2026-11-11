@@ -29,7 +29,100 @@ pub fn listing(answered: &Answered<'_>, request: Listing, work: Work) -> Answer<
 
 /// A run read and annotated as a listing of it says.
 fn annotated(answered: &Answered<'_>, request: Listing, work: Work) -> Run {
-    let mut run = Run::read(answered, request, work);
+    let run = Run::read(answered, request, work);
+    annotate(answered, work, run, false)
+}
+
+/// The lines of one run a walk decoded, annotated as `listing` reads them; only a line a claim
+/// needs is spelled.
+pub fn walked_listing(
+    answered: &Answered<'_>,
+    decodes: impl Iterator<Item = crate::body::Decoded>,
+    work: Work,
+) -> Vec<Line> {
+    let mut run = Run {
+        lines: Vec::new(),
+        lifts: Vec::new(),
+        windows: Vec::new(),
+        completion: Completion::Complete,
+        next: 0,
+        context: None,
+    };
+    for one in decodes {
+        let size = one.lift.size as usize;
+        run.next = one.lift.addr + u64::from(one.lift.size);
+        run.context = Some(one.continuation);
+        run.lines.push(Line {
+            address: one.lift.addr,
+            bytes: one.window[..size].to_vec(),
+            syntax: None,
+            flow: Some(r2sleigh_lift::flow::of(&one.lift)),
+            annotations: Vec::new(),
+        });
+        run.lifts.push((work > Work::Decode).then_some(one.lift));
+        run.windows.push(Some(one.window));
+    }
+    annotate(answered, work, run, true).lines
+}
+
+/// `listed_by_block` over a walk's own decodes: each block's instructions are one run.
+pub fn walked_by_block(
+    answered: &Answered<'_>,
+    blocks: &[r2il::R2ILBlock],
+    decodes: Vec<crate::body::Decoded>,
+) -> Vec<Line> {
+    let mut extents = (blocks.iter())
+        .filter(|block| block.size > 0)
+        .map(|block| (block.addr, block.addr + u64::from(block.size)))
+        .collect::<Vec<_>>();
+    extents.sort_unstable();
+    extents.dedup();
+    // A block's run chains from its start; blocks entered past a prefix share the decodes after it.
+    let at = |address: u64| {
+        decodes
+            .binary_search_by_key(&address, |one| one.lift.addr)
+            .ok()
+    };
+    let runs = (extents.iter())
+        .map(|&(start, end)| chained(&decodes, &at, start, end))
+        .collect::<Vec<_>>();
+    let mut uses = vec![0u32; decodes.len()];
+    runs.iter().flatten().for_each(|&index| uses[index] += 1);
+    let mut decodes = decodes.into_iter().map(Some).collect::<Vec<_>>();
+    let mut lines = Vec::new();
+    for run in runs {
+        let run = run.into_iter().filter_map(|index| {
+            uses[index] -= 1;
+            match uses[index] {
+                0 => decodes[index].take(),
+                _ => decodes[index].clone(),
+            }
+        });
+        lines.extend(walked_listing(answered, run, super::Work::Function));
+    }
+    lines
+}
+
+/// The decodes a run from `start` reads before `end`, by index, each starting where the last ends.
+fn chained(
+    decodes: &[crate::body::Decoded],
+    at: &impl Fn(u64) -> Option<usize>,
+    start: u64,
+    end: u64,
+) -> Vec<usize> {
+    let mut run = Vec::new();
+    let mut next = start;
+    while next < end
+        && let Some(index) = at(next)
+    {
+        run.push(index);
+        next += u64::from(decodes[index].lift.size.max(1));
+    }
+    run
+}
+
+/// Annotate a run read, spelling a line a claim needs where `spell`.
+fn annotate(answered: &Answered<'_>, work: Work, mut run: Run, spell: bool) -> Run {
     let mut beyond = Lookahead {
         answered,
         next: run.next,
@@ -40,6 +133,7 @@ fn annotated(answered: &Answered<'_>, request: Listing, work: Work) -> Run {
     let lifted = super::annotate::Run {
         lifts: &run.lifts,
         windows: &run.windows,
+        spell,
     };
     super::annotate::over_run(answered, work, &lifted, &mut beyond, &mut run.lines);
     run
@@ -645,6 +739,118 @@ mod tests {
 
     fn after_lea(rest: &[u8]) -> Vec<u8> {
         mapped(&LEA.iter().chain(rest).copied().collect::<Vec<_>>())
+    }
+
+    #[test]
+    fn a_walked_run_claims_what_its_listing_claims_and_spells_only_those_lines() {
+        // lea rax, [rip + 0x10]; nop; mov ecx, [0x1020]; ret
+        let bytes = after_lea(&[0x90, 0x8b, 0x0c, 0x25, 0x20, 0x10, 0x00, 0x00, 0xc3]);
+        let machine = Everywhere(Machine::new(
+            embedded_machine("x86-64").expect("x86-64 is compiled in"),
+        ));
+        let program = Mapped::new(BASE, bytes);
+        let answered = Answered {
+            decoders: &machine,
+            memory: Memory {
+                program: &program,
+                endian: Endianness::Little,
+            },
+            call_effect: None,
+            proved: None,
+            body: None,
+            holdings: false,
+            parameters: None,
+        };
+        let walked =
+            crate::body::listed_body(BASE, &machine.0.disasm, &program, &Default::default());
+        let (_, decodes) = walked.expect("the body walks");
+        let walked = walked_listing(&answered, decodes.into_iter(), Work::Function);
+        let request = Listing {
+            start: BASE,
+            stop: Stop::After(walked.len()),
+        };
+        let listed = listing(&answered, request, Work::Function).value;
+        assert_eq!(walked.len(), 4);
+        for (walked, listed) in walked.iter().zip(&listed) {
+            assert_eq!(
+                walked.annotations, listed.annotations,
+                "{:#x}",
+                listed.address
+            );
+            let spelled = (!walked.annotations.is_empty()).then_some(&listed.syntax);
+            assert_eq!(walked.syntax.as_ref(), spelled.and_then(Option::as_ref));
+        }
+        assert!(walked[1].syntax.is_none() && !walked[2].annotations.is_empty());
+    }
+
+    #[test]
+    fn a_block_entered_past_a_prefix_lists_its_own_decodes() {
+        // je +1; rex mov eax, 0x1020; mov ecx, [rax]; ret -- the block at 0x1003 skips the rex.
+        let bytes = mapped(&[
+            0x74, 0x01, 0x40, 0xb8, 0x20, 0x10, 0x00, 0x00, 0x8b, 0x08, 0xc3,
+        ]);
+        let machine = Everywhere(Machine::new(
+            embedded_machine("x86-64").expect("x86-64 is compiled in"),
+        ));
+        let program = Mapped::new(BASE, bytes);
+        let walked =
+            crate::body::listed_body(BASE, &machine.0.disasm, &program, &Default::default());
+        let (body, decodes) = walked.expect("the body walks");
+        let blocks = body
+            .blocks
+            .into_iter()
+            .map(|block| block.lifted)
+            .collect::<Vec<_>>();
+        let starts = blocks.iter().map(|block| block.addr).collect::<Vec<_>>();
+        assert_eq!(starts, [0x1000, 0x1002, 0x1003]);
+        let walked = WalkedBody::new(BASE, &blocks, machine.0.tables());
+        let answered = Answered {
+            decoders: &machine,
+            memory: Memory {
+                program: &program,
+                endian: Endianness::Little,
+            },
+            call_effect: None,
+            proved: None,
+            body: Some(&walked),
+            holdings: false,
+            parameters: None,
+        };
+        let lines = walked_by_block(&answered, &blocks, decodes);
+        // Each block listed from its start, as `pdf` lists it.
+        let listed = (blocks.iter()).flat_map(|block| {
+            let stop = Stop::At(block.addr + u64::from(block.size));
+            listing(
+                &answered,
+                Listing {
+                    start: block.addr,
+                    stop,
+                },
+                Work::Function,
+            )
+            .value
+        });
+        let listed = listed.collect::<Vec<_>>();
+        let addresses = |lines: &[Line]| lines.iter().map(|line| line.address).collect::<Vec<_>>();
+        assert_eq!(addresses(&lines), addresses(&listed));
+        for (walked, listed) in lines.iter().zip(&listed) {
+            assert_eq!(
+                walked.annotations, listed.annotations,
+                "{:#x}",
+                listed.address
+            );
+        }
+        let read = AnnotationKind::Reads {
+            address: 0x1020,
+            width: 4,
+        };
+        assert!(lines.last().is_some_and(|ret| ret.address == 0x100a));
+        assert!(
+            lines[lines.len() - 2]
+                .annotations
+                .iter()
+                .any(|one| one.kind == read)
+        );
     }
 
     #[test]

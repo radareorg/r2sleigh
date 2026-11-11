@@ -11,38 +11,38 @@ pdd @ sym.checked_sum
 pdd @ sym.nested
 EOF
 EXPECT=<<EOF
-uint32_t checked_sum(uint32_t* arg0, uint32_t arg1, uint32_t* arg2)
+r2sleigh_result_u32 checked_sum(uint32_t* arg0, uint32_t arg1, uint32_t* arg2)
 {
     __attribute__((noreturn)) void exit(int32_t);
 
     uint32_t tmp_11aa_0_1;
 
-    /* r2dec proof: no individual construct is marked; 20 source obligations: 13 rendered, 7 elided, 0 refused; 5 statements rendered; 1 callee prototype supplied by the source */
+    /* r2dec proof: no individual construct is marked; 20 source obligations: 13 rendered, 7 elided, 0 refused; 5 statements rendered; 1 callee prototype supplied by the source; the result is unproven (Written): 1 unproven-return carried */
     {
         if ((uint8_t)((int32_t)arg1 < (int32_t)0U)) {
             exit(2);
         }
         r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)arg1);
         tmp_11aa_0_1 = r2sleigh_load_u32((void*)(uint64_t)arg0);
-        return (uint32_t)((uint32_t)tmp_11aa_0_1 + (uint32_t)arg1);
+        return r2sleigh_carrier_u32((uint32_t)((uint32_t)tmp_11aa_0_1 + (uint32_t)arg1));
     }
 }
 
-uint64_t nested(uint64_t arg0, uint32_t* arg1, uint32_t* arg2)
+r2sleigh_result_u64 nested(uint64_t arg0, uint32_t* arg1, uint32_t* arg2)
 {
     __attribute__((noreturn)) void exit(int32_t);
 
-    /* r2dec proof: no individual construct is marked; 31 source obligations: 21 rendered, 10 elided, 0 refused; 7 statements rendered; 1 callee prototype supplied by the source */
+    /* r2dec proof: no individual construct is marked; 31 source obligations: 21 rendered, 10 elided, 0 refused; 7 statements rendered; 1 callee prototype supplied by the source; the result is unproven (Written): 2 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg0 == (uint64_t)0U)) {
             r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)3U);
-            return 0;
+            return r2sleigh_carrier_u64(0);
         } else {
             if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
                 exit(3);
             }
             r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)r2sleigh_load_u32((void*)(uint64_t)arg1));
-            return 1;
+            return r2sleigh_carrier_u64(1);
         }
     }
 }
@@ -58,54 +58,54 @@ pdd @ sym.first_or_die
 pdd @ sym.nested
 EOF
 EXPECT=<<EOF
-uint32_t checked_sum(uint32_t* arg0, uint32_t arg1, uint32_t* arg2)
+r2sleigh_result_u32 checked_sum(uint32_t* arg0, uint32_t arg1, uint32_t* arg2)
 {
     __attribute__((noreturn)) void exit(int32_t);
 
     uint32_t tmp_7a8_8_1;
 
-    /* r2dec proof: no individual construct is marked; 15 source obligations: 15 rendered, 0 elided, 0 refused; 5 statements rendered; 1 callee prototype supplied by the source */
+    /* r2dec proof: no individual construct is marked; 15 source obligations: 15 rendered, 0 elided, 0 refused; 5 statements rendered; 1 callee prototype supplied by the source; the result is unproven (Written): 1 unproven-return carried */
     {
         if ((uint8_t)((uint32_t)((uint32_t)((uint32_t)31U >= (uint32_t)32U ? (uint32_t)0U : (uint32_t)((uint32_t)arg1 >> (uint32_t)31U)) & (uint32_t)1U) != (uint32_t)0U)) {
             exit(2);
         }
         r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)arg1);
         tmp_7a8_8_1 = r2sleigh_load_u32((void*)(uint64_t)arg0);
-        return (uint32_t)((uint32_t)arg1 + (uint32_t)tmp_7a8_8_1);
+        return r2sleigh_carrier_u32((uint32_t)((uint32_t)arg1 + (uint32_t)tmp_7a8_8_1));
     }
 }
 
-uint32_t first_or_die(uint32_t* arg0)
+r2sleigh_result_u32 first_or_die(uint32_t* arg0)
 {
     __attribute__((noreturn)) void abort(void);
 
     uint32_t tmp_7c8_8_1;
 
-    /* r2dec proof: no individual construct is marked; 9 source obligations: 9 rendered, 0 elided, 0 refused; 4 statements rendered; 1 callee prototype supplied by the source */
+    /* r2dec proof: no individual construct is marked; 9 source obligations: 9 rendered, 0 elided, 0 refused; 4 statements rendered; 1 callee prototype supplied by the source; the result is unproven (Written): 1 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg0 == (uint64_t)0U)) {
             abort();
         }
         tmp_7c8_8_1 = r2sleigh_load_u32((void*)(uint64_t)arg0);
-        return (uint32_t)((uint32_t)tmp_7c8_8_1 + (uint32_t)1U);
+        return r2sleigh_carrier_u32((uint32_t)((uint32_t)tmp_7c8_8_1 + (uint32_t)1U));
     }
 }
 
-uint64_t nested(uint64_t arg0, uint32_t* arg1, uint32_t* arg2)
+r2sleigh_result_u64 nested(uint64_t arg0, uint32_t* arg1, uint32_t* arg2)
 {
     __attribute__((noreturn)) void exit(int32_t);
 
-    /* r2dec proof: no individual construct is marked; 19 source obligations: 19 rendered, 0 elided, 0 refused; 7 statements rendered; 1 callee prototype supplied by the source; the result's second register is open: no call read decides it */
+    /* r2dec proof: no individual construct is marked; 19 source obligations: 19 rendered, 0 elided, 0 refused; 7 statements rendered; 1 callee prototype supplied by the source; the result's second register is open: no call read decides it; the result is unproven (Written): 2 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg0 == (uint64_t)0U)) {
             r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)3U);
-            return 0;
+            return r2sleigh_carrier_u64(0);
         } else {
             if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
                 exit(3);
             }
             r2sleigh_store_u32((void*)(uint64_t)arg2, (uint32_t)r2sleigh_load_u32((void*)(uint64_t)arg1));
-            return 1;
+            return r2sleigh_carrier_u64(1);
         }
     }
 }

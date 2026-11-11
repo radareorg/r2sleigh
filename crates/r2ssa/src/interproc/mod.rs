@@ -15,7 +15,7 @@ use std::sync::Arc;
 use r2il::{MemoryOrdering, SpaceId};
 use serde::{Deserialize, Serialize};
 
-use crate::abi::AbiProfile;
+use crate::abi::Formals;
 use crate::function::SsaArtifact;
 use crate::graph::{InstPayload, UseSite, ValueId};
 use crate::op::{AtomicUpdateOp, SSAOp};
@@ -769,7 +769,7 @@ fn only_arity_unproven(prepared: &SsaArtifact, instruction: crate::CanonicalInst
 
 fn unknown_call_argument_state(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
     converged: bool,
 ) -> CallArgumentState {
     CallArgumentState {
@@ -1102,7 +1102,7 @@ impl PreparedCalleeSummary {
         if prepared.provenance_kind() != crate::SsaArtifactProvenanceKind::TrustedSource {
             return Err(PreparedInterprocSummaryError::ManualFunction);
         }
-        let abi = AbiProfile::from_machine_context(prepared.machine_context())
+        let abi = Formals::of(prepared.machine_context())
             .ok_or(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext)?;
         let local = collect_source_owned_summary_facts(prepared, &abi);
         require_converged_call_carriers(&local)?;
@@ -1348,7 +1348,7 @@ pub fn solve_prepared_interproc_summary_set_from_callee_summaries(
     if root.machine_context().function_interface().is_none() {
         return Err(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext);
     }
-    let root_abi = AbiProfile::from_machine_context(root.machine_context())
+    let root_abi = Formals::of(root.machine_context())
         .ok_or(PreparedInterprocSummaryError::UnknownOrIncoherentMachineContext)?;
 
     // A body kept across roots carries the revision of its own capture; the
@@ -2028,13 +2028,14 @@ fn exact_call_result_storage(
         return None;
     }
     match interface.result() {
-        crate::SourceCallResult::Register { storage }
+        crate::SourceCallResult::Register { storage, .. }
             if Some(storage) == exact_function_return_storage(prepared) =>
         {
             Some(storage)
         }
         crate::SourceCallResult::Register { .. }
         | crate::SourceCallResult::Pair { .. }
+        | crate::SourceCallResult::Unproven { .. }
         | crate::SourceCallResult::Void => None,
     }
 }
@@ -2052,20 +2053,20 @@ fn exact_function_return_storage(prepared: &SsaArtifact) -> Option<crate::Canoni
     }
 }
 
-fn collect_local_summary_facts(prepared: &SsaArtifact, abi: &AbiProfile) -> LocalSummaryFacts {
+fn collect_local_summary_facts(prepared: &SsaArtifact, abi: &Formals<'_>) -> LocalSummaryFacts {
     collect_local_summary_facts_with_obligation_authority(prepared, abi, false)
 }
 
 fn collect_source_owned_summary_facts(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
 ) -> LocalSummaryFacts {
     collect_local_summary_facts_with_obligation_authority(prepared, abi, true)
 }
 
 fn collect_local_summary_facts_with_obligation_authority(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
     source_owned: bool,
 ) -> LocalSummaryFacts {
     let function = prepared.function();
@@ -2380,7 +2381,7 @@ fn has_volatile_or_unknown_effect<V>(op: &SSAOp<V>) -> bool {
 
 fn apply_call_carrier_transfer(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
     state: &mut CallCarrierMap,
     op: &SSAOp<ValueId>,
 ) {
@@ -2430,7 +2431,7 @@ fn mark_location_access(
 
 fn classify_memory_access_location(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
     addr: &SSAVar,
     space: SpaceId,
     width: u32,
@@ -2478,7 +2479,7 @@ fn scaled_argument_index(prepared: &SsaArtifact, value: ValueId) -> Option<(usiz
 /// the walk needs no depth bound.
 fn classify_memory_access_location_value(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
     value_id: ValueId,
     space: SpaceId,
     width: u32,
@@ -2515,7 +2516,7 @@ fn classify_memory_access_location_value(
 /// What a value names on its own: an argument's object, a global, the heap.
 fn classify_address_root(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
     value_id: ValueId,
     space: SpaceId,
     width: u32,
@@ -2697,7 +2698,7 @@ fn summary_const_value(prepared: &SsaArtifact, value_id: ValueId) -> Option<u64>
     }
 }
 
-fn collect_call_arg_state(prepared: &SsaArtifact, abi: &AbiProfile) -> CallArgumentState {
+fn collect_call_arg_state(prepared: &SsaArtifact, abi: &Formals<'_>) -> CallArgumentState {
     // The carrier lattice is flat: a cell is unreached, then one entry
     // argument or value, then unknown, so each moves at most twice.
     let height = tracked_call_carriers(prepared, abi)
@@ -2711,7 +2712,7 @@ fn collect_call_arg_state(prepared: &SsaArtifact, abi: &AbiProfile) -> CallArgum
 /// where the call stands.
 fn call_arguments_in(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
     call_id: CallSiteId,
     state: &CallCarrierMap,
 ) -> Vec<SummaryOperand> {
@@ -2740,7 +2741,7 @@ fn call_arguments_in(
 /// once per block.
 fn block_carrier_effect(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
     tracked: &BTreeSet<CallCarrierKey>,
     block: crate::graph::BlockId,
 ) -> CallCarrierMap {
@@ -2776,7 +2777,7 @@ fn block_carrier_effect(
 /// that runs past it degrades every observation to unknown.
 fn collect_call_arg_state_of_height(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
     height: usize,
 ) -> CallArgumentState {
     let function = prepared.function();
@@ -2785,14 +2786,8 @@ fn collect_call_arg_state_of_height(
         .iter()
         .map(|carrier| {
             let CallCarrierKey::Storage(storage) = carrier;
-            let value = prepared
-                .machine_context()
-                .abi_model()
-                .argument_registers()
-                .iter()
-                .find(|slot| slot.storage() == *storage)
-                .map(|slot| CallCarrierState::EntryArg(slot.index() as usize))
-                .unwrap_or(CallCarrierState::Unknown);
+            let value = (abi.exact_argument_index_for_storage(*storage))
+                .map_or(CallCarrierState::Unknown, CallCarrierState::EntryArg);
             (*carrier, value)
         })
         .collect::<BTreeMap<_, _>>();
@@ -2913,16 +2908,12 @@ enum CallCarrierKey {
 
 type CallCarrierMap = BTreeMap<CallCarrierKey, CallCarrierState>;
 
-fn tracked_call_carriers(prepared: &SsaArtifact, abi: &AbiProfile) -> BTreeSet<CallCarrierKey> {
+fn tracked_call_carriers(prepared: &SsaArtifact, abi: &Formals<'_>) -> BTreeSet<CallCarrierKey> {
     if !abi.is_source_owned() {
         return BTreeSet::new();
     }
-    prepared
-        .machine_context()
-        .abi_model()
-        .argument_registers()
-        .iter()
-        .map(|slot| CallCarrierKey::Storage(slot.storage()))
+    abi.argument_storages()
+        .map(CallCarrierKey::Storage)
         .chain(
             prepared
                 .machine_context()
@@ -2946,7 +2937,7 @@ fn storages_overlap(left: crate::CanonicalStorageId, right: crate::CanonicalStor
 
 fn update_call_carrier_state(
     prepared: &SsaArtifact,
-    _abi: &AbiProfile,
+    _abi: &Formals<'_>,
     state: &mut CallCarrierMap,
     value_id: ValueId,
 ) {
@@ -2969,7 +2960,7 @@ fn update_call_carrier_state(
 
 fn call_argument_carriers(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
     call_id: CallSiteId,
 ) -> Option<Vec<CallCarrierKey>> {
     if !abi.is_source_owned() {
@@ -2987,7 +2978,7 @@ fn call_argument_carriers(
 
 fn unknown_call_arguments(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
     call_id: CallSiteId,
 ) -> Vec<SummaryOperand> {
     let count = prepared
@@ -2999,7 +2990,7 @@ fn unknown_call_arguments(
 
 pub fn observe_call_arguments(
     prepared: &SsaArtifact,
-    abi: &AbiProfile,
+    abi: &Formals<'_>,
 ) -> BTreeMap<CallSiteId, Vec<CallArgObservation>> {
     collect_call_arg_state(prepared, abi)
         .by_call

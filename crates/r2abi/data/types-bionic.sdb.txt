@@ -1,0 +1,1048 @@
+# Rows that cite the bionic header they are read from: what Android's C library declares. Read
+# only for a program the container says runs on bionic (`data/README.md`). None of it is
+# radare2's. Every row carries `.include=` and sits under a comment naming bionic, which
+# `tests/cited_rows.rs` requires. Read from bionic's libc/include (android.googlesource.com,
+# platform/bionic, main). A pointer's own qualifiers and bionic's nullability annotations are
+# not part of a prototype's type and are left out.
+
+# bionic libc/private/bionic_ssp.h declares `extern void __stack_chk_fail();`, and
+# libc/bionic/__stack_chk_fail.cpp defines it as one call to async_safe_fatal, which never returns.
+__stack_chk_fail=func
+func.__stack_chk_fail.args=0
+func.__stack_chk_fail.ret=void
+func.__stack_chk_fail.include=private/bionic_ssp.h
+func.__stack_chk_fail.noreturn=true
+
+# bionic <errno.h>: errno is (*__errno()).
+__errno=func
+func.__errno.args=0
+func.__errno.ret=int *
+func.__errno.include=errno.h
+
+# bionic <string.h>: the fortified string functions <bits/fortify/string.h> calls, and the GNU and
+# BSD extensions bionic declares.
+__strchr_chk=func
+func.__strchr_chk.args=3
+func.__strchr_chk.arg.0=const char *,s
+func.__strchr_chk.arg.1=int,ch
+func.__strchr_chk.arg.2=size_t,n
+func.__strchr_chk.ret=char *
+func.__strchr_chk.include=string.h
+
+__strrchr_chk=func
+func.__strrchr_chk.args=3
+func.__strrchr_chk.arg.0=const char *,s
+func.__strrchr_chk.arg.1=int,ch
+func.__strrchr_chk.arg.2=size_t,n
+func.__strrchr_chk.ret=char *
+func.__strrchr_chk.include=string.h
+
+__strlen_chk=func
+func.__strlen_chk.args=2
+func.__strlen_chk.arg.0=const char *,s
+func.__strlen_chk.arg.1=size_t,n
+func.__strlen_chk.ret=size_t
+func.__strlen_chk.include=string.h
+
+stpcpy=func
+func.stpcpy.args=2
+func.stpcpy.arg.0=char *,dst
+func.stpcpy.arg.1=const char *,src
+func.stpcpy.ret=char *
+func.stpcpy.include=string.h
+
+strsep=func
+func.strsep.args=2
+func.strsep.arg.0=char **,s_ptr
+func.strsep.arg.1=const char *,delimiter
+func.strsep.ret=char *
+func.strsep.include=string.h
+
+memccpy=func
+func.memccpy.args=4
+func.memccpy.arg.0=void *,dst
+func.memccpy.arg.1=const void *,src
+func.memccpy.arg.2=int,stop_char
+func.memccpy.arg.3=size_t,n
+func.memccpy.ret=void *
+func.memccpy.include=string.h
+
+# bionic <bits/fortify/fcntl.h>: what the fortified open and openat call when no mode is passed.
+__open_2=func
+func.__open_2.args=2
+func.__open_2.arg.0=const char *,path
+func.__open_2.arg.1=int,flags
+func.__open_2.ret=int
+func.__open_2.include=bits/fortify/fcntl.h
+
+__openat_2=func
+func.__openat_2.args=3
+func.__openat_2.arg.0=int,dir_fd
+func.__openat_2.arg.1=const char *,path
+func.__openat_2.arg.2=int,flags
+func.__openat_2.ret=int
+func.__openat_2.include=bits/fortify/fcntl.h
+
+# bionic <fcntl.h>.
+posix_fallocate=func
+func.posix_fallocate.args=3
+func.posix_fallocate.arg.0=int,fd
+func.posix_fallocate.arg.1=off_t,offset
+func.posix_fallocate.arg.2=off_t,length
+func.posix_fallocate.ret=int
+func.posix_fallocate.include=fcntl.h
+
+# bionic <unistd.h>. syscall's tail is the system call's own arguments.
+syscall=func
+func.syscall.args=2
+func.syscall.arg.0=long,number
+func.syscall.arg.1=,...
+func.syscall.ret=long
+func.syscall.include=unistd.h
+func.syscall.tail=variadic
+
+_exit=func
+func._exit.args=1
+func._exit.arg.0=int,status
+func._exit.ret=void
+func._exit.include=unistd.h
+func._exit.noreturn=true
+
+dup2=func
+func.dup2.args=2
+func.dup2.arg.0=int,old_fd
+func.dup2.arg.1=int,new_fd
+func.dup2.ret=int
+func.dup2.include=unistd.h
+
+dup=func
+func.dup.args=1
+func.dup.arg.0=int,old_fd
+func.dup.ret=int
+func.dup.include=unistd.h
+
+access=func
+func.access.args=2
+func.access.arg.0=const char *,path
+func.access.arg.1=int,mode
+func.access.ret=int
+func.access.include=unistd.h
+
+vfork=func
+func.vfork.args=0
+func.vfork.ret=pid_t
+func.vfork.include=unistd.h
+
+fork=func
+func.fork.args=0
+func.fork.ret=pid_t
+func.fork.include=unistd.h
+
+ftruncate=func
+func.ftruncate.args=2
+func.ftruncate.arg.0=int,fd
+func.ftruncate.arg.1=off_t,length
+func.ftruncate.ret=int
+func.ftruncate.include=unistd.h
+
+fsync=func
+func.fsync.args=1
+func.fsync.arg.0=int,fd
+func.fsync.ret=int
+func.fsync.include=unistd.h
+
+fdatasync=func
+func.fdatasync.args=1
+func.fdatasync.arg.0=int,fd
+func.fdatasync.ret=int
+func.fdatasync.include=unistd.h
+
+lchown=func
+func.lchown.args=3
+func.lchown.arg.0=const char *,path
+func.lchown.arg.1=uid_t,owner
+func.lchown.arg.2=gid_t,group
+func.lchown.ret=int
+func.lchown.include=unistd.h
+
+fchownat=func
+func.fchownat.args=5
+func.fchownat.arg.0=int,dir_fd
+func.fchownat.arg.1=const char *,path
+func.fchownat.arg.2=uid_t,owner
+func.fchownat.arg.3=gid_t,group
+func.fchownat.arg.4=int,flags
+func.fchownat.ret=int
+func.fchownat.include=unistd.h
+
+rmdir=func
+func.rmdir.args=1
+func.rmdir.arg.0=const char *,path
+func.rmdir.ret=int
+func.rmdir.include=unistd.h
+
+alarm=func
+func.alarm.args=1
+func.alarm.arg.0=unsigned int,seconds
+func.alarm.ret=unsigned int
+func.alarm.include=unistd.h
+
+setsid=func
+func.setsid.args=0
+func.setsid.ret=pid_t
+func.setsid.include=unistd.h
+
+getsid=func
+func.getsid.args=1
+func.getsid.arg.0=pid_t,pid
+func.getsid.ret=pid_t
+func.getsid.include=unistd.h
+
+setpgid=func
+func.setpgid.args=2
+func.setpgid.arg.0=pid_t,pid
+func.setpgid.arg.1=pid_t,pgid
+func.setpgid.ret=int
+func.setpgid.include=unistd.h
+
+getppid=func
+func.getppid.args=0
+func.getppid.ret=pid_t
+func.getppid.include=unistd.h
+
+symlinkat=func
+func.symlinkat.args=3
+func.symlinkat.arg.0=const char *,old_path
+func.symlinkat.arg.1=int,new_dir_fd
+func.symlinkat.arg.2=const char *,new_path
+func.symlinkat.ret=int
+func.symlinkat.include=unistd.h
+
+link=func
+func.link.args=2
+func.link.arg.0=const char *,old_path
+func.link.arg.1=const char *,new_path
+func.link.ret=int
+func.link.include=unistd.h
+
+linkat=func
+func.linkat.args=5
+func.linkat.arg.0=int,old_dir_fd
+func.linkat.arg.1=const char *,old_path
+func.linkat.arg.2=int,new_dir_fd
+func.linkat.arg.3=const char *,new_path
+func.linkat.arg.4=int,flags
+func.linkat.ret=int
+func.linkat.include=unistd.h
+
+fchdir=func
+func.fchdir.args=1
+func.fchdir.arg.0=int,fd
+func.fchdir.ret=int
+func.fchdir.include=unistd.h
+
+chroot=func
+func.chroot.args=1
+func.chroot.arg.0=const char *,path
+func.chroot.ret=int
+func.chroot.include=unistd.h
+
+getgid=func
+func.getgid.args=0
+func.getgid.ret=gid_t
+func.getgid.include=unistd.h
+
+getegid=func
+func.getegid.args=0
+func.getegid.ret=gid_t
+func.getegid.include=unistd.h
+
+sync=func
+func.sync.args=0
+func.sync.ret=void
+func.sync.include=unistd.h
+
+sethostname=func
+func.sethostname.args=2
+func.sethostname.arg.0=const char *,name
+func.sethostname.arg.1=size_t,n
+func.sethostname.ret=int
+func.sethostname.include=unistd.h
+
+tcsetpgrp=func
+func.tcsetpgrp.args=2
+func.tcsetpgrp.arg.0=int,fd
+func.tcsetpgrp.arg.1=pid_t,pid
+func.tcsetpgrp.ret=int
+func.tcsetpgrp.include=unistd.h
+
+nice=func
+func.nice.args=1
+func.nice.arg.0=int,incr
+func.nice.ret=int
+func.nice.include=unistd.h
+
+# bionic <bits/sysconf.h>, included by <unistd.h>.
+sysconf=func
+func.sysconf.args=1
+func.sysconf.arg.0=int,name
+func.sysconf.ret=long
+func.sysconf.include=bits/sysconf.h
+
+# bionic <bits/fortify/unistd.h>: the fortified read, write and readlinkat.
+__read_chk=func
+func.__read_chk.args=4
+func.__read_chk.arg.0=int,fd
+func.__read_chk.arg.1=void *,buf
+func.__read_chk.arg.2=size_t,count
+func.__read_chk.arg.3=size_t,buf_size
+func.__read_chk.ret=ssize_t
+func.__read_chk.include=bits/fortify/unistd.h
+
+__write_chk=func
+func.__write_chk.args=4
+func.__write_chk.arg.0=int,fd
+func.__write_chk.arg.1=const void *,buf
+func.__write_chk.arg.2=size_t,count
+func.__write_chk.arg.3=size_t,buf_size
+func.__write_chk.ret=ssize_t
+func.__write_chk.include=bits/fortify/unistd.h
+
+__readlinkat_chk=func
+func.__readlinkat_chk.args=5
+func.__readlinkat_chk.arg.0=int,dirfd
+func.__readlinkat_chk.arg.1=const char *,path
+func.__readlinkat_chk.arg.2=char *,buf
+func.__readlinkat_chk.arg.3=size_t,size
+func.__readlinkat_chk.arg.4=size_t,buf_size
+func.__readlinkat_chk.ret=ssize_t
+func.__readlinkat_chk.include=bits/fortify/unistd.h
+
+# bionic <bits/fortify/stdio.h>.
+__fwrite_chk=func
+func.__fwrite_chk.args=5
+func.__fwrite_chk.arg.0=const void *,buf
+func.__fwrite_chk.arg.1=size_t,size
+func.__fwrite_chk.arg.2=size_t,count
+func.__fwrite_chk.arg.3=FILE *,fp
+func.__fwrite_chk.arg.4=size_t,buf_size
+func.__fwrite_chk.ret=size_t
+func.__fwrite_chk.include=bits/fortify/stdio.h
+
+# bionic <stdio.h>.
+setbuffer=func
+func.setbuffer.args=3
+func.setbuffer.arg.0=FILE *,fp
+func.setbuffer.arg.1=char *,buf
+func.setbuffer.arg.2=int,size
+func.setbuffer.ret=void
+func.setbuffer.include=stdio.h
+
+# bionic <arpa/inet.h>.
+inet_ntop=func
+func.inet_ntop.args=4
+func.inet_ntop.arg.0=int,af
+func.inet_ntop.arg.1=const void *,src
+func.inet_ntop.arg.2=char *,dst
+func.inet_ntop.arg.3=socklen_t,size
+func.inet_ntop.ret=const char *
+func.inet_ntop.include=arpa/inet.h
+
+inet_pton=func
+func.inet_pton.args=3
+func.inet_pton.arg.0=int,af
+func.inet_pton.arg.1=const char *,src
+func.inet_pton.arg.2=void *,dst
+func.inet_pton.ret=int
+func.inet_pton.include=arpa/inet.h
+
+# bionic <sys/socket.h>.
+setsockopt=func
+func.setsockopt.args=5
+func.setsockopt.arg.0=int,fd
+func.setsockopt.arg.1=int,level
+func.setsockopt.arg.2=int,option
+func.setsockopt.arg.3=const void *,value
+func.setsockopt.arg.4=socklen_t,value_length
+func.setsockopt.ret=int
+func.setsockopt.include=sys/socket.h
+
+shutdown=func
+func.shutdown.args=2
+func.shutdown.arg.0=int,fd
+func.shutdown.arg.1=int,how
+func.shutdown.ret=int
+func.shutdown.include=sys/socket.h
+
+sendto=func
+func.sendto.args=6
+func.sendto.arg.0=int,fd
+func.sendto.arg.1=const void *,buf
+func.sendto.arg.2=size_t,n
+func.sendto.arg.3=int,flags
+func.sendto.arg.4=const struct sockaddr *,dst_addr
+func.sendto.arg.5=socklen_t,dst_addr_length
+func.sendto.ret=ssize_t
+func.sendto.include=sys/socket.h
+
+recvfrom=func
+func.recvfrom.args=6
+func.recvfrom.arg.0=int,fd
+func.recvfrom.arg.1=void *,buf
+func.recvfrom.arg.2=size_t,n
+func.recvfrom.arg.3=int,flags
+func.recvfrom.arg.4=struct sockaddr *,src_addr
+func.recvfrom.arg.5=socklen_t *,src_addr_length
+func.recvfrom.ret=ssize_t
+func.recvfrom.include=sys/socket.h
+
+recvmsg=func
+func.recvmsg.args=3
+func.recvmsg.arg.0=int,fd
+func.recvmsg.arg.1=struct msghdr *,msg
+func.recvmsg.arg.2=int,flags
+func.recvmsg.ret=ssize_t
+func.recvmsg.include=sys/socket.h
+
+listen=func
+func.listen.args=2
+func.listen.arg.0=int,fd
+func.listen.arg.1=int,backlog
+func.listen.ret=int
+func.listen.include=sys/socket.h
+
+accept=func
+func.accept.args=3
+func.accept.arg.0=int,fd
+func.accept.arg.1=struct sockaddr *,addr
+func.accept.arg.2=socklen_t *,addr_length
+func.accept.ret=int
+func.accept.include=sys/socket.h
+
+getsockname=func
+func.getsockname.args=3
+func.getsockname.arg.0=int,fd
+func.getsockname.arg.1=struct sockaddr *,addr
+func.getsockname.arg.2=socklen_t *,addr_length
+func.getsockname.ret=int
+func.getsockname.include=sys/socket.h
+
+__cmsg_nxthdr=func
+func.__cmsg_nxthdr.args=2
+func.__cmsg_nxthdr.arg.0=struct msghdr *,msg
+func.__cmsg_nxthdr.arg.1=struct cmsghdr *,cmsg
+func.__cmsg_nxthdr.ret=struct cmsghdr *
+func.__cmsg_nxthdr.include=sys/socket.h
+
+# bionic <signal.h>.
+__libc_current_sigrtmin=func
+func.__libc_current_sigrtmin.args=0
+func.__libc_current_sigrtmin.ret=int
+func.__libc_current_sigrtmin.include=signal.h
+
+__libc_current_sigrtmax=func
+func.__libc_current_sigrtmax.args=0
+func.__libc_current_sigrtmax.ret=int
+func.__libc_current_sigrtmax.include=signal.h
+
+sigaction=func
+func.sigaction.args=3
+func.sigaction.arg.0=int,signal
+func.sigaction.arg.1=const struct sigaction *,new_action
+func.sigaction.arg.2=struct sigaction *,old_action
+func.sigaction.ret=int
+func.sigaction.include=signal.h
+
+# bionic <sys/stat.h>. mode_t is the kernel's __kernel_mode_t: 16 bits on 32-bit ARM and x86, 32
+# on the 64-bit targets, read from the target's data model (`CDataModel::kernel_mode_bits`).
+mknod=func
+func.mknod.args=3
+func.mknod.arg.0=const char *,path
+func.mknod.arg.1=mode_t,mode
+func.mknod.arg.2=dev_t,dev
+func.mknod.ret=int
+func.mknod.include=sys/stat.h
+
+mknodat=func
+func.mknodat.args=4
+func.mknodat.arg.0=int,dir_fd
+func.mknodat.arg.1=const char *,path
+func.mknodat.arg.2=mode_t,mode
+func.mknodat.arg.3=dev_t,dev
+func.mknodat.ret=int
+func.mknodat.include=sys/stat.h
+
+mkdirat=func
+func.mkdirat.args=3
+func.mkdirat.arg.0=int,dir_fd
+func.mkdirat.arg.1=const char *,path
+func.mkdirat.arg.2=mode_t,mode
+func.mkdirat.ret=int
+func.mkdirat.include=sys/stat.h
+
+fchmodat=func
+func.fchmodat.args=4
+func.fchmodat.arg.0=int,dir_fd
+func.fchmodat.arg.1=const char *,path
+func.fchmodat.arg.2=mode_t,mode
+func.fchmodat.arg.3=int,flags
+func.fchmodat.ret=int
+func.fchmodat.include=sys/stat.h
+
+# bionic <bits/fortify/stat.h>.
+__umask_chk=func
+func.__umask_chk.args=1
+func.__umask_chk.arg.0=mode_t,mode
+func.__umask_chk.ret=mode_t
+func.__umask_chk.include=bits/fortify/stat.h
+
+# bionic <time.h>.
+clock_gettime=func
+func.clock_gettime.args=2
+func.clock_gettime.arg.0=clockid_t,clock
+func.clock_gettime.arg.1=struct timespec *,ts
+func.clock_gettime.ret=int
+func.clock_gettime.include=time.h
+
+nanosleep=func
+func.nanosleep.args=2
+func.nanosleep.arg.0=const struct timespec *,duration
+func.nanosleep.arg.1=struct timespec *,remainder
+func.nanosleep.ret=int
+func.nanosleep.include=time.h
+
+tzset=func
+func.tzset.args=0
+func.tzset.ret=void
+func.tzset.include=time.h
+
+strptime=func
+func.strptime.args=3
+func.strptime.arg.0=const char *,s
+func.strptime.arg.1=const char *,fmt
+func.strptime.arg.2=struct tm *,tm
+func.strptime.ret=char *
+func.strptime.include=time.h
+
+# bionic <sys/time.h>.
+settimeofday=func
+func.settimeofday.args=2
+func.settimeofday.arg.0=const struct timeval *,tv
+func.settimeofday.arg.1=const struct timezone *,tz
+func.settimeofday.ret=int
+func.settimeofday.include=sys/time.h
+
+# bionic <wchar.h>.
+wcwidth=func
+func.wcwidth.args=1
+func.wcwidth.arg.0=wchar_t,wc
+func.wcwidth.ret=int
+func.wcwidth.include=wchar.h
+
+# bionic <sys/sysinfo.h>.
+sysinfo=func
+func.sysinfo.args=1
+func.sysinfo.arg.0=struct sysinfo *,info
+func.sysinfo.ret=int
+func.sysinfo.include=sys/sysinfo.h
+
+# bionic <sys/klog.h>.
+klogctl=func
+func.klogctl.args=3
+func.klogctl.arg.0=int,type
+func.klogctl.arg.1=char *,buf
+func.klogctl.arg.2=int,buf_size
+func.klogctl.ret=int
+func.klogctl.include=sys/klog.h
+
+# bionic <termios.h>; speed_t is the kernel's unsigned int.
+cfgetispeed=func
+func.cfgetispeed.args=1
+func.cfgetispeed.arg.0=const struct termios *,t
+func.cfgetispeed.ret=speed_t
+func.cfgetispeed.include=termios.h
+
+cfgetospeed=func
+func.cfgetospeed.args=1
+func.cfgetospeed.arg.0=const struct termios *,t
+func.cfgetospeed.ret=speed_t
+func.cfgetospeed.include=termios.h
+
+cfmakeraw=func
+func.cfmakeraw.args=1
+func.cfmakeraw.arg.0=struct termios *,t
+func.cfmakeraw.ret=void
+func.cfmakeraw.include=termios.h
+
+cfsetspeed=func
+func.cfsetspeed.args=2
+func.cfsetspeed.arg.0=struct termios *,t
+func.cfsetspeed.arg.1=speed_t,speed
+func.cfsetspeed.ret=int
+func.cfsetspeed.include=termios.h
+
+cfsetispeed=func
+func.cfsetispeed.args=2
+func.cfsetispeed.arg.0=struct termios *,t
+func.cfsetispeed.arg.1=speed_t,speed
+func.cfsetispeed.ret=int
+func.cfsetispeed.include=termios.h
+
+cfsetospeed=func
+func.cfsetospeed.args=2
+func.cfsetospeed.arg.0=struct termios *,t
+func.cfsetospeed.arg.1=speed_t,speed
+func.cfsetospeed.ret=int
+func.cfsetospeed.include=termios.h
+
+tcsendbreak=func
+func.tcsendbreak.args=2
+func.tcsendbreak.arg.0=int,fd
+func.tcsendbreak.arg.1=int,duration
+func.tcsendbreak.ret=int
+func.tcsendbreak.include=termios.h
+
+# bionic <setjmp.h>: sigjmp_buf is an array of long, passed as a pointer to its first element.
+sigsetjmp=func
+func.sigsetjmp.args=2
+func.sigsetjmp.arg.0=long *,env
+func.sigsetjmp.arg.1=int,save_signal_mask
+func.sigsetjmp.ret=int
+func.sigsetjmp.include=setjmp.h
+
+siglongjmp=func
+func.siglongjmp.args=2
+func.siglongjmp.arg.0=long *,env
+func.siglongjmp.arg.1=int,value
+func.siglongjmp.ret=void
+func.siglongjmp.include=setjmp.h
+func.siglongjmp.noreturn=true
+
+# bionic <net/if.h>.
+if_nametoindex=func
+func.if_nametoindex.args=1
+func.if_nametoindex.arg.0=const char *,name
+func.if_nametoindex.ret=unsigned int
+func.if_nametoindex.include=net/if.h
+
+if_indextoname=func
+func.if_indextoname.args=2
+func.if_indextoname.arg.0=unsigned int,index
+func.if_indextoname.arg.1=char *,buf
+func.if_indextoname.ret=char *
+func.if_indextoname.include=net/if.h
+
+# bionic <mntent.h>.
+getmntent=func
+func.getmntent.args=1
+func.getmntent.arg.0=FILE *,fp
+func.getmntent.ret=struct mntent *
+func.getmntent.include=mntent.h
+
+setmntent=func
+func.setmntent.args=2
+func.setmntent.arg.0=const char *,filename
+func.setmntent.arg.1=const char *,type
+func.setmntent.ret=FILE *
+func.setmntent.include=mntent.h
+
+endmntent=func
+func.endmntent.args=1
+func.endmntent.arg.0=FILE *,fp
+func.endmntent.ret=int
+func.endmntent.include=mntent.h
+
+# bionic <sys/inotify.h>.
+inotify_init=func
+func.inotify_init.args=0
+func.inotify_init.ret=int
+func.inotify_init.include=sys/inotify.h
+
+inotify_add_watch=func
+func.inotify_add_watch.args=3
+func.inotify_add_watch.arg.0=int,fd
+func.inotify_add_watch.arg.1=const char *,path
+func.inotify_add_watch.arg.2=uint32_t,mask
+func.inotify_add_watch.ret=int
+func.inotify_add_watch.include=sys/inotify.h
+
+inotify_rm_watch=func
+func.inotify_rm_watch.args=2
+func.inotify_rm_watch.arg.0=int,fd
+func.inotify_rm_watch.arg.1=uint32_t,watch_descriptor
+func.inotify_rm_watch.ret=int
+func.inotify_rm_watch.include=sys/inotify.h
+
+# bionic <sys/wait.h>.
+wait=func
+func.wait.args=1
+func.wait.arg.0=int *,status
+func.wait.ret=pid_t
+func.wait.include=sys/wait.h
+
+waitpid=func
+func.waitpid.args=3
+func.waitpid.arg.0=pid_t,pid
+func.waitpid.arg.1=int *,status
+func.waitpid.arg.2=int,options
+func.waitpid.ret=pid_t
+func.waitpid.include=sys/wait.h
+
+wait4=func
+func.wait4.args=4
+func.wait4.arg.0=pid_t,pid
+func.wait4.arg.1=int *,status
+func.wait4.arg.2=int,options
+func.wait4.arg.3=struct rusage *,rusage
+func.wait4.ret=pid_t
+func.wait4.include=sys/wait.h
+
+# bionic <locale.h>; locale_t is <xlocale.h>'s struct __locale_t *.
+newlocale=func
+func.newlocale.args=3
+func.newlocale.arg.0=int,category_mask
+func.newlocale.arg.1=const char *,locale_name
+func.newlocale.arg.2=struct __locale_t *,base
+func.newlocale.ret=struct __locale_t *
+func.newlocale.include=locale.h
+
+uselocale=func
+func.uselocale.args=1
+func.uselocale.arg.0=struct __locale_t *,l
+func.uselocale.ret=struct __locale_t *
+func.uselocale.include=locale.h
+
+# bionic <libgen.h>.
+dirname=func
+func.dirname.args=1
+func.dirname.arg.0=const char *,path
+func.dirname.ret=char *
+func.dirname.include=libgen.h
+
+# bionic <sys/mount.h>.
+mount=func
+func.mount.args=5
+func.mount.arg.0=const char *,source
+func.mount.arg.1=const char *,target
+func.mount.arg.2=const char *,fs_type
+func.mount.arg.3=unsigned long,flags
+func.mount.arg.4=const void *,data
+func.mount.ret=int
+func.mount.include=sys/mount.h
+
+umount2=func
+func.umount2.args=2
+func.umount2.arg.0=const char *,target
+func.umount2.arg.1=int,flags
+func.umount2.ret=int
+func.umount2.include=sys/mount.h
+
+# bionic <sched.h>.
+sched_get_priority_min=func
+func.sched_get_priority_min.args=1
+func.sched_get_priority_min.arg.0=int,policy
+func.sched_get_priority_min.ret=int
+func.sched_get_priority_min.include=sched.h
+
+sched_get_priority_max=func
+func.sched_get_priority_max.args=1
+func.sched_get_priority_max.arg.0=int,policy
+func.sched_get_priority_max.ret=int
+func.sched_get_priority_max.include=sched.h
+
+sched_getscheduler=func
+func.sched_getscheduler.args=1
+func.sched_getscheduler.arg.0=pid_t,pid
+func.sched_getscheduler.ret=int
+func.sched_getscheduler.include=sched.h
+
+sched_getparam=func
+func.sched_getparam.args=2
+func.sched_getparam.arg.0=pid_t,pid
+func.sched_getparam.arg.1=struct sched_param *,param
+func.sched_getparam.ret=int
+func.sched_getparam.include=sched.h
+
+sched_setscheduler=func
+func.sched_setscheduler.args=3
+func.sched_setscheduler.arg.0=pid_t,pid
+func.sched_setscheduler.arg.1=int,policy
+func.sched_setscheduler.arg.2=const struct sched_param *,param
+func.sched_setscheduler.ret=int
+func.sched_setscheduler.include=sched.h
+
+# bionic <utmp.h>.
+getutent=func
+func.getutent.args=0
+func.getutent.ret=struct utmp *
+func.getutent.include=utmp.h
+
+setutent=func
+func.setutent.args=0
+func.setutent.ret=void
+func.setutent.include=utmp.h
+
+endutent=func
+func.endutent.args=0
+func.endutent.ret=void
+func.endutent.include=utmp.h
+
+# bionic <sys/resource.h>.
+prlimit=func
+func.prlimit.args=4
+func.prlimit.arg.0=pid_t,pid
+func.prlimit.arg.1=int,resource
+func.prlimit.arg.2=const struct rlimit *,new_limit
+func.prlimit.arg.3=struct rlimit *,old_limit
+func.prlimit.ret=int
+func.prlimit.include=sys/resource.h
+
+getpriority=func
+func.getpriority.args=2
+func.getpriority.arg.0=int,which
+func.getpriority.arg.1=id_t,who
+func.getpriority.ret=int
+func.getpriority.include=sys/resource.h
+
+setpriority=func
+func.setpriority.args=3
+func.setpriority.arg.0=int,which
+func.setpriority.arg.1=id_t,who
+func.setpriority.arg.2=int,priority
+func.setpriority.ret=int
+func.setpriority.include=sys/resource.h
+
+# bionic <stdlib.h>.
+__ctype_get_mb_cur_max=func
+func.__ctype_get_mb_cur_max.args=0
+func.__ctype_get_mb_cur_max.ret=size_t
+func.__ctype_get_mb_cur_max.include=stdlib.h
+
+# bionic <pwd.h>.
+getpwuid_r=func
+func.getpwuid_r.args=5
+func.getpwuid_r.arg.0=uid_t,uid
+func.getpwuid_r.arg.1=struct passwd *,pwd
+func.getpwuid_r.arg.2=char *,buf
+func.getpwuid_r.arg.3=size_t,n
+func.getpwuid_r.arg.4=struct passwd **,result
+func.getpwuid_r.ret=int
+func.getpwuid_r.include=pwd.h
+
+getpwnam_r=func
+func.getpwnam_r.args=5
+func.getpwnam_r.arg.0=const char *,name
+func.getpwnam_r.arg.1=struct passwd *,pwd
+func.getpwnam_r.arg.2=char *,buf
+func.getpwnam_r.arg.3=size_t,n
+func.getpwnam_r.arg.4=struct passwd **,result
+func.getpwnam_r.ret=int
+func.getpwnam_r.include=pwd.h
+
+# bionic <grp.h>.
+getgrgid_r=func
+func.getgrgid_r.args=5
+func.getgrgid_r.arg.0=gid_t,gid
+func.getgrgid_r.arg.1=struct group *,group
+func.getgrgid_r.arg.2=char *,buf
+func.getgrgid_r.arg.3=size_t,n
+func.getgrgid_r.arg.4=struct group **,result
+func.getgrgid_r.ret=int
+func.getgrgid_r.include=grp.h
+
+getgrnam_r=func
+func.getgrnam_r.args=5
+func.getgrnam_r.arg.0=const char *,name
+func.getgrnam_r.arg.1=struct group *,group
+func.getgrnam_r.arg.2=char *,buf
+func.getgrnam_r.arg.3=size_t,n
+func.getgrnam_r.arg.4=struct group **,result
+func.getgrnam_r.ret=int
+func.getgrnam_r.include=grp.h
+
+getgrouplist=func
+func.getgrouplist.args=4
+func.getgrouplist.arg.0=const char *,user
+func.getgrouplist.arg.1=gid_t,group
+func.getgrouplist.arg.2=gid_t *,groups
+func.getgrouplist.arg.3=int *,group_count
+func.getgrouplist.ret=int
+func.getgrouplist.include=grp.h
+
+# bionic <bits/getentropy.h>, included by <unistd.h>.
+getentropy=func
+func.getentropy.args=2
+func.getentropy.arg.0=void *,buffer
+func.getentropy.arg.1=size_t,buffer_size
+func.getentropy.ret=int
+func.getentropy.include=bits/getentropy.h
+
+# bionic <sys/statvfs.h>.
+statvfs=func
+func.statvfs.args=2
+func.statvfs.arg.0=const char *,path
+func.statvfs.arg.1=struct statvfs *,buf
+func.statvfs.ret=int
+func.statvfs.include=sys/statvfs.h
+
+# bionic <sys/xattr.h>.
+getxattr=func
+func.getxattr.args=4
+func.getxattr.arg.0=const char *,path
+func.getxattr.arg.1=const char *,name
+func.getxattr.arg.2=void *,value
+func.getxattr.arg.3=size_t,size
+func.getxattr.ret=ssize_t
+func.getxattr.include=sys/xattr.h
+
+lgetxattr=func
+func.lgetxattr.args=4
+func.lgetxattr.arg.0=const char *,path
+func.lgetxattr.arg.1=const char *,name
+func.lgetxattr.arg.2=void *,value
+func.lgetxattr.arg.3=size_t,size
+func.lgetxattr.ret=ssize_t
+func.lgetxattr.include=sys/xattr.h
+
+fgetxattr=func
+func.fgetxattr.args=4
+func.fgetxattr.arg.0=int,fd
+func.fgetxattr.arg.1=const char *,name
+func.fgetxattr.arg.2=void *,value
+func.fgetxattr.arg.3=size_t,size
+func.fgetxattr.ret=ssize_t
+func.fgetxattr.include=sys/xattr.h
+
+flistxattr=func
+func.flistxattr.args=3
+func.flistxattr.arg.0=int,fd
+func.flistxattr.arg.1=char *,list
+func.flistxattr.arg.2=size_t,size
+func.flistxattr.ret=ssize_t
+func.flistxattr.include=sys/xattr.h
+
+fsetxattr=func
+func.fsetxattr.args=5
+func.fsetxattr.arg.0=int,fd
+func.fsetxattr.arg.1=const char *,name
+func.fsetxattr.arg.2=const void *,value
+func.fsetxattr.arg.3=size_t,size
+func.fsetxattr.arg.4=int,flags
+func.fsetxattr.ret=int
+func.fsetxattr.include=sys/xattr.h
+
+# bionic <regex.h>.
+regerror=func
+func.regerror.args=4
+func.regerror.arg.0=int,error_code
+func.regerror.arg.1=const regex_t *,re
+func.regerror.arg.2=char *,buf
+func.regerror.arg.3=size_t,n
+func.regerror.ret=size_t
+func.regerror.include=regex.h
+
+# bionic <netdb.h>; getnameinfo's lengths are size_t, where POSIX says socklen_t.
+gethostbyname=func
+func.gethostbyname.args=1
+func.gethostbyname.arg.0=const char *,name
+func.gethostbyname.ret=struct hostent *
+func.gethostbyname.include=netdb.h
+
+__get_h_errno=func
+func.__get_h_errno.args=0
+func.__get_h_errno.ret=int *
+func.__get_h_errno.include=netdb.h
+
+hstrerror=func
+func.hstrerror.args=1
+func.hstrerror.arg.0=int,error
+func.hstrerror.ret=const char *
+func.hstrerror.include=netdb.h
+
+getnameinfo=func
+func.getnameinfo.args=7
+func.getnameinfo.arg.0=const struct sockaddr *,sa
+func.getnameinfo.arg.1=socklen_t,sa_length
+func.getnameinfo.arg.2=char *,host
+func.getnameinfo.arg.3=size_t,host_length
+func.getnameinfo.arg.4=char *,service
+func.getnameinfo.arg.5=size_t,service_length
+func.getnameinfo.arg.6=int,flags
+func.getnameinfo.ret=int
+func.getnameinfo.include=netdb.h
+
+getservbyport=func
+func.getservbyport.args=2
+func.getservbyport.arg.0=int,port_in_network_order
+func.getservbyport.arg.1=const char *,proto
+func.getservbyport.ret=struct servent *
+func.getservbyport.include=netdb.h
+
+# bionic <ifaddrs.h>.
+getifaddrs=func
+func.getifaddrs.args=1
+func.getifaddrs.arg.0=struct ifaddrs **,list_ptr
+func.getifaddrs.ret=int
+func.getifaddrs.include=ifaddrs.h
+
+# bionic <sys/file.h>.
+flock=func
+func.flock.args=2
+func.flock.arg.0=int,fd
+func.flock.arg.1=int,op
+func.flock.ret=int
+func.flock.include=sys/file.h
+
+# bionic <sys/mman.h>.
+mlockall=func
+func.mlockall.args=1
+func.mlockall.arg.0=int,flags
+func.mlockall.ret=int
+func.mlockall.include=sys/mman.h
+
+# bionic <sys/swap.h>.
+swapon=func
+func.swapon.args=2
+func.swapon.arg.0=const char *,path
+func.swapon.arg.1=int,flags
+func.swapon.ret=int
+func.swapon.include=sys/swap.h
+
+swapoff=func
+func.swapoff.args=1
+func.swapoff.arg.0=const char *,path
+func.swapoff.ret=int
+func.swapoff.include=sys/swap.h
+
+# bionic <syslog.h>.
+openlog=func
+func.openlog.args=3
+func.openlog.arg.0=const char *,prefix
+func.openlog.arg.1=int,option
+func.openlog.arg.2=int,facility
+func.openlog.ret=void
+func.openlog.include=syslog.h
+
+closelog=func
+func.closelog.args=0
+func.closelog.ret=void
+func.closelog.include=syslog.h
+
+# bionic <iconv.h>; iconv_t is struct __iconv_t *.
+iconv_open=func
+func.iconv_open.args=2
+func.iconv_open.arg.0=const char *,dst_encoding
+func.iconv_open.arg.1=const char *,src_encoding
+func.iconv_open.ret=struct __iconv_t *
+func.iconv_open.include=iconv.h
+
+iconv=func
+func.iconv.args=5
+func.iconv.arg.0=struct __iconv_t *,converter
+func.iconv.arg.1=char **,src_buf
+func.iconv.arg.2=size_t *,src_bytes_left
+func.iconv.arg.3=char **,dst_buf
+func.iconv.arg.4=size_t *,dst_bytes_left
+func.iconv.ret=size_t
+func.iconv.include=iconv.h
+

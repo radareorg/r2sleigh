@@ -118,11 +118,9 @@ fn observable_beside(
         .iter()
         .map(|storage| storage.location())
         .collect::<std::collections::BTreeSet<_>>();
-    let arguments = machine
-        .abi_model()
-        .argument_registers()
-        .iter()
-        .map(|slot| slot.storage().location())
+    let arguments = (machine.function_interface().into_iter())
+        .flat_map(|interface| interface.parameters())
+        .filter_map(|parameter| Some(parameter.register_storage()?.location()))
         .collect::<std::collections::BTreeSet<_>>();
     let transfer_inputs = graph.inputs(at);
     graph.insts.iter().find(|inst| {

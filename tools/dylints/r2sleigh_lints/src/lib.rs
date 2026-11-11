@@ -16,6 +16,8 @@ use rustc_lint::{LateContext, LateLintPass, LintContext};
 
 dylint_linting::dylint_library!();
 
+mod convention_view;
+
 rustc_lint::declare_lint!(
     /// ### What it does
     ///
@@ -2152,6 +2154,14 @@ rustc_lint::declare_lint!(
     "a refusal is a property of the stage type; no reader re-checks it"
 );
 
+rustc_lint::declare_lint!(
+    /// A reference to `parse_c_type_like` outside the module that defines it reads a type back from
+    /// its spelling; types reach r2types as `SourceTypeGraph` (doc/adr-call-boundary.md, D168).
+    pub TYPE_SPELLING_REPARSED,
+    Deny,
+    "a type reaches r2types through `SourceTypeGraph`, never by reparsing its spelling"
+);
+
 rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     DISPLAY_NAMES_OUTSIDE_RENDERING,
     STRING_PREFIX_SEMANTIC_CLASSIFICATION,
@@ -2232,7 +2242,8 @@ rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     ENTITY_KEYED_MAP,
     R2IL_OP_PROPERTY_OUTSIDE_R2IL,
     SSA_CALL_CLASS_OUTSIDE_OP,
-    EXHAUSTED_READ_THROUGH_SEALED_STAGE
+    EXHAUSTED_READ_THROUGH_SEALED_STAGE,
+    TYPE_SPELLING_REPARSED
 ]);
 
 #[unsafe(no_mangle)]
@@ -2321,8 +2332,13 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         R2IL_OP_PROPERTY_OUTSIDE_R2IL,
         SSA_CALL_CLASS_OUTSIDE_OP,
         EXHAUSTED_READ_THROUGH_SEALED_STAGE,
+        TYPE_SPELLING_REPARSED,
+        convention_view::CONVENTION_VIEW_READ,
     ]);
     lint_store.register_late_lint_pass(Box::new(|_| Box::new(R2sleighLintPass)));
+    lint_store.register_late_lint_pass(Box::new(|_| {
+        Box::<convention_view::ConventionViewPass>::default()
+    }));
 }
 
 impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
@@ -3240,6 +3256,15 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
                 }
             }
             _ => {}
+        }
+
+        if reparses_a_type_spelling(cx, expr) {
+            span_lint(
+                cx,
+                TYPE_SPELLING_REPARSED,
+                expr.span,
+                "this reads a type back from its spelling; take it from the `SourceTypeGraph` through `source_type_like`",
+            );
         }
 
         if let Some(stage) = exhausted_read_through_sealed_stage(cx, expr) {
@@ -5946,6 +5971,31 @@ fn exhausted_read_through_sealed_stage<'tcx>(
             _ => return None,
         };
     }
+}
+
+/// Files that may still reference `parse_c_type_like` outside its module. The list only falls (D168).
+const TYPE_SPELLING_REPARSE_ALLOWLIST: &[&str] = &[];
+
+/// Whether `expr` names `parse_c_type_like` outside its defining module, in production code.
+fn reparses_a_type_spelling(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
+    let ExprKind::Path(qpath) = &expr.kind else {
+        return false;
+    };
+    let rustc_hir::def::Res::Def(rustc_hir::def::DefKind::Fn, def_id) =
+        cx.qpath_res(qpath, expr.hir_id)
+    else {
+        return false;
+    };
+    if cx.tcx.item_name(def_id).as_str() != "parse_c_type_like"
+        || cx.tcx.parent_module(expr.hir_id).to_def_id() == cx.tcx.parent(def_id)
+        || clippy_utils::is_in_test(cx.tcx, expr.hir_id)
+    {
+        return false;
+    }
+    let filename = format!("{:?}", cx.sess().source_map().span_to_filename(expr.span));
+    !TYPE_SPELLING_REPARSE_ALLOWLIST
+        .iter()
+        .any(|allowed| filename.contains(allowed))
 }
 
 #[test]

@@ -91,13 +91,13 @@ fn a_librarys_default_visibility_definition_is_its_own_only_until_another_image_
         at(&library, 0x4018),
         Some(r2image::WriteKind::Relative(0x4010))
     );
-    // The words the psABI reserves are written with no value stated.
+    // The two words the psABI reserves for the loader are stated as its own.
     let reserved = library
         .loader_writes()
         .iter()
-        .filter(|write| write.kind == r2image::WriteKind::Unknown)
+        .filter(|write| write.kind == r2image::WriteKind::Reserved)
         .count();
-    assert!(reserved > 0);
+    assert_eq!(reserved, 2);
 }
 
 #[test]

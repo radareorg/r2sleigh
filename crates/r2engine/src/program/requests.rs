@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+use super::fates::World;
 use super::{OpenProgram, ProgramInputs, Source, View};
 use crate::discovery::{Basis, Confidence, Discovered};
 use crate::isolation::isolated;
@@ -122,17 +123,6 @@ fn edges_of(
         }
     }
     edges
-}
-
-/// Whether a function's own analysis reads what the program's calls to it read of its result
-/// registers (doc/adr-resolved-bodies.md, "Caller reads"). Reading them surveys the program.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum Callers {
-    /// The body and its callees alone: a fresh open.
-    #[default]
-    Unread,
-    /// The program's calls too, once `aa` surveyed it.
-    Read,
 }
 
 /// Why a function's listing carries no analysis, and what its walk could not follow.
@@ -629,7 +619,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     pub fn analyse_program(&mut self) -> Result<(), String> {
         self.start_request();
         self.surveyed()?;
-        self.callers = Callers::Read;
+        self.callers = World::Closed;
         Ok(())
     }
 
@@ -678,7 +668,7 @@ impl<S: Source + 'static> OpenProgram<S> {
         self.start_request();
         let sites = self.surveyed()?.supervisor.clone();
         let container = self.source().container();
-        let table = r2abi::Syscalls::for_platform(
+        let table = r2abi::Syscalls::for_kernel(
             super::kernel(container),
             &container.arch.name,
             container.arch.bits,
@@ -764,11 +754,7 @@ impl<S: Source + 'static> OpenProgram<S> {
                 program: self,
                 endian: self.endian(),
             },
-            call_effect: self
-                .db
-                .inputs()
-                .assembled()
-                .and_then(|held| held.call_effect.as_ref()),
+            call_effect: self.view().default_call_effect(),
             proved,
             body: None,
             holdings: true,
@@ -789,6 +775,17 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ReferenceIndex {
     fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
         indexed(&View::new(db, true)).map(|index| super::analysis::Shared(Arc::new(index)))
     }
+
+    /// A body the request's control stopped is unread for now, as `Walked` held it.
+    fn hold(value: &Self::Value) -> crate::query::db::Hold {
+        let unread = value.as_ref().map(|index| index.0.coverage.unread.values());
+        let stopped =
+            |unread: &Unread| matches!(unread, Unread::Refused(refusal) if refusal.stopped());
+        match unread.is_ok_and(|mut unread| unread.any(stopped)) {
+            true => crate::query::db::Hold::Stopped,
+            false => crate::query::db::Hold::Held,
+        }
+    }
 }
 
 /// Read every believed body's references, each from the walk `pdf` and `afb` read.
@@ -799,20 +796,21 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
     let walked = &survey.walked;
     let mut index = Indexing::default();
     let mut coverage = Coverage::default();
-    index.read_words(&view.source().container().loader_writes);
+    let writes = &view.source().container().loader_writes;
+    index.read_words(
+        writes,
+        |at| crate::native::Program::holds_code(view, at),
+        &mut coverage,
+    );
     // A program that states no function is never assembled, and has nothing to index.
     if walked.is_empty() {
         return Ok(index.finish(coverage));
     }
     let walker = super::returns::Walking::new(view.clone(), true)?;
     for (&entry, thumb) in walked {
-        // The body is the one resolved through its dispatch tables, which `Walked` owns.
+        // `Walked`'s body, its decodes kept: the listing lifts nothing again (D162).
         let walk = match thumb {
-            Ok(thumb) => {
-                let walking = view.db.get::<super::analysis::Walked>(&(entry, *thumb));
-                let walking = walking.map_err(|cycle| format!("{cycle:?}"))?;
-                walking.0.clone().map(|walk| (*thumb, walk))
-            }
+            Ok(thumb) => listed_walk(view, entry, *thumb).map(|walk| (*thumb, walk)),
             Err(refusal) => Err(refusal.clone()),
         };
         let (thumb, walk) = match walk {
@@ -822,14 +820,14 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
                 continue;
             }
         };
-        if !walk.body().unresolved.is_empty() {
+        if !walk.body.unresolved.is_empty() {
             coverage
                 .unresolved
-                .insert(entry, walk.body().unresolved.clone());
+                .insert(entry, walk.body.unresolved.clone());
         }
         let machine = walker.machine(thumb).ok_or("no machine")?;
         let decoder = (walker.target(thumb), machine);
-        match claimed_by(view, decoder, entry, &walk.lifted()) {
+        match claimed_by(view, decoder, entry, walk) {
             Ok(lines) => {
                 coverage.read.push(entry);
                 index.read(entry, lines);
@@ -842,13 +840,31 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
     Ok(index.finish(coverage))
 }
 
+/// The body `Walked` holds for `entry`, its decodes kept: the same walk, refusals and tables.
+fn listed_walk<S: Source + 'static>(
+    view: &View<'_, S>,
+    entry: u64,
+    thumb: bool,
+) -> Result<crate::native::ListedWalk, NativeRefusal> {
+    let target = super::analysis::target(view, entry, thumb)?;
+    let key = (entry, thumb);
+    let held = view.db.held::<super::analysis::DispatchTables>(&key);
+    let held = held.ok().flatten().map(|tables| (*tables.0).clone());
+    let tables = || (*super::analysis::dispatch_tables(view.db, key).0).clone();
+    let walked = crate::isolation::isolated(|| {
+        crate::native::listed_walk(&target, view, entry, held, &tables)
+    });
+    walked.unwrap_or_else(|panicked| Err(panicked.into()))
+}
+
 /// One body listed as the reference index reads it, or why it is unread.
 fn claimed_by<S: Source + 'static>(
     view: &View<'_, S>,
     (target, machine): (&crate::native::NativeTarget<'_>, &crate::machine::Machine),
     entry: u64,
-    lifted: &[r2il::R2ILBlock],
+    walk: crate::native::ListedWalk,
 ) -> Result<Vec<Line>, Unread> {
+    let lifted = &walk.lifted;
     let body = WalkedBody::new(entry, lifted, target.arch);
     let answered = Answered {
         decoders: &Walked(machine),
@@ -856,13 +872,13 @@ fn claimed_by<S: Source + 'static>(
             program: view,
             endian: super::view::endian(view.source()),
         },
-        call_effect: target.call_effect,
+        call_effect: target.call.call_effect().ok(),
         proved: None,
         body: Some(&body),
         holdings: false,
         parameters: Some(view),
     };
-    let lines = listed_by_block(&answered, lifted).value;
+    let lines = crate::query::decode::walked_by_block(&answered, lifted, walk.decodes);
     // A line that needed the def-use graph, and it did not build, leaves the body unread.
     if let Some(failure) = body.failure() {
         return Err(Unread::NoSsa(failure));

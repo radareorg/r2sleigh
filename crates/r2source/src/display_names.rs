@@ -102,6 +102,12 @@ impl DisplayNames {
             .filter(|name| !name.is_empty())
     }
 
+    /// What parameter `index` is called: the source's name, else its position.
+    pub fn parameter_name(&self, index: usize) -> String {
+        self.parameter(index)
+            .map_or_else(|| positional_parameter_name(index), str::to_owned)
+    }
+
     /// Record the names the source gave this function's stack slots.
     ///
     /// The key is the coordinate the source declared, not the one objects are
@@ -178,6 +184,11 @@ impl DisplayNames {
 }
 
 /// Whether a name is one of the placeholders a tool invents when it has none.
+/// The one positional parameter name, numbered from `arg0` (decided 2026-11-09).
+pub fn positional_parameter_name(index: usize) -> String {
+    format!("arg{index}")
+}
+
 fn is_placeholder_parameter_name(name: &str) -> bool {
     let trimmed = name.trim();
     if trimmed.is_empty() {

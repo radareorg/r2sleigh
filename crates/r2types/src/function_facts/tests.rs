@@ -4,7 +4,8 @@ use r2il::{
     ArchSpec, R2ILBlock, R2ILOp, RegisterBitSlice, RegisterDef, RegisterProjection,
     RegisterProjectionDisposition, RegisterStorage, SpaceId, Varnode,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use rustc_hash::FxHashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The instruction a fixture names by its block and its place in the block.
 fn inst_at(prepared: &r2ssa::SsaArtifact, block_addr: u64, index: usize) -> r2ssa::InstId {
@@ -250,7 +251,7 @@ fn exact_source_param_slots_ignore_misleading_register_names() {
     .expect("exact parameter type graph");
     let interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
         b"exact-param-alias".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [r2ssa::SourceAbiParameterSpec::new(0, storage)],
         r2ssa::SourceFunctionReturn::Void,
         [],
@@ -292,16 +293,19 @@ fn exact_source_param_slots_ignore_misleading_register_names() {
         .parameters
         .get(&0)
         .expect("exact boundary parameter");
-    assert_eq!(resolver.slot_for_value(parameter.value), Some(0));
+    assert_eq!(
+        resolver.slot_for_value(parameter.value().expect("a register formal")),
+        Some(0)
+    );
     let parameter_var = &source
         .graph()
-        .value(parameter.value)
+        .value(parameter.value().expect("a register formal"))
         .expect("parameter graph value")
         .var;
     assert_eq!(
         source
             .decompile_prep_facts()
-            .formal_parameter_of(parameter.value),
+            .formal_parameter_of(parameter.value().expect("a register formal")),
         Some(0),
         "SSA preparation must consume the same exact boundary slot"
     );
@@ -425,7 +429,7 @@ fn signed_i32_return_source(has_return: bool, read: bool) -> r2ssa::SsaArtifact 
     .expect("exact signed return graph");
     let interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
         b"exact-signed-return".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [],
         r2ssa::SourceFunctionReturn::Register {
             storage: storage(0),
@@ -596,10 +600,13 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
     let mut boundary = r2ssa::SourceCallBoundaryFact {
         call_site: call_site_id,
         at,
-        calling_convention: Some("sysv64".to_string()),
+        convention: Some(r2ssa::ConventionId::SysVAmd64),
         variadic: Some(false),
         noreturn: Some(false),
-        result_kind: Some(r2ssa::SourceCallResult::Register { storage }),
+        result_kind: Some(r2ssa::SourceCallResult::register(storage)),
+        unstated_lanes: Box::default(),
+        unstated_carrier: None,
+        ignored: Box::default(),
         arguments: Vec::new(),
         fixed_argument_count: Some(0),
         variadic_argument_count_evidence: None,
@@ -649,7 +656,7 @@ fn exact_source_param_slots_accept_exact_empty_interface() {
     };
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         b"exact-empty-interface".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [],
         r2ssa::SourceFunctionReturn::Void,
         [],
@@ -771,15 +778,13 @@ fn function_facts_owns_input_quality_evidence() {
 #[test]
 fn function_facts_owns_canonical_callee_resolution() {
     let callsite = r2ssa::InstId(3);
-    let function_names = HashMap::from([(0x402000, "sym.helper".to_string())]);
-    let symbols = HashMap::new();
-    let known_function_signatures = HashMap::new();
+    let function_names = FxHashMap::from_iter([(0x402000, "sym.helper".to_string())]);
+    let symbols = FxHashMap::default();
     let callee_facts = BTreeMap::new();
     let ctx = crate::CalleeIdentityContext {
         function_names: &function_names,
         symbols: &symbols,
         callee_facts: &callee_facts,
-        known_function_signatures: &known_function_signatures,
     };
     let resolution = CalleeResolutionFacts::from_direct_call_targets([(callsite, 0x402000)], &ctx);
 
@@ -835,6 +840,7 @@ fn function_facts_owns_canonical_callsite_arguments() {
                 variadic: false,
                 fixed_argument_count: None,
                 callee_signature: None,
+                callee_unproven_bits: None,
                 callee_signature_types: None,
                 variadic_argument_count_evidence: None,
                 variadic_argument_count_refusal: None,
@@ -1046,6 +1052,7 @@ fn callsite_facts_own_canonical_argument_vector() {
         variadic: false,
         fixed_argument_count: None,
         callee_signature: None,
+        callee_unproven_bits: None,
         callee_signature_types: None,
         variadic_argument_count_evidence: None,
         variadic_argument_count_refusal: None,
@@ -1274,13 +1281,11 @@ fn prepared_call_results_bind_certified_exprs_to_stable_call_ids() {
         b"certified-call-result-fixture".to_vec(),
         r2ssa::SourceCallSiteIdentity::new(0x401000, target_storage),
         true,
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [],
         false,
         false,
-        r2ssa::SourceCallResult::Register {
-            storage: result_storage,
-        },
+        r2ssa::SourceCallResult::register(result_storage),
     )
     .expect("exact call-result interface");
     let prepared = x86_stack_home_under(&[block], None, vec![call_interface])
@@ -1326,7 +1331,7 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
     let parameter_storage = register_storage(0x10);
     let function_interface = r2ssa::SourceFunctionInterface::new_exact(
         revision.clone(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [r2ssa::SourceAbiParameterSpec::new(0, parameter_storage)],
         r2ssa::SourceFunctionReturn::Void,
         [],
@@ -1340,7 +1345,7 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
     );
     let callee_interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
         revision.clone(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [r2ssa::SourceAbiParameterSpec::new(0, parameter_storage)],
         r2ssa::SourceFunctionReturn::Void,
         [],
@@ -1367,7 +1372,7 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
             r2ssa::CanonicalStorageId::from_varnode(&target),
         ),
         true,
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [r2ssa::SourceCallArgumentSpec::new(0, parameter_storage)],
         false,
         false,
@@ -1383,13 +1388,18 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
         .parameters
         .get(&0)
         .expect("entry parameter boundary");
-    assert!(prepared.graph().use_sites(parameter.value).is_empty());
+    assert!(
+        prepared
+            .graph()
+            .use_sites(parameter.value().expect("a register formal"))
+            .is_empty()
+    );
     assert_eq!(
         prepared
             .callsite_certificate_for_inst(inst_at(&prepared, 0x401000, 0))
             .expect("callsite certificate")
             .argument_values,
-        [parameter.value]
+        [parameter.value().expect("a register formal")]
     );
 
     let mut facts = FunctionFacts::default();
@@ -1444,7 +1454,7 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
             .expect("render facts")
             .parameter_values(0)
             .collect::<Vec<_>>(),
-        [parameter.value]
+        [parameter.value().expect("a register formal")]
     );
 }
 
@@ -1470,6 +1480,7 @@ fn prepared_decompile_evidence_replaces_detached_source_dependent_rows() {
         variadic: false,
         fixed_argument_count: None,
         callee_signature: None,
+        callee_unproven_bits: None,
         callee_signature_types: None,
         variadic_argument_count_evidence: None,
         variadic_argument_count_refusal: None,
@@ -1591,7 +1602,6 @@ fn the_enriched_report_holds_the_projection_of_its_final_types() {
     let calls = CallFacts::project(
         source.as_ref(),
         &again.display_names,
-        &again.types.known_function_signatures,
         &again.types.callee_facts,
         &BTreeMap::new(),
     );
@@ -1626,7 +1636,10 @@ fn field_certificates_populate_direct_member_render_facts() {
             slot: 0,
             field_offset: 8,
             field_name: "hash".to_string(),
-            field_type: Some("uint64_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 64,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     };
@@ -1704,13 +1717,18 @@ fn field_certificates_do_not_follow_a_loop_carried_pointer_as_the_parameter() {
                 slot: 0,
                 field_offset: 8,
                 field_name: "value".to_string(),
-                field_type: Some("uint64_t".to_string()),
+                field_type: Some(CTypeLike::Int {
+                    bits: 64,
+                    signedness: crate::Signedness::Unsigned,
+                }),
             },
             crate::facts::FieldAccessCertificate {
                 slot: 0,
                 field_offset: 0x10,
                 field_name: "next".to_string(),
-                field_type: Some("struct Node *".to_string()),
+                field_type: Some(CTypeLike::Pointer(Box::new(CTypeLike::Struct(
+                    "Node".to_owned(),
+                )))),
             },
         ],
         ..FunctionTypeFacts::default()
@@ -1793,7 +1811,10 @@ fn field_certificates_do_not_populate_member_render_facts_for_wrong_width() {
             slot: 0,
             field_offset: 8,
             field_name: "small".to_string(),
-            field_type: Some("uint32_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 32,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     };
@@ -1832,7 +1853,10 @@ fn field_certificates_do_not_populate_member_render_facts_for_wrong_param_slot()
             slot: 0,
             field_offset: 8,
             field_name: "hash".to_string(),
-            field_type: Some("uint64_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 64,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     };
@@ -1856,7 +1880,10 @@ fn field_certificates_do_not_populate_member_render_facts_for_wrong_param_slot()
             slot: 1,
             field_offset: 8,
             field_name: "hash".to_string(),
-            field_type: Some("uint64_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 64,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     };
@@ -1937,7 +1964,7 @@ fn x86_stack_home_prepared(blocks: &[R2ILBlock]) -> r2ssa::SsaArtifact {
     let second_parameter = register_storage(0x18);
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         b"x86-stack-home-fixture".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [
             r2ssa::SourceAbiParameterSpec::new(0, parameter),
             r2ssa::SourceAbiParameterSpec::new(1, second_parameter),
@@ -2258,7 +2285,10 @@ fn field_certificate_type_facts(slot: usize, offset: u64) -> FunctionTypeFacts {
             slot,
             field_offset: offset,
             field_name: "hash".to_string(),
-            field_type: Some("uint64_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 64,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     }
@@ -2332,7 +2362,10 @@ fn field_certificates_populate_stack_home_member_render_facts() {
             slot: 0,
             field_offset: 4,
             field_name: "hash".to_string(),
-            field_type: Some("uint32_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 32,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     };
@@ -2360,7 +2393,10 @@ fn field_certificates_do_not_populate_stack_home_member_without_reload_proof() {
             slot: 0,
             field_offset: 4,
             field_name: "hash".to_string(),
-            field_type: Some("uint32_t".to_string()),
+            field_type: Some(CTypeLike::Int {
+                bits: 32,
+                signedness: crate::Signedness::Unsigned,
+            }),
         }],
         ..FunctionTypeFacts::default()
     };
@@ -2436,7 +2472,7 @@ fn scalar_array_candidates_populate_indexed_member_render_facts() {
             slot: 0,
             field_offset: 4,
             field_name: "score".to_string(),
-            field_type: Some("int32_t".to_string()),
+            field_type: Some(CTypeLike::i32()),
         }],
         scalar_array_render_candidates: vec![crate::facts::ScalarArrayRenderCandidate {
             slot: 0,
@@ -2523,7 +2559,7 @@ fn scalar_array_member_candidate_requires_semantic_index_identity() {
             slot,
             field_offset: 4,
             field_name: "score".to_string(),
-            field_type: Some("int32_t".to_string()),
+            field_type: Some(CTypeLike::i32()),
         }],
         scalar_array_render_candidates: vec![crate::facts::ScalarArrayRenderCandidate {
             slot,
@@ -3262,7 +3298,7 @@ fn untyped_return_source() -> r2ssa::SsaArtifact {
     };
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         b"untyped-return".to_vec(),
-        "sysv64",
+        r2source::ConventionId::SysVAmd64,
         [],
         r2ssa::SourceFunctionReturn::Register {
             storage: register(0),
@@ -3288,8 +3324,9 @@ fn untyped_return_source() -> r2ssa::SsaArtifact {
     .expect("prepared untyped return")
 }
 
+/// A declared graph decides the exact type; a body's recovered graph only writes its carrier (D201).
 #[test]
-fn a_recovered_graph_decides_a_carrier_and_a_read_one_the_exact_type() {
+fn a_recovered_graph_is_a_written_carrier_and_a_read_one_the_exact_type() {
     let int32 = CTypeLike::Int {
         bits: 32,
         signedness: crate::Signedness::Signed,
@@ -3300,15 +3337,16 @@ fn a_recovered_graph_decides_a_carrier_and_a_read_one_the_exact_type() {
     assert_eq!(
         decide(&signed_i32_return_source(true, true)),
         ReturnTypeFact::Decided {
-            ty: int32.clone(),
+            ty: int32,
             by: ReturnTypeEvidence::ExactSource,
         }
     );
     assert_eq!(
         decide(&signed_i32_return_source(true, false)),
-        ReturnTypeFact::Decided {
-            ty: int32,
-            by: ReturnTypeEvidence::Carrier,
+        ReturnTypeFact::Unproven {
+            carrier: Some(CTypeLike::uint(32)),
+            cause: Some(crate::UnprovenCause::Written),
+            spelled: true,
         }
     );
 }
@@ -3332,7 +3370,11 @@ fn no_value_is_void_only_where_the_boundary_proves_it() {
             &BTreeMap::new(),
             &crate::EvidenceTypes::default()
         ),
-        ReturnTypeFact::Unproven { carrier: None }
+        ReturnTypeFact::Unproven {
+            carrier: None,
+            cause: None,
+            spelled: false,
+        }
     );
 }
 
@@ -3361,18 +3403,25 @@ fn a_locally_inferred_signature_does_not_decide_the_return() {
         &crate::EvidenceTypes::default(),
     );
     facts.apply_return_type_fact(returns);
+    // The body writes the carrier and nothing states its type: unproven, never the local signature's.
     assert_eq!(
         facts.return_type(),
-        Some(&ReturnTypeFact::Refused(ReturnTypeRefusal::UntypedReturn))
+        Some(&ReturnTypeFact::Unproven {
+            carrier: Some(CTypeLike::uint(64)),
+            cause: Some(crate::UnprovenCause::Written),
+            spelled: true,
+        })
     );
     let merged = facts
         .type_facts()
         .merged_signature
         .as_ref()
         .expect("signature");
+    // A caller's declaration reads the written carrier, the typedef's target, not the local `u32`.
     assert_eq!(
-        merged.ret_type, None,
-        "the signature claims a return r2types refused"
+        merged.ret_type,
+        Some(CTypeLike::uint(64)),
+        "the signature states the carrier"
     );
 }
 
@@ -3382,7 +3431,7 @@ fn pair_graph(i_at: u64, size: u64, align: u64) -> Option<r2ssa::SourceTypeGraph
     r2ssa::SourceTypeGraph::new(
         [
             r2ssa::SourceType::new(0, pair, size, align),
-            r2ssa::SourceType::new(1, r2ssa::SourceTypeKind::Char { signed: true }, 8, 8),
+            r2ssa::SourceType::new(1, r2ssa::SourceTypeKind::Char { signed: Some(true) }, 8, 8),
             r2ssa::SourceType::new(2, r2ssa::SourceTypeKind::SignedInteger, 32, 32),
         ],
         [r2ssa::SourceAggregateLayout::new(

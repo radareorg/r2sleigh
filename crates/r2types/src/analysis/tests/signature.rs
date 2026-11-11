@@ -9,11 +9,11 @@ fn abi_register_params_are_the_stated_argument_registers() {
     let signature = super::InferredSignature {
         function_name: "f".to_string(),
         signature: "int f(long a, long b, long c)".to_string(),
-        ret_type: "int".to_string(),
+        ret_type: Some(parse_test_type("int", 64)),
         params: ["a", "b", "c"]
             .map(|name| super::InferredSignatureParam {
                 name: name.to_string(),
-                param_type: "int64_t".to_string(),
+                ty: parse_test_type("int64_t", 64),
             })
             .to_vec(),
         callconv: String::new(),
@@ -24,7 +24,7 @@ fn abi_register_params_are_the_stated_argument_registers() {
             .iter()
             .map(|name| name.to_string())
             .collect::<Vec<_>>();
-        super::inferred_signature_abi_register_params(&signature, &stated, 64)
+        super::inferred_signature_abi_register_params(&signature, &stated)
             .into_iter()
             .map(|param| param.reg)
             .collect::<Vec<_>>()
@@ -139,7 +139,7 @@ fn main_name_without_signature_evidence_does_not_fabricate_signature_output() {
         inferred_signature: InferredSignature {
             function_name: "sym.main".to_string(),
             signature: "void sym.main ()".to_string(),
-            ret_type: "void".to_string(),
+            ret_type: Some(parse_test_type("void", 64)),
             params: Vec::new(),
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
@@ -150,7 +150,7 @@ fn main_name_without_signature_evidence_does_not_fabricate_signature_output() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     };
     let analysis = build_type_analysis(input);
-    assert_eq!(spelled_signature(&analysis).ret_type, "void");
+    assert_eq!(spelled_ret(&spelled_signature(&analysis).ret_type), "void");
     assert!(
         spelled_signature(&analysis).params.is_empty(),
         "main name alone must not fabricate argc/argv/envp parameters"
@@ -194,10 +194,10 @@ fn user_type_hint_replaces_weak_pointer_sized_generic_arg() {
     let mut inferred_signature = InferredSignature {
         function_name: "sym.demo".to_string(),
         signature: "int64_t sym.demo(int64_t)".to_string(),
-        ret_type: "int64_t".to_string(),
+        ret_type: Some(parse_test_type("int64_t", 64)),
         params: vec![InferredSignatureParam {
             name: "arg1".to_string(),
-            param_type: "int64_t".to_string(),
+            ty: parse_test_type("int64_t", 64),
         }],
         callconv: "amd64".to_string(),
         arch: "x86-64".to_string(),
@@ -214,7 +214,7 @@ fn user_type_hint_replaces_weak_pointer_sized_generic_arg() {
     assert_eq!(usage.applied.len(), 1);
     assert!(usage.ignored.is_empty());
     assert!(usage.conflicts.is_empty());
-    assert_eq!(inferred_signature.params[0].param_type, "int32_t");
+    assert_eq!(spelled(&inferred_signature.params[0].ty), "int32_t");
     assert_eq!(
         render_signature_type(
             parsed_context.register_params[0]
@@ -265,7 +265,7 @@ fn interproc_heap_alloc_summary_upgrades_pointer_sized_scalar_return() {
         inferred_signature: InferredSignature {
             function_name: "sym.alloc_wrapper".to_string(),
             signature: "int64_t sym.alloc_wrapper ()".to_string(),
-            ret_type: "int64_t".to_string(),
+            ret_type: Some(parse_test_type("int64_t", 64)),
             params: Vec::new(),
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
@@ -276,7 +276,10 @@ fn interproc_heap_alloc_summary_upgrades_pointer_sized_scalar_return() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(spelled_signature(&analysis).ret_type, "allocation_ptr");
+    assert_eq!(
+        spelled_ret(&spelled_signature(&analysis).ret_type),
+        "allocation_ptr"
+    );
     assert_eq!(
         analysis
             .type_facts
@@ -360,10 +363,10 @@ fn interproc_returned_arg_summary_propagates_param_type_and_callee_facts() {
         inferred_signature: InferredSignature {
             function_name: "sym.identity".to_string(),
             signature: "int64_t sym.identity (char * src)".to_string(),
-            ret_type: "int64_t".to_string(),
+            ret_type: Some(parse_test_type("int64_t", 64)),
             params: vec![InferredSignatureParam {
                 name: "src".to_string(),
-                param_type: "char *".to_string(),
+                ty: parse_test_type("char *", 64),
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
@@ -374,7 +377,10 @@ fn interproc_returned_arg_summary_propagates_param_type_and_callee_facts() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(spelled_signature(&analysis).ret_type, "int8_t*");
+    assert_eq!(
+        spelled_ret(&spelled_signature(&analysis).ret_type),
+        "int8_t*"
+    );
     let callee = analysis
         .type_facts
         .callee_facts
@@ -412,10 +418,10 @@ fn local_inferred_scalar_param_narrows_external_wide_signature() {
         inferred_signature: InferredSignature {
             function_name: "sym._check_secret".to_string(),
             signature: "int64_t sym._check_secret (int32_t arg1)".to_string(),
-            ret_type: "int64_t".to_string(),
+            ret_type: Some(parse_test_type("int64_t", 64)),
             params: vec![InferredSignatureParam {
                 name: "arg1".to_string(),
-                param_type: "int32_t".to_string(),
+                ty: parse_test_type("int32_t", 64),
             }],
             callconv: String::new(),
             arch: "aarch64".to_string(),
@@ -426,7 +432,10 @@ fn local_inferred_scalar_param_narrows_external_wide_signature() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(spelled_signature(&analysis).params[0].param_type, "int32_t");
+    assert_eq!(
+        spelled(&spelled_signature(&analysis).params[0].ty),
+        "int32_t"
+    );
     let merged = analysis
         .type_facts
         .merged_signature
@@ -486,23 +495,23 @@ fn exact_named_external_size_signature_blocks_local_byte_narrowing() {
             function_name: "dbg.scan_example".to_string(),
             signature: "uint8_t dbg.scan_example (uint8_t* buf, uint8_t n, uint8_t a, uint8_t b)"
                 .to_string(),
-            ret_type: "uint8_t".to_string(),
+            ret_type: Some(parse_test_type("uint8_t", 64)),
             params: vec![
                 InferredSignatureParam {
                     name: "buf".to_string(),
-                    param_type: "uint8_t*".to_string(),
+                    ty: parse_test_type("uint8_t*", 64),
                 },
                 InferredSignatureParam {
                     name: "n".to_string(),
-                    param_type: "uint8_t".to_string(),
+                    ty: parse_test_type("uint8_t", 64),
                 },
                 InferredSignatureParam {
                     name: "a".to_string(),
-                    param_type: "uint8_t".to_string(),
+                    ty: parse_test_type("uint8_t", 64),
                 },
                 InferredSignatureParam {
                     name: "b".to_string(),
-                    param_type: "uint8_t".to_string(),
+                    ty: parse_test_type("uint8_t", 64),
                 },
             ],
             callconv: "amd64".to_string(),
@@ -514,9 +523,15 @@ fn exact_named_external_size_signature_blocks_local_byte_narrowing() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(spelled_signature(&analysis).ret_type, "size_t");
+    assert_eq!(
+        spelled_ret(&spelled_signature(&analysis).ret_type),
+        "size_t"
+    );
     assert_eq!(spelled_signature(&analysis).params[1].name, "n");
-    assert_eq!(spelled_signature(&analysis).params[1].param_type, "size_t");
+    assert_eq!(
+        spelled(&spelled_signature(&analysis).params[1].ty),
+        "size_t"
+    );
     assert_eq!(
         analysis
             .type_facts
@@ -564,23 +579,23 @@ fn authoritative_external_signature_keeps_param_count_over_longer_local_signatur
         inferred_signature: InferredSignature {
             function_name: "sym.alloc_and_copy".to_string(),
             signature: "int8_t * sym.alloc_and_copy (int8_t * src, uint8_t len, int64_t arg3, int64_t arg4)".to_string(),
-            ret_type: "int8_t *".to_string(),
+            ret_type: Some(parse_test_type("int8_t *", 64)),
             params: vec![
                 InferredSignatureParam {
                     name: "src".to_string(),
-                    param_type: "int8_t *".to_string(),
+                    ty: parse_test_type("int8_t *", 64),
                 },
                 InferredSignatureParam {
                     name: "len".to_string(),
-                    param_type: "uint8_t".to_string(),
+                    ty: parse_test_type("uint8_t", 64),
                 },
                 InferredSignatureParam {
                     name: "arg3".to_string(),
-                    param_type: "int64_t".to_string(),
+                    ty: parse_test_type("int64_t", 64),
                 },
                 InferredSignatureParam {
                     name: "arg4".to_string(),
-                    param_type: "int64_t".to_string(),
+                    ty: parse_test_type("int64_t", 64),
                 },
             ],
             callconv: "amd64".to_string(),
@@ -697,10 +712,10 @@ fn inferred_signature_certificate_records_local_source() {
         inferred_signature: InferredSignature {
             function_name: "sym.local_exact".to_string(),
             signature: "int32_t sym.local_exact (int32_t value)".to_string(),
-            ret_type: "int32_t".to_string(),
+            ret_type: Some(parse_test_type("int32_t", 64)),
             params: vec![InferredSignatureParam {
                 name: "value".to_string(),
-                param_type: "int32_t".to_string(),
+                ty: parse_test_type("int32_t", 64),
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
@@ -758,7 +773,7 @@ fn stack_local_type_assumption_does_not_claim_signature_authority() {
     });
     assert_eq!(
         applied_type_assumption_parameter_slots(&usage, &context, &x86_64_register_identity()),
-        HashSet::from([1])
+        FxHashSet::from_iter([1])
     );
 }
 
@@ -806,10 +821,10 @@ fn interproc_heap_alloc_summary_upgrades_generic_return_type() {
         inferred_signature: InferredSignature {
             function_name: "sym.alloc_wrapper".to_string(),
             signature: "void * sym.alloc_wrapper (int64_t n)".to_string(),
-            ret_type: "unknown_t".to_string(),
+            ret_type: Some(parse_test_type("unknown_t", 64)),
             params: vec![InferredSignatureParam {
                 name: "n".to_string(),
-                param_type: "int64_t".to_string(),
+                ty: parse_test_type("int64_t", 64),
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
@@ -867,10 +882,10 @@ fn interproc_void_return_summary_replaces_weak_scalar_return_type() {
         inferred_signature: InferredSignature {
             function_name: "sym.side_effect_worker".to_string(),
             signature: "int64_t sym.side_effect_worker (int64_t arg1)".to_string(),
-            ret_type: "int64_t".to_string(),
+            ret_type: Some(parse_test_type("int64_t", 64)),
             params: vec![InferredSignatureParam {
                 name: "arg1".to_string(),
-                param_type: "int64_t".to_string(),
+                ty: parse_test_type("int64_t", 64),
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
@@ -881,7 +896,7 @@ fn interproc_void_return_summary_replaces_weak_scalar_return_type() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(spelled_signature(&analysis).ret_type, "void");
+    assert_eq!(spelled_ret(&spelled_signature(&analysis).ret_type), "void");
     assert_eq!(
         analysis
             .type_facts
@@ -976,10 +991,10 @@ fn interproc_escape_only_does_not_certify_out_param() {
         inferred_signature: InferredSignature {
             function_name: "sym.escape_user".to_string(),
             signature: "void sym.escape_user (int64_t p)".to_string(),
-            ret_type: "void".to_string(),
+            ret_type: Some(parse_test_type("void", 64)),
             params: vec![InferredSignatureParam {
                 name: "p".to_string(),
-                param_type: "int64_t".to_string(),
+                ty: parse_test_type("int64_t", 64),
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
@@ -1022,10 +1037,10 @@ fn interproc_arg_write_out_param_certificate_records_write_evidence() {
         inferred_signature: InferredSignature {
             function_name: "sym.write_user".to_string(),
             signature: "void sym.write_user (void *out)".to_string(),
-            ret_type: "void".to_string(),
+            ret_type: Some(parse_test_type("void", 64)),
             params: vec![InferredSignatureParam {
                 name: "out".to_string(),
-                param_type: "void *".to_string(),
+                ty: parse_test_type("void *", 64),
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
@@ -1087,10 +1102,10 @@ fn interproc_memory_write_out_param_certificate_records_memory_write_evidence() 
         inferred_signature: InferredSignature {
             function_name: "sym.write_user".to_string(),
             signature: "void sym.write_user (void *out)".to_string(),
-            ret_type: "void".to_string(),
+            ret_type: Some(parse_test_type("void", 64)),
             params: vec![InferredSignatureParam {
                 name: "out".to_string(),
-                param_type: "void *".to_string(),
+                ty: parse_test_type("void *", 64),
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
@@ -1129,11 +1144,11 @@ fn interproc_summary_name_does_not_project_role_signature() {
             function_name: "sym.limfield.isra.0".to_string(),
             signature: "int64_t sym.limfield.isra.0(int64_t arg1, int64_t arg2, int64_t arg3)"
                 .to_string(),
-            ret_type: "int64_t".to_string(),
+            ret_type: Some(parse_test_type("int64_t", 64)),
             params: (0..3)
                 .map(|idx| InferredSignatureParam {
                     name: format!("arg{}", idx + 1),
-                    param_type: "int64_t".to_string(),
+                    ty: parse_test_type("int64_t", 64),
                 })
                 .collect(),
             callconv: "amd64".to_string(),
@@ -1145,7 +1160,10 @@ fn interproc_summary_name_does_not_project_role_signature() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(spelled_signature(&analysis).ret_type, "int64_t");
+    assert_eq!(
+        spelled_ret(&spelled_signature(&analysis).ret_type),
+        "int64_t"
+    );
     // The merged signature names parameters from zero, as the rendering declares them.
     let names = spelled_signature(&analysis)
         .params
@@ -1163,19 +1181,19 @@ fn semantic_role_signature_hint_does_not_truncate_named_authoritative_signature(
             function_name: "sym.printf_fetchargs".to_string(),
             signature: "int32_t sym.printf_fetchargs (struct parser *parser, struct slot *slot, uint32_t flags)"
                 .to_string(),
-            ret_type: "int32_t".to_string(),
+            ret_type: Some(parse_test_type("int32_t", 64)),
             params: vec![
                 InferredSignatureParam {
                     name: "parser".to_string(),
-                    param_type: "struct parser *".to_string(),
+                    ty: parse_test_type("struct parser *", 64),
                 },
                 InferredSignatureParam {
                     name: "slot".to_string(),
-                    param_type: "struct slot *".to_string(),
+                    ty: parse_test_type("struct slot *", 64),
                 },
                 InferredSignatureParam {
                     name: "flags".to_string(),
-                    param_type: "uint32_t".to_string(),
+                    ty: parse_test_type("uint32_t", 64),
                 },
             ],
             callconv: "amd64".to_string(),
@@ -1230,10 +1248,10 @@ fn interproc_summary_name_does_not_truncate_weak_entry_signature() {
         inferred_signature: InferredSignature {
             function_name: "entry.init0".to_string(),
             signature: "int64_t entry.init0(void *arg1)".to_string(),
-            ret_type: "int64_t".to_string(),
+            ret_type: Some(parse_test_type("int64_t", 64)),
             params: vec![InferredSignatureParam {
                 name: "arg1".to_string(),
-                param_type: "void *".to_string(),
+                ty: parse_test_type("void *", 64),
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
@@ -1244,10 +1262,13 @@ fn interproc_summary_name_does_not_truncate_weak_entry_signature() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(spelled_signature(&analysis).ret_type, "int64_t");
+    assert_eq!(
+        spelled_ret(&spelled_signature(&analysis).ret_type),
+        "int64_t"
+    );
     assert_eq!(spelled_signature(&analysis).params.len(), 1);
     assert_eq!(spelled_signature(&analysis).params[0].name, "arg0");
-    assert_eq!(spelled_signature(&analysis).params[0].param_type, "void*");
+    assert_eq!(spelled(&spelled_signature(&analysis).params[0].ty), "void*");
     assert_eq!(
         analysis
             .type_facts
@@ -1279,31 +1300,31 @@ fn interproc_summary_name_does_not_replace_weak_scalar_return() {
             signature:
                 "int64_t dbg.verror_at_line(int status, int errnum, int8_t *file_name, unsigned int line_number, int8_t *message, struct __va_list_tag *args)"
                     .to_string(),
-            ret_type: "int64_t".to_string(),
+            ret_type: Some(parse_test_type("int64_t", 64)),
             params: vec![
                 InferredSignatureParam {
                     name: "status".to_string(),
-                    param_type: "int".to_string(),
+                    ty: parse_test_type("int", 64),
                 },
                 InferredSignatureParam {
                     name: "errnum".to_string(),
-                    param_type: "int".to_string(),
+                    ty: parse_test_type("int", 64),
                 },
                 InferredSignatureParam {
                     name: "file_name".to_string(),
-                    param_type: "int8_t *".to_string(),
+                    ty: parse_test_type("int8_t *", 64),
                 },
                 InferredSignatureParam {
                     name: "line_number".to_string(),
-                    param_type: "unsigned int".to_string(),
+                    ty: parse_test_type("unsigned int", 64),
                 },
                 InferredSignatureParam {
                     name: "message".to_string(),
-                    param_type: "int8_t *".to_string(),
+                    ty: parse_test_type("int8_t *", 64),
                 },
                 InferredSignatureParam {
                     name: "args".to_string(),
-                    param_type: "struct __va_list_tag *".to_string(),
+                    ty: parse_test_type("struct __va_list_tag *", 64),
                 },
             ],
             callconv: "amd64".to_string(),
@@ -1315,7 +1336,10 @@ fn interproc_summary_name_does_not_replace_weak_scalar_return() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(spelled_signature(&analysis).ret_type, "int64_t");
+    assert_eq!(
+        spelled_ret(&spelled_signature(&analysis).ret_type),
+        "int64_t"
+    );
     assert_eq!(spelled_signature(&analysis).params.len(), 6);
     assert_eq!(
         analysis
@@ -1495,15 +1519,15 @@ fn interproc_returned_arg_summary_exports_callee_facts() {
         inferred_signature: InferredSignature {
             function_name: "sym.wrapper_user".to_string(),
             signature: "void * sym.wrapper_user (void * dst, void * src)".to_string(),
-            ret_type: "void *".to_string(),
+            ret_type: Some(parse_test_type("void *", 64)),
             params: vec![
                 InferredSignatureParam {
                     name: "dst".to_string(),
-                    param_type: "void *".to_string(),
+                    ty: parse_test_type("void *", 64),
                 },
                 InferredSignatureParam {
                     name: "src".to_string(),
-                    param_type: "void *".to_string(),
+                    ty: parse_test_type("void *", 64),
                 },
             ],
             callconv: "amd64".to_string(),
@@ -1603,7 +1627,7 @@ fn interproc_summary_name_does_not_export_role_callee_type_facts() {
         inferred_signature: InferredSignature {
             function_name: "sym.sort_driver".to_string(),
             signature: "void sym.sort_driver(void)".to_string(),
-            ret_type: "void".to_string(),
+            ret_type: Some(parse_test_type("void", 64)),
             params: Vec::new(),
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
@@ -1719,10 +1743,10 @@ fn interproc_memory_effect_summary_upgrades_generic_pointer_like_params() {
         inferred_signature: InferredSignature {
             function_name: "sym.ptr_user".to_string(),
             signature: "void sym.ptr_user (int64_t p)".to_string(),
-            ret_type: "void".to_string(),
+            ret_type: Some(parse_test_type("void", 64)),
             params: vec![InferredSignatureParam {
                 name: "p".to_string(),
-                param_type: "int64_t".to_string(),
+                ty: parse_test_type("int64_t", 64),
             }],
             callconv: "amd64".to_string(),
             arch: "x86-64".to_string(),
@@ -1733,7 +1757,7 @@ fn interproc_memory_effect_summary_upgrades_generic_pointer_like_params() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(spelled_signature(&analysis).params[0].param_type, "void*");
+    assert_eq!(spelled(&spelled_signature(&analysis).params[0].ty), "void*");
     assert_eq!(
         analysis
             .type_facts

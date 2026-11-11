@@ -76,7 +76,7 @@ fn dual_space_exact_parameter_artifact(arch: &crate::Arch) -> SsaArtifact {
     });
     let interface = SourceFunctionInterface::new_exact(
         b"dual-space-exact-parameter".to_vec(),
-        "aarch64-test",
+        r2source::ConventionId::Aapcs64,
         [SourceAbiParameterSpec::new(
             0,
             CanonicalStorageId {
@@ -712,7 +712,7 @@ fn stack_assumption_certificate_uses_the_typed_stack_base() {
     });
     let interface = SourceFunctionInterface::new_exact(
         b"assumption-stack-role-revision-1".to_vec(),
-        "test-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [SourceStackSlotSpec::new_local(
@@ -820,7 +820,7 @@ fn register_storage(offset: u64, size: u32) -> CanonicalStorageId {
 fn return_boundary_interface() -> SourceFunctionInterface {
     SourceFunctionInterface::new(
         b"return-boundary-revision-1".to_vec(),
-        "test-register-abi",
+        r2source::ConventionId::SysVAmd64,
         [SourceAbiParameterSpec::new(0, register_storage(8, 8))],
         SourceFunctionReturn::Register {
             storage: register_storage(0, 8),
@@ -833,7 +833,7 @@ fn return_boundary_interface() -> SourceFunctionInterface {
 fn preserved_stack_interface() -> SourceFunctionInterface {
     SourceFunctionInterface::new_exact(
         b"preserved-stack-revision-1".to_vec(),
-        "test-register-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Void,
         [],
@@ -846,7 +846,7 @@ fn preserved_stack_interface() -> SourceFunctionInterface {
 fn complete_return_interface(return_kind: SourceFunctionReturn) -> SourceFunctionInterface {
     SourceFunctionInterface::new_exact(
         b"complete-return-certificate-revision-1".to_vec(),
-        "test-register-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         return_kind,
         [],
@@ -969,7 +969,7 @@ fn exact_signed_low_return_artifact(write_logical_carrier: bool) -> SsaArtifact 
     .expect("exact signed return type graph");
     let interface = SourceFunctionInterface::new_exact_with_logical_types(
         b"exact-signed-low-return".to_vec(),
-        "test-register-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Register {
             storage: register_storage(0, 8),
@@ -1079,7 +1079,7 @@ fn constant_return_artifact(constant: u64, result_typed: bool) -> SsaArtifact {
     let interface = if result_typed {
         SourceFunctionInterface::new_exact_with_logical_types(
             b"constant-low-return".to_vec(),
-            "test-register-abi",
+            r2source::ConventionId::SysVAmd64,
             [],
             result,
             [],
@@ -1090,7 +1090,7 @@ fn constant_return_artifact(constant: u64, result_typed: bool) -> SsaArtifact {
     } else {
         SourceFunctionInterface::new_with_logical_types(
             b"constant-untyped-return".to_vec(),
-            "test-register-abi",
+            r2source::ConventionId::SysVAmd64,
             [],
             result,
             [],
@@ -1125,7 +1125,7 @@ fn composed_return_arch_spec(whole_name: &str, slice_name: &str, pc_name: &str) 
 fn composed_return_interface() -> SourceFunctionInterface {
     SourceFunctionInterface::new(
         b"return-composition-revision-1".to_vec(),
-        "test-register-abi",
+        r2source::ConventionId::SysVAmd64,
         [],
         SourceFunctionReturn::Register {
             storage: register_storage(0, 4),

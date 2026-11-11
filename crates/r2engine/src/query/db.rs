@@ -26,9 +26,10 @@
 //! gets [`Cycle`] rather than recursing; a strongly connected set of facts is
 //! solved by one query over the set (P6).
 
+use rustc_hash::FxHashMap;
 use std::any::{Any, TypeId};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -139,6 +140,8 @@ pub struct DbStats {
     pub computed: u64,
     /// Recomputations whose value equalled the previous one.
     pub backdated: u64,
+    /// Dependencies the query graph forbids that a computation reached (`Db::defect`).
+    pub defects: u64,
 }
 
 /// A held answer found good, with what it depends on.
@@ -162,6 +165,8 @@ struct Frame {
     held: bool,
     /// The `Newest` entries this held frame read, kept until its answer is held or not.
     pending: Pending,
+    /// The query this frame runs.
+    query: &'static str,
 }
 
 #[derive(Clone)]
@@ -226,7 +231,7 @@ trait AnyTable<I: Inputs> {
 /// The program's derived facts.
 pub struct Db<I: Inputs> {
     inputs: I,
-    tables: RefCell<HashMap<TypeId, Rc<dyn AnyTable<I>>>>,
+    tables: RefCell<FxHashMap<TypeId, Rc<dyn AnyTable<I>>>>,
     /// The dependencies of each query running, innermost last.
     frames: RefCell<Vec<Frame>>,
     stats: RefCell<DbStats>,
@@ -236,7 +241,7 @@ impl<I: Inputs + 'static> Db<I> {
     pub fn new(inputs: I) -> Self {
         Self {
             inputs,
-            tables: RefCell::new(HashMap::new()),
+            tables: RefCell::new(FxHashMap::default()),
             frames: RefCell::new(Vec::new()),
             stats: RefCell::new(DbStats::default()),
         }
@@ -297,6 +302,19 @@ impl<I: Inputs + 'static> Db<I> {
         }
         frame.last_bytes = Some(frame.deps.len());
         frame.deps.push(Dep::Bytes(range));
+    }
+
+    /// How many computations of the query named `query` are running, this one included.
+    pub fn running(&self, query: &'static str) -> usize {
+        (self.frames.borrow().iter())
+            .filter(|frame| frame.query == query)
+            .count()
+    }
+
+    /// Count a dependency the query graph forbids (a defect, never a fallback), with its evidence.
+    pub fn defect(&self, what: std::fmt::Arguments<'_>) {
+        r2il::refusal_evidence!("query-defect", "{what}");
+        self.stats.borrow_mut().defects += 1;
     }
 
     /// The answer to `Q` at `key`, reused where nothing it read has moved.
@@ -603,6 +621,7 @@ impl<Q: Query<I>, I: Inputs + 'static> Table<Q, I> {
         }
         db.frames.borrow_mut().push(Frame {
             held: Q::RETENTION == Retention::Held,
+            query: Q::NAME,
             ..Frame::default()
         });
         let frame = Running {

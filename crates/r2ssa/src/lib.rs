@@ -27,8 +27,8 @@ mod arch;
 pub mod arena;
 pub(crate) mod assumption;
 pub mod block;
+pub mod body_boundary;
 pub(crate) mod bytes;
-pub mod caller_reads;
 pub mod cfg;
 pub(crate) mod constant;
 pub(crate) mod control;
@@ -50,6 +50,7 @@ pub mod lanes;
 pub mod liveness;
 pub(crate) mod liveout;
 pub(crate) mod machine;
+pub mod site_boundary;
 pub use arch::Arch;
 pub(crate) mod machine_context;
 pub(crate) mod mirror;
@@ -62,13 +63,16 @@ pub(crate) mod op;
 pub(crate) mod optimize;
 pub mod origin;
 pub(crate) mod phi;
-pub(crate) mod printf;
+pub mod place;
+pub mod printf;
 pub(crate) mod reaching_rules;
 pub(crate) mod read_only;
 pub mod recover_interface;
 mod reload;
 pub(crate) mod rename;
 pub(crate) mod save_area;
+pub(crate) mod saved_register;
+pub(crate) mod security_cookie;
 pub(crate) mod semantic;
 mod slice;
 pub(crate) mod slot_promotion;
@@ -86,7 +90,7 @@ mod values;
 pub(crate) mod var;
 pub mod view;
 
-pub use abi::AbiProfile;
+pub use abi::Formals;
 pub use address::{
     AddressProvenanceFacts, AffineAddressTerm, ParameterAddressExpression,
     PointeeAddressExpression, PointeeStep,
@@ -148,22 +152,21 @@ pub use machine::{
     MachineZeroDivisorBehavior, float_width_is_supported, machine_address_provenance,
 };
 pub use machine_context::{
-    MACHINE_CONTEXT_SCHEMA_VERSION, MachineAbiModel, MachineAbiRegisterSlot,
-    MachineMemoryEndianness, MachineMemoryModel, MachineMemorySpace, MachineRegisterGeometryState,
-    SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION, SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION,
-    SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiClass, SourceAbiParameterSpec,
-    SourceAggregateLayout, SourceAggregateMember, SourceArity, SourceArityFloor,
-    SourceBoundaryReads, SourceCallArgumentSpec, SourceCallEffect, SourceCallResult,
-    SourceCallSiteIdentity, SourceCallSiteInterface, SourceCallSiteInterfaceError,
-    SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature, SourceConventionSlots,
-    SourceFloorCause, SourceFormatParameterRule, SourceFunctionInterface,
+    MACHINE_CONTEXT_SCHEMA_VERSION, MachineAbiModel, MachineMemoryEndianness, MachineMemoryModel,
+    MachineMemorySpace, MachineRegisterGeometryState, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
+    SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION,
+    SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceArity,
+    SourceArityFloor, SourceBoundaryReads, SourceCallArgumentSpec, SourceCallEffect,
+    SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
+    SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature,
+    SourceConventionSlots, SourceFloorCause, SourceFormatParameterRule, SourceFunctionInterface,
     SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineContext,
     SourceMachineRoles, SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation,
-    SourceResultCause, SourceResultSeed, SourceStackAllocationContract, SourceStackGrowth,
-    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
-    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
-    SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, loaded_target_slot,
-    terminal_indirect_loaded_slot,
+    SourceResultCause, SourceResultSeed, SourceResultWidth, SourceStackAllocationContract,
+    SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType,
+    SourceTypeAlias, SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError,
+    SourceTypeGraphParts, SourceTypeKind, SourceUnprovenCall, SourceUnprovenResult,
+    SourceUnstatedCall, loaded_target_slot, terminal_indirect_loaded_slot,
 };
 pub use obligation::{
     CanonicalInstructionId, CanonicalInstructionSite, ObligationInventoryFailure,
@@ -179,7 +182,7 @@ pub use r2sleigh_lift::{
     GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineLiftedFunction, GenuineLiftedFunctionAuthority,
     TrustedLiftedFunction,
 };
-pub use r2source::OwnedFunctionSnapshot;
+pub use r2source::{ConventionId, OwnedFunctionSnapshot};
 pub use semantic::{
     BlockAssumption, ByDirection, CallArgumentCertificate, CallArgumentLocation,
     CallBoundaryRefusal, CallBoundarySlot, CallBoundaryValueFact, CallFrameReach, CallMemoryEffect,
@@ -187,7 +190,7 @@ pub use semantic::{
     CallSiteTransfer, CalleeStackAllocationCertificate, CallerSlotSupply,
     CallerStackSlotCertificate, CallsiteCertificate, CompareKind, CompareProvenance, ControlDomain,
     ControlDomainFacts, ControlDomainId, ControlGuard, EntryAffineForm, ExtentAssumption,
-    ForLoopCertificate, FrameReach, GlobalObjectKey, InductionFact, InductionStep,
+    ForLoopCertificate, FormalHome, FrameReach, GlobalObjectKey, InductionFact, InductionStep,
     LoopCarrierEdgeValue, LoopCarrierFact, LoopCarrierMemberFact, LoopCarrierMemberRole,
     LoopCarrierUpdateFact, LoopCertificate, LoopId, LoopTrips, MachineReturnControlCertificate,
     MemberRunPlace, MemberRunSource, MemberRunStoreCertificate, MemberRunStoreMember,

@@ -25,7 +25,7 @@ impl<T> PartialEq for Shared<T> {
 
 /// One function's analysis, sealing and rendering: its entry, whether it is Thumb, and whether
 /// it reads its callers.
-pub(super) type Key = (u64, bool, super::Callers);
+pub(super) type Key = (u64, bool, super::World);
 
 /// One function's walk and preparation, by its key; the most recent only.
 pub(super) struct Analysed;
@@ -80,7 +80,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Analysed {
 }
 
 /// The machine the function at `entry` runs on, under its language's convention, or why there is none.
-fn target<'a, S: Source + 'static>(
+pub(super) fn target<'a, S: Source + 'static>(
     view: &View<'a, S>,
     entry: u64,
     thumb: bool,
@@ -92,7 +92,6 @@ fn target<'a, S: Source + 'static>(
         ));
     };
     view.target_of(machine, entry)
-        .map_err(NativeRefusal::Unassembled)
 }
 
 /// One function's walk through the dispatch tables it reads, by its entry and whether it is Thumb.

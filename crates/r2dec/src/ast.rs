@@ -2010,7 +2010,8 @@ pub struct CAggregateDef {
     /// `struct` or `union`, as the tag was introduced.
     pub is_union: bool,
     pub name: String,
-    /// Each member's declared type and name, in offset order.
+    /// Each member's declared type and name, in offset order; none declares the tag alone (C has
+    /// no empty aggregate), which a pointer to it needs.
     pub members: Vec<(CType, String)>,
 }
 
@@ -2766,7 +2767,7 @@ mod tests {
         let strings = |element: CType| {
             r2types::CTypeLike::Pointer(Box::new(r2types::CTypeLike::Pointer(Box::new(element))))
         };
-        let char_ = r2types::CTypeLike::plain_char(true);
+        let char_ = r2types::CTypeLike::plain_char(Some(true));
         let int8 = r2types::CTypeLike::Int {
             bits: 8,
             signedness: r2types::Signedness::Signed,

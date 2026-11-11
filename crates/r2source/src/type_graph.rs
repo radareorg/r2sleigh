@@ -17,19 +17,21 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Serialize;
 
-pub const SOURCE_TYPE_GRAPH_SCHEMA_VERSION: u32 = 2;
+pub const SOURCE_TYPE_GRAPH_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SourceTypeKind {
     SignedInteger,
     UnsignedInteger,
     /// Plain `char`: one byte, a type distinct from both signed and unsigned
-    /// char, whose signedness the ABI states.
+    /// char, whose signedness the ABI states; `None` where nothing states it.
     Char {
-        signed: bool,
+        signed: Option<bool>,
     },
+    /// `const_target` is the pointee's `const`, the one qualifier a prototype keeps.
     Pointer {
         target_type_id: u32,
+        const_target: bool,
     },
     Struct {
         aggregate_id: u32,
@@ -607,7 +609,7 @@ impl SourceTypeGraph {
             return Vec::new();
         };
         match source_type.kind {
-            SourceTypeKind::Pointer { target_type_id } => vec![target_type_id],
+            SourceTypeKind::Pointer { target_type_id, .. } => vec![target_type_id],
             SourceTypeKind::Array {
                 element_type_id, ..
             } => vec![element_type_id],
@@ -734,8 +736,12 @@ impl<'a> Renumbering<'a> {
             .filter_map(|id| self.graph.get(*id))
             .map(|source_type| {
                 let kind = match source_type.kind {
-                    SourceTypeKind::Pointer { target_type_id } => SourceTypeKind::Pointer {
+                    SourceTypeKind::Pointer {
+                        target_type_id,
+                        const_target,
+                    } => SourceTypeKind::Pointer {
                         target_type_id: map(target_type_id),
+                        const_target,
                     },
                     SourceTypeKind::Array {
                         element_type_id,
@@ -964,7 +970,7 @@ fn validate_type(
         SourceTypeKind::Float => {
             sized_consistently(size, align) && matches!(size, 16 | 32 | 64 | 80 | 96 | 128)
         }
-        SourceTypeKind::Pointer { target_type_id } => {
+        SourceTypeKind::Pointer { target_type_id, .. } => {
             sized_consistently(size, align)
                 && matches!(size, 32 | 64)
                 && type_at(parts, target_type_id).is_some()
