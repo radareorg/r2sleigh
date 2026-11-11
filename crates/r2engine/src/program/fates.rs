@@ -184,18 +184,15 @@ impl Supply {
 }
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
-    /// The callee, the world, and for a function the supply its seal hands in (ADR section 3).
-    type Key = (CalleeKey, World, Option<Supply>);
+    /// The callee and the world; a function's supply is its open read's (D317).
+    type Key = (CalleeKey, World);
     type Value = Option<CallBoundary>;
     const NAME: &'static str = "call-boundary";
     const RETENTION: Retention = Retention::Held;
 
     /// Work: an import's placement; a function's forwarding component, read once, and `O(LANES)`
     /// to decide.
-    fn compute(
-        db: &Db<ProgramInputs<S>>,
-        &(callee, world, supply): &(CalleeKey, World, Option<Supply>),
-    ) -> Self::Value {
+    fn compute(db: &Db<ProgramInputs<S>>, &(callee, world): &(CalleeKey, World)) -> Self::Value {
         let view = View::new(db, true);
         match (callee, world) {
             (CalleeKey::Import(ImportId(at)), _) => {
@@ -215,9 +212,13 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
                         "call-boundary {entry:#x} reached inside another"
                     ));
                 }
-                let supply = supply?;
-                let forwarding = (*db.get::<ComponentForwarding>(&entry).ok()?).clone()?;
                 let thumb = view.thumb_at(entry);
+                // Each call's per-lane statement composes a callee's supply into the open read (D317).
+                let open = db
+                    .get::<super::analysis::CalleeReads>(&(entry, thumb))
+                    .ok()?;
+                let supply = Supply::of(open.0.interface.as_ref()?);
+                let forwarding = (*db.get::<ComponentForwarding>(&entry).ok()?).clone()?;
                 let result = BoundaryResult::decided(db, (entry, thumb), &forwarding, supply);
                 r2il::refusal_evidence!(
                     "call-boundary",
@@ -825,6 +826,10 @@ fn decided_result(
         }
         Returns::Unproven => {
             let carriers = carriers?;
+            // A call reading the second register takes the pair, as for a register result.
+            if carriers.second && second.read {
+                return Some(SourceClosedResult::Read(SourceReadLanes::Pair));
+            }
             if integer_read && (!carriers.float || !float.read) {
                 return Some(SourceClosedResult::Read(SourceReadLanes::Integer));
             }
@@ -1170,11 +1175,9 @@ impl<S: Source + 'static> Reading<'_, S> {
     /// for a printf format, what a float-free format takes); an image function, what its body does.
     fn callee(&self, callee: u64) -> (CallEffect, Option<Formatted>) {
         if crate::native::Program::import_at(self.view, callee).is_some() {
-            let boundary = self.db.get::<CallBoundary>(&(
-                CalleeKey::Import(ImportId(callee)),
-                World::Open,
-                None,
-            ));
+            let boundary = self
+                .db
+                .get::<CallBoundary>(&(CalleeKey::Import(ImportId(callee)), World::Open));
             let reads = match boundary.ok().as_deref() {
                 Some(Some(CallBoundary::Import { reads })) => reads.clone(),
                 _ => None,

@@ -242,10 +242,9 @@ fn closed_alone<S: Source + 'static>(
     alone: &Shared<CalleeRead>,
     demand: Demand,
 ) -> Shared<CalleeRead> {
-    let decided = (demand == Demand::Arity)
-        .then(|| alone.0.interface.as_ref())
-        .flatten()
-        .and_then(|open| crate::native::Program::closed_result(view, node.0, open));
+    let decided = (demand == Demand::Arity && alone.0.interface.is_some())
+        .then(|| crate::native::Program::closed_result(view, node.0))
+        .flatten();
     if decided.is_none() {
         return alone.clone();
     }

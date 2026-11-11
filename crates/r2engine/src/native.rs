@@ -105,12 +105,8 @@ pub trait Program: crate::body::Program {
     }
 
     /// What the closed world's `CallBoundary` decided of the result of the function at `entry`, from
-    /// the supply its own seal states (`open`); none outside `aa` (doc/adr-result-side.md, section 3).
-    fn closed_result(
-        &self,
-        _entry: u64,
-        _open: &r2source::SourceFunctionInterface,
-    ) -> Option<r2source::SourceClosedResult> {
+    /// its open read's supply; none outside `aa` (doc/adr-result-side.md, section 3; D317).
+    fn closed_result(&self, _entry: u64) -> Option<r2source::SourceClosedResult> {
         None
     }
 
@@ -1647,11 +1643,11 @@ impl<'a> Native<'a> {
             ),
         };
         let mut first = seal_first(None)?;
-        // The closed world's held decision, from the supply this seal states (doc/adr-result-side.md).
-        let reads = (world == crate::program::World::Closed)
-            .then(|| first.machine_context().function_interface().cloned())
-            .flatten()
-            .and_then(|open| self.program.closed_result(entry, &open));
+        // The closed world's held decision, from the open read's supply (doc/adr-result-side.md, D317).
+        let open = first.machine_context().function_interface().is_some();
+        let reads = (world == crate::program::World::Closed && open)
+            .then(|| self.program.closed_result(entry))
+            .flatten();
         if reads.is_some() {
             drop(first);
             first = seal_first(reads)?;

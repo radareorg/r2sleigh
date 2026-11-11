@@ -1289,6 +1289,24 @@ fn written_on_every_return(
     .then_some(slot)
 }
 
+/// Whether every return hands back in `lane` what a call left there, stated or not. O(V + E).
+fn left_by_calls(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    lane: CanonicalStorageId,
+) -> bool {
+    let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[lane]);
+    live_out.has_returns()
+        && live_out.unresolved_blocks().next().is_none()
+        && live_out.iter().all(|value| {
+            matches!(
+                returned_by_call(graph, facts, value),
+                ReturnedByCall::Stated | ReturnedByCall::Unstated(_) | ReturnedByCall::Undecided(_)
+            )
+        })
+}
+
 /// The float bytes a closed-world read takes.
 fn float_bytes(closed: r2source::SourceClosedResult) -> Option<u8> {
     match closed {
@@ -1867,6 +1885,27 @@ fn recover_interface_inner(
                 float: Some(float),
                 second: None,
                 integer_undefined: true,
+            });
+        }
+    }
+    // A forwarder's carriers are the lanes its calls leave at its returns, so the open read the
+    // decision reads names them though no callee is resolved there (D317).
+    if no_tail_boundary
+        && result == RecoveredFunctionResult::Unproven
+        && result_carriers.is_none()
+        && let Some(integer) = slots.result_slot()
+    {
+        let float = (slots.float_result_slot()).filter(|lane| {
+            result_register_written(func, graph, *lane, Some(&facts), (true, true)).is_some()
+        });
+        let second =
+            (slots.second_result_slot()).filter(|lane| left_by_calls(func, graph, &facts, *lane));
+        if float.is_some() || second.is_some() {
+            result_carriers = Some(r2source::SourceResultCarriers {
+                integer,
+                float,
+                second,
+                integer_undefined: false,
             });
         }
     }
