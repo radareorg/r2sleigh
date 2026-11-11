@@ -326,7 +326,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/r2ssa/src/semantic/frame_reach.rs",
         "FrameReach::escape_spans",
     ),
-    ("crates/r2ssa/src/semantic/frame_reach.rs", "call_reaches"),
     ("crates/r2ssa/src/semantic/frame_reach.rs", "compiler_slots"),
     (
         "crates/r2ssa/src/semantic/mod.rs",
@@ -338,7 +337,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/r2ssa/src/site_boundary.rs", "argument_registers"),
     ("crates/r2ssa/src/site_boundary.rs", "argument_takes"),
     ("crates/r2ssa/src/site_boundary.rs", "unknown_call_takes"),
-    ("crates/r2ssa/src/slot_promotion.rs", "StackArguments::of"),
     ("crates/r2ssa/src/slot_promotion.rs", "promote"),
     ("crates/r2ssa/src/slot_promotion.rs", "saves"),
     ("crates/r2ssa/src/stack_bound.rs", "decide"),

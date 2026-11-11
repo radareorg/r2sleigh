@@ -1297,8 +1297,8 @@ impl SourceMachineContext {
             .and_then(|instruction| self.raw_call_site_at(instruction))
             .and_then(|identity| self.call_site_interface(identity))
             .filter(|interface| interface.is_complete() && !interface.is_variadic())?;
-        let reserved = (self.convention_slots())
-            .and_then(r2source::SourceConventionSlots::stack_arguments)
+        let reserved = (self.convention())
+            .and_then(r2source::ConventionModel::stack_arguments)
             .map_or(0, |placement| placement.first_offset().max(0));
         let slots =
             (interface.arguments().iter()).filter_map(|argument| match argument.location() {
