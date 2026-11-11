@@ -41,6 +41,8 @@ pub enum UnprovenCause {
     Unread,
     /// The result forwards through a cycle of callees that state none.
     ForwardCycle,
+    /// The convention states no complete set of result lanes, so none is proven empty.
+    LanesUnbounded,
 }
 
 impl UnprovenCause {
@@ -51,6 +53,7 @@ impl UnprovenCause {
             Self::EntryInput => "EntryInput",
             Self::Unread => "Unread",
             Self::ForwardCycle => "ForwardCycle",
+            Self::LanesUnbounded => "LanesUnbounded",
         }
     }
 
@@ -64,13 +67,19 @@ impl UnprovenCause {
         if causes.contains(&Cause::Unread) {
             return Some(Self::Unread);
         }
-        let written = causes
-            .iter()
-            .any(|cause| !matches!(cause, Cause::HandedBack | Cause::NoReturn));
+        let written = causes.iter().any(|cause| {
+            !matches!(
+                cause,
+                Cause::HandedBack | Cause::NoReturn | Cause::LanesUnbounded
+            )
+        });
         if written {
             return Some(Self::Written);
         }
-        (causes.contains(&Cause::HandedBack)).then_some(Self::EntryInput)
+        if causes.contains(&Cause::HandedBack) {
+            return Some(Self::EntryInput);
+        }
+        (causes.contains(&Cause::LanesUnbounded)).then_some(Self::LanesUnbounded)
     }
 }
 

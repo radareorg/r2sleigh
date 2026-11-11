@@ -200,6 +200,7 @@ mod tests {
             ]),
             hidden_return: None,
             results: Box::default(),
+            results_complete: None,
             owned: Box::new([OwnedRange::ReturnAddress(0..8)]),
             preserved: Box::default(),
             killed: Box::default(),

@@ -1119,6 +1119,125 @@ fn result_register_written(
     None
 }
 
+/// Why a lane past the typed three, or the float lane's call bytes, hold a result: the supply walk
+/// of doc/adr-result-side.md, "S36 as built". O(V + lanes × (V + E)).
+fn unheld_lane_written(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    machine_context: &crate::SourceMachineContext,
+) -> Option<SourceResultCause> {
+    let model = machine_context.convention()?;
+    if model.results_complete.is_none() {
+        return Some(SourceResultCause::LanesUnbounded);
+    }
+    let written = (graph.values.iter())
+        .filter(|value| graph.def_inst(value.id).is_some())
+        .filter_map(|value| value.canonical_storage)
+        .collect::<BTreeSet<_>>();
+    let walk = |lane: CanonicalStorageId, unstated_only: bool| {
+        if !written.iter().any(|storage| overlaps(*storage, lane)) {
+            return None;
+        }
+        lane_supply(func, graph, facts, (machine_context, lane), unstated_only)
+    };
+    // The float lane's body writes are `float_result_written`'s; a call's bytes there are not yet.
+    let typed = model.typed_results();
+    if let Some(cause) = typed.float.and_then(|float| walk(float, true)) {
+        return Some(cause);
+    }
+    let typed = [typed.integer, typed.float, typed.second];
+    let mut holds = vec![false; model.results.len()];
+    for (at, lane) in model.results.iter().enumerate() {
+        let first_empty = lane.follows.is_some_and(|first| !holds[first]);
+        if typed
+            .iter()
+            .flatten()
+            .any(|held| overlaps(*held, lane.storage))
+            || lane.entry == r2source::convention::LaneEntry::Input
+            || first_empty
+        {
+            continue;
+        }
+        if let Some(cause) = walk(lane.storage, false) {
+            holds[at] = true;
+            return Some(cause);
+        }
+    }
+    None
+}
+
+/// What a return leaves in `lane` past its entry bytes, by copies and merges: a body write
+/// (`Written`, unless `unstated_only`) or a call's bytes no contract states. O(V + E).
+fn lane_supply(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    (machine_context, lane): (&crate::SourceMachineContext, CanonicalStorageId),
+    unstated_only: bool,
+) -> Option<SourceResultCause> {
+    let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[lane]);
+    let mut seen = crate::dense::IdSet::default();
+    let mut pending = live_out.iter().collect::<Vec<_>>();
+    // Each value is taken once, so the walk ends after every value reaching a return.
+    while let Some(value) = pending.pop() {
+        let value = crate::constant::root_of(graph, value);
+        if !seen.insert(value) || !graph.written_by_body(value) {
+            continue;
+        }
+        let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
+            continue;
+        };
+        let cause = match &inst.payload {
+            crate::graph::InstPayload::Phi { .. } => {
+                pending.extend(graph.inputs(inst.id).iter().copied());
+                None
+            }
+            crate::graph::InstPayload::Op(crate::op::SSAOp::CallDefine { .. }) => {
+                call_supply(graph, facts, machine_context, value, unstated_only)
+            }
+            crate::graph::InstPayload::Op(_) => {
+                (!unstated_only).then_some(SourceResultCause::Written)
+            }
+        };
+        if cause.is_some() {
+            return cause;
+        }
+    }
+    None
+}
+
+/// Why a call's bytes at a return are a result; on the float lane, a callee whose carriers leave it
+/// out writes none there (scratch-result case 2; per-lane supply is S16's).
+fn call_supply(
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    machine_context: &crate::SourceMachineContext,
+    value: crate::ValueId,
+    unstated_only: bool,
+) -> Option<SourceResultCause> {
+    let id = match returned_by_call(graph, facts, value) {
+        ReturnedByCall::Void => return None,
+        ReturnedByCall::Stated | ReturnedByCall::Produced => {
+            return (!unstated_only).then_some(SourceResultCause::Written);
+        }
+        ReturnedByCall::Unstated(id) => id,
+    };
+    let call = facts.call_sites.by_id.get(&id)?;
+    let statement =
+        (call.direct_target).and_then(|target| machine_context.callee_statement(target));
+    if unstated_only
+        && statement
+            .and_then(|s| s.carriers)
+            .is_some_and(|c| c.float.is_none())
+    {
+        return None;
+    }
+    let named =
+        (call.direct_target).map_or(SourceUnstatedCall::Indirect, SourceUnstatedCall::Direct);
+    Some(SourceResultCause::Returned(named))
+}
+
 /// `slot`, where every return hands back a value the body wrote there: no path leaves it as the
 /// caller left it, and no call nothing states clobbers it.
 fn written_on_every_return(
@@ -1754,6 +1873,18 @@ fn recover_interface_inner(
             });
         }
     }
+    // Void only where every lane of the return set holds nothing (S36): asked only of a `Void` the
+    // body or the closed world would decide, whose cause then keeps it `Unproven`.
+    let deciding_void = result == RecoveredFunctionResult::Void
+        || (result == RecoveredFunctionResult::Unproven
+            && closed == Some(r2source::SourceClosedResult::Void));
+    let unheld = deciding_void
+        .then(|| unheld_lane_written(func, graph, &facts, machine_context?))
+        .flatten();
+    if let Some(cause) = unheld {
+        result = RecoveredFunctionResult::Unproven;
+        result_causes.insert(cause);
+    }
     // The closed world's decision (doc/adr-call-boundary.md, D166, D202): a read makes a written
     // integer result a value, every call dead makes a result no byte defines void, a written one unread.
     match closed {
@@ -1764,7 +1895,9 @@ fn recover_interface_inner(
         {
             applied = closed;
         }
-        Some(r2source::SourceClosedResult::Void) if result == RecoveredFunctionResult::Unproven => {
+        Some(r2source::SourceClosedResult::Void)
+            if result == RecoveredFunctionResult::Unproven && unheld.is_none() =>
+        {
             result = RecoveredFunctionResult::Void;
             live_out = crate::liveout::FunctionLiveOut::default();
             result_carriers = None;
@@ -3405,6 +3538,8 @@ mod tests {
                 variadic: None,
                 noreturn: None,
                 result_kind: None,
+                unstated_lanes: Box::default(),
+                unstated_carrier: None,
                 fixed_argument_count: Some(arguments.len()),
                 ignored: Box::default(),
                 variadic_argument_count_evidence: None,

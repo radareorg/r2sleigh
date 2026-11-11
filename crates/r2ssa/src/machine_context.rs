@@ -3073,6 +3073,10 @@ pub(crate) struct CalleeStatement {
     pub(crate) arity: crate::SourceArity,
     /// Its result, where the body proves it: an unproven result leaves an exact arity exact.
     pub(crate) result: Option<crate::SourceCallResult>,
+    /// The carrier its header spells an unproven result in.
+    pub(crate) seed: Option<r2source::SourceResultSeed>,
+    /// The typed lanes its body writes a result byte in, where its result is unproven.
+    pub(crate) carriers: Option<r2source::SourceResultCarriers>,
 }
 
 impl CalleeStatement {
@@ -3115,6 +3119,10 @@ impl CalleeStatement {
                         }
                         crate::SourceFunctionReturn::Unproven => None,
                     },
+                    seed: interface
+                        .unproven_result()
+                        .and_then(r2source::SourceUnprovenResult::seed),
+                    carriers: interface.result_carriers(),
                 },
             )
         });

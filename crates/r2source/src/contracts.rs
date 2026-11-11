@@ -398,6 +398,8 @@ pub enum SourceResultCause {
     Unread,
     /// A call returns the result on through a cycle of forwarders.
     ForwardCycle,
+    /// No citation states the convention's result lanes complete, so no lane is proven empty (S36).
+    LanesUnbounded,
 }
 
 /// What the direct paths of a body prove of an unproven result: the convention's carrier, at the

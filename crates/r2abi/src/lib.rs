@@ -19,7 +19,7 @@ pub mod syscalls;
 pub mod types;
 
 pub use convention::{
-    ConventionId, ConventionRow, Cspec, Extension, HomeArea, RegName, Side, SlotClass,
+    ConventionId, ConventionRow, Cspec, Extension, HomeArea, RegName, ResultSet, Side, SlotClass,
     SpecOverride, Toolchain,
 };
 pub use data_model::CDataModel;

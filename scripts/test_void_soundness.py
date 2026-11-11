@@ -83,8 +83,8 @@ class Externs(unittest.TestCase):
         verdict = gate.Verdict(BUILD, "p_f3_chain_c", "struct f3", "r2sleigh_result_u64", True)
         void = gate.Extern(BUILD, "c_f3_chain_c", "p_f3_chain_c", "void")
         refused = gate.Extern(BUILD, "c_f3_chain_c", "p_f3_chain_c", None)
-        self.assertEqual(gate.outcome([verdict], [], [], set(), 0, [void])[1], 1)
-        self.assertEqual(gate.outcome([verdict], [], [], set(), 0, [refused])[1], 0)
+        self.assertEqual(gate.outcome([verdict], [], [], set(), [void])[1], 1)
+        self.assertEqual(gate.outcome([verdict], [], [], set(), [refused])[1], 0)
 
     def test_too_few_extern_rows_fail(self) -> None:
         manifest = {"d.c": {f"p_{n}": {"read": True, "returns": "double"} for n in range(10)}}
@@ -131,8 +131,8 @@ class Exits(unittest.TestCase):
     def row(self, function: str, rendered: str | None, read: bool = True, build: gate.Build = BUILD) -> gate.Verdict:
         return gate.Verdict(build, function, "double", rendered, read)
 
-    def code(self, verdicts, problems=(), short=(), known=(), premised=0) -> int:
-        return gate.outcome(list(verdicts), list(problems), list(short), set(known), premised)[1]
+    def code(self, verdicts, problems=(), short=(), known=()) -> int:
+        return gate.outcome(list(verdicts), list(problems), list(short), set(known))[1]
 
     def test_a_sound_run_exits_0(self) -> None:
         self.assertEqual(self.code([self.row("p_a", "double")]), 0)
@@ -161,9 +161,10 @@ class Exits(unittest.TestCase):
     def test_a_build_not_scored_exits_2(self) -> None:
         self.assertEqual(self.code([self.row("p_a", "double")], problems=["d.gcc.O3: does not compile"]), 2)
 
-    def test_too_few_premised_voids_exits_1(self) -> None:
-        self.assertEqual(self.code([self.row("p_a", "double")], premised=1), 1)
-        self.assertEqual(self.code([self.row("p_a", "double"), self.row("p_c", "void", read=False)], premised=1), 0)
+    def test_an_unread_written_result_rendered_void_exits_1(self) -> None:
+        # Every `ignored` producer forwards what a call wrote: unread, never void (D202).
+        self.assertEqual(self.code([self.row("p_a", "double"), self.row("p_c", "void", read=False)]), 1)
+        self.assertEqual(self.code([self.row("p_a", "double"), self.row("p_c", "double", read=False)]), 0)
 
     def test_a_missing_compiler_exits_2_unless_allowed(self) -> None:
         self.assertEqual(gate.toolchain_exit(["gcc", "clang"], ["gcc"], True, False), 2)

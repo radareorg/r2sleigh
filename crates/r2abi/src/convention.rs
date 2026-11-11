@@ -222,7 +222,20 @@ pub struct ConventionRow {
     /// What its boundaries carry that no call boundary states, which refuses every function.
     pub refused: Option<&'static str>,
     pub overrides: &'static [SpecOverride],
+    /// That the result lanes are every lane a result comes back in, and how they pair; none where
+    /// no document states the set complete, so no result of the convention is ever `void`.
+    pub results: Option<ResultSet>,
     /// The documents that state these.
+    pub citation: &'static str,
+}
+
+/// A convention's result lanes as one complete set (doc/adr-result-side.md, "The lane set").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResultSet {
+    /// `(lane, first)`: the lane holds a result only beside `first`.
+    pub follows: &'static [(RegName, RegName)],
+    /// The lanes that hold nothing at entry (the x87 stack is empty on entry).
+    pub empty: &'static [RegName],
     pub citation: &'static str,
 }
 
@@ -273,6 +286,22 @@ const SYSTEM_V_AMD64: ConventionRow = ConventionRow {
     }),
     stack_bound: None,
     overrides: &[SYSV_RESULTS],
+    results: Some(ResultSet {
+        follows: &[
+            (RegName("rdx"), RegName("rax")),
+            (RegName("xmm1"), RegName("xmm0")),
+            (RegName("st1"), RegName("st0")),
+        ],
+        empty: &[RegName("st0"), RegName("st1")],
+        citation: "System V AMD64 psABI 1.0, section 3.2.3, \"Returning of Values\": \"If the class \
+                   is INTEGER, the next available register of the sequence %rax, %rdx is used\"; \
+                   \"If the class is SSE, the next available vector register of the sequence \
+                   %xmm0, %xmm1 is used\"; \"If the class is COMPLEX_X87, the real part of the \
+                   value is returned in %st0 and the imaginary part in %st1\"; a class MEMORY \
+                   result is returned through the hidden pointer, in %rax; Figure 3.4 makes \
+                   %st0 to %st7 temporaries, so a callee finds the x87 stack empty: what a body \
+                   holds there it wrote",
+    }),
     citation: "System V AMD64 psABI 1.0, section 3.2.2: \"The 128-byte area beyond the \
                location pointed to by %rsp is considered to be reserved and shall not be \
                modified by signal or interrupt handlers\"; section 3.5.7: \"%al is used as \
@@ -297,6 +326,14 @@ const MICROSOFT_X64: ConventionRow = ConventionRow {
     }),
     stack_bound: None,
     overrides: &[],
+    results: Some(ResultSet {
+        follows: &[],
+        empty: &[],
+        citation: "Microsoft x64 software conventions, \"Return values\": \"A scalar return value \
+                   that can fit into 64 bits, including the __m64 type, is returned through RAX. \
+                   Non-scalar types including floats, doubles, and vector types such as __m128 \
+                   ... are returned in XMM0\"; otherwise the caller passes a pointer, returned in RAX",
+    }),
     citation: "Microsoft x64 software conventions, \"Stack usage\": the convention \
                defines no red zone; its register usage table lists RBP as nonvolatile and usable as a frame pointer; \"Stack allocation\": \"The stack will always be maintained 16-byte aligned, except within the prolog (for example, after the return address is pushed)\"; \"The caller is responsible for allocating space for the parameters to the callee. The caller must always allocate sufficient space to store four register parameters, even if the callee doesn't take that many parameters\", the area directly above the return address; \"Varargs\": \"It's the callee's responsibility to dump arguments that have their address taken\"; Windows SDK vadefs.h: _crt_va_arg on _M_X64 steps the char * va_list by sizeof(__int64) per argument",
 };
@@ -316,6 +353,7 @@ const I386_CDECL: ConventionRow = ConventionRow {
     }),
     stack_bound: None,
     overrides: &[],
+    results: None,
     citation: "System V i386 ABI 1.1, \"Function Calling Sequence\": the convention \
                defines no red zone; its register table gives %ebp the frame pointer role; \"The end of the input argument area shall be aligned on a 16 byte boundary\", so %esp + 4 is a multiple of 16 at entry",
 };
@@ -360,6 +398,18 @@ const AAPCS64: ConventionRow = ConventionRow {
     }),
     stack_bound: None,
     overrides: &AAPCS64_INTEGER_UNSPECIFIED,
+    results: Some(ResultSet {
+        follows: &[
+            (RegName("x1"), RegName("x0")),
+            (RegName("q1"), RegName("q0")),
+            (RegName("q2"), RegName("q1")),
+            (RegName("q3"), RegName("q2")),
+        ],
+        empty: &[],
+        citation: "AAPCS64, section 6.9 \"Result return\": a result is returned in the registers \
+                   an identical first argument would be passed in (x0 and x1, or v0 to v3 for an \
+                   HFA or HVA, consecutive from v0); otherwise through the memory x8 addresses",
+    }),
     citation: "AAPCS64, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
                by [SP, stack-base - 1]\"; its general-purpose register table names r29 FP, the frame pointer; \"Universal stack constraints\": \"SP mod 16 = 0\"; Appendix \"Variable argument lists\": the general register save area holds x0 to x7 in order, and \"__gr_top: set to the address of the byte immediately following the general register argument save area\"; the va_list is {void *__stack; void *__gr_top; void *__vr_top; int __gr_offs; int __vr_offs;} (__stack at offset 0, __gr_top at 8), and \"__gr_offs: set to 0 - ((8 - named_gr) * 8)\"",
@@ -406,6 +456,7 @@ const AAPCS32: ConventionRow = ConventionRow {
     }),
     stack_bound: None,
     overrides: &[],
+    results: None,
     citation: "AAPCS32, \"Universal stack constraints\": \"A process may only access \
                (for reading or writing) the closed interval of the entire stack delimited \
                by [SP, stack-base - 1]\"; AAPCS32 leaves the frame pointer to the platform, and GCC in ARM state keeps it in r11, the APCS fp; \"Public interfaces\": \"SP mod 8 = 0\"",
@@ -426,6 +477,7 @@ const RISCV_LP64: ConventionRow = ConventionRow {
     }),
     stack_bound: None,
     overrides: &[],
+    results: None,
     citation: "RISC-V ELF psABI, \"Integer Calling Convention\": the convention defines \
                no red zone; \"Register Convention\": x8 \"s0/fp Saved register/frame pointer\"; \"the stack pointer shall be aligned to a 128-bit boundary upon procedure entry\"",
 };
@@ -462,6 +514,7 @@ const GO_AMD64: ConventionRow = ConventionRow {
                    stackguard0 uintptr` after `type stack struct { lo, hi uintptr }`, so 16 bytes in",
     }),
     overrides: &[],
+    results: None,
     citation: "Go internal ABI (src/cmd/compile/abi-internal.md), amd64: \"RBP | Frame pointer \
                | Same | Same\"; it defines no red zone; amd64: \"The stack pointer, RSP, grows down and is always aligned to 8 bytes\"",
 };
@@ -480,6 +533,7 @@ const GO_ARM64: ConventionRow = ConventionRow {
         citation: "Go internal ABI (src/cmd/compile/abi-internal.md), arm64: \"R28 | Current \
                    goroutine | Same | Same\"; runtime/runtime2.go: `stackguard0` 16 bytes into `g`",
     }),
+    results: None,
     citation: "Go internal ABI (src/cmd/compile/abi-internal.md), arm64: \"R29 | Frame pointer \
                | Same | Same\"; it defines no red zone; arm64: \"The stack pointer, RSP, grows down and is always aligned to 16 bytes\"",
     ..GO_AMD64

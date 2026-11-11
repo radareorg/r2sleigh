@@ -18,7 +18,8 @@ use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
 use r2sleigh_lift::profile::{LanguageProfile, ParamEntry, SlotClass, SpecStorage};
 use r2source::convention::{
-    BoundaryForms, LaneSet, LaneSource, Location, OwnedRange, ResultLane, Section, SectionClass,
+    BoundaryForms, LaneEntry, LaneSet, LaneSource, Location, OwnedRange, ResultLane, Section,
+    SectionClass,
 };
 use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, ConventionModel, SourceDataObject, SourceEndianness,
@@ -2560,11 +2561,13 @@ pub fn convention_model(
     let link = profile.return_address.as_deref().and_then(|n| at.placed(n));
     let (preserved, reserved) = duties(&at, prototype, link, bits, kernel);
     let owned = owned(prototype, row.home, &sections, profile.return_address_slot);
+    let results = results(&at, prototype, row, &sections)?;
     let model = ConventionModel {
         id: row.id,
         sections,
         hidden_return,
-        results: results(&at, prototype, row)?,
+        results_complete: complete(&results, row),
+        results,
         owned,
         preserved,
         killed: at.lanes(&prototype.killed_by_call),
@@ -2714,39 +2717,109 @@ fn sections(
     Ok((sections.into(), hidden_return))
 }
 
-/// The specification's `<output>` registers, then the lanes a cited override adds.
+/// The specification's `<output>` registers, then the lanes a cited override adds, each with what
+/// it holds at entry and the lane it follows (doc/adr-result-side.md, "The lane set").
 fn results(
     at: &Resolver<'_>,
     prototype: &r2sleigh_lift::profile::ProtoModel,
     row: &r2abi::ConventionRow,
+    sections: &[Section],
 ) -> Result<Box<[ResultLane]>, NativeRefusal> {
     let mut results = Vec::new();
+    let lane = |storage, class, extension, stated_by| ResultLane {
+        storage,
+        class,
+        extension,
+        stated_by,
+        entry: LaneEntry::Scratch,
+        follows: None,
+    };
     for entry in &prototype.output {
         if let SpecStorage::Register(name) = &entry.at {
-            results.push(ResultLane {
-                storage: at.required(name)?,
-                class: entry.class,
-                extension: extension(row, r2abi::Side::Output, entry),
-                stated_by: LaneSource::Specification,
-            });
+            results.push(lane(
+                at.required(name)?,
+                entry.class,
+                extension(row, r2abi::Side::Output, entry),
+                LaneSource::Specification,
+            ));
         }
     }
     for item in row.overrides {
         let r2abi::SpecOverride::Results { class, lanes, .. } = *item else {
             continue;
         };
-        for lane in lanes.iter().filter_map(|name| at.placed(name.0)) {
-            if !results.iter().any(|stated| stated.storage == lane) {
-                results.push(ResultLane {
-                    storage: lane,
+        for storage in lanes.iter().filter_map(|name| at.placed(name.0)) {
+            if !results.iter().any(|stated| stated.storage == storage) {
+                results.push(lane(
+                    storage,
                     class,
-                    extension: r2abi::Extension::Unspecified,
-                    stated_by: LaneSource::Override,
-                });
+                    r2abi::Extension::Unspecified,
+                    LaneSource::Override,
+                ));
             }
         }
     }
+    let arguments = (sections.iter())
+        .flat_map(|section| section.locations.iter())
+        .filter_map(|location| match location {
+            Location::Register { storage, .. } => Some(*storage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let set = row.results;
+    let named = |names: &[r2abi::RegName]| {
+        names
+            .iter()
+            .filter_map(|name| at.placed(name.0))
+            .collect::<Vec<_>>()
+    };
+    let empty = set.map(|set| named(set.empty)).unwrap_or_default();
+    let pairs = (set.iter().flat_map(|set| set.follows.iter()))
+        .filter_map(|(lane, first)| Some((at.placed(lane.0)?, at.placed(first.0)?)))
+        .collect::<Vec<_>>();
+    let storages = results.iter().map(|lane| lane.storage).collect::<Vec<_>>();
+    for lane in &mut results {
+        lane.entry = if empty.iter().any(|held| overlap(*held, lane.storage)) {
+            LaneEntry::Empty
+        } else if arguments.iter().any(|held| overlap(*held, lane.storage)) {
+            LaneEntry::Input
+        } else {
+            LaneEntry::Scratch
+        };
+        lane.follows = (pairs.iter())
+            .find(|(follower, _)| overlap(*follower, lane.storage))
+            .and_then(|(_, first)| storages.iter().position(|held| overlap(*held, *first)));
+    }
     Ok(results.into())
+}
+
+/// The cited completeness of a lane set, where the row states it and the set fits a site's boundary.
+fn complete(results: &[ResultLane], row: &r2abi::ConventionRow) -> Option<&'static str> {
+    // Overlapping lanes (`XMM0_Qa` beside `xmm0`) are one lane.
+    let distinct = (0..results.len())
+        .filter(|at| {
+            !results[..*at]
+                .iter()
+                .any(|earlier| overlap(earlier.storage, results[*at].storage))
+        })
+        .count();
+    if distinct > r2source::convention::RESULT_LANES {
+        r2il::refusal_evidence!(
+            "result-lanes",
+            "{:?} returns in {distinct} lanes, past the {} a boundary tracks",
+            row.id,
+            r2source::convention::RESULT_LANES
+        );
+        return None;
+    }
+    row.results.map(|set| set.citation)
+}
+
+/// Whether two storages share a byte.
+fn overlap(one: CanonicalStorageId, other: CanonicalStorageId) -> bool {
+    one.space == other.space
+        && one.offset < other.offset + u64::from(other.size)
+        && other.offset < one.offset + u64::from(one.size)
 }
 
 /// Who owns each entry-relative stack range the specification states. A `localrange` from the

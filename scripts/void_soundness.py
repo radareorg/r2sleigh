@@ -15,17 +15,18 @@ A caller's extern is graded too: `void f(...)` in the function that calls `f` is
 absence, made where the read happens, so an extern `void` for a function some caller reads is a false
 void wherever the header is not. A call the engine refuses declares nothing and is counted, not failed.
 
-A function no caller reads may be `void` (the closed world's premise, doc/adr-resolved-bodies.md)
-and is counted, not failed. A global function of a relocatable object is read by other objects.
+A function no caller reads may be `void` only where it writes no result (the closed world's
+premise, doc/adr-resolved-bodies.md); every `ignored` producer here forwards what a call wrote, so
+one rendered `void` fails (D202). A global function of a relocatable object is read by other objects.
 
 What the gate claims is what it can fail: a function a caller reads is void only where
-tests/gold/void_soundness/known.json names its build (`program.compiler.opt[.isa]/function`) and a cause,
-each void at the base: an x87 result recovery holds no lane for (ROADMAP D200).
+tests/gold/void_soundness/known.json names its build (`program.compiler.opt[.isa]/function`) and a cause;
+since S36 it names none, and an extern is never admitted.
 Every producer is salted so no compiler folds one into another, every compiler
 named must be found (or --allow-missing-compilers), every function of the manifest must have a verdict in
 every build scored, and at most a tenth of the judged rows may be functions r2s did not render.
 
-Exit status: 0 sound, 1 a read value rendered `void`, 2 the truth could not be read, 77 no ELF toolchain.
+Exit status: 0 sound, 1 a read value rendered `void` (header or extern) or an unread written one, 2 the truth could not be read, 77 no ELF toolchain.
 """
 
 from __future__ import annotations
@@ -282,9 +283,11 @@ def toolchain_exit(named: list[str], found: list[str], toolchain: bool, allow_mi
 
 
 def outcome(verdicts: list[Verdict], problems: list[str], short: list[str], known: set[str],
-            min_premised: int, externs: list[Extern] = ()) -> tuple[dict, int]:
+            externs: list[Extern] = ()) -> tuple[dict, int]:
     """The report and the exit status: 1 for a new or stale false void, a build with a function unjudged,
-    or more than a tenth of the judged rows unrendered; 2 for a build not scored; 1 for too few premised."""
+    or more than a tenth of the judged rows unrendered; 1 for an extern `void` of a read result, or an
+    unread result rendered void (each `ignored` producer forwards what a call wrote: D202 makes it
+    unread, never void); 2 for a build not scored."""
     bad = [verdict for verdict in verdicts if verdict.false_void]
     premised = [verdict for verdict in verdicts if verdict.premised_void]
     read = [verdict for verdict in verdicts if verdict.read]
@@ -323,14 +326,13 @@ def outcome(verdicts: list[Verdict], problems: list[str], short: list[str], know
         "too_few_rows": short, "not_scored": problems,
         "externs": len(externs), "extern_void": [f"{r.build} {r.caller} {r.callee}" for r in voided],
         "extern_refused": len(refused)}
-    if new or stale or short or too_many or voided:
+    for verdict in premised:
+        print(f"UNREAD VOID {verdict.build} {verdict.function}: no caller reads its written result, "
+              f"which is unread, never void (D202)")
+    if new or stale or short or too_many or voided or premised:
         return report, 1
     if problems:
         return report, 2
-    if len(premised) < min_premised:
-        print(f"the closed world found {len(premised)} premised voids, fewer than the {min_premised} "
-              f"the suite is built to find", file=sys.stderr)
-        return report, 1
     return report, 0
 
 
@@ -348,8 +350,6 @@ def main() -> int:
     parser.add_argument("--jobs", type=int, default=4)
     parser.add_argument("--prebuilt", type=Path,
                         help="a directory of <program>.<compiler>.<opt>.dbg and .str builds, for a host that cannot build ELF")
-    parser.add_argument("--min-premised", type=int, default=1,
-                        help="the premised voids the suite must still find, so that a closed world switched off fails")
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
 
@@ -397,7 +397,7 @@ def main() -> int:
     known = known_false_voids(args.sources / "known.json")
     scored = scored_builds(jobs, problems)
     short = floors(verdicts, manifest, scored) + extern_floors(externs, manifest, scored)
-    report, code = outcome(verdicts, problems, short, known, args.min_premised if not only else 0, externs)
+    report, code = outcome(verdicts, problems, short, known, externs)
     print(report["summary"])
     if args.json:
         args.json.write_text(json.dumps(report, indent=1) + "\n")

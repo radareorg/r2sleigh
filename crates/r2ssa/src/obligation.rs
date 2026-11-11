@@ -3218,6 +3218,8 @@ mod tests {
                 variadic: Some(false),
                 noreturn: Some(false),
                 result_kind: Some(crate::SourceCallResult::Void),
+                unstated_lanes: Box::default(),
+                unstated_carrier: None,
                 ignored: Box::default(),
                 arguments: vec![
                     crate::semantic::SourceCallArgumentFact {

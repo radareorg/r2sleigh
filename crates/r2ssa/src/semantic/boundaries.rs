@@ -1239,6 +1239,44 @@ fn stated_call_arguments(
     (arguments, true)
 }
 
+/// Where the callee states no result, every result lane the call kills is unstated, carried as the
+/// callee's header carries it, else in the integer lane (D201, D307; doc/adr-result-side.md).
+fn state_unstated_result(
+    boundary: &mut SourceCallBoundaryFact,
+    machine_context: &SourceMachineContext,
+    stated: Option<&crate::machine_context::CalleeStatement>,
+) {
+    if stated.is_some_and(|statement| statement.result.is_some()) {
+        return;
+    }
+    let Some(model) = machine_context.convention() else {
+        return;
+    };
+    let clobbered = machine_context.call_clobbered_carriers();
+    let shares = |one: CanonicalStorageId, other: CanonicalStorageId| {
+        one.space == other.space
+            && one.offset < other.offset + u64::from(other.size)
+            && other.offset < one.offset + u64::from(one.size)
+    };
+    boundary.unstated_lanes = (model.results.iter())
+        .map(|lane| lane.storage)
+        .filter(|lane| clobbered.iter().any(|killed| shares(*killed, *lane)))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let integer = model
+        .typed_results()
+        .integer
+        .map(|slot| r2source::SourceResultSeed {
+            slot,
+            bits: slot.size.saturating_mul(8),
+            signed: false,
+        });
+    boundary.unstated_carrier = (!boundary.unstated_lanes.is_empty())
+        .then(|| stated.and_then(|statement| statement.seed).or(integer))
+        .flatten();
+}
+
 /// The boundary a convention built for a callee that mints no contract, beside what the callee's
 /// body `stated`, where it states anything (CalleeStatement), or why an import states nothing.
 fn adopt_convention(
@@ -1322,6 +1360,8 @@ pub(crate) fn collect_source_boundary_facts(
             variadic: None,
             noreturn: None,
             result_kind: None,
+            unstated_lanes: Box::default(),
+            unstated_carrier: None,
             arguments: Vec::new(),
             ignored: Box::default(),
             fixed_argument_count: None,
@@ -1668,6 +1708,7 @@ pub(crate) fn collect_source_boundary_facts(
                         .direct_target
                         .and_then(|target| machine_context.unstated_import(target));
                     adopt_convention(&mut boundary, convention, stated, unstated);
+                    state_unstated_result(&mut boundary, machine_context, stated);
                 }
             }
         }

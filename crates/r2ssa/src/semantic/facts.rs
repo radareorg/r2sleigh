@@ -753,6 +753,12 @@ pub struct SourceCallBoundaryFact {
     pub variadic: Option<bool>,
     pub noreturn: Option<bool>,
     pub result_kind: Option<SourceCallResult>,
+    /// Result lanes the call may change that no contract states (S36): what the call leaves there
+    /// is a result no one states, never no value, so the call is never declared `void`.
+    pub unstated_lanes: Box<[crate::CanonicalStorageId]>,
+    /// The carrier an unstated result is spelled in: the callee header's, else the convention's
+    /// integer lane (D201). None where no lane is unstated.
+    pub unstated_carrier: Option<r2source::SourceResultSeed>,
     pub arguments: Vec<SourceCallArgumentFact>,
     /// The argument positions the callee's interface states it ignores (holes, D165): each is
     /// passed as a typed residual, so the value reaching it is no read and holds nothing live.

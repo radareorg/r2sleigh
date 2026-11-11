@@ -825,3 +825,102 @@ fn a_termination_function_another_way_reaches_keeps_its_result() {
         "{text}"
     );
 }
+
+/// `f` is `fld1; ret`: its result is x87 st0, a lane no typed lane covers; `caller` stores st0 and
+/// clears xmm0 and xmm1. `void` needs every lane of the return set held: never void (S36, D200).
+const X87_WRITTEN: &[u8] = &[
+    0xd9, 0xe8, // 1000 fld1
+    0xc3, // 1002 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, // 1003 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0xdd, 0x1e, // 1015 fstp qword [rsi]
+    0x0f, 0x57, 0xc0, // 1017 xorps xmm0, xmm0
+    0x0f, 0x57, 0xc9, // 101a xorps xmm1, xmm1
+    0xc3, // 101d ret
+    0x90, 0x90,
+];
+
+#[test]
+fn a_written_x87_result_is_never_void_cold_or_under_the_closed_world() {
+    let program = || {
+        Literal::of_code(
+            X87_WRITTEN,
+            &[("f", BASE, 0x03), ("caller", BASE + 0x10, 0x0e)],
+        )
+    };
+    let cold = OpenProgram::of(program())
+        .rendered(BASE)
+        .expect("it renders");
+    let text = cold.response.output.into_text();
+    assert!(!text.starts_with("void f("), "{text}");
+    // Every typed lane is dead at the one call: before S36 the closed world made this `void`.
+    let text = analysed(program());
+    assert!(!text.starts_with("void f("), "{text}");
+    assert!(text.contains("unproven"), "{text}");
+}
+
+/// `f` writes xmm0 and xmm1 (`struct { float a, b, c; }` comes back so); `caller` stores xmm1 and
+/// clears eax. No contract states `f`'s result at the call, so the extern is no `void` (S36).
+const SECOND_FLOAT_READ: &[u8] = &[
+    0x0f, 0x57, 0xc0, // 1000 xorps xmm0, xmm0
+    0x0f, 0x57, 0xc9, // 1003 xorps xmm1, xmm1
+    0xc3, // 1006 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1007 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0xf3, 0x0f, 0x11, 0x0e, // 1015 movss [rsi], xmm1
+    0x31, 0xc0, // 1019 xor eax, eax
+    0xc3, // 101b ret
+    0x90, 0x90, 0x90, 0x90,
+];
+
+#[test]
+fn a_call_no_contract_states_declares_no_void_extern() {
+    let program = || {
+        Literal::of_code(
+            SECOND_FLOAT_READ,
+            &[("f", BASE, 0x07), ("caller", BASE + 0x10, 0x0c)],
+        )
+    };
+    for analyse in [false, true] {
+        let mut open = OpenProgram::of(program());
+        if analyse {
+            open.analyse_program().expect("it surveys");
+        }
+        let rendered = open.rendered(BASE + 0x10).expect("it renders");
+        let text = rendered.response.output.into_text();
+        assert!(text.contains(" f("), "{text}");
+        assert!(!text.contains("void f("), "{text}");
+    }
+}
+
+/// `f` is `push rax; call [rdi]; pop rax; ret`: RAX comes back as it was, XMM0 as the unstated call
+/// left it (ldb.clang `p_ldb_forward_b`); `caller` stores XMM0. Never void (S36).
+const FORWARDED_UNSTATED_FLOAT: &[u8] = &[
+    0x50, // 1000 push rax
+    0xff, 0x17, // 1001 call [rdi]
+    0x58, // 1003 pop rax
+    0xc3, // 1004 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1005 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0xf2, 0x0f, 0x11, 0x06, // 1015 movsd [rsi], xmm0
+    0xc3, // 1019 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+];
+
+#[test]
+fn a_forwarded_unstated_float_result_is_never_void() {
+    let program = || {
+        Literal::of_code(
+            FORWARDED_UNSTATED_FLOAT,
+            &[("f", BASE, 0x05), ("caller", BASE + 0x10, 0x0a)],
+        )
+    };
+    let cold = OpenProgram::of(program())
+        .rendered(BASE)
+        .expect("it renders");
+    let text = cold.response.output.into_text();
+    assert!(!text.starts_with("void f("), "{text}");
+    let text = analysed(program());
+    assert!(!text.starts_with("void f("), "{text}");
+}

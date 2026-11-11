@@ -38,6 +38,9 @@ pub(super) struct CallPlan {
     pub(super) result: Option<CallResult>,
     /// How many low bytes of its one result register r2ssa states the callee's value fills.
     pub(super) width: Option<SourceResultWidth>,
+    /// The carrier's bits where the call reads no result and its boundary does not state `void`:
+    /// a result no contract states is still one (S36), so its extern is never `void`.
+    pub(super) unread: Option<u32>,
     pub(super) noreturn: bool,
     /// For a tail transfer, the register and class its callee returns in; `Some(None)` where the
     /// facts state no result.
@@ -480,6 +483,7 @@ fn planned(
         stacked,
         fixed,
         variadic: certificate.variadic,
+        unread: unread_result(artifact, *site, result.is_none()),
         result,
         width,
         // C may drop what follows a call it believes never returns, so only the source says so.
@@ -494,6 +498,17 @@ fn planned(
         tail,
         declared: None,
     })
+}
+
+/// The carrier bits of a result nothing reads: the stated register's width, or the carrier r2ssa
+/// states where no contract states the result (D307); none where r2ssa states `void`.
+fn unread_result(artifact: &SsaArtifact, site: r2ssa::CallSiteId, unread: bool) -> Option<u32> {
+    let boundary = artifact.facts().boundaries.calls.get(&site)?;
+    let bits = match boundary.result_kind {
+        Some(r2source::SourceCallResult::Register { width, .. }) => u32::from(width.logical) * 8,
+        _ => boundary.unstated_carrier?.bits,
+    };
+    (unread && crate::prelude::carrier(bits).is_some()).then_some(bits)
 }
 
 /// Whether the CFG gives the block the call at `inst` ends no successor: the source's block graph

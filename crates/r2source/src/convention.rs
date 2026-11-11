@@ -56,7 +56,33 @@ pub struct ResultLane {
     pub class: SlotClass,
     pub extension: Extension,
     pub stated_by: LaneSource,
+    /// What the lane holds at entry, by the convention.
+    pub entry: LaneEntry,
+    /// The position in `results` of the lane this one holds a result only beside.
+    pub follows: Option<usize>,
 }
+
+/// What a result lane holds at entry (doc/adr-result-side.md, "The lane set").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneEntry {
+    /// An argument location: its entry bytes are the caller's argument.
+    Input,
+    /// No argument location: its entry bytes define nothing (scratch-result case 1).
+    Scratch,
+    /// The convention states it empty at entry (SysV 3.2.1: the x87 stack).
+    Empty,
+}
+
+/// The convention's typed result lanes, each absent where it names none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TypedResults {
+    pub integer: Option<CanonicalStorageId>,
+    pub float: Option<CanonicalStorageId>,
+    pub second: Option<CanonicalStorageId>,
+}
+
+/// More lanes than a site's boundary tracks: such a set is refused, and states no result `void`.
+pub const RESULT_LANES: usize = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaneSource {
@@ -174,6 +200,9 @@ pub struct ConventionModel {
     /// The pointer to a result the caller allocates (AAPCS64 x8).
     pub hidden_return: Option<CanonicalStorageId>,
     pub results: Box<[ResultLane]>,
+    /// The citation that states `results` every lane a result comes back in; none where nothing
+    /// does or the set is refused, and then no result of the convention is `void`.
+    pub results_complete: Option<&'static str>,
     pub owned: Box<[OwnedRange]>,
     /// What a call leaves as it found it: the specification's `unaffected`, less the return
     /// address, and the ABI's callee-saved control bits.
@@ -252,16 +281,30 @@ impl ConventionModel {
         (self.sections.iter()).any(|section| section.class == SectionClass::Shared)
     }
 
-    /// The candidate slots: a view of this model, as the snapshot carries it.
-    pub fn convention_slots(&self) -> Result<SourceConventionSlots, SourceMachineRolesError> {
+    /// The typed result lanes: the integer register, the float one and the second integer one,
+    /// which holds a two-register value's high half.
+    pub fn typed_results(&self) -> TypedResults {
         let results = self
             .result_registers(SlotClass::Integer)
             .collect::<Vec<_>>();
-        let result = results.first().copied();
-        // The second integer result entry holds a two-register value's high half.
+        let integer = results.first().copied();
         let second = (results.get(1).copied())
-            .filter(|second| result.is_some_and(|first| first.size == second.size));
-        let float_result = self.result_registers(SlotClass::Float).next();
+            .filter(|second| integer.is_some_and(|first| first.size == second.size));
+        let float = self.result_registers(SlotClass::Float).next();
+        TypedResults {
+            integer,
+            float,
+            second,
+        }
+    }
+
+    /// The candidate slots: a view of this model, as the snapshot carries it.
+    pub fn convention_slots(&self) -> Result<SourceConventionSlots, SourceMachineRolesError> {
+        let TypedResults {
+            integer: result,
+            float: float_result,
+            second,
+        } = self.typed_results();
         Ok(
             SourceConventionSlots::new(
                 self.id,

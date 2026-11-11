@@ -7811,8 +7811,8 @@ impl Program for CallsAFunction {
     }
 }
 
-/// `release` leaves RAX as it found it and tails to `free`: void (D200 case 1). Its call site states
-/// no result (its arity is a floor), so `scan`'s result is unproven in either layout.
+/// `release` hands XMM0 back (D208) and its arity is a floor, so its call states no result: its
+/// extern is the carrier, never `void` (S36), and `scan`'s result is unproven in either layout.
 #[test]
 fn a_call_to_a_void_callee_leaves_the_exit_returning_it_no_value_in_either_layout() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -7828,7 +7828,7 @@ fn a_call_to_a_void_callee_leaves_the_exit_returning_it_no_value_in_either_layou
         };
         let response = decompile(&target, &program, BASE).expect("decompile");
         let text = response.output.text();
-        let declaration = format!("void fcn_{callee:x}(uint64_t, uint64_t);");
+        let declaration = format!("r2sleigh_result_u64 fcn_{callee:x}(uint64_t, uint64_t);");
         assert_eq!(
             text.matches(&declaration).count(),
             1,

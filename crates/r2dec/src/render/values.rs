@@ -1744,9 +1744,10 @@ impl<'a> Values<'a> {
 
     /// The C type the call returns: its declared prototype's, else its result's class, else `void`.
     fn return_type(&self, inst: InstId, plan: &CallPlan) -> Result<CType, CallRefusal> {
-        let ret = match plan.returns() {
-            Some(class) => needed(terms::c_type(class), inst, CallRefusal::ResultNotSpelled)?,
-            None => CType::Void,
+        let ret = match (plan.returns(), plan.unread) {
+            (Some(class), _) => needed(terms::c_type(class), inst, CallRefusal::ResultNotSpelled)?,
+            (None, Some(bits)) if plan.tail.is_none() => crate::prelude::result_carrier(bits),
+            (None, _) => CType::Void,
         };
         Ok(plan
             .declared

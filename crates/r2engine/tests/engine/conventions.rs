@@ -211,3 +211,44 @@ fn the_apple_arm64_model_extends_arguments_to_32_bits() {
     );
     assert!(!model.reserved.is_empty(), "x18");
 }
+
+/// The lane set (D305): SysV's six lanes, which follows which, x87 empty at entry, the set cited
+/// complete; AAPCS64 pairs x1 with x0 and q1 to q3 in turn; a model whose row cites none has none.
+#[test]
+fn a_result_lane_set_states_entries_pairs_and_its_completeness() {
+    use r2source::convention::LaneEntry;
+    let lane = |model: &ConventionModel, offset: u64| {
+        let at = (model.results.iter())
+            .position(|lane| lane.storage.offset == offset)
+            .expect("a lane");
+        (
+            model.results[at].entry,
+            model.results[at]
+                .follows
+                .map(|first| model.results[first].storage.offset),
+        )
+    };
+    let sysv = model_of_sysv();
+    assert!(sysv.results_complete.is_some());
+    assert_eq!(lane(&sysv, 0x0), (LaneEntry::Scratch, None), "rax");
+    assert_eq!(
+        lane(&sysv, 0x10),
+        (LaneEntry::Input, Some(0x0)),
+        "rdx after rax"
+    );
+    assert_eq!(
+        lane(&sysv, 0x1240),
+        (LaneEntry::Input, Some(0x1200)),
+        "xmm1 after xmm0"
+    );
+    assert_eq!(lane(&sysv, 0x1100).0, LaneEntry::Empty, "st0");
+    let aapcs64 = model("aarch64", None, ConventionId::Aapcs64, Kernel::Linux);
+    assert!(aapcs64.results_complete.is_some());
+    assert_eq!(
+        lane(&aapcs64, 0x4008),
+        (LaneEntry::Input, Some(0x4000)),
+        "x1 after x0"
+    );
+    assert!(ConventionId::I386Cdecl.row().results.is_none());
+    assert!(ConventionId::Aapcs32.row().results.is_none());
+}

@@ -603,6 +603,8 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
         variadic: Some(false),
         noreturn: Some(false),
         result_kind: Some(r2ssa::SourceCallResult::register(storage)),
+        unstated_lanes: Box::default(),
+        unstated_carrier: None,
         ignored: Box::default(),
         arguments: Vec::new(),
         fixed_argument_count: Some(0),
