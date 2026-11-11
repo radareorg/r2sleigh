@@ -692,7 +692,7 @@ CMDS=aa; pdd @ 0x00001521
 EXPECT=<<EOF
 r2sleigh_result_u64 fcn_1521(uint64_t arg0, uint32_t arg1)
 {
-    /* r2dec proof: 2 constructs are marked below; 24 source obligations: 0 rendered, 10 elided, 0 refused, 14 residual; 1 statements rendered; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
+    /* r2dec proof: 2 constructs are marked below; 24 source obligations: 0 rendered, 10 elided, 0 refused, 14 residual; 1 statements rendered; no call reads the result (assuming closed-world); the result's second register is open: no call read decides it; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
     {
         r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x1521:51 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
         return r2sleigh_residual_u64(2);

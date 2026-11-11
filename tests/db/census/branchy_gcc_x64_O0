@@ -1060,6 +1060,8 @@ NAME=0x00401764
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401764
 EXPECT=<<EOF
+struct fcn_401472_arg0;
+
 r2sleigh_result_u64 fcn_401764(void)
 {
     uint32_t addr_chain(void);
@@ -1086,7 +1088,7 @@ r2sleigh_result_u64 fcn_401764(void)
     int32_t printf(const char*, ...);
     uint64_t pure_zero_guard(void);
     uint32_t rec_index(uint32_t*, uint32_t, uint32_t);
-    uint64_t rec_spread(uint64_t, uint64_t);
+    uint32_t rec_spread(struct fcn_401472_arg0*, uint32_t);
     uint32_t rec_write(uint32_t*, uint32_t);
     uint32_t sign_xor(uint32_t, uint32_t);
     uint64_t slot_eq_guard(uint32_t);
@@ -1202,7 +1204,7 @@ r2sleigh_result_u64 fcn_401764(void)
         rbx_4 = (uint64_t)(uint32_t)((uint64_t)rax_36 >> 0U);
         rax_38 = (uint64_t)rec_index((uint32_t*)(uint64_t)(frame + 48U), 0, 6);
         rax_40 = (uint64_t)half_stride((uint16_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)16U), 1);
-        rax_42 = (uint64_t)(uint32_t)rec_spread((uint64_t)(frame + 48U), 3);
+        rax_42 = (uint64_t)rec_spread((struct fcn_401472_arg0*)(uint64_t)(frame + 48U), 3);
         tmp_401a41_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         rax_44 = (uint64_t)triple_temp((uint32_t)tmp_401a41_8_1);
         rax_46 = (uint64_t)rec_write((uint32_t*)(uint64_t)(frame + 48U), 4);

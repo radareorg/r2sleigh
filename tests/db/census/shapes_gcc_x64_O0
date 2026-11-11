@@ -704,10 +704,12 @@ NAME=0x004018b6
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x004018b6
 EXPECT=<<EOF
+struct fcn_4017ac_arg0;
+
 uint64_t shape_struct_pointer(uint64_t arg0, uint64_t arg1)
 {
     __uint128_t mixed_from(uint64_t, uint64_t);
-    uint64_t mixed_touch(uint64_t);
+    r2sleigh_result_u64 mixed_touch(struct fcn_4017ac_arg0*);
 
     uint64_t tmp_4018d9_8_1;
     uint64_t tmp_4018dd_8_1;
@@ -735,8 +737,8 @@ uint64_t shape_struct_pointer(uint64_t arg0, uint64_t arg1)
         rdx_2 = (uint64_t)((__uint128_t)pair_4018e7 >> 64U);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 32U), (uint64_t)rax_4);
         r2sleigh_store_u64((void*)((uint64_t)(frame + 32U) + (uint64_t)8U), (uint64_t)rdx_2);
-        mixed_touch((uint64_t)(frame + 32U));
-        mixed_touch((uint64_t)(frame + 32U));
+        mixed_touch((struct fcn_4017ac_arg0*)(uint64_t)(frame + 32U));
+        mixed_touch((struct fcn_4017ac_arg0*)(uint64_t)(frame + 32U));
         tmp_40190c_8_1 = r2sleigh_load_u8((void*)(uint64_t)(frame + 32U));
         rdx_5 = (uint64_t)(uint8_t)tmp_40190c_8_1;
         tmp_40191d_8_1 = r2sleigh_load_u16((void*)((uint64_t)(frame + 32U) + (uint64_t)2U));

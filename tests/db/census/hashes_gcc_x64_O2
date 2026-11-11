@@ -85,7 +85,7 @@ r2sleigh_result_u32 fcn_401050(void)
     uint64_t adler32(uint64_t, uint64_t);
     uint64_t combined(uint64_t, uint64_t);
     uint32_t crc32_bitwise(uint64_t, uint64_t);
-    uint64_t crc32_init(void);
+    r2sleigh_result_u64 crc32_init(void);
     uint32_t crc32_table(uint64_t, uint64_t);
     uint64_t djb2(uint64_t, uint64_t);
     uint64_t fletcher32(uint64_t, uint64_t);
