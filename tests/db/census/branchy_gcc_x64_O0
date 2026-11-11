@@ -571,7 +571,7 @@ uint64_t slot_eq_guard(uint32_t arg0)
 {
     uint64_t rax_9;
 
-    /* r2dec proof: no individual construct is marked; 22 source obligations: 12 rendered, 7 elided, 0 refused, 3 compiler-inserted (assuming ub-free); 2 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 21 source obligations: 12 rendered, 7 elided, 0 refused, 2 compiler-inserted (assuming ub-free); 2 statements rendered; a call reads the result (assuming closed-world) */
     {
         rax_9 = (uint8_t)((uint32_t)arg0 != (uint32_t)11U) ? 0 : 1;
         {
@@ -1138,7 +1138,7 @@ r2sleigh_result_u64 fcn_401764(void)
     uint64_t rax_62;
     _Alignas(16) uint8_t frame[568];
 
-    /* r2dec proof: no individual construct is marked; 547 source obligations: 359 rendered, 171 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 12 assumed (frame extent unproven); 79 statements rendered; 6 callee prototypes supplied by the source; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 544 source obligations: 359 rendered, 170 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 12 assumed (frame extent unproven); 79 statements rendered; 6 callee prototypes supplied by the source; the result is unproven (Written): 1 unproven-return carried */
     /* symbol `main`; C allows that name no other prototype */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 48U), (uint64_t)0U);

@@ -296,7 +296,7 @@ uint64_t shape_variadic(uint64_t arg0, uint64_t arg1)
     uint64_t rax_58;
     _Alignas(16) uint8_t frame[264];
 
-    /* r2dec proof: no individual construct is marked; 243 source obligations: 141 rendered, 60 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 37 assumed (frame extent unproven); 51 statements rendered; 4 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 240 source obligations: 141 rendered, 59 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 37 assumed (frame extent unproven); 51 statements rendered; 4 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 32U), (uint64_t)arg1);
@@ -382,7 +382,7 @@ uint64_t vfold(uint32_t arg0, ...)
     uint32_t tmp_4014e0_8_1;
     _Alignas(16) uint8_t frame[248];
 
-    /* r2dec proof: 15 constructs are marked below; 125 source obligations: 62 rendered, 41 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 17 residual; 44 statements rendered; 8 held from entry, read as residuals (XMM0_0, XMM1_0, XMM2_0, XMM3_0, XMM4_0, XMM5_0, XMM6_0, XMM7_0); 6 variadic tail registers, read as residuals (R8_0, R9_0, RAX_0, RCX_0, RDX_0, RSI_0); a call reads the result (assuming closed-world) */
+    /* r2dec proof: 15 constructs are marked below; 122 source obligations: 62 rendered, 40 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 17 residual; 44 statements rendered; 8 held from entry, read as residuals (XMM0_0, XMM1_0, XMM2_0, XMM3_0, XMM4_0, XMM5_0, XMM6_0, XMM7_0); 6 variadic tail registers, read as residuals (R8_0, R9_0, RAX_0, RCX_0, RDX_0, RSI_0); a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u32((void*)(uint64_t)(frame + 12U), (uint32_t)arg0);
         r2sleigh_store_u64((void*)((uint64_t)(frame + 64U) + (uint64_t)8U), (uint64_t)r2sleigh_residual_u64(1));
@@ -561,7 +561,7 @@ uint64_t shape_call_chain(uint64_t arg0, uint64_t arg1)
     uint64_t rax_35;
     _Alignas(16) uint8_t frame[104];
 
-    /* r2dec proof: no individual construct is marked; 150 source obligations: 94 rendered, 47 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 4 assumed (frame extent unproven); 33 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 147 source obligations: 94 rendered, 46 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 4 assumed (frame extent unproven); 33 statements rendered; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)arg1);
@@ -724,7 +724,7 @@ uint64_t shape_struct_pointer(uint64_t arg0, uint64_t arg1)
     _Alignas(16) uint8_t frame[72];
     __uint128_t pair_4018e7;
 
-    /* r2dec proof: no individual construct is marked; 86 source obligations: 51 rendered, 26 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 4 assumed (frame extent unproven); 20 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 83 source obligations: 51 rendered, 25 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 4 assumed (frame extent unproven); 20 statements rendered; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)arg1);
@@ -812,7 +812,7 @@ uint64_t shape_struct_array(uint32_t arg0, uint32_t arg1)
     uint32_t tmp_401a90_18_1;
     _Alignas(16) uint8_t frame[88];
 
-    /* r2dec proof: no individual construct is marked; 85 source obligations: 73 rendered, 7 elided, 0 refused, 5 compiler-inserted (assuming ub-free); 16 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 82 source obligations: 73 rendered, 6 elided, 0 refused, 3 compiler-inserted (assuming ub-free); 16 statements rendered; a call reads the result (assuming closed-world) */
     {
         rdi_1 = (uint64_t)(uint32_t)arg0;
         rsi_1 = (uint64_t)(uint32_t)arg1;
@@ -860,7 +860,7 @@ uint64_t shape_stack_buffer(uint64_t arg0, uint8_t arg1)
     uint8_t tmp_401b4c_18_1;
     _Alignas(16) uint8_t frame[88];
 
-    /* r2dec proof: no individual construct is marked; 74 source obligations: 62 rendered, 7 elided, 0 refused, 5 compiler-inserted (assuming ub-free); 13 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 71 source obligations: 62 rendered, 6 elided, 0 refused, 3 compiler-inserted (assuming ub-free); 13 statements rendered; a call reads the result (assuming closed-world) */
     {
         rsi_1 = (uint64_t)(uint8_t)arg1;
         stack_m104_1 = 0;
@@ -1263,7 +1263,7 @@ uint64_t shape_pointer_to_pointer(uint64_t arg0, uint64_t arg1)
     uint32_t tmp_401fe2_8_1;
     _Alignas(16) uint8_t frame[168];
 
-    /* r2dec proof: no individual construct is marked; 196 source obligations: 106 rendered, 66 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 19 assumed (frame extent unproven); 52 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 193 source obligations: 106 rendered, 65 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 19 assumed (frame extent unproven); 52 statements rendered; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)arg1);
@@ -1407,7 +1407,7 @@ uint64_t shape_function_pointer(uint64_t arg0, uint64_t arg1)
     uint32_t tmp_40217a_8_1;
     _Alignas(16) uint8_t frame[104];
 
-    /* r2dec proof: 3 constructs are marked below; 105 source obligations: 45 rendered, 33 elided, 0 refused, 5 compiler-inserted (assuming ub-free), 22 residual; 25 statements rendered; 1 never assigned, read as residuals (RAX_13); a call reads the result (assuming closed-world) */
+    /* r2dec proof: 3 constructs are marked below; 102 source obligations: 45 rendered, 32 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 22 residual; 25 statements rendered; 1 never assigned, read as residuals (RAX_13); a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)arg1);
