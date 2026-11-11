@@ -39,12 +39,16 @@ graded through the same path an engine rendering takes:
   ``compile-error``;
 * an identifier missing from the link map must be ``compile-error``;
 * a refusal must be ``refused``;
-* a rendering whose call retires more than four times the instruction budget
-  (a fake counter says so, so no performance counter is needed) must be
-  ``slow``, and one that retires exactly that must stay ``equal``: the budget
-  decides, and only the count can.
-* a rendering that raises the budget's own signal (SIGPWR) is not ``slow``: only
-  the counter's overflow is the budget.
+* under fake costs (``Cost.fake_original``, ``Cost.fake_rendering``, so no
+  counter is needed), a rendering one tick past its allowance must be ``slow``,
+  naming the -O2 build, and one at it ``equal``: past four times the original,
+  past the floor, just either side of the floor, and by CPU time; one twenty
+  times its original ``slow``; an original at sixteen times the budget graded
+  and one tick past it dropped (ADR D339).
+* with no fake, a rendering that spins is stopped by the CPU timer and must be
+  ``slow``, not a hang and not a death by SIGPROF.
+* a rendering that raises the allowance's own signal (SIGPWR) or the CPU
+  timer's (SIGPROF) is not ``slow``: only the measure decides.
 """
 
 from __future__ import annotations
@@ -101,14 +105,27 @@ class Case:
     expect_compared: str | None = None
     # The cost the case runs under, where it is not the run's own.
     cost: Cost | None = None
+    # The build a `slow` names.
+    expect_build: str | None = None
 
 
-_BUDGET = 1000
+_BUDGET = 1600
+_K = RENDERING_FACTOR
+_FLOOR = _BUDGET // (_K * _K)
 _IDENTITY_ADD = (
     "#include <stdint.h>\n#include <stddef.h>\n"
     "int32_t sub_add(int32_t a, int32_t b)\n{\n"
     "    return (int32_t)((uint32_t)a + (uint32_t)b);\n}\n"
 )
+
+
+def _cost_cases(name: str, original: int, allowed: int, measure: str = "instructions") -> list:
+    """A rendering at its allowance is ``equal``, one tick past it ``slow``, named by -O2."""
+    def cost(rendering: int) -> Cost:
+        return Cost(measure, _BUDGET, fake_original=original, fake_rendering=rendering)
+    return [Case(f"{name}-at-the-allowance", "st_add", "equal", _IDENTITY_ADD, cost=cost(allowed)),
+            Case(f"{name}-past-the-allowance", "st_add", "slow", _IDENTITY_ADD,
+                 expect_build="O2", cost=cost(allowed + 1))]
 
 
 def _tu(body: str, headers: str = "#include <stdint.h>\n#include <stddef.h>\n") -> str:
@@ -336,16 +353,39 @@ CASES = [
         "extern int32_t st_counter;\nvoid sub_bump(int32_t by)\n{\n"
         "    st_counter = (int32_t)((uint32_t)st_counter + (uint32_t)by);\n}\n")),
     Case("refusal", "st_add", "refused", "", refused="the case says so"),
-    # The fake counter makes every rendering run retire `fake` instructions.
-    Case("over-the-instruction-budget", "st_add", "slow", _IDENTITY_ADD,
-         cost=Cost("instructions", _BUDGET, fake=RENDERING_FACTOR * _BUDGET + 1)),
-    Case("at-the-instruction-budget", "st_add", "equal", _IDENTITY_ADD,
-         cost=Cost("instructions", _BUDGET, fake=RENDERING_FACTOR * _BUDGET)),
-    # A SIGPWR the rendering raises itself is a signal, not the counter's budget: not `slow`.
+    # Fake costs (ADR D339): the original reports `fake_original`, every rendering
+    # `fake_rendering`, in place of the measure. The -O2 build may cost K x max(original, B/K/K).
+    *_cost_cases("ratio", original=_BUDGET, allowed=_K * _BUDGET),
+    *_cost_cases("floor", original=1, allowed=_K * _FLOOR),
+    *_cost_cases("ratio-just-above-the-floor", original=_FLOOR + 1, allowed=_K * (_FLOOR + 1)),
+    *_cost_cases("floor-just-below-the-ratio", original=_FLOOR - 1, allowed=_K * _FLOOR),
+    *_cost_cases("ratio-by-cpu-time", original=_BUDGET, allowed=_K * _BUDGET, measure="time"),
+    Case("twenty-times-the-original", "st_add", "slow", _IDENTITY_ADD, expect_build="O2",
+         cost=Cost("instructions", _BUDGET, fake_original=_FLOOR,
+                   fake_rendering=20 * _FLOOR)),
+    # The original may cost K*K*B; past that the vector is outside its domain.
+    Case("original-at-its-guard", "st_add", "equal", _IDENTITY_ADD,
+         cost=Cost("instructions", _BUDGET, fake_original=_K * _K * _BUDGET, fake_rendering=1)),
+    Case("original-past-its-guard", "st_add", "untested", _IDENTITY_ADD,
+         cost=Cost("instructions", _BUDGET, fake_original=_K * _K * _BUDGET + 1,
+                   fake_rendering=1)),
+    # No fake: the CPU timer itself stops a rendering that spins, as `slow` and not as a hang
+    # or a profiling signal. The original costs under the floor, so -O2 may use B/K of CPU.
+    Case("a-rendering-the-cpu-timer-stops", "st_add", "slow", _tu(
+        "int32_t sub_add(int32_t a, int32_t b)\n{\n"
+        "    volatile uint32_t spin = (uint32_t)a + (uint32_t)b;\n"
+        "    for (;;)\n        spin = spin + 1u;\n}\n"),
+        expect_build="O2", cost=Cost("time", 32)),
+    # A SIGPROF the rendering raises itself is a signal, not the CPU timer: not `slow`.
+    Case("a-profiling-signal-the-rendering-raises", "st_add", "differs", _tu(
+        "#include <signal.h>\nint32_t sub_add(int32_t a, int32_t b)\n{\n"
+        "    raise(SIGPROF);\n    return (int32_t)((uint32_t)a + (uint32_t)b);\n}\n"),
+        cost=Cost("time", _BUDGET, fake_rendering=1)),
+    # A SIGPWR the rendering raises itself is a signal, not the allowance: not `slow`.
     Case("a-budget-signal-the-rendering-raises", "st_add", "differs", _tu(
         "#include <signal.h>\nint32_t sub_add(int32_t a, int32_t b)\n{\n"
         "    raise(SIGPWR);\n    return (int32_t)((uint32_t)a + (uint32_t)b);\n}\n"),
-        cost=Cost("instructions", _BUDGET, fake=1)),
+        cost=Cost("instructions", _BUDGET, fake_rendering=1)),
 ]
 
 
@@ -443,6 +483,10 @@ def run_self_tests(config: gate.Config, workdir: Path,
             compared = gate.trap_comparison(graded.status, graded.vectors)
             ok = compared == case.expect_compared
             why = f"expected {case.expect_compared} compared before the trap, got {compared}"
+        if ok and case.expect_build:
+            got_build = graded.evidence.get("build")
+            ok = got_build == case.expect_build
+            why = f"expected the {case.expect_build} build named, got {got_build}"
         if ok and case.expect_guard:
             got_guard = graded.evidence.get("guard")
             ok = got_guard == case.expect_guard

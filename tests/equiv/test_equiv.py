@@ -50,7 +50,7 @@ from dwarf import (  # noqa: E402
 from r2s_batch import contract_problems, parse_pddj, run_batch  # noqa: E402
 from spec import CallSpec, call_spec  # noqa: E402
 from target import AARCH64, WIN64, X86_64, Target  # noqa: E402
-from vectors import JOB_MAGIC, Vector, encode_job  # noqa: E402
+from vectors import JOB_MAGIC, Run, Vector, encode_job  # noqa: E402
 
 STUB = HERE / "testdata" / "stub_r2s.py"
 CAN_RUN = gate.environment_problem() is None and shutil.which("gcc") is not None
@@ -603,6 +603,18 @@ class ClassifyTests(unittest.TestCase):
         o2_late = self.line(0, pairs={(2, 4): False})
         o2_late["runs"][4] = {"run": 4, "outcome": "budget"}
         self.assertEqual(gate.classify([o2_late], [], 0, self.NONE)[0], "slow")
+        # The like-for-like build is named first, whether or not an -O0 build also overran
+        # (ADR D339), so the reason does not follow an -O0 build near its own allowance.
+        both = self.line(0, o0=timeout, pairs={(0, 2): False, (2, 3): False, (2, 4): False})
+        both["runs"][4] = {"run": 4, "outcome": "budget"}
+        for line in (o2_late, both):
+            evidence = gate.classify([line], [], 0, self.NONE)[1]
+            self.assertEqual(gate.reason("slow", evidence), "O2")
+        self.assertEqual(gate.reason("slow", gate.classify([o0_late], [], 0, self.NONE)[1]), "O0")
+        # An -O0 build that sits near its own allowance may be stopped in one run and finish in
+        # the next: the record is the same bytes either way.
+        self.assertEqual(json.dumps(gate.classify([o2_late], [], 0, self.NONE)),
+                         json.dumps(gate.classify([both], [], 0, self.NONE)))
         # Both builds finished and still disagree: that stays undefined behaviour.
         disagree = self.line(0, pairs={(2, 4): False})
         self.assertEqual(gate.classify([disagree], [], 0, self.NONE)[0], "ub")
@@ -621,9 +633,9 @@ class ClassifyTests(unittest.TestCase):
         self.assertEqual(gate.classify([hung, self.line(1)], [], 0, self.NONE, min_graded=1)[0],
                          "equal")
 
-    def test_a_run_s_instruction_count_never_reaches_a_record(self):
-        # The counter's last digits vary; a record must be the same bytes on every run.
-        counted = {"insns": 123456}
+    def test_a_run_s_cost_never_reaches_a_record(self):
+        # A count's last digits and a CPU time vary; a record must be the same bytes on every run.
+        counted = {"cost": 123456}
         late = self.line(0, o0={"run": 2, "outcome": "budget", **counted},
                          pairs={(0, 2): False, (2, 3): False, (2, 4): False})
         late["runs"][0].update(counted)
@@ -633,7 +645,7 @@ class ClassifyTests(unittest.TestCase):
         hung["pairs"] = [p for p in hung["pairs"] if p["b"] != 2 and p["a"] != 2]
         for line in (late, wrong, hung):
             evidence = gate.classify([line], [], 0, self.NONE)[1]
-            self.assertNotIn("insns", json.dumps(evidence), line["vector"])
+            self.assertNotIn("cost", json.dumps(evidence), line["vector"])
 
     def test_an_equal_needs_its_floor_of_graded_vectors_and_a_defect_does_not(self):
         lines = [self.line(0), self.line(1, original="signal"), self.line(2, original="signal")]
@@ -772,8 +784,12 @@ class CostTests(unittest.TestCase):
         self.assertEqual(flags, (1 << 5) | (1 << 6))
 
     def test_a_baseline_is_held_to_its_own_measure_and_budget(self):
-        baseline = {"cost": {"measure": "time", "budget": 1000}}
+        baseline = {"cost": cost.Cost("time", 1000).to_json()}
         self.assertIsNone(cost.departure(baseline, cost.Cost("time", 1000)))
+        # One graded against the absolute budget (before ADR D339) is refused, not reread.
+        absolute = cost.departure({"cost": {"measure": "time", "budget": 1000}},
+                                  cost.Cost("time", 1000))
+        self.assertIn("factor", absolute)
         by_count = cost.departure(baseline, cost.Cost("instructions", 1000))
         self.assertIn("counts time", by_count)
         self.assertIn("counts instructions", by_count)
@@ -791,22 +807,26 @@ class CostTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)
-            time_shard = shard(tmp, "a.json", {"measure": "time", "budget": 1000})
-            same = shard(tmp, "b.json", {"measure": "time", "budget": 1000})
-            other = shard(tmp, "c.json", {"measure": "instructions", "budget": 1000})
+            time_shard = shard(tmp, "a.json", cost.Cost("time", 1000).to_json())
+            same = shard(tmp, "b.json", cost.Cost("time", 1000).to_json())
+            other = shard(tmp, "c.json", cost.Cost("instructions", 1000).to_json())
+            absolute = shard(tmp, "d.json", {"measure": "time", "budget": 1000})
             self.assertEqual(merge_shards.load_records([time_shard, same])[3],
                              cost.Cost("time", 1000))
             with self.assertRaises(ValueError) as refused:
                 merge_shards.load_records([time_shard, other])
             self.assertIn("different measures", str(refused.exception))
+            with self.assertRaises(ValueError):
+                merge_shards.load_records([time_shard, absolute])
 
     def test_a_record_states_the_cost_it_was_graded_by(self):
         counted = cost.Cost("instructions", 5)
         record = gate.Record(key="a::gcc-O0::f", function="f", address=0, status="equal",
                              cost=counted.to_json())
-        self.assertEqual(record.to_json()["cost"], {"measure": "instructions", "budget": 5})
+        stated = {"measure": "instructions", "budget": 5, "factor": cost.RENDERING_FACTOR}
+        self.assertEqual(record.to_json()["cost"], stated)
         proposed = gate.baseline_from([record], None, None, counted)
-        self.assertEqual(proposed["cost"], {"measure": "instructions", "budget": 5})
+        self.assertEqual(proposed["cost"], stated)
         self.assertEqual(proposed["schema"], 3)
 
 
@@ -905,18 +925,29 @@ class TargetTests(unittest.TestCase):
         through, _ = link.shim_source(slot, "sub_f", 0x140001000, WIN64, frozenset({0x1400056D0}))
         self.assertIn("vfprintf:\n    movabs $0x1400056d0, %r11\n    jmp *(%r11)\n", through)
 
-    def test_the_job_header_carries_the_measure_and_a_64_bit_budget(self):
-        # struct job_header in rt/equiv_rt.c: 88 bytes, the budget a u64 since
-        # four times a billion instructions does not fit the u32 it replaced.
+    def test_the_job_header_carries_each_run_s_allowance_in_ticks(self):
+        # struct job_header in rt/equiv_rt.c: 104 bytes; struct job_run's factor (ADR D339).
         spec = CallSpec(name="f", address=0x1000, params=[], ret_kind="int", ret_bytes=4,
                         ret_spelling="int")
-        counted = cost.Cost("instructions", 3_000_000_000, hang_ms=7000, fake=5)
+        k = cost.RENDERING_FACTOR
+        counted = cost.Cost("instructions", 3_000_000_000, hang_ms=7000, fake_original=5,
+                            fake_rendering=6)
         header = encode_job(spec, [], [], [], counted)
-        self.assertEqual(len(header), 88)
+        self.assertEqual(len(header), 104)
         self.assertEqual(header[:8], JOB_MAGIC)
-        fields = struct.unpack("<8sQQQQ8IQQ", header)
-        hang, measure, budget, fake = fields[8], fields[12], fields[13], fields[14]
-        self.assertEqual((hang, measure, budget, fake), (7000, 1, 3_000_000_000, 5))
+        fields = struct.unpack("<8sQQQQ8IQQQQ", header)
+        self.assertEqual((fields[8], fields[12]), (7000, 1))
+        self.assertEqual(fields[13:], (k * k * 3_000_000_000, 3_000_000_000 // (k * k), 5, 6))
+        # CPU time is carried in nanoseconds; the budget states milliseconds.
+        timed = struct.unpack("<8sQQQQ8IQQQQ", encode_job(
+            spec, [], [], [], cost.Cost("time", 1000, fake_original=2)))
+        self.assertEqual((timed[12],) + timed[13:],
+                         (0, k * k * 10**9, 10**9 // (k * k), 2 * 10**6, 0))
+        # The -O2 build and the identity get the factor; the unoptimised builds its square.
+        self.assertEqual((cost.Cost.factor(True), cost.Cost.factor(False)), (k, k * k))
+        run = encode_job(spec, [Run("O2", so_path="x.so", symbol="f", replaces=True,
+                                    factor=k)], [], [], counted)[104:]
+        self.assertEqual(struct.unpack_from("<QII", run), (0, 1, k))
 
     def test_function_links_jump_through_a_register_no_argument_uses(self):
         links = [{"ident": "callee", "kind": "function", "addr": 0x401234},

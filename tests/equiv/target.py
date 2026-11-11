@@ -366,11 +366,10 @@ class Target:
     def time_scale(self) -> int:
         """The factor every per-call time budget is multiplied by on this host.
 
-        The budgets (``--timeout-ms``: the original's, four times it for a
-        rendering) are native wall-clock time. Under an emulator the same code
-        takes longer, and a budget that is not scaled leaves a rendering
-        a fraction of its native margin, so a loaded host turns an equal
-        record slow on one run and not the next.
+        The budget (``--timeout-ms``) is native CPU time. Under an emulator the
+        same code takes longer, and a budget that is not scaled puts the
+        original's guard and the floor (:class:`cost.Cost`) a fraction of their
+        native distance from the corpus's costs.
         """
         return self.emulator_slowdown if self.emulated() else 1
 
