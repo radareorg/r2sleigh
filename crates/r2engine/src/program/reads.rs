@@ -44,7 +44,7 @@ pub(super) fn only_called<S: Source + 'static>(
     let claimed = (index.0.to(callee))
         .filter(|(fact, _)| fact.role == Role::Call)
         .count();
-    let all = usize::try_from(calls).is_ok_and(|calls| calls == claimed);
+    let all = every_call_read(calls, claimed);
     if !all {
         r2il::refusal_evidence!(
             "closed-world",
@@ -52,6 +52,11 @@ pub(super) fn only_called<S: Source + 'static>(
         );
     }
     all
+}
+
+/// Whether the calls a boundary read are every call the index claims: one short is a call unread.
+fn every_call_read(calls: u32, claimed: usize) -> bool {
+    usize::try_from(calls).is_ok_and(|calls| calls == claimed)
 }
 
 /// The functions the program enters other than by a direct call, by entry, ascending; `None` where
@@ -94,6 +99,11 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
                 "{} bodies unread: not every way in is known",
                 index.coverage.unread.len()
             );
+            return None;
+        }
+        // A loader write the index cannot read may name any function.
+        if let Some(at) = index.coverage.unstated.first() {
+            r2il::refusal_evidence!("closed-world", "{at:#x}: a loader write no record states");
             return None;
         }
         for (fact, claimant) in index.claimed() {
@@ -313,4 +323,77 @@ fn stored_words<S: Source>(source: &S, entries: &[u64], stated: &[u64], escaped:
 fn in_slot(slots: &[u64], at: u64, pointer: u64) -> bool {
     let below = slots.partition_point(|slot| *slot <= at);
     below > 0 && at < slots[below - 1].saturating_add(pointer)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{every_call_read, stored_words};
+    use crate::program::{Arch, Container, Endian, Segment, Source};
+
+    /// A 64-bit image of one segment at `vaddr` holding `bytes`.
+    struct Image {
+        vaddr: u64,
+        bytes: Vec<u8>,
+        container: Container,
+    }
+
+    impl Source for Image {
+        fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+            let at = usize::try_from(vaddr.checked_sub(self.vaddr)?).ok()?;
+            let rest = self.bytes.get(at..).filter(|rest| !rest.is_empty())?;
+            Some(rest.iter().take(max).copied().collect())
+        }
+        fn container(&self) -> &Container {
+            &self.container
+        }
+        fn identity(&self) -> u64 {
+            0
+        }
+        fn byte_revision(&self) -> u64 {
+            0
+        }
+        fn written_since(&self, _: u64, _: &std::ops::Range<u64>) -> bool {
+            false
+        }
+    }
+
+    /// An image above 4 GiB, as a Mach-O is linked: only a pointer-wide word names an entry there.
+    #[test]
+    fn a_pointer_wide_word_above_four_gib_names_its_function() {
+        let vaddr: u64 = 0x1_0000_0000;
+        let mut bytes = vec![0u8; 16];
+        bytes[8..].copy_from_slice(&vaddr.to_le_bytes());
+        let segment = Segment {
+            vaddr,
+            vsize: 16,
+            file_size: 16,
+            ..Segment::default()
+        };
+        let container = Container {
+            arch: Arch {
+                name: "x86-64".to_owned(),
+                bits: 64,
+                endian: Endian::Little,
+                instructions: None,
+            },
+            segments: vec![segment],
+            ..Container::default()
+        };
+        let image = Image {
+            vaddr,
+            bytes,
+            container,
+        };
+        let mut escaped = Vec::new();
+        stored_words(&image, &[vaddr], &[], &mut escaped);
+        assert!(escaped.contains(&vaddr), "{escaped:?}");
+    }
+
+    /// A call the index claims that no boundary read may read the result: one short refuses.
+    #[test]
+    fn a_call_count_one_short_of_the_index_is_not_every_call() {
+        assert!(every_call_read(2, 2));
+        assert!(!every_call_read(1, 2));
+        assert!(!every_call_read(2, 1));
+    }
 }

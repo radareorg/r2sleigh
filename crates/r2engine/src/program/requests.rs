@@ -796,7 +796,12 @@ fn indexed<S: Source + 'static>(view: &View<'_, S>) -> Result<References, String
     let walked = &survey.walked;
     let mut index = Indexing::default();
     let mut coverage = Coverage::default();
-    index.read_words(&view.source().container().loader_writes);
+    let writes = &view.source().container().loader_writes;
+    index.read_words(
+        writes,
+        |at| crate::native::Program::holds_code(view, at),
+        &mut coverage,
+    );
     // A program that states no function is never assembled, and has nothing to index.
     if walked.is_empty() {
         return Ok(index.finish(coverage));

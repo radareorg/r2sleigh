@@ -546,6 +546,8 @@ fn section_stubs(
                     write.kind,
                     r2abi::statement::WriteKind::Unknown
                         | r2abi::statement::WriteKind::NotAnAddress
+                        | r2abi::statement::WriteKind::Reserved
+                        | r2abi::statement::WriteKind::Copy
                 )
             });
         let import = slot.and_then(|slot| slots.get(&slot));

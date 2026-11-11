@@ -130,7 +130,9 @@ pub fn code(
     let mut unstated = Vec::new();
     for write in writes[first..].iter().take_while(|write| write.place < end) {
         let held = match (write.encoding, &write.kind) {
-            (Encoding::Word, WriteKind::Unknown) => continue,
+            (Encoding::Word, WriteKind::Unknown | WriteKind::Reserved | WriteKind::Copy) => {
+                continue;
+            }
             (Encoding::Word, _) => write.target(),
             (Encoding::FromPlace, _) => write
                 .target()
