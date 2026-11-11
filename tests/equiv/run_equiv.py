@@ -80,20 +80,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                         help="compiler for the renderings (default: the target's gcc)")
     parser.add_argument("--vectors", type=int, default=48)
     parser.add_argument("--measure", choices=cost.MEASURES, default="time",
-                        help="what a call's budget counts: wall-clock milliseconds, which a "
-                             "loaded host moves, or retired instructions (perf_event_open, "
-                             "native runs only), which it does not")
+                        help="what a call's cost counts: CPU time, or retired instructions "
+                             "(perf_event_open, native runs only); each run is graded against "
+                             "its original on the same vector (cost.Cost, ADR D339)")
     parser.add_argument("--timeout-ms", type=int, default=cost.DEFAULT_TIME_MS,
-                        help="with --measure time, the original's budget per call, in native "
-                             "time (an emulated target scales it); a rendering gets four "
-                             "times it")
+                        help="with --measure time, the budget B in CPU milliseconds, native "
+                             "(an emulated target scales it)")
     parser.add_argument("--budget-instructions", type=int, default=cost.DEFAULT_INSTRUCTIONS,
-                        help="with --measure instructions, the original's budget per call; a "
-                             "rendering gets four times it")
+                        help="with --measure instructions, the budget B")
     parser.add_argument("--hang-ms", type=int, default=cost.DEFAULT_HANG_MS,
-                        help="with --measure instructions, the wall-clock guard per call, "
-                             "which ends a run that retires nothing (a blocked call) and "
-                             "never grades cost")
+                        help="the wall-clock guard per call, which ends a run that does not run "
+                             "(a blocked call) and never grades cost")
     parser.add_argument("--function-timeout", type=float, default=300.0,
                         help="seconds r2s may spend on one function before it is restarted")
     parser.add_argument("--startup-timeout", type=float, default=600.0,

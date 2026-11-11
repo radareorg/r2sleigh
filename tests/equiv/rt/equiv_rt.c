@@ -64,6 +64,7 @@
 #include <sys/syscall.h>
 #include <sys/time.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <ucontext.h>
 #include <unistd.h>
 
@@ -237,7 +238,7 @@ struct equiv_ret {
 
 extern void equiv_call(void *fn, const struct equiv_regs *in, struct equiv_ret *out);
 
-#define JOB_MAGIC "EQVJOB03"
+#define JOB_MAGIC "EQVJOB04"
 
 enum ret_kind { RET_VOID = 0, RET_INT = 1, RET_F32 = 2, RET_F64 = 3, RET_INT128 = 4 };
 
@@ -250,23 +251,26 @@ struct job_header {
     uint32_t n_runs;
     uint32_t n_vectors;
     uint32_t n_pairs;
-    uint32_t hang_ms;         /* wall-clock guard per run when the budget counts instructions */
+    uint32_t hang_ms;         /* wall-clock guard per run: a blocked call uses no CPU */
     uint32_t ret_kind;
     uint32_t ret_bytes;
     uint32_t out_cap;         /* bytes of fd 1 and of fd 2 kept per run */
-    uint32_t measure;         /* MEASURE_*: what budget counts */
-    uint64_t budget;          /* the original's, in ms or instructions; renderings get four times it */
-    uint64_t fake_count;      /* tests: what each rendering run counts in place of the counter */
+    uint32_t measure;         /* MEASURE_*: what a cost counts */
+    /* Costs in ticks: instructions, or CPU nanoseconds under MEASURE_TIME (cost.Cost). */
+    uint64_t original_guard;  /* the original's allowance; past it the vector is outside the domain */
+    uint64_t floor;           /* run r's allowance is factor_r x max(the original's cost, floor) */
+    uint64_t fake_original;   /* tests: the cost the original reports in place of the measure */
+    uint64_t fake_rendering;  /* tests: the cost each rendering reports */
 };
 
-/* doc/adr-verified-layers.md D38. */
+/* doc/adr-verified-layers.md D38, D339. */
 enum measure { MEASURE_TIME = 0, MEASURE_INSTRUCTIONS = 1 };
-_Static_assert(sizeof(struct job_header) == 88, "the job header layout (vectors.encode_job)");
+_Static_assert(sizeof(struct job_header) == 104, "the job header layout (vectors.encode_job)");
 
 struct job_run {
     uint64_t address;         /* called directly when so_path is empty */
     uint32_t replaces;        /* 1: this run's function replaces the graded one */
-    uint32_t reserved;
+    uint32_t factor;          /* its allowance over the original's cost (cost.Cost.factor) */
     char so_path[512];
     char symbol[256];
     char label[32];
@@ -296,7 +300,7 @@ enum outcome {
     OUT_EXIT = 2,             /* called exit(); captured from the atexit hook */
     OUT_EXIT_RAW = 3,         /* ended with a status and no capture (_exit, a sanitizer) */
     OUT_SIGNAL = 4,
-    OUT_BUDGET = 5,           /* stopped past its budget: the only outcome that is `slow` */
+    OUT_BUDGET = 5,           /* stopped past its allowance: the only outcome that is `slow` */
     OUT_SKIPPED = 6,          /* not run: the original was outside its domain */
     OUT_HANG = 7              /* stopped by the wall-clock guard, which says nothing of cost */
 };
@@ -317,9 +321,9 @@ struct slot_head {
     int32_t guard;               /* GUARD_*: how control reached the original's code */
     int32_t guard_error;         /* errno of a guard that could not be installed */
     uint64_t guard_caller;       /* return address at a delegated entry */
-    uint64_t insns;              /* instructions the call retired, where counted */
+    uint64_t cost;               /* the call's cost in ticks, once it settled */
     int32_t counter_error;       /* errno of a counter that could not be armed */
-    volatile int32_t budget_signal; /* BUDGET_SIGNAL was the counter's own, not the function's */
+    volatile int32_t budget_signal; /* BUDGET_SIGNAL was the allowance's own, not the function's */
     uint32_t trap_site;          /* arg 0 at a trap in the rendering: a residual's site */
     int32_t trap_depth;          /* TRAP_*: which activation of the function trapped */
     uint64_t out_at_capture;     /* bytes on fd 1 and fd 2 when the state was captured */
@@ -506,27 +510,34 @@ static void child_capture(int how)
     slot->captured = how;
 }
 
-/* ADR D38: the counter overflows once, at the budget, into BUDGET_SIGNAL, whose default
- * action ends the run; settle ends a call that retired more by the read the same way. */
+/* ADR D38, D339: a run past its allowance ends by BUDGET_SIGNAL, whose default action ends
+ * it: the counter's overflow, the CPU timer's expiry, or settle's check after the call. */
 #define BUDGET_SIGNAL SIGPWR
+#define DAY_US 86400000000ull  /* no timer is armed past a day */
 
 static int g_counter = -1;
-static uint64_t g_counter_budget;
-static int g_counter_fake;
+static uint64_t g_allowance;
+static int g_cost_fake;
+static uint64_t g_cost_fake_value;
+static uint64_t g_cpu_start;
 static volatile sig_atomic_t g_budget_raised;
-static uint64_t g_counter_fake_count;
 
-/* A test's stand-in for the counter: the call retires `count`, whatever it does. */
-static void counter_fake(uint64_t budget, uint64_t count)
+static uint64_t cpu_now(void)
 {
-    g_counter_budget = budget;
-    g_counter_fake = 1;
-    g_counter_fake_count = count;
+    struct timespec now;
+    clock_gettime(CLOCK_PROCESS_CPUTIME_ID, &now);
+    return (uint64_t)now.tv_sec * 1000000000u + (uint64_t)now.tv_nsec;
+}
+
+/* A test's stand-in for the measure: the call costs `value`, whatever it does. */
+static void cost_fake(uint64_t value)
+{
+    g_cost_fake = 1;
+    g_cost_fake_value = value;
 }
 
 static int counter_arm(uint64_t budget)
 {
-    g_counter_budget = budget;
     struct perf_event_attr attr;
     memset(&attr, 0, sizeof attr);
     attr.type = PERF_TYPE_HARDWARE;
@@ -551,35 +562,56 @@ static int counter_arm(uint64_t budget)
     return 0;
 }
 
-static void counter_start(void)
+static void cpu_timer_arm(uint64_t ns)
 {
-    if (g_counter >= 0)
-        ioctl(g_counter, PERF_EVENT_IOC_REFRESH, 1);
+    uint64_t us = ns / 1000 + 1;
+    if (us > DAY_US)
+        us = DAY_US;
+    struct itimerval timer;
+    memset(&timer, 0, sizeof timer);
+    timer.it_value.tv_sec = (time_t)(us / 1000000);
+    timer.it_value.tv_usec = (suseconds_t)(us % 1000000);
+    setitimer(ITIMER_PROF, &timer, NULL);
 }
 
-static void counter_settle(void)
+static void cost_start(void)
 {
-    uint64_t count = 0;
-    if (g_counter_fake) {
-        count = g_counter_fake_count;
-    } else if (g_counter >= 0) {
-        ioctl(g_counter, PERF_EVENT_IOC_DISABLE, 0);
-        if (read(g_counter, &count, sizeof count) != (ssize_t)sizeof count)
-            count = 0;
-        close(g_counter);
-        g_counter = -1;
-    } else {
+    if (g_head.measure == MEASURE_INSTRUCTIONS) {
+        if (g_counter >= 0)
+            ioctl(g_counter, PERF_EVENT_IOC_REFRESH, 1);
         return;
     }
-    g_child_slot->insns = count;
-    if (count > g_counter_budget) {
+    /* ITIMER_PROF counts the process's CPU time, so a loaded host does not move it. */
+    g_cpu_start = cpu_now();
+    cpu_timer_arm(g_allowance);
+}
+
+static void cost_settle(void)
+{
+    uint64_t cost = 0;
+    if (g_head.measure == MEASURE_TIME) {
+        struct itimerval off;
+        memset(&off, 0, sizeof off);
+        setitimer(ITIMER_PROF, &off, NULL);
+        cost = cpu_now() - g_cpu_start;
+    } else if (g_counter >= 0) {
+        ioctl(g_counter, PERF_EVENT_IOC_DISABLE, 0);
+        if (read(g_counter, &cost, sizeof cost) != (ssize_t)sizeof cost)
+            cost = 0;
+        close(g_counter);
+        g_counter = -1;
+    }
+    if (g_cost_fake)
+        cost = g_cost_fake_value;
+    g_child_slot->cost = cost;
+    if (cost > g_allowance) {
         g_budget_raised = 1;
         raise(BUDGET_SIGNAL);
     }
 }
 
-/* Only the counter's overflow (a positive si_code on its descriptor) or settle's own raise is
- * the budget; a SIGPWR the function raised or was sent ends the run as an ordinary signal. */
+/* Only the counter's overflow (a positive si_code on its descriptor), the CPU timer or
+ * settle's own raise is the allowance; a SIGPWR the function raised is an ordinary signal. */
 static void child_budget(int sig, siginfo_t *info, void *context)
 {
     (void)context;
@@ -588,10 +620,32 @@ static void child_budget(int sig, siginfo_t *info, void *context)
     raise(sig);  /* SA_RESETHAND restored the default action, which runs on return */
 }
 
+/* The timer counts by the kernel's ticks and may expire short of the allowance: it re-arms
+ * for the rest. A SIGPROF with the timer still armed is the call's own (ADR D339). */
+static void child_cpu_timer(int sig, siginfo_t *info, void *context)
+{
+    (void)info;
+    (void)context;
+    struct itimerval left;
+    int expired = getitimer(ITIMER_PROF, &left) == 0 && !left.it_value.tv_sec
+                  && !left.it_value.tv_usec;
+    if (g_in_call && expired) {
+        uint64_t used = cpu_now() - g_cpu_start;
+        if (used < g_allowance) {
+            cpu_timer_arm(g_allowance - used);
+            return;
+        }
+        g_budget_raised = 1;
+        raise(BUDGET_SIGNAL);
+    }
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
 static void child_exit_hook(void)
 {
     if (g_in_call) {
-        counter_settle();
+        cost_settle();
         child_capture(CAPTURE_EXIT);
     }
 }
@@ -731,7 +785,7 @@ static int guard_install(struct run_state *run)
     return 0;
 }
 
-static void child_run(struct run_state *run, const struct job_vector *vec, uint64_t budget)
+static void child_run(struct run_state *run, const struct job_vector *vec, uint64_t allowance)
 {
     dup2(run->out_fd, 1);
     dup2(run->err_fd, 2);
@@ -762,24 +816,29 @@ static void child_run(struct run_state *run, const struct job_vector *vec, uint6
     on_budget.sa_flags = SA_SIGINFO | SA_RESETHAND | SA_ONSTACK;
     sigemptyset(&on_budget.sa_mask);
     sigaction(BUDGET_SIGNAL, &on_budget, NULL);
+    on_budget.sa_sigaction = child_cpu_timer;
+    on_budget.sa_flags = SA_SIGINFO | SA_ONSTACK;  /* it re-arms, so it stays installed */
+    sigaction(SIGPROF, &on_budget, NULL);
     /* The signal mask is inherited, and a blocked SIGALRM arms a timer that never fires. */
     sigset_t none;
     sigemptyset(&none);
     sigprocmask(SIG_SETMASK, &none, NULL);
-    /* Under the time measure the budget is the guard; under instructions, hang_ms is. */
-    int guard_ms = g_head.measure == MEASURE_TIME ? (int)budget : (int)g_head.hang_ms;
+    /* The wall clock only ends a call that does not run: one blocked, or starved of CPU. */
+    uint64_t guard_ms = g_head.hang_ms;
+    if (g_head.measure == MEASURE_TIME)
+        guard_ms += 4 * (allowance > DAY_US * 1000 ? DAY_US / 1000 : allowance / 1000000);
     struct rlimit cpu;
     cpu.rlim_cur = (rlim_t)(guard_ms / 1000) * 2 + 2;
     cpu.rlim_max = cpu.rlim_cur + 1;
     setrlimit(RLIMIT_CPU, &cpu);
 
     g_child_slot = run->slot;
-    if (g_head.measure == MEASURE_INSTRUCTIONS) {
-        int error = 0;
-        if (g_head.fake_count)
-            counter_fake(budget, run->spec->replaces ? g_head.fake_count : 0);
-        else
-            error = counter_arm(budget);
+    g_allowance = allowance;
+    int faked = g_head.fake_original || g_head.fake_rendering;
+    if (faked && (run->spec->replaces || run->spec->so_path[0] == '\0'))
+        cost_fake(run->spec->replaces ? g_head.fake_rendering : g_head.fake_original);
+    if (g_head.measure == MEASURE_INSTRUCTIONS && !faked) {
+        int error = counter_arm(allowance);
         if (error) {
             run->slot->counter_error = error;
             _exit(0);
@@ -803,16 +862,16 @@ static void child_run(struct run_state *run, const struct job_vector *vec, uint6
 
     struct itimerval timer;
     memset(&timer, 0, sizeof timer);
-    timer.it_value.tv_sec = guard_ms / 1000;
-    timer.it_value.tv_usec = (guard_ms % 1000) * 1000;
+    timer.it_value.tv_sec = (time_t)(guard_ms / 1000);
+    timer.it_value.tv_usec = (suseconds_t)(guard_ms % 1000) * 1000;
     setitimer(ITIMER_REAL, &timer, NULL);
 
     struct equiv_ret ret;
     memset(&ret, 0, sizeof ret);
     g_in_call = 1;
-    counter_start();
+    cost_start();
     equiv_call(run->fn, &vec->regs, &ret);
-    counter_settle();
+    cost_settle();
     g_in_call = 0;
 
     memset(&timer, 0, sizeof timer);
@@ -842,7 +901,7 @@ static size_t read_capture(int fd, char *buffer, size_t cap, size_t *total)
     return done;
 }
 
-static void run_one(struct run_state *run, const struct job_vector *vec, uint64_t budget)
+static void run_one(struct run_state *run, const struct job_vector *vec, uint64_t allowance)
 {
     memset(run->slot, 0, sizeof *run->slot);
     /* Empty both captures and rewind them. The offset belongs to the open file
@@ -864,7 +923,7 @@ static void run_one(struct run_state *run, const struct job_vector *vec, uint64_
         return;
     }
     if (pid == 0)
-        child_run(run, vec, budget);
+        child_run(run, vec, allowance);
     int status = 0;
     while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
     }
@@ -884,11 +943,10 @@ static void run_one(struct run_state *run, const struct job_vector *vec, uint64_
     }
     if (WIFSIGNALED(status)) {
         int sig = WTERMSIG(status);
-        if (sig == BUDGET_SIGNAL && g_head.measure == MEASURE_INSTRUCTIONS
-            && run->slot->budget_signal)
+        if (sig == BUDGET_SIGNAL && run->slot->budget_signal)
             run->outcome = OUT_BUDGET;
         else if (sig == SIGALRM)
-            run->outcome = g_head.measure == MEASURE_TIME ? OUT_BUDGET : OUT_HANG;
+            run->outcome = OUT_HANG;
         else
             run->outcome = OUT_SIGNAL;
         run->status = sig;
@@ -1126,9 +1184,9 @@ static void emit_run(size_t index, const struct run_state *run)
             fprintf(g_out, ",\"trap_site\":%u,\"trap_depth\":\"%s\"", run->slot->trap_site,
                     trap_depth_name[run->slot->trap_depth]);
     }
-    /* A skipped or unloaded run's slot still holds the last vector's count. */
-    if (run->slot->insns && run->outcome != OUT_SKIPPED && run->outcome != OUT_UNAVAILABLE)
-        fprintf(g_out, ",\"insns\":%llu", (unsigned long long)run->slot->insns);
+    /* A skipped or unloaded run's slot still holds the last vector's cost. */
+    if (run->slot->cost && run->outcome != OUT_SKIPPED && run->outcome != OUT_UNAVAILABLE)
+        fprintf(g_out, ",\"cost\":%llu", (unsigned long long)run->slot->cost);
     if (run->outcome == OUT_RETURN) {
         fputs(",\"" RET_INT_NAME "\":", g_out);
         json_hex(g_out, (const uint8_t *)&run->slot->ret.r0, 8);
@@ -1189,7 +1247,7 @@ static int equiv_main(int argc, char **argv, char **envp)
         return die("cannot map the arena at its fixed address");
     g_arena = arena;
 
-    if (g_head.measure == MEASURE_INSTRUCTIONS && !g_head.fake_count) {
+    if (g_head.measure == MEASURE_INSTRUCTIONS && !g_head.fake_original && !g_head.fake_rendering) {
         int error = counter_arm(1);
         if (error) {
             char what[160];
@@ -1293,8 +1351,9 @@ static int equiv_main(int argc, char **argv, char **envp)
 
         /* Run 0 is the original. When it does not return or exit normally,
          * the vector lies outside the function's defined domain and the
-         * renderings are not asked. */
+         * renderings are not asked; when it does, its cost sets theirs (D339). */
         int original_ok = 1;
+        uint64_t original_cost = 0;
         for (uint32_t r = 0; r < g_head.n_runs; r++) {
             struct run_state *run = &g_runs[r];
             run->out_len = run->err_len = 0;
@@ -1307,9 +1366,17 @@ static int equiv_main(int argc, char **argv, char **envp)
                 run->outcome = OUT_SKIPPED;
                 continue;
             }
-            run_one(run, vec, r == 0 ? g_head.budget : g_head.budget * 4);
+            uint64_t base = original_cost > g_head.floor ? original_cost : g_head.floor;
+            uint64_t allowance;
             if (r == 0)
+                allowance = g_head.original_guard;
+            else if (__builtin_mul_overflow(base, (uint64_t)run->spec->factor, &allowance))
+                allowance = UINT64_MAX;
+            run_one(run, vec, allowance);
+            if (r == 0) {
                 original_ok = run->outcome == OUT_RETURN || run->outcome == OUT_EXIT;
+                original_cost = run->slot->cost;
+            }
         }
 
         fprintf(g_out, "{\"vector\":%u,\"runs\":[", v);

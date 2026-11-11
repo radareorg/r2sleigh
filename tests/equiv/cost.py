@@ -1,11 +1,12 @@
-"""What a run's budget counts, and whether this host can count it (ADR D38).
+"""What a run's cost counts, what each run may spend, and whether this host can count it.
 
-A budget is a number of one measure. ``time`` is wall-clock milliseconds, which
-a loaded host moves: the same vector can finish in one run and overrun in the
-next. ``instructions`` is user-space instructions the call retires, counted by
-``perf_event_open`` in the runtime, which the host's load does not move. Every
-record and every baseline states its measure and budget, and the ratchet never
-compares across them (:func:`departure`).
+A cost is a number of one measure (ADR D38). ``time`` is the CPU time the call
+uses; ``instructions`` is the user-space instructions it retires, counted by
+``perf_event_open`` in the runtime. A rendering is graded against its original
+on the same vector and runner (ADR D339): its allowance is a factor times the
+original's cost, so a faster or slower runner moves both. Every record and every
+baseline states its measure, budget and factor, and the ratchet never compares
+across them (:func:`departure`).
 """
 
 from __future__ import annotations
@@ -21,29 +22,60 @@ from typing import Callable
 from target import Target
 
 MEASURES = ("time", "instructions")
-# A rendering's budget is this many times the original's (rt/equiv_rt.c).
+# A like-for-like run (the identity, the -O2 build) may cost this many times the original
+# (ADR D339); an unoptimised build (-O0, pattern, UBSan) this many times that.
 RENDERING_FACTOR = 4
 DEFAULT_TIME_MS = 1000
-# About a second of this corpus's loops: review.c `fact` retires 2.5, 3.3 and 4.5 billion on its
-# three largest vectors, every other original under 3 million (README, Cost).
+# About a second of this corpus's loops (README, Cost).
 DEFAULT_INSTRUCTIONS = 4_000_000_000
-# Under `instructions` the wall clock only ends a run that retires nothing (a blocked call), so
-# it is long enough that a loaded host does not reach it; the loaded legs of D38's gate ran at 120 s.
+# The wall clock only ends a run that does not run (a blocked call), so it is long enough that a
+# loaded host does not reach it; the loaded legs of D38's gate ran at 120 s.
 DEFAULT_HANG_MS = 120_000
 
 
 @dataclass(frozen=True)
 class Cost:
-    """The original's budget in one measure; a rendering gets :data:`RENDERING_FACTOR` times it."""
+    """A budget ``B`` in one measure, and what each run may spend against it (ADR D339).
+
+    With ``k`` = :data:`RENDERING_FACTOR`, an original may cost ``k*k*B``; past that the vector
+    is outside its domain. A like-for-like run may cost ``k * max(c, B/(k*k))``, ``c`` the
+    original's cost on the vector, and an unoptimised build ``k`` times that. Below ``B/(k*k)``
+    a cost is too small to compare, so ``B/k`` and ``B`` are the floors.
+    """
 
     measure: str = "time"
     budget: int = DEFAULT_TIME_MS
     hang_ms: int = DEFAULT_HANG_MS
-    # Tests only: the count every rendering run reports in place of the counter.
-    fake: int = 0
+    # Tests only: the costs the original and every rendering report in place of the measure.
+    fake_original: int = 0
+    fake_rendering: int = 0
 
     def to_json(self) -> dict:
-        return {"measure": self.measure, "budget": self.budget}
+        return {"measure": self.measure, "budget": self.budget, "factor": RENDERING_FACTOR}
+
+    def ticks(self, amount: int) -> int:
+        """``amount`` of this measure in the runtime's ticks: instructions, or CPU nanoseconds."""
+        return amount * 1_000_000 if self.measure == "time" else amount
+
+    def original_guard(self) -> int:
+        return self.ticks(RENDERING_FACTOR * RENDERING_FACTOR * self.budget)
+
+    def floor(self) -> int:
+        return self.ticks(self.budget) // (RENDERING_FACTOR * RENDERING_FACTOR)
+
+    @staticmethod
+    def factor(optimised: bool) -> int:
+        """A run's allowance over its original's cost: an unoptimised build's -O0 code is the
+        compiler's cost, not the rendering's (ADR D339)."""
+        return RENDERING_FACTOR if optimised else RENDERING_FACTOR * RENDERING_FACTOR
+
+    def worst_vector_ms(self, runs: int) -> int:
+        """Wall milliseconds one vector of ``runs`` runs may take with every run at its guard."""
+        if self.measure != "time":
+            return runs * self.hang_ms
+        k, b = RENDERING_FACTOR, self.budget
+        cpu = [k * k * b] + [k * k * k * k * b] * (runs - 1)
+        return sum(self.hang_ms + 5 * ms for ms in cpu)
 
 
 class CostRefused(Exception):
@@ -55,9 +87,8 @@ def resolve(measure: str, target: Target, timeout_ms: int = DEFAULT_TIME_MS,
             counter: Callable[[], str | None] | None = None) -> Cost:
     """The cost a run grades by, or :class:`CostRefused` saying why it cannot.
 
-    ``time`` is native milliseconds, scaled for an emulated target
-    (:meth:`target.Target.time_scale`), so a baseline's ``time`` budget is wall
-    milliseconds on the runner it was blessed on. ``instructions`` needs a counter the
+    ``time`` is native CPU milliseconds, scaled for an emulated target
+    (:meth:`target.Target.time_scale`). ``instructions`` needs a counter the
     host runs natively: an emulated guest has none (qemu-user answers ENOSYS to
     ``perf_event_open`` and the packaged qemu has no ``-plugin``).
     """
@@ -79,6 +110,9 @@ def resolve(measure: str, target: Target, timeout_ms: int = DEFAULT_TIME_MS,
 def departure(baseline: dict, cost: Cost) -> str | None:
     """Why a run by ``cost`` may not be held to ``baseline``, or None."""
     held = baseline.get("cost") or {}
+    if held and held.get("factor") != RENDERING_FACTOR:
+        return (f"the baseline graded cost with factor {held.get('factor')}, this run with "
+                f"{RENDERING_FACTOR} against each vector's original (ADR D339); re-bless it")
     if held.get("measure") != cost.measure:
         return (f"the baseline counts {held.get('measure')}, this run counts {cost.measure}; "
                 "the verdicts are not comparable. Run with --measure "

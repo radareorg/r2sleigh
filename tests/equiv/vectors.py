@@ -47,7 +47,7 @@ POINTER_TABLE = 64
 MASK64 = (1 << 64) - 1
 
 RET_KINDS = {"void": 0, "int": 1, "f32": 2, "f64": 3, "int128": 4}
-JOB_MAGIC = b"EQVJOB03"
+JOB_MAGIC = b"EQVJOB04"
 
 
 def int_pool(size: int, signed: bool, constants: tuple[int, ...] | list[int] = ()) -> list[int]:
@@ -299,6 +299,8 @@ class Run:
     symbol: str = ""
     # The run's function replaces the graded one in the image for the call.
     replaces: bool = False
+    # Its allowance over the original's cost on the vector (cost.Cost); the original's own is 0.
+    factor: int = 0
 
 
 def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
@@ -312,7 +314,7 @@ def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
     out = bytearray()
     guard_start, guard_end = spec.guard()
     out += struct.pack(
-        "<8sQQQQ8IQQ",
+        "<8sQQQQ8IQQQQ",
         JOB_MAGIC,
         ARENA_BASE,
         ARENA_SIZE,
@@ -326,8 +328,10 @@ def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
         spec.ret_bytes,
         out_cap,
         MEASURES.index(cost.measure),
-        cost.budget,
-        cost.fake,
+        cost.original_guard(),
+        cost.floor(),
+        cost.ticks(cost.fake_original),
+        cost.ticks(cost.fake_rendering),
     )
     for run in runs:
         so = run.so_path.encode()
@@ -335,8 +339,8 @@ def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
         label = run.label.encode()
         if len(so) >= 512 or len(symbol) >= 256 or len(label) >= 32:
             raise ValueError(f"run {run.label}: a path or name is too long for the job")
-        out += struct.pack("<QII512s256s32s", run.address, int(run.replaces), 0, so, symbol,
-                           label)
+        out += struct.pack("<QII512s256s32s", run.address, int(run.replaces), run.factor, so,
+                           symbol, label)
     for a, b in pairs:
         out += struct.pack("<II", a, b)
     vector_format = f"<Q{abi.regs_format()}II"

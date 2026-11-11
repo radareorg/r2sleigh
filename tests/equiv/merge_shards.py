@@ -44,7 +44,7 @@ def load_records(paths: list[Path]) -> tuple[list[gate.Record], set[tuple[str, s
     ran: set[tuple[str, str]] = set()
     toolchain: dict[str, str] = {}
     targets: set[str] = set()
-    counted: set[tuple[str, int]] = set()
+    counted: set[tuple[str, int, int]] = set()
     for path in paths:
         payload = json.loads(path.read_text(encoding="utf-8"))
         config = payload["config"]
@@ -54,7 +54,8 @@ def load_records(paths: list[Path]) -> tuple[list[gate.Record], set[tuple[str, s
             raise ValueError(f"{path}: shards of {' and '.join(sorted(targets))} cannot be "
                              "held to one baseline")
         shard_cost = config.get("cost") or {}
-        counted.add((str(shard_cost.get("measure")), int(shard_cost.get("budget") or 0)))
+        counted.add((str(shard_cost.get("measure")), int(shard_cost.get("budget") or 0),
+                     int(shard_cost.get("factor") or 0)))
         if len(counted) > 1:
             raise ValueError(f"{path}: shards counted by different measures or budgets "
                              f"({sorted(counted)}) cannot be held to one baseline")
@@ -74,7 +75,10 @@ def load_records(paths: list[Path]) -> tuple[list[gate.Record], set[tuple[str, s
                 proof=raw.get("proof", {}), vectors=raw.get("vectors", {}),
                 strict=raw.get("strict", ""), cost=raw.get("cost", {}),
             ))
-    measure, budget = next(iter(counted)) if counted else ("time", 0)
+    measure, budget, factor = next(iter(counted)) if counted else ("time", 0, 0)
+    if counted and factor != costs.RENDERING_FACTOR:
+        raise ValueError(f"the shards graded cost with factor {factor}, not "
+                         f"{costs.RENDERING_FACTOR} against each vector's original (ADR D339)")
     return records, ran, toolchain, costs.Cost(measure, budget)
 
 
