@@ -219,9 +219,9 @@ def refused(lines):
 # statement that opens with a keyword has the same shape -- `return x;`,
 # `goto L2;` -- and declares nothing: taking `return x;` for a declaration
 # listed `x` once more for every return of it. A block-scope `extern` names an
-# object defined elsewhere, which the program assigns.
+# object defined elsewhere, which the program assigns. `struct Foo;` declares a tag, no object.
 DECLARATION = re.compile(
-    r"^\s*(?!(?:return|goto|else|case|do|extern)\b)(?:const\s+)?"
+    r"^\s*(?!(?:return|goto|else|case|do|extern)\b)(?!(?:struct|union)\s+\w+\s*;)(?:const\s+)?"
     r"[A-Za-z_][\w*\s]*?\b([A-Za-z_]\w*)\s*;\s*$"
 )
 # A rendering defines each struct it reads through, `struct node { ... };`,
