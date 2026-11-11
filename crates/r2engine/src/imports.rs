@@ -1,6 +1,5 @@
-//! Which library row an import binds: the library the container states for it, by its DLL, its
-//! two-level namespace dylib or its version need; never by a bare name, and never to a body
-//! (doc/adr-call-boundary.md, Refusals "A library row", "S20 as built").
+//! Which library row an import binds: the library its DLL, dylib ordinal or version need states,
+//! never a bare name and never a body (doc/adr-call-boundary.md, "S20 as built").
 
 use std::collections::BTreeMap;
 
@@ -215,9 +214,8 @@ impl Imports {
         &self.rows
     }
 
-    /// The row the import `name` binds, or why none: O(log imports + log rows). `name` is one
-    /// the container states as an import (`Program::import_at`); a body's name binds nothing. A
-    /// mangled name's own row applies whatever library defines it (S13).
+    /// The row the import `name` (`Program::import_at`, never a body's) binds, or why none:
+    /// O(log imports + log rows). A mangled name's own row applies whatever defines it (S13).
     pub fn bind(&self, name: &str) -> Result<&LibraryRow, &'static str> {
         let mangled = || self.rows.row(LibraryId::Itanium, name);
         match self.scope(name) {

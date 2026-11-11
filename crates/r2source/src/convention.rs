@@ -326,9 +326,8 @@ impl ConventionModel {
         )
     }
 
-    /// A call whose callee runs under this convention or `other`, as no site states which: it reads
-    /// and writes what either does and preserves what both do (doc/adr-call-boundary.md, "S20 as
-    /// built"). Only its call effect is read; nothing is placed in it. O(locations + lanes).
+    /// A call whose callee runs under this convention or `other`: it reads and writes what either
+    /// does and preserves what both do; only its call effect is read (ADR "S20 as built"). O(lanes).
     pub fn either(&self, other: &Self) -> Self {
         let union = |left: &[LaneSet], right: &[LaneSet]| {
             let mut all = left.iter().chain(right).cloned().collect::<Vec<_>>();

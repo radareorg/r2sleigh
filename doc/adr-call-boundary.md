@@ -539,8 +539,9 @@ S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
 - **A stack read past 64 unread slots:** the slots up to the 64th hole stand and the arity is a floor with cause `ArgumentAreaPastBudget`, so one load at `[rsp + 0x40000000]` costs `O(reads + 64)`, never a record per slot.
 - **Caller writes:** evidence only. They are never arity proof, for a callee with a body or without one.
 - **Indirect calls with no stated type:** residual. Virtual calls stay residual too.
-- **A library row:** applies only through an import binding. A versioned import binds to the library its version names. An unversioned import binds at `Declared` only where the container's `DT_NEEDED` names one C library. A name match on a static body applies nothing (AGENTS rule 6).
+- **A library row:** applies only through an import binding. A versioned import binds to the library its version names. An unversioned import binds at `Declared` only where the container's `DT_NEEDED` names one C library. A PE import binds the DLL its directory names and a Mach-O import the dylib its two-level namespace ordinal names; a library no table states binds nothing (S20). A name match on a static body applies nothing (AGENTS rule 6).
 - **DWARF whose arrivals disagree with placement, or `DW_CC_nocall`:** no declaration for this body; a `Dispute` with refusal evidence.
+- **A `DW_AT_calling_convention` code no model has:** the function is refused; it is never placed under the default (S20).
 - **Void:** only with no written lane and no entry byte on a result lane, or under a proven closed world with every site `Dead`. Exports, taken addresses, variadic callees, unresolved branches, budget `Unknown` and forwarding cycles keep the carrier as `Unproven`. The scratch-result case follows [scratch-result](adr-scratch-result.md).
 - **Value:** only from DWARF, a declaration, or a closed-world `Read` fate. A written carrier alone is `Unproven`.
 - **Bytes read above an `Undefined` result byte:** stay a residual.

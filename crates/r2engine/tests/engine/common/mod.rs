@@ -1002,7 +1002,7 @@ impl Literal {
     }
 
     /// The same program stating `import` from `dylib`, as a two-level namespace's ordinal names it.
-    pub fn from_dylib(mut self, import: &str, dylib: &str) -> Self {
+    pub fn with_dylib(mut self, import: &str, dylib: &str) -> Self {
         self.container.symbols.push(Symbol {
             name: import.into(),
             import: true,

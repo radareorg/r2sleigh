@@ -1390,9 +1390,8 @@ pub fn import_reads(target: &NativeTarget<'_>, name: &str) -> Option<crate::impo
     placing_imports(target, None, |placement| placement.reads(declared))
 }
 
-/// `f` over the placement an import's row takes: the program's own convention, which its libraries
-/// run under, where this function's debug information states another (S20). `None` where the
-/// machine does not build.
+/// `f` over the placement an import's row takes: under the program's own convention, which its
+/// libraries run under (S20). `None` where the machine does not build.
 fn placing_imports<R>(
     target: &NativeTarget<'_>,
     built: Option<&NativeMachine>,

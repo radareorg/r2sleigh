@@ -92,7 +92,7 @@ fn printing(mach_o: bool) -> OpenProgram<Literal> {
         .with_data()
         .importing("printf");
     let darwin =
-        |program: Literal| (program.mach_o()).from_dylib("printf", "/usr/lib/libSystem.B.dylib");
+        |program: Literal| (program.mach_o()).with_dylib("printf", "/usr/lib/libSystem.B.dylib");
     let mut program = OpenProgram::of(if mach_o { darwin(program) } else { program });
     program.source_mut().write(TEXT, b"%d\n\0");
     program

@@ -1,6 +1,5 @@
-//! A function's convention is what its debug information states: clang's `ms_abi` and `sysv_abi`
-//! (`DW_CC_LLVM_Win64`, `DW_CC_LLVM_X86_64SysV`); the target's default otherwise
-//! (doc/adr-call-boundary.md, "S20 as built").
+//! A function's convention is what its debug information states (clang's `ms_abi`, `sysv_abi`),
+//! the target's default otherwise (doc/adr-call-boundary.md, "S20 as built").
 
 use crate::common;
 
@@ -8,9 +7,8 @@ use common::{BASE, Literal};
 use r2abi::StatedConvention;
 use r2engine::program::OpenProgram;
 
-/// `long diff(long a, long b) __attribute__((ms_abi)) { return a - b; }` at clang `-O1`, then
-/// `twice(a, b) { return diff(b, a) * 2; }` under SysV: r2image's `dwarf_ms_abi.c`, its call's
-/// arguments swapped so a placement under the wrong convention shows.
+/// `ms_abi long diff(long a, long b) { return a - b; }` at clang `-O1`, then SysV `twice(a, b)
+/// { return diff(b, a) * 2; }`: r2image's `dwarf_ms_abi.c` with the call's arguments swapped.
 const DIFF_AND_TWICE: &[u8] = &[
     0x48, 0x89, 0xc8, // 1000 mov rax, rcx
     0x48, 0x29, 0xd0, // 1003 sub rax, rdx
@@ -60,9 +58,8 @@ fn program(stated: StatedConvention) -> OpenProgram<Literal> {
     )
 }
 
-/// `diff` under `sysv_abi` in a PE (`mov rax, rdi; sub rax, rsi; ret`), and a Microsoft x64
-/// `keeps(a, b, f)` holding `a` in rsi, which Microsoft x64 preserves and SysV does not, across
-/// a call through r8.
+/// `diff` under `sysv_abi` in a PE, and a Microsoft x64 `keeps(a, b, f)` holding `a` across a
+/// call through r8 in rsi, which Microsoft x64 preserves and SysV does not.
 const SYSV_IN_A_PE: &[u8] = &[
     0x48, 0x89, 0xf8, // 1000 mov rax, rdi
     0x48, 0x29, 0xf0, // 1003 sub rax, rsi
@@ -189,9 +186,8 @@ fn an_import_called_under_ms_abi_is_placed_under_the_program_s_convention() {
     assert_eq!(names, ["rdi"]);
 }
 
-/// A Microsoft x64 function in a PE that states a `sysv_abi` function: no site states its callee's
-/// convention, so a call keeps only what both preserve. rsi survives no indirect call there; with
-/// nothing stated it does.
+/// In a PE stating a `sysv_abi` function no site states its callee's convention, so rsi survives
+/// no indirect call from a Microsoft x64 function; with nothing stated it does.
 #[test]
 fn a_call_in_a_program_stating_sysv_abi_keeps_no_register_sysv_clobbers() {
     let mut open = pe(StatedConvention::LlvmX8664SysV);

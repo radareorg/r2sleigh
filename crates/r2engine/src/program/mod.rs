@@ -165,9 +165,8 @@ impl Machines {
         })
     }
 
-    /// What a native request needs for the function at `entry`: the convention its declaration
-    /// states, else by its language: a Go function under ABIInternal unless pclntab marks it
-    /// assembly (ABI0), refusing where no table states which. O(log functions).
+    /// What a native request needs at `entry`: the convention its declaration states, else its
+    /// language's (Go: ABIInternal, ABI0 where pclntab marks assembly, else refused). O(log functions).
     fn assembled_at(&self, container: &Container, entry: u64) -> Result<Chosen<'_>, Unassembled> {
         let declared = container.declarations.function_at(entry);
         let (arch, bits) = (&container.arch.name, container.arch.bits);
@@ -206,9 +205,8 @@ impl Machines {
     }
 }
 
-/// The convention a function's debug information states, where it names one other than the
-/// target's default; `Normal`, `Program` and `NoCall` keep the default, and placement refuses the
-/// last two. A code no model here has refuses the function (doc/adr-call-boundary.md, S20).
+/// The convention a function's debug information states, `None` where it keeps the target's
+/// default; a code no model here has refuses the function (doc/adr-call-boundary.md, S20).
 fn stated_convention(
     arch: &str,
     bits: u32,
@@ -261,9 +259,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Convention {
     }
 }
 
-/// What a call from a function under one convention may run under: its own model, joined with
-/// every other the program's functions state, since no site states its callee's. Held; O(stated
-/// conventions x registers), and the convention's own model where none is stated.
+/// What a call from a function under one convention may run under: its model joined with every
+/// other the program states, as no site states its callee's. O(stated conventions x registers).
 pub(super) struct AnyCall;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for AnyCall {
