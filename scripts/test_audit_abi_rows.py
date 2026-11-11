@@ -123,6 +123,33 @@ class Prototypes(unittest.TestCase):
         self.assertEqual(mixed.modes()[0], "-std=c17 -D_POSIX_C_SOURCE=200809L")
         self.assertIn("__typeof__(fputs)", audit.assertion(rows["fputs"]))
 
+    def test_a_probe_includes_the_synopsis_prerequisites_first(self) -> None:
+        wide = audit.CitedRow("fgetwc", " wchar.h: ISO C17. ", "wint_t", "wchar.h", {0: "FILE *,stream"})
+        self.assertEqual(audit.headers_of(wide), ["stddef.h", "stdarg.h", "stdio.h", "wchar.h"])
+        self.assertIn("#include <stdio.h>\n#include <wchar.h>", audit.assertion(wide))
+
+    def test_a_fortify_header_is_reached_through_its_public_wrapper(self) -> None:
+        row = audit.CitedRow("__open_2", " glibc. ", "int", "bits/fcntl2.h", {0: "const char *,path", 1: "int,oflag"})
+        self.assertEqual(audit.headers_of(row)[-1], "fcntl.h")
+        self.assertNotIn("bits/", audit.assertion(row))
+
+    def test_a_redirected_name_is_probed_as_the_function_the_header_declares(self) -> None:
+        row = audit.CitedRow("__isoc23_strtol", " stdlib.h: glibc. ", "long", "stdlib.h", {0: "const char *,s"})
+        self.assertIn("__typeof__(strtol)", audit.assertion(row))
+
+    def test_a_posix_type_brings_sys_types(self) -> None:
+        row = audit.CitedRow("mmap64", " sys/mman.h: glibc. ", "void *", "sys/mman.h", {0: "off64_t,offset"})
+        self.assertIn("sys/types.h", audit.headers_of(row))
+
+    def test_a_row_naming_xsi_is_also_probed_under_it(self) -> None:
+        row = audit.CitedRow("sigaltstack", " signal.h: POSIX.1-2017; sigaltstack is XSI. ")
+        self.assertIn("-std=c17 -D_XOPEN_SOURCE=700", row.modes())
+
+    def test_the_shipped_xsi_rows_name_xsi(self) -> None:
+        rows = {row.name: row for row in audit.cited_rows((audit.DATA / "types-posix.sdb.txt").read_text())}
+        for name in ("sigaltstack", "getpwent", "getgrent", "wcswidth"):
+            self.assertIn("-std=c17 -D_XOPEN_SOURCE=700", rows[name].modes(), name)
+
     def test_a_row_citing_gccs_builtins_is_not_compiled(self) -> None:
         self.assertNotIn("__memcpy_chk", self.rows())
 

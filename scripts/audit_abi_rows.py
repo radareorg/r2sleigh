@@ -215,11 +215,46 @@ def cited_rows(text: str) -> list[CitedRow]:
     return [row for row in rows.values() if row.header and "GCC" not in row.comment]
 
 
+# The header a standard's synopsis includes before the row's own, by the type the prototype spells:
+# ISO C17 7.29.3.1 lists <stdio.h> before <wchar.h> for `FILE`, 7.29.5.1 <time.h> for `struct tm`.
+PREREQUISITES = (
+    ("FILE", "stdio.h"),
+    ("struct tm", "time.h"),
+    ("struct timespec", "time.h"),
+    ("struct timeval", "sys/time.h"),
+    ("struct stat", "sys/stat.h"),
+    ("fd_set", "sys/select.h"),
+    ("sigset_t", "signal.h"),
+    ("locale_t", "locale.h"),
+    ("ssize_t", "sys/types.h"),
+    ("off_t", "sys/types.h"),
+    ("off64_t", "sys/types.h"),
+)
+# glibc 2.38 declares `strtol` with `__asm__("__isoc23_strtol")` (<stdlib.h>, `__GLIBC_USE (C2X_STRTOL)`):
+# the linked name is no identifier, so the probe names the function the header redirects.
+REDIRECTED = "__isoc23_"
+# glibc's fortify headers refuse a direct include ("Never include <bits/...> directly"): each is
+# reached through the public header that includes it.
+PUBLIC_WRAPPERS = {
+    "bits/stdio2-decl.h": "stdio.h",
+    "bits/fcntl2.h": "fcntl.h",
+    "bits/wchar2-decl.h": "wchar.h",
+}
+
+
+def headers_of(row: CitedRow) -> list[str]:
+    """What the probe includes, in order: the synopsis's prerequisites, then the row's public header."""
+    public = PUBLIC_WRAPPERS.get(row.header, row.header)
+    spelled = row.prototype()
+    first = [header for word, header in PREREQUISITES if re.search(rf"\b{word}\b", spelled)]
+    return list(dict.fromkeys(["stddef.h", "stdarg.h", *first, public]))
+
+
 def assertion(row: CitedRow) -> str:
     """One translation unit that compiles only where the header declares the row's prototype."""
     return (
-        f"#include <stddef.h>\n#include <stdarg.h>\n#include <{row.header}>\n"
-        f"_Static_assert(__builtin_types_compatible_p(__typeof__({row.name}), {row.prototype()}), \"row\");\n"
+        "".join(f"#include <{header}>\n" for header in headers_of(row)) +
+        f"_Static_assert(__builtin_types_compatible_p(__typeof__({row.name.removeprefix(REDIRECTED)}), {row.prototype()}), \"row\");\n"
     )
 
 

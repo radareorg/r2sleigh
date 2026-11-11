@@ -343,8 +343,8 @@ func.uname.arg.0=struct utsname *,name
 func.uname.ret=int
 func.uname.include=sys/utsname.h
 
-# signal.h: POSIX.1-2017. sigset_t and stack_t are the header's types; the table lays out
-# neither.
+# signal.h: POSIX.1-2017; sigaltstack is XSI. sigset_t and stack_t are the header's types; the
+# table lays out neither.
 sigemptyset=func
 func.sigemptyset.args=1
 func.sigemptyset.arg.0=sigset_t *,set
@@ -457,8 +457,8 @@ func.tcsetattr.arg.2=const struct termios *,termios_p
 func.tcsetattr.ret=int
 func.tcsetattr.include=termios.h
 
-# pwd.h, grp.h and wchar.h: POSIX.1-2017. The user and group records are returned by pointer
-# to storage the library owns.
+# pwd.h, grp.h and wchar.h: POSIX.1-2017; getpwent, getgrent and wcswidth are XSI. The user and
+# group records are returned by pointer to storage the library owns.
 getpwnam=func
 func.getpwnam.args=1
 func.getpwnam.arg.0=const char *,name
