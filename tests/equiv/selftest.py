@@ -378,9 +378,10 @@ CASES = [
         "    for (;;)\n        spin = spin + 1u;\n}\n"),
         expect_build="O2", cost=Cost("time", 32)),
     # Under `instructions` the CPU timer is not the measure: no SIGPROF handler, no timer armed.
+    # Zeroed first: a Win64 rendering's calls are the Microsoft x64 ABI's and may write nothing.
     Case("no-cpu-timer-under-instructions", "st_add", "equal", _tu(
         "#include <signal.h>\n#include <sys/time.h>\nint32_t sub_add(int32_t a, int32_t b)\n{\n"
-        "    struct sigaction held;\n    struct itimerval left;\n"
+        "    struct sigaction held = {0};\n    struct itimerval left = {{0, 0}, {0, 0}};\n"
         "    sigaction(SIGPROF, NULL, &held);\n    getitimer(ITIMER_PROF, &left);\n"
         "    int armed = held.sa_handler != SIG_DFL || left.it_value.tv_sec != 0\n"
         "                || left.it_value.tv_usec != 0;\n"
