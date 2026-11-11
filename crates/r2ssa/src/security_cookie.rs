@@ -287,6 +287,25 @@ fn check_calls(
     calls
 }
 
+/// What an operation does with a value it reads, for a walk asking whether nothing keeps it.
+enum Read {
+    /// `xor eax, eax`: it reads the lane and computes 0 whatever it holds.
+    Cancels,
+    /// A register operation: its result is read in turn.
+    Into(Option<VarId>),
+    /// An effect, a branch or a return keeps the value.
+    Kept,
+}
+
+fn reads(op: &SSAOp<VarId>) -> Read {
+    match op {
+        SSAOp::IntXor { a, b, .. } | SSAOp::IntSub { a, b, .. } if a == b => Read::Cancels,
+        SSAOp::CBranch { .. } | SSAOp::Return { .. } => Read::Kept,
+        _ if inert(op) => Read::Into(op.dst().copied()),
+        _ => Read::Kept,
+    }
+}
+
 fn overlaps(a: r2source::CanonicalStorageId, b: r2source::CanonicalStorageId) -> bool {
     a.space == b.space
         && a.offset < b.offset + u64::from(b.size)
@@ -306,18 +325,13 @@ impl<'f> Readers<'f> {
         let mut readers = IdMap::<VarId, Vec<OpId>>::new(func.values().len());
         let mut merged = IdSet::new(func.values().len());
         let mut ops = IdMap::new(func.id_limit());
-        for block in (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr)) {
-            for (_, phi) in block.sited_phis() {
-                for (_, source) in &phi.sources {
-                    merged.insert(*source);
-                }
-            }
-            for (id, op) in block.sited() {
-                ops.insert(id, op);
-                op.for_each_source(|source| {
-                    readers.get_or_insert_with(*source, Vec::new).push(id);
-                });
-            }
+        let blocks = || (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr));
+        let phis = blocks().flat_map(|block| block.sited_phis().map(|(_, phi)| phi));
+        merged.extend(phis.flat_map(|phi| phi.sources.iter().map(|(_, source)| *source)));
+        for (id, op) in blocks().flat_map(|block| block.sited()) {
+            ops.insert(id, op);
+            let sources = op.sources().into_iter().copied();
+            sources.for_each(|source| readers.get_or_insert_with(source, Vec::new).push(id));
         }
         Self {
             readers,
@@ -461,11 +475,11 @@ impl Context<'_> {
             if leaves(func, addr) {
                 return true;
             }
-            for next in func.successors(addr) {
-                if seen.insert(next) {
-                    work.push((next, 0));
-                }
-            }
+            let unseen = func
+                .successors(addr)
+                .into_iter()
+                .filter(|next| seen.insert(*next));
+            work.extend(unseen.map(|next| (next, 0)));
         }
         false
     }
@@ -523,29 +537,25 @@ impl Context<'_> {
             if self.readers.merged.contains(var) {
                 return false;
             }
-            for reader in self.readers.of_var(var) {
-                if sinks.contains(*reader) || dead.contains(reader) {
-                    continue;
-                }
-                walked += 1;
-                let Some(op) = self
-                    .readers
-                    .op(*reader)
-                    .filter(|op| inert(op) && walked < BUDGET)
-                else {
-                    return false;
-                };
-                if matches!(op, SSAOp::CBranch { .. } | SSAOp::Return { .. }) {
-                    return false;
-                }
-                // `xor eax, eax` reads the lane and computes 0 whatever it holds.
-                if let SSAOp::IntXor { a, b, .. } | SSAOp::IntSub { a, b, .. } = op
-                    && a == b
-                {
-                    continue;
-                }
-                dead.push(*reader);
-                work.extend(op.dst().copied());
+            let unseen = (self.readers.of_var(var).iter().copied())
+                .filter(|reader| !sinks.contains(*reader) && !dead.contains(reader))
+                .collect::<Vec<_>>();
+            walked += unseen.len();
+            let read = |reader: &OpId| self.readers.op(*reader).map_or(Read::Kept, reads);
+            if walked > BUDGET
+                || unseen
+                    .iter()
+                    .any(|reader| matches!(read(reader), Read::Kept))
+            {
+                return false;
+            }
+            let into = unseen.into_iter().filter_map(|reader| match read(&reader) {
+                Read::Into(dst) => Some((reader, dst)),
+                _ => None,
+            });
+            for (reader, dst) in into.collect::<Vec<_>>() {
+                dead.push(reader);
+                work.extend(dst);
             }
         }
         true

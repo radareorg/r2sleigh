@@ -66,7 +66,7 @@ impl<'a, S: Source + 'static> View<'a, S> {
         let walker = super::returns::Walking::new(self.clone(), false).ok()?;
         let target = walker.target(false);
         let picked = target.imports.bind(name).ok().and_then(pick)?;
-        Some((picked, target.convention.clone()))
+        Some((picked, std::sync::Arc::clone(&target.convention)))
     }
 
     /// The view a query reads through; the names, the stubs, the stated starts and, where asked, the modes are asked once.
