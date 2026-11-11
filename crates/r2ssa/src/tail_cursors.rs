@@ -134,9 +134,11 @@ impl Prover<'_> {
             if self.graph.def_inst(value.id).is_none() {
                 continue;
             }
+            // A home `va_list` has no bound apart from its pointer.
+            let bounded = list.base.is_some();
             let kind = match self.root(value.id) {
-                Some(at) if at == self.area.bound && at == overflow_init => Kind::Rooted,
-                Some(at) if at == self.area.bound => Kind::Base,
+                Some(at) if bounded && at == self.area.bound && at == overflow_init => Kind::Rooted,
+                Some(at) if bounded && at == self.area.bound => Kind::Base,
                 Some(at) if at == overflow_init => Kind::Overflow,
                 _ => continue,
             };
@@ -169,7 +171,7 @@ impl Prover<'_> {
             (list.offset, Kind::Offset),
         ]
         .into_iter()
-        .find_map(|(whole, kind)| (cell == whole).then_some((out, kind)))
+        .find_map(|(whole, kind)| (Some(cell) == whole).then_some((out, kind)))
     }
 
     /// The constants `va_start` leaves in the offset field that a merge takes beside a step of
@@ -182,8 +184,11 @@ impl Prover<'_> {
         if !inputs.iter().any(|input| self.is_step(*input)) {
             return Vec::new();
         }
+        let Some(row) = self.row else {
+            return Vec::new();
+        };
         let starts = |input: &ValueId| {
-            self.size(*input) >= self.row.offset_width
+            self.size(*input) >= row.offset_width
                 && self
                     .constant(*input)
                     .is_some_and(|bits| self.is_next_extended(bits))
@@ -193,13 +198,19 @@ impl Prover<'_> {
 
     /// Whether the low bytes of `bits` are what `va_start` leaves in the offset field.
     pub(crate) fn is_next(&self, bits: u64) -> bool {
-        let mask = u64::MAX >> (64 - 8 * self.row.offset_width.clamp(1, 8));
+        let Some(row) = self.row else {
+            return false;
+        };
+        let mask = u64::MAX >> (64 - 8 * row.offset_width.clamp(1, 8));
         bits & mask == self.next().cast_unsigned() & mask
     }
 
     /// Whether `bits` is that field zero-extended: a register holding the offset.
     fn is_next_extended(&self, bits: u64) -> bool {
-        let field = 8 * self.row.offset_width.clamp(1, 8);
+        let Some(row) = self.row else {
+            return false;
+        };
+        let field = 8 * row.offset_width.clamp(1, 8);
         self.is_next(bits) && (field == 64 || bits >> field == 0)
     }
 
@@ -499,11 +510,11 @@ impl Prover<'_> {
         (val, kind): (ValueId, Kind),
         addr: ValueId,
     ) -> Result<(), String> {
-        let cells: &[Cell] = match kind {
-            Kind::Base => &[list.base],
-            Kind::Overflow => &[list.overflow],
-            Kind::Rooted => &[list.base, list.overflow],
-            Kind::Offset => &[list.offset],
+        let cells = match kind {
+            Kind::Base => [list.base, None],
+            Kind::Overflow => [list.overflow, None],
+            Kind::Rooted => [list.base, list.overflow],
+            Kind::Offset => [list.offset, None],
             Kind::Address | Kind::Rounded => {
                 return Err(format!("a {kind:?} cursor is stored"));
             }
@@ -511,6 +522,7 @@ impl Prover<'_> {
         let to = self.root(addr);
         match cells
             .iter()
+            .flatten()
             .any(|cell| to == Some(cell.at) && self.size(val) == cell.size)
         {
             true => Ok(()),

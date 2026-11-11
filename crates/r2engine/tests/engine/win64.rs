@@ -239,3 +239,86 @@ fn a_local_passed_as_the_fifth_argument_stays_in_memory() {
     let caller = rendered(&mut open, BASE + 0x10);
     common::assert_local_stays_in_memory(&caller);
 }
+
+/// clang -O0 `int sum(int n, ...)` for `x86_64-pc-windows-msvc`: it homes `rdx`, `r8` and `r9`,
+/// keeps `va_list ap = &home[1]` in a frame cell and adds `*(int *)ap` `n` times, stepping `ap`
+/// by `step`; `caller` calls `sum(3, 1, 2, 3)`.
+fn summing(step: u8) -> &'static [u8] {
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+        0x4c, 0x89, 0x4c, 0x24, 0x38, // 1004 mov [rsp + 0x38], r9
+        0x4c, 0x89, 0x44, 0x24, 0x30, // 1009 mov [rsp + 0x30], r8
+        0x48, 0x89, 0x54, 0x24, 0x28, // 100e mov [rsp + 0x28], rdx
+        0x89, 0x4c, 0x24, 0x14, // 1013 mov [rsp + 0x14], ecx
+        0x48, 0x8d, 0x44, 0x24, 0x28, // 1017 lea rax, [rsp + 0x28]: &home[1]
+        0x48, 0x89, 0x44, 0x24, 0x08, // 101c mov [rsp + 0x8], rax: ap
+        0xc7, 0x44, 0x24, 0x04, 0, 0, 0, 0, // 1021 mov dword [rsp + 0x4], 0: total
+        0xc7, 0x04, 0x24, 0, 0, 0, 0, // 1029 mov dword [rsp], 0: i
+        0x8b, 0x04, 0x24, // 1030 mov eax, [rsp]
+        0x3b, 0x44, 0x24, 0x14, // 1033 cmp eax, [rsp + 0x14]
+        0x0f, 0x8d, 0x29, 0, 0, 0, // 1037 jge 0x1066
+        0x48, 0x8b, 0x44, 0x24, 0x08, // 103d mov rax, [rsp + 0x8]
+        0x48, 0x89, 0xc1, // 1042 mov rcx, rax
+        0x48, 0x83, 0xc1, step, // 1045 add rcx, step
+        0x48, 0x89, 0x4c, 0x24, 0x08, // 1049 mov [rsp + 0x8], rcx
+        0x8b, 0x00, // 104e mov eax, [rax]
+        0x03, 0x44, 0x24, 0x04, // 1050 add eax, [rsp + 0x4]
+        0x89, 0x44, 0x24, 0x04, // 1054 mov [rsp + 0x4], eax
+        0x8b, 0x04, 0x24, // 1058 mov eax, [rsp]
+        0x83, 0xc0, 0x01, // 105b add eax, 1
+        0x89, 0x04, 0x24, // 105e mov [rsp], eax
+        0xe9, 0xca, 0xff, 0xff, 0xff, // 1061 jmp 0x1030
+        0x8b, 0x44, 0x24, 0x04, // 1066 mov eax, [rsp + 0x4]
+        0x48, 0x83, 0xc4, 0x18, // 106a add rsp, 0x18
+        0xc3, // 106e ret
+        0x90, // 106f nop
+        0x48, 0x83, 0xec, 0x28, // 1070 sub rsp, 0x28
+        0xb9, 0x03, 0, 0, 0, // 1074 mov ecx, 3
+        0xba, 0x01, 0, 0, 0, // 1079 mov edx, 1
+        0x41, 0xb8, 0x02, 0, 0, 0, // 107e mov r8d, 2
+        0x41, 0xb9, 0x03, 0, 0, 0, // 1084 mov r9d, 3
+        0xe8, 0x71, 0xff, 0xff, 0xff, // 108a call 0x1000
+        0x48, 0x83, 0xc4, 0x28, // 108f add rsp, 0x28
+        0xc3, // 1093 ret
+    ];
+    code.resize(0xa0, 0xcc);
+    Box::leak(code.into_boxed_slice())
+}
+
+fn sum(step: u8) -> OpenProgram<Literal> {
+    let functions = [("sum", BASE, 0x70), ("caller", BASE + 0x70, 0x24)];
+    OpenProgram::of(Literal::of_code(summing(step), &functions).pe())
+}
+
+/// A body that walks its own home `va_list` one slot per trip, `n` times, takes a tail its first
+/// parameter counts: the caller's constant 3 passes three more (ADR "Count-driven tail").
+#[test]
+fn a_home_cursor_counted_by_a_parameter_is_a_counted_tail() {
+    let mut open = sum(8);
+    let callee = rendered(&mut open, BASE);
+    assert!(
+        callee.contains("sum(") && callee.contains(", ...)"),
+        "{callee}"
+    );
+    let caller = rendered(&mut open, BASE + 0x70);
+    let arguments = common::call_arguments(&caller, "sum").unwrap_or_else(|| panic!("{caller}"));
+    let bare = arguments
+        .iter()
+        .map(|argument| common::bare(argument).trim_end_matches('U'))
+        .collect::<Vec<_>>();
+    assert_eq!(bare, ["3", "1", "2", "3"], "{caller}");
+}
+
+/// The same walk stepping by 4: a trip reads past its own slot, so no count bounds the tail.
+#[test]
+fn a_home_cursor_stepping_other_than_a_slot_is_no_counted_tail() {
+    let mut open = sum(4);
+    let callee = rendered(&mut open, BASE);
+    assert!(!callee.contains("..."), "{callee}");
+    let caller = rendered(&mut open, BASE + 0x70);
+    let arguments = common::call_arguments(&caller, "sum");
+    assert!(
+        arguments.is_none_or(|arguments| arguments.len() != 4),
+        "{caller}"
+    );
+}

@@ -162,6 +162,65 @@ pub(crate) fn home_va_list(
     }
     // A tail from position 0 leaves no fixed parameter to name it, which C cannot declare.
     let named = named.filter(|named| *named > 0)?;
+    homed_tail((graph, prep), (slots, model), observations, named)
+}
+
+/// Microsoft x64's variadic body walking its own tail from the lowest home whose address it keeps;
+/// the area stands only beside a proven `tail_count`. O(insts + uses).
+pub(crate) fn home_cursor(
+    (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
+    slots: &SourceConventionSlots,
+    machine: &crate::SourceMachineContext,
+    observations: &crate::deadphi::ProvenProgramObservations,
+) -> Option<SaveArea> {
+    let model = machine.convention().filter(|_| slots.shared_positions())?;
+    let positions = slots.argument_slots().len();
+    let homes = (0..positions)
+        .map(|position| Some(model.home(u8::try_from(position).ok()?)?.start))
+        .collect::<Option<Vec<_>>>()?;
+    // The lowest home whose address is kept: used other than as the address of an access.
+    let kept = |value: ValueId| {
+        graph.use_sites(value).iter().any(|site| {
+            let Some(inst) = graph.inst(site.inst) else {
+                return true;
+            };
+            let unobserved = inst.output.is_some_and(|out| !observations.contains(out));
+            match &inst.payload {
+                InstPayload::Op(SSAOp::Load { addr, .. }) => *addr != value,
+                InstPayload::Op(SSAOp::Store { addr, val, .. }) => *addr != value || *val == value,
+                _ => !unobserved,
+            }
+        })
+    };
+    let named = (graph.values.iter())
+        .filter(|value| graph.def_inst(value.id).is_some())
+        .filter_map(|value| {
+            let root = prep.entry_stack_address_root_of(value.id)?;
+            let at = (root.base == StackAddressBase::StackPointer).then_some(root.offset)?;
+            let position = homes.iter().position(|home| *home == at)?;
+            kept(value.id).then_some(position)
+        })
+        .min()?;
+    // A kept `&home[0]` is no tail a fixed parameter names.
+    (named > 0).then_some(())?;
+    homed_tail((graph, prep), (slots, model), observations, named)
+}
+
+/// The save area of a Microsoft x64 tail from `named`: each later position's entry value read only
+/// by its home.
+fn homed_tail(
+    (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
+    (slots, model): (&SourceConventionSlots, &r2source::ConventionModel),
+    observations: &crate::deadphi::ProvenProgramObservations,
+    named: usize,
+) -> Option<SaveArea> {
+    let arguments = slots.argument_slots();
+    let at_entry = |value: ValueId| {
+        prep.entry_stack_address_root_of(value)
+            .filter(|root| root.base == StackAddressBase::StackPointer)
+            .map(|root| root.offset)
+    };
+    let home_of = |position: usize| Some(model.home(u8::try_from(position).ok()?)?.start);
     // Each tail position's entry value is read only by its home: a store there, or the copy a
     // promoted home left that nothing reads.
     let (saves, _) = entry_saves((graph, prep), arguments, &at_entry);

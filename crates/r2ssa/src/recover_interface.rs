@@ -1949,12 +1949,23 @@ fn recover_interface_inner(
         return Ok(None);
     };
     // A variadic prologue's saves to the register save area are its tail, not parameter reads.
+    let mut cursor_count = None;
     let mut save_area = prep
         .and_then(|prep| crate::save_area::register_save_area(graph, prep, slots, &observations))
         .or_else(|| {
             let (prep, machine) = prep.zip(machine_context)?;
             let homes = (graph, prep);
             crate::save_area::home_va_list(homes, &facts, slots, machine, &observations)
+        })
+        .or_else(|| {
+            // A home the body walks itself is a tail only where its count is proven.
+            let (prep, machine) = prep.zip(machine_context)?;
+            let area = crate::save_area::home_cursor((graph, prep), slots, machine, &observations)?;
+            let tail = (&area, &observations);
+            cursor_count = Some(crate::tail_count::tail_count(
+                func, graph, prep, slots, tail,
+            )?);
+            Some(area)
         });
     // A carrier passed straight to a call is read by that call: the callee's statement reads it.
     // Each entry carrier's widest read, found once for every argument that asks (D105).
@@ -2187,7 +2198,9 @@ fn recover_interface_inner(
         })
         .collect::<Vec<_>>();
     let tail_count = save_area.as_ref().zip(prep).and_then(|(area, prep)| {
-        crate::tail_count::tail_count(func, graph, prep, slots, (area, &observations))
+        cursor_count.or_else(|| {
+            crate::tail_count::tail_count(func, graph, prep, slots, (area, &observations))
+        })
     });
     let return_mechanism = recovered_return_mechanism(&facts);
     let result_is_return_address = result.register().is_some()
