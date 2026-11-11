@@ -75,6 +75,14 @@ impl crate::body::Program for Knowing<'_> {
         self.program.returns_through(slot)
     }
 
+    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+        self.program.halts_on_through(slot)
+    }
+
+    fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+        self.program.yields_through(slot)
+    }
+
     fn loader_writes(&self) -> &[crate::program::LoaderWrite] {
         self.program.loader_writes()
     }

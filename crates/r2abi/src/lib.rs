@@ -25,7 +25,8 @@ pub use convention::{
 pub use data_model::CDataModel;
 pub use declarations::{DataObject, Declarations};
 pub use library::{
-    CLibrary, Dll, FormatKind, Kernel, LibraryId, LibraryRow, LibraryRows, PrototypeId, Tail,
+    CLibrary, Dll, FormatKind, Handle, Kernel, LibraryId, LibraryRow, LibraryRows, PrototypeId,
+    Tail,
 };
 pub use loader::{LoaderCall, loader_call};
 pub use mangled::Passing;

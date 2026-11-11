@@ -136,8 +136,25 @@ pub struct LibraryRow {
     /// mangled name may not know of a hidden result pointer or a VTT.
     pub passing: crate::mangled::Passing,
     pub noreturn: bool,
+    /// A parameter that, holding this handle, makes the call not return.
+    pub halts_on: Option<(u8, Handle)>,
+    /// The handle the result always is.
+    pub yields: Option<Handle>,
     /// The standard and header the row is read from; empty for a row radare2's tables state.
     pub citation: Box<str>,
+}
+
+/// A handle a Microsoft row names by what it refers to, not by its value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Handle {
+    /// The calling process's own handle, as `GetCurrentProcess` returns it.
+    CurrentProcess,
+}
+
+impl Handle {
+    fn read(text: &str) -> Option<Self> {
+        (text == "current-process").then_some(Self::CurrentProcess)
+    }
 }
 
 /// Every row one C library's program reads, and the graph their types are nodes of.
@@ -325,6 +342,8 @@ impl LibraryRows {
             },
             passing: mangled.passing,
             noreturn: false,
+            halts_on: None,
+            yields: None,
             citation: citation.into(),
         })
     }
@@ -399,6 +418,8 @@ impl LibraryRows {
             tail,
             passing: crate::mangled::Passing::Stated,
             noreturn: declared.noreturn,
+            halts_on: declared.halts_on,
+            yields: declared.yields,
             citation: citation.into(),
         }
     }
@@ -482,6 +503,8 @@ struct Declared {
     parameters: BTreeMap<usize, (String, Option<String>)>,
     returns: Option<String>,
     noreturn: bool,
+    halts_on: Option<(u8, Handle)>,
+    yields: Option<Handle>,
     include: Option<String>,
     /// The reference page and minimum version a Microsoft row cites.
     cite: Option<String>,
@@ -585,6 +608,12 @@ impl Table {
         match what {
             "ret" => declared.returns = Some(value.to_owned()),
             "noreturn" => declared.noreturn = value == "true",
+            "yields" => declared.yields = Handle::read(value),
+            "halts_on" => {
+                declared.halts_on = value.split_once(',').and_then(|(index, handle)| {
+                    Some((index.trim().parse().ok()?, Handle::read(handle.trim())?))
+                });
+            }
             "include" => declared.include = Some(value.to_owned()),
             "cite" => declared.cite = Some(value.to_owned()),
             "tail" => declared.tail = Some(value.to_owned()),

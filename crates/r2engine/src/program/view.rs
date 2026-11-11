@@ -55,6 +55,20 @@ impl<S: Source + 'static> Clone for View<'_, S> {
 }
 
 impl<'a, S: Source + 'static> View<'a, S> {
+    /// What the row of the import sealed at `slot` states through `pick`, and the convention it
+    /// is called under; `None` where no row binds it or the row states nothing there.
+    fn import_through<T>(
+        &self,
+        slot: u64,
+        pick: impl Fn(&r2abi::LibraryRow) -> Option<T>,
+    ) -> Option<(T, std::sync::Arc<r2source::ConventionModel>)> {
+        let name = crate::stated::sealed_import(self, slot)?;
+        let walker = super::returns::Walking::new(self.clone(), false).ok()?;
+        let target = walker.target(false);
+        let picked = target.imports.bind(name).ok().and_then(pick)?;
+        Some((picked, target.convention.clone()))
+    }
+
     /// The view a query reads through; the names, the stubs, the stated starts and, where asked, the modes are asked once.
     pub(super) fn new(db: &'a Db<ProgramInputs<S>>, with_modes: bool) -> Self {
         let imports = db.get::<Imports>(&()).expect("the imports ask for nothing");
@@ -257,6 +271,20 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
                 .ok()
                 .and_then(|walker| crate::discovery::Walker::declared(&walker, slot))
                 .is_none_or(|answer| answer.comes())
+    }
+
+    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+        let ((index, handle), model) = self.import_through(slot, |row| row.halts_on)?;
+        let register = model
+            .argument_registers(r2abi::SlotClass::Integer)
+            .nth(index.into());
+        register.map(|register| (register, handle))
+    }
+
+    fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+        let (handle, model) = self.import_through(slot, |row| row.yields)?;
+        let register = model.result_registers(r2abi::SlotClass::Integer).next();
+        register.map(|register| (register, handle))
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {

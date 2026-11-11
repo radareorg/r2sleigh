@@ -126,6 +126,7 @@ func.GetCurrentProcess.args=0
 func.GetCurrentProcess.ret=HANDLE
 func.GetCurrentProcess.include=processthreadsapi.h
 func.GetCurrentProcess.cite=https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getcurrentprocess (Windows XP)
+func.GetCurrentProcess.yields=current-process
 
 # Microsoft, GetCurrentProcessId: processthreadsapi.h, minimum supported client Windows XP.
 GetCurrentProcessId=func
@@ -410,6 +411,7 @@ func.TerminateProcess.arg.1=UINT,uExitCode
 func.TerminateProcess.ret=BOOL
 func.TerminateProcess.include=processthreadsapi.h
 func.TerminateProcess.cite=https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess (Windows XP)
+func.TerminateProcess.halts_on=0,current-process
 
 # Microsoft, TlsAlloc: processthreadsapi.h, minimum supported client Windows XP.
 TlsAlloc=func

@@ -98,6 +98,20 @@ pub trait Program {
         true
     }
 
+    /// The argument register that, holding `Handle`, makes a transfer through `slot` not return,
+    /// where the import the loader binds there states one.
+    fn halts_on_through(
+        &self,
+        _slot: u64,
+    ) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+        None
+    }
+
+    /// The register a call through `slot` leaves holding a handle the import states.
+    fn yields_through(&self, _slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+        None
+    }
+
     /// The register a call leaves the return address in, where the machine
     /// names one. The compiler specification states it; the walk reads the
     /// bytes and cannot know it, which is why it is asked for here.
@@ -318,6 +332,68 @@ impl Instruction {
 }
 
 /// Whether control leaves an instruction ending this way for somewhere other than the next one, which ends a basic block.
+/// A register holding a handle an import yielded, and the call that yielded it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Held {
+    storage: r2source::CanonicalStorageId,
+    handle: r2abi::Handle,
+    from: u64,
+}
+
+/// The handles one straight run holds, read forward: a copy hands one on, any other write or a
+/// call ends it. `O(ops * held)`.
+#[derive(Debug, Clone, Default)]
+struct Handles {
+    at: Option<u64>,
+    held: Vec<Held>,
+}
+
+impl Handles {
+    fn step(&mut self, lifted: &R2ILBlock, program: &dyn Program) {
+        let overlaps = |a: r2source::CanonicalStorageId, b: r2source::CanonicalStorageId| {
+            a.space == b.space
+                && a.offset < b.offset + u64::from(b.size)
+                && b.offset < a.offset + u64::from(a.size)
+        };
+        for (index, op) in lifted.ops.iter().enumerate() {
+            // An unstated operation stands for writes the lift dropped.
+            if matches!(op, r2il::R2ILOp::Unimplemented) {
+                self.held.clear();
+                continue;
+            }
+            if op.is_call() {
+                self.held.clear();
+                let slot = r2ssa::loaded_target_slot(lifted, index).map(|slot| slot.offset);
+                let yielded = slot
+                    .filter(|slot| crate::stated::sealed_import(program, *slot).is_some())
+                    .and_then(|slot| program.yields_through(slot));
+                self.held.extend(yielded.map(|(storage, handle)| Held {
+                    storage,
+                    handle,
+                    from: lifted.addr,
+                }));
+                continue;
+            }
+            let Some(output) = op.output() else {
+                continue;
+            };
+            let written = r2source::CanonicalStorageId::from_varnode(output);
+            let copied = match op {
+                r2il::R2ILOp::Copy { src, .. } => {
+                    let src = r2source::CanonicalStorageId::from_varnode(src);
+                    self.held.iter().find(|held| held.storage == src).copied()
+                }
+                _ => None,
+            };
+            self.held.retain(|held| !overlaps(held.storage, written));
+            self.held.extend(copied.map(|held| Held {
+                storage: written,
+                ..held
+            }));
+        }
+    }
+}
+
 fn ends_block(terminator: &BlockTerminator) -> bool {
     !matches!(
         terminator,
@@ -496,6 +572,10 @@ struct Walk {
     slot_calls: BTreeMap<u64, u64>,
     /// The calls through a slot the program states never returns, by instruction.
     halting: BTreeSet<u64>,
+    /// The registers holding a handle an import yielded, valid at the run's next address.
+    handles: Handles,
+    /// Each tail jump proven not to return from a handle, and the instruction that yielded it.
+    proven: Vec<(u64, u64)>,
     falls_into: BTreeSet<u64>,
     /// Whether each address the lift states context for decodes in another context than this walk's.
     target_contexts: BTreeMap<u64, bool>,
@@ -542,6 +622,8 @@ impl Walk {
             tail_calls: BTreeSet::new(),
             slot_calls: BTreeMap::new(),
             halting: BTreeSet::new(),
+            handles: Handles::default(),
+            proven: Vec::new(),
             falls_into: BTreeSet::new(),
             target_contexts: BTreeMap::new(),
             unresolved: Vec::new(),
@@ -785,6 +867,15 @@ impl Walk {
         }
         self.leaders.insert(target);
         successors.push(target);
+        // A branch into a proven run reaches the tail jump with a handle nothing proved.
+        let (entered, kept) = std::mem::take(&mut self.proven)
+            .into_iter()
+            .partition::<Vec<_>, _>(|(from, at)| *from < target && target <= *at);
+        self.proven = kept;
+        for (_, at) in entered {
+            self.halting.remove(&at);
+            self.stop(at, UnresolvedReason::IndirectBranch);
+        }
     }
 
     /// Drop the overlap stops at `addr`: an instruction states a start there, so it is no arm's guess.
@@ -838,6 +929,12 @@ impl Walk {
         let next = instruction.end();
         let mut successors = Vec::new();
         self.loads.extend(constant_loads(&instruction.lifted.ops));
+        if self.handles.at != Some(addr) || self.leaders.contains(&addr) {
+            self.handles = Handles::default();
+        }
+        let handles_before = self.handles.held.clone();
+        self.handles.step(&instruction.lifted, program);
+        self.handles.at = Some(next);
         if let BlockTerminator::IndirectCall { fallthrough } = instruction.terminator
             && let Some(target) = self.folded_call(&instruction, previous)
         {
@@ -911,7 +1008,13 @@ impl Walk {
             // case rather than two: both go wherever a previous pass proved
             // the dispatch reads, and both stop where nothing did.
             BlockTerminator::IndirectBranch | BlockTerminator::Switch { .. } => {
-                self.dispatch(addr, next, &mut successors, program)
+                match self.halts_through(&instruction, &handles_before, program) {
+                    Some(from) => {
+                        self.halting.insert(addr);
+                        self.proven.extend(from.map(|from| (from, addr)));
+                    }
+                    None => self.dispatch(addr, next, &mut successors, program),
+                }
             }
             BlockTerminator::Return => self.leaving = true,
             // A trap has nowhere to go.
@@ -975,6 +1078,29 @@ impl Walk {
             origins.step(op);
         }
         origins.of(target)?.constant()
+    }
+
+    /// Whether a tail jump through an import slot never returns: `Some(None)` where the import
+    /// never does, `Some(Some(from))` where a handle the call at `from` yielded makes it not.
+    fn halts_through(
+        &self,
+        instruction: &Instruction,
+        held: &[Held],
+        program: &dyn Program,
+    ) -> Option<Option<u64>> {
+        let ops = &instruction.lifted.ops;
+        let at = ops
+            .iter()
+            .rposition(|op| matches!(op, r2il::R2ILOp::BranchInd { .. }))?;
+        let slot = r2ssa::loaded_target_slot(&instruction.lifted, at)?.offset;
+        crate::stated::sealed_import(program, slot)?;
+        if !program.returns_through(slot) {
+            return Some(None);
+        }
+        let (argument, handle) = program.halts_on_through(slot)?;
+        (held.iter())
+            .find(|held| held.storage == argument && held.handle == handle)
+            .map(|held| Some(held.from))
     }
 
     /// Follow an indirect branch to the arms a previous pass read, or on past it where it is a call; stop where neither.

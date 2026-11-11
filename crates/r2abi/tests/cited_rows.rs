@@ -1,7 +1,7 @@
 //! Each cited row names its header on `.include=`, sits under a comment naming its standard, and
 //! states its tail where it spells `...` (doc/adr-call-boundary.md, S8).
 
-use r2abi::{CLibrary, Dll, LibraryId, LibraryRows, Tail};
+use r2abi::{CLibrary, Dll, Handle, LibraryId, LibraryRows, Tail};
 
 /// Each cited table and the fewest rows it holds.
 const CITED: [(&str, usize); 5] = [
@@ -154,6 +154,16 @@ fn a_microsoft_row_cites_its_page() {
     assert!(count >= 50, "{count} KERNEL32 rows");
     let exit = rows.row(LibraryId::Dll(Dll::Kernel32), "ExitProcess");
     assert!(exit.is_some_and(|row| row.noreturn));
+    // TerminateProcess returns unless its handle is the caller's own, which GetCurrentProcess yields.
+    let kernel32 = |name| rows.row(LibraryId::Dll(Dll::Kernel32), name).expect(name);
+    let terminate = kernel32("TerminateProcess");
+    assert!(!terminate.noreturn);
+    assert_eq!(terminate.halts_on, Some((0, Handle::CurrentProcess)));
+    assert_eq!(
+        kernel32("GetCurrentProcess").yields,
+        Some(Handle::CurrentProcess)
+    );
+    assert_eq!(kernel32("GetCurrentProcessId").yields, None);
     let printf = rows.row(LibraryId::Dll(Dll::Ucrt), "__stdio_common_vfprintf");
     let printf = printf.expect("UCRT's printf");
     assert_eq!(printf.tail.printf_format(), Some(2));

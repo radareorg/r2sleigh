@@ -161,6 +161,12 @@ or `va_list(<index>)`, the index counting fixed parameters from zero. A row with
 row without its header, source or tail, a tail its prototype does not have, a `.tail=` in an
 uncited table, and a row declared in two tables.
 
+A Microsoft row states a handle its page names by what it refers to: `func.<name>.yields=current-process`
+where the result is the calling process's handle (`GetCurrentProcess`), and
+`func.<name>.halts_on=<index>,current-process` where the page says the call does not return when that
+parameter is it (`TerminateProcess`: "When a process terminates itself, TerminateProcess stops
+execution of the calling thread and does not return").
+
 The printf and scanf families, `err`, `syslog`, `error` and the fortified `__*printf_chk` moved
 here from radare2's tables to state `Tail::Format`, which replaced the engine's guess of a format
 from a parameter called `format`.
