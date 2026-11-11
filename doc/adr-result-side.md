@@ -28,7 +28,7 @@ The code at `d8487d42d` shows why one design is needed:
 - `fates.rs:422` decides `Void` for a function nothing calls. No call executes it, so no fact decides its result.
 - `SourceAbove` has one producer value, `Undefined` (`contracts.rs:508`, `lanes.rs:690`).
 - r2engine `function_type` drops a signature whose result is `Unknown` (`declared/mod.rs:382`). 0pack has 1,222 `declaration-disagrees` sites and pumasim 690.
-- `SourceLoaderRole` has a reader in `recover_interface` and no producer: `native.rs:2142` always passes `None`.
+- `SourceLoaderRole` had a reader in `recover_interface` and no producer: `native.rs:2142` always passed `None`. S22 deleted it (D238).
 - `SiteBoundary.written` has no reader and is computed at every `Unknown` site (`site_boundary.rs:137, 911-933`).
 - Cost: pumasim `0x3b6b20` `aa; pdd` went from 64.378 G to 66.400 G instructions (+3.1%) over the stack. No profile splits the 66.40 G. `Walked` is `Retention::Newest` (`analysis.rs:125`), so each `CalleeEntry` lifts its callee again.
 
@@ -173,7 +173,7 @@ A lane that no row below proves is `Unproven`.
 | Lane `None` | the lane's `follows` lane is `None` | r2engine decision, from the cited lane set | as the lane it follows |
 | Lane `None` | an `Input` pass-through or handed-back lane `Dead` at every way in, one call or more | r2engine decision | `Solved`, `ClosedWorld` |
 | Every lane `None` | a declaration states `void` (DWARF whose arrivals hold, a cited row) | r2engine `declared`, placed by r2ssa `place` | `DebugInfo` or `Declared` |
-| Every lane `None` | the loader calls the function: `DT_INIT`, `DT_FINI`, `DT_INIT_ARRAY`, `DT_FINI_ARRAY` entries, cited from the ELF gABI as `void (*)(void)` | r2image states the entries; r2abi cites the row; r2engine sets `SourceLoaderRole` (S22) | `Declared` |
+| Lane `None` at the loader's way in | the loader calls an ELF termination function (`DT_FINI`, a `DT_FINI_ARRAY` entry) passing and reading nothing: the gABI's atexit mechanism and C17's `void (*)(void)` handler. The gABI states no type; constructors have no row (D240) | r2image states the entries; r2abi `loader_call` cites the row; r2engine `Escapes` drops the entry and its stated word (S22, D237) | `Solved`, `ClosedWorld` |
 | Every lane `None` | the address flows only into parameters declared `void (*)(...)` (D205) | r2engine `Escapes` taking sites, r2abi typed rows | `Declared`, `UbFreeSource` |
 | `Void` | every lane `None`, one return reached | r2engine decision | the weakest basis of its lanes; the union of their premises |
 | Demand `Dead` at a call | the forward walk from the call reaches an overwrite or the path's end before any read | r2ssa `site_boundary` | evidence |
@@ -354,7 +354,7 @@ A fourth belongs with them: `adopt_convention` sets `results_complete = true` al
 | 8 | S30 | D205; D334 to D337 | the declared-callback `None` constructor | r2engine `Escapes`; r2abi typed rows (after S28) | 4 true, 0 false |
 | 9 | S31b | G9, G10; D318 to D321 | the register effect (survey-held, default bound on a cold `pdd`); `CalleeEntry` deleted; `SiteBoundary.written` and `written_before` deleted; the one-call minimum for closed-world decisions | r2engine `fates`, survey; r2ssa `site_boundary` | pumasim `0x3b6b20` profiled first, then the cost gates; the one-call minimum's census moves named (`_dl_relocate_static_pie` and its stripped twin); `preserved_call_carriers` deleted only at zero measured yield loss |
 
-S22 (G11, D237 to D240) is the loader-role producer and runs beside these in group A. S16 rebases onto S31a, so the decision has one home before the lattice grows.
+S22 (G11, D237 to D240) runs beside these in group A. It was built as a way in of the closed world, not as `SourceLoaderRole`: a declared `void` outranks the closed world, so it would hide a call that reads the result. Under S31b's one-call minimum, the row's call counts as one call that leaves every lane dead, or the 9 `_fini` return to residuals. S16 rebases onto S31a, so the decision has one home before the lattice grows.
 
 Every slice also holds: `void_soundness.py` at 0 false voids in headers and externs (once S36 grades externs), `scratch_void.py` exit 0, both equivalence ratchets, the touched crates' engine tests, the census judged line by line.
 
