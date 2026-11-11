@@ -566,9 +566,28 @@ Gates, measured against S31a `c183bdf75` on the Mac with release r2s; the branch
 - The 152 moved DecBench functions, each kind read: `memchr` takes `const void *` (ISO C17 7.24.5.1; 32 declarations), `write` takes `const void *` (22) and a record field read through it follows, `mmap`'s offset is signed `off_t` (12), `fchmod` takes unsigned `mode_t` (5), `strtoull` returns `unsigned long long`, `readlink` takes `size_t` and returns `ssize_t`, `strndup` takes `size_t`, and gzip's 2 `modf` calls render where radare2's `floating_point` row stated no prototype. sdiff `checksigs` (`0x4b20`) is `void` and its `return r2sleigh_residual_u64(1)` is `return;`: the import calls after its 4 call sites state fixed prototypes, so three result lanes go from unknown to dead.
 - The moved causes on the 35 builds: `Unproven(Written)` 985 to 978 source void, `Unread` 5 to 12, `EntryInput` 137 to 136. A cited fixed prototype stops a call reading lanes past it, so a closed-world read reaches further before it stops. No source value becomes `void`.
 
+## S16b as measured (2026-11-11)
+
+D226 asked for one preparation per function on a cold `pdd`, output byte-identical to S16. Measured on S39 `39ff8eda9` (S16's code), release, Mac. No code is kept.
+
+- Cold pumasim `pdd @ 0x23fdf0` is 24.71 G and 1.39 s. It makes 145 preparations: 107 alone (0.54 s) and 38 second ones (0.28 s, 4.9 G). `0x2312c0` is 0.20 s alone and 0.19 s again (3.4 G each).
+- The gate is 20.02 G. Removing all 38 second preparations gives about 19.8 G. That leaves 0.2 G for finding the owners, so `0x2312c0` must be built once and nearly every other second preparation must go.
+- One preparation of the 146 splits into `construct` 0.74 s (65%), `SSAFunction::seal` 0.08 s (7%) and `collect` 0.31 s (27%). `construct` is one SSA build that recovery reads and the seal keeps. The callees' statements enter that build (`CalleeBoundaries`, `correlate_call_site_interfaces`), so no part of it is shared between the alone and the stated preparation.
+- The owners are a fact of the alone build. `result_calls` reads the live-out values of the SSA, after `recover_interface` decides whether the result is unproven (`returned_result`, `direct_return_result`, `written_bytes`, `defines_nothing`). A probe that stops after recovery still pays 65% per function: about 23 G.
+- A re-seal inside one `resolve` (the closed world's `seal_first` pattern) saves the first `collect`: about 1.3 G, to 23.4 G. It needs the owner graph before any seal is dropped, so Tarjan's search would hold seals. Not built.
+- A raw backward walk was run in shadow beside the alone read: the last writer of the integer and float lanes at each return, direct tail targets, none where a call is indirect. It costs 1.9 ms over 107 bodies (0.03 G). Two cuts were run on pumasim, neither kept.
+  - Cut 1 (one definition per return, tail blocks walked): 19 of 107 functions differ. Cut 2 (every reaching definition, returns only): 17 of 107, and 5 of 23 on 0pack `0x62ecf0`.
+  - 12 functions miss their owners in both cuts, `0x2312c0` among them. All 12 dump the same shape: the integer lane's last write is the body's own, and the float lane holds a callee's bytes. Read on `0x35ae60`, that write is the stack protector's `xor rax, fs:[0x28]`. `lanes` records it as `Fill::Undefined` where `stack_protector::decide` decided the check, so the integer lane holds nothing and the callee owns the result.
+  - `stack_protector::decide` proves the check on the SSA function: frame definitions, a slot stored once, both guard reads, under `Premise::UbFreeSource`. A copy of it on lifted blocks is a second owner of that proof, and a weaker pattern names an owner where the proof refuses.
+  - The other differences moved with the cut: 7 in cut 1 (6 from walking tail blocks), 5 in cut 2 (4 from taking a merged definition, which the alone read states as a register). The two cuts were not combined, so the count with the 12 set aside is not measured.
+- Stating a different owner set is sound and moves statements: a missed owner leaves `0x35ae60` `Unproven` where S16 resolves it `Void`.
+- S16 against S18 `5fa7c9dc3`, one run each: cold pumasim 24.46 to 24.71 G, 0pack `0x62ecf0` 15.47 to 15.66 G, bash `aa; pdd @ 0x2e630` 14.38 to 14.40 G, pumasim `aa; pdd @ 0x3b6b20` 66.38 to 66.79 G. Under `aa` the alone read is the `CallBoundary` supply (D317) and names the arity owners, so one preparation does not apply there.
+
+The bound stays two preparations per function the `Demand::Result` closure reaches, plus a cycle's rounds.
+
 ## Open questions
 
 1. The register effect's survey pass is an estimate (about 1 G per 450 bodies on bash). If it does not bring pumasim `0x3b6b20` to 64.38 G, S31b keeps the lazy ask per call with the same function.
 2. The loader-write refusal (`Unknown` writes) costs no census or DecBench binary once r2image states `Reserved` and `Copy` (S31a as built); MIPS's whole reserved table and undecoded Mach-O chain formats still refuse.
-3. A cold `pdd` prepares a function twice where an owner's statement moves its result (D226). One preparation needs the owners before the first: predicted from the raw walk's `Returned` site fates, each resolved once, a superset of the alone read's owners. Resolving every callee instead is the closure the query-database ADR measured at 1,148 bodies against 370 on pumasim. Owner `resolved.rs`, with S16.
+3. A cold `pdd` prepares a function twice where an owner's statement moves its result (D226). One preparation needs the owners before the first. "S16b as measured" shows no exact source for them below the SSA build. Open: keep the bound of two and regrade D226 against S18, or define owners on the raw walk and judge every moved line. Owner `resolved.rs`.
 4. Row numbers come from ROADMAP's "Reserved rows" table. This ADR holds D310 to D313.
