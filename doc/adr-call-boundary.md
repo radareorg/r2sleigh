@@ -964,3 +964,22 @@ On S7b (`60208afbd`, 2026-11-11):
 - Touched crates' tests: 1,941 pass (r2abi, r2dec, r2engine, r2image, r2source, r2ssa). Census 444 goldens pass, 0 moved. Dylint 8, the baseline. Structure counts equal the baseline; `long_comments` is 2,491.
 - hello_gs `0x140001010` prints `fcn_140001090((uint64_t)0x14001d008U, rax_1)` and `0x140001090` the floor "at least 2 (a register past them is only homed)", as above.
 - Row numbers: S6 took D214, so this slice's Win64 float varargs row is D220; D215 to D217 keep their numbers.
+
+## D217 as built (2026-11-11)
+
+Slot promotion carried a frame address stored into an outgoing stack-argument slot to that slot's loads, as if only this function read it. The callee reads the slot, so the address escapes.
+
+- Owner: `r2ssa` slot promotion (`StackArguments`). One dominator-tree walk carries the stack pointer to each call: `O(B + ops)`. Each classification round reads the slots each call takes: `O(calls x slots)`.
+- The slots a call reads are the boundary's: a complete call-site interface's stack slots; a callee statement's exact count past the registers; otherwise the run of slots this function stores to, from the first. The coordinates are the boundary's too: from the pointer a `CallRestore` records, or from the callee's pointer past what the transfer spends.
+- An address stored into such a slot escapes, and the slot keeps its store, so `FrameReach` still sees the address leave. A slot holding only a value still promotes, and the boundary reads its version.
+- A call at a pointer no offset places, or under no convention, may read any slot: every stored address escapes there.
+- Tests: `a_local_passed_as_the_fifth_argument_stays_in_memory` (Microsoft x64) and `a_local_passed_as_the_seventh_argument_stays_in_memory` (SysV) store 5 into a local, pass its address only through the stack slot, and read the local after the call. At base both print `return r2sleigh_carrier_u32(5)`, where the callee writes 9. At head the store stands before the call and the load after it.
+- The `va_list` fixture keeps all four homes and the outgoing slot in memory. `print_line` stores `arg0` into home 0 and reloads it for the format. The three tail homes are the save area of `...`, so the proof elides them, and the call stays a residual, since `&home[1]` has no C spelling. `a_home_handed_on_as_a_cited_va_list_is_a_variadic_tail` now asserts the home-0 store.
+
+Gates, release r2s, base `505319748`:
+
+- Census: 444 goldens pass, 0 lines move. Touched crates' tests: 1,488 pass (r2ssa, r2engine).
+- hello_gs 0 of 259 and testapp 0 of 181 functions move in `aa; pdd`. hello_gs `0x140001040` passes `arg3` as its fifth argument through `[rsp+0x20]`, a value, so its rendering is unchanged.
+- Certification, radare2 `test/bins/elf --limit 24 --functions 8`: base and head print 50 rendered, 30 refused, 0 invented, 0 dropped. Coverage: 560 of 562 rendered, no regressions.
+- Cost, instructions retired, median of three, base then head: cold `pdd` on pumasim `0x23fdf0` 19.88 to 19.92 G (+0.2%), 0pack `0x62ecf0` 15.396 to 15.404 G (+0.05%), output identical. Peak footprint moves within run-to-run noise.
+- Dylint: 8 warnings, the baseline.

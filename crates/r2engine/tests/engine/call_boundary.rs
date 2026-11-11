@@ -579,3 +579,42 @@ fn forwarders_that_forward_to_each_other_end() {
     assert!(!text.starts_with("void f("), "{text}");
     assert!(!text.contains("closed-world"), "{text}");
 }
+
+/// `store_through` writes 9 through its seventh argument; `caller` passes `&local` there, on the
+/// stack at `[rsp]`, from `r11`, which no convention passes, and reads `local` back.
+const SEVENTH: &[u8] = &[
+    0x48, 0x8b, 0x44, 0x24, 0x08, // 1000 mov rax, [rsp + 0x8]: the seventh argument
+    0xc7, 0x00, 0x09, 0x00, 0x00, 0x00, // 1005 mov dword [rax], 9
+    0xc3, // 100b ret
+    0xcc, 0xcc, 0xcc, 0xcc, // 100c padding
+    0x48, 0x83, 0xec, 0x18, // 1010 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x10, 0x05, 0x00, 0x00, 0x00, // 1014 mov dword [rsp + 0x10], 5
+    0x4c, 0x8d, 0x5c, 0x24, 0x10, // 101c lea r11, [rsp + 0x10]
+    0x4c, 0x89, 0x1c, 0x24, // 1021 mov [rsp], r11
+    0x31, 0xff, // 1025 xor edi, edi
+    0x31, 0xf6, // 1027 xor esi, esi
+    0x31, 0xd2, // 1029 xor edx, edx
+    0x31, 0xc9, // 102b xor ecx, ecx
+    0x45, 0x31, 0xc0, // 102d xor r8d, r8d
+    0x45, 0x31, 0xc9, // 1030 xor r9d, r9d
+    0xe8, 0xc8, 0xff, 0xff, 0xff, // 1033 call 0x1000
+    0x8b, 0x44, 0x24, 0x10, // 1038 mov eax, [rsp + 0x10]
+    0x48, 0x83, 0xc4, 0x18, // 103c add rsp, 0x18
+    0xc3, // 1040 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+];
+
+/// A local whose address is the seventh SysV argument stays in memory: the callee reads the
+/// outgoing slot that holds it, so its store stands before the call and its read after (D217).
+#[test]
+fn a_local_passed_as_the_seventh_argument_stays_in_memory() {
+    let functions = [("store_through", BASE, 0xc), ("caller", BASE + 0x10, 0x31)];
+    let mut open = OpenProgram::of(Literal::of_code(SEVENTH, &functions));
+    let caller = open
+        .rendered(BASE + 0x10)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    common::assert_local_stays_in_memory(&caller);
+}

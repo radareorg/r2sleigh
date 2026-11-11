@@ -81,6 +81,8 @@ fn a_home_handed_on_as_a_cited_va_list_is_a_variadic_tail() {
         callee.contains("print_line(uint64_t arg0, ...)"),
         "{callee}"
     );
+    // `&home[1]` is the callee's fifth argument: the homes stay in memory, and home 0 keeps its store.
+    assert!(callee.contains("(uint64_t)arg0);"), "{callee}");
     // The format types nothing, so its address spells as the integer the body reads.
     let caller = rendered(&mut open, BASE + 0x40);
     assert!(
@@ -170,4 +172,36 @@ fn a_homed_parameter_is_read_through_the_callee_s_home() {
     assert!(!callee.contains("r2sleigh_residual"), "{callee}");
     let caller = rendered(&mut open, BASE + 0x20);
     assert!(caller.contains("f(3, 4)"), "{caller}");
+}
+
+/// `store_through` writes 9 through its fifth argument; `caller` passes `&local` there, on the
+/// stack at `[rsp + 0x20]`, from `r11`, which no convention passes, and reads `local` back.
+const FIFTH: &[u8] = &[
+    0x48, 0x8b, 0x44, 0x24, 0x28, // 1000 mov rax, [rsp + 0x28]: the fifth argument
+    0xc7, 0x00, 0x09, 0x00, 0x00, 0x00, // 1005 mov dword [rax], 9
+    0xc3, // 100b ret
+    0xcc, 0xcc, 0xcc, 0xcc, // 100c padding
+    0x48, 0x83, 0xec, 0x38, // 1010 sub rsp, 0x38
+    0xc7, 0x44, 0x24, 0x30, 0x05, 0x00, 0x00, 0x00, // 1014 mov dword [rsp + 0x30], 5
+    0x4c, 0x8d, 0x5c, 0x24, 0x30, // 101c lea r11, [rsp + 0x30]
+    0x4c, 0x89, 0x5c, 0x24, 0x20, // 1021 mov [rsp + 0x20], r11
+    0x31, 0xc9, // 1026 xor ecx, ecx
+    0x31, 0xd2, // 1028 xor edx, edx
+    0x45, 0x31, 0xc0, // 102a xor r8d, r8d
+    0x45, 0x31, 0xc9, // 102d xor r9d, r9d
+    0xe8, 0xcb, 0xff, 0xff, 0xff, // 1030 call 0x1000
+    0x8b, 0x44, 0x24, 0x30, // 1035 mov eax, [rsp + 0x30]
+    0x48, 0x83, 0xc4, 0x38, // 1039 add rsp, 0x38
+    0xc3, // 103d ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+];
+
+/// A local whose address is the fifth argument stays in memory: the callee reads the outgoing slot
+/// that holds it, so its store stands before the call and its read after (D217).
+#[test]
+fn a_local_passed_as_the_fifth_argument_stays_in_memory() {
+    let functions = [("store_through", BASE, 0xc), ("caller", BASE + 0x10, 0x2e)];
+    let mut open = OpenProgram::of(Literal::of_code(FIFTH, &functions).pe());
+    let caller = rendered(&mut open, BASE + 0x10);
+    common::assert_local_stays_in_memory(&caller);
 }

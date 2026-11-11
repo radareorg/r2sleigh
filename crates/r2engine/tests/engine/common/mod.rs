@@ -1201,6 +1201,16 @@ pub fn parameters(c: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+/// `caller` stores 5 into `local` before its call to `store_through` and reads `local` after it: the
+/// callee's write through the stack argument is not folded away as 5 (D217).
+pub fn assert_local_stays_in_memory(caller: &str) {
+    let call = caller.find("call to store_through").expect(caller);
+    let stored = caller.find("(uint32_t)5U);").expect(caller);
+    let read = caller.rfind("r2sleigh_load_u32(").expect(caller);
+    assert!(stored < call && call < read, "{caller}");
+    assert!(!caller.contains("r2sleigh_carrier_u32(5)"), "{caller}");
+}
+
 /// The arguments of the first call to `callee` in the body (past the signature
 /// and any declaration of it), split at their top-level commas.
 pub fn call_arguments(c: &str, callee: &str) -> Option<Vec<String>> {
