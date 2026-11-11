@@ -957,3 +957,10 @@ Gates, release r2s, base `b2f9b4758`:
 - Not run:
   - Equivalence. The x86-64 and aarch64 runs need the Linux build host, which this slice did not use, and no corpus PE has a target (D216).
   - The full workspace suite. Only the touched crates' suites and the census goldens ran.
+
+On S7b (`60208afbd`, 2026-11-11):
+
+- Equivalence, release, on one x86-64 host (gcc 13.3, clang 18.1; aarch64 under qemu-user): x86-64 and aarch64 each hold all 828 records of S7b's baselines (745 and 743 equal). The ELF targets take the old owner rule, so no record moves.
+- Touched crates' tests: 1,941 pass (r2abi, r2dec, r2engine, r2image, r2source, r2ssa). Census 444 goldens pass, 0 moved. Dylint 8, the baseline. Structure counts equal the baseline; `long_comments` is 2,491.
+- hello_gs `0x140001010` prints `fcn_140001090((uint64_t)0x14001d008U, rax_1)` and `0x140001090` the floor "at least 2 (a register past them is only homed)", as above.
+- Row numbers: S6 took D214, so this slice's Win64 float varargs row is D220; D215 to D217 keep their numbers.
