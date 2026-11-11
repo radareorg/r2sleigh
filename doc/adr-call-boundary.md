@@ -1072,3 +1072,60 @@ Gates, debug r2s on S15 (`dbe66a333`; `40dd51372` changes only docs and the aarc
 - The 9 exit-bar functions print `void _fini(void)` (`fcn_401ba0` and `fcn_17cc` stripped) with "no call reads the result (assuming closed-world)": branchy O0, frame_pointer_locals clang O0g, hashes O2 and stripped, rv_O0g and stripped, rv_O2, shapes O0, two_units O0g. Each body is `sub rsp, 8; add rsp, 8; ret`. Residual obligations 2 to 0 each.
 - Census: 9 goldens, 31 lines, and nothing else. 27 are the 9 `_fini`. 4 are `deregister_tm_clones` in 4 of those goldens (hashes O2 and stripped, branchy O0, shapes O0): "unproven (Written)" becomes "no call reads the result (assuming closed-world); the result is unproven (Unread)". Its one caller `__do_global_dtors_aux` returns its result on and is a non-PIE `.fini_array` entry. In PIE fixtures the slot's `R_X86_64_RELATIVE` addend is one more word naming it (rv_O0g file offset `0x618` names `0x1160`), so nothing moves there (D239).
 - Engine: `a_termination_function_the_loader_alone_calls_is_void` (`void f(void)` under `aa`; a cold render and an `InitHook` keep the residual) and `a_termination_function_another_way_reaches_keeps_its_result` (a second data word keeps the residual; a call reading the RAX `f` writes makes it `uint64_t f(void)` with "a call reads the result").
+
+## S17 as built (2026-11-11)
+
+S17 is the rest of Win64 after S10: `/GS` (D215), a Win64 equivalence target (D216), and floating varargs with a home `va_list`'s count (D220). Branch `s17-win64-rest`.
+
+### `/GS` (D215)
+
+What the code said that this ADR did not, and the owner chosen:
+
+- `GuardRow::LoadConfigCookie` is the row for `(x86, 64, Ucrt)`. The row says the C library checks a load-config cookie. The container says where: `convention_model` takes `Container::security_cookie` beside the kernel and the library, and `forms` sets `BoundaryForms::security_cookie` only where both state it. `SourceCallEffect::security_cookie` carries `SourceSecurityCookie { address, width }` to r2ssa. A PE is `Ucrt` by its format, so both radare2 test PEs take the row.
+- The callee is proven in r2ssa (`security_cookie::proves_check`), during interface recovery, and minted as `SourceFunctionInterface::security_check`. The proof:
+  - one block's branch compares the entry value of the first integer argument register with a load of the cookie's address and width;
+  - that block dominates every return;
+  - every block reached from the failing edge goes on inside the function or ends at a call that does not return, and none returns;
+  - no block a return is reached from stores, calls, enters the machine or branches indirectly.
+  - The name decides nothing: `a_cookie_compare_that_comes_back_is_no_check_whatever_its_name` names a body `__security_check_cookie` whose failing arm returns.
+  - MSVC's check also tests the cookie's top 16 bits on the passing edge (`rol rcx, 16; test cx, cx`). That arm reaches the same failure. The proof does not need the second test: a returning path writes no memory and no result carrier, so eliding the call claims only that a call that returns did nothing a caller reads.
+- A UCRT check's failure is `__report_gsfailure`: `__fastfail` (`int 0x29`) where `IsProcessorFeaturePresent(23)` holds, then `__raise_securityfailure`, which tail-jumps to `TerminateProcess(GetCurrentProcess(), 0xc0000409)`. Without a fact for that jump, the failure returned and no check was proven on hello_gs or testapp. Two cited KERNEL32 keys supply it (`data/README.md`):
+  - `func.GetCurrentProcess.yields=current-process`: "The return value is a pseudo handle to the current process."
+  - `func.TerminateProcess.halts_on=0,current-process`: "When a process terminates itself, TerminateProcess stops execution of the calling thread and does not return."
+  - `LibraryRow::{yields, halts_on}` type them as `Handle::CurrentProcess`; the handle's value (`(HANDLE)-1`, "currently") decides nothing.
+- Discovery owns whether control comes back. The body walk follows handles through one straight run: a call through a sealed import slot whose row yields a handle leaves it in the convention's integer result register, a copy hands it on, any other write or call ends it (`body::Handles`, `O(ops × held)`). A tail jump through a sealed slot halts where the import never returns (`ExitProcess`), or where its `halts_on` register holds that handle. A branch later found into the proven run puts the jump's stop back (`Walk::transfer`). hello_gs `0x140011cb0` (`__raise_securityfailure`) is now `noreturn`; `terminating_the_current_process_does_not_return` and `terminating_another_handle_may_return` are the engine tests.
+- `preserved_call_carriers` now counts writes only in blocks a return is reached from. A write on a path that never returns is unseen by a caller. The check's failure path writes `rax`; its passing path writes `rcx` and flags. So callers read `rax`, `rdx` and `r8` to `r11` past the check as their own.
+- The caller (`security_cookie::decide`, after `stack_protector::decide`, under `Premise::UbFreeSource`):
+  - each direct call to a proven check is handed `saved ^ sp`, where `saved` is the prologue's `[cookie] ^ sp'` itself (a promoted slot) or the reload of a slot whose one writer stored it before the reload, and no other load reads that slot;
+  - `sp` and `sp'` are the entry stack pointer at one offset;
+  - the cookie load, both xors, the save and reload, the call instruction's operations, and the flags nothing reads are recorded compiler-inserted, as `stack_protector` records the canary's;
+  - the call stays in the SSA, recorded compiler-inserted, and the boundary pass gives it no C boundary. A clobber of the call that something reads refuses the elision.
+  - A value carried across the elided call in a result carrier stays a residual: the return-value walk (`reaching_rules::op_ends_reaching_walk`) ends at any call. Exempting an inserted call there turned 9 of hello_gs's 11 elisions into refusals on the return boundary's taint, so it was withdrawn (D231). hello_gs `0x140003178` returns `r2sleigh_residual_u64(3)` at base and head.
+  - A save that reaches a return in a result carrier refuses the elision: testapp `0x140009a10` returns the save in `rax` on its `jb` path, and that C is what the machine computes.
+- Two readers learned of compiler-inserted operations: obligation liveness does not propagate through one (`SeedingFacts::inserted`), and a read by one leaves a value inside the stack geometry (`StackGeometryContext::inserted`). Without them the stack pointer the xor read stayed a live producer nothing rendered, and testapp `0x1400051a4` and `0x140009a10` refused.
+- Found: a `/GS` function's other readers of the cookie keep their reads. Of the 36 readers radare2 `axt` names in each PE, 16 in hello_gs and 20 in testapp call no check: UCRT's pointer encoding (`mov rax, [cookie]; xor; ror`), `__security_init_cookie` (the writer), and the check itself.
+
+### Floating varargs and a home `va_list`'s count (D220)
+
+- `printf_consumed_arguments` states each operand's class. A positional operand read as two classes refuses (`ConflictingOperandClass`); merged formats whose floating operands differ refuse.
+- A floating operand at shared position p < 4 is the argument where `r_p` and `xmm_p`'s low 8 bytes reach one root or one constant through copies, low pieces and zero extensions (`same_bits`). The argument names the float register `SourceConventionSlots::float_argument_slots()[p]`, read from the convention. Otherwise `FloatingVariadicArgument` stays.
+- The double prints as `r2sleigh_float_from_bits_64(rax_1)` with `rax_1 = 0x4004000000000000`; r2dec folds no bit pattern to a literal.
+- `save_area::home_cursor` starts a tail at the lowest home whose address the body keeps; the area stands only where `tail_count` proves a count over it, and the prover now runs with no base or offset cell. clang -O0 does not home `rcx`: it stores `n` to a local, read through that local's cell. A cursor value a call reads implicitly (`CallUse`) still counts as harmless, as on SysV. The clang -O1 shape (cursor in a register, `dec ecx; jne`) is untested.
+
+### A Win64 equivalence target (D216)
+
+- Design: the PE is mapped at its own image base inside an empty non-PIE Linux host, so `LD_PRELOAD`, `fork` per run and the trap guard work unchanged (`rt/pe_win64.c`). Imports from UCRT, KERNEL32 and VCRUNTIME bind to Microsoft x64 shims over glibc; one with no shim binds to `abort`. `rt/call_win64.S` enters with `rcx`, `rdx`, `r8`, `r9`, `xmm0` to `xmm3` and stack words past the home. Renderings build with `gcc -mabi=ms -fno-builtin -U_FORTIFY_SOURCE`; `rt/ms_support.c` forwards libc, libgcc and libubsan helpers to their System V versions. Object links go through the dynamic loader, as on AArch64.
+- Rejected: wine. A Win32 process has no `fork` or `LD_PRELOAD`, so it meant a rewrite of the runtime.
+- Population: `tests/corpus` and `tests/gold` by clang-cl `/MD /GS /Od|/O1|/O2` with DWARF, linked by lld-link-18 against an xwin 0.10.0 sysroot. `llvm-strip` keeps section addresses; `readelf` reads DWARF from an `objcopy -O elf64-x86-64` copy. Every corpus PE imports `__stdio_common_vfprintf` and carries a load-config cookie, so it also grades D215 and D220.
+- Baseline from the S17 base (`9f924f196`), 483 records: 365 equal, 72 residual-trap (34 held-from-entry, 25 `CallNotRendered`), 15 refused (unaccounted effect obligations), 28 unsupported, 3 `ub`. The 3 `ub` are `shape_variadic` at O0, O1 and O2: the rendering writes a 5th-or-later variadic argument into its frame array and passes 4 registers (D232).
+- The inline UCRT `printf` is recovered as `fcn_X(uint64_t, ...)` and its callers pass the format and arguments; the printf body refuses in all 10 records.
+- Found: `pddj` links a call through `call [__imp_X]` with kind `function` at the IAT slot's address; the harness jumps through slots the import table names. The link's owner should state kind `import`.
+- A result that rests on Windows' own library behaviour is graded against glibc's; `tests/equiv/README.md` states the limit.
+- Run: `EQUIV_XWIN=<xwin> bash tests/equiv/run_win64.sh <r2s>` on an x86-64 Linux host, about 510 s with `--jobs 2`. No CI job: the runners hold no xwin sysroot. 46 self-tests pass on win64, x86-64 and aarch64; 156 harness tests pass.
+
+### Gates
+
+- Touched crates' tests (r2abi, r2source, r2ssa, r2engine): all pass; r2engine engine 583, r2ssa 746. Clippy `-D warnings` clean with `--tests`. Dylint 8, the baseline.
+- Census: 444 goldens pass after 14 move. Each moved line is a proof line only: an ELF canary function owes 3 fewer obligations (5 to 3 compiler-inserted, one fewer elided), since liveness no longer runs through the canary's inserted operations into their inputs. The rendered C is unchanged.
+- x86-64 and aarch64 equivalence: graded by CI's `full-ci` ratchets on the pull request (the shared build host was held by another run).
+- Hand-read, release r2s, hello_gs: `main` prints `fcn_140001090((uint64_t)0x14001d008U, rax_1); return 0;` as at base. `0x140003178`, `0x14000fc3c` and `0x1400095d4` render with no cookie load and no check call; `0x1400095d4` and 8 others refused at base. `0x140005f80` renders where base had 22 `UnsupportedInstruction` gaps, since `0x140006050` is now `noreturn`; its own cookie read is UCRT's pointer decode, kept.
