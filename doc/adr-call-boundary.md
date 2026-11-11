@@ -1035,7 +1035,7 @@ What the code said that this ADR did not, and the owner chosen:
   - r2abi states the tail (`Tail::Format { index, kind: Printf }`).
   - r2engine `Placement::reads` states `ImportReads::format`: the format parameter's register and the tail's vector registers, only for a printf format placed whole where the convention has no count register. SysV keeps `al` (`Counted`).
   - The site walk (`fates.rs` `Reading::formatted_sites`) folds the format register at each call with r2ssa `BlockOrigins::step_under` and the convention's `SourceCallEffect`, reads the text with `immutable_text_at` (`text_at` over bytes mapped read-only that the loader does not write, `TableBytes::ReadOnly`), and parses it with r2ssa `printf.rs`, now public. A format with no floating conversion takes no tail vector register (`Effects::by_site`).
-- A call keeps a preserved register's constant: clang -O1 and -O2 build the format once in x21 and pass it to 15 `printf`s across other calls. The SSA format reader rests on the same convention fact for those calls.
+- A call keeps a preserved register's constant: clang -O1 and -O2 build the format once in x21 and pass it to 15 `printf`s across other calls. The SSA format reader rests on the same convention fact: a probe whose callee writes x19 without restoring it prints the literal cold and decides `void` under `aa`. A body that breaks AAPCS64's callee-saved set is outside both readers' premise.
 - `strlen` and `memcpy` move from radare2's table to the cited ISO C17 table (7.24.6.3, 7.24.2.1), `Tail::None`. Uncited, each read every argument location, so review.c clang -O1 `fill`'s q0 reached `copy_name`'s `strlen` and stayed open.
 - Cost: one forward pass per block over a body that calls a printf-format import, O(ops); none otherwise.
 
@@ -1043,7 +1043,7 @@ Not built:
 
 - shapes.c clang -O0 `shape_stash` and `mixed_touch`: `main` spills the format to `[sp, #8]` and reloads it before each `printf`. `BlockOrigins` tracks no frame slot, so the call takes q0 to q7 and both stay `residual-trap`. Proving the reload needs the frame slot unescaped across the calls between (D221).
 
-Gates, release r2s, base `505319748`:
+Gates, release r2s, base `505319748`; the branch was then restacked on D217's default deny and the result-side ADR (`9ad72ecd2`), where CI's full run passes:
 
 - The 15 records' `aa; pdd` on stripped aarch64 builds, read by hand: 13 print `void` with "no call reads the result (assuming closed-world)" and a bare `return;` (base: `r2sleigh_result_u64` and `return r2sleigh_residual_u64(1);`). Bodies are byte-identical. clang -O2 `inverted_void` stores 8 bytes at `0x420040`: clang merged `g_note` and `g_sink`.
 - Engine tests (`call_boundary.rs`, aarch64): `%d` is `void`, `%f` never, a format held in caller-saved x9 across a call never; the D219 forwarder above.
@@ -1053,4 +1053,4 @@ Gates, release r2s, base `505319748`:
 - Cost, release, instructions retired, median of three, base then head; output byte-identical: cold `pdd` 0pack `0x62ecf0` 15.37 to 15.37 G, pumasim `0x23fdf0` 19.86 to 19.85 G; bash `0x2e630` `aa; pdd` 14.30 to 14.33 G (+0.2%), under D153's 15.43 G. Peak footprint within run-to-run noise.
 - Dylint 8 warnings, the baseline. `comment_runs` adds no run. Structure counts equal the baseline.
 - On D217 (`d8487d42d`): the 15 records print as above and the census holds 444 goldens.
-- Equivalence, CI on #363: x86-64 holds every record. AArch64 moves 21 records from `residual-trap` to `equal`: the 13 above, and 8 more whose void body's lanes reached the same `printf` or `strlen` (`and_chain_effect` clang O0 to O2, `crc32_init` clang O2, `fill` clang O0 and O2, `indirect_store` clang O1, `mixed_touch` gcc O1). Hand-read `fill` clang O0 and O2: `void`, `return;`, bodies unchanged. All 21 are blessed. The two clang -O0 records keep `residual-trap` with cause D221.
+- Equivalence, CI on #363: x86-64 holds every record. AArch64 moves 21 records from `residual-trap` to `equal`: the 13 above, and 8 more whose void body's lanes reached the same `printf` or `strlen` (`and_chain_effect` clang O0 to O2, `crc32_init` clang O2, `fill` clang O0 and O2, `indirect_store` clang O1, `mixed_touch` gcc O1). Each of the 8 was read by hand, base then head: `unproven (EntryInput)` with `return r2sleigh_residual_u64(1);`, then `void` with `return;`; bodies unchanged. All 21 are blessed. The two clang -O0 records keep `residual-trap` with cause D221.
