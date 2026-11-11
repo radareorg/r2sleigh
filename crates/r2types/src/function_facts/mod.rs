@@ -809,7 +809,8 @@ pub(super) fn float_lane(
 fn carrier_word(result: Option<r2ssa::SourceCallResult>, bits: Option<u32>) -> Option<CTypeLike> {
     let bits = match result? {
         r2ssa::SourceCallResult::Void => bits?,
-        r2ssa::SourceCallResult::Unproven { integer, .. } => integer.size.checked_mul(8)?,
+        r2ssa::SourceCallResult::Unproven { integer, .. }
+        | r2ssa::SourceCallResult::Unstated { carrier: integer } => integer.size.checked_mul(8)?,
         _ => return None,
     };
     Some(CTypeLike::Int {
@@ -929,11 +930,15 @@ impl SourceOwnedCalleeSignature {
             );
             return None;
         }
+        // A result the declaration does not state is the carrier its interface seeds (D330).
+        let unstated = signature.return_type == CTypeLike::Unknown;
+        let seed = (interface.unproven_result()).and_then(r2ssa::SourceUnprovenResult::seed);
+        let unproven_bits = seed.filter(|_| unstated).map(|seed| seed.bits);
         Some(Self {
             address,
             interface,
             signature,
-            unproven_bits: None,
+            unproven_bits,
         })
     }
 

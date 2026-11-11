@@ -139,6 +139,8 @@ pub struct LibraryRow {
     /// Whether the parameters are all a call passes before its arguments: a row read from a
     /// mangled name may not know of a hidden result pointer or a VTT.
     pub passing: crate::mangled::Passing,
+    /// Whether the row states what the function returns.
+    pub result: RowResult,
     pub noreturn: bool,
     /// A parameter that, holding this handle, makes the call not return.
     pub halts_on: Option<(u8, Handle)>,
@@ -146,6 +148,15 @@ pub struct LibraryRow {
     pub yields: Option<Handle>,
     /// The standard and header the row is read from; empty for a row radare2's tables state.
     pub citation: Box<str>,
+}
+
+/// Whether a row states its function's result (doc/adr-result-side.md, "Imports with an unstated result").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowResult {
+    /// The row's return type is the function's, `void` included.
+    Stated,
+    /// The row is read from a mangled name, which states parameters only.
+    Unstated,
 }
 
 /// A handle a Microsoft row names by what it refers to, not by its value.
@@ -346,6 +357,7 @@ impl LibraryRows {
                 false => Tail::None,
             },
             passing: mangled.passing,
+            result: RowResult::Unstated,
             noreturn: false,
             halts_on: None,
             yields: None,
@@ -422,6 +434,7 @@ impl LibraryRows {
             prototype: id,
             tail,
             passing: crate::mangled::Passing::Stated,
+            result: RowResult::Stated,
             noreturn: declared.noreturn,
             halts_on: declared.halts_on,
             yields: declared.yields,

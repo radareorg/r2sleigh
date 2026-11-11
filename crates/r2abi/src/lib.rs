@@ -26,7 +26,7 @@ pub use data_model::{CDataModel, KERNEL_MODE_CITATION};
 pub use declarations::{DataObject, Declarations};
 pub use library::{
     CLibrary, Dll, FormatKind, Handle, Kernel, LibraryId, LibraryRow, LibraryRows, PrototypeId,
-    Tail,
+    RowResult, Tail,
 };
 pub use loader::{LoaderCall, loader_call};
 pub use mangled::Passing;

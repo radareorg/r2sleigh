@@ -69,9 +69,9 @@ pub(crate) fn note_unproven_constructs(
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
-    (unassigned, open_second_result, laid_out, conflicting): (
+    (unassigned, (open_second_result, disputed), laid_out, conflicting): (
         &[UnassignedRead],
-        bool,
+        (bool, &[Disputed]),
         usize,
         &[String],
     ),
@@ -173,6 +173,7 @@ pub(crate) fn note_unproven_constructs(
     if let Some(cause) = unproven {
         note_unproven(&mut detail, func, cause);
     }
+    note_disputed(&mut detail, disputed);
     // A layout the accesses prove, spelled as a structure no declaration states (doc/adr-aggregates.md).
     // A tag two graphs state as different kinds has no one declaration: its pointers are words.
     for tag in conflicting {
@@ -226,6 +227,29 @@ fn closed_world(
             "; a call reads the result (assuming closed-world)"
         }
         _ => "; no call reads the result (assuming closed-world)",
+    }
+}
+
+/// A result lane where the body's returns contradict the declaration, and what they leave there.
+type Disputed = (r2source::SourceTypedLane, r2source::SourceBodyLane);
+
+/// The declaration stays, and each lane its body disputes is named (D331): refusal evidence.
+fn note_disputed(detail: &mut String, disputed: &[Disputed]) {
+    use r2source::{SourceBodyLane as Body, SourceTypedLane as Lane};
+    for (lane, body) in disputed {
+        let lane = match lane {
+            Lane::Integer => "integer",
+            Lane::Float => "float",
+        };
+        let found = match body {
+            Body::None => "no return defines",
+            Body::Written => "a return defines",
+            Body::Open => continue,
+        };
+        let _ = write!(
+            detail,
+            "; the declared result is kept against the body: {found} the {lane} result register"
+        );
     }
 }
 

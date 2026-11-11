@@ -404,6 +404,8 @@ pub enum SourceResultCause {
     ForwardCycle,
     /// No citation states the convention's result lanes complete, so no lane is proven empty (S36).
     LanesUnbounded,
+    /// The declaration states parameters and no result (a mangled name): every killed lane is open.
+    Unstated,
 }
 
 /// What the direct paths of a body prove of an unproven result: the convention's carrier, at the
@@ -551,6 +553,7 @@ impl SourceCallResult {
             Self::Register { storage, .. } => (Some(storage), None),
             Self::Pair { low, high } => (Some(low), Some(high)),
             Self::Unproven { integer, float } => (Some(integer), Some(float)),
+            Self::Unstated { carrier } => (Some(carrier), None),
         };
         first.into_iter().chain(second)
     }
@@ -976,6 +979,33 @@ impl SourceRoleRegisterNames {
     }
 }
 
+/// What a declared body's own returns leave in one result lane (doc/adr-result-side.md,
+/// "Declaration against body"); `None` and `Written` are proven.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+pub enum SourceBodyLane {
+    /// Nothing proves either.
+    #[default]
+    Open,
+    /// No return leaves a byte the body defines, or an input's entry byte.
+    None,
+    /// Every return's value is stated, and one leaves a byte the body defines.
+    Written,
+}
+
+/// A typed result lane the body of a declared function is read in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum SourceTypedLane {
+    Integer,
+    Float,
+}
+
+/// A declared body's integer and float result lanes, each with its register (D331).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+pub struct SourceBodyResult {
+    pub integer: Option<(CanonicalStorageId, SourceBodyLane)>,
+    pub float: Option<(CanonicalStorageId, SourceBodyLane)>,
+}
+
 /// The registers a result may be in beyond what is proven: the integer result register and the
 /// float one where the body writes both, and the second integer register where the body also
 /// writes it on every return. A call takes what its caller reads.
@@ -1107,6 +1137,8 @@ pub struct SourceFunctionInterface {
     result_holds_input: bool,
     /// The body reaches no return: its `Void` states what a call leaves, and no type (S24).
     no_return_reached: bool,
+    /// What the body's returns leave in the result lanes, where a declaration states the result.
+    body_result: SourceBodyResult,
     /// What the logical types are read from (doc/adr-provenance.md):
     /// `DebugInfo` where the binary declares the body, `Declared` where a
     /// library's prototype was found by an import's name, `CarrierWidth`
@@ -1589,6 +1621,10 @@ impl SourceFunctionInterface {
             closed_result: None,
             result_holds_input: false,
             no_return_reached: false,
+            body_result: SourceBodyResult {
+                integer: None,
+                float: None,
+            },
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
     }
@@ -1649,6 +1685,7 @@ impl SourceFunctionInterface {
             closed_result: self.closed_result,
             result_holds_input: self.result_holds_input,
             no_return_reached: self.no_return_reached,
+            body_result: self.body_result,
             types: self.types.clone(),
             ..rebuilt
         })
@@ -1856,6 +1893,14 @@ impl SourceFunctionInterface {
         self.unproven_result.as_ref()
     }
 
+    /// The lane a call's extern spells where a declaration states the parameters and no result:
+    /// the call then states none, and every killed lane is unproven (D330).
+    pub fn unstated_carrier(&self) -> Option<CanonicalStorageId> {
+        let result = self.unproven_result.as_ref()?;
+        let unstated = result.causes() == [SourceResultCause::Unstated];
+        result.seed().filter(|_| unstated).map(|seed| seed.slot)
+    }
+
     /// What a cycle's fixpoint assumes of a member: these parameters, exactly or as a floor, and
     /// the result `seed` states or none (doc/adr-resolved-bodies.md, "Arity" and "A cycle's results").
     #[must_use]
@@ -1970,6 +2015,37 @@ impl SourceFunctionInterface {
     pub const fn with_result_holding_input(mut self) -> Self {
         self.result_holds_input = true;
         self
+    }
+
+    /// Record what the body's returns leave in the result lanes of a declared function.
+    #[must_use]
+    pub const fn with_body_result(mut self, body: SourceBodyResult) -> Self {
+        self.body_result = body;
+        self
+    }
+
+    /// The lanes where the body's returns contradict the declared result, which stays: a declared
+    /// lane no return defines, or a lane a declared `void` leaves written (D331). O(lanes).
+    pub fn body_disputed_lanes(
+        &self,
+    ) -> impl Iterator<Item = (SourceTypedLane, SourceBodyLane)> + '_ {
+        let lanes = [
+            (SourceTypedLane::Integer, self.body_result.integer),
+            (SourceTypedLane::Float, self.body_result.float),
+        ];
+        let declared = self.types_are_declared();
+        let holds = |lane: CanonicalStorageId| {
+            (self.return_kind.storages()).any(|held| held.location() == lane.location())
+        };
+        lanes.into_iter().filter_map(move |(lane, body)| {
+            let (storage, body) = body.filter(|_| declared)?;
+            let disputed = match (self.return_kind, body) {
+                (SourceFunctionReturn::Void, SourceBodyLane::Written) => true,
+                (_, SourceBodyLane::None) => holds(storage),
+                _ => false,
+            };
+            disputed.then_some((lane, body))
+        })
     }
 
     /// Whether a return hands back a parameter: the result is an entry input, not a written value.
@@ -2584,6 +2660,11 @@ pub enum SourceCallResult {
         integer: CanonicalStorageId,
         float: CanonicalStorageId,
     },
+    /// The callee's declaration states no result: every result lane the call kills is unproven,
+    /// and `carrier` is the lane its extern spells (D330).
+    Unstated {
+        carrier: CanonicalStorageId,
+    },
 }
 
 /// A callee that hands back one of its own arguments as a format string.
@@ -2842,6 +2923,12 @@ impl SourceCallSiteInterface {
                 SourceCallResult::Unproven { integer, float },
             ) if carriers.integer == integer && carriers.float == Some(float) => {
                 SourceCallResult::Unproven { integer, float }
+            }
+            // A declaration with no stated result: the call states none, at the seeded carrier.
+            (SourceFunctionReturn::Unproven, _, SourceCallResult::Unstated { carrier })
+                if callee.unstated_carrier() == Some(carrier) =>
+            {
+                SourceCallResult::Unstated { carrier }
             }
             // An unproven result is no claim, so no exact contract holds it.
             (SourceFunctionReturn::Unproven, ..) => {

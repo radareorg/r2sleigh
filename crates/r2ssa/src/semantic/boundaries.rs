@@ -1509,6 +1509,17 @@ pub(crate) fn collect_source_boundary_facts(
             boundary.noreturn = Some(interface.is_noreturn());
             boundary.result_kind = Some(interface.result());
             boundary.unstated_lanes = unproven_lanes(machine_context, call_site, interface);
+            // The contract states no result: none here, and every killed lane unstated (D330).
+            if let SourceCallResult::Unstated { carrier } = interface.result() {
+                boundary.result_kind = None;
+                state_unstated_result(&mut boundary, machine_context, None);
+                let seeded = |seed: r2source::SourceResultSeed| r2source::SourceResultSeed {
+                    slot: carrier,
+                    bits: carrier.size.saturating_mul(8),
+                    ..seed
+                };
+                boundary.unstated_carrier = boundary.unstated_carrier.map(seeded);
+            }
             boundary.refusal = Some(CallBoundaryRefusal::InterfaceIncomplete);
             boundary.ignored = (interface.exact_callee_interface().into_iter())
                 .flat_map(|callee| callee.parameters())
@@ -1653,7 +1664,8 @@ pub(crate) fn collect_source_boundary_facts(
                         SourceCallResult::Register { storage, .. }
                         | SourceCallResult::Unproven {
                             integer: storage, ..
-                        },
+                        }
+                        | SourceCallResult::Unstated { carrier: storage },
                     ) => call_result_values_after_call(
                         graph,
                         machine_context,
