@@ -159,33 +159,14 @@ pub(crate) fn note_unproven_constructs(
         );
     }
     note_floor(&mut detail, floor);
-    // A premise is its own clause: the closed world decided the result (D166, D234).
     if ledger.is_some_and(|ledger| ledger.premises().contains(&r2source::Premise::ClosedWorld)) {
-        detail.push_str(match unproven {
-            Some(Some(r2types::UnprovenCause::ForwardCycle)) => {
-                "; a call returns the result on through a cycle (assuming closed-world)"
-            }
-            // A value no body proves, decided only by its reading calls.
-            None if func.ret_type != crate::ast::CType::Void => {
-                "; a call reads the result (assuming closed-world)"
-            }
-            _ => "; no call reads the result (assuming closed-world)",
-        });
+        detail.push_str(closed_world(func, unproven));
     }
     if open_second_result {
         detail.push_str("; the result's second register is open: no call read decides it");
     }
     if let Some(cause) = unproven {
-        // Every return of the unproven result is counted: carried, or a residual (D233).
-        let (carried, residual) = crate::prelude::unproven_returns(func);
-        let cause = cause.map_or("no return reached", r2types::UnprovenCause::name);
-        let _ = write!(
-            &mut detail,
-            "; the result is unproven ({cause}): {carried} unproven-return carried"
-        );
-        if residual > 0 {
-            let _ = write!(&mut detail, ", {residual} unproven-return residual");
-        }
+        note_unproven(&mut detail, func, cause);
     }
     // A layout the accesses prove, spelled as a structure no declaration states (doc/adr-aggregates.md).
     match laid_out {
@@ -217,6 +198,36 @@ pub(crate) fn note_unproven_constructs(
         })
     };
     func.body.insert(0, CStmt::comment(text));
+}
+
+/// A premise is its own clause: what the closed world decided of the result (D166, D234).
+fn closed_world(
+    func: &CFunction,
+    unproven: Option<Option<r2types::UnprovenCause>>,
+) -> &'static str {
+    match unproven {
+        Some(Some(r2types::UnprovenCause::ForwardCycle)) => {
+            "; a call returns the result on through a cycle (assuming closed-world)"
+        }
+        // A value no body proves, decided only by its reading calls.
+        None if func.ret_type != crate::ast::CType::Void => {
+            "; a call reads the result (assuming closed-world)"
+        }
+        _ => "; no call reads the result (assuming closed-world)",
+    }
+}
+
+/// Every return of the unproven result, counted once: carried, or a residual (D233).
+fn note_unproven(detail: &mut String, func: &CFunction, cause: Option<r2types::UnprovenCause>) {
+    let (carried, residual) = crate::prelude::unproven_returns(func);
+    let cause = cause.map_or("no return reached", r2types::UnprovenCause::name);
+    let _ = write!(
+        detail,
+        "; the result is unproven ({cause}): {carried} unproven-return carried"
+    );
+    if residual > 0 {
+        let _ = write!(detail, ", {residual} unproven-return residual");
+    }
 }
 
 /// The header lists what is proven; a floor says more may be passed (D100).
