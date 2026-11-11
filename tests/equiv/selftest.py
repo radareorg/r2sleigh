@@ -47,6 +47,7 @@ graded through the same path an engine rendering takes:
   and one tick past it dropped (ADR D339).
 * with no fake, a rendering that spins is stopped by the CPU timer and must be
   ``slow``, not a hang and not a death by SIGPROF.
+* under ``instructions`` a rendering sees no SIGPROF handler and no CPU timer.
 * a rendering that raises the allowance's own signal (SIGPWR) or the CPU
   timer's (SIGPROF) is not ``slow``: only the measure decides.
 """
@@ -376,6 +377,15 @@ CASES = [
         "    volatile uint32_t spin = (uint32_t)a + (uint32_t)b;\n"
         "    for (;;)\n        spin = spin + 1u;\n}\n"),
         expect_build="O2", cost=Cost("time", 32)),
+    # Under `instructions` the CPU timer is not the measure: no SIGPROF handler, no timer armed.
+    Case("no-cpu-timer-under-instructions", "st_add", "equal", _tu(
+        "#include <signal.h>\n#include <sys/time.h>\nint32_t sub_add(int32_t a, int32_t b)\n{\n"
+        "    struct sigaction held;\n    struct itimerval left;\n"
+        "    sigaction(SIGPROF, NULL, &held);\n    getitimer(ITIMER_PROF, &left);\n"
+        "    int armed = held.sa_handler != SIG_DFL || left.it_value.tv_sec != 0\n"
+        "                || left.it_value.tv_usec != 0;\n"
+        "    return (int32_t)((uint32_t)a + (uint32_t)b + (uint32_t)armed);\n}\n"),
+        cost=Cost("instructions", _BUDGET, fake_original=1, fake_rendering=1)),
     # A SIGPROF the rendering raises itself is a signal, not the CPU timer: not `slow`.
     Case("a-profiling-signal-the-rendering-raises", "st_add", "differs", _tu(
         "#include <signal.h>\nint32_t sub_add(int32_t a, int32_t b)\n{\n"

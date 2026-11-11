@@ -298,7 +298,9 @@ Owner: GT.
   graded on every run (45 equal, 3 slow), and gcc `-O2` and clang `-O1` `fact`
   grade all 48 vectors, where the ones past the old budget were dropped.
 - Cost of the gate: a vector whose original costs `c` may take `54c` when every
-  build is stopped. review.c at clang `-O1` takes 170 s on x86-64 and at clang
+  build is stopped. The driver's ceiling (`Config.driver_ceiling`) is every run
+  at its guard, about two hours a vector at `B` = 1 s, so it no longer bounds a
+  shard: the shard's own abort does. review.c at clang `-O1` takes 170 s on x86-64 and at clang
   `-O2` 385 s under qemu, inside the shards' 8 and 22 minutes.
 
 **D39. Upstream drift is a gate, not a discovery.** Owner: GT, with VC.
