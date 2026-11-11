@@ -604,6 +604,8 @@ pub(crate) struct SeedingFacts<'a> {
         crate::semantic::MemoryRoundTripCertificate,
     >,
     pub(crate) meeting_arms: &'a BTreeSet<u64>,
+    /// The compiler-inserted operations, whose inputs no C statement reads through them.
+    pub(crate) inserted: crate::dense::IdSet<InstId>,
 }
 
 impl<'a> SeedingFacts<'a> {
@@ -614,11 +616,13 @@ impl<'a> SeedingFacts<'a> {
             crate::semantic::MemoryRoundTripCertificate,
         >,
         meeting_arms: &'a BTreeSet<u64>,
+        inserted: crate::dense::IdSet<InstId>,
     ) -> Self {
         Self {
             private_stack_objects,
             memory_round_trips,
             meeting_arms,
+            inserted,
         }
     }
 
@@ -1016,7 +1020,7 @@ impl SemanticObligationInventory {
         // First close dependencies from observable effects and exact ABI boundaries. A loop
         // carrier is semantically live only when that independent root closure reaches its phi;
         // recognizer-retained facts must never decide source obligation liveness.
-        propagate_live_dependencies(graph, &direct, &mut required);
+        propagate_live_dependencies(graph, (&direct, &seeding.inserted), &mut required);
         let live_before_loop_annotation = required.keys().collect::<crate::dense::IdSet<_>>();
         for fact in structured.loops.values() {
             for carrier in &fact.carriers {
@@ -1070,7 +1074,7 @@ impl SemanticObligationInventory {
                 }
             }
         }
-        propagate_live_dependencies(graph, &direct, &mut required);
+        propagate_live_dependencies(graph, (&direct, &seeding.inserted), &mut required);
         // A private read the walk reached owes its access; its inputs are already walked.
         for (inst, ordinal, address) in private_reads {
             if required.contains(inst) {
@@ -2005,7 +2009,7 @@ fn seed_value_definition(
 
 fn propagate_live_dependencies(
     graph: &SsaGraph,
-    direct: &crate::dense::IdSet<InstId>,
+    (direct, inserted): (&crate::dense::IdSet<InstId>, &crate::dense::IdSet<InstId>),
     required: &mut ObligationSeeds,
 ) {
     let mut ready = required.keys().collect::<VecDeque<_>>();
@@ -2014,7 +2018,8 @@ fn propagate_live_dependencies(
         if !visited.insert(inst_id) {
             continue;
         }
-        let Some(inst) = graph.inst(inst_id).filter(|_| !direct.contains(inst_id)) else {
+        let stops = direct.contains(inst_id) || inserted.contains(inst_id);
+        let Some(inst) = graph.inst(inst_id).filter(|_| !stops) else {
             continue;
         };
         for input in graph.inputs(inst.id) {
@@ -3249,7 +3254,12 @@ mod tests {
             artifact.structured(),
             &boundaries,
             None,
-            &SeedingFacts::new(&BTreeSet::new(), &BTreeMap::new(), &BTreeSet::new()),
+            &SeedingFacts::new(
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                crate::dense::IdSet::default(),
+            ),
         );
 
         assert!(!inventory.is_complete());
@@ -3472,7 +3482,12 @@ mod tests {
             artifact.structured(),
             &artifact.facts().boundaries,
             None,
-            &SeedingFacts::new(&BTreeSet::new(), &BTreeMap::new(), &BTreeSet::new()),
+            &SeedingFacts::new(
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                crate::dense::IdSet::default(),
+            ),
         );
         assert!(!inventory.is_complete());
         assert!(inventory.construction_failures.iter().any(|failure| {
@@ -3510,7 +3525,12 @@ mod tests {
             artifact.structured(),
             &artifact.facts().boundaries,
             None,
-            &SeedingFacts::new(&BTreeSet::new(), &BTreeMap::new(), &BTreeSet::new()),
+            &SeedingFacts::new(
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                crate::dense::IdSet::default(),
+            ),
         );
         assert_eq!(inventory.source_instruction_count(), 0);
         assert!(!inventory.unstructured_cycle_blocks().is_empty());
@@ -3594,7 +3614,12 @@ mod tests {
             &structured,
             &artifact.facts().boundaries,
             None,
-            &SeedingFacts::new(&BTreeSet::new(), &BTreeMap::new(), &BTreeSet::new()),
+            &SeedingFacts::new(
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                crate::dense::IdSet::default(),
+            ),
         );
         assert!(
             inventory

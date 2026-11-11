@@ -767,6 +767,7 @@ fn terminal_past_call_boundary<'o, V: Ord + 'o>(
 /// an argument register across a call to a callee it has seen never write it,
 /// and the caller then reads that register after the call as its own.
 ///
+/// Only blocks a return is reached from count: a write on a path that never returns is unseen.
 /// Every exit has to be a return for the claim to hold. A block that leaves by
 /// any other transfer hands control to a body not read here, so nothing is
 /// claimed for the function; a call that ends its block with no successor is
@@ -784,7 +785,7 @@ pub(crate) fn preserved_call_carriers(
     if candidates.is_empty() {
         return BTreeSet::new();
     }
-    let mut saw_return = false;
+    let mut returning = Vec::new();
     for block in &graph.blocks {
         if !function.successors(block.addr).is_empty() {
             continue;
@@ -794,20 +795,28 @@ pub(crate) fn preserved_call_carriers(
             .iter()
             .filter_map(|inst| graph.op(*inst));
         match terminal_past_call_boundary(ops) {
-            Some(SSAOp::Return { .. }) => saw_return = true,
+            Some(SSAOp::Return { .. }) => returning.push(block.addr),
             Some(op) if op.is_call() => {}
             _ => return BTreeSet::new(),
         }
     }
-    if !saw_return {
+    if returning.is_empty() {
         return BTreeSet::new();
     }
+    // Only a block a return is reached from writes what a caller sees: O(blocks + edges).
+    let mut reaching = BTreeSet::new();
+    while let Some(addr) = returning.pop() {
+        if reaching.insert(addr) {
+            returning.extend(function.predecessors(addr).iter().copied());
+        }
+    }
+    let returns_from = |block: &&crate::graph::GraphBlock| reaching.contains(&block.addr);
     let mut preserved = candidates.iter().copied().collect::<BTreeSet<_>>();
     // A call inside this body leaves alone only what its own callee proves
     // it does. The call defines only the registers this body touches, so the
     // rest of the universe is answered here: a register no instruction
     // writes survives an inner call only when that callee's body says so.
-    let ops = (graph.blocks.iter())
+    let ops = (graph.blocks.iter().filter(returns_from))
         .flat_map(|block| graph.op_insts(block.id))
         .filter_map(|inst| graph.op(*inst));
     for op in ops {
@@ -830,9 +839,13 @@ pub(crate) fn preserved_call_carriers(
     // The distinct storages written, once each: the universe is the whole
     // register file, so matching it per instruction would cost `O(I * U)`
     // where `O(I log w + w * U)` answers the same question.
+    let seen = |inst: &&crate::graph::GraphInst| {
+        (graph.block(inst.block)).is_none_or(|block| reaching.contains(&block.addr))
+    };
     let written = graph
         .insts
         .iter()
+        .filter(seen)
         .filter(|inst| inst.output.is_some())
         .filter_map(|inst| graph.written_storage(inst))
         .collect::<BTreeSet<_>>();

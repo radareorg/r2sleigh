@@ -731,6 +731,8 @@ pub(crate) struct StackGeometryContext<'a> {
     pub(crate) unobserved: &'a crate::deadphi::DeadPhis,
     pub(crate) machine_context: Option<&'a SourceMachineContext>,
     pub(crate) declared_slots: &'a DeclaredStackSlots,
+    /// The compiler-inserted operations: a read by one is no program reader of the frame.
+    pub(crate) inserted: &'a crate::dense::IdSet<InstId>,
 }
 
 #[cfg_attr(
@@ -754,6 +756,7 @@ pub(crate) fn collect_stack_geometry_certificate(
         unobserved,
         machine_context,
         declared_slots,
+        inserted,
     } = answered;
     let Some(prep) = prep else {
         return StackGeometryCertificate::default();
@@ -964,6 +967,7 @@ pub(crate) fn collect_stack_geometry_certificate(
             || return_control_uses.contains(site)
             || stack_address_uses.contains(site)
             || unobserved.unobserved_uses().contains(site)
+            || inserted.contains(site.inst)
     };
     let candidates = values.clone();
     let values = greatest_closed(graph, &geometry_outputs, values, inside, |value, site| {

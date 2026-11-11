@@ -1078,6 +1078,9 @@ pub struct SourceFunctionInterface {
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
+    /// Whether the body is a `/GS` check: it returns only past its first argument equalling the
+    /// load-config cookie, with no memory effect, and otherwise reaches a call that never returns.
+    security_check: bool,
     /// Why the parameters are a floor, where a slot past them may be read or handed on.
     arity_floor: Option<SourceArityFloor>,
     /// Why the result is unproven, where recovery states it.
@@ -1563,6 +1566,7 @@ impl SourceFunctionInterface {
             tail_count: None,
             va_list_parameter: None,
             body_proven_return_address: false,
+            security_check: false,
             arity_floor: None,
             unproven_result: None,
             result_carriers: None,
@@ -1620,6 +1624,7 @@ impl SourceFunctionInterface {
             tail_count: self.tail_count,
             va_list_parameter: self.va_list_parameter,
             body_proven_return_address: self.body_proven_return_address,
+            security_check: self.security_check,
             arity_floor: self.arity_floor.clone(),
             unproven_result: self.unproven_result.clone(),
             result_carriers: self.result_carriers,
@@ -1987,6 +1992,18 @@ impl SourceFunctionInterface {
     /// Whether the result is the return address the caller pushed.
     pub const fn body_proven_return_address(&self) -> bool {
         self.body_proven_return_address
+    }
+
+    /// Record that the body is a proven `/GS` check (r2ssa `security_cookie::proves_check`).
+    #[must_use]
+    pub const fn with_security_check(mut self) -> Self {
+        self.security_check = true;
+        self
+    }
+
+    /// Whether the body is a proven `/GS` check, whose call a caller elides with its cookie.
+    pub const fn security_check(&self) -> bool {
+        self.security_check
     }
 
     /// The same interface, its logical types read from `types`.
@@ -3936,7 +3953,16 @@ pub struct SourceCallEffect {
     stack_guard: Option<SourceStackGuard>,
     /// Where the convention keeps the lowest stack pointer a function may run with.
     stack_bound: Option<SourceStackGuard>,
+    /// The `/GS` cookie the load configuration names.
+    security_cookie: Option<SourceSecurityCookie>,
     reads: SourceBoundaryReads,
+}
+
+/// The word a PE's load configuration names as its `/GS` cookie, at an absolute address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SourceSecurityCookie {
+    pub address: u64,
+    pub width: u32,
 }
 
 /// Memory at a constant offset from a register's entry value: a stack protector's guard, or a
@@ -4009,6 +4035,7 @@ impl SourceCallEffect {
             system_reserved: Box::default(),
             stack_guard: None,
             stack_bound: None,
+            security_cookie: None,
             reads,
         })
     }
@@ -4079,6 +4106,20 @@ impl SourceCallEffect {
     /// `g.stackguard0`), where it states one.
     pub const fn stack_bound(&self) -> Option<&SourceStackGuard> {
         self.stack_bound.as_ref()
+    }
+
+    /// The same effect, with the `/GS` cookie the container's load configuration names.
+    #[must_use]
+    pub fn with_security_cookie(self, cookie: Option<SourceSecurityCookie>) -> Self {
+        Self {
+            security_cookie: cookie,
+            ..self
+        }
+    }
+
+    /// The `/GS` cookie, where the C library's guard row and the container both state it.
+    pub const fn security_cookie(&self) -> Option<&SourceSecurityCookie> {
+        self.security_cookie.as_ref()
     }
 
     /// The registers the convention names as destroyed, sorted.

@@ -184,7 +184,11 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Convention {
         let model = crate::native::convention_model(
             arch,
             bits,
-            (kernel(container), c_library(container)),
+            (
+                kernel(container),
+                c_library(container),
+                container.security_cookie,
+            ),
             &assembled.compiler,
             id.row(),
         );
@@ -557,6 +561,14 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
 
     fn returns_through(&self, slot: u64) -> bool {
         self.view().returns_through(slot)
+    }
+
+    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+        self.view().halts_on_through(slot)
+    }
+
+    fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+        self.view().yields_through(slot)
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {

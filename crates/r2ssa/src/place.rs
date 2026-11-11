@@ -216,6 +216,7 @@ mod tests {
                 variadic_on_stack: false,
                 guard: None,
                 stack_bound: None,
+                security_cookie: None,
             },
             refused: None,
         }

@@ -341,6 +341,9 @@ impl PreparedFunctionFacts {
                 &private_stack_objects,
                 &memory_round_trips,
                 &meeting_arms(function),
+                (function.compiler_inserted().iter())
+                    .filter_map(|op| graph.inst_for_op(op))
+                    .collect(),
             ),
         );
         phase!("obligations", obligations.obligations().len());

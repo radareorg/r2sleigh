@@ -989,6 +989,12 @@ impl Literal {
         program
     }
 
+    /// The same program, its PE load configuration naming the `/GS` cookie at `address`.
+    pub fn with_security_cookie(mut self, address: u64) -> Self {
+        self.container.security_cookie = Some(address);
+        self
+    }
+
     /// The same program with a data section, where a write can put a string.
     pub fn with_data(mut self) -> Self {
         self.container.sections.push(Section {

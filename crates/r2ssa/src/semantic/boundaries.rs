@@ -1352,7 +1352,15 @@ pub(crate) fn collect_source_boundary_facts(
     let arrival_merges = merges_of_arrivals(graph);
     // Each entry carrier's widest read, found once for every boundary that asks (D105).
     let held_widths = std::cell::OnceCell::new();
+    let inserted = function.compiler_inserted();
     for call_site in call_sites.by_id.values() {
+        // A call the compiler inserted (a `/GS` check) is no C call: it has no boundary to render.
+        if graph
+            .op_for_inst(call_site.at)
+            .is_some_and(|op| inserted.contains(op))
+        {
+            continue;
+        }
         let mut boundary = SourceCallBoundaryFact {
             call_site: call_site.id,
             at: call_site.at,

@@ -2549,7 +2549,7 @@ fn register_named(arch: &ArchSpec, storage: CanonicalStorageId) -> Option<&str> 
 pub fn convention_model(
     arch: &ArchSpec,
     bits: u32,
-    (kernel, library): (r2abi::Kernel, r2abi::CLibrary),
+    (kernel, library, cookie): (r2abi::Kernel, r2abi::CLibrary, Option<u64>),
     profile: &LanguageProfile,
     row: &r2abi::ConventionRow,
 ) -> Result<ConventionModel, NativeRefusal> {
@@ -2574,7 +2574,7 @@ pub fn convention_model(
         likely_trash: at.lanes(&prototype.likely_trash),
         reserved,
         link,
-        forms: forms(&at, prototype, row, bits, library),
+        forms: forms(&at, prototype, row, bits, (library, cookie)),
         refused: row.refused,
     };
     // The slots are a view; one that does not hold refuses the model, as it refused each function.
@@ -2901,7 +2901,7 @@ fn forms(
     prototype: &r2sleigh_lift::profile::ProtoModel,
     row: &r2abi::ConventionRow,
     bits: u32,
-    library: r2abi::CLibrary,
+    (library, cookie): (r2abi::CLibrary, Option<u64>),
 ) -> BoundaryForms {
     let guard = |guard: Option<&r2abi::StackGuard>| {
         let guard = guard?;
@@ -2911,6 +2911,7 @@ fn forms(
             width: guard.width,
         })
     };
+    let guard_row = r2abi::guard_row(&at.arch.name, bits, library);
     BoundaryForms {
         frame_pointer: row.frame_pointer.and_then(|name| at.resolve(name.0)),
         red_zone: row.red_zone,
@@ -2929,11 +2930,19 @@ fn forms(
             residue: stack.residue,
         }),
         variadic_on_stack: prototype.variadic_on_stack,
-        guard: guard(
-            r2abi::guard_row(&at.arch.name, bits, library)
-                .map(|r2abi::GuardRow::ThreadSlot(slot)| slot),
-        ),
+        guard: guard(match guard_row {
+            Some(r2abi::GuardRow::ThreadSlot(slot)) => Some(slot),
+            _ => None,
+        }),
         stack_bound: guard(row.stack_bound.as_ref()),
+        // The row says the C library checks a load-config cookie; the container says where.
+        security_cookie: matches!(guard_row, Some(r2abi::GuardRow::LoadConfigCookie))
+            .then_some(cookie)
+            .flatten()
+            .map(|address| r2source::SourceSecurityCookie {
+                address,
+                width: bits / 8,
+            }),
     }
 }
 
@@ -3087,7 +3096,7 @@ mod tests {
         let convention = convention_model(
             &embedded.arch,
             64,
-            (r2abi::Kernel::Unknown, r2abi::CLibrary::Unknown),
+            (r2abi::Kernel::Unknown, r2abi::CLibrary::Unknown, None),
             &compiler,
             r2abi::ConventionId::SysVAmd64.row(),
         )

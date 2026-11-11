@@ -72,6 +72,7 @@ mod reload;
 pub(crate) mod rename;
 pub(crate) mod save_area;
 pub(crate) mod saved_register;
+pub(crate) mod security_cookie;
 pub(crate) mod semantic;
 mod slice;
 pub(crate) mod slot_promotion;

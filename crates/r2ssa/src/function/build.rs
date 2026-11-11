@@ -214,6 +214,7 @@ impl SSAFunction {
         crate::read_only::fold_loads(&mut func, machine_context);
         // Before preparation, so the comparison a decided check leaves unread folds away.
         crate::stack_protector::decide(&mut func, machine_context);
+        crate::security_cookie::decide(&mut func, machine_context, callees.security_checks());
         crate::stack_bound::decide(&mut func, machine_context);
         // Preparation reads the interface for the return projection only;
         // the prep facts, collected when the function is sealed, read it for

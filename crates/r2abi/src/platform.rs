@@ -148,10 +148,14 @@ const I386_LINUX_GUARD: StackGuard = StackGuard {
 pub enum GuardRow {
     /// A word at a constant offset from the thread pointer.
     ThreadSlot(StackGuard),
+    /// The word the PE load configuration's `SecurityCookie` names (Microsoft PE format,
+    /// "Load Configuration Layout"); its address is the container's.
+    LoadConfigCookie,
 }
 
 const X86_64_GLIBC_GUARD: GuardRow = GuardRow::ThreadSlot(X86_64_LINUX_GUARD);
 const I386_GLIBC_GUARD: GuardRow = GuardRow::ThreadSlot(I386_LINUX_GUARD);
+const UCRT_GUARD: GuardRow = GuardRow::LoadConfigCookie;
 
 /// The C library's guard row for an architecture. AArch64 glibc keeps it in the global
 /// `__stack_chk_guard`, which no register addresses; a library no row cites states none.
@@ -159,6 +163,7 @@ pub fn guard_row(arch: &str, bits: u32, library: CLibrary) -> Option<&'static Gu
     match (crate::family(arch), bits, library) {
         (Some("x86"), 64, CLibrary::Glibc | CLibrary::Musl) => Some(&X86_64_GLIBC_GUARD),
         (Some("x86"), 32, CLibrary::Glibc) => Some(&I386_GLIBC_GUARD),
+        (Some("x86"), 64, CLibrary::Ucrt) => Some(&UCRT_GUARD),
         _ => None,
     }
 }

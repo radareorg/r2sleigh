@@ -120,8 +120,13 @@ impl Machine {
             let id =
                 ConventionId::default_for(family, bits, platform.kernel()).expect("a convention");
             let (kernel, library) = (platform.kernel(), platform.library());
-            let model =
-                convention_model(&embedded.arch, bits, (kernel, library), &compiler, id.row());
+            let model = convention_model(
+                &embedded.arch,
+                bits,
+                (kernel, library, None),
+                &compiler,
+                id.row(),
+            );
             Under {
                 convention: std::sync::Arc::new(model.expect("the convention's model")),
                 compiler,
@@ -7161,7 +7166,7 @@ fn go_machine_on(arch: &str) -> Machine {
     let model = convention_model(
         &machine.embedded.arch,
         64,
-        (Kernel::Linux, CLibrary::Glibc),
+        (Kernel::Linux, CLibrary::Glibc, None),
         &compiler,
         id.row(),
     )

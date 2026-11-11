@@ -219,6 +219,8 @@ pub struct RecoveredInterface {
     result_holds_input: bool,
     /// How the body uses each slot and the bytes it leaves in each result lane.
     boundary: crate::body_boundary::BodyBoundary,
+    /// Whether the body is a proven `/GS` check (`security_cookie::proves_check`).
+    security_check: bool,
 }
 
 impl RecoveredInterface {
@@ -2323,6 +2325,8 @@ fn recover_interface_inner(
         closed: applied,
         result_holds_input,
         boundary,
+        security_check: machine_context
+            .is_some_and(|machine| crate::security_cookie::proves_check(func, machine)),
     }))
 }
 
@@ -3271,6 +3275,10 @@ fn mint_recovered_interface_inner(
         interface.with_body_proven_return_address().ok()?
     } else {
         interface
+    };
+    let interface = match recovered.security_check {
+        true => interface.with_security_check(),
+        false => interface,
     };
     with_stacked_return(recovered, interface)
 }

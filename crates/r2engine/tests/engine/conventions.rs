@@ -35,7 +35,7 @@ fn model(
     let built = convention_model(
         &machine.arch,
         64,
-        (kernel, library(kernel)),
+        (kernel, library(kernel), None),
         &profile,
         id.row(),
     );

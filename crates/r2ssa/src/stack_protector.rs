@@ -385,12 +385,12 @@ pub(crate) fn inserted_addresses(func: &SSAFunction, inserted: &IdSet<OpId>) -> 
 }
 
 /// Every store whose address is a root plus a constant, by root; written once, by the walk below.
-struct SlotStores {
+pub(crate) struct SlotStores {
     by_root: IdMap<VarId, Vec<(i64, i64, OpId, VarId)>>,
 }
 
 impl SlotStores {
-    fn of(func: &SSAFunction, defs: &Definitions) -> Self {
+    pub(crate) fn of(func: &SSAFunction, defs: &Definitions) -> Self {
         let mut by_root = IdMap::<VarId, Vec<_>>::new(func.values().len());
         for block in func
             .block_addrs()
@@ -411,7 +411,7 @@ impl SlotStores {
     }
 
     /// The one store that writes any byte of `[offset, offset + width)` from `root`, if exactly one does.
-    fn sole_writer(&self, (root, offset): Affine, width: u32) -> Option<(OpId, VarId)> {
+    pub(crate) fn sole_writer(&self, (root, offset): Affine, width: u32) -> Option<(OpId, VarId)> {
         let end = offset + i64::from(width);
         let mut writers = self
             .by_root
@@ -565,7 +565,7 @@ fn check(
 
 /// A condition that is true exactly when two values are equal (or exactly when they differ), the
 /// two values, and the difference the condition tests where it tests one.
-fn equality(
+pub(crate) fn equality(
     func: &SSAFunction,
     defs: &Definitions,
     cond: VarId,

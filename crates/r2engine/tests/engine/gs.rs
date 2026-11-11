@@ -1,0 +1,182 @@
+//! Microsoft `/GS` (doc/adr-call-boundary.md, S17): the cookie is the word the load
+//! configuration names, and a check is a body proven to compare its argument with it and to
+//! reach only a call that never returns otherwise. The callee's name decides nothing.
+
+use crate::common;
+
+use common::{BASE, Literal, TEXT};
+use r2engine::program::OpenProgram;
+
+/// `check(x)`: `cmp rcx, [cookie]; jne fail; ret; fail: call ExitProcess`, and `guarded`, which
+/// saves `[cookie] ^ rsp`, sets `eax = 7` and hands the saved word `^ rsp` to `check`.
+const GUARDED: &[u8] = &[
+    0x48, 0x3b, 0x0d, 0x99, 0x00, 0x00, 0x00, // 1000 cmp rcx, [rip + 0x99]: the cookie
+    0x75, 0x01, // 1007 jne 0x100a
+    0xc3, // 1009 ret
+    0xe8, 0x81, 0x00, 0x00, 0x00, // 100a call 0x1090: ExitProcess
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 100f padding
+    0x48, 0x83, 0xec, 0x28, // 1020 sub rsp, 0x28
+    0x48, 0x8b, 0x05, 0x75, 0x00, 0x00, 0x00, // 1024 mov rax, [rip + 0x75]: the cookie
+    0x48, 0x31, 0xe0, // 102b xor rax, rsp
+    0x48, 0x89, 0x44, 0x24, 0x20, // 102e mov [rsp + 0x20], rax
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1033 mov eax, 7
+    0x48, 0x8b, 0x4c, 0x24, 0x20, // 1038 mov rcx, [rsp + 0x20]
+    0x48, 0x31, 0xe1, // 103d xor rcx, rsp
+    0xe8, 0xbb, 0xff, 0xff, 0xff, // 1040 call 0x1000
+    0x48, 0x83, 0xc4, 0x28, // 1045 add rsp, 0x28
+    0xc3, // 1049 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 104a padding
+    0xff, 0x25, 0x02, 0x00, 0x00, 0x00, // 1090 jmp [rip + 2]: the stub
+    0xcc, 0xcc, // 1096 padding
+    0, 0, 0, 0, 0, 0, 0, 0, // 1098 the slot
+    0x32, 0xa2, 0xdf, 0x2d, 0x99, 0x2b, 0, 0, // 10a0 the cookie
+];
+
+/// [`GUARDED`] with the failing arm `xor eax, eax; ret`: it comes back, so nothing is proven.
+const RETURNING: &[u8] = &{
+    let mut code = [0u8; 0xa8];
+    let mut at = 0;
+    while at < code.len() {
+        code[at] = GUARDED[at];
+        at += 1;
+    }
+    // 100a xor eax, eax; ret
+    code[0x0a] = 0x31;
+    code[0x0b] = 0xc0;
+    code[0x0c] = 0xc3;
+    code[0x0d] = 0xcc;
+    code[0x0e] = 0xcc;
+    code
+};
+
+const CHECK: u64 = BASE;
+const CALLER: u64 = BASE + 0x20;
+
+fn program(code: &'static [u8], check: &str, cookie: Option<u64>) -> OpenProgram<Literal> {
+    let functions = [(check, CHECK, 0x0f), ("guarded", CALLER, 0x2a)];
+    let mut program = Literal::of_code(code, &functions)
+        .with_data()
+        .writable_data_after(TEXT)
+        .importing_from("KERNEL32.dll", "ExitProcess")
+        .pe();
+    if let Some(cookie) = cookie {
+        program = program.with_security_cookie(cookie);
+    }
+    OpenProgram::of(program)
+}
+
+fn rendered(open: &mut OpenProgram<Literal>, at: u64) -> String {
+    open.rendered(at)
+        .expect("it renders")
+        .response
+        .output
+        .into_text()
+}
+
+/// The save, the reload and the call to the proven check are the compiler's, elided under the
+/// UB-free premise. The 7 the caller returns past the check stays a residual (D231).
+#[test]
+fn a_call_to_a_proven_check_of_the_load_config_cookie_is_elided() {
+    let mut open = program(GUARDED, "check", Some(TEXT));
+    let text = rendered(&mut open, CALLER);
+    assert!(!text.contains("check("), "{text}");
+    assert!(!text.contains("0x10a0"), "{text}");
+    assert!(text.contains("compiler-inserted"), "{text}");
+}
+
+/// No load configuration states a cookie, so the same bytes are no check.
+#[test]
+fn without_a_load_config_cookie_the_check_is_a_call() {
+    let mut open = program(GUARDED, "check", None);
+    let text = rendered(&mut open, CALLER);
+    assert!(text.contains("check("), "{text}");
+    assert!(text.contains("0x10a0"), "{text}");
+}
+
+/// A body whose failing arm comes back proves nothing, whatever its name says.
+#[test]
+fn a_cookie_compare_that_comes_back_is_no_check_whatever_its_name() {
+    let mut open = program(RETURNING, "__security_check_cookie", Some(TEXT));
+    let text = rendered(&mut open, CALLER);
+    assert!(text.contains("__security_check_cookie("), "{text}");
+    assert!(text.contains("0x10a0"), "{text}");
+}
+
+/// `TerminateProcess(GetCurrentProcess(), code)` as a tail jump: Microsoft states it never returns
+/// for the calling process, so `raise` never comes back and its caller's `return 5` is unreached.
+const TERMINATES: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 1000 sub rsp, 0x28
+    0xff, 0x15, 0x8e, 0x00, 0x00, 0x00, // 1004 call [rip + 0x8e]: GetCurrentProcess
+    0x48, 0x89, 0xc1, // 100a mov rcx, rax
+    0xba, 0x09, 0x04, 0x00, 0xc0, // 100d mov edx, 0xc0000409
+    0x48, 0x83, 0xc4, 0x28, // 1012 add rsp, 0x28
+    0xff, 0x25, 0x8c, 0x00, 0x00, 0x00, // 1016 jmp [rip + 0x8c]: TerminateProcess
+    0xcc, 0xcc, 0xcc, 0xcc, // 101c padding
+    0x48, 0x83, 0xec, 0x28, // 1020 sub rsp, 0x28
+    0xe8, 0xd7, 0xff, 0xff, 0xff, // 1024 call 0x1000
+    0xb8, 0x05, 0x00, 0x00, 0x00, // 1029 mov eax, 5
+    0x48, 0x83, 0xc4, 0x28, // 102e add rsp, 0x28
+    0xc3, // 1032 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1033 padding
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1090 GetCurrentProcess's stub room
+    0, 0, 0, 0, 0, 0, 0, 0, // 1098 its slot
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 10a0 TerminateProcess's stub room
+    0, 0, 0, 0, 0, 0, 0, 0, // 10a8 its slot
+];
+
+/// [`TERMINATES`] handing `rbx` in place of the handle: no row says that call ends the process.
+const TERMINATES_ANOTHER: &[u8] = &{
+    let mut code = [0u8; 0xb0];
+    let mut at = 0;
+    while at < code.len() {
+        code[at] = TERMINATES[at];
+        at += 1;
+    }
+    code[0x0c] = 0xd9; // 100a mov rcx, rbx
+    code
+};
+
+fn terminating(code: &'static [u8]) -> OpenProgram<Literal> {
+    let functions = [("raise", BASE, 0x1c), ("caller", BASE + 0x20, 0x13)];
+    let symbol = |name: &str, vaddr| r2engine::program::Symbol {
+        name: name.into(),
+        vaddr,
+        import: true,
+        library: Some("KERNEL32.dll".into()),
+        ..r2engine::program::Symbol::default()
+    };
+    let program = Literal::of_code(code, &functions)
+        .importing_through(0x1090..0x1096, 0x1098, "GetCurrentProcess")
+        .importing_through(0x10a0..0x10a6, 0x10a8, "TerminateProcess")
+        .declaring(symbol("GetCurrentProcess", 0x1098))
+        .declaring(symbol("TerminateProcess", 0x10a8))
+        .pe();
+    OpenProgram::of(program)
+}
+
+#[test]
+fn terminating_the_current_process_does_not_return() {
+    let mut open = terminating(TERMINATES);
+    let text = rendered(&mut open, BASE + 0x20);
+    assert!(text.contains("__attribute__((noreturn))"), "{text}");
+    assert!(!text.contains("(5)"), "{text}");
+}
+
+#[test]
+fn terminating_another_handle_may_return() {
+    let mut open = terminating(TERMINATES_ANOTHER);
+    let text = rendered(&mut open, BASE + 0x20);
+    assert!(!text.contains("noreturn"), "{text}");
+    assert!(text.contains("return r2sleigh_carrier_u64(5)"), "{text}");
+}

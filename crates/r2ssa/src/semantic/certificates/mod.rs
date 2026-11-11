@@ -917,6 +917,9 @@ pub(crate) fn collect_prepared_function_certificates(
         collect_machine_return_control_certificates(
             boundaries, graph, objects, structured, unobserved,
         );
+    let inserted = (function.compiler_inserted().iter())
+        .filter_map(|op| graph.inst_for_op(op))
+        .collect::<crate::dense::IdSet<_>>();
     let stack_geometry = collect_stack_geometry_certificate(
         boundaries,
         prep,
@@ -929,6 +932,7 @@ pub(crate) fn collect_prepared_function_certificates(
             unobserved,
             machine_context,
             declared_slots,
+            inserted: &inserted,
         },
     );
     let unbounded_index = unbounded_index_objects(values, objects, structured);

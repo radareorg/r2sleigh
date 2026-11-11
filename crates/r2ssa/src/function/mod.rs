@@ -3655,6 +3655,8 @@ pub(crate) struct CalleeBoundaries {
     results: BTreeMap<u64, CallBoundaryDef>,
     /// Callees whose body proves the result carrier holds the return address.
     return_addresses: BTreeMap<u64, CanonicalStorageId>,
+    /// Callees whose body is a proven `/GS` check, which returns no result.
+    security_checks: BTreeSet<u64>,
 }
 
 impl CalleeBoundaries {
@@ -3668,7 +3670,13 @@ impl CalleeBoundaries {
         let mut preserved = preserved.clone();
         let mut results = BTreeMap::new();
         let mut return_addresses = BTreeMap::new();
+        let mut security_checks = BTreeSet::new();
         for (address, interface) in interfaces {
+            // A check's call is the compiler's; what it leaves in the result carrier is no result.
+            if interface.security_check() {
+                security_checks.insert(*address);
+                continue;
+            }
             // The same boundary cannot both hand a register back untouched and name it as what it
             // returns: a pair's two registers alike.
             let returned = interface.return_kind().storages().collect::<Vec<_>>();
@@ -3705,7 +3713,13 @@ impl CalleeBoundaries {
             preserved,
             results,
             return_addresses,
+            security_checks,
         }
+    }
+
+    /// The callees whose body is a proven `/GS` check.
+    pub(crate) const fn security_checks(&self) -> &BTreeSet<u64> {
+        &self.security_checks
     }
 
     /// What each callee proves it leaves alone, less its own result carrier.

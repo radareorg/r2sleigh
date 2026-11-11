@@ -7,7 +7,7 @@ pub use r2abi::{ConventionId, Extension, SlotClass};
 
 use crate::{
     CanonicalStorageId, SourceBoundaryReads, SourceCallEffect, SourceConventionSlots,
-    SourceEntryStack, SourceMachineRolesError, SourceRegisterSaveArea,
+    SourceEntryStack, SourceMachineRolesError, SourceRegisterSaveArea, SourceSecurityCookie,
     SourceStackArgumentPlacement, SourceStackGuard,
 };
 
@@ -189,6 +189,8 @@ pub struct BoundaryForms {
     pub guard: Option<SourceStackGuard>,
     /// The runtime's lowest stack pointer (Go's `g.stackguard0`).
     pub stack_bound: Option<SourceStackGuard>,
+    /// The `/GS` cookie the PE load configuration names.
+    pub security_cookie: Option<SourceSecurityCookie>,
 }
 
 /// One convention on one target, every register resolved.
@@ -364,6 +366,7 @@ impl ConventionModel {
             .and_then(|effect| effect.with_system_reserved(reserved))
             .and_then(|effect| effect.with_stack_guard(self.forms.guard))
             .and_then(|effect| effect.with_stack_bound(self.forms.stack_bound))
+            .map(|effect| effect.with_security_cookie(self.forms.security_cookie))
     }
 }
 

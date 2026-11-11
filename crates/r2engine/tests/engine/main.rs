@@ -13,6 +13,7 @@ mod control;
 mod conventions;
 mod degraded;
 mod discovery;
+mod gs;
 mod imports;
 mod language;
 mod legacy_route_interlock;
