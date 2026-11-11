@@ -1,0 +1,30 @@
+# A function's convention is what its debug information states (doc/adr-call-boundary.md, "S20
+# as built"): clang states `ms_abi` on `diff` as DW_CC_LLVM_Win64, so it takes rcx and rdx.
+
+NAME=an ms_abi function in an ELF takes rcx and rdx
+FILE=crates/r2image/tests/data/dwarf_ms_abi.elf
+CMDS=aa; pdd @ sym.diff; pdd @ sym.twice
+EXPECT=<<EOF
+int64_t diff(int64_t a, int64_t b)
+{
+    /* r2dec proof: no individual construct is marked; 6 source obligations: 3 rendered, 3 elided, 0 refused; 1 statements rendered */
+    {
+        return (int64_t)((uint64_t)a - (uint64_t)b);
+    }
+}
+
+int64_t twice(int64_t a, int64_t b)
+{
+    int64_t diff(int64_t, int64_t);
+
+    uint64_t rax_1;
+
+    /* r2dec proof: no individual construct is marked; 18 source obligations: 10 rendered, 8 elided, 0 refused; 2 statements rendered; 1 callee prototype supplied by the source */
+    {
+        rax_1 = (uint64_t)diff(a, b);
+        return (int64_t)((uint64_t)rax_1 * (uint64_t)2U);
+    }
+}
+
+EOF
+RUN

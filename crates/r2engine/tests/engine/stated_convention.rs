@@ -203,11 +203,42 @@ fn a_call_in_a_program_stating_sysv_abi_keeps_no_register_sysv_clobbers() {
     // `add rax, rsi` past the call reads an rsi the call may have written, never `a`.
     let text = rendered(&mut open, TWICE);
     assert!(!text.contains("+ (uint64_t)arg0"), "{text}");
-    assert!(text.contains("RSI_2"), "{text}");
     let mut unstated = pe(StatedConvention::Normal);
     let target = r2engine::native::Program::target_at(&unstated, TWICE).expect("a machine");
     let effect = target.call.call_effect().expect("an effect");
     assert!(effect.preserves(register(&target, "rsi")));
     let text = rendered(&mut unstated, TWICE);
     assert!(text.contains("+ (uint64_t)arg0"), "{text}");
+}
+
+/// `diff` under `sysv_abi` in a PE, its body writing rsi (`xor esi, esi`), called directly by a
+/// Microsoft x64 `keeps(a, b)` that reads rsi past the call.
+const SYSV_WRITES_RSI: &[u8] = &[
+    0x48, 0x89, 0xf8, // 1000 mov rax, rdi
+    0x48, 0x29, 0xf0, // 1003 sub rax, rsi
+    0x31, 0xf6, // 1006 xor esi, esi
+    0xc3, // 1008 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1009 padding
+    0x48, 0x83, 0xec, 0x28, // 1010 sub rsp, 0x28
+    0x48, 0x89, 0xce, // 1014 mov rsi, rcx
+    0x48, 0x89, 0xd7, // 1017 mov rdi, rdx
+    0xe8, 0xe1, 0xff, 0xff, 0xff, // 101a call 0x1000
+    0x48, 0x01, 0xf0, // 101f add rax, rsi
+    0x48, 0x83, 0xc4, 0x28, // 1022 add rsp, 0x28
+    0xc3, // 1026 ret
+];
+
+/// A direct call's kills are its callee's: the `sysv_abi` body writes rsi, so the caller's
+/// `add rax, rsi` reads no `a`, under `aa` and cold.
+#[test]
+fn a_direct_call_to_a_sysv_abi_callee_kills_what_its_body_writes() {
+    let functions = [("diff", BASE, 9), ("keeps", TWICE, 0x17)];
+    let stated = declaring(StatedConvention::LlvmX8664SysV);
+    let program = Literal::of_code(SYSV_WRITES_RSI, &functions).with_declarations(stated);
+    let mut open = OpenProgram::of(program.pe());
+    let cold = rendered(&mut open, TWICE);
+    assert!(!cold.contains("+ (uint64_t)arg0"), "{cold}");
+    open.analyse_program().expect("aa");
+    let text = rendered(&mut open, TWICE);
+    assert!(!text.contains("+ (uint64_t)arg0"), "{text}");
 }

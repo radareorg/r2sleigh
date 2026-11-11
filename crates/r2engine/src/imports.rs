@@ -37,7 +37,7 @@ enum Binding {
 }
 
 impl Linkage {
-    /// What `container` states: O(imports × log imports + needed libraries).
+    /// What `container` states: O(imports × (log imports + needed libraries)).
     pub fn of(container: &Container) -> Self {
         let mut bindings: BTreeMap<Box<str>, Binding> = BTreeMap::new();
         // An ELF import the loader binds is a dynamic symbol; `.symtab` repeats it unversioned.
