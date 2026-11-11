@@ -544,6 +544,7 @@ impl SourceCallResult {
             Self::Void => (None, None),
             Self::Register { storage, .. } => (Some(storage), None),
             Self::Pair { low, high } => (Some(low), Some(high)),
+            Self::Unproven { integer, float } => (Some(integer), Some(float)),
         };
         first.into_iter().chain(second)
     }
@@ -2533,6 +2534,12 @@ pub enum SourceCallResult {
         low: CanonicalStorageId,
         high: CanonicalStorageId,
     },
+    /// An unproven result whose callee writes both the integer and the float register: one group,
+    /// no lane decided (D212, W46). The integer register is the carrier the callee's header spells.
+    Unproven {
+        integer: CanonicalStorageId,
+        float: CanonicalStorageId,
+    },
 }
 
 /// A callee that hands back one of its own arguments as a format string.
@@ -2783,6 +2790,14 @@ impl SourceCallSiteInterface {
             // A call that reads no result of an unproven one is a statement.
             (SourceFunctionReturn::Unproven, Some(_), SourceCallResult::Void) => {
                 SourceCallResult::Void
+            }
+            // Both written carriers, as one group.
+            (
+                SourceFunctionReturn::Unproven,
+                Some(carriers),
+                SourceCallResult::Unproven { integer, float },
+            ) if carriers.integer == integer && carriers.float == Some(float) => {
+                SourceCallResult::Unproven { integer, float }
             }
             // An unproven result is no claim, so no exact contract holds it.
             (SourceFunctionReturn::Unproven, ..) => {

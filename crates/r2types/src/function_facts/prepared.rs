@@ -1365,7 +1365,8 @@ pub(crate) fn prepared_call_render_facts(prepared: &r2ssa::SsaArtifact) -> Funct
                     }
                     Some(
                         r2ssa::SourceCallResult::Register { .. }
-                        | r2ssa::SourceCallResult::Pair { .. },
+                        | r2ssa::SourceCallResult::Pair { .. }
+                        | r2ssa::SourceCallResult::Unproven { .. },
                     ) => CallsiteRenderDisposition::TerminalReturn,
                     Some(r2ssa::SourceCallResult::Void) => {
                         CallsiteRenderDisposition::TerminalVoidReturn

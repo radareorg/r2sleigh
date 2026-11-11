@@ -1371,6 +1371,25 @@ fn state_unstated_result(
         .flatten();
 }
 
+/// The lanes a call to an unproven callee leaves `Unproven` (`recover_interface::call_lanes`).
+fn unproven_lanes(
+    machine_context: &SourceMachineContext,
+    call_site: &CallSiteFact,
+    interface: &r2source::SourceCallSiteInterface,
+) -> Box<[crate::CanonicalStorageId]> {
+    let Some(callee) = interface.exact_callee_interface() else {
+        return Box::default();
+    };
+    if callee.return_kind() != r2source::SourceFunctionReturn::Unproven {
+        return Box::default();
+    }
+    let passes =
+        (call_site.direct_target).and_then(|target| machine_context.callee_preserved(target));
+    let results = crate::recover_interface::convention_results(machine_context.convention());
+    let lanes = crate::recover_interface::call_lanes(callee, passes, &results);
+    lanes.map_or_else(Box::default, |lanes| lanes.unproven.into())
+}
+
 /// The boundary a convention built for a callee that mints no contract, beside what the callee's
 /// body `stated`, where it states anything (CalleeStatement), or why an import states nothing.
 fn adopt_convention(
@@ -1488,6 +1507,7 @@ pub(crate) fn collect_source_boundary_facts(
             boundary.variadic = Some(interface.is_variadic());
             boundary.noreturn = Some(interface.is_noreturn());
             boundary.result_kind = Some(interface.result());
+            boundary.unstated_lanes = unproven_lanes(machine_context, call_site, interface);
             boundary.refusal = Some(CallBoundaryRefusal::InterfaceIncomplete);
             boundary.ignored = (interface.exact_callee_interface().into_iter())
                 .flat_map(|callee| callee.parameters())
@@ -1626,15 +1646,20 @@ pub(crate) fn collect_source_boundary_facts(
                     (CallSiteTransfer::TailCall, _) | (_, SourceCallResult::Void) => {
                         Some(Vec::new())
                     }
-                    (CallSiteTransfer::Call, SourceCallResult::Register { storage, .. }) => {
-                        call_result_values_after_call(
-                            graph,
-                            machine_context,
-                            block_addr,
-                            op_index,
-                            storage,
-                        )
-                    }
+                    // A group's value is its integer carrier, as the callee's header spells it (D201).
+                    (
+                        CallSiteTransfer::Call,
+                        SourceCallResult::Register { storage, .. }
+                        | SourceCallResult::Unproven {
+                            integer: storage, ..
+                        },
+                    ) => call_result_values_after_call(
+                        graph,
+                        machine_context,
+                        block_addr,
+                        op_index,
+                        storage,
+                    ),
                     // Each half is the value the call leaves in its register, low first.
                     (CallSiteTransfer::Call, SourceCallResult::Pair { low, high }) => [low, high]
                         .into_iter()

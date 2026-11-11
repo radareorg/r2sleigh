@@ -40,6 +40,26 @@ pub struct FunctionLiveOut {
     clobbered: BTreeSet<u64>,
 }
 
+/// Whether `last` is a direct tail transfer out of the body to a callee that leaves every one of
+/// `storages` as it found it (D212): its block hands back what reaches it, as a return does.
+fn passing_tail(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    last: &crate::op::SSAOp<ValueId>,
+    storages: &[CanonicalStorageId],
+) -> bool {
+    let crate::op::SSAOp::Branch { target, .. } = last else {
+        return false;
+    };
+    let Some(target) = (graph.value(*target)).and_then(|value| value.canonical_storage) else {
+        return false;
+    };
+    target.space == crate::CanonicalStorageSpace::Ram
+        && graph.block_id_for_addr(target.offset).is_none()
+        && !storages.is_empty()
+        && (storages.iter()).all(|storage| func.call_passes(target.offset, *storage))
+}
+
 /// Whether a write puts some of the returned bytes in place.
 ///
 /// A `CanonicalLocation` is the register; a `CanonicalStorageId`'s size is only
@@ -75,14 +95,13 @@ impl FunctionLiveOut {
         for block in &graph.blocks {
             // A predicated return (`bxeq lr`) ends its block in a return the terminator does not name.
             let last = graph.op_insts(block.id).last();
+            let last = last.and_then(|inst| graph.op(*inst));
             let returns = func
                 .cfg()
                 .get_block(block.addr)
                 .is_some_and(|cfg| cfg.is_return())
-                || matches!(
-                    last.and_then(|inst| graph.op(*inst)),
-                    Some(crate::op::SSAOp::Return { .. })
-                );
+                || matches!(last, Some(crate::op::SSAOp::Return { .. }))
+                || last.is_some_and(|last| passing_tail(func, graph, last, return_storages));
             if !returns {
                 continue;
             }
@@ -174,7 +193,7 @@ impl FunctionLiveOut {
                 // the register before it -- for a function whose final act is
                 // `warnx(fmt, ...)`, the format string -- as the value
                 // returned.
-                if crate::reaching_rules::op_ends_reaching_walk(func, op) {
+                if crate::reaching_rules::op_ends_reaching_walk(func, graph, op, return_storage) {
                     clobbered = true;
                     break;
                 }

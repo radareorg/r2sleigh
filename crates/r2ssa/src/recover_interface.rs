@@ -749,6 +749,8 @@ enum ReturnedByCall {
     Void,
     /// The callee's result is stated nowhere, so what the register holds is unproven.
     Unstated(crate::semantic::CallSiteId),
+    /// A lane the call states nothing of where its callee's unproven result may be (D212, W46).
+    Undecided(crate::semantic::CallSiteId),
 }
 
 /// Whether a call left this register undefined, unstated, or returned it.
@@ -803,7 +805,15 @@ fn returned_by_call(
     let outside = |result: crate::SourceCallResult| {
         held.is_some_and(|held| result.storages().all(|storage| !overlaps(storage, held)))
     };
+    let unstated =
+        held.is_some_and(|held| (boundary.unstated_lanes.iter()).any(|lane| overlaps(*lane, held)));
+    let grouped = matches!(
+        boundary.result_kind,
+        Some(SourceCallResult::Unproven { .. })
+    );
     match (boundary.results_complete, boundary.result_kind) {
+        (true, Some(_)) if unstated => ReturnedByCall::Undecided(*id),
+        (true, Some(result)) if grouped && !outside(result) => ReturnedByCall::Undecided(*id),
         (true, Some(crate::SourceCallResult::Void)) => ReturnedByCall::Void,
         (true, None) => ReturnedByCall::Unstated(*id),
         (true, Some(result)) if outside(result) => ReturnedByCall::Void,
@@ -1081,18 +1091,22 @@ fn closed_by_calls_that_do_not_return(func: &SSAFunction) -> bool {
 fn float_result_written(
     func: &SSAFunction,
     graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
     slots: &SourceConventionSlots,
 ) -> Option<(CanonicalStorageId, crate::liveout::FunctionLiveOut)> {
-    result_register_written(func, graph, slots.float_result_slot()?, None)
+    // A lane a callee's unproven result may be in is a carrier, as a body's own write is (D212).
+    let float = slots.float_result_slot()?;
+    result_register_written(func, graph, float, Some(facts), (false, false))
 }
 
-/// `slot` and its live-out, where an operation of the body reaches a return there through any merge;
-/// with `stated`, so does a call whose complete boundary states its result there.
+/// `slot` and its live-out, where a body's operation, an `Undecided` lane (D212), a `stated` call's
+/// result or, with `unstated`, a call stating none reaches a return there through any merge.
 fn result_register_written(
     func: &SSAFunction,
     graph: &SsaGraph,
     float: CanonicalStorageId,
-    stated: Option<&crate::semantic::PreparedFunctionFacts>,
+    facts: Option<&crate::semantic::PreparedFunctionFacts>,
+    (stated, unstated): (bool, bool),
 ) -> Option<(CanonicalStorageId, crate::liveout::FunctionLiveOut)> {
     let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[float]);
     let mut seen = crate::dense::IdSet::default();
@@ -1110,8 +1124,11 @@ fn result_register_written(
                 pending.extend(graph.inputs(inst.id).iter().copied())
             }
             crate::graph::InstPayload::Op(crate::op::SSAOp::CallDefine { .. }) => {
-                let stated = stated.map(|facts| returned_by_call(graph, facts, value));
-                if stated == Some(ReturnedByCall::Stated) {
+                let by = facts.map(|facts| returned_by_call(graph, facts, value));
+                if (stated && by == Some(ReturnedByCall::Stated))
+                    || matches!(by, Some(ReturnedByCall::Undecided(_)))
+                    || (unstated && matches!(by, Some(ReturnedByCall::Unstated(_))))
+                {
                     return Some((float, live_out));
                 }
             }
@@ -1223,7 +1240,7 @@ fn call_supply(
         ReturnedByCall::Stated | ReturnedByCall::Produced => {
             return (!unstated_only).then_some(SourceResultCause::Written);
         }
-        ReturnedByCall::Unstated(id) => id,
+        ReturnedByCall::Unstated(id) | ReturnedByCall::Undecided(id) => id,
     };
     let call = facts.call_sites.by_id.get(&id)?;
     let statement =
@@ -1338,8 +1355,10 @@ fn recovered_result_over(
     for value in live_out.iter() {
         match returned_by_call(graph, facts, value) {
             ReturnedByCall::Void => continue,
-            ReturnedByCall::Unstated(_) if skip_unstated => continue,
-            ReturnedByCall::Unstated(_) => return RecoveredFunctionResult::Unproven,
+            ReturnedByCall::Unstated(_) | ReturnedByCall::Undecided(_) if skip_unstated => continue,
+            ReturnedByCall::Unstated(_) | ReturnedByCall::Undecided(_) => {
+                return RecoveredFunctionResult::Unproven;
+            }
             ReturnedByCall::Produced | ReturnedByCall::Stated => {}
         }
         let Some(storage) = graph.value(value).and_then(|value| value.canonical_storage) else {
@@ -1567,7 +1586,7 @@ fn recover_interface_inner(
         return Ok(None);
     }
 
-    let tail = match tail_result_storage(&facts) {
+    let tail = match tail_result_storage(func, &facts, slots) {
         TailResult::NoTailBoundary => TailResult::NoTailBoundary,
         TailResult::Exact(result) => TailResult::Exact(result),
         // The body hands control to a callee it names nothing about, and
@@ -1583,9 +1602,7 @@ fn recover_interface_inner(
         // the other; the convention gives both the same result register, so
         // the arm that writes it says what the function returns. An import
         // thunk has no such arm and still refuses.
-        TailResult::Unproven
-            if direct_return_result(func, graph, &facts, slots.result_slot()).is_some() =>
-        {
+        TailResult::Unproven if direct_return_result(func, graph, &facts, slots).is_some() => {
             let slot = slots.result_slot();
             r2il::refusal_evidence!(
                 "interface-recovery",
@@ -1622,7 +1639,10 @@ fn recover_interface_inner(
     // Why the direct returns beside void tails leave the result unproven, where they do.
     let mut beside_void_tails = None;
     let mut result = match tail {
-        TailResult::Unproven => RecoveredFunctionResult::Unproven,
+        // A group states no exact tail result (`stated_result`).
+        TailResult::Unproven | TailResult::Exact(SourceCallResult::Unproven { .. }) => {
+            RecoveredFunctionResult::Unproven
+        }
         // The tail callee's value is this function's, at the width the callee states.
         TailResult::Exact(SourceCallResult::Register {
             storage: slot,
@@ -1698,7 +1718,7 @@ fn recover_interface_inner(
         // A body that writes both result registers on its way out hands back one of them: the
         // callers' reads say which, where they agree (doc/adr-resolved-bodies.md, "Caller reads").
         if result.register().is_some()
-            && let Some((float, float_live_out)) = float_result_written(func, graph, slots)
+            && let Some((float, float_live_out)) = float_result_written(func, graph, &facts, slots)
         {
             let float_read = (closed.and_then(float_bytes)).map(|bytes| float_lane(float, bytes));
             match closed {
@@ -1737,7 +1757,7 @@ fn recover_interface_inner(
         if integer_unheld
             && let Some(float) = slots.float_result_slot()
             && let Some((float, float_live_out)) =
-                result_register_written(func, graph, float, Some(&facts))
+                result_register_written(func, graph, float, Some(&facts), (true, true))
         {
             match (closed.and_then(float_bytes)).map(|bytes| float_lane(float, bytes)) {
                 Some(observed) => {
@@ -1752,12 +1772,17 @@ fn recover_interface_inner(
                     float_returned = true;
                     applied = closed;
                 }
-                // A written float lane is a carrier no read decided: never void (D200).
+                // A written float lane is a carrier no read decided: never void (D200). One an unstated
+                // call fills is that call's (`result_calls`).
                 None if result == RecoveredFunctionResult::Void => {
                     result = RecoveredFunctionResult::Unproven;
                     // What feeds the written lane is observed: its inputs are parameters.
                     candidate_live_out = float_live_out;
-                    result_causes.insert(SourceResultCause::Written);
+                    if result_register_written(func, graph, float, Some(&facts), (true, false))
+                        .is_some()
+                    {
+                        result_causes.insert(SourceResultCause::Written);
+                    }
                     result_carriers = Some(r2source::SourceResultCarriers {
                         integer: candidate,
                         float: Some(float),
@@ -1854,10 +1879,7 @@ fn recover_interface_inner(
         && result == RecoveredFunctionResult::Void
         && let Some(float) = slots.float_result_slot()
     {
-        let tails = (facts.call_sites.by_id.values())
-            .filter(|call| call.transfer == crate::CallSiteTransfer::TailCall)
-            .filter_map(|call| graph.block_addr_of(call.at))
-            .collect::<BTreeSet<_>>();
+        let tails = owned_tail_blocks(func, graph, &facts, float);
         let float_live_out =
             crate::liveout::FunctionLiveOut::compute(func, graph, &[float]).without(&tails);
         // A path that never writes the lane reaches the entry unresolved, or through a merge's arm.
@@ -2302,7 +2324,7 @@ fn recover_interface_inner(
     };
     let unproven_result = match result {
         RecoveredFunctionResult::Unproven => {
-            let calls = result_calls(func, graph, &facts, slots.result_slot(), tail_unproven);
+            let calls = result_calls(func, graph, &facts, slots, tail_unproven);
             result_causes.extend(calls);
             if result_causes.is_empty() {
                 result_causes.insert(SourceResultCause::Undefined);
@@ -2594,7 +2616,7 @@ fn result_calls(
     func: &SSAFunction,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
-    slot: Option<CanonicalStorageId>,
+    slots: &SourceConventionSlots,
     tails_unproven: bool,
 ) -> BTreeSet<SourceResultCause> {
     let named = |call: &crate::semantic::CallSiteFact| {
@@ -2603,11 +2625,9 @@ fn result_calls(
     };
     let unstated = |call: &crate::semantic::CallSiteFact| {
         let boundary = facts.boundaries.calls.get(&call.id);
-        !boundary
-            .is_some_and(|boundary| boundary.results_complete && boundary.result_kind.is_some())
+        !boundary.is_some_and(|boundary| stated_result(boundary, slots).is_some())
     };
-    let tails = facts.call_sites.by_id.values();
-    let tails = tails.filter(|call| call.transfer == crate::CallSiteTransfer::TailCall);
+    let tails = owned_tails(func, facts, slots);
     let mut causes: BTreeSet<SourceResultCause> = tails
         .filter(|call| unstated(call))
         .map(|call| SourceResultCause::Tailed(named(call)))
@@ -2615,15 +2635,16 @@ fn result_calls(
     if tails_unproven && causes.is_empty() {
         causes.insert(SourceResultCause::TailsDisagree);
     }
-    let Some(slot) = slot else {
-        return causes;
-    };
-    let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]);
-    for value in live_out.iter() {
-        if let ReturnedByCall::Unstated(id) = returned_by_call(graph, facts, value)
-            && let Some(call) = facts.call_sites.by_id.get(&id)
-        {
-            causes.insert(SourceResultCause::Returned(named(call)));
+    let lanes = [slots.result_slot(), slots.float_result_slot()];
+    for slot in lanes.into_iter().flatten() {
+        let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]);
+        for value in live_out.iter() {
+            if let ReturnedByCall::Unstated(id) | ReturnedByCall::Undecided(id) =
+                returned_by_call(graph, facts, value)
+                && let Some(call) = facts.call_sites.by_id.get(&id)
+            {
+                causes.insert(SourceResultCause::Returned(named(call)));
+            }
         }
     }
     causes
@@ -2686,16 +2707,10 @@ fn direct_return_result(
     func: &SSAFunction,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
-    candidate: Option<CanonicalStorageId>,
+    slots: &SourceConventionSlots,
 ) -> Option<CanonicalStorageId> {
-    let candidate = candidate?;
-    let tail_blocks = facts
-        .call_sites
-        .by_id
-        .values()
-        .filter(|call| call.transfer == crate::CallSiteTransfer::TailCall)
-        .filter_map(|call| graph.block_addr_of(call.at))
-        .collect::<BTreeSet<_>>();
+    let candidate = slots.result_slot()?;
+    let tail_blocks = owned_tail_blocks(func, graph, facts, candidate);
     if tail_blocks.is_empty() {
         return None;
     }
@@ -2734,10 +2749,7 @@ fn joined_with_direct_returns(
     facts: &crate::semantic::PreparedFunctionFacts,
     (slot, narrow): (CanonicalStorageId, CanonicalStorageId),
 ) -> CanonicalStorageId {
-    let tails = (facts.call_sites.by_id.values())
-        .filter(|call| call.transfer == crate::CallSiteTransfer::TailCall)
-        .filter_map(|call| graph.block_addr_of(call.at))
-        .collect::<BTreeSet<_>>();
+    let tails = owned_tail_blocks(func, graph, facts, slot);
     let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]).without(&tails);
     if live_out.unresolved_blocks().next().is_some() {
         return slot;
@@ -2772,10 +2784,7 @@ fn direct_returns_beside_void_tails(
     let Some(slot) = slots.result_slot() else {
         return (RecoveredFunctionResult::Void, None);
     };
-    let tails = (facts.call_sites.by_id.values())
-        .filter(|call| call.transfer == crate::CallSiteTransfer::TailCall)
-        .filter_map(|call| graph.block_addr_of(call.at))
-        .collect::<BTreeSet<_>>();
+    let tails = owned_tail_blocks(func, graph, facts, slot);
     let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]).without(&tails);
     let entry_undefined = entry_defines_nothing(graph, slots, slot);
     let untouched = live_out.unresolved_blocks().next().is_some()
@@ -2798,18 +2807,53 @@ fn direct_returns_beside_void_tails(
     (recovered_result_over(&returns, slot, false), None)
 }
 
-fn tail_result_storage(facts: &crate::semantic::PreparedFunctionFacts) -> TailResult {
-    let mut results = facts
-        .call_sites
-        .by_id
-        .values()
+/// The tail transfers that own the result: every one but a tail to a callee that leaves each result
+/// lane as it found it (D212), whose block hands back what reaches it, as a return does.
+fn owned_tails<'f>(
+    func: &'f SSAFunction,
+    facts: &'f crate::semantic::PreparedFunctionFacts,
+    slots: &'f SourceConventionSlots,
+) -> impl Iterator<Item = &'f crate::semantic::CallSiteFact> + 'f {
+    let lanes = [
+        slots.result_slot(),
+        slots.float_result_slot(),
+        slots.second_result_slot(),
+    ];
+    let passes = move |target: u64| {
+        (lanes.iter().flatten()).all(|lane| func.call_passes(target, *lane))
+            && lanes.iter().any(Option::is_some)
+    };
+    (facts.call_sites.by_id.values())
         .filter(|call| call.transfer == crate::CallSiteTransfer::TailCall)
+        .filter(move |call| !call.direct_target.is_some_and(passes))
+}
+
+/// The blocks that leave by a tail transfer whose callee may change `lane`; one that passes it
+/// hands it back as a return does (`liveout::passing_tail`).
+fn owned_tail_blocks(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    lane: CanonicalStorageId,
+) -> BTreeSet<u64> {
+    (facts.call_sites.by_id.values())
+        .filter(|call| call.transfer == crate::CallSiteTransfer::TailCall)
+        .filter(|call| !(call.direct_target).is_some_and(|target| func.call_passes(target, lane)))
+        .filter_map(|call| graph.block_addr_of(call.at))
+        .collect()
+}
+
+fn tail_result_storage(
+    func: &SSAFunction,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    slots: &SourceConventionSlots,
+) -> TailResult {
+    let mut results = owned_tails(func, facts, slots)
         .map(|call| {
-            let boundary = facts.boundaries.calls.get(&call.id)?;
             // What the tail callee returns is the prototype's claim, and an
             // argument count the body cannot prove -- a variadic import thunk
             // forwards a tail it never sees -- says nothing about the result.
-            boundary.results_complete.then_some(boundary.result_kind?)
+            stated_result(facts.boundaries.calls.get(&call.id)?, slots)
         })
         .peekable();
     if results.peek().is_none() {
@@ -2836,6 +2880,20 @@ fn tail_result_storage(facts: &crate::semantic::PreparedFunctionFacts) -> TailRe
         };
     }
     TailResult::Exact(first)
+}
+
+/// What a call's complete boundary states it returns, where no float lane it states nothing of may
+/// hold its result instead (D212).
+fn stated_result(
+    boundary: &crate::semantic::SourceCallBoundaryFact,
+    slots: &SourceConventionSlots,
+) -> Option<SourceCallResult> {
+    let float = slots.float_result_slot();
+    let open = (boundary.unstated_lanes.iter())
+        .any(|lane| float.is_some_and(|float| overlaps(*lane, float)));
+    let result = boundary.result_kind?;
+    let grouped = matches!(result, SourceCallResult::Unproven { .. });
+    (boundary.results_complete && !open && !grouped).then_some(result)
 }
 
 /// The width of a register storage, where it is one an integer type can have.
@@ -3315,6 +3373,69 @@ fn with_stacked_return(
     }
 }
 
+/// The lanes of a call to a callee whose result is unproven (D212): what the call states, and the
+/// lanes left `Unproven`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CallLanes {
+    pub(crate) result: SourceCallResult,
+    pub(crate) unproven: Vec<CanonicalStorageId>,
+}
+
+/// Each lane of `results` at a call to `callee`, default deny: `PassThrough`, `None` or `Unproven`;
+/// `Void` needs no `Unproven` lane (doc/adr-call-boundary.md, "S16 as built").
+pub(crate) fn call_lanes(
+    callee: &SourceFunctionInterface,
+    passes: Option<&BTreeSet<CanonicalStorageId>>,
+    results: &[CanonicalStorageId],
+) -> Option<CallLanes> {
+    let carriers = callee.result_carriers()?;
+    let passed = |lane| passes.is_some_and(|kept| crate::semantic::covers(kept, lane));
+    let integer =
+        (!carriers.integer_undefined && !passed(carriers.integer)).then_some(carriers.integer);
+    let none = |lane: CanonicalStorageId| {
+        carriers.integer_undefined
+            && [Some(carriers.integer), carriers.second]
+                .into_iter()
+                .flatten()
+                .any(|held| overlaps(held, lane))
+    };
+    let float = carriers.float.filter(|float| !passed(*float));
+    if integer.is_some() && carriers.second.is_some_and(|second| !passed(second)) {
+        return None;
+    }
+    let unproven = |result: SourceCallResult| {
+        let stated = |lane: CanonicalStorageId| result.storages().any(|held| overlaps(held, lane));
+        let lanes = results.iter().copied().chain(carriers.float);
+        (lanes.chain([carriers.integer]))
+            .filter(|lane| !stated(*lane) && !passed(*lane) && !none(*lane))
+            .collect::<BTreeSet<_>>()
+    };
+    let result = match (integer, float) {
+        // Two written carriers stay one unproven group: no constructor picks one.
+        (Some(integer), Some(float)) => SourceCallResult::Unproven { integer, float },
+        (Some(lane), None) | (None, Some(lane)) => SourceCallResult::register(lane),
+        (None, None) if !results.is_empty() && unproven(SourceCallResult::Void).is_empty() => {
+            SourceCallResult::Void
+        }
+        // An input handed back as found is the caller's own bytes in that register, as stated.
+        (None, None) if !carriers.integer_undefined => SourceCallResult::register(carriers.integer),
+        (None, None) => return None,
+    };
+    Some(CallLanes {
+        result,
+        unproven: unproven(result).into_iter().collect(),
+    })
+}
+
+/// The storages of the convention's result lanes; none without a model.
+pub(crate) fn convention_results(
+    model: Option<&r2source::ConventionModel>,
+) -> Vec<CanonicalStorageId> {
+    (model.into_iter())
+        .flat_map(|model| model.results.iter().map(|lane| lane.storage))
+        .collect()
+}
+
 /// Mint a call-site interface from an interface recovered for the callee.
 ///
 /// radare2 reports a prototype for a call only when it has one. For a local
@@ -3335,6 +3456,8 @@ fn with_stacked_return(
 /// admission gates.
 pub fn mint_recovered_call_site_interface(
     callee: &SourceFunctionInterface,
+    passes: Option<&BTreeSet<CanonicalStorageId>>,
+    results: &[CanonicalStorageId],
     identity: SourceCallSiteIdentity,
     revision_identity: &[u8],
 ) -> Option<SourceCallSiteInterface> {
@@ -3379,12 +3502,9 @@ pub fn mint_recovered_call_site_interface(
             width: (callee.result_width()).unwrap_or(SourceResultWidth::whole(storage)),
         },
         SourceFunctionReturn::Pair { low, high } => SourceCallResult::Pair { low, high },
-        // A second carrier leaves which register is the result open: the call states none.
-        SourceFunctionReturn::Unproven => match callee.result_carriers() {
-            Some(carriers) if carriers.float.is_none() && carriers.second.is_none() => {
-                SourceCallResult::register(carriers.integer)
-            }
-            _ => {
+        SourceFunctionReturn::Unproven => match call_lanes(callee, passes, results) {
+            Some(lanes) => lanes.result,
+            None => {
                 r2il::refusal_evidence!(
                     "call-site-minting",
                     "the callee's result is unproven ({:?}), so its body describes no call contract",
@@ -3534,10 +3654,59 @@ mod tests {
             },
         );
         // The pair is the callee's: every call takes it, read whole or not (D62).
-        let site =
-            mint_recovered_call_site_interface(&interface, identity, b"pair").expect("a call site");
+        let site = mint_recovered_call_site_interface(&interface, None, &[], identity, b"pair")
+            .expect("a call site");
         assert_eq!(site.result(), SourceCallResult::Pair { low, high });
         assert_eq!(site.exact_callee_interface(), Some(&interface));
+    }
+
+    fn lane_interface(carriers: r2source::SourceResultCarriers) -> SourceFunctionInterface {
+        SourceFunctionInterface::new(
+            b"lanes".to_vec(),
+            AAPCS64,
+            [],
+            SourceFunctionReturn::Unproven,
+            [],
+        )
+        .expect("an unproven interface")
+        .with_result_carriers(carriers)
+    }
+
+    /// Each lane at a call, default deny (D212): `Void` only where every lane of the set passes or is
+    /// none, two written carriers one group, and with no lane set no `Void`.
+    #[test]
+    fn a_call_states_void_only_where_every_lane_passes_or_is_none() {
+        let (x0, x1, q0) = (register(0, 8), register(8, 8), register(0x5000, 16));
+        let handed_back = r2source::SourceResultCarriers {
+            integer: x0,
+            float: Some(q0),
+            second: None,
+            integer_undefined: true,
+        };
+        let callee = lane_interface(handed_back);
+        let every = BTreeSet::from([x0, x1, q0]);
+        let lanes = call_lanes(&callee, Some(&every), &[x0, x1, q0]).expect("lanes");
+        assert_eq!(lanes.result, SourceCallResult::Void);
+        assert!(lanes.unproven.is_empty());
+        // x1 may change and nothing proves it holds no value: no `Void`.
+        let some = BTreeSet::from([x0, q0]);
+        assert_eq!(call_lanes(&callee, Some(&some), &[x0, x1, q0]), None);
+        // No lane set: no `Void`.
+        assert_eq!(call_lanes(&callee, Some(&every), &[]), None);
+        // Two written carriers are one group: no lane is picked.
+        let written = r2source::SourceResultCarriers {
+            integer_undefined: false,
+            ..handed_back
+        };
+        let lanes = call_lanes(&lane_interface(written), None, &[x0, x1, q0]).expect("lanes");
+        assert_eq!(
+            lanes.result,
+            SourceCallResult::Unproven {
+                integer: x0,
+                float: q0
+            }
+        );
+        assert_eq!(lanes.unproven, vec![x1]);
     }
 
     fn call_boundary_with(
@@ -3803,6 +3972,8 @@ mod tests {
 
         let callsite = mint_recovered_call_site_interface(
             &interface,
+            None,
+            &[],
             SourceCallSiteIdentity::new(
                 0x2003,
                 CanonicalStorageId {
@@ -4008,7 +4179,8 @@ mod tests {
         assert_eq!(minted.return_kind(), SourceFunctionReturn::Unproven);
         // Nothing this body proves describes a call to it, arguments included.
         assert!(
-            mint_recovered_call_site_interface(&minted, identity, b"thunk-revision").is_none(),
+            mint_recovered_call_site_interface(&minted, None, &[], identity, b"thunk-revision")
+                .is_none(),
             "an unproven result cannot be a call site's exact contract"
         );
 

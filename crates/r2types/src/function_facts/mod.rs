@@ -1483,6 +1483,21 @@ impl FunctionFacts {
                 }
                 // A call that reads only a pair's first register takes that half alone.
                 (Some(result), _) if pair_callee => call_result_type(&signature.interface, result),
+                // A call that takes none of an unproven result's lanes still declares the callee's
+                // header: its carrier word, which the projection spells as the typedef (W46).
+                (Some(r2ssa::SourceCallResult::Void), CTypeLike::Unknown) => {
+                    (signature.unproven_bits).map(|bits| CTypeLike::Int {
+                        bits,
+                        signedness: crate::Signedness::Unsigned,
+                    })
+                }
+                // A group's carrier word, as the header spells it (D201).
+                (Some(r2ssa::SourceCallResult::Unproven { integer, .. }), CTypeLike::Unknown) => {
+                    Some(CTypeLike::Int {
+                        bits: integer.size.saturating_mul(8),
+                        signedness: crate::Signedness::Unsigned,
+                    })
+                }
                 (_, CTypeLike::Unknown) => {
                     site_result.and_then(|result| call_result_type(&signature.interface, result))
                 }

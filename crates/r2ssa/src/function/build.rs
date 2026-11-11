@@ -31,6 +31,7 @@ impl SSAFunction {
         Self {
             call_preserved_carriers: None,
             supervisor_calls: BTreeSet::new(),
+            callee_passes: Arc::default(),
             promoted_slots: std::collections::BTreeSet::new(),
             compiler_inserted: crate::dense::IdSet::default(),
             compiler_inserted_blocks: BTreeMap::new(),
@@ -201,6 +202,7 @@ impl SSAFunction {
         )?;
         phase("raw", func.num_blocks());
         func.call_preserved_carriers = call_preserved_carriers;
+        func.callee_passes = Arc::new(callees.preserved().clone());
         func.stack_pointer_carrier = stack_pointer_carrier;
         // Before preparation, so the arithmetic above the constant folds with it.
         func.forward_proven_call_return_addresses(callees);
@@ -572,6 +574,7 @@ impl SSAFunction {
             supervisor_calls: arch
                 .map(|arch| arch.supervisor_calls.iter().copied().collect())
                 .unwrap_or_default(),
+            callee_passes: Arc::default(),
             promoted_slots: std::collections::BTreeSet::new(),
             compiler_inserted: crate::dense::IdSet::default(),
             compiler_inserted_blocks: BTreeMap::new(),

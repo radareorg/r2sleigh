@@ -1925,6 +1925,7 @@ fn correlate_call_site_interfaces(
     source: &OwnedFunctionSnapshot,
     (blocks, calls): (&[R2ILBlock], &CallOperations),
     callee_interfaces: &BTreeMap<u64, SourceFunctionInterface>,
+    callees: &CalleeBoundaries,
 ) -> CorrelatedCallSites {
     let mut tail_calls = Vec::new();
     let mut interfaces = Vec::new();
@@ -1981,6 +1982,8 @@ fn correlate_call_site_interfaces(
             if let Some(mut interface) =
                 crate::recover_interface::mint_recovered_call_site_interface(
                     callee,
+                    callees.preserved().get(&call.target_address()),
+                    &crate::recover_interface::convention_results(source.convention()),
                     identity,
                     source.source_revision_identity(),
                 )
@@ -2391,8 +2394,6 @@ impl TrustedSsaArtifact {
         // coherence. Refusing here instead would suppress the whole function
         // for a fact the pipeline is built to carry.
         let calls = CallOperations::of(&blocks);
-        let correlated_call_sites =
-            correlate_call_site_interfaces(&source, (&blocks, &calls), callee_interfaces);
         // What each callee said about its own boundary, read once for every
         // pass that asks what a call to it does to the registers.
         let callees = CalleeBoundaries::from_interfaces(
@@ -2400,6 +2401,8 @@ impl TrustedSsaArtifact {
             callee_preserved_carriers,
             callee_interfaces,
         );
+        let correlated_call_sites =
+            correlate_call_site_interfaces(&source, (&blocks, &calls), callee_interfaces, &callees);
         // Every call target the source named, whether or not a prototype was
         // recovered for it: a name and a prototype are independent facts.
         let mut display_names = r2source::DisplayNames::new();
@@ -2591,6 +2594,8 @@ impl TrustedSsaArtifact {
                 if let Some(interface) =
                     crate::recover_interface::mint_recovered_call_site_interface(
                         own,
+                        None,
+                        &crate::recover_interface::convention_results(source.convention()),
                         identity,
                         source.source_revision_identity(),
                     )
@@ -2848,6 +2853,8 @@ pub struct SSAFunction {
     call_preserved_carriers: Option<SourceCallPreservedCarriers>,
     /// The user operations that enter the supervisor, as the lift names them.
     supervisor_calls: BTreeSet<u32>,
+    /// What each direct callee proves it leaves as found, less its result: a call to it passes those (D212).
+    callee_passes: Arc<CalleePreservedCarriers>,
     /// The lifted memory operations promotion took out of memory.
     ///
     /// A promoted slot access is a copy of a variable in the prepared
@@ -3268,6 +3275,7 @@ impl Clone for SSAFunction {
         Self {
             call_preserved_carriers: self.call_preserved_carriers,
             supervisor_calls: self.supervisor_calls.clone(),
+            callee_passes: Arc::clone(&self.callee_passes),
             promoted_slots: self.promoted_slots.clone(),
             compiler_inserted: self.compiler_inserted.clone(),
             compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
@@ -3806,6 +3814,11 @@ impl SSAFunction {
     }
 
     /// Whether this user operation enters the supervisor, whose kernel-written result no contract names.
+    /// Whether the direct callee at `target` leaves every byte of `storage` as it found it.
+    pub(crate) fn call_passes(&self, target: u64, storage: CanonicalStorageId) -> bool {
+        (self.callee_passes.get(&target)).is_some_and(|kept| crate::semantic::covers(kept, storage))
+    }
+
     pub fn enters_supervisor<V>(&self, op: &SSAOp<V>) -> bool {
         matches!(op, SSAOp::CallOther { userop, .. } if self.supervisor_calls.contains(userop))
     }
