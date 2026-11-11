@@ -210,7 +210,8 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
     identity = link.build_trampoline(config.cc, workdir, spec.address, target)
     builds, strict, skipped = link.build_rendering(config.cc, workdir, code, links, definition,
                                                    link.needed_libraries(str(binary), target),
-                                                   spec.address, config.compile_timeout, target)
+                                                   spec.address, config.compile_timeout, target,
+                                                   target.import_slots(binary))
     record.strict = strict
     if not identity.ok:
         record.status = "harness-error"

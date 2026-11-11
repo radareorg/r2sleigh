@@ -91,7 +91,8 @@ def links_into_body(links: list[dict], guard: tuple[int, int]) -> list[str]:
     return found
 
 
-def _shim_entries(links: list[dict], definition: str, target: Target = X86_64
+def _shim_entries(links: list[dict], definition: str, target: Target = X86_64,
+                  slots: frozenset[int] = frozenset()
                   ) -> tuple[list[tuple[str, str, int]], list[str]]:
     """``(ident, kind, address)`` of every function and object the shim defines,
     in identifier order; and what it skipped."""
@@ -116,7 +117,10 @@ def _shim_entries(links: list[dict], definition: str, target: Target = X86_64
         if not isinstance(address, int) or address <= 0:
             skipped.append(f"{ident}: no address")
             continue
-        if kind in ("function", "object"):
+        if kind == "function" and address in slots:
+            # r2s links a PE import called through `call [slot]` at its IAT slot.
+            kind = "slot"
+        if kind in ("function", "object", "slot"):
             entries.append((ident, str(kind), address))
     return entries, skipped
 
@@ -128,16 +132,19 @@ def shim_objects(links: list[dict], definition: str) -> list[tuple[str, int]]:
 
 
 def shim_source(links: list[dict], definition: str, entry: int | None = None,
-                target: Target = X86_64) -> tuple[str, list[str]]:
+                target: Target = X86_64, slots: frozenset[int] = frozenset()
+                ) -> tuple[str, list[str]]:
     """Assembly defining every linked function and object; and what it skipped.
 
     ``entry`` is the graded function's address: a function link there jumps to
     ``definition``.
     """
     lines = ["    .text"]
-    entries, skipped = _shim_entries(links, definition, target)
+    entries, skipped = _shim_entries(links, definition, target, slots)
     for ident, kind, address in entries:
-        if kind == "function" and address == entry:
+        if kind == "slot":
+            lines += target.asm.jump_through_slot(ident, address)
+        elif kind == "function" and address == entry:
             lines += target.asm.jump_to_symbol(ident, definition)
         elif kind == "function":
             lines += target.asm.jump_to_address(ident, address)
@@ -202,7 +209,8 @@ def needed_libraries(binary: str, target: Target = X86_64) -> tuple[str, ...]:
 
 def build_rendering(cc: str, workdir: Path, code: str, links: list[dict],
                     definition: str, needed: tuple[str, ...] = (), entry: int | None = None,
-                    timeout: float = COMPILE_TIMEOUT, target: Target = X86_64
+                    timeout: float = COMPILE_TIMEOUT, target: Target = X86_64,
+                    slots: frozenset[int] = frozenset()
                     ) -> tuple[dict[str, Built], str, list[str]]:
     """Compile a rendering four ways; returns the builds, the strict verdict, and skipped links.
 
@@ -218,7 +226,7 @@ def build_rendering(cc: str, workdir: Path, code: str, links: list[dict],
     workdir.mkdir(parents=True, exist_ok=True)
     source = "rendering.c"
     (workdir / source).write_text(code, encoding="utf-8")
-    shim, skipped = shim_source(links, definition, entry, target)
+    shim, skipped = shim_source(links, definition, entry, target, slots)
     shim_path = "shim.S"
     (workdir / shim_path).write_text(shim, encoding="utf-8")
     loader = []

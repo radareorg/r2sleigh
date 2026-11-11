@@ -76,7 +76,8 @@ baseline is blessed with `--write-baseline <path>`.
 PE32+ images that import UCRT (`/MD`) and carry a `/GS` cookie, mapped into a
 Linux process ([tests/equiv/README.md](../tests/equiv/README.md), "Win64"). No
 CI job runs it: it needs an xwin sysroot (632 MB) that the runners do not hold,
-so it is held by `tests/equiv/run_win64.sh` on an x86-64 Linux build host.
+so it is held by `tests/equiv/run_win64.sh` on an x86-64 Linux build host
+(`--measure instructions`; 483 records, 365 equal, about 510 s with `--jobs 2`).
 Setup, once per host (Ubuntu 24.04):
 
 ```bash

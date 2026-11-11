@@ -102,6 +102,46 @@ SUPPORT int printf(const char *format, ...)
     return written;
 }
 
+/* libgcc's helpers, which gcc calls under -mabi=ms with the 128-bit operands by reference:
+ * each forwards to libgcc_s's System V one. */
+static void *libgcc(const char *name)
+{
+    static void *handle;
+    void *volatile at[2] = { (void *)dlopen, (void *)dlsym };
+    if (!handle)
+        handle = ((dlopen_t)at[0])("libgcc_s.so.1", RTLD_NOW | RTLD_LOCAL);
+    return handle ? ((dlsym_t)at[1])(handle, name) : 0;
+}
+
+#define LIBGCC(result, name, ...)                                                               \
+    typedef result (__attribute__((sysv_abi)) *name##_t)(__VA_ARGS__);                         \
+    SUPPORT result name
+#define FORWARD(name, ...) return ((name##_t)libgcc(#name))(__VA_ARGS__)
+
+typedef __int128 ti;
+typedef unsigned __int128 uti;
+
+LIBGCC(ti, __divti3, ti, ti)(ti a, ti b) { FORWARD(__divti3, a, b); }
+LIBGCC(ti, __modti3, ti, ti)(ti a, ti b) { FORWARD(__modti3, a, b); }
+LIBGCC(uti, __udivti3, uti, uti)(uti a, uti b) { FORWARD(__udivti3, a, b); }
+LIBGCC(uti, __umodti3, uti, uti)(uti a, uti b) { FORWARD(__umodti3, a, b); }
+LIBGCC(ti, __divmodti4, ti, ti, ti *)(ti a, ti b, ti *r) { FORWARD(__divmodti4, a, b, r); }
+LIBGCC(uti, __udivmodti4, uti, uti, uti *)(uti a, uti b, uti *r) { FORWARD(__udivmodti4, a, b, r); }
+LIBGCC(int, __popcountti2, ti)(ti a) { FORWARD(__popcountti2, a); }
+LIBGCC(int, __parityti2, ti)(ti a) { FORWARD(__parityti2, a); }
+LIBGCC(int, __popcountdi2, long long)(long long a) { FORWARD(__popcountdi2, a); }
+LIBGCC(int, __paritydi2, long long)(long long a) { FORWARD(__paritydi2, a); }
+LIBGCC(double, __floattidf, ti)(ti a) { FORWARD(__floattidf, a); }
+LIBGCC(double, __floatuntidf, uti)(uti a) { FORWARD(__floatuntidf, a); }
+LIBGCC(float, __floattisf, ti)(ti a) { FORWARD(__floattisf, a); }
+LIBGCC(float, __floatuntisf, uti)(uti a) { FORWARD(__floatuntisf, a); }
+LIBGCC(ti, __fixdfti, double)(double a) { FORWARD(__fixdfti, a); }
+LIBGCC(uti, __fixunsdfti, double)(double a) { FORWARD(__fixunsdfti, a); }
+LIBGCC(ti, __fixsfti, float)(float a) { FORWARD(__fixsfti, a); }
+LIBGCC(uti, __fixunssfti, float)(float a) { FORWARD(__fixunssfti, a); }
+LIBGCC(double, __powidf2, double, int)(double a, int b) { FORWARD(__powidf2, a, b); }
+LIBGCC(float, __powisf2, float, int)(float a, int b) { FORWARD(__powisf2, a, b); }
+
 /* The ubsan variant defines EQUIV_UBSAN (link.py). */
 #if defined(EQUIV_UBSAN)
 typedef void (__attribute__((sysv_abi)) *handler)(uintptr_t, uintptr_t, uintptr_t, uintptr_t);

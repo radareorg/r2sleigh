@@ -7,4 +7,4 @@ r2s=${1:?usage: run_win64.sh <r2s> [run_equiv.py arguments]}
 shift
 : "${EQUIV_XWIN:?set EQUIV_XWIN to an xwin splat output}"
 exec python3 "$here/run_equiv.py" --target win64 --r2s "$r2s" \
-    --baseline "$here/baseline-win64.json" "$@"
+    --measure instructions --baseline "$here/baseline-win64.json" "$@"

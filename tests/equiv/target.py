@@ -29,10 +29,12 @@ three with its name (``aarch64-gcc-O0``, ``rt-aarch64``,
 
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shutil
 import signal
+import struct
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -193,6 +195,16 @@ class X86_64Assembly(Assembly):
             f"    jmp {definition}",
         ]
 
+    def jump_through_slot(self, symbol: str, slot: int) -> list[str]:
+        """A global function ``symbol`` that jumps to what the pointer at ``slot`` holds."""
+        return [
+            f"    .globl {symbol}",
+            f"    .type {symbol}, @function",
+            f"{symbol}:",
+            f"    movabs $0x{slot:x}, %r11",
+            "    jmp *(%r11)",
+        ]
+
     def stack_note(self) -> str:
         return '    .section .note.GNU-stack,"",@progbits'
 
@@ -317,6 +329,10 @@ class Target:
             if candidate.exists():
                 return str(candidate)
         return None
+
+    def import_slots(self, binary: Path) -> frozenset[int]:
+        """The addresses of a PE's import address table slots; none for an ELF."""
+        return pe_import_slots(str(binary)) if self.windows else frozenset()
 
     def debug_view(self, binary: Path) -> Path:
         """The file ``readelf`` reads ``binary``'s DWARF and symbols from.
@@ -444,6 +460,39 @@ AARCH64 = Target(
     asm=AArch64Assembly(),
     objects_through_loader=True,
 )
+
+
+@functools.lru_cache(maxsize=None)
+def pe_import_slots(path: str) -> frozenset[int]:
+    """Every IAT slot a PE32+'s import directory names, by its address (the loader binds each)."""
+    data = Path(path).read_bytes()
+    pe = struct.unpack_from("<I", data, 0x3C)[0]
+    count, optional_size = struct.unpack_from("<H", data, pe + 6)[0], struct.unpack_from(
+        "<H", data, pe + 20)[0]
+    optional = pe + 24
+    base = struct.unpack_from("<Q", data, optional + 24)[0]
+    directory = struct.unpack_from("<I", data, optional + 112 + 8)[0]
+    sections = [struct.unpack_from("<IIII", data, optional + optional_size + 40 * i + 8)
+                for i in range(count)]
+
+    def at(rva: int) -> int:
+        for vsize, start, raw_size, raw in sections:
+            if start <= rva < start + max(vsize, raw_size):
+                return raw + rva - start
+        raise ValueError(f"{path}: RVA 0x{rva:x} lies in no section")
+
+    slots: set[int] = set()
+    descriptor = directory
+    while directory:
+        names, _, _, name, first = struct.unpack_from("<IIIII", data, at(descriptor))
+        if not name and not first:
+            break
+        index = 0
+        while struct.unpack_from("<Q", data, at(names or first) + 8 * index)[0]:
+            slots.add(base + first + 8 * index)
+            index += 1
+        descriptor += 20
+    return frozenset(slots)
 
 
 def first_on_path(*names: str) -> str:

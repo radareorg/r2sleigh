@@ -900,6 +900,10 @@ class TargetTests(unittest.TestCase):
         self.assertNotIn("puts:", win64)
         elf, _ = link.shim_source(links, "sub_f", 0x401000, X86_64)
         self.assertNotIn("fwrite:", elf)
+        # r2s links an import called through `call [slot]` at the slot: the jump reads the slot.
+        slot = [{"ident": "vfprintf", "kind": "function", "addr": 0x1400056D0}]
+        through, _ = link.shim_source(slot, "sub_f", 0x140001000, WIN64, frozenset({0x1400056D0}))
+        self.assertIn("vfprintf:\n    movabs $0x1400056d0, %r11\n    jmp *(%r11)\n", through)
 
     def test_the_job_header_carries_the_measure_and_a_64_bit_budget(self):
         # struct job_header in rt/equiv_rt.c: 88 bytes, the budget a u64 since
@@ -1721,6 +1725,7 @@ class Win64BuildTests(unittest.TestCase):
                                      capture_output=True, text=True, check=True).stdout
             dwarf = Dwarf.read(binary.unstripped, WIN64)
             cookie = _security_cookie(binary.unstripped)
+            slots = WIN64.import_slots(binary.unstripped)
         sections = [line.split()[1:4] for line in headers[1].splitlines()
                     if line.strip()[:1].isdigit()]
         self.assertTrue(sections)
@@ -1732,6 +1737,7 @@ class Win64BuildTests(unittest.TestCase):
         self.assertIsNotNone(cookie)
         functions = {s.name: s for s in dwarf.subprograms() if s.name}
         self.assertGreater(functions["st_add"].size, 0)
+        self.assertTrue(slots)
 
 
 class _PipelineCases(_OnTarget):

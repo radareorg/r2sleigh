@@ -1,0 +1,2006 @@
+{
+ "cost": {
+  "budget": 4000000000,
+  "measure": "instructions"
+ },
+ "note": "Win64 (run_equiv.py --target win64, tests/equiv/run_win64.sh): clang-cl 18.1 /MD /GS PEs mapped into the Linux runtime. Blessed from the first full run of the s17 base r2s (9f924f196) on an x86-64 Ubuntu 24.04 host, measure instructions, after reading the records; a cause in brackets names the owner. No CI job runs this target: the runners hold no xwin sysroot.",
+ "records": {
+  "tests/corpus/branchy.c::win64-clang-cl-O0::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::_snprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::_vfprintf_l": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::_vsnprintf": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::_vsnprintf_l": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::_vsprintf_l": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::addr_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::affine_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::and_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::and_chain_effect": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::bool_relay": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::bounded_fetch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::constant_branch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::elem_at": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::elem_before": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::gate_one": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::gate_three": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::global_eq_guard": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::half_stride": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::inverted_goto": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::inverted_guard": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::inverted_void": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::main": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::mask_probe": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::narrow64": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::narrow8": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::opaque_self_xor": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::paired_sum_diff": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::printf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::pure_zero_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::rec_index": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::rec_spread": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::rec_write": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::sign_xor": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::slot_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::sprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::tail_guard": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::triple_temp": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::typed_compete": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::vsprintf": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::wide_tail": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::widen_pair": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O0::zero_of": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::addr_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::affine_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::and_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::and_chain_effect": {
+   "cause": "[P7, result proof] The source returns void or the result carrier is unproven, so the rendered return is a counted residual that traps where it would be read.",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::bool_relay": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::bounded_fetch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::constant_branch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::elem_at": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::elem_before": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::gate_one": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::gate_three": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::global_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::half_stride": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::inverted_goto": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::inverted_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::inverted_void": {
+   "cause": "[P7, result proof] The source returns void or the result carrier is unproven, so the rendered return is a counted residual that traps where it would be read.",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::main": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::mask_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::narrow64": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::narrow8": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::opaque_self_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::paired_sum_diff": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::printf": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 4 unaccounted (live-value-producer at 0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::pure_zero_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::rec_index": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::rec_spread": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::rec_write": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::sign_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::slot_eq_guard": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::tail_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::triple_temp": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::typed_compete": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::wide_tail": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O1::widen_pair": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::addr_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::affine_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::and_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::and_chain_effect": {
+   "cause": "[P7, result proof] The source returns void or the result carrier is unproven, so the rendered return is a counted residual that traps where it would be read.",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::bool_relay": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::bounded_fetch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::constant_branch": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::elem_at": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::elem_before": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::gate_one": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::gate_three": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::global_eq_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::half_stride": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::inverted_goto": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::inverted_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::inverted_void": {
+   "cause": "[P7, result proof] The source returns void or the result carrier is unproven, so the rendered return is a counted residual that traps where it would be read.",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::main": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::mask_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::narrow64": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::narrow8": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::opaque_self_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::paired_sum_diff": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::printf": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 4 unaccounted (live-value-producer at 0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::pure_zero_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::rec_index": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::rec_spread": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::rec_write": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::sign_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::slot_eq_guard": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::tail_guard": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::triple_temp": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::typed_compete": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::wide_tail": {
+   "status": "equal"
+  },
+  "tests/corpus/branchy.c::win64-clang-cl-O2::widen_pair": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::_snprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::_vfprintf_l": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::_vsnprintf": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::_vsnprintf_l": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::_vsprintf_l": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::adler32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::combined": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::crc32_bitwise": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::crc32_init": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::crc32_table": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::djb2": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::fletcher32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::fnv1a32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::fnv1a64": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::main": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::murmur3_32": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 1 unaccounted (live-value-producer at 0x:phi:Register:0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::pearson": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::printf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::rotl32": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::sdbm": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::siphash24": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::sprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::unaligned_words": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::vsprintf": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O0::xxhash32": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 3 unaccounted (loop-carried-state at 0x:phi:Register:0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::adler32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::combined": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::crc32_bitwise": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::crc32_init": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::crc32_table": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::djb2": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::fletcher32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::fnv1a32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::fnv1a64": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::main": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::murmur3_32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::pearson": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::printf": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 4 unaccounted (live-value-producer at 0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::sdbm": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::siphash24": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::unaligned_words": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O1::xxhash32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::adler32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::combined": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::crc32_bitwise": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::crc32_init": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u128 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::crc32_table": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::djb2": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::fletcher32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::fnv1a32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::fnv1a64": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::main": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::murmur3_32": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::pearson": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::printf": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 4 unaccounted (live-value-producer at 0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::sdbm": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::siphash24": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::unaligned_words": {
+   "status": "equal"
+  },
+  "tests/corpus/hashes.c::win64-clang-cl-O2::xxhash32": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::_snprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::_vfprintf_l": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::_vsnprintf": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::_vsnprintf_l": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::_vsprintf_l": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::indirect_load": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::indirect_store": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::main": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::mixed_fold": {
+   "cause": "[gate-limitation] An aggregate passed or returned by value: spec.py marks every by-value aggregate unsupported, so the thunk never builds one under Microsoft x64.",
+   "owner": "GT",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::mixed_from": {
+   "cause": "[gate-limitation] An aggregate passed or returned by value: spec.py marks every by-value aggregate unsupported, so the thunk never builds one under Microsoft x64.",
+   "owner": "GT",
+   "reason": "an aggregate return (struct mixed)",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::mixed_touch": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::op_add": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::op_mul": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::op_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::printf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_bool_caller": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_bool_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_byte_indexed_buffer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_call_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_function_pointer": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 3 unaccounted (loop-carried-state at 0x:phi:Register:0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_multiword_return": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_mutual_even": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_mutual_odd": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_pointer_to_pointer": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 3 unaccounted (loop-carried-state at 0x:phi:Register:0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_recurse_direct": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_recurse_mutual": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_signed_divmod": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_stack_buffer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_stash": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_step": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_struct_array": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_struct_pointer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_struct_value": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_variadic": {
+   "cause": "[P4, Win64 stack arguments] shape_variadic calls UCRT's inline snprintf with five or more arguments; the rendering stores the stack arguments into its own frame array and passes four registers, so the callee reads whatever lies past the real home area and -O0 and -O2 disagree.",
+   "owner": "P4",
+   "reason": "-O0 and -O2 builds disagree return",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "ub"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::shape_variadic_local": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::snprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::sprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::vfold": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::vsnprintf": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::vsprintf": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O0::wide_make": {
+   "cause": "[gate-limitation] An aggregate passed or returned by value: spec.py marks every by-value aggregate unsupported, so the thunk never builds one under Microsoft x64.",
+   "owner": "GT",
+   "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::indirect_load": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::indirect_store": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::main": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::mixed_fold": {
+   "cause": "[gate-limitation] An aggregate passed or returned by value: spec.py marks every by-value aggregate unsupported, so the thunk never builds one under Microsoft x64.",
+   "owner": "GT",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::mixed_touch": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::op_add": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::op_mul": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::op_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::printf": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 4 unaccounted (live-value-producer at 0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_bool_caller": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_bool_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_byte_indexed_buffer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_call_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_function_pointer": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_multiword_return": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_mutual_even": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_mutual_odd": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_pointer_to_pointer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_recurse_direct": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_recurse_mutual": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_signed_divmod": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_stack_buffer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_stash": {
+   "cause": "[P7, result proof] The source returns void or the result carrier is unproven, so the rendered return is a counted residual that traps where it would be read.",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_step": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_struct_array": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_struct_pointer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_struct_value": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_variadic": {
+   "cause": "[P4, Win64 stack arguments] shape_variadic calls UCRT's inline snprintf with five or more arguments; the rendering stores the stack arguments into its own frame array and passes four registers, so the callee reads whatever lies past the real home area and -O0 and -O2 disagree.",
+   "owner": "P4",
+   "reason": "-O0 and -O2 builds disagree return",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "ub"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::shape_variadic_local": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::snprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::vfold": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O1::wide_make": {
+   "cause": "[gate-limitation] An aggregate passed or returned by value: spec.py marks every by-value aggregate unsupported, so the thunk never builds one under Microsoft x64.",
+   "owner": "GT",
+   "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::indirect_load": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::indirect_store": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::main": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::mixed_fold": {
+   "cause": "[gate-limitation] An aggregate passed or returned by value: spec.py marks every by-value aggregate unsupported, so the thunk never builds one under Microsoft x64.",
+   "owner": "GT",
+   "reason": "parameter value: an aggregate passed by value (struct mixed)",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::mixed_touch": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::op_add": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::op_mul": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::op_xor": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::printf": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 4 unaccounted (live-value-producer at 0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_bool_caller": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_bool_probe": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_byte_indexed_buffer": {
+   "cause": "[P7, Win64 boundary] A value the rendering reads is neither assigned nor admitted as an argument at this Microsoft x64 boundary, so it stays a counted residual that traps.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 never-assigned",
+   "site": "crates/r2ssa/src/demand.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_call_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_function_pointer": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_multiword_return": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_mutual_even": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_mutual_odd": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_pointer_to_pointer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_recurse_direct": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_recurse_mutual": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_signed_divmod": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_stack_buffer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_stash": {
+   "cause": "[P7, result proof] The source returns void or the result carrier is unproven, so the rendered return is a counted residual that traps where it would be read.",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_step": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_struct_array": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_struct_pointer": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_struct_value": {
+   "status": "equal"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_variadic": {
+   "cause": "[P4, Win64 stack arguments] shape_variadic calls UCRT's inline snprintf with five or more arguments; the rendering stores the stack arguments into its own frame array and passes four registers, so the callee reads whatever lies past the real home area and -O0 and -O2 disagree.",
+   "owner": "P4",
+   "reason": "-O0 and -O2 builds disagree return",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "ub"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::shape_variadic_local": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::snprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::vfold": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/shapes.c::win64-clang-cl-O2::wide_make": {
+   "cause": "[gate-limitation] An aggregate passed or returned by value: spec.py marks every by-value aggregate unsupported, so the thunk never builds one under Microsoft x64.",
+   "owner": "GT",
+   "reason": "an aggregate return (struct wide)",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::_snprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::_vfprintf_l": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::_vsnprintf": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::_vsnprintf_l": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::_vsprintf_l": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::main": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::printf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::sprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_abs_minmax": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_arith_shift": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_byte_order": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_carry_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_count_bits": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_div_pow2": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_mul_high": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_narrow_wrap": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_overflow_flags": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_rotate": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_sign_extend": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_signed_compare": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::value_width_conflict": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O0::vsprintf": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::main": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::printf": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 4 unaccounted (live-value-producer at 0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_abs_minmax": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_arith_shift": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_byte_order": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u128 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_carry_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_count_bits": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_div_pow2": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_mul_high": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_narrow_wrap": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_overflow_flags": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_rotate": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_sign_extend": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u128 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_signed_compare": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O1::value_width_conflict": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::main": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::printf": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 4 unaccounted (live-value-producer at 0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_abs_minmax": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_arith_shift": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_byte_order": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_carry_chain": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_count_bits": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_div_pow2": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_mul_high": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_narrow_wrap": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_overflow_flags": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_rotate": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_sign_extend": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_signed_compare": {
+   "status": "equal"
+  },
+  "tests/corpus/values.c::win64-clang-cl-O2::value_width_conflict": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O0::cell_exchange": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O0::counter_next": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O0::flags_clear": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O0::flags_set": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O0::lock_try": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O0::parity_toggle": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O0::reference_release": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O0::slot_swap": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O0::ticket_take": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O0::total_add": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O1::cell_exchange": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O1::counter_next": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O1::flags_clear": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O1::flags_set": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O1::lock_try": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O1::parity_toggle": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O1::reference_release": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O1::slot_swap": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O1::ticket_take": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O1::total_add": {
+   "cause": "[P7, result proof] The source returns void or the result carrier is unproven, so the rendered return is a counted residual that traps where it would be read.",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O2::cell_exchange": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O2::counter_next": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O2::flags_clear": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O2::flags_set": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O2::lock_try": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O2::parity_toggle": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O2::reference_release": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O2::slot_swap": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O2::ticket_take": {
+   "status": "equal"
+  },
+  "tests/gold/atomics.c::win64-clang-cl-O2::total_add": {
+   "cause": "[P7, result proof] The source returns void or the result carrier is unproven, so the rendered return is a counted residual that traps where it would be read.",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O0::main": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O0::table_dispatch": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 3 unaccounted (loop-carried-state at 0x:phi:Register:0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O0::table_op_add": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O0::table_op_mul": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O0::table_op_xor": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O1::main": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O1::table_dispatch": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O1::table_op_add": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O1::table_op_mul": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O1::table_op_xor": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O2::main": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O2::table_dispatch": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O2::table_op_add": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O2::table_op_mul": {
+   "status": "equal"
+  },
+  "tests/gold/code_pointer_table.c::win64-clang-cl-O2::table_op_xor": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::win64-clang-cl-O0::addc": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::win64-clang-cl-O0::classify": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/flag_materialisation.c::win64-clang-cl-O0::gt": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/flag_materialisation.c::win64-clang-cl-O0::sum_carry": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::win64-clang-cl-O1::addc": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::win64-clang-cl-O1::classify": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::win64-clang-cl-O1::gt": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::win64-clang-cl-O1::sum_carry": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::win64-clang-cl-O2::addc": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::win64-clang-cl-O2::classify": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::win64-clang-cl-O2::gt": {
+   "status": "equal"
+  },
+  "tests/gold/flag_materialisation.c::win64-clang-cl-O2::sum_carry": {
+   "status": "equal"
+  },
+  "tests/gold/loop_carried.c::win64-clang-cl-O0::exchange_after_store": {
+   "status": "equal"
+  },
+  "tests/gold/loop_carried.c::win64-clang-cl-O0::spread": {
+   "status": "equal"
+  },
+  "tests/gold/loop_carried.c::win64-clang-cl-O1::exchange_after_store": {
+   "status": "equal"
+  },
+  "tests/gold/loop_carried.c::win64-clang-cl-O1::spread": {
+   "status": "equal"
+  },
+  "tests/gold/loop_carried.c::win64-clang-cl-O2::exchange_after_store": {
+   "status": "equal"
+  },
+  "tests/gold/loop_carried.c::win64-clang-cl-O2::spread": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O0::fnv_fold": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O0::main": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O0::mem_scan2": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O0::out_param_parse": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O0::sparse_switch": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O0::state_machine": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O0::struct_nested_array": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O0::table_walk": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O1::fnv_fold": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O1::main": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O1::mem_scan2": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O1::out_param_parse": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O1::sparse_switch": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O1::state_machine": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O1::struct_nested_array": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O1::table_walk": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O2::fnv_fold": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O2::main": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O2::mem_scan2": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u128 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O2::out_param_parse": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O2::sparse_switch": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O2::state_machine": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O2::struct_nested_array": {
+   "status": "equal"
+  },
+  "tests/gold/manual_limits.c::win64-clang-cl-O2::table_walk": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::_snprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::_vfprintf_l": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::_vsnprintf": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::_vsnprintf_l": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::_vsprintf_l": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::add": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::avg": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::bit_count": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::classify": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::copy_name": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::dispatch": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::fact": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::fill": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::find": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::list_len": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::main": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::mul_div": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::printf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::rotl": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::sext": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::sprintf": {
+   "cause": "[gate-limitation] A variadic definition (UCRT's inline printf, sprintf, _snprintf or the source's vfold): the thunk cannot know how many trailing arguments the callee reads (spec.py).",
+   "owner": "GT",
+   "reason": "variadic definition: the count of its trailing arguments is unknown",
+   "site": "tests/equiv/spec.py",
+   "status": "unsupported"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::sum_array": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O0::vsprintf": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::add": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::avg": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::bit_count": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::classify": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::copy_name": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::dispatch": {
+   "cause": "[P7, #122] The function tail-jumps through a pointer with no resolved target, an indirect branch that stays a residual trap.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnresolvedIndirectBranch",
+   "site": "crates/r2engine/src/body.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::fact": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u128 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::fill": {
+   "cause": "[P7, result proof] The source returns void or the result carrier is unproven, so the rendered return is a counted residual that traps where it would be read.",
+   "compared": "memory",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::find": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::list_len": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::main": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u128 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::mul_div": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::printf": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 4 unaccounted (live-value-producer at 0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::rotl": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::sext": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O1::sum_array": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::__local_stdio_printf_options": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::add": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::avg": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::bit_count": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::classify": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::copy_name": {
+   "cause": "[P7, Win64 calls] A call through a UCRT import slot with no declaration, or to a local body whose arity is only a floor, is not rendered; its residual traps where the call would run.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::dispatch": {
+   "cause": "[P7, #122] The function tail-jumps through a pointer with no resolved target, an indirect branch that stays a residual trap.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:UnresolvedIndirectBranch",
+   "site": "crates/r2engine/src/body.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::fact": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u128 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::fill": {
+   "cause": "[P7, Win64 boundary] A value the rendering reads is neither assigned nor admitted as an argument at this Microsoft x64 boundary, so it stays a counted residual that traps.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 unadmitted-argument",
+   "site": "crates/r2ssa/src/demand.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::find": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::list_len": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::main": {
+   "cause": "[P7, Win64 boundary] The rendering reads a register's entry value that the Microsoft x64 interface never states as a parameter (a home, an xmm6 to xmm15 save or a callee-saved register), so it is a counted residual that traps where it is read.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u128 held-from-entry",
+   "site": "crates/r2ssa/src/recover_interface.rs",
+   "status": "residual-trap"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::mul_div": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::printf": {
+   "cause": "[P7, effect accounting] r2ssa leaves effect obligations unaccounted in UCRT's inline printf family or a loop-carried state, so the function refuses, as S10 and S13 recorded for hello_gs.",
+   "owner": "P7",
+   "reason": "refused: r2sleigh refused fcn: native effect obligations refused: 0 refused, 4 unaccounted (live-value-producer at 0x), 0 conflicts",
+   "site": "crates/r2ssa/src/obligation.rs",
+   "status": "refused"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::rotl": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::sext": {
+   "status": "equal"
+  },
+  "tests/gold/review.c::win64-clang-cl-O2::sum_array": {
+   "status": "equal"
+  }
+ },
+ "schema": 3,
+ "toolchain": {
+  "clang-cl": "Ubuntu clang version 18.1.3 (1ubuntu1)"
+ }
+}
