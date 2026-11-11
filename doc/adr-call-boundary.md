@@ -1021,3 +1021,34 @@ Gates, debug r2s on `s10-win64` `505319748`, census rerun on `d8487d42d` and `05
 - Census: 14 goldens, 157 line pairs, proof lines only. 130 move the premise clause (119 "a call reads", 11 "no call reads"). 29 gain "1 unproven-return residual" (23) or "2 unproven-return residual" (6). Two lines take both. A script applied both transforms to the base goldens and matched the re-record in every line. Each residual count equals the `return ... r2sleigh_residual_uN(...)` lines below it, counting the casted `(uint64_t)r2sleigh_residual_u64(4)` in `__do_global_dtors_aux`. The one line left at "0 unproven-return carried" is rv_O2 `dispatch`, "no return reached", which holds no return.
 - Engine: `a_closed_world_read_states_its_premise_and_a_cold_render_stays_unproven` asserts "; a call reads the result (assuming closed-world)" and no "refused, a call". `an_aarch64_keep_is_never_void` asserts "0 unproven-return carried, 1 unproven-return residual" beside `return r2sleigh_residual_u64(1);`. Both fail on the old line.
 - Not run here: equivalence and certification. No C changes, so CI's runs grade them.
+
+## S15 as built (2026-11-11)
+
+D218 and D219, the 15 aarch64 equivalence records S7 left `residual-trap` (`unproven (EntryInput)`).
+
+Invariant: a call takes a vector register of a variadic tail unless its own format proves no floating operand; a lane is `void` only where every lane a body may hand back is dead at every call, the calls are every way in, and each forwarder's calls are too. A format the walk cannot fold, a refused parse, a `VaList`, scanf or wide kind keeps today's takes, so an unproven call never decides a lane.
+
+What the code said that this ADR did not, and the owner chosen:
+
+- D219 was already built. "The result side as built" asks every-way-in lazily (`Forwarded::DeadIfEveryWayIn`, `Sites::forwarders`), per lane, whatever the forwarder's own integer lane does. The row described S7's `exhaustive`, which D213 deleted. A probe build whose imports took no vector register decided all 15 `void`, the nine D219 records with them. S15 adds the test: `a_lane_forwarded_through_a_caller_whose_result_is_read_is_decided_per_lane`.
+- D218's owners, one each:
+  - r2abi states the tail (`Tail::Format { index, kind: Printf }`).
+  - r2engine `Placement::reads` states `ImportReads::format`: the format parameter's register and the tail's vector registers, only for a printf format placed whole where the convention has no count register. SysV keeps `al` (`Counted`).
+  - The site walk (`fates.rs` `Reading::formatted_sites`) folds the format register at each call with r2ssa `BlockOrigins::step_under` and the convention's `SourceCallEffect`, reads the text with `text_at` (static and unwritten), and parses it with r2ssa `printf.rs`, now public. A format with no floating conversion takes no tail vector register (`Effects::by_site`).
+- A call keeps a preserved register's constant: clang -O1 and -O2 build the format once in x21 and pass it to 15 `printf`s across other calls. The SSA format reader rests on the same convention fact for those calls.
+- `strlen` and `memcpy` move from radare2's table to the cited ISO C17 table (7.24.6.3, 7.24.2.1), `Tail::None`. Uncited, each read every argument location, so review.c clang -O1 `fill`'s q0 reached `copy_name`'s `strlen` and stayed open.
+- Cost: one forward pass per block over a body that calls a printf-format import, O(ops); none otherwise.
+
+Not built:
+
+- shapes.c clang -O0 `shape_stash` and `mixed_touch`: `main` spills the format to `[sp, #8]` and reloads it before each `printf`. `BlockOrigins` tracks no frame slot, so the call takes q0 to q7 and both stay `residual-trap`. Proving the reload needs the frame slot unescaped across the calls between (D221).
+
+Gates, release r2s, base `505319748`:
+
+- The 15 records' `aa; pdd` on stripped aarch64 builds, read by hand: 13 print `void` with "no call reads the result (assuming closed-world)" and a bare `return;` (base: `r2sleigh_result_u64` and `return r2sleigh_residual_u64(1);`). Bodies are byte-identical. clang -O2 `inverted_void` stores 8 bytes at `0x420040`: clang merged `g_note` and `g_sink`.
+- Engine tests (`call_boundary.rs`, aarch64): `%d` is `void`, `%f` never, a format held in caller-saved x9 across a call never; the D219 forwarder above.
+- `mutants_d213.py`: 22 of 22 killed. Three D218 mutants join the 19: the per-site effect ignored, a float format read as float-free, a call keeping every register.
+- Certification, radare2 `test/bins/elf --limit 24 --functions 8`: 50 rendered, 30 refused, 0 invented, 0 dropped, at base and head.
+- Census: 2 goldens, 2 lines. x86-64 `fill` in `rv_O2` (`0x14c0`) and `rv_O0g_stripped` (`0x1391`) go from `unproven (Written)` to `unproven (Unread)`, "no call reads the result (assuming closed-world)": the cited `strlen` no longer takes RAX in `copy_name`. The C does not move.
+- Cost, release, instructions retired, median of three, base then head; output byte-identical: cold `pdd` 0pack `0x62ecf0` 15.37 to 15.37 G, pumasim `0x23fdf0` 19.86 to 19.85 G; bash `0x2e630` `aa; pdd` 14.30 to 14.33 G (+0.2%), under D153's 15.43 G. Peak footprint within run-to-run noise.
+- Dylint 8 warnings, the baseline. `comment_runs` adds no run. Structure counts equal the baseline.
