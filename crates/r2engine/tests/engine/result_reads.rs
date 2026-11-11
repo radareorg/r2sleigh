@@ -355,22 +355,25 @@ const A64_RETURNS_ITS_ARGUMENT: &[u8] = &[
     0xd5, // 101c padding
 ];
 
-/// An argument register handed back untouched is the result where every reading call reads it, and
-/// the return reads it as the parameter it is. With no call, nothing says so.
+/// An argument register handed back untouched stays unproven where a call reads it: under
+/// `-fipa-ra` a `void` callee that leaves x0 alone has the same bytes (result-side ADR, D228).
 #[test]
-fn an_argument_register_handed_back_untouched_is_the_result_callers_read() {
+fn an_argument_register_handed_back_untouched_stays_unproven_where_a_call_reads_it() {
     let program = |functions: &[(&'static str, u64, u64)]| {
         Literal::of_code(A64_RETURNS_ITS_ARGUMENT, functions).in_aarch64()
     };
-    let text = rendered(program(&[("f", BASE, 4), ("caller", BASE + 0x10, 0x0c)]));
-    assert!(text.contains("return (uint64_t)arg0;"), "{text}");
-    assert!(!text.contains("r2sleigh_residual"), "{text}");
-    let unread = rendered(program(&[("f", BASE, 4)]));
-    assert!(unread.contains("r2sleigh_residual_"), "{unread}");
+    for functions in [
+        &[("f", BASE, 4), ("caller", BASE + 0x10, 0x0c)][..],
+        &[("f", BASE, 4)],
+    ] {
+        let text = rendered(program(functions));
+        assert!(text.contains("unproven (EntryInput)"), "{text}");
+        assert!(!text.contains("return (uint64_t)arg0;"), "{text}");
+    }
 }
 
 /// AArch64 `fmov d0, #1.0; ret` hands x0 back untouched beside the float it writes, and a caller
-/// `bl f; str w0, [x1]` reads x0: the handed-back argument is the result.
+/// `bl f; str w0, [x1]` reads x0: no write of x0 proves a result there.
 const A64_FLOAT_BESIDE_ITS_ARGUMENT: &[u8] = &[
     0x00, 0x10, 0x6e, 0x1e, // 1000 fmov d0, #1.0
     0xc0, 0x03, 0x5f, 0xd6, // 1004 ret
@@ -383,15 +386,15 @@ const A64_FLOAT_BESIDE_ITS_ARGUMENT: &[u8] = &[
 ];
 
 #[test]
-fn an_argument_handed_back_beside_a_written_float_is_the_result_callers_read() {
+fn an_argument_handed_back_beside_a_written_float_stays_unproven_where_a_call_reads_it() {
     let program = Literal::of_code(
         A64_FLOAT_BESIDE_ITS_ARGUMENT,
         &[("f", BASE, 8), ("caller", BASE + 0x10, 0x0c)],
     )
     .in_aarch64();
     let text = rendered(program);
-    assert!(text.contains("return (uint64_t)arg0;"), "{text}");
-    assert!(!text.contains("r2sleigh_residual"), "{text}");
+    assert!(text.contains("unproven (EntryInput)"), "{text}");
+    assert!(!text.contains("return (uint64_t)arg0;"), "{text}");
 }
 
 /// `mov rax, rdi; mov rdx, rsi; ret`, a 16-byte value returned in RDX:RAX, then

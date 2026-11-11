@@ -1679,8 +1679,6 @@ fn recover_interface_inner(
     let mut result_causes = BTreeSet::new();
     result_causes.extend(beside_void_tails);
     let mut live_out = crate::liveout::FunctionLiveOut::default();
-    // The argument register handed back untouched as the result, which the return reads.
-    let mut returned_argument = None;
     let mut result_carriers = None;
     let read = |lanes: r2source::SourceReadLanes| {
         closed == Some(r2source::SourceClosedResult::Read(lanes))
@@ -1753,7 +1751,6 @@ fn recover_interface_inner(
         // An integer register holding nothing the body computed leaves the float one, which the body
         // or a callee's stated result fills, as the result where every reading call reads it there.
         let integer_unheld = handed_back || result == RecoveredFunctionResult::Void;
-        let mut float_returned = false;
         if integer_unheld
             && let Some(float) = slots.float_result_slot()
             && let Some((float, float_live_out)) =
@@ -1769,7 +1766,6 @@ fn recover_interface_inner(
                     });
                     result_carriers = None;
                     candidate_live_out = float_live_out;
-                    float_returned = true;
                     applied = closed;
                 }
                 // A written float lane is a carrier no read decided: never void (D200). One an unstated
@@ -1800,29 +1796,6 @@ fn recover_interface_inner(
                     });
                 }
                 None => {}
-            }
-        }
-        // Where callers read the integer register beside a written float, the argument it hands back
-        // is still their result.
-        if !float_returned
-            && handed_back
-            && slots
-                .argument_slots()
-                .iter()
-                .any(|argument| argument.location() == candidate.location())
-        {
-            // An argument register the body hands back untouched is its result where every reading
-            // call reads it: AArch64's `ret` of a narrowing function returns its argument in x0.
-            if read(r2source::SourceReadLanes::Integer) {
-                result = RecoveredFunctionResult::Register(RecoveredResult {
-                    slot: candidate,
-                    observed: candidate,
-                    signed: false,
-                    float: false,
-                });
-                result_carriers = None;
-                returned_argument = Some(candidate);
-                applied = closed;
             }
         }
         // An integer result whose second register the body also writes on every return is one
@@ -1999,9 +1972,7 @@ fn recover_interface_inner(
     };
     let handed = passed_through_entry_storages(&facts.boundaries, graph, held);
     let observed_reads = |saved: Option<&crate::dense::IdSet<crate::ValueId>>| {
-        let mut reads = observed_entry_read_storages(func, graph, &observations, saved);
-        reads.extend(returned_argument.filter(|returned| !reads.contains(returned)));
-        reads
+        observed_entry_read_storages(func, graph, &observations, saved)
     };
     let mut observed = observed_reads(save_area.as_ref().map(|area| &area.saved));
     let read_at = |reads: &[CanonicalStorageId], slot: CanonicalStorageId| {
