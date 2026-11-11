@@ -16,6 +16,8 @@ use rustc_lint::{LateContext, LateLintPass, LintContext};
 
 dylint_linting::dylint_library!();
 
+mod convention_view;
+
 rustc_lint::declare_lint!(
     /// ### What it does
     ///
@@ -2331,8 +2333,12 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         SSA_CALL_CLASS_OUTSIDE_OP,
         EXHAUSTED_READ_THROUGH_SEALED_STAGE,
         TYPE_SPELLING_REPARSED,
+        convention_view::CONVENTION_VIEW_READ,
     ]);
     lint_store.register_late_lint_pass(Box::new(|_| Box::new(R2sleighLintPass)));
+    lint_store.register_late_lint_pass(Box::new(|_| {
+        Box::<convention_view::ConventionViewPass>::default()
+    }));
 }
 
 impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {

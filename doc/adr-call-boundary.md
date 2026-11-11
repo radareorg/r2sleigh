@@ -212,7 +212,7 @@ pub struct LaneSet { pub storage: CanonicalStorageId, pub bytes: Range<u8> }
   - `r2ssa::abi::AbiProfile`, read also by `interproc/mod.rs` and `interproc/dependence.rs`;
   - r2types `RegisterIdentity::argument_registers` (`register_identity.rs:24`);
   - d72's `CallingConvention.result_registers`.
-- During the item, the old contracts are read-only views of the model. `slot_promotion.rs:93`, `frame_reach.rs:146`, r2dec `values.rs:2672` and the two `interproc` readers keep compiling. The views are deleted at the item's exit.
+- During the item, the old contracts are read-only views of the model. `slot_promotion.rs:93`, `frame_reach.rs:146`, r2dec `values.rs:2672` and the two `interproc` readers keep compiling. The views are deleted at the item's exit (S34). Until then the Dylint `convention_view_read` (D309) denies a production reader outside its allowlist, 136 `(file, item)` pairs at D309, and the list only falls.
 - `ConventionModel::owner(offset)` is the one rule for the caller's region. It replaces three rules: `contracts.rs:562`, `function/mod.rs:1527` (`caller_frame_offset`, read also at `info.rs:357` and `caller_stack_slots.rs:37`) and `slot_promotion.rs:677`.
 
 ### Evidence (r2ssa)
@@ -497,6 +497,7 @@ Slice 0 is Order step 7: d70-gate and d75's follow-up land, each after its one s
 | S13 | Data rows: bionic, libstdc++ parameters from mangling with `Unproven` results, KERNEL32 once cited rows exist | r2abi | ls-toybox: 0 residuals at `__errno`, `__strchr_chk`, `__open_2`, `getline`, `_exit`, `dup2` (of 703). 0pack (7,621 sites) and pumasim (4,942): every mangled callee states its parameter count. hello_gs (98) and testapp (96): each cited KERNEL32 row's sites declared | none |
 
 | S14 | `CDataModel` per `(arch, CLibrary)` with citations; `ScalarKind::PlainChar`; `wchar_t` from the model | r2abi | The `-dM -E` conformance test per listed target. d71 round-7 probes: aarch64 `mkdir`, `strnlen`, `unlinkat`, `regexec`, `error_at_line` and `wcsdup` parameters never `int8_t*` or `int32_t*`. x86-64 output unmoved | the fixed `Signed` default for `char`, `named_scalar`'s `wchar_t` |
+| S34 | Delete the views: `SourceConventionSlots`, `SourceCallEffect` with `SourceBoundaryReads`, `RegisterIdentity::argument_registers`, the `callconv` and `calling_convention` strings (to `ConventionId`), `CalleeFact.signature_callconv`, `AdvisoryCallPrototype`, `reg_type_hints` | r2source, r2ssa, r2types, r2engine | `convention_view_read`'s allowlist empty; the lint goes with the views. Until S34, the lint (D309) holds the readers to 136 `(file, item)` pairs at most | the views and strings |
 
 S4 to S7 are P7's single signature item. S10 and S11 are P4 slices.
 

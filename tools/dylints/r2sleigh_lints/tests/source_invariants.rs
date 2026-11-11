@@ -27,7 +27,9 @@ use source::{View, file, production, workspace_root};
 #[test]
 fn every_lint_path_filter_names_a_live_path() {
     let lints = file("tools/dylints/r2sleigh_lints/src/lib.rs");
-    let paths = lints.view().literals_starting_with("crates/");
+    let allowlists = file("tools/dylints/r2sleigh_lints/src/convention_view.rs");
+    let mut paths = lints.view().literals_starting_with("crates/");
+    paths.extend(allowlists.view().literals_starting_with("crates/"));
     assert!(
         paths.len() > 10,
         "the lints' path filters were not found: {paths:?}"
