@@ -287,7 +287,7 @@ Owner: GT.
 - Gate: self-tests under fake costs pin each edge on every host (one tick past
   the allowance and at it, at four times the original, the floor, either side of
   `B/(k*k)`, by CPU time; twenty times; the original's guard), and one with no
-  fake has the CPU timer stop a spinning rendering as `slow`: 59 pass on x86-64
+  fake has the CPU timer stop a spinning rendering as `slow`: 60 pass on x86-64
   under both measures and on aarch64. Two runs of review.c and hashes.c per
   target on contabo, one alone and one beside six busy loops on its four cores,
   wrote the same `records.json` byte for byte (188 records each; 332 and 594 s
@@ -297,6 +297,8 @@ Owner: GT.
   the `-O2` build, where it named `-O0`. Its three vectors at n near 2^31 are
   graded on every run (45 equal, 3 slow), and gcc `-O2` and clang `-O1` `fact`
   grade all 48 vectors, where the ones past the old budget were dropped.
+- Win64 (`instructions`, not in CI): a full run under the rule graded 483
+  records and none moved, so `baseline-win64.json` states the factor.
 - Cost of the gate: a vector whose original costs `c` may take `54c` when every
   build is stopped. The driver's ceiling (`Config.driver_ceiling`) is every run
   at its guard, about two hours a vector at `B` = 1 s, so it no longer bounds a

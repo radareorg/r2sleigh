@@ -1,9 +1,10 @@
 {
  "cost": {
   "budget": 4000000000,
+  "factor": 4,
   "measure": "instructions"
  },
- "note": "Win64 (run_equiv.py --target win64, tests/equiv/run_win64.sh): clang-cl 18.1 /MD /GS PEs mapped into the Linux runtime. Blessed from the first full run of the s17 base r2s (9f924f196) on an x86-64 Ubuntu 24.04 host, measure instructions, after reading the records; a cause in brackets names the owner. No CI job runs this target: the runners hold no xwin sysroot.",
+ "note": "Win64 (run_equiv.py --target win64, tests/equiv/run_win64.sh): clang-cl 18.1 /MD /GS PEs mapped into the Linux runtime. Blessed from the first full run of the s17 base r2s (9f924f196) on an x86-64 Ubuntu 24.04 host, measure instructions, after reading the records; a cause in brackets names the owner. No CI job runs this target: the runners hold no xwin sysroot. Re-blessed at D339 (S39): cost is graded against each vector's original (factor 4); a full run of the same base r2s under the new rule graded 483 records and none moved.",
  "records": {
   "tests/corpus/branchy.c::win64-clang-cl-O0::__local_stdio_printf_options": {
    "status": "equal"
