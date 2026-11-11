@@ -47,6 +47,8 @@ pub enum Width {
     LongDouble,
     /// `wchar_t`'s, which the target's [`CDataModel`] states.
     WideChar,
+    /// The Linux kernel's `__kernel_mode_t`, bionic's `mode_t`: the target's [`CDataModel`] states it.
+    KernelMode,
 }
 
 /// What one scalar's bits mean.
@@ -542,7 +544,7 @@ fn scalar_spelling(scalar: &Scalar) -> String {
 fn bits_of(width: Width) -> u32 {
     match width {
         Width::Bits(bits) => bits,
-        Width::Long | Width::Pointer | Width::LongDouble | Width::WideChar => 0,
+        Width::Long | Width::Pointer | Width::LongDouble | Width::WideChar | Width::KernelMode => 0,
     }
 }
 

@@ -445,8 +445,8 @@ func.sigaction.arg.2=struct sigaction *,old_action
 func.sigaction.ret=int
 func.sigaction.include=signal.h
 
-# bionic <sys/stat.h>. mode_t's width is the target's (16 bits on 32-bit ARM and x86, 32 on the
-# 64-bit targets), which no type name here states.
+# bionic <sys/stat.h>. mode_t is the kernel's __kernel_mode_t: 16 bits on 32-bit ARM and x86, 32
+# on the 64-bit targets, read from the target's data model (`CDataModel::kernel_mode_bits`).
 mknod=func
 func.mknod.args=3
 func.mknod.arg.0=const char *,path

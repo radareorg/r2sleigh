@@ -195,3 +195,28 @@ fn a_rows_char_and_wchar_take_the_targets_sign() {
         Some("const char *".to_owned())
     );
 }
+
+/// Bionic's `mode_t` is the kernel's `__kernel_mode_t`: 16 bits on 32-bit Arm and x86, 32 on the
+/// 64-bit targets; glibc's is 32 everywhere and libSystem's 16.
+#[test]
+fn mode_t_takes_the_targets_kernel_width() {
+    let width = |library: CLibrary, triple: &str| {
+        let rows = r2abi::LibraryRows::embedded(library);
+        let mkdir = rows
+            .find(library.scope(), "mkdir")
+            .expect("mkdir is declared");
+        let ty = rows.prototype(mkdir).parameters[1].ty;
+        rows.graph().size_bits(ty, row(triple))
+    };
+    for (triple, bits) in [
+        ("x86_64-linux-android", 32),
+        ("i686-linux-android", 16),
+        ("aarch64-linux-android", 32),
+        ("armv7a-linux-androideabi", 16),
+    ] {
+        assert_eq!(width(CLibrary::Bionic, triple), Some(bits), "{triple}");
+    }
+    assert_eq!(width(CLibrary::Glibc, "i386-linux-gnu"), Some(32));
+    assert_eq!(width(CLibrary::LibSystem, "arm64-apple-darwin"), Some(16));
+    assert!(!r2abi::KERNEL_MODE_CITATION.is_empty());
+}

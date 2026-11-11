@@ -15,6 +15,8 @@ pub struct CDataModel {
     pub plain_char: Option<ScalarKind>,
     /// `wchar_t`'s sign and bits; `None` where no row states them.
     pub wide_char: Option<(ScalarKind, u32)>,
+    /// The bits of the Linux kernel's `__kernel_mode_t` here ([`KERNEL_MODE_CITATION`]); `None` where no row states it.
+    pub kernel_mode_bits: Option<u32>,
     /// The documents that state this row; empty for a model no row states.
     pub citation: &'static str,
 }
@@ -29,6 +31,7 @@ impl CDataModel {
             long_double_bits: None,
             plain_char: None,
             wide_char: None,
+            kernel_mode_bits: None,
             citation: "",
         }
     }
@@ -55,6 +58,7 @@ impl CDataModel {
             Width::Pointer => Some(self.pointer_bits),
             Width::LongDouble => self.long_double_bits,
             Width::WideChar => self.wide_char.map(|(_, bits)| bits),
+            Width::KernelMode => self.kernel_mode_bits,
         }
     }
 
@@ -81,20 +85,30 @@ const fn row(
         long_double_bits: None,
         plain_char: Some(plain_char),
         wide_char: Some(wide_char),
+        kernel_mode_bits: None,
         citation,
     }
 }
 
 use ScalarKind::{Signed, Unsigned};
 
-const SYSV_X86_64: CDataModel = row(
-    (64, 64),
-    Signed,
-    (Signed, 32),
-    "System V AMD64 psABI 1.0, section 3.1.2, Figure 3.1 \"Scalar Types\": char is a signed \
-     byte, long and pointers 8 bytes; wchar_t is int, the __WCHAR_TYPE__ of every \
-     x86-64 Linux, Android and Darwin compiler",
-);
+/// Where each row's `kernel_mode_bits` is read from.
+pub const KERNEL_MODE_CITATION: &str = "Linux include/uapi/asm-generic/posix_types.h: `typedef \
+    unsigned int __kernel_mode_t`, overridden to `unsigned short` by \
+    arch/x86/include/uapi/asm/posix_types_32.h and arch/arm/include/uapi/asm/posix_types.h; \
+    bionic libc/include/sys/types.h: `typedef __kernel_mode_t __mode_t; typedef __mode_t mode_t`";
+
+const SYSV_X86_64: CDataModel = CDataModel {
+    kernel_mode_bits: Some(32),
+    ..row(
+        (64, 64),
+        Signed,
+        (Signed, 32),
+        "System V AMD64 psABI 1.0, section 3.1.2, Figure 3.1 \"Scalar Types\": char is a signed \
+         byte, long and pointers 8 bytes; wchar_t is int, the __WCHAR_TYPE__ of every \
+         x86-64 Linux, Android and Darwin compiler",
+    )
+};
 
 const MICROSOFT_X64: CDataModel = row(
     (64, 32),
@@ -104,22 +118,28 @@ const MICROSOFT_X64: CDataModel = row(
      long is 4 bytes, wchar_t is unsigned short (2 bytes); x64 pointers are 8 bytes",
 );
 
-const SYSV_I386: CDataModel = row(
-    (32, 32),
-    Signed,
-    (Signed, 32),
-    "System V i386 psABI 1.1, \"Fundamental Types\": char is a signed byte, long and \
-     pointers 4 bytes; wchar_t is a 32-bit signed integer, the __WCHAR_TYPE__ of every \
-     i386 Linux and Android compiler",
-);
+const SYSV_I386: CDataModel = CDataModel {
+    kernel_mode_bits: Some(16),
+    ..row(
+        (32, 32),
+        Signed,
+        (Signed, 32),
+        "System V i386 psABI 1.1, \"Fundamental Types\": char is a signed byte, long and \
+         pointers 4 bytes; wchar_t is a 32-bit signed integer, the __WCHAR_TYPE__ of every \
+         i386 Linux and Android compiler",
+    )
+};
 
-const AAPCS64: CDataModel = row(
-    (64, 64),
-    Unsigned,
-    (Unsigned, 32),
-    "AAPCS64, \"Arm C and C++ language mappings\": char is an unsigned byte and wchar_t \
-     an unsigned int; LP64 makes long and pointers 8 bytes",
-);
+const AAPCS64: CDataModel = CDataModel {
+    kernel_mode_bits: Some(32),
+    ..row(
+        (64, 64),
+        Unsigned,
+        (Unsigned, 32),
+        "AAPCS64, \"Arm C and C++ language mappings\": char is an unsigned byte and wchar_t \
+         an unsigned int; LP64 makes long and pointers 8 bytes",
+    )
+};
 
 const APPLE_ARM64: CDataModel = row(
     (64, 64),
@@ -129,18 +149,24 @@ const APPLE_ARM64: CDataModel = row(
      types, where AAPCS64 makes them unsigned; wchar_t is 4 bytes, long and pointers 8",
 );
 
-const AAPCS32: CDataModel = row(
-    (32, 32),
-    Unsigned,
-    (Unsigned, 32),
-    "AAPCS32, \"Arm C and C++ language mappings\": char is an unsigned byte and wchar_t \
-     an unsigned int on Linux; long and pointers 4 bytes",
-);
+const AAPCS32: CDataModel = CDataModel {
+    kernel_mode_bits: Some(16),
+    ..row(
+        (32, 32),
+        Unsigned,
+        (Unsigned, 32),
+        "AAPCS32, \"Arm C and C++ language mappings\": char is an unsigned byte and wchar_t \
+         an unsigned int on Linux; long and pointers 4 bytes",
+    )
+};
 
-const RISCV_LP64: CDataModel = row(
-    (64, 64),
-    Unsigned,
-    (Signed, 32),
-    "RISC-V ELF psABI, \"C/C++ type details\": char is unsigned and wchar_t a signed \
-     32-bit integer; LP64 makes long and pointers 8 bytes",
-);
+const RISCV_LP64: CDataModel = CDataModel {
+    kernel_mode_bits: Some(32),
+    ..row(
+        (64, 64),
+        Unsigned,
+        (Signed, 32),
+        "RISC-V ELF psABI, \"C/C++ type details\": char is unsigned and wchar_t a signed \
+         32-bit integer; LP64 makes long and pointers 8 bytes",
+    )
+};

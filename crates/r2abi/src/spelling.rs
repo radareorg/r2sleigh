@@ -291,9 +291,10 @@ fn named_scalar(name: &str, library: CLibrary) -> Option<(ScalarKind, Width)> {
             "mode_t" => Some((Unsigned, Width::Bits(16))),
             _ => None,
         }),
-        // Bionic's `<sys/types.h>` and the kernel UAPI; `mode_t` has no one width and stays opaque
-        // (doc/adr-call-boundary.md, S13 as built).
+        // Bionic's `<sys/types.h>` and the kernel UAPI; `mode_t` is the kernel's, as wide as the
+        // target's data model states (`KERNEL_MODE_CITATION`).
         CLibrary::Bionic => posix(name).or(match name {
+            "mode_t" => Some((Unsigned, Width::KernelMode)),
             "off_t" | "clock_t" | "suseconds_t" => Some((Signed, Width::Long)),
             "off64_t" => Some((Signed, Width::Bits(64))),
             "dev_t" => Some((Unsigned, Width::Long)),
