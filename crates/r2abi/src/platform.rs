@@ -155,14 +155,30 @@ pub enum GuardRow {
 
 const X86_64_GLIBC_GUARD: GuardRow = GuardRow::ThreadSlot(X86_64_LINUX_GUARD);
 const I386_GLIBC_GUARD: GuardRow = GuardRow::ThreadSlot(I386_LINUX_GUARD);
+
+/// Bionic's x86 canary: slot 5 of the thread's TLS words, one pointer each from the segment base.
+const BIONIC_GUARD_CITATION: &str = "bionic libc/platform/bionic/tls_defines.h: \
+    `TLS_SLOT_STACK_GUARD 5` on x86, used for -fstack-protector, a slot one pointer wide from \
+    %fs:0 or %gs:0; LLVM X86ISelLoweringCall.cpp, getIRStackGuard: %fs:0x28, gs:0x14 on i386, \
+    for Android from API 17 (hasStackGuardSlotTLS)";
+const X86_64_BIONIC_GUARD: GuardRow = GuardRow::ThreadSlot(StackGuard {
+    citation: BIONIC_GUARD_CITATION,
+    ..X86_64_LINUX_GUARD
+});
+const I386_BIONIC_GUARD: GuardRow = GuardRow::ThreadSlot(StackGuard {
+    citation: BIONIC_GUARD_CITATION,
+    ..I386_LINUX_GUARD
+});
 const UCRT_GUARD: GuardRow = GuardRow::LoadConfigCookie;
 
-/// The C library's guard row for an architecture. AArch64 glibc keeps it in the global
+/// The C library's guard row for an architecture. AArch64 glibc and bionic keep it in the global
 /// `__stack_chk_guard`, which no register addresses; a library no row cites states none.
 pub fn guard_row(arch: &str, bits: u32, library: CLibrary) -> Option<&'static GuardRow> {
     match (crate::family(arch), bits, library) {
         (Some("x86"), 64, CLibrary::Glibc | CLibrary::Musl) => Some(&X86_64_GLIBC_GUARD),
         (Some("x86"), 32, CLibrary::Glibc) => Some(&I386_GLIBC_GUARD),
+        (Some("x86"), 64, CLibrary::Bionic) => Some(&X86_64_BIONIC_GUARD),
+        (Some("x86"), 32, CLibrary::Bionic) => Some(&I386_BIONIC_GUARD),
         (Some("x86"), 64, CLibrary::Ucrt) => Some(&UCRT_GUARD),
         _ => None,
     }
@@ -278,6 +294,27 @@ mod tests {
                 .iter()
                 .all(|row| !row.citation.is_empty())
         );
+    }
+
+    /// Bionic's x86 canary sits where glibc's does, under its own citation; its AArch64 one is a global.
+    #[test]
+    fn bionic_states_its_x86_guard_slot() {
+        let slot = |arch: &str, bits: u32| match guard_row(arch, bits, CLibrary::Bionic) {
+            Some(GuardRow::ThreadSlot(guard)) => Some(*guard),
+            _ => None,
+        };
+        let wide = slot("x86-64", 64).expect("bionic x86-64 states a slot");
+        assert_eq!(
+            (wide.register.0, wide.offset, wide.width),
+            ("fs_base", 0x28, 8)
+        );
+        let narrow = slot("x86", 32).expect("bionic i386 states a slot");
+        assert_eq!(
+            (narrow.register.0, narrow.offset, narrow.width),
+            ("gs_base", 0x14, 4)
+        );
+        assert!(wide.citation.contains("bionic") && narrow.citation.contains("bionic"));
+        assert_eq!(slot("aarch64", 64), None);
     }
 
     /// MXCSR's control bits are callee-saved and its status bits are not, so of

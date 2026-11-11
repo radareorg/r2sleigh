@@ -4,11 +4,6 @@
 # by that name: `android_log_*` is liblog's `__android_log_*` under a key
 # with the underscores dropped, and `xalloc_die` is gnulib's. See README.md.
 
-__stack_chk_fail=func
-func.__stack_chk_fail.args=0
-func.__stack_chk_fail.noreturn=true
-func.__stack_chk_fail.ret=void
-
 # bionic's fortified stdio, from <bits/fortify/stdio.h>: the size the caller
 # asked for is an `int` third-from-last, and the size the compiler knows of the
 # buffer comes last. glibc's (types-linux.sdb.txt) puts the buffer's size

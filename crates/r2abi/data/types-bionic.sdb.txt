@@ -5,6 +5,14 @@
 # platform/bionic, main). A pointer's own qualifiers and bionic's nullability annotations are
 # not part of a prototype's type and are left out.
 
+# bionic libc/private/bionic_ssp.h declares `extern void __stack_chk_fail();`, and
+# libc/bionic/__stack_chk_fail.cpp defines it as one call to async_safe_fatal, which never returns.
+__stack_chk_fail=func
+func.__stack_chk_fail.args=0
+func.__stack_chk_fail.ret=void
+func.__stack_chk_fail.include=private/bionic_ssp.h
+func.__stack_chk_fail.noreturn=true
+
 # bionic <errno.h>: errno is (*__errno()).
 __errno=func
 func.__errno.args=0
