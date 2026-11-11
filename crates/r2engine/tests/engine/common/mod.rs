@@ -908,6 +908,27 @@ impl Literal {
         self
     }
 
+    /// The same program entering `vaddr` as `kind`, from the word the container states at `slot`.
+    pub fn entering_from(mut self, vaddr: u64, kind: EntryKind, slot: u64) -> Self {
+        self.container.entries.push(Entry {
+            vaddr,
+            kind,
+            thumb: false,
+            stated_at: Some(r2abi::statement::StatedAt {
+                offset: slot - BASE,
+                vaddr: Some(slot),
+            }),
+        });
+        self
+    }
+
+    /// The same program, its code section ending at `end`: what follows is no code.
+    pub fn text_ending(mut self, end: u64) -> Self {
+        self.container.sections[0].vsize = end - BASE;
+        self.container.sections[0].file_size = end - BASE;
+        self
+    }
+
     /// The same program with one more symbol in the container.
     pub fn declaring(mut self, symbol: Symbol) -> Self {
         self.container.symbols.push(symbol);

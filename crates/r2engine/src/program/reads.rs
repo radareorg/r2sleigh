@@ -103,17 +103,32 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
                 escaped.push(fact.to);
             }
         }
-        escaped.extend(
-            (container.entries.iter())
-                .filter(|entry| !matches!(entry.kind, EntryKind::Symbol | EntryKind::Declared))
-                .map(|entry| entry.vaddr),
-        );
+        // A loader call a cited row states passes nothing and reads nothing, so it is no way in a
+        // caller's read must count; the slot stating it names no other (D237).
+        let mut stated = Vec::new();
+        for entry in &container.entries {
+            match r2abi::loader_call(container.format, entry.kind) {
+                Some(call) if call.adds_no_read() => {
+                    r2il::refusal_evidence!(
+                        "closed-world",
+                        "{:#x}: the loader's {:?} call reads nothing ({})",
+                        entry.vaddr,
+                        entry.kind,
+                        call.citation
+                    );
+                    stated.extend(entry.stated_at.and_then(|at| at.vaddr));
+                }
+                _ if matches!(entry.kind, EntryKind::Symbol | EntryKind::Declared) => {}
+                _ => escaped.push(entry.vaddr),
+            }
+        }
+        stated.sort_unstable();
         escaped.extend(
             (container.symbols.iter())
                 .filter(|symbol| exported(container.format, symbol))
                 .map(|symbol| symbol.vaddr),
         );
-        stored_words(source, &survey.entries(), &mut escaped);
+        stored_words(source, &survey.entries(), &stated, &mut escaped);
         escaped.sort_unstable();
         escaped.dedup();
         Some(escaped.into())
@@ -253,11 +268,13 @@ fn exported(format: Format, symbol: &Symbol) -> bool {
 
 /// Each of `entries` some mapped file word names: pointer-wide at any offset, and on a 64-bit machine
 /// 32 bits wide too (an `imm32` or `.long` of a non-PIE address), with bit 0 cleared as Thumb sets it.
-fn stored_words<S: Source>(source: &S, entries: &[u64], escaped: &mut Vec<u64>) {
+/// A word starting in a pointer-wide slot at one of `stated` (ascending) is the loader's, not a way in.
+fn stored_words<S: Source>(source: &S, entries: &[u64], stated: &[u64], escaped: &mut Vec<u64>) {
     let (Some(&low), Some(&high)) = (entries.first(), entries.last()) else {
         return;
     };
     let little = super::view::endian(source) == r2il::Endianness::Little;
+    let pointer = u64::from(source.container().arch.bits / 8);
     let widths: &[usize] = match source.container().arch.bits {
         64 => &[8, 4],
         _ => &[4],
@@ -271,7 +288,7 @@ fn stored_words<S: Source>(source: &S, entries: &[u64], escaped: &mut Vec<u64>) 
             continue;
         };
         for &width in widths {
-            for window in bytes.windows(width) {
+            for (at, window) in bytes.windows(width).enumerate() {
                 let mut word = [0u8; 8];
                 let word = if little {
                     word[..width].copy_from_slice(window);
@@ -281,11 +298,20 @@ fn stored_words<S: Source>(source: &S, entries: &[u64], escaped: &mut Vec<u64>) 
                     u64::from_be_bytes(word)
                 };
                 for value in [word, word & !1] {
-                    if (low..=high).contains(&value) && entries.binary_search(&value).is_ok() {
+                    if (low..=high).contains(&value)
+                        && entries.binary_search(&value).is_ok()
+                        && !in_slot(stated, segment.vaddr + at as u64, pointer)
+                    {
                         escaped.push(value);
                     }
                 }
             }
         }
     }
+}
+
+/// Whether `at` lies in a `pointer`-byte slot starting at one of `slots` (ascending): `O(log slots)`.
+fn in_slot(slots: &[u64], at: u64, pointer: u64) -> bool {
+    let below = slots.partition_point(|slot| *slot <= at);
+    below > 0 && at < slots[below - 1].saturating_add(pointer)
 }

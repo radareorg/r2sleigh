@@ -748,3 +748,80 @@ fn a_lane_forwarded_through_a_caller_whose_result_is_read_is_decided_per_lane() 
     let text = text.response.output.into_text();
     assert!(text.starts_with("void f("), "{text}");
 }
+
+/// `f`: `sub rsp, 8; add rsp, 8; ret`, which hands back the entry RAX as `_fini` does; no code calls
+/// it. 0x1020 is the dynamic table's word naming `f`, and 0x1028 one more data word.
+const FINI: &[u8] = &[
+    0x48, 0x83, 0xec, 0x08, // 1000 sub rsp, 8
+    0x48, 0x83, 0xc4, 0x08, // 1004 add rsp, 8
+    0xc3, // 1008 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1009 padding
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, // 1010 padding, or a caller
+    0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1020 DT_FINI's value: f
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1028 a data word
+];
+
+/// `f` entered as `kind` from the word at 0x1020, with no symbol beyond its own.
+fn entered(kind: r2abi::statement::EntryKind) -> Literal {
+    Literal::of_code(FINI, &[("f", BASE, 0x09)])
+        .data_mapped_after(BASE + 0x20)
+        .text_ending(BASE + 0x20)
+        .entering_from(BASE, kind, BASE + 0x20)
+}
+
+/// The loader calls `DT_FINI`'s function as an `atexit` handler (r2abi `loader_call`), which reads
+/// no result: under `aa` it is `void`, decided by the container's tag, no name (D237).
+#[test]
+fn a_termination_function_the_loader_alone_calls_is_void() {
+    use r2abi::statement::EntryKind;
+    let text = analysed(entered(EntryKind::FiniHook));
+    assert!(text.starts_with("void f(void)"), "{text}");
+    assert!(
+        text.contains("; no call reads the result (assuming closed-world)"),
+        "{text}"
+    );
+    // A cold render joins no call, so the entry RAX stays an unproven result.
+    let cold = OpenProgram::of(entered(EntryKind::FiniHook))
+        .rendered(BASE)
+        .expect("it renders");
+    let cold = cold.response.output.into_text();
+    assert!(cold.contains("return r2sleigh_residual_"), "{cold}");
+    // An initialiser has no row: glibc passes it `argc, argv, envp`, and the gABI states no type.
+    let init = analysed(entered(EntryKind::InitHook));
+    assert!(init.contains("return r2sleigh_residual_"), "{init}");
+}
+
+/// The row speaks for the loader's call alone: another word naming `f` is a way in it does not
+/// cover, and a call reading the RAX `f` writes makes it a value (D237).
+#[test]
+fn a_termination_function_another_way_reaches_keeps_its_result() {
+    use r2abi::statement::EntryKind;
+    let mut stored = entered(EntryKind::FiniHook);
+    stored.write(BASE + 0x28, &BASE.to_le_bytes());
+    let text = analysed(stored);
+    assert!(text.contains("return r2sleigh_residual_"), "{text}");
+    // 1000 mov eax, 7; 1005 ret. 1010 call 0x1000; 1015 mov [rdi], rax; 1018 ret
+    let mut read = entered(EntryKind::FiniHook).declaring(r2abi::statement::Symbol {
+        name: "caller".into(),
+        vaddr: BASE + 0x10,
+        size: 0x09,
+        kind: r2abi::statement::SymbolKind::Function,
+        defined: true,
+        ..r2abi::statement::Symbol::default()
+    });
+    read.write(
+        BASE,
+        &[0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3, 0x90, 0x90, 0x90],
+    );
+    read.write(
+        BASE + 0x10,
+        &[0xe8, 0xeb, 0xff, 0xff, 0xff, 0x48, 0x89, 0x07, 0xc3],
+    );
+    let text = analysed(read);
+    assert!(text.starts_with("uint64_t f(void)"), "{text}");
+    assert!(
+        text.contains("; a call reads the result (assuming closed-world)"),
+        "{text}"
+    );
+}
