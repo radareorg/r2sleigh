@@ -281,6 +281,10 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         register.map(|register| (register, handle))
     }
 
+    fn binds_handles(&self) -> bool {
+        self.source().container().format == r2abi::statement::Format::Pe
+    }
+
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
         let (handle, model) = self.import_through(slot, |row| row.yields)?;
         let register = model.result_registers(r2abi::SlotClass::Integer).next();

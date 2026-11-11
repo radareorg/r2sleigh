@@ -107,6 +107,11 @@ pub trait Program {
         None
     }
 
+    /// Whether an import row of this program may yield a handle: only a PE's KERNEL32 rows do.
+    fn binds_handles(&self) -> bool {
+        false
+    }
+
     /// The register a call through `slot` leaves holding a handle the import states.
     fn yields_through(&self, _slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
         None
@@ -933,8 +938,10 @@ impl Walk {
             self.handles = Handles::default();
         }
         let handles_before = self.handles.held.clone();
-        self.handles.step(&instruction.lifted, program);
-        self.handles.at = Some(next);
+        if program.binds_handles() {
+            self.handles.step(&instruction.lifted, program);
+            self.handles.at = Some(next);
+        }
         if let BlockTerminator::IndirectCall { fallthrough } = instruction.terminator
             && let Some(target) = self.folded_call(&instruction, previous)
         {

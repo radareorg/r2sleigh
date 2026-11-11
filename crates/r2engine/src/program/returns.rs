@@ -83,6 +83,10 @@ impl crate::body::Program for Knowing<'_> {
         self.program.yields_through(slot)
     }
 
+    fn binds_handles(&self) -> bool {
+        self.program.binds_handles()
+    }
+
     fn loader_writes(&self) -> &[crate::program::LoaderWrite] {
         self.program.loader_writes()
     }

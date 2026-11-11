@@ -571,6 +571,10 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         self.view().yields_through(slot)
     }
 
+    fn binds_handles(&self) -> bool {
+        self.view().binds_handles()
+    }
+
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.view().return_address_register()
     }
