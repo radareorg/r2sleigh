@@ -721,6 +721,10 @@
     "pinned_hashes_gcc_x64_O2::sym._dl_relocate_static_pie": 2,
     "pinned_shapes_gcc_x64_O0::sym._dl_relocate_static_pie": 2,
     "branchy_x64_O1::sym._and_chain_effect": 2,
-    "branchy_x64_O2::sym._and_chain_effect": 2
+    "branchy_x64_O2::sym._and_chain_effect": 2,
+    "branchy_arm64_O1::sym._narrow64": 2,
+    "branchy_arm64_O2::sym._narrow64": 2,
+    "branchy_arm64_O2::sym._inverted_goto": 4,
+    "hashes_arm64_O2::sym._main": 3
   }
 }
