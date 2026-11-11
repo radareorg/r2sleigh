@@ -46,7 +46,7 @@ CMDS=aa; pdd @ 0x01001510
 EXPECT=<<EOF
 void store(double x, double* p)
 {
-    /* r2dec proof: no individual construct is marked; 9 source obligations: 3 rendered, 6 elided, 0 refused; 2 statements rendered */
+    /* r2dec proof: no individual construct is marked; 9 source obligations: 3 rendered, 6 elided, 0 refused; 2 statements rendered; the declared result is kept against the body: a return defines the float result register */
     {
         r2sleigh_store_u64((void*)(uint64_t)p, (uint64_t)r2sleigh_float_to_bits_64(x + x));
         return;
