@@ -64,7 +64,7 @@ pub(crate) mod optimize;
 pub mod origin;
 pub(crate) mod phi;
 pub mod place;
-pub(crate) mod printf;
+pub mod printf;
 pub(crate) mod reaching_rules;
 pub(crate) mod read_only;
 pub mod recover_interface;

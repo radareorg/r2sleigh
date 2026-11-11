@@ -518,6 +518,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
             view: &view,
             lanes: lanes_of(target, &slots),
             slots: &slots,
+            call: target.convention.call_effect().ok(),
             depth: Depth::Deep,
         };
         let direct = direct_calls(body).collect::<Vec<_>>();
@@ -564,6 +565,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeEntry {
             view: &view,
             lanes: lanes_of(target, &slots),
             slots: &slots,
+            call: target.convention.call_effect().ok(),
             depth: Depth::Shallow,
         };
         let effects = reading.effects(body);
@@ -639,6 +641,8 @@ struct Reading<'a, S: Source + 'static> {
     view: &'a View<'a, S>,
     lanes: ResultLanes,
     slots: &'a SourceConventionSlots,
+    /// What the convention says a call leaves standing: a format held in a preserved register.
+    call: Option<r2source::SourceCallEffect>,
     depth: Depth,
 }
 
@@ -661,18 +665,67 @@ impl<S: Source + 'static> Reading<'_, S> {
             })
             .collect::<BTreeMap<_, _>>();
         let callees = (direct.chain(folded.values().copied())).collect::<BTreeSet<_>>();
-        Effects {
+        let mut by_callee = BTreeMap::new();
+        let mut formatted = BTreeMap::new();
+        for callee in callees {
+            let (effect, format) = self.callee(callee);
+            by_callee.insert(callee, effect);
+            if let Some(format) = format {
+                formatted.insert(callee, format);
+            }
+        }
+        let mut effects = Effects {
             body,
-            by_callee: (callees.into_iter())
-                .map(|callee| (callee, self.callee(callee)))
-                .collect(),
+            by_callee,
             folded,
+            by_site: BTreeMap::new(),
             indirect: CallEffect {
                 takes: self.unknown(),
                 counted: None,
                 overwrites: Overwrites::All,
             },
+        };
+        if !formatted.is_empty() {
+            effects.by_site = self.formatted_sites(&effects, &formatted);
         }
+        effects
+    }
+
+    /// Each call to a printf-format import whose block folds its format to a literal with no
+    /// floating conversion: it takes no tail vector register (D218). One forward pass per block.
+    fn formatted_sites(
+        &self,
+        effects: &Effects<'_>,
+        formatted: &BTreeMap<u64, Formatted>,
+    ) -> BTreeMap<(usize, usize), CallEffect> {
+        let mut sites = BTreeMap::new();
+        for (at, block) in effects.body.blocks.iter().enumerate() {
+            let mut origins = r2ssa::origin::BlockOrigins::default();
+            for (op, operation) in block.lifted.ops.iter().enumerate() {
+                let format = (operation.is_call())
+                    .then(|| effects.callee_at(at, op))
+                    .flatten()
+                    .and_then(|callee| formatted.get(&callee));
+                let effect = format.and_then(|format| self.unfloated(&origins, format));
+                sites.extend(effect.map(|effect| ((at, op), effect)));
+                origins.step_under(operation, self.call.as_ref());
+            }
+        }
+        sites
+    }
+
+    /// The call's effect without its tail vector registers, where `origins` fold its format to a
+    /// literal the printf reader parses whole and finds no floating conversion in.
+    fn unfloated(
+        &self,
+        origins: &r2ssa::origin::BlockOrigins,
+        format: &Formatted,
+    ) -> Option<CallEffect> {
+        let register = r2il::Varnode::register(format.register.offset, format.register.size);
+        let address = origins.of(&register)?.constant()?;
+        let text = crate::native::text_at(self.view, address)?;
+        let consumed = r2ssa::printf::printf_consumed_arguments(&text).ok()?;
+        (!consumed.any_floating).then_some(format.unfloated)
     }
 
     /// What a call to a callee nothing is known of may take: a summary's own calls set the variadic
@@ -684,9 +737,9 @@ impl<S: Source + 'static> Reading<'_, S> {
         }
     }
 
-    /// A call to `callee`: an import overwrites every result register and takes what its boundary
-    /// reads; a function of the image takes and overwrites what its own body does.
-    fn callee(&self, callee: u64) -> CallEffect {
+    /// A call to `callee`: an import overwrites every result register and takes what it reads (and,
+    /// for a printf format, what a float-free format takes); an image function, what its body does.
+    fn callee(&self, callee: u64) -> (CallEffect, Option<Formatted>) {
         if crate::native::Program::import_at(self.view, callee).is_some() {
             let boundary = self
                 .db
@@ -695,12 +748,30 @@ impl<S: Source + 'static> Reading<'_, S> {
                 Some(Some(CallBoundary::Import { reads })) => reads.clone(),
                 _ => None,
             };
+            let formatted = (reads.as_ref())
+                .and_then(|reads| Some((reads, reads.format.as_ref()?)))
+                .map(|(reads, format)| {
+                    let mut unfloated = reads.clone();
+                    unfloated
+                        .registers
+                        .retain(|read| !format.floats.contains(read));
+                    let (takes, counted) = self.import_takes(Some(unfloated));
+                    Formatted {
+                        register: format.format,
+                        unfloated: CallEffect {
+                            takes,
+                            counted,
+                            overwrites: Overwrites::All,
+                        },
+                    }
+                });
             let (takes, counted) = self.import_takes(reads);
-            return CallEffect {
+            let effect = CallEffect {
                 takes,
                 counted,
                 overwrites: Overwrites::All,
             };
+            return (effect, formatted);
         }
         // A summary reads no other summary, so one costs one pass over one body (ADR, Cost).
         let summary = (self.depth == Depth::Deep)
@@ -709,7 +780,7 @@ impl<S: Source + 'static> Reading<'_, S> {
                 self.db.get::<CalleeEntry>(&(callee, thumb))
             })
             .and_then(Result::ok);
-        match summary.and_then(|summary| *summary) {
+        let effect = match summary.and_then(|summary| *summary) {
             Some(summary) => CallEffect {
                 takes: summary.takes,
                 counted: None,
@@ -720,7 +791,8 @@ impl<S: Source + 'static> Reading<'_, S> {
                 counted: None,
                 overwrites: Overwrites::Nothing,
             },
-        }
+        };
+        (effect, None)
     }
 
     /// What the import's placement reads (S8 `Placement::reads`); its count register bounds the
@@ -758,23 +830,40 @@ impl<S: Source + 'static> Reading<'_, S> {
     }
 }
 
+/// A printf-format import: the register its format arrives in, and what a call takes where that
+/// format has no floating conversion.
+struct Formatted {
+    register: CanonicalStorageId,
+    unfloated: CallEffect,
+}
+
 /// What each call of one body does to the result registers.
 struct Effects<'b> {
     body: &'b Body,
     by_callee: BTreeMap<u64, CallEffect>,
     /// The calls the walk folded to a target, by block and operation.
     folded: BTreeMap<(usize, usize), u64>,
+    /// The calls whose own format states what they take, by block and operation.
+    by_site: BTreeMap<(usize, usize), CallEffect>,
     /// A call whose callee the walk did not read: it may take the arguments and clobbers the lot.
     indirect: CallEffect,
 }
 
-impl CallEffects for Effects<'_> {
-    fn at(&self, block: usize, op: usize) -> CallEffect {
-        let callee = match &self.body.blocks[block].lifted.ops[op] {
+impl Effects<'_> {
+    fn callee_at(&self, block: usize, op: usize) -> Option<u64> {
+        match &self.body.blocks[block].lifted.ops[op] {
             R2ILOp::Call { target } => Some(target.offset),
             _ => self.folded.get(&(block, op)).copied(),
-        };
-        callee
+        }
+    }
+}
+
+impl CallEffects for Effects<'_> {
+    fn at(&self, block: usize, op: usize) -> CallEffect {
+        if let Some(effect) = self.by_site.get(&(block, op)) {
+            return *effect;
+        }
+        (self.callee_at(block, op))
             .and_then(|callee| self.by_callee.get(&callee))
             .copied()
             .unwrap_or(self.indirect)

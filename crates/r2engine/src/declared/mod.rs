@@ -327,6 +327,7 @@ impl<'a> Placement<'a> {
             return crate::imports::ImportReads {
                 registers,
                 count_register: None,
+                format: None,
             };
         }
         let overlaps = |a: &CanonicalStorageId, b: &CanonicalStorageId| {
@@ -334,6 +335,7 @@ impl<'a> Placement<'a> {
                 && a.offset < b.offset + u64::from(b.size)
                 && b.offset < a.offset + u64::from(a.size)
         };
+        let fixed = registers.len();
         let sections = self.target.convention.sections.iter();
         for location in sections.flat_map(|section| section.locations.iter()) {
             if let r2source::convention::Location::Register { storage, .. } = location
@@ -342,9 +344,34 @@ impl<'a> Placement<'a> {
                 registers.push(*storage);
             }
         }
+        // A printf format states whether any operand is floating; `al` counts them where it exists.
+        let format = match (tail, forms.count_register, placed_whole) {
+            (
+                r2abi::Tail::Format {
+                    index,
+                    kind: r2abi::FormatKind::Printf,
+                },
+                None,
+                true,
+            ) => {
+                let at = placement.locations.get(usize::from(index));
+                let floats = self.machine.slots.float_argument_slots();
+                (at.and_then(|location| location.register())).map(|format| {
+                    crate::imports::FormatTail {
+                        format,
+                        floats: (registers[fixed..].iter())
+                            .filter(|read| floats.iter().any(|float| overlaps(read, float)))
+                            .copied()
+                            .collect(),
+                    }
+                })
+            }
+            _ => None,
+        };
         crate::imports::ImportReads {
             registers,
             count_register: forms.count_register,
+            format,
         }
     }
 

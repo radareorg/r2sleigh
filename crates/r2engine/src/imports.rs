@@ -130,6 +130,16 @@ pub struct ImportReads {
     pub registers: Vec<r2source::CanonicalStorageId>,
     /// SysV `al`, read with a tail and bounding the vector registers it counts.
     pub count_register: Option<r2source::CanonicalStorageId>,
+    /// A printf-format `...` in registers with no count register (AAPCS64): what bounds its vector reads.
+    pub format: Option<FormatTail>,
+}
+
+/// Where a printf-family call's format arrives, and the tail's vector registers, which only a
+/// floating conversion reads (doc/adr-call-boundary.md, "S15 as built").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FormatTail {
+    pub format: r2source::CanonicalStorageId,
+    pub floats: Vec<r2source::CanonicalStorageId>,
 }
 
 impl Imports {

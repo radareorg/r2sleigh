@@ -626,3 +626,108 @@ fn a_local_passed_as_the_seventh_argument_stays_in_memory() {
         .into_text();
     common::assert_local_stays_in_memory(&caller);
 }
+
+/// `f` of the AArch64 programs below: off the page `adrp` builds, which would read as its address.
+const F: u64 = BASE + 0x08;
+
+/// AArch64 words at `BASE`, `printf`'s stub at `STUB` (`ldr x16, [slot]; br x16`) and its slot.
+fn aarch64_with_printf(words: &[(u64, u32)]) -> &'static [u8] {
+    let mut code = vec![0u8; 0xb0];
+    for (at, word) in words {
+        let at = (*at - BASE) as usize;
+        code[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    code[0x90..0x94].copy_from_slice(&0x5800_0050u32.to_le_bytes());
+    code[0x94..0x98].copy_from_slice(&0xd61f_0200u32.to_le_bytes());
+    Box::leak(code.into_boxed_slice())
+}
+
+/// `f` is `ret`: it hands back x0 and q0 to q3 as its caller left them. `caller` builds the format
+/// address in `held`, calls `f`, then `printf(format, 7)` with the format moved from `held`.
+fn printing(held: u32, format: &[u8]) -> String {
+    let code = aarch64_with_printf(&[
+        (F, 0xd65f_03c0),                              // ret
+        (BASE + 0x10, 0xa9bf_7bfd),                    // stp x29, x30, [sp, #-16]!
+        (BASE + 0x14, 0x9000_0000 | held),             // adrp xN, 0x1000
+        (BASE + 0x18, 0x9102_8000 | held << 5 | held), // add xN, xN, #0xa0
+        (BASE + 0x1c, 0x97ff_fffb),                    // bl f
+        (BASE + 0x20, 0xaa00_03e0 | held << 16),       // mov x0, xN
+        (BASE + 0x24, 0x5280_00e1),                    // mov w1, #7
+        (BASE + 0x28, 0x9400_001a),                    // bl printf
+        (BASE + 0x2c, 0xa8c1_7bfd),                    // ldp x29, x30, [sp], #16
+        (BASE + 0x30, 0xd65f_03c0),                    // ret
+    ]);
+    let program = Literal::of_code(code, &[("f", F, 0x04), ("caller", BASE + 0x10, 0x24)])
+        .in_aarch64()
+        .with_data()
+        .importing("printf");
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(common::TEXT, format);
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(F).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// D218: a format with no floating conversion reads no vector register, so `f`'s q0 to q3 die at
+/// `printf`: void under `aa`, the format held in x19, which the call to `f` preserves.
+#[test]
+fn an_aarch64_printf_whose_format_has_no_float_reads_no_vector_register() {
+    let text = printing(19, b"%d\n\0");
+    assert!(text.starts_with("void f("), "{text}");
+    assert!(text.contains("(assuming closed-world)"), "{text}");
+}
+
+/// `%f` reads q0: `f`'s q0 reaches the call, so `f` is never void.
+#[test]
+fn an_aarch64_printf_whose_format_has_a_float_keeps_q0_read() {
+    let text = printing(19, b"%f\n\0");
+    assert!(!text.starts_with("void f("), "{text}");
+}
+
+/// x9 is caller-saved: the call to `f` may change it, so the format at `printf` is unknown and the
+/// call may read every vector argument register.
+#[test]
+fn an_aarch64_printf_whose_format_a_call_may_change_reads_every_vector_register() {
+    let text = printing(9, b"%d\n\0");
+    assert!(!text.starts_with("void f("), "{text}");
+}
+
+/// D219: `mid` (`bl f; mov x0, #5; ret`) hands back `f`'s q0 to q3; `top` reads `mid`'s x0, then
+/// `printf("%d\n", x)` kills the rest. Decided per lane: `f` is void though `mid`'s result is read.
+#[test]
+fn a_lane_forwarded_through_a_caller_whose_result_is_read_is_decided_per_lane() {
+    let code = aarch64_with_printf(&[
+        (F, 0xd65f_03c0),           // f: ret
+        (BASE + 0x10, 0xa9bf_7bfd), // mid: stp x29, x30, [sp, #-16]!
+        (BASE + 0x14, 0x97ff_fffd), // bl f
+        (BASE + 0x18, 0xd280_00a0), // mov x0, #5
+        (BASE + 0x1c, 0xa8c1_7bfd), // ldp x29, x30, [sp], #16
+        (BASE + 0x20, 0xd65f_03c0), // ret
+        (BASE + 0x30, 0xa9bf_7bfd), // top: stp x29, x30, [sp, #-16]!
+        (BASE + 0x34, 0x97ff_fff7), // bl mid
+        (BASE + 0x38, 0xaa00_03e1), // mov x1, x0
+        (BASE + 0x3c, 0x9000_0000), // adrp x0, 0x1000
+        (BASE + 0x40, 0x9102_8000), // add x0, x0, #0xa0
+        (BASE + 0x44, 0x9400_0013), // bl printf
+        (BASE + 0x48, 0xa8c1_7bfd), // ldp x29, x30, [sp], #16
+        (BASE + 0x4c, 0xd65f_03c0), // ret
+    ]);
+    let functions = [
+        ("f", F, 0x04),
+        ("mid", BASE + 0x10, 0x14),
+        ("top", BASE + 0x30, 0x20),
+    ];
+    let program = Literal::of_code(code, &functions)
+        .in_aarch64()
+        .with_data()
+        .importing("printf");
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(common::TEXT, b"%d\n\0");
+    open.analyse_program().expect("it surveys");
+    let mid = open.rendered(BASE + 0x10).expect("it renders");
+    let mid = mid.response.output.into_text();
+    assert!(mid.starts_with("uint64_t mid("), "{mid}");
+    let text = open.rendered(F).expect("it renders");
+    let text = text.response.output.into_text();
+    assert!(text.starts_with("void f("), "{text}");
+}

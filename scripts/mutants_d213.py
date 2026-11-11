@@ -65,6 +65,14 @@ MUTANTS = [
                      ".filter(|_| false)")], [UNIT]),
     ("the-body-outranks-the-declaration", [(FATES, "true => Authority::Declared,\n        false => Authority::Body,",
                                             "true => Authority::Body,\n        false => Authority::Declared,")], [UNIT]),
+    # D218: a printf call's own format states its vector reads.
+    ("a-format-states-nothing", [(FATES, "if let Some(effect) = self.by_site.get(&(block, op)) {",
+                                  "if let Some(effect) = None::<&CallEffect> {")], [BOUNDARY]),
+    ("a-float-conversion-reads-no-vector", [(FATES, "(!consumed.any_floating).then_some(format.unfloated)",
+                                             "Some(format.unfloated)")], [BOUNDARY]),
+    ("a-call-keeps-every-register", [(FATES, "origins.step_under(operation, self.call.as_ref());",
+                                      "if !operation.is_call() {\n                    origins.step(operation);\n                }")],
+     [BOUNDARY]),
     # The byte liveness after a call.
     ("call-takes-ignored", [(LIVENESS, "merge(&mut live.open, call.takes.0);", "let _ = call.takes.0;")], [SITES, BOUNDARY]),
     ("return-hands-nothing-back", [(LIVENESS, "merge(&mut live.returned, self.lanes.every());",

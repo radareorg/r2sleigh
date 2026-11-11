@@ -1,7 +1,7 @@
 //! Deterministic argument accounting for printf-family format literals.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PrintfFormatRefusal {
+pub enum PrintfFormatRefusal {
     UnterminatedSpecifier,
     UnsupportedConversion,
     InvalidPosition,
@@ -88,12 +88,12 @@ fn consume_argument(
 /// than its integer one, so a consumer that assigns carriers in order needs to
 /// know whether any operand is floating before it does so.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct PrintfConsumedArguments {
+pub struct PrintfConsumedArguments {
     pub count: usize,
     pub any_floating: bool,
 }
 
-pub(crate) fn printf_consumed_arguments(
+pub fn printf_consumed_arguments(
     format: &str,
 ) -> Result<PrintfConsumedArguments, PrintfFormatRefusal> {
     let bytes = format.as_bytes();
