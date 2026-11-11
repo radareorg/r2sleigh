@@ -239,6 +239,68 @@ r2engine reads it.
   host: a rendering one instruction past four times the budget is `slow`, one at
   exactly that is `equal`.
 
+**D339. A rendering's cost is graded against its original on the same runner.**
+Owner: GT.
+- Problem: under D38's `time` a rendering was `slow` past four times a fixed
+  wall budget, and an original past the budget was dropped. Both edges are
+  absolute, so a vector whose original needs about the budget was graded on a
+  fast runner and dropped on a slow one: review.c `fact` at clang `-O2` read
+  `slow` on #358 and `equal` on #360 with the same rendering.
+- Rule, with `k` = 4 and the budget `B`, in either measure: an original may
+  cost `k*k*B`, and past that the vector is outside its domain. A
+  like-for-like run (the identity, the rendering's `-O2` build) may cost
+  `k * max(c, B/(k*k))`, `c` the original's cost on that vector; an
+  unoptimised build (`-O0`, pattern, UBSan) `k` times that. A faster or slower
+  runner scales `c` and the rendering's cost together, so above `B/(k*k)` the
+  verdict is a ratio. Below it a cost is too small to compare, so the floors
+  are `B/k` and `B`.
+- `time` counts the CPU time of the call (`CLOCK_PROCESS_CPUTIME_ID`, armed as
+  `ITIMER_PROF`), not wall time: load from other jobs moves wall time and not
+  the process's CPU. The wall clock is a hang guard under both measures
+  (`hang_ms`, plus four times the allowance under `time`).
+- Why the unoptimised builds get `k` more: their `-O0` code is the compiler's
+  cost. Counted on review.c and hashes.c, 63 records have an `-O0`, pattern or
+  UBSan run past four times its original on some vector (`avg` at clang `-O2`
+  51 times), and clang `-O1` `fact`'s `-O0` build retires 4.25 times its
+  original where its `-O2` build retires 1.00 times. A `slow` names the `-O2`
+  build first, so the reason does not follow an `-O0` build near its own edge.
+- Against D38: the `-O2` build's allowance on a vector D38 graded (`c <= B`) is
+  at most D38's `k*B`; an unoptimised build's is larger only where `c > B/4`,
+  where its `-O0` code's ratio is the compiler's; a vector D38 dropped
+  (`B < c <= k*k*B`) is now graded. A rendering twenty times its original is
+  `slow` wherever `c > B/80`.
+- Where the edges sit: `B/(k*k)` lies 20 times above the small originals and
+  at least 1.6 times below `fact`'s big ones on a runner twice contabo's speed;
+  a ratio edge at `B/k` put clang `-O2` `fact`'s 2.5 billion vector (0.34 s
+  on contabo) under it on such a runner, where its verdict would follow speed.
+- Measured, x86-64 on contabo (EPYC under KVM), instructions and CPU time:
+  every original in review.c and hashes.c is under 12 million instructions
+  (3 ms) or is `fact`'s, 2.5 to 10.7 billion (0.34 to 2.8 s of CPU). `fact`'s
+  big vectors cost, against their original, 20.3 times (O0, pattern), 8.55
+  (O2) and 21.1 (UBSan) at clang `-O2`, 4.25 and 1.00 at clang `-O1`, 3.00 and
+  1.00 at gcc `-O2`; CPU time agrees within 25 % except clang `-O1`'s `-O0`
+  builds at 2.8 to 3.7, whose `k*k` allowance is 16. Wall time for the same runs
+  moved 2.5 to 3.1 at gcc `-O2` where CPU time moved 2.9 to 3.1.
+- The CPU timer counts by the kernel's ticks and `cost` by the scheduler's
+  clock, so an expiry short of the allowance re-arms for the rest; a `SIGPROF`
+  with the timer still armed is the call's own and ends the run as a signal.
+- Gate: self-tests under fake costs pin each edge on every host (one tick past
+  the allowance and at it, at four times the original, the floor, either side of
+  `B/(k*k)`, by CPU time; twenty times; the original's guard), and one with no
+  fake has the CPU timer stop a spinning rendering as `slow`: 59 pass on x86-64
+  under both measures and on aarch64. Two runs of review.c and hashes.c per
+  target on contabo, one alone and one beside six busy loops on its four cores,
+  wrote the same `records.json` byte for byte (188 records each; 332 and 594 s
+  on x86-64, 1200 and 1995 s under qemu). The largest original is 2.4 s against
+  a 16 s guard on x86-64 and 9.3 s against 80 s under qemu.
+- Moved: review.c `fact` at clang `-O2` stays `slow` on both targets and names
+  the `-O2` build, where it named `-O0`. Its three vectors at n near 2^31 are
+  graded on every run (45 equal, 3 slow), and gcc `-O2` and clang `-O1` `fact`
+  grade all 48 vectors, where the ones past the old budget were dropped.
+- Cost of the gate: a vector whose original costs `c` may take `54c` when every
+  build is stopped. review.c at clang `-O1` takes 170 s on x86-64 and at clang
+  `-O2` 385 s under qemu, inside the shards' 8 and 22 minutes.
+
 **D39. Upstream drift is a gate, not a discovery.** Owner: GT, with VC.
 - A scheduled CI job reports how far each pin is behind its upstream (the
   Ghidra fork's base against Ghidra master, `TESTBINS_REF` against
