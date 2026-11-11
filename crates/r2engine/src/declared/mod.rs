@@ -282,6 +282,9 @@ impl<'a> Placement<'a> {
     /// separate floating-point registers returns a `double` in one of those.
     /// A result whose class this does not decide is not claimed at all.
     fn result(&self, declared: Declared<'_>) -> (SourceFunctionReturn, Option<CanonicalStorageId>) {
+        if result_unstated(declared) {
+            return (SourceFunctionReturn::Unproven, None);
+        }
         let returns = declared.prototype.return_type;
         if declared.graph.peel(returns).0 == TypeId::VOID {
             return (SourceFunctionReturn::Void, None);
@@ -394,8 +397,8 @@ impl<'a> Placement<'a> {
             .collect()
     }
 
-    /// A declared prototype as the type layer states it, through the graph. A parameter with no
-    /// place is `Unknown` and keeps the rest (D151); such a result states nothing.
+    /// A declared prototype as the type layer states it. A parameter with no place, or a result
+    /// the row does not state (D330), is `Unknown`; a stated result with no place states nothing.
     pub(crate) fn function_type(&self, declared: Declared<'_>) -> Option<r2types::FunctionType> {
         let mut interned = Interned::new(declared.graph, self.model);
         let params = (declared.prototype.parameters.iter())
@@ -408,9 +411,12 @@ impl<'a> Placement<'a> {
                 .unwrap_or(r2types::CTypeLike::Unknown)
         };
         let params = params.into_iter().map(convert).collect();
-        let return_type = convert(returns);
+        let return_type = match result_unstated(declared) {
+            true => r2types::CTypeLike::Unknown,
+            false => Some(convert(returns)).filter(|ty| *ty != r2types::CTypeLike::Unknown)?,
+        };
         Some(r2types::FunctionType {
-            return_type: (return_type != r2types::CTypeLike::Unknown).then_some(return_type)?,
+            return_type,
             params,
             variadic: declared.prototype.variadic,
         })
@@ -531,8 +537,34 @@ impl Placement<'_> {
             interface.with_types(r2source::Confidence::of(declared.basis)),
         )?;
         let stacked = placement.locations.iter().any(|at| at.register().is_none());
+        let interface = match result_unstated(declared) {
+            true => self.unstated_result(interface),
+            false => interface,
+        };
         let interface = self.carriers(name, interface, frame.frame_pointer)?;
         self.stacked_return(name, interface, stacked)
+    }
+
+    /// A result the row does not state: `Unproven({Unstated})`, seeded at the convention's
+    /// integer lane; a call states none and leaves every killed lane unproven (D330).
+    fn unstated_result(
+        &self,
+        interface: r2source::SourceFunctionInterface,
+    ) -> r2source::SourceFunctionInterface {
+        let typed = self.target.convention.typed_results();
+        let Some(integer) = typed.integer else {
+            return interface;
+        };
+        let seed = r2source::SourceResultSeed {
+            slot: integer,
+            bits: integer.size.saturating_mul(8),
+            signed: false,
+        };
+        let causes = [r2source::SourceResultCause::Unstated];
+        let Some(unproven) = r2source::SourceUnprovenResult::of(causes, Some(seed)) else {
+            return interface;
+        };
+        interface.with_unproven_result(unproven)
     }
 
     /// The return address a call pushes, bound where a stack parameter is placed past it, as the
@@ -605,6 +637,13 @@ impl Placement<'_> {
             }
         }
     }
+}
+
+/// Whether the declaration is a row that states parameters and no result (a mangled name).
+fn result_unstated(declared: Declared<'_>) -> bool {
+    declared
+        .row
+        .is_some_and(|row| row.result == r2abi::RowResult::Unstated)
 }
 
 /// The row's cited format: a `...` counted by `Tail::Format`, or a `va_list` whose format

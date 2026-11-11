@@ -355,7 +355,8 @@ fn tail_result(
         r2ssa::SourceCallResult::Void => Ok(Exit::Typed(CTypeLike::Void)),
         r2ssa::SourceCallResult::Register { .. }
         | r2ssa::SourceCallResult::Pair { .. }
-        | r2ssa::SourceCallResult::Unproven { .. } => signatures
+        | r2ssa::SourceCallResult::Unproven { .. }
+        | r2ssa::SourceCallResult::Unstated { .. } => signatures
             .get(&call_site)
             .map(|signature| signature.return_type.clone())
             .filter(|ty| *ty != CTypeLike::Unknown)

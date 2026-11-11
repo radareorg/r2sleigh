@@ -2036,6 +2036,7 @@ fn exact_call_result_storage(
         crate::SourceCallResult::Register { .. }
         | crate::SourceCallResult::Pair { .. }
         | crate::SourceCallResult::Unproven { .. }
+        | crate::SourceCallResult::Unstated { .. }
         | crate::SourceCallResult::Void => None,
     }
 }

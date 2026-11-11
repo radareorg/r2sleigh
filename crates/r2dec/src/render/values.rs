@@ -581,6 +581,9 @@ fn plan_calls(
             let defines = |tag: &str, is_union| tags.agrees(tag, is_union, callee);
             plan.declared = signature
                 .and_then(|signature| calls::Prototype::of(signature, plan.fixed, &defines));
+            // A declaration that states no result names its carrier, whatever its types spell.
+            plan.carrier = (signature.and(input.callee_unproven_bits(inst.id)))
+                .filter(|bits| crate::prelude::carrier(*bits).is_some());
             if let (Some(signature), None) = (signature, &plan.declared) {
                 r2il::refusal_evidence!("staged-call-prototype", "{:?}: {signature:?}", inst.id);
             }
@@ -1745,6 +1748,13 @@ impl<'a> Values<'a> {
 
     /// The C type the call returns: its declared prototype's, else its result's class, else `void`.
     fn return_type(&self, inst: InstId, plan: &CallPlan) -> Result<CType, CallRefusal> {
+        // An unstated result is the carrier typedef at every call; a read at another class is no C.
+        if let Some(bits) = plan.carrier {
+            let read = plan.returns().map(terms::c_type);
+            let held = read.is_none_or(|ty| ty == Some(CType::uint(bits)));
+            let carrier = held.then(|| crate::prelude::result_carrier(bits));
+            return needed(carrier, inst, CallRefusal::ResultNotSpelled);
+        }
         let ret = match (plan.returns(), plan.unread) {
             (Some(class), _) => needed(terms::c_type(class), inst, CallRefusal::ResultNotSpelled)?,
             (None, Some(bits)) if plan.tail.is_none() => crate::prelude::result_carrier(bits),

@@ -217,9 +217,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
                 let open = db
                     .get::<super::analysis::CalleeReads>(&(entry, thumb))
                     .ok()?;
-                let supply = Supply::of(open.0.interface.as_ref()?);
+                let open = open.0.interface.as_ref()?;
                 let forwarding = (*db.get::<ComponentForwarding>(&entry).ok()?).clone()?;
-                let result = BoundaryResult::decided(db, (entry, thumb), &forwarding, supply);
+                let result = BoundaryResult::decided(db, (entry, thumb), &forwarding, open);
                 r2il::refusal_evidence!(
                     "call-boundary",
                     "{entry:#x}: closed world decides {:?}",
@@ -719,14 +719,15 @@ fn read(lane: &mut JoinedLane, bytes: ByteMask, width: Option<Option<u32>>) {
 }
 
 impl BoundaryResult {
-    /// The decision from the supply the seal hands in and the calls' forwarding (the demand): every
-    /// way in is asked only where every lane is dead.
+    /// The decision from the open read's supply and the calls' forwarding (the demand): every way
+    /// in is asked only where every lane is dead.
     fn decided<S: Source + 'static>(
         db: &Db<ProgramInputs<S>>,
         (entry, thumb): (u64, bool),
         forwarding: &Forwarding,
-        supply: Supply,
+        open: &r2source::SourceFunctionInterface,
     ) -> Self {
+        let supply = Supply::of(open);
         let lanes = &forwarding.lanes;
         let mut asked = None;
         let mut every_way_in =
@@ -738,6 +739,7 @@ impl BoundaryResult {
                 .is_some_and(|summary| summary.overwrites.touches(usize::from(lane.0)))
         };
         let disputes = disputes_of(supply, lanes, overwritten);
+        let disputes = (disputes.into_iter().chain(body_disputes(open))).collect::<Vec<_>>();
         let holds = holds(supply, lanes);
         let dead = asked == Some(true);
         let decisions = std::array::from_fn(|at| match lanes[at] {
@@ -896,6 +898,21 @@ fn disputes_of(
             lost: Authority::Calls,
         })
         .collect()
+}
+
+/// The lanes where a declaration overrules its own body's returns: DWARF stays first, and the
+/// body's loss is evidence (doc/adr-result-side.md, "Declaration against body"). O(lanes).
+fn body_disputes(
+    declared: &r2source::SourceFunctionInterface,
+) -> impl Iterator<Item = Dispute> + '_ {
+    declared.body_disputed_lanes().map(|(lane, _)| Dispute {
+        lane: match lane {
+            r2source::SourceTypedLane::Integer => LaneId::INTEGER,
+            r2source::SourceTypedLane::Float => LaneId::FLOAT,
+        },
+        kept: Authority::Declared,
+        lost: Authority::Body,
+    })
 }
 
 /// One direct call a body makes, and its boundary.
@@ -1351,6 +1368,47 @@ mod tests {
         assert_eq!(found, vec![lost]);
         let found = disputes_of(Supply::of(&void(false)), &read_integer(), |_| true);
         assert_eq!(found[0].kept, Authority::Body);
+    }
+
+    /// A declared `void` whose body's returns leave a written integer lane keeps `void`, and the
+    /// body loses; a recovered interface or an open lane disputes nothing (D331).
+    #[test]
+    fn a_declaration_its_body_contradicts_is_kept_and_the_body_loses() {
+        use r2source::{CanonicalStorageId, CanonicalStorageSpace, SourceBodyLane};
+        let rax = CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset: 0,
+            size: 8,
+        };
+        let body = |lane| r2source::SourceBodyResult {
+            integer: Some((rax, lane)),
+            float: None,
+        };
+        let written = void(true).with_body_result(body(SourceBodyLane::Written));
+        let lost = Dispute {
+            lane: LaneId::INTEGER,
+            kept: Authority::Declared,
+            lost: Authority::Body,
+        };
+        assert_eq!(super::body_disputes(&written).collect::<Vec<_>>(), [lost]);
+        let open = void(true).with_body_result(body(SourceBodyLane::Open));
+        assert_eq!(super::body_disputes(&open).count(), 0);
+        // A declared `void` holds no result in the lane, so a lane no return defines agrees.
+        let none = void(true).with_body_result(body(SourceBodyLane::None));
+        assert_eq!(super::body_disputes(&none).count(), 0);
+        let recovered = void(false).with_body_result(body(SourceBodyLane::Written));
+        assert_eq!(super::body_disputes(&recovered).count(), 0);
+        // The IPA-SRA shape: a declared register result no return defines.
+        let returns = SourceFunctionReturn::Register { storage: rax };
+        let int =
+            SourceFunctionInterface::new(b"int".to_vec(), ConventionId::SysVAmd64, [], returns, []);
+        let int = int
+            .expect("an interface")
+            .with_types(Confidence::of(Basis::DebugInfo));
+        let dropped = int.clone().with_body_result(body(SourceBodyLane::None));
+        assert_eq!(super::body_disputes(&dropped).collect::<Vec<_>>(), [lost]);
+        let written = int.with_body_result(body(SourceBodyLane::Written));
+        assert_eq!(super::body_disputes(&written).count(), 0);
     }
 
     /// A callee that leaves the lane alone hands the caller its own bytes back: no dispute.

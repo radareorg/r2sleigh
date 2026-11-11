@@ -242,3 +242,86 @@ fn a_direct_call_to_a_sysv_abi_callee_kills_what_its_body_writes() {
     let text = rendered(&mut open, TWICE);
     assert!(!text.contains("+ (uint64_t)arg0"), "{text}");
 }
+
+/// `mov [rdi], esi; ret`: the body GCC leaves of `int store(int *p, int v)` once IPA-SRA drops a
+/// result no caller reads (find `visit_open_fds.constprop.0.isra.0`): no return defines RAX.
+const RESULT_DROPPED: &[u8] = &[
+    0x89, 0x37, // 1000 mov [rdi], esi
+    0xc3, // 1002 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1003 padding
+    0x89, 0x37, // 1010 mov [rdi], esi
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1012 mov eax, 7
+    0xc3, // 1017 ret
+];
+
+/// `store` declared `returns store(int *p, int v)` at `BASE` and at `TWICE`, where the second
+/// body writes EAX.
+fn storing(returns: Option<&str>) -> OpenProgram<Literal> {
+    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Type, TypeGraph, TypeId, Width};
+    let mut graph = TypeGraph::new();
+    let int = graph.add(Type::Scalar(Scalar {
+        kind: ScalarKind::Signed,
+        width: Width::Bits(32),
+        name: Some("int".to_owned()),
+    }));
+    let pointer = graph.add(Type::Pointer { target: int });
+    let prototype = |name: &str| Prototype {
+        name: name.to_owned(),
+        parameters: vec![
+            Parameter::new(pointer, "int *", Some("p")),
+            Parameter::new(int, "int", Some("v")),
+        ],
+        returns: returns.unwrap_or("void").into(),
+        return_type: returns.map_or(TypeId::VOID, |_| int),
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(BASE, prototype("store"));
+    declarations.declare_function(TWICE, prototype("store_seven"));
+    let functions = [("store", BASE, 3), ("store_seven", TWICE, 8)];
+    OpenProgram::of(Literal::of_code(RESULT_DROPPED, &functions).with_declarations(declarations))
+}
+
+const KEPT_AGAINST_THE_BODY: &str = "the declared result is kept against the body";
+
+/// DWARF states `int` and no return defines RAX: the declaration stays, the return is a residual
+/// and the proof line names the disputed lane, cold and under `aa` (D331).
+#[test]
+fn a_declared_result_no_return_defines_keeps_its_type_and_disputes_the_body() {
+    for closed in [false, true] {
+        let mut open = storing(Some("int"));
+        if closed {
+            open.analyse_program().expect("aa");
+        }
+        let text = rendered(&mut open, BASE);
+        assert!(
+            text.contains("int32_t store(int32_t* p, int32_t v)"),
+            "{text}"
+        );
+        let clause = format!("{KEPT_AGAINST_THE_BODY}: no return defines the integer result");
+        assert!(text.contains(&clause), "{closed}: {text}");
+        assert!(text.contains("return r2sleigh_residual_"), "{text}");
+        // A body that writes the declared lane disputes nothing.
+        let text = rendered(&mut open, TWICE);
+        assert!(text.contains("int32_t store_seven("), "{text}");
+        assert!(!text.contains(KEPT_AGAINST_THE_BODY), "{text}");
+    }
+}
+
+/// DWARF states `void`, and a return leaves a value the body defines in RAX: `void` stays, and
+/// the proof line names the written lane. A body that leaves RAX alone disputes nothing.
+#[test]
+fn a_declared_void_whose_body_writes_a_result_lane_stays_void_and_names_the_lane() {
+    let mut open = storing(None);
+    let text = rendered(&mut open, TWICE);
+    assert!(
+        text.contains("void store_seven(int32_t* p, int32_t v)"),
+        "{text}"
+    );
+    let clause = format!("{KEPT_AGAINST_THE_BODY}: a return defines the integer result");
+    assert!(text.contains(&clause), "{text}");
+    let text = rendered(&mut open, BASE);
+    assert!(text.contains("void store(int32_t* p, int32_t v)"), "{text}");
+    assert!(!text.contains(KEPT_AGAINST_THE_BODY), "{text}");
+}

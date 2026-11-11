@@ -1128,6 +1128,109 @@ fn a_mangled_import_whose_result_is_unstated_places_no_argument() {
     assert_eq!(arguments.len(), 2, "{text}");
 }
 
+/// `mov esi, 7; call f; mov rdi, rax; mov rsi, -1; call f; xor eax, eax; ret`: two calls of one
+/// import, the first's result read, the second's not, the second argument at two widths.
+const TWO_CALLS_OF_ONE_IMPORT: &[u8] = &[
+    0xbe, 0x07, 0x00, 0x00, 0x00, // 0x1000 mov esi, 7
+    0xe8, 0x16, 0x00, 0x00, 0x00, // 0x1005 call 0x1020
+    0x48, 0x89, 0xc7, // 0x100a mov rdi, rax
+    0x48, 0xc7, 0xc6, 0xff, 0xff, 0xff, 0xff, // 0x100d mov rsi, -1
+    0xe8, 0x07, 0x00, 0x00, 0x00, // 0x1014 call 0x1020
+    0x31, 0xc0, // 0x1019 xor eax, eax
+    0xc3, // 0x101b ret
+    0x90, 0x90, 0x90, 0x90, // 0x101c padding
+    0xc3, // 0x1020 the import's stub
+];
+
+/// `std::ostream::_M_insert<unsigned long>` is `Passing::Stated`, its row two parameters and no
+/// result: one carrier extern, and both calls render against it, read or unread (D330).
+#[test]
+fn a_mangled_import_with_no_stated_result_keeps_its_parameters_in_one_carrier_extern() {
+    let insert = "_ZNSo9_M_insertImEERSoT_";
+    let text = rendered_calling(TWO_CALLS_OF_ONE_IMPORT, insert);
+    assert!(!text.contains("disagrees with its declaration"), "{text}");
+    // A declaration has its result type before the name; a call statement has nothing or `x =`.
+    let externs = (text.lines())
+        .filter(|line| {
+            let before = line.find(insert).map(|at| line[..at].trim());
+            before.is_some_and(|before| !before.is_empty() && !before.contains('='))
+        })
+        .collect::<Vec<_>>();
+    let expected = format!("r2sleigh_result_u64 {insert}(uint64_t, uint64_t);");
+    assert_eq!(
+        externs.iter().map(|line| line.trim()).collect::<Vec<_>>(),
+        [expected],
+        "{text}"
+    );
+    // Both calls render, and the first's result is the second's `this`.
+    let first = common::call_arguments(&text, insert).expect("the first call");
+    assert_eq!(first.len(), 2, "{text}");
+    assert_eq!(text.matches(&format!("{insert}(")).count(), 3, "{text}");
+    assert!(text.contains(&format!("= {insert}(")), "{text}");
+}
+
+/// `mov edi, 1; call 0x1020; ret`: the caller returns whatever the import leaves.
+const FORWARDS_AN_IMPORT: &[u8] = &[
+    0xbf, 0x01, 0x00, 0x00, 0x00, // 0x1000 mov edi, 1
+    0xe8, 0x16, 0x00, 0x00, 0x00, // 0x1005 call 0x1020
+    0xc3, // 0x100a ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 0x100b padding
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 0x1016 padding
+    0xc3, // 0x1020 the import's stub
+];
+
+/// A call to an import with no row, a row that places nothing, or one stating parameters only
+/// leaves every killed lane unproven: its caller and its extern are never `void` (S36, D330).
+#[test]
+fn a_call_to_an_import_with_no_stated_result_is_never_void() {
+    for name in ["frobnicate", "_Z3fooi", "_ZN1BC1Ei"] {
+        let text = rendered_calling(FORWARDS_AN_IMPORT, name);
+        let header = text.lines().find(|line| line.contains(" caller("));
+        let header = header.unwrap_or_else(|| panic!("{name}: {text}"));
+        assert!(!header.starts_with("void "), "{name}: {text}");
+        assert!(text.contains("the result is unproven"), "{name}: {text}");
+        assert!(!text.contains(&format!("void {name}(")), "{name}: {text}");
+    }
+}
+
+/// `stp x29, x30, [sp, -16]!; mov w0, 7; bl 0x1020; ldp x29, x30, [sp], 16; ret`.
+const AARCH64_CALLS_AN_IMPORT: &[u8] = &[
+    0xfd, 0x7b, 0xbf, 0xa9, // 0x1000 stp x29, x30, [sp, -16]!
+    0xe0, 0x00, 0x80, 0x52, // 0x1004 mov w0, 7
+    0x06, 0x00, 0x00, 0x94, // 0x1008 bl 0x1020
+    0xfd, 0x7b, 0xc1, 0xa8, // 0x100c ldp x29, x30, [sp], 16
+    0xc0, 0x03, 0x5f, 0xd6, // 0x1010 ret
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 0x1014 nop x3
+    0xc0, 0x03, 0x5f, 0xd6, // 0x1020 the import's stub
+];
+
+/// AAPCS64 passes a hidden result pointer in x8, no argument register, so `_Z3fooi` places its
+/// `int` in w0: one carrier extern, and the caller that returns past it is never `void` (D330).
+#[test]
+fn an_aarch64_mangled_import_places_its_parameters_and_declares_the_carrier() {
+    let mut machine = Machine::on("aarch64", "aarch64", 64, Platform::Linux);
+    let mut rows = LibraryRows::embedded(CLibrary::Glibc);
+    rows.read_mangled(["_Z3fooi"]);
+    machine.imports = Imports::new(rows, CLibrary::Glibc, Linkage::one_c_library());
+    let program = CallsImport {
+        bytes: AARCH64_CALLS_AN_IMPORT,
+        name: "_Z3fooi",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(
+        text.contains("r2sleigh_result_u64 _Z3fooi(int32_t);"),
+        "{text}"
+    );
+    let arguments = common::call_arguments(text, "_Z3fooi").expect("a call to foo");
+    assert_eq!(arguments, ["7"], "{text}");
+    let header = text.lines().find(|line| line.contains(" caller("));
+    assert!(
+        header.is_some_and(|header| !header.starts_with("void ")),
+        "{text}"
+    );
+}
+
 /// `_ZN1BC2Ei` takes a VTT after `this` where `B` has a virtual base, so the `int` is in EDX, not
 /// ESI: the base-object variant places nothing (PR #349 review, Itanium C++ ABI 2.6.2).
 #[test]

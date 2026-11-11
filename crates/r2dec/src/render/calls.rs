@@ -41,6 +41,9 @@ pub(super) struct CallPlan {
     /// The carrier's bits where the call reads no result and its boundary does not state `void`:
     /// a result no contract states is still one (S36), so its extern is never `void`.
     pub(super) unread: Option<u32>,
+    /// The carrier's bits where the callee's declaration states no result: every call declares
+    /// it, read or not (D330).
+    pub(super) carrier: Option<u32>,
     pub(super) noreturn: bool,
     /// For a tail transfer, the register and class its callee returns in; `Some(None)` where the
     /// facts state no result.
@@ -497,6 +500,7 @@ fn planned(
             || never_comes_back(artifact, inst),
         tail,
         declared: None,
+        carrier: None,
     })
 }
 

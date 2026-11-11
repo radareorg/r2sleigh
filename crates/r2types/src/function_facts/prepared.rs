@@ -202,7 +202,7 @@ pub(crate) fn function_type_matches_source_interface(
         (r2ssa::SourceFunctionReturn::Void, CTypeLike::Void) => true,
         // Typed at each call by the carrier its caller reads (`call_result_type`).
         (r2ssa::SourceFunctionReturn::Unproven, CTypeLike::Unknown) => {
-            interface.result_carriers().is_some()
+            interface.result_carriers().is_some() || interface.unstated_carrier().is_some()
         }
         (r2ssa::SourceFunctionReturn::Register { storage }, ty) => {
             let actual_bits = declaration_type_width_bits(ty, ptr_bits).map(u64::from);
@@ -1366,7 +1366,8 @@ pub(crate) fn prepared_call_render_facts(prepared: &r2ssa::SsaArtifact) -> Funct
                     Some(
                         r2ssa::SourceCallResult::Register { .. }
                         | r2ssa::SourceCallResult::Pair { .. }
-                        | r2ssa::SourceCallResult::Unproven { .. },
+                        | r2ssa::SourceCallResult::Unproven { .. }
+                        | r2ssa::SourceCallResult::Unstated { .. },
                     ) => CallsiteRenderDisposition::TerminalReturn,
                     Some(r2ssa::SourceCallResult::Void) => {
                         CallsiteRenderDisposition::TerminalVoidReturn

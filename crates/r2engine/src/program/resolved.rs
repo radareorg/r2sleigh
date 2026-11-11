@@ -135,7 +135,8 @@ fn result_owners(read: &CalleeRead) -> BTreeSet<u64> {
         | SourceResultCause::Written
         | SourceResultCause::Unread
         | SourceResultCause::ForwardCycle
-        | SourceResultCause::LanesUnbounded => None,
+        | SourceResultCause::LanesUnbounded
+        | SourceResultCause::Unstated => None,
     });
     owners.collect::<Option<_>>().unwrap_or_default()
 }

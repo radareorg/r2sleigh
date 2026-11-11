@@ -1665,9 +1665,10 @@ fn recover_interface_inner(
     let mut beside_void_tails = None;
     let mut result = match tail {
         // A group states no exact tail result (`stated_result`).
-        TailResult::Unproven | TailResult::Exact(SourceCallResult::Unproven { .. }) => {
-            RecoveredFunctionResult::Unproven
-        }
+        TailResult::Unproven
+        | TailResult::Exact(
+            SourceCallResult::Unproven { .. } | SourceCallResult::Unstated { .. },
+        ) => RecoveredFunctionResult::Unproven,
         // The tail callee's value is this function's, at the width the callee states.
         TailResult::Exact(SourceCallResult::Register {
             storage: slot,
@@ -2823,6 +2824,103 @@ fn direct_returns_beside_void_tails(
     (recovered_result_over(&returns, slot, false), None)
 }
 
+/// What a declared body's returns leave in its integer and float result lanes, default deny: `None`
+/// and `Written` are proven, else `Open` (D331). O(blocks + values reaching a return) per lane.
+pub(crate) fn body_result_lanes(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    model: &r2source::ConventionModel,
+) -> r2source::SourceBodyResult {
+    use r2source::SourceBodyLane as Lane;
+    use r2source::convention::Location;
+    let arguments = (model.sections.iter()).flat_map(|section| section.locations.iter());
+    let inputs = arguments
+        .filter_map(|location| match location {
+            Location::Register { storage, .. } => Some(*storage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let read = |slot: CanonicalStorageId| {
+        // A tail whose callee may write the lane proves nothing of it.
+        if !owned_tail_blocks(func, graph, facts, slot).is_empty() {
+            return Lane::Open;
+        }
+        let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]);
+        if !live_out.has_returns() || live_out.clobbered_blocks().next().is_some() {
+            return Lane::Open;
+        }
+        // The lane's entry byte at a return is the caller's, unless it defines nothing (case 1).
+        let input = inputs.iter().any(|input| overlaps(*input, slot));
+        let entry_undefined = !input && !read_on_entry(graph, slot);
+        if live_out.unresolved_blocks().next().is_some() && !entry_undefined {
+            return Lane::Open;
+        }
+        let lane = lane_at_returns(func, graph, facts, &live_out, entry_undefined);
+        r2il::refusal_evidence!("declared-body-result", "{slot:?}: {lane:?}");
+        lane
+    };
+    let lanes = model.typed_results();
+    r2source::SourceBodyResult {
+        integer: lanes.integer.map(|slot| (slot, read(slot))),
+        float: lanes.float.map(|slot| (slot, read(slot))),
+    }
+}
+
+/// One lane over each value reaching a return through merges, once: `Written` by a stated call or an
+/// operation's byte, `None` by neither, `Open` at a caller's value, an unstated call or a check.
+fn lane_at_returns(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    live_out: &crate::liveout::FunctionLiveOut,
+    entry_undefined: bool,
+) -> r2source::SourceBodyLane {
+    use crate::graph::InstPayload;
+    use r2source::SourceBodyLane as Lane;
+    // The seal keeps no per-operation record, so a check's residue would read as data.
+    let checked = func.has_compiler_inserted_writes();
+    let written = func.written_or_captured();
+    let mut defined = false;
+    let mut seen = crate::dense::IdSet::default();
+    let mut pending = live_out.iter().collect::<Vec<_>>();
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        let inst = graph.def_inst(value).and_then(|inst| graph.inst(inst));
+        let Some(inst) = inst.filter(|_| graph.written_by_body(value)) else {
+            // The caller's value: an entry byte, or a formal the declaration rebuilt.
+            if !entry_undefined {
+                return Lane::Open;
+            }
+            continue;
+        };
+        match &inst.payload {
+            InstPayload::Phi { .. } => pending.extend(graph.inputs(inst.id).iter().copied()),
+            InstPayload::Op(crate::op::SSAOp::CallDefine { .. }) => {
+                match returned_by_call(graph, facts, value) {
+                    ReturnedByCall::Void => {}
+                    ReturnedByCall::Stated => defined = true,
+                    _ => return Lane::Open,
+                }
+            }
+            InstPayload::Op(_) => {
+                let storage = graph.value(value).and_then(|value| value.canonical_storage);
+                let (Some(storage), false) = (storage, checked) else {
+                    return Lane::Open;
+                };
+                let bytes = written_bytes(&written, graph, value, &mut BTreeSet::new());
+                defined |= !crate::lanes::defines_nothing(&bytes, storage, entry_undefined);
+            }
+        }
+    }
+    match defined {
+        true => Lane::Written,
+        false => Lane::None,
+    }
+}
+
 /// The tail transfers that own the result: every one but a tail to a callee that leaves each result
 /// lane as it found it (D212), whose block hands back what reaches it, as a return does.
 fn owned_tails<'f>(
@@ -3513,9 +3611,13 @@ pub fn mint_recovered_call_site_interface(
             width: (callee.result_width()).unwrap_or(SourceResultWidth::whole(storage)),
         },
         SourceFunctionReturn::Pair { low, high } => SourceCallResult::Pair { low, high },
-        SourceFunctionReturn::Unproven => match call_lanes(callee, passes, results) {
-            Some(lanes) => lanes.result,
-            None => {
+        SourceFunctionReturn::Unproven => match (
+            callee.unstated_carrier(),
+            call_lanes(callee, passes, results),
+        ) {
+            (Some(carrier), _) => SourceCallResult::Unstated { carrier },
+            (None, Some(lanes)) => lanes.result,
+            (None, None) => {
                 r2il::refusal_evidence!(
                     "call-site-minting",
                     "the callee's result is unproven ({:?}), so its body describes no call contract",

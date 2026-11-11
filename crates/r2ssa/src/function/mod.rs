@@ -756,6 +756,7 @@ impl SsaArtifact {
     /// caller correlated against it and the signature derived from it see one
     /// interface rather than the capture's and a promoted copy of it.
     fn seal_body_proven_interface(&mut self) {
+        self.seal_body_result();
         let Some(index) = body_proven_format_parameter(self) else {
             return;
         };
@@ -765,6 +766,24 @@ impl SsaArtifact {
         if let Ok(sealed) = interface.clone().with_body_proven_format_parameter(index) {
             self.machine_context.seal_function_interface(sealed);
         }
+    }
+
+    /// What the body's returns leave in the result lanes of a function a declaration states, which
+    /// recovery never read (doc/adr-result-side.md, "Declaration against body").
+    fn seal_body_result(&mut self) {
+        let context = &self.machine_context;
+        let declared = (context.function_interface()).filter(|own| own.types_are_declared());
+        let (Some(interface), Some(model)) = (declared, context.convention()) else {
+            return;
+        };
+        let body = crate::recover_interface::body_result_lanes(
+            self.function(),
+            self.graph(),
+            self.facts(),
+            model,
+        );
+        let sealed = interface.clone().with_body_result(body);
+        self.machine_context.seal_function_interface(sealed);
     }
 
     /// Run-local identity shared by every clone and downstream proof derived
@@ -3871,6 +3890,11 @@ impl SSAFunction {
         self.checked_differences.extend(differences);
         self.checked_differences.sort_unstable();
         self.checked_differences.dedup();
+    }
+
+    /// Whether a decided check wrote anything: its residue is no C expression's (case 3).
+    pub(crate) fn has_compiler_inserted_writes(&self) -> bool {
+        !self.compiler_inserted.is_empty() || !self.checked_differences.is_empty()
     }
 
     /// Whether `var` is a decided canary check's difference (doc/adr-scratch-result.md, case 3).

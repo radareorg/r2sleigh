@@ -124,6 +124,15 @@ impl<'a> RenderInput<'a> {
             .is_some_and(|carriers| carriers.second.is_some())
     }
 
+    /// The result lanes where the body's returns contradict the declaration, which is kept (D331).
+    pub fn body_disputed_lanes(
+        &self,
+    ) -> Vec<(r2source::SourceTypedLane, r2source::SourceBodyLane)> {
+        (self.artifact().machine_context().function_interface())
+            .map(|own| own.body_disputed_lanes().collect())
+            .unwrap_or_default()
+    }
+
     /// How many call sites take a prototype the source declares (a library table's or the binary's).
     pub fn declared_call_prototypes(&self) -> usize {
         self.facts
@@ -161,6 +170,13 @@ impl<'a> RenderInput<'a> {
             })
             .and_then(|identity| identity.signature.as_ref());
         graded.or(identity)
+    }
+
+    /// The carrier's bits where the callee of the call at `inst` states no result (D201, D330).
+    pub fn callee_unproven_bits(&self, inst: r2ssa::InstId) -> Option<u32> {
+        (self.facts.report().callsites())
+            .and_then(|callsites| callsites.by_callsite.get(inst))
+            .and_then(|facts| facts.callee_unproven_bits)
     }
 
     /// The callee's own projection for the call at `inst`, from a callee body the capture holds,

@@ -128,7 +128,7 @@ pub fn render(
         0,
         (
             unassigned.as_deref().unwrap_or_default(),
-            input.open_second_result(),
+            (input.open_second_result(), &input.body_disputed_lanes()),
             input.inferred_aggregates().len(),
         ),
         (input.return_type())
