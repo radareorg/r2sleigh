@@ -64,10 +64,48 @@ pub(crate) fn proves_check(func: &SSAFunction, machine: &SourceMachineContext) -
     if returns.is_empty() || !returns.iter().all(|addr| func.dominates(block, *addr)) {
         return false;
     }
+    // Whether it returns turns on the argument and the cookie alone: no other input decides it.
+    let decided_by_argument = |var: VarId| {
+        let leaf = |var: VarId| {
+            entry_argument(var) || reads_cookie(var) || func.var(var).constant_bits().is_some()
+        };
+        derived_only_from(&defs, var, leaf)
+    };
     returning_blocks(func, returns).iter().all(|addr| {
-        func.get_block(*addr)
-            .is_some_and(|block| block.sited().all(|(_, op)| inert(op)))
+        let Some(found) = func.get_block(*addr) else {
+            return false;
+        };
+        let condition = found.sited().find_map(|(_, op)| match op {
+            SSAOp::CBranch { cond, .. } => Some(*cond),
+            _ => None,
+        });
+        found.sited().all(|(_, op)| inert(op))
+            && (*addr == block || condition.is_none_or(decided_by_argument))
     })
+}
+
+/// Whether `var` is computed by register operations from values `leaf` accepts, merging none.
+/// Bounded: a computation of more than 64 operations is refused.
+fn derived_only_from(defs: &Definitions, var: VarId, leaf: impl Fn(VarId) -> bool) -> bool {
+    const BUDGET: usize = 64;
+    let mut work = vec![var];
+    let mut walked = 0;
+    while let Some(var) = work.pop() {
+        walked += 1;
+        if walked > BUDGET || !defs.phi_sources(var).is_empty() {
+            return false;
+        }
+        if leaf(var) {
+            continue;
+        }
+        match defs.op(var) {
+            Some((_, op)) if inert(op) && !matches!(op, SSAOp::Load { .. }) => {
+                work.extend(op.sources().into_iter().copied());
+            }
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// The cookie the convention model's forms name, and the first integer argument register.
@@ -224,6 +262,7 @@ pub(crate) fn decide(
         defs: &defs,
         slots: &slots,
         readers: &readers,
+        loads: frame_loads(func, &defs),
         cookie,
         stack_pointer,
         results: (model.result_registers(SlotClass::Integer))
@@ -281,6 +320,24 @@ fn check_calls(
         }
     }
     calls
+}
+
+/// Every load by the root of its address, written once. O(ops).
+fn frame_loads(func: &SSAFunction, defs: &Definitions) -> IdMap<VarId, Vec<(i64, i64, OpId)>> {
+    let mut loads = IdMap::<VarId, Vec<_>>::new(func.values().len());
+    let ops = (func.block_addrs().iter())
+        .filter_map(|addr| func.get_block(*addr))
+        .flat_map(|block| block.sited());
+    for (id, op) in ops {
+        if let SSAOp::Load { dst, addr, .. } = op {
+            let (root, at) = defs.affine(func, *addr);
+            let size = i64::from(func.var(*dst).size);
+            loads
+                .get_or_insert_with(root, Vec::new)
+                .push((at, size, id));
+        }
+    }
+    loads
 }
 
 /// What an operation does with a value it reads, for a walk asking whether nothing keeps it.
@@ -350,6 +407,8 @@ struct Context<'f> {
     defs: &'f Definitions,
     slots: &'f SlotStores,
     readers: &'f Readers<'f>,
+    /// Every load whose address is a root plus a constant, by root: `(offset, size, op)`.
+    loads: IdMap<VarId, Vec<(i64, i64, OpId)>>,
     cookie: r2source::SourceSecurityCookie,
     stack_pointer: r2source::CanonicalStorageId,
     /// The convention's result carriers, which a return reads with no operation naming them.
@@ -510,17 +569,8 @@ impl Context<'_> {
     /// Whether a load other than `reload` reads a byte of the slot.
     fn slot_read_elsewhere(&self, (root, offset): Affine, width: u32, reload: OpId) -> bool {
         let end = offset + i64::from(width);
-        (self.func.block_addrs().iter())
-            .filter_map(|addr| self.func.get_block(*addr))
-            .flat_map(|block| block.sited())
-            .any(|(id, op)| match op {
-                SSAOp::Load { dst, addr, .. } if id != reload => {
-                    let (other, at) = self.defs.affine(self.func, *addr);
-                    let size = i64::from(self.func.var(*dst).size);
-                    other == root && at < end && offset < at + size
-                }
-                _ => false,
-            })
+        (self.loads.get(root).into_iter().flatten())
+            .any(|(at, size, id)| *id != reload && *at < end && offset < at + size)
     }
 
     /// Whether `var` is read only by `sinks`, or by operations whose own results nothing else

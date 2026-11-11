@@ -53,6 +53,30 @@ const RETURNING: &[u8] = &{
     code
 };
 
+/// [`GUARDED`] whose check also fails on a second argument: `if (x != cookie || y != 0) exit`.
+/// Whether it returns turns on `rdx`, which no cookie decides.
+const SECOND_TEST: &[u8] = &{
+    let mut code = [0u8; 0xa8];
+    let mut at = 0;
+    while at < code.len() {
+        code[at] = GUARDED[at];
+        at += 1;
+    }
+    let tail = [
+        0x75, 0x06, // 1007 jne 0x100f
+        0x48, 0x85, 0xd2, // 1009 test rdx, rdx
+        0x75, 0x01, // 100c jne 0x100f
+        0xc3, // 100e ret
+        0xe8, 0x7c, 0x00, 0x00, 0x00, // 100f call 0x1090: ExitProcess
+    ];
+    let mut at = 0;
+    while at < tail.len() {
+        code[0x07 + at] = tail[at];
+        at += 1;
+    }
+    code
+};
+
 const CHECK: u64 = BASE;
 const CALLER: u64 = BASE + 0x20;
 
@@ -225,4 +249,12 @@ fn a_branch_past_the_handle_s_copy_may_return() {
     let text = rendered(&mut open, BASE + 0x30);
     assert!(!text.contains("noreturn"), "{text}");
     assert!(text.contains("return r2sleigh_carrier_u64(5)"), "{text}");
+}
+
+/// A check that also tests another argument may end the process with the cookie intact: no check.
+#[test]
+fn a_cookie_compare_that_also_tests_another_argument_is_no_check() {
+    let mut open = program(SECOND_TEST, "check", Some(TEXT));
+    let text = rendered(&mut open, CALLER);
+    assert!(text.contains("check("), "{text}");
 }
