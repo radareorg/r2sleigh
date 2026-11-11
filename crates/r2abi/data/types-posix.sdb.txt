@@ -3573,3 +3573,108 @@ func.wctype.args=1
 func.wctype.arg.0=const char *,property
 func.wctype.ret=wctype_t
 func.wctype.include=wctype.h
+
+# string.h: GCC builtins.def declares the fortified string functions <string.h> expands to
+# (BUILT_IN_MEMCPY_CHK and the rest); glibc, bionic and libSystem export them alike. The last
+# parameter is the destination's size. GCC 13's own `__builtin___*_chk` types agree with each row.
+__memcpy_chk=func
+func.__memcpy_chk.args=4
+func.__memcpy_chk.arg.0=void *,dest
+func.__memcpy_chk.arg.1=const void *,src
+func.__memcpy_chk.arg.2=size_t,len
+func.__memcpy_chk.arg.3=size_t,destlen
+func.__memcpy_chk.ret=void *
+func.__memcpy_chk.include=string.h
+
+__memmove_chk=func
+func.__memmove_chk.args=4
+func.__memmove_chk.arg.0=void *,dest
+func.__memmove_chk.arg.1=const void *,src
+func.__memmove_chk.arg.2=size_t,len
+func.__memmove_chk.arg.3=size_t,destlen
+func.__memmove_chk.ret=void *
+func.__memmove_chk.include=string.h
+
+__mempcpy_chk=func
+func.__mempcpy_chk.args=4
+func.__mempcpy_chk.arg.0=void *,dest
+func.__mempcpy_chk.arg.1=const void *,src
+func.__mempcpy_chk.arg.2=size_t,len
+func.__mempcpy_chk.arg.3=size_t,destlen
+func.__mempcpy_chk.ret=void *
+func.__mempcpy_chk.include=string.h
+
+__memset_chk=func
+func.__memset_chk.args=4
+func.__memset_chk.arg.0=void *,dest
+func.__memset_chk.arg.1=int,c
+func.__memset_chk.arg.2=size_t,len
+func.__memset_chk.arg.3=size_t,destlen
+func.__memset_chk.ret=void *
+func.__memset_chk.include=string.h
+
+__strcpy_chk=func
+func.__strcpy_chk.args=3
+func.__strcpy_chk.arg.0=char *,dest
+func.__strcpy_chk.arg.1=const char *,src
+func.__strcpy_chk.arg.2=size_t,destlen
+func.__strcpy_chk.ret=char *
+func.__strcpy_chk.include=string.h
+
+__stpcpy_chk=func
+func.__stpcpy_chk.args=3
+func.__stpcpy_chk.arg.0=char *,dest
+func.__stpcpy_chk.arg.1=const char *,src
+func.__stpcpy_chk.arg.2=size_t,destlen
+func.__stpcpy_chk.ret=char *
+func.__stpcpy_chk.include=string.h
+
+__strcat_chk=func
+func.__strcat_chk.args=3
+func.__strcat_chk.arg.0=char *,dest
+func.__strcat_chk.arg.1=const char *,src
+func.__strcat_chk.arg.2=size_t,destlen
+func.__strcat_chk.ret=char *
+func.__strcat_chk.include=string.h
+
+__strncpy_chk=func
+func.__strncpy_chk.args=4
+func.__strncpy_chk.arg.0=char *,dest
+func.__strncpy_chk.arg.1=const char *,src
+func.__strncpy_chk.arg.2=size_t,len
+func.__strncpy_chk.arg.3=size_t,destlen
+func.__strncpy_chk.ret=char *
+func.__strncpy_chk.include=string.h
+
+__strncat_chk=func
+func.__strncat_chk.args=4
+func.__strncat_chk.arg.0=char *,dest
+func.__strncat_chk.arg.1=const char *,src
+func.__strncat_chk.arg.2=size_t,len
+func.__strncat_chk.arg.3=size_t,destlen
+func.__strncat_chk.ret=char *
+func.__strncat_chk.include=string.h
+
+# stdio.h: POSIX.1-2017. The unlocked forms of getchar and putchar.
+getchar_unlocked=func
+func.getchar_unlocked.args=0
+func.getchar_unlocked.ret=int
+func.getchar_unlocked.include=stdio.h
+
+putchar_unlocked=func
+func.putchar_unlocked.args=1
+func.putchar_unlocked.arg.0=int,c
+func.putchar_unlocked.ret=int
+func.putchar_unlocked.include=stdio.h
+
+# POSIX.1-2017 (XSI), the group and user database headers. Each closes the database its get*ent
+# opened.
+endgrent=func
+func.endgrent.args=0
+func.endgrent.ret=void
+func.endgrent.include=grp.h
+
+endpwent=func
+func.endpwent.args=0
+func.endpwent.ret=void
+func.endpwent.include=pwd.h

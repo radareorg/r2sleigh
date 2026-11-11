@@ -5,8 +5,8 @@ use r2abi::{CLibrary, Dll, Handle, LibraryId, LibraryRows, Tail};
 
 /// Each cited table and the fewest rows it holds.
 const CITED: [(&str, usize); 5] = [
-    ("types-posix.sdb.txt", 500),
-    ("types-glibc.sdb.txt", 75),
+    ("types-posix.sdb.txt", 515),
+    ("types-glibc.sdb.txt", 85),
     ("types-bionic.sdb.txt", 100),
     ("types-kernel32.sdb.txt", 50),
     ("types-ucrt.sdb.txt", 1),
@@ -108,7 +108,7 @@ fn every_uncited_glibc_facing_row_names_why() {
     assert!(unnamed.is_empty(), "uncited with no reason: {unnamed:?}");
     let stale = listed.difference(&uncited).collect::<Vec<_>>();
     assert!(stale.is_empty(), "listed, but no uncited row: {stale:?}");
-    assert!(listed.len() <= 130, "{} uncited rows", listed.len());
+    assert!(listed.len() <= 123, "{} uncited rows", listed.len());
 }
 
 /// An uncited table states no tail: its rows are radare2's, `Unstated` until cited.
@@ -308,6 +308,12 @@ fn a_row_is_keyed_by_the_name_a_program_links() {
     assert!(assert_fail.noreturn);
     assert_eq!(assert_fail.tail, Tail::None);
     assert!(glibc.row(LibraryId::Glibc, "__errno_location").is_some());
+    // D151's last two: libio's `__overflow` and glibc's `wcwidth` are cited, fixed prototypes.
+    for (name, parameters) in [("__overflow", 2), ("wcwidth", 1)] {
+        let row = glibc.row(LibraryId::Glibc, name).expect(name);
+        assert_eq!(row.tail, Tail::None, "{name}");
+        assert_eq!(glibc.prototype(row).parameters.len(), parameters, "{name}");
+    }
     let libsystem = LibraryRows::embedded(CLibrary::LibSystem);
     assert!(
         libsystem

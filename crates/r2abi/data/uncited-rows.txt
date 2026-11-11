@@ -20,7 +20,6 @@ dgettext | glibc declares it only under _GNU_SOURCE, and every library reads the
 dngettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 gettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 ngettext | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-__strcpy_chk | GCC's fortified builtin, which no header declares
 compat_mode | no glibc 2.39 header declares it
 getprogname | no glibc 2.39 header declares it
 strlcpy | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
@@ -112,12 +111,6 @@ fflush_unlocked | glibc declares it only under _GNU_SOURCE, and every library re
 stat | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 utime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 utimes | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-__memcpy_chk | GCC's fortified builtin, which no header declares
-__memmove_chk | GCC's fortified builtin, which no header declares
-__memset_chk | GCC's fortified builtin, which no header declares
-__strncpy_chk | GCC's fortified builtin, which no header declares
-__strcat_chk | GCC's fortified builtin, which no header declares
-__strncat_chk | GCC's fortified builtin, which no header declares
 
 # types-linux.sdb.txt, glibc's own.
 xalloc_die | no glibc 2.39 header declares it

@@ -172,6 +172,7 @@ the mode its source names (`-std=c17`, `_POSIX_C_SOURCE=200809L`, `_XOPEN_SOURCE
 `types-glibc.sdb.txt`. `scripts/audit_abi_rows.py --cc gcc` compiles each cited row that names a
 header against it in CI; a row citing GCC's `builtins.def` is not compiled. `uncited-rows.txt`
 names each row left behind and why (61 of them glibc declares), and that list only falls.
+The fortified string functions (`__memcpy_chk` and 8 more) cite GCC's `builtins.def`.
 
 A Microsoft row states a handle its page names by what it refers to: `func.<name>.yields=current-process`
 where the result is the calling process's handle (`GetCurrentProcess`), and

@@ -19,7 +19,7 @@ import sys
 BUILD = "cargo build --release -p r2s --features sleigh"
 R2S = "target/release/r2s"
 RECOVER = "crates/r2ssa/src/recover_interface.rs"
-PORTABLE = "crates/r2abi/data/types.sdb.txt"
+PORTABLE = "crates/r2abi/data/types-posix.sdb.txt"
 LANES = "crates/r2ssa/src/lanes.rs"
 
 # (name, edits, whether it must die, why it may live)

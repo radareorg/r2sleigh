@@ -645,3 +645,74 @@ func.access.arg.0=const char *,path
 func.access.arg.1=int,mode
 func.access.ret=int
 func.access.include=unistd.h
+
+# stdio.h: glibc. libio's entry points, which the getc and putc inlines of <bits/stdio.h> call
+# when the buffer is empty or full (D151).
+__overflow=func
+func.__overflow.args=2
+func.__overflow.arg.0=FILE *,stream
+func.__overflow.arg.1=int,c
+func.__overflow.ret=int
+func.__overflow.include=stdio.h
+
+__uflow=func
+func.__uflow.args=1
+func.__uflow.arg.0=FILE *,stream
+func.__uflow.ret=int
+func.__uflow.include=stdio.h
+
+# stdlib.h: glibc. MB_CUR_MAX expands to this call.
+__ctype_get_mb_cur_max=func
+func.__ctype_get_mb_cur_max.args=0
+func.__ctype_get_mb_cur_max.ret=size_t
+func.__ctype_get_mb_cur_max.include=stdlib.h
+
+# wchar.h: POSIX.1-2017 (XSI), as glibc declares it; bionic's and libSystem's tables state their own (D151).
+wcwidth=func
+func.wcwidth.args=1
+func.wcwidth.arg.0=wchar_t,c
+func.wcwidth.ret=int
+func.wcwidth.include=wchar.h
+
+# unistd.h: POSIX.1-2017, as glibc declares them; bionic's table states its own.
+dup2=func
+func.dup2.args=2
+func.dup2.arg.0=int,fildes
+func.dup2.arg.1=int,fildes2
+func.dup2.ret=int
+func.dup2.include=unistd.h
+
+fchdir=func
+func.fchdir.args=1
+func.fchdir.arg.0=int,fildes
+func.fchdir.ret=int
+func.fchdir.include=unistd.h
+
+fdatasync=func
+func.fdatasync.args=1
+func.fdatasync.arg.0=int,fildes
+func.fdatasync.ret=int
+func.fdatasync.include=unistd.h
+
+fork=func
+func.fork.args=0
+func.fork.ret=pid_t
+func.fork.include=unistd.h
+
+fsync=func
+func.fsync.args=1
+func.fsync.arg.0=int,fildes
+func.fsync.ret=int
+func.fsync.include=unistd.h
+
+sysconf=func
+func.sysconf.args=1
+func.sysconf.arg.0=int,name
+func.sysconf.ret=long
+func.sysconf.include=unistd.h
+
+# unistd.h: glibc (4.3BSD getpagesize, which POSIX.1-2001 removed).
+getpagesize=func
+func.getpagesize.args=0
+func.getpagesize.ret=int
+func.getpagesize.include=unistd.h

@@ -198,13 +198,6 @@ func.ngettext.arg.2=unsigned long int,n
 func.ngettext.ret=char *
 func.ngettext.include=libintl.h
 
-__strcpy_chk=func
-func.__strcpy_chk.args=3
-func.__strcpy_chk.arg.0=char *,dest
-func.__strcpy_chk.arg.1=const char *,src
-func.__strcpy_chk.arg.2=size_t,destlen
-func.__strcpy_chk.ret=char *
-
 compat_mode=func
 func.compat_mode.args=2
 func.compat_mode.arg.0=const char *,function
@@ -768,49 +761,3 @@ func.utimes.arg.0=const char *,filename
 func.utimes.arg.1=const void *,times
 func.utimes.ret=int
 
-__memcpy_chk=func
-func.__memcpy_chk.args=4
-func.__memcpy_chk.arg.0=void *,dest
-func.__memcpy_chk.arg.1=const void *,src
-func.__memcpy_chk.arg.2=size_t,len
-func.__memcpy_chk.arg.3=size_t,destlen
-func.__memcpy_chk.ret=void *
-
-__memmove_chk=func
-func.__memmove_chk.args=4
-func.__memmove_chk.arg.0=void *,dest
-func.__memmove_chk.arg.1=const void *,src
-func.__memmove_chk.arg.2=size_t,len
-func.__memmove_chk.arg.3=size_t,destlen
-func.__memmove_chk.ret=void *
-
-__memset_chk=func
-func.__memset_chk.args=4
-func.__memset_chk.arg.0=void *,dest
-func.__memset_chk.arg.1=int,c
-func.__memset_chk.arg.2=size_t,len
-func.__memset_chk.arg.3=size_t,destlen
-func.__memset_chk.ret=void *
-
-__strncpy_chk=func
-func.__strncpy_chk.args=4
-func.__strncpy_chk.arg.0=char *,dest
-func.__strncpy_chk.arg.1=const char *,src
-func.__strncpy_chk.arg.2=size_t,len
-func.__strncpy_chk.arg.3=size_t,destlen
-func.__strncpy_chk.ret=char *
-
-__strcat_chk=func
-func.__strcat_chk.args=3
-func.__strcat_chk.arg.0=char *,dest
-func.__strcat_chk.arg.1=const char *,src
-func.__strcat_chk.arg.2=size_t,destlen
-func.__strcat_chk.ret=char *
-
-__strncat_chk=func
-func.__strncat_chk.args=4
-func.__strncat_chk.arg.0=char *,dest
-func.__strncat_chk.arg.1=const char *,src
-func.__strncat_chk.arg.2=size_t,len
-func.__strncat_chk.arg.3=size_t,destlen
-func.__strncat_chk.ret=char *

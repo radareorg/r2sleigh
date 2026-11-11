@@ -133,3 +133,5 @@ GetSystemTimeAsFileTime | void | Microsoft sysinfoapi.h VOID GetSystemTimeAsFile
 RaiseException | void | Microsoft errhandlingapi.h VOID RaiseException(DWORD, DWORD, DWORD, const ULONG_PTR *)
 RtlCaptureContext | void | Microsoft winnt.h VOID RtlCaptureContext(PCONTEXT)
 SetLastError | void | Microsoft errhandlingapi.h VOID SetLastError(DWORD)
+endgrent | void | POSIX.1-2017 <grp.h> endgrent (XSI)
+endpwent | void | POSIX.1-2017 (XSI) endpwent, in the user database header
