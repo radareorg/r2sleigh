@@ -62,6 +62,8 @@ pub struct ProvenProgramObservations {
     parents: crate::dense::IdMap<ValueId, ValueId>,
     /// Why each root is one: the obligation that reads it, or the return.
     roots: crate::dense::IdMap<ValueId, String>,
+    /// Values an instruction no rule models may read: not observed, and not proven dead either.
+    unmodelled: crate::dense::IdSet<ValueId>,
 }
 
 pub(crate) use crate::bytes::ByteMask;
@@ -89,12 +91,27 @@ impl ProvenProgramObservations {
             }
         }
         let closure = crate::bytes::closure(graph, roots.keys());
+        // What an unmodelled instruction reads, and what those values depend on. O(V + E).
+        let unmodelled = (facts.obligations.unmodelled().iter())
+            .flat_map(|inst| graph.inputs(inst).iter().copied())
+            .collect::<Vec<_>>();
+        let unmodelled = match unmodelled.is_empty() {
+            true => crate::dense::IdSet::default(),
+            false => crate::bytes::closure(graph, unmodelled).values,
+        };
         Some(Self {
             values: closure.values,
             bytes: closure.bytes,
             parents: closure.parents,
             roots,
+            unmodelled,
         })
+    }
+
+    /// Whether nothing reads `value`: no observation depends on it, and no instruction whose
+    /// semantics no rule models may. The complement of `contains` proves nothing (ROADMAP D327).
+    pub fn proven_unread(&self, value: ValueId) -> bool {
+        !self.values.contains(value) && !self.unmodelled.contains(value)
     }
 
     pub fn contains(&self, value: ValueId) -> bool {

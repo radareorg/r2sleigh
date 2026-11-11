@@ -556,6 +556,10 @@ pub struct SemanticObligationInventory {
     native_spans: BTreeMap<CanonicalInstructionId, crate::GenuineNativeInstructionSpan>,
     construction_failures: Vec<ObligationInventoryFailure>,
     unstructured_cycle_blocks: BTreeSet<u64>,
+    /// The instructions no rule models (a user operation, an unimplemented decode, an unproven
+    /// place or call): not the definitions held only because a return's interface is unproven.
+    #[serde(skip)]
+    unmodelled: crate::dense::IdSet<InstId>,
     /// Whether some graph instruction's obligations were not one run of the table, or named an
     /// instruction with no disposition: the inventory then does not close.
     split_runs: bool,
@@ -580,6 +584,7 @@ impl SemanticObligationInventory {
             native_spans: BTreeMap::new(),
             construction_failures: Vec::new(),
             unstructured_cycle_blocks: BTreeSet::new(),
+            unmodelled: crate::dense::IdSet::default(),
             split_runs: false,
             complete: false,
         }
@@ -697,6 +702,8 @@ impl SemanticObligationInventory {
             UseSite,
         >::new();
         let mut unsupported = crate::dense::IdSet::<InstId>::default();
+        // Returns whose interface is unproven and the definitions reaching them: unsupported too.
+        let mut unproven_exits = crate::dense::IdSet::<InstId>::default();
         let mut duplicate_seeds =
             BTreeSet::<(InstId, SemanticObligationKind, SemanticObligationComponent)>::new();
         // Private frame reads, owed only once the liveness walk reaches them: (inst, ordinal, address).
@@ -898,7 +905,7 @@ impl SemanticObligationInventory {
                 );
             }
             if !boundary.complete {
-                unsupported.insert(boundary.at);
+                unproven_exits.insert(boundary.at);
                 seed_instruction(
                     boundary.at,
                     SemanticObligationKind::VolatileOrUnknownEffect,
@@ -912,7 +919,7 @@ impl SemanticObligationInventory {
             graph,
             &incomplete_returns,
             &mut required,
-            &mut unsupported,
+            &mut unproven_exits,
         );
 
         for boundary in boundaries.calls.values() {
@@ -1124,7 +1131,7 @@ impl SemanticObligationInventory {
                     inst.output
                 );
             }
-            let state = if unsupported.contains(inst.id) {
+            let state = if unsupported.contains(inst.id) || unproven_exits.contains(inst.id) {
                 SemanticInstructionState::UnsupportedUnknown
             } else if !kinds.is_empty() {
                 SemanticInstructionState::LiveObligation
@@ -1154,6 +1161,7 @@ impl SemanticObligationInventory {
                 len: 0,
             });
         }
+        inventory.unmodelled = unsupported;
         inventory.obligations = ObligationTable::of(obligations);
         inventory.index_runs();
         inventory.complete = inventory.derive_is_complete();
@@ -1423,6 +1431,11 @@ impl SemanticObligationInventory {
 
     pub fn construction_failures(&self) -> &[ObligationInventoryFailure] {
         &self.construction_failures
+    }
+
+    /// The instructions no rule models, whose inputs they may read whatever observes their output.
+    pub const fn unmodelled(&self) -> &crate::dense::IdSet<InstId> {
+        &self.unmodelled
     }
 
     pub fn unstructured_cycle_blocks(&self) -> &BTreeSet<u64> {

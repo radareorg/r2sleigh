@@ -46,6 +46,8 @@ pub struct FrameReach {
     /// A frame address escaped that names no object, so every frame object is
     /// reachable.
     whole: bool,
+    /// An escaped address may point at or above the entry stack pointer, or nowhere known.
+    incoming: bool,
     by_call: crate::dense::IdMap<InstId, CallFrameReach>,
 }
 
@@ -65,6 +67,12 @@ impl FrameReach {
     /// object is reachable.
     pub const fn whole(&self) -> bool {
         self.whole
+    }
+
+    /// Whether an escaped address may reach the caller's side of the frame, the homes and the
+    /// argument area at or above the entry stack pointer: code outside may then read them.
+    pub const fn reaches_incoming(&self) -> bool {
+        self.incoming
     }
 
     /// Every call this fact bounds or does not, in instruction order.
@@ -90,11 +98,12 @@ impl FrameReach {
             // Nothing places a frame address, so nothing is proven private.
             return Self {
                 whole: true,
+                incoming: true,
                 ..Self::default()
             };
         };
         let frame = FrameIndex::of(model);
-        let (mut escaped, whole) = escaped_objects(facts, graph, model, &frame);
+        let (mut escaped, whole, incoming) = escaped_objects(facts, graph, model, &frame);
         let direct = escaped.clone();
         let barriers = compiler_slots(function, graph, model, machine_context);
         close_upward(&mut escaped, &frame, &barriers);
@@ -114,6 +123,7 @@ impl FrameReach {
             escaped,
             direct,
             whole,
+            incoming,
             by_call,
         }
     }
@@ -434,14 +444,14 @@ fn entry_offset(facts: &DecompilePrepFacts, value: ValueId) -> Option<i64> {
         .map(|root| root.offset)
 }
 
-/// The frame objects whose addresses escape, and whether one escaped that
-/// names none.
+/// The frame objects whose addresses escape, whether one escaped that names none, and whether one
+/// that escaped may point at or above the entry stack pointer.
 fn escaped_objects(
     facts: &DecompilePrepFacts,
     graph: &SsaGraph,
     model: &ObjectModel,
     frame: &FrameIndex,
-) -> (BTreeSet<ObjectId>, bool) {
+) -> (BTreeSet<ObjectId>, bool, bool) {
     let frame_address = |value: ValueId| {
         graph.value(value).is_some_and(|value| {
             facts.stack_address_root_of(value.id).is_some()
@@ -452,9 +462,15 @@ fn escaped_objects(
     // only grows, bounded by the objects, so a value is re-queued at most once per object.
     let mut origins = crate::dense::IdMap::<ValueId, BTreeSet<ObjectId>>::default();
     let mut tainted = crate::dense::IdSet::default();
+    // The tainted values not proven below the entry stack pointer; the set only grows.
+    let mut above = crate::dense::IdSet::default();
+    let mut incoming = false;
     let mut pending = Vec::new();
     for value in graph.values.iter().map(|value| value.id) {
         if frame_address(value) && tainted.insert(value) {
+            if entry_offset(facts, value).is_none_or(|offset| offset >= 0) {
+                above.insert(value);
+            }
             let own = escaping_object(facts, graph, frame, value)
                 .into_iter()
                 .collect();
@@ -473,12 +489,16 @@ fn escaped_objects(
     };
     while let Some(value) = pending.pop() {
         let from = origins.get(value).cloned().unwrap_or_default();
+        let high = above.contains(value);
         for site in graph.use_sites(value) {
             let Some(inst) = graph.inst(site.inst) else {
                 whole = true;
+                incoming |= high;
                 continue;
             };
-            match carries(inst, site.input_idx, placed(value)) {
+            let carried = carries(inst, site.input_idx, placed(value));
+            incoming |= high && matches!(carried, Carry::Escapes | Carry::Everything);
+            match carried {
                 Carry::Escapes => match escaping_object(facts, graph, frame, value) {
                     Some(object) => {
                         escaped.insert(object);
@@ -499,7 +519,8 @@ fn escaped_objects(
                         let known = origins.get_or_insert_with(out, BTreeSet::new);
                         let before = known.len();
                         known.extend(from.iter().copied());
-                        if tainted.insert(out) || known.len() != before {
+                        let rose = high && above.insert(out);
+                        if tainted.insert(out) || known.len() != before || rose {
                             pending.push(out);
                         }
                     }
@@ -522,7 +543,7 @@ fn escaped_objects(
             "a frame address escapes that names no frame object, so the whole frame is reachable"
         );
     }
-    (escaped, whole)
+    (escaped, whole, incoming)
 }
 
 enum Carry {

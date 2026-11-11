@@ -109,6 +109,7 @@ fn arity_owners(read: &CalleeRead) -> BTreeSet<u64> {
         | SourceFloorCause::ArgumentAreaUnplaced
         | SourceFloorCause::ArgumentAreaRead
         | SourceFloorCause::ArgumentAreaPastBudget
+        | SourceFloorCause::ArgumentAreaEscapes
         | SourceFloorCause::RegisterRead
         | SourceFloorCause::Homed
         | SourceFloorCause::Unplaced(_) => None,
@@ -741,6 +742,7 @@ mod tests {
             SourceFloorCause::ArgumentAreaUnplaced,
             SourceFloorCause::ArgumentAreaRead,
             SourceFloorCause::ArgumentAreaPastBudget,
+            SourceFloorCause::ArgumentAreaEscapes,
             SourceFloorCause::RegisterRead,
         ];
         for cause in unliftable {

@@ -249,10 +249,11 @@ fn floor_cause(cause: &r2source::SourceFloorCause) -> String {
         C::UnresolvedTransfer => "a transfer is unresolved".into(),
         C::SupervisorEntry => "a supervisor entry".into(),
         C::ArgumentAreaUnplaced => "the argument area is unplaced".into(),
-        C::ArgumentAreaRead => "the argument area is read past an unfull register section".into(),
+        C::ArgumentAreaRead => "the argument area is read past the parameters".into(),
         C::ArgumentAreaPastBudget => {
             "the argument area is read past the slots recovery holds".into()
         }
+        C::ArgumentAreaEscapes => "an address of the argument area escapes".into(),
         C::RegisterRead => "a register past them is read".into(),
         C::Homed => "a register past them is only homed".into(),
         C::HandedOn(U::Indirect) => "a register past them reaches an indirect call".into(),
