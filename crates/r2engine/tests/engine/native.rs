@@ -7228,8 +7228,8 @@ fn a_loop_phi_reaching_only_a_residual_has_that_site() {
     assert!(text.contains("r2sleigh_residual_"), "{text}");
 }
 
-/// gcc -O2 `shape_byte_indexed_buffer`: the edge into the vector loop cannot carry `rax = r9` (a
-/// frame address), so its copy is a ValuesNotRendered gap, and that gap is the merge's site.
+/// gcc -O2 `shape_byte_indexed_buffer`: the edge into the vector loop carries `rax = r9`, a frame
+/// address the loop walks in the unknown object, so the frame escapes as one array (S27).
 const EDGE_COPY_GAP: &[u8] = &[
     0xf3, 0x0f, 0x1e, 0xfa, 0x48, 0x83, 0xec, 0x68, 0x49, 0x89, 0xf0, 0x64, 0x48, 0x8b, 0x04, 0x25,
     0x28, 0x00, 0x00, 0x00, 0x48, 0x89, 0x44, 0x24, 0x58, 0x31, 0xc0, 0x4c, 0x8d, 0x4c, 0x24, 0x10,
@@ -7251,10 +7251,11 @@ const EDGE_COPY_GAP: &[u8] = &[
 ];
 
 #[test]
-fn a_phi_copy_written_as_an_edge_gap_is_that_merges_site() {
+fn a_frame_address_a_vector_loop_walks_is_carried_on_its_edge() {
     // The protector's failure is `call 0x230`, which the program states never returns.
     let text = sited_staged_halting("x86-64", "shape_byte_indexed_buffer", EDGE_COPY_GAP, 0x230);
-    assert!(text.contains("ValuesNotRendered"), "{text}");
+    assert!(!text.contains("ValuesNotRendered"), "{text}");
+    assert!(text.contains("(frame + 0U) + (uint64_t)16U);"), "{text}");
 }
 
 /// A loop around `call r12` passing `&frame[8]` (never stored): the stack pointer the loop carries
