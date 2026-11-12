@@ -382,7 +382,7 @@ fn variadic_tail_on_stack(machine_context: &SourceMachineContext) -> bool {
 /// Whether the convention places a floating tail operand: on the stack, or at a shared position.
 fn floating_tail_placed(machine_context: &SourceMachineContext) -> bool {
     variadic_tail_on_stack(machine_context)
-        || (machine_context.convention()).is_some_and(r2source::ConventionModel::shares_positions)
+        || (machine_context.convention()).is_some_and(|model| model.shares_positions())
 }
 
 /// Prove a merged variadic count from formats that agree.

@@ -2415,7 +2415,7 @@ impl SourceFunctionInterface {
     }
 }
 
-fn valid_register_storage(storage: CanonicalStorageId) -> bool {
+pub(crate) fn valid_register_storage(storage: CanonicalStorageId) -> bool {
     storage.space == CanonicalStorageSpace::Register
         && storage.size > 0
         && storage
@@ -2424,7 +2424,10 @@ fn valid_register_storage(storage: CanonicalStorageId) -> bool {
             .is_some()
 }
 
-fn register_storages_overlap(left: CanonicalStorageId, right: CanonicalStorageId) -> bool {
+pub(crate) fn register_storages_overlap(
+    left: CanonicalStorageId,
+    right: CanonicalStorageId,
+) -> bool {
     let Some(left_end) = left.offset.checked_add(u64::from(left.size)) else {
         return true;
     };
@@ -4187,7 +4190,7 @@ impl SourceCallEffect {
     }
 }
 
-fn sorted_storages(
+pub(crate) fn sorted_storages(
     storages: impl IntoIterator<Item = CanonicalStorageId>,
 ) -> Box<[CanonicalStorageId]> {
     let mut storages = storages.into_iter().collect::<Vec<_>>();
@@ -4196,7 +4199,10 @@ fn sorted_storages(
     storages.into_boxed_slice()
 }
 
-fn storage_sets_overlap(left: &[CanonicalStorageId], right: &[CanonicalStorageId]) -> bool {
+pub(crate) fn storage_sets_overlap(
+    left: &[CanonicalStorageId],
+    right: &[CanonicalStorageId],
+) -> bool {
     left.iter().any(|left| {
         right
             .iter()
@@ -4207,7 +4213,10 @@ fn storage_sets_overlap(left: &[CanonicalStorageId], right: &[CanonicalStorageId
 /// Whether every byte of a register storage lies in `ranges`, sorted by offset.
 ///
 /// One sweep over the ranges in offset order, extending the covered prefix.
-fn covers_every_byte(ranges: &[CanonicalStorageId], storage: CanonicalStorageId) -> bool {
+pub(crate) fn covers_every_byte(
+    ranges: &[CanonicalStorageId],
+    storage: CanonicalStorageId,
+) -> bool {
     let Some(end) = storage.offset.checked_add(u64::from(storage.size)) else {
         return false;
     };

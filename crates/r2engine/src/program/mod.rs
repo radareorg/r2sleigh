@@ -286,7 +286,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for AnyCall {
         let stated = stated.filter_map(|(id, built)| built.is_ok().then_some(*id));
         let mut joined = own;
         for other in default.into_iter().chain(stated).filter(|it| it != id) {
-            joined = std::sync::Arc::new(joined.either(&*held(&other)?));
+            let either = joined.either(&*held(&other)?);
+            joined = std::sync::Arc::new(either.map_err(|why| NativeRefusal::Machine(why.why()))?);
         }
         Ok(joined)
     }

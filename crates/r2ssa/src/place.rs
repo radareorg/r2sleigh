@@ -155,7 +155,7 @@ mod tests {
     use super::*;
     use r2source::CanonicalStorageSpace;
     use r2source::convention::Extension;
-    use r2source::convention::{BoundaryForms, Location, Section};
+    use r2source::convention::{BoundaryForms, ConventionParts, Location, Section};
 
     fn register(offset: u64, size: u32) -> CanonicalStorageId {
         CanonicalStorageId {
@@ -183,7 +183,7 @@ mod tests {
     }
 
     fn sysv() -> ConventionModel {
-        ConventionModel {
+        ConventionModel::new(ConventionParts {
             id: ConventionId::SysVAmd64,
             sections: Box::new([
                 section(
@@ -219,7 +219,8 @@ mod tests {
                 security_cookie: None,
             },
             refused: None,
-        }
+        })
+        .expect("a model")
     }
 
     #[test]

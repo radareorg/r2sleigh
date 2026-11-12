@@ -18,8 +18,8 @@ use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
 use r2sleigh_lift::profile::{LanguageProfile, ParamEntry, SlotClass, SpecStorage};
 use r2source::convention::{
-    BoundaryForms, LaneEntry, LaneSet, LaneSource, Location, OwnedRange, ResultLane, Section,
-    SectionClass,
+    BoundaryForms, ConventionParts, LaneEntry, LaneSet, LaneSource, Location, OwnedRange,
+    ResultLane, Section, SectionClass,
 };
 use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, ConventionModel, SourceDataObject, SourceEndianness,
@@ -2828,7 +2828,7 @@ pub fn convention_model(
     let (preserved, reserved) = duties(&at, prototype, link, bits, kernel);
     let owned = owned(prototype, row.home, &sections, profile.return_address_slot);
     let results = results(&at, prototype, row, &sections)?;
-    let model = ConventionModel {
+    let parts = ConventionParts {
         id: row.id,
         sections,
         hidden_return,
@@ -2843,11 +2843,7 @@ pub fn convention_model(
         forms: forms(&at, prototype, row, bits, (library, cookie)),
         refused: row.refused,
     };
-    // The slots are a view; one that does not hold refuses the model, as it refused each function.
-    model
-        .convention_slots()
-        .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?;
-    Ok(model)
+    ConventionModel::new(parts).map_err(|why| NativeRefusal::Machine(why.why()))
 }
 
 /// Where a convention's register names are placed on one architecture.

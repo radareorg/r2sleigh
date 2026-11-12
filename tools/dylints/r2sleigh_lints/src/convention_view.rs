@@ -94,7 +94,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     ("crates/r2engine/src/lib.rs", "trusted_parsed_context"),
     ("crates/r2engine/src/lib.rs", "trusted_source_signature"),
-    ("crates/r2engine/src/native.rs", "convention_model"),
     ("crates/r2engine/src/native.rs", "machine"),
     (
         "crates/r2engine/src/program/fates.rs",
