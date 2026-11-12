@@ -160,7 +160,7 @@ impl Machines {
             go_abi0,
             go_unstated,
             stated,
-            imports: crate::imports::Imports::new(rows, library, linkage),
+            imports: crate::imports::Imports::new(rows, library, linkage).on(&arch, bits),
             data_model: r2abi::CDataModel::of(&arch, bits, library),
         })
     }

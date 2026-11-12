@@ -108,7 +108,7 @@ fn every_uncited_glibc_facing_row_names_why() {
     assert!(unnamed.is_empty(), "uncited with no reason: {unnamed:?}");
     let stale = listed.difference(&uncited).collect::<Vec<_>>();
     assert!(stale.is_empty(), "listed, but no uncited row: {stale:?}");
-    assert!(listed.len() <= 123, "{} uncited rows", listed.len());
+    assert!(listed.len() <= 119, "{} uncited rows", listed.len());
 }
 
 /// An uncited table states no tail: its rows are radare2's, `Unstated` until cited.
@@ -273,6 +273,11 @@ fn every_cited_row_states_a_tail_its_prototype_has() {
                     let narrow = format.ends_with(" char *");
                     assert!(narrow || format.ends_with("wchar_t *"), "{name}: {format}");
                 }
+                Tail::Flagged { index, then, .. } => {
+                    assert!(prototype.variadic && usize::from(index) < fixed, "{name}");
+                    assert_eq!(spelling(index).as_deref(), Some("int"), "{name}");
+                    assert!(then > 0, "{name}");
+                }
                 Tail::VaList { index, format } => {
                     assert!(!prototype.variadic, "{name}");
                     assert_eq!(spelling(index).as_deref(), Some("va_list"), "{name}");
@@ -320,4 +325,48 @@ fn a_row_is_keyed_by_the_name_a_program_links() {
             .rows()
             .all(|row| &*row.linked_name != "assert_fail")
     );
+}
+
+/// glibc's `open` family reads its mode where `__OPEN_NEEDS_MODE` holds (glibc 2.39 `<fcntl.h>`),
+/// whose `__O_TMPFILE` holds each architecture's `__O_DIRECTORY`; another library states only
+/// `...`, and `prctl` is variadic everywhere (RULING 2.2, 2.3).
+#[test]
+fn only_glibc_counts_the_mode_open_reads() {
+    use r2abi::{FlagBits, FlagTest};
+    let glibc = LibraryRows::embedded(CLibrary::Glibc);
+    for (name, index) in [("open", 1), ("open64", 1), ("openat", 2)] {
+        let row = glibc.row(LibraryId::Glibc, name).expect(name);
+        assert_eq!(
+            row.tail,
+            Tail::Flagged {
+                index,
+                test: FlagTest::OpenNeedsMode,
+                then: 1
+            },
+            "{name}"
+        );
+    }
+    let prctl = glibc.row(LibraryId::Glibc, "prctl").expect("prctl");
+    assert_eq!(prctl.tail, Tail::Variadic);
+    let bionic = LibraryRows::embedded(CLibrary::Bionic);
+    let open = bionic
+        .find(CLibrary::Bionic.scope(), "open")
+        .expect("bionic open");
+    assert_eq!(open.tail, Tail::Variadic);
+    let musl = LibraryRows::embedded(CLibrary::Musl);
+    assert!(musl.find(CLibrary::Musl.scope(), "open").is_none());
+    let test = FlagTest::OpenNeedsMode;
+    let bits = |library, arch, width| test.bits(library, arch, width);
+    let x86 = FlagBits {
+        any: 0o100,
+        all: 0o20200000,
+    };
+    let arm = FlagBits {
+        any: 0o100,
+        all: 0o20040000,
+    };
+    assert_eq!(bits(CLibrary::Glibc, "x86", 64), Some(x86));
+    assert_eq!(bits(CLibrary::Glibc, "arm", 64), Some(arm));
+    assert_eq!(bits(CLibrary::Glibc, "x86", 32), None);
+    assert_eq!(bits(CLibrary::Bionic, "arm", 64), None);
 }

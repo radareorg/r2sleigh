@@ -99,6 +99,41 @@ pub enum Tail {
         index: u8,
         format: Option<(u8, FormatKind)>,
     },
+    /// `...` the library's body reads `then` arguments of where the flag at this fixed parameter
+    /// passes `test`, and none where it does not (glibc `open`'s mode).
+    Flagged { index: u8, test: FlagTest, then: u8 },
+}
+
+/// A test a library body makes of a flag argument before it reads its tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlagTest {
+    /// glibc's `__OPEN_NEEDS_MODE` (`<fcntl.h>`): `O_CREAT`, or every bit of `__O_TMPFILE`.
+    OpenNeedsMode,
+}
+
+/// A flag passes where it holds any bit of `any` or every bit of `all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlagBits {
+    pub any: u64,
+    pub all: u64,
+}
+
+impl FlagTest {
+    /// The bits the test reads for this C library on this architecture, where a header read
+    /// states them. O(1).
+    pub fn bits(self, library: CLibrary, arch: &str, bits: u32) -> Option<FlagBits> {
+        // glibc 2.39 `bits/fcntl-linux.h`: `O_CREAT` 0100, `__O_TMPFILE` (020000000 |
+        // __O_DIRECTORY); `__O_DIRECTORY` 0200000 there and 040000 in aarch64's `bits/fcntl.h`.
+        let directory = match (self, library, crate::family(arch), bits) {
+            (Self::OpenNeedsMode, CLibrary::Glibc, Some("x86"), 64) => 0o200000,
+            (Self::OpenNeedsMode, CLibrary::Glibc, Some("arm"), 64) => 0o40000,
+            _ => return None,
+        };
+        Some(FlagBits {
+            any: 0o100,
+            all: 0o20000000 | directory,
+        })
+    }
 }
 
 impl Tail {
@@ -475,7 +510,8 @@ impl LibraryRows {
     }
 }
 
-/// `none`, `variadic`, `format(printf,2)`, `va_list(2)` or `va_list(2,printf,1)`.
+/// `none`, `variadic`, `format(printf,2)`, `va_list(2)`, `va_list(2,printf,1)` or
+/// `flagged(1,open_needs_mode,1)`.
 fn parse_tail(text: &str) -> Option<Tail> {
     let text = text.trim();
     let call = |name: &str| {
@@ -497,6 +533,19 @@ fn parse_tail(text: &str) -> Option<Tail> {
         let (kind, index) = arguments.split_once(',')?;
         let (index, kind) = format(kind, index)?;
         return Some(Tail::Format { index, kind });
+    }
+    if let Some(arguments) = call("flagged") {
+        let mut parts = arguments.split(',').map(str::trim);
+        let index = parts.next()?.parse().ok()?;
+        let test = match parts.next()? {
+            "open_needs_mode" => FlagTest::OpenNeedsMode,
+            _ => return None,
+        };
+        let then = parts.next()?.parse().ok()?;
+        return parts
+            .next()
+            .is_none()
+            .then_some(Tail::Flagged { index, test, then });
     }
     if let Some(arguments) = call("va_list") {
         let mut parts = arguments.splitn(3, ',');
@@ -666,6 +715,15 @@ mod tests {
                 format: None
             })
         );
+        assert_eq!(
+            parse_tail("flagged(1, open_needs_mode, 1)"),
+            Some(Tail::Flagged {
+                index: 1,
+                test: FlagTest::OpenNeedsMode,
+                then: 1
+            })
+        );
+        assert_eq!(parse_tail("flagged(1,o_creat,1)"), None);
         let vfprintf = parse_tail("va_list(2,printf,1)").expect("vfprintf");
         assert_eq!(vfprintf.printf_format(), Some(1));
         assert_eq!(parse_tail("format(strftime,1)"), None);

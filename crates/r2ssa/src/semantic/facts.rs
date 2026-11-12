@@ -692,6 +692,8 @@ pub enum VariadicCallsiteArgumentCountRefusal {
     CountArgumentUnavailable,
     /// The callee's loop bounds its tail by a parameter this call passes no constant for.
     CountArgumentNotConstant,
+    /// The callee reads its tail by a test of a flag this call passes no constant for.
+    FlagNotConstant,
 }
 
 impl VariadicCallsiteArgumentCountRefusal {
@@ -708,6 +710,7 @@ impl VariadicCallsiteArgumentCountRefusal {
             Self::FloatingVariadicArgument => "floating_variadic_argument",
             Self::CountArgumentUnavailable => "count_argument_unavailable",
             Self::CountArgumentNotConstant => "count_argument_not_constant",
+            Self::FlagNotConstant => "flag_not_constant",
         }
     }
 }

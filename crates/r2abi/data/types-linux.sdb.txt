@@ -26,15 +26,6 @@ func.atexit.args=1
 func.atexit.arg.0=func,function
 func.atexit.ret=int
 
-prctl=func
-func.prctl.args=5
-func.prctl.arg.0=int,option
-func.prctl.arg.1=unsigned long,v2
-func.prctl.arg.2=unsigned long,v3
-func.prctl.arg.3=unsigned long,v4
-func.prctl.arg.4=unsigned long,v5
-func.prctl.ret=int
-
 off64_t=typedef
 typedef.off64_t=int64_t
 
@@ -49,12 +40,6 @@ func.ctype_toupper_loc.ret=const int **
 ctype_tolower_loc=func
 func.ctype_tolower_loc.args=0
 func.ctype_tolower_loc.ret=const int **
-
-open64=func
-func.open64.args=2
-func.open64.arg.0=const char *,path
-func.open64.arg.1=int,oflag
-func.open64.ret=int
 
 stat64=func
 func.stat64.args=2

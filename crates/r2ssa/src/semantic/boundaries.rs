@@ -142,11 +142,14 @@ fn counted_tail_argument_count(
         .get(index)
         .and_then(Option::as_ref)
         .ok_or(VariadicCallsiteArgumentCountRefusal::CountArgumentUnavailable)?;
-    let SourceCallArgumentValue::Value(value) = argument.value else {
-        return Err(VariadicCallsiteArgumentCountRefusal::CountArgumentNotConstant);
+    let not_constant = match bound.is_flagged() {
+        true => VariadicCallsiteArgumentCountRefusal::FlagNotConstant,
+        false => VariadicCallsiteArgumentCountRefusal::CountArgumentNotConstant,
     };
-    let bits = resolve_const_value(graph, prep, value)
-        .ok_or(VariadicCallsiteArgumentCountRefusal::CountArgumentNotConstant)?;
+    let SourceCallArgumentValue::Value(value) = argument.value else {
+        return Err(not_constant);
+    };
+    let bits = resolve_const_value(graph, prep, value).ok_or(not_constant)?;
     let tail_arguments = bound
         .bound(bits)
         .filter(|tail| *tail <= LONGEST_TAIL)

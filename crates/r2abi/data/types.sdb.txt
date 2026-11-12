@@ -227,19 +227,6 @@ func.bind.arg.1=struct sockaddr*,address
 func.bind.arg.2=socklen_t,address_len
 func.bind.ret=int
 
-open=func
-func.open.args=2
-func.open.arg.0=const char *,path
-func.open.arg.1=int,oflag
-func.open.ret=int
-
-openat=func
-func.openat.args=3
-func.openat.arg.0=int,fd
-func.openat.arg.1=const char *,path
-func.openat.arg.2=int,oflag
-func.openat.ret=int
-
 imaxdiv=func
 func.imaxdiv.args=2
 func.imaxdiv.arg.0=intmax_t,numer

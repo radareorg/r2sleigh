@@ -316,7 +316,10 @@ impl<'a> Placement<'a> {
         };
         let forms = &self.target.convention.forms;
         let on_stack = forms.variadic_on_stack
-            && matches!(tail, r2abi::Tail::Variadic | r2abi::Tail::Format { .. });
+            && matches!(
+                tail,
+                r2abi::Tail::Variadic | r2abi::Tail::Format { .. } | r2abi::Tail::Flagged { .. }
+            );
         if placed_whole && (tail == r2abi::Tail::None || on_stack) {
             return r2ssa::call_reads::CallReads::placed(registers, None, None, true);
         }
@@ -492,6 +495,7 @@ impl Placement<'_> {
             declared,
             interface.with_types(r2source::Confidence::of(declared.basis)),
         )?;
+        let interface = self.flagged(declared, interface);
         let stacked = placement.locations.iter().any(|at| at.register().is_none());
         let interface = match result_unstated(declared) {
             true => self.unstated_result(interface),
@@ -499,6 +503,40 @@ impl Placement<'_> {
         };
         let interface = self.carriers(name, interface, frame.frame_pointer)?;
         self.stacked_return(name, interface, stacked)
+    }
+
+    /// A row whose library body reads its tail under a test of a flag argument, counted where this
+    /// target's header states the flag's bits (`Tail::Flagged`); otherwise the tail stays `...`.
+    fn flagged(
+        &self,
+        declared: Declared<'_>,
+        interface: r2source::SourceFunctionInterface,
+    ) -> r2source::SourceFunctionInterface {
+        let Some(r2abi::Tail::Flagged { index, test, then }) = declared.row.map(|row| row.tail)
+        else {
+            return interface;
+        };
+        let name = &declared.prototype.name;
+        let Some(bits) = self.target.imports.flag_bits(test) else {
+            r2il::refusal_evidence!(
+                "declared-interface",
+                "{name}: no header states {test:?} here"
+            );
+            return interface;
+        };
+        let count = r2source::SourceTailCount {
+            parameter_index: u32::from(index),
+            rule: r2source::SourceTailRule::Flagged {
+                any: bits.any,
+                all: bits.all,
+                then,
+            },
+        };
+        (interface.clone().with_tail_count(count))
+            .inspect_err(|error| {
+                r2il::refusal_evidence!("declared-interface", "{name}: {error:?}");
+            })
+            .unwrap_or(interface)
     }
 
     /// One declaration's placement and types as an exact interface, with the floor where a class

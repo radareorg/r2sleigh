@@ -1036,22 +1036,49 @@ impl SourceResultCarriers {
     }
 }
 
-/// The fixed parameter that bounds a variadic body's tail: it consumes at most that many tail
-/// arguments (doc/adr-resolved-bodies.md, "Count-driven tail").
+/// The fixed parameter that bounds a variadic callee's tail, and how its value counts the tail
+/// (doc/adr-resolved-bodies.md, "Count-driven tail").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SourceTailCount {
     pub parameter_index: u32,
-    /// The width of the value the body compares, in bytes.
-    pub width_bytes: u32,
-    /// Whether the body compares it signed, so a negative count bounds the tail at none.
-    pub signed: bool,
+    pub rule: SourceTailRule,
+}
+
+/// How a counting parameter's value bounds the tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum SourceTailRule {
+    /// The body runs one trip per tail argument while the value, `width_bytes` wide, is above the
+    /// trip count; `signed` compares it signed, so a negative count bounds the tail at none.
+    Trips { width_bytes: u32, signed: bool },
+    /// A library body reads `then` tail arguments where the flag holds any bit of `any` or every
+    /// bit of `all`, and none otherwise (glibc `__OPEN_NEEDS_MODE`).
+    Flagged { any: u64, all: u64, then: u8 },
 }
 
 impl SourceTailCount {
+    pub const fn trips(parameter_index: u32, width_bytes: u32, signed: bool) -> Self {
+        Self {
+            parameter_index,
+            rule: SourceTailRule::Trips {
+                width_bytes,
+                signed,
+            },
+        }
+    }
+
     /// The tail arguments a call passing `argument` (its register's bits) may be read for.
     pub fn bound(self, argument: u64) -> Option<usize> {
-        let bits = self
-            .width_bytes
+        let (width_bytes, signed) = match self.rule {
+            SourceTailRule::Trips {
+                width_bytes,
+                signed,
+            } => (width_bytes, signed),
+            SourceTailRule::Flagged { any, all, then } => {
+                let reads = argument & any != 0 || argument & all == all;
+                return Some(if reads { usize::from(then) } else { 0 });
+            }
+        };
+        let bits = width_bytes
             .checked_mul(8)
             .filter(|bits| (1..=64).contains(bits))?;
         let value = if bits == 64 {
@@ -1059,10 +1086,15 @@ impl SourceTailCount {
         } else {
             argument & ((1u64 << bits) - 1)
         };
-        if self.signed && value >> (bits - 1) != 0 {
+        if signed && value >> (bits - 1) != 0 {
             return Some(0);
         }
         usize::try_from(value).ok()
+    }
+
+    /// Whether the count is a flag test, which a call that does not fix the flag cannot decide.
+    pub const fn is_flagged(self) -> bool {
+        matches!(self.rule, SourceTailRule::Flagged { .. })
     }
 }
 
@@ -1848,9 +1880,9 @@ impl SourceFunctionInterface {
         self
     }
 
-    /// Record the parameter a variadic body's tail is bounded by. Checked against the parameters
-    /// the interface has, and against its tail.
-    pub fn with_body_proven_tail_count(
+    /// Record the parameter a variadic callee's tail is bounded by: a body's proven count, or a
+    /// cited library row's flag test. Checked against the parameters and the tail.
+    pub fn with_tail_count(
         mut self,
         count: SourceTailCount,
     ) -> Result<Self, SourceFunctionInterfaceError> {
@@ -1864,7 +1896,7 @@ impl SourceFunctionInterface {
         Ok(self)
     }
 
-    /// The parameter the body proves its tail is bounded by.
+    /// The parameter the callee's tail is bounded by, and how.
     pub const fn tail_count(&self) -> Option<SourceTailCount> {
         self.tail_count
     }
@@ -3208,43 +3240,38 @@ mod tests {
 
     #[test]
     fn a_tail_count_bounds_its_tail_at_its_width_and_sign() {
-        let unsigned = SourceTailCount {
-            parameter_index: 0,
-            width_bytes: 4,
-            signed: false,
-        };
+        let unsigned = SourceTailCount::trips(0, 4, false);
         // A register holds the argument's high bits too, which the body never compared.
         assert_eq!(unsigned.bound(3), Some(3));
         assert_eq!(unsigned.bound(0xdead_beef_0000_0002), Some(2));
         assert_eq!(unsigned.bound(0xffff_ffff), Some(0xffff_ffff));
-        let signed = SourceTailCount {
-            signed: true,
-            ..unsigned
-        };
+        let signed = SourceTailCount::trips(0, 4, true);
         assert_eq!(signed.bound(3), Some(3));
         assert_eq!(signed.bound(0xffff_ffff), Some(0), "-1 runs no trip");
         assert_eq!(signed.bound(0x8000_0000), Some(0));
-        let wide = SourceTailCount {
-            width_bytes: 8,
-            ..unsigned
-        };
+        let wide = SourceTailCount::trips(0, 8, false);
         assert_eq!(wide.bound(u64::MAX), usize::try_from(u64::MAX).ok());
-        assert_eq!(
-            SourceTailCount {
-                width_bytes: 0,
-                ..unsigned
-            }
-            .bound(1),
-            None
-        );
-        assert_eq!(
-            SourceTailCount {
-                width_bytes: 9,
-                ..unsigned
-            }
-            .bound(1),
-            None
-        );
+        assert_eq!(SourceTailCount::trips(0, 0, false).bound(1), None);
+        assert_eq!(SourceTailCount::trips(0, 9, false).bound(1), None);
+    }
+
+    /// glibc x86-64 `open`: `O_CREAT` (0100) or all of `__O_TMPFILE` (020200000) reads the mode.
+    #[test]
+    fn a_flag_test_passes_its_tail_only_where_the_flag_holds() {
+        let open = SourceTailCount {
+            parameter_index: 1,
+            rule: SourceTailRule::Flagged {
+                any: 0o100,
+                all: 0o20200000,
+                then: 1,
+            },
+        };
+        assert!(open.is_flagged());
+        assert_eq!(open.bound(0), Some(0), "O_RDONLY");
+        assert_eq!(open.bound(0o101), Some(1), "O_CREAT | O_WRONLY");
+        assert_eq!(open.bound(0o20200002), Some(1), "O_TMPFILE | O_RDWR");
+        assert_eq!(open.bound(0o20000002), Some(0), "__O_TMPFILE's bit alone");
+        assert_eq!(open.bound(0o200000), Some(0), "O_DIRECTORY");
     }
 
     #[test]

@@ -1046,3 +1046,23 @@ func.iconv.arg.4=size_t *,dst_bytes_left
 func.iconv.ret=size_t
 func.iconv.include=iconv.h
 
+# bionic <fcntl.h>: `int open(const char* __path, int __flags, ...)` and `int openat(int __dir_fd,
+# const char* __path, int __flags, ...)`. No body read here states when the mode is read.
+open=func
+func.open.args=3
+func.open.arg.0=const char *,path
+func.open.arg.1=int,flags
+func.open.arg.2=,...
+func.open.ret=int
+func.open.include=fcntl.h
+func.open.tail=variadic
+
+openat=func
+func.openat.args=4
+func.openat.arg.0=int,dir_fd
+func.openat.arg.1=const char *,path
+func.openat.arg.2=int,flags
+func.openat.arg.3=,...
+func.openat.ret=int
+func.openat.include=fcntl.h
+func.openat.tail=variadic

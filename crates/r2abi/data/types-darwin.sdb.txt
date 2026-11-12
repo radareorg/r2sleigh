@@ -294,3 +294,16 @@ func.uuid_unparse_upper.args=2
 func.uuid_unparse_upper.arg.0=const unsigned char *,uu
 func.uuid_unparse_upper.arg.1=char *,out
 func.uuid_unparse_upper.ret=void
+
+open=func
+func.open.args=2
+func.open.arg.0=const char *,path
+func.open.arg.1=int,oflag
+func.open.ret=int
+
+openat=func
+func.openat.args=3
+func.openat.arg.0=int,fd
+func.openat.arg.1=const char *,path
+func.openat.arg.2=int,oflag
+func.openat.ret=int

@@ -3347,7 +3347,7 @@ pub fn mint_recovered_interface(
             false => interface,
         })
         .map(|interface| match recovered.tail_count {
-            Some(count) => match interface.clone().with_body_proven_tail_count(count) {
+            Some(count) => match interface.clone().with_tail_count(count) {
                 Ok(counted) => counted,
                 Err(why) => {
                     r2il::refusal_evidence!("tail-count", "the proven count is refused: {why}");
