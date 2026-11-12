@@ -2430,7 +2430,7 @@
   },
   "tests/gold/manual_limits.c::clang-O1::main": {
    "cause": "[D214, D227] D214 fixed the never-assigned ECX: table_walk takes two parameters and main passes two. The return traps on D227's unproven two-register result: main writes both result registers, so `return manual_sink == 0` is an unproven-return residual.",
-   "compared": "output",
+   "compared": "memory",
    "owner": "P7",
    "reason": "r2sleigh_residual_u64 unproven-return",
    "site": "crates/r2engine/src/program/fates.rs",
