@@ -239,6 +239,7 @@ Decisions
 | D340 | A return whose result is `Unproven` reads no register: it is a residual, so demand roots nothing at it and the release pass frees INSERT bases there (`r2ssa::semantic::returns_no_register`; [byte-relation](doc/adr-byte-relation.md)). Cause: S16 made manual_limits.c `main` `Unproven` (D227); an `Unproven` interface names no return storage, every return block read unresolved, `demanded` was `None`, and each call to a `uint32_t` callee spelled `\| r2sleigh_residual_u64(n) << 32` though only its low half is stored; AArch64 clang `-O0` `main` lost its `movi` stores to `TermNotSpelled`. Gate: `bits_above_a_call_result_no_store_reads_are_no_residual_where_the_return_is_unproven` and its complement, where a store of RAX whole keeps the residual; the equivalence mains trap at their return, with memory compared | r2ssa; built |
 | D341 | Under `time` a `slow` is the processor's verdict ([verified-layers](doc/adr-verified-layers.md) D341): the ratchet holds a baseline `slow` by `slow`, naming any build, or by `equal`; a baseline `equal` that reads `slow` still fails; `instructions` stays exact and `k` stays 4. Cause: review.c clang `-O2` `fact` read `equal` and `slow` on two runs of #376; CI's runners are of six processor models, none counts instructions, and CPU time does not follow the count (1.36 against 4.25 times at clang `-O1`). Gate: four ratchet and bless unit tests; the shard log prints `host:` and `cost:` | GT; built |
 | D342 | The release pass (`release_undemanded_bytes`) keeps the INSERT bases of a `void` body: an empty return-storage list reads every return block unresolved. `semantic::demanded` already treats a `void` return as reading no register. Gate: the pass reads `returns_no_register`; each census line that moves is read | r2ssa; open |
+| D343 | A counted x86-64 equivalence baseline, held on a host that counts instructions: D341 lets a timed `slow` read `equal`, and `cost.departure` refuses a counted run against the `time` baseline, so no run reports a `slow` that became `equal` on every processor. Gate: `run_equiv.py --measure instructions --baseline` on contabo at each stack exit, its `slow` records exact | GT; open |
 
 Reserved rows: each slice of the call-boundary rewrite takes its D-rows from this table when it opens. A row number not listed here is free.
 
@@ -272,7 +273,7 @@ Reserved rows: each slice of the call-boundary rewrite takes its D-rows from thi
 | D334 to D337 | S30 | declared callback slots (D205) |
 | D338 | S38 | deterministic memory: one fixed hasher, purging on a byte count |
 | D339 | S39 | the `slow` verdict graded against the original on the same runner (GT) |
-| D340 to D342 | master ratchet (#378) | demand at an unproven return (D340), the timed `slow` (D341), a `void` body's released bases (D342, open) |
+| D340 to D343 | master ratchet (#378) | demand at an unproven return (D340), the timed `slow` (D341), a `void` body's released bases (D342, open), a counted x86-64 baseline (D343, open) |
 
 S33 (D206's ADR and build) is closed by the result-side ADR's ruling and takes no rows.
 
