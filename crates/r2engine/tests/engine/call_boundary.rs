@@ -704,6 +704,72 @@ fn every_way_in_is_read_before_a_closed_world_void() {
     }
 }
 
+/// `WAYS_IN`'s `f` and `caller`; `stop` at 0x1028 never returns, `g` at 0x1030 calls it, and the 11
+/// bytes at 0x1035 are `g`'s code laid out as if the call came back (bzip2 `BZ2_bz__AssertH__fail`).
+const AFTER_AN_EXIT: &[u8] = &[
+    0xc3, // 1000 ret
+    0xf4, // 1001 hlt
+    0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00, // 1002 nop word [rax + rax]
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1008 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x89, 0x06, // 1015 mov [rsi], eax
+    0x48, 0x89, 0x17, // 1017 mov [rdi], rdx
+    0x0f, 0x57, 0xc0, // 101a xorps xmm0, xmm0
+    0x0f, 0x57, 0xc9, // 101d xorps xmm1, xmm1
+    0xc3, // 1020 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1021 padding
+    0xeb, 0xfe, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1028 stop: jmp 0x1028
+    0xe8, 0xf3, 0xff, 0xff, 0xff, // 1030 g: call 0x1028
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1035 after the call
+];
+
+/// `AFTER_AN_EXIT` with `code` at 0x1035.
+fn after_an_exit(code: &[u8]) -> Literal {
+    let functions = [
+        ("f", BASE, 0x08),
+        ("caller", BASE + 0x10, 0x11),
+        ("stop", BASE + 0x28, 0x02),
+        ("g", BASE + 0x30, 0x05),
+    ];
+    let mut program = Literal::of_code(AFTER_AN_EXIT, &functions);
+    program.write(BASE + 0x35, code);
+    program
+}
+
+/// D244: code after a call that never returns is in no body. It is held where each instruction
+/// decodes, transfers only to known code and names no function; what it names is a way in.
+#[test]
+fn code_after_an_exit_is_held_where_everything_it_names_escapes() {
+    // 1035 mov edx, eax; 1037 test edx, edx; 1039 jg 0x1030; 103b jmp 0x1030
+    let quiet = [0x89, 0xc2, 0x85, 0xd2, 0x7f, 0xf5, 0xeb, 0xf3];
+    let text = analysed(after_an_exit(&quiet));
+    assert!(text.starts_with("void f("), "{text}");
+    assert!(text.contains("closed-world"), "{text}");
+    // 1035 call 0x1000; 103a jmp 0x1030
+    let calls = [0xe8, 0xc6, 0xff, 0xff, 0xff, 0xeb, 0xf4];
+    // 1035 lea rax, [rip - 0x3c] (0x1000); 103c jmp 0x1030
+    let names = [0x48, 0x8d, 0x05, 0xc4, 0xff, 0xff, 0xff, 0xeb, 0xf2];
+    // 1035 mov edx, eax; 1037 jmp rax
+    let indirect = [0x89, 0xc2, 0xff, 0xe0];
+    // 1035 mov edx, eax; 1037 syscall; 1039 jmp 0x1030
+    let supervisor = [0x89, 0xc2, 0x0f, 0x05, 0xeb, 0xf5];
+    let refused = [
+        ("a call to f", &calls[..]),
+        ("f's address", &names[..]),
+        ("an indirect jump", &indirect[..]),
+        ("a supervisor call", &supervisor[..]),
+    ];
+    for (what, code) in refused {
+        let text = analysed(after_an_exit(code));
+        assert!(!text.starts_with("void f("), "{what}: {text}");
+    }
+    // The quiet code after `caller`'s `ret` follows no exit: 1021 mov edx, eax; 1023 jmp 0x1010.
+    let mut after_a_return = ways_in();
+    after_a_return.write(BASE + 0x21, &[0x89, 0xc2, 0xeb, 0xeb]);
+    let text = analysed(after_a_return);
+    assert!(!text.starts_with("void f("), "{text}");
+}
+
 /// A `CallBoundary` decides from the open read and its forwarder component alone: no decision reaches
 /// a function sealed in the closed world, nor another decision (doc/adr-result-side.md, section 5).
 #[test]

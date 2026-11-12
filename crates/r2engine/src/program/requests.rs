@@ -212,6 +212,8 @@ pub(super) struct Survey {
     holders: crate::discovery::Holders,
     /// Each function's direct callers among the walked bodies, in address order.
     callers: BTreeMap<u64, Vec<u64>>,
+    /// The address after each call a walk ended at because its callee never comes back, ascending.
+    after_exits: Vec<u64>,
 }
 
 impl Survey {
@@ -223,6 +225,11 @@ impl Survey {
     /// Every range a walked body holds, in address order.
     pub(super) fn held(&self) -> impl Iterator<Item = std::ops::Range<u64>> + '_ {
         self.holders.ranges()
+    }
+
+    /// Whether `at` follows a call a walk ended at because its callee never comes back: `O(log n)`.
+    pub(super) fn after_exit(&self, at: u64) -> bool {
+        self.after_exits.binary_search(&at).is_ok()
     }
 
     /// Every function discovery found, by entry, ascending.
@@ -922,6 +929,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 supervisor: BTreeMap::new(),
                 holders: crate::discovery::Holders::default(),
                 callers: BTreeMap::new(),
+                after_exits: Vec::new(),
             })));
         }
         let walker = super::returns::Walking::new(view.clone(), true)?;
@@ -950,6 +958,12 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 callers.entry(callee).or_default().push(*entry);
             }
         }
+        let mut after_exits = (found.walks.values())
+            .filter_map(|walk| walk.as_ref().ok())
+            .flat_map(|walk| walk.exits_after())
+            .collect::<Vec<_>>();
+        after_exits.sort_unstable();
+        after_exits.dedup();
         let holders =
             crate::discovery::Holders::of(found.walks.iter().flat_map(|(entry, walk)| {
                 let spans = walk.as_ref().map(|walk| walk.spans()).unwrap_or_default();
@@ -968,6 +982,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             supervisor,
             holders,
             callers,
+            after_exits,
         })))
     }
 }

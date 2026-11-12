@@ -175,35 +175,51 @@ fn unaccounted_code<S: Source + 'static>(
     };
     let walker = super::returns::Walking::new(view.clone(), true).ok()?;
     let disasm = walker.target(false).disasm;
+    // An x86 instruction states an address whole; AArch64 splits one across `adrp` and `add`, which
+    // only a body's def-use joins, so its code after an exit stays unheld.
+    let whole = r2abi::family(&container.arch.name) == Some("x86");
+    let mut filler = |gap: std::ops::Range<u64>| {
+        let gap = Gap {
+            after_exit: whole && survey.after_exit(gap.start),
+            bytes: gap,
+        };
+        padding(&view, disasm, &known, gap, targets)
+    };
     for range in code.into_iter().filter(|range| range.start < range.end) {
         let mut at = range.start;
         for held in covered
             .iter()
             .filter(|held| held.end > range.start && held.start < range.end)
         {
-            if held.start > at && !padding(&view, disasm, &known, at..held.start, targets) {
+            if held.start > at && !filler(at..held.start) {
                 return Some(at);
             }
             at = at.max(held.end);
         }
-        if at < range.end && !padding(&view, disasm, &known, at..range.end, targets) {
+        if at < range.end && !filler(at..range.end) {
             return Some(at);
         }
     }
     None
 }
 
-/// Whether these bytes hold no code that could reach or name a function discovery does not know:
-/// zeros, instructions that lift to no operation, traps, or direct transfers to known code (a call
-/// to `abort` after one that never returns), whose targets join `targets`. An indirect transfer is
-/// unknown code. Each instruction decodes from one window: `O(bytes)`.
+/// Bytes between two held ranges, and whether they follow a call a walk ended at because its
+/// callee never comes back (doc/adr-result-side.md, "S18b as built").
+struct Gap {
+    bytes: std::ops::Range<u64>,
+    after_exit: bool,
+}
+
+/// Whether these bytes hold no code that could reach or name a function discovery does not know. Its direct
+/// transfers' targets, and after an exit every address it holds, join `targets` (doc/adr-result-side.md, "S18b as built"). `O(bytes)`.
 fn padding<S: Source + 'static>(
     view: &View<'_, S>,
     disasm: &r2sleigh_lift::Disassembler,
     known: &dyn Fn(u64) -> bool,
-    bytes: std::ops::Range<u64>,
+    gap: Gap,
     targets: &mut Vec<u64>,
 ) -> bool {
+    let Gap { bytes, after_exit } = gap;
     let Some(held) = usize::try_from(bytes.end - bytes.start)
         .ok()
         .and_then(|size| view.source().read(bytes.start, size))
@@ -231,17 +247,26 @@ fn padding<S: Source + 'static>(
                 .peekable();
             // A multi-byte `nop` forms an address into a temporary and drops it.
             let none = |op: &r2il::R2ILOp| !op.is_control_flow() && op.writes_only_temporaries();
+            let leaves = transfers.peek().is_some();
+            let stated = transfers.all(|op| {
+                matches!(op, r2il::R2ILOp::Breakpoint)
+                    || (op.transfer()).is_some_and(|transfer| {
+                        // `hlt` lifts to a branch to itself, which reaches no other code.
+                        transfer.direct
+                            && (known(transfer.target.offset)
+                                || (!transfer.call && transfer.target.offset == address))
+                    })
+            });
+            // An operation the lift does not model, or one that enters the supervisor, may name anything.
+            let modelled = |op: &r2il::R2ILOp| {
+                !matches!(
+                    op,
+                    r2il::R2ILOp::CallOther { .. } | r2il::R2ILOp::Unimplemented
+                )
+            };
             lifted.ops.iter().all(none)
-                || (transfers.peek().is_some()
-                    && transfers.all(|op| {
-                        matches!(op, r2il::R2ILOp::Breakpoint)
-                            || (op.transfer()).is_some_and(|transfer| {
-                                // `hlt` lifts to a branch to itself, which reaches no other code.
-                                transfer.direct
-                                    && (known(transfer.target.offset)
-                                        || (!transfer.call && transfer.target.offset == address))
-                            })
-                    }))
+                || (leaves && stated)
+                || (after_exit && stated && lifted.ops.iter().all(modelled))
         };
         match disasm
             .lift_after(&window, address, None)
@@ -258,12 +283,25 @@ fn padding<S: Source + 'static>(
                         .filter(|transfer| transfer.direct && transfer.target.offset != address)
                         .map(|transfer| transfer.target.offset),
                 );
+                if after_exit {
+                    targets.extend(lifted.ops.iter().flat_map(named));
+                }
                 at += lifted.size as usize;
             }
             _ => return false,
         }
     }
     true
+}
+
+/// Every address one operation holds: a constant it computes with, or a place in memory it reads or writes.
+fn named(op: &r2il::R2ILOp) -> impl Iterator<Item = u64> + '_ {
+    let stated = |varnode: &&r2il::Varnode| {
+        matches!(varnode.space, r2il::SpaceId::Const | r2il::SpaceId::Ram)
+    };
+    (op.inputs().into_iter().chain(op.output()))
+        .filter(stated)
+        .map(|varnode| varnode.offset)
 }
 
 /// Whether another image may call the function `symbol` names: ELF's dynamic table, or any Mach-O

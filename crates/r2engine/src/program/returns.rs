@@ -28,6 +28,11 @@ impl BodyWalk {
         self.trace.supervisor_calls()
     }
 
+    /// The address after each call the walk ended a block at because its callee never comes back.
+    pub(super) fn exits_after(&self) -> impl Iterator<Item = u64> + '_ {
+        self.trace.exits_after()
+    }
+
     /// Every direct call target the walk reached.
     pub(super) fn calls(&self) -> &std::collections::BTreeSet<u64> {
         self.trace.calls()
