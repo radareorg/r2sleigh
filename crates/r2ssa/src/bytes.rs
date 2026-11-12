@@ -340,13 +340,24 @@ pub(crate) fn closure_of(
     roots: impl IntoIterator<Item = (ValueId, ByteMask)>,
 ) -> Closure {
     let whole = |(value, mask)| (value, mask, crate::edge_fold::ALL);
-    closure_under(graph, roots.into_iter().map(whole))
+    walk(graph, roots.into_iter().map(whole), None)
 }
 
 /// `closure_of`, each root read only under the given in-edges of its own block.
 pub(crate) fn closure_under(
     graph: &SsaGraph,
     roots: impl IntoIterator<Item = (ValueId, ByteMask, crate::edge_fold::Edges)>,
+) -> Closure {
+    let mut folds = crate::edge_fold::EdgeFolds::new(graph);
+    walk(graph, roots, Some(&mut folds))
+}
+
+/// The closure's walk; with no `folds` every input is read however its block is entered, which
+/// over-reads and never under-reads.
+fn walk(
+    graph: &SsaGraph,
+    roots: impl IntoIterator<Item = (ValueId, ByteMask, crate::edge_fold::Edges)>,
+    mut folds: Option<&mut crate::edge_fold::EdgeFolds<'_>>,
 ) -> Closure {
     let width = |value: ValueId| {
         graph
@@ -356,7 +367,6 @@ pub(crate) fn closure_under(
     let mut bytes: crate::dense::IdMap<ValueId, ByteMask> = crate::dense::IdMap::default();
     let mut under: crate::dense::IdMap<ValueId, crate::edge_fold::Edges> =
         crate::dense::IdMap::default();
-    let mut folds = crate::edge_fold::EdgeFolds::new(graph);
     let mut parents = crate::dense::IdMap::default();
     let mut pending = VecDeque::new();
     for (value, mask, read) in roots {
@@ -385,7 +395,10 @@ pub(crate) fn closure_under(
             if mask.is_empty() {
                 continue;
             }
-            let read = folds.read_under(inst, index, input, read_under);
+            let read = match folds.as_deref_mut() {
+                Some(folds) => folds.read_under(inst, index, input, read_under),
+                None => crate::edge_fold::ALL,
+            };
             if read == 0 {
                 continue;
             }
@@ -395,10 +408,13 @@ pub(crate) fn closure_under(
             if before.is_empty() {
                 parents.insert(input, value);
             }
-            let edges = under.get_or_insert_with(input, || 0);
-            let grown = *edges | read;
-            if *entry != before || grown != *edges {
-                *edges = grown;
+            // With no folds every read is under every in-edge: no set is held.
+            let rose = folds.is_some() && {
+                let edges = under.get_or_insert_with(input, || 0);
+                let grown = *edges | read;
+                std::mem::replace(edges, grown) != grown
+            };
+            if *entry != before || rose {
                 pending.push_back(input);
             }
         }

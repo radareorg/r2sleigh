@@ -56,22 +56,28 @@ impl<'g> EdgeFolds<'g> {
         input: ValueId,
         under: Edges,
     ) -> Edges {
-        let defined_in = (self.graph.def_inst(input))
-            .and_then(|def| self.graph.inst(def))
-            .map(|def| def.block);
+        let graph = self.graph;
+        let defined_in = || Some(graph.inst(graph.def_inst(input)?)?.block);
         match &inst.payload {
             InstPayload::Phi { predecessors } => {
                 if predecessors.len() <= Edges::BITS as usize && under & (1 << index) == 0 {
                     return 0;
                 }
                 match predecessors.get(index) {
-                    Some(from) if defined_in == Some(*from) => self.leaving(*from, inst.block),
+                    Some(from) if defined_in() == Some(*from) => self.leaving(*from, inst.block),
                     _ => ALL,
                 }
             }
             InstPayload::Op(op) => {
                 // A block entered only from the one that defines `input` reads it on that edge.
                 let entered = (self.graph.block(inst.block)).map(|block| &block.predecessors[..]);
+                // Read under every in-edge by an operation that selects nothing, in a block with
+                // no one way in: nothing narrows it, wherever `input` is defined.
+                let one_way = matches!(entered, Some([_]));
+                if under == ALL && !one_way && !matches!(op, SSAOp::Select(_)) {
+                    return ALL;
+                }
+                let defined_in = defined_in();
                 match (entered, defined_in) {
                     _ if defined_in == Some(inst.block) => {}
                     (Some([from]), Some(defined)) if *from == defined => {
@@ -117,6 +123,18 @@ impl<'g> EdgeFolds<'g> {
         }
         self.blocks[at].as_ref().expect("just folded")
     }
+}
+
+/// Whether any block's fold drops an in-edge: where none does, every value is read however its
+/// block is entered and no walk needs the folds. One fold per block, as `EdgeFolds` asks.
+pub(crate) fn narrows(graph: &SsaGraph) -> bool {
+    graph.blocks.iter().any(|block| {
+        let fold = block_fold(graph, block.id);
+        let branch = fold
+            .branch
+            .is_some_and(|(_, taken, not)| (taken & not) != ALL);
+        branch || (fold.selects.iter()).any(|(_, yes, no)| (yes & no) != ALL)
+    })
 }
 
 /// The successor a conditional branch ending `block` names, its condition, and the other
@@ -417,7 +435,8 @@ mod tests {
                     storage.space == crate::CanonicalStorageSpace::Register && storage.offset == RCX
                 })
         };
-        let closure = crate::bytes::closure(graph, [written]);
+        let roots = [(written, crate::bytes::ByteMask::All, super::ALL)];
+        let closure = crate::bytes::closure_under(graph, roots);
         closure.values.iter().any(entry)
     }
 

@@ -43,6 +43,9 @@ pub struct DeadPhis {
     unobserved_values: crate::dense::IdSet<ValueId>,
     unobserved_insts: crate::dense::IdSet<InstId>,
     unobserved_uses: BTreeSet<UseSite>,
+    /// Whether some live merge has an arm no path reads (ROADMAP D214): where none has, a reader
+    /// asks nothing per arm.
+    unread_arms: bool,
 }
 
 /// Values with positive evidence that the program observes them.
@@ -90,7 +93,14 @@ impl ProvenProgramObservations {
                 roots.get_or_insert_with(input, || format!("{:?}", obligation.id));
             }
         }
-        let closure = crate::bytes::closure(graph, roots.keys());
+        // An arm no path reads is found only where some block's fold drops an in-edge (D214).
+        let closure = match facts.obligations.narrows() {
+            true => crate::bytes::closure_under(
+                graph,
+                (roots.keys()).map(|value| (value, ByteMask::All, crate::edge_fold::ALL)),
+            ),
+            false => crate::bytes::closure(graph, roots.keys()),
+        };
         // What an unmodelled instruction reads, and what those values depend on. O(V + E).
         let unmodelled = (facts.obligations.unmodelled().iter())
             .flat_map(|inst| graph.inputs(inst).iter().copied())
@@ -208,7 +218,10 @@ impl DeadPhis {
         let roots = (roots.iter())
             .map(|value| (value, ByteMask::All, crate::edge_fold::ALL))
             .chain(owed);
-        let closure = crate::bytes::closure_under(graph, roots);
+        let closure = match obligations.narrows() {
+            true => crate::bytes::closure_under(graph, roots),
+            false => crate::bytes::closure_of(graph, roots.map(|(value, bytes, _)| (value, bytes))),
+        };
         let observed = &closure.values;
 
         let unobserved_values = graph
@@ -225,9 +238,14 @@ impl DeadPhis {
             })
             .map(|value| value.id)
             .collect();
+        let unobserved_uses = match obligations.narrows() {
+            true => closure.unread_arms(graph).collect::<BTreeSet<_>>(),
+            false => BTreeSet::new(),
+        };
         let mut dead = Self {
             unobserved_values,
-            unobserved_uses: closure.unread_arms(graph).collect(),
+            unread_arms: !unobserved_uses.is_empty(),
+            unobserved_uses,
             ..Self::default()
         };
         for inst in &graph.insts {
@@ -377,6 +395,12 @@ impl DeadPhis {
     }
 
     /// Complete input-use domain of [`Self::unobserved_insts`].
+    /// Whether a path reads arm `input_idx` of the live merge `inst`: every arm where no fold
+    /// drops an in-edge, with no lookup.
+    pub fn arm_read(&self, inst: InstId, input_idx: usize) -> bool {
+        !self.unread_arms || !self.unobserved_uses.contains(&UseSite { inst, input_idx })
+    }
+
     pub const fn unobserved_uses(&self) -> &BTreeSet<UseSite> {
         &self.unobserved_uses
     }

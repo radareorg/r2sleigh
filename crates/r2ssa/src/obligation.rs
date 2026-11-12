@@ -566,6 +566,10 @@ pub struct SemanticObligationInventory {
     /// Each live instruction read under only some in-edges of its block, with those in-edges,
     /// sorted (`crate::edge_fold`; ROADMAP D214): a merge's obligations name no other arm.
     read_under: Vec<(InstId, crate::edge_fold::Edges)>,
+    /// Whether any block's fold drops an in-edge (`edge_fold::narrows`): the edge-aware walks
+    /// run only where one does.
+    #[serde(skip)]
+    narrows: bool,
     /// Whether the inventory closes, decided when it was built.
     ///
     /// Deciding it is a walk of every instruction and every obligation with a
@@ -589,9 +593,15 @@ impl SemanticObligationInventory {
             unstructured_cycle_blocks: BTreeSet::new(),
             unmodelled: crate::dense::IdSet::default(),
             read_under: Vec::new(),
+            narrows: false,
             split_runs: false,
             complete: false,
         }
+    }
+
+    /// Whether some block's fold drops an in-edge, so a merge arm may be read by no path.
+    pub(crate) const fn narrows(&self) -> bool {
+        self.narrows
     }
 
     /// The in-edges of its block `inst`'s value is read under: every one where nothing folds.
@@ -1043,7 +1053,8 @@ impl SemanticObligationInventory {
         // carrier is semantically live only when that independent root closure reaches its phi;
         // recognizer-retained facts must never decide source obligation liveness.
         let mut read_under = crate::dense::IdMap::default();
-        let stops = (&direct, &seeding.inserted);
+        let narrows = crate::edge_fold::narrows(graph);
+        let stops = (&direct, &seeding.inserted, narrows);
         let stated = |inputs: &BTreeMap<_, Vec<ValueId>>| {
             let values = inputs.values().flatten();
             values
@@ -1180,7 +1191,10 @@ impl SemanticObligationInventory {
                     source: SemanticSourceSite::GraphInstruction(inst.id),
                     inputs: explicit_inputs
                         .remove(&(inst.id, kind, component))
-                        .unwrap_or_else(|| read_inputs(graph, inst, &read_under)),
+                        .unwrap_or_else(|| match narrows {
+                            true => read_inputs(graph, inst, &read_under),
+                            false => graph.inputs(inst.id).to_vec(),
+                        }),
                     edge_use: explicit_edge_uses.remove(&(inst.id, kind, component)),
                 });
             }
@@ -1191,6 +1205,7 @@ impl SemanticObligationInventory {
             });
         }
         inventory.unmodelled = unsupported;
+        inventory.narrows = narrows;
         inventory.obligations = ObligationTable::of(obligations);
         inventory.read_under = (read_under.iter())
             .filter(|(_, edges)| **edges != crate::edge_fold::ALL)
@@ -2053,27 +2068,32 @@ fn seed_value_definition(
     }
 }
 
+/// Where the liveness walk stops (direct and inserted instructions), and whether any fold narrows.
+type Stops<'a> = (
+    &'a crate::dense::IdSet<InstId>,
+    &'a crate::dense::IdSet<InstId>,
+    bool,
+);
+
 /// Seed each definition a live instruction reads, and state the in-edges each is read under
 /// (`crate::edge_fold`); one is taken again only when its in-edges grow, at most 65 times.
 fn propagate_live_dependencies(
     graph: &SsaGraph,
-    ((direct, inserted), whole): (
-        (&crate::dense::IdSet<InstId>, &crate::dense::IdSet<InstId>),
-        &[InstId],
-    ),
+    ((direct, inserted, narrows), whole): (Stops<'_>, &[InstId]),
     required: &mut ObligationSeeds,
     under: &mut crate::dense::IdMap<InstId, crate::edge_fold::Edges>,
 ) {
     // A seed no walk reached is a root, read however its block is entered; so is a definition
     // an obligation names as its own input (`whole`), which no operand position bounds.
     let mut ready = required.keys().collect::<VecDeque<_>>();
-    for inst in &ready {
+    // Where no fold drops an in-edge every read is under every one, and no set is held.
+    let mut folds = narrows.then(|| crate::edge_fold::EdgeFolds::new(graph));
+    for inst in ready.iter().filter(|_| narrows) {
         under.get_or_insert_with(*inst, || crate::edge_fold::ALL);
     }
-    for inst in whole {
+    for inst in whole.iter().filter(|_| narrows) {
         under.insert(*inst, crate::edge_fold::ALL);
     }
-    let mut folds = crate::edge_fold::EdgeFolds::new(graph);
     while let Some(inst_id) = ready.pop_front() {
         let stops = direct.contains(inst_id) || inserted.contains(inst_id);
         let Some(inst) = graph.inst(inst_id).filter(|_| !stops) else {
@@ -2084,7 +2104,10 @@ fn propagate_live_dependencies(
             let Some(definition) = graph.def_inst(*input) else {
                 continue;
             };
-            let read = folds.read_under(inst, index, *input, read_under);
+            let read = match folds.as_mut() {
+                Some(folds) => folds.read_under(inst, index, *input, read_under),
+                None => crate::edge_fold::ALL,
+            };
             if read == 0 {
                 continue;
             }
@@ -2095,9 +2118,12 @@ fn propagate_live_dependencies(
                 SemanticObligationComponent::Whole,
                 required,
             );
-            let edges = under.get_or_insert_with(definition, || 0);
-            if !was_live || *edges | read != *edges {
-                *edges |= read;
+            let rose = narrows && {
+                let edges = under.get_or_insert_with(definition, || 0);
+                let grown = *edges | read;
+                std::mem::replace(edges, grown) != grown
+            };
+            if !was_live || rose {
                 ready.push_back(definition);
             }
         }

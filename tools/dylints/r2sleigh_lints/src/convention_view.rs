@@ -109,7 +109,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/r2engine/src/program/fates.rs",
         "Reading::import_takes",
     ),
-    ("crates/r2engine/src/program/fates.rs", "Reading::unknown"),
     ("crates/r2engine/src/program/fates.rs", "SiteFates::compute"),
     ("crates/r2engine/src/program/fates.rs", "held_lanes"),
     ("crates/r2engine/src/program/fates.rs", "lanes_of"),

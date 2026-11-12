@@ -476,15 +476,11 @@ impl Demand<'_> {
     fn read_definition(&mut self, value: ValueId, def: InstId, merge: bool) {
         if merge {
             // An arm r2ssa states no path reads binds nothing (ROADMAP D214).
-            let unread = self.artifact.unobserved_merges().unobserved_uses();
+            let merges = self.artifact.unobserved_merges();
             let inputs = self.graph.inputs(def).to_vec();
-            let read = |at: &usize| {
-                let (inst, input_idx) = (def, *at);
-                !unread.contains(&r2ssa::UseSite { inst, input_idx })
-            };
-            let read = (0..inputs.len()).filter(read).collect::<Vec<_>>();
-            for input in read {
-                self.operand(inputs[input], def);
+            let read = (inputs.into_iter().enumerate()).filter(|(at, _)| merges.arm_read(def, *at));
+            for (_, input) in read {
+                self.operand(input, def);
             }
         } else if transfer::reads_answer(self.graph, value) {
             // The walk assigns it from its own variables; its term reads nothing by name.
@@ -2496,11 +2492,7 @@ impl<'a> Values<'a> {
                 continue;
             };
             // An arm no path reads is no assignment: the edge pays the merge with nothing.
-            let unread = self.artifact.unobserved_merges().unobserved_uses();
-            if unread.contains(&r2ssa::UseSite {
-                inst: inst.id,
-                input_idx: slot,
-            }) {
+            if !(self.artifact.unobserved_merges()).arm_read(inst.id, slot) {
                 self.pay(output, forward && !late);
                 continue;
             }
