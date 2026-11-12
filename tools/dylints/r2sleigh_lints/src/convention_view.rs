@@ -335,8 +335,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/r2ssa/src/semantic/shared.rs", "callee_write_spans"),
     ("crates/r2ssa/src/site_boundary.rs", "ResultLanes::of"),
     ("crates/r2ssa/src/site_boundary.rs", "argument_registers"),
-    ("crates/r2ssa/src/site_boundary.rs", "argument_takes"),
-    ("crates/r2ssa/src/site_boundary.rs", "unknown_call_takes"),
     ("crates/r2ssa/src/slot_promotion.rs", "promote"),
     ("crates/r2ssa/src/slot_promotion.rs", "saves"),
     ("crates/r2ssa/src/stack_bound.rs", "decide"),
