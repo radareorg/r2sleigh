@@ -330,7 +330,7 @@ The authority order is the same for each slot and for the result:
 3. A library row, applied through an import binding.
 4. The convention.
 
-A source that loses becomes a `Dispute` and leaves refusal evidence. Caller writes (`SiteBoundary.written`) never raise the arity of any callee. A register written before a call may be scratch reuse, so the write proves no read.
+A source that loses becomes a `Dispute` and leaves refusal evidence. Caller writes never raise the arity of any callee. A register written before a call may be scratch reuse, so the write proves no read. No owner computes them: S31b deleted `SiteBoundary.written` (D321), which had no reader.
 
 Result presence follows six rules:
 

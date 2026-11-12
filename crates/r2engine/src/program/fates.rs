@@ -994,8 +994,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
             .map(|call| (call.block, call.op))
             .collect::<Vec<_>>();
         let flow = flow_of(body, target.disasm.arch_spec().memory_endianness);
-        let arguments = argument_registers(&slots);
-        let fates = flow.site_fates(reading.lanes, &reading.effects(body), &sites, &arguments);
+        let fates = flow.site_fates(reading.lanes, &reading.effects(body), &sites);
         let mut calls = (direct.iter().zip(fates))
             .map(|(call, boundary)| AfterCall {
                 callee: call.callee,

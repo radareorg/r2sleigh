@@ -130,18 +130,14 @@ pub enum LaneFate {
 /// What one call site states of its callee's boundary: evidence only, never arity proof.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SiteBoundary {
-    /// Bytes of each argument register (integer, then float, in convention order) the call's own
-    /// block writes before it.
-    pub written: Box<[ByteMask]>,
     /// The fate of each result lane after the call, by `LaneId`; none where the convention names no
     /// such register.
     pub fates: [Option<LaneFate>; LANES],
 }
 
 impl SiteBoundary {
-    fn unknown(lanes: ResultLanes, written: Box<[ByteMask]>) -> Self {
+    fn unknown(lanes: ResultLanes) -> Self {
         Self {
-            written,
             fates: lanes.slots().map(|slot| slot.map(|_| LaneFate::Unknown)),
         }
     }
@@ -593,20 +589,14 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
     }
 
     /// The boundary at each of `sites` (block, operation), from one pass; one past its budget gives
-    /// every site Unknown. `arguments` are the registers `written` covers.
+    /// every site Unknown.
     pub fn site_fates(
         &self,
         lanes: ResultLanes,
         effects: &dyn CallEffects,
         sites: &[(usize, usize)],
-        arguments: &[CanonicalStorageId],
     ) -> Vec<SiteBoundary> {
-        let mut fates = (sites.iter())
-            .map(|&(block, op)| {
-                let written = written_before(self.blocks[block].lifted(), op, arguments);
-                SiteBoundary::unknown(lanes, written)
-            })
-            .collect::<Vec<_>>();
+        let mut fates = vec![SiteBoundary::unknown(lanes); sites.len()];
         if sites.is_empty() {
             return fates;
         }
@@ -904,32 +894,6 @@ fn predicated(block: &R2ILBlock, index: usize) -> bool {
         .any(|at| block.ops[at].is_control_flow())
 }
 
-/// The bytes of each of `arguments` the block writes before the call at `op`, back to the previous
-/// control operation. `O(op)`.
-fn written_before(
-    block: &R2ILBlock,
-    op: usize,
-    arguments: &[CanonicalStorageId],
-) -> Box<[ByteMask]> {
-    let mut written = vec![ByteMask::default(); arguments.len()];
-    for operation in block.ops[..op].iter().rev() {
-        if operation.is_control_flow() {
-            break;
-        }
-        let Some(output) = operation
-            .output()
-            .filter(|out| out.space == SpaceId::Register)
-        else {
-            continue;
-        };
-        let storage = CanonicalStorageId::from_varnode(output);
-        for (slot, mask) in arguments.iter().zip(&mut written) {
-            mask.0 |= Lane::new(*slot).bytes_of(storage);
-        }
-    }
-    written.into()
-}
-
 /// Whether two storages share a byte.
 fn overlap(a: CanonicalStorageId, b: CanonicalStorageId) -> bool {
     a.space == b.space
@@ -1079,8 +1043,7 @@ mod tests {
             open.iter().copied(),
             Endianness::Little,
         );
-        flow.site_fates(LANES, effects, &[(0, 0)], &[])
-            .swap_remove(0)
+        flow.site_fates(LANES, effects, &[(0, 0)]).swap_remove(0)
     }
 
     fn integer(fate: SiteBoundary) -> K {
@@ -1157,7 +1120,7 @@ mod tests {
             block(0x1004, 4, vec![zero_eax(), zero_extend(), ret()]),
         ];
         let flow = CallerFlow::new(&blocks, [(0, 0x1000), (0, 0x1004)], [], Endianness::Little);
-        let fated = flow.site_fates(LANES, NOTHING, &[(0, 1)], &[]);
+        let fated = flow.site_fates(LANES, NOTHING, &[(0, 1)]);
         assert_eq!(integer(fated[0].clone()), K::Read);
     }
 
@@ -1421,8 +1384,7 @@ mod tests {
             block.push_from(ret(), 0x100c);
             let blocks = [block];
             let flow = CallerFlow::new(&blocks, [], [], Endianness::Little);
-            flow.site_fates(lanes, NOTHING, &[(0, 0)], &[])
-                .swap_remove(0)
+            flow.site_fates(lanes, NOTHING, &[(0, 0)]).swap_remove(0)
         };
         let [(_, first), rest @ ..] = splits;
         let moved = after(first);
@@ -1471,7 +1433,7 @@ mod tests {
         let fate = |ops: Vec<R2ILOp>| {
             let blocks = [block(0x1000, 8, ops)];
             CallerFlow::new(&blocks, [], [], Endianness::Little)
-                .site_fates(lanes, NOTHING, &[(0, 0)], &[])
+                .site_fates(lanes, NOTHING, &[(0, 0)])
                 .swap_remove(0)
         };
         let overwritten = fate(vec![call(), negate.clone(), clear, ret()]);
@@ -1658,7 +1620,7 @@ mod tests {
             [],
             Endianness::Little,
         );
-        let fated = flow.site_fates(LANES, NOTHING, &[(0, 1)], &[]);
+        let fated = flow.site_fates(LANES, NOTHING, &[(0, 1)]);
         assert_eq!(integer(fated[0].clone()), K::Unknown);
         let plain = [block(
             0x1000,
@@ -1692,16 +1654,12 @@ mod tests {
             ..LANES
         };
         let flow = CallerFlow::new(&blocks, [], [], Endianness::Little);
-        let fate = flow
-            .site_fates(lanes, NOTHING, &[(0, 0)], &[])
-            .swap_remove(0);
+        let fate = flow.site_fates(lanes, NOTHING, &[(0, 0)]).swap_remove(0);
         assert_eq!(shape(fate.fates[2]), Some(K::Unknown));
         // The same read of the whole of EDX, with nothing written above it, is the value.
         let blocks = [block(0x1000, 8, vec![call(), store(0x10, 4), ret()])];
         let flow = CallerFlow::new(&blocks, [], [], Endianness::Little);
-        let fate = flow
-            .site_fates(lanes, NOTHING, &[(0, 0)], &[])
-            .swap_remove(0);
+        let fate = flow.site_fates(lanes, NOTHING, &[(0, 0)]).swap_remove(0);
         assert_eq!(shape(fate.fates[2]), Some(K::Read));
     }
 
@@ -1715,9 +1673,7 @@ mod tests {
             ..LANES
         };
         let flow = CallerFlow::new(&blocks, [], [], Endianness::Little);
-        let fate = flow
-            .site_fates(lanes, NOTHING, &[(0, 0)], &[])
-            .swap_remove(0);
+        let fate = flow.site_fates(lanes, NOTHING, &[(0, 0)]).swap_remove(0);
         assert_eq!(shape(fate.fates[0]), Some(K::Dead));
         assert_eq!(shape(fate.fates[2]), Some(K::Read));
     }
@@ -1741,7 +1697,7 @@ mod tests {
         };
         let blocks = [block(0x1000, 8, [vec![call()], ops].concat())];
         CallerFlow::new(&blocks, [], [], Endianness::Little)
-            .site_fates(lanes, NOTHING, &[(0, 0)], &[])
+            .site_fates(lanes, NOTHING, &[(0, 0)])
             .swap_remove(0)
     }
 
@@ -1776,7 +1732,7 @@ mod tests {
         let after = |lanes: ResultLanes, read: R2ILOp| {
             let blocks = [block(0x1000, 8, vec![call(), read, ret()])];
             CallerFlow::new(&blocks, [], [], Endianness::Little)
-                .site_fates(lanes, NOTHING, &[(0, 0)], &[])
+                .site_fates(lanes, NOTHING, &[(0, 0)])
                 .swap_remove(0)
         };
         let whole = after(lanes(Some(XMM0)), store(0x1200, 16));
@@ -1876,11 +1832,6 @@ mod masks {
         offset: 0,
         size: 8,
     };
-    const RDI: CanonicalStorageId = CanonicalStorageId {
-        space: CanonicalStorageSpace::Register,
-        offset: 0x38,
-        size: 8,
-    };
     const LANES: ResultLanes = ResultLanes {
         integer: Some(RAX),
         float: None,
@@ -1907,13 +1858,12 @@ mod masks {
         }
         let flow = CallerFlow::new(std::slice::from_ref(&block), [], [], Endianness::Little);
         let nothing = TakeOnly(super::LaneBytes::default());
-        flow.site_fates(LANES, &nothing, &[(0, 1)], &[RDI])
-            .swap_remove(0)
+        flow.site_fates(LANES, &nothing, &[(0, 1)]).swap_remove(0)
     }
 
-    /// `mov edi, 1; call f; mov [rsi], eax; ret`: four bytes read, four written before.
+    /// `mov edi, 1; call f; mov [rsi], eax; ret`: four bytes read.
     #[test]
-    fn a_fate_states_the_bytes_and_the_site_its_written_arguments() {
+    fn a_fate_states_the_bytes_it_reads() {
         let store = R2ILOp::Store {
             space: SpaceId::Ram,
             addr: Varnode::register(0x30, 8),
@@ -1924,7 +1874,6 @@ mod masks {
         };
         let read = after(vec![store, ret.clone()]);
         assert_eq!(read.fates[0], Some(LaneFate::Read(ByteMask(0xf))));
-        assert_eq!(&*read.written, &[ByteMask(0xf)]);
         let returned = after(vec![ret]);
         assert_eq!(returned.fates[0], Some(LaneFate::Returned(ByteMask(0xff))));
         assert_eq!(ByteMask(0xf).low_run(), Some(4));
