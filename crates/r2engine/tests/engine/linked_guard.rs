@@ -177,3 +177,37 @@ fn without_a_library_row_the_bound_slot_is_no_guard() {
         .loader_written(import_write(WORD, 8, "__stack_chk_guard"));
     assert_kept(&rendered(program));
 }
+
+/// gcc -O2 `shape_struct_array` without its check: the loop reads the frame through `x2`, a merge
+/// of `sp` and `x2 + 8` the object model places in no frame object.
+const WALKED_FRAME: &[u8] = &[
+    0xff, 0x43, 0x00, 0xd1, // 1000 sub sp, sp, #0x10
+    0xe0, 0x03, 0x00, 0xb9, // 1004 str w0, [sp]
+    0xe1, 0x0b, 0x00, 0xb9, // 1008 str w1, [sp, #8]
+    0xe2, 0x03, 0x00, 0x91, // 100c mov x2, sp
+    0x01, 0x00, 0x80, 0x52, // 1010 mov w1, #0
+    0x00, 0x00, 0x80, 0xd2, // 1014 mov x0, #0
+    0x44, 0x84, 0x40, 0xb8, // 1018 ldr w4, [x2], #8
+    0x00, 0x00, 0x04, 0x8b, // 101c add x0, x0, x4
+    0x21, 0x04, 0x00, 0x11, // 1020 add w1, w1, #1
+    0x3f, 0x08, 0x00, 0x71, // 1024 cmp w1, #2
+    0x81, 0xff, 0xff, 0x54, // 1028 b.ne 0x1018
+    0xff, 0x43, 0x00, 0x91, // 102c add sp, sp, #0x10
+    0xc0, 0x03, 0x5f, 0xd6, // 1030 ret
+];
+
+/// A read through a frame address the model places in no frame object may land on any of them, so
+/// no store is dead (aarch64 gcc-O2 `shape_struct_array` read unwritten stack bytes).
+#[test]
+fn a_frame_read_through_an_unplaced_walk_keeps_the_stores_it_may_read() {
+    let program = Literal::of_code(WALKED_FRAME, &[("f", F, 0x34)])
+        .in_aarch64()
+        .running_on(GLIBC);
+    let text = rendered(program);
+    assert!(!text.contains("dead-frame-slot-store"), "{text}");
+    assert!(
+        text.contains("frame + 0U") || text.contains("(frame)"),
+        "{text}"
+    );
+    assert_eq!(text.matches("r2sleigh_store_u32").count(), 2, "{text}");
+}
