@@ -696,6 +696,57 @@ Gates, release r2s, measured on parent S38 `510e01acd` (master's tree at #373), 
 - Tests: 2,744 pass in the touched crates (r2abi, r2source, r2ssa, r2types, r2dec, r2engine, r2s with the goldens); clippy `-D warnings` clean over the workspace; Dylint 8, the baseline; `structure-report.sh` passes with no count moved; `certify_render.py` over radare2's `test/bins/elf` (80 binaries, 8 functions each) reads 0 undefined, 0 invented. Every mutant of `mutants_s31a.py`, `mutants_d213.py`, `mutants_d203.py`, `mutants_d68.py` and `mutants_d75.py` still applies.
 - Cost: release, median of three, instructions retired on the Mac, parent against head: 0pack `0x62ecf0` `pdd` 15.439 to 15.505 G, +0.43% (258 output lines move, the calls that now render); pumasim `0x23fdf0` `pdd` 23.934 to 23.955 G; bash `0x2e630` `aa; pdd` 14.418 to 14.409 G (D153 bound 15.43 G); pumasim `0x3b6b20` `aa; pdd` 64.436 to 64.405 G. The last three print identical output. Peak footprint: 0pack 204.3 to 204.2 MB, pumasim cold 211.0 to 213.4 MB, bash 61.2 MB both, pumasim `aa` 189.7 to 188.5 MB. Before the two review fixes 0pack `0x62ecf0` was 15.438 to 15.436 G. The +0.43% is not the walk: `0x62ecf0` never runs it, a build with the walk switched off costs the same, and so does one with `liveout.rs` at its parent's text. It follows the rewrite of `lane_at_returns` in `recover_interface.rs`, probably a code-generation shift in recovery's functions; not localized further.
 
+## S18b as built (2026-11-12)
+
+Row D244. S18 named two causes of `code no body holds`. Tracing each unheld range found six. Four are built, and the fifth (dispatch rounds) is written and held back on its cost. `Escapes` refused the image of 17 of the 35 builds (S18 counted the 12 that hold a class C function) and refuses 12.
+
+| Cause | Builds | Owner | Built |
+|---|---|---|---|
+| A table index reached from two tested edges | gzip 2 (`main` `0x3b9a`) | r2ssa `values` | yes |
+| A table index tested in memory and reloaded | gzip 2, find 2, diff 2 (`0x10f89`, `0x94af`, `0xa9b0`, `0x76c0`) | r2ssa `reload` | yes |
+| A 16-bit test of a 64-bit index | grep 2 (`0x9d2a`: a merge of `movzwl` words in `rax`, then `cmp $0xe, %ax`) | r2ssa `values` | yes |
+| Code after a call that never returns | bzip2 3 (17 ranges) | r2engine `reads` | yes |
+| A dispatch first reached through an arm | diff 2, diff3 2, find 2, grep 2 (`quotearg_buffer_restyled`, 3 inner dispatches) | r2engine `native`, `body` | no, D285 |
+| A table base that is a loop's merge | diff 2 (`main` `0x50a1`: `rbx` is a phi of the `lea` and the loop's back edge) | r2ssa `values` | no, D285 |
+| Not traced | xmlwf 2 (`0x31be`), libz.so 2 (`inflateBack` `0x7e2c`) | | no, D285 |
+
+- The row counted 9 builds under the first two causes. 7 of those also need the fifth, which S18 left untraced: `DispatchTables` reads one round (resolved-bodies D6), so `quotearg_buffer_restyled`'s inner dispatches stop the walk. bzip2 (3 builds) and gzip (2) answer now.
+- A merge reads each input under its own edge (doc/ssa.md, "Branch assumptions"). `edge_dominates` is unchanged, and a value the merge block reads directly still narrows nothing: `an_edge_into_a_merge_narrows_nothing_there` passes as written. A phi is read once before the carry forward and never queued, so the descent still walks a DAG. Cost: `O(phi inputs)`, and one cloned environment per tested edge into a block that has phis.
+- A reload through one address is the tested load (doc/adr-frame-model.md, "Reloads", which states the proof obligation). This replaces that ADR's "stack slots only". Any store, call or opaque operation between the loads ends the fact, and a frame store does too: `a_store_through_an_unknown_pointer_keeps_the_pointed_loads_apart`.
+- A guard on a copy bounds every zero extension of the copy class, through any number of extensions. The solver holds the extensions by class, sorted once per solve (`O(I log I)`), where it walked the compared value's own users.
+- A guard on the low lane of a value bounds the value where the ascent already holds it inside the lane's width: then the value is the lane. A `movzbl` index tested by `cmp $0x7, %al` read 256 entries, 248 past its table (0pack `0x648d4e`); it reads 8.
+- Code after an exit. The brief asked for bytes "unreachable by any reference in the held `ReferenceIndex`". That is not built: the index is built after `unaccounted_code` ("S7 cost"), and it states nothing of a relative table entry or an unresolved dispatch, so it cannot state that nothing enters the bytes. D244's own rule is built, and it holds whether or not the bytes run. A gap that starts at the address after a call discovery ended a block at (`Survey::after_exit`, from each trace's gated and slot-halting calls) is held where every instruction decodes, every transfer is direct to known code, no operation is a user operation or unimplemented, and every constant and static address its operations hold joins `escaped`. A call from the gap escapes its callee: it is never counted as a read call. A model's-word `Never` qualifies, since nothing rests on the call not returning.
+- x86 only. An x86 instruction states an address whole. AArch64 forms one across `adrp` and `add`, which only a body's def-use joins, so its gaps stay unheld.
+- Dispatch rounds are not in this slice. Reading the dispatches a walk through the read tables first stops at, sealed through those tables, takes the refused images from 12 to 6 and class C `void-closed` to 4 (measured). It costs 4.9 G more on pumasim `aa; pdd @ 0x3b6b20` (76.75 to 81.68 G on the Linux host) and 0.5 G on bash, with the same output for both functions. It waits for its own slice (D285).
+
+Gates, release r2s on the Mac, parent S39 `ec38e0d93` against this head:
+
+| | parent | S18b |
+|---|---|---|
+| Builds of the 35 whose image `Escapes` refuses (every function rendered under `aa`, traced) | 17 | 12 |
+| `void-closed`, 102 class C source voids | 1 | 2 (`uInt64_toAscii`, `checksigs`) |
+| `scratch_void.py`, 35 builds: `void-closed` source void, source value | 3, 0 | 5, 0 |
+| `scratch_void.py`: `void-open` source void, source value | 256, 2 | 255, 2 |
+| `scratch_void.py`: lost voids, exit | 2 (`print_sdiff_hunk`, diff O2 and O2-noinline), 1 | the same 2, 1 |
+| `void_soundness.py`, 166 builds: header false voids, extern false voids | 0, 0 of 2,166 | 0, 0 of 2,166 |
+| Census, every function of the 35 builds | | 56 functions move, 11 builds |
+| 35 builds: `switch` statements, case labels, `UnresolvedIndirectBranch` gaps, refusals | 201, 2,761, 118, 140 | 209, 3,045, 104, 149 |
+
+Timing, instructions retired, median of 3:
+
+| | parent | S18b | |
+|---|---|---|---|
+| pumasim `pdd @ 0x23fdf0`, cold | 24.66 G | 24.66 G | output identical |
+| 0pack `pdd @ 0x62ecf0`, cold | 15.66 G | 15.73 G | output identical |
+| bash `aa; pdd @ 0x2e630` (bound 15.43 G) | 14.39 G | 14.63 G | output identical |
+| pumasim `aa; pdd @ 0x3b6b20` | 66.75 G | 73.49 G | `inflate` gains its declaration |
+
+- The 6.7 G (10%) on pumasim under `aa` is coverage. 63 of its 284 dispatches read `4294967296` or `65536 entries`, so their arms were in no body. 60 are bounded now (863 entries) and `aa` walks their arms: the bodies hold 48,691 more bytes (3,601,960 to 3,650,651) in the same 15,298 functions. 21 more tables read 256 entries past a tested bound of 6 to 17 and read that bound now. Each dispatch is read once: 284 table reads for 284 dispatch instructions, on both sides. 0pack: 5 of 5 unbounded dispatches bounded (70 entries), 6 tables narrowed from 256 to 8 or 9, 17,191 more bytes held.
+- The one new void is bzip2 `uInt64_toAscii` (O2), source void; its caller `0x38c0` renders the second call where it left `CallNotRendered`. `_fini` renders `void` with `return;` in 3 builds where it returned a residual. gzip `copy_stat` (O2-noinline), `void` in the open world, now also states `no call reads the result (assuming closed-world)` and the gate counts it closed; its C is unmoved. The proof line names a premise the open proof does not need; its owner is the proof line (D233).
+- The 9 new refusals are the functions whose tables are now read: gzip `main` and `printf_fetchargs`, find `pred_and` and `0xa990` (O2 and O2-noinline each), and grep `0xa240` (O2-noinline). Each walks its arms and is refused by effect accounting (`live-value-producer` at the dispatch block), the refusal `quotearg_buffer_restyled` already had in gzip (`0xfa70`, 85 unaccounted). Before, each rendered the code up to an `UnresolvedIndirectBranch` gap and no arm. Owner: S23's rows.
+- Read by hand, `aa; pdd`: find `do_fprintf` `0xf5b0` renders 910 lines and 3 switches with 127 case labels (104 lines and a gap). diff `diff_2_files` `0x6d60` renders its 9-case switch. grep `0x92c0` renders 632 lines where it rendered 471.
+- 27 of the 56 moves are the proof line alone: `the result is unproven (Written)` becomes `no call reads the result (assuming closed-world); the result is unproven (Unread)` where the closed world now answers.
+
 ## Open questions
 
 1. The register effect's survey pass is an estimate (about 1 G per 450 bodies on bash). If it does not bring pumasim `0x3b6b20` to 64.38 G, S31b keeps the lazy ask per call with the same function.
