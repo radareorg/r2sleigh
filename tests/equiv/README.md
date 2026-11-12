@@ -294,8 +294,21 @@ With `k` = 4 and the budget `B`:
   rendering's. A rendering stopped past its allowance is `slow`, and the
   record names the `-O2` build when it is among them.
 
+Under `time` that ratio is the processor's. CPU time orders a rendering and its
+original differently on different processors: clang `-O1` `fact`'s `-O0` build
+retires 4.25 times its original's instructions and takes 1.36 times its CPU
+time. CI's runners are of several models and none counts instructions, so a
+cost near an allowance is past it on one runner and inside it on another. The
+ratchet therefore holds a baseline `slow` under `time` by `slow`, naming any
+build, or by `equal`, which says every vector ran inside its allowance and
+agreed; `--write-baseline` keeps the blessed entry. A baseline `equal` that
+reads `slow` is still a departure. Under `instructions` the ratchet is exact
+(ADR D341). The shard log prints the runner's processor (`host:`) and, for each
+vector whose original costs more than `B/(k*k)`, every run's cost over the
+original's (`cost:`).
+
 Above `B/(k*k)` the verdict is a ratio of two costs taken seconds apart on one
-machine, so a faster or slower runner moves both. Below it a cost is too small
+machine, so a faster or slower runner of one model moves both. Below it a cost is too small
 to compare, so `B/k` (`-O2`) and `B` (unoptimised) are floors. The runtime writes each run's cost as `cost` to `result.jsonl`
 (kept by `--keep`), never into a record, since a cost varies in its last
 digits. Wall-clock time (`--hang-ms`, 120 s, plus four times the allowance

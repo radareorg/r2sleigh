@@ -60,6 +60,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -261,6 +262,10 @@ def grade_code(record: Record, workdir: Path, binary: Path, dwarf: Dwarf, spec: 
     helpers = ResidualHelpers(str(builds["O0"].path),
                               link.residual_helpers(builds["O0"].path, target),
                               target.trap_signal)
+    # A self-test's fake cost is its own input, not a measurement.
+    if not (config.cost.fake_original or config.cost.fake_rendering):
+        for line in cost_lines(record.key, vector_lines, config.cost):
+            print(line, file=sys.stderr, flush=True)
     status, evidence, counts = classify(vector_lines, vectors, residual, helpers,
                                         config.floor(), sites)
     record.status = status
@@ -569,6 +574,25 @@ def _run_evidence(run: dict) -> dict:
     return kept
 
 
+def cost_lines(key: str, vector_lines: list[dict], cost: Cost) -> list[str]:
+    """One line per vector whose original costs more than the floor, where a rendering's
+    allowance is a ratio (ADR D339): printed, never kept in a record, since a cost varies."""
+    lines = []
+    for line in vector_lines:
+        runs = line.get("runs", [])
+        base = int(runs[ORIGINAL].get("cost", 0)) if runs else 0
+        if base <= cost.floor():
+            continue
+        # A run its allowance stopped never settled: its slot holds no cost of this vector.
+        spent = " ".join(
+            f"{RUN_LABELS[i]}=" + ("stopped" if _over_budget(run) else
+                                   f"{int(run.get('cost', 0)) / base:.2f}({run.get('outcome')})")
+            for i, run in enumerate(runs[:len(RUN_LABELS)]) if i != ORIGINAL)
+        lines.append(f"cost: {key} vector {line.get('vector')}: original {base} {cost.measure} "
+                     f"ticks; over it: {spent}")
+    return lines
+
+
 def _stack_exhausted(runs: list[dict]) -> bool:
     """Whether the -O0 and -O2 renderings both faulted past their stack's end. The builds make
     no sibling call (link.py), so a tail-recursive original that returns in constant stack
@@ -687,6 +711,8 @@ def ratchet(baseline: dict, records: dict[str, "str | tuple"],
     * a record's status must be the baseline's -- falling short blocks, and so
       does improving, because an improvement the baseline does not hold is one
       the next change may silently lose;
+    * under ``time``, a ``slow`` baseline record is held by ``slow`` naming any
+      build, or by ``equal`` (:func:`timed_slow_holds`);
     * a ``differs``, ``uninit`` or ``ub`` the baseline does not record blocks
       under its own message, as the worst departure;
     * a non-``equal`` record must fail for the reason the baseline records,
@@ -705,6 +731,7 @@ def ratchet(baseline: dict, records: dict[str, "str | tuple"],
     """
     problems: list[str] = []
     held = baseline["records"]
+    timed = (baseline.get("cost") or {}).get("measure") == "time"
 
     def split(graded):
         return (*graded, None, None)[:3] if isinstance(graded, tuple) else (graded, None, None)
@@ -720,6 +747,8 @@ def ratchet(baseline: dict, records: dict[str, "str | tuple"],
             problems.append(f"{key}: in the baseline but not graded by this run")
             continue
         now, why, compared = split(records[key])
+        if timed and timed_slow_holds(before, now):
+            continue
         if now in BLOCKING and now != before:
             problems.append(f"{key}: new {now} (baseline: {before})")
         elif before == "equal" and now != "equal":
@@ -743,6 +772,17 @@ def ratchet(baseline: dict, records: dict[str, "str | tuple"],
     return problems
 
 
+def timed_slow_holds(before: str | None, now: str) -> bool:
+    """Whether a run graded by CPU time holds a baseline ``slow`` (ADR D341).
+
+    CPU time orders a rendering and its original differently on different processors, so a
+    cost near the allowance is past it on one runner and inside it on another, and which
+    build is stopped first moves too. ``equal`` there says every vector ran inside its
+    allowance and agreed. A baseline ``equal`` that reads ``slow`` is still a departure.
+    """
+    return before == "slow" and now in ("slow", "equal")
+
+
 def baseline_from(records: list[Record], previous: dict | None = None,
                   toolchain: dict[str, str] | None = None,
                   cost: Cost | None = None) -> dict:
@@ -750,9 +790,15 @@ def baseline_from(records: list[Record], previous: dict | None = None,
     previous one recorded for the same status and reason. It names the measure
     and budget the run counted by (:func:`cost.departure` holds later runs to them)."""
     old = (previous or {}).get("records", {})
+    measure = cost.measure if cost is not None else ((previous or {}).get("cost") or {}).get("measure")
     out: dict[str, dict] = {}
     for record in sorted(records, key=lambda r: r.key):
         entry: dict = {"status": record.status}
+        kept = old.get(record.key, {})
+        if measure == "time" and timed_slow_holds(kept.get("status"), record.status):
+            # The verdict this processor reads is no move: the blessed entry stands.
+            out[record.key] = dict(kept)
+            continue
         if record.status != "equal":
             status, why, compared = graded(record)
             kept = old.get(record.key, {})
