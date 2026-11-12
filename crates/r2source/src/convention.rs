@@ -12,8 +12,7 @@ use crate::contracts::{
 use crate::{
     CanonicalStorageId, SourceBoundaryReads, SourceCallEffect, SourceCallRegisterEffect,
     SourceConventionSlots, SourceEntryStack, SourceLinkedGuard, SourceMachineRolesError,
-    SourceRegisterSaveArea,
-    SourceSecurityCookie, SourceStackArgumentPlacement, SourceStackGuard,
+    SourceRegisterSaveArea, SourceSecurityCookie, SourceStackArgumentPlacement, SourceStackGuard,
 };
 
 /// Every location of one class, in the convention's order.
@@ -793,6 +792,7 @@ mod tests {
                 guard: None,
                 stack_bound: None,
                 security_cookie: None,
+                linked_guard: None,
             },
             refused: None,
         }
