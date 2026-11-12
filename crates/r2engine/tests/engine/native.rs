@@ -2788,6 +2788,36 @@ fn a_body_result_zero_extended_on_every_path_states_zero_above() {
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 
+/// `STORES_A_BODY_INT_WHOLE` over `test edi, edi; je L; lea eax, [rdi + rdi*2]; ret; L: ret`: one
+/// return leaves RAX as the caller left it.
+const STORES_A_SOME_PATH_INT_WHOLE: &[u8] = &[
+    0x53, // 0x1000 push rbx
+    0x48, 0x89, 0xfb, // 0x1001 mov rbx, rdi
+    0xe8, 0x07, 0x00, 0x00, 0x00, // 0x1004 call 0x1010
+    0x48, 0x89, 0x03, // 0x1009 mov [rbx], rax
+    0x5b, // 0x100c pop rbx
+    0xc3, // 0x100d ret
+    0x90, 0x90, // 0x100e padding
+    0x85, 0xff, // 0x1010 test edi, edi
+    0x74, 0x04, // 0x1012 je 0x1018
+    0x8d, 0x04, 0x7f, // 0x1014 lea eax, [rdi + rdi*2]
+    0xc3, // 0x1017 ret
+    0xc3, // 0x1018 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// A return path no write reaches states no fill: the caller's read above the four bytes is no
+/// zero extension.
+#[test]
+fn a_body_result_one_path_never_writes_states_nothing_above() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let text = rendered_on(&machine, STORES_A_SOME_PATH_INT_WHOLE, "stores");
+    assert!(
+        text.contains("fcn_1010((uint32_t)arg0) | r2sleigh_residual_u64(1) << 32;"),
+        "{text}"
+    );
+}
+
 /// `mov eax, 5; ret` writes EAX: the constant is four bytes wide with zero above, never the eight
 /// the register holds (D74), and no width is read from its magnitude.
 const RETURNS_A_CONSTANT: &[u8] = &[

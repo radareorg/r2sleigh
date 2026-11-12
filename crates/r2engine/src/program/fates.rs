@@ -670,15 +670,8 @@ fn held_lanes<S: Source + 'static>(
                 && lane.offset < argument.offset + u64::from(argument.size)
         })
     };
-    // The lane the cited `follows` row puts after the float one, by its dense id.
-    let results = &target.convention.results;
-    let float = slots_of[usize::from(LaneId::FLOAT.0)];
-    let first = results.iter().position(|lane| Some(lane.storage) == float);
-    let second = results
-        .iter()
-        .find(|lane| first.is_some() && lane.follows == first);
-    let second =
-        second.and_then(|lane| slots_of.iter().position(|slot| *slot == Some(lane.storage)));
+    let lanes = lanes_of(target, &slots);
+    let second = (lanes.after_float(&target.convention.results)).map(|(_, id)| id);
     let held = std::array::from_fn(|at| slots_of[at].is_some_and(|lane| at < 3 || input(&lane)));
     Some((held, second))
 }

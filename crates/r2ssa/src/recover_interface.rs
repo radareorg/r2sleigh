@@ -1293,20 +1293,6 @@ fn unheld_lane_written(
     None
 }
 
-/// The lane the convention fills after `float`, by its cited `follows` row, and its dense lane
-/// id among `ids` (`site_boundary::ResultLanes`). O(lanes).
-fn float_follower(
-    machine_context: &crate::SourceMachineContext,
-    ids: &[Option<CanonicalStorageId>],
-    float: CanonicalStorageId,
-) -> Option<(CanonicalStorageId, u8)> {
-    let model = machine_context.convention()?;
-    let first = (model.results.iter()).position(|lane| overlaps(lane.storage, float))?;
-    let second = (model.results.iter()).find(|lane| lane.follows == Some(first))?;
-    let id = ids.iter().position(|slot| *slot == Some(second.storage))?;
-    Some((second.storage, u8::try_from(id).ok()?))
-}
-
 /// What a return leaves in `lane` past its entry bytes, by copies and merges: a body write
 /// (`Written`, unless `unstated_only`) or a call's bytes no contract states. O(V + E).
 fn lane_supply(
@@ -1493,7 +1479,8 @@ fn recovered_result_over(
     let mut signed = true;
     // Each path's bytes above its own width; a path that leaves none states no fill.
     let mut above = Vec::new();
-    let mut every_path_writes = true;
+    // A return no write reaches leaves the caller's bytes above: no fill is stated.
+    let mut every_path_writes = live_out.unresolved_blocks().next().is_none();
     for value in live_out.iter() {
         match returned_by_call(graph, facts, value) {
             ReturnedByCall::Void => {
@@ -2064,13 +2051,15 @@ fn recover_interface_inner(
     }
     // The lane after the float one, written at a return, makes a float result one group with it.
     if let Some(carriers) = &mut result_carriers
-        && let (Some(float), Some(context)) = (carriers.float, machine_context)
+        && let (Some(_), Some(context)) = (carriers.float, machine_context)
     {
         let results = convention_results(context.convention());
-        let ids = crate::site_boundary::ResultLanes::of(slots, &results).slots();
-        carriers.float_second = float_follower(context, &ids, float)
+        let lanes = crate::site_boundary::ResultLanes::of(slots, &results);
+        let model = context.convention().map(|model| &model.results[..]);
+        carriers.float_second = model
+            .and_then(|model| lanes.after_float(model))
             .filter(|(lane, _)| lane_supply(func, graph, &facts, (context, *lane), false).is_some())
-            .map(|(_, id)| id);
+            .and_then(|(_, id)| u8::try_from(id).ok());
     }
     // Void only where every lane of the return set holds nothing (S36): asked only of a `Void` the
     // body or the closed world would decide, whose cause then keeps it `Unproven`.

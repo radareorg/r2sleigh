@@ -86,6 +86,19 @@ impl ResultLanes {
         lanes
     }
 
+    /// The lane the cited `follows` row of `model` puts after the float one, and its dense id: the
+    /// one statement of it, for recovery and for the callers' join. O(lanes).
+    pub fn after_float(
+        &self,
+        model: &[r2source::convention::ResultLane],
+    ) -> Option<(CanonicalStorageId, usize)> {
+        let float = self.float?;
+        let first = model.iter().position(|lane| overlap(lane.storage, float))?;
+        let second = model.iter().find(|lane| lane.follows == Some(first))?;
+        let id = (self.slots().iter()).position(|slot| *slot == Some(second.storage))?;
+        Some((second.storage, id))
+    }
+
     /// The register each lane tracks, none where there is no such lane.
     pub fn slots(&self) -> [Option<CanonicalStorageId>; LANES] {
         let typed = [self.integer, self.float, self.second];
