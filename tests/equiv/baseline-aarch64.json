@@ -1521,7 +1521,12 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_pointer_to_pointer": {
-   "status": "equal"
+   "cause": "The canary call escaped the whole frame on base; with the guard decided (S27, D257), FrameReach keeps the run escaped and the residual is the visible refusal; master renders the same residual under -fno-stack-protector. The old `equal` rested on the guard's frame slot widening the object that covers these accesses; D260 owns the extent (doc/adr-call-boundary.md, \"S27 as built\").",
+   "compared": "output",
+   "owner": "P4",
+   "reason": "r2sleigh_residual_void gap:StoreNotSpelled",
+   "site": "crates/r2ssa/src/semantic/facts.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O1::shape_recurse_direct": {
    "status": "equal"
@@ -1610,7 +1615,12 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::shape_byte_indexed_buffer": {
-   "status": "equal"
+   "cause": "The canary call escaped the whole frame on base; with the guard decided (S27, D257), FrameReach keeps the run escaped and the residual is the visible refusal; master renders the same residual under -fno-stack-protector. The old `equal` rested on the guard's frame slot widening the object that covers these accesses; D260 owns the extent (doc/adr-call-boundary.md, \"S27 as built\").",
+   "compared": "output",
+   "owner": "P4",
+   "reason": "r2sleigh_residual_void gap:TermNotSpelled",
+   "site": "crates/r2ssa/src/semantic/facts.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-gcc-O2::shape_call_chain": {
    "status": "equal"
