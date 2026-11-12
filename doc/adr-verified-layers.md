@@ -357,18 +357,22 @@ Owner: GT.
   one run and 0.84 s on the other. The denominator moved, so D341's tolerance
   for a `slow` that reads `equal` did not cover an `equal` that reads `slow`.
 - Counter: `tests/equiv/rt/qemu_count.c`, a qemu-user TCG plugin. Each
-  translation block adds its instruction count when it starts (a callback per
-  block, `O(1)`), so a count is a function of the guest code and the qemu
-  build, the same on every host and run. The runtime asks through a syscall
+  translation block adds its instruction count when it starts (an inline add
+  in the generated code, `O(1)` a block), so a count is a function of the guest
+  code and the qemu build, the same on every host and run. The runtime asks through a syscall
   number no kernel defines (`0x4551`), which the plugin sees and qemu answers
   `ENOSYS`: `ARM` zeroes the count and sets the allowance, `SETTLE` stops it
   and writes it to a memfd the guest names (a guest descriptor is the host's
   under qemu-user; qemu 8.2's API writes neither guest memory nor a syscall's
-  result). Past the allowance the plugin sends `SIGPWR` to the vCPU thread, and
-  the runtime calls it the budget only when the count it reads is past the
-  allowance, so a `SIGPWR` the rendering raises stays a signal. A forked child
-  inherits the plugin; only the vCPU that armed counts, as perf counts one
-  thread. A count of 0 is a counter that failed (`unavailable`), never a cost.
+  result). qemu 8.2 has no conditional callback, so a thread of the plugin's,
+  started in each forked child at its first `ARM`, reads the count every
+  millisecond and past the allowance sends `SIGPWR` to the thread that armed.
+  The runtime calls a `SIGPWR` the budget only when the count it reads is past
+  the allowance, and `SETTLE` raises it when the call ends past it, so the
+  verdict is the count and the millisecond only delays the stop; a `SIGPWR`
+  the rendering raises stays a signal. Every vCPU of the child counts (perf
+  counts the calling thread; no graded function starts one). A count of 0 is
+  a counter that failed (`unavailable`), never a cost.
 - Toolchain: Ubuntu 24.04's qemu-user 8.2.2 has no `-plugin`. CI builds qemu
   8.2.2 (`--enable-plugins`, `aarch64-linux-user` only, the tarball pinned by
   its sha256) in the `aarch64-toolchain` job, cached by version and flags; the
@@ -386,9 +390,11 @@ Owner: GT.
   4.25 times, inside 16 (D339's x86-64 count read the same 4.25). clang `-O2`
   `fact` stays `slow`, its `-O2` build stopped on three vectors. gcc `-O2`
   `fact` reads 1.00 and 3.40.
-- Cost: qemu ran 2.1 billion guest instructions of a loop in 2.20 s with the
-  plugin and 1.56 s without (1.41 times). The wall guard adds a millisecond per
-  100,000 counted instructions of the allowance, a tenth of that rate.
+- Cost: qemu ran 2.1 billion guest instructions of a loop in 1.70 s with the
+  plugin and 1.56 s without (1.09 times); a callback per block took 2.20 s,
+  and shapes.c gcc `-O2` ran past 22 minutes with it on contabo. The wall
+  guard adds a millisecond per 100,000 counted instructions of the allowance,
+  under a tenth of that rate.
 
 **D39. Upstream drift is a gate, not a discovery.** Owner: GT, with VC.
 - A scheduled CI job reports how far each pin is behind its upstream (the

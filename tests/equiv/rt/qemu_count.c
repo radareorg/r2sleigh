@@ -4,9 +4,11 @@
  * qemu-user), HELLO writes a greeting there. Past the allowance it sends SIGPWR, as perf does. */
 #include <qemu-plugin.h>
 
+#include <pthread.h>
 #include <signal.h>
 #include <stdint.h>
 #include <sys/syscall.h>
+#include <time.h>
 #include <unistd.h>
 
 QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
@@ -16,45 +18,69 @@ QEMU_PLUGIN_EXPORT int qemu_plugin_version = QEMU_PLUGIN_VERSION;
 enum { COUNTER_HELLO = 1, COUNTER_ARM = 2, COUNTER_SETTLE = 3 };
 static const char COUNTER_HELLO_BYTES[8] = "EQCOUNT1";
 
-static uint64_t g_count;
+static uint64_t g_count;    /* every vCPU's blocks add to it inline, armed or not */
 static uint64_t g_allowance;
 static int g_armed;
-static unsigned int g_vcpu;
+static pid_t g_caller;      /* the thread that armed: the one the budget signal stops */
+static pid_t g_watching;    /* the process whose watcher runs; a forked child starts its own */
 
-/* A block's instructions count as it starts: deterministic for one qemu build. */
-static void tb_exec(unsigned int vcpu_index, void *n_insns)
-{
-    if (!g_armed || vcpu_index != g_vcpu)
-        return;
-    g_count += (uintptr_t)n_insns;
-    if (g_count > g_allowance) {
-        g_armed = 0;
-        syscall(SYS_tgkill, getpid(), (pid_t)syscall(SYS_gettid), SIGPWR);
-    }
-}
-
+/* A block's instructions count as it starts (an inline add, no call): deterministic for one
+ * qemu build. qemu 8.2 has no conditional callback, so a thread checks the allowance. */
 static void tb_trans(qemu_plugin_id_t id, struct qemu_plugin_tb *tb)
 {
     (void)id;
-    qemu_plugin_register_vcpu_tb_exec_cb(tb, tb_exec, QEMU_PLUGIN_CB_NO_REGS,
-                                         (void *)(uintptr_t)qemu_plugin_tb_n_insns(tb));
+    qemu_plugin_register_vcpu_tb_exec_inline(tb, QEMU_PLUGIN_INLINE_ADD_U64, &g_count,
+                                             qemu_plugin_tb_n_insns(tb));
+}
+
+/* Every millisecond; the verdict is the count the runtime reads, never this latency. */
+static void *watch(void *unused)
+{
+    (void)unused;
+    const struct timespec tick = { 0, 1000000 };
+    for (;;) {
+        if (__atomic_load_n(&g_armed, __ATOMIC_ACQUIRE)
+            && __atomic_load_n(&g_count, __ATOMIC_RELAXED) > g_allowance) {
+            __atomic_store_n(&g_armed, 0, __ATOMIC_RELEASE);
+            syscall(SYS_tgkill, getpid(), g_caller, SIGPWR);
+        }
+        nanosleep(&tick, NULL);
+    }
+    return NULL;
+}
+
+/* Started blocking every signal, so a process-directed one reaches qemu's vCPU thread. */
+static void watch_start(void)
+{
+    sigset_t all, old;
+    pthread_t thread;
+    sigfillset(&all);
+    pthread_sigmask(SIG_SETMASK, &all, &old);
+    if (pthread_create(&thread, NULL, watch, NULL) == 0) {
+        pthread_detach(thread);
+        g_watching = getpid();
+    }
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
 }
 
 static void on_syscall(qemu_plugin_id_t id, unsigned int vcpu_index, int64_t num, uint64_t op,
                        uint64_t arg, uint64_t a3, uint64_t a4, uint64_t a5, uint64_t a6,
                        uint64_t a7, uint64_t a8)
 {
-    (void)id, (void)a3, (void)a4, (void)a5, (void)a6, (void)a7, (void)a8;
+    (void)id, (void)vcpu_index, (void)a3, (void)a4, (void)a5, (void)a6, (void)a7, (void)a8;
     if (num != COUNTER_SYSCALL)
         return;
     if (op == COUNTER_ARM) {
-        g_count = 0;
+        if (g_watching != getpid())
+            watch_start();
+        g_caller = (pid_t)syscall(SYS_gettid);
         g_allowance = arg;
-        g_vcpu = vcpu_index;
-        g_armed = 1;
+        __atomic_store_n(&g_count, 0, __ATOMIC_RELAXED);
+        __atomic_store_n(&g_armed, 1, __ATOMIC_RELEASE);
     } else if (op == COUNTER_SETTLE) {
-        g_armed = 0;
-        (void)!pwrite((int)arg, &g_count, sizeof g_count, 0);
+        __atomic_store_n(&g_armed, 0, __ATOMIC_RELEASE);
+        uint64_t count = __atomic_load_n(&g_count, __ATOMIC_RELAXED);
+        (void)!pwrite((int)arg, &count, sizeof count, 0);
     } else if (op == COUNTER_HELLO) {
         (void)!pwrite((int)arg, COUNTER_HELLO_BYTES, sizeof COUNTER_HELLO_BYTES, 0);
     }

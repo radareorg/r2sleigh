@@ -39,7 +39,7 @@ DEFAULT_HANG_MS = 120_000
 # No wall guard or driver ceiling is set past a day (equiv_rt.c's DAY_US; poll takes int ms).
 DAY_MS = 86_400_000
 # Ticks of an allowance per millisecond the wall guard adds: a CPU allowance four times its
-# length; 100 M guest instructions a second under qemu's counter, which ran 950 M (ADR D343).
+# length; 100 M guest instructions a second under qemu's counter, which ran 1.2 G (ADR D343).
 GUARD_TICKS_PER_MS = {"time": 250_000, "perf": 0, "qemu": 100_000}
 QEMU_COUNTER = Path(__file__).resolve().parent / "rt" / "qemu_count.c"
 
@@ -172,7 +172,7 @@ def qemu_plugin(target: Target, workdir: Path | None, cc: str = "cc") -> Path:
     plugin = workdir.resolve() / "qemu_count.so"
     if "," in str(plugin):
         raise CostRefused(f"qemu -plugin cannot take a path with a comma: {plugin}")
-    built = subprocess.run([cc, "-O2", "-Wall", "-Werror", "-shared", "-fPIC",
+    built = subprocess.run([cc, "-O2", "-Wall", "-Werror", "-shared", "-fPIC", "-pthread",
                             f"-I{header.parent}", str(QEMU_COUNTER), "-o", str(plugin)],
                            capture_output=True, text=True, check=False)
     if built.returncode != 0:
