@@ -470,11 +470,8 @@ fn escaped_objects(
             value,
             space: SpaceId::Ram,
         };
-        match model.value_objects.get(&key) {
-            None => Placement::Unplaced,
-            Some(object) if Some(*object) == unknown => Placement::Unknown,
-            Some(_) => Placement::Object,
-        }
+        // The unknown object names no frame object: an access there escapes what flows into it.
+        (model.value_objects.get(&key)).is_some_and(|object| Some(*object) != unknown)
     };
     while let Some(value) = pending.pop() {
         let from = origins.get(value).cloned().unwrap_or_default();
@@ -599,14 +596,6 @@ impl Incoming {
     }
 }
 
-/// Where the object model puts an address: in an object, in the unknown object, or nowhere.
-#[derive(Clone, Copy)]
-enum Placement {
-    Object,
-    Unknown,
-    Unplaced,
-}
-
 enum Carry {
     /// The value leaves the function's sight with the address it carries.
     Escapes,
@@ -633,17 +622,12 @@ fn escaping_object(
 /// What one use of a frame address does with it; `placed` is whether the model puts the address in an object.
 ///
 /// A return is no escape: under the UB-free premise the frame ends with the call (doc/adr-frame-model.md).
-fn carries(inst: &crate::graph::GraphInst, input: usize, placed: Placement) -> Carry {
+fn carries(inst: &crate::graph::GraphInst, input: usize, placed: bool) -> Carry {
     let op = match &inst.payload {
         crate::graph::InstPayload::Phi { .. } => return Carry::Propagates,
         crate::graph::InstPayload::Op(op) => op,
     };
-    let access = || match placed {
-        Placement::Object => Carry::Stops,
-        Placement::Unplaced => Carry::Escapes,
-        // An access the model places in no frame object may land on any of them.
-        Placement::Unknown => Carry::Everything,
-    };
+    let access = || if placed { Carry::Stops } else { Carry::Escapes };
     match op {
         SSAOp::CallUse { .. } | SSAOp::CallOther { .. } => Carry::Escapes,
         _ if op.is_call() || op.jump().is_some() || matches!(op, SSAOp::Switch { .. }) => {
