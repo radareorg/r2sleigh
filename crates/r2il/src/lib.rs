@@ -51,6 +51,7 @@ pub use metadata::{
     FloatEncodingHint, InstructionRun, InstructionRuns, MemoryClass, OpMetadata, PointerHint,
     ScalarKind, StorageClass,
 };
+pub use opcode::ValueMovement;
 pub use opcode::{
     AtomicAccess, AtomicFetchOp, AtomicUpdate, BlockStop, BlockTransfer, BlockTransferKind,
     ControlTransfer, MemoryAccess, R2ILBlock, R2ILOp, SwitchCase, SwitchInfo, ValueUse,

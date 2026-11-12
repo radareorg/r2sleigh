@@ -257,16 +257,9 @@ fn padding<S: Source + 'static>(
                                 || (!transfer.call && transfer.target.offset == address))
                     })
             });
-            // An operation the lift does not model, or one that enters the supervisor, may name anything.
-            let modelled = |op: &r2il::R2ILOp| {
-                !matches!(
-                    op,
-                    r2il::R2ILOp::CallOther { .. } | r2il::R2ILOp::Unimplemented
-                )
-            };
             lifted.ops.iter().all(none)
                 || (leaves && stated)
-                || (after_exit && stated && lifted.ops.iter().all(modelled))
+                || (after_exit && !leaves && moves_only(&lifted.ops))
         };
         match disasm
             .lift_after(&window, address, None)
@@ -289,6 +282,32 @@ fn padding<S: Source + 'static>(
                 at += lifted.size as usize;
             }
             _ => return false,
+        }
+    }
+    true
+}
+
+/// Whether an instruction's operations only move values: what reaches a register or memory is an
+/// input, a loaded word or a literal, so no address is computed here (doc/adr-result-side.md, "S18b as built").
+fn moves_only(ops: &[r2il::R2ILOp]) -> bool {
+    use r2il::ValueMovement as Movement;
+    // The temporaries arithmetic produced: an address to load or store at, never a value to keep.
+    let mut computed: Vec<&r2il::Varnode> = Vec::new();
+    for op in ops {
+        let moved = match op.value_movement() {
+            Movement::Nothing | Movement::Loads | Movement::Literal => continue,
+            Movement::Stores(value) if computed.contains(&value) => return false,
+            Movement::Stores(_) => continue,
+            Movement::Moves(source) => !computed.contains(&source),
+            Movement::Computes => false,
+            Movement::Transfers | Movement::Unstated => return false,
+        };
+        // Arithmetic may leave a temporary, or a flag, which is too narrow to hold an address.
+        match (moved, op.output()) {
+            (true, _) => {}
+            (false, Some(dst)) if dst.space == r2il::SpaceId::Unique => computed.push(dst),
+            (false, Some(flag)) if flag.size == 1 => {}
+            (false, _) => return false,
         }
     }
     true

@@ -753,7 +753,10 @@ fn code_after_an_exit_is_held_where_everything_it_names_escapes() {
     let indirect = [0x89, 0xc2, 0xff, 0xe0];
     // 1035 mov edx, eax; 1037 syscall; 1039 jmp 0x1030
     let supervisor = [0x89, 0xc2, 0x0f, 0x05, 0xeb, 0xf5];
+    // 1035 mov eax, 0x1002; 103a sub eax, 2; 103d jmp 0x1030: `f`'s address, in no operand.
+    let computed = [0xb8, 0x02, 0x10, 0x00, 0x00, 0x83, 0xe8, 0x02, 0xeb, 0xf1];
     let refused = [
+        ("a computed address", &computed[..]),
         ("a call to f", &calls[..]),
         ("f's address", &names[..]),
         ("an indirect jump", &indirect[..]),

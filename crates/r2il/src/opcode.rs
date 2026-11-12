@@ -880,6 +880,27 @@ macro_rules! output_of {
     };
 }
 
+/// What an operation does with the value it handles ([`R2ILOp::value_movement`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueMovement<'a> {
+    /// No operation.
+    Nothing,
+    /// Its output is this input, whole or extended.
+    Moves(&'a Varnode),
+    /// Its output is a literal its operands fix.
+    Literal,
+    /// Its output is a word memory held.
+    Loads,
+    /// It writes this input to memory.
+    Stores(&'a Varnode),
+    /// Its output is a number computed from its inputs.
+    Computes,
+    /// It decides where control goes.
+    Transfers,
+    /// A memory or machine-state operation the question has no answer for.
+    Unstated,
+}
+
 impl R2ILOp {
     /// What this operation does with the numbers it reads.
     pub fn value_use(&self) -> ValueUse {
@@ -1124,6 +1145,31 @@ impl R2ILOp {
             self,
             R2ILOp::CallOther { .. } | R2ILOp::CpuId { .. } | R2ILOp::Unimplemented
         )
+    }
+
+    /// What this operation does with the value it handles, each operation in one class: the
+    /// question "is a new number computed here" asks this, so a new operation must answer it.
+    pub fn value_movement(&self) -> ValueMovement<'_> {
+        match self {
+            R2ILOp::Copy { src, .. }
+            | R2ILOp::IntZExt { src, .. }
+            | R2ILOp::IntSExt { src, .. } => {
+                return ValueMovement::Moves(src);
+            }
+            // `xor eax, eax` is the literal zero whatever the register held.
+            R2ILOp::IntXor { a, b, .. } | R2ILOp::IntSub { a, b, .. } if a == b => {
+                return ValueMovement::Literal;
+            }
+            R2ILOp::Load { .. } => return ValueMovement::Loads,
+            R2ILOp::Store { val, .. } => return ValueMovement::Stores(val),
+            R2ILOp::Nop => return ValueMovement::Nothing,
+            _ => {}
+        }
+        match self {
+            control_operation!() => ValueMovement::Transfers,
+            memory_operation!() | state_operation!() => ValueMovement::Unstated,
+            value_operation!() => ValueMovement::Computes,
+        }
     }
 
     /// Whether this operation changes nothing the program keeps: no register, flag, memory or
