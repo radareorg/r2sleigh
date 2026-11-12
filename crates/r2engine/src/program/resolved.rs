@@ -12,9 +12,9 @@ use r2source::{
     SourceResultSeed, SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall,
 };
 
-use super::analysis::{CalleeReads, Shared, callee_read};
+use super::analysis::{CalleeReads, Shared, built_read, callee_built, callee_read};
 use super::{ProgramInputs, Source, View};
-use crate::native::{CalleeRead, Stated, Unreadable};
+use crate::native::{Built, CalleeRead, Stated, Unreadable};
 use crate::query::db::{Db, Hold, Query, Retention};
 
 /// A function by its entry and whether it is Thumb.
@@ -86,8 +86,15 @@ fn bodies<S: Source + 'static>(view: &View<'_, S>, read: &CalleeRead, demand: De
         Demand::Result => BTreeSet::new(),
         Demand::Arity => arity_owners(read),
     };
-    let owners = result_owners(read).into_iter().chain(arity);
-    let owners = owners.collect::<BTreeSet<_>>().into_iter();
+    let owners = result_owners(read.interface.as_ref())
+        .into_iter()
+        .chain(arity);
+    owned_bodies(view, owners.collect())
+}
+
+/// The bodies among `owners`, in address order, each in the instruction set it is entered in.
+fn owned_bodies<S: Source + 'static>(view: &View<'_, S>, owners: BTreeSet<u64>) -> Vec<Node> {
+    let owners = owners.into_iter();
     let bodies = owners.filter(|owner| crate::native::Program::import_at(view, *owner).is_none());
     bodies.map(|owner| (owner, view.thumb_at(owner))).collect()
 }
@@ -117,10 +124,10 @@ fn arity_owners(read: &CalleeRead) -> BTreeSet<u64> {
     owners.collect::<Option<_>>().unwrap_or_default()
 }
 
-/// The callees whose stated result could prove a read's: none where any cause is not a call to a
-/// named callee (D37). O(causes).
-fn result_owners(read: &CalleeRead) -> BTreeSet<u64> {
-    let unproven = (read.interface.as_ref()).and_then(SourceFunctionInterface::unproven_result);
+/// The callees whose stated result could prove an interface's: none where any cause is not a
+/// call to a named callee (D37). O(causes).
+fn result_owners(interface: Option<&SourceFunctionInterface>) -> BTreeSet<u64> {
+    let unproven = interface.and_then(SourceFunctionInterface::unproven_result);
     let owners = unproven.into_iter().flat_map(SourceUnprovenResult::causes);
     let owners = owners.map(|cause| match cause {
         SourceResultCause::Returned(SourceUnstatedCall::Direct(callee))
@@ -160,6 +167,13 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Resolved {
                 node.0
             ));
         }
+        // A result is resolved from one build of each function below it, where no cycle is known.
+        if demand == Demand::Result
+            && !in_held_cycle(db, node)
+            && let Some(read) = built_resolved(db, node)
+        {
+            return read;
+        }
         let alone = db
             .get::<CalleeReads>(&node)
             .expect("a read asks for no resolution");
@@ -183,6 +197,198 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Resolved {
             _ => Hold::Held,
         }
     }
+}
+
+/// Whether a held component of more than one member holds `node`: its fixpoint decides it.
+fn in_held_cycle<S: Source + 'static>(db: &Db<ProgramInputs<S>>, node: Node) -> bool {
+    let held = db.held::<Component>(&(node, Demand::Result));
+    matches!(held, Ok(Some(component)) if component.members.len() > 1)
+}
+
+/// Whether an owner's read states its result or an exact arity: what resolving again against it
+/// could prove.
+fn proves(read: &CalleeRead) -> bool {
+    let Some(interface) = read.interface.as_ref() else {
+        return false;
+    };
+    let returns = interface.return_kind() != r2source::SourceFunctionReturn::Unproven;
+    read.facts.is_ok() && (returns || interface.arity().is_exact())
+}
+
+/// One function of the build search: built alone, the owners its build names, the next to visit.
+struct Open {
+    node: Node,
+    built: Built,
+    owners: Vec<Node>,
+    next: usize,
+}
+
+/// `root`'s result from one build of each function its owners reach, or `None` where a cycle or
+/// another owner set leaves it to the component (doc/adr-callee-builds.md). O(V + E) builds.
+fn built_resolved<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    root: Node,
+) -> Option<Shared<CalleeRead>> {
+    let view = View::new(db, true);
+    let key = |node| (node, Demand::Result);
+    let mut answers = BTreeMap::<Node, Shared<CalleeRead>>::new();
+    let mut path = Vec::<Open>::new();
+    if let Some(read) = enter(db, &view, root, &mut path) {
+        return Some(read);
+    }
+    // Terminates: each function enters the path once, and each frame visits each owner once.
+    while let Some(open) = path.last_mut() {
+        let owner = open.owners.get(open.next).copied();
+        open.next += 1;
+        let Some(owner) = owner else {
+            let open = path.pop().expect("the frame just read");
+            let node = open.node;
+            let read = close(db, &view, open, &answers)?;
+            if node == root {
+                return Some(read);
+            }
+            held(db, node, &read);
+            answers.insert(node, read);
+            continue;
+        };
+        if answers.contains_key(&owner) {
+            continue;
+        }
+        if path.iter().any(|open| open.node == owner) {
+            r2il::refusal_evidence!(
+                "resolved-build",
+                "{:#x}: its owners close a cycle at {:#x}, left to the component",
+                root.0,
+                owner.0
+            );
+            return None;
+        }
+        // A member of a held cycle is its component's to resolve.
+        let known = match in_held_cycle(db, owner) {
+            true => Some(db.get::<Resolved>(&key(owner)).ok()?),
+            false => db.held::<Resolved>(&key(owner)).ok().flatten(),
+        };
+        let read = match known {
+            Some(known) => (*known).clone(),
+            None => match enter(db, &view, owner, &mut path) {
+                Some(read) => held(db, owner, &read),
+                None => continue,
+            },
+        };
+        answers.insert(owner, read);
+    }
+    None
+}
+
+/// A function's resolution found beside the root's, held unless the request stopped it.
+fn held<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    node: Node,
+    read: &Shared<CalleeRead>,
+) -> Shared<CalleeRead> {
+    if !stopped(&read.0) {
+        db.deposit::<Resolved>([((node, Demand::Result), read.clone())]);
+    }
+    read.clone()
+}
+
+/// A function entering the build search: its answer where its build names no owner, else its
+/// frame pushed.
+fn enter<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    view: &View<'_, S>,
+    node: Node,
+    path: &mut Vec<Open>,
+) -> Option<Shared<CalleeRead>> {
+    let built = match callee_built(db, node) {
+        Ok(built) => built,
+        Err(reason) => {
+            let unread = CalleeRead {
+                interface: None,
+                facts: Err(reason),
+            };
+            return Some(alone_read(db, node, unread));
+        }
+    };
+    let owners = owned_bodies(view, result_owners(built.interface()));
+    if owners.is_empty() {
+        return Some(alone_read(db, node, built_read(db, node, built, &[]).0));
+    }
+    path.push(Open {
+        node,
+        built,
+        owners,
+        next: 0,
+    });
+    None
+}
+
+/// A function's alone read, held as `CalleeReads` answers it.
+fn alone_read<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    node: Node,
+    read: CalleeRead,
+) -> Shared<CalleeRead> {
+    let read = Shared(Arc::new(read));
+    if !stopped(&read.0) {
+        db.deposit::<CalleeReads>([(node, read.clone())]);
+    }
+    read
+}
+
+/// A built function whose owners are all resolved: its build updated by their statements where
+/// one proves something, else sealed alone. `None` where its alone read names other owners.
+fn close<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    view: &View<'_, S>,
+    open: Open,
+    answers: &BTreeMap<Node, Shared<CalleeRead>>,
+) -> Option<Shared<CalleeRead>> {
+    let Open {
+        node,
+        built,
+        owners,
+        ..
+    } = open;
+    let resolved = owners.iter().map(|owner| {
+        let read = answers.get(owner).expect("every owner is visited");
+        (owner.0, Arc::clone(&read.0))
+    });
+    let resolved = resolved.collect::<Vec<_>>();
+    // An owner the request stopped decides nothing, and no answer standing on the stop is held.
+    if resolved.iter().any(|(_, read)| stopped(read)) {
+        return Some(stopped_read());
+    }
+    if !resolved.iter().any(|(_, read)| proves(read)) {
+        let alone = alone_read(db, node, built_read(db, node, built, &[]).0);
+        // The alone read is the first build's unless it restated text or failed past the build.
+        let same = stopped(&alone.0) || bodies(view, &alone.0, Demand::Result) == owners;
+        return same.then_some(alone);
+    }
+    let restatable = built.restatable();
+    let (read, again) = built_read(db, node, built, &resolved);
+    r2il::refusal_evidence!(
+        "resolved-build",
+        "{:#x}: resolved from its build against {} owners, restatable {restatable}",
+        node.0,
+        resolved.len()
+    );
+    // The owners a build names are its alone read's unless the alone read is another seal than
+    // its build's: paid for where this resolution was, and in a debug build.
+    if (again || cfg!(debug_assertions)) && !stopped(&read) {
+        let alone = callee_read(db, node, Stated::default());
+        if !stopped(&alone) && bodies(view, &alone, Demand::Result) != owners {
+            if !again {
+                db.defect(format_args!(
+                    "{:#x}: its build names other owners than its alone read",
+                    node.0
+                ));
+            }
+            alone_read(db, node, alone);
+            return None;
+        }
+    }
+    Some(Shared(Arc::new(read)))
 }
 
 /// A function resolved against its owners outside its component, or alone where none of them
@@ -209,14 +415,7 @@ fn outside_resolved<S: Source + 'static>(
     }
     // Resolving again pays only where some owner now states its result or an exact arity, or the
     // closed world decides it.
-    let proves = |(_, read): &(u64, Arc<CalleeRead>)| {
-        let Some(interface) = read.interface.as_ref() else {
-            return false;
-        };
-        let returns = interface.return_kind() != r2source::SourceFunctionReturn::Unproven;
-        read.facts.is_ok() && (returns || interface.arity().is_exact())
-    };
-    if !resolved.iter().any(proves) {
+    if !resolved.iter().any(|(_, read)| proves(read)) {
         return closed_alone(db, &View::new(db, true), node, alone, demand);
     }
     let stated = Stated {
@@ -277,7 +476,7 @@ fn arity_open(read: &CalleeRead, members: &[Node]) -> bool {
 
 /// Whether a read's result is unproven on calls some member of its component owns.
 fn result_open(read: &CalleeRead, members: &[Node]) -> bool {
-    result_owners(read)
+    result_owners(read.interface.as_ref())
         .iter()
         .any(|owner| is_member(members, *owner))
 }
@@ -552,7 +751,9 @@ impl<'m> Cycle<'m> {
             Demand::Result => BTreeSet::new(),
             Demand::Arity => arity_owners(alone),
         };
-        let named = result_owners(alone).into_iter().chain(arity);
+        let named = result_owners(alone.interface.as_ref())
+            .into_iter()
+            .chain(arity);
         let named = named.collect::<BTreeSet<_>>().into_iter();
         let calls =
             named.filter_map(|callee| members.binary_search_by_key(&callee, |(at, _)| *at).ok());

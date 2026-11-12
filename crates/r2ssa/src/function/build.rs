@@ -32,6 +32,7 @@ impl SSAFunction {
             call_preserved_carriers: None,
             supervisor_calls: BTreeSet::new(),
             callee_passes: Arc::default(),
+            argument_areas_read: false,
             promoted_slots: std::collections::BTreeSet::new(),
             compiler_inserted: crate::dense::IdSet::default(),
             compiler_inserted_blocks: BTreeMap::new(),
@@ -206,12 +207,14 @@ impl SSAFunction {
         func.stack_pointer_carrier = stack_pointer_carrier;
         // Before preparation, so the arithmetic above the constant folds with it.
         func.forward_proven_call_return_addresses(callees);
+        let mut by_area = false;
         let promoted = crate::slot_promotion::promote(
             &mut func,
             machine_context,
             stack_pointer_restored_by_callee.is_some(),
+            &mut by_area,
         );
-        func.record_promoted_slots(promoted);
+        func.record_promoted_slots((promoted, by_area));
         // Before preparation, so what reads a folded load folds with it.
         crate::read_only::fold_loads(&mut func, machine_context);
         // Before preparation, so the comparison a decided check leaves unread folds away.
@@ -575,6 +578,7 @@ impl SSAFunction {
                 .map(|arch| arch.supervisor_calls.iter().copied().collect())
                 .unwrap_or_default(),
             callee_passes: Arc::default(),
+            argument_areas_read: false,
             promoted_slots: std::collections::BTreeSet::new(),
             compiler_inserted: crate::dense::IdSet::default(),
             compiler_inserted_blocks: BTreeMap::new(),

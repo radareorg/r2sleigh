@@ -60,13 +60,17 @@ struct Reach {
     up: BTreeSet<i64>,
     /// Places holding a frame address a call reads as a stack argument: the store stays.
     handed: BTreeSet<i64>,
+    /// Whether some place holding a frame address lies where a call's argument area could reach.
+    by_area: bool,
 }
 
-/// Promote every eligible frame place of `func`; the loads and stores rewritten.
+/// Promote every eligible frame place of `func`, the loads and stores rewritten; `by_area` is
+/// set where the answer read some call's argument area.
 pub(crate) fn promote(
     func: &mut SSAFunction,
     machine: &SourceMachineContext,
     calls_refund_stack: bool,
+    by_area: &mut bool,
 ) -> IdSet<OpId> {
     let Some(stack_pointer) = machine.stack_pointer_carrier() else {
         return IdSet::default();
@@ -153,6 +157,7 @@ pub(crate) fn promote(
     let mut carried: Option<BTreeSet<i64>> = None;
     let (accesses, reach, promotable) = loop {
         let (accesses, reach, carriers) = classify(func, &defs, entry_sp, &sinks, carried.as_ref());
+        *by_area |= reach.by_area;
         if reach.whole {
             break (accesses, reach, BTreeMap::new());
         }
@@ -241,6 +246,25 @@ impl StackArguments {
             steps.extend(children.iter().rev().map(|child| (*child, pointer)));
         }
         Self { calls }
+    }
+
+    /// Whether `read` could differ under other argument areas: every call is at a placed pointer
+    /// and some place of `stored` ends above one, where an area begins. O(calls x stored).
+    fn reads_by_area(&self, points: &IdMap<VarId, Point>, stored: &BTreeMap<i64, u32>) -> bool {
+        let bases = self
+            .calls
+            .iter()
+            .map(|call| match points.get(call.pointer) {
+                Some(Point::Exact(base)) => Some(base.wrapping_add(call.shift)),
+                _ => None,
+            });
+        let Some(bases) = bases.collect::<Option<Vec<_>>>() else {
+            return false;
+        };
+        let lowest = bases.into_iter().min();
+        lowest.is_some_and(|base| {
+            (stored.iter()).any(|(place, width)| place.saturating_add(i64::from(*width)) > base)
+        })
     }
 
     /// The places of `stored` some call may read, given each place's widest access.
@@ -422,6 +446,7 @@ impl<'a> Classifier<'a> {
                 both: BTreeSet::new(),
                 up: BTreeSet::new(),
                 handed: BTreeSet::new(),
+                by_area: false,
             },
             held: BTreeMap::new(),
             loaded: BTreeMap::new(),
@@ -666,6 +691,7 @@ impl<'a> Classifier<'a> {
                 (*place, widest.max().unwrap_or(1))
             })
             .collect();
+        self.reach.by_area = (self.sinks.stack_arguments).reads_by_area(&self.points, &widths);
         let handed = (self.sinks.stack_arguments).read(&self.points, &widths);
         for place in &handed {
             self.escape(self.stored[place]);

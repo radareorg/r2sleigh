@@ -156,6 +156,11 @@ impl Prepared {
         self.ir.note_exhausted(exhausted);
     }
 
+    /// State what each direct callee leaves as found, for a build kept against other statements.
+    pub(crate) fn set_callee_passes(&mut self, preserved: &super::CalleePreservedCarriers) {
+        self.ir.set_callee_passes(preserved);
+    }
+
     /// The same function, one of its facts resting on `premise`.
     pub(crate) fn assuming(mut self, premise: r2source::Premise) -> Self {
         self.ir.record_premise(premise);

@@ -120,7 +120,7 @@ pub use function::{
     PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot, RegisterIdentityCensus,
     RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction, Sealed, SourceRef, SourceSite,
     SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind, StackAddressBase,
-    StackAddressRoot, TrustedSeal, TrustedSsaArtifact, def_use_graph,
+    StackAddressRoot, TrustedConstruction, TrustedSeal, TrustedSsaArtifact, def_use_graph,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,

@@ -227,7 +227,7 @@ struct Records {
 
 /// The result register and width each call states, by the instruction the call was lifted from;
 /// a call that states its register whole is not held.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CallResults(Box<[(u64, CanonicalStorageId, SourceResultWidth)]>);
 
 impl CallResults {
