@@ -294,54 +294,81 @@ fn a_call_under_either_convention_keeps_only_what_both_preserve() {
     }
 }
 
-/// Every model the native path builds on one machine, as `assemble` selects each convention's
-/// specification: its compiler where the row names one, else the default, Windows' and Apple's.
+/// The specifications `assemble` reads a convention under: its compiler's where the row names
+/// one, else the default, Windows' and Apple's.
+fn specifications(
+    machine: &r2sleigh_lift::EmbeddedMachine,
+    row: &r2abi::ConventionRow,
+) -> Vec<(&'static str, Option<&'static str>)> {
+    match row.cspec.toolchain {
+        r2abi::Toolchain::Compiler(compiler) => {
+            vec![(compiler, machine.compiler_spec_of(compiler))]
+        }
+        r2abi::Toolchain::Container => vec![
+            ("default", Some(machine.compiler_spec)),
+            ("windows", machine.compiler_spec_of("windows")),
+            ("apple", machine.compiler_spec_of("apple")),
+        ],
+    }
+}
+
+/// A specification parsed and narrowed to the row's prototype, where it has it.
+fn profile_of(spec: Option<&str>, row: &r2abi::ConventionRow) -> Option<LanguageProfile> {
+    let profile = LanguageProfile::parse(spec?).ok()?;
+    match row.cspec.prototype {
+        Some(prototype) => profile.under(prototype),
+        None => Some(profile),
+    }
+}
+
+const KERNELS: [Kernel; 4] = [
+    Kernel::Linux,
+    Kernel::Darwin,
+    Kernel::Windows,
+    Kernel::Unknown,
+];
+
+/// Every model the native path builds on one machine, named `machine/compiler/id/kernel`; a
+/// refusal is only ever the slots' own, never an effect-only check.
 fn built_on(sleigh: &str, bits: u32) -> Vec<(String, ConventionModel)> {
     let machine = r2sleigh_lift::embedded_machine(sleigh).expect("an embedded machine");
     let mut built = Vec::new();
-    for id in ConventionId::ALL {
-        let row = id.row();
-        let specs = match row.cspec.toolchain {
-            r2abi::Toolchain::Compiler(compiler) => {
-                vec![(compiler, machine.compiler_spec_of(compiler))]
-            }
-            r2abi::Toolchain::Container => vec![
-                ("default", Some(machine.compiler_spec)),
-                ("windows", machine.compiler_spec_of("windows")),
-                ("apple", machine.compiler_spec_of("apple")),
-            ],
-        };
-        for (compiler, spec) in specs {
-            let Some(profile) = spec.and_then(|spec| LanguageProfile::parse(spec).ok()) else {
-                continue;
-            };
-            let profile = match row.cspec.prototype {
-                Some(prototype) => profile.under(prototype),
-                None => Some(profile),
-            };
-            let Some(profile) = profile else { continue };
-            for kernel in [
-                Kernel::Linux,
-                Kernel::Darwin,
-                Kernel::Windows,
-                Kernel::Unknown,
-            ] {
-                let at = (kernel, library(kernel), Some(0x1000));
-                let name = format!("{sleigh}/{compiler}/{id:?}/{kernel:?}");
-                match convention_model(&machine.arch, bits, at, &profile, row) {
-                    Ok(model) => built.push((name, model)),
-                    Err(why) => {
-                        let why = why.to_string();
-                        // Only the slots' checks refuse; a contradictory effect never did.
-                        for effect in [ModelRefusal::Contradictory, ModelRefusal::UnkeptBase] {
-                            assert!(!why.contains(effect.why()), "{name}: {why}");
-                        }
-                    }
-                }
+    let rows = ConventionId::ALL.map(ConventionId::row);
+    let read = rows.iter().flat_map(|row| {
+        let profiles = specifications(&machine, row).into_iter();
+        profiles.filter_map(move |(compiler, spec)| Some((row, compiler, profile_of(spec, row)?)))
+    });
+    for (row, compiler, profile) in read {
+        for kernel in KERNELS {
+            let name = format!("{sleigh}/{compiler}/{:?}/{kernel:?}", row.id);
+            let at = (kernel, library(kernel), Some(0x1000));
+            match convention_model(&machine.arch, bits, at, &profile, row) {
+                Ok(model) => built.push((name, model)),
+                Err(why) => refused_by_the_slots(&name, &why.to_string()),
             }
         }
     }
     built
+}
+
+fn refused_by_the_slots(name: &str, why: &str) {
+    for effect in [ModelRefusal::Contradictory, ModelRefusal::UnkeptBase] {
+        assert!(!why.contains(effect.why()), "{name}: {why}");
+    }
+}
+
+/// Every join `AnyCall` can form of two models under one kernel agrees with its views.
+fn joins_agree(built: &[(String, ConventionModel)], storages: &[r2source::CanonicalStorageId]) {
+    let kernel = |name: &str| name.rsplit('/').next().map(str::to_owned);
+    let pairs = built
+        .iter()
+        .flat_map(|one| built.iter().map(move |other| (one, other)));
+    let pairs = pairs.filter(|((one, _), (other, _))| one != other && kernel(one) == kernel(other));
+    for ((one, model), (other, with)) in pairs {
+        let join = model.either(with);
+        let join = join.unwrap_or_else(|why| panic!("{one} with {other}: {why:?}"));
+        agrees(&format!("{one} with {other}"), &join, storages);
+    }
 }
 
 /// The model's answers are its two views' (S34 step 4; deleted with the views in step 8): on
@@ -349,7 +376,6 @@ fn built_on(sleigh: &str, bits: u32) -> Vec<(String, ConventionModel)> {
 #[test]
 fn the_model_answers_every_register_question_its_views_answer() {
     let mut specifications = std::collections::BTreeSet::new();
-    let mut joins = 0;
     for (sleigh, bits) in [("x86-64", 64), ("x86", 32), ("aarch64", 64)] {
         let machine = r2sleigh_lift::embedded_machine(sleigh).expect("an embedded machine");
         let storages = (machine.arch.registers.iter())
@@ -365,15 +391,8 @@ fn the_model_answers_every_register_question_its_views_answer() {
             agrees(name, model, &storages);
             let compiler = name.split('/').nth(1).unwrap_or_default();
             specifications.insert(format!("{sleigh}/{compiler}"));
-            for (other, with) in &built {
-                if name.rsplit('/').next() == other.rsplit('/').next() && name != other {
-                    let join = model.either(with);
-                    let join = join.unwrap_or_else(|why| panic!("{name} with {other}: {why:?}"));
-                    agrees(&format!("{name} with {other}"), &join, &storages);
-                    joins += 1;
-                }
-            }
         }
+        joins_agree(&built, &storages);
     }
     let selected = [
         "x86-64/gcc",
@@ -392,10 +411,10 @@ fn the_model_answers_every_register_question_its_views_answer() {
             "{specification}: {specifications:?}"
         );
     }
-    assert!(joins > 0);
 }
 
-/// The model and its views give one answer to each question, for every register of the file.
+/// The model and its views give one answer to each question, for every register of the file
+/// and its low half.
 fn agrees(name: &str, model: &ConventionModel, storages: &[r2source::CanonicalStorageId]) {
     let slots = model.convention_slots().expect("the slots");
     let effect = model.call_effect().expect("the effect");
@@ -418,25 +437,20 @@ fn agrees(name: &str, model: &ConventionModel, storages: &[r2source::CanonicalSt
     assert_eq!(model.system_reserved(), effect.system_reserved(), "{name}");
     assert_eq!(model.call_reads(), effect.reads().call(), "{name}");
     assert_eq!(model.result_reads(), effect.reads().ret(), "{name}");
-    for storage in storages {
-        let halves = [
-            *storage,
-            r2source::CanonicalStorageId {
-                size: (storage.size / 2).max(1),
-                ..*storage
-            },
-        ];
-        for storage in halves {
-            assert_eq!(
-                model.effect_on(storage),
-                effect.effect_on(storage),
-                "{name}: {storage:?}"
-            );
-            assert_eq!(
-                model.class_of(storage),
-                slots.class_of(storage),
-                "{name}: {storage:?}"
-            );
-        }
+    let halves = storages.iter().map(|storage| r2source::CanonicalStorageId {
+        size: (storage.size / 2).max(1),
+        ..*storage
+    });
+    for storage in storages.iter().copied().chain(halves) {
+        assert_eq!(
+            model.effect_on(storage),
+            effect.effect_on(storage),
+            "{name}: {storage:?}"
+        );
+        assert_eq!(
+            model.class_of(storage),
+            slots.class_of(storage),
+            "{name}: {storage:?}"
+        );
     }
 }

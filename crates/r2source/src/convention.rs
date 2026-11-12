@@ -53,6 +53,16 @@ pub enum Location {
     },
 }
 
+impl Location {
+    /// The register, where the location is one.
+    pub const fn register(&self) -> Option<CanonicalStorageId> {
+        match *self {
+            Self::Register { storage, .. } => Some(storage),
+            Self::Stack { .. } => None,
+        }
+    }
+}
+
 /// Where a result may be returned, and who states it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResultLane {
@@ -308,10 +318,7 @@ impl Derived {
             }
         }
         let inputs = (parts.register_locations())
-            .filter_map(|location| match *location {
-                Location::Register { storage, .. } => Some(storage),
-                Location::Stack { .. } => None,
-            })
+            .filter_map(Location::register)
             .chain(parts.hidden_return)
             .collect::<Vec<_>>();
         let result_reads = sorted_storages(
@@ -341,13 +348,10 @@ impl Derived {
         {
             return Err(ModelRefusal::Contradictory);
         }
-        let guard = parts.forms.guard.map(|guard| guard.base);
-        let bound = parts.forms.stack_bound.map(|bound| bound.base);
-        if guard.is_some_and(|base| !covers_every_byte(&reserved, base))
-            || bound.is_some_and(|base| {
-                !covers_every_byte(&reserved, base) && !covers_every_byte(&preserved, base)
-            })
-        {
+        let unreserved = |base| !covers_every_byte(&reserved, base);
+        let unkept = |base| unreserved(base) && !covers_every_byte(&preserved, base);
+        let guard = (parts.forms.guard).is_some_and(|guard| unreserved(guard.base));
+        if guard || (parts.forms.stack_bound).is_some_and(|bound| unkept(bound.base)) {
             return Err(ModelRefusal::UnkeptBase);
         }
         let mut roles = (integers.iter().chain(&integer))
@@ -478,11 +482,9 @@ impl ConventionModel {
             (slot.space, slot.offset) <= (storage.space, storage.offset)
         });
         let end = |at: CanonicalStorageId| at.offset + u64::from(at.size);
-        let held = |class: SlotClass| {
-            (roles[..starting].iter()).any(|(slot, of)| {
-                *of == class && slot.space == storage.space && end(storage) <= end(*slot)
-            })
-        };
+        let holds =
+            |slot: &CanonicalStorageId| slot.space == storage.space && end(storage) <= end(*slot);
+        let held = |class| (roles[..starting].iter()).any(|(slot, of)| *of == class && holds(slot));
         match (held(SlotClass::Integer), held(SlotClass::Float)) {
             (true, false) => Some(SlotClass::Integer),
             (false, true) => Some(SlotClass::Float),
@@ -576,18 +578,12 @@ impl ConventionModel {
             all.dedup();
             all.into_boxed_slice()
         };
-        let named = |location: &Location| match *location {
-            Location::Register { storage, .. } => (self.register_locations()).any(
-                |mine| matches!(*mine, Location::Register { storage: it, .. } if it == storage),
-            ),
-            Location::Stack { .. } => false,
-        };
+        let named = (self.register_locations()).filter_map(Location::register);
+        let named = named.collect::<Vec<_>>();
+        let new = |location: &&Location| location.register().is_none_or(|it| !named.contains(&it));
         let theirs = other.sections.iter().map(|section| Section {
             class: section.class,
-            locations: (section.locations.iter())
-                .filter(|location| !named(location))
-                .copied()
-                .collect(),
+            locations: section.locations.iter().filter(new).copied().collect(),
         });
         let mine = |lane: &ResultLane| self.results.iter().any(|it| it.storage == lane.storage);
         let results = (self.results.iter().copied())
