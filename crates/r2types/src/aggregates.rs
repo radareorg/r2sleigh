@@ -161,6 +161,13 @@ fn field_type(ty: &CTypeLike) -> bool {
     }
 }
 
+fn byte() -> CTypeLike {
+    CTypeLike::Int {
+        bits: 8,
+        signedness: Signedness::Unsigned,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,12 +189,5 @@ mod tests {
             Signedness::Signed
         )))));
         assert!(field_type(&CTypeLike::Pointer(Box::new(CTypeLike::Void))));
-    }
-}
-
-fn byte() -> CTypeLike {
-    CTypeLike::Int {
-        bits: 8,
-        signedness: Signedness::Unsigned,
     }
 }
