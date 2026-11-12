@@ -19,7 +19,6 @@ use r2abi::{Arrival, CDataModel, Prototype, ScalarKind, Type, TypeGraph, TypeId}
 use r2source::native::NativeMachine;
 use r2source::{
     CanonicalStorageId, SourceFunctionReturn, SourceLogicalValue, SourceParameterLocation,
-    SourceUnplacedClass,
 };
 use r2ssa::place::ParamClass;
 
@@ -135,43 +134,22 @@ impl<'a> Placement<'a> {
         }
     }
 
-    /// The class a value of this type travels in; `r2ssa::place` places it.
-    fn class(&self, graph: &TypeGraph, ty: TypeId) -> ParamClass {
-        let resolved = graph.resolved(ty);
-        let bits = match resolved {
-            Some(Type::Scalar(scalar)) => self.model.bits(scalar.width),
-            Some(Type::Enum { underlying, .. }) => graph
-                .size_bits(*underlying, &self.model)
-                .and_then(|bits| u32::try_from(bits).ok()),
-            Some(Type::Pointer { .. }) => Some(self.model.pointer_bits),
-            _ => None,
-        };
-        let bytes = |bits: u32| u8::try_from(bits / 8).unwrap_or(u8::MAX);
-        match (resolved, bits) {
-            (Some(Type::Scalar(scalar)), Some(bits @ (32 | 64)))
-                if scalar.kind == ScalarKind::Float =>
-            {
-                ParamClass::Float(bytes(bits))
-            }
-            (Some(Type::Scalar(scalar)), bits) if scalar.kind == ScalarKind::Float => {
-                ParamClass::Unplaced(
-                    bits.map_or(SourceUnplacedClass::Unsized, SourceUnplacedClass::Float),
-                )
-            }
-            (_, Some(bits)) if bits <= self.model.pointer_bits => ParamClass::Integer(bytes(bits)),
-            (_, Some(bits)) => ParamClass::Unplaced(SourceUnplacedClass::WideInteger(bits)),
-            (Some(Type::Record(_) | Type::Array { .. }), None) => {
-                ParamClass::Unplaced(SourceUnplacedClass::Aggregate)
-            }
-            (_, None) => ParamClass::Unplaced(SourceUnplacedClass::Unsized),
-        }
+    /// The declaration's types interned apart from any interface's graph, whose node order
+    /// classifying must not move.
+    fn types<'g>(&self, declared: Declared<'g>) -> Interned<'g> {
+        Interned::new(declared.graph, self.model)
+    }
+
+    /// Each parameter's class, read from `types` in declaration order. O(types reached).
+    fn classes(declared: Declared<'_>, types: &mut Interned<'_>) -> Vec<ParamClass> {
+        (declared.prototype.parameters.iter())
+            .map(|parameter| types.class(parameter.ty))
+            .collect()
     }
 
     /// Where each declared parameter arrives, up to the first class no location takes.
     pub(crate) fn placement(&self, declared: Declared<'_>) -> r2ssa::place::Placement {
-        let classes = (declared.prototype.parameters.iter())
-            .map(|parameter| self.class(declared.graph, parameter.ty))
-            .collect::<Vec<_>>();
+        let classes = Self::classes(declared, &mut self.types(declared));
         r2ssa::place::place(&self.target.convention, &classes)
     }
 
@@ -186,15 +164,17 @@ impl<'a> Placement<'a> {
     }
 
     /// A declaration placed for the body it describes, or `None` where it is not this body's.
-    fn declared_placement(&self, declared: Declared<'_>) -> Option<r2ssa::place::Placement> {
+    fn declared_placement(
+        &self,
+        declared: Declared<'_>,
+        types: &mut Interned<'_>,
+    ) -> Option<r2ssa::place::Placement> {
         if let Some(why) = self.leading_unstated(declared) {
             r2il::refusal_evidence!("declared-interface", "{}: {why}", declared.prototype.name);
             return None;
         }
         let prototype = declared.prototype;
-        let classes = (prototype.parameters.iter())
-            .map(|parameter| self.class(declared.graph, parameter.ty))
-            .collect::<Vec<_>>();
+        let classes = Self::classes(declared, types);
         let arrivals = (prototype.parameters.iter())
             .map(|parameter| match parameter.arrival? {
                 Arrival::Unpassed => Some(r2ssa::place::Arrival::Unpassed),
@@ -281,7 +261,11 @@ impl<'a> Placement<'a> {
     /// Where the result arrives: where its own class arrives. A machine with
     /// separate floating-point registers returns a `double` in one of those.
     /// A result whose class this does not decide is not claimed at all.
-    fn result(&self, declared: Declared<'_>) -> (SourceFunctionReturn, Option<CanonicalStorageId>) {
+    fn result(
+        &self,
+        declared: Declared<'_>,
+        types: &mut Interned<'_>,
+    ) -> (SourceFunctionReturn, Option<CanonicalStorageId>) {
         if result_unstated(declared) {
             return (SourceFunctionReturn::Unproven, None);
         }
@@ -289,7 +273,7 @@ impl<'a> Placement<'a> {
         if declared.graph.peel(returns).0 == TypeId::VOID {
             return (SourceFunctionReturn::Void, None);
         }
-        let storage = match self.class(declared.graph, returns) {
+        let storage = match types.class(returns) {
             ParamClass::Float(bytes) => {
                 (self.machine.slots.float_result_slot()).map(|slot| CanonicalStorageId {
                     size: u32::from(bytes).min(slot.size),
@@ -424,11 +408,12 @@ impl Placement<'_> {
     /// no place in the interface's graph carries no type, and the others keep
     /// theirs.
     pub(crate) fn restatement(&self, declared: Declared<'_>, with_frame: bool) -> Restatement {
-        let Some(placement) = self.declared_placement(declared) else {
+        let mut types = self.types(declared);
+        let Some(placement) = self.declared_placement(declared, &mut types) else {
             return Restatement::default();
         };
         let placed = &placement.locations;
-        let (returns, result) = self.result(declared);
+        let (returns, result) = self.result(declared, &mut types);
         let mut interned = Interned::new(declared.graph, self.model);
         let parameters = (declared.prototype.parameters.iter())
             .zip(placed)

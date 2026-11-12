@@ -2,7 +2,10 @@
 //! (doc/adr-call-boundary.md, "The function's parameters").
 
 use r2source::convention::{ConventionModel, OwnedRange, SectionClass, SlotClass};
-use r2source::{CanonicalStorageId, ConventionId, SourceParameterLocation, SourceUnplacedClass};
+use r2source::{
+    CanonicalStorageId, ConventionId, SourceParameterLocation, SourceType, SourceTypeGraph,
+    SourceTypeKind, SourceUnplacedClass,
+};
 
 /// The class one parameter travels in, as its type states it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -13,6 +16,43 @@ pub enum ParamClass {
     Float(u8),
     /// A class no location takes here; it ends the placed prefix.
     Unplaced(SourceUnplacedClass),
+}
+
+impl ParamClass {
+    /// The class a value of node `id` travels in, the one classifier of a declared type (S32a);
+    /// an integer wider than `pointer_bits` takes no register. O(1).
+    pub fn of(graph: &SourceTypeGraph, id: u32, pointer_bits: u32) -> Self {
+        let node = usize::try_from(id)
+            .ok()
+            .and_then(|id| graph.types().get(id));
+        node.map_or(Self::Unplaced(SourceUnplacedClass::Unsized), |ty| {
+            Self::of_type(ty, pointer_bits)
+        })
+    }
+
+    /// `of` for a node of a graph still being interned, whose kind and size are already final.
+    pub fn of_type(ty: &SourceType, pointer_bits: u32) -> Self {
+        let bits = u32::try_from(ty.size_bits()).unwrap_or(u32::MAX);
+        let bytes = u8::try_from(bits / 8).unwrap_or(u8::MAX);
+        match ty.kind() {
+            SourceTypeKind::Float if matches!(bits, 32 | 64) => Self::Float(bytes),
+            SourceTypeKind::Float => Self::Unplaced(SourceUnplacedClass::Float(bits)),
+            SourceTypeKind::SignedInteger
+            | SourceTypeKind::UnsignedInteger
+            | SourceTypeKind::Char { .. }
+            | SourceTypeKind::Pointer { .. } => match bits {
+                0 => Self::Unplaced(SourceUnplacedClass::Unsized),
+                bits if bits <= pointer_bits => Self::Integer(bytes),
+                bits => Self::Unplaced(SourceUnplacedClass::WideInteger(bits)),
+            },
+            SourceTypeKind::Struct { .. }
+            | SourceTypeKind::Union { .. }
+            | SourceTypeKind::Array { .. } => Self::Unplaced(SourceUnplacedClass::Aggregate),
+            SourceTypeKind::Void | SourceTypeKind::Code { .. } | SourceTypeKind::Opaque { .. } => {
+                Self::Unplaced(SourceUnplacedClass::Unsized)
+            }
+        }
+    }
 }
 
 /// Where the parameters arrive: the placed prefix, and why the rest have no location.

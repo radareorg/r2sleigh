@@ -112,6 +112,15 @@ impl<'a> Interned<'a> {
             .ok()
     }
 
+    /// The class a value of `ty` travels in (`ParamClass::of`); one with no node has no size.
+    pub(crate) fn class(&mut self, ty: TypeId) -> r2ssa::place::ParamClass {
+        let bits = self.model.pointer_bits;
+        match self.node(ty) {
+            Some(id) => r2ssa::place::ParamClass::of_type(&self.parts.types[id as usize], bits),
+            None => r2ssa::place::ParamClass::Unplaced(r2source::SourceUnplacedClass::Unsized),
+        }
+    }
+
     /// One declared node's place: its structure, under the name it is declared by.
     pub(crate) fn node(&mut self, ty: TypeId) -> Option<u32> {
         let structure = self.structure(ty)?;

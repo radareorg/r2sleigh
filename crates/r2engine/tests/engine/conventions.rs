@@ -6,6 +6,8 @@ use r2engine::native::convention_model;
 use r2sleigh_lift::profile::LanguageProfile;
 use r2source::ConventionModel;
 use r2source::convention::{LaneSource, Location, OwnedRange, SectionClass, StackOwner};
+use r2source::{SourceTypeKind as K, SourceUnplacedClass as U};
+use r2ssa::place::ParamClass as C;
 
 /// The C library a program on `kernel` reads here: glibc, libSystem or Microsoft's.
 fn library(kernel: Kernel) -> CLibrary {
@@ -489,4 +491,133 @@ fn refused_effect_clobbers(
         storages.iter().all(|storage| model.clobbers(*storage)),
         "{name}"
     );
+}
+
+/// One node per class `ParamClass::of` answers at a 64-bit pointer, and that class.
+fn classed_nodes() -> Vec<((K, u64), C)> {
+    let int = |bits| (K::SignedInteger, bits);
+    let pointer = K::Pointer {
+        target_type_id: 2,
+        const_target: false,
+    };
+    let array = K::Array {
+        element_type_id: 2,
+        count: Some(4),
+    };
+    vec![
+        (int(8), C::Integer(1)),
+        (int(16), C::Integer(2)),
+        (int(32), C::Integer(4)),
+        (int(64), C::Integer(8)),
+        ((K::UnsignedInteger, 32), C::Integer(4)),
+        ((K::Char { signed: None }, 8), C::Integer(1)),
+        ((pointer, 64), C::Integer(8)),
+        ((K::Float, 32), C::Float(4)),
+        ((K::Float, 64), C::Float(8)),
+        ((K::Float, 16), C::Unplaced(U::Float(16))),
+        ((K::Float, 80), C::Unplaced(U::Float(80))),
+        ((K::Float, 128), C::Unplaced(U::Float(128))),
+        (int(128), C::Unplaced(U::WideInteger(128))),
+        (
+            (K::Struct { aggregate_id: 0 }, 32),
+            C::Unplaced(U::Aggregate),
+        ),
+        (
+            (K::Union { aggregate_id: 1 }, 32),
+            C::Unplaced(U::Aggregate),
+        ),
+        ((array, 128), C::Unplaced(U::Aggregate)),
+        ((K::Opaque { tag_id: 0 }, 0), C::Unplaced(U::Unsized)),
+        ((K::Void, 0), C::Unplaced(U::Unsized)),
+        ((K::Code { signature_id: 0 }, 0), C::Unplaced(U::Unsized)),
+    ]
+}
+
+/// Those nodes as one graph, each at its natural alignment and the array at its element's.
+fn classed_graph(nodes: &[((K, u64), C)]) -> r2source::SourceTypeGraph {
+    use r2source::{
+        SourceAggregateLayout, SourceAggregateMember, SourceCodeSignature, SourceOpaqueTag,
+        SourceTagKeyword, SourceType, SourceTypeGraphParts,
+    };
+    let align = |kind: &K, bits: u64| match (kind, bits) {
+        (K::Array { .. }, _) => 32,
+        (_, 0) => 0,
+        (_, bits) => (1u64 << bits.trailing_zeros()).max(8),
+    };
+    let types = (nodes.iter().enumerate()).map(|(id, ((kind, bits), _))| {
+        SourceType::new(id as u32, *kind, *bits, align(kind, *bits))
+    });
+    let member = || [SourceAggregateMember::new(0, 2, 0, 32, "x")];
+    r2source::SourceTypeGraph::from_parts(SourceTypeGraphParts {
+        types: types.collect(),
+        aggregates: vec![
+            SourceAggregateLayout::new(0, 13, 32, 32, "s", member()),
+            SourceAggregateLayout::new(1, 14, 32, 32, "u", member()),
+        ],
+        signatures: vec![SourceCodeSignature::new(0, 17, [2], false, true)],
+        opaque_tags: vec![SourceOpaqueTag::new(0, SourceTagKeyword::Struct, "FILE")],
+        ..SourceTypeGraphParts::default()
+    })
+    .expect("a graph")
+}
+
+/// Each class alone takes the first register of its own class or floors, and an integer, a double,
+/// an integer share positions on Microsoft x64 only.
+fn places_each_class(name: &str, model: &ConventionModel, nodes: &[((K, u64), C)]) {
+    use r2source::SourceParameterLocation;
+    use r2ssa::place::place;
+    let at = |class, position: usize, bytes: u32| {
+        let register = model.argument(class, position).expect("a register");
+        let size = match class {
+            SlotClass::Float => bytes.min(register.size),
+            _ => register.size,
+        };
+        SourceParameterLocation::Register(r2source::CanonicalStorageId { size, ..register })
+    };
+    for (_, class) in nodes {
+        let placed = place(model, &[*class]);
+        match *class {
+            C::Integer(_) => assert_eq!(placed.locations, [at(SlotClass::Integer, 0, 8)]),
+            C::Float(bytes) => assert_eq!(
+                placed.locations,
+                [at(SlotClass::Float, 0, u32::from(bytes))],
+                "{name}"
+            ),
+            C::Unplaced(why) => {
+                assert!(placed.locations.is_empty(), "{name}");
+                assert_eq!(placed.floor, Some(why), "{name}");
+            }
+        }
+    }
+    let placed = place(model, &[C::Integer(4), C::Float(8), C::Integer(8)]);
+    let shared = name == "Microsoft x64";
+    let expected = [
+        at(SlotClass::Integer, 0, 8),
+        at(SlotClass::Float, usize::from(shared), 8),
+        at(SlotClass::Integer, if shared { 2 } else { 1 }, 8),
+    ];
+    assert_eq!(placed.locations, expected, "{name}");
+}
+
+/// Every class `ParamClass::of` answers, and where SysV, Microsoft x64 and AAPCS64 place it (S32a).
+#[test]
+fn param_class_of_answers_each_class_and_each_model_places_it() {
+    let nodes = classed_nodes();
+    let graph = classed_graph(&nodes);
+    let classes = (0..nodes.len() as u32).map(|id| C::of(&graph, id, 64));
+    assert!(classes.eq(nodes.iter().map(|(_, class)| *class)));
+    let missing = C::of(&graph, nodes.len() as u32, 64);
+    assert_eq!(missing, C::Unplaced(U::Unsized));
+    let ilp32 = C::of(&graph, 3, 32);
+    assert_eq!(ilp32, C::Unplaced(U::WideInteger(64)));
+    let win64 = model(
+        "x86-64",
+        Some("windows"),
+        ConventionId::Win64,
+        Kernel::Windows,
+    );
+    let aapcs64 = model("aarch64", None, ConventionId::Aapcs64, Kernel::Linux);
+    places_each_class("SysV", &model_of_sysv(), &nodes);
+    places_each_class("Microsoft x64", &win64, &nodes);
+    places_each_class("AAPCS64", &aapcs64, &nodes);
 }

@@ -265,7 +265,7 @@ pub struct DeclaredPrototype {          // r2engine builds it; r2ssa places it
 
 `FormalHome::Register(ValueId) | Frame(ObjectId)` lives in r2ssa formal facts (`PreparedFunctionFacts.boundaries.parameters`), indexed by the spec's `index`.
 
-One placement rule, `place(&ConventionModel, &[ParamClass]) -> Placement`, lives in r2ssa and serves the declared route, the recovered route and bodiless imports. It counts each class on its own, or by position where positions are shared. It places stack locations past the registers. Where a class has no location (`long double`, a record passed by value), it returns the placed prefix plus a typed floor. It keeps today's arrival check (`arrivals_hold`, `declared/mod.rs:233-256`): a DWARF arrival that disagrees with the placed location refuses the declaration for this body (`.isra`, `.constprop`). `DW_CC_nocall` refuses convention placement; r2image reads `DW_AT_calling_convention` for it. r2engine keeps only the step from a type to its class (`declared/mod.rs:107`), because r2engine holds the type graph.
+One placement rule, `place(&ConventionModel, &[ParamClass]) -> Placement`, lives in r2ssa and serves the declared route, the recovered route and bodiless imports. It counts each class on its own, or by position where positions are shared. It places stack locations past the registers. Where a class has no location (`long double`, a record passed by value), it returns the placed prefix plus a typed floor. It keeps today's arrival check (`arrivals_hold`, `declared/mod.rs:233-256`): a DWARF arrival that disagrees with the placed location refuses the declaration for this body (`.isra`, `.constprop`). `DW_CC_nocall` refuses convention placement; r2image reads `DW_AT_calling_convention` for it. The step from a type to its class is r2ssa `ParamClass::of`, over the declaration's interned `SourceTypeGraph` node (S32a as built).
 
 r2ssa applies the parameter rule to each section, reading `BodyBoundary.slots`:
 
@@ -713,7 +713,7 @@ Measured, release, instructions retired, base then S3. The bound is twice `aa` p
 
 What the code said that this ADR did not, and the owner chosen:
 
-- `place` is r2ssa `place.rs`. `ParamClass` is `Integer(bytes)`, `Float(bytes)` or `Unplaced(SourceUnplacedClass)`, and r2engine maps a type to it (`declared/mod.rs` `class`). `SourceUnplacedClass` names `Float(bits)`, `WideInteger(bits)`, `Aggregate`, `Unsized` and `PackedStack`; the floor is `SourceFloorCause::Unplaced`.
+- `place` is r2ssa `place.rs`. `ParamClass` is `Integer(bytes)`, `Float(bytes)` or `Unplaced(SourceUnplacedClass)`, and r2ssa `ParamClass::of` maps a type graph node to it (S32a; r2engine's `declared/mod.rs` `class` until then). `SourceUnplacedClass` names `Float(bits)`, `WideInteger(bits)`, `Aggregate`, `Unsized` and `PackedStack`; the floor is `SourceFloorCause::Unplaced`.
 - The cspec's stack section counts from the call (`offset - stackshift`). `place` adds the `OwnedRange::ReturnAddress` the call pushes, so bzip2 `0x1bc6d`'s seventh is `Stack { 8, 4 }` from the entry.
 - Apple arm64 packs stack arguments by size. `place` refuses a stack class narrower than the step there (`PackedStack`) until a cited row places it.
 - `place_declared` keeps the arrival check and `DW_CC_nocall`; r2image reads `DW_AT_calling_convention` into `Prototype::nocall`. `arrivals_hold`, `placed_prefix`, `placed` and the `break` are deleted.
@@ -1277,3 +1277,16 @@ Gates, release r2s, base `ca413c45c` (master):
 - Cost, release, instructions retired (`perf stat -e instructions:u`, Linux build host), median of three, master `ca413c45c` then head with the `FrameReach` fix: cold pumasim `0x23fdf0` 25.03 to 25.14 G (+0.4%), cold 0pack `0x62ecf0` 16.04 to 16.11 G (+0.5%), bash `aa; pdd @ 0x2e630` 14.53 to 14.53 G, pumasim `aa; pdd @ 0x3b6b20` 65.53 to 65.44 G. No x86 path reads a word: `guard_words` returns at once for `Guard::Slot`.
 - Touched crates' tests (r2abi, r2source, r2ssa, r2engine, r2s, all features): pass, 0 fail. Clippy `-D warnings` clean. Structure: no count rises. `comment_runs` adds no run. Dylint did not build on the Linux host (`dylint_driver` clones a `master` that no longer exists); CI's Dylint step grades it.
 - Equivalence, aarch64 gcc O1 and O2 shapes on the Linux host (qemu) and in CI: `shape_struct_array` is equal at O1 and O2 with the `FrameReach` fix. The two residual-trap records above are blessed. CI's `full-ci` ratchets grade the rest.
+
+## S32a as built (2026-11-12)
+
+r2ssa `ParamClass::of(&SourceTypeGraph, id, pointer_bits)` is the one classifier of a declared type (RULING 1.2). S28 reads it for each declared slot, and S32 reads it for a member's subroutine type.
+
+- `of` reads one node: an integer, `char` or pointer no wider than `pointer_bits` is `Integer`, a 32- or 64-bit float is `Float`, any other float is `Float(bits)`, a wider integer `WideInteger`, a struct, union or array `Aggregate`, and `void`, code, an opaque tag or a missing node `Unsized`. O(1).
+- It takes the pointer width because the graph states none. S32's sketch `of(&SourceTypeGraph, u32)` cannot tell `Integer(8)` from `WideInteger(64)` on an ILP32 target.
+- `of_type` classifies a node of a graph still being interned; its kind and size are final once `Interned::node` returns.
+- r2engine's `Placement::class` over the r2abi graph is deleted. `Interned::class` interns the type and asks `of_type`, so no reader of it remains for S32. Each declaration interns its types apart from the interface's graph, so classifying moves none of that graph's nodes.
+- Where the interning states less, only the unplaced cause can change, never a location: an untagged record (a `Void` node), an array of an unsized element and a record with no layout (an opaque tag) are `Unsized` where they were `Aggregate`. The proof prints every `Unplaced` cause as one line.
+- A `_BitInt` of a width the graph refuses (not 8, 16, 32, 64 or 128) is `Unsized` where it was `Integer`.
+- Measured: old against new over every class the census asked (repo corpus, DecBench `-g` and stripped, 15 aarch64 builds, 8 PE builds under Microsoft x64, i386 and Windows arm64), 6,895,613 agree and 0 differ; no case above occurred.
+- Gate: `param_class_of_answers_each_class_and_each_model_places_it` pins 19 nodes and their places on SysV, Microsoft x64 and AAPCS64.
