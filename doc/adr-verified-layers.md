@@ -384,7 +384,9 @@ Owner: GT.
 - Strictness: the ratchet is exact under `instructions` (D341), so a baseline
   `slow` no longer holds by `equal`. A count misses what CPU time saw beyond
   the guest's instructions: kernel time, qemu's translation and helpers.
-- Measured at 410b29d22 on contabo: review.c's 90 records keep every status.
+- Measured at 410b29d22: CI run 43282330723 held all 828 records unmoved
+  under the count on six runner models (EPYC 9V45, 9V74, 7763; Xeon 8370C,
+  8573C, 6975P-C), and contabo's review.c and shapes.c gcc `-O2` agree.
   clang `-O1` `fact` reads `equal` on four counted vectors, its identity and
   `-O2` build 1.00 times the original and its `-O0`, pattern and UBSan builds
   4.25 times, inside 16 (D339's x86-64 count read the same 4.25). clang `-O2`
