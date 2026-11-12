@@ -438,79 +438,19 @@ fn recovered_stack_parameters(
         .values()
         .flat_map(|certificate| certificate.insts.iter().copied())
         .collect::<crate::dense::IdSet<_>>();
-    // Where an object starts from the entry stack pointer, for an object of the entry frame.
-    let starts = |object| match facts.objects.object(object).map(|object| &object.kind) {
-        Some(
-            crate::semantic::ObjectKind::StackSlot {
-                base: StackAddressBase::StackPointer,
-                offset,
-                ..
-            }
-            | crate::semantic::ObjectKind::FrameObject {
-                base: StackAddressBase::StackPointer,
-                offset,
-                ..
-            },
-        ) => Some(*offset),
-        _ => None,
-    };
-    // Whether a place the model did not pin to one byte may lie in the argument area.
-    let may_be_in_area = |location: &crate::semantic::MemoryLocation| {
-        let Some(start) = starts(location.object) else {
-            return false;
-        };
-        match location.address.exact_offset() {
-            Some(offset) => {
-                start
-                    .saturating_add(offset)
-                    .saturating_add(i64::from(location.size))
-                    > first_offset
-            }
-            None => start >= first_offset,
-        }
-    };
     let mut observed: BTreeMap<u64, Option<u32>> = BTreeMap::new();
     let mut unknown = false;
     for access in facts.structured.memory_accesses.values() {
         if access.is_write || access.space != SpaceId::Ram || control.contains(access.id.inst) {
             continue;
         }
-        // A read whose value is proven dead reads nothing; one neither observed nor dead may.
-        if (access.value).is_some_and(|value| observations.proven_unread(value)) {
-            continue;
-        }
-        let value = access.value.filter(|value| observations.contains(*value));
-        // An address the frame places only up to an index names no one byte of its object.
-        let indexed = prep.is_some_and(|prep| {
-            prep.stack_address_root_of(access.address).is_none()
-                && prep.indexed_stack_address_root_of(access.address).is_some()
-        });
-        let relative = (access.provenance_complete && !indexed)
-            .then(|| starts(access.object)?.checked_add(access.object_offset?))
-            .flatten();
-        let Some((value, relative)) = value.zip(relative) else {
-            // No exact place or no observation: unknown where the read may be of the area.
-            let uses = facts.memory.uses_by_inst.get(access.id.inst);
-            let may = match access.provenance_complete {
-                true => (starts(access.object)).is_some_and(|start| match access.object_offset {
-                    Some(offset) if !indexed => start.saturating_add(offset) >= first_offset,
-                    _ => start >= first_offset,
-                }),
-                false => (uses.into_iter().flatten()).any(|read| may_be_in_area(&read.location)),
-            };
-            if may {
-                r2il::refusal_evidence!(
-                    "interface-recovery",
-                    "a read {:?} that may be of the argument area has no proven place or observation: complete {} object {:?} offset {:?} value {:?}",
-                    access.id,
-                    access.provenance_complete,
-                    access.object,
-                    access.object_offset,
-                    access.value
-                );
+        let (value, relative) = match area_read((facts, prep), observations, access, first_offset) {
+            AreaRead::Placed { value, relative } => (value, relative),
+            AreaRead::Unplaced => {
                 unknown = true;
+                continue;
             }
-            continue;
+            AreaRead::Elsewhere => continue,
         };
         let Some(relative) = relative
             .checked_sub(first_offset)
@@ -540,6 +480,100 @@ fn recovered_stack_parameters(
     let mut area = argument_area_slots(&observed, first_offset, slot_bytes);
     area.unknown |= unknown;
     area
+}
+
+/// What one frame read is to the argument area.
+enum AreaRead {
+    /// An observed value read at one entry offset.
+    Placed {
+        value: crate::ValueId,
+        relative: i64,
+    },
+    /// It may be of the area, at no proven place or with no proven observation.
+    Unplaced,
+    /// Proven unread, or no read of the area.
+    Elsewhere,
+}
+
+/// Where an object starts from the entry stack pointer, for an object of the entry frame.
+fn frame_start(
+    facts: &crate::semantic::PreparedFunctionFacts,
+    object: crate::ObjectId,
+) -> Option<i64> {
+    use crate::semantic::ObjectKind::{FrameObject, StackSlot};
+    match facts.objects.object(object).map(|object| &object.kind)? {
+        StackSlot { base, offset, .. } | FrameObject { base, offset, .. }
+            if *base == StackAddressBase::StackPointer =>
+        {
+            Some(*offset)
+        }
+        _ => None,
+    }
+}
+
+/// Classify one read (doc/adr-result-side.md, "S25 as built", finding 8). O(annotations).
+fn area_read(
+    (facts, prep): (
+        &crate::semantic::PreparedFunctionFacts,
+        Option<&crate::DecompilePrepFacts>,
+    ),
+    observations: &crate::deadphi::ProvenProgramObservations,
+    access: &crate::semantic::StructuredMemoryAccessFact,
+    first_offset: i64,
+) -> AreaRead {
+    if (access.value).is_some_and(|value| observations.proven_unread(value)) {
+        return AreaRead::Elsewhere;
+    }
+    let start = frame_start(facts, access.object);
+    // An address the frame places only up to an index names no one byte of its object.
+    let indexed = prep.is_some_and(|prep| {
+        prep.stack_address_root_of(access.address).is_none()
+            && prep.indexed_stack_address_root_of(access.address).is_some()
+    });
+    let exact = (access.provenance_complete && !indexed)
+        .then(|| start?.checked_add(access.object_offset?))
+        .flatten();
+    let value = access.value.filter(|value| observations.contains(*value));
+    if let Some((value, relative)) = value.zip(exact) {
+        return AreaRead::Placed { value, relative };
+    }
+    // A place the model did not pin to one byte may still lie in the area.
+    let annotated = |location: &crate::semantic::MemoryLocation| {
+        frame_start(facts, location.object).is_some_and(|start| {
+            match location.address.exact_offset() {
+                Some(offset) => {
+                    start
+                        .saturating_add(offset)
+                        .saturating_add(i64::from(location.size))
+                        > first_offset
+                }
+                None => start >= first_offset,
+            }
+        })
+    };
+    let may = match access.provenance_complete {
+        true => exact.or(start).is_some_and(|at| at >= first_offset),
+        false => (facts
+            .memory
+            .uses_by_inst
+            .get(access.id.inst)
+            .into_iter()
+            .flatten())
+        .any(|read| annotated(&read.location)),
+    };
+    if !may {
+        return AreaRead::Elsewhere;
+    }
+    r2il::refusal_evidence!(
+        "interface-recovery",
+        "a read {:?} that may be of the argument area has no proven place or observation: complete {} object {:?} offset {:?} value {:?}",
+        access.id,
+        access.provenance_complete,
+        access.object,
+        access.object_offset,
+        access.value
+    );
+    AreaRead::Unplaced
 }
 
 /// Unread slots the argument area may hold below its highest read; past them its slots are a floor.

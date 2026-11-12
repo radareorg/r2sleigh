@@ -459,32 +459,9 @@ fn escaped_objects(
     model: &ObjectModel,
     frame: &FrameIndex,
 ) -> (BTreeSet<ObjectId>, bool, (BTreeSet<i64>, bool)) {
-    let frame_address = |value: ValueId| {
-        graph.value(value).is_some_and(|value| {
-            facts.stack_address_root_of(value.id).is_some()
-                || facts.indexed_stack_address_root_of(value.id).is_some()
-        })
-    };
-    // Which objects each tainted value may point into: its own, or what flows into it. Each set
-    // only grows, bounded by the objects, so a value is re-queued at most once per object.
-    let mut origins = crate::dense::IdMap::<ValueId, BTreeSet<ObjectId>>::default();
-    let mut tainted = crate::dense::IdSet::default();
-    // The tainted values not proven below the entry stack pointer; the set only grows.
-    let mut above = crate::dense::IdSet::default();
-    let mut incoming = (BTreeSet::new(), false);
-    let mut pending = Vec::new();
-    for value in graph.values.iter().map(|value| value.id) {
-        if frame_address(value) && tainted.insert(value) {
-            if entry_offset(facts, value).is_none_or(|offset| offset >= 0) {
-                above.insert(value);
-            }
-            let own = escaping_object(facts, graph, frame, value)
-                .into_iter()
-                .collect();
-            origins.insert(value, own);
-            pending.push(value);
-        }
-    }
+    let mut incoming = Incoming::default();
+    let (mut origins, mut tainted, mut pending) =
+        frame_addresses(facts, graph, frame, &mut incoming);
     let mut escaped = BTreeSet::new();
     let mut whole = false;
     let placed = |value: ValueId| {
@@ -496,22 +473,16 @@ fn escaped_objects(
     };
     while let Some(value) = pending.pop() {
         let from = origins.get(value).cloned().unwrap_or_default();
-        let high = above.contains(value);
-        let mut leaves = || match entry_offset(facts, value) {
-            Some(offset) => drop(incoming.0.insert(offset)),
-            None => incoming.1 = true,
-        };
+        let high = incoming.above.contains(value);
         for site in graph.use_sites(value) {
             let Some(inst) = graph.inst(site.inst) else {
                 whole = true;
-                if high {
-                    leaves();
-                }
+                incoming.leaves(facts, value);
                 continue;
             };
             let carried = carries(inst, site.input_idx, placed(value));
-            if high && matches!(carried, Carry::Escapes | Carry::Everything) {
-                leaves();
+            if matches!(carried, Carry::Escapes | Carry::Everything) {
+                incoming.leaves(facts, value);
             }
             match carried {
                 Carry::Escapes => match escaping_object(facts, graph, frame, value) {
@@ -534,11 +505,7 @@ fn escaped_objects(
                         let known = origins.get_or_insert_with(out, BTreeSet::new);
                         let before = known.len();
                         known.extend(from.iter().copied());
-                        // A value the frame places is where it is; only an unplaced one inherits.
-                        let rose = match entry_offset(facts, out) {
-                            Some(offset) => offset >= 0 && above.insert(out),
-                            None => high && above.insert(out),
-                        };
+                        let rose = incoming.rises(facts, out, high);
                         if tainted.insert(out) || known.len() != before || rose {
                             pending.push(out);
                         }
@@ -562,7 +529,69 @@ fn escaped_objects(
             "a frame address escapes that names no frame object, so the whole frame is reachable"
         );
     }
-    (escaped, whole, incoming)
+    (escaped, whole, (incoming.offsets, incoming.unplaced))
+}
+
+/// What each tainted value may point into, the tainted values and the queue of them.
+type Taint = (
+    crate::dense::IdMap<ValueId, BTreeSet<ObjectId>>,
+    crate::dense::IdSet<ValueId>,
+    Vec<ValueId>,
+);
+
+/// Every frame address seeded: the object it points into is its own; each set only grows, bounded
+/// by the objects, so a value is re-queued at most once per object.
+fn frame_addresses(
+    facts: &DecompilePrepFacts,
+    graph: &SsaGraph,
+    frame: &FrameIndex,
+    incoming: &mut Incoming,
+) -> Taint {
+    let frame_address = |value: ValueId| {
+        facts.stack_address_root_of(value).is_some()
+            || facts.indexed_stack_address_root_of(value).is_some()
+    };
+    let mut origins = crate::dense::IdMap::<ValueId, BTreeSet<ObjectId>>::default();
+    let mut tainted = crate::dense::IdSet::default();
+    let mut pending = Vec::new();
+    for value in graph.values.iter().map(|value| value.id) {
+        if frame_address(value) && tainted.insert(value) {
+            incoming.rises(facts, value, true);
+            let own = escaping_object(facts, graph, frame, value);
+            origins.insert(value, own.into_iter().collect());
+            pending.push(value);
+        }
+    }
+    (origins, tainted, pending)
+}
+
+/// The tainted values not proven below the entry stack pointer, and where those that leave point.
+#[derive(Default)]
+struct Incoming {
+    /// Only grows, so a value is queued for it once.
+    above: crate::dense::IdSet<ValueId>,
+    offsets: BTreeSet<i64>,
+    unplaced: bool,
+}
+
+impl Incoming {
+    /// Whether `value` joins the set: by its own offset where the frame places it, else where an
+    /// input is in it (`inherits`).
+    fn rises(&mut self, facts: &DecompilePrepFacts, value: ValueId, inherits: bool) -> bool {
+        let high = entry_offset(facts, value).map_or(inherits, |offset| offset >= 0);
+        high && self.above.insert(value)
+    }
+
+    /// `value` leaves the body: where it points is recorded, where it is in the set.
+    fn leaves(&mut self, facts: &DecompilePrepFacts, value: ValueId) {
+        if !self.above.contains(value) {
+            return;
+        }
+        match entry_offset(facts, value) {
+            Some(offset) => drop(self.offsets.insert(offset)),
+            None => self.unplaced = true,
+        }
+    }
 }
 
 enum Carry {
