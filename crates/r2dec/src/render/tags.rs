@@ -75,13 +75,7 @@ impl Tags {
                 })
                 .collect::<BTreeMap<_, _>>();
             if defined.len() == candidates.len() {
-                for (name, definition) in stated.iter().filter(|(n, _)| !defined.contains_key(*n)) {
-                    let members = &definition.members;
-                    r2il::refusal_evidence!(
-                        "tag-undefined",
-                        "{name}: a member is unspelled: {members:?}"
-                    );
-                }
+                trace_undefined(&stated, &defined);
                 return Self {
                     stated,
                     defined,
@@ -260,6 +254,23 @@ fn spelled_member(
             Some(defined) => *defined == is_union,
             None => declarable.get(tag) == Some(&is_union),
         }),
+    }
+}
+
+/// Evidence for each laid-out tag the unit cannot define, a member of it being unspelled.
+fn trace_undefined<T>(
+    stated: &BTreeMap<String, r2types::AggregateDefinition>,
+    defined: &BTreeMap<String, T>,
+) {
+    for (name, definition) in stated
+        .iter()
+        .filter(|(name, _)| !defined.contains_key(*name))
+    {
+        let members = &definition.members;
+        r2il::refusal_evidence!(
+            "tag-undefined",
+            "{name}: a member is unspelled: {members:?}"
+        );
     }
 }
 

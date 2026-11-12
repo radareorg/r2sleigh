@@ -182,11 +182,9 @@ impl TypeAnalysis {
             })
             .collect::<Option<Vec<_>>>()?;
         let unproven = self.unproven_carrier_bits();
-        let rows = &self.type_facts().parameter_types;
-        let stated = interface.map_or(r2source::Basis::Convention, |at| at.types().basis);
-        let bases = (0..params.len())
-            .map(|slot| rows.basis(slot).unwrap_or(stated))
-            .collect();
+        // A body's slots bound no caller's type: a callee's derived facts read none of its own
+        // callees, so a type reached through one would disagree with its extern (D262).
+        let bases = vec![r2source::Basis::CarrierWidth; params.len()];
         crate::SourceOwnedCalleeSignature::new(
             &self.source,
             crate::FunctionType {

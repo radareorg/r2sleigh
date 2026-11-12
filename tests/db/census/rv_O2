@@ -137,7 +137,7 @@ r2sleigh_result_u32 fcn_10c0(uint32_t arg0, uint64_t* arg1)
     r2sleigh_result_u64 avg(int64_t*, uint32_t);
     uint32_t bit_count(uint32_t);
     uint32_t classify(uint32_t);
-    uint64_t copy_name(uint8_t*, uint64_t, uint64_t);
+    uint64_t copy_name(uint8_t*, const char*, uint64_t);
     uint32_t fact(uint32_t);
     r2sleigh_result_u64 fill(uint32_t);
     uint64_t find(uint32_t*, uint32_t, uint32_t);
@@ -216,7 +216,7 @@ r2sleigh_result_u32 fcn_10c0(uint32_t arg0, uint64_t* arg1)
             rsi_8 = tmp_11c0_8_1;
         }
         {
-            rax_14 = copy_name((uint8_t*)(uint64_t)((uint64_t)(frame + 16U) + (uint64_t)144U), rsi_8, 16);
+            rax_14 = copy_name((uint8_t*)(uint64_t)((uint64_t)(frame + 16U) + (uint64_t)144U), (const char*)rsi_8, 16);
             tmp_lane_11e2_2_0_1 = (uint32_t)((uint64_t)((uint64_t)rax_14 + (uint64_t)rbx_3) >> 0U);
             rax_15 = (uint64_t)sext((uint8_t)((uint32_t)arg0 >> 0U));
             rax_16 = (uint64_t)rotl((uint32_t)arg0, 3);

@@ -300,10 +300,9 @@ impl<'a> EvidenceBuilder<'a> {
                 if self.value_is_constant(argument.value) {
                     continue;
                 }
-                if let Some(basis) = signature.bases.get(argument.index) {
-                    let node = EvidenceNode::Value(argument.value);
-                    self.callee_slots.push((node, declared.clone(), *basis));
-                }
+                let node = EvidenceNode::Value(argument.value);
+                let basis = signature.bases.get(argument.index);
+                (self.callee_slots).extend(basis.map(|basis| (node, declared.clone(), *basis)));
                 bounds.push((EvidenceNode::Value(argument.value), declared.clone()));
             }
         }

@@ -1206,7 +1206,10 @@ pub(crate) fn callee_read(
     let resolved = crate::isolation::isolated(|| {
         resolved_alone(&native, target, address, ptr_bits, walked, stated)
     });
-    read_of(resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked))))
+    read_of(
+        &native,
+        resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked))),
+    )
 }
 
 /// A callee built against its imports alone, before its seal, with those imports: its interface
@@ -1294,7 +1297,30 @@ pub(crate) fn built_read(
     let resolved = resolved.map(|resolved| resolved.map_err(|refusal| unreadable(&refusal)));
     let resolved = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)));
     let again = resolved.as_ref().is_ok_and(|(_, again)| *again);
-    (read_of(resolved.map(|(artifact, _)| artifact)), again)
+    (
+        read_of(&native, resolved.map(|(artifact, _)| artifact)),
+        again,
+    )
+}
+
+/// The declarations of the imports a resolved body calls directly. O(call sites x log rows).
+fn declared_callees(
+    native: &Native<'_>,
+    artifact: &Resolution,
+) -> Vec<r2types::SourceOwnedCalleeSignature> {
+    let shared = artifact.shared_artifact();
+    let sites = shared.facts().call_sites.by_id.values();
+    let targets =
+        (sites.filter_map(|site| site.direct_target)).collect::<std::collections::BTreeSet<_>>();
+    let targets = targets.into_iter().collect::<Vec<_>>();
+    let ptr_bits = crate::engine_effective_ptr_bits(native.target.arch);
+    declare_imports(
+        native,
+        native.target,
+        &targets,
+        ptr_bits,
+        &mut Callees::default(),
+    )
 }
 
 /// What one callee's body proves, read under the same isolation boundary as its preparation.
@@ -1304,11 +1330,11 @@ fn read_callee(
     address: u64,
     ptr_bits: u32,
 ) -> CalleeRead {
-    read_of(prepared_callee(native, target, address, ptr_bits))
+    read_of(native, prepared_callee(native, target, address, ptr_bits))
 }
 
-/// What a resolved callee proves, derived under isolation.
-fn read_of(resolved: Result<Resolution, Unreadable>) -> CalleeRead {
+/// What a resolved callee proves, derived under isolation against the imports it calls.
+fn read_of(native: &Native<'_>, resolved: Result<Resolution, Unreadable>) -> CalleeRead {
     let artifact = match resolved {
         Ok(resolved) => resolved,
         Err(reason) => {
@@ -1326,7 +1352,8 @@ fn read_of(resolved: Result<Resolution, Unreadable>) -> CalleeRead {
         .machine_context()
         .function_interface()
         .cloned();
-    let facts = match crate::isolation::isolated(|| CalleeFacts::derive(&artifact)) {
+    let declared = declared_callees(native, &artifact);
+    let facts = match crate::isolation::isolated(|| CalleeFacts::derive(&artifact, declared)) {
         Ok(Some(derived)) => Ok(derived),
         Ok(None) => Err(Unreadable::NothingProved),
         Err(panicked) => Err(Unreadable::Panicked(panicked)),

@@ -2614,15 +2614,14 @@ impl FunctionFacts {
                     pointer.clone(),
                     crate::ParameterType::stated(r2source::Basis::Dereferenced),
                 ),
-                (_, pointer) => {
-                    if let Some(pointer) = pointer {
-                        r2il::refusal_evidence!(
-                            "exact-source-signature",
-                            "parameter {index}: {pointer:?} is no pointer at {ty:?}'s width"
-                        );
-                    }
+                (_, Some(pointer)) => {
+                    r2il::refusal_evidence!(
+                        "exact-source-signature",
+                        "parameter {index}: {pointer:?} is no pointer at {ty:?}'s width"
+                    );
                     (ty, crate::ParameterType::stated(basis))
                 }
+                (_, None) => (ty, crate::ParameterType::stated(basis)),
             };
             rows.set(index, row);
             let name = names
@@ -2752,6 +2751,11 @@ impl FunctionFacts {
             return;
         };
         let mut changed = false;
+        if self.types.parameter_types.is_empty()
+            && let Some(interface) = source.machine_context().function_interface()
+        {
+            self.types.parameter_types = crate::ParameterTypes::of_interface(interface);
+        }
         for (slot, parameter) in &source.facts().boundaries.parameters {
             if parameter.index != *slot {
                 continue;
@@ -2778,13 +2782,8 @@ impl FunctionFacts {
             if replace {
                 param.ty = Some(candidate.clone());
                 changed = true;
-                let rows = &mut self.types.parameter_types;
-                if rows.is_empty()
-                    && let Some(interface) = source.machine_context().function_interface()
-                {
-                    *rows = crate::ParameterTypes::of_interface(interface);
-                }
-                rows.set(index, crate::ParameterType::stated(r2source::Basis::Solved));
+                let solved = crate::ParameterType::stated(r2source::Basis::Solved);
+                self.types.parameter_types.set(index, solved);
             }
         }
         if changed {

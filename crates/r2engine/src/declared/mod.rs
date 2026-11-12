@@ -464,6 +464,7 @@ impl Placement<'_> {
             });
         }
         let typed = Typed {
+            basis: declared.basis,
             parameters,
             returns,
             return_value,
@@ -490,7 +491,7 @@ impl Placement<'_> {
     ) -> Option<r2source::SourceFunctionInterface> {
         let name = &declared.prototype.name;
         let convention = self.machine.slots.convention();
-        let interface = self.typed(name, convention, placement, typed, declared.basis)?;
+        let interface = self.typed(name, convention, placement, typed)?;
         // Typed first: a declared format parameter is believed on what the
         // declaration's types are.
         let interface = formatted(
@@ -549,8 +550,8 @@ impl Placement<'_> {
         convention: r2source::ConventionId,
         placement: &r2ssa::place::Placement,
         typed: Typed,
-        basis: r2source::Basis,
     ) -> Option<r2source::SourceFunctionInterface> {
+        let basis = typed.basis;
         let slots = placement.locations.iter().zip(&placement.slots);
         let parameters = slots.enumerate().map(|(index, (location, (id, class)))| {
             let slot = r2source::SourceSlot {
@@ -732,6 +733,8 @@ fn carrier_bytes(location: &SourceParameterLocation) -> u32 {
 /// The typed half of one declaration: a logical value per parameter, the
 /// result's, the frame slots it types, and the graph they are nodes of.
 struct Typed {
+    /// What every parameter's type rests on: the declaration's basis.
+    basis: r2source::Basis,
     parameters: Vec<Option<SourceLogicalValue>>,
     returns: SourceFunctionReturn,
     return_value: Option<SourceLogicalValue>,

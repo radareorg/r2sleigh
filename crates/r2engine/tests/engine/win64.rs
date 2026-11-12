@@ -84,10 +84,10 @@ fn a_home_handed_on_as_a_cited_va_list_is_a_variadic_tail() {
     );
     // `&home[1]` is the callee's fifth argument: the homes stay in memory, and home 0 keeps its store.
     assert!(callee.contains("(uint64_t)arg0);"), "{callee}");
-    // The format types nothing, so its address spells as the integer the body reads.
+    // The callee's format is UCRT's `const char *`, so the caller passes the literal (D262).
     let caller = rendered(&mut open, BASE + 0x40);
     assert!(
-        caller.contains("print_line(0x10a0, (uint64_t)7U)"),
+        caller.contains("print_line(\"%d\\n\", (uint64_t)7U)"),
         "{caller}"
     );
 }

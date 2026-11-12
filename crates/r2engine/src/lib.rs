@@ -972,7 +972,10 @@ pub struct CalleeFacts {
 impl CalleeFacts {
     /// Derive a callee's contribution from the body that owns it. The body is
     /// read here and not retained.
-    pub fn derive(callee: &Arc<r2ssa::TrustedSsaArtifact>) -> Option<Self> {
+    pub fn derive(
+        callee: &Arc<r2ssa::TrustedSsaArtifact>,
+        declared: Vec<r2types::SourceOwnedCalleeSignature>,
+    ) -> Option<Self> {
         let shared = callee.shared_artifact();
         let address = shared.function().entry;
         let interface = shared.machine_context().function_interface()?.clone();
@@ -981,11 +984,13 @@ impl CalleeFacts {
             r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared)
                 .ok()?;
         let context = trusted_parsed_context(callee);
-        let signature = r2types::build_source_owned_type_analysis(
-            r2types::TypeAnalysisRequest::new(Arc::clone(&shared), context).ok()?,
-        )
-        .ok()
-        .and_then(|analysis| analysis.source_owned_callee_signature());
+        // The imports' declarations the callee's own rendering reads, so its header and every
+        // caller's extern type a slot it hands to one alike (D262).
+        let request = r2types::TypeAnalysisRequest::new(Arc::clone(&shared), context).ok()?;
+        let request = request.with_source_owned_callee_signatures(declared).ok()?;
+        let signature = r2types::build_source_owned_type_analysis(request)
+            .ok()
+            .and_then(|analysis| analysis.source_owned_callee_signature());
         Some(Self {
             address,
             interface,

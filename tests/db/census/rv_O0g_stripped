@@ -718,7 +718,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
     double fcn_12ef(uint64_t*, uint32_t);
     uint32_t fcn_1362(uint32_t);
     r2sleigh_result_u32 fcn_1391(uint32_t);
-    uint64_t fcn_13e3(uint8_t*, uint64_t, uint64_t);
+    uint64_t fcn_13e3(uint8_t*, const char*, uint64_t);
     uint32_t fcn_144c(uint32_t);
     uint32_t fcn_146d(uint32_t, uint8_t);
     uint32_t fcn_1489(uint32_t);
@@ -826,7 +826,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
             rax_27 = tmp_16e3_8_1;
         }
         {
-            rax_28 = fcn_13e3((uint8_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)144U), rax_27, 16);
+            rax_28 = fcn_13e3((uint8_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)144U), (const char*)rax_27, 16);
             tmp_1704_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
             r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)rax_28 >> 0U) + (uint32_t)tmp_1704_8_1));
             tmp_170a_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
