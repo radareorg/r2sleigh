@@ -493,14 +493,11 @@ enum Guard<'m> {
 type Through = Option<OpId>;
 
 impl<'m> Guard<'m> {
+    /// The model's guard: the platform's slot, else the library's global the container binds.
     fn of(machine: &'m SourceMachineContext) -> Option<Self> {
-        if let Some(slot) =
-            (machine.call_effect()).and_then(r2source::SourceCallEffect::stack_guard)
-        {
-            return Some(Self::Slot(slot));
-        }
-        let linked = machine.convention()?.forms.linked_guard.as_ref()?;
-        Some(Self::Linked(linked))
+        let forms = &machine.convention()?.forms;
+        (forms.guard.as_ref().map(Self::Slot))
+            .or_else(|| forms.linked_guard.as_ref().map(Self::Linked))
     }
 
     /// Whether a read of `width` bytes at `address` reads the guard, and how. Every load of one

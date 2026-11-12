@@ -336,7 +336,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/r2ssa/src/slot_promotion.rs", "promote"),
     ("crates/r2ssa/src/slot_promotion.rs", "saves"),
     ("crates/r2ssa/src/stack_bound.rs", "decide"),
-    ("crates/r2ssa/src/stack_protector.rs", "decide"),
     ("crates/r2ssa/src/tail_count.rs", "Prover"),
     ("crates/r2ssa/src/tail_count.rs", "Prover::argument_slot"),
     ("crates/r2ssa/src/tail_count.rs", "Prover::saved"),
