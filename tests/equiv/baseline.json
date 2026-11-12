@@ -1159,11 +1159,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O1::shape_byte_indexed_buffer": {
-   "cause": "[#122] The vectorised byte loop loads its constants from a constant pool and stores 128-bit lanes, terms and stores staged does not spell yet (TermNotSpelled, StoreNotSpelled), so the loop is residual where legacy refused it or, at x86 clang-O2 and AArch64 clang-O2 and gcc-O1, matched. Owner: staged spelling of constant-pool vector loads.",
+   "cause": "S27 (FrameReach): the byte buffer is walked through an address the object model places in the unknown object, so its frame now escapes as one array and the buffer's byte store is spelled (base: StoreNotSpelled at the first loop's store; head renders it, residuals 51 to 15 at gcc-O1, 56 to 14 at gcc-O2, 45 to 15 at clang-O1). The trap moves to the read-back term the staged path does not spell yet (TermNotSpelled); D260 owns the frame extent (doc/adr-call-boundary.md, \"S27 as built\").",
    "compared": "output",
-   "owner": "D",
-   "reason": "r2sleigh_residual_void gap:StoreNotSpelled",
-   "site": "crates/r2dec/src/render/terms.rs",
+   "owner": "P4",
+   "reason": "r2sleigh_residual_void gap:TermNotSpelled",
+   "site": "crates/r2ssa/src/semantic/frame_reach.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::clang-O1::shape_call_chain": {
@@ -1512,11 +1512,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_byte_indexed_buffer": {
-   "cause": "[#122] The vectorised byte loop loads its constants from a constant pool and stores 128-bit lanes, terms and stores staged does not spell yet (TermNotSpelled, StoreNotSpelled), so the loop is residual where legacy refused it or, at x86 clang-O2 and AArch64 clang-O2 and gcc-O1, matched. Owner: staged spelling of constant-pool vector loads.",
+   "cause": "S27 (FrameReach): the byte buffer is walked through an address the object model places in the unknown object, so its frame now escapes as one array and the buffer's byte store is spelled (base: StoreNotSpelled at the first loop's store; head renders it, residuals 51 to 15 at gcc-O1, 56 to 14 at gcc-O2, 45 to 15 at clang-O1). The trap moves to the read-back term the staged path does not spell yet (TermNotSpelled); D260 owns the frame extent (doc/adr-call-boundary.md, \"S27 as built\").",
    "compared": "output",
-   "owner": "D",
-   "reason": "r2sleigh_residual_void gap:StoreNotSpelled",
-   "site": "crates/r2dec/src/render/terms.rs",
+   "owner": "P4",
+   "reason": "r2sleigh_residual_void gap:TermNotSpelled",
+   "site": "crates/r2ssa/src/semantic/frame_reach.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_call_chain": {
@@ -1634,11 +1634,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_byte_indexed_buffer": {
-   "cause": "[#122] The vectorised byte loop loads its constants from a constant pool and stores 128-bit lanes, terms and stores staged does not spell yet (TermNotSpelled, StoreNotSpelled), so the loop is residual where legacy refused it or, at x86 clang-O2 and AArch64 clang-O2 and gcc-O1, matched. Owner: staged spelling of constant-pool vector loads.",
+   "cause": "S27 (FrameReach): the byte buffer is walked through an address the object model places in the unknown object, so its frame now escapes as one array and the buffer's byte store is spelled (base: StoreNotSpelled at the first loop's store; head renders it, residuals 51 to 15 at gcc-O1, 56 to 14 at gcc-O2, 45 to 15 at clang-O1). The trap moves to the read-back term the staged path does not spell yet (TermNotSpelled); D260 owns the frame extent (doc/adr-call-boundary.md, \"S27 as built\").",
    "compared": "output",
-   "owner": "D",
-   "reason": "r2sleigh_residual_void gap:StoreNotSpelled",
-   "site": "crates/r2dec/src/render/terms.rs",
+   "owner": "P4",
+   "reason": "r2sleigh_residual_void gap:TermNotSpelled",
+   "site": "crates/r2ssa/src/semantic/frame_reach.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::gcc-O2::shape_call_chain": {
