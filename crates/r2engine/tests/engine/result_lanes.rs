@@ -283,7 +283,8 @@ fn bits_above_a_call_result_a_store_reads_stay_a_residual_where_the_return_is_un
     assert!(text.contains("| r2sleigh_residual_u64(1) << 32"), "{text}");
 }
 
-/// `leaf` writes EAX alone; `f` writes XMM0; `caller` calls `f`, then `leaf`, then stores XMM0.
+/// `leaf` writes EAX alone; `f` writes XMM0; `caller` calls `f`, then `leaf`, then stores XMM0;
+/// `top` calls `caller`.
 const KEPT: &[u8] = &[
     0xb8, 0x01, 0x00, 0x00, 0x00, // 1000 mov eax, 1
     0xc3, // 1005 ret
@@ -296,7 +297,9 @@ const KEPT: &[u8] = &[
     0xe8, 0xd6, 0xff, 0xff, 0xff, // 1025 call 0x1000
     0xf2, 0x0f, 0x11, 0x07, // 102a movsd qword ptr [rdi], xmm0
     0xc3, // 102e ret
-    0xcc,
+    0xcc, 0xe8, 0xeb, 0xff, 0xff, 0xff, // 1030 call 0x1020
+    0xc3, // 1035 ret
+    0xcc, 0xcc,
 ];
 
 /// `call f; call leaf; movsd [rdi], xmm0`: `leaf` keeps XMM0 on every path to its return, so the
@@ -314,4 +317,30 @@ fn a_read_past_a_callee_that_keeps_the_lane_is_the_earlier_calls_read() {
     let text = rendered.response.output.into_text();
     assert!(text.starts_with("double f("), "{text}");
     assert_eq!(open.analysis_stats().defects, 0);
+}
+
+/// `caller`'s register effect is deposited by its own site fates where `f` is decided first, and
+/// asked directly where `top` is: each order renders every function alike (ADR, "S31b as built").
+#[test]
+fn a_deposited_register_effect_renders_as_the_one_asked_directly() {
+    let functions = [
+        ("leaf", BASE, 0x06),
+        ("f", BASE + 0x10, 0x09),
+        ("caller", BASE + 0x20, 0x0f),
+        ("top", BASE + 0x30, 0x06),
+    ];
+    let rendered = |order: [u64; 4]| {
+        let mut open = OpenProgram::of(Literal::of_code(KEPT, &functions));
+        open.analyse_program().expect("it surveys");
+        let mut texts = order.map(|at| {
+            let rendered = open.rendered(at).expect("it renders");
+            (at, rendered.response.output.into_text())
+        });
+        texts.sort();
+        assert_eq!(open.analysis_stats().defects, 0);
+        texts
+    };
+    let deposited = rendered([BASE + 0x10, BASE + 0x20, BASE + 0x30, BASE]);
+    let asked = rendered([BASE + 0x20, BASE + 0x10, BASE + 0x30, BASE]);
+    assert_eq!(deposited, asked);
 }

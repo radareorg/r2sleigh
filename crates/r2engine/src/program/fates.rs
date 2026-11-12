@@ -975,8 +975,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
     const NAME: &'static str = "site-fates";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: one backward pass over the body, `O((B + E) × lanes)` within its budget, and one held
-    /// register effect per distinct callee not yet read.
+    /// Work: one backward pass over the body, `O((B + E) × lanes)` within its budget, one held
+    /// register effect per distinct callee not yet read, and the body's own effect, deposited.
     fn compute(db: &Db<ProgramInputs<S>>, &(caller, thumb): &(u64, bool)) -> Self::Value {
         let view = View::new(db, true);
         let walker = super::returns::Walking::new(view.clone(), true).ok()?;
@@ -1009,6 +1009,16 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
             .collect::<Vec<_>>();
         calls.sort_by_key(|call| (call.callee, call.instruction));
         calls.dedup_by_key(|call| (call.callee, call.instruction));
+        // While it holds the walk and its flow, the body's own register effect is deposited.
+        let held = db.held::<RegisterEffects>(&(caller, thumb));
+        if held.is_ok_and(|held| held.is_none()) {
+            let shallow = Reading {
+                depth: Depth::Shallow,
+                ..reading
+            };
+            let effect = effect_on_flow(&shallow, &walker, target, caller, body, &flow);
+            db.deposit::<RegisterEffects>([((caller, thumb), effect)]);
+        }
         Some(calls.into())
     }
 }
@@ -1023,7 +1033,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for RegisterEffects {
     const NAME: &'static str = "register-effects";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: one backward pass over the body and one scan of the blocks a return is reached from.
+    /// Work: one backward pass over the body and one scan of the blocks a return is reached from;
+    /// `SiteFates` deposits the row of each body it walks, so only a body it did not walk is lifted here.
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
         let view = View::new(db, true);
         let walker = super::returns::Walking::new(view.clone(), true).ok()?;
