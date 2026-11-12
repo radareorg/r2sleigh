@@ -250,7 +250,7 @@ r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, u
 {
     uint64_t tmp_1289_0_2;
 
-    /* r2dec proof: 5 constructs are marked below; 29 source obligations: 0 rendered, 6 elided, 0 refused, 23 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0); 1 callee prototype supplied by the source; the parameters are a floor: at least 3 (an address of the argument area escapes) */
+    /* r2dec proof: 5 constructs are marked below; 29 source obligations: 0 rendered, 6 elided, 0 refused, 23 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0); 1 callee prototype supplied by the source; the parameters are a floor: at least 3 (an address of the argument area escapes); the result is unproven (no return reached): 0 unproven-return carried */
     {
         tmp_1289_0_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x1280:29 covering 1 op (render::values) */

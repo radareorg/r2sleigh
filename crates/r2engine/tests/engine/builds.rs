@@ -82,7 +82,8 @@ fn an_owner_that_moves_the_build_has_it_built_again() {
     ];
     let mut open = OpenProgram::of(Literal::of_code(VALUE, &functions));
     let text = rendered(&mut open, BASE + 0x20);
-    assert!(text.contains("= middle()"), "{text}");
+    // The leaf's `mov eax, 7` states zero above its 32-bit result (D322).
+    assert!(text.contains("= (uint64_t)middle()"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
     let stats = open.analysis_stats();
     assert_eq!(stats.callee_reads.computed, 0, "{stats:?}");
