@@ -313,6 +313,14 @@ pub(crate) fn unite_classes(class: &mut [ValueId], reloads: &IdMap<ValueId, Valu
 }
 
 impl Rereads<'_> {
+    /// A load outside the exact frame: the load of its place since the last write, where there is one.
+    fn reread_place(&mut self, out: ValueId, held: &mut Held) {
+        let first = (self.places.get(out)).and_then(|place| held.reread(*place, out));
+        if let Some(first) = first {
+            self.found.insert(out, first);
+        }
+    }
+
     fn step(&mut self, op: &SSAOp<ValueId>, output: Option<ValueId>, held: &mut Held) {
         let (graph, prep) = (self.graph, self.prep);
         let slot = |addr: ValueId, space: r2il::SpaceId| frame_slot(prep, addr, space);
@@ -322,12 +330,7 @@ impl Rereads<'_> {
                     return;
                 };
                 let Some(root) = slot(*addr, *space) else {
-                    // A word outside the exact frame, read at one address twice with no write between.
-                    let first = (self.places.get(out)).and_then(|place| held.reread(*place, out));
-                    if let Some(first) = first {
-                        self.found.insert(out, first);
-                    }
-                    return;
+                    return self.reread_place(out, held);
                 };
                 let size = graph.value(out).map_or(0, |value| value.var.size);
                 if size == 0 || size > WIDEST {

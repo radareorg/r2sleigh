@@ -570,6 +570,32 @@ fn tested<'a>(
         .flatten()
 }
 
+/// What holds on the edge from the block at `from`: what that block assumes, and what the edge's
+/// own branch tests among `tests`; `None` where neither states anything.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
+    )
+)]
+fn edge_held<'a>(
+    graph: &SsaGraph,
+    predicates: &crate::semantic::PredicateFacts,
+    assumed: &'a BTreeMap<u64, BTreeMap<ValueId, StridedInterval>>,
+    solved: Solved<'_>,
+    (from, tests): (u64, &[crate::semantic::BlockAssumption]),
+) -> Option<std::borrow::Cow<'a, BTreeMap<ValueId, StridedInterval>>> {
+    use std::borrow::Cow;
+    let mut held = assumed.get(&from).map(Cow::Borrowed);
+    let own = tests.iter().filter(|test| test.predecessor == from);
+    for (test, compare) in own.filter_map(|test| Some((test, tested(predicates, test)?))) {
+        let held = held.get_or_insert_with(Cow::default).to_mut();
+        assume(held, graph, solved, compare, test.truth);
+    }
+    held
+}
+
 /// Each merge re-read once, every input under what its own edge proves; the merges that narrow, with
 /// their ranges (doc/ssa.md, "Branch assumptions"). `O(phi inputs)` and one environment per tested edge.
 #[cfg_attr(
@@ -585,7 +611,6 @@ fn narrowed_merges(
     assumed: &BTreeMap<u64, BTreeMap<ValueId, StridedInterval>>,
     solved: Solved<'_>,
 ) -> Vec<(ValueId, StridedInterval)> {
-    use std::borrow::Cow;
     let mut narrowed = Vec::new();
     if predicates.block_assumptions.is_empty() {
         return narrowed;
@@ -600,21 +625,13 @@ fn narrowed_merges(
         if phis.is_empty() {
             continue;
         }
-        // What holds on each edge in: what its source assumes, and what the edge's own branch tests.
         let mut edges = (block.predecessors.iter())
             .filter_map(|source| {
-                let from = address(*source)?;
-                let mut held = assumed.get(&from).map(Cow::Borrowed);
-                for assumption in tests.into_iter().flatten() {
-                    if assumption.predecessor != from {
-                        continue;
-                    }
-                    if let Some(compare) = tested(predicates, assumption) {
-                        let held = held.get_or_insert_with(Cow::default).to_mut();
-                        assume(held, graph, solved, compare, assumption.truth);
-                    }
-                }
-                Some((*source, held?))
+                let edge = (address(*source)?, tests.map_or(&[][..], Vec::as_slice));
+                Some((
+                    *source,
+                    edge_held(graph, predicates, assumed, solved, edge)?,
+                ))
             })
             .collect::<Vec<_>>();
         if edges.is_empty() {
@@ -684,7 +701,7 @@ impl Solved<'_> {
     }
 
     /// Every value that zero-extends one of `value`'s copy class, through any number of extensions:
-    /// the same number at a wider width. Each step widens, so the walk ends.
+    /// the same number at a wider width. Each copy class is visited once: `O(found log found)`.
     fn zero_extensions(self, value: ValueId) -> Vec<ValueId> {
         let of = |class: ValueId| {
             let start = self.extended.partition_point(|(from, _)| *from < class);
@@ -692,14 +709,28 @@ impl Solved<'_> {
             run.take_while(move |(from, _)| *from == class)
                 .map(|(_, wider)| *wider)
         };
-        let mut found = of(self.class_of(value)).collect::<Vec<_>>();
-        let mut at = 0;
-        while let Some(&wider) = found.get(at) {
-            let class = self.class_of(wider);
-            found.extend(of(class).filter(|_| class != self.class_of(value)));
-            at += 1;
+        // The classes visited, ascending, and the ones whose extensions are still to read.
+        let mut visited = vec![self.class_of(value)];
+        let mut pending = visited.clone();
+        let mut found = Vec::new();
+        while let Some(class) = pending.pop() {
+            let from = found.len();
+            found.extend(of(class));
+            let reached = found[from..].iter().map(|wider| self.class_of(*wider));
+            pending.extend(reached.filter(|class| first_visit(&mut visited, *class)));
         }
         found
+    }
+}
+
+/// Whether `class` is new to `visited`, which holds it afterwards, ascending.
+fn first_visit(visited: &mut Vec<ValueId>, class: ValueId) -> bool {
+    match visited.binary_search(&class) {
+        Ok(_) => false,
+        Err(at) => {
+            visited.insert(at, class);
+            true
+        }
     }
 }
 
@@ -1739,6 +1770,48 @@ mod tests {
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
         let ranges = solve_value_ranges(&graph, &function, Some(&prep), &predicates);
         assert_eq!(range_of(&ranges, &graph, &offset).bounds(), Some((0, 56)));
+    }
+
+    /// 64 extensions of one word, each extended again: every extension is found once, however many
+    /// share a copy class.
+    #[test]
+    fn equivalent_extensions_are_each_found_once() {
+        let word = var("word", 0, 2);
+        let mut block = SSABlock::new(0x1000, 16);
+        let mut wide = Vec::new();
+        for at in 0..64u32 {
+            let (half, whole) = (var("half", at + 1, 4), var("whole", at + 1, 8));
+            block.push(crate::op::SSAOp::IntZExt {
+                dst: half.clone(),
+                src: word.clone(),
+            });
+            block.push(crate::op::SSAOp::IntZExt {
+                dst: whole.clone(),
+                src: half,
+            });
+            wide.push(whole);
+        }
+        let cfg = straight_line(block.clone());
+        let function = SSAFunction::from_exact_test_blocks(&[block], cfg);
+        let prep = function.prep_facts_for_test();
+        let graph = SsaGraph::from_function(&function);
+        let class = crate::view::class_values(&graph, Some(&prep.views));
+        let extended = zero_extended(&graph, &class);
+        let solved = Solved {
+            class: &class,
+            state: &[],
+            extended: &extended,
+        };
+        let word = graph.value_id_for_var(&word).expect("the word");
+        let mut found = solved.zero_extensions(word);
+        assert_eq!(found.len(), 128, "{found:?}");
+        found.sort_unstable();
+        found.dedup();
+        assert_eq!(found.len(), 128);
+        for whole in &wide {
+            let whole = graph.value_id_for_var(whole).expect("an extension");
+            assert!(found.binary_search(&whole).is_ok(), "{whole:?}");
+        }
     }
 
     /// grep `0x9d2a`: the index is a merge of 16-bit words held in `rax`, and `cmp $0xe, %ax; ja` tests its low lane.
