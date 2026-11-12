@@ -112,10 +112,11 @@ impl<'a> Interned<'a> {
             .ok()
     }
 
-    /// The class a value of `ty` travels in (`ParamClass::of`); one with no node has no size.
+    /// The class a value of `ty` travels in (`ParamClass::of`), read off its structure by `TypeId`:
+    /// a name binds by spelling, so two scoped typedefs `T` share one node. None has no size.
     pub(crate) fn class(&mut self, ty: TypeId) -> r2ssa::place::ParamClass {
         let bits = self.model.pointer_bits;
-        match self.node(ty) {
+        match self.structure(ty) {
             Some(id) => r2ssa::place::ParamClass::of_type(&self.parts.types[id as usize], bits),
             None => r2ssa::place::ParamClass::Unplaced(r2source::SourceUnplacedClass::Unsized),
         }
@@ -772,5 +773,35 @@ mod tests {
             converted(&graph, parameter, CDataModel::unix(64)),
             CTypeLike::Pointer(Box::new(named))
         );
+    }
+
+    /// `struct A { using T = int; }; using T = double;`: two typedefs spelled `T` share one
+    /// presentation node, and each still travels in its own structure's class.
+    #[test]
+    fn two_typedefs_of_one_spelling_keep_their_own_class() {
+        use r2ssa::place::ParamClass;
+        let mut graph = TypeGraph::new();
+        let integer = int(&mut graph);
+        let double = graph.add(Type::Scalar(Scalar {
+            kind: ScalarKind::Float,
+            width: Width::Bits(64),
+            name: Some("double".to_owned()),
+        }));
+        let scoped = graph.add(Type::Typedef {
+            name: "T".to_owned(),
+            target: integer,
+        });
+        let outer = graph.add(Type::Typedef {
+            name: "T".to_owned(),
+            target: double,
+        });
+        let mut interned = Interned::new(&graph, CDataModel::unix(64));
+        assert_eq!(
+            interned.node(scoped),
+            interned.node(outer),
+            "one spelling, one node"
+        );
+        assert_eq!(interned.class(scoped), ParamClass::Integer(4));
+        assert_eq!(interned.class(outer), ParamClass::Float(8));
     }
 }
