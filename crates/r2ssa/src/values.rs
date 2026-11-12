@@ -521,12 +521,12 @@ fn assumptions_by_block(
     graph: &SsaGraph,
     predicates: &crate::semantic::PredicateFacts,
     solved: Solved<'_>,
-) -> BTreeMap<u64, BTreeMap<ValueId, StridedInterval>> {
+) -> Assumed {
     if predicates.block_assumptions.is_empty() {
         return BTreeMap::new();
     }
     let domtree = function.domtree();
-    let mut by_block = BTreeMap::<u64, BTreeMap<ValueId, StridedInterval>>::new();
+    let mut by_block = Assumed::new();
     let mut ready = vec![domtree.entry];
     while let Some(addr) = ready.pop() {
         let mut held = domtree
@@ -540,22 +540,12 @@ fn assumptions_by_block(
             .into_iter()
             .flatten()
         {
-            let Some(fact) = predicates.predicates.get(&assumption.predicate) else {
-                continue;
-            };
-            if fact.true_target == fact.false_target
-                || !edge_dominates(function, assumption.predecessor, addr)
-            {
+            if !edge_dominates(function, assumption.predecessor, addr) {
                 continue;
             }
-            let Some(compare) = fact
-                .comparison
-                .as_ref()
-                .or(fact.evaluated_comparison.as_ref())
-            else {
-                continue;
-            };
-            assume(&mut held, graph, solved, compare, assumption.truth);
+            if let Some(compare) = tested(predicates, assumption) {
+                assume(&mut held, graph, solved, compare, assumption.truth);
+            }
         }
         if !held.is_empty() {
             by_block.insert(addr, held);
@@ -563,6 +553,109 @@ fn assumptions_by_block(
         ready.extend(domtree.children(addr).iter().copied());
     }
     by_block
+}
+
+/// The comparison an edge's branch tests, where its two ways out differ.
+fn tested<'a>(
+    predicates: &'a crate::semantic::PredicateFacts,
+    assumption: &crate::semantic::BlockAssumption,
+) -> Option<&'a crate::semantic::CompareProvenance> {
+    let fact = predicates.predicates.get(&assumption.predicate)?;
+    (fact.true_target != fact.false_target)
+        .then(|| {
+            fact.comparison
+                .as_ref()
+                .or(fact.evaluated_comparison.as_ref())
+        })
+        .flatten()
+}
+
+/// What each block assumes of the values its branches compare, by copy class.
+type Assumed = BTreeMap<u64, BTreeMap<ValueId, StridedInterval>>;
+
+/// Each merge re-read once, every input under what its own edge proves; the merges that narrow, with
+/// their ranges (doc/ssa.md, "Branch assumptions"). `O(phi inputs)` and one environment per tested edge.
+#[cfg_attr(
+    dylint_lib = "r2sleigh_lints",
+    allow(
+        entity_keyed_map,
+        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
+    )
+)]
+fn narrowed_merges(
+    graph: &SsaGraph,
+    predicates: &crate::semantic::PredicateFacts,
+    assumed: &Assumed,
+    solved: Solved<'_>,
+) -> Vec<(ValueId, StridedInterval)> {
+    use std::borrow::Cow;
+    let mut narrowed = Vec::new();
+    if predicates.block_assumptions.is_empty() {
+        return narrowed;
+    }
+    let address = |block: crate::graph::BlockId| graph.blocks.get(block.0 as usize).map(|b| b.addr);
+    for block in &graph.blocks {
+        let phis = (block.insts.iter())
+            .filter_map(|inst| graph.inst(*inst))
+            .filter(|inst| matches!(inst.payload, InstPayload::Phi { .. }))
+            .collect::<Vec<_>>();
+        let tests = predicates.block_assumptions.get(&block.addr);
+        if phis.is_empty() {
+            continue;
+        }
+        // What holds on each edge in: what its source assumes, and what the edge's own branch tests.
+        let mut edges = (block.predecessors.iter())
+            .filter_map(|source| {
+                let from = address(*source)?;
+                let mut held = assumed.get(&from).map(Cow::Borrowed);
+                for assumption in tests.into_iter().flatten() {
+                    if assumption.predecessor != from {
+                        continue;
+                    }
+                    if let Some(compare) = tested(predicates, assumption) {
+                        let held = held.get_or_insert_with(Cow::default).to_mut();
+                        assume(held, graph, solved, compare, assumption.truth);
+                    }
+                }
+                Some((*source, held?))
+            })
+            .collect::<Vec<_>>();
+        if edges.is_empty() {
+            continue;
+        }
+        edges.sort_unstable_by_key(|(source, _)| *source);
+        edges.dedup_by_key(|(source, _)| *source);
+        for phi in phis {
+            let (Some(output), InstPayload::Phi { predecessors }) = (phi.output, &phi.payload)
+            else {
+                continue;
+            };
+            let Some(was) = solved.state.get(output.0 as usize).copied() else {
+                continue;
+            };
+            let inputs = graph.inputs(phi.id);
+            if inputs.is_empty() || inputs.len() != predecessors.len() {
+                continue;
+            }
+            let arriving = (inputs.iter().zip(predecessors)).map(|(input, source)| {
+                let range = (solved.state.get(input.0 as usize).copied())
+                    .unwrap_or_else(|| StridedInterval::top(was.width_bits()));
+                let held = (edges
+                    .binary_search_by_key(source, |(source, _)| *source)
+                    .ok())
+                .and_then(|at| edges[at].1.get(&solved.class_of(*input)));
+                held.map_or(range, |held| range.meet(held))
+            });
+            let Some(joined) = arriving.reduce(|joined, range| joined.join(&range)) else {
+                continue;
+            };
+            let now = was.meet(&joined);
+            if now != was {
+                narrowed.push((output, now));
+            }
+        }
+    }
+    narrowed
 }
 
 /// Whether every arrival at `block` first takes `predecessor -> block`, so what that edge tests holds there (doc/ssa.md, "Branch assumptions").
@@ -584,12 +677,46 @@ pub(crate) fn edge_dominates(function: &crate::SSAFunction, predecessor: u64, bl
 struct Solved<'a> {
     class: &'a [ValueId],
     state: &'a [StridedInterval],
+    /// Each zero extension, by the copy class it extends, ascending: the class and the wider value.
+    extended: &'a [(ValueId, ValueId)],
 }
 
 impl Solved<'_> {
     fn class_of(self, value: ValueId) -> ValueId {
         class_of(self.class, value)
     }
+
+    /// Every value that zero-extends one of `value`'s copy class, through any number of extensions:
+    /// the same number at a wider width. Each step widens, so the walk ends.
+    fn zero_extensions(self, value: ValueId) -> Vec<ValueId> {
+        let of = |class: ValueId| {
+            let start = self.extended.partition_point(|(from, _)| *from < class);
+            let run = self.extended[start..].iter();
+            run.take_while(move |(from, _)| *from == class)
+                .map(|(_, wider)| *wider)
+        };
+        let mut found = of(self.class_of(value)).collect::<Vec<_>>();
+        let mut at = 0;
+        while let Some(&wider) = found.get(at) {
+            let class = self.class_of(wider);
+            found.extend(of(class).filter(|_| class != self.class_of(value)));
+            at += 1;
+        }
+        found
+    }
+}
+
+/// Every zero extension in the graph, by the copy class of what it extends: `O(I log I)`.
+fn zero_extended(graph: &SsaGraph, class: &[ValueId]) -> Vec<(ValueId, ValueId)> {
+    let mut extended = (graph.insts.iter())
+        .filter(|inst| matches!(inst.payload, InstPayload::Op(SSAOp::IntZExt { .. })))
+        .filter_map(|inst| {
+            let from = graph.inputs(inst.id).first()?;
+            Some((class_of(class, *from), inst.output?))
+        })
+        .collect::<Vec<_>>();
+    extended.sort_unstable();
+    extended
 }
 
 /// The copy class a value belongs to, where the table knows it.
@@ -621,7 +748,15 @@ fn assume(
         if let Some(now) = now {
             held.insert(solved.class_of(side), now);
             // `add eax, 0x83; cmp eax, 0x114; ja` writes rax as the zero extension of the compared bits.
-            for widened in zero_extensions(graph, side) {
+            // `cmp $0xe, %ax` tests the low lane of a value that fits the lane: the value is the lane.
+            if let Some(whole) = fitting_source(graph, solved, side) {
+                let width = (graph.value(whole)).map_or(64, |value| width_of(value.var.size));
+                let was = (held.get(&solved.class_of(whole)).copied())
+                    .or_else(|| solved.state.get(whole.0 as usize).copied())
+                    .unwrap_or_else(|| StridedInterval::top(width));
+                held.insert(solved.class_of(whole), was.meet(&read_at(now, width)));
+            }
+            for widened in solved.zero_extensions(side) {
                 let width = graph
                     .value(widened)
                     .map_or(64, |value| width_of(value.var.size));
@@ -636,14 +771,17 @@ fn assume(
     }
 }
 
-/// Every value that zero-extends this one: the same number at a wider width.
-fn zero_extensions(graph: &SsaGraph, value: ValueId) -> impl Iterator<Item = ValueId> + '_ {
-    graph.use_sites(value).iter().filter_map(|site| {
-        let inst = graph.inst(site.inst)?;
-        matches!(inst.payload, InstPayload::Op(SSAOp::IntZExt { .. }))
-            .then_some(inst.output)
-            .flatten()
-    })
+/// The value `lane` is the low bytes of, where the ascent bounds that value inside the lane's width.
+fn fitting_source(graph: &SsaGraph, solved: Solved<'_>, lane: ValueId) -> Option<ValueId> {
+    let inst = graph.inst(graph.def_inst(lane)?)?;
+    let InstPayload::Op(SSAOp::Subpiece { src, offset: 0, .. }) = &inst.payload else {
+        return None;
+    };
+    let width = width_of(graph.value(lane)?.var.size);
+    let (_, high) = (solved.state.get(src.0 as usize))
+        .filter(|range| !range.is_bottom())?
+        .bounds()?;
+    (!wide(graph, *src) && width < 64 && high <= mask_of(width)).then_some(*src)
 }
 
 /// One arm of a select, under what its condition proves on that arm.
@@ -827,16 +965,18 @@ fn narrow_where_defined(
     state: &mut [StridedInterval],
 ) {
     let SameBits { class, reloads } = same;
-    let assumed = assumptions_by_block(
-        function,
-        graph,
-        predicates,
-        Solved {
-            class,
-            state: &*state,
-        },
-    );
-    if assumed.is_empty() {
+    if predicates.block_assumptions.is_empty() {
+        return;
+    }
+    let extended = zero_extended(graph, class);
+    let solved = Solved {
+        class,
+        state: &*state,
+        extended: &extended,
+    };
+    let assumed = assumptions_by_block(function, graph, predicates, solved);
+    let merged = narrowed_merges(graph, predicates, &assumed, solved);
+    if assumed.is_empty() && merged.is_empty() {
         return;
     }
     // Only the instructions something is assumed about start on the list.
@@ -854,6 +994,15 @@ fn narrow_where_defined(
                 .is_some_and(|inst| !matches!(inst.payload, InstPayload::Phi { .. }))
         })
         .collect::<crate::dense::IdSet<_>>();
+    // A merge is read once here and never queued again, so the carry forward still walks a DAG.
+    for (merge, now) in merged {
+        state[merge.0 as usize] = now;
+        let carried = readers(graph, merge).filter(|reader| {
+            (graph.inst(*reader))
+                .is_some_and(|inst| !matches!(inst.payload, InstPayload::Phi { .. }))
+        });
+        carried.for_each(|reader| _ = queued.insert(reader));
+    }
     let mut ready = queued.iter().collect::<VecDeque<_>>();
     while let Some(inst_id) = ready.pop_front() {
         queued.remove(inst_id);
@@ -1171,6 +1320,84 @@ mod tests {
         assert!(copied.contains(5), "{copied:?}");
     }
 
+    /// `entry: if x <u 10 goto M; other: if z <u 20 goto M else exit; M: m = phi(x, z); y = m * 4`,
+    /// or `other` entering `M` untested.
+    fn merged_index(second_guarded: bool) -> StridedInterval {
+        let (entry, other, merge, exit) = (0x1000, 0x1010, 0x1020, 0x1030);
+        let (x, z, m, y) = (
+            var("x", 0, 4),
+            var("z", 0, 4),
+            var("m", 1, 4),
+            var("y", 1, 4),
+        );
+        let guard = |block: &mut SSABlock, flag: &str, value: &SSAVar, limit: u64| {
+            let below = var(flag, 1, 1);
+            block.push(crate::op::SSAOp::IntLess {
+                dst: below.clone(),
+                a: value.clone(),
+                b: constant(limit, 4),
+            });
+            block.push(crate::op::SSAOp::CBranch {
+                target: constant(merge, 8),
+                cond: below,
+            });
+        };
+        let mut head = SSABlock::new(entry, 16);
+        guard(&mut head, "first", &x, 10);
+        let mut other_block = SSABlock::new(other, 16);
+        let leaves = match second_guarded {
+            true => {
+                guard(&mut other_block, "second", &z, 20);
+                BlockTerminator::ConditionalBranch {
+                    true_target: merge,
+                    false_target: exit,
+                }
+            }
+            false => BlockTerminator::Branch { target: merge },
+        };
+        let mut merge_block = SSABlock::new(merge, 16);
+        merge_block.push_phi(PhiNode {
+            dst: m.clone(),
+            sources: vec![(entry, x), (other, z)],
+            canonical_storage: None,
+        });
+        merge_block.push(crate::op::SSAOp::IntMult {
+            dst: y.clone(),
+            a: m,
+            b: constant(4, 4),
+        });
+        let cfg = cfg_of(
+            entry,
+            &[
+                (
+                    entry,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: merge,
+                        false_target: other,
+                    },
+                ),
+                (other, leaves),
+                (merge, BlockTerminator::Return),
+                (exit, BlockTerminator::Return),
+            ],
+        );
+        let blocks = [head, other_block, merge_block, SSABlock::new(exit, 16)];
+        let (ranges, graph) = solve_over(&blocks, cfg);
+        range_of(&ranges, &graph, &y)
+    }
+
+    /// gzip `main` `0x3b9a`: a table index reached from two tests, neither of whose edges dominates the dispatch.
+    #[test]
+    fn a_merge_reads_each_input_under_its_own_edges_test() {
+        assert_eq!(merged_index(true).bounds(), Some((0, 76)));
+    }
+
+    #[test]
+    fn a_merge_with_an_untested_edge_keeps_what_that_edge_carries() {
+        let scaled = merged_index(false);
+        assert!(scaled.contains(1 << 20), "{scaled:?}");
+    }
+
     #[test]
     fn an_irreducible_counter_widens_and_settles() {
         // entry -> A | B, A -> B, B -> A: neither A nor B dominates the other, so neither is a natural loop header.
@@ -1448,6 +1675,129 @@ mod tests {
             range_of(&ranges, &graph, &offset).bounds(),
             Some((0, 0x450))
         );
+    }
+
+    /// grep `0x9cc5`: `movzwl 0x68(%rbp), %eax` then `cmp $0xe, %ax; ja`: the guard reads a copy of the
+    /// loaded word, and the index is that word extended twice.
+    #[test]
+    fn a_guard_on_a_copy_bounds_the_words_extensions_through_both_widths() {
+        let (entry, body, exit) = (0x1000, 0x1010, 0x1020);
+        let (word, low) = (var("tmp:word", 1, 2), var("ax", 1, 2));
+        let (half, wide) = (var("eax", 1, 4), var("rax", 1, 8));
+        let (within, beyond) = (var("within", 1, 1), var("beyond", 1, 1));
+        let offset = var("offset", 1, 8);
+        let extend = |dst: &SSAVar, src: &SSAVar| crate::op::SSAOp::IntZExt {
+            dst: dst.clone(),
+            src: src.clone(),
+        };
+        let mut head = SSABlock::new(entry, 16);
+        head.push(crate::op::SSAOp::Copy {
+            dst: word.clone(),
+            src: var("loaded", 0, 2),
+        });
+        head.push(extend(&half, &word));
+        head.push(extend(&wide, &half));
+        head.push(crate::op::SSAOp::Subpiece {
+            dst: low.clone(),
+            src: wide.clone(),
+            offset: 0,
+        });
+        head.push(crate::op::SSAOp::IntLessEqual {
+            dst: within.clone(),
+            a: low,
+            b: constant(0xe, 2),
+        });
+        head.push(crate::op::SSAOp::BoolNot {
+            dst: beyond.clone(),
+            src: within,
+        });
+        head.push(crate::op::SSAOp::CBranch {
+            target: constant(exit, 8),
+            cond: beyond,
+        });
+        let mut body_block = SSABlock::new(body, 16);
+        body_block.push(crate::op::SSAOp::IntMult {
+            dst: offset.clone(),
+            a: wide,
+            b: constant(4, 8),
+        });
+        let cfg = cfg_of(
+            entry,
+            &[
+                (
+                    entry,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: exit,
+                        false_target: body,
+                    },
+                ),
+                (body, BlockTerminator::Return),
+                (exit, BlockTerminator::Return),
+            ],
+        );
+        let blocks = [head, body_block, SSABlock::new(exit, 16)];
+        let function = SSAFunction::from_exact_test_blocks(&blocks, cfg);
+        let prep = function.prep_facts_for_test();
+        let graph = SsaGraph::from_function(&function);
+        let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
+        let ranges = solve_value_ranges(&graph, &function, Some(&prep), &predicates);
+        assert_eq!(range_of(&ranges, &graph, &offset).bounds(), Some((0, 56)));
+    }
+
+    /// grep `0x9d2a`: the index is a merge of 16-bit words held in `rax`, and `cmp $0xe, %ax; ja` tests its low lane.
+    #[test]
+    fn a_guard_on_the_low_lane_bounds_a_value_that_fits_the_lane() {
+        let (entry, body, exit) = (0x1000, 0x1010, 0x1020);
+        let (wide, low) = (var("rax", 1, 8), var("ax", 1, 2));
+        let (within, beyond) = (var("within", 1, 1), var("beyond", 1, 1));
+        let offset = var("offset", 1, 8);
+        let mut head = SSABlock::new(entry, 16);
+        head.push(crate::op::SSAOp::IntAnd {
+            dst: wide.clone(),
+            a: var("loaded", 0, 8),
+            b: constant(0xffff, 8),
+        });
+        head.push(crate::op::SSAOp::Subpiece {
+            dst: low.clone(),
+            src: wide.clone(),
+            offset: 0,
+        });
+        head.push(crate::op::SSAOp::IntLessEqual {
+            dst: within.clone(),
+            a: low,
+            b: constant(0xe, 2),
+        });
+        head.push(crate::op::SSAOp::BoolNot {
+            dst: beyond.clone(),
+            src: within,
+        });
+        head.push(crate::op::SSAOp::CBranch {
+            target: constant(exit, 8),
+            cond: beyond,
+        });
+        let mut body_block = SSABlock::new(body, 16);
+        body_block.push(crate::op::SSAOp::IntMult {
+            dst: offset.clone(),
+            a: wide,
+            b: constant(4, 8),
+        });
+        let cfg = cfg_of(
+            entry,
+            &[
+                (
+                    entry,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: exit,
+                        false_target: body,
+                    },
+                ),
+                (body, BlockTerminator::Return),
+                (exit, BlockTerminator::Return),
+            ],
+        );
+        let blocks = [head, body_block, SSABlock::new(exit, 16)];
+        let (ranges, graph) = solve_over(&blocks, cfg);
+        assert_eq!(range_of(&ranges, &graph, &offset).bounds(), Some((0, 56)));
     }
 
     /// Every consumer of the solution reads an operation its inputs fix as that one value, whatever the operand holds.

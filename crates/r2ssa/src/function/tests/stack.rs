@@ -1839,3 +1839,97 @@ fn a_write_that_may_reach_the_slot_keeps_the_two_loads_apart() {
         assert_ne!(range, Some((0, 0x11)), "{between:?}");
     }
 }
+
+/// `cmp [p + 0x38], 0x11; ja out` then `mov eax, [p + displacement]` after `between`: the range of what the second load read.
+fn pointed_reload_range(between: Vec<R2ILOp>, displacement: u64) -> Option<(u64, u64)> {
+    let (arch, interface) = custom_frame();
+    let field = |temp, displacement| R2ILOp::IntAdd {
+        dst: make_unique(temp, 8),
+        a: make_reg(0x30, 8),
+        b: make_const(displacement, 8),
+    };
+    let load = |temp, dst| R2ILOp::Load {
+        dst,
+        space: SpaceId::Ram,
+        addr: make_unique(temp, 8),
+    };
+    let leave = || R2ILOp::Return {
+        target: make_reg(0x20, 8),
+    };
+    let first = vec![
+        field(0x30, 0x38),
+        load(0x30, make_unique(0x40, 4)),
+        R2ILOp::IntLess {
+            dst: make_unique(0x45, 1),
+            a: make_const(0x11, 4),
+            b: make_unique(0x40, 4),
+        },
+        R2ILOp::CBranch {
+            target: make_const(0x3640, 8),
+            cond: make_unique(0x45, 1),
+        },
+    ];
+    let mut second = between;
+    second.extend([
+        field(0x50, displacement),
+        load(0x50, make_unique(0x60, 4)),
+        R2ILOp::IntZExt {
+            dst: make_unique(0x70, 8),
+            src: make_unique(0x60, 4),
+        },
+        leave(),
+    ]);
+    let block = |addr, size, ops| R2ILBlock {
+        addr,
+        size,
+        ops,
+        ..Default::default()
+    };
+    let blocks = vec![
+        block(0x3600, 0x20, first),
+        block(0x3620, 0x20, second),
+        block(0x3640, 4, vec![leave()]),
+    ];
+    let artifact = SsaArtifact::for_decompile_with_interface(
+        &blocks,
+        Some(&crate::Arch::from(arch)),
+        interface,
+    )
+    .expect("pointer artifact must build");
+    let graph = artifact.graph();
+    let extended = (graph.insts.iter())
+        .filter(|inst| {
+            matches!(
+                inst.payload,
+                crate::graph::InstPayload::Op(SSAOp::IntZExt { .. })
+            )
+        })
+        .find(|inst| graph.block_id_for_addr(0x3620) == Some(inst.block))?;
+    artifact.facts().values.get(extended.output?)?.bounds()
+}
+
+/// find `0x94a5`: `cmpl $4, 0x38(%rdx); ja; mov 0x38(%rdx), %eax` indexes a table by the word it tested.
+#[test]
+fn a_reload_through_one_address_is_bounded_by_the_guard_on_the_first_load() {
+    assert_eq!(pointed_reload_range(vec![], 0x38), Some((0, 0x11)));
+}
+
+#[test]
+fn a_write_an_opaque_operation_or_another_address_keeps_the_two_pointer_loads_apart() {
+    let unknown = vec![R2ILOp::Store {
+        space: SpaceId::Ram,
+        addr: make_reg(0x40, 8),
+        val: make_const(1, 4),
+    }];
+    let opaque = vec![R2ILOp::CallOther {
+        output: None,
+        userop: 7,
+        inputs: vec![],
+    }];
+    // A store into the frame may be a store through the pointer: nothing says the pointer is outside it.
+    for between in [unknown, store_at_slot(0x10), opaque] {
+        let range = pointed_reload_range(between.clone(), 0x38);
+        assert_ne!(range, Some((0, 0x11)), "{between:?}");
+    }
+    assert_ne!(pointed_reload_range(vec![], 0x3c), Some((0, 0x11)));
+}

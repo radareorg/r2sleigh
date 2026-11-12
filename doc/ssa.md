@@ -117,6 +117,16 @@ predecessor. It is then inherited by every block `B` dominates, which sees
 the instance of `v` tested on the last traversal of `P -> B` whenever `def(v)`
 dominates `P`.
 
+A merge reads each input under its own edge (D244). The phi at `B` takes input
+`v_i` on `P_i -> B`, where `def(v_i)` dominates `P_i`, so on that edge `v_i`
+satisfies what `P_i` assumes and what the edge's own branch tests, whether or
+not the edge dominates `B`. The phi's range is the join of its inputs read that
+way. Only the phi narrows: a value `B` reads directly is under no edge's test.
+Each phi is read once, from the ascent's ranges, before the carry forward, which
+still never queues a phi and so still walks a DAG. gzip `main` reaches its
+dispatch at `0x3b9a` from `ja` at `0x3b98` and `jbe` at `0x3c15`, each testing
+its own index against `0xd3`: the merged index reads 212 entries.
+
 ### Loop trip counts
 
 `StructuredLoopFact::trips` (`semantic/trips.rs`) claims only: if control

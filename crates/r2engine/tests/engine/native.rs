@@ -1684,6 +1684,80 @@ fn a_guard_on_an_escaped_slot_bounds_the_dispatch_that_reloads_it() {
     assert!(!output.contains("residual"), "{output}");
 }
 
+/// `TABLE_SWITCH` on a word behind a pointer, as find's `pred_and` tests `cmpl $4, 0x38(%rdx)`: the
+/// guard (1000) and the dispatch (1005) are two loads of `[rdi]`; the table is at 0x1040.
+const POINTED_TABLE_SWITCH: &[u8] = &[
+    0x83, 0x3f, 0x03, // 1000 cmp dword [rdi], 3
+    0x77, 0x2e, // 1003 ja 0x1033
+    0x8b, 0x07, // 1005 mov eax, [rdi]
+    0xff, 0x24, 0xc5, 0x40, 0x10, 0x00, 0x00, // 1007 jmp [rax*8 + 0x1040]
+    0xb8, 0x0a, 0x00, 0x00, 0x00, 0xc3, // 100e case 0
+    0xb8, 0x14, 0x00, 0x00, 0x00, 0xc3, // 1014 case 1
+    0xb8, 0x1e, 0x00, 0x00, 0x00, 0xc3, // 101a case 2
+    0xb8, 0x28, 0x00, 0x00, 0x00, 0xc3, // 1020 case 3
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, // 1026 padding
+    0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3, // 1033 default
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1039 padding
+    0x0e, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1040 -> 0x100e
+    0x14, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1048 -> 0x1014
+    0x1a, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1050 -> 0x101a
+    0x20, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1058 -> 0x1020
+];
+
+/// D244: no write or call comes between the guard's load of the pointed word and the dispatch's, so
+/// the second load reads the bits the guard bounded and the walk reads four entries.
+#[test]
+fn a_guard_on_a_pointed_word_bounds_the_dispatch_that_reloads_it() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: POINTED_TABLE_SWITCH.to_vec(),
+        name: "pick",
+    };
+    let walk = r2engine::native::walk(&target, &program, BASE).expect("it walks");
+    assert!(
+        walk.body().unresolved.is_empty(),
+        "{:?}",
+        walk.body().unresolved
+    );
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(output.contains("switch ("), "{output}");
+    for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
+        assert!(output.contains(&format!("case {case}:")), "{output}");
+        assert!(output.contains(&format!("({returns});")), "{output}");
+    }
+    assert!(!output.contains("residual"), "{output}");
+}
+
+/// `POINTED_TABLE_SWITCH` with `mov [rsi], edx` at 0x1005, between the guard's load and the dispatch's:
+/// nothing proves `rsi` is not `rdi`, so the two loads are two values and the dispatch stays unresolved.
+#[test]
+fn a_store_through_an_unknown_pointer_keeps_the_pointed_loads_apart() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let mut bytes = POINTED_TABLE_SWITCH[..5].to_vec();
+    bytes.extend([0x89, 0x16]);
+    bytes.extend(&POINTED_TABLE_SWITCH[5..]);
+    // Two bytes later: the `ja` reaches the default, the dispatch its table, each entry its arm.
+    bytes[4] += 2;
+    bytes[12] += 2;
+    (0..4).for_each(|entry| bytes[0x42 + entry * 8] += 2);
+    let program = Fixture {
+        bytes,
+        name: "pick",
+    };
+    let walk = r2engine::native::walk(&target, &program, BASE).expect("it walks");
+    let stops = (walk.body().unresolved.iter())
+        .map(|stop| (stop.addr, stop.reason))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        stops,
+        vec![(0x1009, r2engine::body::UnresolvedReason::IndirectBranch)]
+    );
+}
+
 /// The guard bounds the home and the dispatch reads the home, so the bound
 /// reaches the index only if the home is one value: the parameter's home is
 /// promoted, while the saved frame pointer beside it stays a save.

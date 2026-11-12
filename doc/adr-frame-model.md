@@ -76,8 +76,20 @@ whichever load of the slot the compare read. A slot nothing escapes is promoted 
 none of this. Memory SSA cannot own the fact: the object model it is built over reads the value ranges. Cost
 `O(ops log h)` for `h` held slots: one table is walked down the chains with an undo trail, so a branch copies
 nothing, a clobber moves the table into the trail in `O(1)`, and a store to an exact slot keeps what it
-misses, looking only at the slots within 64 bytes of it; any other write drops all of it. Stack slots only: a pointer's reload is the
-same fact but a volatile or device read is not, and nothing in the IR says which.
+misses, looking only at the slots within 64 bytes of it; any other write drops all of it.
+
+A word outside the exact frame is held too (D244, 2026-11-11; this replaces "stack slots only"). Two loads of
+one width whose addresses are one constant, or one copy class plus one constant, read one place. The later is
+the earlier's bits along the same chains, and any store, call or opaque operation between them ends that:
+nothing says a pointer is outside the frame, so a frame store drops every place, in `O(1)` by starting a new
+era. The proof obligation: both loads read one address value, and no operation between them on the one path
+that joins them may write memory at all. An operation the walk cannot prove writes nothing ends the fact, and
+an unproven pair is two values (`a_store_through_an_unknown_pointer_keeps_the_pointed_loads_apart`). Places are numbered densely over the loads that share one (`O(L log L)`), so a lookup is one index. The
+premise is that no other agent writes the word between two reads no operation separates. The compiler that
+emitted `cmpl $0x16, (%rax); ja; mov (%rax), %edx; jmp *table(,%rdx,4)` took it: its table has 23 entries, and
+a volatile read is never duplicated. A program that breaks the premise reads past its own table. Measured: gzip
+`printf_fetchargs` `0x10f89`, find `0x94af` and `0xa9b0`, diff `0x76c0` (a static address) each read `4294967296
+entries` before.
 
 ## Done
 
