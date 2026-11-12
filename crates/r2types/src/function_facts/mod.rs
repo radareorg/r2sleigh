@@ -2537,6 +2537,13 @@ impl FunctionFacts {
             .then(|| crate::signature_infer::certified_parameter_pointers(source, aggregates));
         let logical = interface.parameter_logical_values();
         if logical.len() != interface.parameters().len() {
+            r2il::refusal_evidence!(
+                "exact-source-signature",
+                "{:#x}: {} logical values for {} parameters",
+                source.function().entry,
+                logical.len(),
+                interface.parameters().len()
+            );
             return false;
         }
         let spelled = self.types.merged_signature.clone();
@@ -2580,7 +2587,13 @@ impl FunctionFacts {
                     bases.insert(index, r2source::Basis::Dereferenced);
                     pointer.clone()
                 }
-                _ => {
+                pointer => {
+                    if let Some(pointer) = pointer {
+                        r2il::refusal_evidence!(
+                            "exact-source-signature",
+                            "parameter {index}: {pointer:?} is no pointer at {ty:?}'s width"
+                        );
+                    }
                     bases.insert(index, interface.types().basis);
                     ty
                 }

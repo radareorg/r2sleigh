@@ -71,6 +71,13 @@ impl Tags {
                 })
                 .collect::<BTreeMap<_, _>>();
             if defined.len() == candidates.len() {
+                for (name, definition) in stated.iter().filter(|(n, _)| !defined.contains_key(*n)) {
+                    let members = &definition.members;
+                    r2il::refusal_evidence!(
+                        "tag-undefined",
+                        "{name}: a member is unspelled: {members:?}"
+                    );
+                }
                 return Self {
                     stated,
                     defined,

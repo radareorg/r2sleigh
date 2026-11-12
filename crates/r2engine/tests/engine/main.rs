@@ -12,6 +12,7 @@ mod call_boundary;
 mod call_tables;
 mod control;
 mod conventions;
+mod declared_types;
 mod degraded;
 mod discovery;
 mod gs;
