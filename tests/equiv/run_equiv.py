@@ -40,10 +40,12 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import dataclasses
 import hashlib
 import json
 import os
 import re
+import shutil
 import sys
 import time
 from pathlib import Path
@@ -82,8 +84,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--vectors", type=int, default=48)
     parser.add_argument("--measure", choices=cost.MEASURES, default="time",
                         help="what a call's cost counts: CPU time, or retired instructions "
-                             "(perf_event_open, native runs only); each run is graded against "
-                             "its original on the same vector (cost.Cost, ADR D339)")
+                             "(perf_event_open natively, qemu's -plugin for an emulated target, "
+                             "ADR D343); each run is graded against its original on the same "
+                             "vector (cost.Cost, ADR D339)")
+    parser.add_argument("--emulator", type=Path, default=None,
+                        help="the emulator for an emulated target (default: the target's, "
+                             "on PATH), such as a qemu built with --enable-plugins")
     parser.add_argument("--timeout-ms", type=int, default=cost.DEFAULT_TIME_MS,
                         help="with --measure time, the budget B in CPU milliseconds, native "
                              "(an emulated target scales it)")
@@ -260,6 +266,12 @@ def main(argv: list[str] | None = None) -> int:
     args.out = args.out.resolve()
     args.r2s = args.r2s.resolve()
     target = by_name(args.target)
+    if target.emulated():
+        # One emulator, by its path: the cost probes it and every run runs it (the runs' PATH is
+        # /usr/bin:/bin, gate.run_driver).
+        found = shutil.which(str(args.emulator or target.emulator))
+        target = dataclasses.replace(target, emulator=str(Path(found).resolve()) if found
+                                     else str(args.emulator or target.emulator))
     if args.compilers is None:
         args.compilers = ",".join(target.compilers)
     if args.cc is None:
@@ -270,7 +282,7 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_SETUP
     try:
         run_cost = cost.resolve(args.measure, target, args.timeout_ms, args.budget_instructions,
-                                args.hang_ms)
+                                args.hang_ms, workdir=args.out / target.directory("counter"))
     except cost.CostRefused as refusal:
         print(f"equiv: {refusal}", file=sys.stderr)
         return EXIT_SETUP
@@ -318,8 +330,12 @@ def main(argv: list[str] | None = None) -> int:
                   f"{toolchain}; the statuses are not comparable. Run on the blessed "
                   "toolchain, or bless a baseline for this one.")
             return EXIT_RATCHET
-    counts = "an emulated guest is not counted" if target.emulated() else (
-        cost.probe() or "counts instructions")
+    if run_cost.counter == "qemu" and run_cost.measure == "instructions":
+        counts = f"guest instructions counted by {target.emulator} -plugin {run_cost.plugin.name}"
+    elif target.emulated():
+        counts = "an emulated guest is not counted"
+    else:
+        counts = cost.probe() or "counts instructions"
     print(f"host: {host_cpu()}, {os.cpu_count()} processors, {max(1, args.jobs)} jobs; "
           f"{counts}", file=sys.stderr, flush=True)
     binaries = build.build_all(sources, args.compilers.split(","), args.opts.split(","),

@@ -256,8 +256,8 @@ build, never a binary graded under the wrong ABI.
 | a function link | `movabs $addr, %r11; jmp *%r11` | `movz/movk x16, addr; br x16` | as x86-64; a PE import is its thunk |
 | an object link | `.set name, addr` | the same, bound by the loader (below) | the same, bound by the loader (below) |
 | guard, residual trap | `int3`, `ud2` (SIGILL) | `brk #0`, `brk` (SIGTRAP) | as x86-64 |
-| runner | `setarch -R env VAR=... prog` | `setarch -R qemu-aarch64 -L /usr/aarch64-linux-gnu -seed 1 -E VAR=... prog` | `setarch -R env VAR=... EQUIV_PE=a.exe pe_host` |
-| per-call budget | `--budget-instructions`, or `--timeout-ms` of CPU under `--measure time` (each run's allowance against its original: Cost, below) | `--measure time` only, five times `--timeout-ms` | as x86-64 |
+| runner | `setarch -R env VAR=... prog` | `setarch -R qemu-aarch64 -L /usr/aarch64-linux-gnu -seed 1 [-plugin qemu_count.so] -E VAR=... prog` | `setarch -R env VAR=... EQUIV_PE=a.exe pe_host` |
+| per-call budget | `--budget-instructions`, or `--timeout-ms` of CPU under `--measure time` (each run's allowance against its original: Cost, below) | `--budget-instructions` counted by qemu's plugin (`--emulator` a qemu built with `--enable-plugins`), or five times `--timeout-ms` | as x86-64 |
 | `DT_NEEDED` libraries | as `ldd` resolves them | the files in the sysroot | none: imports bind to the runtime's shims |
 | keys, baseline | `gcc-O0`, `baseline.json` | `aarch64-gcc-O0`, `baseline-aarch64.json` | `win64-clang-cl-O0`, `baseline-win64.json` |
 
@@ -312,7 +312,8 @@ machine, so a faster or slower runner of one model moves both. Below it a cost i
 to compare, so `B/k` (`-O2`) and `B` (unoptimised) are floors. The runtime writes each run's cost as `cost` to `result.jsonl`
 (kept by `--keep`), never into a record, since a cost varies in its last
 digits. Wall-clock time (`--hang-ms`, 120 s, plus four times the allowance
-under `time`) only ends a run that does not run, a blocked call: that run is
+under `time`, or a millisecond per 100,000 instructions of it under qemu's
+counter) only ends a run that does not run, a blocked call: that run is
 `hang`, which grades nothing (an original that hangs is dropped, a rendering
 that does leaves the vector ungraded and the record `harness-error`).
 
@@ -327,6 +328,18 @@ that does leaves the vector ungraded and the record `harness-error`).
   in 3.3 billion); a CPU model does (libc picks its string routines by CPU
   feature), so a baseline is blessed on the kind of runner that grades it.
   `--budget-instructions` is 4 billion.
+- `--measure instructions` on an emulated target counts the guest
+  instructions qemu-user executes, by `rt/qemu_count.c`, a TCG plugin the
+  harness builds against the `qemu-plugin.h` installed beside the emulator
+  (ADR D343). Ubuntu 24.04's qemu-user 8.2.2 has no `-plugin`; CI builds qemu
+  8.2.2 with `--enable-plugins` and caches it. The runtime asks the plugin
+  through a syscall number no kernel defines: it zeroes the count before the
+  call and reads it after, through a file whose descriptor the guest and host
+  share. Each translation block adds its instruction count as it starts, so a
+  count is the same on every run and every host for one qemu build; past the
+  allowance the plugin sends `SIGPWR`, and the runtime calls it the budget
+  only when the count it reads is past the allowance. A baseline states its
+  `counter` (`perf` or `qemu`), and `cost.departure` refuses the other.
 - `--measure time` (the default) counts the CPU time of the call
   (`CLOCK_PROCESS_CPUTIME_ID`, stopped by `ITIMER_PROF`, which counts by the
   kernel's ticks and is re-armed for the rest when it expires short of the

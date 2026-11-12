@@ -238,7 +238,7 @@ struct equiv_ret {
 
 extern void equiv_call(void *fn, const struct equiv_regs *in, struct equiv_ret *out);
 
-#define JOB_MAGIC "EQVJOB04"
+#define JOB_MAGIC "EQVJOB05"
 
 enum ret_kind { RET_VOID = 0, RET_INT = 1, RET_F32 = 2, RET_F64 = 3, RET_INT128 = 4 };
 
@@ -256,6 +256,8 @@ struct job_header {
     uint32_t ret_bytes;
     uint32_t out_cap;         /* bytes of fd 1 and of fd 2 kept per run */
     uint32_t measure;         /* MEASURE_*: what a cost counts */
+    uint32_t counter;         /* COUNTER_*: what counts instructions */
+    uint32_t guard_per_ms;    /* the wall guard's extra ms is the allowance over this; 0: none */
     /* Costs in ticks: instructions, or CPU nanoseconds under MEASURE_TIME (cost.Cost). */
     uint64_t original_guard;  /* the original's allowance; past it the vector is outside the domain */
     uint64_t floor;           /* run r's allowance is factor_r x max(the original's cost, floor) */
@@ -265,7 +267,9 @@ struct job_header {
 
 /* doc/adr-verified-layers.md D38, D339. */
 enum measure { MEASURE_TIME = 0, MEASURE_INSTRUCTIONS = 1 };
-_Static_assert(sizeof(struct job_header) == 104, "the job header layout (vectors.encode_job)");
+/* perf_event_open in this process, or rt/qemu_count.c in the emulator running it (ADR D343). */
+enum counter { COUNTER_PERF = 0, COUNTER_QEMU = 1 };
+_Static_assert(sizeof(struct job_header) == 112, "the job header layout (vectors.encode_job)");
 
 struct job_run {
     uint64_t address;         /* called directly when so_path is empty */
@@ -516,6 +520,7 @@ static void child_capture(int how)
 #define DAY_US 86400000000ull  /* no timer is armed past a day */
 
 static int g_counter = -1;
+static int g_qemu_fd = -1;  /* COUNTER_QEMU: the file rt/qemu_count.c writes a count to */
 static uint64_t g_allowance;
 static int g_cost_fake;
 static uint64_t g_cost_fake_value;
@@ -535,6 +540,37 @@ static void cost_fake(uint64_t value)
 {
     g_cost_fake = 1;
     g_cost_fake_value = value;
+}
+
+/* rt/qemu_count.c's syscall and operations. */
+#define COUNTER_SYSCALL 0x4551
+enum { COUNTER_OP_HELLO = 1, COUNTER_OP_ARM = 2, COUNTER_OP_SETTLE = 3 };
+
+/* Stops the emulator's count and reads it; async-signal-safe. */
+static uint64_t qemu_settle(void)
+{
+    uint64_t count = 0;
+    /* Zeroed first: a settle the plugin never saw reads as no count, not the last child's. */
+    if (pwrite(g_qemu_fd, &count, sizeof count, 0) != (ssize_t)sizeof count)
+        return 0;
+    syscall(COUNTER_SYSCALL, COUNTER_OP_SETTLE, g_qemu_fd);
+    if (pread(g_qemu_fd, &count, sizeof count, 0) != (ssize_t)sizeof count)
+        count = 0;
+    return count;
+}
+
+/* Whether the emulator's counter answers: it writes its greeting to a file of ours. */
+static int qemu_hello(void)
+{
+    char said[8] = { 0 };
+    g_qemu_fd = memfd_create("equiv-counter", MFD_CLOEXEC);
+    if (g_qemu_fd < 0)
+        return errno;
+    syscall(COUNTER_SYSCALL, COUNTER_OP_HELLO, g_qemu_fd);
+    if (pread(g_qemu_fd, said, sizeof said, 0) != (ssize_t)sizeof said
+        || memcmp(said, "EQCOUNT1", sizeof said) != 0)
+        return ENOSYS;
+    return 0;
 }
 
 static int counter_arm(uint64_t budget)
@@ -580,6 +616,8 @@ static void cost_start(void)
     if (g_head.measure == MEASURE_INSTRUCTIONS) {
         if (g_counter >= 0)
             ioctl(g_counter, PERF_EVENT_IOC_REFRESH, 1);
+        else if (g_qemu_fd >= 0)
+            syscall(COUNTER_SYSCALL, COUNTER_OP_ARM, g_allowance);
         return;
     }
     /* ITIMER_PROF counts the process's CPU time, so a loaded host does not move it. */
@@ -603,6 +641,10 @@ static void cost_settle(void)
             cost = 0;
         close(g_counter);
         g_counter = -1;
+    } else if (g_qemu_fd >= 0) {
+        cost = qemu_settle();
+        if (cost == 0)  /* the thunk alone is a block: no count is a counter that failed */
+            g_child_slot->counter_error = EIO;
     }
     if (g_cost_fake)
         cost = g_cost_fake_value;
@@ -618,7 +660,8 @@ static void cost_settle(void)
 static void child_budget(int sig, siginfo_t *info, void *context)
 {
     (void)context;
-    if (g_budget_raised || (info->si_code > 0 && g_counter >= 0 && info->si_fd == g_counter))
+    if (g_budget_raised || (info->si_code > 0 && g_counter >= 0 && info->si_fd == g_counter)
+        || (g_in_call && g_qemu_fd >= 0 && qemu_settle() > g_allowance))
         g_child_slot->budget_signal = 1;
     raise(sig);  /* SA_RESETHAND restored the default action, which runs on return */
 }
@@ -832,8 +875,9 @@ static void child_run(struct run_state *run, const struct job_vector *vec, uint6
     sigprocmask(SIG_SETMASK, &none, NULL);
     /* The wall clock only ends a call that does not run: one blocked, or starved of CPU. */
     uint64_t guard_ms = g_head.hang_ms;
-    if (g_head.measure == MEASURE_TIME)
-        guard_ms += 4 * (allowance > DAY_US * 1000 ? DAY_US / 1000 : allowance / 1000000);
+    if (g_head.guard_per_ms)
+        guard_ms += allowance / g_head.guard_per_ms > DAY_US / 1000
+            ? DAY_US / 1000 : allowance / g_head.guard_per_ms;
     struct rlimit cpu;
     cpu.rlim_cur = (rlim_t)(guard_ms / 1000) * 2 + 2;
     cpu.rlim_max = cpu.rlim_cur + 1;
@@ -844,7 +888,7 @@ static void child_run(struct run_state *run, const struct job_vector *vec, uint6
     int faked = g_head.fake_original || g_head.fake_rendering;
     if (faked && (run->spec->replaces || run->spec->so_path[0] == '\0'))
         cost_fake(run->spec->replaces ? g_head.fake_rendering : g_head.fake_original);
-    if (g_head.measure == MEASURE_INSTRUCTIONS && !faked) {
+    if (g_head.measure == MEASURE_INSTRUCTIONS && !faked && g_head.counter == COUNTER_PERF) {
         int error = counter_arm(allowance);
         if (error) {
             run->slot->counter_error = error;
@@ -937,7 +981,8 @@ static void run_one(struct run_state *run, const struct job_vector *vec, uint64_
 
     if (run->slot->counter_error) {
         run->outcome = OUT_UNAVAILABLE;
-        snprintf(run->load_error, sizeof run->load_error, "perf_event_open: %s",
+        snprintf(run->load_error, sizeof run->load_error, "%s: %s",
+                 g_head.counter == COUNTER_QEMU ? "qemu_count.so" : "perf_event_open",
                  strerror(run->slot->counter_error));
         return;
     }
@@ -1254,7 +1299,17 @@ static int equiv_main(int argc, char **argv, char **envp)
         return die("cannot map the arena at its fixed address");
     g_arena = arena;
 
-    if (g_head.measure == MEASURE_INSTRUCTIONS && !g_head.fake_original && !g_head.fake_rendering) {
+    if (g_head.measure == MEASURE_INSTRUCTIONS && !g_head.fake_original && !g_head.fake_rendering
+        && g_head.counter == COUNTER_QEMU) {
+        int error = qemu_hello();
+        if (error) {
+            char what[160];
+            snprintf(what, sizeof what, "no instruction counter in the emulator (qemu -plugin "
+                     "qemu_count.so): %s", strerror(error));
+            return die(what);
+        }
+    } else if (g_head.measure == MEASURE_INSTRUCTIONS && !g_head.fake_original
+               && !g_head.fake_rendering) {
         int error = counter_arm(1);
         if (error) {
             char what[160];

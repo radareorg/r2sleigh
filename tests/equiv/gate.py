@@ -65,7 +65,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import link
-from cost import Cost
+from cost import DAY_MS, Cost
 from dwarf import Dwarf
 from r2s_batch import Answer
 from spec import CallSpec
@@ -102,7 +102,7 @@ class Config:
         """Seconds the runtime may take for these vectors before it is presumed stuck:
         every run of every vector ending at its guard."""
         per_vector_ms = self.cost.worst_vector_ms(len(RUN_LABELS))
-        return max(120.0, vector_count * per_vector_ms / 1000.0 + 60.0)
+        return min(DAY_MS / 1000.0, max(120.0, vector_count * per_vector_ms / 1000.0 + 60.0))
 
     def floor(self) -> int:
         """How many graded vectors an ``equal`` or ``residual-trap`` must rest on.
@@ -315,7 +315,8 @@ def run_driver(binary: Path, job: Path, out: Path, config: Config,
         *config.target.program_environment(binary),
     ]
     program = config.target.host_program(binary, config.runtime)
-    argv = [*fixed_layout_prefix(), *config.target.run_argv(program, assignments)]
+    argv = [*fixed_layout_prefix(),
+            *config.target.run_argv(program, assignments, config.cost.plugin)]
     budget = config.driver_ceiling(vector_count)
     out.unlink(missing_ok=True)
     try:

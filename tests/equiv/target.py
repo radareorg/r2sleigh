@@ -373,7 +373,8 @@ class Target:
         """
         return self.emulator_slowdown if self.emulated() else 1
 
-    def run_argv(self, program: Path, environment: list[str]) -> list[str]:
+    def run_argv(self, program: Path, environment: list[str],
+                 plugin: Path | None = None) -> list[str]:
         """The command that runs ``program`` of this target with ``environment`` set in it.
 
         Natively, ``env(1)`` sets the variables as the last program before the
@@ -386,6 +387,8 @@ class Target:
         if not self.emulated():
             return ["/usr/bin/env", *environment, str(program)]
         argv = [str(self.emulator), *self.emulator_args]
+        if plugin is not None:
+            argv += ["-plugin", str(plugin)]
         for assignment in environment:
             if "," in assignment:
                 raise ValueError(f"qemu -E cannot pass a value with a comma: {assignment}")

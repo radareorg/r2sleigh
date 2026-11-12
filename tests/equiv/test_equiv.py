@@ -783,13 +783,49 @@ class CostTests(unittest.TestCase):
     EMULATED = dataclasses.replace(AARCH64, native_machines=())
     NATIVE = dataclasses.replace(X86_64, native_machines=(os.uname().machine,))
 
-    def test_an_emulated_target_cannot_count_instructions_and_says_why(self):
-        with self.assertRaises(cost.CostRefused) as refused:
-            cost.resolve("instructions", self.EMULATED, counter=lambda: None)
-        self.assertIn("qemu-aarch64", str(refused.exception))
+    @staticmethod
+    def emulator(root: Path, plugins: bool) -> Path:
+        """A stand-in qemu that prints a help with or without ``-plugin``."""
+        (root / "bin").mkdir(parents=True)
+        program = root / "bin" / "qemu-aarch64"
+        shown = "-plugin              QEMU_PLUGIN" if plugins else "-seed number"
+        program.write_text(f"#!/bin/sh\nprintf '%s\\n' '{shown}'\n")
+        program.chmod(0o755)
+        return program
+
+    def test_an_emulator_without_plugins_cannot_count_instructions_and_says_why(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = self.emulator(Path(tmp), plugins=False)
+            target = dataclasses.replace(self.EMULATED, emulator=str(stub))
+            with self.assertRaises(cost.CostRefused) as refused:
+                cost.resolve("instructions", target, workdir=Path(tmp) / "w",
+                             counter=lambda: None)
+        self.assertIn("no -plugin", str(refused.exception))
         self.assertIn("--measure time", str(refused.exception))
         # The time measure scales for the emulator, as it always did.
         self.assertEqual(cost.resolve("time", self.EMULATED, 1000).budget, 5000)
+
+    def test_an_emulator_with_plugins_needs_the_header_it_installs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            stub = self.emulator(Path(tmp), plugins=True)
+            target = dataclasses.replace(self.EMULATED, emulator=str(stub))
+            with self.assertRaises(cost.CostRefused) as refused:
+                cost.resolve("instructions", target, workdir=Path(tmp) / "w")
+            self.assertIn(str(Path(tmp).resolve() / "include" / "qemu-plugin.h"),
+                          str(refused.exception))
+
+    def test_qemu_counts_under_its_own_counter_and_guard(self):
+        counted = cost.Cost("instructions", 4_000_000_000, counter="qemu")
+        self.assertEqual(counted.to_json()["counter"], "qemu")
+        self.assertEqual(counted.guard_ticks_per_ms(), 100_000)
+        # A run's wall guard grows with its allowance under qemu; perf's stays hang_ms.
+        perf = cost.Cost("instructions", 4_000_000_000)
+        self.assertEqual(perf.worst_vector_ms(6), 6 * perf.hang_ms)
+        self.assertGreater(counted.worst_vector_ms(6),
+                           6 * counted.hang_ms + counted.original_guard() // 100_000)
+        argv = AARCH64.run_argv(Path("/w/prog"), ["EQUIV_JOB=/w/job"], Path("/w/qemu_count.so"))
+        if AARCH64.emulated():
+            self.assertEqual(argv[-3:], ["-plugin", "/w/qemu_count.so", "/w/prog"])
 
     def test_a_host_that_cannot_count_refuses_instead_of_grading_by_time(self):
         with self.assertRaises(cost.CostRefused) as refused:
@@ -842,6 +878,17 @@ class CostTests(unittest.TestCase):
         self.assertIn("budget", cost.departure(baseline, cost.Cost("time", 5000)))
         # A baseline that says nothing is not one any measure may be held to.
         self.assertIsNotNone(cost.departure({}, cost.Cost("time", 1000)))
+        # Instructions counted by qemu's plugin are not perf's (ADR D343); a baseline that
+        # names no counter was counted by perf (baseline-win64.json).
+        by_qemu = cost.Cost("instructions", 7, counter="qemu")
+        self.assertIsNone(cost.departure({"cost": by_qemu.to_json()}, by_qemu))
+        self.assertIn("counted by qemu", cost.departure(
+            {"cost": by_qemu.to_json()}, cost.Cost("instructions", 7)))
+        self.assertIn("counted by perf", cost.departure(
+            {"cost": {"measure": "instructions", "budget": 7, "factor": 4}}, by_qemu))
+        self.assertIsNone(cost.departure(
+            {"cost": {"measure": "instructions", "budget": 7, "factor": 4}},
+            cost.Cost("instructions", 7)))
 
     def test_shards_that_counted_differently_are_not_merged(self):
         def shard(tmp: Path, name: str, counted: dict) -> Path:
@@ -857,6 +904,11 @@ class CostTests(unittest.TestCase):
             same = shard(tmp, "b.json", cost.Cost("time", 1000).to_json())
             other = shard(tmp, "c.json", cost.Cost("instructions", 1000).to_json())
             absolute = shard(tmp, "d.json", {"measure": "time", "budget": 1000})
+            perf = shard(tmp, "e.json", cost.Cost("instructions", 1000).to_json())
+            qemu = shard(tmp, "f.json", cost.Cost("instructions", 1000, counter="qemu").to_json())
+            self.assertEqual(merge_shards.load_records([qemu])[3].counter, "qemu")
+            with self.assertRaises(ValueError):
+                merge_shards.load_records([perf, qemu])
             self.assertEqual(merge_shards.load_records([time_shard, same])[3],
                              cost.Cost("time", 1000))
             with self.assertRaises(ValueError) as refused:
@@ -869,7 +921,8 @@ class CostTests(unittest.TestCase):
         counted = cost.Cost("instructions", 5)
         record = gate.Record(key="a::gcc-O0::f", function="f", address=0, status="equal",
                              cost=counted.to_json())
-        stated = {"measure": "instructions", "budget": 5, "factor": cost.RENDERING_FACTOR}
+        stated = {"measure": "instructions", "budget": 5, "factor": cost.RENDERING_FACTOR,
+                  "counter": "perf"}
         self.assertEqual(record.to_json()["cost"], stated)
         proposed = gate.baseline_from([record], None, None, counted)
         self.assertEqual(proposed["cost"], stated)
@@ -972,27 +1025,31 @@ class TargetTests(unittest.TestCase):
         self.assertIn("vfprintf:\n    movabs $0x1400056d0, %r11\n    jmp *(%r11)\n", through)
 
     def test_the_job_header_carries_each_run_s_allowance_in_ticks(self):
-        # struct job_header in rt/equiv_rt.c: 104 bytes; struct job_run's factor (ADR D339).
+        # struct job_header in rt/equiv_rt.c: 112 bytes; struct job_run's factor (ADR D339).
         spec = CallSpec(name="f", address=0x1000, params=[], ret_kind="int", ret_bytes=4,
                         ret_spelling="int")
         k = cost.RENDERING_FACTOR
         counted = cost.Cost("instructions", 3_000_000_000, hang_ms=7000, fake_original=5,
                             fake_rendering=6)
         header = encode_job(spec, [], [], [], counted)
-        self.assertEqual(len(header), 104)
+        self.assertEqual(len(header), 112)
         self.assertEqual(header[:8], JOB_MAGIC)
-        fields = struct.unpack("<8sQQQQ8IQQQQ", header)
-        self.assertEqual((fields[8], fields[12]), (7000, 1))
-        self.assertEqual(fields[13:], (k * k * 3_000_000_000, 3_000_000_000 // (k * k), 5, 6))
+        fields = struct.unpack("<8sQQQQ10IQQQQ", header)
+        # The measure, its counter (perf) and the wall guard's ticks per ms (none).
+        self.assertEqual((fields[8], fields[12], fields[13], fields[14]), (7000, 1, 0, 0))
+        self.assertEqual(fields[15:], (k * k * 3_000_000_000, 3_000_000_000 // (k * k), 5, 6))
+        by_qemu = struct.unpack("<8sQQQQ10IQQQQ", encode_job(
+            spec, [], [], [], dataclasses.replace(counted, counter="qemu")))
+        self.assertEqual(by_qemu[12:15], (1, 1, 100_000))
         # CPU time is carried in nanoseconds; the budget states milliseconds.
-        timed = struct.unpack("<8sQQQQ8IQQQQ", encode_job(
+        timed = struct.unpack("<8sQQQQ10IQQQQ", encode_job(
             spec, [], [], [], cost.Cost("time", 1000, fake_original=2)))
-        self.assertEqual((timed[12],) + timed[13:],
-                         (0, k * k * 10**9, 10**9 // (k * k), 2 * 10**6, 0))
+        self.assertEqual(timed[12:15] + timed[15:],
+                         (0, 0, 250_000, k * k * 10**9, 10**9 // (k * k), 2 * 10**6, 0))
         # The -O2 build and the identity get the factor; the unoptimised builds its square.
         self.assertEqual((cost.Cost.factor(True), cost.Cost.factor(False)), (k, k * k))
         run = encode_job(spec, [Run("O2", so_path="x.so", symbol="f", replaces=True,
-                                    factor=k)], [], [], counted)[104:]
+                                    factor=k)], [], [], counted)[112:]
         self.assertEqual(struct.unpack_from("<QII", run), (0, 1, k))
 
     def test_function_links_jump_through_a_register_no_argument_uses(self):
@@ -1892,18 +1949,22 @@ class _PipelineCases(_OnTarget):
         with tempfile.TemporaryDirectory() as tmp_text:
             tmp = Path(tmp_text)
             if self.TARGET.emulated():
-                cwd = os.getcwd()
-                os.chdir(tmp)
                 try:
-                    code = run_equiv.main(["--measure", "instructions", "--target",
-                                           self.TARGET.name, "--out", "out"])
-                finally:
-                    os.chdir(cwd)
-                self.assertEqual(code, run_equiv.EXIT_SETUP)
-                return
-            reason = cost.probe()
-            if reason:
-                self.skipTest(reason)
+                    cost.qemu_plugin(self.TARGET, tmp / "probe")
+                except cost.CostRefused:
+                    cwd = os.getcwd()
+                    os.chdir(tmp)
+                    try:
+                        code = run_equiv.main(["--measure", "instructions", "--target",
+                                               self.TARGET.name, "--out", "out"])
+                    finally:
+                        os.chdir(cwd)
+                    self.assertEqual(code, run_equiv.EXIT_SETUP)
+                    return
+            else:
+                reason = cost.probe()
+                if reason:
+                    self.skipTest(reason)
             written = []
             for _ in range(2):
                 _, records = self.run_gate(tmp, "--opts", "O2", "--measure", "instructions",
