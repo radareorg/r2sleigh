@@ -331,9 +331,8 @@ fn a_row_is_keyed_by_the_name_a_program_links() {
     );
 }
 
-/// glibc's `open` family reads its mode where `__OPEN_NEEDS_MODE` holds (glibc 2.39 `<fcntl.h>`),
-/// whose `__O_TMPFILE` holds each architecture's `__O_DIRECTORY`; another library states only
-/// `...`, and `prctl` is variadic everywhere (RULING 2.2, 2.3).
+/// glibc's `open` family reads its mode where `__OPEN_NEEDS_MODE` holds, its bits per architecture;
+/// another library states only `...`, and `prctl` is `...` (RULING 2.2, 2.3).
 #[test]
 fn only_glibc_counts_the_mode_open_reads() {
     use r2abi::{FlagBits, FlagTest};

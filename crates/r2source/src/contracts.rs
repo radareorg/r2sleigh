@@ -189,9 +189,8 @@ pub struct SourceAbiParameterSpec {
     slot: Option<SourceSlot>,
 }
 
-/// One parameter's convention slot: its dense number in convention order (integer registers, then
-/// float registers, then the stack; r2ssa `body_boundary::SlotId`), its section, and the basis of
-/// its type: `DebugInfo` or `Declared` state one, every other basis only a width (D261).
+/// One parameter's convention slot (r2ssa `body_boundary::SlotId`), its section, and its type's
+/// basis: `DebugInfo` or `Declared` state a type, any other only a width (D261).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SourceSlot {
     pub id: u32,

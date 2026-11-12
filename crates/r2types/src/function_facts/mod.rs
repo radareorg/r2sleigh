@@ -2528,8 +2528,7 @@ impl FunctionFacts {
         let Some(graph) = interface.type_graph() else {
             return false;
         };
-        // A slot whose basis states no type holds a width. A declared callee slot it is handed to
-        // types it (D262), else a certified access through it makes it a pointer to what it reads;
+        // A width-only slot takes a declared callee slot's pointer (D262), else a certified access's;
         // the solver's own guesses at pointers and signedness are not proof.
         let slot_basis = |index: usize| {
             (interface.parameters().get(index))

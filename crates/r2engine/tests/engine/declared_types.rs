@@ -1,6 +1,5 @@
-//! What a declaration states about a slot reaches the rendering: a counted tail passes exactly the
-//! arguments its library body reads, and a structure a stripped parameter lays out is spelled
-//! (ROADMAP D261 to D264, S28).
+//! What a declaration states about a slot reaches the rendering: declared pointers, a counted tail,
+//! a stripped parameter's structure (ROADMAP D261 to D264, S28).
 
 use crate::common;
 
@@ -111,9 +110,8 @@ fn prctl_states_only_its_ellipsis() {
     assert_eq!(common::call_arguments(&naming, "prctl"), None, "{naming}");
 }
 
-/// pigz `free_pool` stripped, cut down: `free(pool->head->link); return pool->made;` after `.plt`.
-/// The field at 8 is solved a pointer to a word of no stated sign, which left the structure the
-/// parameter's accesses lay out undefined and the parameter `uint64_t` (D74).
+/// pigz `free_pool` stripped, cut down: `free(pool->head->link); return pool->made;`. The field at
+/// 8 was a pointer to a word of no stated sign, so the structure stayed undefined (D74).
 const POOL: [u8; 0x3f] = plt_then(&[
     0x55, // 1020 push rbp
     0x53, // 1021 push rbx

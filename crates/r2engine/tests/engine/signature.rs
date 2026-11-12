@@ -236,9 +236,8 @@ fn x86_64_declared(import: &str) -> String {
     declared.map(str::trim).unwrap_or(&text).to_owned()
 }
 
-/// A row's `wchar_t` and `char` take the target's sign: unsigned under AAPCS64 glibc, signed
-/// under SysV x86-64; with no C library stated, nothing states `wchar_t`, so the pointer to it
-/// passes as `void*` (D263).
+/// A row's `wchar_t` and `char` take the target's sign (AAPCS64 glibc unsigned, SysV x86-64
+/// signed); with no C library, nothing states `wchar_t` and its pointer passes as `void*` (D263).
 #[test]
 fn a_rows_wchar_t_and_char_are_the_targets() {
     assert_eq!(
