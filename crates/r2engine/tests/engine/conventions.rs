@@ -338,7 +338,17 @@ fn built_on(sleigh: &str, bits: u32) -> Vec<(String, ConventionModel)> {
     for (row, compiler, profile) in read {
         for kernel in KERNELS {
             let name = format!("{sleigh}/{compiler}/{:?}/{kernel:?}", row.id);
-            let at = (kernel, library(kernel), Some(0x1000));
+            // Each container form a row can name: a load-config cookie and a linked guard.
+            let guards = r2engine::native::ContainerGuards {
+                cookie: Some(0x1000),
+                linked: Some(r2source::SourceLinkedGuard {
+                    copy: Some(0x1010),
+                    slots: Box::new([0x1018]),
+                    slot_width: bits / 8,
+                    width: bits / 8,
+                }),
+            };
+            let at = (kernel, library(kernel), guards);
             if let Ok(model) = convention_model(&machine.arch, bits, at, &profile, row) {
                 built.push((name, model));
             }
