@@ -233,13 +233,15 @@ fn an_aarch64_argument_passed_through_a_call_is_never_void() {
     assert!(text.contains("EntryInput"), "{text}");
 }
 
-/// `narrow` is `mov eax, edi; ret`. `stores` zeroes XMM0, calls it, stores EAX and writes EAX: RAX
-/// and XMM0 are both written at its return, so its result is unproven. `stores_whole` stores RAX.
+/// `narrow` writes EAX on one return path and leaves RAX unwritten on the other: no fill above.
+/// `stores` writes XMM0 and EAX, so its result is unproven; `stores_whole` stores RAX whole.
 const UNREAD_ABOVE: &[u8] = &[
-    0x89, 0xf8, // 1000 mov eax, edi
-    0xc3, // 1002 ret
-    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0x66, 0x0f, 0xef,
-    0xc0, // 1010 pxor xmm0, xmm0
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x04, // 1002 je 0x1008
+    0x8d, 0x04, 0x7f, // 1004 lea eax, [rdi + rdi*2]
+    0xc3, // 1007 ret
+    0xc3, // 1008 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0x66, 0x0f, 0xef, 0xc0, // 1010 pxor xmm0, xmm0
     0xe8, 0xe7, 0xff, 0xff, 0xff, // 1014 call 0x1000
     0x89, 0x06, // 1019 mov dword ptr [rsi], eax
     0xb8, 0x01, 0x00, 0x00, 0x00, // 101b mov eax, 0x1
@@ -255,7 +257,7 @@ const UNREAD_ABOVE: &[u8] = &[
 
 fn unread_above(at: u64) -> String {
     let functions = &[
-        ("narrow", BASE, 0x03),
+        ("narrow", BASE, 0x09),
         ("stores", BASE + 0x10, 0x11),
         ("stores_whole", BASE + 0x30, 0x12),
     ];
