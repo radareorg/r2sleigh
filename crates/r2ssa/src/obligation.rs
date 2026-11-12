@@ -2053,9 +2053,8 @@ fn seed_value_definition(
     }
 }
 
-/// Seed each definition a live instruction reads, and state the in-edges of its block each live
-/// instruction is read under (`crate::edge_fold`): a merge arm outside them is read by no path.
-/// An instruction is taken again only when its in-edges grow, at most 65 times.
+/// Seed each definition a live instruction reads, and state the in-edges each is read under
+/// (`crate::edge_fold`); one is taken again only when its in-edges grow, at most 65 times.
 fn propagate_live_dependencies(
     graph: &SsaGraph,
     ((direct, inserted), whole): (

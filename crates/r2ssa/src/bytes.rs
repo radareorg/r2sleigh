@@ -329,8 +329,7 @@ fn observed_input_bytes(
 ///
 /// A mask only grows, by union, and is trimmed to its value's width, so a
 /// value is queued again only when it gains a byte or saturates -- at most 65
-/// times -- and the walk stays linear in the graph's edges.
-/// A value is read under a set of its block's in-edges, which only grows too (65 more).
+/// times -- and the walk stays linear in the graph's edges; its in-edge set grows as often.
 pub(crate) fn closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>) -> Closure {
     closure_of(graph, roots.into_iter().map(|value| (value, ByteMask::All)))
 }
