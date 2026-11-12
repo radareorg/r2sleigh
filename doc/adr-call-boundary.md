@@ -1240,3 +1240,36 @@ On S31a, S20 and S18 (rebased onto `f301c8646`, 2026-11-11; tests, goldens, Dyli
 - `either` builds through `new`. The join of Microsoft x64 and SysV named rcx, rdx, r8 and r9 twice and failed the slots' check, which nothing read. It now keeps each register in its first position. Its effect is unchanged: the views read the locations as a set.
 - A call under no model (ruling 2.1): r2ssa `Arch::{call_reads, call_clobbered, call_effect_on}` take `Option<&ConventionModel>`. Under `None` or a refused effect every outermost register is read and clobbered, and none is preserved or reserved. `SourceMachineContext::result_slot`'s fallback to `Arch::result_slot` stays until step 8.
 - `native::convention_model` reads no view, so D309's allowlist falls from 131 to 130 (134 to 133 before S25 removed three readers).
+
+## S27 as built (2026-11-12)
+
+`GuardRow::LinkedGlobal` (D257). AArch64 reads its canary from a global, and only a binding the container states places it.
+
+- r2abi: `GuardRow::LinkedGlobal(LinkedGuard { symbol, width, citation })` for `(arm, 64)` under glibc, musl and bionic, all `__stack_chk_guard`, 8 bytes. glibc defines it in ld.so (`elf/rtld.c`, exported at `GLIBC_2.17`) because the AArch64 thread control block keeps no guard. GCC reads the global by default (`-mstack-protector-guard=global`). The x86 bionic rows stay `ThreadSlot`, as LLVM reads the TLS slot there.
+- r2engine `stated::linked_guard` reads the binding from the container once per convention model, O(W + R):
+  - a word the loader writes the import's address into (`WriteKind::Import`, `Encoding::Word`, pointer wide, never `Writable`), the predicate `sealed_import` uses for a call;
+  - the one `R_*_COPY` record naming the symbol, at the copy's own address. Two copies state no place.
+  - A defined symbol of that name binds nothing (`a_defined_symbol_named_like_the_guard_binds_nothing`). A static link keeps only that symbol, so its canary stays a residual (D259).
+- `ContainerGuards { cookie, linked }` carries both container facts into `convention_model`. `forms` places each only where the row names its kind, as S17 did for the cookie. r2source `BoundaryForms::linked_guard: Option<SourceLinkedGuard { copy, slots, slot_width, width }>`.
+- r2ssa `stack_protector::decide` reads the guard as `Guard::Slot` (the call effect's `stack_guard`, as before) or `Guard::Linked` (the model's forms: no new `SourceCallEffect` reader, D309). One proof decides both: `Guard::read` takes a load at the copy's address, or a load at offset 0 from a load of one bound word. Every load of a sealed word holds one address, so clang's second GOT load reaches the same guard. The `Affine` equality between the two sides is gone; both sides are reads of the one stated guard.
+- The rereads in the checking block now match by `Guard::read`, width included. Before they matched by address alone.
+- A word load is recorded compiler-inserted only when every reader is an inserted operation (`unread_words`, after the address temporaries are taken). A word another reader sees stays a load. A rewritten reread's address temporaries are walked as well (`inserted_addresses`'s `from`). Without that, clang's second GOT load rendered as `(void)r2sleigh_load_u64(0x1080)`.
+- `unchecked` (a body that never returns) takes the linked guard through the same `Guard::read`.
+
+Found:
+
+- LLVM reads Android AArch64's canary at `tpidr_el0 + 0x28` (AArch64ISelLowering `getIRStackGuard`, bionic `TLS_SLOT_STACK_GUARD`). Bionic's row here is GCC's global. A second, TLS row for bionic is D258. radare2's `ls-toybox` (bionic, LLVM) has no stack protector at all.
+- The equivalence corpora build with no stack protector: no aarch64 record reads `__stack_chk_guard`.
+
+Gates, release r2s, base `ca413c45c` (master):
+
+- Engine tests (`linked_guard.rs`, an in-memory AArch64 glibc ELF): clang -O2's check through a sealed GOT slot bound to `__stack_chk_guard` is elided, and the proof line has no residual or unaccounted obligation. The `-fno-pic` check at an `R_AARCH64_COPY` of it is elided too. A defined symbol of that name at the word, a writable slot, and an ELF that names no C library each keep the reads and the call.
+- radare2 `test/bins/elf/gnome-extensions` (glibc AArch64 PIE, `R_AARCH64_GLOB_DAT __stack_chk_guard` at `0x1fff0` in the RELRO `.got`), `aa; pdd` of every `afl` function: 9 functions move, 1,046 lines. Each elides its check: 4 to 9 obligations `compiler-inserted (assuming ub-free)`, and the `__stack_chk_fail` call and its extern are gone. Read by hand:
+  - `fcn_57a4` returned `r2sleigh_carrier_u64(x0_6)` at base, where `x0_6` is the GOT load: the guard's address read as the result. Head returns `r2sleigh_residual_u64(32)`, 207 to 209 residuals: the compiler-inserted write defines no result byte (D200 case 3).
+  - `fcn_3b40` drops 10 residuals (1,535 to 1,525): the callee-saved restores (`x25`, `x26`) no longer merge through the check's block, so a path returns `x21` directly.
+  - gcc keeps the slot's load in `x5` across the body of `fcn_6ea0`, and calls with open arity read `x5`. That load stays (`x5_2 = r2sleigh_load_u64(0x1fff0)`); only its guard reads are the compiler's.
+- ls-toybox: 150 functions, 10,415 lines, 0 move (no stack protector). Census: 445 goldens pass, 0 lines move (no AArch64 golden has a canary).
+- Certification, base then head: radare2 elf (24 binaries, 8 functions each) 9 calls graded, 0 invented, 0 dropped, both. gnome-extensions 74 to 76 calls graded, 0 invented, 0 dropped.
+- Cost, release, instructions retired (`perf stat -e instructions:u`, Linux build host), median of three, base then head, output byte-identical: cold pumasim `0x23fdf0` 25.03 to 24.96 G, cold 0pack `0x62ecf0` 16.04 to 16.10 G (+0.4%), bash `aa; pdd @ 0x2e630` 14.53 to 14.52 G, pumasim `aa; pdd @ 0x3b6b20` 65.53 to 65.41 G. No x86 path reads a word: `guard_words` returns at once for `Guard::Slot`.
+- Touched crates' tests (r2abi, r2source, r2ssa, r2engine, r2s, all features): pass, 0 fail. Clippy `-D warnings` clean. Structure: no count rises. `comment_runs` adds no run. Dylint did not build on the Linux host (`dylint_driver` clones a `master` that no longer exists); CI's Dylint step grades it.
+- Equivalence: the x86-64 and aarch64 corpora build with no stack protector, so no record reads a guard; CI's `full-ci` ratchets grade it.

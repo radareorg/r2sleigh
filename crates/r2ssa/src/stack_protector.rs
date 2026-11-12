@@ -569,19 +569,18 @@ fn unread_words(func: &SSAFunction, inserted: &IdSet<OpId>, words: &[OpId]) -> V
     }
     let mut read = IdSet::new(func.values().len());
     let mut loaded = Vec::new();
-    for block in (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr)) {
-        for (_, phi) in block.sited_phis() {
-            read.extend(phi.sources.iter().map(|(_, source)| *source));
+    let blocks = || (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr));
+    for (_, phi) in blocks().flat_map(|block| block.sited_phis()) {
+        read.extend(phi.sources.iter().map(|(_, source)| *source));
+    }
+    for (id, op) in blocks().flat_map(|block| block.sited()) {
+        if words.binary_search(&id).is_ok() {
+            loaded.extend(op.dst().map(|dst| (id, *dst)));
         }
-        for (id, op) in block.sited() {
-            if words.binary_search(&id).is_ok() {
-                loaded.extend(op.dst().map(|dst| (id, *dst)));
-            }
-            if !inserted.contains(id) {
-                op.for_each_source(|source| {
-                    read.insert(*source);
-                });
-            }
+        if !inserted.contains(id) {
+            op.for_each_source(|source| {
+                read.insert(*source);
+            });
         }
     }
     (loaded.into_iter())
