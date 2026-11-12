@@ -306,10 +306,14 @@ pub enum SourceFloorCause {
     SupervisorEntry,
     /// Every register slot is a parameter, and the exits do not agree where the argument area is.
     ArgumentAreaUnplaced,
-    /// The argument area is read past register slots not all of which are parameters.
+    /// The argument area is read past register slots not all of which are parameters, across two
+    /// slots, or by a read whose place or observation is unproven.
     ArgumentAreaRead,
     /// The argument area is read past more unread slots than recovery holds: the slots below stand.
     ArgumentAreaPastBudget,
+    /// An address of the caller's side of the frame (a home or the argument area) leaves the body,
+    /// so code outside may read past the parameters.
+    ArgumentAreaEscapes,
     /// A register slot past the parameters is read by a kind of read no rule proves.
     RegisterRead,
     /// A slot past the parameters is only stored to its home: -O0 homes parameters it never uses.

@@ -46,6 +46,10 @@ pub struct FrameReach {
     /// A frame address escaped that names no object, so every frame object is
     /// reachable.
     whole: bool,
+    /// The entry offsets at or above the entry stack pointer that escaped addresses point at.
+    incoming: BTreeSet<i64>,
+    /// An escaped address may point at or above the entry stack pointer at no offset known.
+    incoming_unplaced: bool,
     by_call: crate::dense::IdMap<InstId, CallFrameReach>,
 }
 
@@ -65,6 +69,15 @@ impl FrameReach {
     /// object is reachable.
     pub const fn whole(&self) -> bool {
         self.whole
+    }
+
+    /// The entry offsets at or above the entry stack pointer (the homes and the argument area)
+    /// that escaped addresses point at; none where one may point there at no offset known.
+    pub const fn escaped_incoming(&self) -> Option<&BTreeSet<i64>> {
+        match self.incoming_unplaced {
+            true => None,
+            false => Some(&self.incoming),
+        }
     }
 
     /// Every call this fact bounds or does not, in instruction order.
@@ -90,11 +103,13 @@ impl FrameReach {
             // Nothing places a frame address, so nothing is proven private.
             return Self {
                 whole: true,
+                incoming_unplaced: true,
                 ..Self::default()
             };
         };
         let frame = FrameIndex::of(model);
-        let (mut escaped, whole) = escaped_objects(facts, graph, model, &frame);
+        let (mut escaped, whole, incoming) = escaped_objects(facts, graph, model, &frame);
+        let (incoming, incoming_unplaced) = incoming;
         let direct = escaped.clone();
         let barriers = compiler_slots(function, graph, model, machine_context);
         close_upward(&mut escaped, &frame, &barriers);
@@ -114,6 +129,8 @@ impl FrameReach {
             escaped,
             direct,
             whole,
+            incoming,
+            incoming_unplaced,
             by_call,
         }
     }
@@ -434,34 +451,17 @@ fn entry_offset(facts: &DecompilePrepFacts, value: ValueId) -> Option<i64> {
         .map(|root| root.offset)
 }
 
-/// The frame objects whose addresses escape, and whether one escaped that
-/// names none.
+/// The frame objects whose addresses escape, whether one escaped that names none, and where the
+/// escaped addresses at or above the entry stack pointer point (and whether one is unplaced).
 fn escaped_objects(
     facts: &DecompilePrepFacts,
     graph: &SsaGraph,
     model: &ObjectModel,
     frame: &FrameIndex,
-) -> (BTreeSet<ObjectId>, bool) {
-    let frame_address = |value: ValueId| {
-        graph.value(value).is_some_and(|value| {
-            facts.stack_address_root_of(value.id).is_some()
-                || facts.indexed_stack_address_root_of(value.id).is_some()
-        })
-    };
-    // Which objects each tainted value may point into: its own, or what flows into it. Each set
-    // only grows, bounded by the objects, so a value is re-queued at most once per object.
-    let mut origins = crate::dense::IdMap::<ValueId, BTreeSet<ObjectId>>::default();
-    let mut tainted = crate::dense::IdSet::default();
-    let mut pending = Vec::new();
-    for value in graph.values.iter().map(|value| value.id) {
-        if frame_address(value) && tainted.insert(value) {
-            let own = escaping_object(facts, graph, frame, value)
-                .into_iter()
-                .collect();
-            origins.insert(value, own);
-            pending.push(value);
-        }
-    }
+) -> (BTreeSet<ObjectId>, bool, (BTreeSet<i64>, bool)) {
+    let mut incoming = Incoming::default();
+    let (mut origins, mut tainted, mut pending) =
+        frame_addresses(facts, graph, frame, &mut incoming);
     let mut escaped = BTreeSet::new();
     let mut whole = false;
     let placed = |value: ValueId| {
@@ -473,12 +473,18 @@ fn escaped_objects(
     };
     while let Some(value) = pending.pop() {
         let from = origins.get(value).cloned().unwrap_or_default();
+        let high = incoming.above.contains(value);
         for site in graph.use_sites(value) {
             let Some(inst) = graph.inst(site.inst) else {
                 whole = true;
+                incoming.leaves(facts, value);
                 continue;
             };
-            match carries(inst, site.input_idx, placed(value)) {
+            let carried = carries(inst, site.input_idx, placed(value));
+            if matches!(carried, Carry::Escapes | Carry::Everything) {
+                incoming.leaves(facts, value);
+            }
+            match carried {
                 Carry::Escapes => match escaping_object(facts, graph, frame, value) {
                     Some(object) => {
                         escaped.insert(object);
@@ -499,7 +505,8 @@ fn escaped_objects(
                         let known = origins.get_or_insert_with(out, BTreeSet::new);
                         let before = known.len();
                         known.extend(from.iter().copied());
-                        if tainted.insert(out) || known.len() != before {
+                        let rose = incoming.rises(facts, out, high);
+                        if tainted.insert(out) || known.len() != before || rose {
                             pending.push(out);
                         }
                     }
@@ -522,7 +529,69 @@ fn escaped_objects(
             "a frame address escapes that names no frame object, so the whole frame is reachable"
         );
     }
-    (escaped, whole)
+    (escaped, whole, (incoming.offsets, incoming.unplaced))
+}
+
+/// What each tainted value may point into, the tainted values and the queue of them.
+type Taint = (
+    crate::dense::IdMap<ValueId, BTreeSet<ObjectId>>,
+    crate::dense::IdSet<ValueId>,
+    Vec<ValueId>,
+);
+
+/// Every frame address seeded: the object it points into is its own; each set only grows, bounded
+/// by the objects, so a value is re-queued at most once per object.
+fn frame_addresses(
+    facts: &DecompilePrepFacts,
+    graph: &SsaGraph,
+    frame: &FrameIndex,
+    incoming: &mut Incoming,
+) -> Taint {
+    let frame_address = |value: ValueId| {
+        facts.stack_address_root_of(value).is_some()
+            || facts.indexed_stack_address_root_of(value).is_some()
+    };
+    let mut origins = crate::dense::IdMap::<ValueId, BTreeSet<ObjectId>>::default();
+    let mut tainted = crate::dense::IdSet::default();
+    let mut pending = Vec::new();
+    for value in graph.values.iter().map(|value| value.id) {
+        if frame_address(value) && tainted.insert(value) {
+            incoming.rises(facts, value, true);
+            let own = escaping_object(facts, graph, frame, value);
+            origins.insert(value, own.into_iter().collect());
+            pending.push(value);
+        }
+    }
+    (origins, tainted, pending)
+}
+
+/// The tainted values not proven below the entry stack pointer, and where those that leave point.
+#[derive(Default)]
+struct Incoming {
+    /// Only grows, so a value is queued for it once.
+    above: crate::dense::IdSet<ValueId>,
+    offsets: BTreeSet<i64>,
+    unplaced: bool,
+}
+
+impl Incoming {
+    /// Whether `value` joins the set: by its own offset where the frame places it, else where an
+    /// input is in it (`inherits`).
+    fn rises(&mut self, facts: &DecompilePrepFacts, value: ValueId, inherits: bool) -> bool {
+        let high = entry_offset(facts, value).map_or(inherits, |offset| offset >= 0);
+        high && self.above.insert(value)
+    }
+
+    /// `value` leaves the body: where it points is recorded, where it is in the set.
+    fn leaves(&mut self, facts: &DecompilePrepFacts, value: ValueId) {
+        if !self.above.contains(value) {
+            return;
+        }
+        match entry_offset(facts, value) {
+            Some(offset) => drop(self.offsets.insert(offset)),
+            None => self.unplaced = true,
+        }
+    }
 }
 
 enum Carry {
@@ -625,7 +694,7 @@ fn call_reaches(
                     .and_then(|value| entry_offset(facts, value.id)),
                 _ => None,
             };
-            let area = machine_context.call_argument_area(instruction);
+            let area = (machine_context.call_reads(instruction)).and_then(|reads| reads.stack);
             let (Some(sp), Some(area)) = (sp, area) else {
                 out.insert(call, CallFrameReach::Whole);
                 continue;

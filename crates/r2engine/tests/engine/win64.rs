@@ -197,6 +197,61 @@ fn a_home_handed_to_an_uncited_callee_is_no_variadic_tail() {
     );
 }
 
+/// [`VA_LIST`] with `caller` passing a third argument: `mov r8d, 9` before the call.
+fn va_list_called_with_three() -> OpenProgram<Literal> {
+    let mut code = VA_LIST[..0x50].to_vec();
+    code.extend([0x41, 0xb8, 0x09, 0x00, 0x00, 0x00]); // 1050 mov r8d, 9
+    code.extend([0xe8, 0xa5, 0xff, 0xff, 0xff]); // 1056 call 0x1000
+    code.extend([0x48, 0x83, 0xc4, 0x28, 0xc3]); // 105b add rsp, 0x28; ret
+    code.resize(0x90, 0xcc);
+    code.extend(&VA_LIST[0x90..]);
+    let code: &'static [u8] = Box::leak(code.into_boxed_slice());
+    let functions = [("print_line", BASE, 0x38), ("caller", BASE + 0x40, 0x20)];
+    let program = Literal::of_code(code, &functions)
+        .with_data()
+        .importing_from("unknown.dll", "__stdio_common_vfprintf")
+        .pe();
+    OpenProgram::of(program)
+}
+
+/// `&home[1]` leaves the body, so the callee it reaches may read the homes past it and the stack
+/// arguments: the homed positions bound nothing, and a third argument is never dropped (finding 3).
+#[test]
+fn a_home_address_that_escapes_keeps_the_arity_a_floor_at_callers() {
+    let mut open = va_list_called_with_three();
+    let callee = rendered(&mut open, BASE);
+    assert!(
+        callee.contains("an address of the argument area escapes"),
+        "{callee}"
+    );
+    let caller = rendered(&mut open, BASE + 0x40);
+    assert!(caller.contains("a floor"), "{caller}");
+    assert!(!caller.contains("print_line(0x10a0, 7);"), "{caller}");
+}
+
+/// `f` keeps a local in its first home and hands its address to `g`, which stores through it.
+const LOCAL_IN_A_HOME: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 1000 sub rsp, 0x28
+    0x48, 0x8d, 0x4c, 0x24, 0x30, // 1004 lea rcx, [rsp + 0x30]: the first home
+    0xe8, 0x12, 0x00, 0x00, 0x00, // 1009 call 0x1020
+    0x8b, 0x44, 0x24, 0x30, // 100e mov eax, [rsp + 0x30]
+    0x48, 0x83, 0xc4, 0x28, // 1012 add rsp, 0x28
+    0xc3, // 1016 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1017 padding
+    0xc7, 0x01, 0x07, 0x00, 0x00, 0x00, // 1020 mov dword [rcx], 7
+    0xc3, // 1026 ret
+];
+
+/// A home the body keeps a local in holds no argument: its address leaving the body reaches no
+/// parameter, so the arity stays exact.
+#[test]
+fn a_local_kept_in_a_home_is_no_argument_place() {
+    let functions = [("f", BASE, 0x17), ("g", BASE + 0x20, 7)];
+    let mut open = OpenProgram::of(Literal::of_code(LOCAL_IN_A_HOME, &functions).pe());
+    let text = rendered(&mut open, BASE);
+    assert!(!text.contains("a floor"), "{text}");
+}
+
 fn homed() -> OpenProgram<Literal> {
     let functions = [("f", BASE, 0x1d), ("caller", BASE + 0x20, 0x18)];
     OpenProgram::of(Literal::of_code(HOMED, &functions).pe())

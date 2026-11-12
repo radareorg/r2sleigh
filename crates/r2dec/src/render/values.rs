@@ -475,8 +475,11 @@ impl Demand<'_> {
     /// A merge reads each input on its edge; an operation, what its term reads.
     fn read_definition(&mut self, value: ValueId, def: InstId, merge: bool) {
         if merge {
+            // An arm r2ssa states no path reads binds nothing (ROADMAP D214).
+            let merges = self.artifact.unobserved_merges();
             let inputs = self.graph.inputs(def).to_vec();
-            for input in inputs {
+            let read = (inputs.into_iter().enumerate()).filter(|(at, _)| merges.arm_read(def, *at));
+            for (_, input) in read {
                 self.operand(input, def);
             }
         } else if transfer::reads_answer(self.graph, value) {
@@ -2488,6 +2491,11 @@ impl<'a> Values<'a> {
             let Some(slot) = predecessors.iter().position(|pred| *pred == from_id) else {
                 continue;
             };
+            // An arm no path reads is no assignment: the edge pays the merge with nothing.
+            if !(self.artifact.unobserved_merges()).arm_read(inst.id, slot) {
+                self.pay(output, forward && !late);
+                continue;
+            }
             let input = self.graph.inputs(inst.id)[slot];
             let reads = match self
                 .readers
@@ -2584,6 +2592,11 @@ impl<'a> Values<'a> {
         *self.pending.borrow_mut() = attempt;
         self.mark(inst);
         self.residual_in(inst, stmt);
+        self.pay(output, pays);
+    }
+
+    /// One early forward edge of the merge `output` is rendered: it owes one copy fewer.
+    fn pay(&self, output: ValueId, pays: bool) {
         if let (true, Some(owed)) = (pays, self.owed.borrow_mut().get_mut(output.0 as usize)) {
             debug_assert!(*owed > 0, "a forward edge pays a merge once");
             *owed = owed.saturating_sub(1);

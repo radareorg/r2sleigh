@@ -96,7 +96,7 @@ impl FormalDependence {
                 .boundaries
                 .calls
                 .values()
-                .any(|boundary| !boundary.arguments_complete);
+                .any(|boundary| boundary.may_read_unlisted());
         let carriers = abi
             .argument_storages()
             .filter(|_| indirect)
@@ -150,7 +150,7 @@ impl FormalDependence {
         };
         // An unproven count may take any argument register: what each holds at the call, and
         // whatever the frame exposes, since a stack word it passes is the body's to have stored.
-        if !boundary.arguments_complete {
+        if boundary.may_read_unlisted() {
             return self
                 .carriers
                 .iter()

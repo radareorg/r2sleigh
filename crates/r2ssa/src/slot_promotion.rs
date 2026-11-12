@@ -206,7 +206,7 @@ struct CallArguments {
     pointer: VarId,
     /// What the transfer spends where no restore records the pointer entering it.
     shift: i64,
-    /// `SourceMachineContext::call_argument_area`; none reads every place from the pointer to entry.
+    /// `CallReads::stack` of the call; none reads every place from the pointer to entry.
     area: Option<Vec<(i64, i64)>>,
 }
 
@@ -315,7 +315,7 @@ impl Site<'_> {
         Some(CallArguments {
             pointer,
             shift,
-            area: self.machine.call_argument_area(call.instruction),
+            area: (self.machine.call_reads(call.instruction)).and_then(|reads| reads.stack),
         })
     }
 }

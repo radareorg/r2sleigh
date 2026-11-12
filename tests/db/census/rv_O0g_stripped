@@ -133,7 +133,7 @@ void entry0(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
 {
     uint64_t tmp_10c9_0_2;
 
-    /* r2dec proof: 5 constructs are marked below; 29 source obligations: 0 rendered, 6 elided, 0 refused, 23 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0); 1 callee prototype supplied by the source */
+    /* r2dec proof: 5 constructs are marked below; 29 source obligations: 0 rendered, 6 elided, 0 refused, 23 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0); 1 callee prototype supplied by the source; the parameters are a floor: at least 3 (an address of the argument area escapes) */
     {
         tmp_10c9_0_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x10c0:29 covering 1 op (render::values) */
@@ -716,7 +716,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
     uint32_t fcn_1277(uint64_t);
     uint64_t fcn_12a8(uint64_t, uint64_t);
     double fcn_12ef(uint64_t*, uint32_t);
-    r2sleigh_result_u64 fcn_1362(uint32_t);
+    uint64_t fcn_1362(uint32_t);
     r2sleigh_result_u32 fcn_1391(uint32_t);
     uint64_t fcn_13e3(uint8_t*, uint64_t, uint64_t);
     uint32_t fcn_144c(uint32_t);

@@ -904,3 +904,131 @@ fn a_call_past_a_homed_only_floor_passes_exactly_the_parameters() {
     assert!(text.contains("zero_of()"), "{text}");
     assert!(!text.contains("a floor), and this call writes"), "{text}");
 }
+
+/// `caller`: `mov rsi, rdi; mov edi, 5; call f; ret`, at `BASE + 0x20` behind an `f` of `N` bytes.
+const fn before_its_caller<const N: usize>(f: [u8; N]) -> [u8; 0x2e] {
+    const CALLER: [u8; 14] = [
+        0x48, 0x89, 0xfe, // 1020 mov rsi, rdi
+        0xbf, 0x05, 0x00, 0x00, 0x00, // 1023 mov edi, 5
+        0xe8, 0xd3, 0xff, 0xff, 0xff, // 1028 call 0x1000
+        0xc3, // 102d ret
+    ];
+    let mut bytes = [0xcc; 0x2e];
+    let mut at = 0;
+    while at < N {
+        bytes[at] = f[at];
+        at += 1;
+    }
+    at = 0;
+    while at < CALLER.len() {
+        bytes[0x20 + at] = CALLER[at];
+        at += 1;
+    }
+    bytes
+}
+
+/// clang -O1 `table_walk`'s tail: `sete dl` stores the flag `je` branches on, so on the taken edge
+/// DL is 1 and `cmove eax, ecx` keeps EAX; ECX is read only where `mov ecx, [rsi]` wrote it.
+const DEAD_SELECT_ARM: [u8; 0x2e] = before_its_caller([
+    0x48, 0x85, 0xff, // 1000 test rdi, rdi
+    0x0f, 0x94, 0xc2, // 1003 sete dl
+    0x74, 0x02, // 1006 je 0x100a
+    0x8b, 0x0e, // 1008 mov ecx, [rsi]
+    0x89, 0xf8, // 100a mov eax, edi
+    0xf6, 0xc2, 0x01, // 100c test dl, 1
+    0x0f, 0x44, 0xc1, // 100f cmove eax, ecx
+    0xc3, // 1012 ret
+]);
+
+/// The same, with DL loaded from memory: nothing ties it to the edge, so the entry ECX is read.
+const LIVE_SELECT_ARM: [u8; 0x2e] = before_its_caller([
+    0x48, 0x85, 0xff, // 1000 test rdi, rdi
+    0x8a, 0x56, 0x04, // 1003 mov dl, [rsi + 4]
+    0x74, 0x02, // 1006 je 0x100a
+    0x8b, 0x0e, // 1008 mov ecx, [rsi]
+    0x89, 0xf8, // 100a mov eax, edi
+    0xf6, 0xc2, 0x01, // 100c test dl, 1
+    0x0f, 0x44, 0xc1, // 100f cmove eax, ecx
+    0xc3, // 1012 ret
+]);
+
+/// R8B is 1 on the path that leaves ECX as it arrived and 0 on the one that loads it, and only
+/// `r8b == 0` reaches `mov eax, ecx`: the merge's arrival arm is never read there.
+const DEAD_BRANCH_ARM: [u8; 0x2e] = before_its_caller([
+    0x48, 0x85, 0xff, // 1000 test rdi, rdi
+    0x75, 0x08, // 1003 jne 0x100d
+    0x41, 0xb8, 0x01, 0x00, 0x00, 0x00, // 1005 mov r8d, 1
+    0xeb, 0x05, // 100b jmp 0x1012
+    0x8b, 0x0e, // 100d mov ecx, [rsi]
+    0x45, 0x31, 0xc0, // 100f xor r8d, r8d
+    0x45, 0x84, 0xc0, // 1012 test r8b, r8b
+    0x74, 0x03, // 1015 je 0x101a
+    0x31, 0xc0, // 1017 xor eax, eax
+    0xc3, // 1019 ret
+    0x89, 0xc8, // 101a mov eax, ecx
+    0xc3, // 101c ret
+]);
+
+/// The same, with R8D loaded from memory on the arrival path: the entry ECX may reach the read.
+const LIVE_BRANCH_ARM: [u8; 0x2e] = before_its_caller([
+    0x48, 0x85, 0xff, // 1000 test rdi, rdi
+    0x75, 0x08, // 1003 jne 0x100d
+    0x44, 0x8b, 0x46, 0x04, // 1005 mov r8d, [rsi + 4]
+    0x66, 0x90, // 1009 nop
+    0xeb, 0x05, // 100b jmp 0x1012
+    0x8b, 0x0e, // 100d mov ecx, [rsi]
+    0x45, 0x31, 0xc0, // 100f xor r8d, r8d
+    0x45, 0x84, 0xc0, // 1012 test r8b, r8b
+    0x74, 0x03, // 1015 je 0x101a
+    0x31, 0xc0, // 1017 xor eax, eax
+    0xc3, // 1019 ret
+    0x89, 0xc8, // 101a mov eax, ecx
+    0xc3, // 101c ret
+]);
+
+/// `f` and its caller under `aa`, for a body of `size` bytes.
+fn f_and_its_caller(code: &'static [u8], size: u64) -> (String, String) {
+    let functions = [("f", BASE, size), ("caller", BASE + 0x20, 0x0e)];
+    (
+        surveyed(code, &functions, BASE),
+        surveyed(code, &functions, BASE + 0x20),
+    )
+}
+
+/// How many parameters `f`'s header states, past any type the rendering declares first.
+fn parameter_count(f: &str) -> usize {
+    let header = f.lines().find(|line| line.contains(" f(")).expect(f);
+    common::parameters(header).len()
+}
+
+/// A merge arm no path reads is no read of the entry register: two parameters, and the caller
+/// passes two arguments with no residual (ROADMAP D214).
+fn assert_two_parameters((f, caller): (String, String)) {
+    assert_eq!(parameter_count(&f), 2, "{f}");
+    assert!(!f.contains("r2sleigh_residual"), "{f}");
+    let arguments = common::call_arguments(&caller, "f").expect(&caller);
+    assert_eq!(arguments.len(), 2, "{caller}");
+    assert!(!caller.contains("r2sleigh_residual"), "{caller}");
+}
+
+#[test]
+fn a_select_arm_dead_under_the_edge_that_carries_it_reads_no_parameter() {
+    assert_two_parameters(f_and_its_caller(&DEAD_SELECT_ARM, 0x13));
+}
+
+#[test]
+fn a_select_arm_whose_condition_no_edge_decides_is_read() {
+    let (f, _) = f_and_its_caller(&LIVE_SELECT_ARM, 0x13);
+    assert_eq!(parameter_count(&f), 4, "{f}");
+}
+
+#[test]
+fn a_merge_arm_its_block_never_leaves_to_the_read_under_reads_no_parameter() {
+    assert_two_parameters(f_and_its_caller(&DEAD_BRANCH_ARM, 0x1d));
+}
+
+#[test]
+fn a_merge_arm_whose_flag_no_edge_decides_is_read() {
+    let (f, _) = f_and_its_caller(&LIVE_BRANCH_ARM, 0x1d);
+    assert_eq!(parameter_count(&f), 4, "{f}");
+}

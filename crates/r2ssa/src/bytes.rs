@@ -268,6 +268,32 @@ pub(crate) struct Closure {
     pub(crate) values: crate::dense::IdSet<ValueId>,
     pub(crate) bytes: crate::dense::IdMap<ValueId, ByteMask>,
     pub(crate) parents: crate::dense::IdMap<ValueId, ValueId>,
+    /// The in-edges of its own block each value is read under (`crate::edge_fold`).
+    pub(crate) under: crate::dense::IdMap<ValueId, crate::edge_fold::Edges>,
+}
+
+impl Closure {
+    /// Each merge arm no root reads: the merge is read, never on that in-edge (ROADMAP D214).
+    pub(crate) fn unread_arms<'a>(
+        &'a self,
+        graph: &'a SsaGraph,
+    ) -> impl Iterator<Item = crate::graph::UseSite> + 'a {
+        let merges = graph.insts.iter().filter_map(|inst| match &inst.payload {
+            crate::graph::InstPayload::Phi { predecessors } => {
+                let under = *self.under.get(inst.output?)?;
+                let arms = predecessors
+                    .len()
+                    .min(crate::edge_fold::Edges::BITS as usize);
+                Some((inst.id, under, arms))
+            }
+            crate::graph::InstPayload::Op(_) => None,
+        });
+        merges.flat_map(|(inst, under, arms)| {
+            (0..arms)
+                .filter(move |arm| under & (1 << arm) == 0)
+                .map(move |input_idx| crate::graph::UseSite { inst, input_idx })
+        })
+    }
 }
 
 /// What an observation of `observed` bytes of a value asks of each input, by
@@ -277,7 +303,7 @@ fn observed_input_bytes(
     graph: &SsaGraph,
     inst: &crate::graph::GraphInst,
     observed: ByteMask,
-) -> impl Iterator<Item = (ValueId, ByteMask)> {
+) -> impl Iterator<Item = (usize, ValueId, ByteMask)> {
     let rule = match &inst.payload {
         crate::graph::InstPayload::Phi { .. } => None,
         crate::graph::InstPayload::Op(op) => Some(crate::bytes::rule(op, |value| {
@@ -294,7 +320,7 @@ fn observed_input_bytes(
                 None => observed,
                 Some(rule) => rule.backward(index, observed).unwrap_or(ByteMask::All),
             };
-            (*input, read)
+            (index, *input, read)
         })
 }
 
@@ -303,7 +329,7 @@ fn observed_input_bytes(
 ///
 /// A mask only grows, by union, and is trimmed to its value's width, so a
 /// value is queued again only when it gains a byte or saturates -- at most 65
-/// times -- and the walk stays linear in the graph's edges.
+/// times -- and the walk stays linear in the graph's edges; its in-edge set grows as often.
 pub(crate) fn closure(graph: &SsaGraph, roots: impl IntoIterator<Item = ValueId>) -> Closure {
     closure_of(graph, roots.into_iter().map(|value| (value, ByteMask::All)))
 }
@@ -313,34 +339,67 @@ pub(crate) fn closure_of(
     graph: &SsaGraph,
     roots: impl IntoIterator<Item = (ValueId, ByteMask)>,
 ) -> Closure {
+    let whole = |(value, mask)| (value, mask, crate::edge_fold::ALL);
+    walk(graph, roots.into_iter().map(whole), None)
+}
+
+/// `closure_of`, each root read only under the given in-edges of its own block.
+pub(crate) fn closure_under(
+    graph: &SsaGraph,
+    roots: impl IntoIterator<Item = (ValueId, ByteMask, crate::edge_fold::Edges)>,
+) -> Closure {
+    let mut folds = crate::edge_fold::EdgeFolds::new(graph);
+    walk(graph, roots, Some(&mut folds))
+}
+
+/// The closure's walk; with no `folds` every input is read however its block is entered, which
+/// over-reads and never under-reads.
+fn walk(
+    graph: &SsaGraph,
+    roots: impl IntoIterator<Item = (ValueId, ByteMask, crate::edge_fold::Edges)>,
+    mut folds: Option<&mut crate::edge_fold::EdgeFolds<'_>>,
+) -> Closure {
     let width = |value: ValueId| {
         graph
             .value(value)
             .map_or(ByteMask::All, |value| ByteMask::whole(value.var.size))
     };
     let mut bytes: crate::dense::IdMap<ValueId, ByteMask> = crate::dense::IdMap::default();
+    let mut under: crate::dense::IdMap<ValueId, crate::edge_fold::Edges> =
+        crate::dense::IdMap::default();
     let mut parents = crate::dense::IdMap::default();
     let mut pending = VecDeque::new();
-    for (value, mask) in roots {
+    for (value, mask, read) in roots {
         let mask = mask.intersection(width(value));
-        if mask.is_empty() {
+        if mask.is_empty() || read == 0 {
             continue;
         }
         let entry = bytes.get_or_insert_with(value, || ByteMask::NONE);
         let before = *entry;
         *entry = before.union(mask);
-        if *entry != before {
+        let edges = under.get_or_insert_with(value, || 0);
+        let grown = *edges | read;
+        if *entry != before || grown != *edges {
+            *edges = grown;
             pending.push_back(value);
         }
     }
     while let Some(value) = pending.pop_front() {
         let observed = bytes.get(value).copied().unwrap_or(ByteMask::NONE);
+        let read_under = under.get(value).copied().unwrap_or(crate::edge_fold::ALL);
         let Some(inst) = graph.def_inst(value).and_then(|inst| graph.inst(inst)) else {
             continue;
         };
-        for (input, mask) in observed_input_bytes(graph, inst, observed) {
+        for (index, input, mask) in observed_input_bytes(graph, inst, observed) {
             let mask = mask.intersection(width(input));
             if mask.is_empty() {
+                continue;
+            }
+            let read = match folds.as_deref_mut() {
+                Some(folds) => folds.read_under(inst, index, input, read_under),
+                None => crate::edge_fold::ALL,
+            };
+            if read == 0 {
                 continue;
             }
             let entry = bytes.get_or_insert_with(input, || ByteMask::NONE);
@@ -349,7 +408,13 @@ pub(crate) fn closure_of(
             if before.is_empty() {
                 parents.insert(input, value);
             }
-            if *entry != before {
+            // With no folds every read is under every in-edge: no set is held.
+            let rose = folds.is_some() && {
+                let edges = under.get_or_insert_with(input, || 0);
+                let grown = *edges | read;
+                std::mem::replace(edges, grown) != grown
+            };
+            if *entry != before || rose {
                 pending.push_back(input);
             }
         }
@@ -358,6 +423,7 @@ pub(crate) fn closure_of(
         values: bytes.keys().collect(),
         bytes,
         parents,
+        under,
     }
 }
 

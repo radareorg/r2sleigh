@@ -312,7 +312,7 @@ impl<'a> Placement<'a> {
 
     /// Registers a call to this import may read: its fixed locations, plus every other argument
     /// register under any tail but `None` (Apple arm64 passes `...` on the stack). O(locations).
-    pub(crate) fn reads(&self, declared: Declared<'_>) -> crate::imports::ImportReads {
+    pub(crate) fn reads(&self, declared: Declared<'_>) -> r2ssa::call_reads::CallReads {
         let unstated = self.leading_unstated(declared).is_some();
         let placement = self.placement(declared);
         let placed_whole = !unstated && placement.is_whole();
@@ -328,11 +328,7 @@ impl<'a> Placement<'a> {
         let on_stack = forms.variadic_on_stack
             && matches!(tail, r2abi::Tail::Variadic | r2abi::Tail::Format { .. });
         if placed_whole && (tail == r2abi::Tail::None || on_stack) {
-            return crate::imports::ImportReads {
-                registers,
-                count_register: None,
-                format: None,
-            };
+            return r2ssa::call_reads::CallReads::placed(registers, None, None, true);
         }
         let overlaps = |a: &CanonicalStorageId, b: &CanonicalStorageId| {
             a.space == b.space
@@ -361,7 +357,7 @@ impl<'a> Placement<'a> {
                 let at = placement.locations.get(usize::from(index));
                 let floats = self.machine.slots.float_argument_slots();
                 (at.and_then(|location| location.register())).map(|format| {
-                    crate::imports::FormatTail {
+                    r2ssa::call_reads::FormatTail {
                         format,
                         floats: (registers[fixed..].iter())
                             .filter(|read| floats.iter().any(|float| overlaps(read, float)))
@@ -372,11 +368,7 @@ impl<'a> Placement<'a> {
             }
             _ => None,
         };
-        crate::imports::ImportReads {
-            registers,
-            count_register: forms.count_register,
-            format,
-        }
+        r2ssa::call_reads::CallReads::placed(registers, forms.count_register, format, false)
     }
 
     /// Where a declaration says it takes a pointer.

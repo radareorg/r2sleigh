@@ -794,9 +794,8 @@ pub struct SourceCallBoundaryFact {
     /// result value the caller observes. An exact discarded result is complete
     /// because there is no caller-side value to identify.
     pub complete: bool,
-    /// The same, per coordinate. A caller may resolve what a callee returns
-    /// without resolving what it was passed, and the conjunction above threw
-    /// away a proven result because an argument beside it was unproven.
+    /// The same, per coordinate: each listed argument reaches the call. It bounds no arity, since
+    /// the list may be the registers this body wrote (`arguments_proven` is the arity verdict).
     pub arguments_complete: bool,
     pub results_complete: bool,
     /// The one "arguments proven" verdict (audit D3): the callee states how many arguments it
@@ -808,6 +807,12 @@ pub struct SourceCallBoundaryFact {
 }
 
 impl SourceCallBoundaryFact {
+    /// Whether the call may read an argument location its listed arguments do not name: no
+    /// statement of its callee bounds what it reads (`CallReads`), or a stated one is unreached.
+    pub const fn may_read_unlisted(&self) -> bool {
+        !self.arguments_proven
+    }
+
     /// Whether `argument` is a slot the callee ignores (`ignored`).
     pub fn ignores(&self, argument: &SourceCallArgumentFact) -> bool {
         matches!(argument.slot, CallBoundarySlot::Register { index, .. } if self.ignored.contains(&index))

@@ -1472,13 +1472,18 @@ impl FunctionFacts {
             let Some(signature) = signatures.get(&target) else {
                 continue;
             };
-            let same_interface = source
-                .call_site_interface(arguments.call_site_id)
-                .and_then(r2ssa::SourceCallSiteInterface::exact_callee_interface)
-                .is_some_and(|interface| interface == &signature.interface);
-            let site_result = source
-                .call_site_interface(arguments.call_site_id)
-                .map(r2ssa::SourceCallSiteInterface::result);
+            let site = source.call_site_interface(arguments.call_site_id);
+            let boundary = (source.facts().boundaries.calls).get(&arguments.call_site_id);
+            // A floor callee mints no site interface: its header still states the result (D225).
+            let floor = site.is_none() && !signature.interface.arity().is_exact();
+            let same_interface = floor
+                || site
+                    .and_then(r2ssa::SourceCallSiteInterface::exact_callee_interface)
+                    .is_some_and(|interface| interface == &signature.interface);
+            let site_result = match floor {
+                true => boundary.and_then(|boundary| boundary.result_kind),
+                false => site.map(r2ssa::SourceCallSiteInterface::result),
+            };
             // A call that takes a pair takes the type of both halves, whatever the callee's own
             // signature says of its first register.
             let float_slot = (source.machine_context().convention_slots())

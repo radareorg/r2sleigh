@@ -416,7 +416,10 @@ fn recovered_return_mechanism(
 /// nothing about the caller. A read that crosses a slot boundary describes
 /// something wider than one slot and ends the prefix there.
 fn recovered_stack_parameters(
-    facts: &crate::semantic::PreparedFunctionFacts,
+    (facts, prep): (
+        &crate::semantic::PreparedFunctionFacts,
+        Option<&crate::DecompilePrepFacts>,
+    ),
     observations: &crate::deadphi::ProvenProgramObservations,
     first_offset: i64,
     slot_bytes: u32,
@@ -436,31 +439,21 @@ fn recovered_stack_parameters(
         .flat_map(|certificate| certificate.insts.iter().copied())
         .collect::<crate::dense::IdSet<_>>();
     let mut observed: BTreeMap<u64, Option<u32>> = BTreeMap::new();
+    let mut unknown = false;
     for access in facts.structured.memory_accesses.values() {
-        if access.is_write
-            || !access.provenance_complete
-            || access.space != SpaceId::Ram
-            || control.contains(access.id.inst)
-        {
+        if access.is_write || access.space != SpaceId::Ram || control.contains(access.id.inst) {
             continue;
         }
-        let Some(value) = access.value.filter(|value| observations.contains(*value)) else {
-            continue;
+        let (value, relative) = match area_read((facts, prep), observations, access, first_offset) {
+            AreaRead::Placed { value, relative } => (value, relative),
+            AreaRead::Unplaced => {
+                unknown = true;
+                continue;
+            }
+            AreaRead::Elsewhere => continue,
         };
-        let Some(crate::semantic::ObjectKind::StackSlot {
-            base: StackAddressBase::StackPointer,
-            offset,
-            ..
-        }) = facts
-            .objects
-            .object(access.object)
-            .map(|object| &object.kind)
-        else {
-            continue;
-        };
-        let Some(relative) = offset
-            .checked_add(access.object_offset.unwrap_or(0))
-            .and_then(|address| address.checked_sub(first_offset))
+        let Some(relative) = relative
+            .checked_sub(first_offset)
             .and_then(|relative| u64::try_from(relative).ok())
         else {
             continue;
@@ -484,7 +477,103 @@ fn recovered_stack_parameters(
             _ => *entry = None,
         }
     }
-    argument_area_slots(&observed, first_offset, slot_bytes)
+    let mut area = argument_area_slots(&observed, first_offset, slot_bytes);
+    area.unknown |= unknown;
+    area
+}
+
+/// What one frame read is to the argument area.
+enum AreaRead {
+    /// An observed value read at one entry offset.
+    Placed {
+        value: crate::ValueId,
+        relative: i64,
+    },
+    /// It may be of the area, at no proven place or with no proven observation.
+    Unplaced,
+    /// Proven unread, or no read of the area.
+    Elsewhere,
+}
+
+/// Where an object starts from the entry stack pointer, for an object of the entry frame.
+fn frame_start(
+    facts: &crate::semantic::PreparedFunctionFacts,
+    object: crate::ObjectId,
+) -> Option<i64> {
+    use crate::semantic::ObjectKind::{FrameObject, StackSlot};
+    match facts.objects.object(object).map(|object| &object.kind)? {
+        StackSlot { base, offset, .. } | FrameObject { base, offset, .. }
+            if *base == StackAddressBase::StackPointer =>
+        {
+            Some(*offset)
+        }
+        _ => None,
+    }
+}
+
+/// Classify one read (doc/adr-result-side.md, "S25 as built", finding 8). O(annotations).
+fn area_read(
+    (facts, prep): (
+        &crate::semantic::PreparedFunctionFacts,
+        Option<&crate::DecompilePrepFacts>,
+    ),
+    observations: &crate::deadphi::ProvenProgramObservations,
+    access: &crate::semantic::StructuredMemoryAccessFact,
+    first_offset: i64,
+) -> AreaRead {
+    if (access.value).is_some_and(|value| observations.proven_unread(value)) {
+        return AreaRead::Elsewhere;
+    }
+    let start = frame_start(facts, access.object);
+    // An address the frame places only up to an index names no one byte of its object.
+    let indexed = prep.is_some_and(|prep| {
+        prep.stack_address_root_of(access.address).is_none()
+            && prep.indexed_stack_address_root_of(access.address).is_some()
+    });
+    let exact = (access.provenance_complete && !indexed)
+        .then(|| start?.checked_add(access.object_offset?))
+        .flatten();
+    let value = access.value.filter(|value| observations.contains(*value));
+    if let Some((value, relative)) = value.zip(exact) {
+        return AreaRead::Placed { value, relative };
+    }
+    // A place the model did not pin to one byte may still lie in the area.
+    let annotated = |location: &crate::semantic::MemoryLocation| {
+        frame_start(facts, location.object).is_some_and(|start| {
+            match location.address.exact_offset() {
+                Some(offset) => {
+                    start
+                        .saturating_add(offset)
+                        .saturating_add(i64::from(location.size))
+                        > first_offset
+                }
+                None => start >= first_offset,
+            }
+        })
+    };
+    let may = match access.provenance_complete {
+        true => exact.or(start).is_some_and(|at| at >= first_offset),
+        false => (facts
+            .memory
+            .uses_by_inst
+            .get(access.id.inst)
+            .into_iter()
+            .flatten())
+        .any(|read| annotated(&read.location)),
+    };
+    if !may {
+        return AreaRead::Elsewhere;
+    }
+    r2il::refusal_evidence!(
+        "interface-recovery",
+        "a read {:?} that may be of the argument area has no proven place or observation: complete {} object {:?} offset {:?} value {:?}",
+        access.id,
+        access.provenance_complete,
+        access.object,
+        access.object_offset,
+        access.value
+    );
+    AreaRead::Unplaced
 }
 
 /// Unread slots the argument area may hold below its highest read; past them its slots are a floor.
@@ -495,6 +584,8 @@ const HOLE_BUDGET: usize = 64;
 struct ArgumentArea {
     slots: Vec<RecoveredStackParameter>,
     past_budget: bool,
+    /// A read crosses two slots, or may be of the area with no proven place or observation.
+    unknown: bool,
 }
 
 /// The slots below the highest read, each `observed` its widest read (`None` crossing two), are
@@ -523,6 +614,12 @@ fn argument_area_slots(
         let Some(observed_bytes) = observed.get(&slot).map_or(Some(None), |bytes| {
             bytes.map(|bytes| Some(bytes.next_power_of_two().min(slot_bytes)))
         }) else {
+            // A read crossing into the next slot places no parameter: the slots below stand.
+            r2il::refusal_evidence!(
+                "interface-recovery",
+                "argument-area slot {slot} is read across its end, so the slots stop below it"
+            );
+            area.unknown = true;
             break;
         };
         let Some(offset) = i64::try_from(slot)
@@ -2056,7 +2153,7 @@ fn recover_interface_inner(
             .filter(|(_, at)| at.block == used.block && at.ordinal > used.ordinal)
             .min_by_key(|(_, at)| at.ordinal)?
             .0;
-        (!call.arguments_complete).then(|| unproven_call(&facts, machine_context, call.call_site))
+        (call.may_read_unlisted()).then(|| unproven_call(&facts, machine_context, call.call_site))
     };
     // Each register's entry values and the lanes minted for them, found in one pass. O(V log V).
     let mut entry_values = BTreeMap::<_, Vec<crate::ValueId>>::new();
@@ -2071,6 +2168,12 @@ fn recover_interface_inner(
                 .push(value.id);
         }
     }
+    // An escaped address that may reach a homed argument or the argument area lets code outside
+    // read them (FrameReach); a body with no prep facts places no frame address (tests only).
+    let escapes_incoming = prep.is_some_and(|prep| {
+        let model = machine_context.and_then(crate::SourceMachineContext::convention);
+        argument_place_escapes((graph, prep), &facts, model)
+    });
     // Each register slot's use (doc/adr-call-boundary.md, rule 3).
     let use_of = |slot: CanonicalStorageId| {
         // The prologue saves every vector register under the count it is handed, and the area
@@ -2093,11 +2196,11 @@ fn recover_interface_inner(
             .zip(shared_position(slots, slot))
             .and_then(|(model, position)| model.home(position));
         if let Some(home) = home.filter(|_| !saved)
-            && homed_in_its_home(graph, &facts, &observations, home, entries)
+            && homed_in_its_home(graph, &facts, &observations, home, (entries, &handed_to))
         {
             return SlotUse::Homed {
                 loaded: false,
-                escapes: false,
+                escapes: escapes_incoming,
             };
         }
         if let Some(read) = widest(&observed) {
@@ -2120,7 +2223,18 @@ fn recover_interface_inner(
         if saved {
             return SlotUse::SaveArea;
         }
-        unobserved_use(graph, &ignored_reads, &handed_to, entries)
+        match unobserved_use(
+            (graph, &facts),
+            (&ignored_reads, &observations),
+            &handed_to,
+            entries,
+        ) {
+            SlotUse::Homed { loaded, .. } => SlotUse::Homed {
+                loaded,
+                escapes: escapes_incoming,
+            },
+            used => used,
+        }
     };
     // The register sections in convention order: each slot's class and register, and its use.
     let (mut registers, mut uses, mut spans) = (Vec::new(), Vec::new(), Vec::new());
@@ -2254,14 +2368,14 @@ fn recover_interface_inner(
         let first = (slots.stack_arguments()).map_or(0, |placement| placement.first_offset());
         match return_mechanism {
             Some(RecoveredReturnMechanism::Link) => Some(recovered_stack_parameters(
-                &facts,
+                (&facts, prep),
                 &observations,
                 first,
                 slot_bytes,
             )),
             Some(RecoveredReturnMechanism::Stacked { slot_bytes: spent }) => {
                 Some(recovered_stack_parameters(
-                    &facts,
+                    (&facts, prep),
                     &observations,
                     i64::from(spent) + first,
                     slot_bytes,
@@ -2291,9 +2405,13 @@ fn recover_interface_inner(
         (true, false, Some(area)) if !area.slots.is_empty() => {
             Some(SourceFloorCause::ArgumentAreaRead)
         }
+        // A read no slot places bounds nothing: the parameters below it are a floor.
+        (true, _, Some(area)) if area.unknown => Some(SourceFloorCause::ArgumentAreaRead),
         _ => None,
     };
     let past_budget = (argument_area.as_ref()).is_some_and(|area| area.past_budget);
+    // A proven variadic tail is that escape: its cursor walks the homes and the area.
+    let escapes = save_area.is_none() && escapes_incoming;
     // A supervisor call reads registers no operation names, so what it is handed is no read here.
     let enters_supervisor = (graph.insts.iter()).any(|inst| {
         matches!(&inst.payload, crate::graph::InstPayload::Op(op) if func.enters_supervisor(op))
@@ -2304,6 +2422,7 @@ fn recover_interface_inner(
             enters_supervisor.then_some(SourceFloorCause::SupervisorEntry),
             area,
             past_budget.then_some(SourceFloorCause::ArgumentAreaPastBudget),
+            escapes.then_some(SourceFloorCause::ArgumentAreaEscapes),
         ]
         .into_iter()
         .flatten(),
@@ -2387,7 +2506,7 @@ fn unproven_calls_reached(
     slot: CanonicalStorageId,
 ) -> Vec<SourceUnprovenCall> {
     let unproven =
-        (facts.boundaries.calls.values()).filter(|boundary| !boundary.arguments_complete);
+        (facts.boundaries.calls.values()).filter(|boundary| boundary.may_read_unlisted());
     let kept = graph.values.iter().any(|value| {
         graph.caller_supplied(value.id)
             && value
@@ -2501,7 +2620,10 @@ fn homed_in_its_home(
     facts: &crate::semantic::PreparedFunctionFacts,
     observations: &crate::deadphi::ProvenProgramObservations,
     home: std::ops::Range<i64>,
-    entries: &[crate::ValueId],
+    (entries, handed): (
+        &[crate::ValueId],
+        &dyn Fn(crate::InstId) -> Option<SourceUnprovenCall>,
+    ),
 ) -> bool {
     let objects = (facts.objects.entry_stack_roots.iter())
         .filter(|(_, root)| {
@@ -2521,16 +2643,63 @@ fn homed_in_its_home(
         }
         stores.insert(access.id.inst);
     }
+    // A call that may read past its listed arguments may read the register, so it is no home only.
+    let taken = |call_use| handed(call_use).is_some();
     !stores.is_empty()
-        && (entries.iter())
-            .all(|value| crate::save_area::read_only_by(graph, *value, &stores, observations))
+        && (entries.iter()).all(|value| {
+            crate::save_area::read_only_by(graph, *value, &stores, (observations, &taken))
+        })
 }
 
-/// `slot`'s use where no observation reads it (rule 3; doc/adr-call-boundary.md, "S6 as built"):
-/// `Unknown` reaching an unproven call, `Homed` only copied, else `Unread`. O(values reached).
+/// Whether an escaped address may point at an argument's place: a stack argument, a home holding
+/// its position's entry register, or no place known. O(escaped offsets x homes + stores).
+fn argument_place_escapes(
+    (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
+    facts: &crate::semantic::PreparedFunctionFacts,
+    model: Option<&r2source::ConventionModel>,
+) -> bool {
+    let Some(escaped) = facts.objects.frame_reach.escaped_incoming() else {
+        return true;
+    };
+    let homes = (0..=u8::MAX)
+        .map_while(|position| Some((position, model?.home(position)?)))
+        .collect::<Vec<_>>();
+    // Whether the home holds the entry value of a register passed at its position.
+    let homed = |position: u8, home: &std::ops::Range<i64>| {
+        let registers = [SlotClass::Integer, SlotClass::Float].map(|class| {
+            model.and_then(|model| model.argument_registers(class).nth(usize::from(position)))
+        });
+        let in_home = |object| {
+            (facts.objects.entry_stack_roots.get(&object)).is_some_and(|root| {
+                root.base == StackAddressBase::StackPointer && home.contains(&root.offset)
+            })
+        };
+        (facts.structured.memory_accesses.values())
+            .filter(|access| access.is_write && in_home(access.object))
+            .filter_map(|access| graph.value(prep.views.copy_root(access.value?)))
+            .any(|stored| {
+                stored.var.version == 0
+                    && graph.caller_supplied(stored.id)
+                    && registers.iter().flatten().any(|register| {
+                        (stored.canonical_storage)
+                            .is_some_and(|storage| storage.location() == register.location())
+                    })
+            })
+    };
+    escaped.iter().any(|offset| {
+        let home = homes.iter().find(|(_, home)| home.contains(offset));
+        home.is_none_or(|(position, home)| homed(*position, home))
+    })
+}
+
+/// `slot`'s use where no observation reads it (rule 3; doc/adr-result-side.md, "Parameter side"):
+/// `Unknown` reaching an unproven call or not proven `dead`, `Homed` only copied, else `Unread`.
 fn unobserved_use(
-    graph: &SsaGraph,
-    ignored: &BTreeSet<crate::graph::UseSite>,
+    (graph, facts): (&SsaGraph, &crate::semantic::PreparedFunctionFacts),
+    (ignored, observations): (
+        &BTreeSet<crate::graph::UseSite>,
+        &crate::deadphi::ProvenProgramObservations,
+    ),
     handed: &dyn Fn(crate::InstId) -> Option<SourceUnprovenCall>,
     entries: &[crate::ValueId],
 ) -> SlotUse {
@@ -2567,6 +2736,15 @@ fn unobserved_use(
             }
         }
     }
+    // `Unread` is a proof: an operation with no modelled semantics may read what nothing observes.
+    if let Some(alive) = (entries.iter()).find(|value| !observations.proven_unread(**value)) {
+        r2il::refusal_evidence!(
+            "interface-recovery",
+            "entry value {alive:?} is neither observed nor proven dead: {}",
+            unproven_readers(graph, facts, *alive)
+        );
+        return SlotUse::Unknown(SourceFloorCause::RegisterRead);
+    }
     match moved && !used {
         true => SlotUse::Homed {
             loaded: false,
@@ -2574,6 +2752,30 @@ fn unobserved_use(
         },
         false => SlotUse::Unread,
     }
+}
+
+/// The unmodelled instructions that may read `value`, for the trace. O(values reached).
+fn unproven_readers(
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    value: crate::ValueId,
+) -> String {
+    let mut seen = crate::dense::IdSet::default();
+    let mut pending = vec![value];
+    let mut names = BTreeSet::new();
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        for inst in (graph.use_sites(value).iter()).filter_map(|site| graph.inst(site.inst)) {
+            if facts.obligations.unmodelled().contains(inst.id) {
+                let text = format!("{:?}", inst.payload);
+                names.insert(text.split([' ', '{']).next().unwrap_or("op").to_string());
+            }
+            pending.extend(inst.output);
+        }
+    }
+    names.into_iter().collect::<Vec<_>>().join(",")
 }
 
 /// Whether `op` computes a constant whatever its inputs hold: `x ^ x`, `x - x`, `x & 0`.

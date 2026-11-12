@@ -43,6 +43,9 @@ pub struct DeadPhis {
     unobserved_values: crate::dense::IdSet<ValueId>,
     unobserved_insts: crate::dense::IdSet<InstId>,
     unobserved_uses: BTreeSet<UseSite>,
+    /// Whether some live merge has an arm no path reads (ROADMAP D214): where none has, a reader
+    /// asks nothing per arm.
+    unread_arms: bool,
 }
 
 /// Values with positive evidence that the program observes them.
@@ -62,6 +65,8 @@ pub struct ProvenProgramObservations {
     parents: crate::dense::IdMap<ValueId, ValueId>,
     /// Why each root is one: the obligation that reads it, or the return.
     roots: crate::dense::IdMap<ValueId, String>,
+    /// Values an instruction no rule models may read: not observed, and not proven dead either.
+    unmodelled: crate::dense::IdSet<ValueId>,
 }
 
 pub(crate) use crate::bytes::ByteMask;
@@ -88,13 +93,35 @@ impl ProvenProgramObservations {
                 roots.get_or_insert_with(input, || format!("{:?}", obligation.id));
             }
         }
-        let closure = crate::bytes::closure(graph, roots.keys());
+        // An arm no path reads is found only where some block's fold drops an in-edge (D214).
+        let closure = match facts.obligations.narrows() {
+            true => crate::bytes::closure_under(
+                graph,
+                (roots.keys()).map(|value| (value, ByteMask::All, crate::edge_fold::ALL)),
+            ),
+            false => crate::bytes::closure(graph, roots.keys()),
+        };
+        // What an unmodelled instruction reads, and what those values depend on. O(V + E).
+        let unmodelled = (facts.obligations.unmodelled().iter())
+            .flat_map(|inst| graph.inputs(inst).iter().copied())
+            .collect::<Vec<_>>();
+        let unmodelled = match unmodelled.is_empty() {
+            true => crate::dense::IdSet::default(),
+            false => crate::bytes::closure(graph, unmodelled).values,
+        };
         Some(Self {
             values: closure.values,
             bytes: closure.bytes,
             parents: closure.parents,
             roots,
+            unmodelled,
         })
+    }
+
+    /// Whether nothing reads `value`: no observation depends on it, and no instruction whose
+    /// semantics no rule models may. The complement of `contains` proves nothing (ROADMAP D327).
+    pub fn proven_unread(&self, value: ValueId) -> bool {
+        !self.values.contains(value) && !self.unmodelled.contains(value)
     }
 
     pub fn contains(&self, value: ValueId) -> bool {
@@ -126,6 +153,26 @@ impl ProvenProgramObservations {
     }
 }
 
+/// The roots read however their block is entered: the live outputs, each parameter's entry value
+/// (a rendered variable whether or not the body reads it) and each argument a call is passed.
+fn entered_roots(
+    live_out: &FunctionLiveOut,
+    boundaries: &SourceBoundaryFacts,
+) -> crate::dense::IdSet<ValueId> {
+    let mut roots = crate::dense::IdSet::from_iter(live_out.iter());
+    roots.extend((boundaries.parameters.values()).filter_map(|parameter| parameter.value()));
+    for boundary in boundaries.calls.values() {
+        for argument in &boundary.arguments {
+            if let SourceCallArgumentValue::Value(value) = argument.value
+                && !boundary.ignores(argument)
+            {
+                roots.insert(value);
+            }
+        }
+    }
+    roots
+}
+
 impl DeadPhis {
     /// Find the merges nothing observes, following what observation depends on.
     pub fn find(
@@ -154,31 +201,28 @@ impl DeadPhis {
         if !obligations.is_complete() {
             return Self::default();
         }
-        let mut roots = crate::dense::IdSet::from_iter(live_out.iter());
+        // A live merge an obligation names is read only on the in-edges the inventory found a
+        // path reads (ROADMAP D214); every other root is read however its block is entered.
+        let mut owed = crate::dense::IdSet::default();
         for obligation in obligations.obligations().values() {
-            roots.extend(obligation.inputs.iter().copied());
+            owed.extend(obligation.inputs.iter().copied());
         }
-        // Parameters are rendered program variables even when the body does
-        // not read them, so their canonical entry values remain in the named
-        // domain independently of effect liveness.
-        roots.extend(
-            boundaries
-                .parameters
-                .values()
-                .filter_map(|parameter| parameter.value()),
-        );
-        for boundary in boundaries.calls.values() {
-            for argument in &boundary.arguments {
-                if let SourceCallArgumentValue::Value(value) = argument.value
-                    && !boundary.ignores(argument)
-                {
-                    roots.insert(value);
-                }
-            }
-        }
+        let read_under = |value: ValueId| match graph.def_inst(value) {
+            Some(inst) => obligations.read_under(inst),
+            None => crate::edge_fold::ALL,
+        };
+        let roots = entered_roots(live_out, boundaries);
         // Whatever an observation depends on is observed, transitively. The walk
         // is over the graph's own instruction inputs, so it visits each edge once.
-        let observed = crate::bytes::closure(graph, roots).values;
+        let owed = (owed.iter()).map(|value| (value, ByteMask::All, read_under(value)));
+        let roots = (roots.iter())
+            .map(|value| (value, ByteMask::All, crate::edge_fold::ALL))
+            .chain(owed);
+        let closure = match obligations.narrows() {
+            true => crate::bytes::closure_under(graph, roots),
+            false => crate::bytes::closure_of(graph, roots.map(|(value, bytes, _)| (value, bytes))),
+        };
+        let observed = &closure.values;
 
         let unobserved_values = graph
             .values
@@ -194,8 +238,14 @@ impl DeadPhis {
             })
             .map(|value| value.id)
             .collect();
+        let unobserved_uses = match obligations.narrows() {
+            true => closure.unread_arms(graph).collect::<BTreeSet<_>>(),
+            false => BTreeSet::new(),
+        };
         let mut dead = Self {
             unobserved_values,
+            unread_arms: !unobserved_uses.is_empty(),
+            unobserved_uses,
             ..Self::default()
         };
         for inst in &graph.insts {
@@ -235,7 +285,7 @@ impl DeadPhis {
             graph,
             live_out,
             obligations,
-            &observed,
+            observed,
         );
         dead
     }
@@ -342,6 +392,12 @@ impl DeadPhis {
     /// Every pure definition whose output is in [`Self::unobserved_values`].
     pub const fn unobserved_insts(&self) -> &crate::dense::IdSet<InstId> {
         &self.unobserved_insts
+    }
+
+    /// Whether a path reads arm `input_idx` of the live merge `inst`: every arm where no fold
+    /// drops an in-edge, with no lookup.
+    pub fn arm_read(&self, inst: InstId, input_idx: usize) -> bool {
+        !self.unread_arms || !self.unobserved_uses.contains(&UseSite { inst, input_idx })
     }
 
     /// Complete input-use domain of [`Self::unobserved_insts`].

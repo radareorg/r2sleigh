@@ -96,21 +96,6 @@ impl ResultLanes {
     }
 }
 
-/// The bytes of the result registers a call to a callee nothing is known of may take: the registers
-/// the convention passes arguments in, and the variadic count a callee that is variadic reads.
-pub fn unknown_call_takes(lanes: ResultLanes, slots: &SourceConventionSlots) -> LaneBytes {
-    let counted = slots.variadic_count_register();
-    LaneBytes::covered_by(
-        lanes,
-        &[argument_registers(slots), counted.into_iter().collect()].concat(),
-    )
-}
-
-/// The bytes of the result registers a body entered with its arguments hands to the calls it makes.
-pub fn argument_takes(lanes: ResultLanes, slots: &SourceConventionSlots) -> LaneBytes {
-    LaneBytes::covered_by(lanes, &argument_registers(slots))
-}
-
 pub fn argument_registers(slots: &SourceConventionSlots) -> Vec<CanonicalStorageId> {
     [slots.argument_slots(), slots.float_argument_slots()].concat()
 }

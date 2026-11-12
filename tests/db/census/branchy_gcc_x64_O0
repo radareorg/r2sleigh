@@ -115,7 +115,7 @@ void _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
 {
     uint64_t tmp_401079_0_2;
 
-    /* r2dec proof: 5 constructs are marked below; 29 source obligations: 0 rendered, 6 elided, 0 refused, 23 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0); 1 callee prototype supplied by the source */
+    /* r2dec proof: 5 constructs are marked below; 29 source obligations: 0 rendered, 6 elided, 0 refused, 23 residual; 1 statements rendered; 1 held from entry, read as residuals (stack_p0); 1 callee prototype supplied by the source; the parameters are a floor: at least 3 (an address of the argument area escapes) */
     {
         tmp_401079_0_2 = r2sleigh_residual_u64(1);
         r2sleigh_residual_void(2); /* r2dec gap: StoreNotSpelled at 0x401070:29 covering 1 op (render::values) */
@@ -197,7 +197,7 @@ CMDS=aa; pdd @ 0x00401120
 EXPECT=<<EOF
 r2sleigh_result_u64 __do_global_dtors_aux(void)
 {
-    uint64_t deregister_tm_clones(void);
+    r2sleigh_result_u64 deregister_tm_clones(void);
     extern char __TMC_END__[];
 
     uint8_t tmp_401124_0_1;
@@ -227,7 +227,7 @@ CMDS=aa; pdd @ 0x00401150
 EXPECT=<<EOF
 r2sleigh_result_u64 frame_dummy(void)
 {
-    uint64_t register_tm_clones(void);
+    r2sleigh_result_u64 register_tm_clones(void);
 
     /* r2dec proof: no individual construct is marked; 3 source obligations: 2 rendered, 1 elided, 0 refused; 1 statements rendered; the parameters are a floor: at least 0 (a register past them reaches the call to 0x4010e0); the result is unproven (Written): 1 unproven-return carried */
     {

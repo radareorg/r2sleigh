@@ -109,6 +109,7 @@ fn arity_owners(read: &CalleeRead) -> BTreeSet<u64> {
         | SourceFloorCause::ArgumentAreaUnplaced
         | SourceFloorCause::ArgumentAreaRead
         | SourceFloorCause::ArgumentAreaPastBudget
+        | SourceFloorCause::ArgumentAreaEscapes
         | SourceFloorCause::RegisterRead
         | SourceFloorCause::Homed
         | SourceFloorCause::Unplaced(_) => None,
@@ -517,11 +518,11 @@ impl<'m> Cycle<'m> {
             Some((self.members[*callee].0, held.interface.clone()))
         });
         let stated = stated.collect::<Vec<_>>();
-        // A cycle's members keep their open-world results: the fixpoint moves the results it tracks.
+        // A member is read in the world of the seal that consumes it, as one read alone is.
         let stated = Stated {
             owners: &self.outside[at],
             assumed: &stated,
-            world: super::World::Open,
+            world: world_of(self.demand),
         };
         let read = callee_read(db, self.members[at], stated);
         if stopped(&read) {
@@ -741,6 +742,7 @@ mod tests {
             SourceFloorCause::ArgumentAreaUnplaced,
             SourceFloorCause::ArgumentAreaRead,
             SourceFloorCause::ArgumentAreaPastBudget,
+            SourceFloorCause::ArgumentAreaEscapes,
             SourceFloorCause::RegisterRead,
         ];
         for cause in unliftable {
