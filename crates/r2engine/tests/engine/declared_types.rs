@@ -255,3 +255,26 @@ fn a_cited_record_pointer_is_declared_and_passed() {
     assert_eq!(arguments[0], "arg0", "{text}");
     assert!(arguments[1].contains("frame"), "{text}");
 }
+
+/// find `check_option_combinations`, cut down: `while (p) p = p->next; strlen((char *)p);` after
+/// `.plt`. gcc hands the loop's null `p` on in RDI; the argument is a merge of the entry value and
+/// a load, so no declared slot types the parameter (D262).
+const NULL_HANDED_ON: [u8; 0x3c] = plt_then(&[
+    0x48, 0x83, 0xec, 0x08, // 1020 sub rsp, 8
+    0x48, 0x85, 0xff, // 1024 test rdi, rdi
+    0x74, 0x09, // 1027 je 0x1032
+    0x48, 0x8b, 0x7f, 0x08, // 1029 mov rdi, [rdi + 8]
+    0x48, 0x85, 0xff, // 102d test rdi, rdi
+    0x75, 0xf7, // 1030 jne 0x1029
+    0xe8, 0xd9, 0xff, 0xff, 0xff, // 1032 call stub
+    0x48, 0x83, 0xc4, 0x08, // 1037 add rsp, 8
+    0xc3, // 103b ret
+]);
+
+#[test]
+fn a_declared_pointer_types_only_the_entry_value_itself() {
+    let text = on(Libc::Glibc, "strlen", &NULL_HANDED_ON);
+    let parameters = header_parameters(&text, &format!("fcn_{PLT_CALLER:x}"));
+    assert_eq!(parameters.len(), 1, "{text}");
+    assert!(!parameters[0].0.contains("char"), "{text}");
+}

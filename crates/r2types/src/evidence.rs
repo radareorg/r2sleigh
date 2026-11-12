@@ -63,6 +63,40 @@ fn meet_pointers(held: CTypeLike, other: CTypeLike) -> CTypeLike {
     }
 }
 
+/// The parameter entry value `value` is on every path: itself, a copy of one, or a merge every
+/// input of which is the same one; a constant or any other definition refuses. The walk visits
+/// each value once.
+fn entry_identity(
+    graph: &r2ssa::SsaGraph,
+    entries: &r2ssa::dense::IdSet<r2ssa::ValueId>,
+    value: r2ssa::ValueId,
+) -> Option<r2ssa::ValueId> {
+    let mut seen = r2ssa::dense::IdSet::<r2ssa::ValueId>::new(graph.values.len());
+    let mut pending = vec![value];
+    let mut found = None;
+    while let Some(at) = pending.pop() {
+        if !seen.insert(at) {
+            continue;
+        }
+        if entries.contains(at) {
+            match found {
+                Some(entry) if entry != at => return None,
+                _ => found = Some(at),
+            }
+            continue;
+        }
+        let inst = graph.inst(graph.def_inst(at)?)?;
+        match &inst.payload {
+            r2ssa::InstPayload::Phi { .. } => pending.extend(graph.inputs(inst.id)),
+            r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. }) => {
+                pending.push(*graph.inputs(inst.id).first()?);
+            }
+            _ => return None,
+        }
+    }
+    found
+}
+
 /// Whether a declared pointer says nothing of its pointee: `void *` or `const void *`.
 pub(crate) fn is_untyped_pointer(ty: &CTypeLike) -> bool {
     let CTypeLike::Pointer(pointee) = ty.unaliased() else {
@@ -774,38 +808,50 @@ impl<'a> EvidenceBuilder<'a> {
         types
     }
 
-    /// What the type-bearing callee slots each parameter entry value's class is handed to state:
-    /// O(callee slots + parameters).
+    /// What type-bearing callee slots state of each parameter entry value. A pointer counts only
+    /// where the argument is the entry value itself on every path (D262); an integer anywhere in
+    /// its class refuses. O(callee slots x values each identity walk visits + parameters).
     fn declared_bounds(&mut self) -> IdMap<r2ssa::ValueId, DeclaredBound> {
-        let mut classes = FxHashMap::<usize, DeclaredBound>::default();
+        let source = self.source;
+        let values = source.graph().values.len();
+        let mut entries = r2ssa::dense::IdSet::<r2ssa::ValueId>::new(values);
+        let parameters = source.facts().boundaries.parameters.values();
+        for value in parameters.filter_map(|parameter| parameter.value()) {
+            entries.insert(value);
+        }
+        let mut integers = FxHashSet::<usize>::default();
+        let mut pointers = IdMap::<r2ssa::ValueId, DeclaredBound>::new(values);
         for (node, ty, basis) in std::mem::take(&mut self.callee_slots) {
-            let Some(root) = (basis.states_type())
-                .then(|| self.solver.class_of(&node))
-                .flatten()
-            else {
+            if !basis.states_type() {
+                continue;
+            }
+            let CTypeLike::Pointer(_) = ty.unaliased() else {
+                integers.extend(self.solver.class_of(&node));
                 continue;
             };
-            let bound = match ty.unaliased() {
-                CTypeLike::Pointer(_) => DeclaredBound::Pointer(ty.clone(), basis),
-                _ => DeclaredBound::Integer,
+            let EvidenceNode::Value(argument) = node else {
+                continue;
             };
-            let met = match (classes.remove(&root), bound) {
-                (None, bound) => bound,
-                (Some(DeclaredBound::Integer), _) | (_, DeclaredBound::Integer) => {
-                    DeclaredBound::Integer
-                }
-                (Some(DeclaredBound::Pointer(held, a)), DeclaredBound::Pointer(other, b)) => {
-                    DeclaredBound::Pointer(meet_pointers(held, other), a.max(b))
-                }
+            let Some(entry) = entry_identity(source.graph(), &entries, argument) else {
+                r2il::refusal_evidence!("declared-pointer", "{argument:?} is no entry value");
+                continue;
             };
-            classes.insert(root, met);
+            let met = match pointers.remove(entry) {
+                None => DeclaredBound::Pointer(ty, basis),
+                Some(DeclaredBound::Pointer(held, a)) => {
+                    DeclaredBound::Pointer(meet_pointers(held, ty), a.max(basis))
+                }
+                Some(DeclaredBound::Integer) => DeclaredBound::Integer,
+            };
+            pointers.insert(entry, met);
         }
-        let mut declared = IdMap::new(self.source.graph().values.len());
-        let source = self.source;
+        let mut declared = IdMap::new(values);
         let parameters = source.facts().boundaries.parameters.values();
         for value in parameters.filter_map(|parameter| parameter.value()) {
             let root = self.solver.class_of(&EvidenceNode::Value(value));
-            if let Some(bound) = root.and_then(|root| classes.get(&root)) {
+            if root.is_some_and(|root| integers.contains(&root)) {
+                declared.insert(value, DeclaredBound::Integer);
+            } else if let Some(bound) = pointers.get(value) {
                 declared.insert(value, bound.clone());
             }
         }
