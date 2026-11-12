@@ -52,48 +52,113 @@ pub struct EvidenceTypes {
     declared: r2ssa::dense::IdMap<r2ssa::ValueId, DeclaredBound>,
 }
 
-/// Two declared pointers to one value: `void *` refines to the other, two pointees that differ
-/// otherwise give `void *` (D262).
-fn meet_pointers(held: CTypeLike, other: CTypeLike) -> CTypeLike {
-    match (is_untyped_pointer(&held), is_untyped_pointer(&other)) {
-        _ if held == other => held,
-        (true, false) => other,
-        (false, true) => held,
-        _ => CTypeLike::Pointer(Box::new(CTypeLike::Void)),
+/// The declared pointers met so far at one entry value; a conflict stays one (D262).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Met {
+    Pointer(CTypeLike, r2source::Basis),
+    /// Two pointees that differ, neither `void *`: `void *` whatever bound comes after.
+    Conflict(r2source::Basis),
+}
+
+impl Met {
+    /// One more declared pointer: `void *` refines to the other pointee, two others conflict, and
+    /// a conflict absorbs every later bound.
+    fn and(self, ty: CTypeLike, basis: r2source::Basis) -> Self {
+        match self {
+            Self::Conflict(held) => Self::Conflict(held.max(basis)),
+            Self::Pointer(held, a) => match (is_untyped_pointer(&held), is_untyped_pointer(&ty)) {
+                _ if held == ty => Self::Pointer(held, a.max(basis)),
+                (true, false) => Self::Pointer(ty, a.max(basis)),
+                (false, true) => Self::Pointer(held, a.max(basis)),
+                _ => Self::Conflict(a.max(basis)),
+            },
+        }
+    }
+
+    fn bound(self) -> DeclaredBound {
+        match self {
+            Self::Pointer(ty, basis) => DeclaredBound::Pointer(ty, basis),
+            Self::Conflict(basis) => {
+                DeclaredBound::Pointer(CTypeLike::Pointer(Box::new(CTypeLike::Void)), basis)
+            }
+        }
     }
 }
 
-/// The parameter entry value `value` is on every path (itself, a copy, a merge of only it); any
-/// other definition refuses. Each value is visited once.
-fn entry_identity(
-    graph: &r2ssa::SsaGraph,
-    entries: &r2ssa::dense::IdSet<r2ssa::ValueId>,
-    value: r2ssa::ValueId,
-) -> Option<r2ssa::ValueId> {
-    let mut seen = r2ssa::dense::IdSet::<r2ssa::ValueId>::new(graph.values.len());
-    let mut pending = vec![value];
-    let mut found = None;
-    while let Some(at) = pending.pop() {
-        if !seen.insert(at) {
-            continue;
-        }
-        if entries.contains(at) {
-            match found {
-                Some(entry) if entry != at => return None,
-                _ => found = Some(at),
-            }
-            continue;
-        }
-        let inst = graph.inst(graph.def_inst(at)?)?;
-        match &inst.payload {
-            r2ssa::InstPayload::Phi { .. } => pending.extend(graph.inputs(inst.id)),
-            r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. }) => {
-                pending.push(*graph.inputs(inst.id).first()?);
-            }
-            _ => return None,
+/// A value's identity with a parameter entry value: unknown yet, that one on every path, or not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Identity {
+    Top,
+    Entry(r2ssa::ValueId),
+    Bottom,
+}
+
+impl Identity {
+    fn meet(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Top, other) | (other, Self::Top) => other,
+            (Self::Entry(a), Self::Entry(b)) if a == b => self,
+            _ => Self::Bottom,
         }
     }
-    found
+}
+
+/// The entry value each value is on every path (itself, a copy, a merge of only it), once per
+/// function: a worklist where each value only descends `Top`, `Entry`, `Bottom`. O(insts + inputs).
+fn entry_identities(
+    graph: &r2ssa::SsaGraph,
+    entries: &r2ssa::dense::IdSet<r2ssa::ValueId>,
+) -> r2ssa::dense::IdVec<r2ssa::ValueId, Option<r2ssa::ValueId>> {
+    use r2ssa::dense::IdVec;
+    let transparent = |inst: &r2ssa::GraphInst| {
+        matches!(
+            inst.payload,
+            r2ssa::InstPayload::Phi { .. } | r2ssa::InstPayload::Op(r2ssa::SSAOp::Copy { .. })
+        )
+    };
+    let mut state = IdVec::from_fn(graph.values.len(), |value: r2ssa::ValueId| {
+        let defined = graph.def_inst(value).and_then(|inst| graph.inst(inst));
+        match defined {
+            _ if entries.contains(value) => Identity::Entry(value),
+            Some(inst) if transparent(inst) => Identity::Top,
+            _ => Identity::Bottom,
+        }
+    });
+    // The copies and merges reading each value, so a lowered value requeues only them.
+    let mut readers = IdVec::from_fn(graph.values.len(), |_: r2ssa::ValueId| Vec::new());
+    let mut pending = Vec::new();
+    for inst in graph.insts.iter().filter(|inst| transparent(inst)) {
+        for input in graph.inputs(inst.id) {
+            readers[*input].push(inst.id);
+        }
+        pending.push(inst.id);
+    }
+    while let Some(at) = pending.pop() {
+        let Some(inst) = graph.inst(at) else {
+            continue;
+        };
+        let Some(output) = inst.output.filter(|output| !entries.contains(*output)) else {
+            continue;
+        };
+        let inputs = graph.inputs(at);
+        let read = match &inst.payload {
+            r2ssa::InstPayload::Phi { .. } => inputs
+                .iter()
+                .fold(Identity::Top, |met, value| met.meet(state[*value])),
+            _ => inputs
+                .first()
+                .map_or(Identity::Bottom, |value| state[*value]),
+        };
+        let met = state[output].meet(read);
+        if met != state[output] {
+            state[output] = met;
+            pending.extend(readers[output].iter().copied());
+        }
+    }
+    IdVec::from_fn(graph.values.len(), |value| match state[value] {
+        Identity::Entry(entry) => Some(entry),
+        Identity::Top | Identity::Bottom => None,
+    })
 }
 
 /// Whether a declared pointer says nothing of its pointee: `void *` or `const void *`.
@@ -817,8 +882,9 @@ impl<'a> EvidenceBuilder<'a> {
         for value in parameters.filter_map(|parameter| parameter.value()) {
             entries.insert(value);
         }
+        let identities = entry_identities(source.graph(), &entries);
         let mut integers = FxHashSet::<usize>::default();
-        let mut pointers = IdMap::<r2ssa::ValueId, DeclaredBound>::new(values);
+        let mut pointers = IdMap::<r2ssa::ValueId, Met>::new(values);
         for (node, ty, basis) in std::mem::take(&mut self.callee_slots) {
             if !basis.states_type() {
                 continue;
@@ -830,16 +896,13 @@ impl<'a> EvidenceBuilder<'a> {
             let EvidenceNode::Value(argument) = node else {
                 continue;
             };
-            let Some(entry) = entry_identity(source.graph(), &entries, argument) else {
+            let Some(entry) = identities.get(argument).copied().flatten() else {
                 r2il::refusal_evidence!("declared-pointer", "{argument:?} is no entry value");
                 continue;
             };
             let met = match pointers.remove(entry) {
-                None => DeclaredBound::Pointer(ty, basis),
-                Some(DeclaredBound::Pointer(held, a)) => {
-                    DeclaredBound::Pointer(meet_pointers(held, ty), a.max(basis))
-                }
-                Some(DeclaredBound::Integer) => DeclaredBound::Integer,
+                None => Met::Pointer(ty, basis),
+                Some(held) => held.and(ty, basis),
             };
             pointers.insert(entry, met);
         }
@@ -849,8 +912,8 @@ impl<'a> EvidenceBuilder<'a> {
             let root = self.solver.class_of(&EvidenceNode::Value(value));
             if root.is_some_and(|root| integers.contains(&root)) {
                 declared.insert(value, DeclaredBound::Integer);
-            } else if let Some(bound) = pointers.get(value) {
-                declared.insert(value, bound.clone());
+            } else if let Some(met) = pointers.remove(value) {
+                declared.insert(value, met.bound());
             }
         }
         declared
@@ -984,6 +1047,26 @@ fn pointee_type_for_width(width: u32) -> Option<CTypeLike> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `A *`, `B *`, then `A *` again is `void *`; `void *` refines to a typed pointee (D262).
+    #[test]
+    fn a_pointee_conflict_absorbs_every_later_bound() {
+        let to = |ty: CTypeLike| CTypeLike::Pointer(Box::new(ty));
+        let (a, b) = (
+            to(CTypeLike::Struct("a".into())),
+            to(CTypeLike::Struct("b".into())),
+        );
+        let declared = r2source::Basis::Declared;
+        let met = Met::Pointer(a.clone(), declared)
+            .and(b, declared)
+            .and(a.clone(), declared);
+        assert_eq!(
+            met.bound(),
+            DeclaredBound::Pointer(to(CTypeLike::Void), declared)
+        );
+        let refined = Met::Pointer(to(CTypeLike::Void), declared).and(a.clone(), declared);
+        assert_eq!(refined, Met::Pointer(a, declared));
+    }
 
     #[test]
     fn pointee_width_maps_to_addressable_integer_widths() {

@@ -277,3 +277,28 @@ fn a_declared_pointer_types_only_the_entry_value_itself() {
     assert_eq!(parameters.len(), 1, "{text}");
     assert!(!parameters[0].0.contains("char"), "{text}");
 }
+
+/// `fputs((const char *)p, (FILE *)p); fputs((const char *)p, 0);`: `const char *`, `FILE *`,
+/// then `const char *` again; the conflict stays `void *` whatever bound follows (D262).
+const FPUTS_TWICE: [u8; 0x38] = plt_then(&[
+    0x53, // 1020 push rbx
+    0x48, 0x89, 0xfb, // 1021 mov rbx, rdi
+    0x48, 0x89, 0xfe, // 1024 mov rsi, rdi
+    0xe8, 0xe4, 0xff, 0xff, 0xff, // 1027 call stub
+    0x48, 0x89, 0xdf, // 102c mov rdi, rbx
+    0x31, 0xf6, // 102f xor esi, esi
+    0xe8, 0xda, 0xff, 0xff, 0xff, // 1031 call stub
+    0x5b, // 1036 pop rbx
+    0xc3, // 1037 ret
+]);
+
+#[test]
+fn a_conflict_between_declared_pointees_stays_one() {
+    let text = on(Libc::Glibc, "fputs", &FPUTS_TWICE);
+    let parameters = header_parameters(&text, &format!("fcn_{PLT_CALLER:x}"));
+    assert_eq!(
+        parameters.first().map(|p| p.0.as_str()),
+        Some("void*"),
+        "{text}"
+    );
+}
