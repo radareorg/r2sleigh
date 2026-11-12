@@ -52,7 +52,7 @@ pub use convert::{
 pub use data_object::{
     DataObjectTypeFact, DataObjectTypeProvenance, DataObjectTypeRefusal, ProgramDataObjectTypeFacts,
 };
-pub use evidence::EvidenceTypes;
+pub use evidence::{DeclaredBound, EvidenceTypes};
 pub use external::{ExternalField, ExternalStruct, ExternalTypeDb, normalize_external_type_name};
 pub use facts::{
     CalleeFact, CalleeLinkage, CalleeModelPolicyEvidence, CalleeReturnRelation,
@@ -73,6 +73,7 @@ pub use function_facts::{
     admit_declaration_type, aggregate_is_definable, aggregate_members, declaration_type_width_bits,
     unread_slot,
 };
+pub use parameter_types::{ParameterType, ParameterTypes, PointerRefusal};
 
 pub use model::{Signedness, Type};
 pub use prepare::{TypeHint, merge_type_hint};
@@ -85,3 +86,4 @@ pub use analysis::{
 };
 
 mod data_object;
+mod parameter_types;

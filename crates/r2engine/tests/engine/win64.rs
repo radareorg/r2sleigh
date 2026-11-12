@@ -77,8 +77,9 @@ fn va_list(dll: &str) -> OpenProgram<Literal> {
 fn a_home_handed_on_as_a_cited_va_list_is_a_variadic_tail() {
     let mut open = va_list("api-ms-win-crt-stdio-l1-1-0.dll");
     let callee = rendered(&mut open, BASE);
+    // The format handed on is UCRT's `const char *` (D262).
     assert!(
-        callee.contains("print_line(uint64_t arg0, ...)"),
+        callee.contains("print_line(const char* arg0, ...)"),
         "{callee}"
     );
     // `&home[1]` is the callee's fifth argument: the homes stay in memory, and home 0 keeps its store.

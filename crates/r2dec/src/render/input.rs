@@ -56,13 +56,12 @@ impl<'a> RenderInput<'a> {
         self.facts.parameter_declaration(slot, width_bits)
     }
 
-    /// What parameter `slot` is declared, where a declaration states the function's own types: its
-    /// debug information or a library's prototype, never a reading of its body.
+    /// What parameter `slot` is declared, where its row's basis states a type: debug information
+    /// or a library's prototype, its own or a declared callee slot's (D261), never a body reading.
     pub fn declared_parameter(&self, slot: usize, width_bits: u32) -> Option<r2types::CTypeLike> {
-        let interface = self.facts.source().machine_context().function_interface()?;
-        (interface.types().grade() <= r2source::Grade::Declared)
-            .then(|| self.parameter_declaration(slot, width_bits))
-            .flatten()
+        (self.facts.parameter_declaration_fact(slot, width_bits))
+            .filter(|fact| fact.confidence.basis.states_type())
+            .map(|fact| fact.value)
     }
 
     /// The one name of parameter `slot` (r2types `FunctionFacts::parameter_name`).

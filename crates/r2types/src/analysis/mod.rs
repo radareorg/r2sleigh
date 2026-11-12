@@ -182,11 +182,17 @@ impl TypeAnalysis {
             })
             .collect::<Option<Vec<_>>>()?;
         let unproven = self.unproven_carrier_bits();
+        let rows = &self.type_facts().parameter_types;
+        let stated = interface.map_or(r2source::Basis::Convention, |at| at.types().basis);
+        let bases = (0..params.len())
+            .map(|slot| rows.basis(slot).unwrap_or(stated))
+            .collect();
         crate::SourceOwnedCalleeSignature::new(
             &self.source,
             crate::FunctionType {
                 return_type,
                 params,
+                bases,
                 // Function interfaces own fixed carriers. Variadicity belongs
                 // to the exact callsite prototype and is attached there.
                 variadic: false,
@@ -797,7 +803,7 @@ fn build_type_analysis_inner(
     let type_facts = FunctionTypeFacts::builder(FunctionTypeFactInputs {
         merged_signature: merged_signature.clone(),
         // Enrichment states these as it writes each slot.
-        parameter_bases: BTreeMap::new(),
+        parameter_types: crate::ParameterTypes::default(),
         // Enrichment states these from the solve, beside the exact signature.
         inferred_aggregates: BTreeMap::new(),
         parameter_structures: BTreeMap::new(),

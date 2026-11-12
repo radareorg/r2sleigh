@@ -105,6 +105,12 @@ impl Basis {
         Self::Convention,
     ];
 
+    /// Whether a type on this basis states the C type, where every other basis states only a
+    /// width: debug information or a library's declaration (D261).
+    pub const fn states_type(self) -> bool {
+        matches!(self, Self::DebugInfo | Self::Declared)
+    }
+
     /// How strongly a fact on this basis is known.
     pub const fn grade(self) -> Grade {
         match self {

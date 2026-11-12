@@ -109,7 +109,7 @@ fn every_uncited_glibc_facing_row_names_why() {
     assert!(unnamed.is_empty(), "uncited with no reason: {unnamed:?}");
     let stale = listed.difference(&uncited).collect::<Vec<_>>();
     assert!(stale.is_empty(), "listed, but no uncited row: {stale:?}");
-    assert!(listed.len() <= 119, "{} uncited rows", listed.len());
+    assert!(listed.len() <= 116, "{} uncited rows", listed.len());
 }
 
 /// An uncited table states no tail: its rows are radare2's, `Unstated` until cited.

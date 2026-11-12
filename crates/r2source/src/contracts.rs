@@ -184,9 +184,19 @@ impl SourceParameterLocation {
 pub struct SourceAbiParameterSpec {
     index: u32,
     location: SourceParameterLocation,
-    /// The section the slot belongs to and where the parameter comes from, where its producer
-    /// states them (doc/adr-call-boundary.md, "The function's parameters").
-    slot: Option<(crate::convention::SlotClass, crate::Basis)>,
+    /// The convention slot the parameter is at and what its declared type rests on, where its
+    /// producer states them (doc/adr-call-boundary.md, "The function's parameters").
+    slot: Option<SourceSlot>,
+}
+
+/// One parameter's convention slot: its dense number in convention order (integer registers, then
+/// float registers, then the stack; r2ssa `body_boundary::SlotId`), its section, and the basis of
+/// its type: `DebugInfo` or `Declared` state one, every other basis only a width (D261).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SourceSlot {
+    pub id: u32,
+    pub class: crate::convention::SlotClass,
+    pub basis: crate::Basis,
 }
 
 impl SourceAbiParameterSpec {
@@ -223,24 +233,25 @@ impl SourceAbiParameterSpec {
         }
     }
 
-    /// The same parameter, stated in `class`'s section on `basis`.
-    pub const fn in_section(
-        mut self,
-        class: crate::convention::SlotClass,
-        basis: crate::Basis,
-    ) -> Self {
-        self.slot = Some((class, basis));
+    /// The same parameter, stated at `slot`.
+    pub const fn at_slot(mut self, slot: SourceSlot) -> Self {
+        self.slot = Some(slot);
         self
+    }
+
+    /// The slot, where the producer states it.
+    pub const fn slot(&self) -> Option<SourceSlot> {
+        self.slot
     }
 
     /// The section's class, where the producer states it.
     pub fn class(&self) -> Option<crate::convention::SlotClass> {
-        self.slot.map(|(class, _)| class)
+        self.slot.map(|slot| slot.class)
     }
 
     /// Where the parameter comes from: `Convention` for a hole below a read slot.
     pub fn basis(&self) -> Option<crate::Basis> {
-        self.slot.map(|(_, basis)| basis)
+        self.slot.map(|slot| slot.basis)
     }
 
     /// An unread slot below a read one: a parameter only by the convention's order.

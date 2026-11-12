@@ -3635,14 +3635,25 @@ fn mint_recovered_interface_inner(
     };
 
     let register_count = recovered.parameters().len();
+    // Each parameter is at the boundary slot of its location. O(parameters x slots).
+    let slot = |location: SourceParameterLocation, class, basis| {
+        let (id, _) =
+            (recovered.boundary().locations.iter()).find(|(_, at)| at.location == location)?;
+        Some(r2source::SourceSlot {
+            id: id.0,
+            class,
+            basis,
+        })
+    };
     let parameters = recovered
         .parameters()
         .iter()
         .enumerate()
         .map(|(index, parameter)| {
+            let slotted = SourceParameterLocation::Register(parameter.slot());
             Some(
                 SourceAbiParameterSpec::new(u32::try_from(index).ok()?, parameter.location())
-                    .in_section(parameter.class(), parameter.basis()),
+                    .at_slot(slot(slotted, parameter.class(), parameter.basis())?),
             )
         })
         .chain(
@@ -3651,16 +3662,21 @@ fn mint_recovered_interface_inner(
                 .iter()
                 .enumerate()
                 .map(|(index, parameter)| {
+                    let location = SourceParameterLocation::Stack {
+                        offset: parameter.offset(),
+                        size_bytes: parameter.slot_bytes(),
+                        callee_offset: parameter.offset(),
+                    };
                     Some(
                         SourceAbiParameterSpec::with_location(
                             u32::try_from(register_count.checked_add(index)?).ok()?,
-                            SourceParameterLocation::Stack {
-                                offset: parameter.offset(),
-                                size_bytes: parameter.slot_bytes(),
-                                callee_offset: parameter.offset(),
-                            },
+                            location,
                         )
-                        .in_section(SlotClass::Stack, parameter.basis()),
+                        .at_slot(slot(
+                            location,
+                            SlotClass::Stack,
+                            parameter.basis(),
+                        )?),
                     )
                 }),
         )

@@ -744,7 +744,7 @@ NAME=0x00001510
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001510
 EXPECT=<<EOF
-uint64_t copy_name(uint8_t* arg0, uint64_t arg1, uint64_t arg2)
+uint64_t copy_name(uint8_t* arg0, const char* arg1, uint64_t arg2)
 {
     void* memcpy(void*, const void*, uint64_t);
     uint64_t strlen(const char*);
@@ -754,9 +754,9 @@ uint64_t copy_name(uint8_t* arg0, uint64_t arg1, uint64_t arg2)
 
     /* r2dec proof: no individual construct is marked; 47 source obligations: 23 rendered, 24 elided, 0 refused; 5 statements rendered; 2 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
     {
-        rax_1 = strlen((const char*)arg1);
+        rax_1 = strlen(arg1);
         rbx_2 = (uint8_t)((uint64_t)arg2 <= (uint64_t)rax_1) ? (uint64_t)((uint64_t)arg2 - (uint64_t)1U) : (uint64_t)rax_1;
-        memcpy((void*)(uint64_t)arg0, (const void*)arg1, rbx_2);
+        memcpy((void*)(uint64_t)arg0, (const void*)(uint64_t)arg1, rbx_2);
         r2sleigh_store_u8((void*)((uint64_t)arg0 + (uint64_t)rbx_2 * 1U), (uint8_t)0U);
         return (uint64_t)rbx_2;
     }

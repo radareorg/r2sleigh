@@ -55,10 +55,14 @@ impl Tags {
                 .flat_map(|graph| stated_tags(graph))
                 .chain(laid),
         );
-        let declarable = (graph.iter().flat_map(|graph| stated_tags(graph)))
-            .filter(|(name, is_union)| kinds.get(*name) == Some(&Some(*is_union)))
-            .map(|(name, is_union)| (name.to_owned(), is_union))
-            .collect::<BTreeMap<_, _>>();
+        // A pointer may name a tag any graph of the unit states: a callee's extern declares it.
+        let declarable = (graph
+            .iter()
+            .chain(callees)
+            .flat_map(|graph| stated_tags(graph)))
+        .filter(|(name, is_union)| kinds.get(*name) == Some(&Some(*is_union)))
+        .map(|(name, is_union)| (name.to_owned(), is_union))
+        .collect::<BTreeMap<_, _>>();
         let mut candidates = (stated.iter())
             .map(|(name, definition)| (name.clone(), definition.is_union))
             .collect::<BTreeMap<_, _>>();

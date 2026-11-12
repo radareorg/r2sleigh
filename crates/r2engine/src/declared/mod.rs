@@ -392,7 +392,8 @@ impl<'a> Placement<'a> {
             id.and_then(|id| r2types::source_type_like(&graph, id))
                 .unwrap_or(r2types::CTypeLike::Unknown)
         };
-        let params = params.into_iter().map(convert).collect();
+        let params = params.into_iter().map(convert).collect::<Vec<_>>();
+        let bases = vec![declared.basis; params.len()];
         let return_type = match result_unstated(declared) {
             true => r2types::CTypeLike::Unknown,
             false => Some(convert(returns)).filter(|ty| *ty != r2types::CTypeLike::Unknown)?,
@@ -400,6 +401,7 @@ impl<'a> Placement<'a> {
         Some(r2types::FunctionType {
             return_type,
             params,
+            bases,
             variadic: declared.prototype.variadic,
         })
     }
@@ -488,7 +490,7 @@ impl Placement<'_> {
     ) -> Option<r2source::SourceFunctionInterface> {
         let name = &declared.prototype.name;
         let convention = self.machine.slots.convention();
-        let interface = self.typed(name, convention, placement, typed)?;
+        let interface = self.typed(name, convention, placement, typed, declared.basis)?;
         // Typed first: a declared format parameter is believed on what the
         // declaration's types are.
         let interface = formatted(
@@ -547,9 +549,16 @@ impl Placement<'_> {
         convention: r2source::ConventionId,
         placement: &r2ssa::place::Placement,
         typed: Typed,
+        basis: r2source::Basis,
     ) -> Option<r2source::SourceFunctionInterface> {
-        let parameters = (placement.locations.iter().enumerate()).map(|(index, location)| {
-            r2source::SourceAbiParameterSpec::with_location(index as u32, *location)
+        let slots = placement.locations.iter().zip(&placement.slots);
+        let parameters = slots.enumerate().map(|(index, (location, (id, class)))| {
+            let slot = r2source::SourceSlot {
+                id: id.0,
+                class: *class,
+                basis,
+            };
+            r2source::SourceAbiParameterSpec::with_location(index as u32, *location).at_slot(slot)
         });
         let revision = format!("declared:{name}").into_bytes();
         let interface = r2source::SourceFunctionInterface::new_exact_with_logical_types(

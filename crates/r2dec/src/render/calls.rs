@@ -126,7 +126,10 @@ impl Prototype {
             return None;
         }
         let params = (signature.params.iter())
-            .map(|ty| spellable(ty, names).filter(|ty| *ty != CType::Void))
+            .map(|ty| {
+                (spellable(ty, names).or_else(|| untagged_pointer(ty)))
+                    .filter(|ty| *ty != CType::Void)
+            })
             .collect();
         let ret = spellable(&signature.return_type, names);
         Some(Self { params, ret })
@@ -322,6 +325,23 @@ pub(super) fn spellable(ty: &CType, names: &dyn Fn(&str, bool) -> bool) -> Optio
         )?))),
         _ => None,
     }
+}
+
+/// A declared pointer to an opaque name no C declaration states (a mangled row's `this` names a
+/// C++ class), as `void *`: it keeps the pointer and claims nothing of the pointee (D332). Any
+/// other unspelled pointee keeps its class.
+fn untagged_pointer(ty: &CType) -> Option<CType> {
+    let CType::Pointer(pointee) = ty.unaliased() else {
+        return None;
+    };
+    let mut pointee = pointee.as_ref();
+    while let CType::Const(inner) | CType::Typedef { ty: inner, .. } = pointee {
+        pointee = inner;
+    }
+    (*pointee == CType::Unknown).then(|| {
+        r2il::refusal_evidence!("pointee-unspelled", "{ty:?} passes as void*");
+        CType::Pointer(Box::new(CType::Void))
+    })
 }
 
 /// What a pointer points at, as C spells it: a tag `names` admits behind a pointer, qualified,
@@ -858,6 +878,7 @@ mod tests {
         let signature = r2types::FunctionType {
             return_type: CType::uint(64),
             params: vec![int32.clone(), CType::Float(64)],
+            bases: vec![r2source::Basis::Declared; 2],
             variadic: false,
         };
         let none = |_: &str, _: bool| false;
@@ -897,6 +918,7 @@ mod tests {
         let signature = r2types::FunctionType {
             return_type: CType::Void,
             params: vec![node.clone(), binary.clone()],
+            bases: vec![r2source::Basis::Declared; 2],
             variadic: false,
         };
         let unnamed = Prototype::of(&signature, 2, &|_, _| false).map(|p| p.params);
@@ -918,6 +940,7 @@ mod tests {
         );
         let by_value = r2types::FunctionType {
             params: vec![CType::Struct("node".to_string())],
+            bases: vec![r2source::Basis::Declared],
             ..signature
         };
         let by_value = Prototype::of(&by_value, 1, &|_, _| true).map(|p| p.params);

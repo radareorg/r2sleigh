@@ -57,14 +57,12 @@ fts_read_INODE64 | no glibc 2.39 header declares it
 fts_close_INODE64 | no glibc 2.39 header declares it
 fts_set_INODE64 | no glibc 2.39 header declares it
 fts_children_INODE64 | no glibc 2.39 header declares it
-fstat | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 mktime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 asctime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 gmtime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 localtime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 strftime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 wcsftime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-lstat | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 gets | ISO C11 removed it, and no mode of glibc 2.39's <stdio.h> declares it
 signal | a function pointer parameter, which the row reader does not spell
 inet_aton | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
@@ -106,7 +104,6 @@ getbsize | no glibc 2.39 header declares it
 fflagtostr | no glibc 2.39 header declares it
 sigprocmask | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 fflush_unlocked | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-stat | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 utime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 utimes | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 

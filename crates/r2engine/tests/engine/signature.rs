@@ -237,7 +237,8 @@ fn x86_64_declared(import: &str) -> String {
 }
 
 /// A row's `wchar_t` and `char` take the target's sign: unsigned under AAPCS64 glibc, signed
-/// under SysV x86-64; with no C library stated, nothing states `wchar_t` and it renders as base.
+/// under SysV x86-64; with no C library stated, nothing states `wchar_t`, so the pointer to it
+/// passes as `void*` (D263).
 #[test]
 fn a_rows_wchar_t_and_char_are_the_targets() {
     assert_eq!(
@@ -255,10 +256,7 @@ fn a_rows_wchar_t_and_char_are_the_targets() {
     assert_eq!(x86_64_declared("strlen"), "uint64_t strlen(const char*);");
     assert_eq!(
         [a64_declared("wcslen", false), a64_declared("strlen", false)],
-        [
-            "uint64_t wcslen(uint64_t);",
-            "uint64_t strlen(const char*);"
-        ]
+        ["uint64_t wcslen(void*);", "uint64_t strlen(const char*);"]
     );
 }
 

@@ -690,7 +690,8 @@ fn a_staged_return_line_names_the_return_instruction() {
     assert!(named_by(emission, "rax_1 = ").contains(&0x1000), "{unit}");
 }
 
-/// Staged declares the import as its prototype states and passes the argument at that type.
+/// Staged declares the import as its prototype states, and the parameter it hands on unchanged
+/// takes the declared slot's type (D262), so the argument passes with no cast.
 #[test]
 fn a_staged_call_passes_a_declared_import_its_declared_types() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -698,7 +699,8 @@ fn a_staged_call_passes_a_declared_import_its_declared_types() {
     let response = decompile(&target, &Importing, BASE).expect("decompile");
     let text = response.output.text();
     assert!(text.contains("strlen(const char*);"), "{text}");
-    assert!(text.contains("strlen((const char*)"), "{text}");
+    assert!(text.contains("(const char* arg0)"), "{text}");
+    assert!(text.contains("strlen(arg0)"), "{text}");
 }
 
 /// `strlen(0x2000); strlen(0x2010)`, with `strlen` an import's stub at 0x1018.
@@ -955,16 +957,14 @@ fn a_declared_prototype_gives_an_import_its_arguments() {
         "{}",
         response.output
     );
-    // `strlen` takes RDI as the prototype's `const char*`: the first parameter, cast.
+    // `strlen` takes RDI as the prototype's `const char*`: the first parameter, which that slot
+    // types (D262), so it passes with no cast.
     let text = response.output.text();
     let parameters = common::parameters(text);
     assert_eq!(parameters.len(), 1, "{text}");
+    assert_eq!(parameters[0].0, "const char*", "{text}");
     let arguments = common::call_arguments(text, "strlen").expect("a call to strlen");
-    assert_eq!(
-        arguments,
-        [format!("(const char*){}", parameters[0].1)],
-        "{text}"
-    );
+    assert_eq!(arguments, [parameters[0].1.clone()], "{text}");
     // The same marker the plugin's route prints when radare2 supplies one.
     assert!(
         response
@@ -1128,6 +1128,20 @@ fn a_mangled_import_whose_result_is_unstated_places_no_argument() {
     assert_eq!(arguments.len(), 2, "{text}");
 }
 
+/// `this` points to a class no C tag declares: the extern spells it `void*`, keeping the pointer,
+/// where it spelled the register's class (D332).
+#[test]
+fn a_mangled_rows_this_keeps_a_pointer_type() {
+    let text = rendered_calling(HIDDEN_RESULT_CALL, "_ZN1BC1Ei");
+    let declares = text
+        .lines()
+        .find(|line| line.contains("_ZN1BC1Ei(") && line.ends_with(");"));
+    assert!(
+        declares.is_some_and(|line| line.contains("_ZN1BC1Ei(void*, ")),
+        "{text}"
+    );
+}
+
 /// `mov esi, 7; call f; mov rdi, rax; mov rsi, -1; call f; xor eax, eax; ret`: two calls of one
 /// import, the first's result read, the second's not, the second argument at two widths.
 const TWO_CALLS_OF_ONE_IMPORT: &[u8] = &[
@@ -1156,7 +1170,8 @@ fn a_mangled_import_with_no_stated_result_keeps_its_parameters_in_one_carrier_ex
             before.is_some_and(|before| !before.is_empty() && !before.contains('='))
         })
         .collect::<Vec<_>>();
-    let expected = format!("r2sleigh_result_u64 {insert}(uint64_t, uint64_t);");
+    // `this` keeps its pointer, the class it points to unspelled (D332).
+    let expected = format!("r2sleigh_result_u64 {insert}(void*, uint64_t);");
     assert_eq!(
         externs.iter().map(|line| line.trim()).collect::<Vec<_>>(),
         [expected],

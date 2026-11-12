@@ -48,6 +48,40 @@ impl SolverNode for EvidenceNode {
 pub struct EvidenceTypes {
     value_types: r2ssa::dense::IdMap<r2ssa::ValueId, CTypeLike>,
     slot_types: BTreeMap<StackSlotKey, CTypeLike>,
+    /// Each parameter entry value a declared callee slot types: the pointer, or why none (D262).
+    declared: r2ssa::dense::IdMap<r2ssa::ValueId, DeclaredBound>,
+}
+
+/// Two declared pointers to one value: `void *` refines to the other, two pointees that differ
+/// otherwise give `void *` (D262).
+fn meet_pointers(held: CTypeLike, other: CTypeLike) -> CTypeLike {
+    match (is_untyped_pointer(&held), is_untyped_pointer(&other)) {
+        _ if held == other => held,
+        (true, false) => other,
+        (false, true) => held,
+        _ => CTypeLike::Pointer(Box::new(CTypeLike::Void)),
+    }
+}
+
+/// Whether a declared pointer says nothing of its pointee: `void *` or `const void *`.
+pub(crate) fn is_untyped_pointer(ty: &CTypeLike) -> bool {
+    let CTypeLike::Pointer(pointee) = ty.unaliased() else {
+        return false;
+    };
+    match pointee.unaliased() {
+        CTypeLike::Const(inner) => *inner.unaliased() == CTypeLike::Void,
+        pointee => *pointee == CTypeLike::Void,
+    }
+}
+
+/// What the declared callee slots a value's class is handed to state of it (D262, D71 A2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DeclaredBound {
+    /// Every type-bearing slot is a pointer: this one, `void *` where two pointees differ, on the
+    /// weakest of their bases.
+    Pointer(CTypeLike, r2source::Basis),
+    /// A type-bearing slot types it as no pointer.
+    Integer,
 }
 
 impl EvidenceTypes {
@@ -57,6 +91,11 @@ impl EvidenceTypes {
 
     pub fn value_type(&self, value: r2ssa::ValueId) -> Option<&CTypeLike> {
         self.value_types.get(value)
+    }
+
+    /// What declared callee slots state of parameter entry value `value`, where one is handed it.
+    pub fn declared_bound(&self, value: r2ssa::ValueId) -> Option<&DeclaredBound> {
+        self.declared.get(value)
     }
 
     pub fn stack_slot_types(&self) -> impl Iterator<Item = (&StackSlotKey, &CTypeLike)> {
@@ -108,6 +147,8 @@ struct EvidenceBuilder<'a> {
     spellings: Vec<(EvidenceNode, TypeId, CTypeLike)>,
     /// Bounds already asserted, so the pointer-base worklist can tell what is new.
     asserted: FxHashSet<(EvidenceNode, TypeId)>,
+    /// Each callee slot bound with the basis its callee states it on.
+    callee_slots: Vec<(EvidenceNode, CTypeLike, r2source::Basis)>,
 }
 
 impl<'a> EvidenceBuilder<'a> {
@@ -118,6 +159,7 @@ impl<'a> EvidenceBuilder<'a> {
             solver: IncrementalSolver::new(TypeArena::default()),
             spellings: Vec::new(),
             asserted: FxHashSet::default(),
+            callee_slots: Vec::new(),
         }
     }
 
@@ -257,6 +299,10 @@ impl<'a> EvidenceBuilder<'a> {
                 };
                 if self.value_is_constant(argument.value) {
                     continue;
+                }
+                if let Some(basis) = signature.bases.get(argument.index) {
+                    let node = EvidenceNode::Value(argument.value);
+                    self.callee_slots.push((node, declared.clone(), *basis));
                 }
                 bounds.push((EvidenceNode::Value(argument.value), declared.clone()));
             }
@@ -685,7 +731,10 @@ impl<'a> EvidenceBuilder<'a> {
             }
         }
 
-        let mut types = EvidenceTypes::default();
+        let mut types = EvidenceTypes {
+            declared: self.declared_bounds(),
+            ..EvidenceTypes::default()
+        };
         let mut object_types: FxHashMap<r2ssa::ObjectId, CTypeLike> = FxHashMap::default();
         for (node, ty) in self.solver.typed() {
             let Some(resolved) = self.spell(&class_spellings, node, ty) else {
@@ -724,6 +773,44 @@ impl<'a> EvidenceBuilder<'a> {
         }
 
         types
+    }
+
+    /// What the type-bearing callee slots each parameter entry value's class is handed to state:
+    /// O(callee slots + parameters).
+    fn declared_bounds(&mut self) -> IdMap<r2ssa::ValueId, DeclaredBound> {
+        let mut classes = FxHashMap::<usize, DeclaredBound>::default();
+        for (node, ty, basis) in std::mem::take(&mut self.callee_slots) {
+            let Some(root) = (basis.states_type())
+                .then(|| self.solver.class_of(&node))
+                .flatten()
+            else {
+                continue;
+            };
+            let bound = match ty.unaliased() {
+                CTypeLike::Pointer(_) => DeclaredBound::Pointer(ty.clone(), basis),
+                _ => DeclaredBound::Integer,
+            };
+            let met = match (classes.remove(&root), bound) {
+                (None, bound) => bound,
+                (Some(DeclaredBound::Integer), _) | (_, DeclaredBound::Integer) => {
+                    DeclaredBound::Integer
+                }
+                (Some(DeclaredBound::Pointer(held, a)), DeclaredBound::Pointer(other, b)) => {
+                    DeclaredBound::Pointer(meet_pointers(held, other), a.max(b))
+                }
+            };
+            classes.insert(root, met);
+        }
+        let mut declared = IdMap::new(self.source.graph().values.len());
+        let source = self.source;
+        let parameters = source.facts().boundaries.parameters.values();
+        for value in parameters.filter_map(|parameter| parameter.value()) {
+            let root = self.solver.class_of(&EvidenceNode::Value(value));
+            if let Some(bound) = root.and_then(|root| classes.get(&root)) {
+                declared.insert(value, bound.clone());
+            }
+        }
+        declared
     }
 
     fn spell(

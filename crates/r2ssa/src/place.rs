@@ -59,6 +59,8 @@ impl ParamClass {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placement {
     pub locations: Vec<SourceParameterLocation>,
+    /// Each placed location's slot and section, numbered as `body_boundary` numbers a body's.
+    pub slots: Vec<(crate::body_boundary::SlotId, SlotClass)>,
     /// The class at `locations.len()` that no location takes.
     pub floor: Option<SourceUnplacedClass>,
 }
@@ -110,8 +112,21 @@ pub fn place(model: &ConventionModel, classes: &[ParamClass]) -> Placement {
     let (mut taken_integers, mut taken_floats, mut stack_bytes) = (0usize, 0usize, 0u32);
     let mut placement = Placement {
         locations: Vec::with_capacity(classes.len()),
+        slots: Vec::with_capacity(classes.len()),
         floor: None,
     };
+    // Slots run integer registers, float registers, then the stack; shared positions are one run.
+    let registers_before = |class: &ParamClass| match (shared, class) {
+        (false, ParamClass::Float(_)) => integers.len(),
+        _ => 0,
+    };
+    let register_slots = if shared {
+        integers.len()
+    } else {
+        integers.len() + floats.len()
+    };
+    let mut stacked = 0usize;
+    let slot = |at: usize| crate::body_boundary::SlotId(u32::try_from(at).unwrap_or(u32::MAX));
     for (position, class) in classes.iter().enumerate() {
         let (pool, taken, bytes) = match *class {
             ParamClass::Integer(bytes) => (&integers, &mut taken_integers, bytes),
@@ -123,6 +138,10 @@ pub fn place(model: &ConventionModel, classes: &[ParamClass]) -> Placement {
         };
         let index = if shared { position } else { *taken };
         *taken += 1;
+        let section = match class {
+            ParamClass::Float(_) => SlotClass::Float,
+            _ => SlotClass::Integer,
+        };
         if let Some(register) = pool.get(index) {
             let lane = match class {
                 ParamClass::Float(_) => low_lane(*register, u32::from(bytes)),
@@ -131,6 +150,7 @@ pub fn place(model: &ConventionModel, classes: &[ParamClass]) -> Placement {
             placement
                 .locations
                 .push(SourceParameterLocation::Register(lane));
+            (placement.slots).push((slot(registers_before(class) + index), section));
             continue;
         }
         let Some((first, step)) = stack else {
@@ -149,6 +169,8 @@ pub fn place(model: &ConventionModel, classes: &[ParamClass]) -> Placement {
             size_bytes: u32::from(bytes),
             callee_offset: offset,
         });
+        (placement.slots).push((slot(register_slots + stacked), SlotClass::Stack));
+        stacked += 1;
     }
     placement
 }
@@ -284,6 +306,22 @@ mod tests {
             callee_offset: offset,
         };
         assert_eq!(placed.locations[7..], [stack(8, 4), stack(16, 8)]);
+        let slots = placed.slots.iter().map(|(id, _)| id.0).collect::<Vec<_>>();
+        assert_eq!(slots, [0, 1, 2, 3, 4, 5, 6, 8, 9]);
+    }
+
+    /// `f(double, int)`: the slots run integer registers, float registers, then the stack, as a
+    /// body's boundary numbers them, so formal 1 is slot 0 (D261).
+    #[test]
+    fn a_slot_is_numbered_in_convention_order_whatever_the_formal_order() {
+        let placed = place(&sysv(), &[ParamClass::Float(8), ParamClass::Integer(4)]);
+        assert_eq!(
+            placed.slots,
+            [
+                (crate::body_boundary::SlotId(6), SlotClass::Float),
+                (crate::body_boundary::SlotId(0), SlotClass::Integer)
+            ]
+        );
     }
 
     #[test]

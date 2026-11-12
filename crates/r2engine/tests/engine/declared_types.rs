@@ -72,6 +72,8 @@ fn a_constant_flag_counts_the_mode_open_reads() {
     let reading = on(Libc::Glibc, "open", &OPEN_READING);
     let arguments = common::call_arguments(&reading, "open");
     assert_eq!(arguments.map(|a| a.len()), Some(2), "{reading}");
+    // The path handed on is the declared `const char *`, plain `char` and never `int8_t` (D262).
+    assert!(reading.contains("(const char* arg0)"), "{reading}");
     let creating = on(Libc::Glibc, "open", &OPEN_CREATING);
     let arguments = common::call_arguments(&creating, "open").unwrap_or_default();
     assert_eq!(arguments.len(), 3, "{creating}");
@@ -160,4 +162,98 @@ fn a_parameter_handed_to_a_declared_pointer_is_that_pointer() {
     let parameters = common::parameters(header);
     assert_eq!(parameters.len(), 1, "{text}");
     assert!(parameters[0].0.contains("FILE"), "{text}");
+}
+
+/// `f(p) { return memset(p, 0, (size_t)p); }` after `.plt`: one value at a declared pointer and a
+/// declared `size_t`.
+const MEMSET_SELF: [u8; 0x33] = plt_then(&[
+    0x48, 0x83, 0xec, 0x08, // 1020 sub rsp, 8
+    0x48, 0x89, 0xfa, // 1024 mov rdx, rdi
+    0x31, 0xf6, // 1027 xor esi, esi
+    0xe8, 0xe2, 0xff, 0xff, 0xff, // 1029 call stub
+    0x48, 0x83, 0xc4, 0x08, // 102e add rsp, 8
+    0xc3, // 1032 ret
+]);
+
+/// `f(p) { return fputs((const char *)p, (FILE *)p); }` after `.plt`: two declared pointees.
+const FPUTS_SELF: [u8; 0x31] = plt_then(&[
+    0x48, 0x83, 0xec, 0x08, // 1020 sub rsp, 8
+    0x48, 0x89, 0xfe, // 1024 mov rsi, rdi
+    0xe8, 0xe4, 0xff, 0xff, 0xff, // 1027 call stub
+    0x48, 0x83, 0xc4, 0x08, // 102c add rsp, 8
+    0xc3, // 1030 ret
+]);
+
+/// `f(x) { return g(x); }` and `g(x) { return x + 1; }`: `g`'s slot is a recovered width.
+const RECOVERED_CALLEE: [u8; 0x18] = [
+    0x48, 0x83, 0xec, 0x08, // 1000 sub rsp, 8
+    0xe8, 0x07, 0x00, 0x00, 0x00, // 1004 call g
+    0x48, 0x83, 0xc4, 0x08, // 1009 add rsp, 8
+    0xc3, // 100d ret
+    0xcc, 0xcc, // 100e
+    0x48, 0x89, 0xf8, // 1010 g: mov rax, rdi
+    0x48, 0x83, 0xc0, 0x01, // 1013 add rax, 1
+    0xc3, // 1017 ret
+];
+
+fn header_parameters(text: &str, name: &str) -> Vec<(String, String)> {
+    let at = format!("{name}(");
+    let header = text
+        .lines()
+        .find(|line| line.contains(&at))
+        .unwrap_or_default();
+    common::parameters(header)
+}
+
+/// Default deny (D262): a value a declaration also types as no pointer keeps its width; two
+/// declared pointees meet at `void *`; a slot only a recovered width bounds stays that width.
+#[test]
+fn a_declared_pointer_types_a_parameter_only_where_no_declaration_disputes_it() {
+    let memset = on(Libc::Glibc, "memset", &MEMSET_SELF);
+    let parameters = header_parameters(&memset, &format!("fcn_{PLT_CALLER:x}"));
+    assert_eq!(
+        parameters.first().map(|p| p.0.as_str()),
+        Some("uint64_t"),
+        "{memset}"
+    );
+    let fputs = on(Libc::Glibc, "fputs", &FPUTS_SELF);
+    let parameters = header_parameters(&fputs, &format!("fcn_{PLT_CALLER:x}"));
+    assert_eq!(
+        parameters.first().map(|p| p.0.as_str()),
+        Some("void*"),
+        "{fputs}"
+    );
+    let functions = [("f", 0x1000, 14), ("g", 0x1010, 8)];
+    let recovered = rendered(Literal::of_code(&RECOVERED_CALLEE, &functions), 0x1000);
+    let parameters = header_parameters(&recovered, "f");
+    assert_eq!(
+        parameters.first().map(|p| p.0.as_str()),
+        Some("uint64_t"),
+        "{recovered}"
+    );
+}
+
+/// `f(path) { struct stat buf; return stat(path, &buf); }` after `.plt`.
+const STATTING: [u8; 0x37] = plt_then(&[
+    0x48, 0x81, 0xec, 0x98, 0x00, 0x00, 0x00, // 1020 sub rsp, 0x98
+    0x48, 0x89, 0xe6, // 1027 mov rsi, rsp
+    0xe8, 0xe1, 0xff, 0xff, 0xff, // 102a call stub
+    0x48, 0x81, 0xc4, 0x98, 0x00, 0x00, 0x00, // 102f add rsp, 0x98
+    0xc3, // 1036 ret
+]);
+
+/// POSIX `int stat(const char *, struct stat *)` (D263): the record is declared incomplete, the
+/// path passes as the caller's own `const char *`, and the buffer as the frame's address.
+#[test]
+fn a_cited_record_pointer_is_declared_and_passed() {
+    let text = on(Libc::Glibc, "stat", &STATTING);
+    assert!(text.contains("struct stat;"), "{text}");
+    assert!(
+        text.contains("int32_t stat(const char*, struct stat*);"),
+        "{text}"
+    );
+    let arguments = common::call_arguments(&text, "stat").unwrap_or_default();
+    assert_eq!(arguments.len(), 2, "{text}");
+    assert_eq!(arguments[0], "arg0", "{text}");
+    assert!(arguments[1].contains("frame"), "{text}");
 }

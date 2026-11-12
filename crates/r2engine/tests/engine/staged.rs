@@ -211,7 +211,8 @@ fn a_function_that_only_jumps_to_a_stub_is_a_body_not_the_stub() {
         .output
         .into_text();
     assert!(!text.contains("import stub at"), "{text}");
-    assert!(text.contains("free((void*)arg0);"), "{text}");
+    // The parameter handed to `free` is its `void *` (D262).
+    assert!(text.contains("free(arg0);"), "{text}");
 }
 
 /// The container states a stub of `free` whose jump goes through the slot bound to `malloc`: a body, not a
