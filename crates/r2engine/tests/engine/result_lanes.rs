@@ -179,3 +179,51 @@ fn an_aarch64_argument_passed_through_a_call_is_never_void() {
     assert!(!text.starts_with("void fwd("), "{text}");
     assert!(text.contains("EntryInput"), "{text}");
 }
+
+/// `narrow` is `mov eax, edi; ret`. `stores` zeroes XMM0, calls it, stores EAX and writes EAX: RAX
+/// and XMM0 are both written at its return, so its result is unproven. `stores_whole` stores RAX.
+const UNREAD_ABOVE: &[u8] = &[
+    0x89, 0xf8, // 1000 mov eax, edi
+    0xc3, // 1002 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0x66, 0x0f, 0xef,
+    0xc0, // 1010 pxor xmm0, xmm0
+    0xe8, 0xe7, 0xff, 0xff, 0xff, // 1014 call 0x1000
+    0x89, 0x06, // 1019 mov dword ptr [rsi], eax
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 101b mov eax, 0x1
+    0xc3, // 1020 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0x66,
+    0x0f, 0xef, 0xc0, // 1030 pxor xmm0, xmm0
+    0xe8, 0xc7, 0xff, 0xff, 0xff, // 1034 call 0x1000
+    0x48, 0x89, 0x06, // 1039 mov qword ptr [rsi], rax
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 103c mov eax, 0x1
+    0xc3, // 1041 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+];
+
+fn unread_above(at: u64) -> String {
+    let functions = &[
+        ("narrow", BASE, 0x03),
+        ("stores", BASE + 0x10, 0x11),
+        ("stores_whole", BASE + 0x30, 0x12),
+    ];
+    let rendered = OpenProgram::of(Literal::of_code(UNREAD_ABOVE, functions)).rendered(at);
+    rendered.expect("it renders").response.output.into_text()
+}
+
+/// A return whose result is unproven is a residual and reads no register, so the bytes of RAX above
+/// `narrow`'s 32-bit result, which no store reads, are no residual at the call (ROADMAP D340).
+#[test]
+fn bits_above_a_call_result_no_store_reads_are_no_residual_where_the_return_is_unproven() {
+    let text = unread_above(BASE + 0x10);
+    assert!(text.starts_with("r2sleigh_result_u64 "), "{text}");
+    assert!(text.contains("return r2sleigh_residual_u64(1);"), "{text}");
+    assert!(!text.contains("<< 32"), "{text}");
+}
+
+/// The same caller storing RAX whole reads the bytes `narrow` does not state: they stay a residual.
+#[test]
+fn bits_above_a_call_result_a_store_reads_stay_a_residual_where_the_return_is_unproven() {
+    let text = unread_above(BASE + 0x30);
+    assert!(text.starts_with("r2sleigh_result_u64 "), "{text}");
+    assert!(text.contains("| r2sleigh_residual_u64(1) << 32"), "{text}");
+}

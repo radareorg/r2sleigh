@@ -349,6 +349,39 @@ class RatchetTests(unittest.TestCase):
         self.assertEqual(gate.ratchet(self.BASELINE, now),
                          ["a::gcc-O0::h: refused -> no-record; bless it with its cause"])
 
+    def test_a_slow_blessed_under_time_is_held_by_slow_or_equal(self):
+        # CPU time puts a cost near the allowance on either side by processor (ADR D341).
+        baseline = json.loads(json.dumps(self.BASELINE))
+        baseline["records"]["a::gcc-O0::s"] = {
+            "status": "slow", "reason": "O2", "owner": "GT", "site": "tests/equiv/gate.py",
+            "cause": "The -O2 build of the rendering is stopped past its allowance."}
+        now = {"a::gcc-O0::f": "equal", "a::gcc-O0::g": "differs", "a::gcc-O0::h": "refused"}
+        for graded in (("slow", "O2"), ("slow", "O0"), ("equal", "")):
+            now["a::gcc-O0::s"] = graded
+            self.assertEqual(gate.ratchet(baseline, now), [], graded)
+        now["a::gcc-O0::s"] = ("differs", "rax")
+        self.assertEqual(gate.ratchet(baseline, now), ["a::gcc-O0::s: new differs (baseline: slow)"])
+        now["a::gcc-O0::s"] = ("residual-trap", "r2sleigh_residual_u64 unproven-return")
+        self.assertEqual(gate.ratchet(baseline, now),
+                         ["a::gcc-O0::s: slow -> residual-trap; bless it with its cause"])
+
+    def test_an_equal_that_reads_slow_under_time_still_blocks(self):
+        now = {"a::gcc-O0::f": ("slow", "O2"), "a::gcc-O0::g": "differs", "a::gcc-O0::h": "refused"}
+        self.assertEqual(gate.ratchet(self.BASELINE, now), ["a::gcc-O0::f: left equal (now slow)"])
+
+    def test_a_slow_blessed_under_instructions_is_exact(self):
+        baseline = json.loads(json.dumps(self.BASELINE))
+        baseline["cost"] = {"measure": "instructions", "budget": 4_000_000_000, "factor": 4}
+        baseline["records"]["a::gcc-O0::s"] = {
+            "status": "slow", "reason": "O2", "owner": "GT", "site": "tests/equiv/gate.py",
+            "cause": "The -O2 build of the rendering is stopped past its allowance."}
+        now = {"a::gcc-O0::f": "equal", "a::gcc-O0::g": "differs", "a::gcc-O0::h": "refused",
+               "a::gcc-O0::s": ("equal", "")}
+        self.assertEqual(gate.ratchet(baseline, now),
+                         ["a::gcc-O0::s: slow -> equal; bless it with its cause"])
+        now["a::gcc-O0::s"] = ("slow", "O0")
+        self.assertIn("still slow, for another reason", gate.ratchet(baseline, now)[0])
+
     def test_the_same_status_for_another_reason_blocks(self):
         baseline = json.loads(json.dumps(self.BASELINE))
         baseline["records"]["a::gcc-O0::h"]["reason"] = "refused: observation journal: ConflictingWrite"
@@ -448,6 +481,19 @@ class RatchetTests(unittest.TestCase):
         self.assertEqual(compared(3, 3), "memory")
         self.assertEqual(compared(3, 2), "output")
         self.assertEqual(compared(2, 2), "none")
+
+    def test_a_bless_under_time_keeps_a_slow_entry_a_processor_reads_equal(self):
+        previous = json.loads(json.dumps(self.BASELINE))
+        blessed = {"status": "slow", "reason": "O2", "owner": "GT", "site": "tests/equiv/gate.py",
+                   "cause": "The -O2 build of the rendering is stopped past its allowance."}
+        previous["records"]["a::gcc-O0::f"] = dict(blessed)
+        for record in (gate.Record("a::gcc-O0::f", "f", 0, "equal"),
+                       gate.Record("a::gcc-O0::f", "f", 0, "slow", evidence={"build": "O0"})):
+            self.assertEqual(gate.baseline_from([record], previous)["records"]["a::gcc-O0::f"],
+                             blessed)
+        previous["cost"] = {"measure": "instructions", "budget": 4_000_000_000, "factor": 4}
+        entry = gate.baseline_from([gate.Record("a::gcc-O0::f", "f", 0, "equal")], previous)
+        self.assertEqual(entry["records"]["a::gcc-O0::f"], {"status": "equal"})
 
     def test_a_bless_keeps_a_cause_only_for_the_same_reason(self):
         trap = gate.Record("a::gcc-O0::g", "g", 0, "residual-trap",

@@ -42,6 +42,7 @@ import argparse
 import concurrent.futures
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -113,6 +114,17 @@ def run_self_tests(config: gate.Config, out: Path) -> bool:
     if failed:
         print(f"{len(failed)} of {len(outcomes)} self-tests failed: the gate may not grade.")
     return not failed
+
+
+def host_cpu() -> str:
+    """The processor's model name, for the log: a cost in CPU time is read against it."""
+    try:
+        info = Path("/proc/cpuinfo").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return os.uname().machine
+    names = [line.split(":", 1)[1].strip() for line in info.splitlines()
+             if line.startswith("model name") and ":" in line]
+    return names[0] if names else os.uname().machine
 
 
 def sha256(path: Path) -> str:
@@ -306,6 +318,10 @@ def main(argv: list[str] | None = None) -> int:
                   f"{toolchain}; the statuses are not comparable. Run on the blessed "
                   "toolchain, or bless a baseline for this one.")
             return EXIT_RATCHET
+    counts = "an emulated guest is not counted" if target.emulated() else (
+        cost.probe() or "counts instructions")
+    print(f"host: {host_cpu()}, {os.cpu_count()} processors, {max(1, args.jobs)} jobs; "
+          f"{counts}", file=sys.stderr, flush=True)
     binaries = build.build_all(sources, args.compilers.split(","), args.opts.split(","),
                                args.out / "build", target)
     only = re.compile(args.only) if args.only else None

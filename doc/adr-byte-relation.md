@@ -52,6 +52,14 @@ preservation proof once depended on how a clobber list was spelled (M1b).
 - B1: `bytes::closure` is the one backward closure; `Demand` runs it from the
   return values and every effect's inputs, observation from its obligations.
 
+- D340: a return whose result is `Unproven` is a residual and reads no
+  register, as a `void` one reads none (`semantic::returns_no_register`).
+  `Demand` roots nothing at it, and the release pass frees INSERT bases in such
+  a body. Before, an `Unproven` interface named no return storage, every return
+  block read unresolved, and demand was refused for the whole body: each call
+  to a narrower callee spelled its upper bytes as a residual (manual_limits.c
+  `main`, D227). The release pass still keeps a `void` body's bases (D342).
+
 - B3 (`3b60c019` and the next commit): one identity per family at every
   boundary (`root_slot_for_name`); call results, the reaching-value search
   and the return certificate match a slot against the program root whose low

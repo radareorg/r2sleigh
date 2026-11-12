@@ -625,10 +625,18 @@ fn release_undemanded_bytes(
     if !inserts {
         return EditPlan::new();
     }
-    let return_storages = (machine_context.function_interface().into_iter())
+    let interface = machine_context.function_interface();
+    let return_storages = (interface.into_iter())
         .flat_map(|interface| interface.return_kind().storages())
         .collect::<Vec<_>>();
-    let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
+    // A return whose result is unproven is a residual: it reads no register (ROADMAP D340). A
+    // `void` return reads none either, and its bases are released by D342.
+    let unproven = interface.map(r2source::SourceFunctionInterface::return_kind)
+        == Some(r2source::SourceFunctionReturn::Unproven);
+    let live_out = match unproven {
+        true => crate::liveout::FunctionLiveOut::default(),
+        false => crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages),
+    };
     if !crate::demand::exits_are_named(function, &live_out) {
         r2il::refusal_evidence!(
             "demanded-bytes",

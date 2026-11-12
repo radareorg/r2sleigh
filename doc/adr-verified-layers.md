@@ -305,6 +305,47 @@ Owner: GT.
   shard: the shard's own abort does. review.c at clang `-O1` takes 170 s on x86-64 and at clang
   `-O2` 385 s under qemu, inside the shards' 8 and 22 minutes.
 
+**D341. Under `time` a `slow` is the processor's verdict, and the ratchet holds it as one.**
+Owner: GT.
+- Problem: D339 assumed a faster or slower runner scales the original and the
+  rendering together. Across processor models it does not. review.c clang
+  `-O2` `fact` read `equal` on #376's push run and `slow` on its full-ci run,
+  from one r2s binary, and master's x86-64 ratchet failed.
+- Measured on #378, from the `host:` and `cost:` lines its shards print: six
+  processor models graded shards (EPYC 7763, 9V74 and 9V45; Xeon 8370C, 8573C
+  and 6973P-C). None counts instructions: `perf_event_open` answers `EACCES` at
+  the image's `kernel.perf_event_paranoid` of 4 and `ENOENT` at 1. Two EPYC
+  9V74 shards timed the three big originals at 287.5 and 287.9, 215.5 and
+  216.2, 388.7 and 388.5 ms, and vector 37's pattern build at 15.90 and 15.87
+  times its original against an allowance of 16: load does not move the
+  verdict. An EPYC 7763 shard stopped every build too. A Xeon 6973P-C shard
+  read `equal`: the `-O2` build took 3.36, 3.20 and 3.45 times its original
+  and the `-O0` build 11.40, 8.22 and 9.17 times, inside 4 and 16. CPU time
+  does not follow the count: clang `-O1` `fact`'s `-O0`
+  build retires 4.25 times its original's instructions (D339) and takes 1.36
+  times its CPU time on an EPYC 7763.
+- Rule: under `time` the ratchet holds a baseline `slow` by `slow`, naming any
+  build, or by `equal` (`gate.timed_slow_holds`), and `baseline_from` keeps the
+  blessed entry. A baseline `equal` that reads `slow` is a departure as before,
+  and so is every other move. Under `instructions` the ratchet stays exact. The
+  allowance, `k` = 4, is the same under both measures.
+- Why no other edge: an edge on time holds only where it lies outside the
+  pool's range for every record, and the pool gains models. For `fact` such an
+  edge exists on the three models measured, between 1.02 (the like-for-like
+  builds) and 3.20; three models are unmeasured, and a miss fails every pull
+  request. A tighter edge would also call `slow` what the count calls inside
+  its allowance. No hosted runner can count, and the packaged qemu has no
+  `-plugin`.
+- What it gives up: the record's status still follows the processor, and
+  under `time` a record blessed `slow` that reads `equal` on every processor
+  is not reported. Nothing else reports it for x86-64 ELF today:
+  `cost.departure` refuses a counted run against a `time` baseline, and the
+  one counted baseline is Win64's. D343 owns a counted x86-64 baseline.
+- Gate: `test_a_slow_blessed_under_time_is_held_by_slow_or_equal`,
+  `test_an_equal_that_reads_slow_under_time_still_blocks`,
+  `test_a_slow_blessed_under_instructions_is_exact` and
+  `test_a_bless_under_time_keeps_a_slow_entry_a_processor_reads_equal`.
+
 **D39. Upstream drift is a gate, not a discovery.** Owner: GT, with VC.
 - A scheduled CI job reports how far each pin is behind its upstream (the
   Ghidra fork's base against Ghidra master, `TESTBINS_REF` against
