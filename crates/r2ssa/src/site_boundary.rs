@@ -3,7 +3,7 @@
 
 use r2il::eval::independence::{leaves_zero, reads_of};
 use r2il::{Endianness, R2ILBlock, R2ILOp, SpaceId, Varnode};
-use r2source::{CanonicalStorageId, SourceCallEffect, SourceConventionSlots};
+use r2source::{CanonicalStorageId, SourceConventionSlots};
 
 use crate::arch::Arch;
 
@@ -284,20 +284,21 @@ impl UniverseSet {
     }
 }
 
-/// The registers a call may change: each outermost register the call effect neither preserves nor
-/// reserves, as bits over the machine's outermost registers (doc/adr-result-side.md, section 5).
+/// The registers a call may change: each outermost register the convention clobbers, as bits over
+/// the machine's outermost registers (doc/adr-result-side.md, section 5).
 pub struct CallUniverse<'m> {
     outermost: &'m [CanonicalStorageId],
     clobbered: UniverseSet,
 }
 
 impl<'m> CallUniverse<'m> {
-    /// The universe of a call under `effect` on `machine`; the SSA preserved set reads the same. `O(r)`.
-    pub fn of(effect: &SourceCallEffect, machine: &'m Arch) -> Self {
+    /// The universe on `machine` of a convention that `clobbers`; the SSA preserved set reads the
+    /// same. `O(r)` asks.
+    pub fn of(clobbers: &dyn Fn(CanonicalStorageId) -> bool, machine: &'m Arch) -> Self {
         let outermost = machine.outermost_registers();
         let mut clobbered = UniverseSet::empty(outermost.len());
         for (at, storage) in outermost.iter().enumerate() {
-            if effect.clobbers(*storage) {
+            if clobbers(*storage) {
                 clobbered.insert(at);
             }
         }
@@ -336,6 +337,15 @@ fn overlapping(
         .partition_point(|held| held.offset.saturating_add(u64::from(held.size)) <= storage.offset);
     let to = outermost.partition_point(|held| held.offset < end);
     from..to.max(from)
+}
+
+/// What `kept` reads beside the flow: the machine, whether the convention clobbers a register (none
+/// where it states no call effect), and which terminal call a declaration states never returns.
+#[derive(Clone, Copy)]
+pub struct KeptBy<'a> {
+    pub machine: &'a Arch,
+    pub clobbers: Option<&'a dyn Fn(CanonicalStorageId) -> bool>,
+    pub never: &'a dyn Fn(usize, usize) -> bool,
 }
 
 /// What a body does to the registers it is entered with (doc/adr-result-side.md, section 5): one
@@ -760,15 +770,13 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
     }
 
     /// What the body entered at `entry` does to its entry registers; none past the budget or where no
-    /// block starts there. `never`: a terminal call declared never to return. `O((B + E) × LANES)`.
+    /// block starts there. `O((B + E) × LANES)`.
     pub fn register_effect(
         &self,
         entry: u64,
         lanes: ResultLanes,
         effects: &dyn CallEffects,
-        machine: &Arch,
-        call: Option<&SourceCallEffect>,
-        never: &dyn Fn(usize, usize) -> bool,
+        kept: &KeptBy<'_>,
     ) -> Option<RegisterEffect> {
         let at = self
             .starts
@@ -785,21 +793,21 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
             overwrites.0[lane] = tracked.all(lane) & !(taken | live.returned[lane]);
         }
         Some(RegisterEffect {
-            kept: self.kept(machine, call, never),
+            kept: self.kept(kept),
             overwrites,
             takes,
-            machine: machine.clone(),
+            machine: kept.machine.clone(),
         })
     }
 
     /// The universe's registers no block a return is reached from writes; none where an exit is
     /// other than a return or a call `never` states, or a call or unstated operation runs there.
-    fn kept(
-        &self,
-        machine: &Arch,
-        call: Option<&SourceCallEffect>,
-        never: &dyn Fn(usize, usize) -> bool,
-    ) -> UniverseSet {
+    fn kept(&self, by: &KeptBy<'_>) -> UniverseSet {
+        let KeptBy {
+            machine,
+            clobbers,
+            never,
+        } = *by;
         let outermost = machine.outermost_registers();
         let none = UniverseSet::empty(outermost.len());
         let mut returning = Vec::new();
@@ -843,16 +851,18 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
             let output = operation
                 .output()
                 .filter(|out| out.space == SpaceId::Register);
-            if let Some(output) = output {
-                let storage = CanonicalStorageId::from_varnode(output);
-                for at in overlapping(outermost, storage) {
-                    written.insert(at);
-                }
-            }
+            let storage = output.map(CanonicalStorageId::from_varnode);
+            let overlapped = storage.map(|storage| overlapping(outermost, storage));
+            overlapped
+                .into_iter()
+                .flatten()
+                .for_each(|at| written.insert(at));
         }
         // The universe is built only for a body that may keep a register: most make a call.
-        match call {
-            Some(call) => CallUniverse::of(call, machine).clobbered.without(&written),
+        match clobbers {
+            Some(clobbers) => CallUniverse::of(clobbers, machine)
+                .clobbered
+                .without(&written),
             None => none,
         }
     }
@@ -2051,8 +2061,7 @@ mod tests {
             offset: 0x20,
             ..RAX
         };
-        let reads = r2source::SourceBoundaryReads::new([], []).expect("no reads");
-        let call = r2source::SourceCallEffect::new([RAX], [rsp], reads).expect("a call effect");
+        let clobbers = |storage: CanonicalStorageId| storage != rsp;
         let machine = machine();
         let flow = CallerFlow::new(
             blocks,
@@ -2060,7 +2069,12 @@ mod tests {
             open.iter().copied(),
             Endianness::Little,
         );
-        flow.register_effect(0x1000, LANES, NOTHING, &machine, Some(&call), never)
+        let by = super::KeptBy {
+            machine: &machine,
+            clobbers: Some(&clobbers),
+            never,
+        };
+        flow.register_effect(0x1000, LANES, NOTHING, &by)
             .expect("a block starts there")
     }
 

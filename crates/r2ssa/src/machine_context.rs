@@ -493,7 +493,7 @@ fn observed_register_storages(blocks: &[R2ILBlock]) -> BTreeSet<RegisterStorage>
 /// Every register a call may change: each register of the file that no wider one contains, less
 /// what the call effect preserves or reserves (`site_boundary::CallUniverse`). `O(r)`.
 fn call_universe(effect: &SourceCallEffect, machine: &Arch) -> Box<[CanonicalStorageId]> {
-    crate::site_boundary::CallUniverse::of(effect, machine)
+    crate::site_boundary::CallUniverse::of(&|storage| effect.clobbers(storage), machine)
         .registers()
         .collect()
 }

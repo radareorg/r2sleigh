@@ -1016,7 +1016,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
                 depth: Depth::Shallow,
                 ..reading
             };
-            let effect = effect_on_flow(&shallow, &walker, target, caller, body, &flow);
+            let effect = effect_on_flow(&shallow, &walker, target, (caller, body, &flow));
             db.deposit::<RegisterEffects>([((caller, thumb), effect)]);
         }
         Some(calls.into())
@@ -1053,18 +1053,17 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for RegisterEffects {
             depth: Depth::Shallow,
         };
         let flow = flow_of(body, target.disasm.arch_spec().memory_endianness);
-        effect_on_flow(&reading, &walker, target, entry, body, &flow)
+        effect_on_flow(&reading, &walker, target, (entry, body, &flow))
     }
 }
 
-/// The register effect of `body` over its flow, its calls read shallowly by `reading`.
+/// The register effect of the walked body at `entry` over its flow, its calls read shallowly by
+/// `reading`.
 fn effect_on_flow<S: Source + 'static>(
     reading: &Reading<'_, S>,
     walker: &super::returns::Walking<'_, S>,
     target: &NativeTarget<'_>,
-    entry: u64,
-    body: &Body,
-    flow: &CallerFlow<'_, BodyBlock>,
+    (entry, body, flow): (u64, &Body, &CallerFlow<'_, BodyBlock>),
 ) -> Option<RegisterEffect> {
     let effects = reading.effects(body);
     // Only a declared `Never` with no premise proves a call never returns; a derived one is a bound.
@@ -1074,8 +1073,20 @@ fn effect_on_flow<S: Source + 'static>(
         (effects.callee_at(block, op).and_then(declared))
             .is_some_and(|said| matches!(said, Return::Never(assumed) if assumed.is_empty()))
     };
-    let call = reading.call.as_ref();
-    let effect = flow.register_effect(entry, reading.lanes, &effects, target.arch, call, &never);
+    // A convention whose call effect is refused keeps nothing: every register is clobbered.
+    let model = target
+        .call
+        .effect_refused()
+        .is_none()
+        .then_some(&*target.call);
+    let clobbers = model.map(|model| move |storage| model.clobbers(storage));
+    let by = r2ssa::site_boundary::KeptBy {
+        machine: target.arch,
+        clobbers: (clobbers.as_ref())
+            .map(|clobbers| clobbers as &dyn Fn(CanonicalStorageId) -> bool),
+        never: &never,
+    };
+    let effect = flow.register_effect(entry, reading.lanes, &effects, &by);
     r2il::refusal_evidence!(
         "register-effect",
         "{entry:#x}: {}",

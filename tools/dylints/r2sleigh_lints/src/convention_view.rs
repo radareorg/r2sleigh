@@ -95,10 +95,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/r2engine/src/lib.rs", "trusted_parsed_context"),
     ("crates/r2engine/src/lib.rs", "trusted_source_signature"),
     ("crates/r2engine/src/native.rs", "machine"),
-    (
-        "crates/r2engine/src/program/fates.rs",
-        "CalleeEntry::compute",
-    ),
     ("crates/r2engine/src/program/fates.rs", "Reading"),
     (
         "crates/r2engine/src/program/fates.rs",
@@ -107,6 +103,10 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/r2engine/src/program/fates.rs",
         "Reading::import_takes",
+    ),
+    (
+        "crates/r2engine/src/program/fates.rs",
+        "RegisterEffects::compute",
     ),
     ("crates/r2engine/src/program/fates.rs", "SiteFates::compute"),
     ("crates/r2engine/src/program/fates.rs", "held_lanes"),
