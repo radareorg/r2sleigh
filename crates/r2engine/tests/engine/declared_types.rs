@@ -256,9 +256,8 @@ fn a_cited_record_pointer_is_declared_and_passed() {
     assert!(arguments[1].contains("frame"), "{text}");
 }
 
-/// find `check_option_combinations`, cut down: `while (p) p = p->next; strlen((char *)p);` after
-/// `.plt`. gcc hands the loop's null `p` on in RDI; the argument is a merge of the entry value and
-/// a load, so no declared slot types the parameter (D262).
+/// find `check_option_combinations`, cut down: `while (p) p = p->next; strlen((char *)p);`. The
+/// argument merges the entry value and a load, so no declared slot types the parameter (D262).
 const NULL_HANDED_ON: [u8; 0x3c] = plt_then(&[
     0x48, 0x83, 0xec, 0x08, // 1020 sub rsp, 8
     0x48, 0x85, 0xff, // 1024 test rdi, rdi

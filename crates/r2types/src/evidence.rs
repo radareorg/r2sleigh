@@ -63,9 +63,8 @@ fn meet_pointers(held: CTypeLike, other: CTypeLike) -> CTypeLike {
     }
 }
 
-/// The parameter entry value `value` is on every path: itself, a copy of one, or a merge every
-/// input of which is the same one; a constant or any other definition refuses. The walk visits
-/// each value once.
+/// The parameter entry value `value` is on every path (itself, a copy, a merge of only it); any
+/// other definition refuses. Each value is visited once.
 fn entry_identity(
     graph: &r2ssa::SsaGraph,
     entries: &r2ssa::dense::IdSet<r2ssa::ValueId>,
@@ -808,9 +807,8 @@ impl<'a> EvidenceBuilder<'a> {
         types
     }
 
-    /// What type-bearing callee slots state of each parameter entry value. A pointer counts only
-    /// where the argument is the entry value itself on every path (D262); an integer anywhere in
-    /// its class refuses. O(callee slots x values each identity walk visits + parameters).
+    /// What type-bearing callee slots state of each parameter entry value: a pointer only at the
+    /// entry value itself, an integer anywhere in its class (D262). O(slots x walk + parameters).
     fn declared_bounds(&mut self) -> IdMap<r2ssa::ValueId, DeclaredBound> {
         let source = self.source;
         let values = source.graph().values.len();
