@@ -114,6 +114,14 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     }
     inserted.extend(unchecked.iter());
     let words = guard_words(func, &defs, guard, &inserted);
+    // The rereads become copies below; their addresses are still the compiler's.
+    let reread_addresses = (checks.iter())
+        .flat_map(|check| check.rereads.iter())
+        .filter_map(|(_, dst)| match defs.op(*dst) {
+            Some((_, SSAOp::Load { addr, .. })) => Some(*addr),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     // A failure block no other edge reaches goes with the edges into it.
     let failed = checks
         .iter()
@@ -136,10 +144,15 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     }
     decided.reorder();
     func.apply_edits(decided);
-    let words = unread_words(func, &inserted, &words);
-    inserted.extend(words);
-    let addresses = inserted_addresses(func, &inserted);
+    let addresses = inserted_addresses(func, &inserted, &reread_addresses);
     inserted.extend(addresses.iter());
+    // A word load is the compiler's once its readers are: the guard reads and their addresses.
+    let words = unread_words(func, &inserted, &words);
+    if !words.is_empty() {
+        inserted.extend(words);
+        let addresses = inserted_addresses(func, &inserted, &[]);
+        inserted.extend(addresses.iter());
+    }
     func.record_compiler_inserted(inserted, removed, removed_edges);
     func.record_passing_differences(passing);
     func.record_checked_differences(checks.iter().filter_map(|check| check.difference));
@@ -342,12 +355,17 @@ fn escapes(
 }
 
 /// The temporary address arithmetic only inserted operations read: the guard's address the
-/// compiler computed for its reads. One pass counts reads; each operation is taken once.
-pub(crate) fn inserted_addresses(func: &SSAFunction, inserted: &IdSet<OpId>) -> IdSet<OpId> {
+/// compiler computed for its reads, and `from`, the addresses of reads the decision rewrote. One
+/// pass counts reads; each operation is taken once.
+pub(crate) fn inserted_addresses(
+    func: &SSAFunction,
+    inserted: &IdSet<OpId>,
+    from: &[VarId],
+) -> IdSet<OpId> {
     let values = func.values().len();
     let mut reads = IdMap::<VarId, usize>::new(values);
     let mut arithmetic = IdMap::<VarId, (OpId, Vec<VarId>)>::new(values);
-    let mut work = Vec::new();
+    let mut work = from.to_vec();
     for block in (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr)) {
         for (_, phi) in block.sited_phis() {
             for (_, source) in &phi.sources {
