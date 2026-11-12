@@ -394,13 +394,13 @@ impl DeadPhis {
         &self.unobserved_insts
     }
 
-    /// Complete input-use domain of [`Self::unobserved_insts`].
     /// Whether a path reads arm `input_idx` of the live merge `inst`: every arm where no fold
     /// drops an in-edge, with no lookup.
     pub fn arm_read(&self, inst: InstId, input_idx: usize) -> bool {
         !self.unread_arms || !self.unobserved_uses.contains(&UseSite { inst, input_idx })
     }
 
+    /// Complete input-use domain of [`Self::unobserved_insts`].
     pub const fn unobserved_uses(&self) -> &BTreeSet<UseSite> {
         &self.unobserved_uses
     }
