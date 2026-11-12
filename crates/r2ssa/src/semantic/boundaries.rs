@@ -1865,6 +1865,12 @@ pub(crate) fn collect_source_boundary_facts(
 
     if let Some(machine_context) = machine_context {
         facts.preserved_call_carriers = preserved_call_carriers(function, graph, machine_context);
+        r2il::refusal_evidence!(
+            "preserved-carriers",
+            "{:#x}: {}",
+            function.entry,
+            crate::site_boundary::spelled(facts.preserved_call_carriers.iter().copied())
+        );
         if trace_call_definitions() {
             eprintln!(
                 "  preserved across calls to {:#x}: {:?}",

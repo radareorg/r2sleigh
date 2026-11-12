@@ -168,6 +168,13 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Resolved {
                 node.0
             ));
         }
+        // A register effect reads its body's lift alone (doc/adr-result-side.md, section 5).
+        if db.running("register-effects") > 0 {
+            db.defect(format_args!(
+                "register-effects reached resolved {:#x}",
+                node.0
+            ));
+        }
         // A result is resolved from one build of each function below it, where no cycle is known.
         if demand == Demand::Result
             && !in_held_cycle(db, node)

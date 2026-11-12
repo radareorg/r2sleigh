@@ -121,7 +121,8 @@ impl Arch {
     }
 
     /// Each register no wider one contains, by offset: what a call may change, before its effect.
-    pub(crate) fn outermost_registers(&self) -> &[CanonicalStorageId] {
+    /// Starts and ends both ascend, so the registers one storage overlaps are one run.
+    pub fn outermost_registers(&self) -> &[CanonicalStorageId] {
         &self.0.outermost_registers
     }
 

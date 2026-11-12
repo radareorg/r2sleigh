@@ -490,19 +490,11 @@ fn observed_register_storages(blocks: &[R2ILBlock]) -> BTreeSet<RegisterStorage>
         .collect()
 }
 
-/// Every register a call may change: each register of the file that no
-/// wider one contains, less what the call effect preserves or reserves.
-///
-/// The effect is exhaustive -- every register it neither preserves nor
-/// reserves may come back changed -- so this is the set a callee's summary
-/// has to answer for, whatever list of clobbers the convention spells.
-/// `O(r)` over the file's outermost registers.
+/// Every register a call may change: each register of the file that no wider one contains, less
+/// what the call effect preserves or reserves (`site_boundary::CallUniverse`). `O(r)`.
 fn call_universe(effect: &SourceCallEffect, machine: &Arch) -> Box<[CanonicalStorageId]> {
-    machine
-        .outermost_registers()
-        .iter()
-        .copied()
-        .filter(|storage| effect.clobbers(*storage))
+    crate::site_boundary::CallUniverse::of(effect, machine)
+        .registers()
         .collect()
 }
 

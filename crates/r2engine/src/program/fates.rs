@@ -11,8 +11,8 @@ use r2source::{
 };
 use r2ssa::dense::{Csr, DenseId, IdMap};
 use r2ssa::site_boundary::{
-    ByteMask, CallEffect, CallEffects, CallerFlow, Counted, EntrySummary, LANES, LaneBytes,
-    LaneFate, LaneId, Overwrites, ResultLanes, SiteBoundary, argument_registers,
+    ByteMask, CallEffect, CallEffects, CallerFlow, Counted, LANES, LaneBytes, LaneFate, LaneId,
+    Overwrites, RegisterEffect, ResultLanes, SiteBoundary, argument_registers,
 };
 
 use super::analysis::Walked;
@@ -212,6 +212,11 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
                 if db.running("call-boundary") > 1 {
                     db.defect(format_args!(
                         "call-boundary {entry:#x} reached inside another"
+                    ));
+                }
+                if db.running("register-effects") > 0 {
+                    db.defect(format_args!(
+                        "call-boundary {entry:#x} reached from a register effect"
                     ));
                 }
                 let thumb = view.thumb_at(entry);
@@ -763,9 +768,9 @@ impl BoundaryResult {
             false => decided_result(supply, forwarding, &mut every_way_in),
         };
         let overwritten = |lane: LaneId| {
-            let summary = db.get::<CalleeEntry>(&(entry, thumb));
-            (summary.ok().and_then(|summary| *summary))
-                .is_some_and(|summary| summary.overwrites.touches(usize::from(lane.0)))
+            let effect = db.get::<RegisterEffects>(&(entry, thumb));
+            (effect.ok().as_deref().and_then(Option::as_ref))
+                .is_some_and(|effect| effect.overwrites.touches(usize::from(lane.0)))
         };
         let disputes = disputes_of(supply, lanes, overwritten);
         let disputes = (disputes.into_iter().chain(body_disputes(open))).collect::<Vec<_>>();
@@ -970,8 +975,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
     const NAME: &'static str = "site-fates";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: one backward pass over the body, `O((B + E) × lanes)` within its budget, and one entry
-    /// summary per distinct callee not yet summarised.
+    /// Work: one backward pass over the body, `O((B + E) × lanes)` within its budget, and one held
+    /// register effect per distinct callee not yet read.
     fn compute(db: &Db<ProgramInputs<S>>, &(caller, thumb): &(u64, bool)) -> Self::Value {
         let view = View::new(db, true);
         let walker = super::returns::Walking::new(view.clone(), true).ok()?;
@@ -1008,18 +1013,17 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
     }
 }
 
-/// What a body does with the result registers it is entered with, by entry and whether it is
-/// Thumb: the bytes it may take, and the bytes every path to a return overwrites.
-pub(super) struct CalleeEntry;
+/// What a body does to the registers it is entered with, by entry and whether it is Thumb
+/// (doc/adr-result-side.md, section 5): no world, and its calls read shallowly, so no row reads another.
+pub(super) struct RegisterEffects;
 
-impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeEntry {
+impl<S: Source + 'static> Query<ProgramInputs<S>> for RegisterEffects {
     type Key = (u64, bool);
-    type Value = Option<EntrySummary>;
-    const NAME: &'static str = "callee-entry";
+    type Value = Option<RegisterEffect>;
+    const NAME: &'static str = "register-effects";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: one backward pass over the callee's body, its own calls read shallowly, so the
-    /// summary asks no other callee.
+    /// Work: one backward pass over the body and one scan of the blocks a return is reached from.
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
         let view = View::new(db, true);
         let walker = super::returns::Walking::new(view.clone(), true).ok()?;
@@ -1037,10 +1041,38 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeEntry {
             call: target.call.call_effect().ok(),
             depth: Depth::Shallow,
         };
-        let effects = reading.effects(body);
         let flow = flow_of(body, target.disasm.arch_spec().memory_endianness);
-        flow.entry_summary(entry, reading.lanes, &effects)
+        effect_on_flow(&reading, &walker, target, entry, body, &flow)
     }
+}
+
+/// The register effect of `body` over its flow, its calls read shallowly by `reading`.
+fn effect_on_flow<S: Source + 'static>(
+    reading: &Reading<'_, S>,
+    walker: &super::returns::Walking<'_, S>,
+    target: &NativeTarget<'_>,
+    entry: u64,
+    body: &Body,
+    flow: &CallerFlow<'_, BodyBlock>,
+) -> Option<RegisterEffect> {
+    let effects = reading.effects(body);
+    // Only a declared `Never` with no premise proves a call never returns; a derived one is a bound.
+    let never = |block: usize, op: usize| {
+        use crate::discovery::{Return, Walker};
+        let declared = |callee| walker.declared(callee);
+        (effects.callee_at(block, op).and_then(declared))
+            .is_some_and(|said| matches!(said, Return::Never(assumed) if assumed.is_empty()))
+    };
+    let call = reading.call.as_ref();
+    let effect = flow.register_effect(entry, reading.lanes, &effects, target.arch, call, &never);
+    r2il::refusal_evidence!(
+        "register-effect",
+        "{entry:#x}: {}",
+        (effect.as_ref()).map_or("none".into(), |effect| {
+            r2ssa::site_boundary::spelled(effect.kept_registers())
+        })
+    );
+    effect
 }
 
 /// The function's own target where its debug information states a convention other than the
@@ -1110,9 +1142,9 @@ fn flow_of(body: &Body, endian: r2il::Endianness) -> CallerFlow<'_, BodyBlock> {
 /// How far a callee of the body is read for what a call to it does.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Depth {
-    /// By the callee's own entry summary.
+    /// By the callee's held register effect.
     Deep,
-    /// Inside a summary: by what is known without another body, and its own calls set the count.
+    /// Inside a register effect: by what is known without another body; its calls set the count.
     Shallow,
 }
 
@@ -1166,6 +1198,7 @@ impl<S: Source + 'static> Reading<'_, S> {
                 takes: self.unknown(),
                 counted: None,
                 overwrites: Overwrites::All,
+                kept: LaneBytes::default(),
             },
         };
         if !formatted.is_empty() {
@@ -1211,7 +1244,7 @@ impl<S: Source + 'static> Reading<'_, S> {
         (!consumed.any_floating).then_some(format.unfloated)
     }
 
-    /// What a call to a callee nothing is known of may take: a summary's own calls set the variadic
+    /// What a call to a callee nothing is known of may take: an effect's own calls set the variadic
     /// count themselves, so only a caller counts it.
     fn unknown(&self) -> LaneBytes {
         self.unstated.takes(self.lanes, self.depth == Depth::Deep)
@@ -1242,6 +1275,7 @@ impl<S: Source + 'static> Reading<'_, S> {
                             takes,
                             counted,
                             overwrites: Overwrites::All,
+                            kept: LaneBytes::default(),
                         },
                     }
                 });
@@ -1250,26 +1284,29 @@ impl<S: Source + 'static> Reading<'_, S> {
                 takes,
                 counted,
                 overwrites: Overwrites::All,
+                kept: LaneBytes::default(),
             };
             return (effect, formatted);
         }
-        // A summary reads no other summary, so one costs one pass over one body (ADR, Cost).
-        let summary = (self.depth == Depth::Deep)
+        // A row reads no other row, so one costs one pass over one body (ADR, Cost).
+        let row = (self.depth == Depth::Deep)
             .then(|| {
                 let thumb = self.view.thumb_at(callee);
-                self.db.get::<CalleeEntry>(&(callee, thumb))
+                self.db.get::<RegisterEffects>(&(callee, thumb))
             })
             .and_then(Result::ok);
-        let effect = match summary.and_then(|summary| *summary) {
-            Some(summary) => CallEffect {
-                takes: summary.takes,
+        let effect = match row.as_deref().and_then(Option::as_ref) {
+            Some(row) => CallEffect {
+                takes: row.takes,
                 counted: None,
-                overwrites: Overwrites::Bytes(summary.overwrites),
+                overwrites: Overwrites::Bytes(row.overwrites),
+                kept: row.kept_lanes(self.lanes),
             },
             None => CallEffect {
                 takes: self.unknown(),
                 counted: None,
                 overwrites: Overwrites::Nothing,
+                kept: LaneBytes::default(),
             },
         };
         (effect, None)
@@ -1297,7 +1334,7 @@ impl<S: Source + 'static> Reading<'_, S> {
             .filter(|read| !floats.iter().any(|float| overlaps(read, float)))
             .copied()
             .collect::<Vec<_>>();
-        // A summary's own calls set the count themselves, so only a caller's call takes it.
+        // An effect's own calls set the count themselves, so only a caller's call takes it.
         if self.depth == Depth::Deep {
             integers.push(register);
         }

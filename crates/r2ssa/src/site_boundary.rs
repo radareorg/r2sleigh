@@ -3,7 +3,9 @@
 
 use r2il::eval::independence::{leaves_zero, reads_of};
 use r2il::{Endianness, R2ILBlock, R2ILOp, SpaceId, Varnode};
-use r2source::{CanonicalStorageId, SourceConventionSlots};
+use r2source::{CanonicalStorageId, SourceCallEffect, SourceConventionSlots};
+
+use crate::arch::Arch;
 
 /// One bit per byte of a result register; a register past 128 bytes keeps its last bit for the rest.
 type Bytes = u128;
@@ -203,6 +205,9 @@ pub struct CallEffect {
     /// Bytes it takes besides, unless its count register holds nought where the call runs.
     pub counted: Option<Counted>,
     pub overwrites: Overwrites,
+    /// The bytes its callee leaves as found on every path to a return: a read after the call reads
+    /// what was there before it.
+    pub kept: LaneBytes,
 }
 
 /// The vector registers a variadic callee takes by the count its caller states in `register`
@@ -241,17 +246,152 @@ impl CallEffects for TakeOnly {
             takes: self.0,
             counted: None,
             overwrites: Overwrites::Nothing,
+            kept: LaneBytes::default(),
         }
     }
 }
 
-/// What a body does with the result registers it is entered with.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct EntrySummary {
-    /// The bytes some path reads, forwards in a tail transfer or loses before writing them.
-    pub takes: LaneBytes,
-    /// The bytes every path to a return overwrites.
+/// One bit per register of a machine's outermost registers (`Arch::outermost_registers`), in order.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UniverseSet(Box<[u64]>);
+
+impl UniverseSet {
+    fn empty(registers: usize) -> Self {
+        Self(vec![0; registers.div_ceil(64)].into())
+    }
+
+    fn insert(&mut self, at: usize) {
+        self.0[at / 64] |= 1 << (at % 64);
+    }
+
+    pub fn contains(&self, at: usize) -> bool {
+        self.0
+            .get(at / 64)
+            .is_some_and(|word| word >> (at % 64) & 1 == 1)
+    }
+
+    /// Whether no register is in the set.
+    pub fn is_empty(&self) -> bool {
+        self.0.iter().all(|word| *word == 0)
+    }
+
+    fn without(&self, other: &Self) -> Self {
+        Self(
+            (self.0.iter().zip(&other.0))
+                .map(|(one, gone)| one & !gone)
+                .collect(),
+        )
+    }
+}
+
+/// The registers a call may change: each outermost register the call effect neither preserves nor
+/// reserves, as bits over the machine's outermost registers (doc/adr-result-side.md, section 5).
+pub struct CallUniverse<'m> {
+    outermost: &'m [CanonicalStorageId],
+    clobbered: UniverseSet,
+}
+
+impl<'m> CallUniverse<'m> {
+    /// The universe of a call under `effect` on `machine`; the SSA preserved set reads the same. `O(r)`.
+    pub fn of(effect: &SourceCallEffect, machine: &'m Arch) -> Self {
+        let outermost = machine.outermost_registers();
+        let mut clobbered = UniverseSet::empty(outermost.len());
+        for (at, storage) in outermost.iter().enumerate() {
+            if effect.clobbers(*storage) {
+                clobbered.insert(at);
+            }
+        }
+        Self {
+            outermost,
+            clobbered,
+        }
+    }
+
+    /// The registers of the universe, in the machine's order.
+    pub fn registers(&self) -> impl Iterator<Item = CanonicalStorageId> + '_ {
+        (self.outermost.iter().enumerate())
+            .filter(|(at, _)| self.clobbered.contains(*at))
+            .map(|(_, storage)| *storage)
+    }
+}
+
+/// Registers as `offset:size`, space-separated: the evidence both preserved sets print, for the
+/// loss count that compares them (doc/adr-result-side.md, "S31b as built").
+pub fn spelled(storages: impl Iterator<Item = CanonicalStorageId>) -> String {
+    let spelled = storages.map(|storage| format!("{:#x}:{}", storage.offset, storage.size));
+    spelled.collect::<Vec<_>>().join(" ")
+}
+
+/// The outermost registers sharing a byte with `storage`: one run, as their starts and ends ascend.
+/// `O(log r)`.
+fn overlapping(
+    outermost: &[CanonicalStorageId],
+    storage: CanonicalStorageId,
+) -> std::ops::Range<usize> {
+    if storage.space != r2source::CanonicalStorageSpace::Register {
+        return 0..0;
+    }
+    let end = storage.offset.saturating_add(u64::from(storage.size));
+    let from = outermost
+        .partition_point(|held| held.offset.saturating_add(u64::from(held.size)) <= storage.offset);
+    let to = outermost.partition_point(|held| held.offset < end);
+    from..to.max(from)
+}
+
+/// What a body does to the registers it is entered with (doc/adr-result-side.md, section 5): one
+/// row per body, its own calls read shallowly, so no row reads another.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisterEffect {
+    /// The universe's registers every path to a return leaves as found; empty unless every exit is
+    /// a return or a declared never-returning call, and no call runs where a return is reached.
+    pub kept: UniverseSet,
+    /// The result bytes every path to a return overwrites.
     pub overwrites: LaneBytes,
+    /// The result bytes some path reads, forwards in a tail transfer or loses before writing them.
+    pub takes: LaneBytes,
+    /// The machine whose outermost registers `kept` indexes.
+    machine: Arch,
+}
+
+impl RegisterEffect {
+    /// Whether kept registers cover every byte of `storage`. `O(log r)` plus the registers it overlaps.
+    pub fn keeps(&self, storage: CanonicalStorageId) -> bool {
+        let outermost = self.machine.outermost_registers();
+        let end = storage.offset.saturating_add(u64::from(storage.size));
+        let mut reached = storage.offset;
+        for at in overlapping(outermost, storage) {
+            let held = outermost[at];
+            if !self.kept.contains(at) {
+                continue;
+            }
+            if held.offset > reached {
+                return false;
+            }
+            reached = reached.max(held.offset.saturating_add(u64::from(held.size)));
+            if reached >= end {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// The registers this body keeps, in the machine's order.
+    pub fn kept_registers(&self) -> impl Iterator<Item = CanonicalStorageId> + '_ {
+        (self.machine.outermost_registers().iter().enumerate())
+            .filter(|(at, _)| self.kept.contains(*at))
+            .map(|(_, storage)| *storage)
+    }
+
+    /// Every byte of each lane whose register this body keeps whole.
+    pub fn kept_lanes(&self, lanes: ResultLanes) -> LaneBytes {
+        let mut kept = LaneBytes::default();
+        for (at, slot) in lanes.slots().iter().enumerate() {
+            if let Some(slot) = slot.filter(|slot| self.keeps(*slot)) {
+                kept.0[at] = Lane::new(slot).all;
+            }
+        }
+        kept
+    }
 }
 
 /// The bytes of the lanes, each tracked at the slot its register sits in.
@@ -309,6 +449,11 @@ impl Lane {
             false => 0,
         }
     }
+}
+
+/// The bytes of `every` a call's callee may change: all but those it keeps.
+fn unkept(every: [Bytes; LANES], kept: LaneBytes) -> [Bytes; LANES] {
+    std::array::from_fn(|lane| every[lane] & !kept.0[lane])
 }
 
 /// `plane` and `bytes` together.
@@ -614,14 +759,17 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
         fates
     }
 
-    /// What the body entered at `entry` takes of the result registers and overwrites on every path
-    /// to a return; none where no block starts there or the pass exceeded its budget.
-    pub fn entry_summary(
+    /// What the body entered at `entry` does to its entry registers; none past the budget or where no
+    /// block starts there. `never`: a terminal call declared never to return. `O((B + E) × LANES)`.
+    pub fn register_effect(
         &self,
         entry: u64,
         lanes: ResultLanes,
         effects: &dyn CallEffects,
-    ) -> Option<EntrySummary> {
+        machine: &Arch,
+        call: Option<&SourceCallEffect>,
+        never: &dyn Fn(usize, usize) -> bool,
+    ) -> Option<RegisterEffect> {
         let at = self
             .starts
             .binary_search_by_key(&entry, |(start, _)| *start)
@@ -636,7 +784,77 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
             takes.0[lane] = taken;
             overwrites.0[lane] = tracked.all(lane) & !(taken | live.returned[lane]);
         }
-        Some(EntrySummary { takes, overwrites })
+        Some(RegisterEffect {
+            kept: self.kept(machine, call, never),
+            overwrites,
+            takes,
+            machine: machine.clone(),
+        })
+    }
+
+    /// The universe's registers no block a return is reached from writes; none where an exit is
+    /// other than a return or a call `never` states, or a call or unstated operation runs there.
+    fn kept(
+        &self,
+        machine: &Arch,
+        call: Option<&SourceCallEffect>,
+        never: &dyn Fn(usize, usize) -> bool,
+    ) -> UniverseSet {
+        let outermost = machine.outermost_registers();
+        let none = UniverseSet::empty(outermost.len());
+        let mut returning = Vec::new();
+        for (at, block) in self.blocks.iter().map(Lifted::lifted).enumerate() {
+            if self.open[at] || self.leaves[at] || self.irregular[at] {
+                return none;
+            }
+            if (block.ops.iter()).any(|op| matches!(op, R2ILOp::Return { .. })) {
+                returning.push(at);
+            }
+            if !self.successors.of_block(at).is_empty() {
+                continue;
+            }
+            match block.ops.last() {
+                Some(R2ILOp::Return { .. }) => {}
+                Some(op) if op.is_call() && never(at, block.ops.len() - 1) => {}
+                _ => return none,
+            }
+        }
+        // A body no return ends keeps nothing; else the blocks a return is reached from, `O(B + E)`.
+        if returning.is_empty() {
+            return none;
+        }
+        let mut reaching = vec![false; self.blocks.len()];
+        while let Some(at) = returning.pop() {
+            if !std::mem::replace(&mut reaching[at], true) {
+                let from = self.predecessors.of_block(at).iter();
+                returning.extend(from.map(|from| *from as usize));
+            }
+        }
+        let mut written = UniverseSet::empty(outermost.len());
+        let reached = (self.blocks.iter().zip(&reaching)).filter(|(_, reached)| **reached);
+        for operation in reached.flat_map(|(block, _)| &block.lifted().ops) {
+            let through = |access: r2il::MemoryAccess<'_>| access.space == SpaceId::Register;
+            if operation.is_call()
+                || operation.reads_unstated()
+                || operation.memory_accesses().any(through)
+            {
+                return none;
+            }
+            let output = operation
+                .output()
+                .filter(|out| out.space == SpaceId::Register);
+            if let Some(output) = output {
+                let storage = CanonicalStorageId::from_varnode(output);
+                for at in overlapping(outermost, storage) {
+                    written.insert(at);
+                }
+            }
+        }
+        // The universe is built only for a body that may keep a register: most make a call.
+        match call {
+            Some(call) => CallUniverse::of(call, machine).clobbered.without(&written),
+            None => none,
+        }
     }
 }
 
@@ -775,7 +993,9 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
         // A read past a write that may not happen, a call that may leave a byte as it found it or
         // an operation with unstated effects may read that operation's value: no proof of ours.
         let doubtful = match &call {
-            Some(call) if call.overwrites != Overwrites::All => self.lanes.every(),
+            Some(call) if call.overwrites != Overwrites::All => {
+                unkept(self.lanes.every(), call.kept)
+            }
             _ if operation.reads_unstated() => self.lanes.every(),
             _ if mode.weak => operation
                 .output()
@@ -1491,6 +1711,7 @@ mod tests {
                     stated: None,
                 }),
                 overwrites: Overwrites::All,
+                kept: LaneBytes::default(),
             }
         }
     }
@@ -1547,6 +1768,7 @@ mod tests {
                 counted: None,
                 takes: LaneBytes::default(),
                 overwrites,
+                kept: LaneBytes::default(),
             });
             integer(fates_with(&blocks, &[], &[], &later))
         };
@@ -1569,6 +1791,7 @@ mod tests {
                 counted: None,
                 takes,
                 overwrites: Overwrites::All,
+                kept: LaneBytes::default(),
             })
         };
         let fate = fates_with(&blocks, &[], &[], &later(takes));
@@ -1773,22 +1996,88 @@ mod tests {
         assert_eq!(fate.fates[3..], [None; OTHERS]);
     }
 
+    /// `call f; call leaf; movq [rdi], xmm0`: a leaf that keeps XMM0 leaves f's, so the read is
+    /// f's; one that keeps only RAX may have changed it.
+    #[test]
+    fn a_read_past_a_later_call_that_keeps_the_lane_is_the_earlier_calls_read() {
+        let blocks = [block(
+            0x1000,
+            8,
+            vec![call(), call(), store(0x1200, 8), ret()],
+        )];
+        let after = |kept: &[CanonicalStorageId]| {
+            let later = Later(CallEffect {
+                counted: None,
+                takes: LaneBytes::default(),
+                overwrites: Overwrites::Bytes(LaneBytes::covered_by(LANES, &[RAX])),
+                kept: LaneBytes::covered_by(LANES, kept),
+            });
+            let fate = fates_with(&blocks, &[], &[], &later);
+            (shape(fate.fates[0]), shape(fate.fates[FLOAT_LANE]))
+        };
+        assert_eq!(after(&[XMM0]), (Some(K::Dead), Some(K::Read)));
+        assert_eq!(after(&[]), (Some(K::Dead), Some(K::Unknown)));
+        assert_eq!(after(&[RDX]), (Some(K::Dead), Some(K::Unknown)));
+    }
+
+    /// RAX, RDX, the vector registers and the rest the tests name; RSP is the one a call preserves.
+    fn machine() -> crate::Arch {
+        let mut spec = r2il::ArchSpec::new("x86-64");
+        spec.addr_size = 8;
+        for (name, offset, size) in [
+            ("RAX", 0, 8),
+            ("EAX", 0, 4),
+            ("RDX", 0x10, 8),
+            ("RSP", 0x20, 8),
+            ("RSI", 0x30, 8),
+            ("RDI", 0x38, 8),
+            ("R8", 0x40, 8),
+            ("cond", 0x100, 1),
+            ("XMM0", 0x1200, 16),
+            ("XMM1", 0x1240, 16),
+        ] {
+            spec.add_register(r2il::RegisterDef::new(name, offset, size));
+        }
+        crate::Arch::new(spec)
+    }
+
+    fn effect_with(
+        blocks: &[R2ILBlock],
+        edges: &[(usize, u64)],
+        open: &[usize],
+        never: &dyn Fn(usize, usize) -> bool,
+    ) -> super::RegisterEffect {
+        let rsp = CanonicalStorageId {
+            offset: 0x20,
+            ..RAX
+        };
+        let reads = r2source::SourceBoundaryReads::new([], []).expect("no reads");
+        let call = r2source::SourceCallEffect::new([RAX], [rsp], reads).expect("a call effect");
+        let machine = machine();
+        let flow = CallerFlow::new(
+            blocks,
+            edges.iter().copied(),
+            open.iter().copied(),
+            Endianness::Little,
+        );
+        flow.register_effect(0x1000, LANES, NOTHING, &machine, Some(&call), never)
+            .expect("a block starts there")
+    }
+
+    fn effect(blocks: &[R2ILBlock], edges: &[(usize, u64)]) -> super::RegisterEffect {
+        effect_with(blocks, edges, &[], &|_, _| false)
+    }
+
     /// A body entered with the registers as a caller left them: what it may read of them, and what
     /// every path to a return overwrites.
     #[test]
-    fn a_body_summary_names_what_it_takes_and_what_it_overwrites_on_every_path() {
-        let summary = |blocks: &[R2ILBlock], edges: &[(usize, u64)]| {
-            let flow = CallerFlow::new(blocks, edges.iter().copied(), [], Endianness::Little);
-            flow.entry_summary(0x1000, LANES, NOTHING)
-                .expect("a block starts there")
-        };
+    fn a_body_effect_names_what_it_takes_and_what_it_overwrites_on_every_path() {
         let rax =
             |bytes| LaneBytes::covered_by(LANES, &[CanonicalStorageId { size: bytes, ..RAX }]);
-        // `mov eax, 1; ret` overwrites RAX's low four bytes and its high four stay: only the whole
-        // register written is every byte.
-        let low = summary(&[block(0x1000, 4, vec![write(0, 4), ret()])], &[]);
+        // `mov eax, 1; ret` overwrites RAX's low four bytes and its high four stay.
+        let low = effect(&[block(0x1000, 4, vec![write(0, 4), ret()])], &[]);
         assert_eq!(low.overwrites, rax(4));
-        let whole = summary(&[block(0x1000, 4, vec![write(0, 8), ret()])], &[]);
+        let whole = effect(&[block(0x1000, 4, vec![write(0, 8), ret()])], &[]);
         assert_eq!(whole.overwrites, rax(8));
         // A write on the second arm only is a write the body may make: the walk takes every arm.
         let late = [
@@ -1796,27 +2085,106 @@ mod tests {
             block(0x1004, 4, vec![ret()]),
             block(0x1010, 4, vec![write(0, 4), ret()]),
         ];
-        assert_eq!(
-            summary(&late, &[(0, 0x1004), (0, 0x1010)]).overwrites,
-            LaneBytes::default()
-        );
-        // A write on one arm only is no overwrite.
-        let arms = [
-            block(0x1000, 4, vec![branch(0x1010)]),
-            block(0x1004, 4, vec![write(0, 8), ret()]),
-            block(0x1010, 4, vec![ret()]),
-        ];
-        let one_arm = summary(&arms, &[(0, 0x1004), (0, 0x1010)]);
-        assert_eq!(one_arm.overwrites, LaneBytes::default());
+        let late = effect(&late, &[(0, 0x1004), (0, 0x1010)]);
+        assert_eq!(late.overwrites, LaneBytes::default());
         // `test al, al` before the write takes AL.
-        let variadic = summary(
+        let variadic = effect(
             &[block(0x1000, 4, vec![store(0, 1), write(0, 8), ret()])],
             &[],
         );
         assert_eq!(variadic.takes, rax(1));
         // A tail transfer hands the register to code the body does not hold.
-        let tail = summary(&[block(0x1000, 4, vec![jump(0x5000)])], &[]);
+        let tail = effect(&[block(0x1000, 4, vec![jump(0x5000)])], &[]);
         assert_eq!(tail.takes, LaneBytes::covered_by(LANES, &[RAX, XMM0]));
+    }
+
+    /// `mov eax, 1; ret` keeps XMM0 and RDX and writes RAX; RSP is no register a call may change.
+    #[test]
+    fn a_leaf_keeps_each_register_it_never_writes() {
+        let leaf = effect(&[block(0x1000, 4, vec![write(0, 4), ret()])], &[]);
+        assert!(leaf.keeps(XMM0) && leaf.keeps(RDX), "{leaf:?}");
+        assert!(!leaf.keeps(RAX), "{leaf:?}");
+        let rsp = CanonicalStorageId {
+            offset: 0x20,
+            ..RAX
+        };
+        assert!(!leaf.keeps(rsp), "{leaf:?}");
+        let float = LaneBytes::covered_by(LANES, &[XMM0]);
+        assert_eq!(leaf.kept_lanes(LANES), float);
+    }
+
+    /// A write on one path to a return is a register the body may change.
+    #[test]
+    fn a_body_that_writes_the_lane_on_one_path_keeps_nothing_of_it() {
+        let arms = [
+            block(0x1000, 4, vec![branch(0x1010)]),
+            block(0x1004, 4, vec![write(0x1208, 4), ret()]),
+            block(0x1010, 4, vec![ret()]),
+        ];
+        let arms = effect(&arms, &[(0, 0x1004), (0, 0x1010)]);
+        assert!(!arms.keeps(XMM0) && arms.keeps(RDX), "{arms:?}");
+        assert_eq!(arms.kept_lanes(LANES), LaneBytes::covered_by(LANES, &[RAX]));
+    }
+
+    /// An exit the walk did not follow, or a branch to code the body does not hold, may write
+    /// anything: the body keeps nothing.
+    #[test]
+    fn a_body_with_an_open_exit_or_a_tail_transfer_keeps_nothing() {
+        let returns = [block(0x1000, 4, vec![ret()])];
+        assert!(effect(&returns, &[]).keeps(XMM0));
+        let open = effect_with(&returns, &[], &[0], &|_, _| false);
+        assert!(open.kept.is_empty(), "{open:?}");
+        let tail = [
+            block(0x1000, 4, vec![branch(0x1010)]),
+            block(0x1004, 4, vec![ret()]),
+        ];
+        let tail = effect(&tail, &[(0, 0x1004)]);
+        assert!(tail.kept.is_empty(), "{tail:?}");
+    }
+
+    /// `cpuid` and a user operation write registers no operand names: the body keeps nothing.
+    #[test]
+    fn a_body_with_an_unstated_operation_keeps_nothing() {
+        let user = R2ILOp::CallOther {
+            output: None,
+            userop: 3,
+            inputs: Vec::new(),
+        };
+        let cpuid = R2ILOp::CpuId {
+            dst: Varnode::register(0x10, 4),
+        };
+        for unstated in [user, cpuid, R2ILOp::Unimplemented] {
+            let body = effect(&[block(0x1000, 4, vec![unstated, ret()])], &[]);
+            assert!(body.kept.is_empty(), "{body:?}");
+        }
+    }
+
+    /// A call on a path to a return may change any register the convention lets it: nothing is
+    /// kept, whatever the callee does.
+    #[test]
+    fn a_call_on_a_path_to_a_return_keeps_nothing() {
+        let body = effect(&[block(0x1000, 4, vec![call(), ret()])], &[]);
+        assert!(body.kept.is_empty(), "{body:?}");
+    }
+
+    /// `jz L; ret / L: movq xmm0, rax; call abort`: an exit at a call declared never to return
+    /// reaches no return, so its writes are unseen; an exit at any other call keeps nothing.
+    #[test]
+    fn a_never_returning_exit_hides_its_writes() {
+        let blocks = [
+            block(0x1000, 4, vec![branch(0x1010)]),
+            block(0x1004, 4, vec![ret()]),
+            block(0x1010, 4, vec![write(0x1200, 8), call()]),
+        ];
+        let edges = [(0, 0x1004), (0, 0x1010)];
+        let declared = effect_with(&blocks, &edges, &[], &|block, op| (block, op) == (2, 1));
+        assert!(declared.keeps(XMM0), "{declared:?}");
+        let derived = effect_with(&blocks, &edges, &[], &|_, _| false);
+        assert!(derived.kept.is_empty(), "{derived:?}");
+        // A body every path of which ends at such a call reaches no return, and keeps nothing.
+        let never = [block(0x1000, 4, vec![write(0x1200, 8), call()])];
+        let never = effect_with(&never, &[], &[], &|_, _| true);
+        assert!(never.kept.is_empty(), "{never:?}");
     }
 }
 
