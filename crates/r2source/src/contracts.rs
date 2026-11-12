@@ -413,6 +413,8 @@ pub struct SourceResultSeed {
     pub slot: CanonicalStorageId,
     pub bits: u32,
     pub signed: bool,
+    /// What every such path leaves above `bits`.
+    pub above: SourceAbove,
 }
 
 /// Every cause a function's result is unproven, sorted; never empty.
@@ -987,6 +989,9 @@ pub struct SourceResultCarriers {
     /// No return leaves in the integer register a byte the body defines or an input's entry byte
     /// (doc/adr-scratch-result.md, cases 1 to 3), so neither it nor the second register holds a result.
     pub integer_undefined: bool,
+    /// The dense lane id of the lane the convention fills after the float one (XMM1, q1), where a
+    /// return leaves a written byte there: a call reading both reads one group (result-side ADR).
+    pub float_second: Option<u8>,
 }
 
 impl SourceResultCarriers {
@@ -1083,6 +1088,9 @@ pub struct SourceFunctionInterface {
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
+    /// What every return path of the body leaves above a narrower integer result; a declaration
+    /// states `Undefined` (doc/adr-result-side.md, section 2).
+    result_above: SourceAbove,
     /// Whether the body is a `/GS` check: it returns only past its first argument equalling the
     /// load-config cookie, with no memory effect, and otherwise reaches a call that never returns.
     security_check: bool,
@@ -1097,6 +1105,8 @@ pub struct SourceFunctionInterface {
     closed_result: Option<crate::SourceClosedResult>,
     /// Whether a return hands back a parameter through a merge: its cause is an entry input.
     result_holds_input: bool,
+    /// The body reaches no return: its `Void` states what a call leaves, and no type (S24).
+    no_return_reached: bool,
     /// What the logical types are read from (doc/adr-provenance.md):
     /// `DebugInfo` where the binary declares the body, `Declared` where a
     /// library's prototype was found by an import's name, `CarrierWidth`
@@ -1571,12 +1581,14 @@ impl SourceFunctionInterface {
             tail_count: None,
             va_list_parameter: None,
             body_proven_return_address: false,
+            result_above: SourceAbove::Undefined,
             security_check: false,
             arity_floor: None,
             unproven_result: None,
             result_carriers: None,
             closed_result: None,
             result_holds_input: false,
+            no_return_reached: false,
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
     }
@@ -1629,12 +1641,14 @@ impl SourceFunctionInterface {
             tail_count: self.tail_count,
             va_list_parameter: self.va_list_parameter,
             body_proven_return_address: self.body_proven_return_address,
+            result_above: self.result_above,
             security_check: self.security_check,
             arity_floor: self.arity_floor.clone(),
             unproven_result: self.unproven_result.clone(),
             result_carriers: self.result_carriers,
             closed_result: self.closed_result,
             result_holds_input: self.result_holds_input,
+            no_return_reached: self.no_return_reached,
             types: self.types.clone(),
             ..rebuilt
         })
@@ -1856,6 +1870,8 @@ impl SourceFunctionInterface {
         self.return_logical_value = None;
         self.result_carriers = None;
         self.body_proven_return_address = false;
+        self.result_above = SourceAbove::Undefined;
+        self.no_return_reached = false;
         if let Some(seed) = seed {
             self.state_result(seed);
         }
@@ -1882,6 +1898,7 @@ impl SourceFunctionInterface {
             slot: storage,
             bits: u32::try_from(held.size_bits()).ok()?,
             signed,
+            above: self.result_above,
         })
     }
 
@@ -1913,6 +1930,7 @@ impl SourceFunctionInterface {
             false => SourceCarrierKind::Full,
         };
         self.return_kind = SourceFunctionReturn::Register { storage: seed.slot };
+        self.result_above = seed.above;
         self.return_logical_value = Some(SourceLogicalValue::new(
             id,
             SourceCarrierProjection::new(carrier, 0, bits),
@@ -1957,6 +1975,18 @@ impl SourceFunctionInterface {
     /// Whether a return hands back a parameter: the result is an entry input, not a written value.
     pub const fn result_holds_input(&self) -> bool {
         self.result_holds_input
+    }
+
+    /// Record that the body reaches no return path (doc/adr-result-side.md, section 3).
+    #[must_use]
+    pub fn with_no_return_reached(mut self) -> Self {
+        self.no_return_reached = true;
+        self
+    }
+
+    /// Whether the body reaches no return path: a `Void` result then proves no `void` type.
+    pub const fn no_return_reached(&self) -> bool {
+        self.no_return_reached
     }
 
     /// What the closed world decided of the result, where a `CallBoundary` decided it.
@@ -2010,6 +2040,13 @@ impl SourceFunctionInterface {
     /// Whether the result is the return address the caller pushed.
     pub const fn body_proven_return_address(&self) -> bool {
         self.body_proven_return_address
+    }
+
+    /// Record what every return path of the body leaves above its narrower integer result.
+    #[must_use]
+    pub fn with_result_above(mut self, above: SourceAbove) -> Self {
+        self.result_above = above;
+        self
     }
 
     /// Record that the body is a proven `/GS` check (r2ssa `security_cookie::proves_check`).
@@ -2372,7 +2409,7 @@ impl SourceFunctionInterface {
     }
 
     /// The bytes of the result register the stated integer result occupies: its logical value's
-    /// low bytes, with nothing stated above them; the whole register where no integer is stated.
+    /// low bytes and the fill a body leaves above them; the whole register where no integer is stated.
     pub fn result_width(&self) -> Option<SourceResultWidth> {
         let SourceFunctionReturn::Register { storage } = self.return_kind else {
             return None;
@@ -2400,7 +2437,7 @@ impl SourceFunctionInterface {
         Some(match (integer && narrower, u8::try_from(bits / 8)) {
             (true, Ok(logical)) => SourceResultWidth {
                 logical,
-                above: SourceAbove::Undefined,
+                above: self.result_above,
             },
             _ => whole,
         })

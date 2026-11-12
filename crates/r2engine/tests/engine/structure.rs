@@ -65,7 +65,7 @@ fn the_exit_only_the_chain_reaches_is_the_if_s_body() {
     assert_eq!(tests.len(), 1, "{c}");
     assert_eq!(tests[0].matches("== (uint32_t)0U").count(), 2, "{c}");
     assert!(tests[0].contains(" && "), "{c}");
-    assert!(c.contains("return r2sleigh_carrier_u64(0);"), "{c}");
+    assert!(c.contains("return r2sleigh_carrier_u32(0);"), "{c}");
 }
 
 #[test]

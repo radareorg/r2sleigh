@@ -531,6 +531,23 @@ pub fn keeps_callers(bytes: &[Byte], storage: CanonicalStorageId) -> bool {
     )
 }
 
+/// What every path's bytes hold above a result of `width` bytes: the machine's zero or sign fill
+/// where each byte above is that fill alone on every path, else nothing stated. O(paths × bytes).
+pub fn above(paths: &[Bytes], width: u32) -> SourceAbove {
+    let filled = |fill: Fill| {
+        let fill = Byte::fill(fill);
+        (paths.iter()).all(|bytes| {
+            let over = bytes.get(width as usize..).unwrap_or_default();
+            !over.is_empty() && over.iter().all(|byte| *byte == fill)
+        })
+    };
+    match (paths.is_empty(), filled(Fill::Zero), filled(Fill::Sign)) {
+        (false, true, _) => SourceAbove::Zero,
+        (false, _, true) => SourceAbove::Sign,
+        _ => SourceAbove::Undefined,
+    }
+}
+
 /// Whether a result of `width` bytes is signed by what wrote it: its top
 /// bytes are a sign extension the instruction stated (`movsx eax, al`), or
 /// the byte above it is the architecture's sign fill on every path.
@@ -679,6 +696,44 @@ mod tests {
             .map(|byte| Byte::fill(at(byte)))
             .fold(Byte::NONE, |held, byte| held.join(&byte));
         assert_eq!(many, Byte::Data);
+    }
+
+    /// `above` is the machine's fill only where every byte above the width is that fill alone on
+    /// every path: a path with data, a mixed fill or no byte above states nothing.
+    #[test]
+    fn the_fill_above_a_result_is_stated_only_where_every_path_agrees() {
+        let low = |fill: Fill| -> Bytes {
+            (0..4)
+                .map(|_| Byte::Data)
+                .chain((4..8).map(|_| Byte::fill(fill)))
+                .collect()
+        };
+        let (zero, sign) = (low(Fill::Zero), low(Fill::Sign));
+        assert_eq!(above(&[zero.clone()], 4), SourceAbove::Zero);
+        assert_eq!(above(&[zero.clone(), zero.clone()], 4), SourceAbove::Zero);
+        assert_eq!(above(&[sign.clone()], 4), SourceAbove::Sign);
+        assert_eq!(above(&[zero.clone(), sign], 4), SourceAbove::Undefined);
+        // A narrower path whose fill starts lower still fills the bytes above the joined width.
+        let byte: Bytes = std::iter::once(Byte::Data)
+            .chain((1..8).map(|_| Byte::fill(Fill::Zero)))
+            .collect();
+        assert_eq!(above(&[zero.clone(), byte], 4), SourceAbove::Zero);
+        // Data above on one path, a stated extension, an undefined fill, a joined fill: nothing.
+        assert_eq!(
+            above(&[zero.clone(), vec![Byte::Data; 8]], 4),
+            SourceAbove::Undefined
+        );
+        let widened: Bytes = (0..4)
+            .map(|_| Byte::Data)
+            .chain((4..8).map(|_| Byte::Widened { sign: false }))
+            .collect();
+        assert_eq!(above(&[widened], 4), SourceAbove::Undefined);
+        assert_eq!(above(&[low(Fill::Undefined)], 4), SourceAbove::Undefined);
+        let joined = join(&zero, &low(Fill::Undefined));
+        assert_eq!(above(&[joined], 4), SourceAbove::Undefined);
+        // No path, or no byte above the width: nothing.
+        assert_eq!(above(&[], 4), SourceAbove::Undefined);
+        assert_eq!(above(&[zero], 8), SourceAbove::Undefined);
     }
 
     /// A call to a callee that states a four-byte result defines four bytes of RAX and nothing

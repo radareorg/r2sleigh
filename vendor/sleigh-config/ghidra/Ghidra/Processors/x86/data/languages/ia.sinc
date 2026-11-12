@@ -4044,7 +4044,7 @@ define pcodeop TaskRegister;
 @endif
 :MOV CRmr8,imm8     is vexMode=0 & row=11 & page=0 & CRmr8; imm8                        { CRmr8 = imm8; }
 :MOV CRmr16,imm16   is vexMode=0 & opsize=0 & row=11 & page=1 & CRmr16; imm16       { CRmr16 = imm16; }
-:MOV CRmr32,imm32   is vexMode=0 & opsize=1 & row=11 & page=1 & CRmr32; imm32       { CRmr32 = imm32; }
+:MOV Rmr32,imm32    is vexMode=0 & opsize=1 & row=11 & page=1 & Rmr32 & check_Rmr32_dest; imm32       { Rmr32 = imm32; build check_Rmr32_dest; }
 @ifdef IA64
 :MOV Rmr64,imm64    is $(LONGMODE_ON) & vexMode=0 & opsize=2 & row=11 & page=1 & Rmr64; imm64        { Rmr64 = imm64; }
 @endif

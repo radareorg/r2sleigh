@@ -50,7 +50,7 @@ fn a_caller_reading_the_integer_register_decides_the_result() {
         )
     };
     let text = rendered(program());
-    assert!(text.starts_with("uint64_t f("), "{text}");
+    assert!(text.starts_with("uint32_t f("), "{text}");
     assert!(text.contains("7"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
@@ -733,7 +733,7 @@ fn a_call_in_a_switch_arm_reads_the_result_as_any_call_does() {
         &[("f", BASE, 0x0a), ("caller", BASE + 0x10, 0x52)],
     );
     let text = rendered(program);
-    assert!(text.starts_with("uint64_t f("), "{text}");
+    assert!(text.starts_with("uint32_t f("), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 

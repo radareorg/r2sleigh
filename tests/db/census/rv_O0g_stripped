@@ -129,7 +129,7 @@ NAME=0x000010c0
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000010c0
 EXPECT=<<EOF
-void entry0(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
+r2sleigh_result_u64 entry0(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
 {
     uint64_t tmp_10c9_0_2;
 
@@ -284,7 +284,7 @@ NAME=0x0000120a
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x0000120a
 EXPECT=<<EOF
-uint64_t fcn_120a(uint32_t arg0)
+uint32_t fcn_120a(uint32_t arg0)
 {
     uint64_t rax_14;
 
@@ -296,37 +296,37 @@ uint64_t fcn_120a(uint32_t arg0)
             case 7:
                 {
                     rax_14 = 87;
-                    return (uint64_t)rax_14;
+                    return (uint32_t)rax_14;
                 }
             case 5:
                 {
                     rax_14 = 65;
-                    return (uint64_t)rax_14;
+                    return (uint32_t)rax_14;
                 }
             case 4:
                 {
                     rax_14 = 54;
-                    return (uint64_t)rax_14;
+                    return (uint32_t)rax_14;
                 }
             case 3:
                 {
                     rax_14 = 43;
-                    return (uint64_t)rax_14;
+                    return (uint32_t)rax_14;
                 }
             case 2:
                 {
                     rax_14 = 32;
-                    return (uint64_t)rax_14;
+                    return (uint32_t)rax_14;
                 }
             case 1:
                 {
                     rax_14 = 21;
-                    return (uint64_t)rax_14;
+                    return (uint32_t)rax_14;
                 }
             case 0:
                 {
                     rax_14 = 10;
-                    return (uint64_t)rax_14;
+                    return (uint32_t)rax_14;
                 }
             case 6:
                 break;
@@ -336,7 +336,7 @@ uint64_t fcn_120a(uint32_t arg0)
             rax_14 = (uint64_t)0xffffffffU;
         }
         {
-            return (uint64_t)rax_14;
+            return (uint32_t)rax_14;
         }
     }
 }
@@ -488,7 +488,7 @@ NAME=0x00001362
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x00001362
 EXPECT=<<EOF
-uint64_t fcn_1362(uint32_t arg0)
+uint32_t fcn_1362(uint32_t arg0)
 {
     uint64_t rax_3;
     uint64_t rax_6;
@@ -497,11 +497,11 @@ uint64_t fcn_1362(uint32_t arg0)
     {
         if ((uint8_t)((int32_t)arg0 <= (int32_t)1U)) {
             rax_6 = 1;
-            return (uint64_t)rax_6;
+            return (uint32_t)rax_6;
         } else {
-            rax_3 = fcn_1362((uint32_t)((uint32_t)arg0 - (uint32_t)1U));
+            rax_3 = (uint64_t)(uint32_t)fcn_1362((uint32_t)((uint32_t)arg0 - (uint32_t)1U));
             rax_6 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)(int32_t)((uint64_t)rax_3 >> 0U) * (uint64_t)(int32_t)arg0) >> 0U);
-            return (uint64_t)rax_6;
+            return (uint32_t)rax_6;
         }
     }
 }
@@ -649,7 +649,7 @@ NAME=0x000014b5
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000014b5
 EXPECT=<<EOF
-uint64_t fcn_14b5(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
+uint32_t fcn_14b5(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
 {
     uint32_t stack_m12_1;
     uint32_t tmp_14e4_0_1;
@@ -665,18 +665,18 @@ uint64_t fcn_14b5(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
                 tmp_1504_0_1 = r2sleigh_load_u32((void*)((uint64_t)arg0 + (uint64_t)(int32_t)stack_m12_1 * 4U));
                 if ((uint8_t)((int32_t)arg2 < (int32_t)tmp_1504_0_1)) {
                     rax_14 = (uint64_t)0xffffffffU;
-                    return (uint64_t)rax_14;
+                    return (uint32_t)rax_14;
                 } else {
                     stack_m12_1 = (uint32_t)((uint32_t)stack_m12_1 + (uint32_t)1U);
                 }
             } else {
                 rax_14 = (uint64_t)(uint32_t)stack_m12_1;
-                return (uint64_t)rax_14;
+                return (uint32_t)rax_14;
             }
         }
         {
             rax_14 = (uint64_t)0xffffffffU;
-            return (uint64_t)rax_14;
+            return (uint32_t)rax_14;
         }
     }
 }
@@ -712,7 +712,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
 {
     uint32_t fcn_11a9(uint32_t, uint32_t);
     uint32_t fcn_11c1(uint32_t*, uint32_t);
-    uint64_t fcn_120a(uint32_t);
+    uint32_t fcn_120a(uint32_t);
     uint32_t fcn_1277(uint64_t);
     uint64_t fcn_12a8(uint64_t, uint64_t);
     double fcn_12ef(uint64_t*, uint32_t);
@@ -722,7 +722,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
     uint32_t fcn_144c(uint32_t);
     uint32_t fcn_146d(uint32_t, uint8_t);
     uint32_t fcn_1489(uint32_t);
-    uint64_t fcn_14b5(uint32_t*, uint32_t, uint32_t);
+    uint32_t fcn_14b5(uint32_t*, uint32_t, uint32_t);
     uint64_t fcn_1521(uint64_t, uint64_t);
     int32_t printf(const char*, ...);
 
@@ -796,7 +796,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
         tmp_164a_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)rax_8 >> 0U) + (uint32_t)tmp_164a_8_1));
         tmp_1658_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
-        rax_11 = fcn_120a((uint32_t)tmp_1658_8_1);
+        rax_11 = (uint64_t)fcn_120a((uint32_t)tmp_1658_8_1);
         tmp_1665_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)rax_11 >> 0U) + (uint32_t)tmp_1665_8_1));
         rax_13 = (uint64_t)fcn_1277((uint64_t)((uint64_t)(frame + 48U) + (uint64_t)80U));
@@ -814,7 +814,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
         tmp_16ac_13_2 = tmp_16ac_12_1 ? (uint64_t)tmp_lane_16ac_2_0_1 : (uint64_t)r2sleigh_float_to_bits_64(tmp_16ac_1b_1);
         tmp_16b0_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint32_t)(r2sleigh_float_from_bits_64(tmp_16ac_13_2) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_16ac_13_2) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_16ac_13_2) : r2sleigh_residual_i32(1)) | (uint32_t)((uint32_t)(uint8_t)((uint32_t)tmp_16ac_12_1 ^ (uint32_t)(uint8_t)1U) * (uint32_t)0x80000000U)) + (uint32_t)tmp_16b0_8_1));
-        rax_21 = fcn_1362(5);
+        rax_21 = (uint64_t)fcn_1362(5);
         tmp_16c0_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)rax_21 >> 0U) + (uint32_t)tmp_16c0_8_1));
         tmp_16c6_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
@@ -838,7 +838,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
             rax_34 = (uint64_t)fcn_1489(0xf0f0);
             tmp_173e_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
             r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)((uint64_t)(uint32_t)((uint32_t)(int16_t)((uint64_t)rax_31 >> 0U) + (uint32_t)((uint64_t)rax_33 >> 0U)) + (uint64_t)rax_34) >> 0U) + (uint32_t)tmp_173e_8_1));
-            rax_38 = fcn_14b5((uint32_t*)(uint64_t)0x4040U, 16, 7);
+            rax_38 = (uint64_t)fcn_14b5((uint32_t*)(uint64_t)0x4040U, 16, 7);
             tmp_1767_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
             rax_41 = fcn_1521(0x11a9, (uint64_t)(uint32_t)tmp_1767_8_1);
             tmp_1780_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));

@@ -109,3 +109,45 @@ fn a_32_bit_result_of_a_user_operation_is_zero_extended() {
         assert!(!stray, "{text}: {ops:?}");
     }
 }
+
+/// `mov r32, imm32` (B8+r) writes the doubleword register and widens it, where Ghidra's `CRmr32`
+/// copied the constant into the 64-bit register (vendor/README.md; ROADMAP D323).
+#[test]
+fn a_32_bit_immediate_move_writes_the_doubleword_and_widens_it() {
+    let machine = Machine::x86_64();
+    for (text, bytes, register, wide) in [
+        (
+            "mov eax, 5",
+            &[0xb8, 0x05, 0x00, 0x00, 0x00][..],
+            "EAX",
+            "RAX",
+        ),
+        (
+            "mov r9d, 5",
+            &[0x41, 0xb9, 0x05, 0x00, 0x00, 0x00],
+            "R9D",
+            "R9",
+        ),
+    ] {
+        let (offset, size) = machine.register(register);
+        let narrow = r2il::Varnode::new(SpaceId::Register, offset, size);
+        let ops = machine.lift(bytes);
+        let copied = ops
+            .iter()
+            .any(|op| matches!(op, R2ILOp::Copy { dst, src } if *dst == narrow && src.size == 4));
+        let widened = ops.iter().any(|op| {
+            matches!(op, R2ILOp::IntZExt { dst, src }
+                if *src == narrow && dst.offset == offset && dst.size == 8)
+        });
+        assert!(copied && widened, "{text}: {ops:?}");
+        let state = &machine.run(bytes, &[("RAX", ONES), ("R9", ONES)]);
+        assert_eq!(machine.read(state, wide), 5, "{text}");
+    }
+    // `movabs rax, 5` writes the quadword in one copy.
+    let ops = machine.lift(&[0x48, 0xb8, 0x05, 0, 0, 0, 0, 0, 0, 0]);
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, R2ILOp::Copy { dst, .. } if dst.size == 8)),
+        "{ops:?}"
+    );
+}

@@ -65,7 +65,7 @@ NAME=0x00001040
 FILE=tests/fixtures/frame_pointer_locals_clang_O0g
 CMDS=aa; pdd @ 0x00001040
 EXPECT=<<EOF
-void _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
 {
     uint64_t tmp_1049_0_2;
 

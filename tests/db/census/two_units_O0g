@@ -81,7 +81,7 @@ NAME=0x00001060
 FILE=tests/fixtures/two_units_O0g
 CMDS=aa; pdd @ 0x00001060
 EXPECT=<<EOF
-void _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
 {
     uint64_t tmp_1069_0_2;
 

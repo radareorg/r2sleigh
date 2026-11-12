@@ -1365,6 +1365,7 @@ fn state_unstated_result(
             slot,
             bits: slot.size.saturating_mul(8),
             signed: false,
+            above: r2source::SourceAbove::Undefined,
         });
     boundary.unstated_carrier = (!boundary.unstated_lanes.is_empty())
         .then(|| stated.and_then(|statement| statement.seed).or(integer))

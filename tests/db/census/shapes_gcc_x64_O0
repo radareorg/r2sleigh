@@ -120,7 +120,7 @@ NAME=0x00401090
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401090
 EXPECT=<<EOF
-void _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
 {
     uint64_t tmp_401099_0_2;
 
@@ -160,7 +160,7 @@ NAME=0x004010d0
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x004010d0
 EXPECT=<<EOF
-r2sleigh_result_u64 deregister_tm_clones(void)
+r2sleigh_result_u32 deregister_tm_clones(void)
 {
     uint64_t rax_3;
 
@@ -168,7 +168,7 @@ r2sleigh_result_u64 deregister_tm_clones(void)
     {
         rax_3 = 0x405028;
         {
-            return r2sleigh_carrier_u64((uint64_t)rax_3);
+            return r2sleigh_carrier_u32((uint32_t)rax_3);
         }
     }
 }
@@ -218,7 +218,7 @@ r2sleigh_result_u64 __do_global_dtors_aux(void)
         if ((uint8_t)((uint8_t)tmp_401144_0_1 != (uint8_t)0U)) {
             return r2sleigh_residual_u64(1);
         } else {
-            rax_1 = deregister_tm_clones();
+            rax_1 = (uint64_t)(uint32_t)deregister_tm_clones();
             r2sleigh_store_u8((void*)&__TMC_END__, (uint8_t)1U);
             return r2sleigh_carrier_u64((uint64_t)rax_1);
         }
@@ -1506,7 +1506,7 @@ NAME=0x00402206
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00402206
 EXPECT=<<EOF
-r2sleigh_result_u64 fcn_402206(void)
+r2sleigh_result_u32 fcn_402206(void)
 {
     int32_t printf(const char*, ...);
     uint64_t shape_bool_caller(uint64_t, uint64_t);
@@ -1570,7 +1570,7 @@ r2sleigh_result_u64 fcn_402206(void)
         printf("%016llx\n", rax_52);
         rax_56 = shape_bool_caller((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_56);
-        return r2sleigh_carrier_u64(0);
+        return r2sleigh_carrier_u32(0);
     }
 }
 

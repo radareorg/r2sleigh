@@ -879,7 +879,7 @@ fn the_staged_frame_is_one_array_a_call_may_be_passed_into() {
 fn pdd_writes_from_the_sealed_facts() {
     let staged = r2s(&format!("pdd @ {FNV1A32}"));
     for line in [
-        "return r2sleigh_carrier_u64((uint64_t)0x811c9dc5U);",
+        "return r2sleigh_carrier_u32((uint32_t)0x811c9dc5U);",
         "r2sleigh_load_u8((void*)rdi_1)",
         "* (uint64_t)0x1000193U",
     ] {

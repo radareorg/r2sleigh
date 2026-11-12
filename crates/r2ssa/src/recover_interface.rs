@@ -90,9 +90,16 @@ pub struct RecoveredResult {
     signed: bool,
     /// The carrier is the float result register, read by callers as a float of the observed width.
     float: bool,
+    /// What every return path leaves above the observed bytes (doc/adr-result-side.md, section 2).
+    above: r2source::SourceAbove,
 }
 
 impl RecoveredResult {
+    /// The fill every return path leaves above the observed bytes, `Undefined` where they differ.
+    pub const fn above(self) -> r2source::SourceAbove {
+        self.above
+    }
+
     /// The convention's result register.
     pub const fn slot(self) -> CanonicalStorageId {
         self.slot
@@ -217,6 +224,8 @@ pub struct RecoveredInterface {
     closed: Option<r2source::SourceClosedResult>,
     /// Whether some return hands back a parameter through a merge: an entry input, spelled.
     result_holds_input: bool,
+    /// No return path is reached, so the `Void` result states what a call leaves, never a type.
+    unreached: bool,
     /// How the body uses each slot and the bytes it leaves in each result lane.
     boundary: crate::body_boundary::BodyBoundary,
     /// Whether the body is a proven `/GS` check (`security_cookie::proves_check`).
@@ -1030,6 +1039,7 @@ fn returned_result(
     let untouched = !entry_undefined
         && (live_out.unresolved_blocks().next().is_some() || (merged_entry && !input));
     let result = if !live_out.has_returns() {
+        // A call leaves nothing where control never comes back; the header reads `unreached`.
         if closed_by_calls_that_do_not_return(func) {
             RecoveredFunctionResult::Void
         } else {
@@ -1283,6 +1293,20 @@ fn unheld_lane_written(
     None
 }
 
+/// The lane the convention fills after `float`, by its cited `follows` row, and its dense lane
+/// id among `ids` (`site_boundary::ResultLanes`). O(lanes).
+fn float_follower(
+    machine_context: &crate::SourceMachineContext,
+    ids: &[Option<CanonicalStorageId>],
+    float: CanonicalStorageId,
+) -> Option<(CanonicalStorageId, u8)> {
+    let model = machine_context.convention()?;
+    let first = (model.results.iter()).position(|lane| overlaps(lane.storage, float))?;
+    let second = (model.results.iter()).find(|lane| lane.follows == Some(first))?;
+    let id = ids.iter().position(|slot| *slot == Some(second.storage))?;
+    Some((second.storage, u8::try_from(id).ok()?))
+}
+
 /// What a return leaves in `lane` past its entry bytes, by copies and merges: a body write
 /// (`Written`, unless `unstated_only`) or a call's bytes no contract states. O(V + E).
 fn lane_supply(
@@ -1467,9 +1491,16 @@ fn recovered_result_over(
     let written = func.written_or_captured();
     let mut observed = None;
     let mut signed = true;
+    // Each path's bytes above its own width; a path that leaves none states no fill.
+    let mut above = Vec::new();
+    let mut every_path_writes = true;
     for value in live_out.iter() {
         match returned_by_call(graph, facts, value) {
-            ReturnedByCall::Void => continue,
+            ReturnedByCall::Void => {
+                every_path_writes = false;
+                continue;
+            }
+            // A seed starts a cycle's fixpoint from its own paths: the calls' reads raise it.
             ReturnedByCall::Unstated(_) | ReturnedByCall::Undecided(_) if skip_unstated => continue,
             ReturnedByCall::Unstated(_) | ReturnedByCall::Undecided(_) => {
                 return RecoveredFunctionResult::Unproven;
@@ -1485,6 +1516,7 @@ fn recovered_result_over(
         let bytes = written_bytes(&written, graph, value, &mut BTreeSet::new());
         // Undefined joined with data is data; a path of undefined bytes alone leaves no result.
         if crate::lanes::defines_nothing(&bytes, storage, entry_undefined) {
+            every_path_writes = false;
             continue;
         }
         // A path that writes no byte of the carrier hands back what the
@@ -1494,6 +1526,8 @@ fn recovered_result_over(
         // above, by the definitions that reach the return.
         let observed_size = crate::lanes::written_width(&bytes, storage).unwrap_or(storage.size);
         signed &= crate::lanes::signed(&bytes, observed_size);
+        every_path_writes &= storage.size == slot.size;
+        above.push(bytes);
         let storage = CanonicalStorageId {
             space: slot.space,
             offset: slot.offset,
@@ -1504,11 +1538,16 @@ fn recovered_result_over(
         }
     }
     observed.map_or(RecoveredFunctionResult::Void, |observed| {
+        let above = match every_path_writes {
+            true => crate::lanes::above(&above, observed.size),
+            false => r2source::SourceAbove::Undefined,
+        };
         RecoveredFunctionResult::Register(RecoveredResult {
             slot,
             observed,
             signed,
             float: false,
+            above,
         })
     })
 }
@@ -1772,15 +1811,16 @@ fn recover_interface_inner(
                 size: u32::from(width.logical),
                 ..slot
             };
-            let observed = match width.fills(slot) {
-                true => slot,
-                false => joined_with_direct_returns(func, graph, &facts, (slot, narrow)),
+            let (observed, above) = match width.fills(slot) {
+                true => (slot, r2source::SourceAbove::Undefined),
+                false => joined_with_direct_returns(func, graph, &facts, (slot, narrow), width),
             };
             RecoveredFunctionResult::Register(RecoveredResult {
                 slot,
                 observed,
                 signed: observed == narrow && width.above == r2source::SourceAbove::Sign,
                 float: false,
+                above,
             })
         }
         TailResult::Exact(SourceCallResult::Pair { low, high }) => {
@@ -1805,6 +1845,7 @@ fn recover_interface_inner(
     };
     let mut applied = None;
     let mut result_holds_input = false;
+    let mut unreached = false;
     // An exact tail-call interface owns this boundary. Looking at the value
     // present before the branch would instead mistake a call argument for the
     // value the callee returns into the same register.
@@ -1814,6 +1855,7 @@ fn recover_interface_inner(
         let (recovered, returned) =
             returned_result(func, graph, &facts, &candidate_live_out, slots);
         result = recovered;
+        unreached = !candidate_live_out.has_returns();
         let handed_back = returned == Returned::HandedBack;
         result_holds_input = returned == Returned::Input;
         if result == RecoveredFunctionResult::Unproven {
@@ -1831,6 +1873,7 @@ fn recover_interface_inner(
                 float: None,
                 second: None,
                 integer_undefined: false,
+                float_second: None,
             });
         }
         // A body that writes both result registers on its way out hands back one of them: the
@@ -1852,6 +1895,7 @@ fn recover_interface_inner(
                         observed,
                         signed: false,
                         float: true,
+                        above: r2source::SourceAbove::Undefined,
                     });
                     candidate_live_out = float_live_out;
                     applied = closed;
@@ -1862,6 +1906,7 @@ fn recover_interface_inner(
                         float: Some(float),
                         second: None,
                         integer_undefined: false,
+                        float_second: None,
                     });
                     result = RecoveredFunctionResult::Unproven;
                     result_causes.insert(SourceResultCause::Ambiguous);
@@ -1883,6 +1928,7 @@ fn recover_interface_inner(
                         observed,
                         signed: false,
                         float: true,
+                        above: r2source::SourceAbove::Undefined,
                     });
                     result_carriers = None;
                     candidate_live_out = float_live_out;
@@ -1904,6 +1950,7 @@ fn recover_interface_inner(
                         float: Some(float),
                         second: None,
                         integer_undefined: true,
+                        float_second: None,
                     });
                 }
                 // An argument handed back beside a written float: the callers' reads choose.
@@ -1913,6 +1960,7 @@ fn recover_interface_inner(
                         float: Some(float),
                         second: None,
                         integer_undefined: false,
+                        float_second: None,
                     });
                 }
                 None => {}
@@ -1943,6 +1991,7 @@ fn recover_interface_inner(
                     float: None,
                     second: Some(high),
                     integer_undefined: false,
+                    float_second: None,
                 });
                 candidate_live_out = both();
             }
@@ -1987,6 +2036,7 @@ fn recover_interface_inner(
                 float: Some(float),
                 second: None,
                 integer_undefined: true,
+                float_second: None,
             });
         }
     }
@@ -2008,8 +2058,19 @@ fn recover_interface_inner(
                 float,
                 second,
                 integer_undefined: false,
+                float_second: None,
             });
         }
+    }
+    // The lane after the float one, written at a return, makes a float result one group with it.
+    if let Some(carriers) = &mut result_carriers
+        && let (Some(float), Some(context)) = (carriers.float, machine_context)
+    {
+        let results = convention_results(context.convention());
+        let ids = crate::site_boundary::ResultLanes::of(slots, &results).slots();
+        carriers.float_second = float_follower(context, &ids, float)
+            .filter(|(lane, _)| lane_supply(func, graph, &facts, (context, *lane), false).is_some())
+            .map(|(_, id)| id);
     }
     // Void only where every lane of the return set holds nothing (S36): asked only of a `Void` the
     // body or the closed world would decide, whose cause then keeps it `Unproven`.
@@ -2487,6 +2548,7 @@ fn recover_interface_inner(
         tail_count,
         closed: applied,
         result_holds_input,
+        unreached: unreached && result == RecoveredFunctionResult::Void,
         boundary,
         security_check: machine_context
             .is_some_and(|machine| crate::security_cookie::proves_check(func, machine)),
@@ -2895,6 +2957,7 @@ fn seed_result(
         slot: result.slot(),
         bits,
         signed: result.signed(),
+        above: result.above(),
     })
 }
 
@@ -2957,18 +3020,23 @@ fn direct_return_result(
     (direct.by_return().next().is_some() && defines).then_some(candidate)
 }
 
-/// The tail callee's `narrow` width joined with every direct return's written width: a wider
-/// direct return widens it, and one whose width is unknown keeps the whole `slot`.
+/// The tail callee's `narrow` width joined with every direct return's written width (an unknown
+/// one keeps the whole `slot`), and the fill above that the tail and every direct return state alike.
 fn joined_with_direct_returns(
     func: &SSAFunction,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
     (slot, narrow): (CanonicalStorageId, CanonicalStorageId),
-) -> CanonicalStorageId {
+    tail: SourceResultWidth,
+) -> (CanonicalStorageId, r2source::SourceAbove) {
+    let undefined = r2source::SourceAbove::Undefined;
     let tails = owned_tail_blocks(func, graph, facts, slot);
     let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]).without(&tails);
     if live_out.unresolved_blocks().next().is_some() {
-        return slot;
+        return (slot, undefined);
+    }
+    if !live_out.has_returns() {
+        return (narrow, tail.above);
     }
     let returns = Returns {
         func,
@@ -2978,14 +3046,15 @@ fn joined_with_direct_returns(
         entry_undefined: false,
     };
     match recovered_result_over(&returns, slot, false) {
-        RecoveredFunctionResult::Void => narrow,
+        RecoveredFunctionResult::Void => (narrow, undefined),
         RecoveredFunctionResult::Register(direct) if !direct.float() => {
-            match direct.observed().size > narrow.size {
-                true => direct.observed(),
-                false => narrow,
+            match direct.observed().size.cmp(&narrow.size) {
+                std::cmp::Ordering::Greater => (direct.observed(), undefined),
+                std::cmp::Ordering::Equal if direct.above() == tail.above => (narrow, tail.above),
+                _ => (narrow, undefined),
             }
         }
-        _ => slot,
+        _ => (slot, undefined),
     }
 }
 
@@ -3164,6 +3233,10 @@ pub fn mint_recovered_interface(
         })
         .map(|interface| match recovered.result_holds_input {
             true => interface.with_result_holding_input(),
+            false => interface,
+        })
+        .map(|interface| match recovered.unreached {
+            true => interface.with_no_return_reached(),
             false => interface,
         })
         .map(|interface| match &recovered.unproven_result {
@@ -3547,6 +3620,9 @@ fn mint_recovered_interface_inner(
     // a conflict with the machine.
     .with_role_register_names(roles.role_register_names())
     .with_types(r2source::Confidence::of(r2source::Basis::CarrierWidth));
+    let above = (recovered.result().register())
+        .map_or(r2source::SourceAbove::Undefined, |held| held.above());
+    let interface = interface.with_result_above(above);
     let interface = if recovered.result_is_return_address() {
         interface.with_body_proven_return_address().ok()?
     } else {
@@ -3893,6 +3969,7 @@ mod tests {
             float: Some(q0),
             second: None,
             integer_undefined: true,
+            float_second: None,
         };
         let callee = lane_interface(handed_back);
         let every = BTreeSet::from([x0, x1, q0]);
@@ -4132,6 +4209,7 @@ mod tests {
                 observed: register(0, 8),
                 signed: false,
                 float: false,
+                above: r2source::SourceAbove::Undefined,
             })
         );
     }

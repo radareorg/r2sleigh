@@ -148,6 +148,8 @@ pub struct Carriers {
     pub second: bool,
     /// No return defines a byte of the integer register (scratch-result cases 1 to 3).
     pub integer_undefined: bool,
+    /// The lane after the float one that a return leaves written, as the open read states it.
+    pub float_second: Option<u8>,
 }
 
 impl Supply {
@@ -163,6 +165,7 @@ impl Supply {
             float: carriers.float.is_some(),
             second: carriers.second.is_some(),
             integer_undefined: carriers.integer_undefined,
+            float_second: carriers.float_second,
         });
         let causes = open
             .unproven_result()
@@ -249,6 +252,34 @@ pub struct Direct {
     returned: Box<[Returned]>,
 }
 
+/// The returned lanes kept for their callers, decided from the direct calls alone so the forwarder
+/// graph rests on none of its answers; a lane not kept is joined `Unknown`, never dead. O(returned).
+fn forwarded_lanes(
+    lanes: &mut [JoinedLane; LANES],
+    returned: BTreeSet<Returned>,
+    float_second: Option<usize>,
+) -> Vec<Returned> {
+    let open = lanes
+        .iter()
+        .any(|lane| lane.held && (lane.unknown || lane.cycle));
+    // A lane past the typed three decides a void, or, after a float lane some call may read, a group.
+    let float = usize::from(LaneId::FLOAT.0);
+    let grouped = lanes[float].read || returned.iter().any(|returned| returned.at == float);
+    let second = float_second.filter(|_| grouped);
+    let kept = returned.into_iter().filter(|returned| {
+        let past = returned.at >= 3 && Some(returned.at) != second;
+        let decided = lanes[returned.at].read || (open && past);
+        if decided {
+            join(
+                &mut lanes[returned.at],
+                Some(Forwarded::Fate(LaneFate::Unknown)),
+            );
+        }
+        !decided
+    });
+    kept.collect()
+}
+
 /// A lane a call returns on: the caller, the lane and the bytes it hands back.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct Returned {
@@ -277,7 +308,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for DirectSites {
 fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> Option<Direct> {
     let survey = db.get::<SurveyQuery>(&()).ok()?;
     let survey = Arc::clone(&survey.as_ref().as_ref().ok()?.0);
-    let held = held_lanes(db, callee)?;
+    let (held, float_second) = held_lanes(db, callee)?;
     let mut lanes = held.map(|held| JoinedLane {
         held,
         dead: true,
@@ -307,21 +338,7 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
             join_site(&mut lanes, caller, &site.boundary, &mut returned);
         }
     }
-    // Decided from the direct calls alone, so the forwarder graph does not depend on its answers.
-    let open = lanes
-        .iter()
-        .any(|lane| lane.held && (lane.unknown || lane.cycle));
-    let kept = returned.into_iter().filter(|returned| {
-        let decided = lanes[returned.at].read || (open && returned.at >= 3);
-        if decided {
-            join(
-                &mut lanes[returned.at],
-                Some(Forwarded::Fate(LaneFate::Unknown)),
-            );
-        }
-        !decided
-    });
-    let returned = kept.collect::<Vec<_>>().into();
+    let returned = forwarded_lanes(&mut lanes, returned, float_second).into();
     let container = db.inputs().source.container();
     let loader_calls = (container.entries.iter())
         .filter(|entry| entry.vaddr == callee)
@@ -624,12 +641,20 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for EveryWayIn {
     }
 }
 
+/// Whether a float result is one group with the lane after it: the body writes that lane at a
+/// return and some call reads both (doc/adr-result-side.md, "Struct in registers"). O(1).
+fn group_read(supply: Supply, lanes: &[JoinedLane; LANES]) -> bool {
+    let second = supply.carriers.and_then(|carriers| carriers.float_second);
+    let read = |at: usize| lanes.get(at).is_some_and(|lane| lane.read);
+    read(usize::from(LaneId::FLOAT.0)) && second.is_some_and(|at| read(usize::from(at)))
+}
+
 /// Which result lanes of `callee`'s convention a body may leave a result in: the typed three, and
 /// each other lane that is an argument location. The x87 lanes hold nothing on entry (SysV 3.2.1).
 fn held_lanes<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     callee: u64,
-) -> Option<[bool; LANES]> {
+) -> Option<([bool; LANES], Option<usize>)> {
     let view = View::new(db, true);
     let walker = super::returns::Walking::new(view.clone(), true).ok()?;
     let thumb = view.thumb_at(callee);
@@ -645,9 +670,17 @@ fn held_lanes<S: Source + 'static>(
                 && lane.offset < argument.offset + u64::from(argument.size)
         })
     };
-    Some(std::array::from_fn(|at| {
-        slots_of[at].is_some_and(|lane| at < 3 || input(&lane))
-    }))
+    // The lane the cited `follows` row puts after the float one, by its dense id.
+    let results = &target.convention.results;
+    let float = slots_of[usize::from(LaneId::FLOAT.0)];
+    let first = results.iter().position(|lane| Some(lane.storage) == float);
+    let second = results
+        .iter()
+        .find(|lane| first.is_some() && lane.follows == first);
+    let second =
+        second.and_then(|lane| slots_of.iter().position(|slot| *slot == Some(lane.storage)));
+    let held = std::array::from_fn(|at| slots_of[at].is_some_and(|lane| at < 3 || input(&lane)));
+    Some((held, second))
 }
 
 /// A site's fate on one lane once a return is followed into the caller's own boundary.
@@ -730,7 +763,11 @@ impl BoundaryResult {
         let mut asked = None;
         let mut every_way_in =
             || *asked.get_or_insert_with(|| db.get::<EveryWayIn>(&entry).is_ok_and(|all| *all));
-        let result = decided_result(supply, forwarding, &mut every_way_in);
+        let grouped = group_read(supply, lanes);
+        let result = match grouped {
+            true => None,
+            false => decided_result(supply, forwarding, &mut every_way_in),
+        };
         let overwritten = |lane: LaneId| {
             let summary = db.get::<CalleeEntry>(&(entry, thumb));
             (summary.ok().and_then(|summary| *summary))
@@ -1306,9 +1343,14 @@ impl CallEffects for Effects<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Authority, Dispute, JoinedLane, LANES, LaneId, Supply, disputes_of};
+    use super::{
+        Authority, Dispute, JoinedLane, LANES, LaneId, Returned, Supply, disputes_of,
+        forwarded_lanes,
+    };
     use r2source::confidence::{Basis, Confidence};
     use r2source::{ConventionId, SourceFunctionInterface, SourceFunctionReturn};
+    use r2ssa::site_boundary::ByteMask;
+    use std::collections::BTreeSet;
 
     fn void(declared: bool) -> SourceFunctionInterface {
         let interface = SourceFunctionInterface::new(
@@ -1357,5 +1399,40 @@ mod tests {
     #[test]
     fn a_call_reading_a_lane_the_callee_leaves_alone_disputes_nothing() {
         assert!(disputes_of(Supply::of(&void(true)), &read_integer(), |_| false).is_empty());
+    }
+
+    /// A returned lane the prune does not forward is `Unknown`, never dead by omission; the lane
+    /// after the float one is forwarded where a call reads the float lane (S24).
+    #[test]
+    fn a_lane_the_prune_does_not_forward_is_unknown_never_dead() {
+        let held = JoinedLane {
+            held: true,
+            dead: true,
+            ..JoinedLane::default()
+        };
+        let returned = |at: usize| Returned {
+            caller: 0x2000,
+            at,
+            bytes: ByteMask(0xff),
+        };
+        // The integer lane is open, the float lane read: lanes 3 and 4 are returned on.
+        let mut lanes = [held; LANES];
+        lanes[0].unknown = true;
+        lanes[0].dead = false;
+        lanes[1].read = true;
+        lanes[1].dead = false;
+        let both = BTreeSet::from([returned(3), returned(4)]);
+        let kept = forwarded_lanes(&mut lanes, both.clone(), Some(3));
+        assert_eq!(kept, vec![returned(3)]);
+        assert!(lanes[3].dead && !lanes[3].unknown, "{:?}", lanes[3]);
+        assert!(lanes[4].unknown && !lanes[4].dead, "{:?}", lanes[4]);
+        // No call reads or returns the float lane: neither is forwarded, and both are unknown.
+        let mut lanes = [held; LANES];
+        lanes[0].unknown = true;
+        lanes[0].dead = false;
+        assert!(forwarded_lanes(&mut lanes, both, Some(3)).is_empty());
+        for at in [3, 4] {
+            assert!(lanes[at].unknown && !lanes[at].dead, "{:?}", lanes[at]);
+        }
     }
 }

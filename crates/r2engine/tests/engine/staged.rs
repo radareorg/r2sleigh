@@ -60,10 +60,10 @@ fn a_described_call_is_written_from_the_callsite_facts() {
         .expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
     // `call one; ret`: the result register the call leaves is what `caller` returns.
-    assert!(text.contains("r2sleigh_result_u64 one(void);"), "{text}");
-    assert!(text.contains("rax_1 = one();"), "{text}");
+    assert!(text.contains("r2sleigh_result_u32 one(void);"), "{text}");
+    assert!(text.contains("rax_1 = (uint64_t)one();"), "{text}");
     assert!(
-        text.contains("return r2sleigh_carrier_u64((uint64_t)rax_1);"),
+        text.contains("return r2sleigh_carrier_u32((uint32_t)rax_1);"),
         "{text}"
     );
     // `one` returns, so nothing may tell C otherwise; its return push writes nothing.

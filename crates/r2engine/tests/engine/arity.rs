@@ -450,7 +450,7 @@ fn under_aa_a_recursive_root_calls_itself_with_its_resolved_arity() {
         .response
         .output
         .into_text();
-    assert!(text.contains("= fact("), "{text}");
+    assert!(text.contains("= (uint64_t)(uint32_t)fact("), "{text}");
     assert!(!text.contains("vector count"), "{text}");
 }
 

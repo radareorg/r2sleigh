@@ -200,6 +200,8 @@ pub(crate) fn function_type_matches_source_interface(
     }
     match (interface.return_kind(), &signature.return_type) {
         (r2ssa::SourceFunctionReturn::Void, CTypeLike::Void) => true,
+        // No return is reached: the header spells the carrier word, and a call leaves nothing.
+        (r2ssa::SourceFunctionReturn::Void, CTypeLike::Int { .. }) => interface.no_return_reached(),
         // Typed at each call by the carrier its caller reads (`call_result_type`).
         (r2ssa::SourceFunctionReturn::Unproven, CTypeLike::Unknown) => {
             interface.result_carriers().is_some()

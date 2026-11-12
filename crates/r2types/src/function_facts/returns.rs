@@ -251,6 +251,12 @@ impl ReturnTypeFact {
         if let Some(ty) = declared(source) {
             return Self::decided_by(ty, ReturnTypeEvidence::Declared);
         }
+        // No return path is reached: nothing proves `void` (doc/adr-result-side.md, section 3).
+        if interface.is_some_and(r2ssa::SourceFunctionInterface::no_return_reached) {
+            let word = source.machine_context().result_slot();
+            let bits = word.map(|slot| slot.size.saturating_mul(8));
+            return Self::unproven_at(source, bits, None, true);
+        }
         // r2ssa owns the result boundary: one it proved void leaves no type to agree on.
         if interface.map(r2ssa::SourceFunctionInterface::return_kind)
             == Some(r2ssa::SourceFunctionReturn::Void)

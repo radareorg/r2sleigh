@@ -1493,7 +1493,7 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
     // Every arm, with the value the source case returned, in order.
     for (case, returns) in [(0, "10"), (1, "20"), (2, "30"), (3, "40")] {
         assert!(output.contains(&format!("case {case}:")), "{output}");
-        let carried = format!("return r2sleigh_carrier_u64({returns});");
+        let carried = format!("return r2sleigh_carrier_u32({returns});");
         assert!(output.contains(&carried), "{output}");
     }
     let labels = output
@@ -1801,7 +1801,7 @@ fn what_a_function_returns_is_read_off_the_arms_its_dispatch_reaches() {
     assert!(response.output.function().is_some(), "{output}");
     assert!(!output.starts_with("void "), "{output}");
     for returns in ["10", "20", "30"] {
-        let carried = format!("return r2sleigh_carrier_u64({returns});");
+        let carried = format!("return r2sleigh_carrier_u32({returns});");
         assert!(output.contains(&carried), "{output}");
     }
 }
@@ -2759,6 +2759,57 @@ fn bits_above_a_declared_narrower_result_are_never_zero() {
         text.contains("rax_1 = (uint64_t)(uint32_t)fcn_1010() | r2sleigh_residual_u64(1) << 32;"),
         "{text}"
     );
+}
+
+/// `STORES_A_DECLARED_INT_WHOLE` over a body no declaration states: `mov eax, edi; add eax, esi;
+/// ret` writes EAX on its one path, and the 32-bit write zeroes RAX above it.
+const STORES_A_BODY_INT_WHOLE: &[u8] = &[
+    0x53, // 0x1000 push rbx
+    0x48, 0x89, 0xfb, // 0x1001 mov rbx, rdi
+    0xe8, 0x07, 0x00, 0x00, 0x00, // 0x1004 call 0x1010
+    0x48, 0x89, 0x03, // 0x1009 mov [rbx], rax
+    0x5b, // 0x100c pop rbx
+    0xc3, // 0x100d ret
+    0x90, 0x90, // 0x100e padding
+    0x89, 0xf8, // 0x1010 mov eax, edi
+    0x01, 0xf0, // 0x1012 add eax, esi
+    0xc3, // 0x1014 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// The machine zeroes RAX above a 32-bit write, so a body that writes EAX on every return path
+/// states `Zero` above its four bytes: the caller's 64-bit read is the zero extension (S24, G1).
+#[test]
+fn a_body_result_zero_extended_on_every_path_states_zero_above() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let text = rendered_on(&machine, STORES_A_BODY_INT_WHOLE, "stores");
+    assert!(text.contains("r2sleigh_result_u32 fcn_1010("), "{text}");
+    assert!(text.contains("(uint64_t)fcn_1010("), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
+/// `mov eax, 5; ret` writes EAX: the constant is four bytes wide with zero above, never the eight
+/// the register holds (D74), and no width is read from its magnitude.
+const RETURNS_A_CONSTANT: &[u8] = &[
+    0xb8, 0x05, 0x00, 0x00, 0x00, // 0x1000 mov eax, 5
+    0xc3, // 0x1005 ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// `movabs rax, 5; ret` writes RAX whole: the same magnitude at the instruction's eight bytes.
+const RETURNS_A_WIDE_CONSTANT: &[u8] = &[
+    0x48, 0xb8, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 0x1000 movabs rax, 5
+    0xc3, // 0x100a ret
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
+
+#[test]
+fn a_returned_constant_is_as_wide_as_the_instruction_that_wrote_it() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let narrow = rendered_on(&machine, RETURNS_A_CONSTANT, "five");
+    assert!(narrow.contains("r2sleigh_result_u32 five("), "{narrow}");
+    let wide = rendered_on(&machine, RETURNS_A_WIDE_CONSTANT, "five");
+    assert!(wide.contains("r2sleigh_result_u64 five("), "{wide}");
 }
 
 /// Render bytes of `machine` mapped at `BASE`, refusing nothing.
@@ -7843,7 +7894,7 @@ fn a_call_to_a_void_callee_leaves_the_exit_returning_it_no_value_in_either_layou
         );
         assert!(text.contains("the result is unproven (Written)"), "{text}");
         assert_eq!(
-            text.matches("return r2sleigh_residual_u64(").count(),
+            text.matches("return r2sleigh_residual_u32(").count(),
             2,
             "{text}"
         );

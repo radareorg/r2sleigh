@@ -48,6 +48,64 @@ fn the_canary_left_in_the_result_register_is_no_result() {
     assert!(!text.contains("return 0;"), "{text}");
 }
 
+/// gcc 13.3 `-O2 -fstack-protector-all`, `r = 0; b[0] = 1; if (*s) r = s[1]; return r;`: the scrub
+/// after the guard store is also `r = 0`, and the check runs in RDX (result-side ADR, S24 as built).
+const SCRUB_RETURNED: [u8; 0x62] = plt_then(&[
+    0x48, 0x83, 0xec, 0x18, // 1020 sub rsp, 0x18
+    0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // 1024 mov rax, fs:[0x28]
+    0x48, 0x89, 0x44, 0x24, 0x08, // 102d mov [rsp + 8], rax
+    0x31, 0xc0, // 1032 xor eax, eax
+    0x80, 0x3f, 0x00, // 1034 cmp byte [rdi], 0
+    0xc6, 0x04, 0x24, 0x01, // 1037 mov byte [rsp], 1
+    0x74, 0x04, // 103b je 0x1041
+    0x0f, 0xb6, 0x47, 0x01, // 103d movzx eax, byte [rdi + 1]
+    0x48, 0x8b, 0x54, 0x24, 0x08, // 1041 mov rdx, [rsp + 8]
+    0x64, 0x48, 0x2b, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00, // 1046 sub rdx, fs:[0x28]
+    0x75, 0x05, // 104f jne 0x1056
+    0x48, 0x83, 0xc4, 0x18, // 1051 add rsp, 0x18
+    0xc3, // 1055 ret
+    0xe8, 0x05, 0x00, 0x00, 0x00, // 1056 call 0x1060
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 105b
+    0xeb, 0xfe, // 1060 jmp 0x1060
+]);
+
+/// The scrub after the guard store is no compiler-inserted write where gcc merges it with a C
+/// zero (G19, refused): the path that skips the load returns that zero, a value.
+#[test]
+fn a_guard_scrub_a_return_reads_is_the_returned_zero() {
+    let text = rendered(Literal::plt_wrapped("puts", &SCRUB_RETURNED), PLT_CALLER);
+    assert!(!header(&text).starts_with("void "), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+}
+
+/// gcc's cold part of pigz `alloc` (`0x4044b0`): the body's one way out is a call that never comes
+/// back. `halt` at 0x1060 never returns.
+const NEVER_RETURNS: [u8; 0x62] = plt_then(&[
+    0x48, 0x83, 0xec, 0x08, // 1020 sub rsp, 8
+    0xe8, 0x37, 0x00, 0x00, 0x00, // 1024 call 0x1060
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1029
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1039
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1049
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1059
+    0xeb, 0xfe, // 1060 jmp 0x1060
+]);
+
+/// No return path leaves no lane a `void` could be read from (D74's silent void): the header is
+/// the carrier word, and the proof line says no return is reached.
+#[test]
+fn a_body_no_return_path_leaves_is_never_void() {
+    let text = rendered(Literal::plt_wrapped("puts", &NEVER_RETURNS), PLT_CALLER);
+    assert!(header(&text).starts_with("r2sleigh_result_u64 "), "{text}");
+    assert!(
+        text.contains("the result is unproven (no return reached)"),
+        "{text}"
+    );
+    assert!(text.contains("fcn_1060();"), "{text}");
+}
+
 /// The same check in RAX, with `puts`' result kept in RBX and moved back after it.
 const CANARY_KEEPS: [u8; 0x62] = plt_then(&[
     0x53, // 1020 push rbx

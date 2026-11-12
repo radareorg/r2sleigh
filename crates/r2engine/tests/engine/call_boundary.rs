@@ -25,7 +25,7 @@ fn a_closed_world_read_states_its_premise_and_a_cold_render_stays_unproven() {
         .rendered(BASE)
         .expect("it renders");
     let text = cold.response.output.into_text();
-    assert!(text.starts_with("r2sleigh_result_u64 f("), "{text}");
+    assert!(text.starts_with("r2sleigh_result_u32 f("), "{text}");
     assert!(
         !cold
             .response
@@ -44,7 +44,7 @@ fn a_closed_world_read_states_its_premise_and_a_cold_render_stays_unproven() {
         analysed.response.premises
     );
     let text = analysed.response.output.into_text();
-    assert!(text.starts_with("uint64_t f("), "{text}");
+    assert!(text.starts_with("uint32_t f("), "{text}");
     // The premise is its own clause, never a column of the obligation list (D234).
     assert!(
         text.contains("; a call reads the result (assuming closed-world)"),
@@ -121,7 +121,7 @@ fn a_written_result_no_call_reads_is_unread_never_void() {
         .response
         .output
         .into_text();
-    assert!(text.starts_with("r2sleigh_result_u64 f("), "{text}");
+    assert!(text.starts_with("r2sleigh_result_u32 f("), "{text}");
     assert!(text.contains("unproven (Unread)"), "{text}");
     assert!(
         text.contains("no call reads the result (assuming closed-world)"),
@@ -157,7 +157,7 @@ fn a_forwarded_read_of_bytes_the_forwarder_wrote_is_no_read_of_the_callee() {
     let mut open = OpenProgram::of(Literal::of_code(LOW_BYTE_OVERWRITTEN, &functions));
     open.analyse_program().expect("it surveys");
     let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
-    assert!(text.starts_with("r2sleigh_result_u64 f("), "{text}");
+    assert!(text.starts_with("r2sleigh_result_u32 f("), "{text}");
     assert!(!text.contains("a call reads the result"), "{text}");
 }
 
@@ -251,7 +251,7 @@ fn code_no_body_holds_refuses_the_closed_world_before_the_reference_index() {
     open.analyse_program().expect("it surveys");
     let rendering = open.rendered(BASE).expect("it renders");
     let text = rendering.response.output.into_text();
-    assert!(text.starts_with("r2sleigh_result_u64 f("), "{text}");
+    assert!(text.starts_with("r2sleigh_result_u32 f("), "{text}");
     assert!(!text.contains("no call reads the result"), "{text}");
     assert!(
         !rendering
@@ -1009,7 +1009,7 @@ fn a_termination_function_another_way_reaches_keeps_its_result() {
         &[0xe8, 0xeb, 0xff, 0xff, 0xff, 0x48, 0x89, 0x07, 0xc3],
     );
     let text = analysed(read);
-    assert!(text.starts_with("uint64_t f(void)"), "{text}");
+    assert!(text.starts_with("uint32_t f(void)"), "{text}");
     assert!(
         text.contains("; a call reads the result (assuming closed-world)"),
         "{text}"
