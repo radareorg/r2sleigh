@@ -4,10 +4,11 @@
 use r2abi::{CLibrary, Dll, Handle, LibraryId, LibraryRows, Tail};
 
 /// Each cited table and the fewest rows it holds.
-const CITED: [(&str, usize); 5] = [
+const CITED: [(&str, usize); 6] = [
     ("types-posix.sdb.txt", 515),
     ("types-glibc.sdb.txt", 85),
     ("types-bionic.sdb.txt", 100),
+    ("types-musl.sdb.txt", 2),
     ("types-kernel32.sdb.txt", 50),
     ("types-ucrt.sdb.txt", 1),
 ];
@@ -143,6 +144,9 @@ fn a_cited_row_is_declared_in_no_other_table() {
     }
     let both = posix.intersection(&glibc).collect::<Vec<_>>();
     assert!(both.is_empty(), "declared by both cited tables: {both:?}");
+    let musl = names("types-musl.sdb.txt");
+    let both = musl.intersection(&posix).collect::<Vec<_>>();
+    assert!(both.is_empty(), "musl's cited rows also portable: {both:?}");
     let bionic = names("types-bionic.sdb.txt");
     let android = names("types-android.sdb.txt");
     for table in [&android, &posix] {
@@ -354,7 +358,10 @@ fn only_glibc_counts_the_mode_open_reads() {
         .expect("bionic open");
     assert_eq!(open.tail, Tail::Variadic);
     let musl = LibraryRows::embedded(CLibrary::Musl);
-    assert!(musl.find(CLibrary::Musl.scope(), "open").is_none());
+    let open = musl
+        .find(CLibrary::Musl.scope(), "open")
+        .expect("musl open");
+    assert_eq!(open.tail, Tail::Variadic);
     let test = FlagTest::OpenNeedsMode;
     let bits = |library, arch, width| test.bits(library, arch, width);
     let x86 = FlagBits {

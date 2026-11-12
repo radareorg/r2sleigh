@@ -81,8 +81,8 @@ fn a_constant_flag_counts_the_mode_open_reads() {
     );
 }
 
-/// A flag the call does not fix counts nothing, and a library whose body nobody cited states only
-/// `...`: both calls stay residual.
+/// A flag the call does not fix counts nothing, and bionic and musl, whose bodies nobody cited,
+/// state only `...`: each call stays residual (RULING 2.3).
 #[test]
 fn an_uncounted_open_tail_stays_residual() {
     let forwarding = on(Libc::Glibc, "open", &OPEN_FORWARDING);
@@ -91,8 +91,14 @@ fn an_uncounted_open_tail_stays_residual() {
         None,
         "{forwarding}"
     );
-    let bionic = on(Libc::Bionic, "open", &OPEN_CREATING);
-    assert_eq!(common::call_arguments(&bionic, "open"), None, "{bionic}");
+    for libc in [Libc::Bionic, Libc::Musl] {
+        let other = on(libc, "open", &OPEN_CREATING);
+        assert_eq!(common::call_arguments(&other, "open"), None, "{other}");
+        assert!(
+            other.contains("variadic, its argument count unproven"),
+            "{other}"
+        );
+    }
 }
 
 /// glibc declares `int prctl(int, ...)` and its body reads by option, which no row counts: the
@@ -131,4 +137,27 @@ fn a_stripped_parameter_whose_accesses_lay_out_a_structure_points_to_it() {
         .unwrap_or_default();
     assert!(header.contains("(struct "), "{text}");
     assert!(text.contains("->f_1c"), "{text}");
+}
+
+/// `f(stream) { return fclose(stream); }` after `.plt`, stripped.
+const CLOSING: [u8; 0x2e] = plt_then(&[
+    0x48, 0x83, 0xec, 0x08, // 1020 sub rsp, 8
+    0xe8, 0xe7, 0xff, 0xff, 0xff, // 1024 call stub
+    0x48, 0x83, 0xc4, 0x08, // 1029 add rsp, 8
+    0xc3, // 102d ret
+]);
+
+/// A stripped caller's parameter handed unchanged to `fclose(FILE *)` is that pointer, at the
+/// library row's basis (D71 A2); radare2 and the parent printed `uint64_t arg0`.
+#[test]
+fn a_parameter_handed_to_a_declared_pointer_is_that_pointer() {
+    let text = on(Libc::Glibc, "fclose", &CLOSING);
+    let at = format!("fcn_{PLT_CALLER:x}(");
+    let header = text
+        .lines()
+        .find(|line| line.contains(&at))
+        .unwrap_or_default();
+    let parameters = common::parameters(header);
+    assert_eq!(parameters.len(), 1, "{text}");
+    assert!(parameters[0].0.contains("FILE"), "{text}");
 }

@@ -24,6 +24,8 @@ is a merge that keeps them rather than a copy that drops them.
   itself.
 - `types-bionic.sdb.txt`: bionic's rows that carry their header, read with
   `types-android.sdb.txt` and on the same terms as `types-posix.sdb.txt`.
+- `types-musl.sdb.txt`: musl's rows that carry their header, read beside the portable tables on
+  the same terms as `types-posix.sdb.txt`.
 - `types-kernel32.sdb.txt` and `types-ucrt.sdb.txt`: what KERNEL32.dll and the
   Universal C Runtime export, each row citing Microsoft's reference page (or
   header) and the minimum version it states; read only for a PE import that
@@ -152,7 +154,7 @@ Where radare2 scopes differently:
 
 Every row of `types-posix.sdb.txt` and `types-glibc.sdb.txt` names the header it is read from on
 a `func.<name>.include=` line and sits under a comment naming its source (`r2abi::library::SOURCES`:
-ISO C17, POSIX.1-2017, POSIX.1-2024, 4.4BSD, glibc, LSB 5.0, GCC, bionic or Microsoft). The bionic,
+ISO C17, POSIX.1-2017, POSIX.1-2024, 4.4BSD, glibc, LSB 5.0, GCC, bionic, musl or Microsoft). The bionic,
 KERNEL32 and UCRT tables are cited the same way; a Microsoft row adds `func.<name>.cite=`, the
 reference page and its minimum supported client. A binary-only LSB 5.0 interface
 (`__stack_chk_fail`) has no header: it cites its LSB section on `func.<name>.cite=` instead, under

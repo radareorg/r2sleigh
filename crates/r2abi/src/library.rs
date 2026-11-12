@@ -11,7 +11,7 @@ use crate::types::TypeGraph;
 pub enum CLibrary {
     Glibc,
     Bionic,
-    /// Reads only the portable rows until a cited musl table exists.
+    /// musl, whose cited table is small: it reads the portable rows besides.
     Musl,
     /// Apple's libSystem, which every Mach-O links.
     LibSystem,
@@ -37,6 +37,7 @@ pub enum LibraryId {
     Portable,
     Glibc,
     Bionic,
+    Musl,
     LibSystem,
     /// objc4's runtime, `libobjc.A.dylib`: bound only by an import that names that dylib.
     Objc,
@@ -224,6 +225,7 @@ const GLIBC: &str = include_str!("../data/types-linux.sdb.txt");
 const GLIBC_CITED: &str = include_str!("../data/types-glibc.sdb.txt");
 const BIONIC: &str = include_str!("../data/types-android.sdb.txt");
 const BIONIC_CITED: &str = include_str!("../data/types-bionic.sdb.txt");
+const MUSL_CITED: &str = include_str!("../data/types-musl.sdb.txt");
 const LIBSYSTEM: &str = include_str!("../data/types-darwin.sdb.txt");
 const OBJC: &str = include_str!("../data/types-objc.sdb.txt");
 const KERNEL32: &str = include_str!("../data/types-kernel32.sdb.txt");
@@ -247,7 +249,7 @@ const fn table(library: LibraryId, cited: bool, text: &'static str) -> Embedded 
 }
 
 /// The sources a cited row's comment may name.
-pub const SOURCES: [&str; 9] = [
+pub const SOURCES: [&str; 10] = [
     "ISO C17",
     "POSIX.1-2017",
     "POSIX.1-2024",
@@ -256,6 +258,7 @@ pub const SOURCES: [&str; 9] = [
     "LSB 5.0",
     "GCC",
     "bionic",
+    "musl",
     "Microsoft",
 ];
 
@@ -270,7 +273,8 @@ impl CLibrary {
             Self::Glibc => &[LibraryId::Glibc, CxxRuntime, Portable],
             Self::Bionic => &[LibraryId::Bionic, CxxRuntime, Portable],
             Self::LibSystem => &[LibraryId::LibSystem, CxxRuntime, Portable],
-            Self::Musl | Self::Ucrt | Self::Unknown => &[CxxRuntime, Portable],
+            Self::Musl => &[LibraryId::Musl, CxxRuntime, Portable],
+            Self::Ucrt | Self::Unknown => &[CxxRuntime, Portable],
         }
     }
 }
@@ -289,7 +293,7 @@ impl Default for LibraryRows {
 impl LibraryRows {
     /// The rows a program on this C library can bind, each table read once.
     pub fn embedded(library: CLibrary) -> Self {
-        use LibraryId::{Bionic, CxxRuntime, Glibc, LibSystem, Portable};
+        use LibraryId::{Bionic, CxxRuntime, Glibc, LibSystem, Musl, Portable};
         let own: &[Embedded] = match library {
             CLibrary::Glibc => &[table(Glibc, false, GLIBC), table(Glibc, true, GLIBC_CITED)],
             CLibrary::Bionic => &[
@@ -304,7 +308,8 @@ impl LibraryRows {
                 table(LibraryId::Dll(Dll::Kernel32), true, KERNEL32),
                 table(LibraryId::Dll(Dll::Ucrt), true, UCRT),
             ],
-            CLibrary::Musl | CLibrary::Unknown => &[],
+            CLibrary::Musl => &[table(Musl, true, MUSL_CITED)],
+            CLibrary::Unknown => &[],
         };
         let shared = [
             table(Portable, false, PORTABLE),
