@@ -329,7 +329,7 @@ pub(super) fn spellable(ty: &CType, names: &dyn Fn(&str, bool) -> bool) -> Optio
 
 /// A declared pointer to an opaque name (a mangled row's `this`) as `void *`: the pointer, and
 /// nothing of the pointee (D332); any other unspelled pointee keeps its class.
-fn untagged_pointer(ty: &CType) -> Option<CType> {
+pub(super) fn untagged_pointer(ty: &CType) -> Option<CType> {
     let CType::Pointer(pointee) = ty.unaliased() else {
         return None;
     };

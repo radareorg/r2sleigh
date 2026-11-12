@@ -905,7 +905,8 @@ impl<'a> Values<'a> {
             // A declared type is spelled as stated, a tag the graph states incomplete; an analysed
             // one only where it is a pointer, naming only tags the unit defines.
             let declared = match input.declared_parameter(index as usize, ty.width_bits()) {
-                Some(declared) => calls::spellable(&declared, &|tag, union| tags.names(tag, union)),
+                Some(declared) => calls::spellable(&declared, &|tag, union| tags.names(tag, union))
+                    .or_else(|| calls::untagged_pointer(&declared)),
                 None => (input.parameter_declaration(index as usize, ty.width_bits()))
                     .filter(|ty| matches!(ty.unaliased(), r2types::CTypeLike::Pointer(_)))
                     .and_then(|analysed| {
