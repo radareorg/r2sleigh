@@ -161,7 +161,9 @@ fn extern_decl(plan: &CallPlan, mut types: Vec<CType>, ret_type: CType) -> Optio
     if let Some(declared) = &plan.declared {
         let declared = types.iter_mut().zip(&declared.params);
         for (ty, to) in declared.filter(|(ty, _)| !crate::prelude::is_unread_slot(ty)) {
-            *ty = to.clone();
+            if let Some(to) = to {
+                *ty = to.clone();
+            }
         }
     }
     types.truncate(plan.fixed);
@@ -581,11 +583,11 @@ fn plan_calls(
         if matches!(plan.callee, calls::Callee::Named { .. }) {
             let signature = input.declared_callee_signature(inst.id);
             let callee = input.callee_type_graph(inst.id);
-            let defines = |tag: &str, is_union| tags.agrees(tag, is_union, callee);
+            let declares = |tag: &str, is_union| tags.declares(tag, is_union, callee);
             plan.declared = signature
-                .and_then(|signature| calls::Prototype::of(signature, plan.fixed, &defines));
-            if let (Some(signature), None) = (signature, &plan.declared) {
-                r2il::refusal_evidence!("staged-call-prototype", "{:?}: {signature:?}", inst.id);
+                .and_then(|signature| calls::Prototype::of(signature, plan.fixed, &declares));
+            if let Some(signature) = signature {
+                classed_evidence(inst.id, signature, plan.declared.as_ref());
             }
             // No declaration: the callee's own projection, as its header spells it (W46).
             if signature.is_none() {
@@ -603,6 +605,20 @@ fn plan_calls(
         planned.insert(inst.id, plan);
     }
     (planned, unplanned, results)
+}
+
+/// Evidence for each parameter `signature` declares that the call passes at its class.
+fn classed_evidence(
+    inst: InstId,
+    signature: &r2types::FunctionType,
+    declared: Option<&calls::Prototype>,
+) {
+    let spelled = |at: usize| declared.and_then(|declared| declared.params.get(at)?.as_ref());
+    for (at, ty) in signature.params.iter().enumerate() {
+        if spelled(at).is_none() {
+            r2il::refusal_evidence!("staged-call-prototype", "{inst:?}: {at} {ty:?}");
+        }
+    }
 }
 
 /// The instructions a term computes in place of reading their values.
@@ -945,15 +961,17 @@ impl<'a> Values<'a> {
         let mut pointing = Vec::new();
         for (index, home, ty) in parameters.into_iter().flatten() {
             let class = terms::c_type(&ty).expect("a classed parameter has a C type");
-            // A declared type is spelled as stated; an analysed one only where it is a pointer.
-            let analysed = (input.parameter_declaration(index as usize, ty.width_bits()))
-                .filter(|ty| matches!(ty.unaliased(), r2types::CTypeLike::Pointer(_)));
-            let declared = (input.declared_parameter(index as usize, ty.width_bits()))
-                .or(analysed)
-                .and_then(|declared| {
-                    calls::spellable(&declared, &|tag, union| tags.defines(tag, union))
-                })
-                .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
+            // A declared type is spelled as stated, a tag the graph states incomplete; an analysed
+            // one only where it is a pointer, naming only tags the unit defines.
+            let declared = match input.declared_parameter(index as usize, ty.width_bits()) {
+                Some(declared) => calls::spellable(&declared, &|tag, union| tags.names(tag, union)),
+                None => (input.parameter_declaration(index as usize, ty.width_bits()))
+                    .filter(|ty| matches!(ty.unaliased(), r2types::CTypeLike::Pointer(_)))
+                    .and_then(|analysed| {
+                        calls::spellable(&analysed, &|tag, union| tags.defines(tag, union))
+                    }),
+            }
+            .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
             let differs = declared.as_ref().is_some_and(|declared| *declared != class);
             // A hole states no type: r2types spells its class's typedef, which claims none (D165).
             let hole = (input.parameter_declaration(index as usize, ty.width_bits()))
@@ -978,8 +996,10 @@ impl<'a> Values<'a> {
                     self.frame_formals.push((index, name, ty, differs))
                 }
             }
+            // An incomplete tag has no member to name.
             if let CType::Pointer(pointee) = &c
                 && let CType::Struct(tag) = pointee.as_ref()
+                && tags.defines(tag, false)
             {
                 pointing.push((index as usize, tag.clone(), CExpr::Var(name)));
             }
@@ -1756,7 +1776,8 @@ impl<'a> Values<'a> {
         Ok(plan
             .declared
             .as_ref()
-            .map_or(ret, |declared| declared.ret.clone()))
+            .and_then(|declared| declared.ret.clone())
+            .unwrap_or(ret))
     }
 
     /// What the call at `inst` declares of its named callee, a function of its plan alone: the same
@@ -1822,7 +1843,9 @@ impl<'a> Values<'a> {
         let ret_type = self.return_type(inst, plan)?;
         // A declared prototype passes and returns at the types the source states.
         if let Some(declared) = &plan.declared {
-            let passed = (arguments.iter_mut().zip(&mut types).zip(&declared.params))
+            let passed = (arguments.iter_mut().zip(&mut types))
+                .zip(declared.params.iter().map(Option::as_ref))
+                .filter_map(|(passed, to)| Some((passed, to?)))
                 .filter(|((_, ty), _)| !crate::prelude::is_unread_slot(ty));
             for ((argument, ty), to) in passed {
                 let taken = std::mem::replace(argument, CExpr::IntLit(0));
@@ -1940,8 +1963,8 @@ impl<'a> Values<'a> {
                 )?;
                 // A call is returned as it is where it is declared the function's own type, or an
                 // integer where the function returns one: `return` converts it as the cast would.
-                let declared = match &plan.declared {
-                    Some(declared) => declared.ret.clone(),
+                let declared = match plan.declared.as_ref().and_then(|d| d.ret.as_ref()) {
+                    Some(declared) => declared.clone(),
                     None => terms::c_type(class)?,
                 };
                 let returned = match returned_call(spelled, ty) {
@@ -1958,7 +1981,7 @@ impl<'a> Values<'a> {
             ) if plan
                 .declared
                 .as_ref()
-                .is_some_and(|declared| declared.ret == CType::Void) =>
+                .is_some_and(|declared| declared.ret == Some(CType::Void)) =>
             {
                 let call = self.call_expr(inst, plan).ok()?;
                 let undefined =
@@ -2067,8 +2090,8 @@ impl<'a> Values<'a> {
         Some(stmts)
     }
 
-    /// A call to the function's own entry: by its own name and at its own parameters' classes, so
-    /// the call agrees with the definition it stands in.
+    /// A call to the function's own entry: by its own name and at the types its header declares,
+    /// so the call agrees with the definition it stands in.
     fn recursive_call(&self, inst: InstId, plan: &CallPlan) -> Option<CStmt> {
         let params = self.own.params.as_ref()?;
         if params.len() != plan.arguments.len() {
@@ -2082,7 +2105,12 @@ impl<'a> Values<'a> {
                 continue;
             }
             let held = self.value_type(*argument)?;
-            arguments.push(fit(self.operand(*argument, inst)?, &held, class)?);
+            let fitted = fit(self.operand(*argument, inst)?, &held, class)?;
+            let (classed, declared) = (terms::c_type(class)?, &self.params.get(position)?.ty);
+            arguments.push(match self.declared_variable(&fitted, declared) {
+                Some(variable) => variable,
+                None => calls::to_declared(fitted, &classed, declared),
+            });
         }
         let callee = CExpr::External {
             name: self.own.name.clone(),

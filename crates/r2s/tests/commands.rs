@@ -850,7 +850,7 @@ fn a_staged_recursive_call_agrees_with_its_own_definition() {
     assert!(
         staged
             .out
-            .contains("= (uint64_t)(uint32_t)fact((uint32_t)((uint32_t)n - (uint32_t)1U));"),
+            .contains("= (uint64_t)(uint32_t)fact((int32_t)((uint32_t)n - (uint32_t)1U));"),
         "{}",
         staged.out
     );

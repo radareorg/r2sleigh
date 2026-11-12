@@ -115,6 +115,44 @@ fn staged_declares_the_struct_and_function_pointer_types_the_source_states() {
     );
 }
 
+/// `pool *` and `Node *`, typedefs of structs, are struct pointers, and `struct lock_s`, laid out
+/// nowhere, is declared incomplete; a self-call passes the header's types (pigz `free_pool`).
+#[test]
+fn a_typedefed_struct_pointer_and_an_incomplete_tag_are_spelled() {
+    let free_pool = run("struct_pointers_O0g", "aa; pdd @ sym.free_pool");
+    assert!(
+        free_pool.contains("int32_t free_pool(struct pool* p)"),
+        "{free_pool}"
+    );
+    assert!(
+        free_pool.find("struct lock_s;") < free_pool.find("struct pool {"),
+        "{free_pool}"
+    );
+    assert!(
+        free_pool.contains("    struct lock_s* have;"),
+        "{free_pool}"
+    );
+    let held = run("struct_pointers_O0g", "aa; pdd @ sym.held");
+    assert!(held.contains("int32_t held(struct lock_s* l)"), "{held}");
+    let depth = run("struct_pointers_O0g", "aa; pdd @ sym.depth");
+    assert!(
+        depth.contains("int32_t depth(struct Node* leaves, struct pool* p, int32_t index)"),
+        "{depth}"
+    );
+    let call = (depth.lines())
+        .find(|line| line.contains("depth(") && !line.starts_with("int32_t"))
+        .unwrap_or_default();
+    assert!(
+        call.contains("(struct Node*)") && call.contains(", p, "),
+        "{depth}"
+    );
+    let main = run("struct_pointers_O0g", "aa; pdd @ sym.main");
+    assert!(
+        main.contains("int32_t depth(struct Node*, struct pool*, int32_t);"),
+        "{main}"
+    );
+}
+
 /// `main` declares `unsigned v[4]`, three `struct node`, `double d[3]` and
 /// `char buf[16]`. Each is one object of its declared type, and each is what
 /// its callee is handed.

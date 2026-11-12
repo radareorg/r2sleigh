@@ -554,7 +554,7 @@ int32_t fact(int32_t n)
             rax_6 = 1;
             return (int32_t)rax_6;
         } else {
-            rax_3 = (uint64_t)(uint32_t)fact((uint32_t)((uint32_t)n - (uint32_t)1U));
+            rax_3 = (uint64_t)(uint32_t)fact((int32_t)((uint32_t)n - (uint32_t)1U));
             rax_6 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)(int32_t)((uint64_t)rax_3 >> 0U) * (uint64_t)(int32_t)n) >> 0U);
             return (int32_t)rax_6;
         }
