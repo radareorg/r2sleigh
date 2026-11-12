@@ -1068,11 +1068,11 @@ impl SemanticObligationInventory {
                 let carrier_storage = carrier_inst
                     .and_then(|inst| graph.inst(inst))
                     .and_then(|inst| graph.written_storage(inst));
-                for update in &carrier.updates {
-                    // An arm no path reads owes no transition.
-                    if !arm_read(&read_under, update.site.inst, update.site.input_idx) {
-                        continue;
-                    }
+                // An arm no path reads owes no transition.
+                let read = (carrier.updates.iter()).filter(|update| {
+                    arm_read(&read_under, update.site.inst, update.site.input_idx)
+                });
+                for update in read {
                     if let (Some(carrier_inst), Some(carrier)) = (carrier_inst, carrier_storage)
                         && update.site.inst == carrier_inst
                         && update.validate(graph)

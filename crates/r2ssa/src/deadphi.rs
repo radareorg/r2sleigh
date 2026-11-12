@@ -143,6 +143,26 @@ impl ProvenProgramObservations {
     }
 }
 
+/// The roots read however their block is entered: the live outputs, each parameter's entry value
+/// (a rendered variable whether or not the body reads it) and each argument a call is passed.
+fn entered_roots(
+    live_out: &FunctionLiveOut,
+    boundaries: &SourceBoundaryFacts,
+) -> crate::dense::IdSet<ValueId> {
+    let mut roots = crate::dense::IdSet::from_iter(live_out.iter());
+    roots.extend((boundaries.parameters.values()).filter_map(|parameter| parameter.value()));
+    for boundary in boundaries.calls.values() {
+        for argument in &boundary.arguments {
+            if let SourceCallArgumentValue::Value(value) = argument.value
+                && !boundary.ignores(argument)
+            {
+                roots.insert(value);
+            }
+        }
+    }
+    roots
+}
+
 impl DeadPhis {
     /// Find the merges nothing observes, following what observation depends on.
     pub fn find(
@@ -181,25 +201,7 @@ impl DeadPhis {
             Some(inst) => obligations.read_under(inst),
             None => crate::edge_fold::ALL,
         };
-        let mut roots = crate::dense::IdSet::from_iter(live_out.iter());
-        // Parameters are rendered program variables even when the body does
-        // not read them, so their canonical entry values remain in the named
-        // domain independently of effect liveness.
-        roots.extend(
-            boundaries
-                .parameters
-                .values()
-                .filter_map(|parameter| parameter.value()),
-        );
-        for boundary in boundaries.calls.values() {
-            for argument in &boundary.arguments {
-                if let SourceCallArgumentValue::Value(value) = argument.value
-                    && !boundary.ignores(argument)
-                {
-                    roots.insert(value);
-                }
-            }
-        }
+        let roots = entered_roots(live_out, boundaries);
         // Whatever an observation depends on is observed, transitively. The walk
         // is over the graph's own instruction inputs, so it visits each edge once.
         let owed = (owed.iter()).map(|value| (value, ByteMask::All, read_under(value)));

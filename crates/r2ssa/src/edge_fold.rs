@@ -70,18 +70,14 @@ impl<'g> EdgeFolds<'g> {
                 }
             }
             InstPayload::Op(op) => {
-                if defined_in != Some(inst.block) {
-                    // A block entered only from the one that defines `input` reads it on that edge.
-                    let entered = self
-                        .graph
-                        .block(inst.block)
-                        .map(|block| &block.predecessors[..]);
-                    return match (entered, defined_in) {
-                        (Some([from]), Some(defined)) if *from == defined => {
-                            self.leaving(defined, inst.block)
-                        }
-                        _ => ALL,
-                    };
+                // A block entered only from the one that defines `input` reads it on that edge.
+                let entered = (self.graph.block(inst.block)).map(|block| &block.predecessors[..]);
+                match (entered, defined_in) {
+                    _ if defined_in == Some(inst.block) => {}
+                    (Some([from]), Some(defined)) if *from == defined => {
+                        return self.leaving(defined, inst.block);
+                    }
+                    _ => return ALL,
                 }
                 match (op, index) {
                     (SSAOp::Select(_), 1) => under & self.select(inst).0,

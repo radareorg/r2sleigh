@@ -478,13 +478,13 @@ impl Demand<'_> {
             // An arm r2ssa states no path reads binds nothing (ROADMAP D214).
             let unread = self.artifact.unobserved_merges().unobserved_uses();
             let inputs = self.graph.inputs(def).to_vec();
-            for (input_idx, input) in inputs.into_iter().enumerate() {
-                if !unread.contains(&r2ssa::UseSite {
-                    inst: def,
-                    input_idx,
-                }) {
-                    self.operand(input, def);
-                }
+            let read = |at: &usize| {
+                let (inst, input_idx) = (def, *at);
+                !unread.contains(&r2ssa::UseSite { inst, input_idx })
+            };
+            let read = (0..inputs.len()).filter(read).collect::<Vec<_>>();
+            for input in read {
+                self.operand(inputs[input], def);
             }
         } else if transfer::reads_answer(self.graph, value) {
             // The walk assigns it from its own variables; its term reads nothing by name.
