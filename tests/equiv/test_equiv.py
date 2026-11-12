@@ -823,9 +823,13 @@ class CostTests(unittest.TestCase):
         self.assertEqual(perf.worst_vector_ms(6), 6 * perf.hang_ms)
         self.assertGreater(counted.worst_vector_ms(6),
                            6 * counted.hang_ms + counted.original_guard() // 100_000)
-        argv = AARCH64.run_argv(Path("/w/prog"), ["EQUIV_JOB=/w/job"], Path("/w/qemu_count.so"))
-        if AARCH64.emulated():
-            self.assertEqual(argv[-3:], ["-plugin", "/w/qemu_count.so", "/w/prog"])
+        # qemu reads its own options before the guest's: the plugin pair precedes every -E.
+        argv = self.EMULATED.run_argv(Path("/w/prog"), ["EQUIV_JOB=/w/job"],
+                                      Path("/w/qemu_count.so"))
+        self.assertEqual(argv[argv.index("-plugin") + 1], "/w/qemu_count.so")
+        self.assertLess(argv.index("-plugin"), argv.index("-E"))
+        self.assertEqual(argv[-3:], ["-E", "EQUIV_JOB=/w/job", "/w/prog"])
+        self.assertNotIn("-plugin", self.EMULATED.run_argv(Path("/w/prog"), []))
 
     def test_a_host_that_cannot_count_refuses_instead_of_grading_by_time(self):
         with self.assertRaises(cost.CostRefused) as refused:
