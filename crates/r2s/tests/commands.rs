@@ -597,7 +597,9 @@ fn a_staged_call_passes_its_stack_arguments() {
     assert!(
         staged
             .out
-            .contains("tmp_40133c_8_1, tmp_401335_8_1, rax_45, tmp_401320_8_1, rax_42);"),
+            .contains(
+                "tmp_40133c_8_1, tmp_401335_8_1, (uint64_t)((uint64_t)tmp_401324_8_1 ^ (uint64_t)tmp_40132b_8_1), tmp_401320_8_1, rax_42);"
+            ),
         "{}",
         staged.out
     );

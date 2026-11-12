@@ -744,7 +744,6 @@ r2sleigh_result_u64 _main(uint32_t arg0, int64_t* arg1)
     uint32_t tmp_100000ee8_8_1;
     uint32_t tmp_100000ef4_8_1;
     uint64_t x8_25;
-    uint64_t x1_8;
     uint64_t x0_13;
     uint32_t tmp_100000f38_8_1;
     uint32_t tmp_100000f44_8_1;
@@ -756,7 +755,7 @@ r2sleigh_result_u64 _main(uint32_t arg0, int64_t* arg1)
     uint32_t tmp_100000fb4_8_1;
     _Alignas(16) uint8_t frame[192];
 
-    /* r2dec proof: 1 construct is marked below; 222 source obligations: 169 rendered, 35 elided, 0 refused, 16 assumed (frame extent unproven), 2 residual; 57 statements rendered; 1 data object type refused; 1 callee prototype supplied by the source; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
+    /* r2dec proof: 1 construct is marked below; 222 source obligations: 169 rendered, 35 elided, 0 refused, 16 assumed (frame extent unproven), 2 residual; 56 statements rendered; 1 data object type refused; 1 callee prototype supplied by the source; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
     {
         r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)124U), (uint32_t)0U);
         r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U), (uint32_t)arg0);
@@ -806,8 +805,7 @@ r2sleigh_result_u64 _main(uint32_t arg0, int64_t* arg1)
                 }
             }
             {
-                x1_8 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
-                x0_13 = (uint64_t)_table_walk((uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), (uint8_t*)x1_8);
+                x0_13 = (uint64_t)_table_walk((uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), (uint8_t*)r2sleigh_load_u64((void*)(uint64_t)(frame + 16U)));
                 tmp_100000f38_8_1 = r2sleigh_load_u32((void*)&_manual_sink);
                 r2sleigh_store_u32((void*)&_manual_sink, (uint32_t)((uint32_t)((uint64_t)x0_13 >> 0U) + (uint32_t)tmp_100000f38_8_1));
                 tmp_100000f44_8_1 = r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U));

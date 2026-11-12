@@ -1465,7 +1465,7 @@ uint64_t combined(uint64_t arg0, uint64_t arg1)
         rax_1 = fnv1a64(arg0, arg1);
         rax_2 = (uint64_t)djb2(arg0, arg1);
         rax_3 = (uint64_t)crc32_bitwise(arg0, arg1);
-        r9_2 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_2 << (uint64_t)(uint32_t)32U)) ^ (uint64_t)rax_1) + (uint64_t)(uint32_t)((uint64_t)rax_3 >> 0U));
+        r9_2 = (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_3 >> 0U) + (uint64_t)((uint64_t)rax_1 ^ (uint64_t)((uint64_t)(uint32_t)32U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_2 << (uint64_t)(uint32_t)32U))));
         r9_3 = (uint64_t)((uint64_t)((uint64_t)(uint32_t)7U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r9_2 << (uint64_t)(uint32_t)7U)) | (uint64_t)((uint64_t)(uint32_t)57U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)r9_2 >> (uint64_t)(uint32_t)57U)));
         rax_4 = (uint64_t)murmur3_32((uint8_t*)arg0, arg1, (uint32_t)((uint64_t)r9_3 >> 0U));
         return (uint64_t)((uint64_t)(uint32_t)((uint64_t)rax_4 >> 0U) ^ (uint64_t)r9_3);
