@@ -1681,13 +1681,11 @@ fn recover_interface_inner(
         }
     };
     let facts = if let Some(machine_context) = machine_context {
-        crate::semantic::PreparedFunctionFacts::collect_with_context(
+        crate::semantic::PreparedFunctionFacts::collect_for_recovery(
             func,
             prep,
             graph,
-            &crate::AssumptionSet::default(),
             machine_context,
-            "recover",
         )?
     } else {
         crate::semantic::PreparedFunctionFacts::collect(func, graph)?

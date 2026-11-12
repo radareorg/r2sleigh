@@ -355,6 +355,7 @@ impl Sealed {
                     assumptions: &crate::AssumptionSet::default(),
                     machine_context: Some(&machine_context),
                     site: "prepare",
+                    certified: crate::semantic::Certified::Whole,
                 },
                 control,
             )?;
