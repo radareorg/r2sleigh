@@ -521,12 +521,12 @@ fn assumptions_by_block(
     graph: &SsaGraph,
     predicates: &crate::semantic::PredicateFacts,
     solved: Solved<'_>,
-) -> Assumed {
+) -> BTreeMap<u64, BTreeMap<ValueId, StridedInterval>> {
     if predicates.block_assumptions.is_empty() {
         return BTreeMap::new();
     }
     let domtree = function.domtree();
-    let mut by_block = Assumed::new();
+    let mut by_block = BTreeMap::<u64, BTreeMap<ValueId, StridedInterval>>::new();
     let mut ready = vec![domtree.entry];
     while let Some(addr) = ready.pop() {
         let mut held = domtree
@@ -570,9 +570,6 @@ fn tested<'a>(
         .flatten()
 }
 
-/// What each block assumes of the values its branches compare, by copy class.
-type Assumed = BTreeMap<u64, BTreeMap<ValueId, StridedInterval>>;
-
 /// Each merge re-read once, every input under what its own edge proves; the merges that narrow, with
 /// their ranges (doc/ssa.md, "Branch assumptions"). `O(phi inputs)` and one environment per tested edge.
 #[cfg_attr(
@@ -585,7 +582,7 @@ type Assumed = BTreeMap<u64, BTreeMap<ValueId, StridedInterval>>;
 fn narrowed_merges(
     graph: &SsaGraph,
     predicates: &crate::semantic::PredicateFacts,
-    assumed: &Assumed,
+    assumed: &BTreeMap<u64, BTreeMap<ValueId, StridedInterval>>,
     solved: Solved<'_>,
 ) -> Vec<(ValueId, StridedInterval)> {
     use std::borrow::Cow;
