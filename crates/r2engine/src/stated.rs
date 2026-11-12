@@ -45,9 +45,8 @@ pub fn sealed_import(program: &dyn crate::body::Program, slot: u64) -> Option<&s
     (word && kept).then_some(symbol.as_str())
 }
 
-/// Where the container binds a library's global stack guard (doc/adr-call-boundary.md, "S27 as
-/// built"): a sealed word the loader writes its address into, and its one copy here (`R_*_COPY`).
-/// A defined symbol of that name binds nothing. O(W + R) in the loader's writes and records.
+/// Where the container binds a library's global stack guard: its sealed import words and its one
+/// `R_*_COPY` (doc/adr-call-boundary.md, "S27 as built"). O(W + R).
 pub fn linked_guard(
     container: &crate::program::Container,
     guard: &r2abi::LinkedGuard,

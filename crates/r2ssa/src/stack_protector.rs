@@ -354,9 +354,8 @@ fn escapes(
     escaped
 }
 
-/// The temporary address arithmetic only inserted operations read: the guard's address the
-/// compiler computed for its reads, and `from`, the addresses of reads the decision rewrote. One
-/// pass counts reads; each operation is taken once.
+/// The temporary address arithmetic only inserted operations read, from their loads and `from`
+/// (the addresses of rewritten reads). One pass counts reads; each operation is taken once.
 pub(crate) fn inserted_addresses(
     func: &SSAFunction,
     inserted: &IdSet<OpId>,

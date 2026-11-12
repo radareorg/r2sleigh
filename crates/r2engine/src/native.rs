@@ -2807,11 +2807,6 @@ fn register_named(arch: &ArchSpec, storage: CanonicalStorageId) -> Option<&str> 
     named.map(|register| register.name.as_str())
 }
 
-/// One convention's model on this machine: the specification's default prototype joined with
-/// the ABI's row, every register resolved once (doc/adr-call-boundary.md, "The joined model").
-///
-/// A location or result register the architecture lacks refuses the model; a preserved,
-/// killed or reserved one it lacks costs precision, never soundness, and is left out.
 /// Where the container places the guard words a C library's row names; the row says which applies.
 #[derive(Debug, Clone, Default)]
 pub struct ContainerGuards {
@@ -2821,6 +2816,11 @@ pub struct ContainerGuards {
     pub linked: Option<r2source::SourceLinkedGuard>,
 }
 
+/// One convention's model on this machine: the specification's default prototype joined with
+/// the ABI's row, every register resolved once (doc/adr-call-boundary.md, "The joined model").
+///
+/// A location or result register the architecture lacks refuses the model; a preserved,
+/// killed or reserved one it lacks costs precision, never soundness, and is left out.
 pub fn convention_model(
     arch: &ArchSpec,
     bits: u32,
