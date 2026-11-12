@@ -1,6 +1,6 @@
 # ADR: a callee is built once and its owners' statements update the build
 
-Status: built 2026-11-12 (D226, D282 to D285). Owners: r2ssa `TrustedConstruction` and `BuildKey`, r2engine `resolved.rs`.
+Status: built 2026-11-12 (D226, D286 to D289). Owners: r2ssa `TrustedConstruction` and `BuildKey`, r2engine `resolved.rs`.
 
 ## Problem
 
@@ -34,7 +34,7 @@ The owners:
 ## What runs again
 
 - A callee that keeps a register a call would define removes `CallDefine`s. Renaming, phi placement and every pass after them read those definitions, so the build runs again from the held lift (6 of 38 restated functions on pumasim `pdd @ 0x23fdf0`, 1 of 4 on 0pack `pdd @ 0x62ecf0`).
-- Recovery runs again on every restated function. Each phase of its collection takes the machine context, whose call-site interfaces the owner's statement changes (D285).
+- Recovery runs again on every restated function. Each phase of its collection takes the machine context, whose call-site interfaces the owner's statement changes (D289).
 - An owner cycle, or an alone read that names other owners than its build, leaves the function to `Component` and `least_fixpoint` as before (0 on both commands).
 - A callee resolved against owners holds no `CalleeReads`. A later listing that asks its pointer parameters computes `CalleeSummary`, one alone preparation.
 
@@ -50,13 +50,13 @@ Release, Mac, instructions retired in G, median of 3 under one `heavy.sh` lock. 
 | Head | pumasim `pdd @ 0x23fdf0` | 0pack `pdd @ 0x62ecf0` | bash `aa; pdd @ 0x2e630` | pumasim `aa; pdd @ 0x3b6b20` |
 |---|---|---|---|---|
 | master ca413c45c | 23.96 | 15.46 | 14.42 | 64.48 |
-| The head without D284 | 20.32 | 15.24 | 14.33 | 63.45 |
+| The head without D287 | 20.32 | 15.24 | 14.33 | 63.45 |
 | The head | 19.49 | 14.83 | 14.34 | 63.45 |
 | Bound | 20.32 | 15.69 | 15.43 | 64.46 |
 
 - pumasim cold builds 123 functions where master builds 155; 9 are built twice (the 6 above, and 3 of 1 to 3 blocks whose alone resolution seals again). `0x2312c0` is built once: its 2 owners keep its build.
 - Single runs of the steps on pumasim cold: no alone seal or collection, 22.14 G with 4 builds kept; result carriers a call defines whole and promotion's area record, 20.76 G with 32 kept; one lookup per renamed read or write, 20.65 G.
-- The profile of the head before D284 (samply, 1,460 samples) put the second recoveries at 90 samples (6.2%), recovery's collection at 320 (22%) and its certificates at 60 (4.1%). D284 measures 0.83 G on pumasim cold. Under `aa; pdd` recovery is 24 of 8,253 samples, so D284 does not move those two commands.
+- The profile of the head before D287 (samply, 1,460 samples) put the second recoveries at 90 samples (6.2%), recovery's collection at 320 (22%) and its certificates at 60 (4.1%). D287 measures 0.83 G on pumasim cold. Under `aa; pdd` recovery is 24 of 8,253 samples, so D287 does not move those two commands.
 - An exhausted certificate pass was not observed: 0 of 2,459 compared outputs differ.
 - Peak RSS on pumasim cold is 235 MB against 246 MB.
 
