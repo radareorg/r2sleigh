@@ -709,9 +709,9 @@ mod tests {
                 .collect()
         };
         let (zero, sign) = (low(Fill::Zero), low(Fill::Sign));
-        assert_eq!(above(&[zero.clone()], 4), SourceAbove::Zero);
+        assert_eq!(above(std::slice::from_ref(&zero), 4), SourceAbove::Zero);
         assert_eq!(above(&[zero.clone(), zero.clone()], 4), SourceAbove::Zero);
-        assert_eq!(above(&[sign.clone()], 4), SourceAbove::Sign);
+        assert_eq!(above(std::slice::from_ref(&sign), 4), SourceAbove::Sign);
         assert_eq!(above(&[zero.clone(), sign], 4), SourceAbove::Undefined);
         // A narrower path whose fill starts lower still fills the bytes above the joined width.
         let byte: Bytes = std::iter::once(Byte::Data)
