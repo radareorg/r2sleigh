@@ -211,3 +211,32 @@ fn a_frame_read_through_an_unplaced_walk_keeps_the_stores_it_may_read() {
     );
     assert_eq!(text.matches("r2sleigh_store_u32").count(), 2, "{text}");
 }
+
+/// [`WALKED_FRAME`] walking down from `sp + 8`: `ldr w4, [x2], #-8` reads the slot below.
+const WALKED_DOWN: &[u8] = &{
+    let mut code = [0u8; 0x34];
+    let mut at = 0;
+    while at < code.len() {
+        code[at] = WALKED_FRAME[at];
+        at += 1;
+    }
+    let (add, load) = ([0xe2, 0x23, 0x00, 0x91], [0x44, 0x84, 0x5f, 0xb8]);
+    let mut byte = 0;
+    while byte < 4 {
+        code[0x0c + byte] = add[byte]; // add x2, sp, #8
+        code[0x18 + byte] = load[byte]; // ldr w4, [x2], #-8
+        byte += 1;
+    }
+    code
+};
+
+/// Only the object at `sp + 8` flows into the walk, and it steps down: the extent rule escapes
+/// the run between compiler slots both ways (`close_upward`), so the store at `sp` stays.
+#[test]
+fn a_frame_walk_stepping_down_keeps_the_store_below_it() {
+    let program = Literal::of_code(WALKED_DOWN, &[("f", F, 0x34)])
+        .in_aarch64()
+        .running_on(GLIBC);
+    let text = rendered(program);
+    assert_eq!(text.matches("r2sleigh_store_u32").count(), 2, "{text}");
+}
