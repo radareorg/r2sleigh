@@ -1869,21 +1869,72 @@ impl<'a> Native<'a> {
             .map(|interface| interface.stack_slots().to_vec())
             .unwrap_or_default();
         let restated = (first.as_ref()).and_then(|first| self.restated(first, &declared_slots));
+        // A member's type is a declaration's (D166), so only a declared body mints from it.
+        let declared = declared_root.interface.is_some();
+        let members = (first.as_ref().filter(|_| declared))
+            .map_or_else(Vec::new, |first| self.member_calls(first));
+        let alone = restated.is_none() && folded.is_empty();
         let artifact = match first {
-            Some(first) if restated.is_none() && folded.is_empty() => (first, reads.is_some()),
+            Some(first) if alone && members.is_empty() => (first, reads.is_some()),
             first => {
+                let rows = (first.as_ref()).map(|first| first.artifact().member_calls().clone());
                 drop(first);
+                let minted = !members.is_empty();
+                if minted {
+                    r2il::refusal_evidence!(
+                        "member-calls",
+                        "{entry:#x}: sealed again for {} member calls",
+                        members.len()
+                    );
+                }
                 // A body that proved no frame slot restates nothing, and the declaration stands.
                 let restatement = Restatement {
                     interface: restated.or(declared_root.interface),
                     signature: declared_root.signature,
                     slot_names: declared_root.slot_names,
+                    member_calls: members,
                 };
+                let retry = minted.then(|| (restatement.clone(), folded.clone()));
                 let seal = self.seal(root, callees, folded, restatement, (tables, calls), reads)?;
-                (self.collected(seal)?, true)
+                let second = self.collected(seal)?;
+                // A contract adds no provenance, so the second seal proves the rows it was minted
+                // from; where it does not, the contracts are a defect and the body seals without.
+                let agrees = (rows.as_ref())
+                    .is_some_and(|rows| rows.agrees(second.artifact().member_calls()));
+                match retry.filter(|_| !agrees) {
+                    None => (second, true),
+                    Some((mut restatement, folded)) => {
+                        r2il::refusal_evidence!(
+                            "member-calls-defect",
+                            "{entry:#x}: a member contract moved the member calls it was minted from"
+                        );
+                        drop(second);
+                        restatement.member_calls.clear();
+                        let seal =
+                            self.seal(root, callees, folded, restatement, (tables, calls), reads)?;
+                        (self.collected(seal)?, true)
+                    }
+                }
             }
         };
         Ok(artifact)
+    }
+
+    /// The contract of each call the first seal proves goes through a typed member (S32).
+    fn member_calls(&self, first: &TrustedSsaArtifact) -> Vec<r2source::SourceCallSiteInterface> {
+        let artifact = first.artifact();
+        let Some(interface) = artifact.machine_context().function_interface() else {
+            return Vec::new();
+        };
+        let Some(graph) = interface.type_graph() else {
+            return Vec::new();
+        };
+        let placement = Placement::new(self.target, &self.machine);
+        (artifact.member_calls().proven())
+            .filter_map(|(_, call)| {
+                placement.member_call(graph, &call, interface.revision_identity())
+            })
+            .collect()
     }
 
     fn over(target: &'a NativeTarget<'a>, program: &'a dyn Program) -> Result<Self, NativeRefusal> {
@@ -2327,6 +2378,7 @@ impl<'a> Native<'a> {
             interface,
             signature,
             slot_names,
+            member_calls,
         } = restatement;
         let arity = interface.as_ref().map_or(0, |i| i.parameters().len());
         let blocks = walked
@@ -2406,6 +2458,7 @@ impl<'a> Native<'a> {
             interface,
             closed_result,
             frame_saves: self.program.frame_saves(walked.body.entry),
+            member_calls,
         };
 
         let snapshot =

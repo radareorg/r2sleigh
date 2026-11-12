@@ -127,6 +127,9 @@ pub struct NativeFunction {
     /// The register saves the container's call-frame information states for
     /// this function.
     pub frame_saves: Vec<crate::SourceFrameSave>,
+    /// Contracts a first seal minted for calls through a typed member (S32); empty on a first
+    /// capture. One about another revision is not about this body and is dropped.
+    pub member_calls: Vec<crate::SourceCallSiteInterface>,
 }
 
 /// Mint a snapshot from a capture the engine made itself.
@@ -195,6 +198,7 @@ pub fn capture(
         })
         .collect::<Vec<_>>();
 
+    let revision = identity.clone();
     let advisory_calls = function
         .calls
         .iter()
@@ -274,6 +278,12 @@ pub fn capture(
     .map(|snapshot| match &machine.convention {
         Some(model) => snapshot.with_convention(std::sync::Arc::clone(model)),
         None => snapshot,
+    })
+    .and_then(|snapshot| {
+        let member_calls = (function.member_calls.into_iter())
+            .filter(|call| call.revision_identity() == revision.as_ref())
+            .collect();
+        snapshot.with_member_calls(member_calls)
     })
 }
 
@@ -381,6 +391,7 @@ mod tests {
             signature: None,
             closed_result: None,
             frame_saves: Vec::new(),
+            member_calls: Vec::new(),
         }
     }
 

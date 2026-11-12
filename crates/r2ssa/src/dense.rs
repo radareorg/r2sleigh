@@ -37,6 +37,7 @@ macro_rules! dense_id {
 dense_id!(crate::graph::ValueId);
 dense_id!(crate::graph::InstId);
 dense_id!(crate::graph::BlockId);
+dense_id!(crate::semantic::CallSiteId);
 
 /// A value for every id below a bound.
 #[derive(Debug, Clone, PartialEq, Eq)]

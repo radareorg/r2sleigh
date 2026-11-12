@@ -11,6 +11,7 @@
 
 mod frame;
 mod graph;
+mod member;
 
 pub(crate) use frame::rebased;
 use graph::Interned;
@@ -94,6 +95,8 @@ pub(crate) struct Restatement {
     pub(crate) interface: Option<r2source::SourceFunctionInterface>,
     pub(crate) signature: Option<r2source::SourceSignaturePresentation>,
     pub(crate) slot_names: Vec<r2source::SourceStackSlotName>,
+    /// The contract of each call through a typed member, minted from a first seal (S32).
+    pub(crate) member_calls: Vec<r2source::SourceCallSiteInterface>,
 }
 
 /// The target's C data model, or the Unix one at its pointer width where none is listed.
@@ -459,6 +462,7 @@ impl Placement<'_> {
             parameters,
             returns,
             return_value,
+            slots: frame.slots.clone(),
             graph: interned.finish(),
         };
         let interface = self.interface(declared, &placement, typed, &frame);
@@ -468,6 +472,7 @@ impl Placement<'_> {
                 .then(|| presentation(declared.prototype, placed.len())),
             slot_names: frame.names,
             interface,
+            member_calls: Vec::new(),
         }
     }
 
@@ -479,34 +484,8 @@ impl Placement<'_> {
         frame: &frame::DeclaredFrame,
     ) -> Option<r2source::SourceFunctionInterface> {
         let name = &declared.prototype.name;
-        let parameters = (placement.locations.iter().enumerate()).map(|(index, location)| {
-            r2source::SourceAbiParameterSpec::with_location(index as u32, *location)
-        });
-        let revision = format!("declared:{name}").into_bytes();
         let convention = self.machine.slots.convention();
-        let interface = r2source::SourceFunctionInterface::new_exact_with_logical_types(
-            revision,
-            convention,
-            parameters,
-            typed.returns,
-            frame.slots.clone(),
-            typed.parameters,
-            typed.return_value,
-            typed.graph,
-        )
-        .inspect_err(|error| {
-            r2il::refusal_evidence!(
-                "declared-interface",
-                "{name} does not state an interface: {error:?}"
-            );
-        })
-        .ok()?;
-        let interface = match placement.floor {
-            None => interface,
-            Some(class) => interface.with_arity_floor(r2source::SourceArityFloor::of([
-                r2source::SourceFloorCause::Unplaced(class),
-            ])?),
-        };
+        let interface = self.typed(name, convention, placement, typed)?;
         // Typed first: a declared format parameter is believed on what the
         // declaration's types are.
         let interface = formatted(
@@ -520,6 +499,44 @@ impl Placement<'_> {
         };
         let interface = self.carriers(name, interface, frame.frame_pointer)?;
         self.stacked_return(name, interface, stacked)
+    }
+
+    /// One declaration's placement and types as an exact interface, with the floor where a class
+    /// has no location.
+    fn typed(
+        &self,
+        name: &str,
+        convention: r2source::ConventionId,
+        placement: &r2ssa::place::Placement,
+        typed: Typed,
+    ) -> Option<r2source::SourceFunctionInterface> {
+        let parameters = (placement.locations.iter().enumerate()).map(|(index, location)| {
+            r2source::SourceAbiParameterSpec::with_location(index as u32, *location)
+        });
+        let revision = format!("declared:{name}").into_bytes();
+        let interface = r2source::SourceFunctionInterface::new_exact_with_logical_types(
+            revision,
+            convention,
+            parameters,
+            typed.returns,
+            typed.slots,
+            typed.parameters,
+            typed.return_value,
+            typed.graph,
+        )
+        .inspect_err(|error| {
+            r2il::refusal_evidence!(
+                "declared-interface",
+                "{name} does not state an interface: {error:?}"
+            );
+        })
+        .ok()?;
+        match placement.floor {
+            None => Some(interface),
+            Some(class) => Some(interface.with_arity_floor(r2source::SourceArityFloor::of([
+                r2source::SourceFloorCause::Unplaced(class),
+            ])?)),
+        }
     }
 
     /// A result the row does not state: `Unproven({Unstated})`, seeded at the convention's
@@ -666,11 +683,12 @@ fn carrier_bytes(location: &SourceParameterLocation) -> u32 {
 }
 
 /// The typed half of one declaration: a logical value per parameter, the
-/// result's, and the graph they are nodes of.
+/// result's, the frame slots it types, and the graph they are nodes of.
 struct Typed {
     parameters: Vec<Option<SourceLogicalValue>>,
     returns: SourceFunctionReturn,
     return_value: Option<SourceLogicalValue>,
+    slots: Vec<r2source::SourceStackSlotSpec>,
     graph: Option<r2source::SourceTypeGraph>,
 }
 

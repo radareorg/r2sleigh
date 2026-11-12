@@ -433,6 +433,8 @@ pub struct SourceMachineContext {
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     /// The sealed import slot each `CallSlot` site calls through (audit W8).
     slot_targets: BTreeMap<SourceCallSiteIdentity, u64>,
+    /// The sites whose contract an earlier seal minted from a member's type (S32).
+    member_call_sites: BTreeSet<SourceCallSiteIdentity>,
     /// The name the source gave each raw call site's callee.
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
     /// How far each callee is proven to touch through each pointer argument,
@@ -832,6 +834,7 @@ impl SourceMachineContext {
             tail_call_sites,
             callee_linkages: BTreeMap::new(),
             slot_targets: BTreeMap::new(),
+            member_call_sites: BTreeSet::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
             callee_library: BTreeMap::new(),
@@ -1266,6 +1269,15 @@ impl SourceMachineContext {
 
     pub(crate) fn set_slot_targets(&mut self, slots: BTreeMap<SourceCallSiteIdentity, u64>) {
         self.slot_targets = slots;
+    }
+
+    pub(crate) fn set_member_call_sites(&mut self, sites: BTreeSet<SourceCallSiteIdentity>) {
+        self.member_call_sites = sites;
+    }
+
+    /// Whether the site's contract is a member's, minted from an earlier seal's `MemberCalls`.
+    pub fn is_member_call_site(&self, identity: SourceCallSiteIdentity) -> bool {
+        self.member_call_sites.contains(&identity)
     }
 
     /// The sealed import slot a call through memory reaches, where the source states one.

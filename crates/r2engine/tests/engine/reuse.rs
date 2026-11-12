@@ -242,6 +242,7 @@ fn rendered_returning_object(declared: bool) -> String {
         signature: None,
         closed_result: None,
         frame_saves: Vec::new(),
+        member_calls: Vec::new(),
     };
     let snapshot = r2source::native::capture(&machine, function).expect("a capture");
     let lifted = r2sleigh_lift::Disassembler::lift_owned_function(snapshot).expect("a lift");

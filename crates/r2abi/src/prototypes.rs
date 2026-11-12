@@ -36,7 +36,7 @@ pub struct Prototype {
 
 /// A subprogram's `DW_AT_calling_convention` as its producer writes it (DWARF 5 3.3.1.1; LLVM's
 /// vendor codes are `llvm/BinaryFormat/Dwarf.def`'s `HANDLE_DW_CC`).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum StatedConvention {
     /// No attribute, or `DW_CC_normal`.
     #[default]

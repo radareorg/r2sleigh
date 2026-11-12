@@ -1,0 +1,324 @@
+# A call through a function-pointer member of a declared pointer parameter takes the member's type
+# as its contract (ROADMAP D171, doc/adr-call-boundary.md "S32 as built"). The fixtures are
+# tests/fixtures/src/member_call.c; a stripped build states no type and keeps the gap.
+
+NAME=x86-64 O2: two calls, a narrow int, nine arguments, a double
+FILE=tests/fixtures/member_call_gcc_x64_O2g
+CMDS=pdd @ sym.ops_release; pdd @ sym.ops_size; pdd @ sym.ops_wide; pdd @ sym.ops_scale
+EXPECT=<<EOF
+struct ops;
+
+void ops_release(struct ops* o, void* p, void* q)
+{
+    uint64_t tmp_401350_0_1;
+    uint64_t tmp_401353_8_1;
+    uint64_t tmp_401356_0_1;
+    uint64_t tmp_40135c_8_1;
+
+    /* r2dec proof: no individual construct is marked; 40 source obligations: 22 rendered, 18 elided, 0 refused; 8 statements rendered; 1 structure laid out from a parameter's accesses */
+    {
+        tmp_401350_0_1 = r2sleigh_load_u64((void*)(uint64_t)o);
+        tmp_401353_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)1U * 8U));
+        ((void(*)(uint64_t, uint64_t))(uint64_t)tmp_401353_8_1)(tmp_401350_0_1, (uint64_t)p);
+        tmp_401356_0_1 = r2sleigh_load_u64((void*)(uint64_t)o);
+        tmp_40135c_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)1U * 8U));
+        ((void(*)(uint64_t, uint64_t))(uint64_t)tmp_40135c_8_1)(tmp_401356_0_1, (uint64_t)q);
+        r2sleigh_store_u32((void*)((uint64_t)o + (uint64_t)18U * 4U), (uint32_t)0U);
+        return;
+    }
+}
+
+struct ops;
+
+int64_t ops_size(struct ops* o, int32_t n)
+{
+    uint64_t tmp_40137b_0_1;
+    uint64_t tmp_40137e_8_1;
+    uint64_t rax_2;
+
+    /* r2dec proof: no individual construct is marked; 25 source obligations: 16 rendered, 9 elided, 0 refused; 4 statements rendered */
+    {
+        tmp_40137b_0_1 = r2sleigh_load_u64((void*)(uint64_t)o);
+        tmp_40137e_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)2U * 8U));
+        rax_2 = (uint64_t)(uint32_t)((uint64_t(*)(uint64_t, uint64_t))(uint64_t)tmp_40137e_8_1)(tmp_40137b_0_1, (uint64_t)(uint32_t)n);
+        return (int64_t)((uint64_t)(int32_t)((uint64_t)rax_2 >> 0U) + (uint64_t)1U);
+    }
+}
+
+struct ops;
+
+int64_t ops_wide(struct ops* o, int64_t a)
+{
+    uint64_t tmp_4013c4_8_1;
+    uint64_t rax_2;
+
+    /* r2dec proof: no individual construct is marked; 44 source obligations: 32 rendered, 12 elided, 0 refused; 3 statements rendered */
+    {
+        tmp_4013c4_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)3U * 8U));
+        rax_2 = ((uint64_t(*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))(uint64_t)tmp_4013c4_8_1)((uint64_t)a, (uint64_t)((uint64_t)a + (uint64_t)1U), (uint64_t)((uint64_t)a + (uint64_t)2U), (uint64_t)((uint64_t)a + (uint64_t)3U), (uint64_t)((uint64_t)a + (uint64_t)4U), (uint64_t)((uint64_t)a + (uint64_t)5U), (uint64_t)((uint64_t)a + (uint64_t)6U), (uint64_t)((uint64_t)a + (uint64_t)7U), (uint64_t)((uint64_t)a + (uint64_t)8U));
+        return (int64_t)((uint64_t)rax_2 + (uint64_t)1U);
+    }
+}
+
+struct ops;
+
+double ops_scale(struct ops* o, double x)
+{
+    uint32_t tmp_4013db_8_1;
+    uint64_t tmp_4013de_8_1;
+    __uint128_t xmm0_1;
+    uint64_t tmp_lane_4013e1_1_0_1;
+
+    /* r2dec proof: no individual construct is marked; 24 source obligations: 15 rendered, 9 elided, 0 refused; 5 statements rendered; 1 structure laid out from a parameter's accesses */
+    {
+        tmp_4013db_8_1 = r2sleigh_load_u32((void*)((uint64_t)o + (uint64_t)18U * 4U));
+        tmp_4013de_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)4U * 8U));
+        xmm0_1 = (__uint128_t)r2sleigh_float_to_bits_64(((double(*)(double, uint64_t))(uint64_t)tmp_4013de_8_1)(x, (uint64_t)(uint32_t)tmp_4013db_8_1));
+        tmp_lane_4013e1_1_0_1 = (uint64_t)((__uint128_t)xmm0_1 >> 0U);
+        return (double)(r2sleigh_float_from_bits_64(tmp_lane_4013e1_1_0_1) + r2sleigh_float_from_bits_64((uint64_t)0x3ff0000000000000U));
+    }
+}
+
+EOF
+RUN
+
+NAME=x86-64 O2: variadic, record result and loaded slot stay residual
+FILE=tests/fixtures/member_call_gcc_x64_O2g
+CMDS=pdd @ sym.ops_log; pdd @ sym.ops_make; pdd @ sym.ops_virtual
+EXPECT=<<EOF
+struct ops;
+
+int32_t ops_log(struct ops* o, const char* s)
+{
+    uint64_t tmp_401402_8_1;
+
+    /* r2dec proof: 3 constructs are marked below; 22 source obligations: 5 rendered, 9 elided, 0 refused, 8 residual; 2 statements rendered; 1 never assigned, read as residuals (RAX_2) */
+    {
+        tmp_401402_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)5U * 8U));
+        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x4013f0:35 covering 1 op (render::values): call to an indirect target: it is handed a vector count: variadic or unprototyped, its argument count unproven */
+        r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x4013f0:42 covering 1 op (render::values) */
+        return (int32_t)((uint32_t)((uint64_t)r2sleigh_residual_u64(3) >> 0U) + (uint32_t)1U);
+    }
+}
+
+struct ops;
+
+int64_t ops_make(struct ops* o, int32_t n)
+{
+    uint64_t tmp_40144e_8_1;
+    uint64_t tmp_401451_8_1;
+    uint64_t rax_4;
+    _Alignas(16) uint8_t frame[56];
+
+    /* r2dec proof: 1 construct is marked below; 26 source obligations: 9 rendered, 9 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 5 residual; 4 statements rendered */
+    {
+        tmp_40144e_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)7U * 8U));
+        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401430:40 covering 1 op (render::values): call to an indirect target: argument slot 1 may hand on what this function was passed */
+        tmp_401451_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 16U) + (uint64_t)8U));
+        rax_4 = (uint64_t)((uint64_t)tmp_401451_8_1 + (uint64_t)1U);
+        {
+            return (int64_t)rax_4;
+        }
+    }
+}
+
+struct ops;
+
+int32_t ops_virtual(struct ops* o)
+{
+    uint64_t tmp_401488_0_1;
+    uint64_t tmp_40148b_8_1;
+    uint64_t tmp_40148f_0_1;
+
+    /* r2dec proof: 1 construct is marked below; 25 source obligations: 12 rendered, 10 elided, 0 refused, 3 residual; 4 statements rendered; 1 structure laid out from a parameter's accesses */
+    {
+        tmp_401488_0_1 = r2sleigh_load_u64((void*)(uint64_t)o);
+        tmp_40148b_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)8U * 8U));
+        tmp_40148f_0_1 = r2sleigh_load_u64((void*)tmp_40148b_8_1);
+        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401480:15 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
+        return (int32_t)r2sleigh_load_u32((void*)((uint64_t)o + (uint64_t)18U * 4U));
+    }
+}
+
+EOF
+RUN
+
+NAME=x86-64 O0: the parameter reloaded from its spill slot
+FILE=tests/fixtures/member_call_gcc_x64_O0g
+CMDS=pdd @ sym.ops_release; pdd @ sym.ops_size
+EXPECT=<<EOF
+struct ops;
+
+void ops_release(struct ops* o, void* p, void* q)
+{
+    uint64_t tmp_401152_8_1;
+    uint64_t tmp_40115a_0_1;
+    uint64_t tmp_40116d_8_1;
+    uint64_t tmp_401175_0_1;
+
+    /* r2dec proof: no individual construct is marked; 37 source obligations: 23 rendered, 14 elided, 0 refused; 8 statements rendered; the declared result is kept against the body: a return defines the integer result register; 1 structure laid out from a parameter's accesses */
+    {
+        tmp_401152_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)1U * 8U));
+        tmp_40115a_0_1 = r2sleigh_load_u64((void*)(uint64_t)o);
+        ((void(*)(uint64_t, uint64_t))(uint64_t)tmp_401152_8_1)(tmp_40115a_0_1, (uint64_t)p);
+        tmp_40116d_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)1U * 8U));
+        tmp_401175_0_1 = r2sleigh_load_u64((void*)(uint64_t)o);
+        ((void(*)(uint64_t, uint64_t))(uint64_t)tmp_40116d_8_1)(tmp_401175_0_1, (uint64_t)q);
+        r2sleigh_store_u32((void*)((uint64_t)o + (uint64_t)18U * 4U), (uint32_t)0U);
+        return;
+    }
+}
+
+struct ops;
+
+int64_t ops_size(struct ops* o, int32_t n)
+{
+    uint64_t tmp_4011a9_8_1;
+    uint64_t tmp_4011b1_0_1;
+    uint64_t rax_4;
+
+    /* r2dec proof: no individual construct is marked; 26 source obligations: 16 rendered, 10 elided, 0 refused; 4 statements rendered */
+    {
+        tmp_4011a9_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)2U * 8U));
+        tmp_4011b1_0_1 = r2sleigh_load_u64((void*)(uint64_t)o);
+        rax_4 = (uint64_t)(uint32_t)((uint64_t(*)(uint64_t, uint64_t))(uint64_t)tmp_4011a9_8_1)(tmp_4011b1_0_1, (uint64_t)(uint32_t)n);
+        return (int64_t)((uint64_t)(int32_t)((uint64_t)rax_4 >> 0U) + (uint64_t)1U);
+    }
+}
+
+EOF
+RUN
+
+NAME=aarch64 O2: ldp loads the member beside the first argument
+FILE=tests/fixtures/member_call_gcc_aarch64_O2g
+CMDS=pdd @ sym.ops_release; pdd @ sym.ops_size; pdd @ sym.ops_wide
+EXPECT=<<EOF
+struct ops;
+
+void ops_release(struct ops* o, void* p, void* q)
+{
+    uint64_t tmp_400958_8_1;
+    uint64_t tmp_400958_18_1;
+    uint64_t tmp_400960_8_1;
+    uint64_t tmp_400960_18_1;
+
+    /* r2dec proof: no individual construct is marked; 29 source obligations: 22 rendered, 7 elided, 0 refused; 8 statements rendered; 1 structure laid out from a parameter's accesses */
+    {
+        tmp_400958_8_1 = r2sleigh_load_u64((void*)(uint64_t)o);
+        tmp_400958_18_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)1U * 8U));
+        ((void(*)(uint64_t, uint64_t))(uint64_t)r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)1U * 8U)))(tmp_400958_8_1, (uint64_t)p);
+        tmp_400960_8_1 = r2sleigh_load_u64((void*)(uint64_t)o);
+        tmp_400960_18_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)1U * 8U));
+        ((void(*)(uint64_t, uint64_t))(uint64_t)r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)1U * 8U)))(tmp_400960_8_1, (uint64_t)q);
+        r2sleigh_store_u32((void*)((uint64_t)o + (uint64_t)18U * 4U), (uint32_t)0U);
+        return;
+    }
+}
+
+struct ops;
+
+int64_t ops_size(struct ops* o, int32_t n)
+{
+    uint64_t x2_2;
+    uint64_t x0_2;
+
+    /* r2dec proof: no individual construct is marked; 19 source obligations: 16 rendered, 3 elided, 0 refused; 3 statements rendered */
+    {
+        x2_2 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)2U * 8U));
+        x0_2 = (uint64_t)(uint32_t)((uint64_t(*)(uint64_t, uint64_t))(uint64_t)r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)2U * 8U)))(r2sleigh_load_u64((void*)(uint64_t)o), (uint64_t)(uint32_t)n);
+        return (int64_t)((uint64_t)(int32_t)((uint64_t)x0_2 >> 0U) + (uint64_t)1U);
+    }
+}
+
+struct ops;
+
+int64_t ops_wide(struct ops* o, int64_t a)
+{
+    uint64_t x8_1;
+    uint64_t x0_2;
+
+    /* r2dec proof: no individual construct is marked; 40 source obligations: 35 rendered, 5 elided, 0 refused; 3 statements rendered */
+    {
+        x8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)3U * 8U));
+        x0_2 = ((uint64_t(*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))(uint64_t)r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)3U * 8U)))((uint64_t)a, (uint64_t)((uint64_t)a + (uint64_t)1U), (uint64_t)((uint64_t)a + (uint64_t)2U), (uint64_t)((uint64_t)a + (uint64_t)3U), (uint64_t)((uint64_t)a + (uint64_t)4U), (uint64_t)((uint64_t)a + (uint64_t)5U), (uint64_t)((uint64_t)a + (uint64_t)6U), (uint64_t)((uint64_t)a + (uint64_t)7U), (uint64_t)((uint64_t)a + (uint64_t)8U));
+        return (int64_t)((uint64_t)x0_2 + (uint64_t)1U);
+    }
+}
+
+EOF
+RUN
+
+NAME=aarch64 O0
+FILE=tests/fixtures/member_call_gcc_aarch64_O0g
+CMDS=pdd @ sym.ops_release; pdd @ sym.ops_size
+EXPECT=<<EOF
+struct ops;
+
+void ops_release(struct ops* o, void* p, void* q)
+{
+    uint64_t x2_1;
+    uint64_t x2_3;
+
+    /* r2dec proof: no individual construct is marked; 25 source obligations: 21 rendered, 4 elided, 0 refused; 6 statements rendered; 1 structure laid out from a parameter's accesses */
+    {
+        x2_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)1U * 8U));
+        ((void(*)(uint64_t, uint64_t))(uint64_t)r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)1U * 8U)))(r2sleigh_load_u64((void*)(uint64_t)o), (uint64_t)p);
+        x2_3 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)1U * 8U));
+        ((void(*)(uint64_t, uint64_t))(uint64_t)r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)1U * 8U)))(r2sleigh_load_u64((void*)(uint64_t)o), (uint64_t)q);
+        r2sleigh_store_u32((void*)((uint64_t)o + (uint64_t)18U * 4U), (uint32_t)0U);
+        return;
+    }
+}
+
+struct ops;
+
+int64_t ops_size(struct ops* o, int32_t n)
+{
+    uint64_t x2_1;
+    uint64_t x0_4;
+
+    /* r2dec proof: no individual construct is marked; 19 source obligations: 16 rendered, 3 elided, 0 refused; 3 statements rendered */
+    {
+        x2_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)2U * 8U));
+        x0_4 = (uint64_t)(uint32_t)((uint64_t(*)(uint64_t, uint64_t))(uint64_t)r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)2U * 8U)))(r2sleigh_load_u64((void*)(uint64_t)o), (uint64_t)(uint32_t)n);
+        return (int64_t)((uint64_t)(int32_t)((uint64_t)x0_4 >> 0U) + (uint64_t)1U);
+    }
+}
+
+EOF
+RUN
+
+NAME=a stripped build states no member type and keeps the gap
+FILE=tests/fixtures/member_call_gcc_x64_O2
+CMDS=pdd @ 0x401340
+EXPECT=<<EOF
+struct fcn_401340_arg0 {
+    uint64_t f_0;
+    uint64_t f_8;
+    uint8_t _pad_10[56];
+    uint32_t f_48;
+};
+
+r2sleigh_result_u64 fcn_401340(struct fcn_401340_arg0* arg0, uint64_t arg1, uint64_t arg2)
+{
+    uint64_t tmp_401350_0_1;
+    uint64_t tmp_401353_8_1;
+    uint64_t tmp_401356_0_1;
+    uint64_t tmp_40135c_8_1;
+
+    /* r2dec proof: 4 constructs are marked below; 43 source obligations: 12 rendered, 18 elided, 0 refused, 13 residual; 6 statements rendered; the parameters are a floor: at least 3 (a register past them reaches an indirect call); the result's second register is open: no call read decides it; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual; 1 structure laid out from a parameter's accesses */
+    {
+        tmp_401350_0_1 = r2sleigh_load_u64((void*)&arg0->f_0);
+        tmp_401353_8_1 = r2sleigh_load_u64((void*)&arg0->f_8);
+        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401340:30 covering 1 op (render::values): call to an indirect target: argument slot 1 may hand on what this function was passed */
+        r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x401340:37 covering 1 op (render::values) */
+        tmp_401356_0_1 = r2sleigh_load_u64((void*)&arg0->f_0);
+        tmp_40135c_8_1 = r2sleigh_load_u64((void*)&arg0->f_8);
+        r2sleigh_residual_void(3); /* r2dec gap: CallNotRendered at 0x401340:77 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
+        r2sleigh_store_u32((void*)&arg0->f_48, (uint32_t)0U);
+        return r2sleigh_residual_u64(4);
+    }
+}
+
+EOF
+RUN

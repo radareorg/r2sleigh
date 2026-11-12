@@ -393,6 +393,12 @@ impl Sealed {
             &facts.structured.memory_accesses,
             &machine_context,
         );
+        let member_calls = crate::member_call::collect_member_calls(
+            &self.graph,
+            &facts.call_sites,
+            &aggregate_accesses,
+            &machine_context,
+        );
         // The obligations are about the native instructions of the lift the
         // function came from; a span the obligations cannot bind means the
         // lift and the function disagree.
@@ -416,6 +422,7 @@ impl Sealed {
             facts,
             machine_context,
             aggregate_accesses,
+            member_calls,
             spellings: finish.spellings,
         })
     }

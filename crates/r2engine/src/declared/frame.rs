@@ -245,6 +245,7 @@ pub(crate) fn rebased(
                 ),
             })
             .collect(),
+        member_calls: declared.member_calls,
     }
 }
 

@@ -390,6 +390,7 @@ pub struct SsaArtifact {
     facts: PreparedFunctionFacts,
     machine_context: SourceMachineContext,
     aggregate_accesses: AggregateAccessProjectionFacts,
+    member_calls: crate::member_call::MemberCalls,
     spellings: ArtifactSpellings,
 }
 
@@ -1570,6 +1571,11 @@ impl SsaArtifact {
         &self.aggregate_accesses
     }
 
+    /// Each call site's member-call row, derived beside the projections (S32).
+    pub const fn member_calls(&self) -> &crate::member_call::MemberCalls {
+        &self.member_calls
+    }
+
     pub fn with_assumptions(&self, assumptions: &AssumptionSet) -> Self {
         let mut facts = PreparedFunctionFacts::collect_with_context(
             self.function(),
@@ -1587,6 +1593,12 @@ impl SsaArtifact {
             &facts.structured.memory_accesses,
             &self.machine_context,
         );
+        let member_calls = crate::member_call::collect_member_calls(
+            self.graph(),
+            &facts.call_sites,
+            &aggregate_accesses,
+            &self.machine_context,
+        );
         let mut assumed = Self {
             authority: SsaArtifactAuthority::new(),
             provenance: SsaArtifactProvenance::Manual,
@@ -1596,6 +1608,7 @@ impl SsaArtifact {
             facts,
             machine_context: self.machine_context.clone(),
             aggregate_accesses,
+            member_calls,
             spellings: self.spellings.clone(),
         };
         assumed.seal_dead_frame_stores();
@@ -2264,6 +2277,8 @@ struct CorrelatedCallSites {
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
     /// The sealed import slot each correlated `CallSlot` site calls through.
     slot_targets: BTreeMap<SourceCallSiteIdentity, u64>,
+    /// The sites whose contract is one the snapshot states for a typed member (S32).
+    member_sites: BTreeSet<SourceCallSiteIdentity>,
 }
 
 fn correlate_call_site_interfaces(
@@ -2394,12 +2409,27 @@ fn correlate_call_site_interfaces(
         }
         interfaces.push(interface);
     }
+    // A member's contract states a site no advisory call names; one the source states wins.
+    let members = source.member_calls();
+    let stated = (interfaces.iter())
+        .filter(|_| !members.is_empty())
+        .map(SourceCallSiteInterface::identity)
+        .collect::<BTreeSet<_>>();
+    let mut member_sites = BTreeSet::new();
+    for member in members {
+        let identity = member.identity();
+        if !stated.contains(&identity) {
+            member_sites.insert(identity);
+            interfaces.push(member.clone());
+        }
+    }
     CorrelatedCallSites {
         tail_calls,
         interfaces,
         callee_linkages,
         callee_names,
         slot_targets,
+        member_sites,
     }
 }
 
@@ -2847,6 +2877,8 @@ impl TrustedSsaArtifact {
                 provisional_machine_context.set_callee_statements(&callee_statements);
                 provisional_machine_context
                     .set_slot_targets(correlated_call_sites.slot_targets.clone());
+                provisional_machine_context
+                    .set_member_call_sites(correlated_call_sites.member_sites.clone());
                 provisional_machine_context.set_reentering_callees(reentering.clone());
                 provisional_machine_context.set_unstated_imports(unstated_imports.clone());
                 // The preliminary build may be the one sealed, so it decides under the same premises.
@@ -3016,6 +3048,7 @@ impl TrustedSsaArtifact {
         }
         machine_context.set_callee_statements(&callee_statements);
         machine_context.set_slot_targets(correlated_call_sites.slot_targets);
+        machine_context.set_member_call_sites(correlated_call_sites.member_sites);
         machine_context.set_frame_saves(source.image().frame_saves());
         machine_context.set_accepted_premises(premises.clone());
         machine_context.set_convention(source.shared_convention());

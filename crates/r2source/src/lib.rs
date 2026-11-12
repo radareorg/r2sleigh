@@ -867,8 +867,37 @@ struct SnapshotState {
     call_effect: Option<SourceCallEffect>,
     /// The model `convention_slots` is a view of, where the capture holds one.
     convention: Option<Arc<ConventionModel>>,
+    /// Contracts an earlier seal minted for calls through a typed member (S32), one per site.
+    member_calls: Box<[SourceCallSiteInterface]>,
     captured_fields: CapturedSourceFields,
     diagnostics: DiagnosticIdentity,
+}
+
+/// Which addresses a body's blocks cover: each block's start, sorted, with the furthest end any
+/// block starting at or before it reaches. Built in O(B log B); each lookup is O(log B).
+struct BlockSpans(Vec<(u64, u64)>);
+
+impl BlockSpans {
+    fn of(blocks: &[OwnedFunctionBlock]) -> Self {
+        let mut spans = (blocks.iter())
+            .map(|block| {
+                let size = u64::try_from(block.bytes.len()).unwrap_or(u64::MAX);
+                (block.address, block.address.saturating_add(size))
+            })
+            .collect::<Vec<_>>();
+        spans.sort_unstable();
+        let mut furthest = 0;
+        for span in &mut spans {
+            furthest = furthest.max(span.1);
+            span.1 = furthest;
+        }
+        Self(spans)
+    }
+
+    fn covers(&self, at: u64) -> bool {
+        let before = self.0.partition_point(|(start, _)| *start <= at);
+        before > 0 && at < self.0[before - 1].1
+    }
 }
 
 /// One opaque, deeply owned, immutable source transaction.
@@ -1018,6 +1047,7 @@ impl OwnedFunctionSnapshot {
             convention_slots,
             call_effect,
             convention: None,
+            member_calls: Box::default(),
             captured_fields,
             diagnostics,
         })))
@@ -1114,6 +1144,31 @@ impl OwnedFunctionSnapshot {
         self
     }
 
+    /// The same capture stating a contract for each call through a typed member. Each is about
+    /// this revision and an instruction of the body, and names its site once. O(n log n).
+    pub(crate) fn with_member_calls(
+        mut self,
+        calls: Vec<SourceCallSiteInterface>,
+    ) -> Result<Self, SnapshotValidationError> {
+        let mut sites = BTreeSet::new();
+        let spans = BlockSpans::of(&self.0.image.blocks);
+        let valid = calls.iter().all(|call| {
+            call.revision_identity() == &*self.0.source_revision_identity
+                && spans.covers(call.identity().instruction())
+                && sites.insert(call.identity())
+        });
+        if !valid {
+            return Err(SnapshotValidationError::InvalidAdvisoryCall);
+        }
+        Arc::make_mut(&mut self.0).member_calls = calls.into_boxed_slice();
+        Ok(self)
+    }
+
+    /// The contracts an earlier seal minted for calls through a typed member.
+    pub fn member_calls(&self) -> &[SourceCallSiteInterface] {
+        &self.0.member_calls
+    }
+
     pub fn captured_fields(&self) -> CapturedSourceFields {
         self.0.captured_fields
     }
@@ -1150,6 +1205,23 @@ impl Eq for OwnedFunctionSnapshot {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Block spans answer from one sorted index, out of order and with a block nested in another.
+    #[test]
+    fn block_spans_cover_each_block_and_nothing_between() {
+        let block = |address, size: usize| OwnedFunctionBlock {
+            address,
+            bytes: Arc::from(vec![0x90; size]),
+            successors: Box::new([]),
+            switch_instruction: None,
+            transfer_unresolved: false,
+        };
+        let spans = BlockSpans::of(&[block(0x1020, 4), block(0x1000, 0x10), block(0x1004, 2)]);
+        let covered = [0x1000, 0x1005, 0x100f, 0x1020, 0x1023].map(|at| spans.covers(at));
+        assert_eq!(covered, [true; 5]);
+        let outside = [0xfff, 0x1010, 0x101f, 0x1024].map(|at| spans.covers(at));
+        assert_eq!(outside, [false; 4]);
+    }
 
     fn snapshot() -> OwnedFunctionSnapshot {
         OwnedFunctionSnapshot::from_captured_parts(

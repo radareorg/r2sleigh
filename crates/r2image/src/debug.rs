@@ -543,6 +543,15 @@ impl Reader<'_, '_, '_> {
         .ok()
     }
 
+    /// A subprogram's or subroutine type's `DW_AT_calling_convention`; none is `Normal`.
+    fn convention(&mut self, die: Die) -> StatedConvention {
+        // gimli reads the attribute as its own variant, which has no `udata_value`.
+        match self.attr(die, gimli::DW_AT_calling_convention) {
+            Some((_, AttributeValue::CallingConvention(code))) => StatedConvention::of(code.0),
+            _ => StatedConvention::Normal,
+        }
+    }
+
     fn code(&mut self, die: Die) -> Type {
         let mut parameters = Vec::new();
         let mut variadic = false;
@@ -560,6 +569,7 @@ impl Reader<'_, '_, '_> {
             parameters,
             variadic,
             prototyped,
+            convention: self.convention(die),
         })
     }
 }
@@ -700,10 +710,7 @@ impl Reader<'_, '_, '_> {
             // next function's rather than this one's.
             noreturn: self.flag(die, gimli::DW_AT_noreturn),
             // gimli reads the attribute as its own variant, which has no `udata_value`.
-            convention: match self.attr(die, gimli::DW_AT_calling_convention) {
-                Some((_, AttributeValue::CallingConvention(code))) => StatedConvention::of(code.0),
-                _ => StatedConvention::Normal,
-            },
+            convention: self.convention(die),
             frame_base,
             locals,
         };

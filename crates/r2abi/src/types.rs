@@ -123,6 +123,8 @@ pub struct Signature {
     /// Whether the parameters are stated at all. `int f()` in C, or a
     /// declaration that says only that something is a function, states none.
     pub prototyped: bool,
+    /// The convention the type states (`DW_AT_calling_convention` on a subroutine type).
+    pub convention: crate::StatedConvention,
 }
 
 /// The qualifiers on one type: which never change its layout, and which a
@@ -574,6 +576,7 @@ mod tests {
             parameters: vec![int, int],
             variadic: false,
             prototyped: true,
+            convention: crate::StatedConvention::Normal,
         }));
         let pointer = graph.add(Type::Pointer { target: code });
         assert_eq!(
