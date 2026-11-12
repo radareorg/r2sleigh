@@ -219,6 +219,12 @@ impl Definitions {
         }
     }
 
+    /// The absolute address a root and offset are, where the root is a constant.
+    pub(crate) fn absolute(&self, func: &SSAFunction, (root, offset): Affine) -> Option<u64> {
+        let base = self.constant(func, root)?;
+        u64::try_from(base.wrapping_add(offset)).ok()
+    }
+
     /// The sources of the merge defining `var`, empty where no merge does.
     pub(crate) fn phi_sources(&self, var: VarId) -> &[VarId] {
         self.phis.get(var).map_or(&[], Vec::as_slice)

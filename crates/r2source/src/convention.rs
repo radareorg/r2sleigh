@@ -11,7 +11,8 @@ use crate::contracts::{
 };
 use crate::{
     CanonicalStorageId, SourceBoundaryReads, SourceCallEffect, SourceCallRegisterEffect,
-    SourceConventionSlots, SourceEntryStack, SourceMachineRolesError, SourceRegisterSaveArea,
+    SourceConventionSlots, SourceEntryStack, SourceLinkedGuard, SourceMachineRolesError,
+    SourceRegisterSaveArea,
     SourceSecurityCookie, SourceStackArgumentPlacement, SourceStackGuard,
 };
 
@@ -205,6 +206,8 @@ pub struct BoundaryForms {
     pub stack_bound: Option<SourceStackGuard>,
     /// The `/GS` cookie the PE load configuration names.
     pub security_cookie: Option<SourceSecurityCookie>,
+    /// The library's global stack protector word, where the container binds it.
+    pub linked_guard: Option<SourceLinkedGuard>,
 }
 
 /// One convention on one target, every register resolved: what `ConventionModel::new` checks.

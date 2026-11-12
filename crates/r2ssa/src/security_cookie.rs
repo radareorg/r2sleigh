@@ -38,7 +38,7 @@ pub(crate) fn proves_check(func: &SSAFunction, machine: &SourceMachineContext) -
     };
     let reads_cookie = |var: VarId| {
         defs.load(func, var).is_some_and(|(_, address, width)| {
-            absolute(func, &defs, address) == Some(cookie.address) && width == cookie.width
+            defs.absolute(func, address) == Some(cookie.address) && width == cookie.width
         })
     };
     let checks = (func.block_addrs().iter().copied())
@@ -159,12 +159,6 @@ fn comparison(
         },
         (left, right),
     ))
-}
-
-/// An address that is a constant: its root a literal plus its offset.
-fn absolute(func: &SSAFunction, defs: &Definitions, (root, offset): Affine) -> Option<u64> {
-    let base = defs.constant(func, root)?;
-    u64::try_from(base.wrapping_add(offset)).ok()
 }
 
 /// Every block reached from `from`, itself included. O(blocks + edges).
@@ -561,7 +555,7 @@ impl Context<'_> {
     /// The read of the cookie `var` is, through copies.
     fn cookie_read(&self, var: VarId) -> Option<OpId> {
         let (load, address, width) = self.defs.load(self.func, var)?;
-        (absolute(self.func, self.defs, address) == Some(self.cookie.address)
+        (self.defs.absolute(self.func, address) == Some(self.cookie.address)
             && width == self.cookie.width)
             .then_some(load)
     }

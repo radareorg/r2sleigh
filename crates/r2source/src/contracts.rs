@@ -4122,6 +4122,17 @@ pub struct SourceSecurityCookie {
     pub width: u32,
 }
 
+/// A stack protector's global word where the container binds it (`r2abi::GuardRow::LinkedGlobal`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceLinkedGuard {
+    /// The copy of it in this image (`R_*_COPY`), read at its own address.
+    pub copy: Option<u64>,
+    /// Each sealed word the loader writes its address into, ascending.
+    pub slots: Box<[u64]>,
+    pub slot_width: u32,
+    pub width: u32,
+}
+
 /// Memory at a constant offset from a register's entry value: a stack protector's guard, or a
 /// convention's stack bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

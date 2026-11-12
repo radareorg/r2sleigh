@@ -217,6 +217,7 @@ mod tests {
                 guard: None,
                 stack_bound: None,
                 security_cookie: None,
+                linked_guard: None,
             },
             refused: None,
         })

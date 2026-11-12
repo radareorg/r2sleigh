@@ -244,14 +244,20 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Convention {
             .map_err(|why| NativeRefusal::Unassembled(why.clone()))?;
         let container = inputs.source.container();
         let (arch, bits) = (&machines.machine.arch, container.arch.bits);
+        let library = c_library(container);
+        let guards = crate::native::ContainerGuards {
+            cookie: container.security_cookie,
+            linked: match r2abi::guard_row(&arch.name, bits, library) {
+                Some(r2abi::GuardRow::LinkedGlobal(row)) => {
+                    crate::stated::linked_guard(container, row, bits / 8)
+                }
+                _ => None,
+            },
+        };
         let model = crate::native::convention_model(
             arch,
             bits,
-            (
-                kernel(container),
-                c_library(container),
-                container.security_cookie,
-            ),
+            (kernel(container), library, guards),
             &assembled.compiler,
             id.row(),
         );

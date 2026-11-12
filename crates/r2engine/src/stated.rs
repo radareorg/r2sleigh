@@ -45,6 +45,44 @@ pub fn sealed_import(program: &dyn crate::body::Program, slot: u64) -> Option<&s
     (word && kept).then_some(symbol.as_str())
 }
 
+/// Where the container binds a library's global stack guard (doc/adr-call-boundary.md, "S27 as
+/// built"): a sealed word the loader writes its address into, and its one copy here (`R_*_COPY`).
+/// A defined symbol of that name binds nothing. O(W + R) in the loader's writes and records.
+pub fn linked_guard(
+    container: &crate::program::Container,
+    guard: &r2abi::LinkedGuard,
+    pointer: u32,
+) -> Option<r2source::SourceLinkedGuard> {
+    use r2abi::statement::{Applies, Encoding, WriteKind};
+    let slots = (container.loader_writes.iter())
+        .filter(|write| {
+            matches!(&write.kind, WriteKind::Import { symbol, .. } if symbol == guard.symbol)
+                && write.encoding == Encoding::Word
+                && write.width == u64::from(pointer)
+                && container.permanence(&(write.place..write.end()))
+                    != crate::program::Permanence::Writable
+        })
+        .map(|write| write.place)
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut copies = (container.relocations.iter()).filter(|record| {
+        record.applies == Applies::Copy
+            && record.width == u64::from(guard.width)
+            && record
+                .symbol
+                .as_ref()
+                .is_some_and(|symbol| &*symbol.name == guard.symbol)
+    });
+    let copy = copies.next().map(|record| record.vaddr);
+    // Two copies of one object state no one place for it.
+    let copy = copy.filter(|_| copies.next().is_none());
+    (copy.is_some() || !slots.is_empty()).then(|| r2source::SourceLinkedGuard {
+        copy,
+        slots: slots.into_iter().collect(),
+        slot_width: pointer,
+        width: guard.width,
+    })
+}
+
 /// Whether the loader writes any byte of `range`: one search.
 pub fn written(program: &dyn Program, range: &Range<u64>) -> bool {
     r2abi::statement::writes_any(program.loader_writes(), range)

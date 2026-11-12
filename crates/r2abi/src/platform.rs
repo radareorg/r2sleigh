@@ -148,10 +148,43 @@ const I386_LINUX_GUARD: StackGuard = StackGuard {
 pub enum GuardRow {
     /// A word at a constant offset from the thread pointer.
     ThreadSlot(StackGuard),
+    /// A global the library defines; only a binding the container states places it.
+    LinkedGlobal(LinkedGuard),
     /// The word the PE load configuration's `SecurityCookie` names (Microsoft PE format,
     /// "Load Configuration Layout"); its address is the container's.
     LoadConfigCookie,
 }
+
+/// A stack protector's global word, by the symbol a C library defines it under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LinkedGuard {
+    pub symbol: &'static str,
+    pub width: u32,
+    pub citation: &'static str,
+}
+
+/// GCC AArch64 reads the global (`-mstack-protector-guard=global`, its default), LLVM too except on
+/// Android, where it reads `tpidr_el0 + 0x28` (no row yet; doc/adr-call-boundary.md, S27).
+const AARCH64_GLIBC_GUARD: GuardRow = GuardRow::LinkedGlobal(LinkedGuard {
+    symbol: "__stack_chk_guard",
+    width: 8,
+    citation: "glibc elf/rtld.c: `uintptr_t __stack_chk_guard attribute_relro` where the thread \
+        control block keeps no guard (sysdeps/aarch64/nptl/tls.h); ld.so exports it at \
+        GLIBC_2.17; GCC gcc/config/aarch64/aarch64.opt: -mstack-protector-guard=global",
+});
+const AARCH64_MUSL_GUARD: GuardRow = GuardRow::LinkedGlobal(LinkedGuard {
+    symbol: "__stack_chk_guard",
+    width: 8,
+    citation: "musl src/env/__stack_chk_fail.c: `uintptr_t __stack_chk_guard`; GCC \
+        gcc/config/aarch64/aarch64.opt: -mstack-protector-guard=global",
+});
+const AARCH64_BIONIC_GUARD: GuardRow = GuardRow::LinkedGlobal(LinkedGuard {
+    symbol: "__stack_chk_guard",
+    width: 8,
+    citation: "bionic libc/bionic/__libc_init_main_thread.cpp: `uintptr_t __stack_chk_guard`, \
+        which libc.so exports; GCC gcc/config/aarch64/aarch64.opt: \
+        -mstack-protector-guard=global",
+});
 
 const X86_64_GLIBC_GUARD: GuardRow = GuardRow::ThreadSlot(X86_64_LINUX_GUARD);
 const I386_GLIBC_GUARD: GuardRow = GuardRow::ThreadSlot(I386_LINUX_GUARD);
@@ -171,8 +204,7 @@ const I386_BIONIC_GUARD: GuardRow = GuardRow::ThreadSlot(StackGuard {
 });
 const UCRT_GUARD: GuardRow = GuardRow::LoadConfigCookie;
 
-/// The C library's guard row for an architecture. AArch64 glibc and bionic keep it in the global
-/// `__stack_chk_guard`, which no register addresses; a library no row cites states none.
+/// The C library's guard row for an architecture; a library no row cites states none.
 pub fn guard_row(arch: &str, bits: u32, library: CLibrary) -> Option<&'static GuardRow> {
     match (crate::family(arch), bits, library) {
         (Some("x86"), 64, CLibrary::Glibc | CLibrary::Musl) => Some(&X86_64_GLIBC_GUARD),
@@ -180,6 +212,9 @@ pub fn guard_row(arch: &str, bits: u32, library: CLibrary) -> Option<&'static Gu
         (Some("x86"), 64, CLibrary::Bionic) => Some(&X86_64_BIONIC_GUARD),
         (Some("x86"), 32, CLibrary::Bionic) => Some(&I386_BIONIC_GUARD),
         (Some("x86"), 64, CLibrary::Ucrt) => Some(&UCRT_GUARD),
+        (Some("arm"), 64, CLibrary::Glibc) => Some(&AARCH64_GLIBC_GUARD),
+        (Some("arm"), 64, CLibrary::Musl) => Some(&AARCH64_MUSL_GUARD),
+        (Some("arm"), 64, CLibrary::Bionic) => Some(&AARCH64_BIONIC_GUARD),
         _ => None,
     }
 }
@@ -315,6 +350,20 @@ mod tests {
         );
         assert!(wide.citation.contains("bionic") && narrow.citation.contains("bionic"));
         assert_eq!(slot("aarch64", 64), None);
+    }
+
+    /// AArch64 glibc, musl and bionic keep the canary in a global the container must bind.
+    #[test]
+    fn aarch64_states_a_linked_guard() {
+        for library in [CLibrary::Glibc, CLibrary::Musl, CLibrary::Bionic] {
+            let Some(GuardRow::LinkedGlobal(guard)) = guard_row("aarch64", 64, library) else {
+                panic!("{library:?} states a linked guard");
+            };
+            assert_eq!((guard.symbol, guard.width), ("__stack_chk_guard", 8));
+            assert!(!guard.citation.is_empty());
+        }
+        assert_eq!(guard_row("aarch64", 64, CLibrary::Unknown), None);
+        assert_eq!(guard_row("arm", 32, CLibrary::Glibc), None);
     }
 
     /// MXCSR's control bits are callee-saved and its status bits are not, so of

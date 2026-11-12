@@ -123,7 +123,7 @@ impl Machine {
             let model = convention_model(
                 &embedded.arch,
                 bits,
-                (kernel, library, None),
+                (kernel, library, Default::default()),
                 &compiler,
                 id.row(),
             );
@@ -7426,7 +7426,7 @@ fn go_machine_on(arch: &str) -> Machine {
     let model = convention_model(
         &machine.embedded.arch,
         64,
-        (Kernel::Linux, CLibrary::Glibc, None),
+        (Kernel::Linux, CLibrary::Glibc, Default::default()),
         &compiler,
         id.row(),
     )

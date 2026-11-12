@@ -2812,10 +2812,19 @@ fn register_named(arch: &ArchSpec, storage: CanonicalStorageId) -> Option<&str> 
 ///
 /// A location or result register the architecture lacks refuses the model; a preserved,
 /// killed or reserved one it lacks costs precision, never soundness, and is left out.
+/// Where the container places the guard words a C library's row names; the row says which applies.
+#[derive(Debug, Clone, Default)]
+pub struct ContainerGuards {
+    /// The PE load configuration's `/GS` cookie.
+    pub cookie: Option<u64>,
+    /// The `GuardRow::LinkedGlobal` word, where the container binds it (`stated::linked_guard`).
+    pub linked: Option<r2source::SourceLinkedGuard>,
+}
+
 pub fn convention_model(
     arch: &ArchSpec,
     bits: u32,
-    (kernel, library, cookie): (r2abi::Kernel, r2abi::CLibrary, Option<u64>),
+    (kernel, library, guards): (r2abi::Kernel, r2abi::CLibrary, ContainerGuards),
     profile: &LanguageProfile,
     row: &r2abi::ConventionRow,
 ) -> Result<ConventionModel, NativeRefusal> {
@@ -2840,7 +2849,7 @@ pub fn convention_model(
         likely_trash: at.lanes(&prototype.likely_trash),
         reserved,
         link,
-        forms: forms(&at, prototype, row, bits, (library, cookie)),
+        forms: forms(&at, prototype, row, bits, (library, guards)),
         refused: row.refused,
     };
     ConventionModel::new(parts).map_err(|why| NativeRefusal::Machine(why.why()))
@@ -3163,7 +3172,7 @@ fn forms(
     prototype: &r2sleigh_lift::profile::ProtoModel,
     row: &r2abi::ConventionRow,
     bits: u32,
-    (library, cookie): (r2abi::CLibrary, Option<u64>),
+    (library, guards): (r2abi::CLibrary, ContainerGuards),
 ) -> BoundaryForms {
     let guard = |guard: Option<&r2abi::StackGuard>| {
         let guard = guard?;
@@ -3199,12 +3208,16 @@ fn forms(
         stack_bound: guard(row.stack_bound.as_ref()),
         // The row says the C library checks a load-config cookie; the container says where.
         security_cookie: matches!(guard_row, Some(r2abi::GuardRow::LoadConfigCookie))
-            .then_some(cookie)
+            .then_some(guards.cookie)
             .flatten()
             .map(|address| r2source::SourceSecurityCookie {
                 address,
                 width: bits / 8,
             }),
+        // The row names the library's global; only the container's binding places it.
+        linked_guard: matches!(guard_row, Some(r2abi::GuardRow::LinkedGlobal(_)))
+            .then_some(guards.linked)
+            .flatten(),
     }
 }
 
@@ -3358,7 +3371,11 @@ mod tests {
         let convention = convention_model(
             &embedded.arch,
             64,
-            (r2abi::Kernel::Unknown, r2abi::CLibrary::Unknown, None),
+            (
+                r2abi::Kernel::Unknown,
+                r2abi::CLibrary::Unknown,
+                Default::default(),
+            ),
             &compiler,
             r2abi::ConventionId::SysVAmd64.row(),
         )
