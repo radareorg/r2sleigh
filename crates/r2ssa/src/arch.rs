@@ -159,21 +159,22 @@ impl Arch {
         self.0.result_slot
     }
 
-    /// What a call under `model` reads without an operand naming it; under none, every
-    /// outermost register (ruling 2.1: no model states no argument dead).
+    /// What a call under `model` reads without an operand naming it; under none or a refused
+    /// effect, every outermost register (ruling 2.1: no model states no argument dead).
     pub fn call_reads<'a>(
         &'a self,
         model: Option<&'a ConventionModel>,
     ) -> &'a [CanonicalStorageId] {
-        model.map_or(self.outermost_registers(), ConventionModel::call_reads)
+        (model.and_then(ConventionModel::call_reads)).unwrap_or(self.outermost_registers())
     }
 
-    /// What a call under `model` names clobbered; under none, every outermost register.
+    /// What a call under `model` names clobbered; under none or a refused effect, every outermost
+    /// register.
     pub fn call_clobbered<'a>(
         &'a self,
         model: Option<&'a ConventionModel>,
     ) -> &'a [CanonicalStorageId] {
-        model.map_or(self.outermost_registers(), ConventionModel::clobbered)
+        (model.and_then(ConventionModel::clobbered)).unwrap_or(self.outermost_registers())
     }
 
     /// What a call under `model` does to `storage`; under none it may leave anything there.

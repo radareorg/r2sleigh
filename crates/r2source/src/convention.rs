@@ -250,8 +250,8 @@ impl Deref for ConventionModel {
     }
 }
 
-/// Why `ConventionModel::new` refuses a model: an answer it would give is ambiguous or
-/// contradicts another.
+/// Why `ConventionModel::new` refuses a model (ambiguous positions), or refuses only its effect
+/// (`effect_refused`: two duties of one register contradict).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelRefusal {
     /// A location, lane or result that is no register.
@@ -285,6 +285,13 @@ struct Derived {
     arguments: [Box<[CanonicalStorageId]>; 2],
     /// Each argument register and first typed result with its class, sorted.
     roles: Box<[(CanonicalStorageId, SlotClass)]>,
+    /// What a call does, or why the convention states nothing consistent about it.
+    effect: Result<Effect, ModelRefusal>,
+}
+
+/// What a call does to the registers and reads of them, each set sorted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Effect {
     clobbered: Box<[CanonicalStorageId]>,
     preserved: Box<[CanonicalStorageId]>,
     reserved: Box<[CanonicalStorageId]>,
@@ -293,8 +300,8 @@ struct Derived {
 }
 
 impl Derived {
-    /// The checks `convention_slots` and `call_effect` ran, then the index; O(L log L) in the
-    /// model's locations and lanes.
+    /// The checks `convention_slots` ran, then the index; O(L log L) in the model's locations
+    /// and lanes. The effect's own checks refuse only the effect, as `call_effect` did.
     fn of(parts: &ConventionParts) -> Result<Self, ModelRefusal> {
         let register = |storage: &CanonicalStorageId| valid_register_storage(*storage);
         let TypedResults {
@@ -317,6 +324,24 @@ impl Derived {
                 return Err(ModelRefusal::UnpairedSecondResult);
             }
         }
+        let mut roles = (integers.iter().chain(&integer))
+            .map(|storage| (*storage, SlotClass::Integer))
+            .chain((floats.iter().chain(&float)).map(|storage| (*storage, SlotClass::Float)))
+            .collect::<Vec<_>>();
+        roles.sort_unstable();
+        roles.dedup();
+        Ok(Self {
+            arguments: [integers, floats],
+            roles: roles.into_boxed_slice(),
+            effect: Effect::of(parts),
+        })
+    }
+}
+
+impl Effect {
+    /// Clobbered is every location a call reads or writes, `killedbycall` and the link, less
+    /// what is preserved or reserved; the checks are `call_effect`'s.
+    fn of(parts: &ConventionParts) -> Result<Self, ModelRefusal> {
         let inputs = (parts.register_locations())
             .filter_map(Location::register)
             .chain(parts.hidden_return)
@@ -339,7 +364,7 @@ impl Derived {
         let clobbered = sorted_storages(clobbered);
         let mut held = (call_reads.iter().chain(&result_reads).chain(&clobbered))
             .chain(preserved.iter().chain(&reserved));
-        if !held.all(register) {
+        if !held.all(|storage| valid_register_storage(*storage)) {
             return Err(ModelRefusal::NotARegister);
         }
         if storage_sets_overlap(&clobbered, &preserved)
@@ -354,15 +379,7 @@ impl Derived {
         if guard || (parts.forms.stack_bound).is_some_and(|bound| unkept(bound.base)) {
             return Err(ModelRefusal::UnkeptBase);
         }
-        let mut roles = (integers.iter().chain(&integer))
-            .map(|storage| (*storage, SlotClass::Integer))
-            .chain((floats.iter().chain(&float)).map(|storage| (*storage, SlotClass::Float)))
-            .collect::<Vec<_>>();
-        roles.sort_unstable();
-        roles.dedup();
         Ok(Self {
-            arguments: [integers, floats],
-            roles: roles.into_boxed_slice(),
             clobbered,
             preserved,
             reserved,
@@ -492,12 +509,21 @@ impl ConventionModel {
         }
     }
 
+    /// Why the convention states no consistent call effect, where it does not; then every answer
+    /// about a call is the one for no model (ruling 2.1).
+    pub fn effect_refused(&self) -> Option<ModelRefusal> {
+        self.index.effect.as_ref().err().copied()
+    }
+
     /// What a call does to a storage: reserved where every byte is, preserved where every byte
-    /// is, else clobbered, since a part left uncovered may come back changed. O(L).
+    /// is, else clobbered, as is every storage under a refused effect. O(L).
     pub fn effect_on(&self, storage: CanonicalStorageId) -> SourceCallRegisterEffect {
-        if covers_every_byte(&self.index.reserved, storage) {
+        let Ok(effect) = &self.index.effect else {
+            return SourceCallRegisterEffect::Clobbered;
+        };
+        if covers_every_byte(&effect.reserved, storage) {
             SourceCallRegisterEffect::SystemReserved
-        } else if covers_every_byte(&self.index.preserved, storage) {
+        } else if covers_every_byte(&effect.preserved, storage) {
             SourceCallRegisterEffect::Preserved
         } else {
             SourceCallRegisterEffect::Clobbered
@@ -516,31 +542,50 @@ impl ConventionModel {
         self.effect_on(storage) == SourceCallRegisterEffect::SystemReserved
     }
 
-    /// Every location a call reads or writes, `killedbycall` and the link, less what is
-    /// preserved or reserved; sorted.
-    pub fn clobbered(&self) -> &[CanonicalStorageId] {
-        &self.index.clobbered
+    /// Every location a call reads or writes, `killedbycall` and the link, less what is kept;
+    /// none under a refused effect, where every register is clobbered.
+    pub fn clobbered(&self) -> Option<&[CanonicalStorageId]> {
+        self.index
+            .effect
+            .as_ref()
+            .ok()
+            .map(|effect| &*effect.clobbered)
     }
 
-    /// Each preserved lane as a storage of its own, sorted.
+    /// Each preserved lane as a storage of its own; none under a refused effect.
     pub fn preserved_registers(&self) -> &[CanonicalStorageId] {
-        &self.index.preserved
+        self.index
+            .effect
+            .as_ref()
+            .map_or(&[], |effect| &effect.preserved)
     }
 
-    /// Each lane the platform reserves to the system as a storage of its own, sorted.
+    /// Each lane reserved to the system as a storage of its own; none under a refused effect.
     pub fn system_reserved(&self) -> &[CanonicalStorageId] {
-        &self.index.reserved
+        self.index
+            .effect
+            .as_ref()
+            .map_or(&[], |effect| &effect.reserved)
     }
 
-    /// What a call may read without an operand naming it: every argument register, the hidden
-    /// result pointer and the count register; sorted.
-    pub fn call_reads(&self) -> &[CanonicalStorageId] {
-        &self.index.call_reads
+    /// What a call reads without an operand naming it: the argument registers, the hidden result
+    /// pointer and the count register; none under a refused effect, where it reads every one.
+    pub fn call_reads(&self) -> Option<&[CanonicalStorageId]> {
+        self.index
+            .effect
+            .as_ref()
+            .ok()
+            .map(|effect| &*effect.call_reads)
     }
 
-    /// What a return hands back: the specification's result registers, sorted.
-    pub fn result_reads(&self) -> &[CanonicalStorageId] {
-        &self.index.result_reads
+    /// What a return hands back, the specification's result registers; none under a refused
+    /// effect.
+    pub fn result_reads(&self) -> Option<&[CanonicalStorageId]> {
+        self.index
+            .effect
+            .as_ref()
+            .ok()
+            .map(|effect| &*effect.result_reads)
     }
 
     /// The candidate slots: a view of this model, as the snapshot carries it.
@@ -760,26 +805,38 @@ mod tests {
         assert!(model.preserves(register(0x18, 4)));
         assert!(model.clobbers(register(0x18, 16)), "half preserved");
         let clobbered = [register(0, 8), register(0x30, 8), register(0x38, 8)];
-        assert_eq!(model.clobbered(), clobbered);
-        assert_eq!(model.call_reads(), &clobbered[1..]);
-        assert_eq!(model.result_reads(), [register(0, 8)]);
+        assert_eq!(model.clobbered(), Some(&clobbered[..]));
+        assert_eq!(model.call_reads(), Some(&clobbered[1..]));
+        assert_eq!(model.result_reads(), Some(&[register(0, 8)][..]));
     }
 
-    /// A model whose answers would contradict each other or be ambiguous is refused, not built.
+    /// Ambiguous positions refuse the model. A contradictory effect refuses only the effect, so
+    /// every call under it is clobbering.
     #[test]
-    fn an_ambiguous_or_contradictory_model_is_refused() {
-        let new = |parts| ConventionModel::new(parts).err();
-        let twice = new(parts(&[0x38, 0x38], &[], &[]));
-        assert_eq!(twice, Some(ModelRefusal::RegisterTwice));
-        let both = new(parts(&[0x38], &[0x18], &[0x18]));
-        assert_eq!(both, Some(ModelRefusal::Contradictory));
+    fn an_ambiguous_model_is_refused_and_a_contradictory_effect_clobbers_everything() {
+        let twice = ConventionModel::new(parts(&[0x38, 0x38], &[], &[]));
+        assert_eq!(twice.err(), Some(ModelRefusal::RegisterTwice));
+        let refused = |parts| {
+            ConventionModel::new(parts)
+                .expect("a model")
+                .effect_refused()
+        };
+        let both = parts(&[0x38], &[0x18], &[0x18]);
+        assert_eq!(refused(both.clone()), Some(ModelRefusal::Contradictory));
         let mut unkept = parts(&[0x38], &[], &[]);
         unkept.forms.guard = Some(SourceStackGuard {
             base: register(0x20, 8),
             offset: 0x28,
             width: 8,
         });
-        assert_eq!(new(unkept), Some(ModelRefusal::UnkeptBase));
+        assert_eq!(refused(unkept), Some(ModelRefusal::UnkeptBase));
+        let model = ConventionModel::new(both).expect("a model");
+        assert!(model.clobbers(register(0x18, 8)));
+        assert!(model.call_reads().is_none() && model.preserved_registers().is_empty());
+        assert_eq!(
+            model.argument(SlotClass::Integer, 0),
+            Some(register(0x38, 8))
+        );
     }
 
     /// A join names each argument register once, reads what either reads, keeps what both keep.
@@ -792,6 +849,7 @@ mod tests {
         assert_eq!(join.arguments(SlotClass::Integer), named);
         assert!(join.preserves(register(0x18, 8)));
         assert!(join.clobbers(register(0x28, 8)), "only one keeps it");
-        assert!(join.call_reads().contains(&register(0x08, 8)));
+        let reads = join.call_reads().expect("an effect");
+        assert!(reads.contains(&register(0x08, 8)));
     }
 }

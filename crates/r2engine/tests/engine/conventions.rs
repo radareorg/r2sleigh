@@ -417,40 +417,61 @@ fn the_model_answers_every_register_question_its_views_answer() {
 /// and its low half.
 fn agrees(name: &str, model: &ConventionModel, storages: &[r2source::CanonicalStorageId]) {
     let slots = model.convention_slots().expect("the slots");
-    let effect = model.call_effect().expect("the effect");
-    assert_eq!(
-        model.arguments(SlotClass::Integer),
-        slots.argument_slots(),
-        "{name}"
-    );
+    let integers = slots.argument_slots();
+    assert_eq!(model.arguments(SlotClass::Integer), integers, "{name}");
     let floats = slots.float_argument_slots();
     assert_eq!(model.arguments(SlotClass::Float), floats, "{name}");
-    for (at, storage) in slots.argument_slots().iter().enumerate() {
-        assert_eq!(
-            model.argument(SlotClass::Integer, at),
-            Some(*storage),
-            "{name}"
-        );
+    for (at, storage) in integers.iter().enumerate() {
+        let positioned = model.argument(SlotClass::Integer, at);
+        assert_eq!(positioned, Some(*storage), "{name}");
     }
-    assert_eq!(model.clobbered(), effect.clobbered(), "{name}");
-    assert_eq!(model.preserved_registers(), effect.preserved(), "{name}");
-    assert_eq!(model.system_reserved(), effect.system_reserved(), "{name}");
-    assert_eq!(model.call_reads(), effect.reads().call(), "{name}");
-    assert_eq!(model.result_reads(), effect.reads().ret(), "{name}");
     let halves = storages.iter().map(|storage| r2source::CanonicalStorageId {
         size: (storage.size / 2).max(1),
         ..*storage
     });
-    for storage in storages.iter().copied().chain(halves) {
-        assert_eq!(
-            model.effect_on(storage),
-            effect.effect_on(storage),
-            "{name}: {storage:?}"
-        );
-        assert_eq!(
-            model.class_of(storage),
-            slots.class_of(storage),
-            "{name}: {storage:?}"
-        );
+    let storages = storages.iter().copied().chain(halves).collect::<Vec<_>>();
+    for storage in &storages {
+        let class = model.class_of(*storage);
+        assert_eq!(class, slots.class_of(*storage), "{name}: {storage:?}");
     }
+    match model.call_effect() {
+        Ok(effect) => effects_agree(name, model, &effect, &storages),
+        Err(_) => refused_effect_clobbers(name, model, &storages),
+    }
+}
+
+fn effects_agree(
+    name: &str,
+    model: &ConventionModel,
+    effect: &r2source::SourceCallEffect,
+    storages: &[r2source::CanonicalStorageId],
+) {
+    assert_eq!(model.effect_refused(), None, "{name}");
+    assert_eq!(model.clobbered(), Some(effect.clobbered()), "{name}");
+    assert_eq!(model.preserved_registers(), effect.preserved(), "{name}");
+    assert_eq!(model.system_reserved(), effect.system_reserved(), "{name}");
+    assert_eq!(model.call_reads(), Some(effect.reads().call()), "{name}");
+    assert_eq!(model.result_reads(), Some(effect.reads().ret()), "{name}");
+    for storage in storages {
+        let same = model.effect_on(*storage) == effect.effect_on(*storage);
+        assert!(same, "{name}: {storage:?}");
+    }
+}
+
+/// Where the view refused the effect, the model states none and every storage is clobbered.
+fn refused_effect_clobbers(
+    name: &str,
+    model: &ConventionModel,
+    storages: &[r2source::CanonicalStorageId],
+) {
+    assert!(model.effect_refused().is_some(), "{name}");
+    assert!(
+        model.clobbered().is_none() && model.call_reads().is_none(),
+        "{name}"
+    );
+    assert!(model.preserved_registers().is_empty(), "{name}");
+    assert!(
+        storages.iter().all(|storage| model.clobbers(*storage)),
+        "{name}"
+    );
 }
