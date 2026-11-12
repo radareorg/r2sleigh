@@ -440,7 +440,7 @@ Measured, release r2s on the 22 programs built by gcc 13.3 and clang 18.1 (166 b
 - 12 of the 799 extern voids were introduced by #355 (D200): clang `c_cld_chain_*` declared `uint64_t` at base. The other 787 were at base.
 - Every function of the 166 builds: 139 headers move. 24 are source values leaving `void`. 115 are source-void consumers whose return leaves XMM0 as an unstated call left it (`c_v2_chain_lo`: `call p; movsd [sink], xmm0; ret`); `double c(){ double v = p(); sink = v; return v; }` has those bytes, so `Unproven` is the sound header.
 - `scratch_void.py` over the 35 DecBench builds: `void-open` 272 to 249, `void-closed` 4 to 4; each of the 23 lost voids returns XMM0 as a call no contract states left it (zlib's `test_flush` ends `call deflateEnd@plt; ...; ret`, an import with no cited result: section 4, "Imports with an unstated result"). Each is named `moves` in `known.txt`, and the recorded floors fall to 249 and 253 by name.
-- Release cost, Mac `time -l`, median of 3, base `s37-view-lint`: 0pack `pdd @ 0x62ecf0` 15.41 to 15.43 G instructions; pumasim `aa; pdd @ 0x3b6b20` 66.39 to 66.48 G; pumasim `pdd @ 0x23fdf0` 19.91 to 24.45 G, peak 213 to 236 MB. The rise is the root's own result: `Gui::Gui` ends in a call to a mangled Qt import whose result no row states, so it is `Unproven`, not `void`, and demand now reads its return carriers through a 7,165-line body (5 more residuals). The walk itself is not it: restricting it to `Void` decisions left 24.45 G.
+- Release cost, Mac `time -l`, median of 3, base `s37-view-lint`: 0pack `pdd @ 0x62ecf0` 15.41 to 15.43 G instructions; pumasim `aa; pdd @ 0x3b6b20` 66.39 to 66.48 G; pumasim `pdd @ 0x23fdf0` 19.91 to 24.45 G, peak 213 to 236 MB. The root's own result moves (`Gui::Gui` is `Unproven`, 5 more residuals), but the rise is a callee prepared twice: see "The cold step, bisected". Restricting the walk to `Void` decisions left 24.45 G because `0x2312c0` is a `Void` decision.
 - Certification (radare2 ELF bins, 24 binaries, 8 functions): 50 rendered, 30 refused, 0 invented, 0 undefined reads, the same as `s37-view-lint`. Coverage sweep: 560 of 562 rendered, no regression.
 - Census, every `afl` function of the 23 census fixtures: 1 line moves, `code_pointer_table_O0` `_main`'s extern `void _table_dispatch` to `r2sleigh_result_u64`, the callee's own header.
 
@@ -599,13 +599,44 @@ D226 asked for one preparation per function on a cold `pdd`, output byte-identic
   - `stack_protector::decide` proves the check on the SSA function: frame definitions, a slot stored once, both guard reads, under `Premise::UbFreeSource`. A copy of it on lifted blocks is a second owner of that proof, and a weaker pattern names an owner where the proof refuses.
   - The other differences moved with the cut: 7 in cut 1 (6 from walking tail blocks), 5 in cut 2 (4 from taking a merged definition, which the alone read states as a register). The two cuts were not combined, so the count with the 12 set aside is not measured.
 - Stating a different owner set is sound and moves statements: a missed owner leaves `0x35ae60` `Unproven` where S16 resolves it `Void`.
-- S16 against S18 `5fa7c9dc3`, one run each: cold pumasim 24.46 to 24.71 G, 0pack `0x62ecf0` 15.47 to 15.66 G, bash `aa; pdd @ 0x2e630` 14.38 to 14.40 G, pumasim `aa; pdd @ 0x3b6b20` 66.38 to 66.79 G. Under `aa` the alone read is the `CallBoundary` supply (D317) and names the arity owners, so one preparation does not apply there.
+- S16 against S18 `5fa7c9dc3`, one run each (medians of 3 are in "The cold step, bisected"): cold pumasim 24.46 to 24.71 G, 0pack `0x62ecf0` 15.47 to 15.66 G, bash `aa; pdd @ 0x2e630` 14.38 to 14.40 G, pumasim `aa; pdd @ 0x3b6b20` 66.38 to 66.79 G. Under `aa` the alone read is the `CallBoundary` supply (D317) and names the arity owners, so one preparation does not apply there.
 
 The bound stays two preparations per function the `Demand::Result` closure reaches, plus a cycle's rounds.
+
+## The cold step, bisected (2026-11-12)
+
+Every PR head from #360 to #372 was built in release and measured on the Mac (`/usr/bin/time -l`, instructions retired, median of 3, one `heavy.sh` lock).
+
+| PR | Head | pumasim `pdd @ 0x23fdf0` | 0pack `pdd @ 0x62ecf0` | bash `aa; pdd @ 0x2e630` | pumasim `aa; pdd @ 0x3b6b20` |
+|---|---|---|---|---|---|
+| #360 s10-win64 | f26030869 | 19.95 | 15.47 | 14.31 | 66.46 |
+| #365 s37-view-lint | 33222faf2 | 19.91 | 15.38 | 14.34 | 66.40 |
+| #366 s36-false-voids | ec94ec1bf | 24.46 | 15.43 | 14.34 | 66.46 |
+| #370 s18-cited-rows | 5fa7c9dc3 | 24.45 | 15.49 | 14.38 | 66.42 |
+| #371 s16-result-pass | 64d75c27d | 24.67 | 15.68 | 14.44 | 66.88 |
+| #373 master | ca413c45c | 23.94 | 15.44 | 14.42 | 64.46 |
+
+- The step is #366, and f57e1cb57 is its one commit that touches a crate. #361 to #365 and #367 to #370 each move pumasim cold by under 0.04 G.
+- Mechanism, read from `R2DEC_TRACE_REFUSAL=1` evidence at #365 and #366. `0x2312c0` (`Gui::languageChange`, 810 blocks, 17,867 bytes) calls `0x3f0010` (`QStringData::deleteSelf`) at `0x235866`, then runs `mov rax, [rsp+8]; xor rax, fs:[0x28]` at `0x23586b` and returns. Its integer lane holds the stack protector's residue, and XMM0 at its return holds what that call left. At #365 its alone read is `Void`. At #366 the float-lane walk of `unheld_lane_written` makes it `Unproven` with cause `Returned(Direct(0x3f0010))`. `outside_resolved` resolves `0x3f0010` (`Void`) and prepares `0x2312c0` again: 1 SSA build to 2. The call to `0x3534e0` (`QTabWidget::changeTab`, header `r2sleigh_result_u64`) stays unstated in that second build; `0x3534e0` is first prepared at #371, where S16 names it an owner too. `0x2312c0`'s own header is `void` at #365, #366 and master, and the root's extern of it is `uint64_t _ZN3Gui14languageChangeEv(uint64_t)` at every head.
+- Counts on pumasim cold, #365 to #366: interface recoveries 124 to 135, SSA builds 133 to 144, functions prepared 93 to 101 (8 new owners). Built twice goes 37 to 40: `0x2312c0`, `0x2f2cc0`, `0x30f950` and `0x335830` go from once to twice, the new `0x230db0` and `0x35ae60` are built twice, and `0x333bf0`, `0x333d70` and `0x376450` are built once where they were built twice. 0pack `0x62ecf0` builds 19 functions 20 times at both heads.
+- With the float-lane walk skipped, #366 measures 19.99 G (4.47 G lower) and builds 133 times, as #365 does. Its output moves 420 lines against #366: `Gui::Gui` is `void` again. That is a `void` S36 cannot prove (its last call is to an import that states no result), so the walk stays. The 4.47 G is not split per function at #366; S16b's split at S39, with two owners stated, puts `0x2312c0`'s second preparation at 3.4 G.
+- S16's own deltas, #370 to #371. 0pack cold +0.19 G: 19 functions and 20 builds become 24 and 28 (5 new owners; `0x48901c`, `0x49274a` and `0x5f8060` built twice), and `outside_resolved` rises from 0.8% to 1.8% of samples. pumasim `aa; pdd` +0.46 G: the build count is 1,739 against 1,740, so the cost is per preparation; `r2ssa::rename::append_call_boundary_defs` rises from 129 to 173 of 8,068 samples (probably the per-lane call definitions, 0.5% of the run). Sampling noise on the loaded machine is 2%, so that attribution is not exact.
+- Profile of pumasim cold at #371 (samply, 5,034 samples): `outside_resolved` is 16.4% inclusive, about 4.0 G (S16b's timed split gives 4.9 G). Inside it the SSA build (`from_blocks_for_decompile_with_interface_and_control`) is 33%, the final `collected` 21%. Recovery's own fact collection (`collect_with_context` under `recover_interface_inner`) is 19% of the whole run.
+
+What was tried against the 2% gate (20.32 G), and why none lands:
+
+- An ordering hint from a raw backward walk, with today's second preparation kept where the SSA disagrees. It needs an accept check that yields the alone read's owners from the build against the predicted owners. `construct` hands each stated owner's interface and preserved carriers to `CalleeBoundaries`, which the SSA build reads, so that build is a different SSA and cannot state them. Without the check a wrong prediction moves output.
+- The hint's yield, scored on S16b's log at S39 for the shape S36 made: 10 of the 38 second preparations are predicted (258 ms of 299 ms), and 12 functions are predicted an owner the alone read does not name (145 ms of wasted preparation, `0x23da20` alone 95 ms), before the extra owners those predictions resolve.
+- Reusing the alone SSA build for the second preparation saves at most its 33%: about 1.3 G, to 23.4 G. Skipping the first `collect` saves about 1.3 G ("S16b as measured"). Both together miss the gate.
+- The register effect of section 5 does not decide it cold: an inner callee with no held effect overwrites nothing known, and `0x2312c0`'s other owner at S16, `0x3534e0`, makes calls.
+
+Master is lower than #371 through S38's fixed hasher alone; its output on the four commands is byte-identical to #371's and `0x2312c0` is still built twice.
+
+So the second preparation is the cost of a default-deny `void` on the float lane: `0x2312c0` is `void` at #366 only because `0x3f0010` states `Void`. No code changes here, and D226's gate stands failing.
 
 ## Open questions
 
 1. The register effect's survey pass is an estimate (about 1 G per 450 bodies on bash). If it does not bring pumasim `0x3b6b20` to 64.38 G, S31b keeps the lazy ask per call with the same function.
 2. The loader-write refusal (`Unknown` writes) costs no census or DecBench binary once r2image states `Reserved` and `Copy` (S31a as built); MIPS's whole reserved table and undecoded Mach-O chain formats still refuse.
-3. A cold `pdd` prepares a function twice where an owner's statement moves its result (D226). One preparation needs the owners before the first. "S16b as measured" shows no exact source for them below the SSA build. Open: keep the bound of two and regrade D226 against S18, or define owners on the raw walk and judge every moved line. Owner `resolved.rs`.
+3. A cold `pdd` prepares a function twice where an owner's statement moves its result (D226). The step is S36's f57e1cb57 ("The cold step, bisected"). No output-identical one-preparation design was found: the raw walk has no accept check, and SSA reuse saves at most 1.3 G of the 4.75 G. Open for the maintainer: keep the bound of two and regrade D226 against #366 (24.46 G), or fund a design that states a callee's float lane without its resolved body. Owner `resolved.rs`.
 4. Row numbers come from ROADMAP's "Reserved rows" table. This ADR holds D310 to D313.
