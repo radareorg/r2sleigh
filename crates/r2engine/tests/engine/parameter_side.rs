@@ -161,3 +161,34 @@ fn a_whole_slot_read_in_place_is_a_parameter_and_no_floor() {
     let literal = Literal::of_code(CODE, &[("f", BASE, 0x18)]);
     assert_eq!(floor_causes(literal), []);
 }
+
+/// `f`: `call g; add eax, 1; ret`; `g`: `mov eax, [rsp + 8]; ret`, whose parameters are a floor.
+const FLOOR_CALLEE: &[u8] = &[
+    0xe8, 0x0b, 0x00, 0x00, 0x00, // 1000 call 0x1010
+    0x83, 0xc0, 0x01, // 1005 add eax, 1
+    0xc3, // 1008 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1009 padding
+    0x8b, 0x44, 0x24, 0x08, 0xc3, // 1010 mov eax, [rsp + 8]; ret
+];
+
+/// A floor callee mints no call contract, and its caller's extern still spells the result its
+/// header does: one projection, read at both (D225).
+#[test]
+fn a_floor_callee_s_extern_result_is_its_header_s() {
+    let functions = [("f", BASE, 9), ("g", BASE + 0x10, 5)];
+    let mut open = OpenProgram::of(Literal::of_code(FLOOR_CALLEE, &functions));
+    open.analyse_program().expect("it surveys");
+    let mut text = |at| (open.rendered(at).expect("it renders").response.output).into_text();
+    let (caller, callee) = (text(BASE), text(BASE + 0x10));
+    let header =
+        (callee.lines().find(|line| line.contains(" g("))).unwrap_or_else(|| panic!("{callee}"));
+    assert!(callee.contains("a floor"), "{callee}");
+    let result = header.split(" g(").next().unwrap_or_default().trim();
+    let declared = (caller.lines().map(str::trim))
+        .find(|line| line.contains(" g(") && line.ends_with(';') && !line.contains('='))
+        .unwrap_or_else(|| panic!("{caller}"));
+    assert!(
+        declared.starts_with(&format!("{result} g(")),
+        "{caller}\n{callee}"
+    );
+}

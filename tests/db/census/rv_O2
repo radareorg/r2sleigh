@@ -356,7 +356,7 @@ CMDS=aa; pdd @ 0x00001360
 EXPECT=<<EOF
 r2sleigh_result_u64 frame_dummy(void)
 {
-    uint64_t register_tm_clones(void);
+    r2sleigh_result_u64 register_tm_clones(void);
 
     /* r2dec proof: no individual construct is marked; 3 source obligations: 2 rendered, 1 elided, 0 refused; 1 statements rendered; the parameters are a floor: at least 0 (a register past them reaches the call to 0x12e0); the result is unproven (Written): 1 unproven-return carried */
     {
