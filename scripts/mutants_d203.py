@@ -25,7 +25,7 @@ LANES = "crates/r2ssa/src/lanes.rs"
 # (name, edits, whether it must die, why it may live)
 MUTANTS = [
     # A void call's leftover on one path decides every path: `some_path` returns a value on the other.
-    ("some-path-join", [(RECOVER, "ReturnedByCall::Void => continue,",
+    ("some-path-join", [(RECOVER, "ReturnedByCall::Void => {\n                every_path_writes = false;\n                continue;\n            }",
                          "ReturnedByCall::Void => return RecoveredFunctionResult::Void,")], True, ""),
     # `puts` stated void: `tail_puts` forwards its result.
     ("void-row", [(PORTABLE, "func.puts.ret=int\n", "func.puts.ret=void\n")], True, ""),
