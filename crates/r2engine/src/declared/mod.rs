@@ -551,6 +551,7 @@ impl Placement<'_> {
             slot: integer,
             bits: integer.size.saturating_mul(8),
             signed: false,
+            above: r2source::SourceAbove::Undefined,
         };
         let causes = [r2source::SourceResultCause::Unstated];
         let Some(unproven) = r2source::SourceUnprovenResult::of(causes, Some(seed)) else {

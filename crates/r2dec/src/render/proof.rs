@@ -61,6 +61,15 @@ fn proof_columns(
     line
 }
 
+/// The clauses the proof line adds: unassigned reads, the result's open lane and disputes, the
+/// structures laid out, and the tags stated as two kinds.
+type Clauses<'a> = (
+    &'a [UnassignedRead],
+    (bool, &'a [Disputed]),
+    usize,
+    &'a [String],
+);
+
 /// State what the rendering did and did not show; always emitted, since silence would claim
 /// everything was proven (doc/adr-decompiler-rewrite.md, "The proof line").
 pub(crate) fn note_unproven_constructs(
@@ -69,12 +78,7 @@ pub(crate) fn note_unproven_constructs(
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
-    (unassigned, (open_second_result, disputed), laid_out, conflicting): (
-        &[UnassignedRead],
-        (bool, &[Disputed]),
-        usize,
-        &[String],
-    ),
+    (unassigned, (open_second_result, disputed), laid_out, conflicting): Clauses<'_>,
     unproven: Option<Option<r2types::UnprovenCause>>,
     floor: Option<(usize, &r2source::SourceArityFloor)>,
 ) {
