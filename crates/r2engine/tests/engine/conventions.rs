@@ -5,9 +5,7 @@ use r2abi::{CLibrary, ConventionId, Extension, Kernel, SlotClass};
 use r2engine::native::convention_model;
 use r2sleigh_lift::profile::LanguageProfile;
 use r2source::ConventionModel;
-use r2source::convention::{
-    LaneSource, Location, ModelRefusal, OwnedRange, SectionClass, StackOwner,
-};
+use r2source::convention::{LaneSource, Location, OwnedRange, SectionClass, StackOwner};
 
 /// The C library a program on `kernel` reads here: glibc, libSystem or Microsoft's.
 fn library(kernel: Kernel) -> CLibrary {
@@ -328,8 +326,7 @@ const KERNELS: [Kernel; 4] = [
     Kernel::Unknown,
 ];
 
-/// Every model the native path builds on one machine, named `machine/compiler/id/kernel`; a
-/// refusal is only ever the slots' own, never an effect-only check.
+/// Every model the native path builds on one machine, named `machine/compiler/id/kernel`.
 fn built_on(sleigh: &str, bits: u32) -> Vec<(String, ConventionModel)> {
     let machine = r2sleigh_lift::embedded_machine(sleigh).expect("an embedded machine");
     let mut built = Vec::new();
@@ -342,19 +339,12 @@ fn built_on(sleigh: &str, bits: u32) -> Vec<(String, ConventionModel)> {
         for kernel in KERNELS {
             let name = format!("{sleigh}/{compiler}/{:?}/{kernel:?}", row.id);
             let at = (kernel, library(kernel), Some(0x1000));
-            match convention_model(&machine.arch, bits, at, &profile, row) {
-                Ok(model) => built.push((name, model)),
-                Err(why) => refused_by_the_slots(&name, &why.to_string()),
+            if let Ok(model) = convention_model(&machine.arch, bits, at, &profile, row) {
+                built.push((name, model));
             }
         }
     }
     built
-}
-
-fn refused_by_the_slots(name: &str, why: &str) {
-    for effect in [ModelRefusal::Contradictory, ModelRefusal::UnkeptBase] {
-        assert!(!why.contains(effect.why()), "{name}: {why}");
-    }
 }
 
 /// Every join `AnyCall` can form of two models under one kernel agrees with its views.
@@ -376,6 +366,7 @@ fn joins_agree(built: &[(String, ConventionModel)], storages: &[r2source::Canoni
 #[test]
 fn the_model_answers_every_register_question_its_views_answer() {
     let mut specifications = std::collections::BTreeSet::new();
+    let mut refused = Vec::new();
     for (sleigh, bits) in [("x86-64", 64), ("x86", 32), ("aarch64", 64)] {
         let machine = r2sleigh_lift::embedded_machine(sleigh).expect("an embedded machine");
         let storages = (machine.arch.registers.iter())
@@ -391,6 +382,7 @@ fn the_model_answers_every_register_question_its_views_answer() {
             agrees(name, model, &storages);
             let compiler = name.split('/').nth(1).unwrap_or_default();
             specifications.insert(format!("{sleigh}/{compiler}"));
+            refused.extend(model.effect_refused().map(|why| format!("{name}: {why:?}")));
         }
         joins_agree(&built, &storages);
     }
@@ -411,6 +403,13 @@ fn the_model_answers_every_register_question_its_views_answer() {
             "{specification}: {specifications:?}"
         );
     }
+    // D274: Go's arm64 specification names x18 unaffected, which Darwin reserves.
+    let expected = ["GoAmd64", "GoArm64", "GoAmd64Abi0", "GoArm64Abi0"];
+    let expected = expected
+        .iter()
+        .chain(&["GoAmd64Unstated", "GoArm64Unstated"]);
+    let expected = expected.map(|id| format!("aarch64/golang/{id}/Darwin: Contradictory"));
+    assert_eq!(refused, expected.collect::<Vec<_>>());
 }
 
 /// The model and its views give one answer to each question, for every register of the file
@@ -452,6 +451,8 @@ fn effects_agree(
     assert_eq!(model.system_reserved(), effect.system_reserved(), "{name}");
     assert_eq!(model.call_reads(), Some(effect.reads().call()), "{name}");
     assert_eq!(model.result_reads(), Some(effect.reads().ret()), "{name}");
+    assert_eq!(model.stack_guard().as_ref(), effect.stack_guard(), "{name}");
+    assert_eq!(model.stack_bound().as_ref(), effect.stack_bound(), "{name}");
     for storage in storages {
         let same = model.effect_on(*storage) == effect.effect_on(*storage);
         assert!(same, "{name}: {storage:?}");
@@ -470,6 +471,10 @@ fn refused_effect_clobbers(
         "{name}"
     );
     assert!(model.preserved_registers().is_empty(), "{name}");
+    assert!(
+        model.stack_guard().is_none() && model.stack_bound().is_none(),
+        "{name}"
+    );
     assert!(
         storages.iter().all(|storage| model.clobbers(*storage)),
         "{name}"

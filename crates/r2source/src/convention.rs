@@ -578,6 +578,17 @@ impl ConventionModel {
             .map(|effect| &*effect.call_reads)
     }
 
+    /// Where the platform keeps the stack guard, where it states one; none under a refused effect.
+    pub fn stack_guard(&self) -> Option<SourceStackGuard> {
+        self.forms.guard.filter(|_| self.index.effect.is_ok())
+    }
+
+    /// Where the convention keeps the lowest stack pointer, where it states one; none under a
+    /// refused effect.
+    pub fn stack_bound(&self) -> Option<SourceStackGuard> {
+        self.forms.stack_bound.filter(|_| self.index.effect.is_ok())
+    }
+
     /// What a return hands back, the specification's result registers; none under a refused
     /// effect.
     pub fn result_reads(&self) -> Option<&[CanonicalStorageId]> {
@@ -833,6 +844,7 @@ mod tests {
         let model = ConventionModel::new(both).expect("a model");
         assert!(model.clobbers(register(0x18, 8)));
         assert!(model.call_reads().is_none() && model.preserved_registers().is_empty());
+        assert!(model.stack_guard().is_none());
         assert_eq!(
             model.argument(SlotClass::Integer, 0),
             Some(register(0x38, 8))
