@@ -951,6 +951,16 @@ impl SsaGraph {
             .collect()
     }
 
+    /// The call a carrier read (`CallUse`) stands before: the inverse of [`Self::call_boundary_reads`].
+    /// O(reads in its run).
+    pub fn call_of_boundary_read(&self, read: InstId) -> Option<InstId> {
+        let read = self.inst(read)?;
+        let after = self.block(read.block)?.insts.get(read.ordinal + 1..)?;
+        let is_read = |inst: &InstId| matches!(self.op(*inst), Some(SSAOp::CallUse { .. }));
+        let next = *after.iter().find(|inst| !is_read(inst))?;
+        self.op(next).is_some_and(SSAOp::is_call).then_some(next)
+    }
+
     pub fn use_sites(&self, id: ValueId) -> &[UseSite] {
         let start = self.use_offsets.get(id.0 as usize).copied().unwrap_or(0) as usize;
         let end = self

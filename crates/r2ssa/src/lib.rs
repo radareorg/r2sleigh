@@ -171,12 +171,12 @@ pub use machine_context::{
     SourceUnstatedCall, loaded_target_slot, terminal_indirect_loaded_slot,
 };
 pub use obligation::{
-    CanonicalInstructionId, CanonicalInstructionSite, ObligationInventoryFailure,
-    ObligationInventoryFailureKind, SEMANTIC_OBLIGATION_SCHEMA_VERSION,
+    CanonicalInstructionId, CanonicalInstructionSite, NamedObligation, ObligationInventoryFailure,
+    ObligationInventoryFailureKind, SEMANTIC_OBLIGATION_SCHEMA_VERSION, SeedReason,
     SemanticInstructionDisposition, SemanticInstructionState, SemanticMemoryOrdering,
     SemanticObligation, SemanticObligationComponent, SemanticObligationId,
     SemanticObligationInventory, SemanticObligationKind, SemanticSourceSite, SpelledInstruction,
-    SpelledObligation,
+    SpelledObligation, ValueReaders,
 };
 pub use op::{AtomicOp, AtomicUpdateOp, BlockTransferOp, InsertOp, OpTransfer, SSAOp, SelectOp};
 pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats, SccpMode};

@@ -493,26 +493,6 @@ impl Demand<'_> {
     }
 }
 
-/// Each `CALLUSE` of `block` and the call it hands its carrier to, the next in the block.
-fn call_uses(
-    graph: &SsaGraph,
-    block: &r2ssa::GraphBlock,
-    used_by: &mut r2ssa::dense::IdMap<InstId, InstId>,
-) {
-    let mut pending = Vec::new();
-    for inst in block.insts.iter().filter_map(|id| graph.inst(*id)) {
-        match &inst.payload {
-            InstPayload::Op(SSAOp::CallUse { .. }) => pending.push(inst.id),
-            InstPayload::Op(op) if calls::plans_a_call(op) => {
-                for using in pending.drain(..) {
-                    used_by.insert(using, inst.id);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 /// The canonical terms: a value is inlined where it is duplicable, or where its one reader can
 /// move it there; any other is bound.
 fn canonical_roots(
@@ -534,7 +514,7 @@ fn canonical_roots(
             return true;
         }
         let read_by = readers.of(query.value);
-        let (Some(def), [only]) = (graph.def_inst(query.value), read_by.as_slice()) else {
+        let (Some(def), [only]) = (graph.def_inst(query.value), read_by) else {
             return false;
         };
         readers.movable(
@@ -635,67 +615,25 @@ fn discharged_insts<'g>(
     })
 }
 
-/// Who reads each value: its live graph readers, and the returns whose boundary reads it with no
-/// graph use. A dead reader computes nothing, so it does not count.
+/// Who reads each value, as the obligation inventory says ([`r2ssa::ValueReaders`]).
 struct Readers<'a> {
     graph: &'a SsaGraph,
     inventory: &'a SemanticObligationInventory,
-    /// The returns and calls whose boundary reads a value, by value.
-    boundary: r2ssa::dense::IdMap<ValueId, Vec<InstId>>,
-    /// The call a `CALLUSE` hands its carrier to: the next call in its block.
-    used_by: r2ssa::dense::IdMap<InstId, InstId>,
+    index: r2ssa::ValueReaders,
 }
 
 impl<'a> Readers<'a> {
     fn new(graph: &'a SsaGraph, inventory: &'a SemanticObligationInventory) -> Self {
-        let mut boundary = r2ssa::dense::IdMap::new(graph.values.len());
-        for obligation in inventory.obligations().values() {
-            if !matches!(
-                obligation.id.kind,
-                SemanticObligationKind::ReturnValue | SemanticObligationKind::CallArgument
-            ) {
-                continue;
-            }
-            let Some(inst) = obligation.source.graph_inst() else {
-                continue;
-            };
-            for input in &obligation.inputs {
-                boundary.get_or_insert_with(*input, Vec::new).push(inst);
-            }
-        }
-        let mut used_by = r2ssa::dense::IdMap::new(graph.insts.len());
-        for block in &graph.blocks {
-            call_uses(graph, block, &mut used_by);
-        }
+        let index = r2ssa::ValueReaders::of(inventory, graph);
         Self {
             graph,
             inventory,
-            boundary,
-            used_by,
+            index,
         }
     }
 
-    fn of(&self, value: ValueId) -> Vec<InstId> {
-        let live = self
-            .graph
-            .use_sites(value)
-            .iter()
-            .map(|site| self.used_by.get(site.inst).copied().unwrap_or(site.inst))
-            .filter(|inst| {
-                matches!(
-                    self.inventory.state_of(*inst),
-                    Some(
-                        SemanticInstructionState::LiveObligation
-                            | SemanticInstructionState::UnsupportedUnknown
-                    )
-                )
-            });
-        let mut readers = live
-            .chain(self.boundary.get(value).into_iter().flatten().copied())
-            .collect::<Vec<_>>();
-        readers.sort_unstable();
-        readers.dedup();
-        readers
+    fn of(&self, value: ValueId) -> &[InstId] {
+        self.index.get(value)
     }
 
     /// Whether `reader` may compute the producer's term in place of `def`: later in its block, no

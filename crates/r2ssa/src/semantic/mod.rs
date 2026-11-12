@@ -399,6 +399,7 @@ impl PreparedFunctionFacts {
             predicates: &predicates,
             call_sites: &call_sites,
             structured: &structured,
+            obligations: &obligations,
         };
         let certificates = match certified {
             Certified::Whole => collect_prepared_function_certificates(

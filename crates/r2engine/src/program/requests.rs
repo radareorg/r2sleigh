@@ -140,6 +140,8 @@ pub struct RenderedResponse {
     pub output: crate::EngineRendering,
     pub obligation_ledger: Option<r2dec::ledger::ObligationLedger>,
     pub premises: std::collections::BTreeSet<r2source::Premise>,
+    /// Where effect accounting refused, each undecided obligation named (D174).
+    pub undecided: Vec<r2ssa::NamedObligation>,
 }
 
 impl From<EngineDecompileResponse> for RenderedResponse {
@@ -148,6 +150,7 @@ impl From<EngineDecompileResponse> for RenderedResponse {
             output: response.output,
             obligation_ledger: response.obligation_ledger,
             premises: response.premises,
+            undecided: response.undecided,
         }
     }
 }
@@ -181,6 +184,7 @@ impl Rendering {
                 output: crate::EngineRendering::Listing(comment),
                 obligation_ledger: None,
                 premises: std::collections::BTreeSet::new(),
+                undecided: Vec::new(),
             },
             definition: r2dec::rendered_name_of(Some(name), entry),
             unread: Vec::new(),

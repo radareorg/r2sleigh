@@ -1514,6 +1514,12 @@ fn obligations(session: &mut Session, argument: &str) -> Result<String, String> 
         return Ok(format!("no obligation ledger: {why}"));
     };
     let mut out = format!("{}\n", ledger.report());
+    if !rendering.response.undecided.is_empty() {
+        out.push_str("\nrefused or unaccounted\n");
+    }
+    for obligation in &rendering.response.undecided {
+        out.push_str(&format!("  {obligation}\n"));
+    }
     if !rendering.unread.is_empty() {
         out.push_str("\ncallees not read\n");
     }

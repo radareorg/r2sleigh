@@ -1486,6 +1486,9 @@ pub struct EngineDecompileResponse {
     pub diagnostics: EngineDiagnostics,
     /// The premises the analysis relied on, whatever the rendering kept of what they decided.
     pub premises: BTreeSet<r2source::Premise>,
+    /// Where effect accounting refused, each refused or unaccounted obligation with its
+    /// operation and seed, in reading order (D174, D253).
+    pub undecided: Vec<r2ssa::NamedObligation>,
 }
 
 impl EngineDecompileResponse {
@@ -1959,7 +1962,9 @@ impl EngineSession {
                 EnginePhaseStatus::Refused,
                 render_time,
             );
-            return refused_decompile_response_with_metrics_and_audits(
+            let artifact = sealed.trusted_ssa.as_ref().map(|ssa| ssa.artifact());
+            let undecided = undecided_obligations(obligation_ledger.as_ref(), artifact);
+            let mut response = refused_decompile_response_with_metrics_and_audits(
                 &sealed.function_name,
                 &reason,
                 input_quality,
@@ -1968,6 +1973,8 @@ impl EngineSession {
                 Some(response_function_facts),
                 obligation_ledger,
             );
+            response.undecided = undecided;
+            return response;
         }
         if let Err(refusal) =
             poll_engine_execution(&request.execution, EnginePhase::FfiConversion, &metrics)
@@ -1996,6 +2003,7 @@ impl EngineSession {
             metrics,
             diagnostics,
             premises,
+            undecided: Vec::new(),
         }
     }
 }
@@ -2339,7 +2347,28 @@ fn refused_decompile_response_with_metrics_and_audits(
         metrics,
         diagnostics,
         premises: BTreeSet::new(),
+        undecided: Vec::new(),
     }
+}
+
+/// The ledger's refused and unaccounted obligations, each named by the sealed inventory.
+fn undecided_obligations(
+    ledger: Option<&r2dec::ledger::ObligationLedger>,
+    artifact: Option<&r2ssa::SsaArtifact>,
+) -> Vec<r2ssa::NamedObligation> {
+    let (Some(ledger), Some(artifact)) = (ledger, artifact) else {
+        return Vec::new();
+    };
+    let undecided = (ledger.entries()).filter(|(_, outcome)| {
+        matches!(
+            outcome,
+            r2dec::ledger::Outcome::Refused | r2dec::ledger::Outcome::Unattributed
+        )
+    });
+    let (graph, inventory) = (artifact.graph(), artifact.obligations());
+    undecided
+        .filter_map(|(id, _)| inventory.name(graph, id))
+        .collect()
 }
 
 fn seal_refused_decompile_function_facts(
