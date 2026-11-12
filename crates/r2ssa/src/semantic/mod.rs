@@ -428,15 +428,14 @@ fn demanded(
 ) -> Option<crate::demand::DemandedBytes> {
     let interface = (body.machine_context).and_then(SourceMachineContext::function_interface);
     let result = interface.and_then(returned_bytes);
-    // A void function's return reads no register, so no return block is left unnamed.
-    let void = interface.map(r2source::SourceFunctionInterface::return_kind)
-        == Some(r2source::SourceFunctionReturn::Void);
+    // Such a return reads no register, so no return block is left unnamed.
+    let unread = interface.is_some_and(returns_no_register);
     // A return a written result leaves undefined (case 1) reads no register either.
     let undefined = (calls.1.returns.values())
         .filter(|boundary| boundary.result_unproven && result.is_some())
         .filter_map(|boundary| body.graph.block_addr_of(boundary.at))
         .collect::<BTreeSet<_>>();
-    let without = match void {
+    let without = match unread {
         true => crate::liveout::FunctionLiveOut::default(),
         false => live_out.without(&undefined),
     };
@@ -506,6 +505,15 @@ fn tail_reads(
         }
     }
     Some((tails, reads))
+}
+
+/// Whether no return of `interface` reads a register: a `void` one hands back nothing, and one whose
+/// result is `Unproven` is a residual that stops before any caller reads (ROADMAP D340).
+pub(crate) fn returns_no_register(interface: &r2source::SourceFunctionInterface) -> bool {
+    matches!(
+        interface.return_kind(),
+        r2source::SourceFunctionReturn::Void | r2source::SourceFunctionReturn::Unproven
+    )
 }
 
 /// The bytes of its result register a function's caller reads: the low bytes the declared type
