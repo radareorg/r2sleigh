@@ -91,17 +91,21 @@ impl BlockText {
 /// statements + phi inputs)`: a block follows its dominators and forward predecessors.
 pub(super) fn spell(
     input: &RenderInput<'_>,
+    tags: &super::tags::Tags,
     values: Option<&Values<'_>>,
     order: &[u64],
     work: &DecompileWorkControl<'_>,
 ) -> Result<Spelled, DecompileExecutionStop> {
+    let ty = super::result_type(input, tags);
+    // A decided result is the declared one, spelled alike.
+    let decided = (input.return_type())
+        .and_then(r2types::ReturnTypeFact::decided)
+        .map(|_| ty.clone());
     let spelling = Spelling {
         input,
         values,
-        ty: super::result_type(input),
-        decided: input
-            .return_type()
-            .and_then(r2types::ReturnTypeFact::decided),
+        ty,
+        decided,
         carried: super::unproven_carrier_bits(input),
     };
     let mut blocks = FxHashMap::with_capacity_and_hasher(order.len(), Default::default());
@@ -117,7 +121,7 @@ struct Spelling<'s, 'i> {
     values: Option<&'s Values<'i>>,
     /// The function's result type, and the one the analysis decided, if it did.
     ty: CType,
-    decided: Option<&'s CType>,
+    decided: Option<CType>,
     /// An unproven result's carrier width: a spelled return hands its value through the identity.
     carried: Option<u32>,
 }
@@ -284,7 +288,8 @@ impl<'i> Spelling<'_, 'i> {
         }
         // An edge out of the function is a tail call D2 writes from its certificate; any other
         // transfer the text cannot make, so it traps rather than return.
-        let tail = (self.values).and_then(|values| values.tail_call(from, &self.ty, self.decided));
+        let tail = (self.values)
+            .and_then(|values| values.tail_call(from, &self.ty, self.decided.as_ref()));
         if let Some(stmts) = tail {
             let stmts = stmts.into_iter().map(|stmt| match stmt {
                 CStmt::Return(value) => CStmt::Return(self.carry(value)),
@@ -301,9 +306,12 @@ impl<'i> Spelling<'_, 'i> {
     /// A return hands back what D2 spelled, else a residual of the result type, or nothing for `void`.
     fn return_stmt(&self, addr: u64) -> CStmt {
         let carried = self.carried.map(|_| &self.ty);
-        let spelled = self
-            .values
-            .and_then(|values| Some((values.returned(addr, self.decided.or(carried))?, values)));
+        let spelled = self.values.and_then(|values| {
+            Some((
+                values.returned(addr, self.decided.as_ref().or(carried))?,
+                values,
+            ))
+        });
         if let Some((value, values)) = spelled {
             let stmt = CStmt::Return(self.carry(value));
             values.spelled_terminator(addr, &stmt);

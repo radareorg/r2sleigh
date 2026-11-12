@@ -69,7 +69,12 @@ pub(crate) fn note_unproven_constructs(
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
-    (unassigned, open_second_result, laid_out): (&[UnassignedRead], bool, usize),
+    (unassigned, open_second_result, laid_out, conflicting): (
+        &[UnassignedRead],
+        bool,
+        usize,
+        &[String],
+    ),
     unproven: Option<Option<r2types::UnprovenCause>>,
     floor: Option<(usize, &r2source::SourceArityFloor)>,
 ) {
@@ -169,6 +174,13 @@ pub(crate) fn note_unproven_constructs(
         note_unproven(&mut detail, func, cause);
     }
     // A layout the accesses prove, spelled as a structure no declaration states (doc/adr-aggregates.md).
+    // A tag two graphs state as different kinds has no one declaration: its pointers are words.
+    for tag in conflicting {
+        let _ = write!(
+            &mut detail,
+            "; tag `{tag}` is stated as both a struct and a union, so a pointer to it is spelled at its class"
+        );
+    }
     match laid_out {
         0 => {}
         1 => detail.push_str("; 1 structure laid out from a parameter's accesses"),

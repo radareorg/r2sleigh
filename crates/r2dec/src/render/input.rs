@@ -101,6 +101,18 @@ impl<'a> RenderInput<'a> {
             .type_graph()
     }
 
+    /// The type graph each call site's callee declares, in call-site order.
+    pub fn callee_type_graphs(&self) -> impl Iterator<Item = &'a r2ssa::SourceTypeGraph> + '_ {
+        let sites = (self.facts.report().callsites()).into_iter();
+        sites
+            .flat_map(|callsites| callsites.by_callsite.values())
+            .filter_map(|facts| {
+                (self.facts.source().call_site_interface(facts.call_site_id))?
+                    .exact_callee_interface()?
+                    .type_graph()
+            })
+    }
+
     /// How many parameters the function takes at least, where its interface states only a floor
     /// (D37), with the causes it names; the proof line carries it to the header (D100).
     pub fn arity_floor(&self) -> Option<(usize, &'a r2source::SourceArityFloor)> {

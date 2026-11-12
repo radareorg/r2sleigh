@@ -1,6 +1,7 @@
 //! D4: each struct and union tag a staged rendering spells, defined once at the layout the declared
 //! graph states, else declared incomplete behind a pointer (doc/adr-decompiler-rewrite.md).
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{RenderInput, calls};
@@ -13,16 +14,21 @@ pub(super) struct Tags {
     defined: BTreeMap<String, (bool, Vec<(CType, String)>)>,
     /// Each tag the declared graph states, laid out or not, as a union or not: a pointer may name it.
     declarable: BTreeMap<String, bool>,
+    /// Each tag any graph of the unit states, as a union or not; `None` where two disagree.
+    kinds: BTreeMap<String, Option<bool>>,
+    /// The tags a pointer asked for whose kinds disagree, so it was spelled at its class.
+    refused: RefCell<BTreeSet<String>>,
 }
 
 impl Tags {
     pub(super) fn of(input: &RenderInput<'_>) -> Self {
-        Self::of_parts(input.type_graph(), input.inferred_aggregates())
+        let callees = input.callee_type_graphs().collect::<Vec<_>>();
+        Self::of_parts(input.type_graph(), input.inferred_aggregates(), &callees)
     }
 
     #[cfg(test)]
     fn of_graph(graph: Option<&r2ssa::SourceTypeGraph>) -> Self {
-        Self::of_parts(graph, &BTreeMap::new())
+        Self::of_parts(graph, &BTreeMap::new(), &[])
     }
 
     /// The greatest set of laid-out aggregates whose members name only tags in the set or, behind a
@@ -30,6 +36,7 @@ impl Tags {
     fn of_parts(
         graph: Option<&r2ssa::SourceTypeGraph>,
         inferred: &BTreeMap<String, r2types::AggregateDefinition>,
+        callees: &[&r2ssa::SourceTypeGraph],
     ) -> Self {
         let declared = (graph.iter())
             .flat_map(|graph| graph.aggregates().iter().map(move |layout| (graph, layout)))
@@ -42,7 +49,16 @@ impl Tags {
             .map(|(name, definition)| (name.clone(), definition.clone()))
             .chain(declared)
             .collect::<BTreeMap<_, _>>();
-        let declarable = graph.map(declarable_tags).unwrap_or_default();
+        let laid = (stated.iter()).map(|(name, definition)| (name.as_str(), definition.is_union));
+        let kinds = unit_kinds(
+            (graph.iter().chain(callees))
+                .flat_map(|graph| stated_tags(graph))
+                .chain(laid),
+        );
+        let declarable = (graph.iter().flat_map(|graph| stated_tags(graph)))
+            .filter(|(name, is_union)| kinds.get(*name) == Some(&Some(*is_union)))
+            .map(|(name, is_union)| (name.to_owned(), is_union))
+            .collect::<BTreeMap<_, _>>();
         let mut candidates = (stated.iter())
             .map(|(name, definition)| (name.clone(), definition.is_union))
             .collect::<BTreeMap<_, _>>();
@@ -59,6 +75,8 @@ impl Tags {
                     stated,
                     defined,
                     declarable,
+                    kinds,
+                    refused: RefCell::default(),
                 };
             }
             candidates = (defined.iter())
@@ -77,7 +95,7 @@ impl Tags {
     pub(super) fn names(&self, name: &str, is_union: bool) -> bool {
         match self.defined.get(name) {
             Some((defined, _)) => *defined == is_union,
-            None => self.declarable.get(name) == Some(&is_union),
+            None => self.one_kind(name, is_union) && self.declarable.get(name) == Some(&is_union),
         }
     }
 
@@ -91,7 +109,10 @@ impl Tags {
     ) -> bool {
         self.agrees(name, is_union, graph)
             || (!self.defined.contains_key(name)
-                && graph.is_some_and(|graph| declarable_tags(graph).get(name) == Some(&is_union)))
+                && self.one_kind(name, is_union)
+                && graph.is_some_and(|graph| {
+                    stated_tags(graph).any(|stated| stated == (name, is_union))
+                }))
     }
 
     /// Whether a callee's projection may name tag `name` behind a pointer: the unit lays it out as
@@ -102,7 +123,26 @@ impl Tags {
         is_union: bool,
         graph: Option<&r2ssa::SourceTypeGraph>,
     ) -> bool {
-        self.agrees(name, is_union, graph) || !self.defined.contains_key(name)
+        self.agrees(name, is_union, graph)
+            || (!self.defined.contains_key(name) && self.one_kind(name, is_union))
+    }
+
+    /// Whether every graph of the unit that states tag `name` states it as `is_union`; a tag two
+    /// state as different kinds is recorded, since no one declaration of it is C.
+    fn one_kind(&self, name: &str, is_union: bool) -> bool {
+        match self.kinds.get(name) {
+            None => true,
+            Some(Some(kind)) => *kind == is_union,
+            Some(None) => {
+                self.refused.borrow_mut().insert(name.to_owned());
+                false
+            }
+        }
+    }
+
+    /// The tags a pointer named whose kinds the unit's graphs disagree on, by name.
+    pub(super) fn conflicting(&self) -> Vec<String> {
+        self.refused.borrow().iter().cloned().collect()
     }
 
     /// Whether `graph`, a callee's own, lays tag `name` out as the unit defines it.
@@ -212,9 +252,9 @@ fn spelled_member(
     }
 }
 
-/// The struct and union tags `graph` states, laid out or not, whose name C spells; a name stated
-/// as both is neither. O(types + tags).
-fn declarable_tags(graph: &r2ssa::SourceTypeGraph) -> BTreeMap<String, bool> {
+/// The struct and union tags `graph` states, laid out or not, whose name C spells, each as a union
+/// or not. O(types + tags).
+fn stated_tags(graph: &r2ssa::SourceTypeGraph) -> impl Iterator<Item = (&str, bool)> {
     let laid_out = graph.aggregates().iter().filter_map(|layout| {
         let ty = (graph.types().get(usize::try_from(layout.type_id()).ok()?))
             .filter(|ty| ty.id() == layout.type_id())?;
@@ -224,27 +264,24 @@ fn declarable_tags(graph: &r2ssa::SourceTypeGraph) -> BTreeMap<String, bool> {
             _ => None,
         }
     });
-    let opaque = graph
-        .opaque_tags()
-        .iter()
-        .filter_map(|tag| match tag.keyword() {
-            r2ssa::SourceTagKeyword::Struct => Some((tag.name(), false)),
-            r2ssa::SourceTagKeyword::Union => Some((tag.name(), true)),
-            _ => None,
-        });
-    let mut tags = BTreeMap::<&str, Option<bool>>::new();
-    for (name, is_union) in laid_out
-        .chain(opaque)
-        .filter(|(name, _)| spells_a_tag(name))
-    {
-        let kind = tags.entry(name).or_insert(Some(is_union));
+    let opaque = (graph.opaque_tags().iter()).filter_map(|tag| match tag.keyword() {
+        r2ssa::SourceTagKeyword::Struct => Some((tag.name(), false)),
+        r2ssa::SourceTagKeyword::Union => Some((tag.name(), true)),
+        _ => None,
+    });
+    (laid_out.chain(opaque)).filter(|(name, _)| spells_a_tag(name))
+}
+
+/// Each tag `stated` names, as a union or not; `None` where two statements disagree.
+fn unit_kinds<'g>(stated: impl Iterator<Item = (&'g str, bool)>) -> BTreeMap<String, Option<bool>> {
+    let mut kinds = BTreeMap::<String, Option<bool>>::new();
+    for (name, is_union) in stated {
+        let kind = kinds.entry(name.to_owned()).or_insert(Some(is_union));
         if *kind != Some(is_union) {
             *kind = None;
         }
     }
-    (tags.into_iter())
-        .filter_map(|(name, is_union)| Some((name.to_owned(), is_union?)))
-        .collect()
+    kinds
 }
 
 /// Whether `name` is a C identifier: letters, digits and `_`, not led by a digit.
@@ -412,5 +449,42 @@ mod tests {
             .map(|tag| (tag.name, tag.members.len()))
             .collect::<Vec<_>>();
         assert_eq!(order, [("lock_s".to_owned(), 0), ("pool".to_owned(), 2)]);
+    }
+
+    /// A graph stating only an opaque tag `item` of `keyword`, behind a pointer.
+    fn opaque_item(keyword: r2ssa::SourceTagKeyword) -> r2ssa::SourceTypeGraph {
+        let parts = r2ssa::SourceTypeGraphParts {
+            types: vec![
+                r2ssa::SourceType::new(0, r2ssa::SourceTypeKind::Opaque { tag_id: 0 }, 0, 0),
+                r2ssa::SourceType::new(
+                    1,
+                    r2ssa::SourceTypeKind::Pointer {
+                        target_type_id: 0,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
+            ],
+            opaque_tags: vec![r2ssa::SourceOpaqueTag::new(0, keyword, "item")],
+            ..r2ssa::SourceTypeGraphParts::default()
+        };
+        r2ssa::SourceTypeGraph::from_parts(parts).expect("an item graph")
+    }
+
+    /// A caller's `struct item*` and a callee's `union item*` have no one declaration: neither is
+    /// named, both fall to their class, and the proof line names the tag (Codex on #383).
+    #[test]
+    fn a_tag_two_graphs_state_as_different_kinds_is_not_named() {
+        let own = opaque_item(r2ssa::SourceTagKeyword::Struct);
+        let callee = opaque_item(r2ssa::SourceTagKeyword::Union);
+        let alone = Tags::of_parts(Some(&own), &std::collections::BTreeMap::new(), &[]);
+        assert!(alone.names("item", false));
+        assert!(alone.conflicting().is_empty());
+        let tags = Tags::of_parts(Some(&own), &std::collections::BTreeMap::new(), &[&callee]);
+        assert!(!tags.names("item", false));
+        assert!(!tags.declares("item", true, Some(&callee)));
+        assert!(!tags.admits("item", true, Some(&callee)));
+        assert_eq!(tags.conflicting(), ["item".to_owned()]);
     }
 }
