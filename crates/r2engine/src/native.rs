@@ -629,29 +629,27 @@ pub(crate) fn walk_reading(
     read: &TableRounds<'_>,
 ) -> Result<Walk, NativeRefusal> {
     let native = Native::over(target, program)?;
-    // One walk continued through each round's tables: the root is lifted once (D367).
-    let mut walk =
-        crate::body::Lifting::start(entry, target.disasm, program).map_err(NativeRefusal::Body)?;
-    let ended = |walk: crate::body::Lifting| native.walked(walk.into_body());
-    if walk.dispatches().next().is_none() {
-        return Ok(Walk::of(ended(walk), Tables::default()));
+    let root = native.walk(entry)?;
+    if !(root.body.unresolved.iter()).any(Tables::stops) {
+        return Ok(Walk::of(root, Tables::default()));
     }
     let tables = (read.first)();
     if tables.read.is_empty() {
-        return Ok(Walk::of(ended(walk), tables));
+        return Ok(Walk::of(root, tables));
     }
-    walk.dispatch(&tables.dispatched(), target.disasm, program);
-    if !tables.later_reached(walk.dispatches()) {
-        return Ok(Walk::of(ended(walk), tables));
+    let through = native.walk_dispatched(entry, &tables.dispatched())?;
+    if !tables.later_reached(through.indirect_stops()) {
+        return Ok(Walk::of(through, tables));
     }
     let all = (read.later)(&tables);
     if all.read.is_empty() {
-        return Ok(Walk::of(native.walk(entry)?, all));
+        return Ok(Walk::of(root, all));
     }
-    if all.read.len() != tables.read.len() {
-        walk.dispatch(&all.dispatched(), target.disasm, program);
-    }
-    Ok(Walk::of(ended(walk), all))
+    let through = match all.read.len() == tables.read.len() {
+        true => through,
+        false => native.walk_dispatched(entry, &all.dispatched())?,
+    };
+    Ok(Walk::of(through, all))
 }
 
 /// One body as the reference index lists it: walked once, through the tables `read` gives.
