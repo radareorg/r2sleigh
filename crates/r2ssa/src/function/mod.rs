@@ -2733,6 +2733,7 @@ impl TrustedSsaArtifact {
         .with_conventions(site_conventions.clone());
         let correlated_call_sites =
             correlate_call_site_interfaces(&source, (&blocks, &calls), callee_interfaces, &callees);
+        let callees = callees.with_slots(&correlated_call_sites.slot_targets);
         // Every call target the source named, whether or not a prototype was
         // recovered for it: a name and a prototype are independent facts.
         let mut display_names = r2source::DisplayNames::new();
@@ -4035,6 +4036,8 @@ pub(crate) struct CalleeBoundaries {
     preserved: CalleePreservedCarriers,
     /// The convention each stated callee runs under; the rest run under the calls' model.
     conventions: SiteConventions,
+    /// The import slot each `CallSlot` site calls through, by instruction (D364).
+    slots: BTreeMap<u64, u64>,
     results: BTreeMap<u64, CallBoundaryDef>,
     /// The storage of each of `results`.
     result_storages: BTreeMap<u64, CanonicalStorageId>,
@@ -4099,6 +4102,7 @@ impl CalleeBoundaries {
         Self {
             preserved,
             conventions: SiteConventions::new(),
+            slots: BTreeMap::new(),
             results,
             result_storages,
             return_addresses,
@@ -4109,6 +4113,13 @@ impl CalleeBoundaries {
     /// The same statements with the convention each stated callee runs under.
     pub(crate) fn with_conventions(mut self, conventions: SiteConventions) -> Self {
         self.conventions = conventions;
+        self
+    }
+
+    /// The same statements with the slot each correlated `CallSlot` site calls through.
+    fn with_slots(mut self, slots: &BTreeMap<SourceCallSiteIdentity, u64>) -> Self {
+        let by_instruction = slots.iter().map(|(site, slot)| (site.instruction(), *slot));
+        self.slots = by_instruction.collect();
         self
     }
 
@@ -4174,6 +4185,7 @@ fn decompile_call_boundary_config(
         stack_pointer_restored_by_callee,
         preserved_by_target: callees.preserved,
         convention_by_target: callees.conventions,
+        slot_by_instruction: callees.slots,
         result_by_target: callees.results,
         argument_regs: match calls {
             true => arch.call_reads(model).to_vec(),

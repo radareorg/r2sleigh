@@ -1096,7 +1096,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
     const RETENTION: Retention = Retention::Held;
 
     /// Work: the body's own register effect, deposited, then one backward pass over the body,
-    /// `O((B + E) × lanes)` within its budget, and one held register effect per distinct callee.
+    /// `O((B + E) × lanes)` within its budget, and one held effect and `KeptAcross` per callee.
     fn compute(db: &Db<ProgramInputs<S>>, &(caller, thumb): &(u64, bool)) -> Self::Value {
         read_body(db, (caller, thumb), |read| {
             // Deposited before any deep read, so the row depends on what a computed row reads (ADR).
@@ -1144,6 +1144,29 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for RegisterEffects {
     /// `SiteFates` deposits the row of each body it walks, so only a body it did not walk is lifted here.
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
         read_body(db, (entry, thumb), |read| read.effect(entry)).flatten()
+    }
+}
+
+/// What a call to a body keeps: its register effect closed over each pending callee's own answer
+/// (D363). A cycle, a callee with no row or another machine keeps nothing. `O(p × r / 64)` per row.
+pub(super) struct KeptAcross;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for KeptAcross {
+    type Key = (u64, bool);
+    type Value = Option<r2ssa::site_boundary::Kept>;
+    const NAME: &'static str = "kept-across";
+    const RETENTION: Retention = Retention::Held;
+
+    /// Work: one row, then each pending callee's answer until nothing is left; worst case the
+    /// bodies a return path reaches, each lifted once.
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
+        let effect = db.get::<RegisterEffects>(&(entry, thumb)).ok()?;
+        let effect = (*effect).as_ref()?;
+        let view = View::new(db, true);
+        Some(effect.closed(|callee| {
+            let key = (callee, view.thumb_at(callee));
+            (*db.get::<KeptAcross>(&key).ok()?).clone()
+        }))
     }
 }
 
@@ -1231,18 +1254,29 @@ fn effect_on_flow<S: Source + 'static>(
         .is_none()
         .then_some(&*target.call);
     let clobbers = model.map(|model| move |storage| model.clobbers(storage));
+    // An import has no row, so a call to one keeps nothing without asking.
+    let callee = |block: usize, op: usize| {
+        let entered = effects.callee_at(block, op)?;
+        crate::native::Program::import_at(reading.view, entered)
+            .is_none()
+            .then_some(entered)
+    };
     let by = r2ssa::site_boundary::KeptBy {
         machine: target.arch,
         clobbers: (clobbers.as_ref())
             .map(|clobbers| clobbers as &dyn Fn(CanonicalStorageId) -> bool),
         never: &never,
+        callee: &callee,
     };
     let effect = flow.register_effect(entry, reading.lanes, &effects, &by);
     r2il::refusal_evidence!(
         "register-effect",
         "{entry:#x}: {}",
         (effect.as_ref()).map_or("none".into(), |effect| {
-            r2ssa::site_boundary::spelled(effect.kept_registers())
+            let pending = effect.pending.iter().map(|callee| format!("{callee:#x}"));
+            let pending = pending.collect::<Vec<_>>().join(" ");
+            let unwritten = r2ssa::site_boundary::spelled(effect.unwritten_registers());
+            format!("{unwritten} pending [{pending}]")
         })
     );
     effect
@@ -1502,19 +1536,20 @@ impl<S: Source + 'static> Reading<'_, S> {
             };
             return (effect, formatted);
         }
-        // A row reads no other row, so one costs one pass over one body (ADR, Cost).
+        // A row reads no other row, so one costs one pass over one body (ADR, Cost); what the call
+        // keeps is the row closed over its callees' (D363).
+        let key = (callee, self.view.thumb_at(callee));
         let row = (self.depth == Depth::Deep)
-            .then(|| {
-                let thumb = self.view.thumb_at(callee);
-                self.db.get::<RegisterEffects>(&(callee, thumb))
-            })
+            .then(|| self.db.get::<RegisterEffects>(&key))
             .and_then(Result::ok);
         let effect = match row.as_deref().and_then(Option::as_ref) {
             Some(row) => CallEffect {
                 takes: row.takes,
                 counted: None,
                 overwrites: Overwrites::Bytes(row.overwrites),
-                kept: row.kept_lanes(self.lanes),
+                kept: (self.db.get::<KeptAcross>(&key).ok())
+                    .and_then(|kept| (*kept).as_ref().map(|kept| kept.kept_lanes(self.lanes)))
+                    .unwrap_or_default(),
                 reads: LaneBytes::default(),
             },
             None => CallEffect {

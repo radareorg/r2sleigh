@@ -442,10 +442,8 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
 
     fn kept_at(&self, entry: u64) -> Option<std::collections::BTreeSet<r2ssa::CanonicalStorageId>> {
         let key = (entry, self.thumb_at(entry));
-        let effect = self.db.get::<super::fates::RegisterEffects>(&key).ok()?;
-        (*effect)
-            .as_ref()
-            .map(|effect| effect.kept_registers().collect())
+        let kept = self.db.get::<super::fates::KeptAcross>(&key).ok()?;
+        (*kept).as_ref().map(|kept| kept.kept_registers().collect())
     }
 
     fn site_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {

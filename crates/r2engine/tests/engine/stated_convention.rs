@@ -333,9 +333,9 @@ fn a_declared_void_whose_body_writes_a_result_lane_stays_void_and_names_the_lane
     assert!(!text.contains(KEPT_AGAINST_THE_BODY), "{text}");
 }
 
-/// `diff` under `sysv_abi` in a PE, and a Microsoft x64 `keeps(a)` holding `a` in rsi across a
-/// call to an import, then adding it to the import's result.
-const KEEPS_ACROSS_AN_IMPORT: &[u8] = &{
+/// `diff` under `sysv_abi` in a PE, and a Microsoft x64 `keeps(a)` holding `a` in rsi across
+/// `call`, a call to an import (six bytes), then adding it to the import's result.
+const fn keeping(call: [u8; 6]) -> [u8; 0xa0] {
     let mut code = [0xccu8; 0xa0];
     let body: &[u8] = &[
         0x48, 0x89, 0xf8, // 1000 mov rax, rdi
@@ -345,10 +345,10 @@ const KEEPS_ACROSS_AN_IMPORT: &[u8] = &{
     let keeps: &[u8] = &[
         0x48, 0x83, 0xec, 0x28, // 1010 sub rsp, 0x28
         0x48, 0x89, 0xce, // 1014 mov rsi, rcx
-        0xe8, 0x74, 0x00, 0x00, 0x00, // 1017 call 0x1090: the import's stub
-        0x48, 0x01, 0xf0, // 101c add rax, rsi
-        0x48, 0x83, 0xc4, 0x28, // 101f add rsp, 0x28
-        0xc3, // 1023 ret
+        0, 0, 0, 0, 0, 0, // 1017 the call
+        0x48, 0x01, 0xf0, // 101d add rax, rsi
+        0x48, 0x83, 0xc4, 0x28, // 1020 add rsp, 0x28
+        0xc3, // 1024 ret
     ];
     let stub: &[u8] = &[0xff, 0x25, 0x02, 0x00, 0x00, 0x00]; // 1090 jmp [rip + 2]
     let mut at = 0;
@@ -362,6 +362,11 @@ const KEEPS_ACROSS_AN_IMPORT: &[u8] = &{
         at += 1;
     }
     at = 0;
+    while at < call.len() {
+        code[0x17 + at] = call[at];
+        at += 1;
+    }
+    at = 0;
     while at < stub.len() {
         code[0x90 + at] = stub[at];
         at += 1;
@@ -372,11 +377,21 @@ const KEEPS_ACROSS_AN_IMPORT: &[u8] = &{
         at += 1;
     }
     code
-};
+}
+
+/// `call 0x1090; nop`: the import's stub.
+const KEEPS_ACROSS_AN_IMPORT: [u8; 0xa0] = keeping([0xe8, 0x74, 0x00, 0x00, 0x00, 0x90]);
+
+/// `call [rip + 0x7b]`: the import's slot at 0x1098 (`CallSlot`).
+const KEEPS_ACROSS_THE_SLOT: [u8; 0xa0] = keeping([0xff, 0x15, 0x7b, 0x00, 0x00, 0x00]);
 
 fn importing_pe(dll: &str) -> OpenProgram<Literal> {
-    let functions = [("diff", BASE, 7), ("keeps", TWICE, 0x14)];
-    let program = Literal::of_code(KEEPS_ACROSS_AN_IMPORT, &functions)
+    importing_pe_through(&KEEPS_ACROSS_AN_IMPORT, dll)
+}
+
+fn importing_pe_through(code: &'static [u8], dll: &str) -> OpenProgram<Literal> {
+    let functions = [("diff", BASE, 7), ("keeps", TWICE, 0x15)];
+    let program = Literal::of_code(code, &functions)
         .with_declarations(declaring(StatedConvention::LlvmX8664SysV))
         .importing_from(dll, "GetLastError")
         .pe();
@@ -393,4 +408,51 @@ fn a_pe_stating_one_sysv_function_keeps_rsi_across_a_kernel32_call() {
     let mut unbound = importing_pe("foo.dll");
     let text = rendered(&mut unbound, TWICE);
     assert!(!text.contains("arg0"), "{text}");
+}
+
+/// The same call through the import's slot (`call [__imp_GetLastError]`) runs under the slot's
+/// import's model: a bound import keeps rsi, an unbound one does not (D364).
+#[test]
+fn a_call_through_a_bound_import_s_slot_keeps_rsi_as_its_stub_does() {
+    let mut bound = importing_pe_through(&KEEPS_ACROSS_THE_SLOT, "KERNEL32.dll");
+    let text = rendered(&mut bound, TWICE);
+    assert!(text.contains("+ (uint64_t)arg0"), "{text}");
+    let mut unbound = importing_pe_through(&KEEPS_ACROSS_THE_SLOT, "foo.dll");
+    let text = rendered(&mut unbound, TWICE);
+    assert!(!text.contains("arg0"), "{text}");
+}
+
+/// `diff` stated at `BASE` with a body that saves, zeroes and restores rsi, then a SysV `keeps(a)`
+/// holding `a` in rsi across a direct call to it and adding it to the result.
+const RESTORES_RSI: &[u8] = &[
+    0x56, // 1000 push rsi
+    0x31, 0xf6, // 1001 xor esi, esi
+    0x5e, // 1003 pop rsi
+    0x48, 0x89, 0xc8, // 1004 mov rax, rcx
+    0xc3, // 1007 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1008 padding
+    0x48, 0x83, 0xec, 0x08, // 1010 sub rsp, 8
+    0x48, 0x89, 0xfe, // 1014 mov rsi, rdi
+    0xe8, 0xe4, 0xff, 0xff, 0xff, // 1017 call 0x1000
+    0x48, 0x01, 0xf0, // 101c add rax, rsi
+    0x48, 0x83, 0xc4, 0x08, // 101f add rsp, 8
+    0xc3, // 1023 ret
+];
+
+/// A call to a callee stated `ms_abi` keeps rsi, which Microsoft x64 preserves, in a SysV caller
+/// that clobbers it; the body's pop writes rsi, so only the stated model keeps it (D252, allow).
+#[test]
+fn a_sysv_caller_keeps_rsi_across_a_call_to_a_stated_ms_abi_callee() {
+    let functions = [("diff", BASE, 8), ("keeps", TWICE, 0x14)];
+    let open = |stated| {
+        let code = Literal::of_code(RESTORES_RSI, &functions);
+        OpenProgram::of(code.with_declarations(declaring(stated)))
+    };
+    let mut stated = open(StatedConvention::LlvmWin64);
+    let text = rendered(&mut stated, TWICE);
+    assert!(text.contains("+ (uint64_t)arg0"), "{text}");
+    // Unstated, `diff` runs under SysV, which clobbers rsi.
+    let mut unstated = open(StatedConvention::Normal);
+    let text = rendered(&mut unstated, TWICE);
+    assert!(!text.contains("+ (uint64_t)arg0"), "{text}");
 }
