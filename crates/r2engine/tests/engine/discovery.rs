@@ -539,3 +539,21 @@ fn a_call_to_a_never_no_statement_makes_leaves_its_exit_unnamed() {
     );
     assert!(!declared.contains("unproven)"), "{declared}");
 }
+
+/// `fail: mov ecx, 7; int 0x29; ret`, then `caller: call fail; mov eax, 1; ret`.
+const FASTFAILS: &[u8] = &[
+    0xb9, 7, 0, 0, 0, 0xcd, 0x29, 0xc3, 0xe8, 0xf3, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,
+];
+
+/// Windows states `int 0x29` (`__fastfail`) never returns, so a PE's call to `fail` ends its
+/// caller; under Linux the same vector is a call that comes back (D229).
+#[test]
+fn a_call_to_a_function_that_fastfails_ends_its_caller_in_a_pe() {
+    let (fail, caller) = (BASE, BASE + 8);
+    let functions = [("fail", fail, 8), ("caller", caller, 11)];
+    let mut pe = OpenProgram::of(Literal::of_code(FASTFAILS, &functions).pe());
+    assert_eq!(extent(&mut pe, fail), (fail + 7, true));
+    assert_eq!(extent(&mut pe, caller), (caller + 5, true));
+    let mut elf = OpenProgram::of(Literal::of_code(FASTFAILS, &functions));
+    assert_eq!(extent(&mut elf, caller), (caller + 11, false));
+}

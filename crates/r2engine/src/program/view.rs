@@ -301,6 +301,11 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         self.source().container().format == r2abi::statement::Format::Pe
     }
 
+    fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
+        let kernel = super::kernel(self.source().container());
+        r2abi::syscalls::interrupt_never_returns(kernel, arch, vector).is_none()
+    }
+
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
         let (handle, model) = self.import_through(slot, |row| row.yields)?;
         let register = model.result_registers(r2abi::SlotClass::Integer).next();

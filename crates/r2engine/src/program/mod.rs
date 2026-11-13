@@ -667,6 +667,10 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         self.view().binds_handles()
     }
 
+    fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
+        self.view().interrupt_returns(arch, vector)
+    }
+
     fn return_address_register(&self) -> Option<r2il::Varnode> {
         self.view().return_address_register()
     }

@@ -97,6 +97,12 @@ pub trait Program {
         true
     }
 
+    /// Whether control comes back from interrupt `vector` on `arch`: false only where the kernel's
+    /// row states it never does (D229).
+    fn interrupt_returns(&self, _arch: &str, _vector: u64) -> bool {
+        true
+    }
+
     /// The argument register that, holding `Handle`, makes a transfer through `slot` not return,
     /// where the import the loader binds there states one.
     fn halts_on_through(
@@ -326,6 +332,8 @@ struct Instruction {
     terminator: BlockTerminator,
     /// The decode window and context, where the walk keeps its decodes.
     decode: Option<Box<(Vec<u8>, Continuation)>>,
+    /// An `int n` whose vector the kernel's row states never comes back (D229).
+    halts: bool,
 }
 
 impl Instruction {
@@ -531,6 +539,24 @@ impl Trace {
             bytes: decoded.values().map(|size| u64::from(*size)).sum(),
         }
     }
+}
+
+/// The vector of an x86 `int n`, the constant Sleigh's `swi` operation reads.
+fn interrupt_vector(ops: &[r2il::R2ILOp], arch: &r2il::ArchSpec) -> Option<u64> {
+    ops.iter().find_map(|op| match op {
+        r2il::R2ILOp::CallOther { userop, inputs, .. }
+            if arch
+                .user_ops
+                .get(*userop as usize)
+                .is_some_and(|name| name == "swi") =>
+        {
+            let [vector] = inputs.as_slice() else {
+                return None;
+            };
+            (vector.space == r2il::SpaceId::Const).then_some(vector.offset)
+        }
+        _ => None,
+    })
 }
 
 /// Whether an instruction's p-code enters the supervisor: a user operation the
@@ -827,11 +853,15 @@ impl Walk {
                 .or_insert(target.foreign);
         }
         let decode = self.decodes.then(|| Box::new((fetch, one.continuation)));
+        let arch = disasm.arch_spec();
+        let halts = interrupt_vector(&lifted.ops, arch)
+            .is_some_and(|vector| !program.interrupt_returns(&arch.name, vector));
         Some(Instruction {
             lifted,
             bytes,
             terminator,
             decode,
+            halts,
         })
     }
 
@@ -1002,6 +1032,9 @@ impl Walk {
             // A call through a register is opaque, so it is assumed to come
             // back -- unless it calls through a slot whose pointer the
             // program states, and what it states there never returns.
+            BlockTerminator::IndirectCall { .. } if instruction.halts => {
+                self.halting.insert(addr);
+            }
             BlockTerminator::IndirectCall { fallthrough } => {
                 let ops = &instruction.lifted.ops;
                 let at = ops
@@ -1014,7 +1047,12 @@ impl Walk {
                 {
                     self.slot_calls.insert(addr, slot);
                 }
-                if through.is_none_or(|slot| program.returns_through(slot)) {
+                let halts = self.halts_through(&instruction, &handles_before, program);
+                if let Some(from) = halts {
+                    // A call that terminates the current process (D229), as S17's tail jump.
+                    self.halting.insert(addr);
+                    self.proven.extend(from.map(|from| (from, addr)));
+                } else if through.is_none_or(|slot| program.returns_through(slot)) {
                     self.continues(fallthrough, &mut successors, program)
                 } else {
                     self.halting.insert(addr);
@@ -1105,9 +1143,13 @@ impl Walk {
         program: &dyn Program,
     ) -> Option<Option<u64>> {
         let ops = &instruction.lifted.ops;
-        let at = ops
-            .iter()
-            .rposition(|op| matches!(op, r2il::R2ILOp::BranchInd { .. }))?;
+        let transfer = |op: &r2il::R2ILOp| {
+            matches!(
+                op,
+                r2il::R2ILOp::BranchInd { .. } | r2il::R2ILOp::CallInd { .. }
+            )
+        };
+        let at = ops.iter().rposition(transfer)?;
         let slot = r2ssa::loaded_target_slot(&instruction.lifted, at)?.offset;
         crate::stated::sealed_import(program, slot)?;
         if !program.returns_through(slot) {
@@ -1438,6 +1480,7 @@ mod transfer_tests {
             lifted,
             bytes: Vec::new(),
             decode: None,
+            halts: false,
             terminator: BlockTerminator::ConditionalBranch {
                 true_target: 0x2000,
                 false_target: 0x1006,
