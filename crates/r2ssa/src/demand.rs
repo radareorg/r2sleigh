@@ -118,7 +118,12 @@ pub(crate) fn exits_are_named_beside(
     live_out: &FunctionLiveOut,
     tails: &BTreeSet<u64>,
 ) -> bool {
-    if live_out.unresolved_blocks().next().is_some() {
+    if let Some(block) = live_out.unresolved_blocks().next() {
+        r2il::refusal_evidence!(
+            "exits-unnamed",
+            "{:#x}: return {block:#x} is unresolved",
+            function.entry
+        );
         return false;
     }
     let cfg = function.cfg();
@@ -129,14 +134,24 @@ pub(crate) fn exits_are_named_beside(
         if tails.contains(&block.addr) {
             return true;
         }
-        match &block.terminator {
+        let named = match &block.terminator {
             BlockTerminator::Return => true,
             BlockTerminator::ConditionalExit { .. } => false,
             BlockTerminator::Call { .. } | BlockTerminator::IndirectCall { .. } => {
                 successors.is_empty() || !leaves
             }
             _ => !leaves,
+        };
+        if !named {
+            r2il::refusal_evidence!(
+                "exits-unnamed",
+                "{:#x}: block {:#x} leaves by {:?} to {successors:x?}",
+                function.entry,
+                block.addr,
+                block.terminator
+            );
         }
+        named
     })
 }
 

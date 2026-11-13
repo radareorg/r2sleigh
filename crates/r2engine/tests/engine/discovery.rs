@@ -438,6 +438,29 @@ fn a_call_to_a_function_that_executes_int3_ends_its_caller() {
     assert_eq!(extent(&mut program, caller), (caller + 5, true));
 }
 
+/// `fatal: ret`, then `caller: call fatal; mov eax, 1; ret`.
+const DECLARED_FATAL: &[u8] = &[0xc3, 0xe8, 0xfa, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3];
+
+/// Debug information that declares `fatal` `DW_AT_noreturn` (diffutils `try_help`) ends a call to it
+/// with no premise (D255); with none, the body's `ret` comes back.
+#[test]
+fn a_call_to_a_function_its_debug_information_declares_noreturn_ends_its_caller() {
+    let (fatal, caller) = (BASE, BASE + 1);
+    let functions = [("fatal", fatal, 1), ("caller", caller, 11)];
+    let prototype = r2abi::Prototype {
+        name: "fatal".to_owned(),
+        noreturn: true,
+        ..r2abi::Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(r2abi::TypeGraph::new());
+    declarations.declare_function(fatal, prototype);
+    let literal = Literal::of_code(DECLARED_FATAL, &functions);
+    let mut declared = OpenProgram::of(literal.with_declarations(declarations));
+    assert_eq!(extent(&mut declared, caller), (caller + 5, true));
+    let mut bare = OpenProgram::of(Literal::of_code(DECLARED_FATAL, &functions));
+    assert_eq!(extent(&mut bare, caller), (caller + 11, false));
+}
+
 /// `sys: int 0x80; ret`, then `caller: call sys; mov eax, 1; ret`.
 const INTERRUPTS: &[u8] = &[
     0xcd, 0x80, 0xc3, 0xe8, 0xf8, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,

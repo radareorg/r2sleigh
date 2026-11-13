@@ -914,13 +914,20 @@ pub(crate) fn handed(
     }
 }
 
-/// Whether control comes back from the import at `address`, as its own declaration says; `None` where it is no import.
+/// Whether control comes back from the import at `address`, as its own declaration says, or from a
+/// body the binary's debug information states never returns; `None` where neither says.
 pub(crate) fn declared_return(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     address: u64,
 ) -> Option<crate::discovery::Return> {
     use crate::discovery::Return;
+    let declarations = target.declarations;
+    // `DW_AT_noreturn` is a declaration with no premise (D255); folded bodies declared apart state none.
+    let stated = (declarations.function_at(address)).is_some_and(|prototype| prototype.noreturn);
+    if stated && !declarations.is_contested(address) {
+        return Some(Return::Never(std::collections::BTreeSet::new()));
+    }
     let Some(name) = program.import_at(address) else {
         // A Go function the runtime model says never returns, under the runtime's contract.
         let go = program.language_at(address) == r2abi::statement::SourceLanguage::Go;
