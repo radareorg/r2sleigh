@@ -417,11 +417,21 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
             .map(|effect| effect.kept_registers().collect())
     }
 
-    fn stated_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
-        let container = self.source().container();
-        let declared = container.declarations.function_at(callee)?;
-        let (arch, bits) = (&container.arch.name, container.arch.bits);
-        let id = super::stated_convention(arch, bits, declared.convention).ok()??;
+    fn site_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
+        let inputs = self.db.inputs();
+        let id = match self.import_at(callee) {
+            Some(name) => {
+                let machines = inputs.machines().ok()?;
+                machines.imports.bound(&name).then_some(())?;
+                inputs.assembled()?.convention
+            }
+            None => {
+                let container = self.source().container();
+                let declared = container.declarations.function_at(callee)?;
+                let (arch, bits) = (&container.arch.name, container.arch.bits);
+                super::stated_convention(arch, bits, declared.convention).ok()??
+            }
+        };
         let model = self.db.get::<super::Convention>(&id).ok()?;
         (*model).as_ref().ok().cloned()
     }

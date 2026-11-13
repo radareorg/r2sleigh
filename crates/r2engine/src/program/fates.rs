@@ -1056,7 +1056,7 @@ fn read_body<S: Source + 'static, R>(
         view: &view,
         lanes: lanes_of(target, slots),
         slots,
-        unstated: r2ssa::call_reads::CallReads::every_location(&target.convention),
+        unstated: r2ssa::call_reads::CallReads::every_location(&target.call),
         call: std::sync::Arc::clone(&target.call),
         depth,
     };

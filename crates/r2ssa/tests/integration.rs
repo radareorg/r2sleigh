@@ -40,7 +40,7 @@ mod tests {
         let integer = r2source::convention::SlotClass::Integer;
         let model = r2source::convention::testing::model(r2ssa::ConventionId::SysVAmd64)
             .arguments(integer, place(&["rdi", "rsi", "rdx", "rcx", "r8", "r9"]))
-            .forms(|forms| forms.count_register = place(&["al"]).first().copied())
+            .forms(|forms| forms.count_register = place(&["rax"]).first().copied())
             .result(integer, place(&["rax"])[0])
             .result(integer, place(&["rdx"])[0])
             .killed(clobbered)

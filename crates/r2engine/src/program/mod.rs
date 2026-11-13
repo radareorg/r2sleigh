@@ -710,8 +710,8 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
         self.target(vaddr).ok()
     }
 
-    fn stated_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
-        crate::native::Program::stated_convention_at(&self.view(), callee)
+    fn site_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
+        crate::native::Program::site_convention_at(&self.view(), callee)
     }
 
     fn kept_at(&self, entry: u64) -> Option<std::collections::BTreeSet<r2ssa::CanonicalStorageId>> {

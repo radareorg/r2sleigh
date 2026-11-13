@@ -124,12 +124,19 @@ fn arriving(open: &mut OpenProgram<Literal>) -> Vec<String> {
 fn an_ms_abi_function_in_an_elf_places_rcx_first() {
     let mut open = program(StatedConvention::LlvmWin64);
     assert_eq!(arriving(&mut open), ["rcx", "rdx"]);
+    // `afi` names the interface's convention (D275).
+    let convention = |open: &mut OpenProgram<Literal>| open.function_info(BASE).ok()?.convention;
+    assert_eq!(convention(&mut open), Some(r2abi::ConventionId::Win64));
     let text = rendered(&mut open, BASE);
     assert!(text.contains("(uint64_t)a - (uint64_t)b"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
     // Unstated, the same declaration is placed in rdi and rsi, where the body reads nothing.
     let mut unstated = program(StatedConvention::Normal);
     assert_eq!(arriving(&mut unstated), ["rdi", "rsi"]);
+    assert_eq!(
+        convention(&mut unstated),
+        Some(r2abi::ConventionId::SysVAmd64)
+    );
 }
 
 /// The SysV caller passes `diff(b, a)` in rcx and rdx, the callee's own locations; read as

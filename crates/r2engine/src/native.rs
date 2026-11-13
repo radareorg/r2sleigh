@@ -98,9 +98,9 @@ pub trait Program: crate::body::Program {
         None
     }
 
-    /// The convention a call to `callee` runs under where its declaration states one (RULING 1.6);
-    /// `None` runs the call under the calls' model.
-    fn stated_convention_at(&self, _callee: u64) -> Option<Arc<ConventionModel>> {
+    /// The model a call to `callee` runs under where the program states it: a bound import's
+    /// program default, a declared body's own; `None` runs it under `AnyCall` (RULING 1.6, 2.6).
+    fn site_convention_at(&self, _callee: u64) -> Option<Arc<ConventionModel>> {
         None
     }
 
@@ -1050,7 +1050,7 @@ fn declare_imports(
 ) -> Vec<r2types::SourceOwnedCalleeSignature> {
     let mut signatures = Vec::new();
     for address in targets {
-        if let Some(model) = site_convention(native, target, *address) {
+        if let Some(model) = native.program.site_convention_at(*address) {
             callees.conventions.insert(*address, model);
         }
         let Some(name) = native.program.import_at(*address) else {
@@ -1553,22 +1553,6 @@ pub(crate) fn restate(
             r2il::refusal_evidence!("restate-interface", "the slots do not restate: {error:?}");
         })
         .ok()
-}
-
-/// The model a call to `address` runs under where the program states it: a bound import's default,
-/// a declared body's own; else `AnyCall` (ADR call-boundary, "S34 as built"). O(log imports).
-fn site_convention(
-    native: &Native<'_>,
-    target: &NativeTarget<'_>,
-    address: u64,
-) -> Option<Arc<ConventionModel>> {
-    match native.program.import_at(address) {
-        Some(name) => target.imports.bound(&name).then(|| {
-            let default = target.program.as_ref().map(|program| &program.convention);
-            Arc::clone(default.unwrap_or(&target.convention))
-        }),
-        None => native.program.stated_convention_at(address),
-    }
 }
 
 /// What the bodies a function calls say about their own boundaries.
