@@ -518,13 +518,32 @@ fn tail_reads(
     let tail_calls =
         (call_sites.by_id.values()).filter(|call| call.transfer == CallSiteTransfer::TailCall);
     for call in tail_calls {
-        let boundary = boundaries.calls.get(&call.id)?;
+        let refused = |why: &str| {
+            r2il::refusal_evidence!(
+                "exits-unnamed",
+                "{:#x}: tail {:?} {why}",
+                body.function.entry,
+                call.id
+            );
+        };
+        let Some(boundary) = boundaries.calls.get(&call.id) else {
+            refused("has no boundary");
+            return None;
+        };
         let named =
             boundary.complete && boundary.arguments_complete && boundary.variadic == Some(false);
         let Some(SourceCallResult::Register { storage, width }) = boundary.result_kind else {
+            refused(&format!("states result {:?}", boundary.result_kind));
             return None;
         };
         if !named || width.fills(storage) {
+            refused(&format!(
+                "complete {} arguments {} variadic {:?} fills {}",
+                boundary.complete,
+                boundary.arguments_complete,
+                boundary.variadic,
+                width.fills(storage)
+            ));
             return None;
         }
         let block = body

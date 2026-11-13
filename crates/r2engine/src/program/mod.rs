@@ -653,8 +653,12 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         self.view().returns_through(slot)
     }
 
-    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
         self.view().halts_on_through(slot)
+    }
+
+    fn halts_on(&self, callee: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
+        crate::body::Program::halts_on(&self.view(), callee)
     }
 
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {

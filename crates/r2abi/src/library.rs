@@ -178,8 +178,8 @@ pub struct LibraryRow {
     /// Whether the row states what the function returns.
     pub result: RowResult,
     pub noreturn: bool,
-    /// A parameter that, holding this handle, makes the call not return.
-    pub halts_on: Option<(u8, Handle)>,
+    /// A parameter that, holding this value, makes the call not return.
+    pub halts_on: Option<(u8, Halt)>,
     /// The handle the result always is.
     pub yields: Option<Handle>,
     /// The standard and header the row is read from; empty for a row radare2's tables state.
@@ -205,6 +205,24 @@ pub enum Handle {
 impl Handle {
     fn read(text: &str) -> Option<Self> {
         (text == "current-process").then_some(Self::CurrentProcess)
+    }
+}
+
+/// The value of a row's argument that makes its call not return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Halt {
+    /// The handle named.
+    Handle(Handle),
+    /// Any nonzero integer, as glibc's `error(3)` exits on a nonzero status.
+    NonZero,
+}
+
+impl Halt {
+    fn read(text: &str) -> Option<Self> {
+        match text {
+            "nonzero" => Some(Self::NonZero),
+            _ => Handle::read(text).map(Self::Handle),
+        }
     }
 }
 
@@ -592,7 +610,7 @@ struct Declared {
     parameters: BTreeMap<usize, (String, Option<String>)>,
     returns: Option<String>,
     noreturn: bool,
-    halts_on: Option<(u8, Handle)>,
+    halts_on: Option<(u8, Halt)>,
     yields: Option<Handle>,
     include: Option<String>,
     /// The reference page and minimum version a Microsoft row cites.
@@ -701,7 +719,7 @@ impl Table {
             "yields" => declared.yields = Handle::read(value),
             "halts_on" => {
                 declared.halts_on = value.split_once(',').and_then(|(index, handle)| {
-                    Some((index.trim().parse().ok()?, Handle::read(handle.trim())?))
+                    Some((index.trim().parse().ok()?, Halt::read(handle.trim())?))
                 });
             }
             "include" => declared.include = Some(value.to_owned()),

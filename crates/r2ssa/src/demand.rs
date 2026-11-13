@@ -118,21 +118,23 @@ pub(crate) fn exits_are_named_beside(
     live_out: &FunctionLiveOut,
     tails: &BTreeSet<u64>,
 ) -> bool {
-    if let Some(block) = live_out.unresolved_blocks().next() {
+    // Every unnamed exit is reported, so the evidence lists each cause (O(blocks)).
+    let mut named = true;
+    for block in live_out.unresolved_blocks() {
         r2il::refusal_evidence!(
             "exits-unnamed",
             "{:#x}: return {block:#x} is unresolved",
             function.entry
         );
-        return false;
+        named = false;
     }
     let cfg = function.cfg();
-    cfg.blocks().all(|block| {
+    cfg.blocks().fold(named, |all, block| {
         let successors = block.successors();
         let leaves =
             successors.is_empty() || successors.iter().any(|next| cfg.get_block(*next).is_none());
         if tails.contains(&block.addr) {
-            return true;
+            return all;
         }
         let named = match &block.terminator {
             BlockTerminator::Return => true,
@@ -153,7 +155,7 @@ pub(crate) fn exits_are_named_beside(
                 block.terminator
             );
         }
-        named
+        all && named
     })
 }
 
