@@ -3735,10 +3735,11 @@ fn mint_recovered_interface_inner(
         .enumerate()
         .map(|(index, parameter)| {
             let slotted = SourceParameterLocation::Register(parameter.slot());
-            Some(
-                SourceAbiParameterSpec::new(u32::try_from(index).ok()?, parameter.location())
-                    .at_slot(slot(slotted, parameter.class(), parameter.basis())?),
-            )
+            Some(SourceAbiParameterSpec::new(
+                u32::try_from(index).ok()?,
+                parameter.location(),
+                slot(slotted, parameter.class(), parameter.basis())?,
+            ))
         })
         .chain(
             recovered
@@ -3751,17 +3752,11 @@ fn mint_recovered_interface_inner(
                         size_bytes: parameter.slot_bytes(),
                         callee_offset: parameter.offset(),
                     };
-                    Some(
-                        SourceAbiParameterSpec::with_location(
-                            u32::try_from(register_count.checked_add(index)?).ok()?,
-                            location,
-                        )
-                        .at_slot(slot(
-                            location,
-                            SlotClass::Stack,
-                            parameter.basis(),
-                        )?),
-                    )
+                    Some(SourceAbiParameterSpec::with_location(
+                        u32::try_from(register_count.checked_add(index)?).ok()?,
+                        location,
+                        slot(location, SlotClass::Stack, parameter.basis())?,
+                    ))
                 }),
         )
         .collect::<Option<Vec<_>>>()?;

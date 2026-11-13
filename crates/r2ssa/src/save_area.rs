@@ -500,7 +500,11 @@ mod tests {
         let interface = SourceFunctionInterface::new_exact(
             b"save-area".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, register(0))],
+            [SourceAbiParameterSpec::new(
+                0,
+                register(0),
+                r2source::SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Void,
             [],
         )

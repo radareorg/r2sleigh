@@ -60,8 +60,8 @@ fn buffer_then_undeclared_pointer() -> (r2il::ArchSpec, r2ssa::SourceFunctionInt
         b"member-names-by-parameter".to_vec(),
         r2source::ConventionId::Aapcs64,
         [
-            r2ssa::SourceAbiParameterSpec::new(0, storage(0)),
-            r2ssa::SourceAbiParameterSpec::new(1, storage(8)),
+            r2ssa::SourceAbiParameterSpec::new(0, storage(0), r2source::SourceSlot::integer(0)),
+            r2ssa::SourceAbiParameterSpec::new(1, storage(8), r2source::SourceSlot::integer(1)),
         ],
         r2ssa::SourceFunctionReturn::Void,
         [],
@@ -154,8 +154,8 @@ fn two_pointers(
         b"layouts-by-type-id".to_vec(),
         template.convention(),
         [
-            r2ssa::SourceAbiParameterSpec::new(0, storage(0)),
-            r2ssa::SourceAbiParameterSpec::new(1, storage(8)),
+            r2ssa::SourceAbiParameterSpec::new(0, storage(0), r2source::SourceSlot::integer(0)),
+            r2ssa::SourceAbiParameterSpec::new(1, storage(8), r2source::SourceSlot::integer(1)),
         ],
         r2ssa::SourceFunctionReturn::Void,
         [],

@@ -84,6 +84,7 @@ fn exact_rdi_test_source_snapshot(revision: &str) -> Arc<EngineSourceSnapshot> {
                 offset: 0x10,
                 size: 8,
             },
+            r2source::SourceSlot::integer(0),
         )],
         r2ssa::SourceFunctionReturn::Void,
         std::iter::empty::<r2ssa::SourceStackSlotSpec>(),
@@ -555,7 +556,11 @@ fn interproc_summary_build_uses_only_trusted_callee_bodies() {
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         b"interproc-owner/rev1".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [r2ssa::SourceAbiParameterSpec::new(0, storage(8))],
+        [r2ssa::SourceAbiParameterSpec::new(
+            0,
+            storage(8),
+            r2source::SourceSlot::integer(0),
+        )],
         r2ssa::SourceFunctionReturn::Register {
             storage: storage(0),
         },

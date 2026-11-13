@@ -24,9 +24,9 @@ pub use r2source::{
     SourceFormatParameterRule, SourceFunctionInterface, SourceFunctionInterfaceError,
     SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError,
     SourceOpaqueTag, SourceParameterLocation, SourceResultCause, SourceResultSeed,
-    SourceResultWidth, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
-    SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure,
-    SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
+    SourceResultWidth, SourceSlot, SourceStackAllocationContract, SourceStackGrowth,
+    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
+    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
     SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, StackAddressBase,
 };
 
@@ -1822,8 +1822,16 @@ mod tests {
                 b"overlapping-register-interface".to_vec(),
                 r2source::ConventionId::SysVAmd64,
                 [
-                    SourceAbiParameterSpec::new(0, register_storage(0, 8)),
-                    SourceAbiParameterSpec::new(1, register_storage(4, 4)),
+                    SourceAbiParameterSpec::new(
+                        0,
+                        register_storage(0, 8),
+                        r2source::SourceSlot::integer(0)
+                    ),
+                    SourceAbiParameterSpec::new(
+                        1,
+                        register_storage(4, 4),
+                        r2source::SourceSlot::integer(1)
+                    ),
                 ],
                 SourceFunctionReturn::Void,
                 [],
@@ -1839,7 +1847,11 @@ mod tests {
         let interface = SourceFunctionInterface::new_exact(
             b"exact-stack-slot-roles".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, parameter_storage)],
+            [SourceAbiParameterSpec::new(
+                0,
+                parameter_storage,
+                r2source::SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Void,
             [
                 SourceStackSlotSpec::new_local(
@@ -1887,7 +1899,11 @@ mod tests {
         let compatibility = SourceFunctionInterface::new(
             b"compatibility-stack-slot".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, parameter_storage)],
+            [SourceAbiParameterSpec::new(
+                0,
+                parameter_storage,
+                r2source::SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new(
                 StackAddressBase::FramePointer,
@@ -1915,7 +1931,11 @@ mod tests {
             SourceFunctionInterface::new_exact(
                 b"typed-stack-pointer".to_vec(),
                 r2source::ConventionId::SysVAmd64,
-                [SourceAbiParameterSpec::new(0, parameter)],
+                [SourceAbiParameterSpec::new(
+                    0,
+                    parameter,
+                    r2source::SourceSlot::integer(0),
+                )],
                 SourceFunctionReturn::Register { storage: result },
                 slots,
             )
@@ -2422,7 +2442,11 @@ mod tests {
         let overlapping = SourceFunctionInterface::new_exact(
             b"overlapping-machine-frame-pointer".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, frame_pointer)],
+            [SourceAbiParameterSpec::new(
+                0,
+                frame_pointer,
+                r2source::SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
                 StackAddressBase::FramePointer,
@@ -2456,7 +2480,11 @@ mod tests {
             SourceFunctionInterface::new_exact(
                 b"malformed-stack-slot-role".to_vec(),
                 r2source::ConventionId::SysVAmd64,
-                [SourceAbiParameterSpec::new(0, parameter_storage)],
+                [SourceAbiParameterSpec::new(
+                    0,
+                    parameter_storage,
+                    r2source::SourceSlot::integer(0),
+                )],
                 SourceFunctionReturn::Void,
                 slots,
             )
@@ -2597,9 +2625,21 @@ mod tests {
         assert!(pointer32.validates_pointer_width(32));
         assert!(!pointer32.validates_pointer_width(64));
         let parameters = [
-            SourceAbiParameterSpec::new(0, register_storage(0, 8)),
-            SourceAbiParameterSpec::new(1, register_storage(8, 8)),
-            SourceAbiParameterSpec::new(2, register_storage(16, 8)),
+            SourceAbiParameterSpec::new(
+                0,
+                register_storage(0, 8),
+                r2source::SourceSlot::integer(0),
+            ),
+            SourceAbiParameterSpec::new(
+                1,
+                register_storage(8, 8),
+                r2source::SourceSlot::integer(1),
+            ),
+            SourceAbiParameterSpec::new(
+                2,
+                register_storage(16, 8),
+                r2source::SourceSlot::integer(2),
+            ),
         ];
         let low_i32 = SourceCarrierProjection::new(SourceCarrierKind::LowBits, 0, 32);
         let interface = SourceFunctionInterface::new_with_logical_types(
@@ -2701,8 +2741,16 @@ mod tests {
             b"fnv-u8-pointer-revision".to_vec(),
             r2source::ConventionId::Aapcs64,
             [
-                SourceAbiParameterSpec::new(0, register_storage(0, 8)),
-                SourceAbiParameterSpec::new(1, register_storage(8, 8)),
+                SourceAbiParameterSpec::new(
+                    0,
+                    register_storage(0, 8),
+                    r2source::SourceSlot::integer(0),
+                ),
+                SourceAbiParameterSpec::new(
+                    1,
+                    register_storage(8, 8),
+                    r2source::SourceSlot::integer(1),
+                ),
             ],
             SourceFunctionReturn::Register {
                 storage: register_storage(0, 8),
@@ -2948,7 +2996,11 @@ mod tests {
         let interface = SourceFunctionInterface::new(
             b"missing-register-interface".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, register_storage(0, 8))],
+            [SourceAbiParameterSpec::new(
+                0,
+                register_storage(0, 8),
+                r2source::SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Void,
             [],
         )

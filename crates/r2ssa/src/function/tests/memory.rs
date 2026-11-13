@@ -754,7 +754,11 @@ fn a_declared_stack_argument_is_the_store_the_call_finds_above_its_stack_pointer
     let interface = SourceFunctionInterface::new_exact(
         b"stack-argument".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [SourceAbiParameterSpec::new(0, storage(8, 8))],
+        [SourceAbiParameterSpec::new(
+            0,
+            storage(8, 8),
+            r2source::SourceSlot::integer(0),
+        )],
         SourceFunctionReturn::Void,
         [],
     )
@@ -875,7 +879,11 @@ fn reads_of_the_same_bytes_under_the_same_memory_are_one_content_in_any_block() 
     let interface = crate::SourceFunctionInterface::new_exact(
         b"same-content-reads".to_vec(),
         r2source::ConventionId::Aapcs64,
-        [SourceAbiParameterSpec::new(0, parameter)],
+        [SourceAbiParameterSpec::new(
+            0,
+            parameter,
+            r2source::SourceSlot::integer(0),
+        )],
         SourceFunctionReturn::Void,
         [],
     )

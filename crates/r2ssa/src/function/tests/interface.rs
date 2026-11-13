@@ -369,7 +369,11 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
     let function_interface = SourceFunctionInterface::new_exact(
         revision.to_vec(),
         r2source::ConventionId::Aapcs64,
-        [SourceAbiParameterSpec::new(0, argument_storage)],
+        [SourceAbiParameterSpec::new(
+            0,
+            argument_storage,
+            r2source::SourceSlot::integer(0),
+        )],
         SourceFunctionReturn::Void,
         [],
     )
@@ -837,7 +841,11 @@ fn a_narrow_formal_is_the_callers_lane_and_the_whole_register_keeps_the_callers_
     let interface = SourceFunctionInterface::new_exact(
         b"narrow-formal".to_vec(),
         r2source::ConventionId::Aapcs64,
-        [SourceAbiParameterSpec::new(0, lane)],
+        [SourceAbiParameterSpec::new(
+            0,
+            lane,
+            r2source::SourceSlot::integer(0),
+        )],
         SourceFunctionReturn::Void,
         [],
     )

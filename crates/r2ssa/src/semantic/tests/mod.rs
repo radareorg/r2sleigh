@@ -84,6 +84,7 @@ fn dual_space_exact_parameter_artifact(arch: &crate::Arch) -> SsaArtifact {
                 offset: 0,
                 size: 8,
             },
+            r2source::SourceSlot::integer(0),
         )],
         SourceFunctionReturn::Void,
         [],
@@ -840,7 +841,11 @@ fn return_boundary_interface() -> SourceFunctionInterface {
     SourceFunctionInterface::new(
         b"return-boundary-revision-1".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [SourceAbiParameterSpec::new(0, register_storage(8, 8))],
+        [SourceAbiParameterSpec::new(
+            0,
+            register_storage(8, 8),
+            r2source::SourceSlot::integer(0),
+        )],
         SourceFunctionReturn::Register {
             storage: register_storage(0, 8),
         },

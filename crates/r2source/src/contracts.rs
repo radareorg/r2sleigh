@@ -183,9 +183,9 @@ impl SourceParameterLocation {
 pub struct SourceAbiParameterSpec {
     index: u32,
     location: SourceParameterLocation,
-    /// The convention slot the parameter is at and what its declared type rests on, where its
-    /// producer states them (doc/adr-call-boundary.md, "The function's parameters").
-    slot: Option<SourceSlot>,
+    /// The convention slot the parameter is at and what its declared type rests on
+    /// (doc/adr-call-boundary.md, "The function's parameters").
+    slot: SourceSlot,
 }
 
 /// One parameter's convention slot (r2ssa `body_boundary::SlotId`), its section, and its type's
@@ -197,64 +197,72 @@ pub struct SourceSlot {
     pub basis: crate::Basis,
 }
 
-impl SourceAbiParameterSpec {
-    /// A parameter passed in a register.
-    pub const fn new(index: u32, storage: CanonicalStorageId) -> Self {
+impl SourceSlot {
+    /// Integer slot `id` whose type rests on the width read alone.
+    pub const fn integer(id: u32) -> Self {
         Self {
-            index,
-            location: SourceParameterLocation::Register(storage),
-            slot: None,
+            id,
+            class: crate::convention::SlotClass::Integer,
+            basis: crate::Basis::Decoded,
         }
+    }
+
+    /// Stack slot `id` whose type rests on the width read alone.
+    pub const fn stack(id: u32) -> Self {
+        Self {
+            class: crate::convention::SlotClass::Stack,
+            ..Self::integer(id)
+        }
+    }
+}
+
+impl SourceAbiParameterSpec {
+    /// A parameter passed in a register, at `slot`.
+    pub const fn new(index: u32, storage: CanonicalStorageId, slot: SourceSlot) -> Self {
+        Self::with_location(index, SourceParameterLocation::Register(storage), slot)
     }
 
     /// A parameter passed in the argument area, `offset` bytes above the
-    /// stack pointer at entry.
+    /// stack pointer at entry, at `slot`.
     ///
     /// Entry is already the callee's own view, so the two coordinates agree.
-    pub const fn on_stack(index: u32, offset: i64, size_bytes: u32) -> Self {
-        Self {
-            index,
-            location: SourceParameterLocation::Stack {
-                offset,
-                size_bytes,
-                callee_offset: offset,
-            },
-            slot: None,
-        }
+    pub const fn on_stack(index: u32, offset: i64, size_bytes: u32, slot: SourceSlot) -> Self {
+        let location = SourceParameterLocation::Stack {
+            offset,
+            size_bytes,
+            callee_offset: offset,
+        };
+        Self::with_location(index, location, slot)
     }
 
-    pub const fn with_location(index: u32, location: SourceParameterLocation) -> Self {
+    pub const fn with_location(
+        index: u32,
+        location: SourceParameterLocation,
+        slot: SourceSlot,
+    ) -> Self {
         Self {
             index,
             location,
-            slot: None,
+            slot,
         }
     }
 
-    /// The same parameter, stated at `slot`.
-    pub const fn at_slot(mut self, slot: SourceSlot) -> Self {
-        self.slot = Some(slot);
-        self
-    }
-
-    /// The slot, where the producer states it.
-    pub const fn slot(&self) -> Option<SourceSlot> {
+    pub const fn slot(&self) -> SourceSlot {
         self.slot
     }
 
-    /// The section's class, where the producer states it.
-    pub fn class(&self) -> Option<crate::convention::SlotClass> {
-        self.slot.map(|slot| slot.class)
+    pub const fn class(&self) -> crate::convention::SlotClass {
+        self.slot.class
     }
 
     /// Where the parameter comes from: `Convention` for a hole below a read slot.
-    pub fn basis(&self) -> Option<crate::Basis> {
-        self.slot.map(|slot| slot.basis)
+    pub const fn basis(&self) -> crate::Basis {
+        self.slot.basis
     }
 
     /// An unread slot below a read one: a parameter only by the convention's order.
     pub fn is_hole(&self) -> bool {
-        self.basis() == Some(crate::Basis::Convention)
+        self.basis() == crate::Basis::Convention
     }
 
     pub const fn index(&self) -> u32 {
@@ -3348,8 +3356,8 @@ mod tests {
             b"variadic-function".to_vec(),
             crate::ConventionId::SysVAmd64,
             [
-                SourceAbiParameterSpec::new(0, register_storage(0x38, 8)),
-                SourceAbiParameterSpec::new(1, register_storage(0x30, 8)),
+                SourceAbiParameterSpec::new(0, register_storage(0x38, 8), SourceSlot::integer(0)),
+                SourceAbiParameterSpec::new(1, register_storage(0x30, 8), SourceSlot::integer(1)),
             ],
             SourceFunctionReturn::Register {
                 storage: register_storage(0, 8),
@@ -3604,7 +3612,11 @@ mod tests {
         let exact = SourceFunctionInterface::new_exact(
             b"exact-frame-pointer".to_vec(),
             crate::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, parameter)],
+            [SourceAbiParameterSpec::new(
+                0,
+                parameter,
+                SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Register { storage: result },
             [
                 SourceStackSlotSpec::new_local(
@@ -3692,7 +3704,11 @@ mod tests {
         let parameter_overlap = SourceFunctionInterface::new_exact(
             b"frame-parameter-overlap".to_vec(),
             crate::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, frame_pointer)],
+            [SourceAbiParameterSpec::new(
+                0,
+                frame_pointer,
+                SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
                 StackAddressBase::FramePointer,
@@ -3819,7 +3835,11 @@ mod tests {
         let base = SourceFunctionInterface::new_exact(
             b"explicit-frame-validation".to_vec(),
             crate::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, parameter)],
+            [SourceAbiParameterSpec::new(
+                0,
+                parameter,
+                SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Register { storage: result },
             [],
         )

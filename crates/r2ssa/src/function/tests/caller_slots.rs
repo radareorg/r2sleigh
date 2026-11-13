@@ -91,7 +91,12 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
     let interface = SourceFunctionInterface::new_exact(
         b"caller-slots".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [SourceAbiParameterSpec::on_stack(0, 16, 8)],
+        [SourceAbiParameterSpec::on_stack(
+            0,
+            16,
+            8,
+            crate::SourceSlot::stack(0),
+        )],
         SourceFunctionReturn::Register {
             storage: storage(0),
         },

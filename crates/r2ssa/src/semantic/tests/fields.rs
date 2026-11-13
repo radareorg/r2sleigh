@@ -12,7 +12,11 @@ fn parameter_artifact(blocks: Vec<R2ILBlock>) -> SsaArtifact {
     let interface = SourceFunctionInterface::new_exact(
         b"parameter-fields".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [SourceAbiParameterSpec::new(0, register_storage(RDI, 8))],
+        [SourceAbiParameterSpec::new(
+            0,
+            register_storage(RDI, 8),
+            r2source::SourceSlot::integer(0),
+        )],
         SourceFunctionReturn::Void,
         [SourceStackSlotSpec::new_local(
             StackAddressBase::StackPointer,

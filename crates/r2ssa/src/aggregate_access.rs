@@ -671,8 +671,16 @@ mod tests {
             REVISION.to_vec(),
             r2source::ConventionId::Aapcs64,
             [
-                SourceAbiParameterSpec::new(0, register_storage(0)),
-                SourceAbiParameterSpec::new(1, register_storage(8)),
+                SourceAbiParameterSpec::new(
+                    0,
+                    register_storage(0),
+                    r2source::SourceSlot::integer(0),
+                ),
+                SourceAbiParameterSpec::new(
+                    1,
+                    register_storage(8),
+                    r2source::SourceSlot::integer(1),
+                ),
             ],
             SourceFunctionReturn::Void,
             [],
@@ -753,9 +761,13 @@ mod tests {
         pointer_offset: u64,
     ) -> SourceFunctionInterface {
         let parameters = [
-            SourceAbiParameterSpec::new(0, register_storage(pointer_offset)),
-            SourceAbiParameterSpec::new(1, register_storage(8)),
-            SourceAbiParameterSpec::new(2, register_storage(16)),
+            SourceAbiParameterSpec::new(
+                0,
+                register_storage(pointer_offset),
+                r2source::SourceSlot::integer(0),
+            ),
+            SourceAbiParameterSpec::new(1, register_storage(8), r2source::SourceSlot::integer(1)),
+            SourceAbiParameterSpec::new(2, register_storage(16), r2source::SourceSlot::integer(2)),
         ];
         if !exact_graph {
             return SourceFunctionInterface::new(
