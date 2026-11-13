@@ -2599,10 +2599,9 @@ fn count_register_set(at: CallPosition<'_>, machine_context: &SourceMachineConte
     // The call's own read of the count register names the value that reaches it.
     let reads = graph.boundary_reads_spelled_at(block_addr, op_index);
     let Some(value) = reads.iter().find_map(|read| match graph.op(*read) {
-        Some(SSAOp::CallUse { src }) => (graph.value(*src))
-            .and_then(|value| value.canonical_storage)
-            .is_some_and(|storage| register_storages_overlap(storage, count))
-            .then_some(*src),
+        Some(SSAOp::CallUse { src, slot }) => {
+            register_storages_overlap(*slot, count).then_some(*src)
+        }
         _ => None,
     }) else {
         return false;

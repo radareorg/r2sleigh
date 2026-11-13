@@ -980,7 +980,7 @@ fn release_undemanded_bytes(
         );
         return EditPlan::new();
     }
-    let demand = crate::demand::DemandedBytes::of(graph, &live_out);
+    let demand = crate::demand::DemandedBytes::of(graph, &live_out, Some(machine_context));
     function.release_undemanded_insert_bases(graph, &demand)
 }
 

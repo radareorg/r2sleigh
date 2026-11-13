@@ -566,9 +566,9 @@ mod tests {
             .expect("block")
             .ops()
             .iter()
-            .any(|op| matches!(op, SSAOp::CallUse { src } if *src == source));
+            .any(|op| matches!(op, SSAOp::CallUse { src, .. } if *src == source));
         let reads_copy = func.named_block(0x1000).expect("block").ops().iter().any(
-            |op| matches!(op, SSAOp::CallUse { src } if src.name() == "RDI" && src.version > 0),
+            |op| matches!(op, SSAOp::CallUse { src, .. } if src.name() == "RDI" && src.version > 0),
         );
         assert!(
             reads_source || !reads_copy,

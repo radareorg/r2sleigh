@@ -770,7 +770,7 @@ impl<'a> Walker<'a> {
                 let next = self.displaced(var, value, (*a, *b), subtract);
                 self.set(*dst, next);
             }
-            SSAOp::CallUse { src } if (self.sinks.upward_at)(block, index, *src) => {
+            SSAOp::CallUse { src, .. } if (self.sinks.upward_at)(block, index, *src) => {
                 self.escape_up(value);
             }
             SSAOp::CallUse { .. } | SSAOp::CallOther { .. } => self.escape(value),

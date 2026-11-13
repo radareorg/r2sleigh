@@ -932,15 +932,16 @@ impl HeldLaneWidths {
     pub(crate) fn of(graph: &SsaGraph, machine_context: &SourceMachineContext) -> Self {
         let mut widths = crate::dense::IdMap::new(graph.values.len());
         for value in &graph.values {
-            let Some(storage) = value.canonical_storage.filter(|storage| {
+            let entry = value.canonical_storage.is_some_and(|storage| {
                 storage.space == CanonicalStorageSpace::Register
                     && value.var.version == 0
                     && graph.def_inst(value.id).is_none()
-            }) else {
+            });
+            if !entry {
                 continue;
-            };
+            }
             let widest = (graph.use_sites(value.id).iter()).try_fold(0, |widest, site| {
-                read_width(graph, machine_context, storage, site.inst).map(|read| widest.max(read))
+                read_width(graph, machine_context, site.inst).map(|read| widest.max(read))
             });
             widths.insert(value.id, widest);
         }
@@ -967,26 +968,54 @@ impl HeldLaneWidths {
     }
 }
 
-/// The low bytes of entry register `storage` one use reads: a subpiece's end, or the narrowest lane
-/// a call's callee holds of it; `None` where the use may read the whole register.
+/// The low bytes of an entry register one use reads: a subpiece's end, or what its call takes
+/// (`call_read_bytes`); `None` where the use may read the whole register.
 fn read_width(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
-    storage: CanonicalStorageId,
     reader: crate::graph::InstId,
 ) -> Option<u32> {
     match graph.op(reader)? {
         SSAOp::Subpiece { dst, offset, .. } => Some(offset.saturating_add(graph.var(*dst).size)),
-        SSAOp::CallUse { .. } => {
-            let interface = call_after(graph, reader, machine_context)?;
-            (interface.arguments().iter())
-                .filter(|argument| argument.register_storage() == Some(storage))
-                .filter_map(|argument| callee_held_lane(interface, argument.index(), storage))
-                .map(|lane| lane.size)
-                .min()
-        }
+        SSAOp::CallUse { .. } => call_read_bytes(graph, machine_context, reader),
         _ => None,
     }
+}
+
+/// The low bytes of the carrier a `CallUse` reads that its call takes: none where the call's
+/// complete interface states no argument there (`CallReads`), the widest lane the callee holds of
+/// each argument stated there (D266 rule 2); `None` where one is read whole or nothing states it.
+pub(crate) fn call_read_bytes(
+    graph: &SsaGraph,
+    machine_context: &SourceMachineContext,
+    read: crate::graph::InstId,
+) -> Option<u32> {
+    let SSAOp::CallUse { slot, .. } = graph.op(read)? else {
+        return None;
+    };
+    let (instruction, interface) = call_after(graph, read, machine_context)?;
+    let reads = machine_context.call_reads(Some(instruction))?;
+    let stated = |storage: &CanonicalStorageId| storage_overlaps(*storage, *slot);
+    let register = slot.space == CanonicalStorageSpace::Register;
+    if register && reads.stated && !reads.registers.iter().any(stated) {
+        return Some(0);
+    }
+    let interface = interface?;
+    let mut lanes = (interface.arguments().iter())
+        .filter(|argument| argument.register_storage().as_ref().is_some_and(stated))
+        .map(|argument| {
+            let storage = argument.register_storage()?;
+            (storage == *slot).then(|| callee_held_lane(interface, argument.index(), storage))?
+        })
+        .map(|lane| lane.map(|lane| lane.size));
+    let first = lanes.next()??;
+    lanes.try_fold(first, |widest, lane| Some(widest.max(lane?)))
+}
+
+fn storage_overlaps(a: CanonicalStorageId, b: CanonicalStorageId) -> bool {
+    a.space == b.space
+        && a.offset < b.offset.saturating_add(u64::from(b.size))
+        && b.offset < a.offset.saturating_add(u64::from(a.size))
 }
 
 /// The interface of the call a `CallUse` precedes in its block: the reads run up to the call.
@@ -994,13 +1023,17 @@ fn call_after<'a>(
     graph: &SsaGraph,
     read: crate::graph::InstId,
     machine_context: &'a SourceMachineContext,
-) -> Option<&'a crate::SourceCallSiteInterface> {
+) -> Option<(u64, Option<&'a crate::SourceCallSiteInterface>)> {
     let inst = graph.inst(read)?;
     let block = graph.block(inst.block)?;
     let instruction = (block.insts.get(inst.ordinal..)?.iter())
         .find_map(|inst| graph.op(*inst)?.transfer().filter(|flow| flow.call))?
         .instruction?;
-    machine_context.call_site_interface(machine_context.raw_call_site_at(instruction)?)
+    let identity = machine_context.raw_call_site_at(instruction);
+    Some((
+        instruction,
+        identity.and_then(|identity| machine_context.call_site_interface(identity)),
+    ))
 }
 
 /// Whether `lane` is this function's own entry value of the low lane of `carrier`, its entry

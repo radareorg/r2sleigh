@@ -491,7 +491,13 @@ fn demanded(
     let live_out = &without;
     let (tails, reads) = tail_reads(body, calls).unwrap_or_default();
     crate::demand::exits_are_named_beside(body.function, live_out, &tails).then(|| {
-        crate::demand::DemandedBytes::of_returning(body.graph, live_out, (result, &reads), ignored)
+        let reads = (result, reads.as_slice());
+        crate::demand::DemandedBytes::of_returning(
+            body.graph,
+            live_out,
+            reads,
+            (ignored, body.machine_context),
+        )
     })
 }
 
