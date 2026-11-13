@@ -1350,6 +1350,7 @@ D221: a format spilled to the frame and reloaded in another block is still the c
 - The reload equals the spill only through a promoted slot. Promotion reads D290's escape walk, so a slot whose address a call receives stays in memory and its reload folds to nothing: the call takes every vector register.
 - The seal reads no other row's facts, so a `RegisterEffects` row depends on it as on `Walked`.
 - `dispatch_reads` is not folded into this query: Ge (D285) owns the dispatch rounds and their seal.
+- Integrated with Ge: the seal reads the whole walked body through the tables its walk followed, as Ge's whole-body seal does; both Gb tests and Ge's pass.
 - Tests: `a_spilled_format_reloaded_in_another_block_reads_no_vector_register` (fails without the seal) and `a_spilled_format_whose_slot_a_call_receives_keeps_q0_taken`.
 - Open for the Exit bar: shapes.c clang -O0 `shape_stash` and `mixed_touch` under `aa` on aarch64 equivalence, and bash `aa` within 0.3%.
 
