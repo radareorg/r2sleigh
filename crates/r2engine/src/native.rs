@@ -2937,7 +2937,7 @@ impl Native<'_> {
         body: &crate::body::Body,
     ) -> (Vec<SourceDataObject>, Option<r2source::SourceTypeGraph>) {
         let declarations = self.target.declarations;
-        let named = referenced(body)
+        let referenced = referenced(body)
             .into_iter()
             .filter(|address| !body.calls.contains(address))
             // An import's slot is a word the loader fills, not an object the source names: its
@@ -2946,7 +2946,15 @@ impl Native<'_> {
                 self.program.import_at(*address).is_none()
                     || r2abi::statement::write_at(self.program.loader_writes(), *address)
                         .is_none_or(|write| write.place != *address)
-            })
+            });
+        // A reference inside a declared object also names the object at its start (D361).
+        let starts = referenced.flat_map(|address| {
+            let start = declarations
+                .object_containing(address)
+                .map(|(start, _)| start);
+            std::iter::once(address).chain(start.filter(|start| *start != address))
+        });
+        let named = (starts.collect::<BTreeSet<_>>().into_iter())
             .filter_map(|address| Some((address, self.program.name_at(address)?)))
             .collect::<Vec<_>>();
         let types = (named.iter())

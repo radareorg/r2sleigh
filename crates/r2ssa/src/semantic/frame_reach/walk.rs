@@ -10,7 +10,6 @@ use crate::function::SSAFunction;
 use crate::machine_context::SourceMachineContext;
 use crate::op::SSAOp;
 use crate::value_table::VarId;
-use r2source::convention::SlotClass;
 
 /// How far an address may move from where it points.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -314,7 +313,7 @@ struct Sinks<'a> {
     calls_refund_stack: bool,
     /// The registers a call may read where no `CallUse` says which: none under a convention.
     read_by_calls: Box<dyn Fn(crate::CanonicalStorageId) -> bool + 'a>,
-    /// Whether the `CallUse` at this block and index hands its value to a callee that reaches
+    /// Whether the `CallUse` at this block and index hands its register to a callee that reaches
     /// only upward through it.
     upward_at: Box<dyn Fn(u64, usize, crate::CanonicalStorageId) -> bool + 'a>,
     stack_arguments: StackArguments,
@@ -344,33 +343,20 @@ impl<'a> Sinks<'a> {
                 && storage.space == crate::CanonicalStorageSpace::Register
                 && !bases.contains(&Some(storage))
         };
-        let integer_arguments = machine
-            .convention()
-            .map(|slots| slots.arguments(SlotClass::Integer).to_vec())
-            .unwrap_or_default();
+        // The callee is the call's raw identity's target, its reach indexed by the site's model.
         let upward_at = move |block: u64, index: usize, storage: crate::CanonicalStorageId| {
             let Some(ops) = func.get_block(block).map(|block| block.ops()) else {
                 return false;
             };
-            let target = ops[index + 1..].iter().find_map(|op| match op {
+            let call = ops[index + 1..].iter().find_map(|op| match op {
                 SSAOp::CallUse { .. } => None,
-                op => Some(
-                    op.call()
-                        .filter(|call| call.direct)
-                        .and_then(|call| func.var(*call.target).constant_bits()),
-                ),
+                op => Some(op.call().filter(|call| call.direct)),
             });
-            let Some(Some(target)) = target else {
-                return false;
-            };
-            let Some(position) = (integer_arguments.iter())
-                .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
-            else {
-                return false;
-            };
-            machine
-                .callee_argument_reach(target)
-                .and_then(|reach| reach.get(&position))
+            let target = (call.flatten().and_then(|call| call.instruction))
+                .and_then(|instruction| machine.raw_call_site_at(instruction))
+                .and_then(crate::semantic::direct_target_from_raw_identity);
+            target
+                .and_then(|target| machine.callee_reach_through(target, storage))
                 .is_some_and(crate::interproc::ArgumentReach::is_upward)
         };
         Self {

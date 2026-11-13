@@ -166,17 +166,22 @@ pub struct DemandedBytes {
 }
 
 impl DemandedBytes {
-    pub(crate) fn of(graph: &SsaGraph, live_out: &FunctionLiveOut) -> Self {
-        Self::of_returning(graph, live_out, (None, &[]), &BTreeSet::new())
+    pub(crate) fn of(
+        graph: &SsaGraph,
+        live_out: &FunctionLiveOut,
+        context: Option<&crate::SourceMachineContext>,
+    ) -> Self {
+        Self::of_returning(graph, live_out, (None, &[]), (&BTreeSet::new(), context))
     }
 
     /// The same, where a return reads only the `result` bytes its interface states (`None`: whole),
-    /// a tail exit reads the bytes `tails` names, and no `ignored` read counts.
+    /// a tail exit reads the bytes `tails` names, no `ignored` read counts, and a call reads an
+    /// argument at the lane its callee holds (`semantic::call_read_bytes`, D366).
     pub(crate) fn of_returning(
         graph: &SsaGraph,
         live_out: &FunctionLiveOut,
         (result, tails): (Option<CanonicalStorageId>, &[(ValueId, ByteMask)]),
-        ignored: &BTreeSet<UseSite>,
+        (ignored, context): (&BTreeSet<UseSite>, Option<&crate::SourceMachineContext>),
     ) -> Self {
         let returned = live_out.iter().map(|value| {
             let storage = graph.value(value).and_then(|value| value.canonical_storage);
@@ -199,9 +204,16 @@ impl DemandedBytes {
                         input_idx: *input_idx,
                     })
                 };
+                let held = match inst.payload {
+                    InstPayload::Op(SSAOp::CallUse { .. }) => context.and_then(|context| {
+                        crate::semantic::call_read_bytes(graph, context, inst.id)
+                    }),
+                    _ => None,
+                };
+                let mask = held.map_or(ByteMask::All, ByteMask::whole);
                 (graph.inputs(inst.id).iter().enumerate())
                     .filter(read)
-                    .map(|(_, input)| (*input, ByteMask::All))
+                    .map(move |(_, input)| (*input, mask))
             });
         let roots = returned.chain(tails.iter().copied()).chain(effects);
         Self {
@@ -346,7 +358,7 @@ mod tests {
         if !exits_are_named(&function, &live_out) {
             return false;
         }
-        let demand = DemandedBytes::of(&graph, &live_out);
+        let demand = DemandedBytes::of(&graph, &live_out, None);
         !function
             .release_undemanded_insert_bases(&graph, &demand)
             .is_empty()

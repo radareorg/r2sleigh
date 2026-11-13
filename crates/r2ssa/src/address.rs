@@ -876,6 +876,7 @@ mod tests {
                         offset: (index as u64) * 8,
                         size: 8,
                     },
+                    crate::SourceSlot::integer(index as u32),
                 )
             }),
             SourceFunctionReturn::Void,
@@ -1050,7 +1051,11 @@ mod tests {
         let interface = SourceFunctionInterface::new_exact(
             b"exact-space-parameter-spill".to_vec(),
             r2source::ConventionId::Aapcs64,
-            [SourceAbiParameterSpec::new(0, parameter_storage)],
+            [SourceAbiParameterSpec::new(
+                0,
+                parameter_storage,
+                r2source::SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
                 StackAddressBase::StackPointer,
@@ -1147,7 +1152,11 @@ mod tests {
         let interface = SourceFunctionInterface::new_exact(
             b"narrow-spill-reload".to_vec(),
             r2source::ConventionId::Aapcs64,
-            [SourceAbiParameterSpec::new(0, register_storage(0))],
+            [SourceAbiParameterSpec::new(
+                0,
+                register_storage(0),
+                r2source::SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
                 StackAddressBase::StackPointer,
@@ -1261,8 +1270,8 @@ mod tests {
             b"sign-extended-parameter".to_vec(),
             r2source::ConventionId::Aapcs64,
             [
-                SourceAbiParameterSpec::new(0, register(0, 8)),
-                SourceAbiParameterSpec::new(1, register(8, 4)),
+                SourceAbiParameterSpec::new(0, register(0, 8), r2source::SourceSlot::integer(0)),
+                SourceAbiParameterSpec::new(1, register(8, 4), r2source::SourceSlot::integer(1)),
             ],
             SourceFunctionReturn::Void,
             [],

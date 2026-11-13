@@ -24,9 +24,9 @@ pub use r2source::{
     SourceFormatParameterRule, SourceFunctionInterface, SourceFunctionInterfaceError,
     SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError,
     SourceOpaqueTag, SourceParameterLocation, SourceResultCause, SourceResultSeed,
-    SourceResultWidth, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
-    SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure,
-    SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
+    SourceResultWidth, SourceSlot, SourceStackAllocationContract, SourceStackGrowth,
+    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
+    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
     SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, StackAddressBase,
 };
 
@@ -436,6 +436,8 @@ pub struct SourceMachineContext {
     /// before the interprocedural solve exists, so the fact arrives with the
     /// bodies the capture took rather than from that solve.
     callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+    /// The convention each stated callee runs under, by entry; any other call runs under `calls`.
+    site_conventions: crate::SiteConventions,
     /// The library models of the imports this body calls, by entry.
     callee_library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The callees a runtime model says re-enter their caller at its entry.
@@ -814,6 +816,7 @@ impl SourceMachineContext {
             member_call_sites: BTreeSet::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
+            site_conventions: crate::SiteConventions::new(),
             callee_library: BTreeMap::new(),
             reentering_callees: BTreeSet::new(),
             unstated_imports: BTreeMap::new(),
@@ -1141,6 +1144,34 @@ impl SourceMachineContext {
         callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
     ) {
         self.callee_argument_reach = callee_argument_reach;
+    }
+
+    pub(crate) fn set_site_conventions(&mut self, conventions: crate::SiteConventions) {
+        self.site_conventions = conventions;
+    }
+
+    /// What a call to `target` runs under: the callee's stated model, else `calls`.
+    pub fn site_model(&self, target: u64) -> Option<&r2source::ConventionModel> {
+        (self.site_conventions.get(&target)).map_or_else(|| self.calls(), |model| Some(&**model))
+    }
+
+    /// The integer argument registers a call to `target` hands, in the order the callee's own
+    /// summary numbers its reach (D365); none where no model states them.
+    pub fn site_integer_arguments(&self, target: u64) -> &[CanonicalStorageId] {
+        self.site_model(target)
+            .map(|model| model.arguments(r2source::convention::SlotClass::Integer))
+            .unwrap_or_default()
+    }
+
+    /// How far `target` reaches through what it is handed in `storage`, by the site's model.
+    pub fn callee_reach_through(
+        &self,
+        target: u64,
+        storage: CanonicalStorageId,
+    ) -> Option<&crate::interproc::ArgumentReach> {
+        let position = (self.site_integer_arguments(target).iter())
+            .position(|slot| slot.space == storage.space && slot.offset == storage.offset)?;
+        self.callee_argument_reach.get(&target)?.get(&position)
     }
 
     pub(crate) fn set_frame_saves(&mut self, saves: &[r2source::SourceFrameSave]) {
@@ -1822,8 +1853,16 @@ mod tests {
                 b"overlapping-register-interface".to_vec(),
                 r2source::ConventionId::SysVAmd64,
                 [
-                    SourceAbiParameterSpec::new(0, register_storage(0, 8)),
-                    SourceAbiParameterSpec::new(1, register_storage(4, 4)),
+                    SourceAbiParameterSpec::new(
+                        0,
+                        register_storage(0, 8),
+                        r2source::SourceSlot::integer(0)
+                    ),
+                    SourceAbiParameterSpec::new(
+                        1,
+                        register_storage(4, 4),
+                        r2source::SourceSlot::integer(1)
+                    ),
                 ],
                 SourceFunctionReturn::Void,
                 [],
@@ -1839,7 +1878,11 @@ mod tests {
         let interface = SourceFunctionInterface::new_exact(
             b"exact-stack-slot-roles".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, parameter_storage)],
+            [SourceAbiParameterSpec::new(
+                0,
+                parameter_storage,
+                r2source::SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Void,
             [
                 SourceStackSlotSpec::new_local(
@@ -1887,7 +1930,11 @@ mod tests {
         let compatibility = SourceFunctionInterface::new(
             b"compatibility-stack-slot".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, parameter_storage)],
+            [SourceAbiParameterSpec::new(
+                0,
+                parameter_storage,
+                r2source::SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new(
                 StackAddressBase::FramePointer,
@@ -1915,7 +1962,11 @@ mod tests {
             SourceFunctionInterface::new_exact(
                 b"typed-stack-pointer".to_vec(),
                 r2source::ConventionId::SysVAmd64,
-                [SourceAbiParameterSpec::new(0, parameter)],
+                [SourceAbiParameterSpec::new(
+                    0,
+                    parameter,
+                    r2source::SourceSlot::integer(0),
+                )],
                 SourceFunctionReturn::Register { storage: result },
                 slots,
             )
@@ -2422,7 +2473,11 @@ mod tests {
         let overlapping = SourceFunctionInterface::new_exact(
             b"overlapping-machine-frame-pointer".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, frame_pointer)],
+            [SourceAbiParameterSpec::new(
+                0,
+                frame_pointer,
+                r2source::SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Void,
             [SourceStackSlotSpec::new_local(
                 StackAddressBase::FramePointer,
@@ -2456,7 +2511,11 @@ mod tests {
             SourceFunctionInterface::new_exact(
                 b"malformed-stack-slot-role".to_vec(),
                 r2source::ConventionId::SysVAmd64,
-                [SourceAbiParameterSpec::new(0, parameter_storage)],
+                [SourceAbiParameterSpec::new(
+                    0,
+                    parameter_storage,
+                    r2source::SourceSlot::integer(0),
+                )],
                 SourceFunctionReturn::Void,
                 slots,
             )
@@ -2597,9 +2656,21 @@ mod tests {
         assert!(pointer32.validates_pointer_width(32));
         assert!(!pointer32.validates_pointer_width(64));
         let parameters = [
-            SourceAbiParameterSpec::new(0, register_storage(0, 8)),
-            SourceAbiParameterSpec::new(1, register_storage(8, 8)),
-            SourceAbiParameterSpec::new(2, register_storage(16, 8)),
+            SourceAbiParameterSpec::new(
+                0,
+                register_storage(0, 8),
+                r2source::SourceSlot::integer(0),
+            ),
+            SourceAbiParameterSpec::new(
+                1,
+                register_storage(8, 8),
+                r2source::SourceSlot::integer(1),
+            ),
+            SourceAbiParameterSpec::new(
+                2,
+                register_storage(16, 8),
+                r2source::SourceSlot::integer(2),
+            ),
         ];
         let low_i32 = SourceCarrierProjection::new(SourceCarrierKind::LowBits, 0, 32);
         let interface = SourceFunctionInterface::new_with_logical_types(
@@ -2701,8 +2772,16 @@ mod tests {
             b"fnv-u8-pointer-revision".to_vec(),
             r2source::ConventionId::Aapcs64,
             [
-                SourceAbiParameterSpec::new(0, register_storage(0, 8)),
-                SourceAbiParameterSpec::new(1, register_storage(8, 8)),
+                SourceAbiParameterSpec::new(
+                    0,
+                    register_storage(0, 8),
+                    r2source::SourceSlot::integer(0),
+                ),
+                SourceAbiParameterSpec::new(
+                    1,
+                    register_storage(8, 8),
+                    r2source::SourceSlot::integer(1),
+                ),
             ],
             SourceFunctionReturn::Register {
                 storage: register_storage(0, 8),
@@ -2948,7 +3027,11 @@ mod tests {
         let interface = SourceFunctionInterface::new(
             b"missing-register-interface".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, register_storage(0, 8))],
+            [SourceAbiParameterSpec::new(
+                0,
+                register_storage(0, 8),
+                r2source::SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Void,
             [],
         )

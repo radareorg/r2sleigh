@@ -456,3 +456,95 @@ fn a_sysv_caller_keeps_rsi_across_a_call_to_a_stated_ms_abi_callee() {
     let text = rendered(&mut unstated, TWICE);
     assert!(!text.contains("+ (uint64_t)arg0"), "{text}");
 }
+
+/// `ms_abi void hand(long **a, long *b, long *c) { *a = b; *c = 1; }`, then SysV `below()`: `y`
+/// at sp+0x20, `x` above it, `hand(0, &x, 0)`, `return y`. `b` escapes; `c` reaches upward.
+const HAND_BELOW: &[u8] = &[
+    0x48, 0x89, 0x11, // 1000 mov [rcx], rdx
+    0x49, 0xc7, 0x00, 0x01, 0x00, 0x00, 0x00, // 1003 mov qword [r8], 1
+    0xc3, // 100a ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 100b padding
+    0x48, 0x83, 0xec, 0x38, // 1010 sub rsp, 0x38
+    0x48, 0xc7, 0x44, 0x24, 0x20, 0x07, 0x00, 0x00, 0x00, // 1014 mov qword [rsp+0x20], 7
+    0x48, 0xc7, 0x44, 0x24, 0x28, 0x05, 0x00, 0x00, 0x00, // 101d mov qword [rsp+0x28], 5
+    0x48, 0x8d, 0x54, 0x24, 0x28, // 1026 lea rdx, [rsp+0x28]
+    0x45, 0x31, 0xc0, // 102b xor r8d, r8d
+    0x66, 0x90, // 102e nop
+    0x31, 0xc9, // 1030 xor ecx, ecx
+    0xe8, 0xc9, 0xff, 0xff, 0xff, // 1032 call 0x1000
+    0x48, 0x8b, 0x44, 0x24, 0x20, // 1037 mov rax, [rsp+0x20]
+    0x48, 0x83, 0xc4, 0x38, // 103c add rsp, 0x38
+    0xc3, // 1040 ret
+];
+
+/// `hand` declared `ms_abi` with three pointer parameters.
+fn declaring_hand() -> r2abi::Declarations {
+    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Type, TypeGraph, Width};
+    let mut graph = TypeGraph::new();
+    let long = graph.add(Type::Scalar(Scalar {
+        kind: ScalarKind::Signed,
+        width: Width::Bits(64),
+        name: Some("long int".to_owned()),
+    }));
+    let pointer = graph.add(Type::Pointer { target: long });
+    let pointer_pointer = graph.add(Type::Pointer { target: pointer });
+    let prototype = Prototype {
+        name: "hand".to_owned(),
+        parameters: vec![
+            Parameter::new(pointer_pointer, "long **", Some("a")),
+            Parameter::new(pointer, "long *", Some("b")),
+            Parameter::new(pointer, "long *", Some("c")),
+        ],
+        returns: "void".into(),
+        return_type: r2abi::TypeId::VOID,
+        convention: StatedConvention::LlvmWin64,
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(BASE, prototype);
+    declarations
+}
+
+/// `HAND_BELOW` handing `&x` in r8 alone: `hand(0, 0, &x)`.
+const HAND_ONLY_UPWARD: &[u8] = &[
+    0x48, 0x89, 0x11, // 1000 mov [rcx], rdx
+    0x49, 0xc7, 0x00, 0x01, 0x00, 0x00, 0x00, // 1003 mov qword [r8], 1
+    0xc3, // 100a ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 100b padding
+    0x48, 0x83, 0xec, 0x38, // 1010 sub rsp, 0x38
+    0x48, 0xc7, 0x44, 0x24, 0x20, 0x07, 0x00, 0x00, 0x00, // 1014 mov qword [rsp+0x20], 7
+    0x48, 0xc7, 0x44, 0x24, 0x28, 0x05, 0x00, 0x00, 0x00, // 101d mov qword [rsp+0x28], 5
+    0x4c, 0x8d, 0x44, 0x24, 0x28, // 1026 lea r8, [rsp+0x28]
+    0x31, 0xd2, // 102b xor edx, edx
+    0x31, 0xc9, // 102d xor ecx, ecx
+    0x0f, 0x1f, 0x00, // 102f nop
+    0xe8, 0xc9, 0xff, 0xff, 0xff, // 1032 call 0x1000
+    0x48, 0x8b, 0x44, 0x24, 0x20, // 1037 mov rax, [rsp+0x20]
+    0x48, 0x83, 0xc4, 0x38, // 103c add rsp, 0x38
+    0xc3, // 1040 ret
+];
+
+fn below(code: &'static [u8]) -> String {
+    let functions = [("hand", BASE, 0x0b), ("below", TWICE, 0x31)];
+    let mut open =
+        OpenProgram::of(Literal::of_code(code, &functions).with_declarations(declaring_hand()));
+    rendered(&mut open, TWICE)
+}
+
+/// D365: r8 is `hand`'s third argument, which reaches only upward from `&x`, so `y` below it
+/// stays this body's and its 7 is read without a load.
+#[test]
+fn a_frame_address_an_ms_abi_callee_reaches_upward_leaves_the_slot_below() {
+    let text = below(HAND_ONLY_UPWARD);
+    assert!(text.contains("hand("), "{text}");
+    assert!(!text.contains("r2sleigh_load_u64"), "{text}");
+}
+
+/// D365: rdx is `hand`'s second argument, which escapes; under the caller's SysV order it would
+/// be the third, which reaches only upward, and `y` below `x` would fold to 7.
+#[test]
+fn a_frame_address_handed_to_an_ms_abi_callee_escapes_by_the_callees_order() {
+    let text = below(HAND_BELOW);
+    assert!(text.contains("hand("), "{text}");
+    assert!(text.contains("r2sleigh_load_u64"), "{text}");
+}

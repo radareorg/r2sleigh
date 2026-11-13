@@ -2539,7 +2539,11 @@ fn promotion_fixture_with_argument(
     let interface = SourceFunctionInterface::new_exact(
         b"promotion-test".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [SourceAbiParameterSpec::new(0, argument)],
+        [SourceAbiParameterSpec::new(
+            0,
+            argument,
+            r2source::SourceSlot::integer(0),
+        )],
         SourceFunctionReturn::Void,
         [],
     )

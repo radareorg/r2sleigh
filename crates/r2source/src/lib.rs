@@ -1245,7 +1245,11 @@ mod tests {
         SourceFunctionInterface::new_exact(
             [7],
             crate::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, register(0))],
+            [SourceAbiParameterSpec::new(
+                0,
+                register(0),
+                SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Register {
                 storage: register(8),
             },
@@ -1448,7 +1452,11 @@ mod tests {
         let interface_without_frame_pointer = SourceFunctionInterface::new_exact(
             [7],
             crate::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, register(0))],
+            [SourceAbiParameterSpec::new(
+                0,
+                register(0),
+                SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Register {
                 storage: register(8),
             },
@@ -1566,7 +1574,11 @@ mod tests {
         let wrong_revision = SourceFunctionInterface::new_exact(
             [8],
             crate::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, register(0))],
+            [SourceAbiParameterSpec::new(
+                0,
+                register(0),
+                SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Register {
                 storage: register(8),
             },

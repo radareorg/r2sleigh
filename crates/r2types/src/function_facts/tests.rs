@@ -240,7 +240,11 @@ fn exact_source_param_slots_ignore_misleading_register_names() {
     let interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
         b"exact-param-alias".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [r2ssa::SourceAbiParameterSpec::new(0, storage)],
+        [r2ssa::SourceAbiParameterSpec::new(
+            0,
+            storage,
+            r2source::SourceSlot::integer(0),
+        )],
         r2ssa::SourceFunctionReturn::Void,
         [],
         [Some(logical)],
@@ -1301,7 +1305,11 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
     let function_interface = r2ssa::SourceFunctionInterface::new_exact(
         revision.clone(),
         r2source::ConventionId::SysVAmd64,
-        [r2ssa::SourceAbiParameterSpec::new(0, parameter_storage)],
+        [r2ssa::SourceAbiParameterSpec::new(
+            0,
+            parameter_storage,
+            r2source::SourceSlot::integer(0),
+        )],
         r2ssa::SourceFunctionReturn::Void,
         [],
     )
@@ -1315,7 +1323,11 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
     let callee_interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
         revision.clone(),
         r2source::ConventionId::SysVAmd64,
-        [r2ssa::SourceAbiParameterSpec::new(0, parameter_storage)],
+        [r2ssa::SourceAbiParameterSpec::new(
+            0,
+            parameter_storage,
+            r2source::SourceSlot::integer(0),
+        )],
         r2ssa::SourceFunctionReturn::Void,
         [],
         [Some(logical_parameter)],
@@ -1624,8 +1636,12 @@ fn x86_stack_home_prepared(blocks: &[R2ILBlock]) -> r2ssa::SsaArtifact {
         b"x86-stack-home-fixture".to_vec(),
         r2source::ConventionId::SysVAmd64,
         [
-            r2ssa::SourceAbiParameterSpec::new(0, parameter),
-            r2ssa::SourceAbiParameterSpec::new(1, second_parameter),
+            r2ssa::SourceAbiParameterSpec::new(0, parameter, r2source::SourceSlot::integer(0)),
+            r2ssa::SourceAbiParameterSpec::new(
+                1,
+                second_parameter,
+                r2source::SourceSlot::integer(1),
+            ),
         ],
         r2ssa::SourceFunctionReturn::Register {
             storage: register_storage(0x00),

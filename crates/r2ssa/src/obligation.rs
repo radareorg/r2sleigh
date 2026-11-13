@@ -3561,7 +3561,11 @@ mod tests {
         let interface = SourceFunctionInterface::new(
             b"fixture-revision-1".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, parameter_storage)],
+            [SourceAbiParameterSpec::new(
+                0,
+                parameter_storage,
+                r2source::SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Register {
                 storage: return_storage,
             },

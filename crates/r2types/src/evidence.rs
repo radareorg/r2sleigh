@@ -1191,7 +1191,11 @@ mod tests {
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"evidence-without-callee-signatures".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [r2ssa::SourceAbiParameterSpec::new(0, register(0))],
+            [r2ssa::SourceAbiParameterSpec::new(
+                0,
+                register(0),
+                r2source::SourceSlot::integer(0),
+            )],
             r2ssa::SourceFunctionReturn::Void,
             [],
         )
@@ -1260,8 +1264,16 @@ mod tests {
             b"indexed-parameter-evidence".to_vec(),
             r2source::ConventionId::SysVAmd64,
             [
-                r2ssa::SourceAbiParameterSpec::new(0, register(0)),
-                r2ssa::SourceAbiParameterSpec::new(1, register(8)),
+                r2ssa::SourceAbiParameterSpec::new(
+                    0,
+                    register(0),
+                    r2source::SourceSlot::integer(0),
+                ),
+                r2ssa::SourceAbiParameterSpec::new(
+                    1,
+                    register(8),
+                    r2source::SourceSlot::integer(1),
+                ),
             ],
             r2ssa::SourceFunctionReturn::Void,
             [],
@@ -1342,8 +1354,16 @@ mod tests {
             b"unobserved-merge-evidence".to_vec(),
             r2source::ConventionId::SysVAmd64,
             [
-                r2ssa::SourceAbiParameterSpec::new(0, register(0)),
-                r2ssa::SourceAbiParameterSpec::new(1, register(8)),
+                r2ssa::SourceAbiParameterSpec::new(
+                    0,
+                    register(0),
+                    r2source::SourceSlot::integer(0),
+                ),
+                r2ssa::SourceAbiParameterSpec::new(
+                    1,
+                    register(8),
+                    r2source::SourceSlot::integer(1),
+                ),
             ],
             r2ssa::SourceFunctionReturn::Void,
             [],
@@ -1449,8 +1469,16 @@ mod tests {
             b"signed-parameter-evidence".to_vec(),
             r2source::ConventionId::SysVAmd64,
             [
-                r2ssa::SourceAbiParameterSpec::new(0, register(0)),
-                r2ssa::SourceAbiParameterSpec::new(1, register(8)),
+                r2ssa::SourceAbiParameterSpec::new(
+                    0,
+                    register(0),
+                    r2source::SourceSlot::integer(0),
+                ),
+                r2ssa::SourceAbiParameterSpec::new(
+                    1,
+                    register(8),
+                    r2source::SourceSlot::integer(1),
+                ),
             ],
             r2ssa::SourceFunctionReturn::Void,
             [],
@@ -1557,7 +1585,11 @@ mod tests {
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"unsigned-spilled-parameter".to_vec(),
             r2source::ConventionId::Aapcs64,
-            [r2ssa::SourceAbiParameterSpec::new(0, register(8))],
+            [r2ssa::SourceAbiParameterSpec::new(
+                0,
+                register(8),
+                r2source::SourceSlot::integer(0),
+            )],
             r2ssa::SourceFunctionReturn::Void,
             [r2ssa::SourceStackSlotSpec::new_local(
                 r2ssa::StackAddressBase::StackPointer,

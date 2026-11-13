@@ -712,10 +712,7 @@ fn an_unread_slot_below_a_read_one_is_a_hole_spelled_as_its_typedef() {
         .collect::<Vec<_>>();
     assert_eq!(
         bases,
-        [
-            Some(r2source::Basis::Convention),
-            Some(r2source::Basis::Decoded)
-        ]
+        [r2source::Basis::Convention, r2source::Basis::Decoded]
     );
     // The evidence travels with the sealed artifact.
     let boundary = (shared.facts().body_boundary.as_ref()).expect("a recovered body states it");

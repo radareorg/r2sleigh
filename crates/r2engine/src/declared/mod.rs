@@ -563,7 +563,7 @@ impl Placement<'_> {
                 class: *class,
                 basis,
             };
-            r2source::SourceAbiParameterSpec::with_location(index as u32, *location).at_slot(slot)
+            r2source::SourceAbiParameterSpec::with_location(index as u32, *location, slot)
         });
         let revision = format!("declared:{name}").into_bytes();
         let interface = r2source::SourceFunctionInterface::new_exact_with_logical_types(

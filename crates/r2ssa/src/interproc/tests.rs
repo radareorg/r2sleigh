@@ -239,7 +239,11 @@ fn exact_untyped_artifact(
         .copied()
         .enumerate()
         .map(|(index, offset)| {
-            crate::SourceAbiParameterSpec::new(index as u32, register_storage(offset))
+            crate::SourceAbiParameterSpec::new(
+                index as u32,
+                register_storage(offset),
+                crate::SourceSlot::integer(index as u32),
+            )
         })
         .collect::<Vec<_>>();
     let function_interface = crate::SourceFunctionInterface::new_exact(
@@ -319,7 +323,11 @@ fn prepared_owner(addr: u64, arch: &crate::Arch) -> Arc<SsaArtifact> {
     let interface = crate::SourceFunctionInterface::new_exact(
         b"prepared-interproc-owner".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [crate::SourceAbiParameterSpec::new(0, storage(8))],
+        [crate::SourceAbiParameterSpec::new(
+            0,
+            storage(8),
+            r2source::SourceSlot::integer(0),
+        )],
         crate::SourceFunctionReturn::Register {
             storage: storage(0),
         },
@@ -564,7 +572,11 @@ fn prepared_summary_set_models_missing_direct_callee_as_unknown() {
     let function_interface = crate::SourceFunctionInterface::new_exact(
         revision.to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [crate::SourceAbiParameterSpec::new(0, storage(8))],
+        [crate::SourceAbiParameterSpec::new(
+            0,
+            storage(8),
+            r2source::SourceSlot::integer(0),
+        )],
         crate::SourceFunctionReturn::Register {
             storage: storage(0),
         },
@@ -942,7 +954,11 @@ fn prepared_summary_uses_exact_abi_carrier_not_callconv_label() {
     let interface = crate::SourceFunctionInterface::new_exact(
         b"prepared-interproc-exact-abi".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [crate::SourceAbiParameterSpec::new(0, storage(32))],
+        [crate::SourceAbiParameterSpec::new(
+            0,
+            storage(32),
+            r2source::SourceSlot::integer(0),
+        )],
         crate::SourceFunctionReturn::Void,
         [],
     )
@@ -2187,7 +2203,11 @@ fn source_owned_call_observer_requires_exact_complete_call_carriers() {
         crate::SourceFunctionInterface::new_exact(
             revision.to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [crate::SourceAbiParameterSpec::new(0, storage(8))],
+            [crate::SourceAbiParameterSpec::new(
+                0,
+                storage(8),
+                r2source::SourceSlot::integer(0),
+            )],
             crate::SourceFunctionReturn::Void,
             [],
         )
