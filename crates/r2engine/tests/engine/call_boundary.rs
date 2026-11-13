@@ -936,6 +936,50 @@ fn printing_from(held: u32, format: &[u8], writable: bool) -> String {
     rendered.response.output.into_text()
 }
 
+/// clang -O0's shape (D221, Gb): `caller` spills the format to `[sp, #16]`, calls `f`, and reloads
+/// it in the next block for `printf(format, 7)`. Where `handed` the slot's address is `f`'s x1.
+fn printing_spilled(format: &[u8], handed: bool) -> String {
+    let code = aarch64_with_printf(&[
+        (F, 0xd65f_03c0),                                              // ret
+        (BASE + 0x10, 0xa9be_7bfd),                                    // stp x29, x30, [sp, #-32]!
+        (BASE + 0x14, 0x9000_0008),                                    // adrp x8, 0x1000
+        (BASE + 0x18, 0x9102_8108),                                    // add x8, x8, #0xa0
+        (BASE + 0x1c, 0xf900_0be8),                                    // str x8, [sp, #16]
+        (BASE + 0x20, if handed { 0x9100_43e1 } else { 0xd503_201f }), // add x1, sp, #16 | nop
+        (BASE + 0x24, 0x97ff_fff9),                                    // bl f
+        (BASE + 0x28, 0x1400_0001),                                    // b 0x102c
+        (BASE + 0x2c, 0xf940_0be0),                                    // ldr x0, [sp, #16]
+        (BASE + 0x30, 0x5280_00e1),                                    // mov w1, #7
+        (BASE + 0x34, 0x9400_0017),                                    // bl printf
+        (BASE + 0x38, 0xa8c2_7bfd),                                    // ldp x29, x30, [sp], #32
+        (BASE + 0x3c, 0xd65f_03c0),                                    // ret
+    ]);
+    let program = Literal::of_code(code, &[("f", F, 0x04), ("caller", BASE + 0x10, 0x30)])
+        .in_aarch64()
+        .with_data()
+        .importing("printf");
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(common::TEXT, format);
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(F).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// Gb: the reload equals the spill, since no call may write a slot whose address stays in the
+/// function, so the format folds and `f`'s q0 to q3 die at `printf`.
+#[test]
+fn a_spilled_format_reloaded_in_another_block_reads_no_vector_register() {
+    let text = printing_spilled(b"%d\n\0", false);
+    assert!(text.starts_with("void f("), "{text}");
+}
+
+/// A call handed the slot's address may write it: the reload is unknown and q0 stays taken.
+#[test]
+fn a_spilled_format_whose_slot_a_call_receives_keeps_q0_taken() {
+    let text = printing_spilled(b"%d\n\0", true);
+    assert!(!text.starts_with("void f("), "{text}");
+}
+
 /// D218: a format with no floating conversion reads no vector register, so `f`'s q0 to q3 die at
 /// `printf`: void under `aa`, the format held in x19, which the call to `f` preserves.
 #[test]

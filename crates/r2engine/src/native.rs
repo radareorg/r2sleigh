@@ -680,6 +680,32 @@ pub(crate) fn dispatch_tables(
     }
 }
 
+/// A walked body sealed against the convention and its imports' rows, no image callee read
+/// (doc/adr-call-boundary.md, Gb): what its values fold to with no interface deciding them.
+pub(crate) fn convention_seal_of(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    walked: &Walk,
+) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
+    let native = Native::over(target, program)?;
+    let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
+    let mut imports = Callees::default();
+    let body = &walked.root.body;
+    declare_imports(
+        &native,
+        target,
+        &reached(body, program),
+        ptr_bits,
+        &mut imports,
+    );
+    let declared = native.declaration(body.entry);
+    let restatement = match declared.interface.is_some() {
+        false => Restatement::default(),
+        true => declared,
+    };
+    native.convention_seal(&walked.root, &imports, restatement)
+}
+
 /// Where each dispatch goes, by the instruction making it.
 fn dispatched(tables: &[NativePointerTable]) -> BTreeMap<u64, Vec<u64>> {
     (tables.iter())

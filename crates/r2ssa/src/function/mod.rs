@@ -528,6 +528,24 @@ impl TrustedSeal {
         crate::semantic::value_reaching(&self.sealed, &self.machine_context, op, storage)
     }
 
+    /// The constant a storage holds before the call the instruction at `instruction` makes, as
+    /// its arguments read it: through promoted slots, never through memory. O(ops).
+    pub fn folded_before_call(
+        &self,
+        instruction: u64,
+        storage: r2source::CanonicalStorageId,
+    ) -> Option<u64> {
+        let graph = self.sealed.graph();
+        let call = (graph.insts.iter()).find(|inst| {
+            graph
+                .op(inst.id)
+                .and_then(SSAOp::call)
+                .is_some_and(|call| call.instruction == Some(instruction))
+        })?;
+        let op = graph.op_for_inst(call.id)?;
+        self.folded_value(self.value_reaching(op, storage)?)
+    }
+
     /// The artifact: the sealed function's facts collected.
     pub fn collect<C: SsaWorkControl + ?Sized>(
         self,

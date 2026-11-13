@@ -1263,6 +1263,8 @@ impl<S: Source + 'static> Reading<'_, S> {
         formatted: &BTreeMap<u64, Formatted>,
     ) -> BTreeMap<(usize, usize), CallEffect> {
         let mut sites = BTreeMap::new();
+        // Asked once, only where the block fold leaves a format unknown (Gb).
+        let mut seal = None;
         for (at, block) in effects.body.blocks.iter().enumerate() {
             let mut origins = r2ssa::origin::BlockOrigins::default();
             for (op, operation) in block.lifted.ops.iter().enumerate() {
@@ -1270,12 +1272,36 @@ impl<S: Source + 'static> Reading<'_, S> {
                     .then(|| effects.callee_at(at, op))
                     .flatten()
                     .and_then(|callee| formatted.get(&callee));
-                let effect = format.and_then(|format| self.unfloated(&origins, format));
+                let effect = format.and_then(|format| {
+                    self.unfloated(&origins, format).or_else(|| {
+                        let seal = seal.get_or_insert_with(|| self.convention_seal(effects.body));
+                        let sealed = seal.as_deref()?;
+                        let instruction = block.lifted.instruction_of(op)?;
+                        let address = sealed.folded_before_call(instruction, format.register)?;
+                        self.unfloated_at(address, format)
+                    })
+                });
                 sites.extend(effect.map(|effect| ((at, op), effect)));
                 origins.step_under(operation, self.call.as_ref());
             }
         }
         sites
+    }
+
+    /// The caller sealed against the convention, where it seals: a spilled format reloaded in
+    /// another block folds through its promoted slot, and an escaped slot stays in memory (D217).
+    fn convention_seal(&self, body: &Body) -> Option<Arc<r2ssa::TrustedSeal>> {
+        let key = (body.entry, self.view.thumb_at(body.entry));
+        let sealing = self.db.get::<super::analysis::ConventionSeal>(&key).ok()?;
+        sealing.0.as_ref().ok().cloned()
+    }
+
+    /// The call's effect without its tail vector registers, where the format at `address` is a
+    /// literal the printf reader parses whole and finds no floating conversion in.
+    fn unfloated_at(&self, address: u64, format: &Formatted) -> Option<CallEffect> {
+        let text = crate::native::immutable_text_at(self.view, address)?;
+        let consumed = r2ssa::printf::printf_consumed_arguments(&text).ok()?;
+        (!consumed.any_floating).then_some(format.unfloated)
     }
 
     /// The call's effect without its tail vector registers, where `origins` fold its format to a
@@ -1287,9 +1313,7 @@ impl<S: Source + 'static> Reading<'_, S> {
     ) -> Option<CallEffect> {
         let register = r2il::Varnode::register(format.register.offset, format.register.size);
         let address = origins.of(&register)?.constant()?;
-        let text = crate::native::immutable_text_at(self.view, address)?;
-        let consumed = r2ssa::printf::printf_consumed_arguments(&text).ok()?;
-        (!consumed.any_floating).then_some(format.unfloated)
+        self.unfloated_at(address, format)
     }
 
     /// What a call to a callee nothing is known of may take: an effect's own calls set the variadic
