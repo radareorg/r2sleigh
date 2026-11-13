@@ -260,9 +260,8 @@ pub fn functions<W: Walker>(
     }
 }
 
-/// Whether control can come back from `seed`, entered in Thumb where `thumb`, and from each
-/// function walked to decide it, by address and instruction set, walking a callee only while an
-/// undecided caller waits on it.
+/// Whether control comes back from `seed` (Thumb where `thumb`) and each function walked to decide
+/// it, by address and set; a callee is walked only while an undecided caller waits on it.
 pub fn returns<W: Walker>(
     seed: u64,
     thumb: bool,

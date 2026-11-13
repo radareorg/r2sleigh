@@ -355,9 +355,8 @@ const SWITCH_CALLS: [u8; 0x1c] = [
     0x00, 0x00, 0x00, 0x00, // 1018 padding
 ];
 
-/// A callee only a dispatch arm reaches is undiscovered while the survey reads the tables; on a
-/// machine with two sets, whether it comes back is asked in the set the call enters it in, never
-/// through the modes the survey is deciding (a cycle the dispatch read refused on).
+/// A callee only a dispatch arm reaches is asked whether it comes back in the set its call enters
+/// it in, while the survey reads the tables: reading the survey's modes there was a cycle.
 #[test]
 fn a_call_in_a_dispatch_arm_is_discovered_on_a_machine_with_two_sets() {
     let found = thumb_entry(&SWITCH_CALLS, false).functions();

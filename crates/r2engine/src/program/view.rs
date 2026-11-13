@@ -239,9 +239,8 @@ impl<'a, S: Source + 'static> View<'a, S> {
         (callee, thumb && self.machine_in(true).is_some())
     }
 
-    /// Whether control comes back from a call to `callee` entered in Thumb where `thumb`: false
-    /// only where the program proves it never does, or a runtime model says so under a premise
-    /// the engine grants.
+    /// Whether a call to `callee`, Thumb where `thumb`, comes back: false only where the program
+    /// proves it never does, or a runtime model says so under a premise the engine grants.
     pub(super) fn comes_back(&self, callee: u64, thumb: bool) -> bool {
         self.db
             .get::<super::returns::ComesBack>(&self.returns_key(callee, thumb))
