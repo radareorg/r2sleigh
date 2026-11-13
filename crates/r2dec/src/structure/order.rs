@@ -1,10 +1,10 @@
 //! The write order of a placement, which the order-invariance gate permutes (ROADMAP D58); without
 //! the `placement_mutants` feature there is one order and no branch.
 
-#[cfg(not(feature = "placement_mutants"))]
-pub(crate) use off::WriteOrder;
 #[cfg(feature = "placement_mutants")]
 pub(crate) use crate::placement_mutants::WriteOrder;
+#[cfg(not(feature = "placement_mutants"))]
+pub(crate) use off::WriteOrder;
 
 // Compiled under test with the feature too, so the production order is pinned wherever tests run.
 #[cfg(any(test, not(feature = "placement_mutants")))]
