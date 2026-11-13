@@ -618,13 +618,37 @@ impl Prior {
         };
         let unread = !self.function.argument_areas_read() && !below(&self.key) && !below(key);
         let areas = unread || self.key.argument_areas == key.argument_areas;
-        // Only the reach promotion asked of: a callee's other positions decide nothing here.
-        let upward = |key: &BuildKey, (target, position): &(u64, usize)| {
-            (key.upward.get(target)).is_some_and(|positions| positions.contains(position))
-        };
-        let reach = (self.function.asked_reach().iter())
-            .all(|asked| upward(&self.key, asked) == upward(key, asked));
+        let reach = same_where_asked(self.function.asked_reach(), &self.key.upward, &key.upward);
         areas && reach && self.key.without_areas() == key.without_areas()
+    }
+}
+
+/// Whether two keys' upward positions agree at every (callee, position) promotion asked: a
+/// callee's other positions decide nothing in the build (D365). `O(asked x log)`.
+fn same_where_asked(
+    asked: &BTreeSet<(u64, usize)>,
+    built: &BTreeMap<u64, BTreeSet<usize>>,
+    now: &BTreeMap<u64, BTreeSet<usize>>,
+) -> bool {
+    let upward = |key: &BTreeMap<u64, BTreeSet<usize>>, (target, position): &(u64, usize)| {
+        (key.get(target)).is_some_and(|positions| positions.contains(position))
+    };
+    (asked.iter()).all(|pair| upward(built, pair) == upward(now, pair))
+}
+
+#[cfg(test)]
+mod asked_reach_tests {
+    use super::*;
+
+    #[test]
+    fn a_reach_moves_the_build_only_where_promotion_asked() {
+        let asked = BTreeSet::from([(0x2000, 0)]);
+        let built = BTreeMap::from([(0x2000, BTreeSet::from([0]))]);
+        let elsewhere = BTreeMap::from([(0x2000, BTreeSet::from([0, 1])), (0x3000, [0].into())]);
+        assert!(same_where_asked(&asked, &built, &elsewhere));
+        let flipped = BTreeMap::from([(0x2000, BTreeSet::from([1]))]);
+        assert!(!same_where_asked(&asked, &built, &flipped));
+        assert!(!same_where_asked(&asked, &BTreeMap::new(), &built));
     }
 }
 
