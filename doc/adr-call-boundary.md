@@ -1340,3 +1340,10 @@ D221: a format spilled to the frame and reloaded in another block is still the c
 - `dispatch_reads` is not folded into this query: Ge (D285) owns the dispatch rounds and their seal.
 - Tests: `a_spilled_format_reloaded_in_another_block_reads_no_vector_register` (fails without the seal) and `a_spilled_format_whose_slot_a_call_receives_keeps_q0_taken`.
 - Open for the Exit bar: shapes.c clang -O0 `shape_stash` and `mixed_touch` under `aa` on aarch64 equivalence, and bash `aa` within 0.3%.
+
+## D228 as built (2026-11-13, `rd-frame`)
+
+A cited fixed float parameter is a read at its call: `sqrt(avg())` decides `avg`'s `double`. r2ssa `CallEffect.reads` holds the bytes a callee certainly reads, and the site walk marks them read at the call, beside `takes`, which only keeps bytes open. r2engine `Reading::import_takes` fills it for an import whose `CallReads` is `stated`, has no count register and no format, from the registers that overlap the convention's float argument slots. An integer argument a callee may leave alone stays `takes` only. An image callee, an unstated row and a variadic or printf row read nothing for certain.
+
+- A callee that leaves XMM0 as found passes the caller's bytes to the parameter: the read past it is the earlier call's (`kept`), so no `double` is decided for it.
+- Open for the Exit bar: census and equivalence moves from rows the corpus cites with float parameters.

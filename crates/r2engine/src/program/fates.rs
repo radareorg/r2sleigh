@@ -1247,6 +1247,7 @@ impl<S: Source + 'static> Reading<'_, S> {
                 counted: None,
                 overwrites: Overwrites::All,
                 kept: LaneBytes::default(),
+                reads: LaneBytes::default(),
             },
         };
         if !formatted.is_empty() {
@@ -1340,7 +1341,7 @@ impl<S: Source + 'static> Reading<'_, S> {
                     unfloated
                         .registers
                         .retain(|read| !format.floats.contains(read));
-                    let (takes, counted) = self.import_takes(Some(unfloated));
+                    let (takes, counted, reads) = self.import_takes(Some(unfloated));
                     Formatted {
                         register: format.format,
                         unfloated: CallEffect {
@@ -1348,15 +1349,17 @@ impl<S: Source + 'static> Reading<'_, S> {
                             counted,
                             overwrites: Overwrites::All,
                             kept: LaneBytes::default(),
+                            reads,
                         },
                     }
                 });
-            let (takes, counted) = self.import_takes(reads);
+            let (takes, counted, reads) = self.import_takes(reads);
             let effect = CallEffect {
                 takes,
                 counted,
                 overwrites: Overwrites::All,
                 kept: LaneBytes::default(),
+                reads,
             };
             return (effect, formatted);
         }
@@ -1373,34 +1376,43 @@ impl<S: Source + 'static> Reading<'_, S> {
                 counted: None,
                 overwrites: Overwrites::Bytes(row.overwrites),
                 kept: row.kept_lanes(self.lanes),
+                reads: LaneBytes::default(),
             },
             None => CallEffect {
                 takes: self.unknown(),
                 counted: None,
                 overwrites: Overwrites::Nothing,
                 kept: LaneBytes::default(),
+                reads: LaneBytes::default(),
             },
         };
         (effect, None)
     }
 
     /// What the import's placement reads (S8 `Placement::reads`); its count register bounds the
-    /// vector registers. An import no row binds takes what an unknown callee does.
+    /// vector registers. An import no row binds takes what an unknown callee does. The third part
+    /// is what it certainly reads: a cited fixed row's float parameters (D228).
     fn import_takes(
         &self,
         reads: Option<r2ssa::call_reads::CallReads>,
-    ) -> (LaneBytes, Option<Counted>) {
+    ) -> (LaneBytes, Option<Counted>, LaneBytes) {
         let Some(reads) = reads else {
-            return (self.unknown(), None);
-        };
-        let Some(register) = reads.count_register else {
-            return (LaneBytes::covered_by(self.lanes, &reads.registers), None);
+            return (self.unknown(), None, LaneBytes::default());
         };
         let floats = self.slots.float_argument_slots();
         let overlaps = |a: &CanonicalStorageId, b: &CanonicalStorageId| {
             a.space == b.space
                 && a.offset < b.offset + u64::from(b.size)
                 && b.offset < a.offset + u64::from(a.size)
+        };
+        let Some(register) = reads.count_register else {
+            let fixed = reads.stated && reads.format.is_none();
+            let certain = (reads.registers.iter())
+                .filter(|read| fixed && floats.iter().any(|float| overlaps(read, float)))
+                .copied()
+                .collect::<Vec<_>>();
+            let takes = LaneBytes::covered_by(self.lanes, &reads.registers);
+            return (takes, None, LaneBytes::covered_by(self.lanes, &certain));
         };
         let mut integers = (reads.registers.iter())
             .filter(|read| !floats.iter().any(|float| overlaps(read, float)))
@@ -1415,7 +1427,8 @@ impl<S: Source + 'static> Reading<'_, S> {
             takes: LaneBytes::covered_by(self.lanes, floats),
             stated: None,
         };
-        (LaneBytes::covered_by(self.lanes, &integers), Some(counted))
+        let takes = LaneBytes::covered_by(self.lanes, &integers);
+        (takes, Some(counted), LaneBytes::default())
     }
 }
 
