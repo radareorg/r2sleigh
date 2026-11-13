@@ -15,7 +15,7 @@ use crate::{
     SsaGraph, StructuredAccessId, StructuredMemoryAccessFact, ValueId,
 };
 
-pub const AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION: u32 = 3;
+pub const AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION: u32 = 4;
 
 /// Exact scalar value carried by one projected memory effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -43,10 +43,11 @@ pub struct AggregateAccessProjection {
     pub pointer_type_id: u32,
     pub struct_type_id: u32,
     pub aggregate_id: u32,
-    pub member_id: u32,
-    /// What the source calls this member, so a consumer can name it without
-    /// carrying the type graph the projection was built from.
+    /// Member ids from the outermost aggregate to the scalar leaf the access reads (D346).
+    pub path: Box<[u32]>,
+    /// The path's member names joined by `.` (`top_left.x`), so a consumer needs no graph.
     pub member_name: Box<str>,
+    /// The leaf's type.
     pub member_type_id: u32,
     pub element_index: Option<AggregateElementIndexProjection>,
     pub byte_offset: u64,
@@ -147,6 +148,73 @@ fn exact_access_binding(
     }
 }
 
+/// The scalar member an access of `size_bits` at `offset_bits` reads, by member path.
+struct ScalarLeaf {
+    path: Vec<u32>,
+    name: String,
+    type_id: u32,
+}
+
+/// Descends by-value struct members to the one scalar member the access covers exactly.
+/// A union, an array, a bit-field or two containing members refuse. The graph refuses
+/// self-containment, so the descent ends within `aggregates().len()` levels; each level is O(m).
+fn scalar_leaf(
+    graph: &crate::SourceTypeGraph,
+    aggregate: &crate::SourceAggregateLayout,
+    offset_bits: u64,
+    size_bits: u64,
+) -> Option<ScalarLeaf> {
+    let mut leaf = ScalarLeaf {
+        path: Vec::new(),
+        name: String::new(),
+        type_id: 0,
+    };
+    let (mut aggregate, mut offset_bits) = (aggregate, offset_bits);
+    for _ in 0..=graph.aggregates().len() {
+        let mut containing = aggregate.members().iter().filter(|member| {
+            member.offset_bits() <= offset_bits
+                && offset_bits - member.offset_bits() < member.size_bits()
+        });
+        let member = containing.next()?;
+        if containing.next().is_some() || member.is_bit_field() {
+            return None;
+        }
+        let member_type = graph_type(graph, member.type_id())?;
+        leaf.path.push(member.member_id());
+        // An anonymous struct member adds no name: C spells its members as the outer's.
+        if !member.name().is_empty() {
+            if !leaf.name.is_empty() {
+                leaf.name.push('.');
+            }
+            leaf.name.push_str(member.name());
+        }
+        let inner = offset_bits - member.offset_bits();
+        match member_type.kind() {
+            SourceTypeKind::Struct { aggregate_id } => {
+                aggregate = usize::try_from(aggregate_id)
+                    .ok()
+                    .and_then(|index| graph.aggregates().get(index))
+                    .filter(|nested| nested.id() == aggregate_id)?;
+                offset_bits = inner;
+            }
+            SourceTypeKind::Union { .. } | SourceTypeKind::Array { .. } => return None,
+            // Where an access lands and how wide it is decide the member, not its kind:
+            // a store to `s->next` projects onto the pointer.
+            _ => {
+                return (inner == 0
+                    && !member.name().is_empty()
+                    && member.size_bits() == size_bits
+                    && member_type.size_bits() == size_bits)
+                    .then(|| ScalarLeaf {
+                        type_id: member.type_id(),
+                        ..leaf
+                    });
+            }
+        }
+    }
+    None
+}
+
 pub(crate) fn collect_aggregate_access_projections(
     graph: &SsaGraph,
     addresses: &AddressProvenanceFacts,
@@ -241,24 +309,9 @@ pub(crate) fn collect_aggregate_access_projections(
             continue;
         };
         let size_bits = u64::from(access.width) * 8;
-        let mut matching_members = aggregate.members().iter().filter(|member| {
-            member.offset_bits() == offset_bits && member.size_bits() == size_bits
-        });
-        let Some(member) = matching_members.next() else {
+        let Some(leaf) = scalar_leaf(type_graph, aggregate, offset_bits, size_bits) else {
             continue;
         };
-        if matching_members.next().is_some() {
-            continue;
-        }
-        let Some(member_type) = graph_type(type_graph, member.type_id()) else {
-            continue;
-        };
-        // What decides whether an access lands on a member is where it lands
-        // and how wide it is, not what kind the member is. Requiring an integer
-        // meant a store to `s->next` projected onto nothing.
-        if member_type.size_bits() != size_bits {
-            continue;
-        }
         let projection = AggregateAccessProjection {
             schema_version: AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION,
             source_revision_identity: revision.clone(),
@@ -266,9 +319,9 @@ pub(crate) fn collect_aggregate_access_projections(
             pointer_type_id,
             struct_type_id,
             aggregate_id,
-            member_id: member.member_id(),
-            member_name: member.name().into(),
-            member_type_id: member.type_id(),
+            path: leaf.path.into_boxed_slice(),
+            member_name: leaf.name.into_boxed_str(),
+            member_type_id: leaf.type_id,
             element_index,
             byte_offset,
             byte_width: access.width,
@@ -361,6 +414,113 @@ mod tests {
             )],
         )
         .expect("valid DemoStruct graph")
+    }
+
+    /// `struct R { struct P tl; struct P br; union U u; }`, `struct P { int x; int y; }`,
+    /// `union U { int a; int b; }`; type 2 is `struct R *`.
+    fn nested_struct_graph() -> SourceTypeGraph {
+        let point = |id| {
+            SourceAggregateLayout::new(
+                id,
+                3,
+                64,
+                32,
+                "P",
+                [
+                    SourceAggregateMember::new(0, 1, 0, 32, "x"),
+                    SourceAggregateMember::new(1, 1, 32, 32, "y"),
+                ],
+            )
+        };
+        SourceTypeGraph::new(
+            [
+                SourceType::new(0, SourceTypeKind::Struct { aggregate_id: 0 }, 160, 32),
+                SourceType::new(1, SourceTypeKind::SignedInteger, 32, 32),
+                SourceType::new(
+                    2,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 0,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
+                SourceType::new(3, SourceTypeKind::Struct { aggregate_id: 1 }, 64, 32),
+                SourceType::new(4, SourceTypeKind::Union { aggregate_id: 2 }, 32, 32),
+            ],
+            [
+                SourceAggregateLayout::new(
+                    0,
+                    0,
+                    160,
+                    32,
+                    "R",
+                    [
+                        SourceAggregateMember::new(0, 3, 0, 64, "tl"),
+                        SourceAggregateMember::new(1, 3, 64, 64, "br"),
+                        SourceAggregateMember::new(2, 4, 128, 32, "u"),
+                    ],
+                ),
+                point(1),
+                SourceAggregateLayout::new(
+                    2,
+                    4,
+                    32,
+                    32,
+                    "U",
+                    [
+                        SourceAggregateMember::new(0, 1, 0, 32, "a"),
+                        SourceAggregateMember::new(1, 1, 0, 32, "b"),
+                    ],
+                ),
+            ],
+        )
+        .expect("valid nested graph")
+    }
+
+    fn interface_with_graph(graph: SourceTypeGraph) -> SourceFunctionInterface {
+        let scalar_carrier = SourceCarrierProjection::new(SourceCarrierKind::LowBits, 0, 32);
+        SourceFunctionInterface::new_with_logical_types(
+            REVISION.to_vec(),
+            r2source::ConventionId::Aapcs64,
+            [
+                SourceAbiParameterSpec::new(0, register_storage(0)),
+                SourceAbiParameterSpec::new(1, register_storage(8)),
+            ],
+            SourceFunctionReturn::Void,
+            [],
+            [
+                Some(SourceLogicalValue::new(
+                    2,
+                    SourceCarrierProjection::new(SourceCarrierKind::Full, 0, 64),
+                )),
+                Some(SourceLogicalValue::new(1, scalar_carrier)),
+            ],
+            None,
+            Some(graph),
+        )
+        .expect("valid nested source interface")
+    }
+
+    /// D346: a read inside a by-value member names the scalar leaf; a union member refuses.
+    #[test]
+    fn a_read_inside_a_nested_struct_member_projects_its_member_path() {
+        let projected = |offset| {
+            let blocks = single_load_blocks(Varnode::register(0, 8), offset, 4, SpaceId::Ram);
+            let artifact =
+                artifact_with_interface(&blocks, interface_with_graph(nested_struct_graph()));
+            let facts = artifact.aggregate_accesses();
+            (facts.projections_for_revision(REVISION).into_iter())
+                .flat_map(|projections| projections.values())
+                .map(|projection| (projection.path.to_vec(), projection.member_name.to_string()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(projected(8), [(vec![1, 0], "br.x".to_string())]);
+        assert_eq!(projected(4), [(vec![0, 1], "tl.y".to_string())]);
+        assert!(
+            projected(16).is_empty(),
+            "a union member names no single leaf"
+        );
     }
 
     fn source_interface(exact_graph: bool) -> SourceFunctionInterface {
@@ -511,7 +671,8 @@ mod tests {
         assert_eq!(load.pointer_type_id, 2);
         assert_eq!(load.struct_type_id, 0);
         assert_eq!(load.aggregate_id, 0);
-        assert_eq!(load.member_id, 2);
+        assert_eq!(load.path.as_ref(), [2]);
+        assert_eq!(load.member_name.as_ref(), "member_2");
         assert_eq!(load.member_type_id, 1);
         assert_eq!(load.element_index, None);
         assert_eq!((load.byte_offset, load.byte_width), (8, 4));
@@ -533,7 +694,7 @@ mod tests {
         let store = facts
             .projection(REVISION, store_access)
             .expect("fourteenth-member store projection");
-        assert_eq!(store.member_id, 13);
+        assert_eq!(store.path.as_ref(), [13]);
         assert_eq!((store.byte_offset, store.byte_width), (52, 4));
         assert_eq!(store.producer, store_inst);
         let AggregateAccessBinding::Write { value } = store.binding else {
