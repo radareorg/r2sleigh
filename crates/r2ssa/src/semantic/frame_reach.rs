@@ -207,10 +207,9 @@ fn access_addresses(op: &SSAOp<ValueId>) -> Vec<(ValueId, SpaceId)> {
 /// Each frame run an escaped address may reach, lowest escaping place to a compiler slot or the
 /// top (doc/adr-frame-model.md, "Escape spans"). O(points + accesses x log places).
 pub(crate) fn escape_spans(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    facts: &crate::DecompilePrepFacts,
+    (function, graph, facts): (&SSAFunction, &SsaGraph, &crate::DecompilePrepFacts),
     declared: &DeclaredStackSlots,
+    interior: &crate::dense::IdSet<ValueId>,
     machine_context: Option<&SourceMachineContext>,
 ) -> Vec<(i64, i64)> {
     let Some(points) = function.frame_points() else {
@@ -251,18 +250,10 @@ pub(crate) fn escape_spans(
             *width = (*width).max(i64::from(slot.size_bytes()));
         }
     }
-    // A canary inside a declared aggregate is that aggregate's interior, not a slot (S27).
-    let interior = |at: i64| {
-        let root = StackAddressRoot {
-            base: StackAddressBase::StackPointer,
-            offset: at,
-        };
-        declared.containing(root).is_some()
-    };
     let barriers = (compiler_slot_stores(function, graph, machine_context, true).into_iter())
         .filter_map(|(address, canary)| {
             let at = offset(address)?;
-            (!canary || !interior(at)).then_some(at)
+            (!canary || !interior.contains(address)).then_some(at)
         })
         .collect::<BTreeSet<_>>();
     // An opaque access no stack root places is in the unknown object: what it points at leaves
@@ -312,6 +303,29 @@ pub(crate) fn escape_spans(
     spans
 }
 
+/// The canary stores inside a declared slot or a write span, each by its address: the one rule
+/// for "a canary inside an object", read before any escape run is seeded. `O(stores x spans)`.
+pub(crate) fn interior_canaries(
+    (function, graph, facts): (&SSAFunction, &SsaGraph, &crate::DecompilePrepFacts),
+    declared: &DeclaredStackSlots,
+    spans: &BTreeMap<StackAddressRoot, i64>,
+    machine_context: Option<&SourceMachineContext>,
+) -> crate::dense::IdSet<ValueId> {
+    let inside = |root: StackAddressRoot| {
+        declared.containing(root).is_some()
+            || (spans.range(..root))
+                .any(|(start, end)| start.base == root.base && root.offset < *end)
+    };
+    let mut interior = crate::dense::IdSet::new(graph.values.len());
+    for (address, canary) in compiler_slot_stores(function, graph, machine_context, false) {
+        let root = facts.stack_address_root_of(address).copied();
+        if canary && root.is_some_and(inside) {
+            interior.insert(address);
+        }
+    }
+    interior
+}
+
 /// Nothing proves where the object an escaped address points into ends: `rows[4]` is four
 /// objects to the partition and one to the callee that indexes it. So an escaped address reaches
 /// every object of this frame around it, out to a slot the compiler owns, which no C object spans.
@@ -354,7 +368,7 @@ fn compiler_slots(
     machine_context: Option<&SourceMachineContext>,
 ) -> BTreeSet<ObjectId> {
     (compiler_slot_stores(function, graph, machine_context, false).into_iter())
-        .filter(|(address, canary)| !canary || model.interior_offset(*address).is_none())
+        .filter(|(address, canary)| !canary || !model.interior_canaries.contains(*address))
         .filter_map(|(address, _)| {
             let key = MemoryObjectKey {
                 value: address,

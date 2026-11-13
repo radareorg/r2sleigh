@@ -18,18 +18,7 @@ pub(crate) fn collect_object_and_memory_facts(
     values: &crate::values::ValueRanges,
 ) -> Result<(ObjectModel, MemorySSAFacts), crate::fixpoint::Exhausted> {
     let facts = prep;
-    let mut builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
-    // A run the build's escaped offsets reach is one object, seeded before the one build (D290).
-    if let Some(facts) = facts {
-        let spans = super::frame_reach::escape_spans(
-            function,
-            graph,
-            facts,
-            declared_slots,
-            machine_context,
-        );
-        builder.escape_spans(&spans);
-    }
+    let builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
     let mut object_model = builder.build(function, graph, values);
     object_model.frame_reach = FrameReach::of(function, graph, &object_model, machine_context);
     let access_summaries = collect_access_summaries(graph, facts, addresses, &object_model);
