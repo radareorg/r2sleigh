@@ -380,9 +380,8 @@ fn a_declared_stack_argument_is_the_callers_outgoing_slot() {
     assert!(arguments[6].ends_with("119U"), "{text}");
 }
 
-/// A call's argument area is measured from the stack pointer before the call pushes its return
-/// address, so `__libc_start_main`'s seventh argument at the caller's `[rsp]` is a frame object
-/// the call reaches (D351: the walk's one reading of the stack pointer at each call).
+/// A call's argument area starts at the stack pointer before the call pushes its return address,
+/// so `__libc_start_main`'s seventh argument at the caller's `[rsp]` is an object it reaches (D351).
 #[test]
 fn a_declared_stack_argument_is_an_object_its_call_reaches() {
     let literal = Literal::plt_wrapped("__libc_start_main", &SEVENTH_ON_THE_STACK);

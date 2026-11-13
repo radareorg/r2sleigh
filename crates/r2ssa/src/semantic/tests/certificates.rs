@@ -769,9 +769,8 @@ fn a_slot_whose_address_escapes_is_not_a_dead_store() {
     assert_eq!(store_ownership(&artifact), (true, false));
 }
 
-/// A round that reads an unplaced address keeps every store, so an address stored into a slot
-/// leaves with it: the byte buffer at `sp` stays live though a save parts it from the derived
-/// escape at `sp + 24` (doc/adr-frame-model.md, "Carried places").
+/// A round reading an unplaced address keeps every store, so the byte buffer at `sp` stays live
+/// though a save parts it from the escape at `sp + 24` (adr-frame-model.md, "Carried places").
 #[test]
 fn an_address_stored_in_an_unplaced_round_leaves_with_its_slot() {
     let artifact = framed_artifact(|block, sp| {

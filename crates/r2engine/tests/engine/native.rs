@@ -6852,9 +6852,8 @@ const COPY_INTO_AN_ARGUMENT: &[u8] = &[
     0xc3, // 0x1013 ret
 ];
 
-/// The boundary passes the value that reached `rdi`, the copy; copy forwarding leaves both of the
-/// call's reads naming `rsi`'s value. The read the `CallUse` names `rdi` is performed and the one
-/// it names `rsi` is not: liveness asks the register, never the value (D283).
+/// Copy forwarding leaves both of the call's reads naming `rsi`'s value; the read whose `CallUse`
+/// names `rdi` is performed and the `rsi` one is not: liveness asks the register (D283).
 #[test]
 fn a_call_reading_the_value_its_copied_argument_carried_reads_it() {
     let machine = Machine::new("x86-64", "x86-64", 64);

@@ -982,9 +982,8 @@ fn read_width(
     }
 }
 
-/// The low bytes of the carrier a `CallUse` reads that its call takes: none for an argument register
-/// of the convention the call's complete interface leaves out (`CallReads`), the widest lane the
-/// callee holds of each argument stated there (D266 rule 2); `None` where one is read whole.
+/// The low bytes of a `CallUse`'s carrier its call takes: none for an argument register a stated
+/// `CallReads` leaves out, else the callee's widest held lane (D266 rule 2); `None`: whole.
 pub(crate) fn call_read_bytes(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,

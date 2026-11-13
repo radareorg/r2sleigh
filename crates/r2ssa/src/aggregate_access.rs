@@ -188,10 +188,8 @@ struct ScalarLeaf {
     type_id: u32,
 }
 
-/// The one scalar the access covers, through by-value structs and fixed-count arrays at the
-/// element the offset names; a union, bit-field, unsized element or overlap refuses. Each step
-/// enters a strictly contained type: O(depth x m), depth at most the type count (ADR "ExtTypeDb as
-/// built").
+/// The one scalar the access covers, through by-value structs and fixed-count arrays; a union,
+/// bit-field, unsized element or overlap refuses. O(depth x m) (ADR "ExtTypeDb as built").
 fn scalar_leaf(
     graph: &crate::SourceTypeGraph,
     aggregate: &crate::SourceAggregateLayout,

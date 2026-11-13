@@ -174,9 +174,8 @@ impl DemandedBytes {
         Self::of_returning(graph, live_out, (None, &[]), (&BTreeSet::new(), context))
     }
 
-    /// The same, where a return reads only the `result` bytes its interface states (`None`: whole),
-    /// a tail exit reads the bytes `tails` names, no `ignored` read counts, and a call reads an
-    /// argument at the lane its callee holds (`semantic::call_read_bytes`, D366).
+    /// The same, where a return reads its interface's `result` bytes, a tail exit the `tails` bytes,
+    /// no `ignored` read counts, and a call an argument at its callee's held lane (D366).
     pub(crate) fn of_returning(
         graph: &SsaGraph,
         live_out: &FunctionLiveOut,

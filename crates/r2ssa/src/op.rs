@@ -252,20 +252,8 @@ pub enum SSAOp<V = SSAVar> {
     /// drifts by one return-address slot at every call it makes.
     CallRestore { dst: V, src: V },
 
-    /// A carrier a call boundary may read, as the convention names it.
-    ///
-    /// The third of the same family as `CallDefine` and `CallRestore`, and the
-    /// one that was missing. A call instruction's own p-code names only the
-    /// callee, so nothing downstream could see that a call consumes its
-    /// arguments: liveness could not keep their producers, and the obligation
-    /// inventory had to keep every definition reaching an incomplete boundary
-    /// out of `ProvenDead` by declaring it an unknown effect instead.
-    ///
-    /// This says the true thing in the graph. The carriers are the
-    /// convention's argument registers, so the set is bounded by the
-    /// architecture rather than by the function's size, and a carrier the
-    /// callee does not actually take is a read of a value that is live anyway. `storage` is the
-    /// register read, kept when forwarding renames `src` (D283).
+    /// A convention argument register `storage` a call may read, so liveness keeps its producer;
+    /// `storage` stays when forwarding renames `src` (D283).
     CallUse {
         src: V,
         storage: r2source::CanonicalStorageId,

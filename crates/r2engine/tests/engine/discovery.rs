@@ -558,16 +558,8 @@ fn a_call_to_a_function_that_fastfails_ends_its_caller_in_a_pe() {
     assert_eq!(extent(&mut elf, caller), (caller + 11, false));
 }
 
-/// A table switch whose arms return `g()` (`mov eax, 1`) and whose default arm calls `ends`:
-/// the import `exit` at the stub, or the body `trap` (`ud2`) at 0x1036.
-///
-/// ```text
-///   1000  cmp edi, 3; ja 0x1020; mov edi, edi; jmp [rdi*8 + 0x1040]
-///   100e  call g; ret                ; cases 0, 1, 2 at 100e, 1014, 101a; case 3 at 1028
-///   1020  xor edi, edi; call ends    ; the default arm
-///   1030  g: mov eax, 1; ret
-///   1036  trap: ud2
-/// ```
+/// A table switch (`jmp [rdi*8 + 0x1040]`) whose arms return `g()` and whose default arm at 0x1020
+/// calls `ends`: the import `exit` at the stub, or the body `trap` (`ud2`) at 0x1036.
 fn switch_ending_at(ends: u64) -> &'static [u8] {
     let mut code = vec![0xcc; 0xa0];
     code[..0x0e].copy_from_slice(&[

@@ -1773,9 +1773,8 @@ impl<'a> ObjectModelBuilder<'a> {
             for (start, end) in &mut self.callee_write_spans {
                 *end = clipped(&boundaries, *start, *end);
             }
-            // A run an escaped address reaches is one object, seeded as a write span (D290); a
-            // canary inside a declared slot or a write span is no compiler slot ending it.
-            // A write whose extent nothing bounds reaches the next boundary, or past every slot.
+            // A run an escaped address reaches is one object, seeded as a write span; a canary
+            // inside it ends nothing, and an unbounded write reaches the next boundary (D290).
             let mut reach = self.callee_write_spans.clone();
             for root in &callee_spans.unbounded {
                 let end = boundaries.ceiling(*root).unwrap_or(i64::MAX);
