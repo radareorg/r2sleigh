@@ -92,6 +92,12 @@ pub trait Program: crate::body::Program {
         r2abi::statement::SourceLanguage::C
     }
 
+    /// The convention a call to `callee` runs under where its declaration states one (RULING 1.6);
+    /// `None` runs the call under the calls' model.
+    fn stated_convention_at(&self, _callee: u64) -> Option<Arc<ConventionModel>> {
+        None
+    }
+
     /// The machine the function at this address is written in, where the
     /// program has more than one; `None` keeps the caller's.
     fn target_at(&self, _vaddr: u64) -> Option<NativeTarget<'_>> {
@@ -1038,6 +1044,9 @@ fn declare_imports(
 ) -> Vec<r2types::SourceOwnedCalleeSignature> {
     let mut signatures = Vec::new();
     for address in targets {
+        if let Some(model) = site_convention(native, target, *address) {
+            callees.conventions.insert(*address, model);
+        }
         let Some(name) = native.program.import_at(*address) else {
             continue;
         };
@@ -1540,6 +1549,23 @@ pub(crate) fn restate(
         .ok()
 }
 
+/// The convention a call to `address` runs under where the program states it (RULING 1.6, 2.6):
+/// an import its container binds runs under the program's default, a body its declaration states
+/// a convention for under that one; any other call runs under `AnyCall`. O(log imports).
+fn site_convention(
+    native: &Native<'_>,
+    target: &NativeTarget<'_>,
+    address: u64,
+) -> Option<Arc<ConventionModel>> {
+    match native.program.import_at(address) {
+        Some(name) => target.imports.bound(&name).then(|| {
+            let default = target.program.as_ref().map(|program| &program.convention);
+            Arc::clone(default.unwrap_or(&target.convention))
+        }),
+        None => native.program.stated_convention_at(address),
+    }
+}
+
 /// What the bodies a function calls say about their own boundaries.
 #[derive(Default)]
 struct Callees {
@@ -1550,6 +1576,8 @@ struct Callees {
     reach: BTreeMap<u64, BTreeMap<usize, ArgumentReach>>,
     /// The imports whose declaration states no interface: they have no body to read one off.
     unstated: BTreeMap<u64, r2ssa::UnstatedImport>,
+    /// The convention each call runs under where the program states it (`site_convention`).
+    conventions: r2ssa::SiteConventions,
 }
 
 impl Callees {
@@ -1568,6 +1596,7 @@ impl Callees {
             reentering,
             exits,
             unstated_imports: self.unstated.clone(),
+            conventions: self.conventions.clone(),
         }
     }
 

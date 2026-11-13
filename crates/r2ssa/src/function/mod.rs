@@ -620,20 +620,21 @@ struct BuildKey {
     argument_areas: Vec<(u64, Vec<(i64, i64)>)>,
     reentering: BTreeSet<u64>,
     unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
+    conventions: SiteConventions,
     premises: BTreeSet<r2source::Premise>,
 }
 
 /// Which result carriers a call defines whole without its callee naming one: the same root, no
 /// byte of which the convention keeps.
 struct DefinedWhole<'a> {
-    /// What the convention keeps or reserves; none where it has no model, and then no carrier is.
+    /// What a call keeps or reserves; none where it has no model, and then no carrier is.
     stays: Option<Vec<CanonicalStorageId>>,
     families: &'a RegisterFamilyInfo,
 }
 
 impl<'a> DefinedWhole<'a> {
     fn of(context: &SourceMachineContext, arch: &'a crate::Arch) -> Self {
-        let stays = context.convention().map(|model| {
+        let stays = context.calls().map(|model| {
             let stays = model.preserved.iter().chain(model.reserved.iter());
             stays.map(|lanes| lanes.storage).collect()
         });
@@ -670,6 +671,7 @@ impl BuildKey {
             &self.return_addresses,
             (&self.security_checks, &self.narrow_results),
             (&self.reentering, &self.unstated_imports, &self.premises),
+            &self.conventions,
         )
     }
 
@@ -732,6 +734,7 @@ impl BuildKey {
             argument_areas: areas.collect(),
             reentering: evidence.reentering.clone(),
             unstated_imports: evidence.unstated_imports.clone(),
+            conventions: callees.conventions.clone(),
             premises: premises.clone(),
         }
     }
@@ -2666,6 +2669,7 @@ impl TrustedSsaArtifact {
             reentering,
             exits,
             unstated_imports,
+            conventions: site_conventions,
         } = evidence;
         let callee_statements = crate::machine_context::CalleeStatement::of(callee_interfaces);
         let source = lifted.source().clone();
@@ -2704,7 +2708,8 @@ impl TrustedSsaArtifact {
             Some(&arch),
             callee_preserved_carriers,
             callee_interfaces,
-        );
+        )
+        .with_conventions(site_conventions.clone());
         let correlated_call_sites =
             correlate_call_site_interfaces(&source, (&blocks, &calls), callee_interfaces, &callees);
         // Every call target the source named, whether or not a prototype was
@@ -3979,7 +3984,13 @@ pub struct CalleeEvidence {
     pub exits: AssumedExits,
     /// The imports called whose declaration states no interface, and why.
     pub unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
+    /// The convention a call to each callee runs under where the program states it: a bound
+    /// import's default, a declaration's own (RULING 1.6, 2.6); every other call runs under `calls`.
+    pub conventions: SiteConventions,
 }
+
+/// The convention each stated callee runs under, by entry address.
+pub type SiteConventions = BTreeMap<u64, Arc<r2source::ConventionModel>>;
 
 /// Calls whose fall-through a body's walk ended because a model, not the program, says the callee
 /// never returns, and what that takes for granted.
@@ -3998,6 +4009,8 @@ pub struct AssumedExits {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CalleeBoundaries {
     preserved: CalleePreservedCarriers,
+    /// The convention each stated callee runs under; the rest run under the calls' model.
+    conventions: SiteConventions,
     results: BTreeMap<u64, CallBoundaryDef>,
     /// The storage of each of `results`.
     result_storages: BTreeMap<u64, CanonicalStorageId>,
@@ -4061,11 +4074,18 @@ impl CalleeBoundaries {
         }
         Self {
             preserved,
+            conventions: SiteConventions::new(),
             results,
             result_storages,
             return_addresses,
             security_checks,
         }
+    }
+
+    /// The same statements with the convention each stated callee runs under.
+    pub(crate) fn with_conventions(mut self, conventions: SiteConventions) -> Self {
+        self.conventions = conventions;
+        self
     }
 
     /// The callees whose body is a proven `/GS` check.
@@ -4129,6 +4149,7 @@ fn decompile_call_boundary_config(
         preserved,
         stack_pointer_restored_by_callee,
         preserved_by_target: callees.preserved,
+        convention_by_target: callees.conventions,
         result_by_target: callees.results,
         argument_regs: match calls {
             true => arch.call_reads(model).to_vec(),

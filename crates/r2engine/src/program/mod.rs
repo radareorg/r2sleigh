@@ -709,6 +709,10 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     fn target_at(&self, vaddr: u64) -> Option<NativeTarget<'_>> {
         self.target(vaddr).ok()
     }
+
+    fn stated_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
+        crate::native::Program::stated_convention_at(&self.view(), callee)
+    }
 }
 
 /// The C library a program runs against, as its container states it.
