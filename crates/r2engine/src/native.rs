@@ -1000,7 +1000,7 @@ pub(crate) fn declared_return(
     // `DW_AT_noreturn` is a declaration with no premise (D255); folded bodies declared apart state none.
     let stated = (declarations.function_at(address)).is_some_and(|prototype| prototype.noreturn);
     if stated && !declarations.is_contested(address) {
-        return Some(Return::Never(std::collections::BTreeSet::new()));
+        return Some(Return::declared(std::collections::BTreeSet::new()));
     }
     let Some(name) = program.import_at(address) else {
         // A Go function the runtime model says never returns, under the runtime's contract.
@@ -1010,11 +1010,11 @@ pub(crate) fn declared_return(
             .then(|| program.name_at(address))
             .flatten()
             .filter(|name| r2abi::runtime::exits(name))
-            .map(|_| Return::Never(std::collections::BTreeSet::from([premise])));
+            .map(|_| Return::declared(std::collections::BTreeSet::from([premise])));
     };
     let row = target.imports.row(&name);
     Some(match row.is_some_and(|row| row.noreturn) {
-        true => Return::Never(std::collections::BTreeSet::new()),
+        true => Return::declared(std::collections::BTreeSet::new()),
         false => Return::Comes,
     })
 }

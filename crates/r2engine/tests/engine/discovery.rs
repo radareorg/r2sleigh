@@ -502,3 +502,40 @@ fn a_function_that_runs_on_into_another_returns_what_that_one_returns() {
     believed(&mut warm);
     assert_eq!(extent(&mut warm, f), (g, false));
 }
+
+/// `trap: ud2`, then `caller: test edi, edi; je 1f; call trap; 1: mov eax, 1; ret`.
+const GUARDED_TRAP: &[u8] = &[
+    0x0f, 0x0b, 0x85, 0xff, 0x74, 0x05, 0xe8, 0xf5, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,
+];
+
+fn rendered_caller(literal: Literal) -> String {
+    let mut open = OpenProgram::of(literal);
+    let rendered = open.rendered(BASE + 2).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// A callee only the walk finds reaching no return ends its call's block, but the exit is unnamed:
+/// the "never" is a bound (RULING 1.4, D255). A declared one names it.
+#[test]
+fn a_call_to_a_never_no_statement_makes_leaves_its_exit_unnamed() {
+    let functions = [("trap", BASE, 2), ("caller", BASE + 2, 15)];
+    let derived = rendered_caller(Literal::of_code(GUARDED_TRAP, &functions));
+    let prototype = r2abi::Prototype {
+        name: "trap".to_owned(),
+        noreturn: true,
+        ..r2abi::Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(r2abi::TypeGraph::new());
+    declarations.declare_function(BASE, prototype);
+    let literal = Literal::of_code(GUARDED_TRAP, &functions).with_declarations(declarations);
+    let declared = rendered_caller(literal);
+    assert!(
+        derived.contains("1 call ends where no return was reached (unproven)"),
+        "{derived}"
+    );
+    assert!(
+        declared.contains("__attribute__((noreturn)) void trap"),
+        "{declared}"
+    );
+    assert!(!declared.contains("unproven)"), "{declared}");
+}

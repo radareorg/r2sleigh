@@ -383,7 +383,7 @@ impl SSAFunction {
             reason = "keyed by name where there is no value table: renaming builds the names the table interns, the table's own interning index, or a one-instruction block"
         )
     )]
-    fn from_blocks_raw_with_policy_and_control<C: SsaWorkControl + ?Sized>(
+    pub(crate) fn from_blocks_raw_with_policy_and_control<C: SsaWorkControl + ?Sized>(
         cfg: CFG,
         arch: Option<&crate::Arch>,
         call_boundaries: Option<&CallBoundaryConfig>,

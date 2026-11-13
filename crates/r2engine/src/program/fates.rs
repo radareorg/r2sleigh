@@ -1108,10 +1108,9 @@ fn effect_on_flow<S: Source + 'static>(
     let effects = reading.effects(body);
     // Only a declared `Never` with no premise proves a call never returns; a derived one is a bound.
     let never = |block: usize, op: usize| {
-        use crate::discovery::{Return, Walker};
+        use crate::discovery::Walker;
         let declared = |callee| walker.declared(callee);
-        (effects.callee_at(block, op).and_then(declared))
-            .is_some_and(|said| matches!(said, Return::Never(assumed) if assumed.is_empty()))
+        (effects.callee_at(block, op).and_then(declared)).is_some_and(|said| said.proves_never())
     };
     // A convention whose call effect is refused keeps nothing: every register is clobbered.
     let model = target

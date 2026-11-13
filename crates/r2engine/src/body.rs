@@ -84,10 +84,9 @@ pub trait Program {
         true
     }
 
-    /// What `returns` saying a call to `callee` never comes back takes for granted; nothing where
-    /// the program proves it.
-    fn exit_premises(&self, _callee: u64) -> BTreeSet<r2source::Premise> {
-        BTreeSet::new()
+    /// Why `returns` says a call to `callee` never comes back; `None` where nothing says so.
+    fn exit(&self, _callee: u64) -> Option<crate::discovery::Never> {
+        None
     }
 
     /// Whether control comes back from a call through the pointer held at
@@ -593,7 +592,7 @@ struct Walk {
     /// Calls not known to return, by callee: each call instruction and the address after it.
     gated: BTreeMap<u64, Vec<(u64, u64)>>,
     /// What each gated callee's "never returns" takes for granted, where it is a model's word.
-    assumed: BTreeMap<u64, BTreeSet<r2source::Premise>>,
+    assumed: BTreeMap<u64, crate::discovery::Never>,
     /// The instructions that enter the supervisor, as the language's own
     /// user-operation table says.
     supervisor: BTreeSet<u64>,
@@ -988,9 +987,12 @@ impl Walk {
                     (true, _) => self.continues(fallthrough, &mut successors, program),
                     // The bytes after a call not known to return may be the next function's.
                     (false, Some(after)) => {
-                        let premises = program.exit_premises(target);
-                        if !premises.is_empty() {
-                            self.assumed.insert(target, premises);
+                        // A "never" no statement makes is a bound, so its exit stays unnamed (D255).
+                        if let Some(never) = program.exit(target)
+                            && (never.proof, never.premises.is_empty())
+                                != (crate::discovery::NeverProof::Declared, true)
+                        {
+                            self.assumed.insert(target, never);
                         }
                         self.gate(target, addr, after);
                     }
@@ -1194,14 +1196,29 @@ impl Walk {
         }
 
         // A call still closed ends its block; one a model closed takes the model's premises.
+        // A call to a "never" only a walk derived ends a block that names no exit (D255).
         let mut exits = r2ssa::AssumedExits::default();
-        for (callee, premises) in &self.assumed {
-            let calls = self.gated.get(callee).map_or(0, Vec::len);
-            if calls > 0 {
-                exits.calls += calls;
-                exits.premises.extend(premises.iter().copied());
+        for (callee, never) in &self.assumed {
+            let calls = self
+                .gated
+                .get(callee)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            if !calls.is_empty() {
+                exits.premises.extend(never.premises.iter().copied());
+            }
+            if never.proof == crate::discovery::NeverProof::NoReturnReached {
+                let held = |(call, _): &(u64, u64)| {
+                    let after = blocks.partition_point(|block| block.lifted.addr <= *call);
+                    Some(blocks.get(after.checked_sub(1)?)?.lifted.addr)
+                };
+                exits.unproven.extend(calls.iter().filter_map(held));
+            } else {
+                exits.calls += calls.len();
             }
         }
+        exits.unproven.sort_unstable();
+        exits.unproven.dedup();
         let body = Body {
             entry: self.entry,
             blocks,

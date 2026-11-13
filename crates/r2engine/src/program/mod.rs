@@ -647,8 +647,8 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         self.comes_back(callee)
     }
 
-    fn exit_premises(&self, callee: u64) -> std::collections::BTreeSet<r2source::Premise> {
-        self.view().exit_premises(callee)
+    fn exit(&self, callee: u64) -> Option<crate::discovery::Never> {
+        self.view().exit(callee)
     }
 
     fn returns_through(&self, slot: u64) -> bool {
