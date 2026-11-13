@@ -77,6 +77,54 @@ const SECOND_TEST: &[u8] = &{
     code
 };
 
+/// [`GUARDED`] as MSVC's i386 `/GS` builds it: `check` takes the word in `ecx` (`__fastcall`), and
+/// `guarded` saves `[cookie] ^ ebp` below its frame pointer.
+const GUARDED_I386: &[u8] = &{
+    let head: [u8; 0x43] = [
+        0x3b, 0x0d, 0xa0, 0x10, 0x00, 0x00, // 1000 cmp ecx, [0x10a0]: the cookie
+        0x75, 0x01, // 1006 jne 0x1009
+        0xc3, // 1008 ret
+        0xe8, 0x82, 0x00, 0x00, 0x00, // 1009 call 0x1090: ExitProcess
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+        0xcc, 0xcc, 0xcc, // 100e padding
+        0x55, // 1020 push ebp
+        0x8b, 0xec, // 1021 mov ebp, esp
+        0x83, 0xec, 0x04, // 1023 sub esp, 4
+        0xa1, 0xa0, 0x10, 0x00, 0x00, // 1026 mov eax, [0x10a0]: the cookie
+        0x33, 0xc5, // 102b xor eax, ebp
+        0x89, 0x45, 0xfc, // 102d mov [ebp - 4], eax
+        0xb8, 0x07, 0x00, 0x00, 0x00, // 1030 mov eax, 7
+        0x8b, 0x4d, 0xfc, // 1035 mov ecx, [ebp - 4]
+        0x33, 0xcd, // 1038 xor ecx, ebp
+        0xe8, 0xc1, 0xff, 0xff, 0xff, // 103a call 0x1000
+        0x8b, 0xe5, // 103f mov esp, ebp
+        0x5d, // 1041 pop ebp
+        0xc3, // 1042 ret
+    ];
+    let mut code = [0xccu8; 0xa8];
+    let mut at = 0;
+    while at < head.len() {
+        code[at] = head[at];
+        at += 1;
+    }
+    // 1090 jmp [0x1098]: the stub; 1098 the slot; 10a0 the cookie.
+    let tail = [
+        0xff, 0x25, 0x98, 0x10, 0x00, 0x00, 0xcc, 0xcc, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    let mut at = 0;
+    while at < tail.len() {
+        code[0x90 + at] = tail[at];
+        at += 1;
+    }
+    let cookie = [0x32, 0xa2, 0xdf, 0x2d, 0, 0, 0, 0];
+    let mut at = 0;
+    while at < cookie.len() {
+        code[0xa0 + at] = cookie[at];
+        at += 1;
+    }
+    code
+};
+
 const CHECK: u64 = BASE;
 const CALLER: u64 = BASE + 0x20;
 
@@ -110,6 +158,36 @@ fn a_call_to_a_proven_check_of_the_load_config_cookie_is_elided() {
     assert!(!text.contains("check("), "{text}");
     assert!(!text.contains("0x10a0"), "{text}");
     assert!(text.contains("compiler-inserted"), "{text}");
+}
+
+/// D230: i386's check takes the saved `[cookie] ^ ebp` in `ecx`, which the UCRT row cites; the
+/// save, reload and call are compiler-inserted under the UB-free premise, as on x86-64 (no x86
+/// 32-bit C renders, so the prepared body is the gate). Without the cookie nothing is.
+#[test]
+fn an_i386_check_of_the_cookie_in_ecx_is_compiler_inserted() {
+    let inserted = |cookie: Option<u64>| {
+        let functions = [("check", CHECK, 0x0e), ("guarded", CALLER, 0x23)];
+        let mut program = Literal::of_code(GUARDED_I386, &functions)
+            .in_i386()
+            .with_data()
+            .writable_data_after(TEXT)
+            .importing_from("KERNEL32.dll", "ExitProcess")
+            .pe();
+        if let Some(cookie) = cookie {
+            program = program.with_security_cookie(cookie);
+        }
+        let mut open = OpenProgram::of(program);
+        let prepared = open.prepared(CALLER).expect("it prepares");
+        let shared = prepared.artifact().shared_artifact();
+        let function = shared.function();
+        let premised = function
+            .premises()
+            .contains(&r2source::Premise::UbFreeSource);
+        (function.compiler_inserted().iter().count(), premised)
+    };
+    let (ops, premised) = inserted(Some(TEXT));
+    assert!(ops > 0 && premised, "{ops} {premised}");
+    assert_eq!(inserted(None), (0, false));
 }
 
 /// No load configuration states a cookie, so the same bytes are no check.

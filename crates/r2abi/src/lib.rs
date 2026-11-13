@@ -31,8 +31,9 @@ pub use library::{
 pub use loader::{LoaderCall, ResultRead, loader_call};
 pub use mangled::Passing;
 pub use platform::{
-    EntryStack, GuardRow, LinkedGuard, PlatformRegister, RegisterDuty, RegisterSaveArea,
-    SaveAreaAnchor, StackGuard, architecture_registers, guard_row, platform_registers,
+    CookieCheck, EntryStack, GuardRow, LinkedGuard, PlatformRegister, RegisterDuty,
+    RegisterSaveArea, SaveAreaAnchor, StackGuard, architecture_registers, guard_row,
+    platform_registers,
 };
 pub use prototypes::{Arrival, FrameBase, Local, Parameter, Prototype, Spelled, StatedConvention};
 pub use syscalls::Syscalls;

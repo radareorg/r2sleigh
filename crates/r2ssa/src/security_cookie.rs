@@ -108,13 +108,12 @@ fn derived_only_from(defs: &Definitions, var: VarId, leaf: impl Fn(VarId) -> boo
     true
 }
 
-/// The cookie the convention model's forms name, and the first integer argument register.
+/// The cookie the convention model's forms name, and the register its check takes (D230).
 fn cookie_and_argument(
     machine: &SourceMachineContext,
 ) -> Option<(r2source::SourceSecurityCookie, r2source::CanonicalStorageId)> {
-    let model = machine.convention()?;
-    let argument = model.argument(SlotClass::Integer, 0)?;
-    Some((model.forms.security_cookie?, argument))
+    let cookie = machine.convention()?.forms.security_cookie?;
+    Some((cookie, cookie.argument))
 }
 
 /// The check one block ends in: the branch's two targets, by whether the values are equal.
@@ -283,7 +282,8 @@ pub(crate) fn decide(
     func.record_premise(r2source::Premise::UbFreeSource);
 }
 
-/// Each direct call to a proven check, and the value its first argument register hands it.
+/// Each direct call to a proven check, and the value its cited register hands it: the boundary's
+/// read, else the register's last whole definition in the block (i386's `ecx`, no cdecl argument).
 fn check_calls(
     func: &SSAFunction,
     checks: &BTreeSet<u64>,
@@ -298,6 +298,12 @@ fn check_calls(
             {
                 handed = Some(*src);
                 continue;
+            }
+            // A write of part of the register leaves no whole value handed.
+            if let Some(written) = op.dst().and_then(|dst| func.storage_of(*dst))
+                && overlaps(written, argument)
+            {
+                handed = (written == argument).then(|| op.dst().copied()).flatten();
             }
             let Some(call) = op.call() else {
                 continue;

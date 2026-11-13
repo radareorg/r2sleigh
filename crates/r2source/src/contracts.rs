@@ -4041,6 +4041,8 @@ impl SourceCallPreservedCarriers {
 pub struct SourceSecurityCookie {
     pub address: u64,
     pub width: u32,
+    /// The register the check takes the saved word in (`r2abi::CookieCheck`).
+    pub argument: CanonicalStorageId,
 }
 
 /// A stack protector's global word where the container binds it (`r2abi::GuardRow::LinkedGlobal`).
