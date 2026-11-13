@@ -728,7 +728,9 @@ impl ValueReaders {
             .filter(|obligation| {
                 matches!(
                     obligation.id.kind,
-                    SemanticObligationKind::ReturnValue | SemanticObligationKind::CallArgument
+                    SemanticObligationKind::ReturnValue
+                        | SemanticObligationKind::CallArgument
+                        | SemanticObligationKind::VolatileOrUnknownEffect
                 )
             })
             .filter_map(|obligation| Some((obligation.source.graph_inst()?, &obligation.inputs)))
@@ -1097,9 +1099,12 @@ impl SemanticObligationInventory {
             }
             if !boundary.complete {
                 unproven_exits.insert(boundary.at);
-                let exit = SeedReason::UnprovenExit(boundary.at);
-                seed_because(boundary.at, UNKNOWN, exit, &mut required);
-                incomplete_returns.push(boundary.at);
+                let inputs = seed_unproven_return(graph, boundary, &mut required);
+                let identity = (boundary.at, UNKNOWN.0, UNKNOWN.1);
+                match inputs {
+                    Some(inputs) => _ = explicit_inputs.insert(identity, inputs),
+                    None => incomplete_returns.push(boundary.at),
+                }
             }
         }
         let exits = taint_incomplete_boundary_inputs(
@@ -2273,6 +2278,25 @@ fn seed_direct_obligations(
     }
 }
 
+/// Seed an unproven return's unknown effect and, where its machine state is proven, the producer of
+/// each register reaching it, which are its inputs (D254); `None` where it keeps the block taint.
+fn seed_unproven_return(
+    graph: &SsaGraph,
+    boundary: &crate::SourceReturnBoundaryFact,
+    required: &mut ObligationSeeds,
+) -> Option<Vec<ValueId>> {
+    let exit = SeedReason::UnprovenExit(boundary.at);
+    seed_because(boundary.at, UNKNOWN, exit, required);
+    if !boundary.machine_state_complete {
+        return None;
+    }
+    for value in &boundary.live_registers {
+        let producer = (SemanticObligationKind::LiveValueProducer, exit);
+        seed_value_definition(graph, *value, producer, required);
+    }
+    Some(boundary.live_registers.clone())
+}
+
 fn seed_instruction(
     inst: InstId,
     kind: SemanticObligationKind,
@@ -2727,8 +2751,8 @@ mod tests {
     }
 
     /// The call arch's call effect: argument and result registers clobbered, the program counter preserved.
-    fn x86_64_call_effect() -> Option<crate::SourceCallEffect> {
-        crate::testing::call_effect(
+    fn x86_64_call_effect() -> Option<crate::Conventions> {
+        crate::testing::conventions(
             [0, 8, 16, 32, 40, 48, 56].map(|offset| register_storage(offset, 8)),
             [register_storage(24, 8)],
         )
@@ -2946,6 +2970,88 @@ mod tests {
             );
         }
         assert!(artifact.obligations().is_complete());
+    }
+
+    /// D254: a call's clobber is a kill. What the body wrote to RDX before the call is no input of
+    /// the return after it, whose RAX a straddling write leaves unproven; the taint made it unknown.
+    #[test]
+    fn an_unproven_return_owes_no_register_a_call_killed() {
+        let target = Varnode::ram(0x4200, 8);
+        let mut arch = x86_64_call_arch_spec();
+        arch.add_register(RegisterDef::new("rsp", 64, 8));
+        arch.add_register(RegisterDef::new("straddle", 7, 2));
+        let mut block = R2ILBlock::new(0x30c0, 8);
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(32, 8),
+            src: Varnode::constant(7, 8),
+        });
+        block.push(R2ILOp::Call {
+            target: target.clone(),
+        });
+        // The stack pointer the call left is stated again; a write across RAX and RDI proves no RAX.
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(64, 8),
+            src: Varnode::register(64, 8),
+        });
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(7, 2),
+            src: Varnode::constant(1, 2),
+        });
+        block.push(R2ILOp::Return {
+            target: Varnode::register(24, 8),
+        });
+        let call = call_interface(
+            b"call-revision-killed",
+            direct_call_identity(&mut block, 1, &target),
+            true,
+            [],
+            false,
+            false,
+            SourceCallResult::Void,
+        );
+        let returns = SourceFunctionReturn::Register {
+            storage: register_storage(0, 8),
+        };
+        let function = SourceFunctionInterface::new_exact(
+            b"killed-revision".to_vec(),
+            r2source::ConventionId::SysVAmd64,
+            [],
+            returns,
+            [],
+        )
+        .and_then(|interface| interface.with_return_address_storage(register_storage(24, 8)))
+        .and_then(|interface| interface.with_stack_pointer_storage(register_storage(64, 8)))
+        .expect("typed machine roles");
+        let artifact = crate::testing::prepared_under(
+            &[block],
+            &crate::Arch::new(arch),
+            Some(function),
+            vec![call],
+            crate::testing::conventions(
+                [0, 8, 16, 32, 40, 48, 56].map(|offset| register_storage(offset, 8)),
+                [register_storage(24, 8), register_storage(64, 8)],
+            ),
+        )
+        .expect("killed artifact");
+        let returned = (artifact.facts().boundaries.returns.values().next()).expect("return");
+        assert!(
+            !returned.complete && returned.machine_state_complete,
+            "{returned:?}"
+        );
+        let graph = artifact.graph();
+        let killed = |value: &crate::ValueId| {
+            (graph.def_inst(*value).and_then(|inst| graph.op(inst)))
+                .is_some_and(|op| matches!(op, SSAOp::CallDefine { .. }))
+        };
+        assert!(!returned.live_registers.iter().any(killed), "{returned:?}");
+        assert!(
+            !returned.live_registers.is_empty(),
+            "the straddling write reaches it"
+        );
+        let written = (artifact.obligations())
+            .disposition_with_id(graph, operation_at(&artifact, 0x30c0, 0))
+            .expect("the write before the call");
+        assert_eq!(written.state, SemanticInstructionState::ProvenDead);
     }
 
     #[test]
@@ -3536,7 +3642,7 @@ mod tests {
             crate::DecompileInputs {
                 arch: Some(&x86_64_call_arch()),
                 // The convention: a call reads rdi, the register written below.
-                call_effect: crate::testing::call_effect_reading(
+                conventions: crate::testing::conventions_reading(
                     [0, 8, 16, 32, 40, 48, 56].map(|offset| register_storage(offset, 8)),
                     [register_storage(24, 8)],
                     [register_storage(8, 8)],
@@ -3633,7 +3739,7 @@ mod tests {
         let clobbered = [0, 8, 16, 32, 40, 48, 56].map(|offset| register_storage(offset, 8));
         let reads = [register_storage(8, 8), register_storage(16, 8)];
         let effect =
-            crate::testing::call_effect_reading(clobbered, [register_storage(24, 8)], reads);
+            crate::testing::conventions_reading(clobbered, [register_storage(24, 8)], reads);
         let artifact =
             crate::testing::prepared_under(&[block], &x86_64_call_arch(), None, Vec::new(), effect)
                 .expect("call artifact");

@@ -124,12 +124,19 @@ fn arriving(open: &mut OpenProgram<Literal>) -> Vec<String> {
 fn an_ms_abi_function_in_an_elf_places_rcx_first() {
     let mut open = program(StatedConvention::LlvmWin64);
     assert_eq!(arriving(&mut open), ["rcx", "rdx"]);
+    // `afi` names the interface's convention (D275).
+    let convention = |open: &mut OpenProgram<Literal>| open.function_info(BASE).ok()?.convention;
+    assert_eq!(convention(&mut open), Some(r2abi::ConventionId::Win64));
     let text = rendered(&mut open, BASE);
     assert!(text.contains("(uint64_t)a - (uint64_t)b"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
     // Unstated, the same declaration is placed in rdi and rsi, where the body reads nothing.
     let mut unstated = program(StatedConvention::Normal);
     assert_eq!(arriving(&mut unstated), ["rdi", "rsi"]);
+    assert_eq!(
+        convention(&mut unstated),
+        Some(r2abi::ConventionId::SysVAmd64)
+    );
 }
 
 /// The SysV caller passes `diff(b, a)` in rcx and rdx, the callee's own locations; read as
@@ -193,19 +200,19 @@ fn a_call_in_a_program_stating_sysv_abi_keeps_no_register_sysv_clobbers() {
     let mut open = pe(StatedConvention::LlvmX8664SysV);
     assert_eq!(arriving(&mut open), ["rdi", "rsi"]);
     let target = r2engine::native::Program::target_at(&open, TWICE).expect("a machine");
-    let effect = target.call.call_effect().expect("an effect");
+    let effect = &*target.call;
     for name in ["rsi", "rdi", "xmm6"] {
         assert!(effect.clobbers(register(&target, name)), "{name}");
     }
     assert!(effect.preserves(register(&target, "rbx")));
-    let reads = effect.reads().call();
+    let reads = effect.call_reads().expect("the join's reads");
     assert!(reads.contains(&register(&target, "rdi")), "SysV's first");
     // `add rax, rsi` past the call reads an rsi the call may have written, never `a`.
     let text = rendered(&mut open, TWICE);
     assert!(!text.contains("+ (uint64_t)arg0"), "{text}");
     let mut unstated = pe(StatedConvention::Normal);
     let target = r2engine::native::Program::target_at(&unstated, TWICE).expect("a machine");
-    let effect = target.call.call_effect().expect("an effect");
+    let effect = &*target.call;
     assert!(effect.preserves(register(&target, "rsi")));
     let text = rendered(&mut unstated, TWICE);
     assert!(text.contains("+ (uint64_t)arg0"), "{text}");
@@ -324,4 +331,66 @@ fn a_declared_void_whose_body_writes_a_result_lane_stays_void_and_names_the_lane
     let text = rendered(&mut open, BASE);
     assert!(text.contains("void store(int32_t* p, int32_t v)"), "{text}");
     assert!(!text.contains(KEPT_AGAINST_THE_BODY), "{text}");
+}
+
+/// `diff` under `sysv_abi` in a PE, and a Microsoft x64 `keeps(a)` holding `a` in rsi across a
+/// call to an import, then adding it to the import's result.
+const KEEPS_ACROSS_AN_IMPORT: &[u8] = &{
+    let mut code = [0xccu8; 0xa0];
+    let body: &[u8] = &[
+        0x48, 0x89, 0xf8, // 1000 mov rax, rdi
+        0x48, 0x29, 0xf0, // 1003 sub rax, rsi
+        0xc3, // 1006 ret
+    ];
+    let keeps: &[u8] = &[
+        0x48, 0x83, 0xec, 0x28, // 1010 sub rsp, 0x28
+        0x48, 0x89, 0xce, // 1014 mov rsi, rcx
+        0xe8, 0x74, 0x00, 0x00, 0x00, // 1017 call 0x1090: the import's stub
+        0x48, 0x01, 0xf0, // 101c add rax, rsi
+        0x48, 0x83, 0xc4, 0x28, // 101f add rsp, 0x28
+        0xc3, // 1023 ret
+    ];
+    let stub: &[u8] = &[0xff, 0x25, 0x02, 0x00, 0x00, 0x00]; // 1090 jmp [rip + 2]
+    let mut at = 0;
+    while at < body.len() {
+        code[at] = body[at];
+        at += 1;
+    }
+    at = 0;
+    while at < keeps.len() {
+        code[0x10 + at] = keeps[at];
+        at += 1;
+    }
+    at = 0;
+    while at < stub.len() {
+        code[0x90 + at] = stub[at];
+        at += 1;
+    }
+    at = 0x98;
+    while at < 0xa0 {
+        code[at] = 0;
+        at += 1;
+    }
+    code
+};
+
+fn importing_pe(dll: &str) -> OpenProgram<Literal> {
+    let functions = [("diff", BASE, 7), ("keeps", TWICE, 0x14)];
+    let program = Literal::of_code(KEEPS_ACROSS_AN_IMPORT, &functions)
+        .with_declarations(declaring(StatedConvention::LlvmX8664SysV))
+        .importing_from(dll, "GetLastError")
+        .pe();
+    OpenProgram::of(program)
+}
+
+/// A bound import runs under the default, Microsoft x64, which keeps rsi though the stated SysV
+/// function clobbers it; an import no table binds runs under the join and keeps no rsi (D252).
+#[test]
+fn a_pe_stating_one_sysv_function_keeps_rsi_across_a_kernel32_call() {
+    let mut bound = importing_pe("KERNEL32.dll");
+    let text = rendered(&mut bound, TWICE);
+    assert!(text.contains("arg0"), "{text}");
+    let mut unbound = importing_pe("foo.dll");
+    let text = rendered(&mut unbound, TWICE);
+    assert!(!text.contains("arg0"), "{text}");
 }

@@ -15,6 +15,7 @@ mod reads;
 mod requests;
 mod resolved;
 mod returns;
+mod slots;
 pub mod source;
 mod starts;
 mod view;
@@ -515,10 +516,6 @@ impl<S: Source + 'static> OpenProgram<S> {
         View::new(&self.db, true)
     }
 
-    /// Whether control comes back from a call to `callee`: false only where the program proves it never does.
-    pub(super) fn comes_back(&self, callee: u64) -> bool {
-        self.view().comes_back(callee)
-    }
     /// The key of one function's analysis, sealing and rendering: its entry, its mode, and
     /// whether it reads its callers.
     fn analysis_key(&self, entry: u64) -> analysis::Key {
@@ -643,12 +640,12 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         self.view().is_entry(vaddr)
     }
 
-    fn returns(&self, callee: u64) -> bool {
-        self.comes_back(callee)
+    fn returns(&self, callee: u64, foreign: bool) -> bool {
+        crate::body::Program::returns(&self.view(), callee, foreign)
     }
 
-    fn exit_premises(&self, callee: u64) -> std::collections::BTreeSet<r2source::Premise> {
-        self.view().exit_premises(callee)
+    fn exit(&self, callee: u64, foreign: bool) -> Option<crate::discovery::Never> {
+        crate::body::Program::exit(&self.view(), callee, foreign)
     }
 
     fn returns_through(&self, slot: u64) -> bool {
@@ -665,6 +662,10 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
 
     fn binds_handles(&self) -> bool {
         self.view().binds_handles()
+    }
+
+    fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
+        self.view().interrupt_returns(arch, vector)
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
@@ -708,6 +709,14 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
 
     fn target_at(&self, vaddr: u64) -> Option<NativeTarget<'_>> {
         self.target(vaddr).ok()
+    }
+
+    fn site_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
+        crate::native::Program::site_convention_at(&self.view(), callee)
+    }
+
+    fn kept_at(&self, entry: u64) -> Option<std::collections::BTreeSet<r2ssa::CanonicalStorageId>> {
+        crate::native::Program::kept_at(&self.view(), entry)
     }
 }
 

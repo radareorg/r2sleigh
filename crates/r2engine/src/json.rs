@@ -63,6 +63,9 @@ pub struct RenderedCallJson {
     /// Arguments that are slots the callee ignores (D165), counted apart from invented ones.
     pub ignored: usize,
     pub variadic: bool,
+    /// A member call's declared parameter count, from its contract's exact callee (D272).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub declared: Option<usize>,
 }
 
 /// Why a unit defines nothing.
@@ -290,7 +293,9 @@ impl RenderedFunctionJson {
                     line: residual.line,
                 })
                 .collect(),
-            calls: emission.calls().iter().map(call_json).collect(),
+            calls: (emission.calls().iter())
+                .map(|call| call_json(call, &rendering.member_arities))
+                .collect(),
         }
     }
 }
@@ -301,8 +306,18 @@ fn call_gap(residual: &r2dec::ResidualSite) -> Option<&r2dec::ast::CallGap> {
 }
 
 /// One rendered call, as `pddj` spells it.
-fn call_json(call: &r2dec::report::RenderedCall) -> RenderedCallJson {
+fn call_json(
+    call: &r2dec::report::RenderedCall,
+    member_arities: &[(r2ssa::InstId, usize)],
+) -> RenderedCallJson {
     use r2dec::report::CallKind;
+    let declared = (call.kind == CallKind::Pointer)
+        .then_some(call.site)
+        .flatten()
+        .and_then(|site| {
+            let found = member_arities.binary_search_by_key(&site, |(at, _)| *at);
+            found.ok().map(|index| member_arities[index].1)
+        });
     RenderedCallJson {
         kind: match call.kind {
             CallKind::Function => "function",
@@ -315,6 +330,7 @@ fn call_json(call: &r2dec::report::RenderedCall) -> RenderedCallJson {
         arguments: call.arguments,
         ignored: call.ignored,
         variadic: call.variadic,
+        declared,
     }
 }
 

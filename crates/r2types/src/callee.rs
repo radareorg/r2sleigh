@@ -702,7 +702,6 @@ mod tests {
             name: Some(name.to_string()),
             linkage,
             signature: None,
-            signature_callconv: None,
             signature_noreturn: false,
             model_policy_evidence: BTreeSet::new(),
             direct_callees: Vec::new(),
@@ -952,7 +951,6 @@ mod tests {
         let symbols = FxHashMap::default();
         let mut fact = callee_fact(0x401000, "sym.imp.printf");
         fact.signature = Some(non_variadic_signature(2));
-        fact.signature_callconv = Some("amd64".to_string());
         let callee_facts = BTreeMap::from([(0x401000, fact)]);
         let ctx = empty_identity_context(&function_names, &symbols, &callee_facts);
 

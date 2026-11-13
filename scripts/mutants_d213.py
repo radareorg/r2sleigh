@@ -73,7 +73,7 @@ MUTANTS = [
                                              "Some(format.unfloated)")], [BOUNDARY]),
     ("a-writable-format-is-trusted", [(FATES, "crate::native::immutable_text_at(self.view, address)?",
                                        "crate::native::text_at(self.view, address)?")], [BOUNDARY]),
-    ("a-call-keeps-every-register", [(FATES, "origins.step_under(operation, self.call.as_ref());",
+    ("a-call-keeps-every-register", [(FATES, "origins.step_under(operation, Some(&self.call));",
                                       "if !operation.is_call() {\n                    origins.step(operation);\n                }")],
      [BOUNDARY]),
     # The byte liveness after a call.

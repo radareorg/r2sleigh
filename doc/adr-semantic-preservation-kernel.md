@@ -61,8 +61,8 @@ the only input) and by doc/adr-renderer-printer.md.
   The inventory owns who reads a value, and r2ssa's dispatch walk and r2dec's
   value placement both ask it. A reader is an instruction that owes something
   or is unknown (`LiveObligation`, `UnsupportedUnknown`); a proven-dead or
-  structural one reads nothing. Each `ReturnValue` and `CallArgument` input is
-  a read by that return or call even with no graph use site: a tail call's
+  structural one reads nothing. Each `ReturnValue`, `CallArgument` and
+  unproven-return input (D254) is a read by that return or call even with no graph use site: a tail call's
   argument and a register a case returns have none. A call's carrier read
   (`CallUse`) is a read by the call unless the call is bounded: its boundary
   is complete and its callee's statement bounds what it reads
@@ -118,6 +118,53 @@ the only input) and by doc/adr-renderer-printer.md.
   joined the dispatch and rendered as a residual; reading the boundary's
   inputs keeps it outside. A value some reader outside the dispatch reads
   never joins (`a_value_read_outside_the_dispatch_is_never_part_of_it`).
+
+- **Unproven machine returns** (D254, `SourceReturnBoundaryFact::live_registers`).
+  A return whose machine state is proven (return address and exit stack
+  pointer) but whose values are not reads every register a caller may read:
+  each register definition that may reach it, as the return's explicit
+  inputs. A call's clobber (a `CallDefine` no boundary states as a result) is
+  killed, not read, and the two machine-state carriers are left to their own
+  facts. The walk is backward over register bytes, entering a block again
+  only with bytes not yet walked through it: O(R · (B + I)) for R register
+  bytes the function writes. Each input's producer owes its value, and the
+  inputs are reads (`ValueReaders`), so a live one renders or the residual
+  return covers it. A return whose machine state is unproven keeps the
+  block-reachability taint. Before, the taint seeded every definition in a
+  block reaching such a return, killed or not: hello_gs and testapp refused
+  16 functions at a merge no text could render (RDX after `__security_check_cookie`).
+
+- **Frame addresses** (D254, `StackGeometryCertificate::object_addresses`,
+  `ElisionReason::FrameAddress`). An instruction is a frame address when its
+  value addresses one own-frame object (a stack slot or frame object at a
+  callee-owned offset below the entry stack pointer) at one constant offset,
+  with no index, and a merge only when every arm states the same object and
+  offset: one pass, O(I + phi inputs). r2rewrite's import records each read
+  it spells as the object's address (`Substitution::addressed`), and r2dec
+  sets a bit where kept text spells that value `&object` and still names the
+  object. A value obligation at such an instruction with the bit set is
+  `Elided(FrameAddress)`, checked after residual cover, so a gapped reader
+  still wins and an escape stays visible in the text (`FrameReach` owns the
+  escape, D290). `thousands_sep` (RBX `lea rbx, [rsp + 8]` on both arms, read
+  by two calls) and gzip `main` (R13 `lea r13, [rsp + 0x24]` on both arms,
+  getopt_long's fifth argument) rendered nothing for the merge before.
+
+- **Traps** (D352, r2sleigh-lift `ModelledUserOperation::Interrupt`). Sleigh
+  spells x86 `int3` and `int1` as `swi(n); call [vector]; return [0]`, its way
+  to end flow at an exception (Intel SDM: #BP and #DB). The lift spells `swi`
+  with vector 3 or 1 as `Breakpoint`, which ends the instruction; any other
+  vector keeps the call Sleigh writes. The `return [0]` had read as a return
+  whose interface is unproven, and its taint refused 7 PE functions that end
+  `call f; int3`.
+
+- **Declared never-returns** (D255, r2engine `declared_return`). A body whose
+  debug information states `DW_AT_noreturn` never comes back, with no premise,
+  so a call to it ends its block and demand names the caller's exits.
+  diffutils `try_help` ends in `error(EXIT_TROUBLE, ...)`, which glibc's row
+  says comes back, so the walk had listed the next function as the call's
+  fallthrough and the caller's result kept every byte of RAX. A body-derived
+  `Never` still names its exit; RULING 1.4 gives `Return::Never` a proof kind
+  so that only a declared one does, which is D255's open half.
 
 ## Done
 

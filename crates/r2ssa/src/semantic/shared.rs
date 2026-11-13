@@ -737,110 +737,6 @@ fn unrooted_definition_chain(
     chain
 }
 
-/// The last operation of a block past a call's boundary: its `CallDefine` and `CallRestore` run and the lanes it inserts.
-fn terminal_past_call_boundary<'o, V: Ord + 'o>(
-    ops: impl DoubleEndedIterator<Item = &'o SSAOp<V>> + Clone,
-) -> Option<&'o SSAOp<V>> {
-    let call_defined = ops
-        .clone()
-        .filter_map(|op| match op {
-            SSAOp::CallDefine { dst } => Some(dst),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
-    ops.rev().find(|op| match op {
-        SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. } => false,
-        SSAOp::Insert(insert) => !call_defined.contains(&insert.value),
-        _ => true,
-    })
-}
-
-/// Convention-clobbered registers no block a return is reached from writes, every exit a return
-/// (GCC's `-fipa-ra` set; doc/adr-call-boundary.md, "S17 as built").
-pub(crate) fn preserved_call_carriers(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    machine_context: &SourceMachineContext,
-) -> BTreeSet<CanonicalStorageId> {
-    // Every register a call may change, not the convention's list of
-    // clobbers: a caller reading any of them after a call to this body needs
-    // the same proof, and a list names only some.
-    let candidates = machine_context.call_universe();
-    if candidates.is_empty() {
-        return BTreeSet::new();
-    }
-    let mut returning = Vec::new();
-    for block in &graph.blocks {
-        if !function.successors(block.addr).is_empty() {
-            continue;
-        }
-        let ops = graph
-            .op_insts(block.id)
-            .iter()
-            .filter_map(|inst| graph.op(*inst));
-        match terminal_past_call_boundary(ops) {
-            Some(SSAOp::Return { .. }) => returning.push(block.addr),
-            Some(op) if op.is_call() => {}
-            _ => return BTreeSet::new(),
-        }
-    }
-    if returning.is_empty() {
-        return BTreeSet::new();
-    }
-    // Only a block a return is reached from writes what a caller sees: O(blocks + edges).
-    let mut reaching = BTreeSet::new();
-    while let Some(addr) = returning.pop() {
-        if reaching.insert(addr) {
-            returning.extend(function.predecessors(addr).iter().copied());
-        }
-    }
-    let returns_from = |block: &&crate::graph::GraphBlock| reaching.contains(&block.addr);
-    let mut preserved = candidates.iter().copied().collect::<BTreeSet<_>>();
-    // A call inside this body leaves alone only what its own callee proves
-    // it does. The call defines only the registers this body touches, so the
-    // rest of the universe is answered here: a register no instruction
-    // writes survives an inner call only when that callee's body says so.
-    let ops = (graph.blocks.iter().filter(returns_from))
-        .flat_map(|block| graph.op_insts(block.id))
-        .filter_map(|inst| graph.op(*inst));
-    for op in ops {
-        let Some(call) = op.call() else {
-            continue;
-        };
-        let inner = if call.direct {
-            (graph.value(*call.target))
-                .and_then(|value| value.canonical_storage)
-                .filter(|storage| storage.space == crate::CanonicalStorageSpace::Ram)
-                .and_then(|storage| machine_context.callee_preserved(storage.offset))
-        } else {
-            None
-        };
-        preserved.retain(|storage| inner.is_some_and(|kept| covers(kept, *storage)));
-        if preserved.is_empty() {
-            return preserved;
-        }
-    }
-    // The distinct storages written, once each: the universe is the whole
-    // register file, so matching it per instruction would cost `O(I * U)`
-    // where `O(I log w + w * U)` answers the same question.
-    let seen = |inst: &&crate::graph::GraphInst| {
-        (graph.block(inst.block)).is_none_or(|block| reaching.contains(&block.addr))
-    };
-    let written = graph
-        .insts
-        .iter()
-        .filter(seen)
-        .filter(|inst| inst.output.is_some())
-        .filter_map(|inst| graph.written_storage(inst))
-        .collect::<BTreeSet<_>>();
-    preserved.retain(|storage| {
-        !written
-            .iter()
-            .any(|written| register_storages_overlap(*written, *storage))
-    });
-    preserved
-}
-
 /// Whether some storage of `kept` covers every byte of `storage`.
 pub(crate) fn covers(kept: &BTreeSet<CanonicalStorageId>, storage: CanonicalStorageId) -> bool {
     kept.iter().any(|kept| storage_contains(*kept, storage))
@@ -1568,8 +1464,8 @@ pub(crate) fn callee_write_spans(
     // puts there, whatever this function itself takes: a caller of one
     // parameter hands `buf` to `f(x, buf)` in the second slot all the same.
     let registers = machine_context
-        .convention_slots()
-        .map(r2source::SourceConventionSlots::argument_slots)
+        .convention()
+        .map(|model| model.arguments(r2source::convention::SlotClass::Integer))
         .unwrap_or_default();
     let mut reaching = BTreeMap::<CanonicalStorageId, ReachingStorage<'_>>::new();
     let mut spans = Vec::new();
@@ -1785,7 +1681,7 @@ impl FrameBoundaries {
         for slot in declared {
             boundaries.insert_entry(slot.offset(), i64::from(slot.size_bytes()));
         }
-        let Some(effect) = machine_context.call_effect() else {
+        let Some(effect) = machine_context.calls() else {
             return boundaries;
         };
         let stack_pointer = machine_context.stack_pointer_carrier();
@@ -1859,7 +1755,7 @@ impl FrameBoundaries {
 /// UB-free premise the reach stops at the first one above the span's start;
 /// a bound looser than that is the range analysis's imprecision, not the
 /// buffer's size. One ordered lookup per span.
-fn clipped(boundaries: &FrameBoundaries, start: StackAddressRoot, end: i64) -> i64 {
+pub(crate) fn clipped(boundaries: &FrameBoundaries, start: StackAddressRoot, end: i64) -> i64 {
     match boundaries.ceiling(start) {
         Some(ceiling) if ceiling < end => {
             r2il::refusal_evidence!(
@@ -2058,12 +1954,12 @@ pub(crate) fn evidenced_stack_roots(
             .and_modify(|known| *known = (*known).max(end))
             .or_insert(end);
     }
+    // The builder clipped these to the boundaries already: its reach and these spans agree.
     for (start, end) in callee_write_spans {
-        let end = clipped(boundaries, *start, *end);
         spans
             .entry(*start)
-            .and_modify(|known| *known = (*known).max(end))
-            .or_insert(end);
+            .and_modify(|known| *known = (*known).max(*end))
+            .or_insert(*end);
     }
     // A callee that reaches through a frame address without a bound reaches
     // the object the address is in, and nothing states where that object

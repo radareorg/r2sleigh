@@ -32,8 +32,8 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
         return;
     }
     let Some(bound) = machine
-        .call_effect()
-        .and_then(r2source::SourceCallEffect::stack_bound)
+        .calls()
+        .and_then(r2source::ConventionModel::stack_bound)
     else {
         return;
     };
@@ -47,7 +47,7 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     let checks = func
         .block_addrs()
         .iter()
-        .filter_map(|addr| check(func, &defs, machine, bound, stack_pointer, *addr))
+        .filter_map(|addr| check(func, &defs, machine, &bound, stack_pointer, *addr))
         .collect::<Vec<_>>();
     if checks.is_empty() {
         return;

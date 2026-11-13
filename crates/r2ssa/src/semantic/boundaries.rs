@@ -378,8 +378,8 @@ impl FormatForwardingLookup<'_> {
 /// like any other.
 fn variadic_tail_on_stack(machine_context: &SourceMachineContext) -> bool {
     machine_context
-        .convention_slots()
-        .is_some_and(r2source::SourceConventionSlots::variadic_tail_on_stack)
+        .convention()
+        .is_some_and(|model| model.forms.variadic_on_stack)
 }
 
 /// Whether the convention places a floating tail operand: on the stack, or at a shared position.
@@ -502,10 +502,10 @@ pub(crate) fn variadic_callsite_arguments(
 ) -> Result<Vec<SourceCallArgumentFact>, VariadicCallsiteArgumentCountRefusal> {
     let convention = recovery
         .machine_context
-        .convention_slots()
+        .convention()
         .ok_or(VariadicCallsiteArgumentCountRefusal::CallingConventionMismatch)?;
-    let slots = convention.argument_slots();
-    if convention.convention() != interface.convention()
+    let slots = convention.arguments(r2source::convention::SlotClass::Integer);
+    if convention.id != interface.convention()
         || interface.arguments().len() > slots.len()
         || interface
             .arguments()
@@ -524,7 +524,7 @@ pub(crate) fn variadic_callsite_arguments(
     // stack. Apple's arm64 ABI puts the whole variadic tail on the stack from
     // its first slot, whatever registers the prefix left free.
     let fixed = interface.arguments().len();
-    let tail_on_stack = convention.variadic_tail_on_stack();
+    let tail_on_stack = convention.forms.variadic_on_stack;
     let stack_index_of = |position: usize| -> Option<usize> {
         if tail_on_stack && position >= fixed {
             Some(position - fixed)
@@ -628,11 +628,7 @@ fn shared_float_slot(
 ) -> Result<CanonicalStorageId, VariadicCallsiteArgumentCountRefusal> {
     (machine_context.convention())
         .filter(|model| model.shares_positions())
-        .and_then(|model| {
-            model
-                .argument_registers(r2source::convention::SlotClass::Float)
-                .nth(position)
-        })
+        .and_then(|model| model.argument(r2source::convention::SlotClass::Float, position))
         .ok_or(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument)
 }
 
@@ -966,11 +962,10 @@ pub(crate) fn convention_call_boundary(
     arrival_merges: &crate::dense::IdSet<ValueId>,
     mut stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> Result<ConventionCallBoundary, CallBoundaryRefusal> {
-    let convention =
-        (machine_context.convention_slots()).ok_or(CallBoundaryRefusal::NoConvention)?;
-    let results = |convention: &r2source::SourceConventionSlots| {
+    let convention = (machine_context.convention()).ok_or(CallBoundaryRefusal::NoConvention)?;
+    let results = |convention: &r2source::ConventionModel| {
         convention
-            .result_slot()
+            .result()
             .and_then(|storage| {
                 observed_convention_call_result_after_call(
                     graph, live_out, block_addr, op_index, storage,
@@ -990,7 +985,7 @@ pub(crate) fn convention_call_boundary(
         let (arguments, arguments_proven) =
             stated_call_arguments(at, machine_context, count, entry_values, stack_pointer);
         return Ok(ConventionCallBoundary {
-            convention: convention.convention(),
+            convention: convention.id,
             arguments,
             unproven: (!arguments_proven).then_some(CallBoundaryRefusal::StatedArgumentUnreached {
                 count: position(count),
@@ -1023,7 +1018,7 @@ pub(crate) fn convention_call_boundary(
     // function, which nothing could pass, proves the count ends below it.
     let written_later = |position: usize| {
         for slot in convention
-            .argument_slots()
+            .arguments(r2source::convention::SlotClass::Integer)
             .iter()
             .skip(position + 1)
             .copied()
@@ -1074,7 +1069,11 @@ pub(crate) fn convention_call_boundary(
     };
     let mut arguments = Vec::new();
     let mut unproven = None;
-    for (position, slot) in convention.argument_slots().iter().enumerate() {
+    for (position, slot) in convention
+        .arguments(r2source::convention::SlotClass::Integer)
+        .iter()
+        .enumerate()
+    {
         let Ok(index) = u32::try_from(position) else {
             break;
         };
@@ -1168,7 +1167,10 @@ pub(crate) fn convention_call_boundary(
     // stack. A slot this function stored into before the call is one the call
     // reads, which is the same evidence the register scan takes, and the first
     // slot with no store ends the count exactly as an untouched register does.
-    if arguments.len() == convention.argument_slots().len()
+    if arguments.len()
+        == convention
+            .arguments(r2source::convention::SlotClass::Integer)
+            .len()
         && let Some(placement) = convention.stack_arguments()
     {
         // Where the area is depends on where the stack pointer stands. Without
@@ -1242,7 +1244,7 @@ pub(crate) fn convention_call_boundary(
         });
     }
     Ok(ConventionCallBoundary {
-        convention: convention.convention(),
+        convention: convention.id,
         arguments,
         unproven,
         results: results(convention),
@@ -1263,10 +1265,10 @@ fn stated_call_arguments(
     entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
     mut stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> (Vec<SourceCallArgumentFact>, bool) {
-    let Some(convention) = machine_context.convention_slots() else {
+    let Some(convention) = machine_context.convention() else {
         return (Vec::new(), false);
     };
-    let registers = convention.argument_slots();
+    let registers = convention.arguments(r2source::convention::SlotClass::Integer);
     let mut arguments = Vec::with_capacity(count);
     for (position, slot) in registers.iter().take(count).enumerate() {
         // The callee reads the slot whatever merges into it.
@@ -1862,29 +1864,10 @@ pub(crate) fn collect_source_boundary_facts(
         facts.calls.insert(call_site.id, boundary);
     }
 
-    if let Some(machine_context) = machine_context {
-        facts.preserved_call_carriers = preserved_call_carriers(function, graph, machine_context);
-        r2il::refusal_evidence!(
-            "preserved-carriers",
-            "{:#x}: {}",
-            function.entry,
-            crate::site_boundary::spelled(facts.preserved_call_carriers.iter().copied())
-        );
-        if trace_call_definitions() {
-            eprintln!(
-                "  preserved across calls to {:#x}: {:?}",
-                function.entry,
-                facts
-                    .preserved_call_carriers
-                    .iter()
-                    .map(|storage| machine_context
-                        .register_name(*storage)
-                        .unwrap_or_else(|| format!("{storage:?}")))
-                    .collect::<Vec<_>>()
-            );
-        }
-    }
-
+    let call_results = (facts.calls.values())
+        .flat_map(|call| call.results.iter().map(|result| result.value))
+        .collect::<crate::dense::IdSet<ValueId>>();
+    let mut register_walk = None::<RegisterWalk<'_>>;
     for inst in &graph.insts {
         if matches!(inst.payload, InstPayload::Op(SSAOp::Return { .. })) {
             let mut values = Vec::new();
@@ -2012,6 +1995,10 @@ pub(crate) fn collect_source_boundary_facts(
                     .is_some_and(|interface| {
                         interface.return_kind() == SourceFunctionReturn::Unproven
                     });
+            // A proven machine return whose values are unproven hands the caller every register.
+            let unproven = machine_context.filter(|_| !complete && machine_state_complete);
+            let reads = (graph, &call_results);
+            let live_registers = live_registers(&mut register_walk, reads, unproven, inst.id);
             facts.returns.insert(
                 inst.id,
                 SourceReturnBoundaryFact {
@@ -2022,11 +2009,166 @@ pub(crate) fn collect_source_boundary_facts(
                     complete,
                     machine_state_complete,
                     result_unproven,
+                    live_registers,
                 },
             );
         }
     }
     facts
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many register walks this thread built: one per function with an unproven machine return.
+    pub(crate) static REGISTER_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The register bytes a function writes, the machine-state carriers left out, and one per-block
+/// table of the bytes walked through, built once for every unproven machine return (D254).
+struct RegisterWalk<'g> {
+    graph: &'g SsaGraph,
+    call_results: &'g crate::dense::IdSet<ValueId>,
+    all: BTreeSet<u64>,
+    walked: Vec<BTreeSet<u64>>,
+    touched: Vec<usize>,
+}
+
+impl<'g> RegisterWalk<'g> {
+    /// One pass over the instructions: `O(I + R)` for `R` register bytes.
+    fn of<'a>(
+        graph: &'g SsaGraph,
+        call_results: &'g crate::dense::IdSet<ValueId>,
+        state: impl Iterator<Item = &'a CanonicalStorageId>,
+    ) -> Self {
+        #[cfg(test)]
+        REGISTER_WALKS.with(|walks| walks.set(walks.get() + 1));
+        let mut all = (graph.insts.iter())
+            .filter_map(|inst| register_bytes(graph, inst))
+            .flatten()
+            .collect::<BTreeSet<u64>>();
+        for carrier in state {
+            let carried = carrier.offset..carrier.offset + u64::from(carrier.size);
+            all.retain(|byte| !carried.contains(byte));
+        }
+        let walked = vec![BTreeSet::new(); graph.blocks.len()];
+        Self {
+            graph,
+            call_results,
+            all,
+            walked,
+            touched: Vec::new(),
+        }
+    }
+
+    /// Every register definition that may reach `at`, a call's clobber left out; only the blocks
+    /// a walk marked are cleared after it: `O(R · (B_r + I_r))` over what this return reaches.
+    fn reaching(&mut self, at: InstId) -> Vec<ValueId> {
+        let Some(exit) = self.graph.inst(at) else {
+            return Vec::new();
+        };
+        let mut live = Vec::new();
+        let mut work = vec![(exit.block, Some(at), self.all.clone())];
+        while let Some((block, before, pending)) = work.pop() {
+            let Some(held) = self.graph.block(block) else {
+                continue;
+            };
+            let pending = self.scan(held, before, pending, &mut live);
+            self.spread(held, &pending, &mut work);
+        }
+        for at in self.touched.drain(..) {
+            self.walked[at].clear();
+        }
+        live.sort_unstable();
+        live.dedup();
+        live
+    }
+
+    /// Walk `held` back from `before`, keeping each definition of a pending byte; what is pending at
+    /// its head.
+    fn scan(
+        &self,
+        held: &crate::graph::GraphBlock,
+        before: Option<InstId>,
+        mut pending: BTreeSet<u64>,
+        live: &mut Vec<ValueId>,
+    ) -> BTreeSet<u64> {
+        let end = before
+            .and_then(|at| held.insts.iter().position(|inst| *inst == at))
+            .unwrap_or(held.insts.len());
+        let insts = held.insts[..end].iter().rev();
+        for inst in insts.filter_map(|id| self.graph.inst(*id)) {
+            let Some(bytes) = register_bytes(self.graph, inst) else {
+                continue;
+            };
+            let before = pending.len();
+            bytes.for_each(|byte| _ = pending.remove(&byte));
+            if pending.len() < before && !self.killed(inst) {
+                live.extend(inst.output);
+            }
+            if pending.is_empty() {
+                break;
+            }
+        }
+        pending
+    }
+
+    /// Whether `inst` is a call's clobber: a `CallDefine` no boundary states as a result.
+    fn killed(&self, inst: &crate::graph::GraphInst) -> bool {
+        matches!(inst.payload, InstPayload::Op(SSAOp::CallDefine { .. }))
+            && inst
+                .output
+                .is_none_or(|value| !self.call_results.contains(value))
+    }
+
+    /// Hand each predecessor of `held` the pending bytes not yet walked through it.
+    fn spread(
+        &mut self,
+        held: &crate::graph::GraphBlock,
+        pending: &BTreeSet<u64>,
+        work: &mut Vec<(crate::graph::BlockId, Option<InstId>, BTreeSet<u64>)>,
+    ) {
+        for predecessor in &held.predecessors {
+            let at = predecessor.0 as usize;
+            let seen = &mut self.walked[at];
+            let fresh = pending.difference(seen).copied().collect::<BTreeSet<_>>();
+            if fresh.is_empty() {
+                continue;
+            }
+            if seen.is_empty() {
+                self.touched.push(at);
+            }
+            seen.extend(fresh.iter().copied());
+            work.push((*predecessor, None, fresh));
+        }
+    }
+}
+
+/// The registers reaching unproven machine return `at`, from the function's one walk (D254).
+fn live_registers<'g>(
+    walk: &mut Option<RegisterWalk<'g>>,
+    (graph, call_results): (&'g SsaGraph, &'g crate::dense::IdSet<ValueId>),
+    machine: Option<&SourceMachineContext>,
+    at: InstId,
+) -> Vec<ValueId> {
+    let Some(machine) = machine else {
+        return Vec::new();
+    };
+    let state = [
+        machine.stack_pointer_carrier(),
+        machine.return_address_carrier(),
+    ];
+    let of = || RegisterWalk::of(graph, call_results, state.iter().flatten());
+    walk.get_or_insert_with(of).reaching(at)
+}
+
+/// The register bytes `inst` writes.
+fn register_bytes(
+    graph: &SsaGraph,
+    inst: &crate::graph::GraphInst,
+) -> Option<std::ops::Range<u64>> {
+    (graph.written_storage(inst))
+        .filter(|storage| storage.space == CanonicalStorageSpace::Register)
+        .map(|storage| storage.offset..storage.offset + u64::from(storage.size))
 }
 
 /// Whether `storage` still holds its entry byte at a return, on every path that reaches it.
@@ -2056,8 +2198,11 @@ fn left_undefined(
 
 /// Whether the convention passes an argument in `storage`, or states no convention.
 fn carries_input(machine_context: &SourceMachineContext, storage: CanonicalStorageId) -> bool {
-    (machine_context.convention_slots()).is_none_or(|slots| {
-        (slots.argument_slots().iter()).any(|slot| slot.location() == storage.location())
+    (machine_context.convention()).is_none_or(|slots| {
+        (slots
+            .arguments(r2source::convention::SlotClass::Integer)
+            .iter())
+        .any(|slot| slot.location() == storage.location())
     })
 }
 
@@ -2447,7 +2592,7 @@ fn count_register_set(at: CallPosition<'_>, machine_context: &SourceMachineConte
     } = at;
     let (Some(prep), Some(count)) = (
         prep,
-        (machine_context.convention_slots()).and_then(|slots| slots.variadic_count_register()),
+        (machine_context.convention()).and_then(|slots| slots.forms.count_register),
     ) else {
         return false;
     };

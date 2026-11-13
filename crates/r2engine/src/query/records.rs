@@ -91,8 +91,8 @@ impl Memory<'_> {
 pub struct Answered<'a> {
     pub decoders: &'a dyn Decoders,
     pub memory: Memory<'a>,
-    /// What a call does, where the program's convention was read: a view of its model.
-    pub call_effect: Option<r2ssa::SourceCallEffect>,
+    /// What a call runs under, where the program's convention was read; none clobbers every register.
+    pub calls: Option<std::sync::Arc<r2ssa::ConventionModel>>,
     /// The function's analysis and what its certificates say of each line; absent below `Work::Function`, which is what keeps a listing cheap.
     pub proved: Option<&'a super::proved::Proved<'a>>,
     /// The walked body the run is in: its blocks, and the def-use that says whether a number a line computes is a step.

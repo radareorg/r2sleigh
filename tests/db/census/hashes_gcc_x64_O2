@@ -154,7 +154,7 @@ NAME=0x00401240
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401240
 EXPECT=<<EOF
-r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, r2sleigh_word_u64 arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, void* arg2)
 {
     uint64_t tmp_401249_0_2;
 

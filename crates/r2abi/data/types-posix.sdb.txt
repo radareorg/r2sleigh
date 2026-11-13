@@ -907,6 +907,28 @@ func.exit.noreturn=true
 func.exit.ret=void
 func.exit.include=stdlib.h
 
+# stdlib.h: ISO C17 7.22.4.2 and 7.22.4.3. Each registers a handler of type `void (*)(void)`
+# that exit and quick_exit call (S30).
+atexit=func
+func.atexit.args=1
+func.atexit.arg.0=void (*)(void),func
+func.atexit.ret=int
+func.atexit.include=stdlib.h
+
+at_quick_exit=func
+func.at_quick_exit.args=1
+func.at_quick_exit.arg.0=void (*)(void),func
+func.at_quick_exit.ret=int
+func.at_quick_exit.include=stdlib.h
+
+# signal.h: ISO C17 7.14.1.1, `void (*signal(int sig, void (*func)(int)))(int);`.
+signal=func
+func.signal.args=2
+func.signal.arg.0=int,sig
+func.signal.arg.1=void (*)(int),func
+func.signal.ret=void (*)(int)
+func.signal.include=signal.h
+
 # The rows below were radare2's, or had no row, and are now read from the header. Each prototype
 # is what glibc 2.39's header declares under the mode its source names (`-std=c17` for ISO C17,
 # with `_POSIX_C_SOURCE=200809L` for POSIX.1-2017 and `_XOPEN_SOURCE=700` for XSI), spelled with

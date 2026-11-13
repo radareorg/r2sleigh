@@ -221,6 +221,11 @@ impl Imports {
         }
     }
 
+    /// Whether the container binds the import `name` to a library it states (S20).
+    pub fn bound(&self, name: &str) -> bool {
+        self.scope(name).is_ok()
+    }
+
     /// The row the import binds, with the refusal stated as evidence.
     pub fn row(&self, name: &str) -> Option<&LibraryRow> {
         self.bind(name)

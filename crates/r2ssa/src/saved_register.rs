@@ -21,13 +21,13 @@ fn lane(root: CanonicalStorageId, offset: u32, width: u32) -> Option<CanonicalSt
     )
 }
 
-/// Whether the convention keeps a lane across calls; with no convention every register is kept.
+/// Whether the calls' model keeps a lane across calls; with no model no lane is kept.
 pub(crate) fn preserved(
-    effect: Option<&r2source::SourceCallEffect>,
+    effect: Option<&r2source::ConventionModel>,
     stack_pointer: Option<CanonicalStorageId>,
     lane: CanonicalStorageId,
 ) -> bool {
-    Some(lane) != stack_pointer && effect.is_none_or(|effect| effect.preserves(lane))
+    Some(lane) != stack_pointer && effect.is_some_and(|effect| effect.preserves(lane))
 }
 
 /// The entry lane an unsealed value holds: an entry register through copies, or a lane of one.

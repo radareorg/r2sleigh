@@ -18,15 +18,15 @@ pub use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
     SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION,
     SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceArity,
-    SourceArityFloor, SourceBoundaryReads, SourceCallArgumentSpec, SourceCallEffect,
-    SourceCallPreservedCarriers, SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
-    SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature,
-    SourceConventionSlots, SourceFloorCause, SourceFormatParameterRule, SourceFunctionInterface,
-    SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
-    SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation, SourceResultCause,
-    SourceResultSeed, SourceResultWidth, SourceStackAllocationContract, SourceStackGrowth,
-    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
-    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
+    SourceArityFloor, SourceCallArgumentSpec, SourceCallPreservedCarriers, SourceCallResult,
+    SourceCallSiteIdentity, SourceCallSiteInterface, SourceCallSiteInterfaceError,
+    SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature, SourceFloorCause,
+    SourceFormatParameterRule, SourceFunctionInterface, SourceFunctionInterfaceError,
+    SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles, SourceMachineRolesError,
+    SourceOpaqueTag, SourceParameterLocation, SourceResultCause, SourceResultSeed,
+    SourceResultWidth, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
+    SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure,
+    SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
     SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, StackAddressBase,
 };
 
@@ -406,19 +406,12 @@ pub struct SourceMachineContext {
     memory_model: MachineMemoryModel,
     function_interface: Option<SourceFunctionInterface>,
     machine_roles: SourceMachineRoles,
-    /// Where this convention would leave arguments and a result. The result
-    /// slot is what makes "is this the return register" answerable without a
-    /// list of register spellings.
-    convention_slots: Option<SourceConventionSlots>,
+    /// The function's convention and its calls'; none only off the native path, where a call
+    /// reads and clobbers every outermost register (RULING 2.1).
+    conventions: Option<r2source::Conventions>,
     abi_model: MachineAbiModel,
-    /// What the convention says a call does to the registers, where it says.
-    call_effect: Option<SourceCallEffect>,
     /// What a call in this body may leave changed: the set construction defines after every call.
     call_clobbered_carriers: Box<[CanonicalStorageId]>,
-    /// Every register a call may change: each register of the file no wider
-    /// one contains, that the call effect neither preserves nor reserves.
-    /// What a callee's body is asked to prove it leaves alone.
-    call_universe: Box<[CanonicalStorageId]>,
     /// What each direct callee's own body proves it leaves alone, by entry.
     callee_preserved: crate::function::CalleePreservedCarriers,
     /// How many arguments each callee whose result is unproven reads at least.
@@ -453,8 +446,6 @@ pub struct SourceMachineContext {
     frame_saves: Vec<r2source::SourceFrameSave>,
     /// The premises the engine grants its derivations (`r2engine::premises`).
     accepted_premises: BTreeSet<r2source::Premise>,
-    /// The convention model the slots and the call effect view, where the capture holds one.
-    convention: Option<std::sync::Arc<r2source::ConventionModel>>,
     /// The function each captured code pointer table entry names, by the
     /// address of the entry. A slot a relocation fills holds no address the
     /// file states, so what it becomes is a fact about the program rather
@@ -470,6 +461,25 @@ pub struct SourceMachineContext {
     source_string_literals: BTreeMap<u64, String>,
     /// Bytes the program never writes, by the address a body loads from: what a load there reads.
     read_only: BTreeMap<u64, Box<[u8]>>,
+    /// The image's data objects whose type is a laid-out struct, with that graph (D348).
+    data_structs: Option<std::sync::Arc<DataStructs>>,
+}
+
+/// Data objects the image graph types as a struct of known size, by address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataStructs {
+    pub graph: r2source::SourceTypeGraph,
+    /// Start address to `(type id, size in bytes)`.
+    by_address: BTreeMap<u64, (u32, u64)>,
+}
+
+impl DataStructs {
+    /// The struct object holding `address`, as its start, type id and the offset into it. O(log n).
+    pub fn containing(&self, address: u64) -> Option<(u64, u32, u64)> {
+        let (&start, &(type_id, size)) = self.by_address.range(..=address).next_back()?;
+        let offset = address - start;
+        (offset < size).then_some((start, type_id, offset))
+    }
 }
 
 /// Unique register-space ranges the lifted body actually reads or writes.
@@ -490,38 +500,27 @@ fn observed_register_storages(blocks: &[R2ILBlock]) -> BTreeSet<RegisterStorage>
         .collect()
 }
 
-/// Every register a call may change: each register of the file that no wider one contains, less
-/// what the call effect preserves or reserves (`site_boundary::CallUniverse`). `O(r)`.
-fn call_universe(effect: &SourceCallEffect, machine: &Arch) -> Box<[CanonicalStorageId]> {
-    crate::site_boundary::CallUniverse::of(&|storage| effect.clobbers(storage), machine)
-        .registers()
-        .collect()
-}
-
-/// What a call in this body may leave changed: the clobber list, and every
-/// register it touches that the call neither preserves nor finds reserved to
-/// the system.
-///
-/// A reserved register is not a definition any call makes, so it is never
-/// here: the thread pointer a body read before a call is the one it reads
-/// after it.
+/// What a call in this body may leave changed: what the model names clobbered and every register
+/// the body touches that the call neither keeps nor finds reserved; under no model, every one.
 fn clobbered_by_a_call(
-    effect: &SourceCallEffect,
+    calls: Option<&r2source::ConventionModel>,
+    arch: Option<&Arch>,
     observed: &BTreeSet<RegisterStorage>,
 ) -> Box<[CanonicalStorageId]> {
-    let touched = observed
-        .iter()
+    let named = match arch {
+        Some(arch) => arch.call_clobbered(calls),
+        None => calls
+            .and_then(r2source::ConventionModel::clobbered)
+            .unwrap_or(&[]),
+    };
+    let touched = (observed.iter())
         .map(|storage| CanonicalStorageId {
             space: CanonicalStorageSpace::Register,
             offset: storage.offset,
             size: storage.size,
         })
-        .filter(|storage| effect.clobbers(*storage));
-    effect
-        .clobbered()
-        .iter()
-        .copied()
-        .chain(touched)
+        .filter(|storage| calls.is_none_or(|model| model.clobbers(*storage)));
+    (named.iter().copied().chain(touched))
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
@@ -535,7 +534,6 @@ impl SourceMachineContext {
             None,
             SourceMachineRoles::default(),
             None,
-            None,
             Vec::new(),
         )
     }
@@ -545,8 +543,7 @@ impl SourceMachineContext {
         arch: Option<&Arch>,
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
-        convention_slots: Option<SourceConventionSlots>,
-        call_effect: Option<SourceCallEffect>,
+        conventions: Option<r2source::Conventions>,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
     ) -> Self {
         Self::from_blocks_with_interfaces_and_tail_calls(
@@ -554,8 +551,7 @@ impl SourceMachineContext {
             arch,
             function_interface,
             machine_roles,
-            convention_slots,
-            call_effect,
+            conventions,
             call_site_interfaces,
             Vec::new(),
         )
@@ -566,8 +562,7 @@ impl SourceMachineContext {
         arch: Option<&Arch>,
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
-        convention_slots: Option<SourceConventionSlots>,
-        call_effect: Option<SourceCallEffect>,
+        conventions: Option<r2source::Conventions>,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
         tail_call_identities: Vec<SourceCallSiteIdentity>,
     ) -> Self {
@@ -576,8 +571,7 @@ impl SourceMachineContext {
             arch,
             function_interface,
             machine_roles,
-            convention_slots,
-            call_effect,
+            conventions,
             call_site_interfaces,
             tail_call_identities,
             &BTreeSet::new(),
@@ -594,14 +588,14 @@ impl SourceMachineContext {
         arch: Option<&Arch>,
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
-        convention_slots: Option<SourceConventionSlots>,
-        call_effect: Option<SourceCallEffect>,
+        conventions: Option<r2source::Conventions>,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
         tail_call_identities: Vec<SourceCallSiteIdentity>,
         terminal_blocks: &BTreeSet<u64>,
     ) -> Self {
         // One walk over the body names every register it touches, for the projections and the clobbers alike.
         let observed = observed_register_storages(blocks);
+        let calls = conventions.as_ref().map(|it| &*it.calls);
         let observed_projections = arch
             .filter(|machine| machine.geometry() == MachineRegisterGeometryState::Available)
             .map(|machine| {
@@ -807,20 +801,11 @@ impl SourceMachineContext {
             memory_model,
             function_interface,
             machine_roles,
-            convention_slots,
+            call_clobbered_carriers: clobbered_by_a_call(calls, arch, &observed),
+            conventions,
             abi_model,
-            call_clobbered_carriers: call_effect
-                .as_ref()
-                .map(|effect| clobbered_by_a_call(effect, &observed))
-                .unwrap_or_default(),
-            call_universe: call_effect
-                .as_ref()
-                .zip(arch)
-                .map(|(effect, arch)| call_universe(effect, arch))
-                .unwrap_or_default(),
             callee_preserved: BTreeMap::new(),
             callee_statements: BTreeMap::new(),
-            call_effect,
             observed_projections,
             raw_call_sites,
             tail_call_sites,
@@ -834,12 +819,12 @@ impl SourceMachineContext {
             unstated_imports: BTreeMap::new(),
             frame_saves: Vec::new(),
             accepted_premises: BTreeSet::new(),
-            convention: None,
             code_pointer_entries: BTreeMap::new(),
             code_pointer_tables: BTreeMap::new(),
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
             read_only: BTreeMap::new(),
+            data_structs: None,
         }
     }
 
@@ -877,28 +862,16 @@ impl SourceMachineContext {
         self.function_interface = Some(interface);
     }
 
-    /// Exact source-owned convention slots, including their typed ABI class.
-    pub const fn convention_slots(&self) -> Option<&SourceConventionSlots> {
-        self.convention_slots.as_ref()
-    }
-
     /// Borrow the machine carriers the source resolved from its register
     /// profile. These are available whether or not an ABI was recovered.
     pub const fn machine_roles(&self) -> &SourceMachineRoles {
         &self.machine_roles
     }
 
-    /// The location a call leaves its result in.
-    ///
-    /// The recovered convention states this when there was one. Failing that
-    /// the architecture states it, which is still the machine speaking rather
-    /// than a list of register spellings that knows the architectures somebody
-    /// thought of.
+    /// The integer result register of the function's convention; none without a model.
     pub fn result_slot(&self) -> Option<CanonicalStorageId> {
-        self.convention_slots
-            .as_ref()
-            .and_then(|slots| slots.result_slot())
-            .or_else(|| self.arch.as_ref().and_then(Arch::result_slot))
+        self.convention()
+            .and_then(r2source::ConventionModel::result)
     }
 
     /// The location this function returns a value in, and whether it returns
@@ -975,14 +948,9 @@ impl SourceMachineContext {
             .map(str::to_owned)
     }
 
-    /// The registers a call in this body may leave changed; empty without a call effect.
+    /// The registers a call in this body may leave changed; every one without a model.
     pub const fn call_clobbered_carriers(&self) -> &[CanonicalStorageId] {
         &self.call_clobbered_carriers
-    }
-
-    /// Every register a call may change; see the field.
-    pub(crate) const fn call_universe(&self) -> &[CanonicalStorageId] {
-        &self.call_universe
     }
 
     /// What the direct callee at `target` proves it leaves alone, where its
@@ -1007,14 +975,29 @@ impl SourceMachineContext {
         self.callee_statements.clone_from(statements);
     }
 
-    /// What the convention says a call does to the registers.
-    pub const fn call_effect(&self) -> Option<&SourceCallEffect> {
-        self.call_effect.as_ref()
+    /// What a call does to `storage` under the calls' model; clobbered under none.
+    pub fn call_effect_on(&self, storage: CanonicalStorageId) -> r2source::CallRegisterEffect {
+        match self.calls() {
+            Some(model) => model.effect_on(storage),
+            None => r2source::CallRegisterEffect::Clobbered,
+        }
     }
 
-    /// Whether a call leaves the frame carriers where they were, per the call effect.
+    pub fn call_preserves(&self, storage: CanonicalStorageId) -> bool {
+        self.call_effect_on(storage) == r2source::CallRegisterEffect::Preserved
+    }
+
+    pub fn call_reserves(&self, storage: CanonicalStorageId) -> bool {
+        self.call_effect_on(storage) == r2source::CallRegisterEffect::SystemReserved
+    }
+
+    pub fn call_clobbers(&self, storage: CanonicalStorageId) -> bool {
+        self.call_effect_on(storage) == r2source::CallRegisterEffect::Clobbered
+    }
+
+    /// Whether a call leaves the frame carriers where they were, per the calls' model.
     pub fn call_preserved_carriers(&self) -> Option<SourceCallPreservedCarriers> {
-        let effect = self.call_effect()?;
+        let effect = self.calls()?;
         let frame_pointer = self
             .function_interface
             .as_ref()
@@ -1168,15 +1151,19 @@ impl SourceMachineContext {
         self.accepted_premises = premises;
     }
 
-    pub(crate) fn set_convention(
-        &mut self,
-        convention: Option<std::sync::Arc<r2source::ConventionModel>>,
-    ) {
-        self.convention = convention;
+    /// The function's convention and its calls', where the capture holds them.
+    pub const fn conventions(&self) -> Option<&r2source::Conventions> {
+        self.conventions.as_ref()
     }
 
+    /// The function's own convention: where its arguments and result lie.
     pub fn convention(&self) -> Option<&r2source::ConventionModel> {
-        self.convention.as_deref()
+        self.conventions.as_ref().map(|it| &*it.own)
+    }
+
+    /// What a call this function makes runs under, where no site states its callee's.
+    pub fn calls(&self) -> Option<&r2source::ConventionModel> {
+        self.conventions.as_ref().map(|it| &*it.calls)
     }
 
     /// Who owns the stack byte at an entry-relative offset: the model's rule, else growing down.
@@ -1286,11 +1273,8 @@ impl SourceMachineContext {
             .and_then(|identity| self.call_site_interface(identity))
             .filter(|interface| interface.is_complete() && !interface.is_variadic());
         match interface {
-            Some(interface) => Some(crate::call_reads::CallReads::exact(
-                interface,
-                self.convention(),
-            )),
-            None => (self.convention()).map(crate::call_reads::CallReads::every_location),
+            Some(interface) => Some(crate::call_reads::CallReads::exact(interface, self.calls())),
+            None => (self.calls()).map(crate::call_reads::CallReads::every_location),
         }
     }
 
@@ -1304,6 +1288,47 @@ impl SourceMachineContext {
     /// Retain literal contents from the exact source snapshot before semantic
     /// preparation. Duplicate addresses with different contents are omitted;
     /// ambiguity is not literal evidence.
+    /// Bind the image's struct-typed data objects (D348). Two objects at one address bind neither.
+    pub(crate) fn bind_data_structs(&mut self, image: &r2source::OwnedFunctionImage) {
+        use r2source::SourceTypeKind;
+        let Some(graph) = image.data_types() else {
+            return;
+        };
+        let mut by_address = BTreeMap::new();
+        let mut doubled = std::collections::BTreeSet::new();
+        for object in image.data_symbols() {
+            let Some(node) =
+                (object.type_id()).and_then(|id| graph.types().get(usize::try_from(id).ok()?))
+            else {
+                continue;
+            };
+            let SourceTypeKind::Struct { .. } = node.kind() else {
+                continue;
+            };
+            let size = node.size_bits() / 8;
+            if size == 0 || !node.size_bits().is_multiple_of(8) {
+                continue;
+            }
+            if by_address
+                .insert(object.address(), (node.id(), size))
+                .is_some()
+            {
+                doubled.insert(object.address());
+            }
+        }
+        by_address.retain(|address, _| !doubled.contains(address));
+        if !by_address.is_empty() {
+            self.data_structs = Some(std::sync::Arc::new(DataStructs {
+                graph: graph.clone(),
+                by_address,
+            }));
+        }
+    }
+
+    pub fn data_structs(&self) -> Option<&DataStructs> {
+        self.data_structs.as_deref()
+    }
+
     /// Bind the read-only bytes the capture took at each address the body loads from.
     pub(crate) fn bind_read_only(&mut self, windows: &[(u64, Vec<u8>)]) {
         self.read_only = windows
@@ -1734,6 +1759,24 @@ mod tests {
         );
     }
 
+    /// The architecture's return registers name no result: under no model the result is
+    /// unproven, never carried (S34).
+    #[test]
+    fn no_model_names_no_result_carrier() {
+        let mut arch = ArchSpec::new("x");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("r0", 0, 8));
+        arch.return_registers = vec![RegisterDef::new("r0", 0, 8)];
+        let context = SourceMachineContext::from_blocks(&[], Some(&crate::Arch::from(arch)));
+        assert_eq!(context.result_slot(), None);
+        assert_eq!(context.return_value_carrier(), None);
+        assert!(
+            context
+                .call_clobbered_carriers()
+                .contains(&register_storage(0, 8))
+        );
+    }
+
     #[test]
     fn a_register_is_named_by_its_storage() {
         let mut arch = ArchSpec::new("AARCH64:LE:64:v8A");
@@ -1742,16 +1785,20 @@ mod tests {
         for (index, name) in ["x0", "x1", "x2"].into_iter().enumerate() {
             arch.add_register(RegisterDef::new(name, index as u64 * 8, 8));
         }
-        let slots = SourceConventionSlots::new(
-            r2source::ConventionId::Aapcs64,
-            [
+        let slots = r2source::convention::testing::model(r2source::ConventionId::Aapcs64)
+            .arguments(
+                r2source::convention::SlotClass::Integer,
+                [
+                    register_storage(0, 8),
+                    register_storage(8, 8),
+                    register_storage(16, 8),
+                ],
+            )
+            .result(
+                r2source::convention::SlotClass::Integer,
                 register_storage(0, 8),
-                register_storage(8, 8),
-                register_storage(16, 8),
-            ],
-            Some(register_storage(0, 8)),
-        )
-        .expect("register slots are well formed");
+            )
+            .conventions();
 
         let context = SourceMachineContext::from_blocks_with_interfaces(
             &[],
@@ -1759,7 +1806,6 @@ mod tests {
             None,
             SourceMachineRoles::default(),
             Some(slots),
-            None,
             Vec::new(),
         );
 
@@ -1985,7 +2031,6 @@ mod tests {
             Some(make()),
             SourceMachineRoles::default(),
             None,
-            None,
             Vec::new(),
         );
         assert!(!without_roles.abi_model().machine_carriers_are_coherent());
@@ -1999,7 +2044,6 @@ mod tests {
                     .expect("return-address role"),
             ),
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
         );
@@ -2015,7 +2059,6 @@ mod tests {
                     .expect("exact machine roles"),
             ),
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
         );
@@ -2037,7 +2080,6 @@ mod tests {
                 .expect("compatibility interface remains representable for refusal diagnostics"),
             ),
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
         );
@@ -2061,7 +2103,6 @@ mod tests {
             ),
             SourceMachineRoles::default(),
             None,
-            None,
             Vec::new(),
         );
         assert!(!narrow.abi_model().machine_carriers_are_coherent());
@@ -2081,7 +2122,6 @@ mod tests {
             ),
             SourceMachineRoles::default(),
             None,
-            None,
             Vec::new(),
         );
         assert!(!subregister_sp.abi_model().machine_carriers_are_coherent());
@@ -2098,7 +2138,6 @@ mod tests {
                     .expect("standalone binding cannot inspect ArchSpec parentage"),
             ),
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
         );
@@ -2136,7 +2175,6 @@ mod tests {
             Some(exact.clone()),
             SourceMachineRoles::default(),
             None,
-            None,
             Vec::new(),
         );
         assert!(all_abi_questions_coherent(coherent.abi_model()));
@@ -2147,7 +2185,6 @@ mod tests {
             Some(&crate::Arch::from(arch.clone())),
             Some(make()),
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
         );
@@ -2169,7 +2206,6 @@ mod tests {
             Some(exact.clone()),
             SourceMachineRoles::default(),
             None,
-            None,
             Vec::new(),
         );
         assert!(!context.abi_model().machine_carriers_are_coherent());
@@ -2184,7 +2220,6 @@ mod tests {
             Some(exact.clone()),
             SourceMachineRoles::default(),
             None,
-            None,
             Vec::new(),
         );
         assert!(!context.abi_model().machine_carriers_are_coherent());
@@ -2197,7 +2232,6 @@ mod tests {
             Some(exact.clone()),
             SourceMachineRoles::default(),
             None,
-            None,
             Vec::new(),
         );
         assert!(!context.abi_model().machine_carriers_are_coherent());
@@ -2209,7 +2243,6 @@ mod tests {
             Some(&crate::Arch::from(wrong_ram_width.clone())),
             Some(exact),
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
         );
@@ -2263,7 +2296,6 @@ mod tests {
             Some(make_explicit(frame_pointer)),
             SourceMachineRoles::default(),
             None,
-            None,
             Vec::new(),
         );
         assert!(all_abi_questions_coherent(coherent.abi_model()));
@@ -2281,7 +2313,6 @@ mod tests {
                 return_address,
             )),
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
         );
@@ -2306,7 +2337,6 @@ mod tests {
             Some(&crate::Arch::from(arch.clone())),
             Some(absent),
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
         );
@@ -2352,7 +2382,6 @@ mod tests {
             Some(narrow_interface),
             SourceMachineRoles::default(),
             None,
-            None,
             Vec::new(),
         );
         assert!(!narrow.abi_model().machine_carriers_are_coherent());
@@ -2374,7 +2403,6 @@ mod tests {
                 return_address,
             )),
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
         );
@@ -2411,7 +2439,6 @@ mod tests {
             Some(&crate::Arch::from(arch.clone())),
             Some(overlapping),
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
         );
@@ -2890,7 +2917,6 @@ mod tests {
             None,
             SourceMachineRoles::default(),
             None,
-            None,
             Vec::new(),
             vec![identity],
         );
@@ -2909,7 +2935,6 @@ mod tests {
             None,
             None,
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
             vec![wrong_target],
@@ -2933,7 +2958,6 @@ mod tests {
             None,
             Some(interface),
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
         );
@@ -2964,7 +2988,6 @@ mod tests {
             Some(&crate::Arch::from(arch.clone())),
             Some(interface),
             SourceMachineRoles::default(),
-            None,
             None,
             Vec::new(),
         );

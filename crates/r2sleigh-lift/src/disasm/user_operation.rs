@@ -34,6 +34,9 @@ pub(crate) enum ModelledUserOperation {
     A64Tbl,
     /// A trap: control leaves for an exception handler and does not come back.
     Trap,
+    /// x86 `int n` through the vector `swi` reads: a trap where `n` is the breakpoint or debug
+    /// vector (D352), else the call through the vector Sleigh writes after it.
+    Interrupt,
     /// ARM `bx` switching instruction set, which the p-code has already done.
     SetIsaMode,
     /// ARM and AArch64 `clrex`: the exclusive monitor a linked load set is cleared.
@@ -367,7 +370,7 @@ const WORD_SHUFFLES: [(&str, ShuffledQuadword, EncodingForm); 11] = [
 
 /// The operations outside the packed-extension family, by the exact name the
 /// specification declares.
-const NAMED: [(&str, ModelledUserOperation); 17] = [
+const NAMED: [(&str, ModelledUserOperation); 18] = [
     ("NEON_ext", ModelledUserOperation::NeonExt),
     ("NEON_ushl", ModelledUserOperation::NeonUshl),
     ("NEON_rev64", ModelledUserOperation::NeonRev64),
@@ -387,6 +390,7 @@ const NAMED: [(&str, ModelledUserOperation); 17] = [
     ("NEON_uaddlv", ModelledUserOperation::NeonAddLongAcross),
     ("a64_TBL", ModelledUserOperation::A64Tbl),
     ("SoftwareBreakpoint", ModelledUserOperation::Trap),
+    ("swi", ModelledUserOperation::Interrupt),
     ("UndefinedInstructionException", ModelledUserOperation::Trap),
     // x86 `ud0`, `ud1` and `ud2`.
     ("invalidInstructionException", ModelledUserOperation::Trap),

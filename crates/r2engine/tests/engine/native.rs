@@ -269,7 +269,7 @@ impl r2engine::body::Program for Halting {
         self.fixture.is_entry(vaddr)
     }
 
-    fn returns(&self, callee: u64) -> bool {
+    fn returns(&self, callee: u64, _foreign: bool) -> bool {
         callee != self.halts
     }
 }
@@ -1624,6 +1624,130 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
     );
 }
 
+/// A switch in an arm of a switch (gnulib `quotearg_buffer_restyled`): the inner dispatch is first
+/// reached through the outer's arm, so only a second round reads its table (D285).
+const NESTED_SWITCH: &[u8] = &[
+    0x83, 0xff, 0x01, // 1000 cmp edi, 1
+    0x77, 0x29, // 1003 ja 0x102e
+    0x89, 0xff, // 1005 mov edi, edi
+    0xff, 0x24, 0xfd, 0x40, 0x10, 0x00, 0x00, // 1007 jmp [rdi*8 + 0x1040]
+    0x83, 0xfe, 0x01, // 100e cmp esi, 1
+    0x77, 0x1b, // 1011 ja 0x102e
+    0x89, 0xf6, // 1013 mov esi, esi
+    0xff, 0x24, 0xf5, 0x50, 0x10, 0x00, 0x00, // 1015 jmp [rsi*8 + 0x1050]
+    0xb8, 0x0a, 0x00, 0x00, 0x00, 0xc3, // 101c inner case 0
+    0xb8, 0x14, 0x00, 0x00, 0x00, 0xc3, // 1022 inner case 1
+    0xb8, 0x1e, 0x00, 0x00, 0x00, 0xc3, // 1028 outer case 1
+    0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3, // 102e default
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1034 padding
+    0x0e, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1040 -> 0x100e
+    0x28, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1048 -> 0x1028
+    0x1c, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1050 -> 0x101c
+    0x22, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1058 -> 0x1022
+];
+
+#[test]
+fn a_dispatch_in_an_arm_is_read_in_the_next_round() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: NESTED_SWITCH.to_vec(),
+        name: "nested",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(response.output.function().is_some(), "{output}");
+    assert_eq!(output.matches("switch (").count(), 2, "{output}");
+    assert!(!output.contains("r2dec gap"), "{output}");
+    for returns in ["10", "20", "30"] {
+        let carried = format!("return r2sleigh_carrier_u32({returns});");
+        assert!(output.contains(&carried), "{output}");
+    }
+}
+
+/// `NESTED_SWITCH` where the outer's second arm is a third switch whose arm 0 enters the inner
+/// dispatch past its guard: only the third round adds that edge, so the inner bound is no bound.
+const BYPASSED_SWITCH: &[u8] = &[
+    0x83, 0xff, 0x01, // 1000 cmp edi, 1
+    0x77, 0x4b, // 1003 ja 0x1050
+    0x89, 0xff, // 1005 mov edi, edi
+    0xff, 0x24, 0xfd, 0x60, 0x10, 0x00, 0x00, // 1007 jmp [rdi*8 + 0x1060]
+    0x83, 0xfe, 0x01, // 100e cmp esi, 1
+    0x77, 0x3d, // 1011 ja 0x1050
+    0x89, 0xf6, // 1013 mov esi, esi
+    0xff, 0x24, 0xf5, 0x70, 0x10, 0x00, 0x00, // 1015 jmp [rsi*8 + 0x1070]
+    0xb8, 0x0a, 0x00, 0x00, 0x00, 0xc3, // 101c inner case 0
+    0xb8, 0x14, 0x00, 0x00, 0x00, 0xc3, // 1022 inner case 1
+    0x83, 0xfa, 0x01, // 1028 cmp edx, 1
+    0x77, 0x23, // 102b ja 0x1050
+    0x89, 0xd2, // 102d mov edx, edx
+    0xff, 0x24, 0xd5, 0x80, 0x10, 0x00, 0x00, // 102f jmp [rdx*8 + 0x1080]
+    0xb8, 0x1e, 0x00, 0x00, 0x00, 0xc3, // 1036 third case 1
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 103c padding
+    0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3, // 1050 default
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 1056 padding
+    0x0e, 0x10, 0, 0, 0, 0, 0, 0, // 1060 -> 0x100e
+    0x28, 0x10, 0, 0, 0, 0, 0, 0, // 1068 -> 0x1028
+    0x1c, 0x10, 0, 0, 0, 0, 0, 0, // 1070 -> 0x101c
+    0x22, 0x10, 0, 0, 0, 0, 0, 0, // 1078 -> 0x1022
+    0x13, 0x10, 0, 0, 0, 0, 0, 0, // 1080 -> 0x1013, past the inner guard
+    0x36, 0x10, 0, 0, 0, 0, 0, 0, // 1088 -> 0x1036
+];
+
+/// [`NESTED_SWITCH`] whose inner case 1 is `mov edi, 5; jmp 0x1005`: past the outer guard, so the
+/// first round's bound is no bound once the second round's arms are walked.
+const REENTERED_SWITCH: &[u8] = &[
+    0x83, 0xff, 0x01, // 1000 cmp edi, 1
+    0x77, 0x2a, // 1003 ja 0x102f
+    0x89, 0xff, // 1005 mov edi, edi
+    0xff, 0x24, 0xfd, 0x40, 0x10, 0x00, 0x00, // 1007 jmp [rdi*8 + 0x1040]
+    0x83, 0xfe, 0x01, // 100e cmp esi, 1
+    0x77, 0x1c, // 1011 ja 0x102f
+    0x89, 0xf6, // 1013 mov esi, esi
+    0xff, 0x24, 0xf5, 0x50, 0x10, 0x00, 0x00, // 1015 jmp [rsi*8 + 0x1050]
+    0xb8, 0x0a, 0x00, 0x00, 0x00, 0xc3, // 101c inner case 0
+    0xbf, 0x05, 0x00, 0x00, 0x00, 0xeb, 0xdc, // 1022 inner case 1: mov edi, 5; jmp 0x1005
+    0xb8, 0x1e, 0x00, 0x00, 0x00, 0xc3, // 1029 outer case 1
+    0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3, // 102f default
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 1035 padding
+    0x0e, 0x10, 0, 0, 0, 0, 0, 0, // 1040 -> 0x100e
+    0x29, 0x10, 0, 0, 0, 0, 0, 0, // 1048 -> 0x1029
+    0x1c, 0x10, 0, 0, 0, 0, 0, 0, // 1050 -> 0x101c
+    0x22, 0x10, 0, 0, 0, 0, 0, 0, // 1058 -> 0x1022
+];
+
+#[test]
+fn a_later_round_reentering_the_first_rounds_guarded_dispatch_drops_the_rounds() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: REENTERED_SWITCH.to_vec(),
+        name: "reentered",
+    };
+    let output = match decompile(&target, &program, BASE) {
+        Ok(response) => response.output.text().to_string(),
+        Err(refused) => format!("{refused:?}"),
+    };
+    assert!(!output.contains("r2sleigh_carrier_u32(10)"), "{output}");
+}
+
+#[test]
+fn a_later_round_entering_an_earlier_rounds_guarded_arm_drops_the_rounds() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: BYPASSED_SWITCH.to_vec(),
+        name: "bypassed",
+    };
+    let output = match decompile(&target, &program, BASE) {
+        Ok(response) => response.output.text().to_string(),
+        Err(refused) => format!("{refused:?}"),
+    };
+    // The inner table's two entries are no bound on `esi` once the third switch's arm 0 runs.
+    assert!(!output.contains("r2sleigh_carrier_u32(10)"), "{output}");
+    assert!(!output.contains("r2sleigh_carrier_u32(20)"), "{output}");
+}
+
 /// clang -O2's `switch (op) { case 1: .. case 5: }` (sw3.c `base1`): `dec edi` biases the selector and
 /// zero-extends it in the guard's block, and only the dispatch reads that widening.
 const BIASED_TABLE_SWITCH: &[u8] = &[
@@ -1984,18 +2108,27 @@ impl Program for WithSink {
 /// dispatch; a tail call from an unproven result is a gap naming `sink` (r2dec `tail_call`).
 #[test]
 fn a_widened_index_a_call_passes_is_not_part_of_the_dispatch() {
-    let x86 = Machine::new("x86-64", "x86-64", 64);
-    let arm = Machine::new("aarch64", "aarch64", 64);
-    for (machine, bytes, called, gaps) in [
-        (&x86, BIASED_INDEX_TAIL_CALLED, "call to sink", true),
-        (&x86, BIASED_INDEX_CALLED, "sink(", false),
-        (&arm, A64_BIASED_INDEX_TAIL_CALLED, "call to sink", true),
+    for (aarch64, bytes, called, gaps) in [
+        (false, BIASED_INDEX_TAIL_CALLED, "call to sink", true),
+        (false, BIASED_INDEX_CALLED, "sink(", false),
+        (true, A64_BIASED_INDEX_TAIL_CALLED, "call to sink", true),
     ] {
-        let target = machine.target();
-        let program = WithSink { bytes, sink: SINK };
-        let response = decompile(&target, &program, BASE).expect("decompile");
-        assert!(response.output.function().is_some(), "{}", response.output);
-        let output = response.output.text();
+        // Through the program, so what `sink` keeps is its register effect's (D320).
+        let size = bytes.len() as u64;
+        let functions = [
+            ("pick", BASE, SINK - BASE),
+            ("sink", SINK, BASE + size - SINK),
+        ];
+        let literal = common::Literal::of_code(bytes, &functions);
+        let literal = if aarch64 {
+            literal.in_aarch64()
+        } else {
+            literal
+        };
+        let mut open = r2engine::program::OpenProgram::of(literal);
+        let rendered = open.rendered(BASE).expect("it renders");
+        let output = rendered.response.output.into_text();
+        let output = output.as_str();
         assert!(output.contains("switch ("), "{output}");
         assert!(output.contains(called), "{output}");
         assert!(gaps || !output.contains("residual"), "{output}");
@@ -2018,9 +2151,10 @@ const FRAME_ADDRESS_MERGE: &[u8] = &[
     0x48, 0x89, 0x3d, 0x00, 0x10, 0x00, 0x00, 0xc3, // 1040 sink: mov [rip + 0x1000], rdi; ret
 ];
 
-/// A refusal names each obligation it leaves undecided by its operation and its seed (D174, D253).
+/// D254: the merge is one frame object's address on both arms, so each call spells it `&object`
+/// and the merge owes nothing more.
 #[test]
-fn a_refusal_names_each_undecided_obligation_by_its_operation_and_seed() {
+fn a_merge_of_one_frame_address_read_by_two_calls_renders() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = WithSink {
@@ -2029,14 +2163,84 @@ fn a_refusal_names_each_undecided_obligation_by_its_operation_and_seed() {
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
+    assert!(response.output.function().is_some(), "{output}");
+    assert_eq!(
+        output.matches("sink((uint64_t)(frame + ").count(),
+        2,
+        "{output}"
+    );
+    let ledger = response.obligation_ledger.expect("ledger");
+    let framed = (ledger.entries()).filter(|(_, outcome)| {
+        *outcome == r2dec::ledger::Outcome::Elided(r2dec::ledger::ElisionReason::FrameAddress)
+    });
+    assert_eq!(framed.count(), 1, "{output}");
+}
+
+/// `FRAME_ADDRESS_MERGE` with one arm at `rsp + 0`: the merge holds two objects' addresses.
+const TWO_FRAME_ADDRESSES: &[u8] = &[
+    0x53, 0x48, 0x83, 0xec, 0x10, // 1000 push rbx; sub rsp, 0x10
+    0x85, 0xff, 0x74, 0x07, // 1005 test edi, edi; je 0x1010
+    0x48, 0x8d, 0x5c, 0x24, 0x08, 0xeb, 0x05, // 1009 lea rbx, [rsp + 8]; jmp 0x1015
+    0x48, 0x8d, 0x5c, 0x24, 0x00, // 1010 lea rbx, [rsp + 0]
+    0x48, 0x89, 0xdf, 0xe8, 0x23, 0x00, 0x00, 0x00, // 1015 mov rdi, rbx; call sink
+    0x48, 0x89, 0xdf, 0xe8, 0x1b, 0x00, 0x00, 0x00, // 101d mov rdi, rbx; call sink
+    0x48, 0x83, 0xc4, 0x10, 0x5b, 0xc3, // 1025 add rsp, 0x10; pop rbx; ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 102b padding
+    0x48, 0x89, 0x3d, 0x00, 0x10, 0x00, 0x00, 0xc3, // 1040 sink: mov [rip + 0x1000], rdi; ret
+];
+
+/// A merge of two objects' addresses is no frame address: it is a variable holding either (D254).
+#[test]
+fn a_merge_of_two_frame_addresses_is_a_variable() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = WithSink {
+        bytes: TWO_FRAME_ADDRESSES,
+        sink: 0x1040,
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(response.output.function().is_some(), "{output}");
+    assert!(output.contains("? (uint64_t)(frame + 16U) : "), "{output}");
+    let ledger = response.obligation_ledger.expect("ledger");
+    let framed = (ledger.entries()).filter(|(_, outcome)| {
+        *outcome == r2dec::ledger::Outcome::Elided(r2dec::ledger::ElisionReason::FrameAddress)
+    });
+    assert_eq!(framed.count(), 0, "{output}");
+}
+
+/// A shrink-wrapped AArch64 return (ls-toybox `0x58a30`): `cbz` reaches the `ret` before the
+/// prologue, so no exit stack pointer is proven (D356) and X1's merge keeps the unproven-exit taint.
+const SHRINK_WRAPPED_RETURN: &[u8] = &[
+    0xc0, 0x00, 0x00, 0x34, // 1000 cbz w0, 0x1018
+    0xfd, 0x7b, 0xbf, 0xa9, // 1004 stp x29, x30, [sp, #-16]!
+    0x41, 0x00, 0x00, 0x34, // 1008 cbz w1, 0x1010
+    0xa1, 0x00, 0x80, 0xd2, // 100c mov x1, #5
+    0xfd, 0x7b, 0xc1, 0xa8, // 1010 ldp x29, x30, [sp], #16
+    0x1f, 0x20, 0x03, 0xd5, // 1014 nop
+    0xc0, 0x03, 0x5f, 0xd6, // 1018 ret
+];
+
+/// A refusal names each obligation it leaves undecided by its operation and its seed (D174, D253).
+#[test]
+fn a_refusal_names_each_undecided_obligation_by_its_operation_and_seed() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: SHRINK_WRAPPED_RETURN.to_vec(),
+        name: "pick",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
     assert!(output.contains("r2sleigh refused"), "{output}");
     let named = (response.undecided.iter()).map(ToString::to_string);
     let named = named.collect::<Vec<_>>();
     assert!(
         named.iter().any(|named| {
-            named.starts_with("live-value-producer at 0x1015:phi:Register:0x18:8 (RBX_")
+            named.starts_with("volatile-or-unknown at 0x1010:phi:Register:0x4008:8 (X1_")
                 && named.contains(" = PHI(")
-                && named.ends_with("seeded by a live reader")
+                && named.contains("seeded by the unproven exit 0x1018:op:")
         }),
         "{named:#?}\n{output}"
     );
@@ -5005,9 +5209,8 @@ fn every_register_a_default_prototype_names_is_one_of_its_machine() {
             })
             .collect::<Vec<_>>();
         assert!(!named.is_empty(), "{sleigh}");
-        let effect = (machine.conventions[machine.default].convention)
-            .call_effect()
-            .expect("the default prototype states a call effect");
+        let effect = &*machine.conventions[machine.default].convention;
+        assert_eq!(effect.effect_refused(), None, "{sleigh}");
         for register in named {
             let placed = machine
                 .embedded
@@ -5023,7 +5226,8 @@ fn every_register_a_default_prototype_names_is_one_of_its_machine() {
                 .collect::<Vec<_>>();
             assert_eq!(placed.len(), 1, "{sleigh}: {register}");
             assert!(
-                effect.clobbered().contains(&placed[0]) || effect.preserved().contains(&placed[0]),
+                effect.clobbered().is_some_and(|it| it.contains(&placed[0]))
+                    || effect.preserved_registers().contains(&placed[0]),
                 "{sleigh}: {register} is in neither list"
             );
         }
@@ -7146,6 +7350,94 @@ fn a_store_into_a_slot_whose_address_escapes_is_rendered() {
     assert!(!output.contains("r2sleigh_residual"), "{output}");
 }
 
+/// `uint64_t *rows[4]` of four frame addresses, indexed by callees with an unbounded `w1` (aarch64
+/// clang-O1 `shape_pointer_to_pointer`, D368): the run from `rows` to the `x29` save is one object.
+#[test]
+fn an_escaped_run_a_callee_indexes_without_a_bound_is_one_object_to_the_save() {
+    const ROWS: &[u8] = &[
+        0x08, 0x58, 0x61, 0xf8, // 0x1000 load: ldr x8, [x0, w1, uxtw 3]
+        0x00, 0x01, 0x40, 0xf9, // 0x1004 ldr x0, [x8]
+        0xc0, 0x03, 0x5f, 0xd6, // 0x1008 ret
+        0x08, 0x58, 0x61, 0xf8, // 0x100c store: ldr x8, [x0, w1, uxtw 3]
+        0x02, 0x01, 0x00, 0xf9, // 0x1010 str x2, [x8]
+        0xc0, 0x03, 0x5f, 0xd6, // 0x1014 ret
+        0xff, 0xc3, 0x01, 0xd1, // 0x1018 rows: sub sp, sp, 0x70
+        0xfd, 0x7b, 0x04, 0xa9, // 0x101c stp x29, x30, [sp, 0x40]
+        0xf5, 0x2b, 0x00, 0xf9, // 0x1020 str x21, [sp, 0x50]
+        0xf4, 0x4f, 0x06, 0xa9, // 0x1024 stp x20, x19, [sp, 0x60]
+        0xfd, 0x03, 0x01, 0x91, // 0x1028 add x29, sp, 0x40
+        0x28, 0x00, 0x00, 0xca, // 0x102c eor x8, x1, x0
+        0x29, 0x00, 0x00, 0x8b, // 0x1030 add x9, x1, x0
+        0x75, 0x48, 0x88, 0x52, // 0x1034 mov w21, 0x4243
+        0xa8, 0x07, 0x3f, 0xa9, // 0x1038 stp x8, x1, [x29, -0x10]
+        0xa8, 0x63, 0x00, 0x91, // 0x103c add x8, x29, 0x18
+        0xf4, 0x03, 0x1f, 0x2a, // 0x1040 mov w20, wzr
+        0xa9, 0x83, 0x1e, 0xf8, // 0x1044 stur x9, [x29, -0x18]
+        0xa9, 0x23, 0x00, 0xd1, // 0x1048 sub x9, x29, 8
+        0xf3, 0x03, 0x1f, 0xaa, // 0x104c mov x19, xzr
+        0xe8, 0xa7, 0x00, 0xa9, // 0x1050 stp x8, x9, [sp, 8]
+        0xa8, 0x43, 0x00, 0xd1, // 0x1054 sub x8, x29, 0x10
+        0xa9, 0x63, 0x00, 0xd1, // 0x1058 sub x9, x29, 0x18
+        0xf5, 0x01, 0xa0, 0x72, // 0x105c movk w21, 0xf, lsl 16
+        0xa0, 0x0f, 0x00, 0xf9, // 0x1060 str x0, [x29, 0x18]
+        0xe8, 0xa7, 0x01, 0xa9, // 0x1064 stp x8, x9, [sp, 0x18]
+        0xe0, 0x23, 0x00, 0x91, // 0x1068 add x0, sp, 8
+        0xe1, 0x03, 0x14, 0x2a, // 0x106c mov w1, w20
+        0xe4, 0xff, 0xff, 0x97, // 0x1070 bl 0x1000
+        0x73, 0x02, 0x15, 0x9b, // 0x1074 madd x19, x19, x21, x0
+        0x94, 0x06, 0x00, 0x11, // 0x1078 add w20, w20, 1
+        0x9f, 0x12, 0x00, 0x71, // 0x107c cmp w20, 4
+        0x41, 0xff, 0xff, 0x54, // 0x1080 b.ne 0x1068
+        0xe0, 0x23, 0x00, 0x91, // 0x1084 add x0, sp, 8
+        0x21, 0x00, 0x80, 0x52, // 0x1088 mov w1, 1
+        0xe2, 0x03, 0x13, 0xaa, // 0x108c mov x2, x19
+        0xdf, 0xff, 0xff, 0x97, // 0x1090 bl 0x100c
+        0xa8, 0x0f, 0x40, 0xf9, // 0x1094 ldr x8, [x29, 0x18]
+        0xe0, 0x23, 0x00, 0x91, // 0x1098 add x0, sp, 8
+        0x61, 0x00, 0x80, 0x52, // 0x109c mov w1, 3
+        0x02, 0x01, 0x13, 0xca, // 0x10a0 eor x2, x8, x19
+        0xda, 0xff, 0xff, 0x97, // 0x10a4 bl 0x100c
+        0xf5, 0x03, 0x1f, 0xaa, // 0x10a8 mov x21, xzr
+        0xf4, 0x03, 0x1f, 0xaa, // 0x10ac mov x20, xzr
+        0xe0, 0x23, 0x00, 0x91, // 0x10b0 add x0, sp, 8
+        0xe1, 0x03, 0x14, 0x2a, // 0x10b4 mov w1, w20
+        0xd2, 0xff, 0xff, 0x97, // 0x10b8 bl 0x1000
+        0x08, 0x20, 0xd5, 0x9a, // 0x10bc lsl x8, x0, x21
+        0x94, 0x06, 0x00, 0x91, // 0x10c0 add x20, x20, 1
+        0xb5, 0x0e, 0x00, 0x91, // 0x10c4 add x21, x21, 3
+        0x9f, 0x12, 0x00, 0xf1, // 0x10c8 cmp x20, 4
+        0x13, 0x01, 0x13, 0xca, // 0x10cc eor x19, x8, x19
+        0x01, 0xff, 0xff, 0x54, // 0x10d0 b.ne 0x10b0
+        0xe0, 0x03, 0x13, 0xaa, // 0x10d4 mov x0, x19
+        0xf4, 0x4f, 0x46, 0xa9, // 0x10d8 ldp x20, x19, [sp, 0x60]
+        0xf5, 0x2b, 0x40, 0xf9, // 0x10dc ldr x21, [sp, 0x50]
+        0xfd, 0x7b, 0x44, 0xa9, // 0x10e0 ldp x29, x30, [sp, 0x40]
+        0xff, 0xc3, 0x01, 0x91, // 0x10e4 add sp, sp, 0x70
+        0xc0, 0x03, 0x5f, 0xd6, // 0x10e8 ret
+    ];
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: ROWS.to_vec(),
+        name: "rows",
+    };
+    let prepared = r2engine::native::prepared(&target, &program, BASE + 0x18).expect("prepared");
+    let slots = &prepared.artifact().certificates().stack_slots;
+    // `rows` at entry -104 runs to the `x29` save at -48: the three scalars at -72 to -56 are in it.
+    assert!(
+        (slots.values()).any(|slot| slot.offset == -104 && slot.size == Some(56)),
+        "no 56-byte object at entry -104"
+    );
+    let response = decompile(&target, &program, BASE + 0x18).expect("decompile");
+    let output = response.output.text();
+    // Four rows, three scalars and `zero` between the saves.
+    let stores = (output.lines())
+        .filter(|line| line.contains("r2sleigh_store_u64("))
+        .count();
+    assert_eq!(stores, 8, "{output}");
+    assert!(!output.contains("StoreNotSpelled"), "{output}");
+}
+
 /// Two byte stores from bases one apart, at an index no range bounds, read through the second
 /// base: staged clang-O2 `shape_stack_buffer` elided the first as dead and read unwritten bytes.
 #[test]
@@ -7365,17 +7657,23 @@ fn microsoft_x64_states_four_positional_register_pairs() {
     };
     let prepared =
         r2engine::native::prepared(&machine.under("ms"), &program, BASE).expect("prepared");
-    let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
+    let slots = (prepared.artifact().machine_context().convention()).expect("slots");
     let integers = ["RCX", "RDX", "R8", "R9"].map(place);
     let floats = ["XMM0_Qa", "XMM1_Qa", "XMM2_Qa", "XMM3_Qa"].map(place);
-    assert_eq!(slots.argument_slots(), integers);
-    assert_eq!(slots.float_argument_slots(), floats);
-    assert!(slots.shared_positions());
+    assert_eq!(
+        slots.arguments(r2source::convention::SlotClass::Integer),
+        integers
+    );
+    assert_eq!(
+        slots.arguments(r2source::convention::SlotClass::Float),
+        floats
+    );
+    assert!(slots.shares_positions());
     // System V counts its two classes apart.
     let prepared =
         r2engine::native::prepared(&machine.under("amd64"), &program, BASE).expect("prepared");
-    let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
-    assert!(!slots.shared_positions());
+    let slots = (prepared.artifact().machine_context().convention()).expect("slots");
+    assert!(!slots.shares_positions());
 }
 
 /// Apple's arm64 sends every variadic argument to the stack because its compiler specification
@@ -7389,8 +7687,8 @@ fn an_arm64_variadic_tail_is_on_the_stack_where_the_compiler_specification_says(
     let on_stack = |platform| {
         let machine = Machine::on("aarch64", "aarch64", 64, platform);
         let prepared = r2engine::native::prepared(&machine.target(), &ret, BASE).expect("prepared");
-        let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
-        slots.variadic_tail_on_stack()
+        let slots = (prepared.artifact().machine_context().convention()).expect("slots");
+        slots.forms.variadic_on_stack
     };
     assert!(on_stack(Platform::Darwin));
     assert!(!on_stack(Platform::Linux));
@@ -7468,59 +7766,20 @@ const CALL_TWICE: &[u8] = &[
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// `CALL_TWICE`, its callee named `arg0`: the caller's parameter holds that name, so no call is C.
-struct CalleeNamedLikeAParameter;
-
-impl r2engine::body::Program for CalleeNamedLikeAParameter {
-    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
-        let slice = CALL_TWICE.get(offset..)?;
-        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
-    }
-
-    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
-        code_region(CALL_TWICE.len(), vaddr)
-    }
-
-    fn is_entry(&self, vaddr: u64) -> bool {
-        matches!(vaddr, BASE | 0x1011)
-    }
-}
-
-impl Program for CalleeNamedLikeAParameter {
-    fn holds_static_data(&self, _vaddr: u64) -> bool {
-        false
-    }
-
-    fn extents(&self) -> &r2types::ProgramExtents {
-        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
-        NONE
-    }
-
-    fn name_at(&self, vaddr: u64) -> Option<String> {
-        match vaddr {
-            BASE => Some("caller".to_owned()),
-            0x1011 => Some("arg0".to_owned()),
-            _ => None,
-        }
-    }
-
-    fn import_at(&self, _vaddr: u64) -> Option<String> {
-        None
-    }
-}
-
 /// A call that spelled its argument and then failed is a gap, so the `lea` its argument absorbed
 /// reaches the text only through that gap: the ledger may not call any of its obligations rendered.
 #[test]
 fn an_absorbed_producer_of_an_unwritten_call_is_not_rendered() {
-    let machine = Machine::new("x86-64", "x86-64", 64);
-    let target = machine.target();
-    let program = CalleeNamedLikeAParameter;
+    // Through the program, so what the callee keeps is its register effect's (D320).
+    let functions = [("caller", BASE, 0x11), ("arg0", 0x1011, 3)];
+    let program =
+        r2engine::program::OpenProgram::of(common::Literal::of_code(CALL_TWICE, &functions));
+    let target = Program::target_at(&program, BASE).expect("a machine");
     let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text().to_owned();
+    // The callee reads `edi` alone, so `arg0` is its 32-bit lane and one projection precedes the call.
     assert!(
-        text.contains("r2dec gap: CallNotRendered at 0x1000:14 "),
+        text.contains("r2dec gap: CallNotRendered at 0x1000:15 "),
         "{text}"
     );
     let prepared = r2engine::native::prepared(&target, &program, BASE).expect("prepared");
@@ -7686,8 +7945,8 @@ fn a_loop_phi_reaching_only_a_residual_has_that_site() {
     assert!(text.contains("r2sleigh_residual_"), "{text}");
 }
 
-/// gcc -O2 `shape_byte_indexed_buffer`: the edge into the vector loop carries `rax = r9`, a frame
-/// address the loop walks in the unknown object, so the frame escapes as one array (S27).
+/// gcc -O2 `shape_byte_indexed_buffer`: the loop walks frame address `r9` in the unknown object
+/// (S27), so one run escapes from `rsp + 8`, the lowest place whose address leaves (D290).
 const EDGE_COPY_GAP: &[u8] = &[
     0xf3, 0x0f, 0x1e, 0xfa, 0x48, 0x83, 0xec, 0x68, 0x49, 0x89, 0xf0, 0x64, 0x48, 0x8b, 0x04, 0x25,
     0x28, 0x00, 0x00, 0x00, 0x48, 0x89, 0x44, 0x24, 0x58, 0x31, 0xc0, 0x4c, 0x8d, 0x4c, 0x24, 0x10,
@@ -7713,7 +7972,7 @@ fn a_frame_address_a_vector_loop_walks_is_carried_on_its_edge() {
     // The protector's failure is `call 0x230`, which the program states never returns.
     let text = sited_staged_halting("x86-64", "shape_byte_indexed_buffer", EDGE_COPY_GAP, 0x230);
     assert!(!text.contains("ValuesNotRendered"), "{text}");
-    assert!(text.contains("(frame + 0U) + (uint64_t)16U);"), "{text}");
+    assert!(text.contains("(frame + 8U) + (uint64_t)8U);"), "{text}");
 }
 
 /// A loop around `call r12` passing `&frame[8]` (never stored): the stack pointer the loop carries
@@ -7891,9 +8150,7 @@ fn go_machine_on(arch: &str) -> Machine {
     )
     .expect("ABIInternal's model");
     assert!(
-        (model.call_effect().ok())
-            .and_then(|effect| effect.stack_bound().copied())
-            .is_some(),
+        model.stack_bound().is_some(),
         "the convention states g.stackguard0"
     );
     machine.conventions.insert(

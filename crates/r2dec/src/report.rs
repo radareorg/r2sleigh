@@ -96,6 +96,8 @@ pub struct RenderedCall {
     pub ignored: usize,
     /// Whether the declaration the call is checked against takes a variadic tail.
     pub variadic: bool,
+    /// The call instruction, in the source graph.
+    pub site: Option<r2ssa::InstId>,
 }
 
 /// Every call to a function the rendering spells, in the order the tree holds them; a machine
@@ -104,7 +106,9 @@ pub(crate) fn calls(func: &CFunction) -> Vec<RenderedCall> {
     let mut found = Vec::new();
     func.visit_body_exprs(&mut |expr| {
         let CExpr::Call {
-            func: callee, args, ..
+            func: callee,
+            args,
+            site,
         } = expr
         else {
             return;
@@ -117,6 +121,7 @@ pub(crate) fn calls(func: &CFunction) -> Vec<RenderedCall> {
                 arguments: args.len(),
                 ignored: args.iter().filter(|arg| is_ignored_slot(arg)).count(),
                 variadic: declared.is_some_and(|declaration| declaration.variadic),
+                site: *site,
             };
         match callee.unobserved() {
             CExpr::External { name, kind } => {

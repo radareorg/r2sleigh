@@ -15,6 +15,9 @@ use crate::types::{
 
 /// Read one spelling into the graph.
 pub(crate) fn read(spelling: &str, graph: &mut TypeGraph, library: CLibrary) -> TypeId {
+    if let Some((returns, parameters)) = code_pointer(spelling) {
+        return read_code_pointer(spelling, (returns, parameters), graph, library);
+    }
     let Some(tokens) = tokens(spelling) else {
         return graph.refused(format!("`{spelling}` is not a C type spelling"));
     };
@@ -42,6 +45,41 @@ pub(crate) fn read(spelling: &str, graph: &mut TypeGraph, library: CLibrary) -> 
         }
     }
     ty
+}
+
+/// `R (*)(P, ...)` split into `R` and the parameter list; nothing for any other spelling.
+fn code_pointer(spelling: &str) -> Option<(&str, &str)> {
+    let (returns, rest) = spelling.split_once("(*)")?;
+    let parameters = rest.trim().strip_prefix('(')?.strip_suffix(')')?;
+    Some((returns.trim(), parameters.trim()))
+}
+
+/// A pointer to code stating its return and parameters (C17 6.7.6.3): `void (*)(void *)`, as the
+/// cited rows spell a callback slot (S30). A parameter list holding parentheses is refused.
+fn read_code_pointer(
+    spelling: &str,
+    (returns, parameters): (&str, &str),
+    graph: &mut TypeGraph,
+    library: CLibrary,
+) -> TypeId {
+    if returns.contains('(') || parameters.contains('(') || parameters.contains("...") {
+        return graph.refused(format!("`{spelling}`: a nested or variadic code pointer"));
+    }
+    let returns = read(returns, graph, library);
+    let parameters = match parameters {
+        "void" => Vec::new(),
+        listed => (listed.split(','))
+            .map(|parameter| read(parameter.trim(), graph, library))
+            .collect(),
+    };
+    let code = graph.add(Type::Code(Signature {
+        returns,
+        parameters,
+        variadic: false,
+        prototyped: true,
+        convention: crate::StatedConvention::Normal,
+    }));
+    graph.add(Type::Pointer { target: code })
 }
 
 /// The words and stars of a spelling, or nothing where it holds anything else.
@@ -153,11 +191,12 @@ fn unqualified(words: &[&str], graph: &mut TypeGraph, library: CLibrary) -> Resu
     match words {
         [] => Err("no type is named".to_owned()),
         ["void"] => Ok(TypeId::VOID),
-        // The table's word for a parameter that is a function: `atexit`'s
-        // handler, `__libc_start_main`'s `main`. It states no signature.
+        // radare2's word for a parameter that is a function (`__libc_start_main`'s `main`): it
+        // states no signature, so its return is refused, never `void` (S30).
         ["func"] => {
+            let returns = graph.refused("`func` states no return");
             let code = graph.add(Type::Code(Signature {
-                returns: TypeId::VOID,
+                returns,
                 parameters: Vec::new(),
                 variadic: false,
                 prototyped: false,

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::{CTypeLike, ExternalAggregateKind, ExternalTypeDb};
+use r2source::{SourceTypeGraph, SourceTypeKind};
+
+use crate::CTypeLike;
 
 /// The owner that supplied a program data object's type.
 ///
@@ -27,7 +29,7 @@ pub struct DataObjectTypeFact {
 pub enum DataObjectTypeRefusal {
     /// The source named the object but stated no type at its address.
     MissingSourceType,
-    /// The source's type is not one the current source type context declares.
+    /// The image graph's type has no layout the renderer can place (D345).
     UnplaceableSourceType(CTypeLike),
     /// Two source observations for one structural address disagreed. Neither
     /// is allowed to win by observation order.
@@ -42,22 +44,27 @@ pub struct ProgramDataObjectTypeFacts {
 }
 
 impl ProgramDataObjectTypeFacts {
-    /// One function snapshot's source observations, each kept where its type
-    /// database can place it.
+    /// Each data symbol's type id in the image graph, kept where that graph lays it out (D345).
+    /// O(objects x type depth).
     pub fn from_source(
-        observations: impl IntoIterator<Item = (u64, Option<CTypeLike>)>,
-        type_db: &ExternalTypeDb,
+        graph: Option<&SourceTypeGraph>,
+        observations: impl IntoIterator<Item = (u64, Option<u32>)>,
     ) -> Self {
         let mut facts = Self::default();
-        for (address, ty) in observations {
-            match ty {
-                None => facts.observe_refused(address, DataObjectTypeRefusal::MissingSourceType),
-                Some(ty) if data_object_type_is_placeable(&ty, type_db, false) => {
+        for (address, type_id) in observations {
+            let typed = graph.zip(type_id);
+            let ty = typed.and_then(|(graph, id)| crate::source_type_like(graph, id));
+            match (typed, ty) {
+                (None, _) => {
+                    facts.observe_refused(address, DataObjectTypeRefusal::MissingSourceType)
+                }
+                (Some((graph, id)), Some(ty)) if placeable(graph, id, false) => {
                     facts.observe_accepted(address, ty);
                 }
-                Some(ty) => {
-                    facts.observe_refused(address, DataObjectTypeRefusal::UnplaceableSourceType(ty))
-                }
+                (Some(_), ty) => facts.observe_refused(
+                    address,
+                    DataObjectTypeRefusal::UnplaceableSourceType(ty.unwrap_or(CTypeLike::Unknown)),
+                ),
             }
         }
         facts
@@ -142,49 +149,95 @@ impl ProgramDataObjectTypeFacts {
     }
 }
 
-fn data_object_type_is_placeable(
-    ty: &CTypeLike,
-    type_db: &ExternalTypeDb,
-    behind_pointer: bool,
-) -> bool {
-    match ty {
-        CTypeLike::Const(inner) => data_object_type_is_placeable(inner, type_db, behind_pointer),
-        CTypeLike::Void => behind_pointer,
-        CTypeLike::Bool | CTypeLike::Int { .. } | CTypeLike::Float(_) | CTypeLike::BitVector(_) => {
-            true
-        }
-        CTypeLike::Pointer(inner) => data_object_type_is_placeable(inner, type_db, true),
-        CTypeLike::Array(inner, _) => data_object_type_is_placeable(inner, type_db, false),
-        CTypeLike::Struct(name) => {
-            type_db.resolve_aggregate_kind(name) == Some(ExternalAggregateKind::Struct)
-        }
-        CTypeLike::Union(name) => {
-            type_db.resolve_aggregate_kind(name) == Some(ExternalAggregateKind::Union)
-        }
-        CTypeLike::Enum(name) => {
-            type_db.resolve_aggregate_kind(name) == Some(ExternalAggregateKind::Enum)
-        }
-        // A name is placeable where what it stands for is.
-        CTypeLike::Typedef { ty, .. } => {
-            !matches!(ty.as_ref(), CTypeLike::Unknown)
-                && data_object_type_is_placeable(ty, type_db, behind_pointer)
-        }
-        CTypeLike::Function { .. } | CTypeLike::UnprototypedFunction(_) | CTypeLike::Unknown => {
-            false
+/// Whether the graph lays a type out; an opaque tag, code, or a chain longer than the type count
+/// (a cycle) refuses. O(chain).
+fn placeable(graph: &SourceTypeGraph, type_id: u32, behind_pointer: bool) -> bool {
+    let (mut type_id, mut behind_pointer) = (type_id, behind_pointer);
+    for _ in 0..=graph.types().len() {
+        let Some(node) = usize::try_from(type_id)
+            .ok()
+            .and_then(|index| graph.types().get(index))
+        else {
+            return false;
+        };
+        match node.kind() {
+            SourceTypeKind::Void => return behind_pointer,
+            SourceTypeKind::SignedInteger
+            | SourceTypeKind::UnsignedInteger
+            | SourceTypeKind::Char { .. }
+            | SourceTypeKind::Float => return true,
+            SourceTypeKind::Pointer { target_type_id, .. } => {
+                (type_id, behind_pointer) = (target_type_id, true);
+            }
+            SourceTypeKind::Array {
+                element_type_id, ..
+            } => (type_id, behind_pointer) = (element_type_id, false),
+            SourceTypeKind::Struct { aggregate_id } => {
+                return usize::try_from(aggregate_id)
+                    .ok()
+                    .and_then(|index| graph.aggregates().get(index))
+                    .is_some_and(|aggregate| aggregate.size_bits() > 0);
+            }
+            // No reader defines a union's tag for a global, so a union places nothing.
+            SourceTypeKind::Union { .. }
+            | SourceTypeKind::Code { .. }
+            | SourceTypeKind::Opaque { .. } => {
+                return false;
+            }
         }
     }
+    false
 }
 
 #[cfg(test)]
 mod tests {
+    use r2source::{SourceAggregateLayout, SourceAggregateMember, SourceType};
+
     use super::*;
 
+    /// 0 `int`, 1 `unsigned`, 2 `struct cfg { int a; }`, 3 `struct cfg *`, 4 an opaque typedef.
+    fn graph() -> SourceTypeGraph {
+        SourceTypeGraph::from_parts(r2source::SourceTypeGraphParts {
+            types: vec![
+                SourceType::new(0, SourceTypeKind::SignedInteger, 32, 32),
+                SourceType::new(1, SourceTypeKind::UnsignedInteger, 32, 32),
+                SourceType::new(2, SourceTypeKind::Struct { aggregate_id: 0 }, 32, 32),
+                SourceType::new(
+                    3,
+                    SourceTypeKind::Pointer {
+                        target_type_id: 2,
+                        const_target: false,
+                    },
+                    64,
+                    64,
+                ),
+                SourceType::new(4, SourceTypeKind::Opaque { tag_id: 0 }, 0, 0),
+            ],
+            aggregates: vec![SourceAggregateLayout::new(
+                0,
+                2,
+                32,
+                32,
+                "cfg",
+                [SourceAggregateMember::new(0, 0, 0, 32, "a")],
+            )],
+            opaque_tags: vec![r2source::SourceOpaqueTag::new(
+                0,
+                r2source::SourceTagKeyword::Typedef,
+                "looks_specific_t",
+            )],
+            ..r2source::SourceTypeGraphParts::default()
+        })
+        .expect("valid graph")
+    }
+
+    fn facts(id: Option<u32>) -> ProgramDataObjectTypeFacts {
+        ProgramDataObjectTypeFacts::from_source(Some(&graph()), [(0x7000, id)])
+    }
+
     #[test]
-    fn a_builtin_radare_type_is_accepted_and_marked() {
-        let facts = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, Some(CTypeLike::i32()))],
-            &ExternalTypeDb::default(),
-        );
+    fn a_builtin_type_is_accepted_and_marked() {
+        let facts = facts(Some(0));
         assert_eq!(
             facts.get(0x7000).map(|fact| &fact.ty),
             Some(&CTypeLike::i32())
@@ -195,12 +248,19 @@ mod tests {
         );
     }
 
+    /// D345 gate 3: a global struct places from the image graph alone, its pointer too.
     #[test]
-    fn an_undeclared_typedef_spelling_is_refused() {
-        let facts = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, Some(CTypeLike::typedef("looks_specific_t")))],
-            &ExternalTypeDb::default(),
+    fn a_global_struct_places_from_the_image_graph() {
+        assert_eq!(
+            facts(Some(2)).get(0x7000).map(|fact| &fact.ty),
+            Some(&CTypeLike::Struct("cfg".to_string()))
         );
+        assert!(facts(Some(3)).get(0x7000).is_some());
+    }
+
+    #[test]
+    fn an_undeclared_typedef_is_refused() {
+        let facts = facts(Some(4));
         assert!(facts.get(0x7000).is_none());
         assert_eq!(
             facts.refused().get(&0x7000),
@@ -211,11 +271,8 @@ mod tests {
     }
 
     #[test]
-    fn no_radare_type_is_a_refusal_not_a_default_type() {
-        let facts = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, None::<CTypeLike>)],
-            &ExternalTypeDb::default(),
-        );
+    fn no_source_type_is_a_refusal_not_a_default_type() {
+        let facts = facts(None);
         assert!(facts.get(0x7000).is_none());
         assert_eq!(
             facts.refused().get(&0x7000),
@@ -225,15 +282,8 @@ mod tests {
 
     #[test]
     fn accepted_program_fact_survives_a_later_missing_observation() {
-        let mut accepted = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, Some(CTypeLike::i32()))],
-            &ExternalTypeDb::default(),
-        );
-        let missing = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, None::<CTypeLike>)],
-            &ExternalTypeDb::default(),
-        );
-        accepted.absorb(&missing);
+        let mut accepted = facts(Some(0));
+        accepted.absorb(&facts(None));
         assert_eq!(
             accepted.get(0x7000).map(|fact| &fact.ty),
             Some(&CTypeLike::i32())
@@ -242,20 +292,7 @@ mod tests {
 
     #[test]
     fn conflicting_program_types_refuse_independent_of_order() {
-        let signed = ProgramDataObjectTypeFacts::from_source(
-            [(0x7000, Some(CTypeLike::i32()))],
-            &ExternalTypeDb::default(),
-        );
-        let unsigned = ProgramDataObjectTypeFacts::from_source(
-            [(
-                0x7000,
-                Some(CTypeLike::Int {
-                    bits: 32,
-                    signedness: crate::Signedness::Unsigned,
-                }),
-            )],
-            &ExternalTypeDb::default(),
-        );
+        let (signed, unsigned) = (facts(Some(0)), facts(Some(1)));
         for (mut first, second) in [(signed.clone(), unsigned.clone()), (unsigned, signed)] {
             first.absorb(&second);
             assert!(first.get(0x7000).is_none());

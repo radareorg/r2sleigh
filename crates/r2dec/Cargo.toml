@@ -20,6 +20,7 @@ default = []
 placement_mutants = []
 
 [dev-dependencies]
+r2source = { path = "../r2source", features = ["testing"] }
 proptest = "1.12"
 serde_json.workspace = true
 

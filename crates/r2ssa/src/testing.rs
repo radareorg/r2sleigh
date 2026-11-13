@@ -1,51 +1,54 @@
-//! What a call does, which production reads off the program's convention.
+//! A convention for tests, built from registers through `ConventionModel::new`.
 
 use r2il::R2ILBlock;
 
 use crate::{
-    CanonicalStorageId, DecompileInputs, SourceCallEffect, SourceCallSiteInterface,
+    CanonicalStorageId, Conventions, DecompileInputs, SourceCallSiteInterface,
     SourceFunctionInterface, SsaArtifact,
 };
 
-/// A call effect naming these registers clobbered and these preserved, whose call reads nothing.
-pub(crate) fn call_effect(
+/// A convention whose calls clobber `clobbered`, keep `preserved` and read nothing.
+pub(crate) fn conventions(
     clobbered: impl IntoIterator<Item = CanonicalStorageId>,
     preserved: impl IntoIterator<Item = CanonicalStorageId>,
-) -> Option<SourceCallEffect> {
-    call_effect_reading(clobbered, preserved, [])
+) -> Option<Conventions> {
+    conventions_reading(clobbered, preserved, [])
 }
 
-/// A call effect whose call reads these registers.
-pub(crate) fn call_effect_reading(
+/// A convention whose calls read `reads` as its integer arguments.
+pub(crate) fn conventions_reading(
     clobbered: impl IntoIterator<Item = CanonicalStorageId>,
     preserved: impl IntoIterator<Item = CanonicalStorageId>,
     reads: impl IntoIterator<Item = CanonicalStorageId>,
-) -> Option<SourceCallEffect> {
-    let reads = crate::SourceBoundaryReads::new(reads, []).expect("register reads");
-    Some(SourceCallEffect::new(clobbered, preserved, reads).expect("a call effect"))
+) -> Option<Conventions> {
+    let model = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+        .arguments(r2source::convention::SlotClass::Integer, reads)
+        .killed(clobbered)
+        .preserved(preserved);
+    Some(model.conventions())
 }
 
-/// Decompile-prepared SSA with these interfaces, under this call effect.
+/// Decompile-prepared SSA with these interfaces, under these conventions.
 pub(crate) fn prepared_under(
     blocks: &[R2ILBlock],
     arch: &crate::Arch,
     function_interface: Option<SourceFunctionInterface>,
     call_site_interfaces: Vec<SourceCallSiteInterface>,
-    call_effect: Option<SourceCallEffect>,
+    conventions: Option<Conventions>,
 ) -> Option<SsaArtifact> {
     SsaArtifact::for_decompile_with(
         blocks,
         DecompileInputs {
             arch: Some(arch),
             function_interface,
-            call_effect,
+            conventions,
             call_site_interfaces,
             ..Default::default()
         },
     )
 }
 
-/// Decompile-prepared SSA with these interfaces, under a call effect preserving these registers.
+/// Decompile-prepared SSA with these interfaces, under a convention preserving these registers.
 pub(crate) fn prepared(
     blocks: &[R2ILBlock],
     arch: &crate::Arch,
@@ -58,6 +61,6 @@ pub(crate) fn prepared(
         arch,
         function_interface,
         call_site_interfaces,
-        call_effect([], preserved),
+        conventions([], preserved),
     )
 }

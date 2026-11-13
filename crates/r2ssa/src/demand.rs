@@ -118,7 +118,12 @@ pub(crate) fn exits_are_named_beside(
     live_out: &FunctionLiveOut,
     tails: &BTreeSet<u64>,
 ) -> bool {
-    if live_out.unresolved_blocks().next().is_some() {
+    if let Some(block) = live_out.unresolved_blocks().next() {
+        r2il::refusal_evidence!(
+            "exits-unnamed",
+            "{:#x}: return {block:#x} is unresolved",
+            function.entry
+        );
         return false;
     }
     let cfg = function.cfg();
@@ -129,14 +134,26 @@ pub(crate) fn exits_are_named_beside(
         if tails.contains(&block.addr) {
             return true;
         }
-        match &block.terminator {
+        let named = match &block.terminator {
             BlockTerminator::Return => true,
             BlockTerminator::ConditionalExit { .. } => false,
+            // A call ending on a "never" no statement makes may come back (D255).
             BlockTerminator::Call { .. } | BlockTerminator::IndirectCall { .. } => {
-                successors.is_empty() || !leaves
+                let unproven = &function.assumed_exits().unproven;
+                (successors.is_empty() && unproven.binary_search(&block.addr).is_err()) || !leaves
             }
             _ => !leaves,
+        };
+        if !named {
+            r2il::refusal_evidence!(
+                "exits-unnamed",
+                "{:#x}: block {:#x} leaves by {:?} to {successors:x?}",
+                function.entry,
+                block.addr,
+                block.terminator
+            );
         }
+        named
     })
 }
 
@@ -340,6 +357,39 @@ mod tests {
         assert!(released(R2ILOp::Return {
             target: reg(0x288, 8),
         }));
+    }
+
+    /// A call that ends the body names its exit only where no walk alone derived its "never" (D255).
+    #[test]
+    fn a_call_ending_on_an_unproven_never_names_no_exit() {
+        let block = R2ILBlock {
+            addr: 0x1000,
+            size: 5,
+            ops: vec![R2ILOp::Call {
+                target: Varnode::new(SpaceId::Ram, 0x2000, 8),
+            }],
+            ..R2ILBlock::default()
+        };
+        let mut declared = crate::cfg::DeclaredSuccessors::entered_at(0x1000);
+        declared.insert(0x1000, []);
+        let cfg = crate::cfg::CFG::from_blocks_with_declared_successors(&[block], Some(&declared));
+        let control = crate::control::UncheckedSsaWorkControl;
+        let built = SSAFunction::from_blocks_raw_with_policy_and_control(
+            cfg.expect("cfg"),
+            Some(&x86_64_arch()),
+            None,
+            &[],
+            &control,
+        );
+        let mut function = built.expect("ssa");
+        let graph = SsaGraph::from_function(&function);
+        let live_out = FunctionLiveOut::compute(&function, &graph, &[]);
+        assert!(exits_are_named(&function, &live_out));
+        function.record_assumed_exits(&crate::AssumedExits {
+            unproven: vec![0x1000],
+            ..crate::AssumedExits::default()
+        });
+        assert!(!exits_are_named(&function, &live_out));
     }
 
     /// The target of a jump out of the body may take RDX as an argument, and

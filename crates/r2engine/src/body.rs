@@ -79,15 +79,15 @@ pub trait Program {
     /// knows its own functions can.
     fn is_entry(&self, vaddr: u64) -> bool;
 
-    /// Whether control comes back from a call to this address, which one body's walk cannot establish; unproven, it does.
-    fn returns(&self, _callee: u64) -> bool {
+    /// Whether control comes back from a call to this address, entered in the walk's instruction set
+    /// unless `foreign`, which one body's walk cannot establish; unproven, it does.
+    fn returns(&self, _callee: u64, _foreign: bool) -> bool {
         true
     }
 
-    /// What `returns` saying a call to `callee` never comes back takes for granted; nothing where
-    /// the program proves it.
-    fn exit_premises(&self, _callee: u64) -> BTreeSet<r2source::Premise> {
-        BTreeSet::new()
+    /// Why `returns` says a call to `callee` never comes back; `None` where nothing says so.
+    fn exit(&self, _callee: u64, _foreign: bool) -> Option<crate::discovery::Never> {
+        None
     }
 
     /// Whether control comes back from a call through the pointer held at
@@ -95,6 +95,12 @@ pub trait Program {
     /// an import the loader binds there, declared as never returning.
     /// Unproven, it does.
     fn returns_through(&self, _slot: u64) -> bool {
+        true
+    }
+
+    /// Whether control comes back from interrupt `vector` on `arch`: false only where the kernel's
+    /// row states it never does (D229).
+    fn interrupt_returns(&self, _arch: &str, _vector: u64) -> bool {
         true
     }
 
@@ -327,6 +333,8 @@ struct Instruction {
     terminator: BlockTerminator,
     /// The decode window and context, where the walk keeps its decodes.
     decode: Option<Box<(Vec<u8>, Continuation)>>,
+    /// An `int n` whose vector the kernel's row states never comes back (D229).
+    halts: bool,
 }
 
 impl Instruction {
@@ -421,6 +429,49 @@ pub struct Reached {
     pub falls_into: Vec<u64>,
     /// Whether control reached a return, a predicated exit or a stop the walk cannot see past.
     pub leaves: bool,
+}
+
+/// A lifting walk continued through each round's dispatch tables: a round lifts only what its arms
+/// newly reach, and its body is the one [`lift_body`] returns told every table followed (D367).
+#[derive(Debug, Clone)]
+pub struct Lifting(Walk);
+
+impl Lifting {
+    /// Lift the body at `entry`, past every call the program says returns, no table told.
+    pub fn start(
+        entry: u64,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) -> Result<Self, BodyError> {
+        Walk::start(entry, disasm, program, BTreeMap::new(), Keep::Lifts).map(Self)
+    }
+
+    /// The instructions at which the walk stopped for want of a dispatch's arms.
+    pub fn dispatches(&self) -> impl Iterator<Item = u64> + '_ {
+        let stops = self.0.unresolved.iter();
+        let stops = stops.filter(|stop| stop.reason == UnresolvedReason::IndirectBranch);
+        stops.map(|stop| stop.addr)
+    }
+
+    /// Continue through the arms of dispatches, lifting only what is not yet decoded.
+    pub fn dispatch(
+        &mut self,
+        arms: &BTreeMap<u64, Vec<u64>>,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) {
+        self.0.follow(arms, disasm, program);
+    }
+
+    /// The body walked so far. O(instructions), no decode.
+    pub fn body(&self) -> Body {
+        self.0.body()
+    }
+
+    /// The body walked, the walk ended.
+    pub fn into_body(self) -> Body {
+        self.0.into_body().0
+    }
 }
 
 /// A walk that keeps where control goes and not what it lifted, continued past a call once its callee is known to return.
@@ -534,6 +585,24 @@ impl Trace {
     }
 }
 
+/// The vector of an x86 `int n`, the constant Sleigh's `swi` operation reads.
+fn interrupt_vector(ops: &[r2il::R2ILOp], arch: &r2il::ArchSpec) -> Option<u64> {
+    ops.iter().find_map(|op| match op {
+        r2il::R2ILOp::CallOther { userop, inputs, .. }
+            if arch
+                .user_ops
+                .get(*userop as usize)
+                .is_some_and(|name| name == "swi") =>
+        {
+            let [vector] = inputs.as_slice() else {
+                return None;
+            };
+            (vector.space == r2il::SpaceId::Const).then_some(vector.offset)
+        }
+        _ => None,
+    })
+}
+
 /// Whether an instruction's p-code enters the supervisor: a user operation the
 /// language declares as one (`ArchSpec::supervisor_calls`).
 fn enters_supervisor(ops: &[r2il::R2ILOp], arch: &r2il::ArchSpec) -> bool {
@@ -593,7 +662,7 @@ struct Walk {
     /// Calls not known to return, by callee: each call instruction and the address after it.
     gated: BTreeMap<u64, Vec<(u64, u64)>>,
     /// What each gated callee's "never returns" takes for granted, where it is a model's word.
-    assumed: BTreeMap<u64, BTreeSet<r2source::Premise>>,
+    assumed: BTreeMap<u64, crate::discovery::Never>,
     /// The instructions that enter the supervisor, as the language's own
     /// user-operation table says.
     supervisor: BTreeSet<u64>,
@@ -674,8 +743,11 @@ impl Walk {
         disasm: &Disassembler,
         program: &dyn Program,
     ) {
+        let arms = arms.iter().filter(|(_, targets)| !targets.is_empty());
+        // Every arm is told first, so a dispatch first reached through an arm is followed too.
+        (self.dispatched).extend(arms.clone().map(|(addr, targets)| (*addr, targets.clone())));
         let mut pending = Vec::new();
-        for (&addr, targets) in arms.iter().filter(|(_, targets)| !targets.is_empty()) {
+        for (&addr, targets) in arms {
             let stopped = |stop: &Unresolved| {
                 (stop.addr, stop.reason) == (addr, UnresolvedReason::IndirectBranch)
             };
@@ -683,7 +755,6 @@ impl Walk {
                 continue;
             }
             self.retract(stopped);
-            self.dispatched.insert(addr, targets.clone());
             for target in targets.iter().collect::<BTreeSet<_>>() {
                 self.arms.insert(*target);
                 self.transfer(*target, &mut pending, program);
@@ -826,11 +897,15 @@ impl Walk {
                 .or_insert(target.foreign);
         }
         let decode = self.decodes.then(|| Box::new((fetch, one.continuation)));
+        let arch = disasm.arch_spec();
+        let halts = interrupt_vector(&lifted.ops, arch)
+            .is_some_and(|vector| !program.interrupt_returns(&arch.name, vector));
         Some(Instruction {
             lifted,
             bytes,
             terminator,
             decode,
+            halts,
         })
     }
 
@@ -982,13 +1057,17 @@ impl Walk {
                 }
                 // A predicated call reaches the next instruction when its predicate fails, whatever the callee does.
                 let predicated = r2il::predicated_call(&instruction.lifted.ops, next);
-                match (predicated || program.returns(target), fallthrough) {
+                let foreign = self.target_contexts.get(&target).copied().unwrap_or(false);
+                match (predicated || program.returns(target, foreign), fallthrough) {
                     (true, _) => self.continues(fallthrough, &mut successors, program),
                     // The bytes after a call not known to return may be the next function's.
                     (false, Some(after)) => {
-                        let premises = program.exit_premises(target);
-                        if !premises.is_empty() {
-                            self.assumed.insert(target, premises);
+                        // A "never" no statement makes is a bound, so its exit stays unnamed (D255).
+                        if let Some(never) = program.exit(target, foreign)
+                            && (never.proof, never.premises.is_empty())
+                                != (crate::discovery::NeverProof::Declared, true)
+                        {
+                            self.assumed.insert(target, never);
                         }
                         self.gate(target, addr, after);
                     }
@@ -998,6 +1077,9 @@ impl Walk {
             // A call through a register is opaque, so it is assumed to come
             // back -- unless it calls through a slot whose pointer the
             // program states, and what it states there never returns.
+            BlockTerminator::IndirectCall { .. } if instruction.halts => {
+                self.halting.insert(addr);
+            }
             BlockTerminator::IndirectCall { fallthrough } => {
                 let ops = &instruction.lifted.ops;
                 let at = ops
@@ -1010,7 +1092,12 @@ impl Walk {
                 {
                     self.slot_calls.insert(addr, slot);
                 }
-                if through.is_none_or(|slot| program.returns_through(slot)) {
+                let halts = self.halts_through(&instruction, &handles_before, program);
+                if let Some(from) = halts {
+                    // A call that terminates the current process (D229), as S17's tail jump.
+                    self.halting.insert(addr);
+                    self.proven.extend(from.map(|from| (from, addr)));
+                } else if through.is_none_or(|slot| program.returns_through(slot)) {
                     self.continues(fallthrough, &mut successors, program)
                 } else {
                     self.halting.insert(addr);
@@ -1101,9 +1188,9 @@ impl Walk {
         program: &dyn Program,
     ) -> Option<Option<u64>> {
         let ops = &instruction.lifted.ops;
-        let at = ops
-            .iter()
-            .rposition(|op| matches!(op, r2il::R2ILOp::BranchInd { .. }))?;
+        // An indirect branch or call: r2il's transfer names no direct target.
+        let transfer = |op: &r2il::R2ILOp| op.transfer().is_some_and(|transfer| !transfer.direct);
+        let at = ops.iter().rposition(transfer)?;
         let slot = r2ssa::loaded_target_slot(&instruction.lifted, at)?.offset;
         crate::stated::sealed_import(program, slot)?;
         if !program.returns_through(slot) {
@@ -1148,7 +1235,19 @@ impl Walk {
     }
 
     /// Gather the decoded instructions into blocks, each ending where control leaves, a leader begins, a hole opens or a fallthrough is closed.
-    fn into_body(self) -> (Body, Vec<Decoded>) {
+    fn into_body(mut self) -> (Body, Vec<Decoded>) {
+        let lifted = self.lifted.take().unwrap_or_default();
+        self.assemble(lifted.into_iter())
+    }
+
+    /// The body walked so far, each lift cloned; the walk goes on. O(instructions), no decode.
+    fn body(&self) -> Body {
+        let lifted = self.lifted.iter().flatten();
+        self.assemble(lifted.map(|(addr, instruction)| (*addr, instruction.clone())))
+            .0
+    }
+
+    fn assemble(&self, lifted: impl Iterator<Item = (u64, Instruction)>) -> (Body, Vec<Decoded>) {
         let closed = (self.gated.values().flatten())
             .map(|(call, _)| *call)
             .chain(self.halting.iter().copied())
@@ -1164,7 +1263,7 @@ impl Walk {
             tail_calls: &self.tail_calls,
             slot_calls: &self.slot_calls,
         };
-        for (addr, mut instruction) in self.lifted.unwrap_or_default() {
+        for (addr, mut instruction) in lifted {
             if let Some(decode) = instruction.decode.take() {
                 let (window, continuation) = *decode;
                 let lift = instruction.lifted.clone();
@@ -1192,20 +1291,35 @@ impl Walk {
         }
 
         // A call still closed ends its block; one a model closed takes the model's premises.
+        // A call to a "never" only a walk derived ends a block that names no exit (D255).
         let mut exits = r2ssa::AssumedExits::default();
-        for (callee, premises) in &self.assumed {
-            let calls = self.gated.get(callee).map_or(0, Vec::len);
-            if calls > 0 {
-                exits.calls += calls;
-                exits.premises.extend(premises.iter().copied());
+        for (callee, never) in &self.assumed {
+            let calls = self
+                .gated
+                .get(callee)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            if !calls.is_empty() {
+                exits.premises.extend(never.premises.iter().copied());
+            }
+            if never.proof == crate::discovery::NeverProof::NoReturnReached {
+                let held = |(call, _): &(u64, u64)| {
+                    let after = blocks.partition_point(|block| block.lifted.addr <= *call);
+                    Some(blocks.get(after.checked_sub(1)?)?.lifted.addr)
+                };
+                exits.unproven.extend(calls.iter().filter_map(held));
+            } else {
+                exits.calls += calls.len();
             }
         }
+        exits.unproven.sort_unstable();
+        exits.unproven.dedup();
         let body = Body {
             entry: self.entry,
             blocks,
-            calls: self.calls.into_iter().collect(),
-            tail_calls: self.tail_calls.into_iter().collect(),
-            unresolved: self.unresolved,
+            calls: self.calls.iter().copied().collect(),
+            tail_calls: self.tail_calls.iter().copied().collect(),
+            unresolved: self.unresolved.clone(),
             exits,
         };
         (body, decodes)
@@ -1419,6 +1533,7 @@ mod transfer_tests {
             lifted,
             bytes: Vec::new(),
             decode: None,
+            halts: false,
             terminator: BlockTerminator::ConditionalBranch {
                 true_target: 0x2000,
                 false_target: 0x1006,

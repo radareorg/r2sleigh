@@ -28,7 +28,7 @@ pub use library::{
     CLibrary, Dll, FlagBits, FlagTest, FormatKind, Handle, Kernel, LibraryId, LibraryRow,
     LibraryRows, PrototypeId, RowResult, Tail,
 };
-pub use loader::{LoaderCall, loader_call};
+pub use loader::{LoaderCall, ResultRead, loader_call};
 pub use mangled::Passing;
 pub use platform::{
     EntryStack, GuardRow, LinkedGuard, PlatformRegister, RegisterDuty, RegisterSaveArea,

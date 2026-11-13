@@ -154,8 +154,8 @@ def arity(args, binary, chosen):
 
     A caller and its callee are two halves of one link: a call handing on more
     arguments than the definition takes invents them, fewer drops them. Both are
-    wrong C whatever the proof line says. A pointer call is counted, not judged:
-    nothing names what it reaches.
+    wrong C whatever the proof line says. A pointer call is graded against the
+    arity its member contract declares (D272), and only counted where none does.
     """
     tally = {
         "calls graded": 0,
@@ -184,13 +184,16 @@ def arity(args, binary, chosen):
         if not rendering:
             continue
         for call in rendering.get("calls", []):
-            if call["kind"] == "pointer":
+            if call["kind"] == "pointer" and call.get("declared") is None:
                 tally["pointer calls"] += 1
                 continue
             if call["kind"] == "import" or call["variadic"]:
                 continue
-            target = address if call["kind"] == "self" else call["addr"]
-            takes = defined_arity(definitions.get(target))
+            if call["kind"] == "pointer":
+                takes = call["declared"]
+            else:
+                target = address if call["kind"] == "self" else call["addr"]
+                takes = defined_arity(definitions.get(target))
             if takes is None:
                 tally["unjudged"] += 1
                 continue

@@ -25,6 +25,7 @@ riscv = ["r2sleigh-lift/riscv"]
 placement_mutants = ["r2dec/placement_mutants"]
 
 [dev-dependencies]
+r2source = { path = "../r2source", features = ["testing"] }
 proptest = "1.12"
 r2dec = { path = "../r2dec", features = ["placement_mutants"] }
 r2ssa = { path = "../r2ssa", features = ["fact_mutants"] }

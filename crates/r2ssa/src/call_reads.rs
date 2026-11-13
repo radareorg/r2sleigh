@@ -39,7 +39,7 @@ impl CallReads {
         let classes = [SlotClass::Integer, SlotClass::Float].into_iter();
         Self {
             registers: classes
-                .flat_map(|class| model.argument_registers(class))
+                .flat_map(|class| model.arguments(class).iter().copied())
                 .collect(),
             count_register: model.forms.count_register,
             format: None,

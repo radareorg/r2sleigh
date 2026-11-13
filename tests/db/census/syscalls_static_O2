@@ -97,15 +97,15 @@ r2sleigh_result_u64 entry0(void)
     uint64_t fcn_401030(void);
     r2sleigh_result_u32 fcn_401050(void);
 
-    /* r2dec proof: 6 constructs are marked below; 38 source obligations: 6 rendered, 17 elided, 0 refused, 15 residual; 3 statements rendered; the parameters are a floor: at least 0 (a supervisor entry); the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
+    /* r2dec proof: 6 constructs are marked below; 50 source obligations: 6 rendered, 29 elided, 0 refused, 15 residual; 3 statements rendered; the parameters are a floor: at least 0 (a supervisor entry); the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
     {
         r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401060:7 covering 1 op (render::values): call to fcn_401000: its arity is only at least 0 (a floor), and this call writes 1 */
-        r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x401060:12 covering 1 op (render::values) */
-        r2sleigh_residual_void(3); /* r2dec gap: CallNotRendered at 0x401060:26 covering 1 op (render::values): call to fcn_401010: its arity is only at least 0 (a floor), and this call writes 1 */
-        r2sleigh_residual_void(4); /* r2dec gap: EffectNotRendered at 0x401060:31 covering 1 op (render::values) */
+        r2sleigh_residual_void(2); /* r2dec gap: EffectNotRendered at 0x401060:14 covering 1 op (render::values) */
+        r2sleigh_residual_void(3); /* r2dec gap: CallNotRendered at 0x401060:51 covering 1 op (render::values): call to fcn_401010: its arity is only at least 0 (a floor), and this call writes 1 */
+        r2sleigh_residual_void(4); /* r2dec gap: EffectNotRendered at 0x401060:58 covering 1 op (render::values) */
         fcn_401030();
         fcn_401050();
-        r2sleigh_residual_void(5); /* r2dec gap: UserOperation(syscall) at 0x401060:80 covering 1 op (render::values) */
+        r2sleigh_residual_void(5); /* r2dec gap: UserOperation(syscall) at 0x401060:155 covering 1 op (render::values) */
         return r2sleigh_residual_u64(6);
     }
 }

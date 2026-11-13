@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::context::ExternalRegisterParamSpec;
 use crate::convert::CTypeLike;
-use crate::external::ExternalTypeDb;
 use crate::model::Signedness;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -398,7 +397,6 @@ pub struct CalleeFact {
     pub name: Option<String>,
     pub linkage: CalleeLinkage,
     pub signature: Option<FunctionType>,
-    pub signature_callconv: Option<String>,
     pub signature_noreturn: bool,
     pub model_policy_evidence: BTreeSet<CalleeModelPolicyEvidence>,
     pub direct_callees: Vec<u64>,
@@ -431,7 +429,6 @@ impl CalleeFact {
             name,
             linkage,
             signature: None,
-            signature_callconv: None,
             signature_noreturn: false,
             model_policy_evidence: BTreeSet::new(),
             direct_callees: Vec::new(),
@@ -479,11 +476,9 @@ pub struct FunctionTypeFacts {
     /// Each parameter that points to an inferred structure: its tag, and the member at each
     /// accessed offset (doc/adr-aggregates.md).
     pub parameter_structures: BTreeMap<usize, ParameterStructure>,
-    pub callconv: Option<String>,
     pub noreturn: bool,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
-    pub external_type_db: ExternalTypeDb,
     pub program_data_objects: crate::ProgramDataObjectTypeFacts,
     pub field_access_certificates: Vec<FieldAccessCertificate>,
     pub array_index_certificates: Vec<ArrayIndexCertificate>,
@@ -502,11 +497,9 @@ pub struct FunctionTypeFactInputs {
     /// Each parameter that points to an inferred structure: its tag, and the member at each
     /// accessed offset (doc/adr-aggregates.md).
     pub parameter_structures: BTreeMap<usize, ParameterStructure>,
-    pub callconv: Option<String>,
     pub noreturn: bool,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
-    pub external_type_db: ExternalTypeDb,
     pub program_data_objects: crate::ProgramDataObjectTypeFacts,
     pub field_access_certificates: Vec<FieldAccessCertificate>,
     pub array_index_certificates: Vec<ArrayIndexCertificate>,
@@ -525,14 +518,9 @@ pub struct FunctionTypeFactsBuilder {
 impl FunctionTypeFacts {
     pub fn is_empty(&self) -> bool {
         self.merged_signature.is_none()
-            && self.callconv.is_none()
             && !self.noreturn
             && self.register_params.is_empty()
             && self.callee_facts.is_empty()
-            && self.external_type_db.structs.is_empty()
-            && self.external_type_db.unions.is_empty()
-            && self.external_type_db.enums.is_empty()
-            && self.external_type_db.diagnostics.is_empty()
             && self.program_data_objects == crate::ProgramDataObjectTypeFacts::default()
             && self.field_access_certificates.is_empty()
             && self.array_index_certificates.is_empty()
@@ -549,11 +537,9 @@ impl FunctionTypeFacts {
             parameter_types: self.parameter_types,
             inferred_aggregates: self.inferred_aggregates,
             parameter_structures: self.parameter_structures,
-            callconv: self.callconv,
             noreturn: self.noreturn,
             register_params: self.register_params,
             callee_facts: self.callee_facts,
-            external_type_db: self.external_type_db,
             program_data_objects: self.program_data_objects,
             field_access_certificates: self.field_access_certificates,
             array_index_certificates: self.array_index_certificates,
@@ -677,7 +663,6 @@ pub fn signature_hint_can_replace_existing(
     existing: &CTypeLike,
     hint: Option<&CTypeLike>,
     ptr_bits: u32,
-    type_db: &crate::ExternalTypeDb,
 ) -> bool {
     let existing = crate::word_free(existing);
     if is_generic_signature_type(Some(existing)) {
@@ -689,9 +674,7 @@ pub fn signature_hint_can_replace_existing(
     if crate::signature_infer::signature_types_are_equivalent(existing, hint, ptr_bits) {
         return false;
     }
-    if type_is_generated_local_struct_pointer(existing)
-        && pointer_hint_is_authoritative(hint, type_db)
-    {
+    if type_is_generated_local_struct_pointer(existing) && pointer_hint_is_authoritative(hint) {
         return true;
     }
     match (existing, hint) {
@@ -703,7 +686,7 @@ pub fn signature_hint_can_replace_existing(
             CTypeLike::Typedef { name, ty },
         ) => {
             let normalized = name.trim().to_ascii_lowercase();
-            crate::analysis::type_db_resolves_type_name(type_db, &normalized, ty)
+            crate::analysis::typedef_resolves(&normalized, ty)
                 || matches!(normalized.as_str(), "int" | "unsigned int")
                 || (normalized == "uintptr_t" && *bits == ptr_bits)
         }
@@ -735,7 +718,6 @@ pub fn signature_hint_can_replace_existing(
                     inner.as_ref(),
                     Some(new_inner.as_ref()),
                     ptr_bits,
-                    type_db,
                 )
                 || (matches!(
                     (inner.as_ref(), new_inner.as_ref()),
@@ -777,7 +759,7 @@ pub fn signature_hint_can_replace_existing(
             },
         ) => {
             is_weak_storage_scalar_typedef(existing_name, ptr_bits)
-                && crate::analysis::type_db_resolves_type_name(type_db, hint_name, hint_target)
+                && crate::analysis::typedef_resolves(hint_name, hint_target)
         }
         (
             CTypeLike::Typedef {
@@ -794,9 +776,8 @@ pub fn signature_return_hint_can_replace_existing(
     existing: &CTypeLike,
     hint: Option<&CTypeLike>,
     ptr_bits: u32,
-    type_db: &crate::ExternalTypeDb,
 ) -> bool {
-    if signature_hint_can_replace_existing(existing, hint, ptr_bits, type_db) {
+    if signature_hint_can_replace_existing(existing, hint, ptr_bits) {
         return true;
     }
     matches!(hint, Some(CTypeLike::Void)) && is_weak_storage_scalar_type(existing, ptr_bits)
@@ -806,7 +787,6 @@ pub fn summary_hint_can_replace_weak_existing(
     existing: &CTypeLike,
     hint: &CTypeLike,
     ptr_bits: u32,
-    type_db: &crate::ExternalTypeDb,
 ) -> bool {
     let existing = crate::word_free(existing);
     if is_generic_signature_type(Some(existing)) {
@@ -845,7 +825,7 @@ pub fn summary_hint_can_replace_weak_existing(
             },
         ) => {
             is_weak_storage_scalar_typedef(existing_name, ptr_bits)
-                && crate::analysis::type_db_resolves_type_name(type_db, hint_name, hint_target)
+                && crate::analysis::typedef_resolves(hint_name, hint_target)
         }
         (
             CTypeLike::Typedef {
@@ -917,7 +897,7 @@ pub fn is_weak_pointer_sized_storage_typedef(name: &str, ptr_bits: u32) -> bool 
             ))
 }
 
-fn pointer_hint_is_authoritative(hint: &CTypeLike, type_db: &crate::ExternalTypeDb) -> bool {
+fn pointer_hint_is_authoritative(hint: &CTypeLike) -> bool {
     let CTypeLike::Pointer(inner) = hint else {
         return false;
     };
@@ -928,9 +908,7 @@ fn pointer_hint_is_authoritative(hint: &CTypeLike, type_db: &crate::ExternalType
         | CTypeLike::Union(_)
         | CTypeLike::Enum(_)
         | CTypeLike::Pointer(_) => true,
-        CTypeLike::Typedef { name, ty } => {
-            crate::analysis::type_db_resolves_type_name(type_db, name, ty)
-        }
+        CTypeLike::Typedef { name, ty } => crate::analysis::typedef_resolves(name, ty),
         _ => false,
     }
 }
@@ -963,11 +941,9 @@ impl FunctionTypeFactsBuilder {
             parameter_types,
             inferred_aggregates,
             parameter_structures,
-            callconv,
             noreturn,
             mut register_params,
             callee_facts,
-            external_type_db,
             program_data_objects,
             mut signature_certificate,
             interproc_diagnostics,
@@ -982,7 +958,6 @@ impl FunctionTypeFactsBuilder {
         );
 
         let mut diagnostics = diagnostics;
-        diagnostics.extend(external_type_db.diagnostics.iter().cloned());
         dedup_preserving_order(&mut diagnostics);
 
         FunctionTypeFacts {
@@ -990,11 +965,9 @@ impl FunctionTypeFactsBuilder {
             parameter_types,
             inferred_aggregates,
             parameter_structures,
-            callconv,
             noreturn,
             register_params,
             callee_facts,
-            external_type_db,
             program_data_objects,
             field_access_certificates,
             array_index_certificates,
@@ -1278,25 +1251,6 @@ mod tests {
 
         assert!(facts.render_authorized_signature().is_some());
         assert!(facts.certified_signature().is_none());
-    }
-
-    #[test]
-    fn builder_merges_external_diagnostics_once() {
-        let external = ExternalTypeDb {
-            diagnostics: vec!["warning".to_string(), "warning".to_string()],
-            ..ExternalTypeDb::default()
-        };
-        let facts = FunctionTypeFacts::builder(FunctionTypeFactInputs {
-            external_type_db: external,
-            diagnostics: vec!["warning".to_string(), "local".to_string()],
-            ..FunctionTypeFactInputs::default()
-        })
-        .build();
-
-        assert_eq!(
-            facts.diagnostics,
-            vec!["warning".to_string(), "local".to_string()]
-        );
     }
 
     #[test]

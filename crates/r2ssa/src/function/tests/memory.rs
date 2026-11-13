@@ -781,7 +781,7 @@ fn a_declared_stack_argument_is_the_store_the_call_finds_above_its_stack_pointer
             arch: Some(&crate::Arch::from(arch.clone())),
             function_interface: Some(interface),
             machine_roles: roles,
-            call_effect: preserving([storage(32, 8)]),
+            conventions: preserving([storage(32, 8)]),
             call_site_interfaces: vec![call_interface],
             ..Default::default()
         },

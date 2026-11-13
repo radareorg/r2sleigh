@@ -120,7 +120,7 @@ NAME=0x00401090
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401090
 EXPECT=<<EOF
-r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, r2sleigh_word_u64 arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, void* arg2)
 {
     uint64_t tmp_401099_0_2;
 

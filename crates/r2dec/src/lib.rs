@@ -20,9 +20,7 @@ pub mod symbol;
 
 /// The knob the write-order gate turns; absent from every build that does not ask for it.
 #[cfg(feature = "placement_mutants")]
-pub mod placement_mutants {
-    pub use crate::structure::order::{WriteOrder, with_write_order};
-}
+pub mod placement_mutants;
 
 pub use crate::codegen::RenderedFunction;
 pub use crate::codegen::{CRole, CRoles, Emission, ResidualSite, SourceLine};

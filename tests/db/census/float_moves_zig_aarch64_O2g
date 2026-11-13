@@ -22,7 +22,7 @@ NAME=0x010104b0
 FILE=tests/fixtures/float_moves_zig_aarch64_O2g
 CMDS=aa; pdd @ 0x010104b0
 EXPECT=<<EOF
-r2sleigh_result_u64 _start(r2sleigh_word_u64 arg0)
+r2sleigh_result_u64 _start(void* arg0)
 {
     /* r2dec proof: 2 constructs are marked below; 22 source obligations: 0 rendered, 3 elided, 0 refused, 19 residual; 0 statements rendered; 1 callee prototype supplied by the source; the parameters are a floor: at least 1 (an address of the argument area escapes); the result is unproven (no return reached): 0 unproven-return carried */
     {
@@ -164,7 +164,7 @@ FILE=tests/fixtures/float_moves_zig_aarch64_O2g
 CMDS=aa; pdd @ 0x010105c0
 EXPECT=<<EOF
 /* r2sleigh: import stub at 0x10105c0; this symbol is the import `__libc_start_main` and has no body of its own. */
-extern int32_t __libc_start_main(void(*)(), int32_t, char**, void(*)(), void(*)(), void(*)(), void*);
+extern int32_t __libc_start_main(void*, int32_t, char**, void*, void*, void*, void*);
 
 EOF
 EXPECT_ERR=<<EOF

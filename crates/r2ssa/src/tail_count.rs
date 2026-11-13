@@ -2,8 +2,7 @@
 //! tail arguments (doc/adr-resolved-bodies.md, "Count-driven tail").
 
 use r2source::{
-    CanonicalStorageId, SourceConventionSlots, SourceRegisterSaveArea, SourceTailCount,
-    StackAddressBase,
+    CanonicalStorageId, ConventionModel, SourceRegisterSaveArea, SourceTailCount, StackAddressBase,
 };
 
 use crate::dense::DenseId;
@@ -270,7 +269,7 @@ pub(crate) struct Prover<'a> {
     pub(crate) prep: &'a crate::DecompilePrepFacts,
     pub(crate) area: &'a SaveArea,
     pub(crate) observations: &'a crate::deadphi::ProvenProgramObservations,
-    pub(crate) slots: &'a SourceConventionSlots,
+    pub(crate) slots: &'a ConventionModel,
     /// The register save area's row; none for a Microsoft x64 home `va_list`.
     pub(crate) row: Option<SourceRegisterSaveArea>,
     /// The slot width: what a cursor steps by.
@@ -283,11 +282,11 @@ pub(crate) fn tail_count(
     function: &SSAFunction,
     graph: &SsaGraph,
     prep: &crate::DecompilePrepFacts,
-    slots: &SourceConventionSlots,
+    slots: &ConventionModel,
     (area, observations): (&SaveArea, &crate::deadphi::ProvenProgramObservations),
 ) -> Option<SourceTailCount> {
-    let row = slots.register_save_area();
-    if row.is_none() && !slots.shared_positions() {
+    let row = slots.forms.save_area;
+    if row.is_none() && !slots.shares_positions() {
         return None;
     }
     let prover = Prover {
@@ -298,7 +297,10 @@ pub(crate) fn tail_count(
         observations,
         slots,
         row,
-        width: slots.argument_slots().first()?.size,
+        width: slots
+            .arguments(r2source::convention::SlotClass::Integer)
+            .first()?
+            .size,
     };
     match prover.prove() {
         Ok(count) => Some(count),
@@ -500,7 +502,12 @@ impl Prover<'_> {
     pub(crate) fn saved(&self) -> Cell {
         let width = i64::from(self.width);
         let named = i64::try_from(self.area.named).unwrap_or(0);
-        let slots = u32::try_from(self.slots.argument_slots().len()).unwrap_or(u32::MAX);
+        let slots = u32::try_from(
+            self.slots
+                .arguments(r2source::convention::SlotClass::Integer)
+                .len(),
+        )
+        .unwrap_or(u32::MAX);
         Cell {
             at: self.area.base + width * named,
             size: self.width.saturating_mul(slots) - self.width * u32::try_from(named).unwrap_or(0),
@@ -1064,9 +1071,12 @@ impl Prover<'_> {
         let held = |slot: &CanonicalStorageId| {
             slot.space == storage.space && slot.offset == storage.offset
         };
-        let slot = (self.slots.argument_slots().iter())
-            .position(|slot| held(slot) && storage.size >= count.size)
-            .ok_or("the count is no argument register")?;
+        let slot = (self
+            .slots
+            .arguments(r2source::convention::SlotClass::Integer)
+            .iter())
+        .position(|slot| held(slot) && storage.size >= count.size)
+        .ok_or("the count is no argument register")?;
         match slot < self.area.named {
             true => Ok(slot),
             false => Err("the count is a tail register".into()),

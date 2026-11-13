@@ -6,7 +6,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use r2il::{ArchSpec, RegisterProjection, RegisterProjectionQuery, RegisterStorage};
-use r2source::{ConventionModel, SourceCallRegisterEffect};
+use r2source::{CallRegisterEffect, ConventionModel};
 
 use crate::function::RegisterFamilyInfo;
 use crate::machine_context::{MachineMemoryModel, MachineRegisterGeometryState};
@@ -34,7 +34,6 @@ struct Tables {
     projections: Box<[RegisterProjection]>,
     query: Option<RegisterProjectionQuery>,
     memory_model: MachineMemoryModel,
-    result_slot: Option<CanonicalStorageId>,
 }
 
 impl Arch {
@@ -67,11 +66,6 @@ impl Arch {
         };
         projections.sort_by_key(|projection| projection.written);
         projections.dedup_by_key(|projection| projection.written);
-        let result_slot = spec.return_registers.first().map(|reg| CanonicalStorageId {
-            space: CanonicalStorageSpace::Register,
-            offset: reg.offset,
-            size: reg.size,
-        });
         Self(Arc::new(Tables {
             register_names: crate::naming::register_name_map(&spec),
             register_families: RegisterFamilyInfo::from_arch(&spec),
@@ -83,7 +77,6 @@ impl Arch {
             geometry,
             projections: projections.into_boxed_slice(),
             query,
-            result_slot,
             spec,
         }))
     }
@@ -155,11 +148,6 @@ impl Arch {
         &self.0.memory_model
     }
 
-    /// Where the architecture returns a value, when it says.
-    pub(crate) fn result_slot(&self) -> Option<CanonicalStorageId> {
-        self.0.result_slot
-    }
-
     /// What a call under `model` reads without an operand naming it; under none or a refused
     /// effect, every outermost register (ruling 2.1: no model states no argument dead).
     pub fn call_reads<'a>(
@@ -183,8 +171,8 @@ impl Arch {
         &self,
         model: Option<&ConventionModel>,
         storage: CanonicalStorageId,
-    ) -> SourceCallRegisterEffect {
-        model.map_or(SourceCallRegisterEffect::Clobbered, |model| {
+    ) -> CallRegisterEffect {
+        model.map_or(CallRegisterEffect::Clobbered, |model| {
             model.effect_on(storage)
         })
     }
@@ -313,7 +301,7 @@ mod tests {
         assert_eq!(arch.call_clobbered(None), file);
         for storage in [register(0, 4), register(8, 8)] {
             let effect = arch.call_effect_on(None, storage);
-            assert_eq!(effect, SourceCallRegisterEffect::Clobbered, "{storage:?}");
+            assert_eq!(effect, CallRegisterEffect::Clobbered, "{storage:?}");
         }
     }
 }

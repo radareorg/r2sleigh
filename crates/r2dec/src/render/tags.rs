@@ -236,8 +236,8 @@ fn spelled_members(
         .collect()
 }
 
-/// A member's type as the definition spells it: an array of a spelled element, a defined tag held
-/// by value, or a type naming behind pointers tags defined or `declarable`.
+/// A member's type as the definition spells it: a spelled array, a defined tag by value, a pointer
+/// to tags defined or `declarable`, or `void *` for one to an opaque name (D332, D256).
 fn spelled_member(
     ty: &CType,
     defined: &BTreeMap<String, bool>,
@@ -253,7 +253,8 @@ fn spelled_member(
         _ => calls::spellable(ty, &|tag, is_union| match defined.get(tag) {
             Some(defined) => *defined == is_union,
             None => declarable.get(tag) == Some(&is_union),
-        }),
+        })
+        .or_else(|| calls::untagged_pointer(ty)),
     }
 }
 
@@ -508,5 +509,34 @@ mod tests {
         assert!(!tags.declares("item", true, Some(&callee)));
         assert!(!tags.admits("item", true, Some(&callee)));
         assert_eq!(tags.conflicting(), ["item".to_owned()]);
+    }
+
+    /// `_M_apply`'s layout (0pack `0x48776a`): `f_8` is `const locale *`, a typedef of nothing the
+    /// unit states, so it is `void *` and the structure stays defined (D256).
+    #[test]
+    fn a_member_pointing_to_an_opaque_name_is_a_void_pointer() {
+        let locale = CType::Pointer(Box::new(CType::Const(Box::new(CType::Typedef {
+            name: "locale".to_owned(),
+            ty: Box::new(CType::Unknown),
+        }))));
+        let definition = r2types::AggregateDefinition {
+            is_union: false,
+            members: vec![
+                (
+                    CType::Int {
+                        bits: 8,
+                        signedness: r2types::Signedness::Unsigned,
+                    },
+                    "f_0".to_owned(),
+                ),
+                (locale, "f_8".to_owned()),
+            ],
+        };
+        let inferred =
+            std::collections::BTreeMap::from([("fcn_48776a_arg0".to_owned(), definition)]);
+        let tags = Tags::of_parts(None, &inferred, &[]);
+        assert!(tags.defines("fcn_48776a_arg0", false));
+        let members = &tags.defined["fcn_48776a_arg0"].1;
+        assert_eq!(members[1].0, CType::Pointer(Box::new(CType::Void)));
     }
 }

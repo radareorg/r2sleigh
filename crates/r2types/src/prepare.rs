@@ -1,36 +1,4 @@
 use crate::signature_infer::RecoveredSignatureParam;
-use rustc_hash::FxHashMap;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum TypeHintRank {
-    Integer = 1,
-    Float = 2,
-    Pointer = 3,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TypeHint {
-    pub rank: TypeHintRank,
-    pub ty: String,
-}
-
-impl TypeHint {
-    pub fn pointer() -> Self {
-        Self {
-            rank: TypeHintRank::Pointer,
-            ty: "void *".to_string(),
-        }
-    }
-}
-
-pub fn merge_type_hint(hints: &mut FxHashMap<String, TypeHint>, key: String, incoming: TypeHint) {
-    match hints.get(&key) {
-        Some(current) if !incoming_hint_should_replace(current, &incoming) => {}
-        _ => {
-            hints.insert(key, incoming);
-        }
-    }
-}
 
 /// Each formal parameter of the boundary facts, in slot order: register and stack alike.
 pub(crate) fn recover_signature_params_from_prepared_ssa(
@@ -141,10 +109,6 @@ fn size_to_neutral_int_type_like(size: u32) -> crate::CTypeLike {
         bits,
         signedness: crate::Signedness::Unknown,
     }
-}
-
-fn incoming_hint_should_replace(current: &TypeHint, incoming: &TypeHint) -> bool {
-    incoming.rank > current.rank || (incoming.rank == current.rank && incoming.ty < current.ty)
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
 # ADR: the scratch result
 
-Status: S1 (D200) and S2 (D201) built; the rest proposed (ROADMAP P7 and T, after the call-boundary ADR's S2; decisions D200 to D208; hand audit 3.5.1, D72 remainder 2)
+Status: S0 (D204), S1 (D200), S2 (D201), S3 (D202, in call-boundary S7) and S4 (D203) built; S5 (D205) deferred; D206 waits for its own ADR; D207 is S19, D245 to D248 (ROADMAP P7 and T; decisions D200 to D208; hand audit 3.5.1, D72 remainder 2)
 
 ## Problem
 

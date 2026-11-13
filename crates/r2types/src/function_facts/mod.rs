@@ -77,12 +77,12 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::CTypeLike;
 use crate::callee::{CalleeIdentityContext, CalleeResolutionFacts};
 use crate::facts::{
     CalleeFact, CalleeLinkage, FunctionTypeFacts, OutParamCertificateEvidence,
     OutParamCertificateSource, SignatureCertificateSource,
 };
-use crate::{CTypeLike, normalize_external_type_name};
 use r2ssa::InstId;
 use r2ssa::dense::IdMap;
 
@@ -95,10 +95,6 @@ impl ParamSlotResolver {
     #[cfg(test)]
     fn is_empty(&self) -> bool {
         self.slots_by_value.is_empty()
-    }
-
-    fn slot_for_value(&self, value: r2ssa::ValueId) -> Option<usize> {
-        self.slots_by_value.get(value).copied()
     }
 }
 
@@ -316,7 +312,6 @@ pub struct FunctionRenderFacts {
     /// Value annotations that supplement, rather than duplicate, certified expressions.
     pub string_literals_by_value: r2ssa::dense::IdMap<r2ssa::ValueId, StringLiteralRenderFact>,
     /// Type-owner render projections tied back to canonical memory-effect identities.
-    pub member_accesses_by_inst: IdMap<InstId, r2ssa::ByDirection<Vec<MemberAccessRenderFact>>>,
     pub array_accesses_by_inst: IdMap<InstId, r2ssa::ByDirection<Vec<ArrayAccessRenderFact>>>,
 }
 
@@ -338,7 +333,6 @@ impl FunctionRenderFacts {
             && self.return_effects_by_inst.is_empty()
             && self.memory_effects_by_inst.is_empty()
             && self.string_literals_by_value.is_empty()
-            && self.member_accesses_by_inst.is_empty()
             && self.array_accesses_by_inst.is_empty()
     }
 
@@ -463,28 +457,6 @@ impl FunctionRenderFacts {
             .filter_map(CertifiedEffect::memory_fact)
     }
 
-    pub fn member_access(
-        &self,
-        access: r2ssa::StructuredAccessId,
-    ) -> Option<&MemberAccessRenderFact> {
-        let memory = self.memory_access(access)?;
-        let facts = self
-            .member_accesses_by_inst
-            .get(memory.access.inst)?
-            .get(memory.is_write);
-        let mut matching = facts.iter().filter(|fact| {
-            fact.access == memory.access
-                && fact.object == memory.object
-                && fact.access_width == memory.width
-        });
-        let first = matching.next()?;
-        matching.next().is_none().then_some(first)
-    }
-
-    pub fn memory_value_type(&self, access: r2ssa::StructuredAccessId) -> Option<&CTypeLike> {
-        self.member_access(access)?.field_type.as_ref()
-    }
-
     /// The return effects, through their index by returning instruction: O(returns), not O(effects).
     pub fn return_effects(&self) -> impl Iterator<Item = &ReturnValueRenderFact> {
         self.return_effects_by_inst
@@ -560,32 +532,6 @@ impl FunctionRenderFacts {
         self.return_effect_id_for_inst(inst)
             .and_then(|id| self.certified_effects.get(&id))
             .and_then(CertifiedEffect::return_fact)
-    }
-
-    pub fn member_access_for_inst(
-        &self,
-        inst: r2ssa::InstId,
-        is_write: bool,
-        field_name: &str,
-        field_offset: u64,
-        access_width: Option<u32>,
-    ) -> Option<&MemberAccessRenderFact> {
-        self.member_accesses_by_inst
-            .get(inst)?
-            .get(is_write)
-            .iter()
-            .find(|fact| {
-                let Some(memory) = self.memory_access(fact.access) else {
-                    return false;
-                };
-                memory.access.inst == inst
-                    && memory.is_write == is_write
-                    && memory.object == fact.object
-                    && memory.width == fact.access_width
-                    && fact.field_offset == field_offset
-                    && fact.field_name.eq_ignore_ascii_case(field_name)
-                    && access_width.is_none_or(|width| fact.access_width == width)
-            })
     }
 
     pub fn array_access_for_inst(
@@ -1199,7 +1145,6 @@ impl SourceOwnedFunctionFacts {
         usage.extend(enriched.assumption_usage());
         enriched.assumption_usage = usage;
         enriched.display_names.absorb(source.display_names());
-        enriched.normalize_field_certificates_from_external_layout();
         enriched.install_calls(calls);
         let ptr_bits = source
             .machine_context()
@@ -1224,7 +1169,6 @@ impl SourceOwnedFunctionFacts {
             .collect();
         enriched.apply_return_type_fact(solved.returns.clone());
         // The types are final here; the projection the seal holds is built from them once.
-        enriched.normalize_field_certificates_from_external_layout();
         enriched.canonicalize_type_facts();
         Self::project_render(source, &mut enriched);
         ProjectedFacts { report: enriched }
@@ -1240,14 +1184,37 @@ impl SourceOwnedFunctionFacts {
         }
         report.populate_parameter_home_reloads();
         if let Some(param_slots) = param_slots.as_ref() {
-            report.populate_member_access_render_facts_from_field_certificates(source, param_slots);
-            // Before the declared-slot pass, which reads an array fact to find
-            // the member offset inside an element the index selects.
             report.populate_array_access_render_facts_from_scalar_candidates(source, param_slots);
-            report.populate_member_access_render_facts_from_declared_slots(source, param_slots);
         }
-        report.populate_certified_loop_carrier_types();
+        report.populate_certified_loop_carrier_types(source);
     }
+}
+
+/// Each projected load's result and its member's type, from the graph the projection names.
+fn projected_load_types(source: &r2ssa::SsaArtifact) -> Vec<(r2ssa::ValueId, CTypeLike)> {
+    let Some(interface) = source.machine_context().function_interface() else {
+        return Vec::new();
+    };
+    let image = source.machine_context().data_structs();
+    let projections = source.aggregate_accesses();
+    (projections
+        .projections_for_revision(interface.revision_identity())
+        .into_iter())
+    .flat_map(BTreeMap::values)
+    .filter_map(|projection| {
+        let r2ssa::AggregateAccessBinding::Read { result } = projection.binding else {
+            return None;
+        };
+        let graph = match projection.graph {
+            r2ssa::GraphOf::Interface => interface.type_graph()?,
+            r2ssa::GraphOf::Image => &image?.graph,
+        };
+        Some((
+            result,
+            crate::convert::source_type_like(graph, projection.member_type_id)?,
+        ))
+    })
+    .collect()
 }
 
 fn exact_source_param_slot_resolver(source: &r2ssa::SsaArtifact) -> Option<ParamSlotResolver> {
@@ -1536,8 +1503,8 @@ impl FunctionFacts {
             };
             // A call that takes a pair takes the type of both halves, whatever the callee's own
             // signature says of its first register.
-            let float_slot = (source.machine_context().convention_slots())
-                .and_then(r2ssa::SourceConventionSlots::float_result_slot);
+            let float_slot =
+                (source.machine_context().convention()).and_then(|model| model.results().float);
             let pair_callee = matches!(
                 signature.interface.return_kind(),
                 r2ssa::SourceFunctionReturn::Pair { .. }
@@ -1737,318 +1704,6 @@ impl FunctionFacts {
 
     pub fn replace_type_facts(&mut self, types: FunctionTypeFacts) {
         self.types = types.canonicalized();
-    }
-
-    pub fn normalize_field_certificates_from_external_layout(&mut self) {
-        let Some(signature) = self.types.merged_signature.as_ref() else {
-            return;
-        };
-        let type_db = &self.types.external_type_db;
-        if type_db.structs.is_empty() {
-            return;
-        }
-
-        for cert in &mut self.types.field_access_certificates {
-            let Some(param) = signature.params.get(cert.slot) else {
-                continue;
-            };
-            let Some(struct_name) = struct_name_from_pointer_type(param.ty.as_ref()) else {
-                continue;
-            };
-            let key = normalize_external_type_name(struct_name).to_ascii_lowercase();
-            let Some(field) = type_db
-                .structs
-                .get(&key)
-                .and_then(|structure| structure.fields.get(&cert.field_offset))
-            else {
-                continue;
-            };
-            cert.field_name = field.name.clone();
-            if cert.field_type.is_none() {
-                cert.field_type = field.ty.clone();
-            }
-        }
-    }
-
-    /// A member of an aggregate the source declared in a frame slot.
-    ///
-    /// The pointer form -- `s->field` through a parameter -- has a producer
-    /// already. A struct held in a slot had none, so an access inside one
-    /// rendered as address arithmetic carrying the frame displacement, and the
-    /// geometry constant in it then had no rendered occurrence.
-    fn populate_member_access_render_facts_from_declared_slots(
-        &mut self,
-        prepared: &r2ssa::SsaArtifact,
-        param_slots: &ParamSlotResolver,
-    ) {
-        let Some(interface) = prepared.machine_context().function_interface() else {
-            return;
-        };
-        let Some(graph) = interface.type_graph() else {
-            return;
-        };
-        let mut member_facts = Vec::new();
-        let mut address_bases = AddressBases::new(prepared);
-        for memory in self.render.memory_accesses() {
-            // Offset zero is a member too when the access is narrower than the
-            // object: the slot's name would stand for the whole aggregate.
-            // An element of an array of aggregates has no constant object
-            // offset -- the index is a value -- but the member's offset inside
-            // the element is as constant as any other, and the array fact for
-            // the same access carries it. Without this the declared type never
-            // sees the access and `arr[i].third` is left to the external
-            // layout's `f_8`.
-            let indexed = self
-                .render
-                .array_accesses_by_inst
-                .get(memory.access.inst)
-                .map(|facts| facts.get(memory.is_write))
-                .and_then(|facts| {
-                    facts.iter().find(|fact| {
-                        fact.access == memory.access
-                            && fact.object == memory.object
-                            && fact.access_width == memory.width
-                    })
-                });
-            let Some(offset_bits) = memory
-                .object_offset
-                .filter(|offset| *offset >= 0)
-                .and_then(|offset| u64::try_from(offset).ok())
-                .or_else(|| indexed.map(|fact| fact.field_offset))
-                .filter(|_| memory.width > 0)
-                .and_then(|bytes| bytes.checked_mul(8))
-            else {
-                r2il::refusal_evidence!(
-                    "member-access-declined",
-                    "object={:?} width={} address={:?}: no constant offset inside the object",
-                    memory.object,
-                    memory.width,
-                    memory.address
-                );
-                continue;
-            };
-            let declined = |why: &str| {
-                r2il::refusal_evidence!(
-                    "member-access-declined",
-                    "object={:?} offset_bits={offset_bits} width={}: {why}",
-                    memory.object,
-                    memory.width
-                );
-            };
-            // A declared stack slot, or the aggregate a pointer parameter points at.
-            let slot_type = prepared.stack_slot_logical_type(memory.object);
-            let pointer_base = slot_type
-                .is_none()
-                .then(|| {
-                    parameter_base_of(prepared, memory.address)
-                        .or_else(|| {
-                            indexed.and_then(|fact| match fact.base {
-                                Some(r2ssa::SemanticId::Parameter(slot)) => {
-                                    usize::try_from(slot).ok()
-                                }
-                                _ => None,
-                            })
-                        })
-                        .or_else(|| address_bases.param_slot(memory, param_slots))
-                })
-                .flatten();
-            let declared_type =
-                slot_type.or_else(|| parameter_pointee_type(interface, pointer_base?));
-            let Some(aggregate) =
-                declared_type.and_then(|type_id| aggregate_layout_for_type(graph, type_id))
-            else {
-                declined("neither a declared slot nor a pointer parameter names an aggregate");
-                continue;
-            };
-            // A tag the rendering cannot define names nothing it can spell, and the fact
-            // would retype the access to it as well as label it.
-            if !aggregate_is_definable(graph, aggregate.name()) {
-                declined("the rendering cannot define that aggregate");
-                continue;
-            }
-            let width_bits = u64::from(memory.width).saturating_mul(8);
-            // The member has to be the whole of what the access reads, or its
-            // name would stand for more or less than the machine touched.
-            let Some(member) = aggregate.members().iter().find(|member| {
-                member.offset_bits() == offset_bits && member.size_bits() == width_bits
-            }) else {
-                declined("no member covers exactly that offset and width");
-                continue;
-            };
-            // Only a scalar is what one access reads or writes. A member that
-            // is an array or a record is bytes to a scalar access -- `c.tag`
-            // written by one eight-byte store is not an assignment C has --
-            // and a bit-field is fewer bits than any access.
-            if !member_is_scalar_leaf(graph, member) {
-                declined("the member is not one scalar the access reads whole");
-                continue;
-            }
-            r2il::refusal_evidence!(
-                "member-access-named",
-                "object={:?} offset_bits={offset_bits} width={} aggregate={} member={}",
-                memory.object,
-                memory.width,
-                aggregate.name(),
-                member.name()
-            );
-            member_facts.push(MemberAccessRenderFact {
-                access: memory.access,
-                object: memory.object,
-                is_write: memory.is_write,
-                field_offset: offset_bits / 8,
-                field_name: member.name().to_string(),
-                field_type: crate::convert::source_type_like(graph, member.type_id()),
-                access_width: memory.width,
-                base: pointer_base.and_then(r2ssa::SemanticId::parameter),
-                source: MemberAccessSource::DeclaredType,
-            });
-        }
-        for fact in member_facts {
-            let facts = (self.render.member_accesses_by_inst)
-                .get_or_insert_with(fact.access.inst, r2ssa::ByDirection::default)
-                .get_mut(fact.is_write);
-            // The declared name replaces one an external layout guessed: two facts for one
-            // access are no fact at all, because the lookup requires exactly one.
-            facts.retain(|existing| {
-                !(existing.access == fact.access
-                    && existing.object == fact.object
-                    && existing.access_width == fact.access_width)
-            });
-            facts.push(fact);
-        }
-    }
-
-    fn populate_member_access_render_facts_from_field_certificates(
-        &mut self,
-        prepared: &r2ssa::SsaArtifact,
-        param_slots: &ParamSlotResolver,
-    ) {
-        if self.types.field_access_certificates.is_empty() {
-            return;
-        }
-
-        let mut member_facts = Vec::new();
-        let mut address_bases = AddressBases::new(prepared);
-        for memory in self.render.memory_accesses() {
-            if memory.width == 0 {
-                continue;
-            }
-            let Some(field_offset) = address_bases.field_offset(memory) else {
-                continue;
-            };
-            let param_slot = address_bases.param_slot(memory, param_slots);
-            let ptr_bits = prepared_memory_access_ptr_bits(prepared, memory);
-            member_facts.extend(self.member_render_facts_for_memory(
-                memory,
-                field_offset,
-                ptr_bits,
-                param_slot,
-            ));
-        }
-
-        for candidate in self.types.scalar_array_render_candidates.iter().copied() {
-            if candidate.access_width == 0
-                || !self.scalar_array_render_candidate_has_array_certificate(candidate)
-            {
-                continue;
-            }
-            let Some(inst) = prepared.graph().inst_for_op(candidate.op) else {
-                continue;
-            };
-            let Some(effect_ids) = (self.render.memory_effects_by_inst.get(inst))
-                .map(|effects| effects.get(candidate.is_write))
-            else {
-                continue;
-            };
-            for effect_id in effect_ids {
-                let Some(memory) = self
-                    .render
-                    .certified_effect(*effect_id)
-                    .and_then(CertifiedEffect::memory_fact)
-                else {
-                    continue;
-                };
-                if memory.access.inst != inst
-                    || memory.is_write != candidate.is_write
-                    || memory.width == 0
-                    || memory.width != candidate.access_width
-                {
-                    continue;
-                }
-                if self
-                    .certified_scalar_array_identity(prepared, memory, candidate)
-                    .is_none()
-                {
-                    continue;
-                }
-                let ptr_bits = prepared_memory_access_ptr_bits(prepared, memory);
-                member_facts.extend(self.member_render_facts_for_memory(
-                    memory,
-                    candidate.field_offset,
-                    ptr_bits,
-                    Some(candidate.slot),
-                ));
-            }
-        }
-
-        for fact in member_facts {
-            let facts = (self.render.member_accesses_by_inst)
-                .get_or_insert_with(fact.access.inst, r2ssa::ByDirection::default)
-                .get_mut(fact.is_write);
-            if !facts.contains(&fact) {
-                facts.push(fact);
-            }
-        }
-
-        for facts in (self.render.member_accesses_by_inst.values_mut()).flat_map(|d| d.each_mut()) {
-            facts.sort_by(|a, b| {
-                (
-                    a.is_write,
-                    a.field_offset,
-                    a.access_width,
-                    a.field_name.as_str(),
-                    a.access,
-                )
-                    .cmp(&(
-                        b.is_write,
-                        b.field_offset,
-                        b.access_width,
-                        b.field_name.as_str(),
-                        b.access,
-                    ))
-            });
-        }
-    }
-
-    fn member_render_facts_for_memory(
-        &self,
-        memory: &MemoryAccessRenderFact,
-        field_offset: u64,
-        ptr_bits: u32,
-        param_slot: Option<usize>,
-    ) -> Vec<MemberAccessRenderFact> {
-        self.types
-            .field_access_certificates
-            .iter()
-            .filter(|cert| {
-                param_slot == Some(cert.slot)
-                    && cert.field_offset == field_offset
-                    && field_certificate_width_matches(cert, memory.width, ptr_bits)
-            })
-            .map(|cert| MemberAccessRenderFact {
-                access: memory.access,
-                object: memory.object,
-                is_write: memory.is_write,
-                field_offset,
-                field_name: cert.field_name.clone(),
-                field_type: cert.field_type.clone(),
-                access_width: memory.width,
-                base: u32::try_from(cert.slot)
-                    .ok()
-                    .map(r2ssa::SemanticId::Parameter),
-                source: MemberAccessSource::ExternalLayout,
-            })
-            .collect()
     }
 
     fn populate_array_access_render_facts_from_scalar_candidates(
@@ -2468,17 +2123,12 @@ impl FunctionFacts {
             reason = "the members of one entity (a certificate, carrier, return or component): a few ids each, where a dense index would cost O(values) per entity"
         )
     )]
-    fn populate_certified_loop_carrier_types(&mut self) {
+    fn populate_certified_loop_carrier_types(&mut self, source: &r2ssa::SsaArtifact) {
         let signature = self.types.render_authorized_signature().cloned();
         let mut memory_value_types = r2ssa::dense::IdMap::<r2ssa::ValueId, CTypeLike>::default();
         let mut conflicting_memory_values = r2ssa::dense::IdSet::default();
-        for memory in self.render.memory_accesses() {
-            let Some(value) = memory.value.filter(|_| !memory.is_write) else {
-                continue;
-            };
-            let Some(ty) = self.render.memory_value_type(memory.access).cloned() else {
-                continue;
-            };
+        // A loaded value's type is its projected member's, in the member's graph (D348).
+        for (value, ty) in projected_load_types(source) {
             match memory_value_types.get(value) {
                 None => {
                     memory_value_types.insert(value, ty);
@@ -2797,7 +2447,6 @@ impl FunctionFacts {
         recovered: &crate::EvidenceTypes,
         ptr_bits: u32,
     ) {
-        let type_db = &self.types.external_type_db;
         let Some(signature) = self.types.merged_signature.as_mut() else {
             return;
         };
@@ -2826,7 +2475,7 @@ impl FunctionFacts {
             let replace = match param.ty.as_ref() {
                 None => true,
                 Some(existing) => {
-                    recovered_type_outranks(existing, candidate, ptr_bits, type_db)
+                    recovered_type_outranks(existing, candidate, ptr_bits)
                         || recovered_scalar_signedness_outranks(existing, candidate, ptr_bits)
                 }
             };

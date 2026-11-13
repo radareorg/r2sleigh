@@ -22,11 +22,6 @@ func.xalloc_die.args=0
 func.xalloc_die.noreturn=true
 func.xalloc_die.ret=void
 
-atexit=func
-func.atexit.args=1
-func.atexit.arg.0=func,function
-func.atexit.ret=int
-
 access=func
 func.access.args=2
 func.access.arg.0=const char *,path

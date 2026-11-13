@@ -4,13 +4,14 @@
 use r2abi::{CLibrary, Dll, Handle, LibraryId, LibraryRows, Tail};
 
 /// Each cited table and the fewest rows it holds.
-const CITED: [(&str, usize); 6] = [
+const CITED: [(&str, usize); 7] = [
     ("types-posix.sdb.txt", 515),
     ("types-glibc.sdb.txt", 85),
     ("types-bionic.sdb.txt", 100),
     ("types-musl.sdb.txt", 2),
     ("types-kernel32.sdb.txt", 50),
     ("types-ucrt.sdb.txt", 1),
+    ("types-cxx-cited.sdb.txt", 1),
 ];
 const UNCITED: [&str; 6] = [
     "types.sdb.txt",
@@ -375,4 +376,31 @@ fn only_glibc_counts_the_mode_open_reads() {
     assert_eq!(bits(CLibrary::Glibc, "arm", 64), Some(arm));
     assert_eq!(bits(CLibrary::Glibc, "x86", 32), None);
     assert_eq!(bits(CLibrary::Bionic, "arm", 64), None);
+}
+
+/// A callback slot a cited row spells returns `void` (S30); radare2's `func` states no return, so
+/// its code returns a refused node, never `void`.
+#[test]
+fn a_cited_callback_slot_returns_void_and_func_states_no_return() {
+    let rows = LibraryRows::embedded(CLibrary::Glibc);
+    let graph = rows.graph();
+    let slot = |library: r2abi::LibraryId, name: &str, index: usize| {
+        let row = rows.row(library, name).unwrap_or_else(|| panic!("{name}"));
+        let prototype = rows.prototype(row);
+        prototype.parameters[index].code_returns(graph)
+    };
+    let portable = r2abi::LibraryId::Portable;
+    for (name, index) in [("atexit", 0), ("at_quick_exit", 0), ("signal", 1)] {
+        assert_eq!(
+            slot(portable, name, index),
+            Some(r2abi::TypeId::VOID),
+            "{name}"
+        );
+    }
+    let on_exit = slot(r2abi::LibraryId::Glibc, "on_exit", 0);
+    assert_eq!(on_exit, Some(r2abi::TypeId::VOID));
+    let cxa = slot(r2abi::LibraryId::CxxRuntime, "__cxa_atexit", 0);
+    assert_eq!(cxa, Some(r2abi::TypeId::VOID));
+    let main = slot(r2abi::LibraryId::Glibc, "__libc_start_main", 0).expect("a code pointer");
+    assert!(matches!(graph.get(main), Some(r2abi::Type::Refused(_))));
 }

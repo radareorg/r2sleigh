@@ -169,6 +169,9 @@ class CitedRow:
         """`int (const char *, ...)`: the function type the row spells."""
         types = [self.arguments[index].rpartition(",")[0].strip() for index in sorted(self.arguments)]
         spelled = ", ".join(kind or "..." for kind in types) or "void"
+        # A function returning a code pointer, `R (*)(A)`, nests: `R (*(params))(A)`.
+        if code := re.fullmatch(r"(.*)\(\*\)(\(.*\))", self.returns):
+            return f"{code.group(1)}(*({spelled})){code.group(2)}"
         return f"{self.returns} ({spelled})"
 
     def modes(self) -> list[str]:

@@ -786,8 +786,8 @@ fn a_body_writing_both_result_registers_returns_what_its_callers_read() {
     );
 }
 
-/// The library table says `__libc_start_main` takes functions (`func`) it gives no parameters for:
-/// each is spelled `void(*)()`, a type C accepts, where it was `/* unknown */*`, which none does.
+/// The library table says `__libc_start_main` takes functions (`func`) it states no type for: a
+/// `func` states no return (S30), so each is `void*`, never an invented `void(*)()` or `unknown`.
 #[test]
 fn an_import_stub_spells_a_function_its_declaration_gives_no_parameters() {
     let binary = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -795,11 +795,12 @@ fn an_import_stub_spells_a_function_its_declaration_gives_no_parameters() {
     let run = on(binary, "pdd @ 0x01010640");
     assert!(
         run.out.contains(
-            "extern int32_t __libc_start_main(void(*)(), int32_t, char**, void(*)(), void(*)(), void(*)(), void*);"
+            "extern int32_t __libc_start_main(void*, int32_t, char**, void*, void*, void*, void*);"
         ),
         "{}",
         run.out
     );
+    assert!(!run.out.contains("void(*)()"), "{}", run.out);
     assert!(!run.out.contains("unknown"), "{}", run.out);
 }
 

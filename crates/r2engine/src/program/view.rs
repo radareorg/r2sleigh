@@ -40,6 +40,8 @@ pub(crate) struct View<'a, S: Source + 'static> {
     starts: Rc<StatedStarts>,
     /// Which set the code discovery found is in; empty for discovery itself, which decides it.
     modes: Rc<super::requests::ModeMap>,
+    /// Whether the body walked through this view is Thumb, where the query's key states it.
+    walking: Option<bool>,
 }
 
 impl<S: Source + 'static> Clone for View<'_, S> {
@@ -50,6 +52,7 @@ impl<S: Source + 'static> Clone for View<'_, S> {
             imports: Rc::clone(&self.imports),
             starts: Rc::clone(&self.starts),
             modes: Rc::clone(&self.modes),
+            walking: self.walking,
         }
     }
 }
@@ -86,6 +89,25 @@ impl<'a, S: Source + 'static> View<'a, S> {
             imports,
             starts,
             modes,
+            walking: None,
+        }
+    }
+
+    /// The same view walking one body in the set its key states, so a callee's set is the
+    /// transfer's and no mode is read.
+    pub(super) fn walking(self, thumb: bool) -> Self {
+        Self {
+            walking: Some(thumb),
+            ..self
+        }
+    }
+
+    /// The set a call enters `callee` in: the walk's unless the transfer states the other one.
+    fn entered(&self, callee: u64, foreign: bool) -> bool {
+        match self.walking {
+            _ if self.machine_in(true).is_none() => false,
+            Some(thumb) => thumb != foreign,
+            None => self.thumb_at(callee),
         }
     }
 
@@ -172,11 +194,11 @@ impl<'a, S: Source + 'static> View<'a, S> {
         })
     }
 
-    /// What a call does under the program's default convention: a view of its held call model.
-    pub(super) fn default_call_effect(&self) -> Option<r2ssa::SourceCallEffect> {
+    /// What a call runs under from the program's default convention: its held `AnyCall` model.
+    pub(super) fn default_calls(&self) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
         let assembled = self.db.inputs().assembled()?;
         let model = self.db.get::<super::AnyCall>(&assembled.convention).ok()?;
-        (*model).as_ref().ok()?.call_effect().ok()
+        (*model).as_ref().ok().cloned()
     }
 
     /// The machine under one convention, its model the program's held one.
@@ -211,23 +233,27 @@ impl<'a, S: Source + 'static> View<'a, S> {
         self.target_of(machine, addr).map_err(|why| why.to_string())
     }
 
-    /// Whether control comes back from a call to `callee`: false only where the program proves it
-    /// never does, or a runtime model says so under a premise the engine grants.
-    pub(super) fn comes_back(&self, callee: u64) -> bool {
+    /// `ComesBack`'s key: a callee and whether it is entered in Thumb, which only a machine with
+    /// both sets can be.
+    pub(super) fn returns_key(&self, callee: u64, thumb: bool) -> (u64, bool) {
+        (callee, thumb && self.machine_in(true).is_some())
+    }
+
+    /// Whether a call to `callee`, Thumb where `thumb`, comes back: false only where the program
+    /// proves it never does, or a runtime model says so under a premise the engine grants.
+    pub(super) fn comes_back(&self, callee: u64, thumb: bool) -> bool {
         self.db
-            .get::<super::returns::ComesBack>(&callee)
+            .get::<super::returns::ComesBack>(&self.returns_key(callee, thumb))
             .map_or(true, |answer| answer.comes())
     }
 
-    /// What a call to `callee` that never comes back takes for granted.
-    pub(super) fn exit_premises(
-        &self,
-        callee: u64,
-    ) -> std::collections::BTreeSet<r2source::Premise> {
-        self.db
-            .get::<super::returns::ComesBack>(&callee)
-            .map(|answer| answer.premises().clone())
-            .unwrap_or_default()
+    /// Why a call to `callee` never comes back, where `ComesBack` says it does not.
+    pub(super) fn exit(&self, callee: u64, thumb: bool) -> Option<crate::discovery::Never> {
+        let key = self.returns_key(callee, thumb);
+        match &*self.db.get::<super::returns::ComesBack>(&key).ok()? {
+            crate::discovery::Return::Never(never) => Some(never.clone()),
+            crate::discovery::Return::Comes => None,
+        }
     }
 }
 
@@ -275,12 +301,12 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         self.starts.holds(vaddr)
     }
 
-    fn returns(&self, callee: u64) -> bool {
-        self.comes_back(callee)
+    fn returns(&self, callee: u64, foreign: bool) -> bool {
+        self.comes_back(callee, self.entered(callee, foreign))
     }
 
-    fn exit_premises(&self, callee: u64) -> std::collections::BTreeSet<r2source::Premise> {
-        View::exit_premises(self, callee)
+    fn exit(&self, callee: u64, foreign: bool) -> Option<crate::discovery::Never> {
+        View::exit(self, callee, self.entered(callee, foreign))
     }
 
     /// A call through a slot that is not a kept loader binding is opaque, so it comes back.
@@ -294,14 +320,17 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
 
     fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
         let ((index, handle), model) = self.import_through(slot, |row| row.halts_on)?;
-        let register = model
-            .argument_registers(r2abi::SlotClass::Integer)
-            .nth(index.into());
+        let register = model.argument(r2abi::SlotClass::Integer, index.into());
         register.map(|register| (register, handle))
     }
 
     fn binds_handles(&self) -> bool {
         self.source().container().format == r2abi::statement::Format::Pe
+    }
+
+    fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
+        let kernel = super::kernel(self.source().container());
+        r2abi::syscalls::interrupt_never_returns(kernel, arch, vector).is_none()
     }
 
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
@@ -409,5 +438,32 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
 
     fn target_at(&self, vaddr: u64) -> Option<NativeTarget<'_>> {
         self.target(vaddr).ok()
+    }
+
+    fn kept_at(&self, entry: u64) -> Option<std::collections::BTreeSet<r2ssa::CanonicalStorageId>> {
+        let key = (entry, self.thumb_at(entry));
+        let effect = self.db.get::<super::fates::RegisterEffects>(&key).ok()?;
+        (*effect)
+            .as_ref()
+            .map(|effect| effect.kept_registers().collect())
+    }
+
+    fn site_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
+        let inputs = self.db.inputs();
+        let id = match self.import_at(callee) {
+            Some(name) => {
+                let machines = inputs.machines().ok()?;
+                machines.imports.bound(&name).then_some(())?;
+                inputs.assembled()?.convention
+            }
+            None => {
+                let container = self.source().container();
+                let declared = container.declarations.function_at(callee)?;
+                let (arch, bits) = (&container.arch.name, container.arch.bits);
+                super::stated_convention(arch, bits, declared.convention).ok()??
+            }
+        };
+        let model = self.db.get::<super::Convention>(&id).ok()?;
+        (*model).as_ref().ok().cloned()
     }
 }

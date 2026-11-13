@@ -34,7 +34,8 @@ pub use certificates::*;
 pub use control_domains::*;
 pub(crate) use declared_slots::*;
 pub use facts::*;
-pub use frame_reach::{CallFrameReach, FrameReach};
+pub(crate) use frame_reach::{Access, Walked, walk};
+pub use frame_reach::{CallFrameReach, FramePoints, FrameReach};
 pub(crate) use loops::*;
 pub(crate) use objects::*;
 pub(crate) use predicates::*;
@@ -641,8 +642,10 @@ pub(crate) fn ensure_source_formal_parameter_values(
     // what a call may read implicitly is fixed by the calling convention, and
     // a function whose captured prototype declares fewer parameters than it
     // passes through is exactly the case that needs this.
-    if let Some(slots) = machine_context.convention_slots() {
-        let argument_storages = slots.argument_slots().to_vec();
+    if let Some(slots) = machine_context.convention() {
+        let argument_storages = slots
+            .arguments(r2source::convention::SlotClass::Integer)
+            .to_vec();
         for storage in argument_storages {
             materialize(graph, &mut existing, storage);
         }

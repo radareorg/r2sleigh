@@ -141,6 +141,15 @@ to its class, and the proof line names the tag. A call to the function's own ent
 declared callee prototype spells each parameter it can, the rest at their
 class, so a typed pointer never meets an integer at a call.
 
+A member pointing to an opaque name (D256, 2026-11-13): `_M_apply`'s parameter
+(0pack `0x48776a`, `0x497eec`) lays out `f_0` and `f_8`, and `f_8` holds what
+`std::locale`'s constructor takes as `const locale &`, a typedef of nothing the
+unit states. `spelled_member` refused that member, and the greatest set dropped
+the whole structure, so the header said `void* arg0`. Such a member is now
+`void *`, the rule a parameter already follows (`untagged_pointer`, D332): the
+pointer is kept and nothing of the pointee is claimed. A member held by value
+still needs its tag defined.
+
 ### Cost
 
 - r2ssa's reach fact is one forward pass over each formal's def-use closure,

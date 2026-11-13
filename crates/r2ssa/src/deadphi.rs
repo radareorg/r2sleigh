@@ -77,13 +77,17 @@ impl ProvenProgramObservations {
         graph: &SsaGraph,
         live_out: &FunctionLiveOut,
         facts: &PreparedFunctionFacts,
+        machine_context: Option<&crate::SourceMachineContext>,
     ) -> Option<Self> {
         if !facts.obligations.is_complete() {
             return None;
         }
+        let lanes = HeldArgumentLanes::of(facts, machine_context);
         let mut roots = crate::dense::IdMap::default();
+        let mut masks = crate::dense::IdMap::<ValueId, ByteMask>::default();
         for value in live_out.iter() {
             roots.get_or_insert_with(value, || "return".to_string());
+            masks.insert(value, ByteMask::All);
         }
         for obligation in facts.obligations.obligations().values() {
             if !obligation.id.kind.is_positive_observation_root() {
@@ -91,15 +95,21 @@ impl ProvenProgramObservations {
             }
             for input in obligation.inputs.iter().copied() {
                 roots.get_or_insert_with(input, || format!("{:?}", obligation.id));
+                let mask = lanes.mask(obligation, input);
+                let joined = masks.get(input).map_or(mask, |known| known.union(mask));
+                masks.insert(input, joined);
             }
         }
+        let roots_masked = (roots.keys()).map(|value| {
+            let mask = masks.get(value).copied().unwrap_or(ByteMask::All);
+            (value, mask, crate::edge_fold::ALL)
+        });
         // An arm no path reads is found only where some block's fold drops an in-edge (D214).
         let closure = match facts.obligations.narrows() {
-            true => crate::bytes::closure_under(
-                graph,
-                (roots.keys()).map(|value| (value, ByteMask::All, crate::edge_fold::ALL)),
-            ),
-            false => crate::bytes::closure(graph, roots.keys()),
+            true => crate::bytes::closure_under(graph, roots_masked),
+            false => {
+                crate::bytes::closure_of(graph, roots_masked.map(|(value, mask, _)| (value, mask)))
+            }
         };
         // What an unmodelled instruction reads, and what those values depend on. O(V + E).
         let unmodelled = (facts.obligations.unmodelled().iter())
@@ -150,6 +160,65 @@ impl ProvenProgramObservations {
         }
         chain.reverse();
         (self.roots.get(current).map(String::as_str), chain)
+    }
+}
+
+/// Each register argument a declared callee holds in a low lane: the call reads that lane of the
+/// value, never the rest (D266 rule 2). Sorted by `(value, index, storage)`; O(arguments log).
+struct HeldArgumentLanes(Vec<((ValueId, u32, crate::CanonicalStorageId), ByteMask)>);
+
+impl HeldArgumentLanes {
+    fn of(
+        facts: &PreparedFunctionFacts,
+        machine_context: Option<&crate::SourceMachineContext>,
+    ) -> Self {
+        let mut lanes = Vec::new();
+        for boundary in facts.boundaries.calls.values() {
+            let interface = (facts.call_sites.by_id.get(&boundary.call_site))
+                .and_then(|site| site.raw_identity)
+                .zip(machine_context)
+                .and_then(|(identity, context)| context.call_site_interface(identity));
+            // A call no exact callee states reads the whole register, so its row is `All`.
+            for argument in &boundary.arguments {
+                let (
+                    SourceCallArgumentValue::Value(value),
+                    crate::semantic::CallBoundarySlot::Register { index, storage },
+                ) = (argument.value, argument.slot)
+                else {
+                    continue;
+                };
+                let held = interface.and_then(|interface| {
+                    crate::semantic::callee_held_lane(interface, index, storage)
+                });
+                let mask = held.map_or(ByteMask::All, |lane| ByteMask::whole(lane.size));
+                lanes.push(((value, index, storage), mask));
+            }
+        }
+        lanes.sort_unstable_by_key(|(key, _)| *key);
+        // One argument handed to two calls is read at the wider of their lanes.
+        lanes.dedup_by(|later, kept| {
+            let same = later.0 == kept.0;
+            if same {
+                kept.1 = kept.1.union(later.1);
+            }
+            same
+        });
+        Self(lanes)
+    }
+
+    /// The bytes of `input` one observation root reads: a held argument's lane, else all.
+    fn mask(&self, obligation: &crate::obligation::SemanticObligation, input: ValueId) -> ByteMask {
+        use crate::obligation::{SemanticObligationComponent, SemanticObligationKind};
+        let SemanticObligationComponent::RegisterSlot { index, storage } = obligation.id.component
+        else {
+            return ByteMask::All;
+        };
+        if obligation.id.kind != SemanticObligationKind::CallArgument {
+            return ByteMask::All;
+        }
+        let key = (input, index, storage);
+        (self.0.binary_search_by_key(&key, |(key, _)| *key))
+            .map_or(ByteMask::All, |found| self.0[found].1)
     }
 }
 
@@ -599,8 +668,8 @@ mod tests {
         let live = FunctionLiveOut::compute(&func, &graph, &return_storages());
         let facts =
             crate::semantic::PreparedFunctionFacts::collect(&func, &graph).expect("settles");
-        let observations =
-            ProvenProgramObservations::find(&graph, &live, &facts).expect("complete obligations");
+        let observations = ProvenProgramObservations::find(&graph, &live, &facts, None)
+            .expect("complete obligations");
         let entry = graph
             .values
             .iter()
