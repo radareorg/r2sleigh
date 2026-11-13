@@ -211,7 +211,7 @@ fn a_declared_pointer_types_a_parameter_only_where_no_declaration_disputes_it() 
     let parameters = header_parameters(&memset, &format!("fcn_{PLT_CALLER:x}"));
     assert_eq!(
         parameters.first().map(|p| p.0.as_str()),
-        Some("uint64_t"),
+        Some("r2sleigh_word_u64"),
         "{memset}"
     );
     let fputs = on(Libc::Glibc, "fputs", &FPUTS_SELF);
@@ -226,7 +226,7 @@ fn a_declared_pointer_types_a_parameter_only_where_no_declaration_disputes_it() 
     let parameters = header_parameters(&recovered, "f");
     assert_eq!(
         parameters.first().map(|p| p.0.as_str()),
-        Some("uint64_t"),
+        Some("r2sleigh_word_u64"),
         "{recovered}"
     );
 }

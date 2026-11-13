@@ -44,7 +44,7 @@ fn a_closed_world_read_states_its_premise_and_a_cold_render_stays_unproven() {
         analysed.response.premises
     );
     let text = analysed.response.output.into_text();
-    assert!(text.starts_with("uint32_t f("), "{text}");
+    assert!(text.starts_with("r2sleigh_word_u32 f("), "{text}");
     // The premise is its own clause, never a column of the obligation list (D234).
     assert!(
         text.contains("; a call reads the result (assuming closed-world)"),
@@ -1002,7 +1002,7 @@ fn a_lane_forwarded_through_a_caller_whose_result_is_read_is_decided_per_lane() 
     open.analyse_program().expect("it surveys");
     let mid = open.rendered(BASE + 0x10).expect("it renders");
     let mid = mid.response.output.into_text();
-    assert!(mid.starts_with("uint64_t mid("), "{mid}");
+    assert!(mid.starts_with("r2sleigh_word_u64 mid("), "{mid}");
     let text = open.rendered(F).expect("it renders");
     let text = text.response.output.into_text();
     assert!(text.starts_with("void f("), "{text}");
@@ -1078,7 +1078,7 @@ fn a_termination_function_another_way_reaches_keeps_its_result() {
         &[0xe8, 0xeb, 0xff, 0xff, 0xff, 0x48, 0x89, 0x07, 0xc3],
     );
     let text = analysed(read);
-    assert!(text.starts_with("uint32_t f(void)"), "{text}");
+    assert!(text.starts_with("r2sleigh_word_u32 f(void)"), "{text}");
     assert!(
         text.contains("; a call reads the result (assuming closed-world)"),
         "{text}"

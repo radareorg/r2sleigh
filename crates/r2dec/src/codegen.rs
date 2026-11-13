@@ -497,9 +497,7 @@ impl<'c> CodeGenerator<'c> {
         prelude.push('\n');
         // Each unproven result's carrier typedef the header, the externs and the helpers spell (D201).
         let mut typedefs = std::collections::BTreeSet::new();
-        func.visit_types(&mut |ty| {
-            typedefs.extend(crate::prelude::result_typedef(ty));
-        });
+        func.visit_types(&mut |ty| crate::prelude::typedefs_within(ty, &mut typedefs));
         for typedef in typedefs {
             prelude.push_str(&typedef);
             prelude.push('\n');

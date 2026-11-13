@@ -291,6 +291,56 @@ impl ReturnTypeFact {
     const fn decided_by(ty: CTypeLike, by: ReturnTypeEvidence) -> Self {
         Self::Decided { ty, by }
     }
+
+    /// A carrier's integer, signed as every returned value's seeds state at its width, else the
+    /// unstated word; r2ssa's fill states no C sign (D265, RULING 1.7). O(returns).
+    pub(crate) fn signed_by(
+        self,
+        source: &r2ssa::SsaArtifact,
+        signedness: &r2ssa::dense::IdMap<
+            r2ssa::ValueId,
+            std::collections::BTreeSet<crate::signedness::ScalarSignednessEvidence>,
+        >,
+    ) -> Self {
+        use crate::signedness::ScalarSignednessEvidence as Seed;
+        let Self::Decided {
+            ty: CTypeLike::Int { bits, .. },
+            by: ReturnTypeEvidence::Carrier,
+        } = self
+        else {
+            return self;
+        };
+        let graph = source.graph();
+        let at_width = |value: r2ssa::ValueId| graph.var(value).size.saturating_mul(8) == bits;
+        // The value itself, or the lane a conventional zero extension widened into the carrier.
+        let lane = |value: r2ssa::ValueId| {
+            let widened =
+                (graph.def_inst(value).and_then(|inst| graph.op(inst))).and_then(|op| match op {
+                    r2ssa::SSAOp::IntZExt { src, .. } => Some(*src),
+                    _ => None,
+                });
+            Some(value)
+                .filter(|value| at_width(*value))
+                .or(widened.filter(|src| at_width(*src)))
+        };
+        let (mut signed, mut unsigned) = (false, false);
+        for certificate in &source.certificates().returns {
+            let seeds = lane(certificate.value).and_then(|value| signedness.get(value));
+            if let Some(seeds) = seeds {
+                signed |= seeds.contains(&Seed::Signed);
+                unsigned |= seeds.contains(&Seed::Unsigned);
+            }
+        }
+        let Ok(width) = u8::try_from(bits) else {
+            return self;
+        };
+        let integer = crate::IntegerDecl {
+            bits: width,
+            width: r2source::Basis::CarrierWidth,
+            sign: crate::SignFact::of(signed, unsigned),
+        };
+        Self::decided_by(integer.spelled(), ReturnTypeEvidence::Carrier)
+    }
 }
 
 /// The return type the program's declaration of this function states, from its interface's graph.

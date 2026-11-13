@@ -69,7 +69,10 @@ pub use function_facts::{
     admit_declaration_type, aggregate_is_definable, aggregate_members, declaration_type_width_bits,
     unread_slot,
 };
-pub use parameter_types::{ParameterType, ParameterTypes, PointerRefusal};
+pub use parameter_types::{
+    IntegerDecl, ParameterType, ParameterTypes, PointerRefusal, SignFact, SlotType, UNSTATED_WORD,
+    is_unstated_word, unstated_word,
+};
 
 pub use model::{Signedness, Type};
 pub use prepare::{TypeHint, merge_type_hint};

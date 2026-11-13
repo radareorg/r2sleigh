@@ -157,6 +157,11 @@ impl Prototype {
 
 /// An argument of type `from` passed as the declared `to`: the cast C performs at a prototype.
 pub(super) fn to_declared(argument: CExpr, from: &CType, to: &CType) -> CExpr {
+    // The unstated word is its integer: the conversion is to that integer (D265).
+    let to = match to {
+        CType::Typedef { ty, .. } if r2types::is_unstated_word(to) => ty.as_ref(),
+        to => to,
+    };
     if from == to {
         return argument;
     }
@@ -308,7 +313,9 @@ pub(super) fn spellable(ty: &CType, names: &dyn Fn(&str, bool) -> bool) -> Optio
             bits: 8 | 16 | 32 | 64,
             signedness: r2types::Signedness::Signed | r2types::Signedness::Unsigned,
         } => Some(ty.clone()),
-        CType::Typedef { name, .. } if name == "char" => Some(ty.clone()),
+        CType::Typedef { name, .. } if name == "char" || r2types::is_unstated_word(ty) => {
+            Some(ty.clone())
+        }
         CType::Typedef { ty, .. } => spellable(ty, names),
         CType::Pointer(pointee) => {
             Some(CType::Pointer(Box::new(pointee_spelling(pointee, names)?)))
@@ -350,7 +357,9 @@ fn pointee_spelling(ty: &CType, names: &dyn Fn(&str, bool) -> bool) -> Option<CT
         CType::Struct(tag) => names(tag, false).then(|| ty.clone()),
         CType::Union(tag) => names(tag, true).then(|| ty.clone()),
         CType::Const(inner) => Some(CType::Const(Box::new(pointee_spelling(inner, names)?))),
-        CType::Typedef { name, ty } if name != "char" => pointee_spelling(ty, names),
+        CType::Typedef { name, ty: inner } if name != "char" && !r2types::is_unstated_word(ty) => {
+            pointee_spelling(inner, names)
+        }
         ty => spellable(ty, names),
     }
 }

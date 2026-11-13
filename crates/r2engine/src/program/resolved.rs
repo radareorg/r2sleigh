@@ -592,7 +592,6 @@ fn join(
     (held.slot == read.slot).then(|| SourceResultSeed {
         slot: held.slot,
         bits: held.bits.max(read.bits),
-        signed: held.signed && read.signed,
         above: match held.bits == read.bits && held.above == read.above {
             true => held.above,
             false => r2source::SourceAbove::Undefined,

@@ -256,13 +256,30 @@ def declared(dwarf: Dwarf, sub) -> Declared:
 
 PRESENCE = ("void_to_void", "void_to_value", "value_to_void", "value_to_value")
 # D201's carrier typedef states where the machine leaves a result and claims no C type (doc/adr-scratch-result.md);
-# D165's hole typedef states a slot the body never reads and claims none either (doc/adr-call-boundary.md).
-UNPROVEN_RESULT = re.compile(r"r2sleigh_result_u\d+|r2sleigh_unread_[uf]\d+")
+# D165's hole typedef states a slot the body never reads and claims none either (doc/adr-call-boundary.md);
+# D265's word typedef states an integer's width and no sign, alone or as a pointee.
+UNPROVEN_RESULT = re.compile(r"r2sleigh_result_u\d+|r2sleigh_unread_[uf]\d+|r2sleigh_word_u\d+")
+UNSTATED_WORD = re.compile(r"r2sleigh_word_u(\d+)")
+
+
+def pointee(ty: c_types.CType) -> c_types.CType:
+    """What `ty` points at through every pointer level, or `ty` itself."""
+    while ty.kind == c_types.PTR and ty.target is not None:
+        ty = ty.target
+    return ty
 
 
 def unproven(actual: c_types.CType) -> bool:
-    """A type spelled through a carrier or hole typedef: the engine marks it unproven, so it is no silent claim."""
+    """A type spelled through a carrier, hole or word typedef: the engine marks it, so it is no silent claim."""
+    actual = pointee(actual)
     return actual.kind == c_types.NAMED and UNPROVEN_RESULT.fullmatch(actual.name) is not None
+
+
+def unstated_sign(expected: c_types.CType, actual: c_types.CType) -> bool:
+    """The word typedef where the source has an integer of its width: the sign alone is left unstated."""
+    expected, actual = pointee(expected), pointee(actual)
+    word = UNSTATED_WORD.fullmatch(actual.name) if actual.kind == c_types.NAMED else None
+    return word is not None and expected.kind == c_types.INT and expected.width * 8 == int(word.group(1))
 
 
 @dataclass
@@ -301,7 +318,7 @@ def score(truth: dict[int, Declared],
         marked = seen.marked or unproven(actual)
         how = "marked" if marked else "silent"
         counts["marked_wrong" if marked else "silently_wrong"] += 1
-        kind = c_types.classify(expected, actual)
+        kind = "unstated_sign" if unstated_sign(expected, actual) else c_types.classify(expected, actual)
         by_kind = tally.wrong.setdefault(how, {}).setdefault(role, {})
         by_kind[kind] = by_kind.get(kind, 0) + 1
         if not marked:
@@ -456,6 +473,7 @@ def grade() -> int:
         "silent": silent,
         "silent_buckets": ordered(tally.wrong.get("silent", {})),
         "marked_buckets": ordered(tally.wrong.get("marked", {})),
+        "marked_sign": sum(kinds.get("unstated_sign", 0) for kinds in tally.wrong.get("marked", {}).values()),
         "return_presence": tally.presence,
     }
     print(json.dumps(report, indent=2))

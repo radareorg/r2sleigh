@@ -80,7 +80,6 @@ pub(crate) fn infer_scalar_signedness<'a, V: DenseId + 'a>(
                 seed(*a, ScalarSignednessEvidence::Signed);
                 seed(*b, ScalarSignednessEvidence::Signed);
             }
-            SSAOp::IntRight { a, .. } => seed(*a, ScalarSignednessEvidence::Unsigned),
             SSAOp::IntSRight { a, .. } => seed(*a, ScalarSignednessEvidence::Signed),
             _ => {}
         }

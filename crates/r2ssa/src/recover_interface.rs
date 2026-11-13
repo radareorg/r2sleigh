@@ -85,9 +85,6 @@ impl RecoveredParameter {
 pub struct RecoveredResult {
     slot: CanonicalStorageId,
     observed: CanonicalStorageId,
-    /// Every return path sign-extends the observed bytes into the byte above
-    /// them: the function computed a signed value of the observed width.
-    signed: bool,
     /// The carrier is the float result register, read by callers as a float of the observed width.
     float: bool,
     /// What every return path leaves above the observed bytes (doc/adr-result-side.md, section 2).
@@ -108,11 +105,6 @@ impl RecoveredResult {
     /// The widest definition that contributes to the result.
     pub const fn observed(self) -> CanonicalStorageId {
         self.observed
-    }
-
-    /// Whether every return path sign-extends the result above its width.
-    pub const fn signed(self) -> bool {
-        self.signed
     }
 
     /// Whether the result is a float in the float result register.
@@ -682,6 +674,7 @@ fn observed_entry_read_storages(
             reads.push(storage);
         }
     };
+    let mut lanes = ReadLanes::new(graph, observations);
     for value in &graph.values {
         if observations.contains(value.id)
             && graph.def_inst(value.id).is_none()
@@ -699,10 +692,8 @@ fn observed_entry_read_storages(
             // lane, and six take the whole register. Covering a byte the
             // program did not read is the side a formal may err on; a lane
             // no register has would leave the interface unmintable.
-            let storage = observations
-                .observed_extent_bytes(value.id)
-                .map(u32::next_power_of_two)
-                .filter(|bytes| *bytes < root.size)
+            let storage = Some(lanes.lane(value.id))
+                .filter(|bytes| *bytes > 0 && *bytes < root.size)
                 .map_or(root, |size| CanonicalStorageId { size, ..root });
             // Which observation this parameter rests on is the whole question
             // when the count is wrong, and it is knowable only here.
@@ -741,6 +732,82 @@ fn observed_entry_read_storages(
         }
     }
     reads
+}
+
+/// The widest offset-0 lane of an entry value an operation reads whole, which is the width it is
+/// read at; the bytes it demands are narrower under a mask (`and edi, 1` reads `edi`; D266).
+struct ReadLanes<'a> {
+    graph: &'a SsaGraph,
+    observations: &'a crate::deadphi::ProvenProgramObservations,
+    /// Bytes per value, `UNSEEN` before it is asked and `ASKING` on a cycle through merges.
+    lanes: Vec<u32>,
+}
+
+impl<'a> ReadLanes<'a> {
+    const UNSEEN: u32 = u32::MAX;
+    const ASKING: u32 = u32::MAX - 1;
+
+    fn new(
+        graph: &'a SsaGraph,
+        observations: &'a crate::deadphi::ProvenProgramObservations,
+    ) -> Self {
+        let lanes = vec![Self::UNSEEN; graph.values.len()];
+        Self {
+            graph,
+            observations,
+            lanes,
+        }
+    }
+
+    /// `value`'s lane in bytes, a power of two that covers every byte observed of it; 0 where
+    /// nothing observes it. Each value is answered once: O(uses reached through merges).
+    fn lane(&mut self, value: crate::ValueId) -> u32 {
+        match self.lanes.get(value.0 as usize).copied() {
+            Some(Self::ASKING) | None => return 0,
+            Some(Self::UNSEEN) => {}
+            Some(known) => return known,
+        }
+        self.lanes[value.0 as usize] = Self::ASKING;
+        let size = self.graph.var(value).size;
+        let extent = (self.observations.observed_extent_bytes(value)).unwrap_or(0);
+        let mut lane = extent;
+        for site in self.graph.use_sites(value).to_vec() {
+            lane = lane.max(self.read_at(site, size));
+        }
+        let lane = match lane {
+            0 => 0,
+            lane => lane.next_power_of_two().min(size.next_power_of_two()),
+        };
+        self.lanes[value.0 as usize] = lane;
+        lane
+    }
+
+    /// The bytes of a `size`-byte value the use at `site` reads beyond what it demands: a merge, a
+    /// copy or an offset-0 SUBPIECE reads its output's lane, and a constant mask its output's bytes.
+    fn read_at(&mut self, site: crate::graph::UseSite, size: u32) -> u32 {
+        let Some(inst) = self.graph.inst(site.inst) else {
+            return 0;
+        };
+        let Some(dst) = inst.output else {
+            return 0;
+        };
+        let op = match &inst.payload {
+            crate::graph::InstPayload::Phi { .. } => return self.lane(dst),
+            crate::graph::InstPayload::Op(op) => op,
+        };
+        match op {
+            crate::SSAOp::Copy { .. } | crate::SSAOp::Subpiece { offset: 0, .. } => self.lane(dst),
+            crate::SSAOp::IntAnd { a, b, .. }
+            | crate::SSAOp::IntOr { a, b, .. }
+            | crate::SSAOp::IntXor { a, b, .. }
+                if self.observations.contains(dst)
+                    && [a, b].iter().any(|mask| self.graph.var(**mask).is_const()) =>
+            {
+                (self.observations.observed_extent_bytes(dst)).map_or(size, |bytes| bytes.min(size))
+            }
+            _ => 0,
+        }
+    }
 }
 
 /// Storages this function hands to a call without ever defining them.
@@ -1476,7 +1543,6 @@ fn recovered_result_over(
     } = *returns;
     let written = func.written_or_captured();
     let mut observed = None;
-    let mut signed = true;
     // Each path's bytes above its own width; a path that leaves none states no fill.
     let mut above = Vec::new();
     // A return no write reaches leaves the caller's bytes above: no fill is stated.
@@ -1512,7 +1578,6 @@ fn recovered_result_over(
         // carrier's. Whether that hands-back is a result at all is decided
         // above, by the definitions that reach the return.
         let observed_size = crate::lanes::written_width(&bytes, storage).unwrap_or(storage.size);
-        signed &= crate::lanes::signed(&bytes, observed_size);
         every_path_writes &= storage.size == slot.size;
         above.push(bytes);
         let storage = CanonicalStorageId {
@@ -1532,7 +1597,6 @@ fn recovered_result_over(
         RecoveredFunctionResult::Register(RecoveredResult {
             slot,
             observed,
-            signed,
             float: false,
             above,
         })
@@ -1806,7 +1870,6 @@ fn recover_interface_inner(
             RecoveredFunctionResult::Register(RecoveredResult {
                 slot,
                 observed,
-                signed: observed == narrow && width.above == r2source::SourceAbove::Sign,
                 float: false,
                 above,
             })
@@ -1881,7 +1944,6 @@ fn recover_interface_inner(
                     result = RecoveredFunctionResult::Register(RecoveredResult {
                         slot: observed,
                         observed,
-                        signed: false,
                         float: true,
                         above: r2source::SourceAbove::Undefined,
                     });
@@ -1914,7 +1976,6 @@ fn recover_interface_inner(
                     result = RecoveredFunctionResult::Register(RecoveredResult {
                         slot: observed,
                         observed,
-                        signed: false,
                         float: true,
                         above: r2source::SourceAbove::Undefined,
                     });
@@ -2946,7 +3007,6 @@ fn seed_result(
     (storage_bits(result.slot()).is_some()).then_some(SourceResultSeed {
         slot: result.slot(),
         bits,
-        signed: result.signed(),
         above: result.above(),
     })
 }
@@ -3540,14 +3600,11 @@ fn mint_recovered_interface_inner(
     // graph describes exactly what is referenced and nothing more. The
     // constructor enforces that literally: a graph carrying a type no logical
     // value names is rejected outright.
-    // Keyed by width and sign: only a result the body sign-extends is signed.
-    let mut widths: Vec<(u32, bool)> = Vec::new();
-    fn note_bits(widths: &mut Vec<(u32, bool)>, bits: u32) {
-        note_type(widths, bits, false);
-    }
-    fn note_type(widths: &mut Vec<(u32, bool)>, bits: u32, signed: bool) {
-        if !widths.contains(&(bits, signed)) {
-            widths.push((bits, signed));
+    // Every integer is unsigned: its C sign is r2types' to state from the body (D265, RULING 1.7).
+    let mut widths: Vec<u32> = Vec::new();
+    fn note_bits(widths: &mut Vec<u32>, bits: u32) {
+        if !widths.contains(&bits) {
+            widths.push(bits);
         }
     }
     // The logical value is typed by what the function read, not by the size of
@@ -3579,15 +3636,15 @@ fn mint_recovered_interface_inner(
     let result_width = match recovered.result() {
         RecoveredFunctionResult::Register(result) if !result.float() => {
             let bits = storage_bits(result.observed())?;
-            note_type(&mut widths, bits, result.signed());
-            Some((bits, result.signed()))
+            note_bits(&mut widths, bits);
+            Some(bits)
         }
         // One integer as wide as both halves (doc/adr-language-profile.md, item 1).
         RecoveredFunctionResult::Pair { low, high } => {
             let half = storage_bits(low).filter(|bits| Some(*bits) == storage_bits(high))?;
             let bits = half.checked_mul(2)?;
-            note_type(&mut widths, bits, false);
-            Some((bits, false))
+            note_bits(&mut widths, bits);
+            Some(bits)
         }
         _ => None,
     };
@@ -3596,13 +3653,10 @@ fn mint_recovered_interface_inner(
     let mut types = widths
         .iter()
         .enumerate()
-        .map(|(index, (bits, signed))| {
+        .map(|(index, bits)| {
             SourceType::new(
                 u32::try_from(index).ok()?,
-                match signed {
-                    true => SourceTypeKind::SignedInteger,
-                    false => SourceTypeKind::UnsignedInteger,
-                },
+                SourceTypeKind::UnsignedInteger,
                 u64::from(*bits),
                 u64::from(*bits),
             )
@@ -3612,24 +3666,24 @@ fn mint_recovered_interface_inner(
     let float_type = float_type(recovered, &mut types)?;
     let float_ids = float_nodes(floats, float_type, &mut types)?;
     let type_graph = SourceTypeGraph::new(types, []).ok()?;
-    let type_id = |bits: u32, signed: bool| -> Option<u32> {
+    let type_id = |bits: u32| -> Option<u32> {
         widths
             .iter()
-            .position(|candidate| *candidate == (bits, signed))
+            .position(|candidate| *candidate == bits)
             .and_then(|index| u32::try_from(index).ok())
     };
     // `Full` where the read is the whole register, `LowBits` where it is the
     // register's low half. The second is what an `int` parameter looks like in
     // a 64-bit argument register, and it is the projection the parameter-fact
     // collector already knows how to narrow.
-    let logical = |bits: u32, signed: bool, carrier_bits: u32| -> Option<SourceLogicalValue> {
+    let logical = |bits: u32, carrier_bits: u32| -> Option<SourceLogicalValue> {
         let kind = if bits < carrier_bits {
             SourceCarrierKind::LowBits
         } else {
             SourceCarrierKind::Full
         };
         Some(SourceLogicalValue::new(
-            type_id(bits, signed)?,
+            type_id(bits)?,
             SourceCarrierProjection::new(kind, 0, u64::from(bits)),
         ))
     };
@@ -3718,22 +3772,22 @@ fn mint_recovered_interface_inner(
         .zip(classes)
         .map(|((bits, carrier_bits), class)| match class {
             SlotClass::Float => float_logical(*bits).map(Some),
-            _ => logical(*bits, false, *carrier_bits).map(Some),
+            _ => logical(*bits, *carrier_bits).map(Some),
         })
         .collect::<Option<Vec<_>>>()?;
     let (return_kind, return_logical_value) = match (recovered.result(), result_width) {
-        (RecoveredFunctionResult::Register(result), Some((bits, signed))) => (
+        (RecoveredFunctionResult::Register(result), Some(bits)) => (
             SourceFunctionReturn::Register {
                 storage: result.slot(),
             },
-            Some(logical(bits, signed, result.slot().size.checked_mul(8)?)?),
+            Some(logical(bits, result.slot().size.checked_mul(8)?)?),
         ),
         (RecoveredFunctionResult::Register(result), None) if result.float() => {
             float_return(result, float_type?)?
         }
-        (RecoveredFunctionResult::Pair { low, high }, Some((bits, signed))) => (
+        (RecoveredFunctionResult::Pair { low, high }, Some(bits)) => (
             SourceFunctionReturn::Pair { low, high },
-            Some(logical(bits, signed, bits)?),
+            Some(logical(bits, bits)?),
         ),
         // A pair is typed or the interface is not minted: no half of it stands for the whole.
         (RecoveredFunctionResult::Pair { .. }, None) => return None,
@@ -4360,7 +4414,6 @@ mod tests {
             RecoveredFunctionResult::Register(RecoveredResult {
                 slot: register(0, 8),
                 observed: register(0, 8),
-                signed: false,
                 float: false,
                 above: r2source::SourceAbove::Undefined,
             })

@@ -903,18 +903,18 @@ impl<'a> Values<'a> {
         for (index, home, ty) in parameters.into_iter().flatten() {
             let class = terms::c_type(&ty).expect("a classed parameter has a C type");
             // A declared type is spelled as stated, a tag the graph states incomplete; an analysed
-            // one only where it is a pointer, naming only tags the unit defines.
+            // one naming only tags the unit defines, an unstated sign as its word (D265).
             let declared = match input.declared_parameter(index as usize, ty.width_bits()) {
                 Some(declared) => calls::spellable(&declared, &|tag, union| tags.names(tag, union))
                     .or_else(|| calls::untagged_pointer(&declared)),
-                None => (input.parameter_declaration(index as usize, ty.width_bits()))
-                    .filter(|ty| matches!(ty.unaliased(), r2types::CTypeLike::Pointer(_)))
-                    .and_then(|analysed| {
-                        calls::spellable(&analysed, &|tag, union| tags.defines(tag, union))
-                    }),
+                None => (input.parameter_declaration(index as usize, ty.width_bits())).and_then(
+                    |analysed| calls::spellable(&analysed, &|tag, union| tags.defines(tag, union)),
+                ),
             }
             .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
-            let differs = declared.as_ref().is_some_and(|declared| *declared != class);
+            // The word is the class the body reads through: no read is cast.
+            let differs = (declared.as_ref())
+                .is_some_and(|declared| *declared != class && !r2types::is_unstated_word(declared));
             // A hole states no type: r2types spells its class's typedef, which claims none (D165).
             let hole = (input.parameter_declaration(index as usize, ty.width_bits()))
                 .filter(crate::prelude::is_unread_slot);

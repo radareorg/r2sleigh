@@ -548,21 +548,6 @@ pub fn above(paths: &[Bytes], width: u32) -> SourceAbove {
     }
 }
 
-/// Whether a result of `width` bytes is signed by what wrote it: its top
-/// bytes are a sign extension the instruction stated (`movsx eax, al`), or
-/// the byte above it is the architecture's sign fill on every path.
-pub fn signed(bytes: &[Byte], width: u32) -> bool {
-    let width = (width as usize).min(bytes.len());
-    let top = &bytes[..width];
-    let stated = top.last() == Some(&Byte::Widened { sign: true })
-        && top
-            .iter()
-            .rev()
-            .take_while(|byte| matches!(byte, Byte::Widened { .. }))
-            .all(|byte| *byte == Byte::Widened { sign: true });
-    stated || bytes.get(width) == Some(&Byte::Filled(vec![Fill::Sign]))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -637,7 +622,7 @@ mod tests {
     /// An extension the instruction states writes its destination whole; a
     /// sign extension it states makes the value signed.
     #[test]
-    fn a_stated_extension_writes_its_destination_and_says_its_sign() {
+    fn a_stated_extension_writes_its_destination() {
         let zero = || Byte::fill(Fill::Zero);
         let widened = |sign| Byte::Widened { sign };
         // `movzx eax, al` then the 32-bit write's convention.
@@ -652,8 +637,7 @@ mod tests {
             zero(),
         ];
         assert_eq!(written_width(&movzx, rax()), Some(4));
-        assert!(!signed(&movzx, 4));
-        // `movsx eax, al`: four bytes, signed.
+        // `movsx eax, al`: four bytes.
         let movsx = [
             Byte::Data,
             widened(true),
@@ -665,7 +649,6 @@ mod tests {
             zero(),
         ];
         assert_eq!(written_width(&movsx, rax()), Some(4));
-        assert!(signed(&movsx, 4));
         // A stated extension joined with data on another path is data.
         assert_eq!(widened(true).join(&Byte::Data), Byte::Data);
         assert_eq!(widened(true).join(&widened(false)), Byte::Data);

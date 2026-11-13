@@ -418,13 +418,12 @@ pub enum SourceResultCause {
     Unstated,
 }
 
-/// What the direct paths of a body prove of an unproven result: the convention's carrier, at the
-/// width those paths write and whether they sign-extend; the start of a cycle's fixpoint.
+/// What the direct paths of a body prove of an unproven result: the convention's carrier at the
+/// width those paths write; the start of a cycle's fixpoint. It states no C sign (RULING 1.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct SourceResultSeed {
     pub slot: CanonicalStorageId,
     pub bits: u32,
-    pub signed: bool,
     /// What every such path leaves above `bits`.
     pub above: SourceAbove,
 }
@@ -1965,7 +1964,7 @@ impl SourceFunctionInterface {
         self
     }
 
-    /// The integer result this interface states, as a seed would: its carrier, width and sign.
+    /// The integer result this interface states, as a seed would: its carrier and width.
     pub fn stated_result(&self) -> Option<SourceResultSeed> {
         let SourceFunctionReturn::Register { storage } = self.return_kind else {
             return None;
@@ -1976,31 +1975,35 @@ impl SourceFunctionInterface {
             .as_ref()?
             .types()
             .get(usize::try_from(logical.type_id()).ok()?)?;
-        let signed = match held.kind() {
-            SourceTypeKind::SignedInteger => true,
-            SourceTypeKind::UnsignedInteger => false,
-            _ => return None,
-        };
+        if !matches!(
+            held.kind(),
+            SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger
+        ) {
+            return None;
+        }
         Some(SourceResultSeed {
             slot: storage,
             bits: u32::try_from(held.size_bits()).ok()?,
-            signed,
             above: self.result_above,
         })
     }
 
-    /// Return `seed.slot`, read at its `bits`: the type is one the graph names or gains.
+    /// Return `seed.slot`, read at its `bits`: an integer the graph names at that width, else an
+    /// unsigned one it gains; the C sign is r2types' (RULING 1.7).
     fn state_result(&mut self, seed: SourceResultSeed) {
-        let kind = match seed.signed {
-            true => SourceTypeKind::SignedInteger,
-            false => SourceTypeKind::UnsignedInteger,
-        };
+        let kind = SourceTypeKind::UnsignedInteger;
         let bits = u64::from(seed.bits);
         let graph = self.type_graph.as_ref();
         let mut types = graph.map_or_else(Vec::new, |graph| graph.types().to_vec());
+        let integer = |kind| {
+            matches!(
+                kind,
+                SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger
+            )
+        };
         let named = types
             .iter()
-            .position(|held| held.kind() == kind && held.size_bits() == bits);
+            .position(|held| integer(held.kind()) && held.size_bits() == bits);
         let id = named.unwrap_or(types.len());
         if named.is_none()
             && let Ok(id) = u32::try_from(id)

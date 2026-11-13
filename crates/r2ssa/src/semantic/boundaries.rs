@@ -1367,7 +1367,6 @@ fn state_unstated_result(
         .map(|slot| r2source::SourceResultSeed {
             slot,
             bits: slot.size.saturating_mul(8),
-            signed: false,
             above: r2source::SourceAbove::Undefined,
         });
     boundary.unstated_carrier = (!boundary.unstated_lanes.is_empty())

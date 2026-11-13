@@ -102,7 +102,7 @@ fn a_body_named_after_a_library_function_takes_nothing_from_the_table() {
         .iter()
         .map(|argument| r2types::c_object_declaration(&argument.ty.value, "_"))
         .collect::<Vec<_>>();
-    assert_eq!(declared, ["uint64_t _"]);
+    assert_eq!(declared, ["r2sleigh_word_u64 _"]);
     // Recovered, so nothing declares it: the type is no more than the body's reading of it.
     let bases = (info.arguments.iter()).map(|argument| argument.ty.confidence.basis);
     assert_eq!(bases.collect::<Vec<_>>(), [Basis::CarrierWidth]);
@@ -171,7 +171,7 @@ fn a_parameter_the_body_reads_through_rests_on_the_dereference() {
     let declared = (info.arguments.iter())
         .map(|argument| r2types::c_object_declaration(&argument.ty.value, "_"))
         .collect::<Vec<_>>();
-    assert_eq!(declared, ["uint32_t* _"]);
+    assert_eq!(declared, ["r2sleigh_word_u32* _"]);
     let bases = (info.arguments.iter()).map(|argument| argument.ty.confidence.basis);
     assert_eq!(bases.collect::<Vec<_>>(), [Basis::Dereferenced]);
 }

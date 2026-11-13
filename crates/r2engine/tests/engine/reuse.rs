@@ -503,7 +503,7 @@ fn a_tail_thunk_returns_what_its_target_returns_once_the_target_is_resolved() {
     let rendering = program.rendered(base + 0x20).expect("it renders");
     let text = rendering.response.output.into_text();
     assert!(
-        text.contains("r2sleigh_result_u32 thunk(uint32_t);"),
+        text.contains("r2sleigh_result_u32 thunk(r2sleigh_word_u32);"),
         "{text}"
     );
     assert!(text.contains("= (uint64_t)thunk(5);"), "{text}");

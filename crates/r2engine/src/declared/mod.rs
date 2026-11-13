@@ -600,7 +600,6 @@ impl Placement<'_> {
         let seed = r2source::SourceResultSeed {
             slot: integer,
             bits: integer.size.saturating_mul(8),
-            signed: false,
             above: r2source::SourceAbove::Undefined,
         };
         let causes = [r2source::SourceResultCause::Unstated];

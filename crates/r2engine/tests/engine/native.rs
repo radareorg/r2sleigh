@@ -319,7 +319,7 @@ fn a_function_is_decompiled_from_bytes_alone() {
         .iter()
         .map(|(ty, _)| ty.as_str())
         .collect::<Vec<_>>();
-    assert_eq!(types, ["uint32_t", "uint32_t"], "{text}");
+    assert_eq!(types, ["r2sleigh_word_u32", "r2sleigh_word_u32"], "{text}");
     let returned = text
         .lines()
         .find(|line| line.trim_start().starts_with("return"))
@@ -360,7 +360,7 @@ fn a_call_is_rendered_from_the_callee_body() {
         response
             .output
             .text()
-            .contains("r2sleigh_result_u32 fcn_100a(uint32_t, uint32_t)"),
+            .contains("r2sleigh_result_u32 fcn_100a(r2sleigh_word_u32, r2sleigh_word_u32)"),
         "{}",
         response.output
     );
@@ -652,7 +652,7 @@ fn a_staged_call_to_a_carried_callee_is_declared_at_its_carriers_widths() {
     let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text();
     assert!(
-        text.contains("r2sleigh_result_u32 fcn_100a(uint32_t, uint32_t);"),
+        text.contains("r2sleigh_result_u32 fcn_100a(r2sleigh_word_u32, r2sleigh_word_u32);"),
         "{text}"
     );
     assert!(text.contains("r2sleigh_result_u32 caller("), "{text}");
@@ -1389,7 +1389,7 @@ fn a_function_is_decompiled_on_aarch64_too() {
     let text = response.output.text();
     let parameters = common::parameters(text);
     assert_eq!(parameters.len(), 1, "{text}");
-    assert_eq!(parameters[0].0, "uint64_t", "{text}");
+    assert_eq!(parameters[0].0, "r2sleigh_word_u64", "{text}");
     let returned = text
         .lines()
         .find(|line| line.trim_start().starts_with("return"))
@@ -2942,7 +2942,7 @@ fn a_value_no_statement_assigns_is_named_on_the_proof_line() {
     // rsi is the second parameter, read by name, and rdi below it a hole: no
     // argument slot is read without a parameter (D165's rule 2).
     assert!(
-        text.contains("entry_and_argument(r2sleigh_unread_u64 arg0, uint64_t arg1)"),
+        text.contains("entry_and_argument(r2sleigh_unread_u64 arg0, r2sleigh_word_u64 arg1)"),
         "{text}"
     );
     assert!(!proof.contains("argument slot"), "{text}");
@@ -3512,6 +3512,8 @@ fn run_rendered(name: &str, units: &[&Rendered], harness: &str) {
              __attribute__((constructor)) static void r2engine_watchdog(void) {{ alarm(30); }}\n\
              typedef uint8_t r2sleigh_result_u8; typedef uint16_t r2sleigh_result_u16;\n\
              typedef uint32_t r2sleigh_result_u32; typedef uint64_t r2sleigh_result_u64;\n\
+             typedef uint8_t r2sleigh_word_u8; typedef uint16_t r2sleigh_word_u16;\n\
+             typedef uint32_t r2sleigh_word_u32; typedef uint64_t r2sleigh_word_u64;\n\
              {prototypes}\n{harness}\n"
         ),
     )
@@ -3817,7 +3819,7 @@ const CLEAR_LOW_BIT: &[u8] = &[
 fn an_and_that_clears_one_bit_takes_the_whole_argument() {
     let text = rendered(CLEAR_LOW_BIT, "clear_low_bit");
     assert!(
-        text.starts_with("r2sleigh_result_u64 clear_low_bit(uint64_t "),
+        text.starts_with("r2sleigh_result_u64 clear_low_bit(r2sleigh_word_u64 "),
         "{text}"
     );
     run_rendered(
@@ -3857,14 +3859,13 @@ const AARCH64_MASK_24_OF_W0: &[u8] = &[
     0xc0, 0x03, 0x5f, 0xd6, // 0x1004 ret
 ];
 
-/// An `and` that keeps three bytes reads three bytes of the argument, and
-/// no register has a three-byte lane, so the formal is the four-byte one
-/// that holds them rather than a width no interface can carry.
+/// A mask is read at the lane its operation reads whole, never at the bytes it keeps (D266):
+/// `and eax` takes the four-byte lane, `and rax` the whole register.
 #[test]
 fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
     let text = rendered(MASK_24_OF_EDI, "mask24_of_edi");
     assert!(
-        text.starts_with("r2sleigh_result_u32 mask24_of_edi(uint32_t "),
+        text.starts_with("r2sleigh_result_u32 mask24_of_edi(r2sleigh_word_u32 "),
         "{text}"
     );
     run_rendered(
@@ -3886,7 +3887,7 @@ fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
 
     let text = rendered(MASK_24_OF_RDI, "mask24_of_rdi");
     assert!(
-        text.starts_with("r2sleigh_result_u64 mask24_of_rdi(uint32_t "),
+        text.starts_with("r2sleigh_result_u64 mask24_of_rdi(r2sleigh_word_u64 "),
         "{text}"
     );
     run_rendered(
@@ -3911,7 +3912,7 @@ fn an_and_that_keeps_three_bytes_takes_the_four_byte_lane() {
         "mask24_of_w0",
     );
     assert!(
-        text.starts_with("r2sleigh_result_u32 mask24_of_w0(uint32_t "),
+        text.starts_with("r2sleigh_result_u32 mask24_of_w0(r2sleigh_word_u32 "),
         "{text}"
     );
     run_rendered(
@@ -4115,7 +4116,7 @@ fn an_and_that_keeps_six_or_seven_bytes_takes_the_whole_register() {
     ] {
         let text = rendered_on(&machine, bytes, name);
         assert!(
-            text.starts_with(&format!("r2sleigh_result_u64 {name}(uint64_t ")),
+            text.starts_with(&format!("r2sleigh_result_u64 {name}(r2sleigh_word_u64 ")),
             "{text}"
         );
         run_rendered(
@@ -6846,7 +6847,7 @@ fn a_lane_written_and_read_back_is_no_parameter() {
         .collect::<Vec<_>>();
     assert_eq!(
         types,
-        ["uint64_t", "uint64_t"],
+        ["r2sleigh_word_u64", "r2sleigh_word_u64"],
         "the signature names a register the function never reads: {text}"
     );
 }
@@ -7331,7 +7332,10 @@ fn a_call_through_a_folded_target_takes_the_callees_interface() {
     let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text();
     assert!(!text.contains("r2dec gap"), "{text}");
-    assert!(text.contains("fcn_1030(uint64_t, uint64_t);"), "{text}");
+    assert!(
+        text.contains("fcn_1030(r2sleigh_word_u64, r2sleigh_word_u64);"),
+        "{text}"
+    );
     let calls = text.matches("fcn_1030(").count();
     assert_eq!(calls, 3, "{text}");
     // The survey walk, which keeps no lifts, folds the same call.
@@ -8281,7 +8285,7 @@ fn a_stack_pointer_merged_past_a_call_to_nowhere_is_the_frame_argument_it_is() {
     assert!(!rendered.contains("r2sleigh refused"), "{rendered}");
     assert!(
         // The extern is the callee's header, whose second parameter is the pointer it loads through.
-        rendered.contains("fcn_1030(0x1000, (uint64_t*)(uint64_t)(frame + 16U))"),
+        rendered.contains("fcn_1030(0x1000, (r2sleigh_word_u64*)(uint64_t)(frame + 16U))"),
         "{rendered}"
     );
 }
