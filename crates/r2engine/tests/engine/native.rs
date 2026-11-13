@@ -2211,7 +2211,7 @@ fn a_merge_of_two_frame_addresses_is_a_variable() {
 }
 
 /// A shrink-wrapped AArch64 return (ls-toybox `0x58a30`): `cbz` reaches the `ret` before the
-/// prologue, so no exit stack pointer is proven (D356) and X1's merge keeps the unproven-exit taint.
+/// prologue, and the epilogue unwinds the frame, so both ways in hold the entry stack pointer.
 const SHRINK_WRAPPED_RETURN: &[u8] = &[
     0xc0, 0x00, 0x00, 0x34, // 1000 cbz w0, 0x1018
     0xfd, 0x7b, 0xbf, 0xa9, // 1004 stp x29, x30, [sp, #-16]!
@@ -2222,13 +2222,41 @@ const SHRINK_WRAPPED_RETURN: &[u8] = &[
     0xc0, 0x03, 0x5f, 0xd6, // 1018 ret
 ];
 
+/// `SHRINK_WRAPPED_RETURN` whose epilogue leaves the frame (`ldp x29, x30, [sp]`): the two ways
+/// into the `ret` hold different stack pointers, so no exit stack pointer is proven.
+const UNBALANCED_RETURN: &[u8] = &[
+    0xc0, 0x00, 0x00, 0x34, // 1000 cbz w0, 0x1018
+    0xfd, 0x7b, 0xbf, 0xa9, // 1004 stp x29, x30, [sp, #-16]!
+    0x41, 0x00, 0x00, 0x34, // 1008 cbz w1, 0x1010
+    0xa1, 0x00, 0x80, 0xd2, // 100c mov x1, #5
+    0xfd, 0x7b, 0x40, 0xa9, // 1010 ldp x29, x30, [sp]
+    0x1f, 0x20, 0x03, 0xd5, // 1014 nop
+    0xc0, 0x03, 0x5f, 0xd6, // 1018 ret
+];
+
+/// A phi-less merge of the entry stack pointer and the unwound one is the entry pointer, so the
+/// shrink-wrapped return's machine state is proven and X1's merge is no unproven-exit seed (D356).
+#[test]
+fn a_shrink_wrapped_return_restores_the_entry_stack_pointer() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: SHRINK_WRAPPED_RETURN.to_vec(),
+        name: "pick",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(response.output.function().is_some(), "{output}");
+    assert!(response.undecided.is_empty(), "{:?}", response.undecided);
+}
+
 /// A refusal names each obligation it leaves undecided by its operation and its seed (D174, D253).
 #[test]
 fn a_refusal_names_each_undecided_obligation_by_its_operation_and_seed() {
     let machine = Machine::new("aarch64", "aarch64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: SHRINK_WRAPPED_RETURN.to_vec(),
+        bytes: UNBALANCED_RETURN.to_vec(),
         name: "pick",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
