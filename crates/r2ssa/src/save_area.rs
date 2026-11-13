@@ -520,9 +520,13 @@ mod tests {
         .expect("prepared");
         let graph = artifact.graph();
         let live_out = crate::liveout::FunctionLiveOut::default();
-        let observations =
-            crate::deadphi::ProvenProgramObservations::find(graph, &live_out, artifact.facts())
-                .expect("observations");
+        let observations = crate::deadphi::ProvenProgramObservations::find(
+            graph,
+            &live_out,
+            artifact.facts(),
+            None,
+        )
+        .expect("observations");
         register_save_area(
             graph,
             artifact.decompile_prep_facts(),
