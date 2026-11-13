@@ -1540,12 +1540,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_pointer_to_pointer": {
-   "cause": "[#122] Three of the stores that fill the rows array with frame addresses are not spelled yet (StoreNotSpelled), so they are residual stores where legacy refused the function.",
-   "compared": "output",
-   "owner": "D",
-   "reason": "r2sleigh_residual_void gap:StoreNotSpelled",
-   "site": "crates/r2dec/src/render/terms.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::gcc-O1::shape_recurse_direct": {
    "status": "equal"

@@ -385,7 +385,9 @@ fn compiler_slots(
                     *graph.inputs(inst.id).first()?,
                     *graph.inputs(inst.id).get(1)?,
                 );
-                (saved(value) || canary.contains(inst.id)).then_some(MemoryObjectKey {
+                // A canary store inside a wider object is that object's interior, not a slot.
+                let own_slot = canary.contains(inst.id) && model.interior_offset(address).is_none();
+                (saved(value) || own_slot).then_some(MemoryObjectKey {
                     value: address,
                     space: *space,
                 })
