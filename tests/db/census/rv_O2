@@ -130,22 +130,22 @@ NAME=0x000010c0
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x000010c0
 EXPECT=<<EOF
-r2sleigh_result_u32 fcn_10c0(uint32_t arg0, uint64_t* arg1)
+r2sleigh_result_u32 fcn_10c0(int32_t arg0, r2sleigh_word_u64* arg1)
 {
     int32_t __printf_chk(int32_t, const char*, ...);
-    uint32_t add(uint32_t, uint32_t);
-    double avg(uint64_t*, uint32_t);
-    uint32_t bit_count(uint32_t);
-    uint32_t classify(uint32_t);
-    uint64_t copy_name(uint8_t*, const char*, uint64_t);
-    uint32_t fact(uint32_t);
-    r2sleigh_result_u64 fill(uint32_t);
-    uint64_t find(uint32_t*, uint32_t, uint32_t);
-    uint32_t list_len(uint64_t);
-    uint64_t mul_div(uint64_t, uint64_t);
-    uint32_t rotl(uint32_t, uint8_t);
-    uint32_t sext(uint8_t);
-    uint32_t sum_array(uint64_t, uint32_t);
+    r2sleigh_word_u32 add(r2sleigh_word_u32, r2sleigh_word_u32);
+    double avg(r2sleigh_word_u64*, int32_t);
+    r2sleigh_word_u32 bit_count(r2sleigh_word_u32);
+    r2sleigh_word_u32 classify(uint32_t);
+    r2sleigh_word_u64 copy_name(r2sleigh_word_u8*, const char*, r2sleigh_word_u64);
+    r2sleigh_word_u32 fact(int32_t);
+    r2sleigh_result_u64 fill(r2sleigh_word_u32);
+    r2sleigh_word_u64 find(int32_t*, int32_t, int32_t);
+    r2sleigh_word_u32 list_len(r2sleigh_word_u64);
+    r2sleigh_word_u64 mul_div(r2sleigh_word_u64, int64_t);
+    r2sleigh_word_u32 rotl(r2sleigh_word_u32, r2sleigh_word_u8);
+    r2sleigh_word_u32 sext(int8_t);
+    r2sleigh_word_u32 sum_array(r2sleigh_word_u64, int32_t);
     extern char g_msg[];
 
     __uint128_t xmm0_1;
@@ -201,7 +201,7 @@ r2sleigh_result_u32 fcn_10c0(uint32_t arg0, uint64_t* arg1)
         rax_8 = (uint64_t)classify((uint32_t)arg0);
         rax_9 = (uint64_t)list_len((uint64_t)((uint64_t)(frame + 16U) + (uint64_t)80U));
         rax_10 = mul_div((uint64_t)(int32_t)((uint64_t)((uint64_t)(int32_t)arg0 * (uint64_t)100U) >> 0U), 3);
-        xmm0_4 = (__uint128_t)r2sleigh_float_to_bits_64(avg((uint64_t*)(uint64_t)((uint64_t)(frame + 16U) + (uint64_t)112U), 3));
+        xmm0_4 = (__uint128_t)r2sleigh_float_to_bits_64(avg((r2sleigh_word_u64*)(uint64_t)((uint64_t)(frame + 16U) + (uint64_t)112U), 3));
         rax_12 = (uint64_t)fact(5);
         tmp_lane_11a4_2_0_1 = (uint64_t)((__uint128_t)xmm0_4 >> 0U);
         tmp_11a4_12_1 = (uint8_t)((uint32_t)(uint8_t)((double)(int64_t)0xffffffff7fffffffU < r2sleigh_float_from_bits_64(tmp_lane_11a4_2_0_1)) & (uint32_t)(uint8_t)(r2sleigh_float_from_bits_64(tmp_lane_11a4_2_0_1) < (double)(int64_t)0x80000000U));
@@ -217,13 +217,13 @@ r2sleigh_result_u32 fcn_10c0(uint32_t arg0, uint64_t* arg1)
             rsi_8 = tmp_11c0_8_1;
         }
         {
-            rax_14 = copy_name((uint8_t*)(uint64_t)((uint64_t)(frame + 16U) + (uint64_t)144U), (const char*)rsi_8, 16);
+            rax_14 = copy_name((r2sleigh_word_u8*)(uint64_t)((uint64_t)(frame + 16U) + (uint64_t)144U), (const char*)rsi_8, 16);
             tmp_lane_11e2_2_0_1 = (uint32_t)((uint64_t)((uint64_t)rax_14 + (uint64_t)rbx_3) >> 0U);
-            rax_15 = (uint64_t)sext((uint8_t)((uint32_t)arg0 >> 0U));
+            rax_15 = (uint64_t)sext((int8_t)((uint32_t)arg0 >> 0U));
             rax_16 = (uint64_t)rotl((uint32_t)arg0, 3);
             rax_17 = (uint64_t)bit_count(0xf0f0);
             tmp_lane_1213_6_0_1 = (uint32_t)((uint32_t)(int16_t)((uint64_t)rax_15 >> 0U) + (uint32_t)((uint64_t)rax_17 >> 0U));
-            rax_18 = find((uint32_t*)(uint64_t)0x4040U, 16, 7);
+            rax_18 = find((int32_t*)(uint64_t)0x4040U, 16, 7);
             r2sleigh_residual_void(2); /* r2dec gap: CallNotRendered at 0x11c4:253 covering 1 op (render::values): call to dispatch: its arity is only at least 1 (a floor), and this call writes 3 */
             r2sleigh_residual_void(3); /* r2dec gap: ValueNotComputed at 0x11c4:260 covering 1 op (render::values) */
             tmp_lane_1246_6_0_1 = (uint32_t)((uint32_t)((uint64_t)r2sleigh_residual_u64(4) >> 0U) + (uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint64_t)rax_16 >> 0U) + (uint32_t)tmp_lane_1213_6_0_1) + (uint32_t)tmp_lane_11e2_2_0_1) + (uint32_t)((uint64_t)rax_18 >> 0U)));
@@ -245,7 +245,7 @@ NAME=0x00001280
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001280
 EXPECT=<<EOF
-r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, r2sleigh_word_u64 arg2)
 {
     uint64_t tmp_1289_0_2;
 
@@ -372,7 +372,7 @@ NAME=0x00001370
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001370
 EXPECT=<<EOF
-uint32_t add(uint32_t arg0, uint32_t arg1)
+r2sleigh_word_u32 add(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1)
 {
     /* r2dec proof: no individual construct is marked; 10 source obligations: 6 rendered, 4 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -389,7 +389,7 @@ NAME=0x00001380
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001380
 EXPECT=<<EOF
-uint32_t sum_array(uint64_t arg0, uint32_t arg1)
+r2sleigh_word_u32 sum_array(r2sleigh_word_u64 arg0, int32_t arg1)
 {
     uint32_t tmp_1384_0_1;
     uint64_t tmp_138d_8_1;
@@ -401,7 +401,7 @@ uint32_t sum_array(uint64_t arg0, uint32_t arg1)
 
     /* r2dec proof: no individual construct is marked; 42 source obligations: 34 rendered, 8 elided, 0 refused; 13 statements rendered; a call reads the result (assuming closed-world) */
     {
-        tmp_1384_0_1 = arg1;
+        tmp_1384_0_1 = (uint32_t)arg1;
         if ((uint8_t)((int32_t)tmp_1384_0_1 <= (int32_t)0U)) {
             return 0;
         } else {
@@ -431,7 +431,7 @@ NAME=0x000013b0
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x000013b0
 EXPECT=<<EOF
-uint32_t classify(uint32_t arg0)
+r2sleigh_word_u32 classify(uint32_t arg0)
 {
     extern char CSWTCH_12[];
 
@@ -460,7 +460,7 @@ NAME=0x000013d0
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x000013d0
 EXPECT=<<EOF
-uint32_t list_len(uint64_t arg0)
+r2sleigh_word_u32 list_len(r2sleigh_word_u64 arg0)
 {
     uint64_t rax_2;
     uint64_t rdi_1;
@@ -498,7 +498,7 @@ NAME=0x00001400
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001400
 EXPECT=<<EOF
-uint64_t mul_div(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 mul_div(r2sleigh_word_u64 arg0, int64_t arg1)
 {
     uint64_t rax_3;
     __uint128_t tmp_1416_0_1;
@@ -563,7 +563,7 @@ NAME=0x00001430
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001430
 EXPECT=<<EOF
-double avg(uint64_t* arg0, uint32_t arg1)
+double avg(r2sleigh_word_u64* arg0, int32_t arg1)
 {
     uint32_t tmp_1434_0_1;
     uint8_t zf_1;
@@ -589,7 +589,7 @@ double avg(uint64_t* arg0, uint32_t arg1)
 
     /* r2dec proof: no individual construct is marked; 68 source obligations: 60 rendered, 8 elided, 0 refused; 38 statements rendered; a call reads the result (assuming closed-world) */
     {
-        tmp_1434_0_1 = arg1;
+        tmp_1434_0_1 = (uint32_t)arg1;
         zf_1 = (uint8_t)((uint32_t)tmp_1434_0_1 == (uint32_t)0U);
         if ((uint8_t)((uint32_t)(uint8_t)((int32_t)tmp_1434_0_1 < (int32_t)0U) | (uint32_t)zf_1)) {
             xmm0_8 = 0;
@@ -652,7 +652,7 @@ NAME=0x00001490
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001490
 EXPECT=<<EOF
-uint32_t fact(uint32_t arg0)
+r2sleigh_word_u32 fact(int32_t arg0)
 {
     uint64_t rdi_1;
     uint64_t rax_2;
@@ -690,7 +690,7 @@ NAME=0x000014c0
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x000014c0
 EXPECT=<<EOF
-r2sleigh_result_u64 fill(uint32_t arg0)
+r2sleigh_result_u64 fill(r2sleigh_word_u32 arg0)
 {
     extern char g_counter[];
 
@@ -780,7 +780,7 @@ NAME=0x00001510
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001510
 EXPECT=<<EOF
-uint64_t copy_name(uint8_t* arg0, const char* arg1, uint64_t arg2)
+r2sleigh_word_u64 copy_name(r2sleigh_word_u8* arg0, const char* arg1, r2sleigh_word_u64 arg2)
 {
     void* memcpy(void*, const void*, uint64_t);
     uint64_t strlen(const char*);
@@ -807,7 +807,7 @@ NAME=0x00001560
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001560
 EXPECT=<<EOF
-uint32_t sext(uint8_t arg0)
+r2sleigh_word_u32 sext(int8_t arg0)
 {
     uint16_t tmp_lane_1564_0_1_1;
     uint64_t rax_1;
@@ -829,7 +829,7 @@ NAME=0x00001580
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001580
 EXPECT=<<EOF
-uint32_t rotl(uint32_t arg0, uint8_t arg1)
+r2sleigh_word_u32 rotl(r2sleigh_word_u32 arg0, r2sleigh_word_u8 arg1)
 {
     uint8_t tmp_1588_0_1;
 
@@ -849,7 +849,7 @@ NAME=0x00001590
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001590
 EXPECT=<<EOF
-uint32_t bit_count(uint32_t arg0)
+r2sleigh_word_u32 bit_count(r2sleigh_word_u32 arg0)
 {
     uint64_t rdi_1;
     uint64_t rdi_1_2;
@@ -893,7 +893,7 @@ NAME=0x000015b0
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x000015b0
 EXPECT=<<EOF
-uint64_t find(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_word_u64 find(int32_t* arg0, int32_t arg1, int32_t arg2)
 {
     uint32_t tmp_15b4_0_1;
     uint64_t rsi_1;
@@ -903,7 +903,7 @@ uint64_t find(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
 
     /* r2dec proof: no individual construct is marked; 43 source obligations: 36 rendered, 7 elided, 0 refused; 16 statements rendered; a call reads the result (assuming closed-world) */
     {
-        tmp_15b4_0_1 = arg1;
+        tmp_15b4_0_1 = (uint32_t)arg1;
         if ((uint8_t)((int32_t)tmp_15b4_0_1 <= (int32_t)0U)) {
         } else {
             rsi_1 = (uint64_t)(int32_t)arg1;
@@ -944,7 +944,7 @@ NAME=0x000015e0
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x000015e0
 EXPECT=<<EOF
-r2sleigh_result_u64 dispatch(uint64_t arg0)
+r2sleigh_result_u64 dispatch(r2sleigh_word_u64 arg0)
 {
     /* r2dec proof: 1 construct is marked below; 2 source obligations: 0 rendered, 1 elided, 0 refused, 1 residual; 0 statements rendered; the parameters are a floor: at least 1 (a transfer is unresolved); the result is unproven (no return reached): 0 unproven-return carried */
     {

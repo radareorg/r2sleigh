@@ -1370,7 +1370,6 @@ impl SolvedFunction {
         let params = crate::prepare::recover_signature_params_from_prepared_ssa(source, ptr_bits);
         let signedness = crate::signedness::scalar_signedness_of(
             source,
-            true,
             crate::signature_infer::signedness_aliases(source, &params),
         );
         let evidence =

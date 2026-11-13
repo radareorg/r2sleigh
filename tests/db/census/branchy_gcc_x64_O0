@@ -111,7 +111,7 @@ NAME=0x00401070
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401070
 EXPECT=<<EOF
-r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, r2sleigh_word_u64 arg2)
 {
     uint64_t tmp_401079_0_2;
 
@@ -244,7 +244,7 @@ NAME=0x00401156
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401156
 EXPECT=<<EOF
-uint32_t gate_one(uint32_t arg0)
+r2sleigh_word_u32 gate_one(r2sleigh_word_u32 arg0)
 {
     uint64_t rax_3;
 
@@ -269,7 +269,7 @@ NAME=0x00401178
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401178
 EXPECT=<<EOF
-uint32_t gate_three(uint32_t arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_word_u32 gate_three(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1, r2sleigh_word_u32 arg2)
 {
     uint64_t rax_3;
 
@@ -296,7 +296,7 @@ NAME=0x004011a9
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004011a9
 EXPECT=<<EOF
-uint32_t affine_probe(uint32_t arg0)
+r2sleigh_word_u32 affine_probe(r2sleigh_word_u32 arg0)
 {
     uint64_t rax_7;
 
@@ -321,7 +321,7 @@ NAME=0x004011d7
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004011d7
 EXPECT=<<EOF
-uint32_t paired_sum_diff(uint32_t arg0, uint32_t arg1)
+r2sleigh_word_u32 paired_sum_diff(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1)
 {
     uint32_t tmp_lane_4011f3_7_0_1;
     uint64_t rax_7;
@@ -350,15 +350,13 @@ NAME=0x00401216
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401216
 EXPECT=<<EOF
-uint32_t mask_probe(uint8_t arg0)
+r2sleigh_word_u32 mask_probe(r2sleigh_word_u32 arg0)
 {
-    uint32_t tmp_lane_40121e_1_0_1;
     uint64_t rax_7;
 
-    /* r2dec proof: no individual construct is marked; 27 source obligations: 20 rendered, 7 elided, 0 refused; 6 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 25 source obligations: 18 rendered, 7 elided, 0 refused; 5 statements rendered; a call reads the result (assuming closed-world) */
     {
-        tmp_lane_40121e_1_0_1 = (uint32_t)((uint64_t)(uint8_t)arg0 >> 0U);
-        if ((uint8_t)((uint32_t)((uint32_t)tmp_lane_40121e_1_0_1 & (uint32_t)192U) == (uint32_t)64U) && (uint8_t)((uint32_t)((uint32_t)tmp_lane_40121e_1_0_1 & (uint32_t)7U) == (uint32_t)5U)) {
+        if ((uint8_t)((uint32_t)((uint32_t)arg0 & (uint32_t)192U) == (uint32_t)64U) && (uint8_t)((uint32_t)((uint32_t)arg0 & (uint32_t)7U) == (uint32_t)5U)) {
             rax_7 = 1;
             return (uint32_t)rax_7;
         } else {
@@ -379,7 +377,7 @@ NAME=0x00401247
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401247
 EXPECT=<<EOF
-uint32_t bounded_fetch(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_word_u32 bounded_fetch(r2sleigh_word_u32* arg0, int32_t arg1, int32_t arg2)
 {
     uint32_t tmp_401282_0_1;
     uint64_t rax_8;
@@ -408,7 +406,7 @@ NAME=0x00401286
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401286
 EXPECT=<<EOF
-uint64_t narrow64(uint64_t arg0)
+r2sleigh_word_u64 narrow64(r2sleigh_word_u64 arg0)
 {
     /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -425,7 +423,7 @@ NAME=0x00401298
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401298
 EXPECT=<<EOF
-uint64_t widen_pair(uint32_t arg0, uint32_t arg1)
+r2sleigh_word_u64 widen_pair(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1)
 {
     /* r2dec proof: no individual construct is marked; 13 source obligations: 6 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -442,7 +440,7 @@ NAME=0x004012b8
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004012b8
 EXPECT=<<EOF
-uint32_t sign_xor(uint32_t arg0, uint32_t arg1)
+r2sleigh_word_u32 sign_xor(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1)
 {
     /* r2dec proof: no individual construct is marked; 14 source obligations: 7 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -459,7 +457,7 @@ NAME=0x004012de
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004012de
 EXPECT=<<EOF
-uint32_t opaque_self_xor(uint32_t arg0)
+r2sleigh_word_u32 opaque_self_xor(r2sleigh_word_u32 arg0)
 {
     extern char g_opaque[];
 
@@ -491,7 +489,7 @@ NAME=0x00401310
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401310
 EXPECT=<<EOF
-uint32_t zero_of(void)
+r2sleigh_word_u32 zero_of(void)
 {
     /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; the parameters are a floor: at least 0 (a register past them is only homed); a call reads the result (assuming closed-world) */
     {
@@ -508,9 +506,9 @@ NAME=0x00401322
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401322
 EXPECT=<<EOF
-uint32_t pure_zero_guard(void)
+r2sleigh_word_u32 pure_zero_guard(void)
 {
-    uint32_t zero_of(void);
+    r2sleigh_word_u32 zero_of(void);
 
     uint64_t rax_2;
     uint64_t rax_5;
@@ -537,7 +535,7 @@ NAME=0x0040134d
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x0040134d
 EXPECT=<<EOF
-uint32_t global_eq_guard(uint32_t arg0)
+r2sleigh_word_u32 global_eq_guard(r2sleigh_word_u32 arg0)
 {
     extern char g_opaque[];
 
@@ -567,7 +565,7 @@ NAME=0x0040137a
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x0040137a
 EXPECT=<<EOF
-uint32_t slot_eq_guard(uint32_t arg0)
+r2sleigh_word_u32 slot_eq_guard(r2sleigh_word_u32 arg0)
 {
     uint64_t rax_9;
 
@@ -591,7 +589,7 @@ NAME=0x004013d3
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004013d3
 EXPECT=<<EOF
-uint32_t elem_at(uint32_t* arg0, uint32_t arg1)
+r2sleigh_word_u32 elem_at(r2sleigh_word_u32* arg0, int32_t arg1)
 {
     /* r2dec proof: no individual construct is marked; 14 source obligations: 7 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -608,7 +606,7 @@ NAME=0x004013fa
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004013fa
 EXPECT=<<EOF
-uint32_t elem_before(uint32_t* arg0, uint32_t arg1)
+r2sleigh_word_u32 elem_before(r2sleigh_word_u32* arg0, int32_t arg1)
 {
     /* r2dec proof: no individual construct is marked; 15 source obligations: 8 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -625,7 +623,7 @@ NAME=0x00401421
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401421
 EXPECT=<<EOF
-uint32_t narrow8(uint32_t arg0)
+r2sleigh_word_u32 narrow8(r2sleigh_word_u32 arg0)
 {
     /* r2dec proof: no individual construct is marked; 9 source obligations: 2 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -642,7 +640,7 @@ NAME=0x00401431
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401431
 EXPECT=<<EOF
-uint32_t rec_write(uint32_t* arg0, uint32_t arg1)
+r2sleigh_word_u32 rec_write(r2sleigh_word_u32* arg0, r2sleigh_word_u32 arg1)
 {
     /* r2dec proof: no individual construct is marked; 14 source obligations: 7 rendered, 7 elided, 0 refused; 2 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -660,7 +658,7 @@ NAME=0x00401453
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401453
 EXPECT=<<EOF
-uint32_t triple_temp(uint32_t arg0)
+r2sleigh_word_u32 triple_temp(r2sleigh_word_u32 arg0)
 {
     uint32_t tmp_lane_401461_6_0_1;
 
@@ -686,7 +684,7 @@ struct fcn_401472_arg0 {
     uint64_t f_8;
 };
 
-uint32_t rec_spread(struct fcn_401472_arg0* arg0, uint32_t arg1)
+r2sleigh_word_u32 rec_spread(struct fcn_401472_arg0* arg0, r2sleigh_word_u32 arg1)
 {
     uint64_t tmp_40149f_8_1;
     uint32_t tmp_4014a9_0_1;
@@ -710,7 +708,7 @@ NAME=0x004014af
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004014af
 EXPECT=<<EOF
-uint32_t half_stride(uint16_t* arg0, uint32_t arg1)
+r2sleigh_word_u32 half_stride(uint16_t* arg0, int32_t arg1)
 {
     uint16_t tmp_4014ce_0_1;
 
@@ -730,7 +728,7 @@ NAME=0x004014d3
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004014d3
 EXPECT=<<EOF
-uint32_t rec_index(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_word_u32 rec_index(r2sleigh_word_u32* arg0, int32_t arg1, r2sleigh_word_u32 arg2)
 {
     uint32_t tmp_401511_8_1;
     uint32_t tmp_401527_0_1;
@@ -753,7 +751,7 @@ NAME=0x0040152d
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x0040152d
 EXPECT=<<EOF
-uint32_t wide_tail(uint32_t* arg0, uint32_t arg1)
+r2sleigh_word_u32 wide_tail(r2sleigh_word_u32* arg0, r2sleigh_word_u32 arg1)
 {
     uint32_t tmp_40154d_8_1;
 
@@ -774,7 +772,7 @@ NAME=0x00401558
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401558
 EXPECT=<<EOF
-uint32_t constant_branch(uint32_t arg0)
+r2sleigh_word_u32 constant_branch(r2sleigh_word_u32 arg0)
 {
     uint64_t rax_7;
 
@@ -798,7 +796,7 @@ NAME=0x00401590
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401590
 EXPECT=<<EOF
-uint32_t and_chain(uint32_t arg0, uint32_t arg1)
+r2sleigh_word_u32 and_chain(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1)
 {
     uint64_t rax_3;
 
@@ -825,7 +823,7 @@ NAME=0x004015b8
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004015b8
 EXPECT=<<EOF
-uint64_t inverted_guard(uint32_t arg0)
+r2sleigh_word_u64 inverted_guard(int32_t arg0)
 {
     extern char g_sink[];
     extern char g_note[];
@@ -857,7 +855,7 @@ NAME=0x004015f1
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004015f1
 EXPECT=<<EOF
-r2sleigh_result_u32 and_chain_effect(uint32_t arg0, uint32_t arg1)
+r2sleigh_result_u32 and_chain_effect(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1)
 {
     extern char g_sink[];
 
@@ -892,7 +890,7 @@ NAME=0x0040161c
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x0040161c
 EXPECT=<<EOF
-r2sleigh_result_u32 inverted_void(uint32_t arg0)
+r2sleigh_result_u32 inverted_void(int32_t arg0)
 {
     extern char g_sink[];
     extern char g_note[];
@@ -922,7 +920,7 @@ NAME=0x00401647
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401647
 EXPECT=<<EOF
-uint64_t inverted_goto(uint32_t arg0)
+r2sleigh_word_u64 inverted_goto(int32_t arg0)
 {
     extern char g_sink[];
     extern char g_note[];
@@ -949,7 +947,7 @@ NAME=0x00401679
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401679
 EXPECT=<<EOF
-uint32_t tail_guard(uint32_t arg0)
+r2sleigh_word_u32 tail_guard(int32_t arg0)
 {
     extern char g_sink[];
     extern char g_note[];
@@ -976,7 +974,7 @@ NAME=0x004016ac
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004016ac
 EXPECT=<<EOF
-uint32_t addr_chain(void)
+r2sleigh_word_u32 addr_chain(void)
 {
     /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -993,7 +991,7 @@ NAME=0x004016dc
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x004016dc
 EXPECT=<<EOF
-uint32_t typed_compete(uint32_t arg0)
+r2sleigh_word_u32 typed_compete(int32_t arg0)
 {
     extern char g_sink[];
     extern char g_note[];
@@ -1020,7 +1018,7 @@ NAME=0x0040170f
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x0040170f
 EXPECT=<<EOF
-uint32_t bool_relay(uint32_t arg0, uint32_t arg1)
+r2sleigh_word_u32 bool_relay(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1)
 {
     uint32_t tmp_lane_401724_0_1_1;
     uint32_t tmp_lane_401731_0_1_1;
@@ -1064,39 +1062,39 @@ struct fcn_401472_arg0;
 
 r2sleigh_result_u32 fcn_401764(void)
 {
-    uint32_t addr_chain(void);
-    uint32_t affine_probe(uint32_t);
-    uint32_t and_chain(uint32_t, uint32_t);
-    r2sleigh_result_u32 and_chain_effect(uint32_t, uint32_t);
-    uint32_t bool_relay(uint32_t, uint32_t);
-    uint32_t bounded_fetch(uint32_t*, uint32_t, uint32_t);
-    uint32_t constant_branch(uint32_t);
-    uint32_t elem_at(uint32_t*, uint32_t);
-    uint32_t elem_before(uint32_t*, uint32_t);
-    uint32_t gate_one(uint32_t);
-    uint32_t gate_three(uint32_t, uint32_t, uint32_t);
-    uint32_t global_eq_guard(uint32_t);
-    uint32_t half_stride(uint16_t*, uint32_t);
-    uint64_t inverted_goto(uint32_t);
-    uint64_t inverted_guard(uint32_t);
-    r2sleigh_result_u32 inverted_void(uint32_t);
-    uint32_t mask_probe(uint8_t);
-    uint64_t narrow64(uint64_t);
-    uint32_t narrow8(uint32_t);
-    uint32_t opaque_self_xor(uint32_t);
-    uint32_t paired_sum_diff(uint32_t, uint32_t);
+    r2sleigh_word_u32 addr_chain(void);
+    r2sleigh_word_u32 affine_probe(r2sleigh_word_u32);
+    r2sleigh_word_u32 and_chain(r2sleigh_word_u32, r2sleigh_word_u32);
+    r2sleigh_result_u32 and_chain_effect(r2sleigh_word_u32, r2sleigh_word_u32);
+    r2sleigh_word_u32 bool_relay(r2sleigh_word_u32, r2sleigh_word_u32);
+    r2sleigh_word_u32 bounded_fetch(r2sleigh_word_u32*, int32_t, int32_t);
+    r2sleigh_word_u32 constant_branch(r2sleigh_word_u32);
+    r2sleigh_word_u32 elem_at(r2sleigh_word_u32*, int32_t);
+    r2sleigh_word_u32 elem_before(r2sleigh_word_u32*, int32_t);
+    r2sleigh_word_u32 gate_one(r2sleigh_word_u32);
+    r2sleigh_word_u32 gate_three(r2sleigh_word_u32, r2sleigh_word_u32, r2sleigh_word_u32);
+    r2sleigh_word_u32 global_eq_guard(r2sleigh_word_u32);
+    r2sleigh_word_u32 half_stride(uint16_t*, int32_t);
+    r2sleigh_word_u64 inverted_goto(int32_t);
+    r2sleigh_word_u64 inverted_guard(int32_t);
+    r2sleigh_result_u32 inverted_void(int32_t);
+    r2sleigh_word_u32 mask_probe(r2sleigh_word_u32);
+    r2sleigh_word_u64 narrow64(r2sleigh_word_u64);
+    r2sleigh_word_u32 narrow8(r2sleigh_word_u32);
+    r2sleigh_word_u32 opaque_self_xor(r2sleigh_word_u32);
+    r2sleigh_word_u32 paired_sum_diff(r2sleigh_word_u32, r2sleigh_word_u32);
     int32_t printf(const char*, ...);
-    uint32_t pure_zero_guard(void);
-    uint32_t rec_index(uint32_t*, uint32_t, uint32_t);
-    uint32_t rec_spread(struct fcn_401472_arg0*, uint32_t);
-    uint32_t rec_write(uint32_t*, uint32_t);
-    uint32_t sign_xor(uint32_t, uint32_t);
-    uint32_t slot_eq_guard(uint32_t);
-    uint32_t tail_guard(uint32_t);
-    uint32_t triple_temp(uint32_t);
-    uint32_t typed_compete(uint32_t);
-    uint32_t wide_tail(uint32_t*, uint32_t);
-    uint64_t widen_pair(uint32_t, uint32_t);
+    r2sleigh_word_u32 pure_zero_guard(void);
+    r2sleigh_word_u32 rec_index(r2sleigh_word_u32*, int32_t, r2sleigh_word_u32);
+    r2sleigh_word_u32 rec_spread(struct fcn_401472_arg0*, r2sleigh_word_u32);
+    r2sleigh_word_u32 rec_write(r2sleigh_word_u32*, r2sleigh_word_u32);
+    r2sleigh_word_u32 sign_xor(r2sleigh_word_u32, r2sleigh_word_u32);
+    r2sleigh_word_u32 slot_eq_guard(r2sleigh_word_u32);
+    r2sleigh_word_u32 tail_guard(int32_t);
+    r2sleigh_word_u32 triple_temp(r2sleigh_word_u32);
+    r2sleigh_word_u32 typed_compete(int32_t);
+    r2sleigh_word_u32 wide_tail(r2sleigh_word_u32*, r2sleigh_word_u32);
+    r2sleigh_word_u64 widen_pair(r2sleigh_word_u32, r2sleigh_word_u32);
 
     uint64_t rax_6;
     uint64_t rbx_1;
@@ -1173,7 +1171,7 @@ r2sleigh_result_u32 fcn_401764(void)
         r2sleigh_store_u16((void*)((uint64_t)(frame + 48U) + (uint64_t)28U), (uint16_t)3U);
         r2sleigh_store_u16((void*)((uint64_t)(frame + 48U) + (uint64_t)30U), (uint16_t)2U);
         r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)5U);
-        rax_6 = (uint64_t)bounded_fetch((uint32_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), 3, 8);
+        rax_6 = (uint64_t)bounded_fetch((r2sleigh_word_u32*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), 3, 8);
         rbx_1 = (uint64_t)(uint32_t)((uint64_t)rax_6 >> 0U);
         rax_7 = (uint64_t)mask_probe(69);
         rax_8 = (uint64_t)paired_sum_diff(140, 110);
@@ -1195,19 +1193,19 @@ r2sleigh_result_u32 fcn_401764(void)
         rax_23 = narrow64((uint64_t)0x1122334455667788U);
         printf("%u %llu %d %d %d\n", (uint64_t)(uint32_t)((uint64_t)rax_23 >> 0U), rax_21, (uint64_t)(uint32_t)((uint64_t)rax_20 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_19 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_17 >> 0U));
         rax_26 = (uint64_t)narrow8(0x1234);
-        rax_28 = (uint64_t)elem_before((uint32_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), 2);
-        rax_30 = (uint64_t)elem_at((uint32_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), 2);
+        rax_28 = (uint64_t)elem_before((r2sleigh_word_u32*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), 2);
+        rax_30 = (uint64_t)elem_at((r2sleigh_word_u32*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), 2);
         rax_31 = (uint64_t)slot_eq_guard(11);
         rax_32 = (uint64_t)global_eq_guard(11);
         printf("%d %d %d %d %u\n", (uint64_t)(uint32_t)((uint64_t)rax_32 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_31 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_30 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_28 >> 0U), (uint64_t)(uint8_t)((uint64_t)rax_26 >> 0U));
-        rax_36 = (uint64_t)wide_tail((uint32_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)64U), 8);
+        rax_36 = (uint64_t)wide_tail((r2sleigh_word_u32*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)64U), 8);
         rbx_4 = (uint64_t)(uint32_t)((uint64_t)rax_36 >> 0U);
-        rax_38 = (uint64_t)rec_index((uint32_t*)(uint64_t)(frame + 48U), 0, 6);
+        rax_38 = (uint64_t)rec_index((r2sleigh_word_u32*)(uint64_t)(frame + 48U), 0, 6);
         rax_40 = (uint64_t)half_stride((uint16_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)16U), 1);
         rax_42 = (uint64_t)rec_spread((struct fcn_401472_arg0*)(uint64_t)(frame + 48U), 3);
         tmp_401a41_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         rax_44 = (uint64_t)triple_temp((uint32_t)tmp_401a41_8_1);
-        rax_46 = (uint64_t)rec_write((uint32_t*)(uint64_t)(frame + 48U), 4);
+        rax_46 = (uint64_t)rec_write((r2sleigh_word_u32*)(uint64_t)(frame + 48U), 4);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)rbx_4);
         printf("%d %d %d %u %d %d\n", (uint64_t)(uint32_t)((uint64_t)rax_46 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_44 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_42 >> 0U), (uint64_t)(uint16_t)((uint64_t)rax_40 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_38 >> 0U), rbx_4);
         rax_49 = (uint64_t)tail_guard(20);
@@ -1221,7 +1219,7 @@ r2sleigh_result_u32 fcn_401764(void)
         and_chain_effect(1, 1);
         rax_59 = (uint64_t)bool_relay(1, 1);
         tmp_401b17_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
-        rax_61 = (uint64_t)typed_compete((uint32_t)tmp_401b17_8_1);
+        rax_61 = (uint64_t)typed_compete((int32_t)tmp_401b17_8_1);
         rax_62 = (uint64_t)addr_chain();
         printf("%d %d %d\n", (uint64_t)(uint32_t)((uint64_t)rax_62 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_61 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_59 >> 0U));
         {

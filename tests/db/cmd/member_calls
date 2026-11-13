@@ -299,7 +299,7 @@ struct fcn_401340_arg0 {
     uint32_t f_48;
 };
 
-r2sleigh_result_u64 fcn_401340(struct fcn_401340_arg0* arg0, uint64_t arg1, uint64_t arg2)
+r2sleigh_result_u64 fcn_401340(struct fcn_401340_arg0* arg0, r2sleigh_word_u64 arg1, r2sleigh_word_u64 arg2)
 {
     uint64_t tmp_401350_0_1;
     uint64_t tmp_401353_8_1;

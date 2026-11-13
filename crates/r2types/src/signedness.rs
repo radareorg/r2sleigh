@@ -22,10 +22,13 @@ pub(crate) enum ScalarSignednessEvidence {
 pub(crate) fn infer_scalar_signedness<'a, V: DenseId + 'a>(
     operations: impl IntoIterator<Item = (&'a SSAOp<V>, bool)>,
     aliases: impl IntoIterator<Item = (V, V)>,
+    returned: impl IntoIterator<Item = V>,
     facts: impl Fn(V) -> (u32, bool),
 ) -> IdMap<V, BTreeSet<ScalarSignednessEvidence>> {
     let operations = operations.into_iter().collect::<Vec<_>>();
+    let aliases = aliases.into_iter().collect::<Vec<_>>();
     let condition_values = control_condition_values(&operations, &facts);
+    let live = live_values(&operations, &aliases, returned);
     let mut reverse_edges = IdMap::<V, Vec<V>>::default();
     let mut signedness = IdMap::<V, BTreeSet<ScalarSignednessEvidence>>::default();
     let mut link = |source: V, derived: V| {
@@ -46,6 +49,9 @@ pub(crate) fn infer_scalar_signedness<'a, V: DenseId + 'a>(
     for (source, derived) in aliases {
         link(source, derived);
     }
+    // A dead operation states nothing: `imul`'s sign extensions compute only its flags (D265).
+    let operations =
+        (operations.into_iter()).filter(|(op, _)| op.dst().is_none_or(|dst| live.contains(*dst)));
     for (op, conventional) in operations {
         match op {
             SSAOp::Copy { dst, src } | SSAOp::Cast { dst, src } | SSAOp::New { dst, src } => {
@@ -105,6 +111,41 @@ pub(crate) fn infer_scalar_signedness<'a, V: DenseId + 'a>(
         }
     }
     signedness
+}
+
+/// The values an effect reads: an operation with no output (a store, branch, call or return), a
+/// returned value, and every value they are computed from through definitions and merges. One
+/// worklist, each value queued once: O(operations + aliases).
+fn live_values<V: DenseId>(
+    operations: &[(&SSAOp<V>, bool)],
+    aliases: &[(V, V)],
+    returned: impl IntoIterator<Item = V>,
+) -> IdSet<V> {
+    let mut definitions = IdMap::<V, usize>::default();
+    let mut merged = IdMap::<V, Vec<V>>::default();
+    for (index, (op, _)) in operations.iter().enumerate() {
+        if let Some(dst) = op.dst() {
+            definitions.get_or_insert_with(*dst, || index);
+        }
+    }
+    for (source, derived) in aliases {
+        merged.get_or_insert_with(*derived, Vec::new).push(*source);
+    }
+    let mut pending = returned.into_iter().collect::<Vec<_>>();
+    for (op, _) in operations.iter().filter(|(op, _)| op.dst().is_none()) {
+        op.for_each_source(|source| pending.push(*source));
+    }
+    let mut live = IdSet::default();
+    while let Some(value) = pending.pop() {
+        if !live.insert(value) {
+            continue;
+        }
+        pending.extend(merged.get(value).into_iter().flatten().copied());
+        if let Some((op, _)) = definitions.get(value).map(|index| operations[*index]) {
+            op.for_each_source(|source| pending.push(*source));
+        }
+    }
+    live
 }
 
 /// The values a conditional branch tests, and every value they carry the
@@ -167,12 +208,11 @@ fn condition_carrier_op<V: Copy>(op: &SSAOp<V>, facts: &impl Fn(V) -> (u32, bool
     )
 }
 
-/// The scalar signedness of a prepared function's values: its graph
+/// The scalar signedness of a prepared function's values: its live graph
 /// operations, with each zero extension the architecture performs set
-/// aside, plus the same-width `aliases`, plus its merges where `merges`.
+/// aside, plus its merges and the same-width `aliases`.
 pub(crate) fn scalar_signedness_of(
     source: &r2ssa::SsaArtifact,
-    merges: bool,
     aliases: impl IntoIterator<Item = (ValueId, ValueId)>,
 ) -> IdMap<ValueId, BTreeSet<ScalarSignednessEvidence>> {
     let graph = source.graph();
@@ -189,7 +229,6 @@ pub(crate) fn scalar_signedness_of(
     let merge_links = graph
         .insts
         .iter()
-        .filter(|_| merges)
         .filter_map(|inst| match &inst.payload {
             r2ssa::InstPayload::Phi { .. } => inst.output.map(|output| (inst, output)),
             r2ssa::InstPayload::Op(_) => None,
@@ -200,7 +239,9 @@ pub(crate) fn scalar_signedness_of(
                 .iter()
                 .map(move |input| (*input, output))
         });
-    infer_scalar_signedness(operations, merge_links.chain(aliases), |value| {
+    let returned = (source.certificates().returns.iter())
+        .flat_map(|certificate| std::iter::once(certificate.value).chain(certificate.high));
+    infer_scalar_signedness(operations, merge_links.chain(aliases), returned, |value| {
         graph.value(value).map_or((0, false), |value| {
             (value.var.size, value.var.constant_bits().is_some())
         })
@@ -229,11 +270,13 @@ mod tests {
             .iter()
             .map(|(source, derived)| (table.intern(source), table.intern(derived)))
             .collect::<Vec<_>>();
+        let observed = (operations.iter()).filter_map(|(op, _)| op.dst().copied());
         let inferred = infer_scalar_signedness(
             operations
                 .iter()
                 .map(|(op, conventional)| (op, *conventional)),
             aliases,
+            observed.collect::<Vec<_>>(),
             |id| {
                 let var = table.var(id);
                 (var.size, var.is_const())
@@ -354,5 +397,43 @@ mod tests {
         let inferred = infer(&operations, &[], false);
 
         assert_eq!(inferred(&value), None);
+    }
+
+    /// x86's three-operand `imul` sign-extends both factors only to compute its overflow flag; a
+    /// flag nothing reads leaves the factor unsigned by no operation (D265).
+    #[test]
+    fn a_dead_flag_computation_seeds_no_sign() {
+        let mut table = r2ssa::ValueTable::default();
+        let mut id = |var: SSAVar| table.intern(&var);
+        let (value, wide, product) = (
+            id(SSAVar::new("EAX", 1, 4)),
+            id(SSAVar::new("wide", 1, 8)),
+            id(SSAVar::new("OF", 1, 8)),
+        );
+        let operations = [
+            SSAOp::IntSExt {
+                dst: wide,
+                src: value,
+            },
+            SSAOp::IntMult {
+                dst: product,
+                a: wide,
+                b: wide,
+            },
+        ];
+        let ops = operations.iter().map(|op| (op, false));
+        let dead = infer_scalar_signedness(ops.clone(), [], [], |id| {
+            let var = table.var(id);
+            (var.size, var.is_const())
+        });
+        assert_eq!(dead.get(value), None);
+        let live = infer_scalar_signedness(ops, [], [product], |id| {
+            let var = table.var(id);
+            (var.size, var.is_const())
+        });
+        assert_eq!(
+            live.get(value),
+            Some(&BTreeSet::from([ScalarSignednessEvidence::Signed]))
+        );
     }
 }

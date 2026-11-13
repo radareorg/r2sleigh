@@ -82,20 +82,20 @@ EXPECT=<<EOF
 r2sleigh_result_u32 fcn_401050(void)
 {
     int32_t __printf_chk(int32_t, const char*, ...);
-    uint32_t adler32(uint64_t, uint64_t);
-    uint64_t combined(uint64_t, uint64_t);
-    uint32_t crc32_bitwise(uint64_t, uint64_t);
+    r2sleigh_word_u32 adler32(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 combined(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u32 crc32_bitwise(r2sleigh_word_u64, r2sleigh_word_u64);
     r2sleigh_result_u64 crc32_init(void);
-    uint32_t crc32_table(uint64_t, uint64_t);
-    uint32_t djb2(uint64_t, uint64_t);
-    uint32_t fletcher32(uint64_t, uint64_t);
-    uint32_t fnv1a32(uint64_t, uint64_t);
-    uint64_t fnv1a64(uint64_t, uint64_t);
-    uint32_t murmur3_32(uint8_t*, uint64_t, uint32_t);
-    uint32_t pearson(uint64_t, uint64_t);
-    uint32_t sdbm(uint64_t, uint64_t);
-    uint64_t siphash24(uint8_t*, uint64_t, uint64_t, uint64_t);
-    uint32_t xxhash32(uint64_t, uint64_t, uint32_t);
+    r2sleigh_word_u32 crc32_table(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u32 djb2(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u32 fletcher32(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u32 fnv1a32(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 fnv1a64(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u32 murmur3_32(uint8_t*, r2sleigh_word_u64, r2sleigh_word_u32);
+    r2sleigh_word_u32 pearson(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u32 sdbm(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 siphash24(uint8_t*, r2sleigh_word_u64, r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u32 xxhash32(uint64_t, uint64_t, r2sleigh_word_u32);
 
     uint64_t rax_2;
     uint64_t rax_5;
@@ -154,7 +154,7 @@ NAME=0x00401240
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401240
 EXPECT=<<EOF
-r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, r2sleigh_word_u64 arg2)
 {
     uint64_t tmp_401249_0_2;
 
@@ -287,7 +287,7 @@ NAME=0x00401330
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401330
 EXPECT=<<EOF
-uint32_t fnv1a32(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u32 fnv1a32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t rsi_1;
     uint64_t rax_2;
@@ -327,7 +327,7 @@ NAME=0x00401370
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401370
 EXPECT=<<EOF
-uint64_t fnv1a64(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 fnv1a64(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t rsi_1;
     uint64_t rax_2;
@@ -373,7 +373,7 @@ NAME=0x004013b0
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x004013b0
 EXPECT=<<EOF
-uint32_t djb2(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u32 djb2(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t rsi_1;
     uint64_t rax_2;
@@ -413,7 +413,7 @@ NAME=0x004013f0
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x004013f0
 EXPECT=<<EOF
-uint32_t sdbm(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u32 sdbm(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t rsi_1;
     uint64_t rax_2;
@@ -453,7 +453,7 @@ NAME=0x00401420
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401420
 EXPECT=<<EOF
-uint32_t adler32(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u32 adler32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t rsi_1;
     uint64_t rax_2;
@@ -502,7 +502,7 @@ NAME=0x004014a0
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x004014a0
 EXPECT=<<EOF
-uint32_t fletcher32(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u32 fletcher32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t tmp_4014a9_8_1;
     uint64_t rax_2;
@@ -555,7 +555,7 @@ NAME=0x00401530
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401530
 EXPECT=<<EOF
-uint32_t crc32_bitwise(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u32 crc32_bitwise(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t rsi_1;
     uint64_t rax_2;
@@ -824,7 +824,7 @@ NAME=0x00401630
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401630
 EXPECT=<<EOF
-uint32_t crc32_table(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u32 crc32_table(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     extern char crc_tab[];
 
@@ -868,7 +868,7 @@ NAME=0x00401680
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401680
 EXPECT=<<EOF
-uint32_t murmur3_32(uint8_t* arg0, uint64_t arg1, uint32_t arg2)
+r2sleigh_word_u32 murmur3_32(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_word_u32 arg2)
 {
     uint64_t rcx_1;
     uint64_t rax_2;
@@ -974,7 +974,7 @@ NAME=0x00401750
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401750
 EXPECT=<<EOF
-uint32_t xxhash32(uint64_t arg0, uint64_t arg1, uint32_t arg2)
+r2sleigh_word_u32 xxhash32(uint64_t arg0, uint64_t arg1, r2sleigh_word_u32 arg2)
 {
     uint64_t rdx_1;
     uint64_t rsi_1;
@@ -1119,7 +1119,7 @@ NAME=0x004018b0
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x004018b0
 EXPECT=<<EOF
-uint64_t siphash24(uint8_t* arg0, uint64_t arg1, uint64_t arg2, uint64_t arg3)
+r2sleigh_word_u64 siphash24(uint8_t* arg0, r2sleigh_word_u64 arg1, r2sleigh_word_u64 arg2, r2sleigh_word_u64 arg3)
 {
     uint64_t rax_2;
     uint64_t rdx_1;
@@ -1402,7 +1402,7 @@ NAME=0x00401b10
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401b10
 EXPECT=<<EOF
-uint32_t pearson(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u32 pearson(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     extern char pearson_tab[];
 
@@ -1446,12 +1446,12 @@ NAME=0x00401b50
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401b50
 EXPECT=<<EOF
-uint64_t combined(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 combined(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
-    uint32_t crc32_bitwise(uint64_t, uint64_t);
-    uint32_t djb2(uint64_t, uint64_t);
-    uint64_t fnv1a64(uint64_t, uint64_t);
-    uint32_t murmur3_32(uint8_t*, uint64_t, uint32_t);
+    r2sleigh_word_u32 crc32_bitwise(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u32 djb2(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 fnv1a64(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u32 murmur3_32(uint8_t*, r2sleigh_word_u64, r2sleigh_word_u32);
 
     uint64_t rax_1;
     uint64_t rax_2;

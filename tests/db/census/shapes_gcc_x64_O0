@@ -120,7 +120,7 @@ NAME=0x00401090
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401090
 EXPECT=<<EOF
-r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, r2sleigh_word_u64 arg2)
 {
     uint64_t tmp_401099_0_2;
 
@@ -253,7 +253,7 @@ NAME=0x00401176
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401176
 EXPECT=<<EOF
-uint64_t shape_variadic(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_variadic(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     int32_t snprintf(char*, uint64_t, const char*, ...);
 
@@ -359,7 +359,7 @@ NAME=0x004013c9
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x004013c9
 EXPECT=<<EOF
-uint64_t vfold(uint32_t arg0, ...)
+r2sleigh_word_u64 vfold(uint32_t arg0, ...)
 {
     uint32_t tmp_4014e7_8_1;
     uint32_t tmp_4014ed_8_1;
@@ -452,9 +452,9 @@ NAME=0x00401515
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401515
 EXPECT=<<EOF
-uint64_t shape_variadic_local(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_variadic_local(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
-    uint64_t vfold(uint32_t, ...);
+    r2sleigh_word_u64 vfold(uint32_t, ...);
 
     uint64_t rax_6;
     uint64_t rax_7;
@@ -486,7 +486,7 @@ NAME=0x00401633
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401633
 EXPECT=<<EOF
-uint64_t shape_step(uint64_t arg0)
+r2sleigh_word_u64 shape_step(r2sleigh_word_u64 arg0)
 {
     /* r2dec proof: no individual construct is marked; 13 source obligations: 6 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -503,7 +503,7 @@ NAME=0x00401660
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401660
 EXPECT=<<EOF
-r2sleigh_result_u64 shape_stash(uint64_t* arg0, uint64_t arg1)
+r2sleigh_result_u64 shape_stash(r2sleigh_word_u64* arg0, r2sleigh_word_u64 arg1)
 {
     /* r2dec proof: no individual construct is marked; 12 source obligations: 4 rendered, 8 elided, 0 refused; 2 statements rendered; no call reads the result (assuming closed-world); the result's second register is open: no call read decides it; the result is unproven (Unread): 1 unproven-return carried */
     {
@@ -521,10 +521,10 @@ NAME=0x0040167e
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x0040167e
 EXPECT=<<EOF
-uint64_t shape_call_chain(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_call_chain(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
-    r2sleigh_result_u64 shape_stash(uint64_t*, uint64_t);
-    uint64_t shape_step(uint64_t);
+    r2sleigh_result_u64 shape_stash(r2sleigh_word_u64*, r2sleigh_word_u64);
+    r2sleigh_word_u64 shape_step(r2sleigh_word_u64);
 
     uint64_t tmp_4016c3_8_1;
     uint64_t tmp_4016d9_8_1;
@@ -554,19 +554,19 @@ uint64_t shape_call_chain(uint64_t arg0, uint64_t arg1)
         r2sleigh_store_u64((void*)((uint64_t)(frame + 40U) + (uint64_t)8U), (uint64_t)0U);
         r2sleigh_store_u64((void*)((uint64_t)(frame + 40U) + (uint64_t)16U), (uint64_t)0U);
         tmp_4016c3_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
-        shape_stash((uint64_t*)(uint64_t)(frame + 40U), (uint64_t)((uint64_t)tmp_4016c3_8_1 ^ (uint64_t)0x123456789abcdefU));
+        shape_stash((r2sleigh_word_u64*)(uint64_t)(frame + 40U), (uint64_t)((uint64_t)tmp_4016c3_8_1 ^ (uint64_t)0x123456789abcdefU));
         tmp_4016d9_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
         rax_8 = shape_step(tmp_4016d9_8_1);
         r2sleigh_store_u64((void*)((uint64_t)(frame + 40U) + (uint64_t)24U), (uint64_t)rax_8);
         tmp_4016e9_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
         tmp_4016ed_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
-        shape_stash((uint64_t*)(uint64_t)((uint64_t)(frame + 40U) + (uint64_t)8U), (uint64_t)((uint64_t)tmp_4016e9_8_1 + (uint64_t)tmp_4016ed_8_1));
+        shape_stash((r2sleigh_word_u64*)(uint64_t)((uint64_t)(frame + 40U) + (uint64_t)8U), (uint64_t)((uint64_t)tmp_4016e9_8_1 + (uint64_t)tmp_4016ed_8_1));
         tmp_401703_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 40U) + (uint64_t)8U));
         rax_13 = shape_step(tmp_401703_8_1);
         r2sleigh_store_u64((void*)((uint64_t)(frame + 40U) + (uint64_t)32U), (uint64_t)rax_13);
         tmp_401713_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 40U) + (uint64_t)8U));
         tmp_401717_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 40U) + (uint64_t)24U));
-        shape_stash((uint64_t*)(uint64_t)((uint64_t)(frame + 40U) + (uint64_t)16U), (uint64_t)((uint64_t)tmp_401713_8_1 ^ (uint64_t)tmp_401717_8_1));
+        shape_stash((r2sleigh_word_u64*)(uint64_t)((uint64_t)(frame + 40U) + (uint64_t)16U), (uint64_t)((uint64_t)tmp_401713_8_1 ^ (uint64_t)tmp_401717_8_1));
         tmp_40172d_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 40U) + (uint64_t)16U));
         rax_19 = shape_step(tmp_40172d_8_1);
         r2sleigh_store_u64((void*)((uint64_t)(frame + 40U) + (uint64_t)40U), (uint64_t)rax_19);
@@ -636,7 +636,7 @@ NAME=0x0040182c
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x0040182c
 EXPECT=<<EOF
-uint64_t mixed_fold(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 mixed_fold(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint8_t tmp_401845_8_1;
     uint16_t tmp_401853_8_1;
@@ -662,7 +662,7 @@ NAME=0x00401876
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401876
 EXPECT=<<EOF
-__uint128_t mixed_from(uint64_t arg0, uint64_t arg1)
+__uint128_t mixed_from(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t tmp_4018ac_8_1;
     _Alignas(16) uint8_t frame[24];
@@ -688,9 +688,9 @@ CMDS=aa; pdd @ 0x004018b6
 EXPECT=<<EOF
 struct fcn_4017ac_arg0;
 
-uint64_t shape_struct_pointer(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_struct_pointer(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
-    __uint128_t mixed_from(uint64_t, uint64_t);
+    __uint128_t mixed_from(r2sleigh_word_u64, r2sleigh_word_u64);
     r2sleigh_result_u64 mixed_touch(struct fcn_4017ac_arg0*);
 
     uint64_t tmp_4018d9_8_1;
@@ -744,10 +744,10 @@ NAME=0x00401961
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401961
 EXPECT=<<EOF
-uint64_t shape_struct_value(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_struct_value(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
-    uint64_t mixed_fold(uint64_t, uint64_t);
-    __uint128_t mixed_from(uint64_t, uint64_t);
+    r2sleigh_word_u64 mixed_fold(r2sleigh_word_u64, r2sleigh_word_u64);
+    __uint128_t mixed_from(r2sleigh_word_u64, r2sleigh_word_u64);
 
     uint64_t rax_2;
     uint64_t rdx_2;
@@ -782,7 +782,7 @@ NAME=0x004019ec
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x004019ec
 EXPECT=<<EOF
-uint64_t shape_struct_array(uint32_t arg0, uint32_t arg1)
+r2sleigh_word_u64 shape_struct_array(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1)
 {
     uint64_t rdi_1;
     uint64_t rsi_1;
@@ -832,7 +832,7 @@ NAME=0x00401ac2
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401ac2
 EXPECT=<<EOF
-uint64_t shape_stack_buffer(uint64_t arg0, uint8_t arg1)
+r2sleigh_word_u64 shape_stack_buffer(r2sleigh_word_u64 arg0, r2sleigh_word_u8 arg1)
 {
     uint64_t rsi_1;
     uint32_t stack_m104_1;
@@ -877,7 +877,7 @@ NAME=0x00401b92
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401b92
 EXPECT=<<EOF
-uint64_t shape_recurse_direct(uint8_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_recurse_direct(r2sleigh_word_u32 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t rax_2;
     uint64_t rax_10;
@@ -885,9 +885,9 @@ uint64_t shape_recurse_direct(uint8_t arg0, uint64_t arg1)
 
     /* r2dec proof: no individual construct is marked; 36 source obligations: 26 rendered, 10 elided, 0 refused; 7 statements rendered; a call reads the result (assuming closed-world) */
     {
-        rax_2 = (uint64_t)(uint32_t)((uint32_t)((uint64_t)(uint8_t)arg0 >> 0U) & (uint32_t)15U);
+        rax_2 = (uint64_t)(uint32_t)((uint32_t)arg0 & (uint32_t)15U);
         if ((uint8_t)((uint64_t)rax_2 != (uint64_t)0U)) {
-            rax_10 = shape_recurse_direct((uint8_t)((uint64_t)rax_2 - (uint64_t)1U), (uint64_t)((uint64_t)rax_2 + (uint64_t)((uint64_t)((uint64_t)arg1 + (uint64_t)arg1) + (uint64_t)arg1)));
+            rax_10 = shape_recurse_direct((uint32_t)((uint64_t)rax_2 - (uint64_t)1U), (uint64_t)((uint64_t)rax_2 + (uint64_t)((uint64_t)((uint64_t)arg1 + (uint64_t)arg1) + (uint64_t)arg1)));
             rax_12 = (uint64_t)((uint64_t)rax_10 ^ (uint64_t)((uint64_t)(uint32_t)3U >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_2 << (uint64_t)(uint32_t)3U)));
             return (uint64_t)rax_12;
         } else {
@@ -906,9 +906,9 @@ NAME=0x00401bf6
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401bf6
 EXPECT=<<EOF
-uint64_t shape_mutual_even(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_mutual_even(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
-    uint64_t shape_mutual_odd(uint64_t, uint64_t);
+    r2sleigh_word_u64 shape_mutual_odd(r2sleigh_word_u64, r2sleigh_word_u64);
 
     uint64_t rax_9;
     uint64_t rax_10;
@@ -935,9 +935,9 @@ NAME=0x00401c4a
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401c4a
 EXPECT=<<EOF
-uint64_t shape_mutual_odd(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_mutual_odd(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
-    uint64_t shape_mutual_even(uint64_t, uint64_t);
+    r2sleigh_word_u64 shape_mutual_even(r2sleigh_word_u64, r2sleigh_word_u64);
 
     uint64_t rax_9;
     uint64_t rax_10;
@@ -964,10 +964,10 @@ NAME=0x00401c9f
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401c9f
 EXPECT=<<EOF
-uint64_t shape_recurse_mutual(uint8_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_recurse_mutual(r2sleigh_word_u32 arg0, r2sleigh_word_u64 arg1)
 {
-    uint64_t shape_mutual_even(uint64_t, uint64_t);
-    uint64_t shape_mutual_odd(uint64_t, uint64_t);
+    r2sleigh_word_u64 shape_mutual_even(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 shape_mutual_odd(r2sleigh_word_u64, r2sleigh_word_u64);
 
     uint64_t rdi_1;
     uint64_t rax_4;
@@ -975,7 +975,7 @@ uint64_t shape_recurse_mutual(uint8_t arg0, uint64_t arg1)
 
     /* r2dec proof: no individual construct is marked; 40 source obligations: 25 rendered, 15 elided, 0 refused; 4 statements rendered; a call reads the result (assuming closed-world) */
     {
-        rdi_1 = (uint64_t)(uint8_t)arg0;
+        rdi_1 = (uint64_t)(uint32_t)arg0;
         rax_4 = shape_mutual_even((uint64_t)(uint32_t)((uint32_t)((uint64_t)rdi_1 >> 0U) & (uint32_t)15U), arg1);
         rax_9 = shape_mutual_odd((uint64_t)(uint32_t)((uint32_t)((uint64_t)rdi_1 >> 0U) & (uint32_t)7U), (uint64_t)((uint64_t)arg1 ^ (uint64_t)0xffffU));
         return (uint64_t)((uint64_t)rax_4 + (uint64_t)rax_9);
@@ -991,7 +991,7 @@ NAME=0x00401cf8
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401cf8
 EXPECT=<<EOF
-uint64_t shape_signed_divmod(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_signed_divmod(r2sleigh_word_u64 arg0, int64_t arg1)
 {
     uint64_t stack_m48_1;
     uint64_t stack_m48_2;
@@ -1030,7 +1030,7 @@ uint64_t shape_signed_divmod(uint64_t arg0, uint64_t arg1)
 
     /* r2dec proof: 4 constructs are marked below; 119 source obligations: 106 rendered, 7 elided, 0 refused, 6 residual; 43 statements rendered; a call reads the result (assuming closed-world) */
     {
-        stack_m48_1 = (uint8_t)((uint64_t)arg1 != (uint64_t)0U) ? arg1 : (uint64_t)-0x7;
+        stack_m48_1 = (uint8_t)((uint64_t)arg1 != (uint64_t)0U) ? (uint64_t)arg1 : (uint64_t)-0x7;
         {
             if ((uint8_t)((uint64_t)((uint64_t)stack_m48_1 + (uint64_t)1U) != (uint64_t)0U)) {
                 stack_m48_2 = stack_m48_1;
@@ -1101,7 +1101,7 @@ NAME=0x00401e08
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401e08
 EXPECT=<<EOF
-__uint128_t wide_make(uint64_t arg0, uint64_t arg1)
+__uint128_t wide_make(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     /* r2dec proof: no individual construct is marked; 18 source obligations: 11 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -1118,9 +1118,9 @@ NAME=0x00401e59
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401e59
 EXPECT=<<EOF
-uint64_t shape_multiword_return(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_multiword_return(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
-    __uint128_t wide_make(uint64_t, uint64_t);
+    __uint128_t wide_make(r2sleigh_word_u64, r2sleigh_word_u64);
 
     uint64_t rax_2;
     uint64_t rdx_2;
@@ -1150,7 +1150,7 @@ NAME=0x00401ec1
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401ec1
 EXPECT=<<EOF
-uint64_t indirect_load(uint64_t* arg0, uint32_t arg1)
+r2sleigh_word_u64 indirect_load(r2sleigh_word_u64* arg0, r2sleigh_word_u32 arg1)
 {
     uint64_t tmp_401ee2_0_1;
     uint64_t tmp_401ee5_0_1;
@@ -1172,7 +1172,7 @@ NAME=0x00401eea
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401eea
 EXPECT=<<EOF
-r2sleigh_result_u64 indirect_store(uint64_t* arg0, uint32_t arg1, uint64_t arg2)
+r2sleigh_result_u64 indirect_store(r2sleigh_word_u64* arg0, r2sleigh_word_u32 arg1, r2sleigh_word_u64 arg2)
 {
     uint64_t tmp_401f0f_0_1;
 
@@ -1193,10 +1193,10 @@ NAME=0x00401f1c
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401f1c
 EXPECT=<<EOF
-uint64_t shape_pointer_to_pointer(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_pointer_to_pointer(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
-    uint64_t indirect_load(uint64_t*, uint32_t);
-    r2sleigh_result_u64 indirect_store(uint64_t*, uint32_t, uint64_t);
+    r2sleigh_word_u64 indirect_load(r2sleigh_word_u64*, r2sleigh_word_u32);
+    r2sleigh_result_u64 indirect_store(r2sleigh_word_u64*, r2sleigh_word_u32, r2sleigh_word_u64);
 
     uint64_t tmp_401f5f_8_1;
     uint64_t tmp_401f66_8_1;
@@ -1249,7 +1249,7 @@ uint64_t shape_pointer_to_pointer(uint64_t arg0, uint64_t arg1)
                 tmp_401fbf_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)32U));
                 tmp_401fca_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 40U));
                 tmp_401fcd_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)40U));
-                rax_16 = indirect_load((uint64_t*)tmp_401fcd_8_1, (uint32_t)tmp_401fca_8_1);
+                rax_16 = indirect_load((r2sleigh_word_u64*)tmp_401fcd_8_1, (uint32_t)tmp_401fca_8_1);
                 r2sleigh_store_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)32U), (uint64_t)((uint64_t)((uint64_t)tmp_401fbf_8_1 * (uint64_t)0xf4243U) + (uint64_t)rax_16));
                 tmp_401fe2_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 40U));
                 r2sleigh_store_u32((void*)(uint64_t)(frame + 40U), (uint32_t)((uint32_t)tmp_401fe2_8_1 + (uint32_t)1U));
@@ -1260,18 +1260,18 @@ uint64_t shape_pointer_to_pointer(uint64_t arg0, uint64_t arg1)
         {
             tmp_401fec_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)32U));
             tmp_401ff0_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)40U));
-            indirect_store((uint64_t*)tmp_401ff0_8_1, 1, tmp_401fec_8_1);
+            indirect_store((r2sleigh_word_u64*)tmp_401ff0_8_1, 1, tmp_401fec_8_1);
             tmp_402001_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 48U));
             tmp_402005_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)32U));
             tmp_40200c_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)40U));
-            indirect_store((uint64_t*)tmp_40200c_8_1, 3, (uint64_t)((uint64_t)tmp_402001_8_1 ^ (uint64_t)tmp_402005_8_1));
+            indirect_store((r2sleigh_word_u64*)tmp_40200c_8_1, 3, (uint64_t)((uint64_t)tmp_402001_8_1 ^ (uint64_t)tmp_402005_8_1));
             r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)0U);
             for (; ; ) {
                 tmp_402053_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
                 if ((uint8_t)((uint32_t)tmp_402053_8_1 <= (uint32_t)3U)) {
                     tmp_402026_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
                     tmp_402029_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)40U));
-                    rax_25 = indirect_load((uint64_t*)tmp_402029_8_1, (uint32_t)tmp_402026_8_1);
+                    rax_25 = indirect_load((r2sleigh_word_u64*)tmp_402029_8_1, (uint32_t)tmp_402026_8_1);
                     tmp_40203a_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
                     tmp_40204b_8_1 = r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)32U));
                     r2sleigh_store_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)32U), (uint64_t)((uint64_t)((uint64_t)(uint8_t)((uint32_t)(uint8_t)((uint32_t)((uint32_t)((uint32_t)tmp_40203a_8_1 + (uint32_t)tmp_40203a_8_1) + (uint32_t)tmp_40203a_8_1) >> 0U) & (uint32_t)(uint8_t)63U) >= (uint64_t)64U ? (uint64_t)0U : (uint64_t)((uint64_t)rax_25 << (uint64_t)(uint8_t)((uint32_t)(uint8_t)((uint32_t)((uint32_t)((uint32_t)tmp_40203a_8_1 + (uint32_t)tmp_40203a_8_1) + (uint32_t)tmp_40203a_8_1) >> 0U) & (uint32_t)(uint8_t)63U))) ^ (uint64_t)tmp_40204b_8_1));
@@ -1301,7 +1301,7 @@ NAME=0x00402077
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00402077
 EXPECT=<<EOF
-r2sleigh_result_u64 op_add(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u64 op_add(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; the result's second register is open: no call read decides it; the result is unproven (Written): 1 unproven-return carried */
     {
@@ -1318,7 +1318,7 @@ NAME=0x00402094
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00402094
 EXPECT=<<EOF
-r2sleigh_result_u64 op_xor(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u64 op_xor(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     /* r2dec proof: no individual construct is marked; 12 source obligations: 5 rendered, 7 elided, 0 refused; 1 statements rendered; the result's second register is open: no call read decides it; the result is unproven (Written): 1 unproven-return carried */
     {
@@ -1335,7 +1335,7 @@ NAME=0x004020ba
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x004020ba
 EXPECT=<<EOF
-r2sleigh_result_u64 op_mul(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u64 op_mul(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     /* r2dec proof: no individual construct is marked; 11 source obligations: 4 rendered, 7 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
@@ -1352,7 +1352,7 @@ NAME=0x004020d9
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x004020d9
 EXPECT=<<EOF
-uint64_t shape_function_pointer(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_function_pointer(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint32_t tmp_40217e_8_1;
     uint64_t tmp_402184_8_1;
@@ -1415,7 +1415,7 @@ NAME=0x0040219e
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x0040219e
 EXPECT=<<EOF
-uint8_t shape_bool_probe(uint64_t arg0)
+r2sleigh_word_u8 shape_bool_probe(r2sleigh_word_u64 arg0)
 {
     /* r2dec proof: no individual construct is marked; 11 source obligations: 4 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -1432,9 +1432,9 @@ NAME=0x004021b4
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x004021b4
 EXPECT=<<EOF
-uint64_t shape_bool_caller(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 shape_bool_caller(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
-    uint8_t shape_bool_probe(uint64_t);
+    r2sleigh_word_u8 shape_bool_probe(r2sleigh_word_u64);
 
     uint64_t rax_2;
     uint64_t stack_m16_1;
@@ -1467,20 +1467,20 @@ EXPECT=<<EOF
 r2sleigh_result_u32 fcn_402206(void)
 {
     int32_t printf(const char*, ...);
-    uint64_t shape_bool_caller(uint64_t, uint64_t);
-    uint64_t shape_call_chain(uint64_t, uint64_t);
-    uint64_t shape_function_pointer(uint64_t, uint64_t);
-    uint64_t shape_multiword_return(uint64_t, uint64_t);
-    uint64_t shape_pointer_to_pointer(uint64_t, uint64_t);
-    uint64_t shape_recurse_direct(uint8_t, uint64_t);
-    uint64_t shape_recurse_mutual(uint8_t, uint64_t);
-    uint64_t shape_signed_divmod(uint64_t, uint64_t);
-    uint64_t shape_stack_buffer(uint64_t, uint8_t);
-    uint64_t shape_struct_array(uint32_t, uint32_t);
-    uint64_t shape_struct_pointer(uint64_t, uint64_t);
-    uint64_t shape_struct_value(uint64_t, uint64_t);
-    uint64_t shape_variadic(uint64_t, uint64_t);
-    uint64_t shape_variadic_local(uint64_t, uint64_t);
+    r2sleigh_word_u64 shape_bool_caller(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 shape_call_chain(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 shape_function_pointer(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 shape_multiword_return(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 shape_pointer_to_pointer(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 shape_recurse_direct(r2sleigh_word_u32, r2sleigh_word_u64);
+    r2sleigh_word_u64 shape_recurse_mutual(r2sleigh_word_u32, r2sleigh_word_u64);
+    r2sleigh_word_u64 shape_signed_divmod(r2sleigh_word_u64, int64_t);
+    r2sleigh_word_u64 shape_stack_buffer(r2sleigh_word_u64, r2sleigh_word_u8);
+    r2sleigh_word_u64 shape_struct_array(r2sleigh_word_u32, r2sleigh_word_u32);
+    r2sleigh_word_u64 shape_struct_pointer(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 shape_struct_value(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 shape_variadic(r2sleigh_word_u64, r2sleigh_word_u64);
+    r2sleigh_word_u64 shape_variadic_local(r2sleigh_word_u64, r2sleigh_word_u64);
 
     uint64_t rax_4;
     uint64_t rax_8;
@@ -1514,11 +1514,11 @@ r2sleigh_result_u32 fcn_402206(void)
         printf("%016llx\n", rax_24);
         rax_28 = shape_stack_buffer((uint64_t)0x123456789abcdefU, (uint8_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_28);
-        rax_32 = shape_recurse_direct((uint8_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        rax_32 = shape_recurse_direct((uint32_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_32);
-        rax_36 = shape_recurse_mutual((uint8_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        rax_36 = shape_recurse_mutual((uint32_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_36);
-        rax_40 = shape_signed_divmod((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        rax_40 = shape_signed_divmod((uint64_t)0x123456789abcdefU, (int64_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_40);
         rax_44 = shape_multiword_return((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_44);

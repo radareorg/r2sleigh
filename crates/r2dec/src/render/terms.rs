@@ -105,7 +105,7 @@ pub(super) fn literal(value: MachineBitVector) -> Option<CExpr> {
 /// `expr` converted to `sink` as by assignment (return, assignment, prototyped argument): an
 /// integer literal under value-keeping unsigned casts becomes the plain literal.
 /// `ty`, the unstated word as its integer (D265).
-fn word_free(ty: &CType) -> &CType {
+pub(super) fn word_free(ty: &CType) -> &CType {
     match ty {
         CType::Typedef { ty: inner, .. } if r2types::is_unstated_word(ty) => inner,
         ty => ty,

@@ -129,7 +129,7 @@ NAME=0x000010c0
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000010c0
 EXPECT=<<EOF
-r2sleigh_result_u64 entry0(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
+r2sleigh_result_u64 entry0(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, r2sleigh_word_u64 arg2)
 {
     uint64_t tmp_10c9_0_2;
 
@@ -237,7 +237,7 @@ NAME=0x000011a9
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000011a9
 EXPECT=<<EOF
-uint32_t fcn_11a9(uint32_t arg0, uint32_t arg1)
+r2sleigh_word_u32 fcn_11a9(r2sleigh_word_u32 arg0, r2sleigh_word_u32 arg1)
 {
     /* r2dec proof: no individual construct is marked; 10 source obligations: 3 rendered, 7 elided, 0 refused; 1 statements rendered; a call reads the result (assuming closed-world) */
     {
@@ -254,7 +254,7 @@ NAME=0x000011c1
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000011c1
 EXPECT=<<EOF
-uint32_t fcn_11c1(uint32_t* arg0, uint32_t arg1)
+r2sleigh_word_u32 fcn_11c1(r2sleigh_word_u32* arg0, int32_t arg1)
 {
     uint32_t stack_m16_1;
     uint32_t stack_m12_1;
@@ -284,7 +284,7 @@ NAME=0x0000120a
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x0000120a
 EXPECT=<<EOF
-uint32_t fcn_120a(uint32_t arg0)
+r2sleigh_word_u32 fcn_120a(uint32_t arg0)
 {
     uint64_t rax_14;
 
@@ -350,7 +350,7 @@ NAME=0x00001277
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x00001277
 EXPECT=<<EOF
-uint32_t fcn_1277(uint64_t arg0)
+r2sleigh_word_u32 fcn_1277(r2sleigh_word_u64 arg0)
 {
     uint64_t stack_m32_1;
     uint32_t stack_m12_1;
@@ -380,7 +380,7 @@ NAME=0x000012a8
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000012a8
 EXPECT=<<EOF
-uint64_t fcn_12a8(uint64_t arg0, uint64_t arg1)
+r2sleigh_word_u64 fcn_12a8(r2sleigh_word_u64 arg0, int64_t arg1)
 {
     uint64_t rax_4;
     __uint128_t tmp_12d4_0_1;
@@ -445,7 +445,7 @@ NAME=0x000012ef
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000012ef
 EXPECT=<<EOF
-double fcn_12ef(uint64_t* arg0, uint32_t arg1)
+double fcn_12ef(r2sleigh_word_u64* arg0, int32_t arg1)
 {
     uint32_t stack_m20_1;
     uint64_t stack_m16_1;
@@ -488,7 +488,7 @@ NAME=0x00001362
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x00001362
 EXPECT=<<EOF
-uint32_t fcn_1362(uint32_t arg0)
+r2sleigh_word_u32 fcn_1362(int32_t arg0)
 {
     uint64_t rax_3;
     uint64_t rax_6;
@@ -499,7 +499,7 @@ uint32_t fcn_1362(uint32_t arg0)
             rax_6 = 1;
             return (uint32_t)rax_6;
         } else {
-            rax_3 = (uint64_t)(uint32_t)fcn_1362((uint32_t)((uint32_t)arg0 - (uint32_t)1U));
+            rax_3 = (uint64_t)(uint32_t)fcn_1362((int32_t)((uint32_t)arg0 - (uint32_t)1U));
             rax_6 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)(int32_t)((uint64_t)rax_3 >> 0U) * (uint64_t)(int32_t)arg0) >> 0U);
             return (uint32_t)rax_6;
         }
@@ -515,7 +515,7 @@ NAME=0x00001391
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x00001391
 EXPECT=<<EOF
-r2sleigh_result_u32 fcn_1391(uint32_t arg0)
+r2sleigh_result_u32 fcn_1391(r2sleigh_word_u32 arg0)
 {
     uint32_t stack_m12_1;
     uint32_t tmp_lane_13cf_0_0_1;
@@ -546,7 +546,7 @@ NAME=0x000013e3
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000013e3
 EXPECT=<<EOF
-uint64_t fcn_13e3(uint8_t* arg0, const char* arg1, uint64_t arg2)
+r2sleigh_word_u64 fcn_13e3(r2sleigh_word_u8* arg0, const char* arg1, uint64_t arg2)
 {
     void* memcpy(void*, const void*, uint64_t);
     uint64_t strlen(const char*);
@@ -577,7 +577,7 @@ NAME=0x0000144c
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x0000144c
 EXPECT=<<EOF
-uint32_t fcn_144c(uint32_t arg0)
+r2sleigh_word_u32 fcn_144c(r2sleigh_word_u32 arg0)
 {
     uint64_t rax_1;
     uint16_t tmp_lane_1459_2_0_1;
@@ -601,7 +601,7 @@ NAME=0x0000146d
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x0000146d
 EXPECT=<<EOF
-uint32_t fcn_146d(uint32_t arg0, uint8_t arg1)
+r2sleigh_word_u32 fcn_146d(r2sleigh_word_u32 arg0, r2sleigh_word_u8 arg1)
 {
     uint8_t tmp_1483_0_1;
 
@@ -621,7 +621,7 @@ NAME=0x00001489
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x00001489
 EXPECT=<<EOF
-uint32_t fcn_1489(uint32_t arg0)
+r2sleigh_word_u32 fcn_1489(r2sleigh_word_u32 arg0)
 {
     uint32_t stack_m28_1;
     uint32_t stack_m12_1;
@@ -649,7 +649,7 @@ NAME=0x000014b5
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x000014b5
 EXPECT=<<EOF
-uint32_t fcn_14b5(uint32_t* arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_word_u32 fcn_14b5(int32_t* arg0, int32_t arg1, int32_t arg2)
 {
     uint32_t stack_m12_1;
     uint32_t tmp_14e4_0_1;
@@ -690,7 +690,7 @@ NAME=0x00001521
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x00001521
 EXPECT=<<EOF
-r2sleigh_result_u64 fcn_1521(uint64_t arg0, uint32_t arg1)
+r2sleigh_result_u64 fcn_1521(r2sleigh_word_u64 arg0, r2sleigh_word_u32 arg1)
 {
     /* r2dec proof: 2 constructs are marked below; 24 source obligations: 0 rendered, 10 elided, 0 refused, 14 residual; 1 statements rendered; no call reads the result (assuming closed-world); the result's second register is open: no call read decides it; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
     {
@@ -708,21 +708,21 @@ NAME=0x00001549
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x00001549
 EXPECT=<<EOF
-r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
+r2sleigh_result_u32 fcn_1549(int32_t arg0, r2sleigh_word_u64* arg1)
 {
-    uint32_t fcn_11a9(uint32_t, uint32_t);
-    uint32_t fcn_11c1(uint32_t*, uint32_t);
-    uint32_t fcn_120a(uint32_t);
-    uint32_t fcn_1277(uint64_t);
-    uint64_t fcn_12a8(uint64_t, uint64_t);
-    double fcn_12ef(uint64_t*, uint32_t);
-    uint32_t fcn_1362(uint32_t);
-    r2sleigh_result_u32 fcn_1391(uint32_t);
-    uint64_t fcn_13e3(uint8_t*, const char*, uint64_t);
-    uint32_t fcn_144c(uint32_t);
-    uint32_t fcn_146d(uint32_t, uint8_t);
-    uint32_t fcn_1489(uint32_t);
-    uint32_t fcn_14b5(uint32_t*, uint32_t, uint32_t);
+    r2sleigh_word_u32 fcn_11a9(r2sleigh_word_u32, r2sleigh_word_u32);
+    r2sleigh_word_u32 fcn_11c1(r2sleigh_word_u32*, int32_t);
+    r2sleigh_word_u32 fcn_120a(uint32_t);
+    r2sleigh_word_u32 fcn_1277(r2sleigh_word_u64);
+    r2sleigh_word_u64 fcn_12a8(r2sleigh_word_u64, int64_t);
+    double fcn_12ef(r2sleigh_word_u64*, int32_t);
+    r2sleigh_word_u32 fcn_1362(int32_t);
+    r2sleigh_result_u32 fcn_1391(r2sleigh_word_u32);
+    r2sleigh_word_u64 fcn_13e3(r2sleigh_word_u8*, const char*, uint64_t);
+    r2sleigh_word_u32 fcn_144c(r2sleigh_word_u32);
+    r2sleigh_word_u32 fcn_146d(r2sleigh_word_u32, r2sleigh_word_u8);
+    r2sleigh_word_u32 fcn_1489(r2sleigh_word_u32);
+    r2sleigh_word_u32 fcn_14b5(int32_t*, int32_t, int32_t);
     uint64_t fcn_1521(uint64_t, uint64_t);
     int32_t printf(const char*, ...);
 
@@ -791,7 +791,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
         tmp_161e_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
         rax_6 = (uint64_t)fcn_11a9((uint32_t)tmp_161e_8_1, 3);
         r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint64_t)rax_6 >> 0U));
-        rax_8 = (uint64_t)fcn_11c1((uint32_t*)(uint64_t)(frame + 48U), 4);
+        rax_8 = (uint64_t)fcn_11c1((r2sleigh_word_u32*)(uint64_t)(frame + 48U), 4);
         tmp_164a_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)rax_8 >> 0U) + (uint32_t)tmp_164a_8_1));
         tmp_1658_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
@@ -805,7 +805,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
         rax_17 = fcn_12a8((uint64_t)(int32_t)((uint64_t)((uint64_t)(int32_t)tmp_167d_8_1 * (uint64_t)100U) >> 0U), 3);
         tmp_1695_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
         r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)rax_17 >> 0U) + (uint32_t)tmp_1695_8_1));
-        xmm0_7 = (__uint128_t)r2sleigh_float_to_bits_64(fcn_12ef((uint64_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)112U), 3));
+        xmm0_7 = (__uint128_t)r2sleigh_float_to_bits_64(fcn_12ef((r2sleigh_word_u64*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)112U), 3));
         tmp_lane_16ac_2_0_1 = (uint64_t)((__uint128_t)xmm0_7 >> 0U);
         tmp_16ac_12_1 = (uint8_t)((uint32_t)(uint8_t)((double)(int64_t)0xffffffff7fffffffU < r2sleigh_float_from_bits_64(tmp_lane_16ac_2_0_1)) & (uint32_t)(uint8_t)(r2sleigh_float_from_bits_64(tmp_lane_16ac_2_0_1) < (double)(int64_t)0x80000000U));
         tmp_16ac_1b_1 = (double)(int32_t)0U;
@@ -826,7 +826,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
             rax_27 = tmp_16e3_8_1;
         }
         {
-            rax_28 = fcn_13e3((uint8_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)144U), (const char*)rax_27, 16);
+            rax_28 = fcn_13e3((r2sleigh_word_u8*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)144U), (const char*)rax_27, 16);
             tmp_1704_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
             r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)rax_28 >> 0U) + (uint32_t)tmp_1704_8_1));
             tmp_170a_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
@@ -836,7 +836,7 @@ r2sleigh_result_u32 fcn_1549(uint32_t arg0, uint64_t* arg1)
             rax_34 = (uint64_t)fcn_1489(0xf0f0);
             tmp_173e_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
             r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)((uint32_t)((uint64_t)((uint64_t)(uint32_t)((uint32_t)(int16_t)((uint64_t)rax_31 >> 0U) + (uint32_t)((uint64_t)rax_33 >> 0U)) + (uint64_t)rax_34) >> 0U) + (uint32_t)tmp_173e_8_1));
-            rax_38 = (uint64_t)fcn_14b5((uint32_t*)(uint64_t)0x4040U, 16, 7);
+            rax_38 = (uint64_t)fcn_14b5((int32_t*)(uint64_t)0x4040U, 16, 7);
             tmp_1767_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
             rax_41 = fcn_1521(0x11a9, (uint64_t)(uint32_t)tmp_1767_8_1);
             tmp_1780_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));

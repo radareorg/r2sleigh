@@ -21,7 +21,7 @@ NAME=0x010014e0
 FILE=tests/fixtures/float_calls_zig_x86_64_O2g
 CMDS=aa; pdd @ 0x010014e0
 EXPECT=<<EOF
-r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, uint64_t arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, r2sleigh_word_u64 arg2)
 {
     uint64_t tmp_10014e5_0_2;
 

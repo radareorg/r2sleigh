@@ -921,11 +921,12 @@ impl<'a> Values<'a> {
             let differs = differs && hole.is_none();
             let c = hole.or(declared).unwrap_or(class);
             let named = crate::ast::c_identifier(&input.parameter_name(index as usize));
+            // The body reads the unstated word as its integer; only the header spells the word.
             let name = self.symbols.borrow_mut().declare(
                 Some(named)
                     .filter(|name| spells_an_identifier(name))
                     .unwrap_or_else(|| r2source::positional_parameter_name(index as usize)),
-                c.clone(),
+                terms::word_free(&c).clone(),
                 SymbolRole::Parameter(index),
             );
             match home {
@@ -2316,7 +2317,9 @@ impl<'a> Values<'a> {
             },
         };
         let spelled = fit(self.operand(*value, inst)?, &held, &class)?;
-        Some(Some(terms::at_sink(&ty, CExpr::cast(ty.clone(), spelled))))
+        // The word is its integer: the cast converts to that (D265).
+        let to = terms::word_free(&ty).clone();
+        Some(Some(terms::at_sink(&ty, CExpr::cast(to, spelled))))
     }
 
     /// A pair's return: its two registers' values joined, the high half above the low, as the one
@@ -2350,7 +2353,10 @@ impl<'a> Values<'a> {
             Some(ty) => ty.clone(),
             None => CType::uint(bits),
         };
-        Some(terms::at_sink(&ty, CExpr::cast(ty.clone(), joined)))
+        Some(terms::at_sink(
+            &ty,
+            CExpr::cast(terms::word_free(&ty).clone(), joined),
+        ))
     }
 
     fn terminator(&self, addr: u64) -> Option<(InstId, &'a SSAOp<ValueId>)> {

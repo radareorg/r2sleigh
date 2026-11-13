@@ -23,7 +23,7 @@ NAME=0x100000548
 FILE=tests/fixtures/manual_limits_O0
 CMDS=aa; pdd @ 0x100000548
 EXPECT=<<EOF
-uint32_t _struct_nested_array(void* arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_word_u32 _struct_nested_array(void* arg0, int32_t arg1, r2sleigh_word_u32 arg2)
 {
     uint64_t tmp_100000568_8_1;
     uint32_t tmp_100000578_8_1;
@@ -73,7 +73,7 @@ struct fcn_1000005d8_arg1 {
     uint64_t f_18;
 };
 
-uint32_t _out_param_parse(uint8_t* arg0, struct fcn_1000005d8_arg1* arg1)
+r2sleigh_word_u32 _out_param_parse(r2sleigh_word_u8* arg0, struct fcn_1000005d8_arg1* arg1)
 {
     uint8_t tmp_10000060c_8_1;
     uint64_t stack_m40_1;
@@ -165,7 +165,7 @@ NAME=0x10000075c
 FILE=tests/fixtures/manual_limits_O0
 CMDS=aa; pdd @ 0x10000075c
 EXPECT=<<EOF
-uint64_t _fnv_fold(uint8_t* arg0, uint64_t arg1)
+r2sleigh_word_u64 _fnv_fold(uint8_t* arg0, uint64_t arg1)
 {
     uint64_t stack_m32_1;
     uint64_t stack_m24_1;
@@ -219,7 +219,7 @@ NAME=0x100000824
 FILE=tests/fixtures/manual_limits_O0
 CMDS=aa; pdd @ 0x100000824
 EXPECT=<<EOF
-uint32_t _sparse_switch(uint32_t arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_word_u32 _sparse_switch(r2sleigh_word_u32 arg0, int32_t arg1, r2sleigh_word_u32 arg2)
 {
     uint8_t tmp_100000900_4_1;
     uint32_t tmp_100000900_5_1;
@@ -290,7 +290,7 @@ NAME=0x100000940
 FILE=tests/fixtures/manual_limits_O0
 CMDS=aa; pdd @ 0x100000940
 EXPECT=<<EOF
-uint32_t _table_walk(uint64_t arg0, uint8_t* arg1)
+r2sleigh_word_u32 _table_walk(r2sleigh_word_u64 arg0, int8_t* arg1)
 {
     uint64_t stack_m40_1;
     uint32_t stack_m28_1;
@@ -407,7 +407,7 @@ NAME=0x100000aa0
 FILE=tests/fixtures/manual_limits_O0
 CMDS=aa; pdd @ 0x100000aa0
 EXPECT=<<EOF
-uint32_t _state_machine(uint8_t* arg0)
+r2sleigh_word_u32 _state_machine(r2sleigh_word_u8* arg0)
 {
     uint64_t stack_m32_1;
     uint32_t stack_m24_1;
@@ -617,7 +617,7 @@ NAME=0x100000d4c
 FILE=tests/fixtures/manual_limits_O0
 CMDS=aa; pdd @ 0x100000d4c
 EXPECT=<<EOF
-uint64_t _mem_scan2(uint8_t* arg0, uint64_t arg1, uint8_t arg2, uint8_t arg3)
+r2sleigh_word_u64 _mem_scan2(uint8_t* arg0, uint64_t arg1, uint8_t arg2, uint8_t arg3)
 {
     uint64_t stack_m40_1;
     uint64_t stack_m32_1;
@@ -713,15 +713,15 @@ static inline struct r2sleigh_bits_256 r2sleigh_bits_zero_extend_64_256(uint64_t
     return carrier;
 }
 
-r2sleigh_result_u64 _main(uint32_t arg0, int64_t* arg1)
+r2sleigh_result_u64 _main(r2sleigh_word_u32 arg0, r2sleigh_word_u64* arg1)
 {
-    uint64_t _fnv_fold(uint8_t*, uint64_t);
-    uint64_t _mem_scan2(uint8_t*, uint64_t, uint8_t, uint8_t);
-    uint32_t _out_param_parse(uint8_t*, struct fcn_1000005d8_arg1*);
-    uint32_t _sparse_switch(uint32_t, uint32_t, uint32_t);
-    uint32_t _state_machine(uint8_t*);
-    uint32_t _struct_nested_array(void*, uint32_t, uint32_t);
-    uint32_t _table_walk(uint64_t, uint8_t*);
+    r2sleigh_word_u64 _fnv_fold(uint8_t*, uint64_t);
+    r2sleigh_word_u64 _mem_scan2(uint8_t*, uint64_t, uint8_t, uint8_t);
+    r2sleigh_word_u32 _out_param_parse(r2sleigh_word_u8*, struct fcn_1000005d8_arg1*);
+    r2sleigh_word_u32 _sparse_switch(r2sleigh_word_u32, int32_t, r2sleigh_word_u32);
+    r2sleigh_word_u32 _state_machine(r2sleigh_word_u8*);
+    r2sleigh_word_u32 _struct_nested_array(void*, int32_t, r2sleigh_word_u32);
+    r2sleigh_word_u32 _table_walk(r2sleigh_word_u64, int8_t*);
     void* memcpy(void*, const void*, uint64_t);
     extern char _manual_sink[];
 
@@ -769,7 +769,7 @@ r2sleigh_result_u64 _main(uint32_t arg0, int64_t* arg1)
         r2sleigh_store_u128((void*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)16U), (__uint128_t)r2sleigh_bits_extract_256_128(z0_3, 0U));
         r2sleigh_store_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)64U), (uint64_t)((uint64_t)x0_3 + (uint64_t)40U));
         tmp_100000e34_8_1 = r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U));
-        x0_4 = (uint64_t)_struct_nested_array((void*)x0_3, (uint32_t)((uint32_t)tmp_100000e34_8_1 & (uint32_t)1U), (uint32_t)r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U)));
+        x0_4 = (uint64_t)_struct_nested_array((void*)x0_3, (int32_t)((uint32_t)tmp_100000e34_8_1 & (uint32_t)1U), (uint32_t)r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U)));
         tmp_100000e4c_8_1 = r2sleigh_load_u32((void*)&_manual_sink);
         r2sleigh_store_u32((void*)&_manual_sink, (uint32_t)((uint32_t)((uint64_t)x0_4 >> 0U) + (uint32_t)tmp_100000e4c_8_1));
         tmp_100000e58_8_1 = r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U));
@@ -782,7 +782,7 @@ r2sleigh_result_u64 _main(uint32_t arg0, int64_t* arg1)
             }
         }
         {
-            x0_6 = (uint64_t)_out_param_parse((uint8_t*)r2sleigh_load_u64((void*)(uint64_t)(frame + 32U)), (struct fcn_1000005d8_arg1*)(uint64_t)(frame + 48U));
+            x0_6 = (uint64_t)_out_param_parse((r2sleigh_word_u8*)r2sleigh_load_u64((void*)(uint64_t)(frame + 32U)), (struct fcn_1000005d8_arg1*)(uint64_t)(frame + 48U));
             r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)0x100008000U);
             tmp_100000ea0_8_1 = r2sleigh_load_u32((void*)&_manual_sink);
             r2sleigh_store_u32((void*)&_manual_sink, (uint32_t)((uint32_t)((uint64_t)x0_6 >> 0U) + (uint32_t)tmp_100000ea0_8_1));
@@ -791,7 +791,7 @@ r2sleigh_result_u64 _main(uint32_t arg0, int64_t* arg1)
             tmp_100000ec4_8_1 = r2sleigh_load_u32((void*)x8_18);
             r2sleigh_store_u32((void*)x8_18, (uint32_t)((uint32_t)((uint64_t)x0_9 >> 0U) + (uint32_t)tmp_100000ec4_8_1));
             x8_19 = r2sleigh_load_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)24U));
-            x0_11 = (uint64_t)_sparse_switch((uint32_t)r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U)), (uint32_t)r2sleigh_load_u32((void*)x8_18), (uint32_t)x8_19);
+            x0_11 = (uint64_t)_sparse_switch((uint32_t)r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U)), (int32_t)r2sleigh_load_u32((void*)x8_18), (uint32_t)x8_19);
             x9_12 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
             tmp_100000ee8_8_1 = r2sleigh_load_u32((void*)x9_12);
             r2sleigh_store_u32((void*)x9_12, (uint32_t)((uint32_t)((uint64_t)x0_11 >> 0U) + (uint32_t)tmp_100000ee8_8_1));
@@ -805,7 +805,7 @@ r2sleigh_result_u64 _main(uint32_t arg0, int64_t* arg1)
                 }
             }
             {
-                x0_13 = (uint64_t)_table_walk((uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), (uint8_t*)r2sleigh_load_u64((void*)(uint64_t)(frame + 16U)));
+                x0_13 = (uint64_t)_table_walk((uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), (int8_t*)r2sleigh_load_u64((void*)(uint64_t)(frame + 16U)));
                 tmp_100000f38_8_1 = r2sleigh_load_u32((void*)&_manual_sink);
                 r2sleigh_store_u32((void*)&_manual_sink, (uint32_t)((uint32_t)((uint64_t)x0_13 >> 0U) + (uint32_t)tmp_100000f38_8_1));
                 tmp_100000f44_8_1 = r2sleigh_load_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U));
@@ -818,7 +818,7 @@ r2sleigh_result_u64 _main(uint32_t arg0, int64_t* arg1)
                     }
                 }
                 {
-                    x0_15 = (uint64_t)_state_machine((uint8_t*)r2sleigh_load_u64((void*)(uint64_t)(frame + 8U)));
+                    x0_15 = (uint64_t)_state_machine((r2sleigh_word_u8*)r2sleigh_load_u64((void*)(uint64_t)(frame + 8U)));
                     r2sleigh_store_u64((void*)(uint64_t)(frame + 0U), (uint64_t)0x100008000U);
                     tmp_100000f88_8_1 = r2sleigh_load_u32((void*)&_manual_sink);
                     r2sleigh_store_u32((void*)&_manual_sink, (uint32_t)((uint32_t)((uint64_t)x0_15 >> 0U) + (uint32_t)tmp_100000f88_8_1));

@@ -113,7 +113,7 @@ NAME=fnv1a32 C
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=s 0x401330; pdd
 EXPECT=<<EOF
-r2sleigh_result_u32 fnv1a32(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u32 fnv1a32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t rsi_1;
     uint64_t rax_2;

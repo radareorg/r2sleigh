@@ -96,7 +96,8 @@ pub(super) fn spell(
     order: &[u64],
     work: &DecompileWorkControl<'_>,
 ) -> Result<Spelled, DecompileExecutionStop> {
-    let ty = super::result_type(input, tags);
+    // The returns convert to the unstated word's integer; only the header spells the word (D265).
+    let ty = super::terms::word_free(&super::result_type(input, tags)).clone();
     // A decided result is the declared one, spelled alike.
     let decided = (input.return_type())
         .and_then(r2types::ReturnTypeFact::decided)

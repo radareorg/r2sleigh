@@ -11,7 +11,7 @@ pdd @ sym.checked_sum
 pdd @ sym.nested
 EOF
 EXPECT=<<EOF
-r2sleigh_result_u32 checked_sum(uint32_t* arg0, uint32_t arg1, uint32_t* arg2)
+r2sleigh_result_u32 checked_sum(r2sleigh_word_u32* arg0, r2sleigh_word_u32 arg1, r2sleigh_word_u32* arg2)
 {
     __attribute__((noreturn)) void exit(int32_t);
 
@@ -28,7 +28,7 @@ r2sleigh_result_u32 checked_sum(uint32_t* arg0, uint32_t arg1, uint32_t* arg2)
     }
 }
 
-r2sleigh_result_u32 nested(uint64_t arg0, uint32_t* arg1, uint32_t* arg2)
+r2sleigh_result_u32 nested(r2sleigh_word_u64 arg0, r2sleigh_word_u32* arg1, r2sleigh_word_u32* arg2)
 {
     __attribute__((noreturn)) void exit(int32_t);
 
@@ -58,7 +58,7 @@ pdd @ sym.first_or_die
 pdd @ sym.nested
 EOF
 EXPECT=<<EOF
-r2sleigh_result_u32 checked_sum(uint32_t* arg0, uint32_t arg1, uint32_t* arg2)
+r2sleigh_result_u32 checked_sum(r2sleigh_word_u32* arg0, r2sleigh_word_u32 arg1, r2sleigh_word_u32* arg2)
 {
     __attribute__((noreturn)) void exit(int32_t);
 
@@ -75,7 +75,7 @@ r2sleigh_result_u32 checked_sum(uint32_t* arg0, uint32_t arg1, uint32_t* arg2)
     }
 }
 
-r2sleigh_result_u32 first_or_die(uint32_t* arg0)
+r2sleigh_result_u32 first_or_die(r2sleigh_word_u32* arg0)
 {
     __attribute__((noreturn)) void abort(void);
 
@@ -91,7 +91,7 @@ r2sleigh_result_u32 first_or_die(uint32_t* arg0)
     }
 }
 
-r2sleigh_result_u64 nested(uint64_t arg0, uint32_t* arg1, uint32_t* arg2)
+r2sleigh_result_u64 nested(r2sleigh_word_u64 arg0, r2sleigh_word_u32* arg1, r2sleigh_word_u32* arg2)
 {
     __attribute__((noreturn)) void exit(int32_t);
 

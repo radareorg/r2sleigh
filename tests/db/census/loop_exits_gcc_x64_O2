@@ -19,8 +19,8 @@ CMDS=aa; pdd @ 0x00401000
 EXPECT=<<EOF
 r2sleigh_result_u32 fcn_401000(void)
 {
-    uint32_t find_then_choose(uint64_t, uint32_t, uint32_t);
-    uint32_t skip_then_find(uint64_t, uint32_t, uint32_t);
+    r2sleigh_word_u32 find_then_choose(r2sleigh_word_u64, r2sleigh_word_u32, r2sleigh_word_u32);
+    r2sleigh_word_u32 skip_then_find(r2sleigh_word_u64, r2sleigh_word_u32, int32_t);
 
     uint64_t rax_1;
     uint64_t rax_2;
@@ -43,7 +43,7 @@ NAME=0x00401040
 FILE=tests/fixtures/loop_exits_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401040
 EXPECT=<<EOF
-uint32_t find_then_choose(uint64_t arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_word_u32 find_then_choose(r2sleigh_word_u64 arg0, r2sleigh_word_u32 arg1, r2sleigh_word_u32 arg2)
 {
     extern char sink[];
 
@@ -90,7 +90,7 @@ NAME=0x004010a0
 FILE=tests/fixtures/loop_exits_gcc_x64_O2
 CMDS=aa; pdd @ 0x004010a0
 EXPECT=<<EOF
-uint32_t skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_word_u32 skip_then_find(r2sleigh_word_u64 arg0, r2sleigh_word_u32 arg1, int32_t arg2)
 {
     extern char sink[];
 

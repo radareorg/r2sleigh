@@ -19,7 +19,7 @@ NAME=0x1000003c0
 FILE=tests/fixtures/code_pointer_table_O0
 CMDS=aa; pdd @ 0x1000003c0
 EXPECT=<<EOF
-r2sleigh_result_u64 _table_op_add(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u64 _table_op_add(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     /* r2dec proof: no individual construct is marked; 7 source obligations: 4 rendered, 3 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
@@ -36,7 +36,7 @@ NAME=0x1000003e0
 FILE=tests/fixtures/code_pointer_table_O0
 CMDS=aa; pdd @ 0x1000003e0
 EXPECT=<<EOF
-r2sleigh_result_u64 _table_op_xor(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u64 _table_op_xor(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     /* r2dec proof: no individual construct is marked; 6 source obligations: 3 rendered, 3 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
@@ -53,7 +53,7 @@ NAME=0x100000400
 FILE=tests/fixtures/code_pointer_table_O0
 CMDS=aa; pdd @ 0x100000400
 EXPECT=<<EOF
-r2sleigh_result_u64 _table_op_mul(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u64 _table_op_mul(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     /* r2dec proof: no individual construct is marked; 6 source obligations: 3 rendered, 3 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     {
@@ -70,7 +70,7 @@ NAME=0x100000420
 FILE=tests/fixtures/code_pointer_table_O0
 CMDS=aa; pdd @ 0x100000420
 EXPECT=<<EOF
-r2sleigh_result_u64 _table_dispatch(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u64 _table_dispatch(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint32_t stack_m76_1;
     _Alignas(16) uint8_t frame[64];

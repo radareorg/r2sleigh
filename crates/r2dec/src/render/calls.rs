@@ -240,7 +240,8 @@ fn at_width(
     demanded: u64,
 ) -> Option<CExpr> {
     let target = super::terms::c_type(class)?;
-    let ty = ty.unwrap_or(&target);
+    // The unstated word is read as its integer (D265).
+    let ty = ty.map_or(&target, super::terms::word_free);
     // An unproven result's carrier typedef is its integer: assigning it converts nothing.
     let same = *ty == target
         || (crate::prelude::result_typedef(ty).is_some() && *ty.unaliased() == target);
