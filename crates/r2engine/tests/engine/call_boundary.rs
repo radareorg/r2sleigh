@@ -1670,3 +1670,22 @@ fn a_main_a_wrapper_branches_to_returns_the_int_the_slot_reads() {
         "{text}"
     );
 }
+
+/// musl's `__libc_start_main` runs `exit(main(argc, argv, envp))` (its cited row): the same take
+/// decides `main`'s `int` on musl as on glibc (D227).
+#[test]
+fn a_main_musls_libc_start_main_takes_returns_its_int() {
+    let musl = [r2abi::statement::PlatformEvidence::Interpreter(
+        r2engine::program::Libc::Musl,
+    )];
+    let literal = at_exit(STARTS_HANDLER, "__libc_start_main").running_on(&musl);
+    let (closed, premises) = handler_answer(literal, true);
+    assert!(
+        closed.contains("r2sleigh_word_u32 handler(void)"),
+        "{closed}"
+    );
+    assert!(
+        premises.contains(&r2source::Premise::UbFreeSource),
+        "{premises:?}"
+    );
+}
