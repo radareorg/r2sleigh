@@ -316,7 +316,7 @@ struct Sinks<'a> {
     read_by_calls: Box<dyn Fn(crate::CanonicalStorageId) -> bool + 'a>,
     /// Whether the `CallUse` at this block and index hands its value to a callee that reaches
     /// only upward through it.
-    upward_at: Box<dyn Fn(u64, usize, VarId) -> bool + 'a>,
+    upward_at: Box<dyn Fn(u64, usize, crate::CanonicalStorageId) -> bool + 'a>,
     stack_arguments: StackArguments,
 }
 
@@ -348,7 +348,7 @@ impl<'a> Sinks<'a> {
             .convention()
             .map(|slots| slots.arguments(SlotClass::Integer).to_vec())
             .unwrap_or_default();
-        let upward_at = move |block: u64, index: usize, src: VarId| {
+        let upward_at = move |block: u64, index: usize, storage: crate::CanonicalStorageId| {
             let Some(ops) = func.get_block(block).map(|block| block.ops()) else {
                 return false;
             };
@@ -363,11 +363,9 @@ impl<'a> Sinks<'a> {
             let Some(Some(target)) = target else {
                 return false;
             };
-            let Some(position) = func.storage_of(src).and_then(|storage| {
-                integer_arguments
-                    .iter()
-                    .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
-            }) else {
+            let Some(position) = (integer_arguments.iter())
+                .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
+            else {
                 return false;
             };
             machine
@@ -787,7 +785,7 @@ impl<'a> Walker<'a> {
                 let next = self.displaced(var, value, (*a, *b), subtract);
                 self.set(*dst, next);
             }
-            SSAOp::CallUse { src } if (self.sinks.upward_at)(block, index, *src) => {
+            SSAOp::CallUse { storage, .. } if (self.sinks.upward_at)(block, index, *storage) => {
                 self.escape_up(value);
             }
             SSAOp::CallUse { .. } | SSAOp::CallOther { .. } => self.escape(value),

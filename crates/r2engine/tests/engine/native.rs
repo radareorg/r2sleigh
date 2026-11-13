@@ -6852,10 +6852,9 @@ const COPY_INTO_AN_ARGUMENT: &[u8] = &[
     0xc3, // 0x1013 ret
 ];
 
-/// The boundary passes the value that reached `rdi`, the copy; copy
-/// forwarding leaves the call reading `rsi`, the value the copy carried. The
-/// two have one class of bits, so the call's read of `rsi` is a read the text
-/// performs, and liveness must not ignore it.
+/// The boundary passes the value that reached `rdi`, the copy; copy forwarding leaves both of the
+/// call's reads naming `rsi`'s value. The read the `CallUse` names `rdi` is performed and the one
+/// it names `rsi` is not: liveness asks the register, never the value (D283).
 #[test]
 fn a_call_reading_the_value_its_copied_argument_carried_reads_it() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -6891,11 +6890,18 @@ fn a_call_reading_the_value_its_copied_argument_carried_reads_it() {
             )
         })
         .collect::<Vec<_>>();
-    assert!(!call_reads.is_empty(), "{}", artifact.dump());
+    assert_eq!(call_reads.len(), 2, "{}", artifact.dump());
+    let r2ssa::CallBoundarySlot::Register { storage: rdi, .. } = call.arguments[0].slot else {
+        panic!("{call:#?}");
+    };
     for site in call_reads {
-        assert!(
-            !artifact.ignored_reads().contains(site),
-            "{site:?} is the argument's read\n{}",
+        let Some(SSAOp::CallUse { storage, .. }) = graph.op(site.inst) else {
+            panic!("{site:?}");
+        };
+        assert_eq!(
+            artifact.ignored_reads().contains(site),
+            *storage != rdi,
+            "{site:?} reads {storage:?}\n{}",
             artifact.dump()
         );
     }

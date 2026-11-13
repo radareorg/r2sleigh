@@ -1218,7 +1218,10 @@ fn append_call_boundary_reads(
         ) {
             retained.push((src.clone(), identity.storage));
         }
-        block_ops.push(SSAOp::CallUse { src });
+        block_ops.push(SSAOp::CallUse {
+            src,
+            storage: identity.storage,
+        });
     }
     retained
 }
