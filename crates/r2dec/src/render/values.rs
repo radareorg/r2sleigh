@@ -876,7 +876,7 @@ impl<'a> Values<'a> {
     fn members_of(
         &self,
         input: &RenderInput<'_>,
-        pointing: Vec<(usize, String, CExpr)>,
+        pointing: Vec<(usize, String, CExpr, bool)>,
     ) -> Vec<Option<CExpr>> {
         let mut members = Vec::new();
         // A member is read and written by a byte copy, which only a little-endian target matches.
@@ -884,8 +884,11 @@ impl<'a> Values<'a> {
             return members;
         }
         let fields = &self.artifact.certificates().parameter_fields;
-        for (slot, tag, base) in pointing {
-            if let Some(cells) = self.projected_members(slot, &tag, &base) {
+        for (slot, tag, base, stated) in pointing {
+            if let Some(cells) = stated
+                .then(|| self.projected_members(slot, &base))
+                .flatten()
+            {
                 if members.is_empty() {
                     members = vec![None; self.roots.arena().len()];
                 }
@@ -936,16 +939,10 @@ impl<'a> Values<'a> {
         members
     }
 
-    /// Each cell an access through parameter `slot` addresses, as `&base->member` where r2ssa
-    /// projects every such access onto a member of `tag` (D359); `None` where one is not.
-    fn projected_members(
-        &self,
-        slot: usize,
-        tag: &str,
-        base: &CExpr,
-    ) -> Option<Vec<(TermId, CExpr)>> {
+    /// Each cell an access through parameter `slot`, declared a pointer to the struct its root
+    /// projects into, addresses as `&base->member` (D359); `None` where one access is unprojected.
+    fn projected_members(&self, slot: usize, base: &CExpr) -> Option<Vec<(TermId, CExpr)>> {
         let interface = self.artifact.machine_context().function_interface()?;
-        let graph = interface.type_graph()?;
         let projections = (self.artifact.aggregate_accesses())
             .projections_for_revision(interface.revision_identity())?;
         let facts = self.artifact.facts();
@@ -955,13 +952,11 @@ impl<'a> Values<'a> {
         });
         let cells = through
             .map(|access| {
+                // A parameter root's struct is the declared pointee's node (`parameter_target`).
                 let projection = projections.get(&access.id)?;
-                let aggregate = graph.aggregates().get(projection.aggregate_id as usize)?;
                 let named = projection.root == r2ssa::AggregateRoot::Parameter(slot as u32)
                     && projection.graph == r2ssa::GraphOf::Interface
-                    && projection.element_index.is_none()
-                    && aggregate.id() == projection.aggregate_id
-                    && aggregate.name() == tag;
+                    && projection.element_index.is_none();
                 let cell = self.roots.access(access.id)?.canonical;
                 let member = CExpr::PtrMember {
                     base: Box::new(base.clone()),
@@ -1004,6 +999,12 @@ impl<'a> Values<'a> {
             let hole = (input.parameter_declaration(index as usize, ty.width_bits()))
                 .filter(crate::prelude::is_unread_slot);
             let differs = differs && hole.is_none();
+            // The source's own declaration, so its struct is the node r2ssa projects into (D359).
+            let stated = hole.is_none()
+                && declared.is_some()
+                && input
+                    .declared_parameter(index as usize, ty.width_bits())
+                    .is_some();
             let c = hole.or(declared).unwrap_or_else(|| unstated_class(&class));
             let named = crate::ast::c_identifier(&input.parameter_name(index as usize));
             // The body reads the unstated word as its integer; only the header spells the word.
@@ -1029,7 +1030,7 @@ impl<'a> Values<'a> {
                 && let CType::Struct(tag) = pointee.as_ref()
                 && tags.defines(tag, false)
             {
-                pointing.push((index as usize, tag.clone(), CExpr::Var(name)));
+                pointing.push((index as usize, tag.clone(), CExpr::Var(name), stated));
             }
             self.params.push(CParam { ty: c, name });
         }

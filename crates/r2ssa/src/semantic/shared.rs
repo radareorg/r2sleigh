@@ -982,9 +982,9 @@ fn read_width(
     }
 }
 
-/// The low bytes of the carrier a `CallUse` reads that its call takes: none where the call's
-/// complete interface states no argument there (`CallReads`), the widest lane the callee holds of
-/// each argument stated there (D266 rule 2); `None` where one is read whole or nothing states it.
+/// The low bytes of the carrier a `CallUse` reads that its call takes: none for an argument register
+/// of the convention the call's complete interface leaves out (`CallReads`), the widest lane the
+/// callee holds of each argument stated there (D266 rule 2); `None` where one is read whole.
 pub(crate) fn call_read_bytes(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
@@ -996,8 +996,14 @@ pub(crate) fn call_read_bytes(
     let (instruction, interface) = call_after(graph, read, machine_context)?;
     let reads = machine_context.call_reads(Some(instruction))?;
     let stated = |storage: &CanonicalStorageId| storage_overlaps(*storage, *slot);
-    let register = slot.space == CanonicalStorageSpace::Register;
-    if register && reads.stated && !reads.registers.iter().any(stated) {
+    // Only the convention's argument registers: a hidden-result pointer (x8) is no argument.
+    let argument = (machine_context.calls()).is_some_and(|model| {
+        crate::call_reads::CallReads::every_location(model)
+            .registers
+            .iter()
+            .any(stated)
+    });
+    if argument && reads.stated && !reads.registers.iter().any(stated) {
         return Some(0);
     }
     let interface = interface?;
