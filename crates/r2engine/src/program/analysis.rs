@@ -160,7 +160,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for DispatchTables {
 
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
         // The survey asks while it runs, so no mode is read: the key states the set.
-        let view = View::new(db, false);
+        let view = View::new(db, false).walking(thumb);
         let read = target(&view, entry, thumb).map(|target| {
             crate::isolation::isolated(|| crate::native::dispatch_tables(&target, &view, entry))
         });

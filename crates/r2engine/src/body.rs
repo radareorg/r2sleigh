@@ -79,13 +79,14 @@ pub trait Program {
     /// knows its own functions can.
     fn is_entry(&self, vaddr: u64) -> bool;
 
-    /// Whether control comes back from a call to this address, which one body's walk cannot establish; unproven, it does.
-    fn returns(&self, _callee: u64) -> bool {
+    /// Whether control comes back from a call to this address, entered in the walk's instruction set
+    /// unless `foreign`, which one body's walk cannot establish; unproven, it does.
+    fn returns(&self, _callee: u64, _foreign: bool) -> bool {
         true
     }
 
     /// Why `returns` says a call to `callee` never comes back; `None` where nothing says so.
-    fn exit(&self, _callee: u64) -> Option<crate::discovery::Never> {
+    fn exit(&self, _callee: u64, _foreign: bool) -> Option<crate::discovery::Never> {
         None
     }
 
@@ -1056,12 +1057,13 @@ impl Walk {
                 }
                 // A predicated call reaches the next instruction when its predicate fails, whatever the callee does.
                 let predicated = r2il::predicated_call(&instruction.lifted.ops, next);
-                match (predicated || program.returns(target), fallthrough) {
+                let foreign = self.target_contexts.get(&target).copied().unwrap_or(false);
+                match (predicated || program.returns(target, foreign), fallthrough) {
                     (true, _) => self.continues(fallthrough, &mut successors, program),
                     // The bytes after a call not known to return may be the next function's.
                     (false, Some(after)) => {
                         // A "never" no statement makes is a bound, so its exit stays unnamed (D255).
-                        if let Some(never) = program.exit(target)
+                        if let Some(never) = program.exit(target, foreign)
                             && (never.proof, never.premises.is_empty())
                                 != (crate::discovery::NeverProof::Declared, true)
                         {

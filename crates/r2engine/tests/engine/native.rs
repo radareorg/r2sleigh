@@ -269,7 +269,7 @@ impl r2engine::body::Program for Halting {
         self.fixture.is_entry(vaddr)
     }
 
-    fn returns(&self, callee: u64) -> bool {
+    fn returns(&self, callee: u64, _foreign: bool) -> bool {
         callee != self.halts
     }
 }

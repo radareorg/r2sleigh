@@ -53,10 +53,11 @@ pub(super) struct Walking<'p, S: Source + 'static> {
     entered: bool,
 }
 
-/// The program as one walk reads it, told which callees are known to come back.
+/// The program as one walk in one instruction set reads it, told which callees are known to come back.
 struct Knowing<'a> {
     program: &'a dyn crate::body::Program,
-    returns: &'a dyn Fn(u64) -> bool,
+    thumb: bool,
+    returns: &'a dyn Fn(u64, bool) -> bool,
 }
 
 impl crate::body::Program for Knowing<'_> {
@@ -72,8 +73,8 @@ impl crate::body::Program for Knowing<'_> {
         self.program.is_entry(vaddr)
     }
 
-    fn returns(&self, callee: u64) -> bool {
-        (self.returns)(callee)
+    fn returns(&self, callee: u64, foreign: bool) -> bool {
+        (self.returns)(callee, self.thumb != foreign)
     }
 
     fn returns_through(&self, slot: u64) -> bool {
@@ -140,10 +141,11 @@ impl<'p, S: Source + 'static> Walking<'p, S> {
         &self,
         entry: u64,
         thumb: bool,
-        returns: &dyn Fn(u64) -> bool,
+        returns: &dyn Fn(u64, bool) -> bool,
     ) -> Result<Body, BodyError> {
         let knowing = Knowing {
             program: &self.program,
+            thumb,
             returns,
         };
         let disasm = self.target(thumb).disasm;
@@ -178,7 +180,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         &self,
         address: u64,
         thumb: bool,
-        returns: &dyn Fn(u64) -> bool,
+        returns: &dyn Fn(u64, bool) -> bool,
     ) -> Result<(BodyWalk, Transfers), NativeRefusal> {
         let thumb = match self.entered {
             true => thumb && self.thumb.is_some(),
@@ -186,6 +188,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         };
         let knowing = Knowing {
             program: &self.program,
+            thumb,
             returns,
         };
         let disasm = self.target(thumb).disasm;
@@ -199,9 +202,15 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         Ok((walk, transfers))
     }
 
-    fn open(&self, walk: &mut BodyWalk, callee: u64, returns: &dyn Fn(u64) -> bool) -> Transfers {
+    fn open(
+        &self,
+        walk: &mut BodyWalk,
+        callee: u64,
+        returns: &dyn Fn(u64, bool) -> bool,
+    ) -> Transfers {
         let knowing = Knowing {
             program: &self.program,
+            thumb: walk.thumb,
             returns,
         };
         let disasm = self.target(walk.thumb).disasm;
@@ -209,11 +218,17 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         Self::step(&mut walk.trace, walk.thumb)
     }
 
-    fn answered(&self, returns: BTreeMap<u64, Return>) {
-        self.program.db.deposit::<ComesBack>(returns);
+    fn answered(&self, returns: BTreeMap<(u64, bool), Return>) {
+        let keyed = (returns.into_iter())
+            .map(|((address, thumb), answer)| (self.program.returns_key(address, thumb), answer));
+        self.program.db.deposit::<ComesBack>(keyed);
     }
 
-    fn dispatch(&self, walk: &mut BodyWalk, returns: &dyn Fn(u64) -> bool) -> Option<Transfers> {
+    fn dispatch(
+        &self,
+        walk: &mut BodyWalk,
+        returns: &dyn Fn(u64, bool) -> bool,
+    ) -> Option<Transfers> {
         walk.trace.dispatches().next()?;
         let tables = super::analysis::dispatch_tables(self.program.db, (walk.entry, walk.thumb));
         let arms = tables.0.dispatched();
@@ -222,6 +237,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         }
         let knowing = Knowing {
             program: &self.program,
+            thumb: walk.thumb,
             returns,
         };
         walk.trace
@@ -229,7 +245,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         Some(Self::step(&mut walk.trace, walk.thumb))
     }
 
-    fn handed(&self, walk: &BodyWalk, returns: &dyn Fn(u64) -> bool) -> Vec<(u64, bool)> {
+    fn handed(&self, walk: &BodyWalk, returns: &dyn Fn(u64, bool) -> bool) -> Vec<(u64, bool)> {
         let target = self.target(walk.thumb);
         let callees = walk.trace.calls().iter().chain(walk.trace.tail_calls());
         let loads = walk.trace.loads();
@@ -259,29 +275,36 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
     }
 }
 
-/// Whether control comes back from a call to a function; the lazy least fixpoint, sharing answers (doc/adr-query-database.md, Q3).
+/// Whether control comes back from a call to a function, by its entry and whether it is entered
+/// in Thumb; the lazy least fixpoint, sharing answers (doc/adr-query-database.md, Q3).
 pub(crate) struct ComesBack;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for ComesBack {
-    type Key = u64;
+    type Key = (u64, bool);
     type Value = Return;
     const NAME: &'static str = "comes-back";
     const RETENTION: Retention = Retention::Held;
 
-    fn compute(db: &Db<ProgramInputs<S>>, &callee: &u64) -> Return {
-        let Ok(walker) = Walking::new(View::new(db, true), false) else {
+    fn compute(db: &Db<ProgramInputs<S>>, &(callee, thumb): &(u64, bool)) -> Return {
+        // Each body is walked in the set its call enters it in, so no mode is read: the survey
+        // reading a dispatch whose arm calls an undiscovered function asks this.
+        let view = View::new(db, false);
+        let Ok(walker) = Walking::new(view.clone(), true) else {
             return Return::Comes;
         };
         if let Some(declared) = walker.declared(callee) {
             return declared;
         }
-        let known = |address| {
-            db.held::<ComesBack>(&address)
+        let known = |address, thumb| {
+            db.held::<ComesBack>(&view.returns_key(address, thumb))
                 .expect("a held lookup never computes")
                 .map(|answer| (*answer).clone())
         };
-        let mut found = crate::discovery::returns(callee, &known, &walker);
-        let answer = found.remove(&callee).unwrap_or(Return::Comes);
+        let found = crate::discovery::returns(callee, thumb, &known, &walker);
+        let mut found = (found.into_iter())
+            .map(|((address, thumb), answer)| (view.returns_key(address, thumb), answer))
+            .collect::<BTreeMap<_, _>>();
+        let answer = found.remove(&(callee, thumb)).unwrap_or(Return::Comes);
         db.deposit::<ComesBack>(found);
         answer
     }

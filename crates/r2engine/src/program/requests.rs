@@ -384,7 +384,8 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// analysis refused, what the walk shows and the record (ROADMAP D29).
     pub fn function_info(&mut self, entry: u64) -> Result<super::info::FunctionInfo, String> {
         self.start_request();
-        let noreturn = self.view().exit(entry).map(|never| never.premises);
+        let view = self.view();
+        let noreturn = (view.exit(entry, view.thumb_at(entry))).map(|never| never.premises);
         let prepared = match self.analysed(entry) {
             Ok(prepared) => prepared,
             // A stop is the request's, and an address nothing maps names no function.
@@ -942,7 +943,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
         }
         let walker = super::returns::Walking::new(view.clone(), true)?;
         let found = crate::discovery::functions(&view, seeds, &walker);
-        db.deposit::<super::returns::ComesBack>(found.returns);
+        let keyed = (found.returns.into_iter())
+            .map(|((address, thumb), answer)| (view.returns_key(address, thumb), answer));
+        db.deposit::<super::returns::ComesBack>(keyed);
         for (vaddr, confidence) in found.placeless {
             placeless.entry(vaddr).or_insert(confidence);
         }

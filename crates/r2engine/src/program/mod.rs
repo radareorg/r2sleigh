@@ -516,10 +516,6 @@ impl<S: Source + 'static> OpenProgram<S> {
         View::new(&self.db, true)
     }
 
-    /// Whether control comes back from a call to `callee`: false only where the program proves it never does.
-    pub(super) fn comes_back(&self, callee: u64) -> bool {
-        self.view().comes_back(callee)
-    }
     /// The key of one function's analysis, sealing and rendering: its entry, its mode, and
     /// whether it reads its callers.
     fn analysis_key(&self, entry: u64) -> analysis::Key {
@@ -644,12 +640,12 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         self.view().is_entry(vaddr)
     }
 
-    fn returns(&self, callee: u64) -> bool {
-        self.comes_back(callee)
+    fn returns(&self, callee: u64, foreign: bool) -> bool {
+        crate::body::Program::returns(&self.view(), callee, foreign)
     }
 
-    fn exit(&self, callee: u64) -> Option<crate::discovery::Never> {
-        self.view().exit(callee)
+    fn exit(&self, callee: u64, foreign: bool) -> Option<crate::discovery::Never> {
+        crate::body::Program::exit(&self.view(), callee, foreign)
     }
 
     fn returns_through(&self, slot: u64) -> bool {

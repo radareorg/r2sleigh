@@ -40,6 +40,8 @@ pub(crate) struct View<'a, S: Source + 'static> {
     starts: Rc<StatedStarts>,
     /// Which set the code discovery found is in; empty for discovery itself, which decides it.
     modes: Rc<super::requests::ModeMap>,
+    /// Whether the body walked through this view is Thumb, where the query's key states it.
+    walking: Option<bool>,
 }
 
 impl<S: Source + 'static> Clone for View<'_, S> {
@@ -50,6 +52,7 @@ impl<S: Source + 'static> Clone for View<'_, S> {
             imports: Rc::clone(&self.imports),
             starts: Rc::clone(&self.starts),
             modes: Rc::clone(&self.modes),
+            walking: self.walking,
         }
     }
 }
@@ -86,6 +89,25 @@ impl<'a, S: Source + 'static> View<'a, S> {
             imports,
             starts,
             modes,
+            walking: None,
+        }
+    }
+
+    /// The same view walking one body in the set its key states, so a callee's set is the
+    /// transfer's and no mode is read.
+    pub(super) fn walking(self, thumb: bool) -> Self {
+        Self {
+            walking: Some(thumb),
+            ..self
+        }
+    }
+
+    /// The set a call enters `callee` in: the walk's unless the transfer states the other one.
+    fn entered(&self, callee: u64, foreign: bool) -> bool {
+        match self.walking {
+            _ if self.machine_in(true).is_none() => false,
+            Some(thumb) => thumb != foreign,
+            None => self.thumb_at(callee),
         }
     }
 
@@ -211,17 +233,25 @@ impl<'a, S: Source + 'static> View<'a, S> {
         self.target_of(machine, addr).map_err(|why| why.to_string())
     }
 
-    /// Whether control comes back from a call to `callee`: false only where the program proves it
-    /// never does, or a runtime model says so under a premise the engine grants.
-    pub(super) fn comes_back(&self, callee: u64) -> bool {
+    /// `ComesBack`'s key: a callee and whether it is entered in Thumb, which only a machine with
+    /// both sets can be.
+    pub(super) fn returns_key(&self, callee: u64, thumb: bool) -> (u64, bool) {
+        (callee, thumb && self.machine_in(true).is_some())
+    }
+
+    /// Whether control comes back from a call to `callee` entered in Thumb where `thumb`: false
+    /// only where the program proves it never does, or a runtime model says so under a premise
+    /// the engine grants.
+    pub(super) fn comes_back(&self, callee: u64, thumb: bool) -> bool {
         self.db
-            .get::<super::returns::ComesBack>(&callee)
+            .get::<super::returns::ComesBack>(&self.returns_key(callee, thumb))
             .map_or(true, |answer| answer.comes())
     }
 
     /// Why a call to `callee` never comes back, where `ComesBack` says it does not.
-    pub(super) fn exit(&self, callee: u64) -> Option<crate::discovery::Never> {
-        match &*self.db.get::<super::returns::ComesBack>(&callee).ok()? {
+    pub(super) fn exit(&self, callee: u64, thumb: bool) -> Option<crate::discovery::Never> {
+        let key = self.returns_key(callee, thumb);
+        match &*self.db.get::<super::returns::ComesBack>(&key).ok()? {
             crate::discovery::Return::Never(never) => Some(never.clone()),
             crate::discovery::Return::Comes => None,
         }
@@ -272,12 +302,12 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         self.starts.holds(vaddr)
     }
 
-    fn returns(&self, callee: u64) -> bool {
-        self.comes_back(callee)
+    fn returns(&self, callee: u64, foreign: bool) -> bool {
+        self.comes_back(callee, self.entered(callee, foreign))
     }
 
-    fn exit(&self, callee: u64) -> Option<crate::discovery::Never> {
-        View::exit(self, callee)
+    fn exit(&self, callee: u64, foreign: bool) -> Option<crate::discovery::Never> {
+        View::exit(self, callee, self.entered(callee, foreign))
     }
 
     /// A call through a slot that is not a kept loader binding is opaque, so it comes back.
