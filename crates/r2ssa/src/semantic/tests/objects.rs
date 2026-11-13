@@ -94,6 +94,13 @@ fn same_value_id_is_space_keyed_for_global_stack_parameter_and_unknown_objects()
         stack.function(),
         stack.graph(),
         super::super::empty_value_ranges(),
+        Some(&super::super::BuildInputs::of(
+            &stack_facts,
+            stack.function(),
+            stack.graph(),
+            Some(stack.machine_context()),
+            super::super::empty_value_ranges(),
+        )),
     );
     let ram_stack = super::super::memory_location_for_addr(
         Some(&stack_facts),

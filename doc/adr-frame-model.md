@@ -64,6 +64,12 @@ declarations.
   frame objects, with phis keyed by `BlockId`), r2types, the renderer, and
   `afv`/`afi`, so the shell and the C name the same objects the same way.
 
+### Escape spans
+
+`FrameReach::escape_spans` names each run of escaped objects an address may reach. `collect_object_and_memory_facts` then builds the object model a second time, with those runs as spans; that build owns the merge. Two inputs of a build are the same for both builds, because no span changes them: what calls write through the frame (`callee_write_spans`, `FrameBoundaries`), and each call's argument area at its stack pointer's entry offset (`CallAreas`, a `ReachingStorage` walk). Both are read once per collection (`BuildInputs`, `CallAreas`). The second build still runs where a span opens.
+
+The second build changes the model even where the rendering does not move. Cold pumasim `0x23fdf0` shows this after S27: a decided canary inside a frame object is no barrier, which opens a single-object run in 19 callees (`0x2312c0`: span (-56, -32), absent before). Their models gain the span, their C does not move, and each was built twice. Skipping a build whose spans the first already reaches never fired on those 19: every span was new. D290 (one escape walk before promotion) deletes the second build.
+
 ## Reloads
 
 Value ranges narrow by copy class, and two loads of one slot are two values. `r2ssa::reload` names, for
