@@ -3481,9 +3481,29 @@ fn duties(
         };
         into.extend(covered_runs(storage, duty));
     }
+    // Both duties say the value survives a call; a reserved lane is the platform's (D274).
+    preserved.retain(|lanes| !covered_by(&reserved, lanes));
     preserved.sort_unstable();
     preserved.dedup();
     (preserved.into(), reserved.into())
+}
+
+/// Whether `runs` cover every byte of `lanes`. `O(n log n)` in the runs.
+fn covered_by(runs: &[LaneSet], lanes: &LaneSet) -> bool {
+    let wanted = lanes.narrowed();
+    let mut held = (runs.iter().map(LaneSet::narrowed))
+        .filter(|run| run.space == wanted.space)
+        .collect::<Vec<_>>();
+    held.sort_unstable_by_key(|run| run.offset);
+    let end = wanted.offset + u64::from(wanted.size);
+    let mut covered = wanted.offset;
+    for run in &held {
+        if run.offset > covered {
+            break;
+        }
+        covered = covered.max(run.offset + u64::from(run.size));
+    }
+    covered >= end && wanted.size > 0
 }
 
 /// What the row states beyond locations, its registers placed.

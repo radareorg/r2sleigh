@@ -375,9 +375,9 @@ fn joins_build(built: &[(String, ConventionModel)]) {
 }
 
 /// Every model the native path builds on the nine selected cspecs, and every join `AnyCall` forms
-/// of two of them, builds; only D274's effects are refused, and a refused effect keeps nothing.
+/// of two of them, builds with its effect; a refused effect would keep nothing.
 #[test]
-fn every_native_model_and_join_builds_and_only_d274_refuses_its_effect() {
+fn every_native_model_and_join_builds_with_its_effect() {
     let mut specifications = std::collections::BTreeSet::new();
     let mut refused = Vec::new();
     for (sleigh, bits) in [("x86-64", 64), ("x86", 32), ("aarch64", 64)] {
@@ -410,13 +410,8 @@ fn every_native_model_and_join_builds_and_only_d274_refuses_its_effect() {
             "{specification}: {specifications:?}"
         );
     }
-    // D274: Go's arm64 specification names x18 unaffected, which Darwin reserves.
-    let expected = ["GoAmd64", "GoArm64", "GoAmd64Abi0", "GoArm64Abi0"];
-    let expected = expected
-        .iter()
-        .chain(&["GoAmd64Unstated", "GoArm64Unstated"]);
-    let expected = expected.map(|id| format!("aarch64/golang/{id}/Darwin: Contradictory"));
-    assert_eq!(refused, expected.collect::<Vec<_>>());
+    // Go's arm64 specification names x18 unaffected, which Darwin reserves: x18 is reserved (D274).
+    assert_eq!(refused, Vec::<String>::new());
 }
 
 /// One node per class `ParamClass::of` answers at a 64-bit pointer, and that class.
