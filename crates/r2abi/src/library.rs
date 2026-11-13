@@ -517,6 +517,21 @@ impl LibraryRows {
 
 /// `none`, `variadic`, `format(printf,2)`, `va_list(2)`, `va_list(2,printf,1)` or
 /// `flagged(1,open_needs_mode,1)`.
+/// The last comma outside parentheses: where a row's parameter name begins.
+fn outer_comma(value: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut last = None;
+    for (at, ch) in value.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => last = Some(at),
+            _ => {}
+        }
+    }
+    last
+}
+
 fn parse_tail(text: &str) -> Option<Tail> {
     let text = text.trim();
     let call = |name: &str| {
@@ -669,8 +684,9 @@ impl Table {
             let Ok(index) = what.parse::<usize>() else {
                 return;
             };
-            let (spelling, called) = match value.split_once(',') {
-                Some((spelling, called)) => (spelling.trim(), Some(called.trim().to_owned())),
+            // A code pointer's spelling holds commas inside its parentheses: the name follows the last outside them.
+            let (spelling, called) = match outer_comma(value).map(|at| value.split_at(at)) {
+                Some((spelling, called)) => (spelling.trim(), Some(called[1..].trim().to_owned())),
                 None => (value, None),
             };
             (self.declare(name).parameters).insert(index, (spelling.to_owned(), called));
@@ -854,7 +870,10 @@ mod tests {
         );
         let atexit = rows.prototype(row("__cxa_atexit"));
         assert_eq!(atexit.parameters.len(), 3);
-        assert!(atexit.parameters[0].is_function());
+        assert_eq!(
+            atexit.parameters[0].code_returns(graph),
+            Some(crate::TypeId::VOID)
+        );
         for name in [
             "__cxa_throw",
             "__cxa_rethrow",

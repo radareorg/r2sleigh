@@ -179,14 +179,17 @@ pub enum Arrival {
 }
 
 impl Parameter {
-    /// Whether the declaration says this parameter is a function.
-    ///
-    /// The type data spells it `func`, which is what `__libc_start_main` says
-    /// of `main` and `atexit` says of the handler it is given. A constant in
-    /// such a slot is a function address on the declaration's authority, which
-    /// is the only ground on which this engine will believe one.
-    pub fn is_function(&self) -> bool {
-        self.spelling.as_type().trim() == "func"
+    /// The return type of the function this parameter points to, where its type is a pointer to
+    /// code; `None` for any other type. A constant in such a slot is a function address on the
+    /// declaration's authority; a refused return (`func`) states no return type (S30).
+    pub fn code_returns(&self, graph: &crate::TypeGraph) -> Option<crate::TypeId> {
+        let crate::types::Type::Pointer { target } = graph.resolved(self.ty)? else {
+            return None;
+        };
+        match graph.resolved(*target)? {
+            crate::types::Type::Code(signature) => Some(signature.returns),
+            _ => None,
+        }
     }
 
     pub fn new(ty: TypeId, spelling: impl Into<Spelled>, name: Option<impl Into<String>>) -> Self {

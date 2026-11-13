@@ -758,3 +758,11 @@ func.prctl.arg.1=,...
 func.prctl.ret=int
 func.prctl.include=sys/prctl.h
 func.prctl.tail=variadic
+
+# stdlib.h: glibc, on_exit(3). The handler takes exit's status and the registered argument.
+on_exit=func
+func.on_exit.args=2
+func.on_exit.arg.0=void (*)(int, void *),function
+func.on_exit.arg.1=void *,arg
+func.on_exit.ret=int
+func.on_exit.include=stdlib.h

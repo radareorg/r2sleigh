@@ -21,11 +21,6 @@ func.__libc_start_main.arg.6=void *,stack_end
 func.__libc_start_main.noreturn=true
 func.__libc_start_main.ret=int
 
-atexit=func
-func.atexit.args=1
-func.atexit.arg.0=func,function
-func.atexit.ret=int
-
 off64_t=typedef
 typedef.off64_t=int64_t
 

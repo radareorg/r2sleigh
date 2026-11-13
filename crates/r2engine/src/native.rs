@@ -950,7 +950,8 @@ pub(crate) fn hands_a_function(
     direct.chain(through_a_slot).any(|name| {
         let declared = Declared::import(target, &name);
         declared.is_some_and(|declared| {
-            (declared.prototype.parameters.iter()).any(r2abi::Parameter::is_function)
+            let code = |parameter: &r2abi::Parameter| parameter.code_returns(declared.graph);
+            (declared.prototype.parameters.iter()).any(|parameter| code(parameter).is_some())
         })
     })
 }
@@ -2860,7 +2861,8 @@ impl Native<'_> {
                 for (index, (parameter, storage)) in
                     prototype.parameters.iter().zip(&placed).enumerate()
                 {
-                    let (true, Some(storage)) = (parameter.is_function(), storage) else {
+                    let code = parameter.code_returns(declared.graph).is_some();
+                    let (true, Some(storage)) = (code, storage) else {
                         continue;
                     };
                     let Some(address) = (seal.value_reaching(id, *storage))

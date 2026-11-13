@@ -218,7 +218,7 @@ func._ZdaPvjSt11align_val_t.ret=void
 
 __cxa_atexit=func
 func.__cxa_atexit.args=3
-func.__cxa_atexit.arg.0=func,func
+func.__cxa_atexit.arg.0=void (*)(void *),func
 func.__cxa_atexit.arg.1=void *,arg
 func.__cxa_atexit.arg.2=void *,dso_handle
 func.__cxa_atexit.ret=int
