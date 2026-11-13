@@ -1,21 +1,44 @@
-//! Exact source-layout projections for scalar aggregate member accesses.
+//! Exact source-layout projections for scalar aggregate member accesses (D171, D346, D348).
 //!
-//! This pass only joins facts already owned by r2ssa: a revision-bound source
-//! type graph, canonical parameter-relative address provenance, and one exact
-//! structured RAM access.  Failure to prove every part leaves the access
-//! unprojected.
+//! Joins facts r2ssa owns: a revision-bound type graph, a root (a pointer parameter, a declared
+//! frame struct, a struct-typed data object, or a projected pointer member's load) and one exact
+//! structured RAM access. Failure to prove every part leaves the access unprojected.
 
 use std::collections::BTreeMap;
 
 use r2il::SpaceId;
 use serde::Serialize;
 
+use crate::dense::IdMap;
+use crate::view::ValueViews;
 use crate::{
-    AddressProvenanceFacts, InstId, InstPayload, SSAOp, SourceMachineContext, SourceTypeKind,
-    SsaGraph, StructuredAccessId, StructuredMemoryAccessFact, ValueId,
+    AddressProvenanceFacts, InstId, InstPayload, ObjectId, SSAOp, SourceMachineContext,
+    SourceTypeKind, SsaGraph, StructuredAccessId, StructuredMemoryAccessFact, ValueId,
 };
 
-pub const AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION: u32 = 4;
+pub const AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION: u32 = 5;
+
+/// What holds the struct a projection reads (D348). Each constructor is proven, never assumed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum AggregateRoot {
+    /// The struct a parameter declared `Pointer { target: Struct }` points at.
+    Parameter(u32),
+    /// A struct a frame slot declares by value; the access lands at a constant offset in it.
+    FrameSlot(ObjectId),
+    /// A data object the image graph types as a struct; the access address is a constant in it.
+    DataObject { address: u64 },
+    /// The struct a projected load of a `Pointer { target: Struct }` member points at.
+    Member(StructuredAccessId),
+}
+
+/// Which graph a projection's type ids name; ids from two graphs never compare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum GraphOf {
+    /// The function interface's `type_graph`.
+    Interface,
+    /// The image's `data_types`.
+    Image,
+}
 
 /// Exact scalar value carried by one projected memory effect.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -39,8 +62,8 @@ pub struct AggregateElementIndexProjection {
 pub struct AggregateAccessProjection {
     pub schema_version: u32,
     pub source_revision_identity: Box<[u8]>,
-    pub source_parameter_index: u32,
-    pub pointer_type_id: u32,
+    pub root: AggregateRoot,
+    pub graph: GraphOf,
     pub struct_type_id: u32,
     pub aggregate_id: u32,
     /// Member ids from the outermost aggregate to the scalar leaf the access reads (D346).
@@ -50,6 +73,7 @@ pub struct AggregateAccessProjection {
     /// The leaf's type.
     pub member_type_id: u32,
     pub element_index: Option<AggregateElementIndexProjection>,
+    /// The access's offset inside the struct (inside one element where indexed).
     pub byte_offset: u64,
     pub byte_width: u32,
     pub space: SpaceId,
@@ -215,123 +239,179 @@ fn scalar_leaf(
     None
 }
 
-pub(crate) fn collect_aggregate_access_projections(
+impl AggregateAccessProjectionFacts {
+    /// The parameter slot a projection is rooted at, where it is.
+    pub fn parameter_projections<'a>(
+        &'a self,
+        revision: &[u8],
+    ) -> impl Iterator<Item = (u32, &'a AggregateAccessProjection)> + 'a {
+        (self.projections_for_revision(revision).into_iter())
+            .flat_map(BTreeMap::values)
+            .filter_map(|projection| match projection.root {
+                AggregateRoot::Parameter(slot) => Some((slot, projection)),
+                _ => None,
+            })
+    }
+}
+
+/// The struct one access lands in, before its member is chosen.
+struct Target<'g> {
+    root: AggregateRoot,
+    graph_of: GraphOf,
+    graph: &'g crate::SourceTypeGraph,
+    struct_type_id: u32,
+    byte_offset: u64,
+    element_index: Option<AggregateElementIndexProjection>,
+}
+
+/// The struct node `type_id` names, by value: its aggregate, checked against the node.
+fn struct_layout(
+    graph: &crate::SourceTypeGraph,
+    type_id: u32,
+) -> Option<&crate::SourceAggregateLayout> {
+    let SourceTypeKind::Struct { aggregate_id } = graph_type(graph, type_id)?.kind() else {
+        return None;
+    };
+    usize::try_from(aggregate_id)
+        .ok()
+        .and_then(|index| graph.aggregates().get(index))
+        .filter(|aggregate| aggregate.id() == aggregate_id && aggregate.type_id() == type_id)
+        .filter(|aggregate| aggregate.size_bits() > 0 && aggregate.size_bits().is_multiple_of(8))
+}
+
+/// The struct a pointer node points at, by type id.
+fn pointee_struct(graph: &crate::SourceTypeGraph, pointer_type_id: u32) -> Option<u32> {
+    let SourceTypeKind::Pointer { target_type_id, .. } = graph_type(graph, pointer_type_id)?.kind()
+    else {
+        return None;
+    };
+    struct_layout(graph, target_type_id).map(|_| target_type_id)
+}
+
+/// `address` as a base value plus a constant: one `INT_ADD` of a constant, through copies.
+fn base_and_offset(
     graph: &SsaGraph,
-    addresses: &AddressProvenanceFacts,
-    accesses: &BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
-    machine_context: &SourceMachineContext,
+    views: &ValueViews<ValueId>,
+    address: ValueId,
+) -> (ValueId, u64) {
+    let address = views.copy_root(address);
+    let added = (graph.def_inst(address))
+        .and_then(|inst| graph.inst(inst))
+        .and_then(|inst| match &inst.payload {
+            InstPayload::Op(SSAOp::IntAdd { a, b, .. }) => {
+                match (views.constant(*a), views.constant(*b)) {
+                    (None, Some(offset)) => Some((views.copy_root(*a), offset)),
+                    (Some(offset), None) => Some((views.copy_root(*b), offset)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        });
+    added.unwrap_or((address, 0))
+}
+
+/// The sources one collection reads.
+pub(crate) struct ProjectionSources<'a> {
+    pub graph: &'a SsaGraph,
+    pub views: &'a ValueViews<ValueId>,
+    pub addresses: &'a AddressProvenanceFacts,
+    pub accesses: &'a BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
+    pub stack_slots: &'a BTreeMap<ObjectId, crate::semantic::StackSlotCertificate>,
+    pub machine_context: &'a SourceMachineContext,
+}
+
+/// Every access's projection. Direct roots first; then a worklist over projected pointer-member
+/// loads roots the accesses through their results, each access once: O(accesses x log).
+pub(crate) fn collect_aggregate_access_projections(
+    sources: &ProjectionSources<'_>,
 ) -> AggregateAccessProjectionFacts {
+    let ProjectionSources {
+        graph,
+        views,
+        addresses,
+        accesses,
+        stack_slots,
+        machine_context,
+    } = *sources;
     let Some(interface) = machine_context.function_interface() else {
         return AggregateAccessProjectionFacts::default();
     };
     let Some(type_graph) = interface.type_graph() else {
         return AggregateAccessProjectionFacts::default();
     };
+    let image = machine_context.data_structs();
     let revision = interface.revision_identity().to_vec().into_boxed_slice();
     let mut projections = BTreeMap::new();
+    // Accesses whose address is a base value plus a constant, waiting on that base.
+    let mut waiting = IdMap::<ValueId, Vec<(StructuredAccessId, u64)>>::default();
+    // Projected accesses not yet asked whether they root others; each access enters once.
+    let mut pointers = Vec::new();
+    let record = |projection: AggregateAccessProjection,
+                  projections: &mut BTreeMap<StructuredAccessId, AggregateAccessProjection>,
+                  pointers: &mut Vec<StructuredAccessId>| {
+        pointers.push(projection.access);
+        projections.insert(projection.access, projection);
+    };
     for (access_id, access) in accesses {
-        let space = access.space;
-        if *access_id != access.id || !access.provenance_complete || space != SpaceId::Ram {
+        if *access_id != access.id || !access.provenance_complete || access.space != SpaceId::Ram {
             continue;
         }
-        let Some(binding) = exact_access_binding(graph, access, space) else {
+        let Some(binding) = exact_access_binding(graph, access, access.space) else {
             continue;
         };
-        let Some(expression) = addresses.parameter_expression(access.address) else {
+        let target = parameter_target(addresses, interface, type_graph, access)
+            .or_else(|| frame_target(stack_slots, type_graph, access))
+            .or_else(|| data_target(views, image, access));
+        let Some(target) = target else {
+            let (base, offset) = base_and_offset(graph, views, access.address);
+            waiting
+                .get_or_insert_with(base, Vec::new)
+                .push((access.id, offset));
             continue;
         };
-        if expression.offset < 0 {
-            continue;
+        if let Some(projection) = project(&revision, access, binding, target) {
+            record(projection, &mut projections, &mut pointers);
         }
-        let Ok(parameter_index) = u32::try_from(expression.parameter) else {
+    }
+    // Each projected load of a struct pointer roots the accesses waiting on its result.
+    while let Some(base_access) = pointers.pop() {
+        let Some(base) = projections.get(&base_access) else {
             continue;
         };
-        let Some(parameter) = interface.parameters().get(expression.parameter) else {
+        let AggregateAccessBinding::Read { result } = base.binding else {
             continue;
         };
-        let Some(logical_value) = interface.parameter_logical_value(expression.parameter) else {
+        let (graph_of, member_graph) = match base.graph {
+            GraphOf::Interface => (GraphOf::Interface, type_graph),
+            GraphOf::Image => match image {
+                Some(image) => (GraphOf::Image, &image.graph),
+                None => continue,
+            },
+        };
+        let Some(struct_type_id) = pointee_struct(member_graph, base.member_type_id) else {
             continue;
         };
-        if parameter.index() != parameter_index {
-            continue;
-        }
-        if expression.parameter_storage != parameter.register_storage() {
-            continue;
-        }
-        let pointer_type_id = logical_value.type_id();
-        let Some(pointer_type) = graph_type(type_graph, pointer_type_id) else {
+        let Some(dependents) = waiting.get(result) else {
             continue;
         };
-        let SourceTypeKind::Pointer {
-            target_type_id: struct_type_id,
-            ..
-        } = pointer_type.kind()
-        else {
-            continue;
-        };
-        let Some(struct_type) = graph_type(type_graph, struct_type_id) else {
-            continue;
-        };
-        let SourceTypeKind::Struct { aggregate_id } = struct_type.kind() else {
-            continue;
-        };
-        let Some(aggregate) = usize::try_from(aggregate_id)
-            .ok()
-            .and_then(|index| type_graph.aggregates().get(index))
-            .filter(|aggregate| {
-                aggregate.id() == aggregate_id && aggregate.type_id() == struct_type_id
-            })
-        else {
-            continue;
-        };
-        if aggregate.size_bits() == 0 || !aggregate.size_bits().is_multiple_of(8) {
-            continue;
-        }
-        let aggregate_size_bytes = aggregate.size_bits() / 8;
-        let element_index = match expression.terms.as_slice() {
-            [] => None,
-            [term]
-                if term.coefficient > 0
-                    && u64::try_from(term.coefficient) == Ok(aggregate_size_bytes)
-                    && graph.value(term.value).is_some() =>
-            {
-                Some(AggregateElementIndexProjection {
-                    value: term.value,
-                    stride_bytes: aggregate_size_bytes,
-                })
+        for &(access_id, offset) in dependents {
+            let Some(access) = accesses.get(&access_id) else {
+                continue;
+            };
+            let Some(binding) = exact_access_binding(graph, access, access.space) else {
+                continue;
+            };
+            let target = Target {
+                root: AggregateRoot::Member(base_access),
+                graph_of,
+                graph: member_graph,
+                struct_type_id,
+                byte_offset: offset,
+                element_index: None,
+            };
+            if let Some(projection) = project(&revision, access, binding, target) {
+                record(projection, &mut projections, &mut pointers);
             }
-            _ => continue,
-        };
-        let Ok(byte_offset) = u64::try_from(expression.offset) else {
-            continue;
-        };
-        let Some(offset_bits) = byte_offset.checked_mul(8) else {
-            continue;
-        };
-        let size_bits = u64::from(access.width) * 8;
-        let Some(leaf) = scalar_leaf(type_graph, aggregate, offset_bits, size_bits) else {
-            continue;
-        };
-        let projection = AggregateAccessProjection {
-            schema_version: AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION,
-            source_revision_identity: revision.clone(),
-            source_parameter_index: parameter_index,
-            pointer_type_id,
-            struct_type_id,
-            aggregate_id,
-            path: leaf.path.into_boxed_slice(),
-            member_name: leaf.name.into_boxed_str(),
-            member_type_id: leaf.type_id,
-            element_index,
-            byte_offset,
-            byte_width: access.width,
-            space,
-            access: access.id,
-            producer: access.id.inst,
-            binding,
-        };
-        if projections.insert(access.id, projection).is_some() {
-            projections.remove(&access.id);
         }
     }
     AggregateAccessProjectionFacts {
@@ -339,6 +419,114 @@ pub(crate) fn collect_aggregate_access_projections(
         source_revision_identity: Some(revision),
         projections,
     }
+}
+
+/// A parameter declared a struct pointer, the access at a constant offset or one exact stride.
+fn parameter_target<'g>(
+    addresses: &AddressProvenanceFacts,
+    interface: &crate::SourceFunctionInterface,
+    type_graph: &'g crate::SourceTypeGraph,
+    access: &StructuredMemoryAccessFact,
+) -> Option<Target<'g>> {
+    let expression = addresses.parameter_expression(access.address)?;
+    let parameter_index = u32::try_from(expression.parameter).ok()?;
+    let parameter = interface.parameters().get(expression.parameter)?;
+    let logical_value = interface.parameter_logical_value(expression.parameter)?;
+    if parameter.index() != parameter_index
+        || expression.parameter_storage != parameter.register_storage()
+    {
+        return None;
+    }
+    let struct_type_id = pointee_struct(type_graph, logical_value.type_id())?;
+    let size_bytes = struct_layout(type_graph, struct_type_id)?.size_bits() / 8;
+    let element_index = match expression.terms.as_slice() {
+        [] => None,
+        [term] if term.coefficient > 0 && u64::try_from(term.coefficient) == Ok(size_bytes) => {
+            Some(AggregateElementIndexProjection {
+                value: term.value,
+                stride_bytes: size_bytes,
+            })
+        }
+        _ => return None,
+    };
+    Some(Target {
+        root: AggregateRoot::Parameter(parameter_index),
+        graph_of: GraphOf::Interface,
+        graph: type_graph,
+        struct_type_id,
+        byte_offset: u64::try_from(expression.offset).ok()?,
+        element_index,
+    })
+}
+
+/// A frame slot the source declares as a struct by value, the access at a constant offset in it.
+fn frame_target<'g>(
+    stack_slots: &BTreeMap<ObjectId, crate::semantic::StackSlotCertificate>,
+    type_graph: &'g crate::SourceTypeGraph,
+    access: &StructuredMemoryAccessFact,
+) -> Option<Target<'g>> {
+    let declared = stack_slots.get(&access.object)?.source_slot?;
+    let struct_type_id = declared.logical_type()?;
+    struct_layout(type_graph, struct_type_id)?;
+    Some(Target {
+        root: AggregateRoot::FrameSlot(access.object),
+        graph_of: GraphOf::Interface,
+        graph: type_graph,
+        struct_type_id,
+        byte_offset: u64::try_from(access.object_offset?).ok()?,
+        element_index: None,
+    })
+}
+
+/// A constant address inside a struct-typed data object of the image graph.
+fn data_target<'g>(
+    views: &ValueViews<ValueId>,
+    image: Option<&'g crate::machine_context::DataStructs>,
+    access: &StructuredMemoryAccessFact,
+) -> Option<Target<'g>> {
+    let image = image?;
+    let (address, struct_type_id, byte_offset) =
+        image.containing(views.constant(access.address)?)?;
+    struct_layout(&image.graph, struct_type_id)?;
+    Some(Target {
+        root: AggregateRoot::DataObject { address },
+        graph_of: GraphOf::Image,
+        graph: &image.graph,
+        struct_type_id,
+        byte_offset,
+        element_index: None,
+    })
+}
+
+/// The projection of one access into its target's struct, where one scalar leaf covers it.
+fn project(
+    revision: &[u8],
+    access: &StructuredMemoryAccessFact,
+    binding: AggregateAccessBinding,
+    target: Target<'_>,
+) -> Option<AggregateAccessProjection> {
+    let aggregate = struct_layout(target.graph, target.struct_type_id)?;
+    let offset_bits = target.byte_offset.checked_mul(8)?;
+    let size_bits = u64::from(access.width) * 8;
+    let leaf = scalar_leaf(target.graph, aggregate, offset_bits, size_bits)?;
+    Some(AggregateAccessProjection {
+        schema_version: AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION,
+        source_revision_identity: revision.into(),
+        root: target.root,
+        graph: target.graph_of,
+        struct_type_id: target.struct_type_id,
+        aggregate_id: aggregate.id(),
+        path: leaf.path.into_boxed_slice(),
+        member_name: leaf.name.into_boxed_str(),
+        member_type_id: leaf.type_id,
+        element_index: target.element_index,
+        byte_offset: target.byte_offset,
+        byte_width: access.width,
+        space: access.space,
+        access: access.id,
+        producer: access.id.inst,
+        binding,
+    })
 }
 
 #[cfg(test)]
@@ -701,8 +889,8 @@ mod tests {
             .projection(REVISION, load_access)
             .expect("third-member load projection");
         assert_eq!(load.source_revision_identity.as_ref(), REVISION);
-        assert_eq!(load.source_parameter_index, 0);
-        assert_eq!(load.pointer_type_id, 2);
+        assert_eq!(load.root, AggregateRoot::Parameter(0));
+        assert_eq!(load.graph, GraphOf::Interface);
         assert_eq!(load.struct_type_id, 0);
         assert_eq!(load.aggregate_id, 0);
         assert_eq!(load.path.as_ref(), [2]);
@@ -882,12 +1070,14 @@ mod tests {
             .get_mut(&load_id)
             .expect("load access")
             .provenance_complete = false;
-        let recollected = collect_aggregate_access_projections(
-            positive.graph(),
-            positive.addresses(),
-            &ambiguous_accesses,
-            positive.machine_context(),
-        );
+        let recollected = collect_aggregate_access_projections(&ProjectionSources {
+            graph: positive.graph(),
+            views: &positive.decompile_prep_facts().views,
+            addresses: positive.addresses(),
+            accesses: &ambiguous_accesses,
+            stack_slots: &positive.certificates().stack_slots,
+            machine_context: positive.machine_context(),
+        });
         assert!(recollected.projection(REVISION, load_id).is_none());
 
         let mut mismatched_graph = positive.graph().clone();
@@ -899,12 +1089,14 @@ mod tests {
             panic!("expected source load");
         };
         *space = SpaceId::Custom(7);
-        let recollected = collect_aggregate_access_projections(
-            &mismatched_graph,
-            positive.addresses(),
-            &positive.structured().memory_accesses,
-            positive.machine_context(),
-        );
+        let recollected = collect_aggregate_access_projections(&ProjectionSources {
+            graph: &mismatched_graph,
+            views: &positive.decompile_prep_facts().views,
+            addresses: positive.addresses(),
+            accesses: &positive.structured().memory_accesses,
+            stack_slots: &positive.certificates().stack_slots,
+            machine_context: positive.machine_context(),
+        });
         assert!(
             recollected.projection(REVISION, load_id).is_none(),
             "a Custom source op must not reuse a Ram machine-context projection"

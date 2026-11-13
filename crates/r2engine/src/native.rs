@@ -1963,9 +1963,14 @@ impl<'a> Native<'a> {
         let Some(graph) = interface.type_graph() else {
             return Vec::new();
         };
+        let image = artifact.machine_context().data_structs();
         let placement = Placement::new(self.target, &self.machine);
         (artifact.member_calls().proven())
             .filter_map(|(_, call)| {
+                let graph = match call.graph {
+                    r2ssa::GraphOf::Interface => graph,
+                    r2ssa::GraphOf::Image => &image?.graph,
+                };
                 placement.member_call(graph, &call, interface.revision_identity())
             })
             .collect()

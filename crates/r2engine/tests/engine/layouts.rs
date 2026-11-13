@@ -3,8 +3,8 @@
 use crate::common;
 
 use common::{BASE, Literal};
-use r2abi::{Member, Record, RecordKind, Type, TypeGraph};
-use r2engine::program::OpenProgram;
+use r2abi::{Member, Record, RecordKind, Signature, StatedConvention, Type, TypeGraph, TypeId};
+use r2engine::program::{OpenProgram, Symbol, SymbolKind};
 
 /// `int next_val(struct node *cur) { return cur->next->val; }`.
 const NEXT_VAL: &[u8] = &[
@@ -13,10 +13,65 @@ const NEXT_VAL: &[u8] = &[
     0xc3, // 1006 ret
 ];
 
-/// `struct node { int val; struct node *next; }` and `int next_val(struct node *cur)`.
-fn declaring() -> r2abi::Declarations {
-    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Width};
+/// `void use(struct holder *h) { h->ops->f(h->ops->o, h->ops->o); }`.
+const LOADED_MEMBER_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x08, // 1000 sub rsp, 8
+    0x48, 0x8b, 0x07, // 1004 mov rax, [rdi]
+    0x48, 0x8b, 0x48, 0x08, // 1007 mov rcx, [rax + 8]
+    0x48, 0x8b, 0x38, // 100b mov rdi, [rax]
+    0x48, 0x89, 0xfe, // 100e mov rsi, rdi
+    0xff, 0xd1, // 1011 call rcx
+    0x48, 0x83, 0xc4, 0x08, // 1013 add rsp, 8
+    0xc3, // 1017 ret
+];
+
+/// `void use(void *p) { struct ops o; o.o = p; o.f(o.o, o.o); }`, `o` at the frame's bottom.
+const FRAME_MEMBER_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0x48, 0x89, 0x3c, 0x24, // 1004 mov [rsp], rdi
+    0x48, 0x8b, 0x44, 0x24, 0x08, // 1008 mov rax, [rsp + 8]
+    0x48, 0x8b, 0x3c, 0x24, // 100d mov rdi, [rsp]
+    0x48, 0x89, 0xfe, // 1011 mov rsi, rdi
+    0xff, 0xd0, // 1014 call rax
+    0x48, 0x83, 0xc4, 0x18, // 1016 add rsp, 0x18
+    0xc3, // 101a ret
+];
+
+/// Where `GLOBAL_MEMBER_CALL`'s `g_ops` lies, after its code.
+const G_OPS: u64 = BASE + 0x20;
+
+/// `void use(void) { g_ops.f(g_ops.o, g_ops.o); }`, then `g_ops`'s 16 bytes.
+const GLOBAL_MEMBER_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x08, // 1000 sub rsp, 8
+    0x48, 0x8b, 0x3c, 0x25, 0x20, 0x10, 0x00, 0x00, // 1004 mov rdi, [0x1020]
+    0x48, 0x8b, 0x04, 0x25, 0x28, 0x10, 0x00, 0x00, // 100c mov rax, [0x1028]
+    0x48, 0x89, 0xfe, // 1014 mov rsi, rdi
+    0xff, 0xd0, // 1017 call rax
+    0x48, 0x83, 0xc4, 0x08, // 1019 add rsp, 8
+    0xc3, // 101d ret
+    0x90, 0x90, // 101e
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 1020 g_ops
+];
+
+/// The declared types: `struct node`, `struct ops { void *o; void (*f)(void *, void *); }` and
+/// `struct holder { struct ops *ops; }`.
+struct Types {
+    graph: TypeGraph,
+    int: TypeId,
+    node_pointer: TypeId,
+    ops: TypeId,
+    holder_pointer: TypeId,
+}
+
+fn types() -> Types {
+    use r2abi::{Scalar, ScalarKind, Width};
     let mut graph = TypeGraph::new();
+    let field = |name: &str, ty, at| Member {
+        name: Some(name.to_owned()),
+        ty,
+        offset_bits: at,
+        bit_size: None,
+    };
     let int = graph.add(Type::Scalar(Scalar {
         kind: ScalarKind::Signed,
         width: Width::Bits(32),
@@ -24,12 +79,6 @@ fn declaring() -> r2abi::Declarations {
     }));
     let node = graph.reserve();
     let node_pointer = graph.add(Type::Pointer { target: node });
-    let field = |name: &str, ty, at| Member {
-        name: Some(name.to_owned()),
-        ty,
-        offset_bits: at,
-        bit_size: None,
-    };
     graph.define(
         node,
         Type::Record(Record {
@@ -39,38 +88,211 @@ fn declaring() -> r2abi::Declarations {
             members: vec![field("val", int, 0), field("next", node_pointer, 64)],
         }),
     );
+    let void_pointer = graph.add(Type::Pointer {
+        target: TypeId::VOID,
+    });
+    let code = graph.add(Type::Code(Signature {
+        returns: TypeId::VOID,
+        parameters: vec![void_pointer; 2],
+        variadic: false,
+        prototyped: true,
+        convention: StatedConvention::Normal,
+    }));
+    let function_pointer = graph.add(Type::Pointer { target: code });
+    let ops = graph.add(Type::Record(Record {
+        kind: RecordKind::Struct,
+        tag: Some("ops".to_owned()),
+        size_bytes: 16,
+        members: vec![
+            field("o", void_pointer, 0),
+            field("f", function_pointer, 64),
+        ],
+    }));
+    let ops_pointer = graph.add(Type::Pointer { target: ops });
+    let holder = graph.add(Type::Record(Record {
+        kind: RecordKind::Struct,
+        tag: Some("holder".to_owned()),
+        size_bytes: 8,
+        members: vec![field("ops", ops_pointer, 0)],
+    }));
+    let holder_pointer = graph.add(Type::Pointer { target: holder });
+    Types {
+        graph,
+        int,
+        node_pointer,
+        ops,
+        holder_pointer,
+    }
+}
+
+/// A function at `BASE` declared to take one parameter of `parameter` and return `returns`.
+fn declaring(
+    name: &str,
+    parameter: Option<(TypeId, &str)>,
+    returns: TypeId,
+) -> r2abi::Declarations {
+    use r2abi::{Parameter, Prototype};
+    let types = types();
     let prototype = Prototype {
-        name: "next_val".to_owned(),
-        parameters: vec![Parameter::new(node_pointer, "struct node *", Some("cur"))],
-        returns: "int".into(),
-        return_type: int,
+        name: name.to_owned(),
+        parameters: (parameter.into_iter())
+            .map(|(ty, spelled)| Parameter::new(ty, spelled, Some("p")))
+            .collect(),
+        returns: if returns == TypeId::VOID {
+            "void"
+        } else {
+            "int"
+        }
+        .into(),
+        return_type: returns,
         ..Prototype::default()
     };
-    let mut declarations = r2abi::Declarations::new(graph);
+    let mut declarations = r2abi::Declarations::new(types.graph);
     declarations.declare_function(BASE, prototype);
     declarations
 }
 
-fn program(code: &'static [u8]) -> OpenProgram<Literal> {
-    let functions = [("next_val", BASE, code.len() as u64)];
-    OpenProgram::of(Literal::of_code(code, &functions).with_declarations(declaring()))
+fn program(code: &'static [u8], declarations: r2abi::Declarations) -> OpenProgram<Literal> {
+    let functions = [("f", BASE, code.len() as u64)];
+    OpenProgram::of(Literal::of_code(code, &functions).with_declarations(declarations))
 }
 
-/// Each projected access's root slot and member path, in access order.
-fn projected(open: &mut OpenProgram<Literal>) -> Vec<String> {
+/// Each projected access's member path and root kind, in access order.
+fn projected(open: &mut OpenProgram<Literal>) -> Vec<(String, &'static str)> {
     let prepared = open.prepared(BASE).expect("it prepares");
     let shared = prepared.artifact().shared_artifact();
     let facts = shared.aggregate_accesses();
     let revision = facts.source_revision_identity().expect("a typed interface");
     (facts.projections_for_revision(revision).into_iter())
         .flat_map(|projections| projections.values())
-        .map(|projection| projection.member_name.to_string())
+        .map(|projection| {
+            let root = match projection.root {
+                r2ssa::AggregateRoot::Parameter(_) => "parameter",
+                r2ssa::AggregateRoot::FrameSlot(_) => "frame",
+                r2ssa::AggregateRoot::DataObject { .. } => "data",
+                r2ssa::AggregateRoot::Member(_) => "member",
+            };
+            (projection.member_name.to_string(), root)
+        })
         .collect()
 }
 
-/// The member a parameter's load reads is named from the projection by type id (D345).
+/// The one call's member row and whether its argument count is proven.
+fn member_call(open: &mut OpenProgram<Literal>) -> (bool, usize, bool) {
+    let prepared = open.prepared(BASE).expect("it prepares");
+    let shared = prepared.artifact().shared_artifact();
+    let (&site, _) = (shared.facts().call_sites.by_id.iter().next()).expect("one call");
+    let boundary = &shared.facts().boundaries.calls[&site];
+    let row = matches!(shared.member_calls().get(site), Some(Ok(_)));
+    (row, boundary.arguments.len(), boundary.arguments_proven)
+}
+
+/// D345: the member a parameter's load reads is named from the projection by type id. D348: the
+/// struct a projected pointer member points at roots the next load.
 #[test]
-fn a_parameter_member_is_named_by_its_projection() {
-    let mut open = program(NEXT_VAL);
-    assert_eq!(projected(&mut open), ["next"]);
+fn a_loaded_pointer_member_roots_the_next_projection() {
+    let types = types();
+    let mut open = program(
+        NEXT_VAL,
+        declaring(
+            "next_val",
+            Some((types.node_pointer, "struct node *")),
+            types.int,
+        ),
+    );
+    assert_eq!(
+        projected(&mut open),
+        [
+            ("next".to_string(), "parameter"),
+            ("val".to_string(), "member")
+        ]
+    );
+}
+
+/// D348 gate 7: `h->ops->f(...)` takes the member's two declared parameters.
+#[test]
+fn a_call_through_a_loaded_members_member_takes_its_type_as_contract() {
+    let types = types();
+    let declarations = declaring(
+        "use",
+        Some((types.holder_pointer, "struct holder *")),
+        TypeId::VOID,
+    );
+    let mut open = program(LOADED_MEMBER_CALL, declarations);
+    let roots = projected(&mut open);
+    assert!(roots.contains(&("f".to_string(), "member")), "{roots:?}");
+    assert_eq!(member_call(&mut open), (true, 2, true));
+}
+
+/// D348 gate 7: `g_ops.f(...)`, a member of a struct-typed global, takes its type as contract.
+#[test]
+fn a_call_through_a_global_structs_member_takes_its_type_as_contract() {
+    let types = types();
+    let mut declarations = declaring("use", None, TypeId::VOID);
+    declarations.declare_object(
+        G_OPS,
+        r2abi::DataObject {
+            name: "g_ops".to_owned(),
+            ty: types.ops,
+            size_bytes: Some(16),
+        },
+    );
+    let functions = [("use", BASE, 0x1e)];
+    let literal = Literal::of_code(GLOBAL_MEMBER_CALL, &functions)
+        .writable_data_after(G_OPS)
+        .declaring(Symbol {
+            name: "g_ops".into(),
+            vaddr: G_OPS,
+            size: 16,
+            kind: SymbolKind::Data,
+            defined: true,
+            ..Symbol::default()
+        })
+        .with_declarations(declarations);
+    let mut open = OpenProgram::of(literal);
+    let roots = projected(&mut open);
+    assert!(roots.contains(&("f".to_string(), "data")), "{roots:?}");
+    assert_eq!(member_call(&mut open), (true, 2, true));
+}
+
+/// D348 gate 7: `o.f(...)`, a member of a struct the frame declares by value.
+#[test]
+fn a_call_through_a_frame_structs_member_takes_its_type_as_contract() {
+    use r2abi::{FrameBase, Local, Parameter, Prototype};
+    let types = types();
+    let void_pointer = (types.graph.iter())
+        .find_map(|(id, ty)| {
+            matches!(ty, Type::Pointer { target } if *target == TypeId::VOID).then_some(id)
+        })
+        .expect("void *");
+    let prototype = Prototype {
+        name: "use".to_owned(),
+        parameters: vec![Parameter::new(void_pointer, "void *", Some("p"))],
+        returns: "void".into(),
+        return_type: TypeId::VOID,
+        frame_base: Some(FrameBase::CallFrameCfa),
+        locals: vec![Local {
+            name: "o".to_owned(),
+            spelling: None,
+            frame_offset: -0x20,
+            size_bytes: Some(16),
+            ty: types.ops,
+            scopes: Vec::new(),
+        }],
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(types.graph);
+    declarations.declare_function(BASE, prototype);
+    let mut open = program(FRAME_MEMBER_CALL, declarations);
+    let roots = projected(&mut open);
+    assert!(roots.contains(&("f".to_string(), "frame")), "{roots:?}");
+    assert_eq!(member_call(&mut open), (true, 2, true));
+}
+
+/// The stripped copy of a member call keeps its gap: no graph roots anything.
+#[test]
+fn a_stripped_member_call_stays_residual() {
+    let functions = [("use", BASE, LOADED_MEMBER_CALL.len() as u64)];
+    let mut open = OpenProgram::of(Literal::of_code(LOADED_MEMBER_CALL, &functions));
+    assert!(!member_call(&mut open).0);
 }

@@ -470,6 +470,25 @@ pub struct SourceMachineContext {
     source_string_literals: BTreeMap<u64, String>,
     /// Bytes the program never writes, by the address a body loads from: what a load there reads.
     read_only: BTreeMap<u64, Box<[u8]>>,
+    /// The image's data objects whose type is a laid-out struct, with that graph (D348).
+    data_structs: Option<std::sync::Arc<DataStructs>>,
+}
+
+/// Data objects the image graph types as a struct of known size, by address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DataStructs {
+    pub graph: r2source::SourceTypeGraph,
+    /// Start address to `(type id, size in bytes)`.
+    by_address: BTreeMap<u64, (u32, u64)>,
+}
+
+impl DataStructs {
+    /// The struct object holding `address`, as its start, type id and the offset into it. O(log n).
+    pub fn containing(&self, address: u64) -> Option<(u64, u32, u64)> {
+        let (&start, &(type_id, size)) = self.by_address.range(..=address).next_back()?;
+        let offset = address - start;
+        (offset < size).then_some((start, type_id, offset))
+    }
 }
 
 /// Unique register-space ranges the lifted body actually reads or writes.
@@ -840,6 +859,7 @@ impl SourceMachineContext {
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
             read_only: BTreeMap::new(),
+            data_structs: None,
         }
     }
 
@@ -1304,6 +1324,47 @@ impl SourceMachineContext {
     /// Retain literal contents from the exact source snapshot before semantic
     /// preparation. Duplicate addresses with different contents are omitted;
     /// ambiguity is not literal evidence.
+    /// Bind the image's struct-typed data objects (D348). Two objects at one address bind neither.
+    pub(crate) fn bind_data_structs(&mut self, image: &r2source::OwnedFunctionImage) {
+        use r2source::SourceTypeKind;
+        let Some(graph) = image.data_types() else {
+            return;
+        };
+        let mut by_address = BTreeMap::new();
+        let mut doubled = std::collections::BTreeSet::new();
+        for object in image.data_symbols() {
+            let Some(node) =
+                (object.type_id()).and_then(|id| graph.types().get(usize::try_from(id).ok()?))
+            else {
+                continue;
+            };
+            let SourceTypeKind::Struct { .. } = node.kind() else {
+                continue;
+            };
+            let size = node.size_bits() / 8;
+            if size == 0 || !node.size_bits().is_multiple_of(8) {
+                continue;
+            }
+            if by_address
+                .insert(object.address(), (node.id(), size))
+                .is_some()
+            {
+                doubled.insert(object.address());
+            }
+        }
+        by_address.retain(|address, _| !doubled.contains(address));
+        if !by_address.is_empty() {
+            self.data_structs = Some(std::sync::Arc::new(DataStructs {
+                graph: graph.clone(),
+                by_address,
+            }));
+        }
+    }
+
+    pub fn data_structs(&self) -> Option<&DataStructs> {
+        self.data_structs.as_deref()
+    }
+
     /// Bind the read-only bytes the capture took at each address the body loads from.
     pub(crate) fn bind_read_only(&mut self, windows: &[(u64, Vec<u8>)]) {
         self.read_only = windows

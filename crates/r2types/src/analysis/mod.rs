@@ -910,19 +910,14 @@ pub(crate) fn field_access_certificates_from_source_aggregate_accesses(
     let Some(graph) = interface.type_graph() else {
         return Vec::new();
     };
-    let Some(projections) = source
-        .aggregate_accesses()
-        .projections_for_revision(interface.revision_identity())
-    else {
-        return Vec::new();
-    };
     let ptr_bits = source
         .machine_context()
         .memory_model()
         .default_address_bits();
     let mut by_location = BTreeMap::<(usize, u64), Option<crate::FieldAccessCertificate>>::new();
-    for projection in projections.values() {
-        let Ok(slot) = usize::try_from(projection.source_parameter_index) else {
+    let projections = source.aggregate_accesses();
+    for (slot, projection) in projections.parameter_projections(interface.revision_identity()) {
+        let Ok(slot) = usize::try_from(slot) else {
             continue;
         };
         let Some(field_type) = crate::convert::source_type_like(graph, projection.member_type_id)
