@@ -145,26 +145,19 @@ impl FunctionPresentation {
 /// Types travel on the interface's `SourceTypeGraph` (ADR call-boundary, Types on the wire).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSignaturePresentation {
-    calling_convention: Option<Box<str>>,
     noreturn: bool,
     parameters: Box<[SourceSignatureParameter]>,
 }
 
 impl SourceSignaturePresentation {
     pub fn new(
-        calling_convention: Option<impl Into<Box<str>>>,
         noreturn: bool,
         parameters: impl IntoIterator<Item = SourceSignatureParameter>,
     ) -> Self {
         Self {
-            calling_convention: calling_convention.map(Into::into),
             noreturn,
             parameters: parameters.into_iter().collect(),
         }
-    }
-
-    pub fn calling_convention(&self) -> Option<&str> {
-        self.calling_convention.as_deref()
     }
 
     pub const fn noreturn(&self) -> bool {
@@ -711,31 +704,10 @@ pub struct AdvisoryCallSite {
     target_name: Option<String>,
     /// Whether the target is the binary's own or imported.
     linkage: AdvisoryCalleeLinkage,
-    /// The prototype radare2 recovered for this site. Present only when radare2
-    /// reported the site as complete; absent means it described the call but
-    /// not what it takes or returns.
-    prototype: Option<AdvisoryCallPrototype>,
-}
-
-/// Prototype radare2 recovered for one call site, keyed by address.
-///
-/// This deliberately carries no call-site identity. An identity names a block
-/// address, an operation index and a target storage, which exist only once the
-/// function has been lifted, so the correlation happens there rather than here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdvisoryCallPrototype {
-    pub convention: ConventionId,
-    pub arguments: Box<[SourceCallArgumentSpec]>,
-    pub variadic: bool,
-    pub noreturn: bool,
-    pub result: SourceCallResult,
 }
 
 impl AdvisoryCallSite {
-    /// A call site described by the capture, with no recovered prototype.
-    ///
-    /// A prototype is attached by the capture that recovered one; a site built
-    /// here states only where the call is, where it goes and how it leaves.
+    /// A call site described by the capture: where the call is, where it goes and how it leaves.
     pub const fn described(
         instruction_address: u64,
         target_address: u64,
@@ -749,14 +721,7 @@ impl AdvisoryCallSite {
             transfer,
             target_name,
             linkage,
-            prototype: None,
         }
-    }
-
-    /// Borrow the prototype radare2 recovered for this site, if it recovered
-    /// one.
-    pub const fn prototype(&self) -> Option<&AdvisoryCallPrototype> {
-        self.prototype.as_ref()
     }
 
     pub const fn instruction_address(&self) -> u64 {

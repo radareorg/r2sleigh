@@ -20,8 +20,8 @@ pub struct FunctionInfo {
     pub blocks: Vec<Block>,
     /// Where each call site transfers, where the instruction states it.
     pub calls: Vec<Option<u64>>,
-    /// The calling convention the type analysis settled on, where it did.
-    pub convention: Option<String>,
+    /// The convention the function's interface states, where it has one.
+    pub convention: Option<r2abi::ConventionId>,
     pub arguments: Vec<Argument>,
     /// Whether arguments continue past `arguments`: a variadic tail the interface states.
     pub variadic: bool,
@@ -119,7 +119,8 @@ impl FunctionInfo {
                 .values()
                 .map(|site| site.direct_target)
                 .collect(),
-            convention: facts.type_facts().callconv.clone(),
+            convention: (artifact.machine_context().function_interface())
+                .map(r2source::SourceFunctionInterface::convention),
             arguments: arguments(artifact, sealed),
             variadic: (artifact.machine_context().function_interface())
                 .is_some_and(r2source::SourceFunctionInterface::is_variadic),

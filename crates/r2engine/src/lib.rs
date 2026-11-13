@@ -24,7 +24,6 @@ pub mod program;
 pub mod query;
 pub mod stated;
 
-use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -622,7 +621,6 @@ pub struct EngineAnalyzeRequest {
     /// the source-owned signature that callers may consume.
     pub ptr_bits: u32,
     pub semantic_metadata_enabled: bool,
-    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub semantic_mode: EngineSemanticMode,
     pub include_interproc_summary_set: bool,
@@ -638,7 +636,6 @@ pub struct EngineAnalyzeRequestParts {
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     pub ptr_bits: u32,
     pub semantic_metadata_enabled: bool,
-    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub include_interproc_summary_set: bool,
 }
@@ -756,7 +753,6 @@ pub struct EngineAnalyzeRequestInput {
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     pub ptr_bits: Option<u32>,
     pub semantic_metadata_enabled: bool,
-    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub include_interproc_summary_set: bool,
 }
@@ -765,7 +761,6 @@ pub struct EngineAnalyzeRequestInput {
 pub struct EngineAnalyzeFunctionRequestInput {
     pub function: EngineFunctionInput,
     pub ptr_bits: Option<u32>,
-    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub include_interproc_summary_set: bool,
 }
@@ -917,7 +912,7 @@ fn source_member_element_count(
 /// from the declared interface's graph (ADR call-boundary, Types on the wire).
 fn trusted_source_signature(
     trusted: &r2ssa::TrustedSsaArtifact,
-) -> Option<(r2types::FunctionSignatureSpec, Option<String>, bool)> {
+) -> Option<(r2types::FunctionSignatureSpec, bool)> {
     let signature = trusted.source().presentation().signature()?;
     let interface =
         (trusted.source().function_interface()).filter(|interface| interface.types_are_declared());
@@ -941,11 +936,7 @@ fn trusted_source_signature(
         _ => typed(interface.and_then(r2ssa::SourceFunctionInterface::return_logical_value)),
     };
     let spec = r2types::FunctionSignatureSpec { ret_type, params };
-    let callconv = signature
-        .calling_convention()
-        .filter(|convention| !convention.is_empty())
-        .map(str::to_string);
-    Some((spec, callconv, signature.noreturn()))
+    Some((spec, signature.noreturn()))
 }
 
 /// Everything one callee contributes to a caller's request.
@@ -1038,12 +1029,9 @@ fn trusted_parsed_context(trusted: &r2ssa::TrustedSsaArtifact) -> r2types::Parse
         &external_type_db,
     );
     r2types::ParsedExternalContext {
-        callconv: signature
-            .as_ref()
-            .and_then(|(_, callconv, _)| callconv.clone()),
-        noreturn: signature.as_ref().is_some_and(|(_, _, noreturn)| *noreturn),
-        current_signature: signature.as_ref().map(|(spec, _, _)| spec.clone()),
-        merged_signature: signature.map(|(spec, _, _)| spec),
+        noreturn: signature.as_ref().is_some_and(|(_, noreturn)| *noreturn),
+        current_signature: signature.as_ref().map(|(spec, _)| spec.clone()),
+        merged_signature: signature.map(|(spec, _)| spec),
         external_type_db,
         program_data_objects,
         assumptions: trusted.artifact().facts().assumptions.clone(),
@@ -1098,7 +1086,6 @@ impl EngineAnalyzeRequest {
             declared_signatures: Vec::new(),
             ptr_bits: parts.ptr_bits,
             semantic_metadata_enabled: parts.semantic_metadata_enabled,
-            reg_type_hints: parts.reg_type_hints,
             parsed_context: parts.parsed_context,
             semantic_mode,
             include_interproc_summary_set: parts.include_interproc_summary_set,
@@ -1134,7 +1121,6 @@ impl EngineAnalyzeRequest {
         self.ptr_bits = engine_ptr_bits(self.arch.as_ref());
         self.source_snapshot = None;
         self.semantic_metadata_enabled = true;
-        self.reg_type_hints.clear();
         // Where the program's sections lie is the caller's to state; the artifact knows one function.
         let program_extents = std::mem::take(&mut self.parsed_context.program_extents);
         self.parsed_context = trusted_parsed_context(&trusted);
@@ -1213,7 +1199,6 @@ fn engine_analyze_request_input_from_function(
         source_snapshot: input.function.source_snapshot,
         ptr_bits: input.ptr_bits,
         semantic_metadata_enabled: input.function.semantic_metadata_enabled,
-        reg_type_hints: input.reg_type_hints,
         parsed_context: input.parsed_context,
         include_interproc_summary_set: input.include_interproc_summary_set,
     }
@@ -1233,7 +1218,6 @@ fn engine_analyze_request_parts_from_input(
         source_snapshot: input.source_snapshot,
         ptr_bits,
         semantic_metadata_enabled: input.semantic_metadata_enabled,
-        reg_type_hints: input.reg_type_hints,
         parsed_context: input.parsed_context,
         include_interproc_summary_set: input.include_interproc_summary_set,
     }
@@ -1386,7 +1370,6 @@ impl EngineFunctionDecompileRequest {
                 EngineAnalyzeFunctionRequestInput {
                     function: input.function,
                     ptr_bits: input.ptr_bits,
-                    reg_type_hints: FxHashMap::default(),
                     parsed_context: input.parsed_context,
                     include_interproc_summary_set: true,
                 },
@@ -1418,7 +1401,6 @@ impl EngineFunctionAnalysisArtifactRequest {
                 EngineAnalyzeFunctionRequestInput {
                     function: input.function,
                     ptr_bits: input.ptr_bits,
-                    reg_type_hints: FxHashMap::default(),
                     parsed_context: input.parsed_context,
                     include_interproc_summary_set: true,
                 },

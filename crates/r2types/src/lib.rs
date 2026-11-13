@@ -75,7 +75,6 @@ pub use parameter_types::{
 };
 
 pub use model::{Signedness, Type};
-pub use prepare::{TypeHint, merge_type_hint};
 pub use r2source::DisplayNames;
 pub use r2ssa::AssumptionUsageReport;
 

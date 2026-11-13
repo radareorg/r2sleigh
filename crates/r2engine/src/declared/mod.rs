@@ -748,5 +748,5 @@ fn presentation(prototype: &Prototype, placed: usize) -> r2source::SourceSignatu
         .map(|parameter| r2source::SourceSignatureParameter::new(parameter.name.clone()));
     let ellipsis =
         (prototype.variadic).then(|| r2source::SourceSignatureParameter::new(Some("...")));
-    r2source::SourceSignaturePresentation::new(None::<String>, false, parameters.chain(ellipsis))
+    r2source::SourceSignaturePresentation::new(false, parameters.chain(ellipsis))
 }

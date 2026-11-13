@@ -2320,90 +2320,23 @@ fn correlate_call_site_interfaces(
         if let Some(name) = call.target_name() {
             callee_names.insert(identity, name.to_string());
         }
-        // A prototype the source recovered supplies the physical call
-        // contract. When this capture also carries the callee body, retain its
-        // recovered logical interface only after those physical carriers
-        // agree. radare2 reports no prototype for most local functions; in
-        // that case the callee-derived interface supplies both layers.
-        let recovered = callee_interfaces.get(&call.target_address());
-        r2il::refusal_evidence!(
-            "call-site-correlation",
-            "advisory {:?} at {:#x} target {:#x} prototype_arguments={:?} callee_interface={}",
-            call.transfer(),
-            call.instruction_address(),
-            call.target_address(),
-            call.prototype().map(|prototype| prototype.arguments.len()),
-            recovered.is_some()
-        );
-        let Some(prototype) = call.prototype() else {
-            let Some(callee) = recovered else {
-                continue;
-            };
-            if let Some(mut interface) =
-                crate::recover_interface::mint_recovered_call_site_interface(
-                    callee,
-                    callees.preserved().get(&call.target_address()),
-                    &crate::recover_interface::convention_results(source.convention()),
-                    identity,
-                    source.source_revision_identity(),
-                )
-            {
-                // The gettext family is named, not prototyped, so the rule
-                // that its result is a translation of its own argument binds
-                // here as it does on the prototype path below.
-                if let Some(target_name) = call.target_name()
-                    && let Some(rule) =
-                        r2source::SourceFormatForwardingRule::for_target_name(target_name)
-                    && let Ok(bound) = interface.clone().with_format_forwarding(rule)
-                {
-                    interface = bound;
-                }
-                interfaces.push(interface);
-            }
+        // The callee body captured with the caller states the site's interface.
+        let Some(callee) = callee_interfaces.get(&call.target_address()) else {
             continue;
         };
-        let Ok(mut interface) = SourceCallSiteInterface::new(
-            source.source_revision_identity().to_vec(),
+        let Some(mut interface) = crate::recover_interface::mint_recovered_call_site_interface(
+            callee,
+            callees.preserved().get(&call.target_address()),
+            &crate::recover_interface::convention_results(source.convention()),
             identity,
-            true,
-            prototype.convention,
-            prototype.arguments.iter().copied(),
-            prototype.variadic,
-            prototype.noreturn,
-            prototype.result,
+            source.source_revision_identity(),
         ) else {
             continue;
         };
-        // A callee body captured with the caller owns the logical fixed-call
-        // signature, but only after its physical carriers agree exactly with
-        // this source-owned callsite contract.
-        if let Some(callee) = recovered
-            && let Ok(with_callee) = interface
-                .clone()
-                .with_exact_callee_interface(callee.clone())
-        {
-            interface = with_callee;
-        }
-        // A call to the gettext family hands back a translation of one of its
-        // own arguments, so a caller whose format came from here counts from
-        // the msgid it passed. radare2 has no prototype for the family and
-        // could not express this if it did -- the format is the return value,
-        // not a parameter -- so the name is matched where names are known and
-        // the fact travels on the interface.
+        // The gettext family hands back a translation of its own argument (a name rule).
         if let Some(target_name) = call.target_name()
             && let Some(rule) = r2source::SourceFormatForwardingRule::for_target_name(target_name)
             && let Ok(bound) = interface.clone().with_format_forwarding(rule)
-        {
-            interface = bound;
-        }
-        // radare2 has a prototype for the printf family and almost never for a
-        // wrapper defined in this binary, so the name above finds nothing for
-        // the wrapper. Its own body proved which parameter it forwards as a
-        // format, and that travels on the callee interface; the builder leaves
-        // an already-bound radare2 rule alone.
-        if let Some(callee) = recovered
-            && let Some(index) = callee.body_proven_format_parameter()
-            && let Ok(bound) = interface.clone().with_body_proven_format_parameter(index)
         {
             interface = bound;
         }
