@@ -309,7 +309,7 @@ Reserved rows: each slice of the call-boundary rewrite takes its D-rows from thi
 | D309 | S37 | assigned 2026-11-11 |
 | D310 to D313 | result-side ADR | D310 the design; D311 to D313 free for its amendments |
 | D314 to D317 | S31a | the held decision, the forwarder component solve, closed-world coverage |
-| D318 to D321 | S31b | the register effect and the cost |
+| D318 to D321 | S31b | the register effect and the cost (used; D320 open) |
 | D322 to D325 | S24 | result width and `above` producers; the no-return header; float groups (used; D325's carrier typedef open) |
 | D326 to D329 | S25 | parameter-side default-deny (used) |
 | D330 to D333 | S26 | imports with unstated results; declaration-against-body disputes (used) |

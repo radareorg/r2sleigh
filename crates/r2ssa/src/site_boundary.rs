@@ -2173,6 +2173,25 @@ mod tests {
         }
     }
 
+    /// A store into the register space, or a branch in the middle of a block, writes or goes where
+    /// the scan does not follow: nothing is kept.
+    #[test]
+    fn a_body_with_a_register_space_store_or_a_stray_branch_keeps_nothing() {
+        let into = R2ILOp::Store {
+            space: SpaceId::Register,
+            addr: Varnode::constant(0x1200, 8),
+            val: Varnode::constant(0, 8),
+        };
+        let stored = effect(&[block(0x1000, 4, vec![into, ret()])], &[]);
+        assert!(stored.kept.is_empty(), "{stored:?}");
+        let stray = [
+            block(0x1000, 4, vec![branch(0x1010), write(0, 8), ret()]),
+            block(0x1010, 4, vec![ret()]),
+        ];
+        let stray = effect(&stray, &[(0, 0x1010)]);
+        assert!(stray.kept.is_empty(), "{stray:?}");
+    }
+
     /// A call on a path to a return may change any register the convention lets it: nothing is
     /// kept, whatever the callee does.
     #[test]
