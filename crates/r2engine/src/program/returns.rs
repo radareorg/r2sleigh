@@ -84,6 +84,10 @@ impl crate::body::Program for Knowing<'_> {
         self.program.halts_on_through(slot)
     }
 
+    fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
+        self.program.interrupt_returns(arch, vector)
+    }
+
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
         self.program.yields_through(slot)
     }

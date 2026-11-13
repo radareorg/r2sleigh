@@ -241,6 +241,9 @@ pub struct ObligationLedger {
     exits: usize,
     #[serde(default)]
     exit_premises: BTreeSet<r2source::Premise>,
+    /// Calls the body ends at where only a walk found the callee reaching no return.
+    #[serde(default)]
+    unproven_exits: usize,
 }
 
 /// A ledger as read back, before its columns are checked against one another.
@@ -256,6 +259,9 @@ struct LedgerColumns {
     exits: usize,
     #[serde(default)]
     exit_premises: BTreeSet<r2source::Premise>,
+    /// Calls the body ends at where only a walk found the callee reaching no return.
+    #[serde(default)]
+    unproven_exits: usize,
 }
 
 impl TryFrom<LedgerColumns> for ObligationLedger {
@@ -306,6 +312,7 @@ impl TryFrom<LedgerColumns> for ObligationLedger {
             premises: columns.premises,
             exits: columns.exits,
             exit_premises: columns.exit_premises,
+            unproven_exits: columns.unproven_exits,
         })
     }
 }
@@ -337,6 +344,7 @@ impl ObligationLedger {
             premises: BTreeSet::new(),
             exits: 0,
             exit_premises: BTreeSet::new(),
+            unproven_exits: 0,
         }
     }
 
@@ -362,6 +370,7 @@ impl ObligationLedger {
         Self {
             exits: exits.calls,
             exit_premises: exits.premises.clone(),
+            unproven_exits: exits.unproven.len(),
             ..self
         }
     }
@@ -369,6 +378,11 @@ impl ObligationLedger {
     /// How many calls the body ends at on a model's word, and what that takes for granted.
     pub const fn exits(&self) -> (usize, &BTreeSet<r2source::Premise>) {
         (self.exits, &self.exit_premises)
+    }
+
+    /// How many calls the body ends at where only a walk found no return.
+    pub const fn unproven_exits(&self) -> usize {
+        self.unproven_exits
     }
 
     /// Every obligation, spelled, in the order the spelling reads.

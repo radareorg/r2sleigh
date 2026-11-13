@@ -59,6 +59,18 @@ impl Syscalls {
     }
 }
 
+/// Why an interrupt `vector` on `arch` under `kernel` never comes back, where a document states it
+/// (D229). x86 only: `int n`'s vector is the operand Sleigh's `swi` reads.
+pub fn interrupt_never_returns(kernel: Kernel, arch: &str, vector: u64) -> Option<&'static str> {
+    match (kernel, crate::family(arch)?, vector) {
+        (Kernel::Windows, "x86", 0x29) => Some(FASTFAIL),
+        _ => None,
+    }
+}
+
+const FASTFAIL: &str = "Microsoft Learn, \"__fastfail\": \"The __fastfail intrinsic does not return\"; \
+                        x86 and x64: `int 0x29`, the failure code in ecx (rcx)";
+
 const LINUX_X86_64: &str = include_str!("../data/syscalls-linux-x86-64.txt");
 const LINUX_X86_32: &str = include_str!("../data/syscalls-linux-x86-32.txt");
 const LINUX_ARM_64: &str = include_str!("../data/syscalls-linux-arm-64.txt");
@@ -78,6 +90,22 @@ fn parse(text: &str) -> BTreeMap<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_windows_fastfail_is_an_interrupt_that_never_returns() {
+        let cited = interrupt_never_returns(Kernel::Windows, "x86-64", 0x29).expect("a row");
+        assert!(cited.contains("does not return"));
+        assert!(interrupt_never_returns(Kernel::Windows, "x86", 0x29).is_some());
+        assert_eq!(interrupt_never_returns(Kernel::Linux, "x86-64", 0x29), None);
+        assert_eq!(
+            interrupt_never_returns(Kernel::Windows, "x86-64", 0x80),
+            None
+        );
+        assert_eq!(
+            interrupt_never_returns(Kernel::Windows, "aarch64", 0x29),
+            None
+        );
+    }
 
     #[test]
     fn one_number_names_different_calls_on_different_architectures() {

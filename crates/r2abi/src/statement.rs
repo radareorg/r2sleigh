@@ -656,6 +656,9 @@ pub struct Relocation {
     /// word the file holds at `vaddr` is the addend: ELF `REL` and `RELR`, and
     /// a Mach-O rebase.
     pub addend: Option<i64>,
+    /// Where the record's addend is one word of its own: an ELF `RELA` entry's
+    /// `r_addend`. `None` where the place holds it or a stream encodes it.
+    pub addend_at: Option<StatedAt>,
     /// The symbol it is computed against, where it names one.
     pub symbol: Option<Box<RelocationSymbol>>,
     /// What the loader computes for it.

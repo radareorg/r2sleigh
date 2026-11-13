@@ -36,6 +36,18 @@ fn proof_columns(
             premises.collect::<Vec<_>>().join(", ")
         );
     }
+    let unproven = ledger.unproven_exits();
+    if unproven > 0 {
+        let calls = if unproven == 1 {
+            "call ends"
+        } else {
+            "calls end"
+        };
+        let _ = write!(
+            &mut line,
+            ", {unproven} {calls} where no return was reached (unproven)"
+        );
+    }
     if closure.assumed > 0 {
         let _ = write!(
             &mut line,

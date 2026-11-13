@@ -15,6 +15,7 @@ mod reads;
 mod requests;
 mod resolved;
 mod returns;
+mod slots;
 pub mod source;
 mod starts;
 mod view;
@@ -647,8 +648,8 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         self.comes_back(callee)
     }
 
-    fn exit_premises(&self, callee: u64) -> std::collections::BTreeSet<r2source::Premise> {
-        self.view().exit_premises(callee)
+    fn exit(&self, callee: u64) -> Option<crate::discovery::Never> {
+        self.view().exit(callee)
     }
 
     fn returns_through(&self, slot: u64) -> bool {
@@ -665,6 +666,10 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
 
     fn binds_handles(&self) -> bool {
         self.view().binds_handles()
+    }
+
+    fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
+        self.view().interrupt_returns(arch, vector)
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {

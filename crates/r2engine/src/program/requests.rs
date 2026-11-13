@@ -384,7 +384,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// analysis refused, what the walk shows and the record (ROADMAP D29).
     pub fn function_info(&mut self, entry: u64) -> Result<super::info::FunctionInfo, String> {
         self.start_request();
-        let noreturn = (!self.comes_back(entry)).then(|| self.view().exit_premises(entry));
+        let noreturn = self.view().exit(entry).map(|never| never.premises);
         let prepared = match self.analysed(entry) {
             Ok(prepared) => prepared,
             // A stop is the request's, and an address nothing maps names no function.

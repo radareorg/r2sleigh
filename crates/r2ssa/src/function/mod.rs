@@ -4019,6 +4019,9 @@ pub type SiteConventions = BTreeMap<u64, Arc<r2source::ConventionModel>>;
 pub struct AssumedExits {
     pub calls: usize,
     pub premises: BTreeSet<r2source::Premise>,
+    /// Blocks, ascending, ending at a call whose callee only a walk found reaching no return: a
+    /// bound, so neither an exit nor a `noreturn` (D255).
+    pub unproven: Vec<u64>,
 }
 
 /// What the callees this function calls said about their own boundaries.
@@ -4303,7 +4306,7 @@ impl SSAFunction {
         &self.assumed_exits
     }
 
-    fn record_assumed_exits(&mut self, exits: &AssumedExits) {
+    pub(crate) fn record_assumed_exits(&mut self, exits: &AssumedExits) {
         self.premises.extend(exits.premises.iter().copied());
         self.assumed_exits = exits.clone();
     }

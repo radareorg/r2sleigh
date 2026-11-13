@@ -2152,7 +2152,10 @@ fn recover_interface_inner(
                 "a closed-world void yields to {unheld:?}"
             );
         }
-        Some(r2source::SourceClosedResult::Void) => {
+        // A cited `void` slot is the C type every way in calls it through: a written lane is no result (S30).
+        Some(
+            r2source::SourceClosedResult::Void | r2source::SourceClosedResult::DeclaredVoid(_),
+        ) => {
             result = RecoveredFunctionResult::Void;
             live_out = crate::liveout::FunctionLiveOut::default();
             result_carriers = None;

@@ -219,15 +219,12 @@ impl<'a, S: Source + 'static> View<'a, S> {
             .map_or(true, |answer| answer.comes())
     }
 
-    /// What a call to `callee` that never comes back takes for granted.
-    pub(super) fn exit_premises(
-        &self,
-        callee: u64,
-    ) -> std::collections::BTreeSet<r2source::Premise> {
-        self.db
-            .get::<super::returns::ComesBack>(&callee)
-            .map(|answer| answer.premises().clone())
-            .unwrap_or_default()
+    /// Why a call to `callee` never comes back, where `ComesBack` says it does not.
+    pub(super) fn exit(&self, callee: u64) -> Option<crate::discovery::Never> {
+        match &*self.db.get::<super::returns::ComesBack>(&callee).ok()? {
+            crate::discovery::Return::Never(never) => Some(never.clone()),
+            crate::discovery::Return::Comes => None,
+        }
     }
 }
 
@@ -279,8 +276,8 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         self.comes_back(callee)
     }
 
-    fn exit_premises(&self, callee: u64) -> std::collections::BTreeSet<r2source::Premise> {
-        View::exit_premises(self, callee)
+    fn exit(&self, callee: u64) -> Option<crate::discovery::Never> {
+        View::exit(self, callee)
     }
 
     /// A call through a slot that is not a kept loader binding is opaque, so it comes back.
@@ -300,6 +297,11 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
 
     fn binds_handles(&self) -> bool {
         self.source().container().format == r2abi::statement::Format::Pe
+    }
+
+    fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
+        let kernel = super::kernel(self.source().container());
+        r2abi::syscalls::interrupt_never_returns(kernel, arch, vector).is_none()
     }
 
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {

@@ -29,17 +29,45 @@ use crate::native::Program;
 /// engine's answers carry it, so the shell reads it from here.
 pub use r2source::confidence::{Basis, Confidence, Fact, Grade, Premise};
 
-/// Whether control comes back from a call to a function, and what a "never" takes for granted.
+/// Whether control comes back from a call to a function, and why a "never" is believed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Return {
     Comes,
-    /// Never comes back: proven where no premise is named, else assuming each one.
-    Never(BTreeSet<Premise>),
+    Never(Never),
+}
+
+/// A call that never comes back: what states it, and what it takes for granted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Never {
+    pub proof: NeverProof,
+    pub premises: BTreeSet<Premise>,
+}
+
+/// What a "never" rests on (doc/adr-call-boundary.md, "S30 as built"; RULING 1.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NeverProof {
+    /// A cited row, a runtime model or the binary's debug information states it.
+    Declared,
+    /// No walk of the body reached a return: a lower bound on what it does, never proof.
+    NoReturnReached,
 }
 
 impl Return {
+    /// A "never" a statement makes, assuming `premises`.
+    pub const fn declared(premises: BTreeSet<Premise>) -> Self {
+        Self::Never(Never {
+            proof: NeverProof::Declared,
+            premises,
+        })
+    }
+
     pub const fn comes(&self) -> bool {
         matches!(self, Self::Comes)
+    }
+
+    /// Whether this proves a call never comes back: declared, assuming nothing.
+    pub fn proves_never(&self) -> bool {
+        matches!(self, Self::Never(never) if never.proof == NeverProof::Declared && never.premises.is_empty())
     }
 
     /// What a "never" takes for granted; nothing for a call that comes back.
@@ -47,7 +75,7 @@ impl Return {
         static NONE: BTreeSet<Premise> = BTreeSet::new();
         match self {
             Self::Comes => &NONE,
-            Self::Never(premises) => premises,
+            Self::Never(never) => &never.premises,
         }
     }
 }
@@ -329,10 +357,10 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
         let mut premises = BTreeMap::<u64, BTreeSet<Premise>>::new();
         let mut work = Vec::new();
         for callee in self.waiting.keys() {
-            if let Some(Return::Never(assumed)) = self.settled(*callee)
-                && !assumed.is_empty()
+            if let Some(Return::Never(never)) = self.settled(*callee)
+                && !never.premises.is_empty()
             {
-                premises.insert(*callee, assumed);
+                premises.insert(*callee, never.premises);
                 work.push(*callee);
             }
         }
@@ -355,7 +383,10 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
                 let answer = self.settled(address).unwrap_or_else(|| {
                     match self.returning.contains(&address) {
                         true => Return::Comes,
-                        false => Return::Never(premises.remove(&address).unwrap_or_default()),
+                        false => Return::Never(Never {
+                            proof: NeverProof::NoReturnReached,
+                            premises: premises.remove(&address).unwrap_or_default(),
+                        }),
                     }
                 });
                 (address, answer)
@@ -719,7 +750,7 @@ mod tests {
         }
 
         fn declared(&self, address: u64) -> Option<Return> {
-            (address == EXIT).then(|| Return::Never(BTreeSet::from([Premise::GoRuntime])))
+            (address == EXIT).then(|| Return::declared(BTreeSet::from([Premise::GoRuntime])))
         }
     }
 
@@ -727,7 +758,10 @@ mod tests {
     const EXIT: u64 = 0x9000;
 
     fn never() -> Return {
-        Return::Never(BTreeSet::new())
+        Return::Never(Never {
+            proof: NeverProof::NoReturnReached,
+            premises: BTreeSet::new(),
+        })
     }
 
     fn found(bodies: &[(u64, &[Step])], seeds: &[u64]) -> Discovery<At, ()> {
@@ -859,10 +893,16 @@ mod tests {
             (0x3000, &[Step::Tail(0x3000)]),
         ];
         let found = found(&bodies, &[0x1000, 0x3000]);
-        let assumed = Return::Never(BTreeSet::from([Premise::GoRuntime]));
+        let assumed = Return::Never(Never {
+            proof: NeverProof::NoReturnReached,
+            premises: BTreeSet::from([Premise::GoRuntime]),
+        });
         assert_eq!(found.returns[&0x2000], assumed);
         assert_eq!(found.returns[&0x1000], assumed);
-        assert_eq!(found.returns[&EXIT], assumed);
+        assert_eq!(
+            found.returns[&EXIT],
+            Return::declared(BTreeSet::from([Premise::GoRuntime]))
+        );
         assert_eq!(found.returns[&0x3000], never());
         let asked = returns(0x1000, &|_| None, &Bodies::of(&bodies));
         assert_eq!(asked[&0x1000], assumed);
