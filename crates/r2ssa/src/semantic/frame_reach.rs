@@ -1,10 +1,5 @@
-//! Which of the frame's objects code outside this function can touch (doc/adr-frame-model.md).
-//!
-//! Under the UB-free premise a callee reaches the frame only through an address this function
-//! hands out, and through the argument area of the call. The one escape walk (`walk`, D290)
-//! runs at build, before promotion and the canary decision, and states the escaped entry
-//! offsets; the seal maps them to objects (`FrameIndex::containing`) and walks nothing.
-//! Cost: O(points x log objects) to map, O(calls x objects) for the argument areas.
+//! Which frame objects outside code can touch: the walk's points mapped to objects at the seal
+//! (doc/adr-frame-model.md, "Escape spans"). O(points x log objects), O(calls x objects).
 
 use super::*;
 

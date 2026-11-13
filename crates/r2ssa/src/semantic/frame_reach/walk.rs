@@ -1,10 +1,5 @@
-//! The frame's one escape walk, run at build before slot promotion (doc/adr-frame-model.md,
-//! "Escape spans", D290). Promotion, the canary decision and the seal read its points.
-//!
-//! Default deny (doc/adr-call-boundary.md, "D217 as built"): a use the walk does not model hands
-//! the address on. Each value holds the set of entry offsets it may point at, `Top` past 64.
-//! Termination: a value's set only grows and each place's held set only grows, so a value is
-//! queued at most 65 times: `O(rounds x 65 x (V + E))`, rounds at most the carrier places.
+//! The frame's one escape walk, default deny, before slot promotion (doc/adr-frame-model.md,
+//! "Escape spans"). A value's set and a place's held set only grow: `O(rounds x 65 x (V + E))`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
