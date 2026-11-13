@@ -251,7 +251,8 @@ fn a_parameter_reloaded_from_its_stack_home_is_still_the_base() {
 
 /// The count parameter is not a pointer, and the base is chosen because of
 /// that: with every parameter called a pointer the sum has two candidates
-/// with unit coefficients and the rule refuses.
+/// with unit coefficients and the rule refuses. With no convention model the
+/// home is no save (D276), so the promoted parameter is read at each use.
 #[test]
 fn a_scalar_parameter_is_not_a_candidate_base() {
     let artifact = artifact_with_parameters(parameter_home_ops(4, 4), &[RDI, RSI]);
@@ -260,12 +261,18 @@ fn a_scalar_parameter_is_not_a_candidate_base() {
     let arena = roots.arena();
     let pointers: Vec<_> = arena
         .iter()
-        .filter(|(id, term)| arena.is_pointer(*id) && matches!(term.kind, TermKind::Leaf(_)))
+        .filter_map(|(id, term)| match term.kind {
+            TermKind::Leaf(read) if arena.is_pointer(id) => Some((id, read.expr)),
+            _ => None,
+        })
         .collect();
+    let values = (pointers.iter())
+        .map(|(_, expr)| *expr)
+        .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(
-        pointers.len(),
+        values.len(),
         1,
-        "only the dereferenced parameter is a pointer, not the length beside it"
+        "only the dereferenced parameter is a pointer, not the length beside it: {pointers:?}"
     );
     let element = roots
         .value(value_named(&artifact, "tmp:1000:60_1"))
@@ -273,5 +280,5 @@ fn a_scalar_parameter_is_not_a_candidate_base() {
     let TermKind::Subscript { base, .. } = arena.term(element.canonical).kind else {
         panic!("expected an element");
     };
-    assert_eq!(base, pointers[0].0);
+    assert!(pointers.iter().any(|(id, _)| *id == base));
 }
