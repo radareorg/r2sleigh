@@ -1163,14 +1163,18 @@ impl SourceMachineContext {
             .unwrap_or_default()
     }
 
-    /// How far `target` reaches through what it is handed in `storage`, by the site's model.
-    pub fn callee_reach_through(
+    /// The argument position `storage` holds in a call to `target`, by the site's model.
+    pub fn site_position(&self, target: u64, storage: CanonicalStorageId) -> Option<usize> {
+        (self.site_integer_arguments(target).iter())
+            .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
+    }
+
+    /// How far `target` reaches through what it is handed at `position`.
+    pub fn callee_reach_at(
         &self,
         target: u64,
-        storage: CanonicalStorageId,
+        position: usize,
     ) -> Option<&crate::interproc::ArgumentReach> {
-        let position = (self.site_integer_arguments(target).iter())
-            .position(|slot| slot.space == storage.space && slot.offset == storage.offset)?;
         self.callee_argument_reach.get(&target)?.get(&position)
     }
 

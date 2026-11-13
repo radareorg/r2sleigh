@@ -618,7 +618,13 @@ impl Prior {
         };
         let unread = !self.function.argument_areas_read() && !below(&self.key) && !below(key);
         let areas = unread || self.key.argument_areas == key.argument_areas;
-        areas && self.key.without_areas() == key.without_areas()
+        // Only the reach promotion asked of: a callee's other positions decide nothing here.
+        let upward = |key: &BuildKey, (target, position): &(u64, usize)| {
+            (key.upward.get(target)).is_some_and(|positions| positions.contains(position))
+        };
+        let reach = (self.function.asked_reach().iter())
+            .all(|asked| upward(&self.key, asked) == upward(key, asked));
+        areas && reach && self.key.without_areas() == key.without_areas()
     }
 }
 
@@ -639,8 +645,9 @@ struct BuildKey {
     reentering: BTreeSet<u64>,
     unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
     conventions: SiteConventions,
-    /// What each callee reaches through each pointer argument: the frame walk reads it (D365).
-    reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+    /// The argument positions through which each callee reaches only upward: all the frame walk
+    /// reads of its reach, compared only where it asked (D365).
+    upward: BTreeMap<u64, BTreeSet<usize>>,
     premises: BTreeSet<r2source::Premise>,
 }
 
@@ -691,7 +698,7 @@ impl BuildKey {
             &self.return_addresses,
             (&self.security_checks, &self.narrow_results),
             (&self.reentering, &self.unstated_imports, &self.premises),
-            (&self.conventions, &self.reach),
+            &self.conventions,
         )
     }
 
@@ -710,12 +717,12 @@ impl BuildKey {
             "security check".to_owned()
         } else if self.narrow_results != other.narrow_results {
             "result width".to_owned()
+        } else if self.without_areas() != other.without_areas() {
+            "premise or import".to_owned()
         } else if self.argument_areas != other.argument_areas {
             "argument area".to_owned()
-        } else if self.reach != other.reach {
-            "argument reach".to_owned()
         } else {
-            "premise or import".to_owned()
+            "argument reach".to_owned()
         }
     }
 
@@ -757,7 +764,13 @@ impl BuildKey {
             reentering: evidence.reentering.clone(),
             unstated_imports: evidence.unstated_imports.clone(),
             conventions: callees.conventions.clone(),
-            reach: evidence.reach.clone(),
+            upward: (evidence.reach.iter())
+                .map(|(target, reach)| {
+                    let upward = reach.iter().filter(|(_, reach)| reach.is_upward());
+                    (*target, upward.map(|(position, _)| *position).collect())
+                })
+                .filter(|(_, positions): &(u64, BTreeSet<usize>)| !positions.is_empty())
+                .collect(),
             premises: premises.clone(),
         }
     }
@@ -4257,6 +4270,12 @@ impl SSAFunction {
     /// Whether what promotion decided read some call's argument area.
     pub(crate) fn argument_areas_read(&self) -> bool {
         (self.frame_points.as_deref()).is_some_and(crate::semantic::FramePoints::by_area)
+    }
+
+    /// The (callee, argument position) pairs whose upward reach promotion's walk asked (D365).
+    pub(crate) fn asked_reach(&self) -> &BTreeSet<(u64, usize)> {
+        static NONE: BTreeSet<(u64, usize)> = BTreeSet::new();
+        (self.frame_points.as_deref()).map_or(&NONE, crate::semantic::FramePoints::asked_reach)
     }
 
     /// What the frame's addresses do, by entry offset; none where no walk ran (the whole frame).

@@ -62,6 +62,8 @@ pub struct FramePoints {
     /// The entry offset each call's argument area is measured from, in operation order; `None`
     /// where no offset places the stack pointer (D351: the one reading of it).
     pub(crate) call_bases: Vec<(OpId, Option<i64>)>,
+    /// Each (callee, argument position) whose upward reach the walk asked, in any round (D365).
+    pub(crate) asked_reach: BTreeSet<(u64, usize)>,
 }
 
 impl FramePoints {
@@ -82,6 +84,7 @@ impl FramePoints {
         self.opaque.dedup();
         self.handed.extend(other.handed);
         self.by_area |= other.by_area;
+        self.asked_reach.extend(other.asked_reach);
     }
 
     /// Whether an address no offset places escapes or is accessed.
@@ -125,6 +128,10 @@ impl FramePoints {
 
     pub(crate) const fn by_area(&self) -> bool {
         self.by_area
+    }
+
+    pub(crate) const fn asked_reach(&self) -> &BTreeSet<(u64, usize)> {
+        &self.asked_reach
     }
 }
 
@@ -272,6 +279,7 @@ pub(crate) fn walk(
     }
     let sinks = Sinks::of(func, machine, stack_pointer, entry_sp, calls_refund_stack);
     let mut carried: Option<BTreeSet<i64>> = None;
+    let mut asked = BTreeSet::new();
     // An entry edge runs the prologue again: an offset names a place per pass, so any escape or
     // opaque access reaches the whole frame.
     let reentered = func.cfg().has_entry_edge();
@@ -286,12 +294,14 @@ pub(crate) fn walk(
             let stored = Walker::new(func, defs, entry_sp, &sinks, Some(&kept)).run();
             walked.points.absorb(stored.points);
         }
+        asked.extend(walked.points.asked_reach.iter().copied());
         if reentered && !(walked.points.escaped.is_empty() && walked.points.opaque.is_empty()) {
             walked.points.whole = true;
         }
         let settled =
             unplaced || (walked.carriers.iter()).all(|place| promoted.contains_key(place));
         if settled {
+            walked.points.asked_reach = asked;
             r2il::refusal_evidence!(
                 "frame-reach",
                 "{:#x}: escaped {:?}, opaque {:?}, unplaced {}",
@@ -308,14 +318,17 @@ pub(crate) fn walk(
     }
 }
 
+/// The (callee, argument position) a `CallUse` hands to, and whether its reach is upward only.
+type ReachAsk = ((u64, usize), bool);
+
 /// Where a frame address leaves through a call.
 struct Sinks<'a> {
     calls_refund_stack: bool,
     /// The registers a call may read where no `CallUse` says which: none under a convention.
     read_by_calls: Box<dyn Fn(crate::CanonicalStorageId) -> bool + 'a>,
-    /// Whether the `CallUse` at this block and index hands its register to a callee that reaches
-    /// only upward through it.
-    upward_at: Box<dyn Fn(u64, usize, crate::CanonicalStorageId) -> bool + 'a>,
+    /// The (callee, position) the `CallUse` at this block and index hands its register to, and
+    /// whether the callee reaches only upward through it.
+    upward_at: Box<dyn Fn(u64, usize, crate::CanonicalStorageId) -> Option<ReachAsk> + 'a>,
     stack_arguments: StackArguments,
 }
 
@@ -345,9 +358,7 @@ impl<'a> Sinks<'a> {
         };
         // The callee is the call's raw identity's target, its reach indexed by the site's model.
         let upward_at = move |block: u64, index: usize, storage: crate::CanonicalStorageId| {
-            let Some(ops) = func.get_block(block).map(|block| block.ops()) else {
-                return false;
-            };
+            let ops = func.get_block(block).map(|block| block.ops())?;
             let call = ops[index + 1..].iter().find_map(|op| match op {
                 SSAOp::CallUse { .. } => None,
                 op => Some(op.call().filter(|call| call.direct)),
@@ -355,9 +366,11 @@ impl<'a> Sinks<'a> {
             let target = (call.flatten().and_then(|call| call.instruction))
                 .and_then(|instruction| machine.raw_call_site_at(instruction))
                 .and_then(crate::semantic::direct_target_from_raw_identity);
-            target
-                .and_then(|target| machine.callee_reach_through(target, storage))
-                .is_some_and(crate::interproc::ArgumentReach::is_upward)
+            let target = target?;
+            let position = machine.site_position(target, storage)?;
+            let upward = (machine.callee_reach_at(target, position))
+                .is_some_and(crate::interproc::ArgumentReach::is_upward);
+            Some(((target, position), upward))
         };
         Self {
             calls_refund_stack,
@@ -771,10 +784,18 @@ impl<'a> Walker<'a> {
                 let next = self.displaced(var, value, (*a, *b), subtract);
                 self.set(*dst, next);
             }
-            SSAOp::CallUse { storage, .. } if (self.sinks.upward_at)(block, index, *storage) => {
-                self.escape_up(value);
+            SSAOp::CallUse { storage, .. } => {
+                let asked = (self.sinks.upward_at)(block, index, *storage);
+                if let Some((pair, _)) = asked {
+                    self.points.asked_reach.insert(pair);
+                }
+                if asked.is_some_and(|(_, upward)| upward) {
+                    self.escape_up(value);
+                } else {
+                    self.escape(value);
+                }
             }
-            SSAOp::CallUse { .. } | SSAOp::CallOther { .. } => self.escape(value),
+            SSAOp::CallOther { .. } => self.escape(value),
             // An access no exact load or store states: through its address it stays in memory;
             // any other operand it reads is handed on.
             _ if memory_addresses(op).is_some() => {
