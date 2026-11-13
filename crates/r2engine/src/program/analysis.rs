@@ -130,9 +130,12 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
             Ok(target) => target,
             Err(refusal) => return Walking(Err(refusal)),
         };
-        let tables = || (*dispatch_tables(db, (entry, thumb)).0).clone();
+        let rounds = crate::native::TableRounds {
+            first: &|| (*dispatch_tables(db, (entry, thumb)).0).clone(),
+            later: &|_| (*later_tables(db, (entry, thumb)).0).clone(),
+        };
         let walked = crate::isolation::isolated(|| {
-            crate::native::walk_reading(&target, &view, entry, &tables)
+            crate::native::walk_reading(&target, &view, entry, &rounds)
         });
         Walking(
             walked
@@ -149,7 +152,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
     }
 }
 
-/// The dispatch tables one function's body reads, by its entry and whether it is Thumb: read once for the survey, the walk and the listings.
+/// The first round of the dispatch tables one function's body reads, by its entry and whether it
+/// is Thumb: read once for the survey, the walk and the listings.
 pub(super) struct DispatchTables;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for DispatchTables {
@@ -163,6 +167,40 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for DispatchTables {
         let view = View::new(db, false).walking(thumb);
         let read = target(&view, entry, thumb).map(|target| {
             crate::isolation::isolated(|| crate::native::dispatch_tables(&target, &view, entry))
+        });
+        Shared(Arc::new(match read {
+            Ok(Ok(tables)) => tables,
+            Ok(Err(panicked)) => crate::native::Tables::refused(panicked.into()),
+            Err(refusal) => crate::native::Tables::refused(refusal),
+        }))
+    }
+
+    fn hold(value: &Self::Value) -> Hold {
+        match value.0.refusal().is_some_and(NativeRefusal::stopped) {
+            true => Hold::Stopped,
+            false => Hold::Held,
+        }
+    }
+}
+
+/// Every round of one function's dispatch tables, by its entry and whether it is Thumb: asked only
+/// where a walk through the first round's arms stops at a dispatch that round did not see (D367).
+pub(super) struct LaterTables;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for LaterTables {
+    type Key = (u64, bool);
+    type Value = Shared<crate::native::Tables>;
+    const NAME: &'static str = "later-tables";
+    const RETENTION: Retention = Retention::Held;
+
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
+        let first = dispatch_tables(db, (entry, thumb));
+        // Asked by the survey too, so read through `DispatchTables`' view.
+        let view = View::new(db, false).walking(thumb);
+        let read = target(&view, entry, thumb).map(|target| {
+            crate::isolation::isolated(|| {
+                crate::native::later_tables(&target, &view, entry, &first.0)
+            })
         });
         Shared(Arc::new(match read {
             Ok(Ok(tables)) => tables,
@@ -236,6 +274,21 @@ pub(super) fn dispatch_tables<S: Source + 'static>(
     key: (u64, bool),
 ) -> Shared<crate::native::Tables> {
     db.get::<DispatchTables>(&key).map_or_else(
+        |cycle| {
+            Shared(Arc::new(crate::native::Tables::refused(
+                NativeRefusal::Prepare(format!("{cycle:?}")),
+            )))
+        },
+        |tables| (*tables).clone(),
+    )
+}
+
+/// Every round of a body's tables; a cycle reads as none, as `dispatch_tables`'.
+pub(super) fn later_tables<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    key: (u64, bool),
+) -> Shared<crate::native::Tables> {
+    db.get::<LaterTables>(&key).map_or_else(
         |cycle| {
             Shared(Arc::new(crate::native::Tables::refused(
                 NativeRefusal::Prepare(format!("{cycle:?}")),
