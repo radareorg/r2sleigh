@@ -430,6 +430,49 @@ pub struct Reached {
     pub leaves: bool,
 }
 
+/// A lifting walk continued through each round's dispatch tables: a round lifts only what its arms
+/// newly reach, and its body is the one [`lift_body`] returns told every table followed (D367).
+#[derive(Debug, Clone)]
+pub struct Lifting(Walk);
+
+impl Lifting {
+    /// Lift the body at `entry`, past every call the program says returns, no table told.
+    pub fn start(
+        entry: u64,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) -> Result<Self, BodyError> {
+        Walk::start(entry, disasm, program, BTreeMap::new(), Keep::Lifts).map(Self)
+    }
+
+    /// The instructions at which the walk stopped for want of a dispatch's arms.
+    pub fn dispatches(&self) -> impl Iterator<Item = u64> + '_ {
+        let stops = self.0.unresolved.iter();
+        let stops = stops.filter(|stop| stop.reason == UnresolvedReason::IndirectBranch);
+        stops.map(|stop| stop.addr)
+    }
+
+    /// Continue through the arms of dispatches, lifting only what is not yet decoded.
+    pub fn dispatch(
+        &mut self,
+        arms: &BTreeMap<u64, Vec<u64>>,
+        disasm: &Disassembler,
+        program: &dyn Program,
+    ) {
+        self.0.follow(arms, disasm, program);
+    }
+
+    /// The body walked so far. O(instructions), no decode.
+    pub fn body(&self) -> Body {
+        self.0.body()
+    }
+
+    /// The body walked, the walk ended.
+    pub fn into_body(self) -> Body {
+        self.0.into_body().0
+    }
+}
+
 /// A walk that keeps where control goes and not what it lifted, continued past a call once its callee is known to return.
 #[derive(Debug, Clone)]
 pub struct Trace(Walk);
@@ -1190,7 +1233,19 @@ impl Walk {
     }
 
     /// Gather the decoded instructions into blocks, each ending where control leaves, a leader begins, a hole opens or a fallthrough is closed.
-    fn into_body(self) -> (Body, Vec<Decoded>) {
+    fn into_body(mut self) -> (Body, Vec<Decoded>) {
+        let lifted = self.lifted.take().unwrap_or_default();
+        self.assemble(lifted.into_iter())
+    }
+
+    /// The body walked so far, each lift cloned; the walk goes on. O(instructions), no decode.
+    fn body(&self) -> Body {
+        let lifted = self.lifted.iter().flatten();
+        self.assemble(lifted.map(|(addr, instruction)| (*addr, instruction.clone())))
+            .0
+    }
+
+    fn assemble(&self, lifted: impl Iterator<Item = (u64, Instruction)>) -> (Body, Vec<Decoded>) {
         let closed = (self.gated.values().flatten())
             .map(|(call, _)| *call)
             .chain(self.halting.iter().copied())
@@ -1206,7 +1261,7 @@ impl Walk {
             tail_calls: &self.tail_calls,
             slot_calls: &self.slot_calls,
         };
-        for (addr, mut instruction) in self.lifted.unwrap_or_default() {
+        for (addr, mut instruction) in lifted {
             if let Some(decode) = instruction.decode.take() {
                 let (window, continuation) = *decode;
                 let lift = instruction.lifted.clone();
@@ -1260,9 +1315,9 @@ impl Walk {
         let body = Body {
             entry: self.entry,
             blocks,
-            calls: self.calls.into_iter().collect(),
-            tail_calls: self.tail_calls.into_iter().collect(),
-            unresolved: self.unresolved,
+            calls: self.calls.iter().copied().collect(),
+            tail_calls: self.tail_calls.iter().copied().collect(),
+            unresolved: self.unresolved.clone(),
             exits,
         };
         (body, decodes)

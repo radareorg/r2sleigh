@@ -686,41 +686,41 @@ pub(crate) fn dispatch_tables(
         Ok(native) => native,
         Err(refusal) => return Tables::refused(refusal),
     };
-    let Ok(root) = native.walk(entry) else {
+    // One lifting walk continued through each round's tables: a round lifts only what its arms newly reach.
+    let Ok(mut walk) = crate::body::Lifting::start(entry, target.disasm, program) else {
         return Tables::default();
     };
-    if !root.body.unresolved.iter().any(Tables::stops) {
+    if walk.dispatches().next().is_none() {
         return Tables::default();
     }
+    let root = native.walked(walk.body());
     let restatement = native.declaration(entry);
     let restatement = match restatement.interface.is_some() {
         true => restatement,
         false => Restatement::default(),
     };
-    let mut tables = native.read_tables(&root.reaching_unresolved(), &[], restatement.clone());
+    let (cut, mut stopped) = (
+        root.reaching_unresolved(),
+        root.indirect_stops().collect::<BTreeSet<_>>(),
+    );
+    drop(root);
+    let mut tables = native.read_tables(&cut, &[], restatement.clone());
+    drop(cut);
     let first = tables.read.len();
     // Each round reads the dispatches the last one's arms newly reach, sealing only the region after
     // each last-read dispatch; a round reading no new instruction ends it: at most one per indirect branch.
-    let mut stopped = root.indirect_stops().collect::<BTreeSet<_>>();
     let mut last = (tables.read.iter())
         .map(|table| table.instruction)
         .collect::<Vec<_>>();
     while !last.is_empty() {
-        let dispatched = tables.dispatched();
-        // A trace decodes without lifting: most bodies' arms reach no new dispatch, and pay only this.
-        let Ok(mut trace) = crate::body::Trace::start(entry, target.disasm, program) else {
-            break;
-        };
-        trace.dispatch(&dispatched, target.disasm, program);
-        let new = (trace.dispatches()).filter(|stop| !stopped.contains(stop));
+        walk.dispatch(&tables.dispatched(), target.disasm, program);
+        let new = (walk.dispatches()).filter(|stop| !stopped.contains(stop));
         let new = new.collect::<BTreeSet<_>>();
         if new.is_empty() {
             break;
         }
         stopped.extend(&new);
-        let Ok(through) = native.walk_dispatched(entry, &dispatched) else {
-            break;
-        };
+        let through = native.walked(walk.body());
         let mut fresh = Vec::new();
         for region in (last.iter()).filter_map(|dispatch| through.region_after(*dispatch, &new)) {
             let held = (tables.read.iter())
@@ -751,7 +751,9 @@ pub(crate) fn dispatch_tables(
         .chain(&later)
         .cloned()
         .collect::<Vec<_>>();
-    match native.rounds_hold(entry, &all, restatement) {
+    // The walk has followed every table: the loop ends only once a round's arms reach no new stop.
+    let whole = native.walked(walk.into_body());
+    match native.rounds_hold(&whole, &all, restatement) {
         Ok(true) => tables.read = all,
         Ok(false) => r2il::refusal_evidence!(
             "dispatch-table",
@@ -2235,12 +2237,11 @@ impl<'a> Native<'a> {
     /// round can add an edge into a region any earlier round sealed, the first included. One seal.
     fn rounds_hold(
         &self,
-        entry: u64,
+        whole: &Walked,
         tables: &[NativePointerTable],
         restatement: Restatement,
     ) -> Result<bool, NativeRefusal> {
-        let whole = self.walk_dispatched(entry, &dispatched(tables))?;
-        let reads = self.table_reads(&whole, tables, restatement)?;
+        let reads = self.table_reads(whole, tables, restatement)?;
         let same = |table: &NativePointerTable, read: &r2ssa::indirect::DispatchTableRead| {
             read.instruction == Some(table.instruction)
                 && !read.call
