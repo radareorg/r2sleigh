@@ -71,7 +71,7 @@ pub use function_facts::{
 };
 pub use parameter_types::{
     IntegerDecl, ParameterType, ParameterTypes, PointerRefusal, SignFact, SlotType, UNSTATED_WORD,
-    is_unstated_word, unstated_word,
+    is_unstated_word, unstated_word, word_free,
 };
 
 pub use model::{Signedness, Type};

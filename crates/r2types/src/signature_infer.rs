@@ -57,12 +57,15 @@ pub(crate) fn infer_signature_from_prepared_ssa(
             let aggregate = (solved.aggregates.get(&param.arg_index)).map(|aggregate| {
                 CTypeLike::Pointer(Box::new(CTypeLike::Struct(aggregate.tag.clone())))
             });
-            let ty = aggregate.unwrap_or_else(|| {
-                param
-                    .value
-                    .and_then(|value| evidence_types.value_type(value))
-                    .cloned()
-                    .unwrap_or(certified_ty)
+            // A certified access through the parameter proves a pointer the solver's scalar may not
+            // overwrite; the solver's own pointer may name a better pointee (D265).
+            let solved = (param.value).and_then(|value| evidence_types.value_type(value));
+            let dereferenced = certified_parameter_widths.contains_key(&param.arg_index);
+            let ty = aggregate.unwrap_or_else(|| match solved {
+                Some(solved @ CTypeLike::Pointer(_)) => solved.clone(),
+                _ if dereferenced => certified_ty,
+                Some(solved) => solved.clone(),
+                None => certified_ty,
             });
             SignatureParamCandidate {
                 name: param.name.clone(),

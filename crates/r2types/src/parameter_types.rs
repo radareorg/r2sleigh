@@ -146,6 +146,14 @@ pub fn unstated_word(bits: u32) -> CTypeLike {
 /// The unstated word typedef's prefix.
 pub const UNSTATED_WORD: &str = "r2sleigh_word_u";
 
+/// `ty`, the unstated word as the integer it is: a merge of evidence reads it as a weak scalar.
+pub fn word_free(ty: &CTypeLike) -> &CTypeLike {
+    match ty {
+        CTypeLike::Typedef { ty: inner, .. } if is_unstated_word(ty) => inner,
+        ty => ty,
+    }
+}
+
 /// Whether `ty` is the unstated word typedef.
 pub fn is_unstated_word(ty: &CTypeLike) -> bool {
     matches!(ty, CTypeLike::Typedef { name, .. } if name.starts_with(UNSTATED_WORD))

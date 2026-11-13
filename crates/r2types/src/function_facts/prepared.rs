@@ -1117,7 +1117,7 @@ pub(crate) fn recovered_scalar_signedness_outranks(
     recovered: &CTypeLike,
     ptr_bits: u32,
 ) -> bool {
-    let scalar = |ty: &CTypeLike| match ty {
+    let scalar = |ty: &CTypeLike| match crate::word_free(ty) {
         CTypeLike::Int { bits, signedness } => Some((*bits, *signedness)),
         CTypeLike::Typedef { name, ty } => match crate::convert::typedef_target(name, ty, ptr_bits)
         {

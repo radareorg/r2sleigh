@@ -72,7 +72,7 @@ pub(crate) fn maybe_upgrade_param_to_pointer(
             param.ty.as_ref().is_none_or(|ty| {
                 is_generic_signature_type(Some(ty))
                     || matches!(
-                        ty,
+                        crate::word_free(ty),
                         CTypeLike::Int {
                             bits,
                             signedness: Signedness::Signed

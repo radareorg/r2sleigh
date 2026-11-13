@@ -679,6 +679,7 @@ pub fn signature_hint_can_replace_existing(
     ptr_bits: u32,
     type_db: &crate::ExternalTypeDb,
 ) -> bool {
+    let existing = crate::word_free(existing);
     if is_generic_signature_type(Some(existing)) {
         return true;
     }
@@ -807,6 +808,7 @@ pub fn summary_hint_can_replace_weak_existing(
     ptr_bits: u32,
     type_db: &crate::ExternalTypeDb,
 ) -> bool {
+    let existing = crate::word_free(existing);
     if is_generic_signature_type(Some(existing)) {
         return true;
     }
@@ -869,7 +871,7 @@ pub fn type_is_generated_local_struct_pointer(ty: &CTypeLike) -> bool {
 }
 
 pub fn is_weak_storage_scalar_type(ty: &CTypeLike, ptr_bits: u32) -> bool {
-    match ty {
+    match crate::word_free(ty) {
         CTypeLike::Int { .. } => true,
         CTypeLike::Typedef { name, .. } => is_weak_storage_scalar_typedef(name, ptr_bits),
         _ => false,
