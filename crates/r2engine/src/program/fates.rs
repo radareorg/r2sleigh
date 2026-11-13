@@ -416,9 +416,8 @@ fn callee_first(survey: &super::requests::Survey, callers: &[u64]) -> Vec<u64> {
             match calls[*at].get(*next).copied() {
                 Some(to) => {
                     *next += 1;
-                    if !std::mem::replace(&mut seen[to], true) {
-                        stack.push((to, 0));
-                    }
+                    let fresh = !std::mem::replace(&mut seen[to], true);
+                    stack.extend(fresh.then_some((to, 0)));
                 }
                 None => {
                     order.push(callers[*at]);

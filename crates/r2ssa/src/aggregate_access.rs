@@ -221,12 +221,10 @@ fn scalar_leaf(
                 graph_type(graph, member.type_id())?;
                 leaf.path.push(PathStep::Member(member.member_id()));
                 // An anonymous struct member adds no name: C spells its members as the outer's.
-                if !member.name().is_empty() {
-                    if !leaf.name.is_empty() {
-                        leaf.name.push('.');
-                    }
-                    leaf.name.push_str(member.name());
+                if !member.name().is_empty() && !leaf.name.is_empty() {
+                    leaf.name.push('.');
                 }
+                leaf.name.push_str(member.name());
                 offset_bits -= member.offset_bits();
                 leaf.type_id = member.type_id();
             }

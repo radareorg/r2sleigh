@@ -590,44 +590,31 @@ impl Context<'_> {
             if self.readers.merged.contains(var) {
                 return None;
             }
-            for reader in self.readers.of_var(var) {
-                if sinks.contains(*reader) {
-                    continue;
-                }
-                let op = self.readers.op(*reader)?;
-                let (dst, kept) = match lane_read(func, op, var, bytes) {
-                    LaneRead::Kept => return None,
-                    LaneRead::None => continue,
-                    LaneRead::Into(dst, kept) => (dst, kept),
-                };
-                if !walked.contains(reader) {
-                    walked.push(*reader);
-                }
-                if walked.len() > BUDGET {
-                    return None;
-                }
-                let Some(dst) = dst else {
-                    continue;
-                };
-                let had = held.get(dst).copied().unwrap_or(0);
-                if had | kept != had {
-                    held.insert(dst, had | kept);
-                    work.push((dst, kept));
-                }
+            let readers =
+                (self.readers.of_var(var).iter()).filter(|reader| !sinks.contains(**reader));
+            for reader in readers {
+                let into = self.byte_step(*reader, var, bytes, &mut walked)?;
+                (walked.len() <= BUDGET).then_some(())?;
+                let gained = into.filter(|(dst, kept)| {
+                    let had = held.get(*dst).copied().unwrap_or(0);
+                    held.insert(*dst, had | kept);
+                    had | kept != had
+                });
+                work.extend(gained);
             }
         }
         // Dead: every reader of the result is a sink or dead; the rest still carry a byte. Each
         // round drops one operation or more, so at most `BUDGET` rounds.
+        let live = |op: OpId, dead: &[OpId]| {
+            let dst = self.readers.op(op).and_then(|op| op.dst().copied());
+            dst.is_some_and(|dst| {
+                self.readers.merged.contains(dst)
+                    || (self.readers.of_var(dst).iter())
+                        .any(|reader| !sinks.contains(*reader) && !dead.contains(reader))
+            })
+        };
         let mut dead = walked.clone();
         loop {
-            let live = |op: OpId, dead: &[OpId]| {
-                let dst = self.readers.op(op).and_then(|op| op.dst().copied());
-                dst.is_some_and(|dst| {
-                    self.readers.merged.contains(dst)
-                        || (self.readers.of_var(dst).iter())
-                            .any(|reader| !sinks.contains(*reader) && !dead.contains(reader))
-                })
-            };
             let next = (dead.iter().copied())
                 .filter(|op| !live(*op, &dead))
                 .collect::<Vec<_>>();
@@ -640,6 +627,29 @@ impl Context<'_> {
             .filter(|op| !dead.contains(op))
             .collect();
         Some((dead, carried))
+    }
+}
+
+impl Context<'_> {
+    /// One reader of `bytes` of `var`, recorded in `walked`: `None` where it keeps them, else the
+    /// result and the bytes it holds, where it has a result holding any.
+    fn byte_step(
+        &self,
+        reader: OpId,
+        var: VarId,
+        bytes: u64,
+        walked: &mut Vec<OpId>,
+    ) -> Option<Option<(VarId, u64)>> {
+        let op = self.readers.op(reader)?;
+        let (dst, kept) = match lane_read(self.func, op, var, bytes) {
+            LaneRead::Kept => return None,
+            LaneRead::None => return Some(None),
+            LaneRead::Into(dst, kept) => (dst, kept),
+        };
+        if !walked.contains(&reader) {
+            walked.push(reader);
+        }
+        Some(dst.map(|dst| (dst, kept)))
     }
 }
 

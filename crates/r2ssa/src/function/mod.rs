@@ -3426,6 +3426,15 @@ pub(crate) fn unpassed_call_reads(
             .collect::<Vec<_>>();
         passed.insert(boundary.at, Some(registers));
     }
+    // A call with no boundary passes nothing; `None` passes every register.
+    let passes = |registers: Option<&Option<Vec<CanonicalStorageId>>>, storage| {
+        registers.is_some_and(|registers| {
+            (registers.as_deref()).is_none_or(|registers| {
+                (registers.iter())
+                    .any(|register| crate::semantic::register_storages_overlap(*register, storage))
+            })
+        })
+    };
     // The reads minted just before a call are its own; any other run passes nothing.
     let mut unpassed = std::collections::BTreeSet::new();
     for block in &graph.blocks {
@@ -3439,21 +3448,10 @@ pub(crate) fn unpassed_call_reads(
             let registers = op
                 .filter(|op| op.call().is_some())
                 .and_then(|_| passed.get(inst));
-            for (read, storage) in run.drain(..) {
-                let read_passed = registers.is_some_and(|registers| {
-                    registers.as_ref().is_none_or(|registers| {
-                        (registers.iter()).any(|register| {
-                            crate::semantic::register_storages_overlap(*register, storage)
-                        })
-                    })
-                });
-                if !read_passed {
-                    unpassed.insert(crate::graph::UseSite {
-                        inst: read,
-                        input_idx: 0,
-                    });
-                }
-            }
+            let unread = run
+                .drain(..)
+                .filter(|(_, storage)| !passes(registers, *storage));
+            unpassed.extend(unread.map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 }));
         }
         unpassed.extend(
             run.into_iter()

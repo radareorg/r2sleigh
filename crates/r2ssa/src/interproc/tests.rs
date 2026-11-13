@@ -2199,15 +2199,12 @@ fn source_owned_call_observer_requires_exact_complete_call_carriers() {
         size: 8,
     };
     let revision = b"interproc-exact-call-carriers";
+    let slot = r2source::SourceSlot::integer(0);
     let function_interface = || {
         crate::SourceFunctionInterface::new_exact(
             revision.to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [crate::SourceAbiParameterSpec::new(
-                0,
-                storage(8),
-                r2source::SourceSlot::integer(0),
-            )],
+            [crate::SourceAbiParameterSpec::new(0, storage(8), slot)],
             crate::SourceFunctionReturn::Void,
             [],
         )
@@ -2245,22 +2242,17 @@ fn source_owned_call_observer_requires_exact_complete_call_carriers() {
         )
         .expect("callsite interface")
     };
-    let complete = crate::testing::prepared(
-        &blocks,
-        &crate::Arch::from(arch.clone()),
-        Some(function_interface()),
-        vec![call_interface(true)],
-        [register_storage(16), register_storage(24)],
-    )
-    .expect("complete call carrier artifact");
-    let incomplete = crate::testing::prepared(
-        &blocks,
-        &crate::Arch::from(arch.clone()),
-        Some(function_interface()),
-        vec![call_interface(false)],
-        [register_storage(16), register_storage(24)],
-    )
-    .expect("incomplete call carrier artifact");
+    let prepared = |complete| {
+        crate::testing::prepared(
+            &blocks,
+            &crate::Arch::from(arch.clone()),
+            Some(function_interface()),
+            vec![call_interface(complete)],
+            [register_storage(16), register_storage(24)],
+        )
+        .expect("call carrier artifact")
+    };
+    let (complete, incomplete) = (prepared(true), prepared(false));
     let complete_abi = Formals::of(complete.machine_context()).expect("source-owned ABI");
     let incomplete_abi = Formals::of(incomplete.machine_context()).expect("source-owned ABI");
     let complete_args = observe_call_arguments(&complete, &complete_abi)
