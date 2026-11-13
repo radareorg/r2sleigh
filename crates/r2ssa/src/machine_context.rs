@@ -1723,6 +1723,24 @@ mod tests {
         );
     }
 
+    /// The architecture's return registers name no result: under no model the result is
+    /// unproven, never carried (S34).
+    #[test]
+    fn no_model_names_no_result_carrier() {
+        let mut arch = ArchSpec::new("x");
+        arch.addr_size = 8;
+        arch.add_register(RegisterDef::new("r0", 0, 8));
+        arch.return_registers = vec![RegisterDef::new("r0", 0, 8)];
+        let context = SourceMachineContext::from_blocks(&[], Some(&crate::Arch::from(arch)));
+        assert_eq!(context.result_slot(), None);
+        assert_eq!(context.return_value_carrier(), None);
+        assert!(
+            context
+                .call_clobbered_carriers()
+                .contains(&register_storage(0, 8))
+        );
+    }
+
     #[test]
     fn a_register_is_named_by_its_storage() {
         let mut arch = ArchSpec::new("AARCH64:LE:64:v8A");

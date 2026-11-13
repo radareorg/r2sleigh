@@ -631,6 +631,25 @@ fn spells_address(value: i128, address: u64) -> bool {
 mod tests {
     use super::*;
 
+    /// A register holding a number past a call keeps it only where the calls' model keeps the
+    /// register; with no model, it holds nothing past the call (S34).
+    #[test]
+    fn a_call_under_no_model_drops_every_register_holder() {
+        let rbx = r2il::Varnode::register(0x18, 8);
+        let call = R2ILOp::Call {
+            target: r2il::Varnode::constant(0x2000, 8),
+        };
+        let mut holders = vec![rbx.clone()];
+        assert!(follow_copies(&call, &mut holders, None));
+        assert!(holders.is_empty());
+        let keeps = r2source::convention::testing::model(r2abi::ConventionId::SysVAmd64)
+            .preserved([CanonicalStorageId::from_varnode(&rbx)])
+            .build();
+        let mut holders = vec![rbx.clone()];
+        assert!(follow_copies(&call, &mut holders, Some(&keeps)));
+        assert_eq!(holders, [rbx]);
+    }
+
     #[test]
     fn a_displacement_beside_a_register_is_never_a_wrapped_address() {
         use r2sleigh_lift::Span;
