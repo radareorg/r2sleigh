@@ -627,7 +627,7 @@ The call-boundary rewrite's gaps, cited as "gap G7". Each row has one owner; its
 | G11 | `_fini` void by a cited row | r2abi `loader_call` | S22: D237, D238, D239; Ga: D240 | the 9 `_fini` print `void` | closed |
 | G12 | the proof line's unproven-return count | r2dec | S21: D233 | census names the residual | closed |
 | G13 | the closed-world premise as its own clause | r2dec | S21: D234 | `a_closed_world_read_states_its_premise_and_a_cold_render_stays_unproven` | closed |
-| G14 | convention views, `callconv` strings, `AdvisoryCallPrototype` | r2source contracts | S34: D273, D274, D275, D276 | D309 allowlist at 0 | open |
+| G14 | convention views, `callconv` strings, `AdvisoryCallPrototype` | r2source contracts | S34: D273, D274, D275, D276 | D309 allowlist at 0 | closed |
 | G15 | `reg_type_hints`, `merge_type_hint` | r2engine | S34: D275 | both deleted | closed |
 | G16 | AArch64 `extension` override sent upstream | vendor | S35: D278 | the PR linked in `vendor/README.md` | open |
 | G17 | stale text (P7, T, D165, D209, D62, D72, ADR status lines) | docs | S35: D279 | none left | closed |
