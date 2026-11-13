@@ -1016,7 +1016,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
     const RETENTION: Retention = Retention::Held;
 
     /// Work: the body's own register effect, deposited, then one backward pass over the body,
-    /// `O((B + E) × lanes)` within its budget, and one held register effect per distinct callee.
+    /// `O((B + E) × lanes)` within its budget, and one held effect and `KeptAcross` per callee.
     fn compute(db: &Db<ProgramInputs<S>>, &(caller, thumb): &(u64, bool)) -> Self::Value {
         read_body(db, (caller, thumb), |read| {
             // Deposited before any deep read, so the row depends on what a computed row reads (ADR).
@@ -1174,7 +1174,13 @@ fn effect_on_flow<S: Source + 'static>(
         .is_none()
         .then_some(&*target.call);
     let clobbers = model.map(|model| move |storage| model.clobbers(storage));
-    let callee = |block: usize, op: usize| effects.callee_at(block, op);
+    // An import has no row, so a call to one keeps nothing without asking.
+    let callee = |block: usize, op: usize| {
+        let entered = effects.callee_at(block, op)?;
+        crate::native::Program::import_at(reading.view, entered)
+            .is_none()
+            .then_some(entered)
+    };
     let by = r2ssa::site_boundary::KeptBy {
         machine: target.arch,
         clobbers: (clobbers.as_ref())

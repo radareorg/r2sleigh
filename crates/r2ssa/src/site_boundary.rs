@@ -355,7 +355,7 @@ fn overlapping(
     from..to.max(from)
 }
 
-/// What `kept` reads beside the flow: the machine, whether the convention clobbers a register (none
+/// What `unwritten` reads beside the flow: the machine, whether the convention clobbers a register (none
 /// without a call effect), which terminal call is declared `Never`, and each call's callee if named.
 #[derive(Clone, Copy)]
 pub struct KeptBy<'a> {
@@ -859,7 +859,7 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
     }
 
     /// The universe's registers no operation but a call writes where a return is reached, and those
-    /// calls' callees; none past an exit `kept` refuses, a call naming no callee or an unstated operation.
+    /// calls' callees; none past an open or undeclared exit, a call naming no callee or an unstated operation.
     fn unwritten(&self, by: &KeptBy<'_>) -> (UniverseSet, Box<[u64]>) {
         let KeptBy {
             machine,
