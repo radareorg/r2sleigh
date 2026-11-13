@@ -15,6 +15,7 @@ mod reads;
 mod requests;
 mod resolved;
 mod returns;
+mod slots;
 pub mod source;
 mod starts;
 mod view;

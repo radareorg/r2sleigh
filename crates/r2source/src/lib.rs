@@ -97,6 +97,18 @@ pub enum SourceClosedResult {
     ForwardCycle,
     /// A call reads these lanes as the call leaves them: a value at `Solved` under the closed world.
     Read(SourceReadLanes),
+    /// Every way in is a call that leaves every lane dead or a cited `void` callback slot the
+    /// address reaches, so no way in reads a result (S30, premises closed world and UB-free source).
+    DeclaredVoid(SourceSlotOrigin),
+}
+
+/// The cited slot a function's address reaches: the import's address and the parameter's index.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct SourceSlotOrigin {
+    pub import: u64,
+    pub parameter: u8,
 }
 
 /// The result lanes a reading call takes.

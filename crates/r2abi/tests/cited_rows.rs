@@ -4,13 +4,14 @@
 use r2abi::{CLibrary, Dll, Handle, LibraryId, LibraryRows, Tail};
 
 /// Each cited table and the fewest rows it holds.
-const CITED: [(&str, usize); 6] = [
+const CITED: [(&str, usize); 7] = [
     ("types-posix.sdb.txt", 515),
     ("types-glibc.sdb.txt", 85),
     ("types-bionic.sdb.txt", 100),
     ("types-musl.sdb.txt", 2),
     ("types-kernel32.sdb.txt", 50),
     ("types-ucrt.sdb.txt", 1),
+    ("types-cxx-cited.sdb.txt", 1),
 ];
 const UNCITED: [&str; 6] = [
     "types.sdb.txt",

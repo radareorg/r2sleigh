@@ -221,6 +221,7 @@ const PORTABLE: &str = include_str!("../data/types.sdb.txt");
 /// ISO C, POSIX and BSD rows, each citing its header (`data/README.md`, "Cited rows").
 const PORTABLE_CITED: &str = include_str!("../data/types-posix.sdb.txt");
 const CXX: &str = include_str!("../data/types-cxx.sdb.txt");
+const CXX_CITED: &str = include_str!("../data/types-cxx-cited.sdb.txt");
 const GLIBC: &str = include_str!("../data/types-linux.sdb.txt");
 const GLIBC_CITED: &str = include_str!("../data/types-glibc.sdb.txt");
 const BIONIC: &str = include_str!("../data/types-android.sdb.txt");
@@ -249,7 +250,7 @@ const fn table(library: LibraryId, cited: bool, text: &'static str) -> Embedded 
 }
 
 /// The sources a cited row's comment may name.
-pub const SOURCES: [&str; 10] = [
+pub const SOURCES: [&str; 11] = [
     "ISO C17",
     "POSIX.1-2017",
     "POSIX.1-2024",
@@ -260,6 +261,7 @@ pub const SOURCES: [&str; 10] = [
     "bionic",
     "musl",
     "Microsoft",
+    "Itanium C++ ABI",
 ];
 
 /// What a row read from a mangled name cites.
@@ -315,6 +317,7 @@ impl LibraryRows {
             table(Portable, false, PORTABLE),
             table(Portable, true, PORTABLE_CITED),
             table(CxxRuntime, false, CXX),
+            table(CxxRuntime, true, CXX_CITED),
         ];
         let mut rows = Self {
             library,

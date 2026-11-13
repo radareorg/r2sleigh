@@ -1155,10 +1155,15 @@ pub enum Transfer {
 /// What a body's transfers do with one register: S25's per-site reads, asked of the call or tail
 /// transfer at (block, operation).
 pub trait CallReadsAt {
+    /// The function or loader slot the walk read the transfer at (block, operation) going to.
+    fn target(&self, block: usize, op: usize) -> Option<u64>;
     /// Whether the transfer may read `register` as an argument.
     fn reads(&self, block: usize, op: usize, register: CanonicalStorageId) -> bool;
     /// Whether the call overwrites `register` on every path back, so a later read is the call's.
     fn overwrites(&self, block: usize, op: usize, register: CanonicalStorageId) -> bool;
+    /// Whether a return hands `register` to the caller: a result or preserved register, or any
+    /// where the convention states no call effect.
+    fn returned(&self, register: CanonicalStorageId) -> bool;
 }
 
 impl<B: Lifted> CallerFlow<'_, B> {
@@ -1230,7 +1235,8 @@ impl<B: Lifted> CallerFlow<'_, B> {
         reads: &dyn CallReadsAt,
         handed: &mut Vec<Handoff>,
     ) -> Walked {
-        if self.open[block] || self.irregular[block] {
+        // A block's own leaving transfer is read below; only control past its end is open.
+        if self.irregular[block] {
             return Walked::Other;
         }
         let lifted = self.blocks[block].lifted();
@@ -1246,14 +1252,15 @@ impl<B: Lifted> CallerFlow<'_, B> {
             if let Some(transfer) = operation.transfer()
                 && !operation.is_local_branch()
             {
-                let target = match transfer.direct && transfer.target.space == SpaceId::Ram {
-                    true => Transfer::Direct(transfer.target.offset),
-                    false => Transfer::Indirect,
+                let encoded = transfer.direct && transfer.target.space == SpaceId::Ram;
+                let target = match (reads.target(block, at), encoded) {
+                    (Some(read), _) => Transfer::Direct(read),
+                    (None, true) => Transfer::Direct(transfer.target.offset),
+                    (None, false) => Transfer::Indirect,
                 };
-                let leaves = match target {
-                    Transfer::Direct(address) => !transfer.call && !holds(address),
-                    Transfer::Indirect => !transfer.call,
-                };
+                let leaves = !transfer.call
+                    && (!encoded || !holds(transfer.target.offset))
+                    && !operation.is_local_branch();
                 // A call through the register, or a branch through it, reads it.
                 if !transfer.direct && covers_any(transfer.target, register) {
                     return Walked::Other;
@@ -1266,11 +1273,11 @@ impl<B: Lifted> CallerFlow<'_, B> {
                             storage: register,
                         });
                     }
-                    if leaves && matches!(operation, R2ILOp::Branch { .. }) {
-                        return Walked::Ends;
-                    }
                     if leaves && target == Transfer::Indirect {
                         return Walked::Other;
+                    }
+                    if leaves && !matches!(operation, R2ILOp::CBranch { .. }) {
+                        return Walked::Ends;
                     }
                     if transfer.call && reads.overwrites(block, at, register) {
                         return Walked::Ends;
@@ -1279,7 +1286,10 @@ impl<B: Lifted> CallerFlow<'_, B> {
                 }
             }
             if matches!(operation, R2ILOp::Return { .. }) {
-                return Walked::Other;
+                return match reads.returned(register) {
+                    true => Walked::Other,
+                    false => Walked::Ends,
+                };
             }
             if mode.inert {
                 continue;
@@ -1300,7 +1310,7 @@ impl<B: Lifted> CallerFlow<'_, B> {
                 return Walked::Ends;
             }
         }
-        if self.leaves[block] {
+        if self.leaves[block] || self.open[block] {
             return Walked::Other;
         }
         Walked::RunsOn
@@ -2424,12 +2434,20 @@ mod tests {
     }
 
     impl super::CallReadsAt for ReadsAll {
+        fn target(&self, _block: usize, _op: usize) -> Option<u64> {
+            None
+        }
+
         fn reads(&self, _block: usize, _op: usize, _register: CanonicalStorageId) -> bool {
             true
         }
 
         fn overwrites(&self, _block: usize, _op: usize, _register: CanonicalStorageId) -> bool {
             self.overwritten
+        }
+
+        fn returned(&self, _register: CanonicalStorageId) -> bool {
+            true
         }
     }
 

@@ -1858,6 +1858,24 @@ fn closed_under_entry(mut keep: Vec<bool>, preceding: &[Vec<usize>], entry: usiz
     keep
 }
 
+/// The parameter of import `name` placed at `storage` whose cited row types it a pointer to code
+/// returning `void` (S30); none where no cited row places one there.
+pub(crate) fn void_slot(
+    target: &NativeTarget<'_>,
+    name: &str,
+    storage: r2source::CanonicalStorageId,
+) -> Option<u8> {
+    let declared = Declared::import(target, name)?;
+    if declared.row.is_none_or(|row| row.citation.is_empty()) {
+        return None;
+    }
+    let placed = placing_imports(target, None, |placement| placement.registers(declared))?;
+    let index = placed.iter().position(|at| *at == Some(storage))?;
+    let parameter = declared.prototype.parameters.get(index)?;
+    let void = parameter.code_returns(declared.graph) == Some(r2abi::TypeId::VOID);
+    void.then(|| u8::try_from(index).ok()).flatten()
+}
+
 /// One program, one machine, and the walk over it.
 /// One dispatch's table, read, and where the dispatch that reads it stands.
 #[derive(Clone)]

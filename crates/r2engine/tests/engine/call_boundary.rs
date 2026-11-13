@@ -1326,3 +1326,103 @@ fn a_forwarded_unstated_float_result_is_never_void() {
     let text = analysed(program());
     assert!(!text.starts_with("void f("), "{text}");
 }
+
+/// `text` at 0x1000, padded with `int3` to `atexit`'s stub at 0x1090, which jumps through 0x1098;
+/// `handler` at 0x1010 calls `helper` at 0x1018 (`mov eax, 1; ret`), so its RAX is written.
+fn at_exit(text: &[u8], import: &str) -> Literal {
+    let mut code = vec![0xcc; 0xa0];
+    code[..text.len()].copy_from_slice(text);
+    code[0x10..0x1e].copy_from_slice(&[
+        0xe8, 0x03, 0x00, 0x00, 0x00, // 1010 call 0x1018
+        0xc3, // 1015 ret
+        0xcc, 0xcc, // 1016 padding
+        0xb8, 0x01, 0x00, 0x00, 0x00, // 1018 mov eax, 1
+        0xc3, // 101d ret
+    ]);
+    code[0x90..0x96].copy_from_slice(&[0xff, 0x25, 0x02, 0x00, 0x00, 0x00]); // jmp [rip + 2]
+    code[0x98..0xa0].fill(0);
+    let mut functions = vec![("main", BASE, 0x10), ("handler", HANDLER, 0x06)];
+    functions.push(("helper", BASE + 0x18, 0x06));
+    if text.len() > 0x20 {
+        functions.push(("wrapper", BASE + 0x20, text.len() as u64 - 0x20));
+    }
+    let code: &'static [u8] = Box::leak(code.into_boxed_slice());
+    Literal::of_code(code, &functions)
+        .importing(import)
+        .running_on(common::GLIBC)
+}
+
+/// `lea rdi, [rip + 9]: handler; call the stub; xor eax, eax; ret`.
+const TAKES_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, 0xe8, 0x84, 0x00, 0x00, 0x00, 0x31, 0xc0, 0xc3,
+];
+
+/// `lea rdi, [rip + 9]: handler; call rdi` at 0x1007, then `ret`: the take reaches an indirect call.
+const CALLS_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, 0xff, 0xd7, 0x31, 0xc0, 0xc3,
+];
+
+/// `main: lea rdi, [handler]; call wrapper`, and `wrapper` at 0x1020 as libc_nonshared's `atexit`
+/// (find `0x278e0`): `xor edx, edx; xor esi, esi; jmp __cxa_atexit`.
+const WRAPS_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, // 1000 lea rdi, [rip + 9]: handler
+    0xe8, 0x14, 0x00, 0x00, 0x00, // 1007 call 0x1020
+    0x31, 0xc0, 0xc3, // 100c xor eax, eax; ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 100f the handler's room
+    0x31, 0xd2, 0x31, 0xf6, // 1020 xor edx, edx; xor esi, esi
+    0xe9, 0x67, 0x00, 0x00, 0x00, // 1024 jmp the stub
+];
+
+/// [`TAKES_HANDLER`] that also calls the handler and stores its EAX: `call 0x1010; mov [rsi], eax`.
+const READS_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, // 1000 lea rdi, [rip + 9]: handler
+    0xe8, 0x84, 0x00, 0x00, 0x00, // 1007 call the stub
+    0xeb, 0x12, // 100c jmp 0x1020
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, // 100e the handler's room
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1020 call 0x1010
+    0x89, 0x06, 0xc3, // 1025 mov [rsi], eax; ret
+];
+
+const HANDLER: u64 = BASE + 0x10;
+
+fn handler_rendered(literal: Literal, survey: bool) -> String {
+    let mut open = OpenProgram::of(literal);
+    if survey {
+        open.analyse_program().expect("it surveys");
+    }
+    let rendered = open.rendered(HANDLER).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// A handler whose address only reaches `atexit`'s cited `void (*)(void)` slot returns nothing
+/// under the closed world, though its RAX is written; cold, it stays unproven (S30, D205).
+#[test]
+fn a_handler_only_atexit_takes_is_void_under_the_closed_world() {
+    let closed = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), true);
+    assert!(closed.contains("void handler(void)"), "{closed}");
+    let cold = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), false);
+    assert!(!cold.contains("void handler("), "{cold}");
+}
+
+/// A slot no cited row types `void` (`qsort`'s comparator returns `int`), or a take a call
+/// through the register reads, proves nothing: the handler keeps its written result.
+#[test]
+fn a_take_into_no_void_slot_keeps_the_result() {
+    let qsort = handler_rendered(at_exit(TAKES_HANDLER, "qsort"), true);
+    assert!(!qsort.contains("void handler("), "{qsort}");
+    let called = handler_rendered(at_exit(CALLS_HANDLER, "atexit"), true);
+    assert!(!called.contains("void handler("), "{called}");
+    // A direct call that reads the result decides it, whatever the slot says.
+    let read = handler_rendered(at_exit(READS_HANDLER, "atexit"), true);
+    assert!(!read.contains("void handler("), "{read}");
+}
+
+/// A wrapper that tail-jumps to `__cxa_atexit` with RDI untouched hands its parameter into the
+/// cited `void (*)(void *)` slot, so a handler only it takes is void (S30, find's `close_stdout`).
+#[test]
+fn a_handler_a_wrapper_hands_to_cxa_atexit_is_void_under_the_closed_world() {
+    let closed = handler_rendered(at_exit(WRAPS_HANDLER, "__cxa_atexit"), true);
+    assert!(closed.contains("void handler(void)"), "{closed}");
+}

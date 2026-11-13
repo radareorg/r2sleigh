@@ -781,6 +781,7 @@ impl BoundaryResult {
             true => None,
             false => decided_result(supply, forwarding, &mut every_way_in),
         };
+        let result = result.or_else(|| declared_void(db, entry, supply, forwarding));
         let overwritten = |lane: LaneId| {
             let effect = db.get::<RegisterEffects>(&(entry, thumb));
             (effect.ok().as_deref().and_then(Option::as_ref))
@@ -798,6 +799,10 @@ impl BoundaryResult {
             _ => LaneDecision::Open,
         });
         let premises = match result {
+            Some(SourceClosedResult::DeclaredVoid(_)) => vec![
+                r2source::Premise::ClosedWorld,
+                r2source::Premise::UbFreeSource,
+            ],
             Some(_) => vec![r2source::Premise::ClosedWorld],
             None => Vec::new(),
         };
@@ -808,6 +813,29 @@ impl BoundaryResult {
             disputes: disputes.into(),
         }
     }
+}
+
+/// `DeclaredVoid` (S30): no call reads, takes, loses or returns on a held lane, every call the
+/// index claims was read, and every other way in hands the address only into cited `void` slots.
+/// Under `UbFreeSource` a function called through `void (*)(...)` returns nothing (C17 6.3.2.3p8).
+fn declared_void<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    entry: u64,
+    supply: Supply,
+    forwarding: &Forwarding,
+) -> Option<SourceClosedResult> {
+    let undecided = matches!(supply.returns, Returns::Unproven | Returns::Register);
+    if supply.declared || !undecided || forwarding.unread || !forwarding.forwarders.is_empty() {
+        return None;
+    }
+    let holds = holds(supply, &forwarding.lanes);
+    let lanes = &forwarding.lanes;
+    let quiet = |at: usize| !holds[at] || !(lanes[at].read || lanes[at].unknown || lanes[at].cycle);
+    if !(0..LANES).all(quiet) || !super::reads::calls_claimed(db, entry, forwarding.calls) {
+        return None;
+    }
+    let origin = (*db.get::<super::slots::DeclaredSlot>(&entry).ok()?)?;
+    Some(SourceClosedResult::DeclaredVoid(origin))
 }
 
 /// Which lanes the body may hold a result in: an integer register no return defines holds none, and
@@ -1042,11 +1070,11 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for RegisterEffects {
 }
 
 /// One walked body as the site fates and the register effect read it: the one prefix both share.
-struct BodyRead<'a, S: Source + 'static> {
+pub(super) struct BodyRead<'a, S: Source + 'static> {
     walker: &'a super::returns::Walking<'a, S>,
     target: &'a NativeTarget<'a>,
-    body: &'a Body,
-    flow: CallerFlow<'a, BodyBlock>,
+    pub(super) body: &'a Body,
+    pub(super) flow: CallerFlow<'a, BodyBlock>,
     /// Its calls read without another body, as the register effect reads them.
     shallow: Reading<'a, S>,
     /// Its calls read by each callee's register effect, as the site fates read them.
@@ -1054,7 +1082,7 @@ struct BodyRead<'a, S: Source + 'static> {
 }
 
 /// The walked body at `key` with its target and flow, handed to `then`; none where it has no walk.
-fn read_body<S: Source + 'static, R>(
+pub(super) fn read_body<S: Source + 'static, R>(
     db: &Db<ProgramInputs<S>>,
     (entry, thumb): (u64, bool),
     then: impl FnOnce(&BodyRead<'_, S>) -> R,
@@ -1085,7 +1113,13 @@ fn read_body<S: Source + 'static, R>(
     }))
 }
 
-impl<S: Source + 'static> BodyRead<'_, S> {
+impl<'a, S: Source + 'static> BodyRead<'a, S> {
+    /// The convention a call clobbers by, where its call effect is stated; none clobbers nothing.
+    pub(super) fn clobbering(&self) -> Option<&'a r2source::ConventionModel> {
+        let model = &*self.target.call;
+        model.effect_refused().is_none().then_some(model)
+    }
+
     /// The body's register effect, its calls read shallowly.
     fn effect(&self, entry: u64) -> Option<RegisterEffect> {
         effect_on_flow(
@@ -1198,6 +1232,20 @@ fn flow_of(body: &Body, endian: r2il::Endianness) -> CallerFlow<'_, BodyBlock> {
         (stop.addr < block.addr + u64::from(block.size)).then_some(at)
     });
     CallerFlow::new(&body.blocks, edges, open, endian)
+}
+
+/// The argument registers a call to the import at `callee` may read, as its placed row states;
+/// `None` where no row binds it, which reads every location.
+pub(super) fn import_reads<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    callee: u64,
+) -> Option<Vec<CanonicalStorageId>> {
+    let key = (CalleeKey::Import(ImportId(callee)), World::Open);
+    let boundary = db.get::<CallBoundary>(&key).ok()?;
+    match boundary.as_ref() {
+        Some(CallBoundary::Import { reads }) => reads.as_ref().map(|reads| reads.registers.clone()),
+        _ => None,
+    }
 }
 
 /// How far a callee of the body is read for what a call to it does.

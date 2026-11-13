@@ -28,13 +28,22 @@ pub(super) fn only_called<S: Source + 'static>(
     let Ok(escapes) = db.get::<Escapes>(&()) else {
         return false;
     };
-    let Some(escaped) = escapes.as_ref() else {
+    let Some(ways) = escapes.as_ref() else {
         return false;
     };
-    if escaped.binary_search(&callee).is_ok() {
+    if ways.escapes(callee) {
         r2il::refusal_evidence!("closed-world", "{callee:#x}: a way in other than a call");
         return false;
     }
+    calls_claimed(db, callee, calls)
+}
+
+/// Whether the `calls` read are every call the reference index claims to `callee`.
+pub(super) fn calls_claimed<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    callee: u64,
+    calls: u32,
+) -> bool {
     let Ok(index) = db.get::<ReferenceIndex>(&()) else {
         return false;
     };
@@ -59,13 +68,49 @@ fn every_call_read(calls: u32, claimed: usize) -> bool {
     usize::try_from(calls).is_ok_and(|calls| calls == claimed)
 }
 
-/// The functions the program enters other than by a direct call, by entry, ascending; `None` where
-/// it does not show every way in (doc/adr-resolved-bodies.md, "Closed world").
+/// The ways the program enters functions other than by a direct call; `None` where it does not
+/// show every way in (doc/adr-resolved-bodies.md, "Closed world").
 pub(super) struct Escapes;
+
+/// Every way in other than a call: what escapes, and each address a body's instruction takes.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct WaysIn {
+    /// Entries reached other than by a call or a take, ascending.
+    escaped: Box<[u64]>,
+    /// Each instruction that forms a function's address in a body (`Role::Value`), by target.
+    takes: Box<[Take]>,
+}
+
+/// One instruction of `owner` forming `target`'s address (S30).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(super) struct Take {
+    pub(super) target: u64,
+    pub(super) from: u64,
+    pub(super) owner: u64,
+}
+
+impl WaysIn {
+    /// Whether `entry` is reached other than by a call: a take is a way in. `O(log n)`.
+    pub(super) fn escapes(&self, entry: u64) -> bool {
+        self.escaped.binary_search(&entry).is_ok() || !self.takes_of(entry).is_empty()
+    }
+
+    /// Whether `entry` escapes other than by a take.
+    pub(super) fn escaped(&self, entry: u64) -> bool {
+        self.escaped.binary_search(&entry).is_ok()
+    }
+
+    /// The takes of `entry`. `O(log n)`.
+    pub(super) fn takes_of(&self, entry: u64) -> &[Take] {
+        let start = self.takes.partition_point(|take| take.target < entry);
+        let end = self.takes.partition_point(|take| take.target <= entry);
+        &self.takes[start..end]
+    }
+}
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
     type Key = ();
-    type Value = Option<Arc<[u64]>>;
+    type Value = Option<Arc<WaysIn>>;
     const NAME: &'static str = "escapes";
     const RETENTION: Retention = Retention::Held;
 
@@ -130,7 +175,18 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
             }
         }
         slots.sort_unstable();
+        let mut takes = Vec::new();
         for (fact, claimant) in index.claimed() {
+            // An address a body's instruction forms is a take, which S30 follows (`DeclaredSlot`).
+            if fact.role == Role::Value && !claimant.owners.is_empty() {
+                let take = |owner: &u64| Take {
+                    target: fact.to,
+                    from: fact.from,
+                    owner: *owner,
+                };
+                takes.extend(claimant.owners.iter().map(take));
+                continue;
+            }
             // A jump inside a function to its own entry is a loop, no way in.
             let looping = fact.role == Role::Jump && claimant.owners.contains(&fact.to);
             // A PIE's slot is a loader write: the reference is the slot's own word.
@@ -162,7 +218,12 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
         stored_words(source, &survey.entries(), &stated, &mut escaped);
         escaped.sort_unstable();
         escaped.dedup();
-        Some(escaped.into())
+        takes.sort_unstable();
+        takes.dedup();
+        Some(Arc::new(WaysIn {
+            escaped: escaped.into(),
+            takes: takes.into(),
+        }))
     }
 }
 
