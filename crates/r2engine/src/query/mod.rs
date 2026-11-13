@@ -41,6 +41,8 @@ pub struct AnalysisStats {
     pub walked: db::QueryStats,
     /// Dependencies the query graph forbids that a computation reached; zero in a sound engine.
     pub defects: u64,
+    /// Builds made anew against their owners' statements (D365).
+    pub rebuilt: u64,
 }
 pub use proved::Proved;
 pub use r2ssa::InductionStep;

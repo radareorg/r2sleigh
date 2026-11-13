@@ -142,6 +142,8 @@ pub struct DbStats {
     pub backdated: u64,
     /// Dependencies the query graph forbids that a computation reached (`Db::defect`).
     pub defects: u64,
+    /// Builds made anew against their owners' statements, where a kept build was refused (D365).
+    pub rebuilt: u64,
 }
 
 /// A held answer found good, with what it depends on.
@@ -315,6 +317,11 @@ impl<I: Inputs + 'static> Db<I> {
     pub fn defect(&self, what: std::fmt::Arguments<'_>) {
         r2il::refusal_evidence!("query-defect", "{what}");
         self.stats.borrow_mut().defects += 1;
+    }
+
+    /// Count a build its owners' statements moved, so it was built anew (D365).
+    pub fn note_rebuilt(&self) {
+        self.stats.borrow_mut().rebuilt += 1;
     }
 
     /// The answer to `Q` at `key`, reused where nothing it read has moved.

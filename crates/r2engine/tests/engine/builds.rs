@@ -89,6 +89,7 @@ fn an_owner_that_moves_the_build_has_it_built_again() {
     assert!(!text.contains("never assigned"), "{text}");
     let stats = open.analysis_stats();
     assert_eq!(stats.callee_reads.computed, 0, "{stats:?}");
+    assert_eq!(stats.rebuilt, 1, "{stats:?}");
     assert_eq!(stats.defects, 0, "{stats:?}");
 }
 
@@ -139,4 +140,39 @@ fn a_callee_that_calls_itself_on_a_returning_path_keeps_nothing() {
         "{text}"
     );
     assert_eq!(open.analysis_stats().defects, 0);
+}
+
+/// `clear(p, f)`: `mov dword [rdi], 0; xor edi, edi; call rsi; mov eax, 7; ret`; `middle`: `mov edi, 0x3000; call clear;
+/// ret`; the root: `call middle; mov [rsi], eax; ret`.
+const REACHES_UPWARD: &[u8] = &[
+    0xc7, 0x07, 0x00, 0x00, 0x00, 0x00, // 1000 mov dword [rdi], 0
+    0x31, 0xff, // 1006 xor edi, edi
+    0xff, 0xd6, // 1008 call rsi
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 100a mov eax, 7
+    0xc3, // 100f ret
+    0xbf, 0x00, 0x30, 0x00, 0x00, // 1010 mov edi, 0x3000
+    0xe8, 0xe6, 0xff, 0xff, 0xff, // 1015 call 0x1000
+    0xc3, // 101a ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 101b padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1020 call 0x1010
+    0x89, 0x06, // 1025 mov [rsi], eax
+    0xc3, // 1027 ret
+];
+
+/// `clear` reaches its first argument upward, and `middle` hands it no frame address, so the
+/// reach decides nothing in `middle`'s build: `clear`'s statement keeps it (D365).
+#[test]
+fn a_reach_promotion_never_asked_keeps_the_build() {
+    let functions = [
+        ("clear", BASE, 0x10),
+        ("middle", BASE + 0x10, 0x0b),
+        ("root", BASE + 0x20, 0x08),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(REACHES_UPWARD, &functions));
+    let text = rendered(&mut open, BASE + 0x20);
+    assert!(text.contains("= middle(arg0, arg1);"), "{text}");
+    let stats = open.analysis_stats();
+    // Comparing every reach the key holds built `middle` twice.
+    assert_eq!(stats.rebuilt, 0, "{stats:?}");
+    assert_eq!(stats.defects, 0, "{stats:?}");
 }

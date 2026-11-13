@@ -1466,30 +1466,42 @@ fn unreadable(refusal: &NativeRefusal) -> Unreadable {
     }
 }
 
-/// `callee_read` against `owners` from a build their statements update, and whether its answer
-/// is another seal than that build's (doc/adr-callee-builds.md).
+/// `callee_read` against `owners` from a build their statements update (doc/adr-callee-builds.md).
+pub(crate) struct BuiltRead {
+    pub(crate) read: CalleeRead,
+    /// Its answer is another seal than that build's.
+    pub(crate) again: bool,
+    /// The statements moved what the build read, so it was built anew (`BuildKey`, D365).
+    pub(crate) rebuilt: bool,
+}
+
 pub(crate) fn built_read(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     walked: &Walk,
     built: Built,
     owners: &[(u64, Arc<CalleeRead>)],
-) -> (CalleeRead, bool) {
+) -> BuiltRead {
     let Ok(native) = Native::over(target, program) else {
-        let unread = CalleeRead {
-            interface: None,
-            facts: Err(Unreadable::NotPrepared),
+        return BuiltRead {
+            read: CalleeRead {
+                interface: None,
+                facts: Err(Unreadable::NotPrepared),
+            },
+            again: false,
+            rebuilt: false,
         };
-        return (unread, false);
     };
     let resolved = crate::isolation::isolated(|| native.resolve_built(walked, built, owners));
     let resolved = resolved.map(|resolved| resolved.map_err(|refusal| unreadable(&refusal)));
     let resolved = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)));
-    let again = resolved.as_ref().is_ok_and(|(_, again)| *again);
-    (
-        read_of(&native, resolved.map(|(artifact, _)| artifact)),
+    let (again, rebuilt) =
+        (resolved.as_ref()).map_or((false, false), |(_, again, rebuilt)| (*again, *rebuilt));
+    BuiltRead {
+        read: read_of(&native, resolved.map(|(artifact, ..)| artifact)),
         again,
-    )
+        rebuilt,
+    }
 }
 
 /// The declarations of the imports a resolved body calls directly. O(call sites x log rows).
@@ -2037,13 +2049,14 @@ impl<'a> Native<'a> {
         walk: &Walk,
         built: Built,
         owners: &[(u64, Arc<CalleeRead>)],
-    ) -> Result<(Resolution, bool), NativeRefusal> {
+    ) -> Result<(Resolution, bool, bool), NativeRefusal> {
         let Built {
             address,
             mut construction,
             mut imports,
             declared_root,
         } = built;
+        let mut rebuilt = false;
         if !owners.is_empty() {
             imports.state(owners, self.program);
             let evidence = self.evidence(&walk.root, &imports);
@@ -2058,6 +2071,7 @@ impl<'a> Native<'a> {
                 owners.len()
             );
             construction = restated;
+            rebuilt = !kept;
         }
         let seal = construction.seal(&self.control);
         let first = First {
@@ -2065,7 +2079,9 @@ impl<'a> Native<'a> {
             declared_root,
             seal: seal.map_err(NativeRefusal::of_preparation)?,
         };
-        self.finish(walk, &imports, crate::program::World::Open, first)
+        let (resolution, again) =
+            self.finish(walk, &imports, crate::program::World::Open, first)?;
+        Ok((resolution, again, rebuilt))
     }
 
     /// What a body's first build captures: its declaration where it states an interface or the

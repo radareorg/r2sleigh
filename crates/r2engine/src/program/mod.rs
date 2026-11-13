@@ -593,6 +593,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             direct_sites: self.db.query_stats::<fates::DirectSites>(),
             walked: self.db.query_stats::<analysis::Walked>(),
             defects: self.db.stats().defects,
+            rebuilt: self.db.stats().rebuilt,
         }
     }
 
