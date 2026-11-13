@@ -299,6 +299,7 @@ jobs:
           python3 scripts/test_mutants_d75.py
           python3 scripts/test_scratch_void.py
           python3 scripts/test_roadmap_gaps.py
+          python3 scripts/test_s35_clauses.py
           python3 scripts/test_void_soundness.py
           python3 scripts/mutants_d213.py --check
           python3 scripts/mutants_s31a.py --check
