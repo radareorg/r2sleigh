@@ -380,6 +380,86 @@ fn a_declared_stack_argument_is_the_callers_outgoing_slot() {
     assert!(arguments[6].ends_with("119U"), "{text}");
 }
 
+/// A call's argument area is measured from the stack pointer before the call pushes its return
+/// address, so `__libc_start_main`'s seventh argument at the caller's `[rsp]` is a frame object
+/// the call reaches (D351: the walk's one reading of the stack pointer at each call).
+#[test]
+fn a_declared_stack_argument_is_an_object_its_call_reaches() {
+    let literal = Literal::plt_wrapped("__libc_start_main", &SEVENTH_ON_THE_STACK);
+    let mut open = OpenProgram::of(literal);
+    let prepared = open.prepared(common::PLT_CALLER).expect("it prepares");
+    let artifact = prepared.artifact().shared_artifact();
+    // `sub rsp, 8` puts the caller's `[rsp]` at entry - 8; the pushed return address is below it.
+    let roots = &artifact.objects().entry_stack_roots;
+    let argument = (roots.iter())
+        .find(|(_, root)| root.offset == -8)
+        .map(|(object, _)| *object)
+        .expect("the seventh argument's object");
+    let call = (artifact.graph().insts.iter())
+        .find(|inst| {
+            artifact
+                .graph()
+                .op(inst.id)
+                .is_some_and(|op| op.call().is_some())
+        })
+        .expect("the call")
+        .id;
+    let reach = artifact.objects().frame_reach.call(call);
+    assert_eq!(
+        reach,
+        &r2ssa::CallFrameReach::Objects([argument].into()),
+        "{roots:?}"
+    );
+}
+
+/// After `.plt`: `rdi` and `rsi` hold one value, and the call is `puts`, which reads `rdi` alone.
+const ONE_VALUE_IN_TWO_REGISTERS: [u8; 0x2e] = common::plt_then(&[
+    0xbf, 0x00, 0x10, 0x00, 0x00, // 1020 mov edi, 0x1000
+    0x48, 0x89, 0xfe, // 1025 mov rsi, rdi
+    0xe8, 0xe3, 0xff, 0xff, 0xff, // 1028 call stub
+    0xc3, // 102d ret
+]);
+
+/// A call's read of a register its boundary does not pass is no read, found by the register the
+/// `CallUse` names: `rsi` holds `puts`'s argument, yet `puts` reads only `rdi` (D283).
+#[test]
+fn a_register_holding_a_passed_value_is_no_read_where_the_call_does_not_pass_it() {
+    let literal = Literal::plt_wrapped("puts", &ONE_VALUE_IN_TWO_REGISTERS);
+    let mut open = OpenProgram::of(literal);
+    let prepared = open.prepared(common::PLT_CALLER).expect("it prepares");
+    let artifact = prepared.artifact().shared_artifact();
+    let graph = artifact.graph();
+    let boundary = (artifact.facts().boundaries.calls.values().next()).expect("the call boundary");
+    let [argument] = boundary.arguments.as_slice() else {
+        panic!("{boundary:?}");
+    };
+    let r2ssa::CallBoundarySlot::Register {
+        storage: passed, ..
+    } = argument.slot
+    else {
+        panic!("{argument:?}");
+    };
+    let reads = graph.call_boundary_reads(boundary.at);
+    let unpassed = (reads.iter())
+        .filter_map(|read| match graph.op(*read) {
+            Some(r2ssa::SSAOp::CallUse { storage, .. }) if *storage != passed => Some(*read),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(!unpassed.is_empty(), "{reads:?}");
+    for read in unpassed {
+        let site = r2ssa::UseSite {
+            inst: read,
+            input_idx: 0,
+        };
+        assert!(
+            artifact.ignored_reads().contains(&site),
+            "{:?}",
+            graph.op(read)
+        );
+    }
+}
+
 /// `f`: `test edi, edi; je ret; sub edi, 1; call f; ret`, a self-recursive function that never
 /// writes `rsi`; `caller`: `mov edi, 5; mov esi, 7; call f; ret`.
 const SELF_RECURSIVE: &[u8] = &[

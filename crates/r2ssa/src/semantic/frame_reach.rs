@@ -86,24 +86,12 @@ impl FrameReach {
     /// The build's points as objects: no walk, and so no points, is the whole frame.
     pub(crate) fn of(
         function: &SSAFunction,
-        prep: Option<&crate::DecompilePrepFacts>,
         graph: &SsaGraph,
         model: &ObjectModel,
         machine_context: Option<&SourceMachineContext>,
     ) -> Self {
         let frame = FrameIndex::of(model);
-        let areas = match (prep, machine_context) {
-            (Some(facts), Some(context)) => call_areas(function, graph, facts, context),
-            _ => crate::dense::IdMap::default(),
-        };
-        let by_call = (areas.iter())
-            .map(|(call, area)| {
-                let reach = area.as_ref().map_or(CallFrameReach::Whole, |area| {
-                    CallFrameReach::Objects(objects_in(&frame, area))
-                });
-                (call, reach)
-            })
-            .collect::<crate::dense::IdMap<_, _>>();
+        let by_call = call_reaches(function, graph, &frame, machine_context);
         let Some(points) = function.frame_points() else {
             return Self {
                 by_call,
@@ -219,10 +207,9 @@ fn access_addresses(op: &SSAOp<ValueId>) -> Vec<(ValueId, SpaceId)> {
 /// Each frame run an escaped address may reach, lowest escaping place to a compiler slot or the
 /// top (doc/adr-frame-model.md, "Escape spans"). O(points + accesses x log places).
 pub(crate) fn escape_spans(
-    function: &SSAFunction,
-    graph: &SsaGraph,
-    facts: &crate::DecompilePrepFacts,
+    (function, graph, facts): (&SSAFunction, &SsaGraph, &crate::DecompilePrepFacts),
     declared: &DeclaredStackSlots,
+    interior: &crate::dense::IdSet<ValueId>,
     machine_context: Option<&SourceMachineContext>,
 ) -> Vec<(i64, i64)> {
     let Some(points) = function.frame_points() else {
@@ -263,18 +250,10 @@ pub(crate) fn escape_spans(
             *width = (*width).max(i64::from(slot.size_bytes()));
         }
     }
-    // A canary inside a declared aggregate is that aggregate's interior, not a slot (S27).
-    let interior = |at: i64| {
-        let root = StackAddressRoot {
-            base: StackAddressBase::StackPointer,
-            offset: at,
-        };
-        declared.containing(root).is_some()
-    };
     let barriers = (compiler_slot_stores(function, graph, machine_context, true).into_iter())
         .filter_map(|(address, canary)| {
             let at = offset(address)?;
-            (!canary || !interior(at)).then_some(at)
+            (!canary || !interior.contains(address)).then_some(at)
         })
         .collect::<BTreeSet<_>>();
     // An opaque access no stack root places is in the unknown object: what it points at leaves
@@ -324,6 +303,30 @@ pub(crate) fn escape_spans(
     spans
 }
 
+/// The canary stores inside a declared slot or a write span (an unbounded write's to its boundary),
+/// by address: the one rule for "a canary inside an object", read before any escape run is seeded.
+/// `O(stores x spans)`.
+pub(crate) fn interior_canaries(
+    (function, graph, facts): (&SSAFunction, &SsaGraph, &crate::DecompilePrepFacts),
+    declared: &DeclaredStackSlots,
+    spans: &BTreeMap<StackAddressRoot, i64>,
+    machine_context: Option<&SourceMachineContext>,
+) -> crate::dense::IdSet<ValueId> {
+    let inside = |root: StackAddressRoot| {
+        declared.containing(root).is_some()
+            || (spans.range(..root))
+                .any(|(start, end)| start.base == root.base && root.offset < *end)
+    };
+    let mut interior = crate::dense::IdSet::new(graph.values.len());
+    for (address, canary) in compiler_slot_stores(function, graph, machine_context, false) {
+        let root = facts.stack_address_root_of(address).copied();
+        if canary && root.is_some_and(inside) {
+            interior.insert(address);
+        }
+    }
+    interior
+}
+
 /// Nothing proves where the object an escaped address points into ends: `rows[4]` is four
 /// objects to the partition and one to the callee that indexes it. So an escaped address reaches
 /// every object of this frame around it, out to a slot the compiler owns, which no C object spans.
@@ -366,7 +369,7 @@ fn compiler_slots(
     machine_context: Option<&SourceMachineContext>,
 ) -> BTreeSet<ObjectId> {
     (compiler_slot_stores(function, graph, machine_context, false).into_iter())
-        .filter(|(address, canary)| !canary || model.interior_offset(*address).is_none())
+        .filter(|(address, canary)| !canary || !model.interior_canaries.contains(*address))
         .filter_map(|(address, _)| {
             let key = MemoryObjectKey {
                 value: address,
@@ -545,44 +548,42 @@ fn entry_offset(facts: &DecompilePrepFacts, value: ValueId) -> Option<i64> {
         .map(|root| root.offset)
 }
 
-/// Each call's argument area at the entry offset of its stack pointer, or `None` where nothing
-/// bounds it. One `ReachingStorage` walk, `O(ops)`.
-fn call_areas(
+/// What each call reaches of the frame: its `CallReads::stack` from the base the walk placed, as
+/// objects; the whole frame where either is missing. `O(insts + calls x log objects)`.
+fn call_reaches(
     function: &SSAFunction,
     graph: &SsaGraph,
-    facts: &DecompilePrepFacts,
-    machine_context: &SourceMachineContext,
-) -> crate::dense::IdMap<InstId, Option<Vec<(i64, i64)>>> {
-    let mut out = crate::dense::IdMap::default();
-    let Some(stack_pointer) = machine_context.stack_pointer_carrier() else {
-        return out;
-    };
-    let mut states = ReachingStorage::new(function, graph, stack_pointer);
-    for block in &graph.blocks {
-        for &call in graph.op_insts(block.id) {
-            let Some(op) = graph.op(call) else {
-                continue;
-            };
-            let Some(transfer) = op.call() else {
-                continue;
-            };
-            let instruction = transfer.instruction;
-            let sp = match states.before(call) {
-                Some(ReachingStorageState::Value(value)) => graph
-                    .value(value)
-                    .and_then(|value| entry_offset(facts, value.id)),
-                _ => None,
-            };
-            let area = (machine_context.call_reads(instruction)).and_then(|reads| reads.stack);
-            let area = sp.zip(area).map(|(sp, area)| {
-                (area.iter())
-                    .map(|(low, high)| (sp.saturating_add(*low), sp.saturating_add(*high)))
-                    .collect::<Vec<_>>()
-            });
-            out.insert(call, area);
+    frame: &FrameIndex,
+    machine_context: Option<&SourceMachineContext>,
+) -> crate::dense::IdMap<InstId, CallFrameReach> {
+    let bases = function
+        .frame_points()
+        .map_or(&[][..], |points| &points.call_bases[..]);
+    let mut by_call = crate::dense::IdMap::default();
+    for inst in &graph.insts {
+        if graph.op(inst.id).is_some_and(|op| op.call().is_some()) {
+            by_call.insert(inst.id, CallFrameReach::Whole);
         }
     }
-    out
+    for (op, base) in bases {
+        let Some((call, base)) = graph.inst_for_op(*op).zip(*base) else {
+            continue;
+        };
+        let instruction = graph
+            .op(call)
+            .and_then(|op| op.call())
+            .map(|call| call.instruction);
+        let area = machine_context
+            .zip(instruction)
+            .and_then(|(context, instruction)| context.call_reads(instruction)?.stack);
+        if let Some(area) = area {
+            let area = (area.iter())
+                .map(|(low, high)| (base.saturating_add(*low), base.saturating_add(*high)))
+                .collect::<Vec<_>>();
+            by_call.insert(call, CallFrameReach::Objects(objects_in(frame, &area)));
+        }
+    }
+    by_call
 }
 
 /// The frame objects any byte of these entry-relative ranges lies in; an

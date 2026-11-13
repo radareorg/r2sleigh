@@ -293,8 +293,8 @@ fn check_calls(
     for block in (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr)) {
         let mut handed = None;
         for (id, op) in block.sited() {
-            if let SSAOp::CallUse { src } = op
-                && func.storage_of(*src) == Some(argument)
+            if let SSAOp::CallUse { src, storage } = op
+                && *storage == argument
             {
                 handed = Some(*src);
                 continue;

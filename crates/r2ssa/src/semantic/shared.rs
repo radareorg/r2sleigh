@@ -1066,7 +1066,7 @@ pub(crate) fn reaching_abi_value_before(
     let ReachingAbi {
         function,
         machine_context,
-        prep,
+        prep: _,
         graph,
         storage,
         policy,
@@ -1233,15 +1233,8 @@ pub(crate) fn reaching_abi_value_before(
         if rest.iter().all(|input| input == first) {
             return Some(ReachingAbiPath::Reaches(ReachingAbiState::Value(*first)));
         }
-        // A merge of the transfer carrier whose every input is the entry's
-        // own stack pointer is that pointer: an early return that never
-        // built the frame meets the epilogue that has unwound it.
-        if policy.stack_pointer == Some(storage)
-            && graph
-                .inputs(phi.id)
-                .iter()
-                .all(|input| value_is_entry_stack_pointer(prep, graph, *input, storage))
-        {
+        let inputs = graph.inputs(phi.id).iter().copied();
+        if entry_pointer_merge(search, inputs.map(ReachingAbiState::Value)) {
             return Some(ReachingAbiPath::Reaches(ReachingAbiState::PreservedEntry));
         }
         r2il::refusal_evidence!(
@@ -1306,16 +1299,35 @@ pub(crate) fn reaching_abi_value_before(
         // through itself, and nothing outside it defined the storage.
         return Some(ReachingAbiPath::Cycle);
     };
-    if !rest.iter().all(|value| value == first) {
-        r2il::refusal_evidence!(
-            "reaching-abi-value",
-            "{block_addr:#x} has no phi for {:?} and its predecessors disagree: {:?}",
-            storage,
-            values
-        );
-        return None;
+    if rest.iter().all(|value| value == first) {
+        return Some(ReachingAbiPath::Reaches(*first));
     }
-    Some(ReachingAbiPath::Reaches(*first))
+    if entry_pointer_merge(search, values.iter().copied()) {
+        return Some(ReachingAbiPath::Reaches(ReachingAbiState::PreservedEntry));
+    }
+    r2il::refusal_evidence!(
+        "reaching-abi-value",
+        "{block_addr:#x} has no phi for {:?} and its predecessors disagree: {:?}",
+        storage,
+        values
+    );
+    None
+}
+
+/// Whether every state a merge of the stack pointer joins is the entry's own pointer, with or
+/// without a phi: an early return that never built the frame meets the unwound epilogue (D356).
+fn entry_pointer_merge(
+    search: ReachingAbi<'_>,
+    mut states: impl Iterator<Item = ReachingAbiState>,
+) -> bool {
+    let storage = search.storage;
+    search.policy.stack_pointer == Some(storage)
+        && states.all(|state| match state {
+            ReachingAbiState::PreservedEntry => true,
+            ReachingAbiState::Value(value) => {
+                value_is_entry_stack_pointer(search.prep, search.graph, value, storage)
+            }
+        })
 }
 
 /// Whether `value` is the stack pointer the function was entered with: the

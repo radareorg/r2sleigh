@@ -3367,15 +3367,8 @@ pub(crate) fn same_content_reads(
     pairs
 }
 
-/// A call's conventional reads of registers the certified call does not
-/// pass. The graph states a read of every register the convention lets a
-/// callee read, so that liveness before the facts exist errs safe; once the
-/// call boundary says which values are arguments, the rest are not reads.
-///
-/// A read is passed when it has the bits of a passed argument, not only its
-/// id: the boundary names the value that reached the argument register, and
-/// copy forwarding may have left the call reading the value that copy
-/// carried. Both are one class (`view::class_values`), and the text reads it.
+/// The reads a call's text does not perform: each `CallUse` whose register no argument its call's
+/// boundary passes names, a call with no boundary passing none (D283). One pass, `O(insts x arguments)`.
 #[cfg_attr(
     dylint_lib = "r2sleigh_lints",
     allow(
@@ -3383,44 +3376,60 @@ pub(crate) fn same_content_reads(
         reason = "a use site is an (instruction, operand) pair, not a dense id"
     )
 )]
-pub(crate) fn uncertified_call_reads(
+pub(crate) fn unpassed_call_reads(
     graph: &SsaGraph,
-    views: Option<&crate::view::ValueViews<ValueId>>,
     boundaries: &crate::semantic::SourceBoundaryFacts,
 ) -> std::collections::BTreeSet<crate::graph::UseSite> {
-    let class = crate::view::class_values(graph, views);
-    let class_of = |value: crate::graph::ValueId| class.get(value.0 as usize).copied();
-    let mut passed = std::collections::BTreeSet::new();
+    let mut passed = crate::dense::IdMap::<crate::InstId, Vec<CanonicalStorageId>>::default();
     for boundary in boundaries.calls.values() {
-        for argument in &boundary.arguments {
-            if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value
-                && !boundary.ignores(argument)
-            {
-                passed.insert(class_of(value).unwrap_or(value));
+        let registers = (boundary.arguments.iter())
+            .filter(|argument| !boundary.ignores(argument))
+            .filter(|argument| {
+                matches!(
+                    argument.value,
+                    crate::semantic::SourceCallArgumentValue::Value(_)
+                )
+            })
+            .filter_map(|argument| match argument.slot {
+                crate::semantic::CallBoundarySlot::Register { storage, .. } => Some(storage),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        passed.insert(boundary.at, registers);
+    }
+    // The reads minted just before a call are its own; any other run passes nothing.
+    let mut unpassed = std::collections::BTreeSet::new();
+    for block in &graph.blocks {
+        let mut run = Vec::new();
+        for &inst in &block.insts {
+            let op = graph.op(inst);
+            if let Some(SSAOp::CallUse { storage, .. }) = op {
+                run.push((inst, *storage));
+                continue;
+            }
+            let registers = op
+                .filter(|op| op.call().is_some())
+                .and_then(|_| passed.get(inst));
+            for (read, storage) in run.drain(..) {
+                let read_passed = registers.is_some_and(|registers| {
+                    (registers.iter()).any(|register| {
+                        crate::semantic::register_storages_overlap(*register, storage)
+                    })
+                });
+                if !read_passed {
+                    unpassed.insert(crate::graph::UseSite {
+                        inst: read,
+                        input_idx: 0,
+                    });
+                }
             }
         }
+        unpassed.extend(
+            run.into_iter()
+                .map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 }),
+        );
     }
-    graph
-        .insts
-        .iter()
-        .filter(|inst| {
-            matches!(
-                inst.payload,
-                crate::graph::InstPayload::Op(SSAOp::CallUse { .. })
-            )
-        })
-        .flat_map(|inst| {
-            graph
-                .inputs(inst.id)
-                .iter()
-                .enumerate()
-                .filter(|(_, input)| !passed.contains(&class_of(**input).unwrap_or(**input)))
-                .map(move |(input_idx, _)| crate::graph::UseSite {
-                    inst: inst.id,
-                    input_idx,
-                })
-        })
-        .collect()
+    unpassed
 }
 
 fn block_at_mut<'a, V>(
