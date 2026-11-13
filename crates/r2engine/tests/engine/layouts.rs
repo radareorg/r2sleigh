@@ -104,6 +104,27 @@ const PAST_THE_END: &[u8] = &[
     0xc3, // 1007 ret
 ];
 
+/// `int third(unsigned i) { struct s3 arr[4]; return arr[i & 3].third; }`, `arr` at the frame's
+/// bottom: the read reaches `arr` from a base displaced by `third`'s offset.
+const FRAME_ARRAY_INDEX: &[u8] = &[
+    0x48, 0x83, 0xec, 0x38, // 1000 sub rsp, 0x38
+    0x83, 0xe7, 0x03, // 1004 and edi, 3
+    0x48, 0x8d, 0x04, 0x7f, // 1007 lea rax, [rdi + rdi*2]
+    0x8b, 0x44, 0x84, 0x08, // 100b mov eax, [rsp + rax*4 + 8]
+    0x48, 0x83, 0xc4, 0x38, // 100f add rsp, 0x38
+    0xc3, // 1013 ret
+];
+
+/// [`FRAME_ARRAY_INDEX`] without the mask: nothing bounds `i`.
+const FRAME_ARRAY_UNBOUNDED: &[u8] = &[
+    0x48, 0x83, 0xec, 0x38, // 1000 sub rsp, 0x38
+    0x89, 0xff, // 1004 mov edi, edi
+    0x48, 0x8d, 0x04, 0x7f, // 1006 lea rax, [rdi + rdi*2]
+    0x8b, 0x44, 0x84, 0x08, // 100a mov eax, [rsp + rax*4 + 8]
+    0x48, 0x83, 0xc4, 0x38, // 100e add rsp, 0x38
+    0xc3, // 1012 ret
+];
+
 /// Where `GLOBAL_MEMBER_CALL`'s `g_ops` lies, after its code.
 const G_OPS: u64 = BASE + 0x20;
 
@@ -515,6 +536,62 @@ fn a_bounded_index_into_an_array_member_projects_its_element() {
     assert_eq!(roots(GUARDED_INDEX), []);
     assert_eq!(roots(UNBOUNDED_INDEX), []);
     assert_eq!(roots(PAST_THE_END), []);
+}
+
+/// `third(unsigned i)` declaring `struct s3 { int a, b, third; } arr[4]` at CFA - 0x40.
+fn frame_array(code: &'static [u8]) -> OpenProgram<Literal> {
+    use r2abi::{FrameBase, Local, Parameter, Prototype, Scalar, ScalarKind, Width};
+    let types = types();
+    let mut graph = types.graph;
+    let unsigned = graph.add(Type::Scalar(Scalar {
+        kind: ScalarKind::Unsigned,
+        width: Width::Bits(32),
+        name: Some("unsigned int".to_owned()),
+    }));
+    let field = |name: &str, at| Member {
+        name: Some(name.to_owned()),
+        ty: types.int,
+        offset_bits: at,
+        bit_size: None,
+    };
+    let s3 = graph.add(Type::Record(Record {
+        kind: RecordKind::Struct,
+        tag: Some("s3".to_owned()),
+        size_bytes: 12,
+        members: vec![field("a", 0), field("b", 32), field("third", 64)],
+    }));
+    let four = graph.add(Type::Array {
+        element: s3,
+        count: Some(4),
+    });
+    let prototype = Prototype {
+        name: "third".to_owned(),
+        parameters: vec![Parameter::new(unsigned, "unsigned int", Some("i"))],
+        returns: "int".into(),
+        return_type: types.int,
+        frame_base: Some(FrameBase::CallFrameCfa),
+        locals: vec![Local {
+            name: "arr".to_owned(),
+            spelling: None,
+            frame_offset: -0x40,
+            size_bytes: Some(48),
+            ty: four,
+            scopes: Vec::new(),
+        }],
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(BASE, prototype);
+    program(code, declarations)
+}
+
+/// D362: `arr[i & 3].third` in a declared frame array projects `third` through a bounded index;
+/// an unbounded index projects nothing.
+#[test]
+fn a_bounded_index_into_a_frame_struct_array_projects_its_member() {
+    let mut open = frame_array(FRAME_ARRAY_INDEX);
+    assert_eq!(projected(&mut open), [("[].third".to_string(), "frame")]);
+    assert_eq!(projected(&mut frame_array(FRAME_ARRAY_UNBOUNDED)), []);
 }
 
 /// D348 default-deny: a merged base, a read no member covers, and a load through `void *` root

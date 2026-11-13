@@ -209,15 +209,14 @@ struct VariableIndex {
 /// The one scalar the access covers, through by-value structs and fixed-count arrays; a union,
 /// bit-field, unsized element or overlap refuses. O(depth x m) (ADR "ExtTypeDb as built").
 fn scalar_leaf(
-    graph: &crate::SourceTypeGraph,
-    aggregate: &crate::SourceAggregateLayout,
+    (graph, root_type_id): (&crate::SourceTypeGraph, u32),
     (offset_bits, size_bits): (u64, u64),
     mut variable: Option<VariableIndex>,
 ) -> Option<ScalarLeaf> {
     let mut leaf = ScalarLeaf {
         path: Vec::new(),
         name: String::new(),
-        type_id: aggregate.type_id(),
+        type_id: root_type_id,
     };
     let mut offset_bits = offset_bits;
     for _ in 0..=graph.types().len() {
@@ -252,7 +251,8 @@ fn scalar_leaf(
             } => {
                 let element = graph_type(graph, element_type_id)?.size_bits();
                 let index = offset_bits.checked_div(element)?;
-                if index >= count || leaf.name.is_empty() {
+                // Only a frame root is an array itself; an unnamed member is no array.
+                if index >= count || (leaf.name.is_empty() && !leaf.path.is_empty()) {
                     return None;
                 }
                 // The variable term steps this array where its stride is the element (D360).
@@ -281,9 +281,10 @@ fn scalar_leaf(
             // Where an access lands and how wide it is decide the member, not its kind:
             // a store to `s->next` projects onto the pointer.
             _ => {
+                let member = (leaf.path.iter()).any(|step| matches!(step, PathStep::Member(_)));
                 return (offset_bits == 0
                     && variable.is_none()
-                    && !leaf.path.is_empty()
+                    && member
                     && !leaf.name.is_empty()
                     && current.size_bits() == size_bits)
                     .then_some(leaf);
@@ -335,6 +336,20 @@ fn struct_layout(
         .filter(|aggregate| aggregate.size_bits() > 0 && aggregate.size_bits().is_multiple_of(8))
 }
 
+/// The struct a root's type lays out: itself, or for an array, its element's (D362).
+fn root_layout(
+    graph: &crate::SourceTypeGraph,
+    type_id: u32,
+) -> Option<&crate::SourceAggregateLayout> {
+    match graph_type(graph, type_id)?.kind() {
+        SourceTypeKind::Array {
+            element_type_id,
+            count: Some(_),
+        } => struct_layout(graph, element_type_id),
+        _ => struct_layout(graph, type_id),
+    }
+}
+
 /// The struct a pointer node points at, by type id.
 fn pointee_struct(graph: &crate::SourceTypeGraph, pointer_type_id: u32) -> Option<u32> {
     let SourceTypeKind::Pointer { target_type_id, .. } = graph_type(graph, pointer_type_id)?.kind()
@@ -376,6 +391,8 @@ pub(crate) struct ProjectionSources<'a> {
     pub machine_context: &'a SourceMachineContext,
     /// What each value can be: the bound a variable index into an array member needs.
     pub values: &'a crate::values::ValueRanges,
+    /// Which accesses reach their object at a computed offset.
+    pub objects: &'a crate::semantic::ObjectModel,
 }
 
 /// Every access's projection. Direct roots first; then a worklist over projected pointer-member
@@ -388,9 +405,9 @@ pub(crate) fn collect_aggregate_access_projections(
         views,
         addresses,
         accesses,
-        stack_slots,
         machine_context,
         values,
+        ..
     } = *sources;
     let Some(interface) = machine_context.function_interface() else {
         return AggregateAccessProjectionFacts::default();
@@ -419,7 +436,7 @@ pub(crate) fn collect_aggregate_access_projections(
             continue;
         };
         let target = parameter_target(addresses, interface, type_graph, (access, values))
-            .or_else(|| frame_target(stack_slots, type_graph, access))
+            .or_else(|| frame_target(sources, type_graph, access))
             .or_else(|| data_target(views, image, access));
         let Some(target) = target else {
             let (base, offset) = base_and_offset(graph, views, access.address);
@@ -530,23 +547,43 @@ fn parameter_target<'g>(
     })
 }
 
-/// A frame slot the source declares as a struct by value, the access at a constant offset in it.
+/// A frame slot declared a struct or an array of them: a constant offset, or for an indexed access
+/// the entry stack pointer's affine form less the slot's offset, one term stepping an array (D362).
 fn frame_target<'g>(
-    stack_slots: &BTreeMap<ObjectId, crate::semantic::StackSlotCertificate>,
+    sources: &ProjectionSources<'_>,
     type_graph: &'g crate::SourceTypeGraph,
     access: &StructuredMemoryAccessFact,
 ) -> Option<Target<'g>> {
-    let declared = stack_slots.get(&access.object)?.source_slot?;
-    let struct_type_id = declared.logical_type()?;
-    struct_layout(type_graph, struct_type_id)?;
+    let certificate = sources.stack_slots.get(&access.object)?;
+    let root_type_id = certificate.source_slot?.logical_type()?;
+    root_layout(type_graph, root_type_id)?;
+    let (byte_offset, variable) = match sources.objects.address_is_indexed(access.address) {
+        false => (u64::try_from(access.object_offset?).ok()?, None),
+        true => {
+            if certificate.base != crate::StackAddressBase::StackPointer {
+                return None;
+            }
+            let expression = sources.addresses.frame_expression(access.address)?;
+            let [term] = expression.terms.as_slice() else {
+                return None;
+            };
+            let offset = expression.offset.checked_sub(certificate.offset)?;
+            let variable = VariableIndex {
+                value: term.value,
+                stride_bytes: u64::try_from(term.coefficient).ok().filter(|s| *s > 0)?,
+                upper: sources.values.upper_bound(term.value),
+            };
+            (u64::try_from(offset).ok()?, Some(variable))
+        }
+    };
     Some(Target {
         root: AggregateRoot::FrameSlot(access.object),
         graph_of: GraphOf::Interface,
         graph: type_graph,
-        struct_type_id,
-        byte_offset: u64::try_from(access.object_offset?).ok()?,
+        struct_type_id: root_type_id,
+        byte_offset,
         element_index: None,
-        variable: None,
+        variable,
     })
 }
 
@@ -578,15 +615,11 @@ fn project(
     binding: AggregateAccessBinding,
     target: Target<'_>,
 ) -> Option<AggregateAccessProjection> {
-    let aggregate = struct_layout(target.graph, target.struct_type_id)?;
+    let aggregate = root_layout(target.graph, target.struct_type_id)?;
     let offset_bits = target.byte_offset.checked_mul(8)?;
     let size_bits = u64::from(access.width) * 8;
-    let leaf = scalar_leaf(
-        target.graph,
-        aggregate,
-        (offset_bits, size_bits),
-        target.variable,
-    )?;
+    let root = (target.graph, target.struct_type_id);
+    let leaf = scalar_leaf(root, (offset_bits, size_bits), target.variable)?;
     Some(AggregateAccessProjection {
         schema_version: AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION,
         source_revision_identity: revision.into(),
@@ -855,8 +888,7 @@ mod tests {
         let graph = array_member_graph();
         let leaf = |offset_bits, size_bits| {
             scalar_leaf(
-                &graph,
-                &graph.aggregates()[0],
+                (&graph, graph.aggregates()[0].type_id()),
                 (offset_bits, size_bits),
                 None,
             )
@@ -899,7 +931,8 @@ mod tests {
             ));
         }
         let graph = SourceTypeGraph::new(types, aggregates).expect("nested graph");
-        let leaf = scalar_leaf(&graph, &graph.aggregates()[0], (0, 32), None).expect("a leaf");
+        let leaf =
+            scalar_leaf((&graph, graph.aggregates()[0].type_id()), (0, 32), None).expect("a leaf");
         assert_eq!(
             leaf.name,
             format!("{}leaf", "inner.".repeat(LEVELS as usize - 1))
@@ -1244,6 +1277,7 @@ mod tests {
             stack_slots: &positive.certificates().stack_slots,
             machine_context: positive.machine_context(),
             values: &positive.facts().values,
+            objects: &positive.facts().objects,
         });
         assert!(recollected.projection(REVISION, load_id).is_none());
 
@@ -1264,6 +1298,7 @@ mod tests {
             stack_slots: &positive.certificates().stack_slots,
             machine_context: positive.machine_context(),
             values: &positive.facts().values,
+            objects: &positive.facts().objects,
         });
         assert!(
             recollected.projection(REVISION, load_id).is_none(),

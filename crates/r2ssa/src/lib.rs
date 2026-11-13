@@ -96,7 +96,7 @@ pub mod view;
 
 pub use abi::Formals;
 pub use address::{
-    AddressProvenanceFacts, AffineAddressTerm, ParameterAddressExpression,
+    AddressProvenanceFacts, AffineAddressTerm, FrameAddressExpression, ParameterAddressExpression,
     PointeeAddressExpression, PointeeStep,
 };
 pub use aggregate_access::{
