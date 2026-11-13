@@ -811,10 +811,10 @@ pub mod testing {
 
         /// Integer and float arguments share one position sequence (Microsoft x64).
         pub fn shared(mut self) -> Self {
-            for section in &mut *self.0.sections {
-                if !matches!(section.class, SectionClass::Stack { .. }) {
-                    section.class = SectionClass::Shared;
-                }
+            let registers = (self.0.sections.iter_mut())
+                .filter(|section| !matches!(section.class, SectionClass::Stack { .. }));
+            for section in registers {
+                section.class = SectionClass::Shared;
             }
             self
         }

@@ -82,7 +82,7 @@ double ops_scale(struct ops* o, double x)
 EOF
 RUN
 
-NAME=x86-64 O2: variadic, record result and loaded slot stay residual
+NAME=x86-64 O2: variadic and record result stay residual, a loaded member's slot is placed (D348)
 FILE=tests/fixtures/member_call_gcc_x64_O2g
 CMDS=pdd @ sym.ops_log; pdd @ sym.ops_make; pdd @ sym.ops_virtual
 EXPECT=<<EOF
@@ -130,12 +130,12 @@ int32_t ops_virtual(struct ops* o)
     uint64_t tmp_40148b_8_1;
     uint64_t tmp_40148f_0_1;
 
-    /* r2dec proof: 1 construct is marked below; 25 source obligations: 12 rendered, 10 elided, 0 refused, 3 residual; 4 statements rendered; 1 structure laid out from a parameter's accesses */
+    /* r2dec proof: no individual construct is marked; 25 source obligations: 15 rendered, 10 elided, 0 refused; 5 statements rendered; 1 structure laid out from a parameter's accesses */
     {
         tmp_401488_0_1 = r2sleigh_load_u64((void*)(uint64_t)o);
         tmp_40148b_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)8U * 8U));
         tmp_40148f_0_1 = r2sleigh_load_u64((void*)tmp_40148b_8_1);
-        r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x401480:15 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
+        ((void(*)(uint64_t))(uint64_t)tmp_40148f_0_1)(tmp_401488_0_1);
         return (int32_t)r2sleigh_load_u32((void*)((uint64_t)o + (uint64_t)18U * 4U));
     }
 }

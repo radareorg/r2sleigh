@@ -165,9 +165,9 @@ r2sleigh_result_u32 fcn_10c0(int32_t arg0, r2sleigh_word_u64* arg1)
     double tmp_11a4_1b_1;
     uint64_t tmp_11a4_13_2;
     uint64_t rbx_3;
-    uint64_t rsi_6;
+    uint64_t rsi_5;
     uint64_t tmp_11c0_8_1;
-    uint64_t rsi_8;
+    uint64_t rsi_7;
     uint64_t rax_14;
     uint32_t tmp_lane_11e2_2_0_1;
     uint64_t rax_15;
@@ -209,23 +209,23 @@ r2sleigh_result_u32 fcn_10c0(int32_t arg0, r2sleigh_word_u64* arg1)
         tmp_11a4_13_2 = tmp_11a4_12_1 ? (uint64_t)tmp_lane_11a4_2_0_1 : (uint64_t)r2sleigh_float_to_bits_64(tmp_11a4_1b_1);
         rbx_3 = (uint64_t)(uint32_t)((uint32_t)((uint64_t)rax_12 >> 0U) + (uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint64_t)rax_6 >> 0U) + (uint32_t)((uint64_t)rax_7 >> 0U)) + (uint32_t)((uint64_t)rax_8 >> 0U)) + (uint32_t)((uint64_t)rax_9 >> 0U)) + (uint32_t)((uint64_t)rax_10 >> 0U)) + (uint32_t)((uint32_t)(r2sleigh_float_from_bits_64(tmp_11a4_13_2) > -2147483649.0 && r2sleigh_float_from_bits_64(tmp_11a4_13_2) < 2147483648.0 ? (int32_t)r2sleigh_float_from_bits_64(tmp_11a4_13_2) : r2sleigh_residual_i32(1)) | (uint32_t)((uint32_t)(uint8_t)((uint32_t)tmp_11a4_12_1 ^ (uint32_t)(uint8_t)1U) * (uint32_t)0x80000000U))));
         fill((uint32_t)arg0);
-        rsi_6 = r2sleigh_load_u64((void*)&g_msg);
+        rsi_5 = r2sleigh_load_u64((void*)&g_msg);
         if ((uint8_t)((int32_t)arg0 <= (int32_t)1U)) {
-            rsi_8 = rsi_6;
+            rsi_7 = rsi_5;
         } else {
             tmp_11c0_8_1 = r2sleigh_load_u64((void*)((uint64_t)arg1 + (uint64_t)1U * 8U));
-            rsi_8 = tmp_11c0_8_1;
+            rsi_7 = tmp_11c0_8_1;
         }
         {
-            rax_14 = copy_name((r2sleigh_word_u8*)(uint64_t)((uint64_t)(frame + 16U) + (uint64_t)144U), (const char*)rsi_8, 16);
+            rax_14 = copy_name((r2sleigh_word_u8*)(uint64_t)((uint64_t)(frame + 16U) + (uint64_t)144U), (const char*)rsi_7, 16);
             tmp_lane_11e2_2_0_1 = (uint32_t)((uint64_t)((uint64_t)rax_14 + (uint64_t)rbx_3) >> 0U);
             rax_15 = (uint64_t)sext((int8_t)((uint32_t)arg0 >> 0U));
             rax_16 = (uint64_t)rotl((uint32_t)arg0, 3);
             rax_17 = (uint64_t)bit_count(0xf0f0);
             tmp_lane_1213_6_0_1 = (uint32_t)((uint32_t)(int16_t)((uint64_t)rax_15 >> 0U) + (uint32_t)((uint64_t)rax_17 >> 0U));
             rax_18 = find((int32_t*)(uint64_t)0x4040U, 16, 7);
-            r2sleigh_residual_void(2); /* r2dec gap: CallNotRendered at 0x11c4:253 covering 1 op (render::values): call to dispatch: its arity is only at least 1 (a floor), and this call writes 3 */
-            r2sleigh_residual_void(3); /* r2dec gap: ValueNotComputed at 0x11c4:260 covering 1 op (render::values) */
+            r2sleigh_residual_void(2); /* r2dec gap: CallNotRendered at 0x11c4:252 covering 1 op (render::values): call to dispatch: its arity is only at least 1 (a floor), and this call writes 3 */
+            r2sleigh_residual_void(3); /* r2dec gap: ValueNotComputed at 0x11c4:259 covering 1 op (render::values) */
             tmp_lane_1246_6_0_1 = (uint32_t)((uint32_t)((uint64_t)r2sleigh_residual_u64(4) >> 0U) + (uint32_t)((uint32_t)((uint32_t)((uint32_t)((uint64_t)rax_16 >> 0U) + (uint32_t)tmp_lane_1213_6_0_1) + (uint32_t)tmp_lane_11e2_2_0_1) + (uint32_t)((uint64_t)rax_18 >> 0U)));
             __printf_chk(2, "%d %s\n", (uint64_t)(uint32_t)tmp_lane_1246_6_0_1, (uint64_t)((uint64_t)(frame + 16U) + (uint64_t)144U));
             tmp_lane_1250_0_1_1 = (uint32_t)(uint8_t)((uint32_t)tmp_lane_1246_6_0_1 >> 0U);
@@ -245,7 +245,7 @@ NAME=0x00001280
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001280
 EXPECT=<<EOF
-r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, r2sleigh_word_u64 arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, void* arg2)
 {
     uint64_t tmp_1289_0_2;
 
@@ -336,7 +336,7 @@ r2sleigh_result_u64 __do_global_dtors_aux(void)
             }
             {
                 r2sleigh_residual_void(2); /* r2dec gap: CallNotRendered at 0x1347:17 covering 1 op (render::values): call to deregister_tm_clones: argument slot 0 may hand on what this function was passed */
-                r2sleigh_residual_void(3); /* r2dec gap: ValueNotComputed at 0x1347:22 covering 1 op (render::values) */
+                r2sleigh_residual_void(3); /* r2dec gap: ValueNotComputed at 0x1347:24 covering 1 op (render::values) */
                 r2sleigh_store_u8((void*)&__TMC_END__, (uint8_t)1U);
                 return (uint64_t)r2sleigh_residual_u64(4);
             }

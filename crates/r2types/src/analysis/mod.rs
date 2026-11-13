@@ -743,7 +743,7 @@ fn build_type_analysis_inner(
         input.ptr_bits,
     );
     let type_facts = FunctionTypeFacts::builder(FunctionTypeFactInputs {
-        merged_signature: merged_signature.clone(),
+        merged_signature,
         // Enrichment states these as it writes each slot.
         parameter_types: crate::ParameterTypes::default(),
         // Enrichment states these from the solve, beside the exact signature.
@@ -753,7 +753,7 @@ fn build_type_analysis_inner(
         register_params: input.parsed_context.register_params.clone(),
         callee_facts,
         program_data_objects: input.parsed_context.program_data_objects.clone(),
-        field_access_certificates: local_structs.source_fields.clone(),
+        field_access_certificates: local_structs.source_fields,
         array_index_certificates,
         scalar_array_render_candidates,
         out_param_certificates,
