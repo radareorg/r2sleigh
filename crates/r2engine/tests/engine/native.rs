@@ -7565,8 +7565,9 @@ fn an_absorbed_producer_of_an_unwritten_call_is_not_rendered() {
     let target = Program::target_at(&program, BASE).expect("a machine");
     let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text().to_owned();
+    // The callee reads `edi` alone, so `arg0` is its 32-bit lane and one projection precedes the call.
     assert!(
-        text.contains("r2dec gap: CallNotRendered at 0x1000:14 "),
+        text.contains("r2dec gap: CallNotRendered at 0x1000:15 "),
         "{text}"
     );
     let prepared = r2engine::native::prepared(&target, &program, BASE).expect("prepared");

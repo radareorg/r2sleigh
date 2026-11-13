@@ -8,7 +8,6 @@ pub(crate) use shared::*;
 pub(crate) use signature::*;
 pub(crate) use structs::*;
 
-use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
 
 use std::sync::Arc;
@@ -20,9 +19,6 @@ use r2ssa::{
 
 use crate::context::{ParsedExternalContext, apply_main_signature_override, is_generic_arg_name};
 use crate::convert::CTypeLike;
-use crate::external::{
-    ExternalField, ExternalStruct, ExternalTypeDb, ExternalUnion, normalize_external_type_name,
-};
 use crate::facts::{
     ArrayIndexBase, ArrayIndexCertificate, CalleeAllocationEffect, CalleeArgEffect,
     CalleeAtomicEffect, CalleeAtomicOp, CalleeAtomicOrdering, CalleeFact, CalleeLifetimeEffect,
@@ -672,8 +668,6 @@ fn build_type_analysis_inner(
         .chain(input.parsed_context.merged_signature.as_ref())
         .any(signature_param_count_is_authoritative);
 
-    // Borrowed, not copied: the database is per binary while this runs per function.
-    let type_db = &input.parsed_context.external_type_db;
     let mut signature_certificate_sources = Vec::new();
     if authoritative_external_arity {
         push_signature_certificate_source(
@@ -681,8 +675,7 @@ fn build_type_analysis_inner(
             SignatureCertificateSource::ExternalContext,
         );
     }
-    let inferred_signature_spec =
-        inferred_signature_to_spec(&input.inferred_signature, input.ptr_bits);
+    let inferred_signature_spec = inferred_signature_to_spec(&input.inferred_signature);
     if inferred_signature_spec.is_some() && !authoritative_external_arity {
         push_signature_certificate_source(
             &mut signature_certificate_sources,
@@ -702,7 +695,6 @@ fn build_type_analysis_inner(
         &summary_view,
         Some(&semantic_projection),
         input.ptr_bits,
-        type_db,
     );
     if merged_signature != before_interproc_signature {
         push_signature_certificate_source(
@@ -726,32 +718,16 @@ fn build_type_analysis_inner(
         );
     }
 
-    let external_structs = collect_external_struct_candidates_from_db(
-        &input.parsed_context.external_type_db,
+    let local_structs = input.local_structs;
+    let array_index_certificates = exact_indexed_access_certificates_from_local_artifacts(
+        &local_structs,
+        merged_signature.as_ref(),
         input.ptr_bits,
     );
-    // A structure a parameter's accesses lay out is the solve's (doc/adr-aggregates.md); no
-    // scored declaration is generated here.
-    let local_structs = input.local_structs;
-    let struct_decls = dedup_struct_decls(external_structs);
-    let mut type_db = input.parsed_context.external_type_db.clone();
-    merge_local_structs_into_type_db(&mut type_db, &struct_decls);
-    let mut array_index_certificates = Vec::new();
-    let mut exact_indexed_access_certificates =
-        exact_indexed_access_certificates_from_local_artifacts(
-            &local_structs,
-            &array_index_certificates,
-            merged_signature.as_ref(),
-            &type_db,
-            input.ptr_bits,
-        );
-    array_index_certificates.append(&mut exact_indexed_access_certificates.array_index);
-    let mut scalar_array_render_candidates = exact_indexed_access_certificates.render_candidates;
+    let mut scalar_array_render_candidates = array_index_certificates.render_candidates;
     scalar_array_render_candidates.sort();
     scalar_array_render_candidates.dedup();
-    let mut field_access_certificates = exact_indexed_access_certificates.field_access;
-    field_access_certificates.sort();
-    field_access_certificates.dedup();
+    let array_index_certificates = array_index_certificates.array_index;
     let signature_certificate = signature_certificate_from_merged(
         merged_signature.as_ref(),
         &signature_certificate_sources,
@@ -765,7 +741,6 @@ fn build_type_analysis_inner(
         &mut input.inferred_signature,
         merged_signature.as_ref(),
         input.ptr_bits,
-        &type_db,
     );
     let type_facts = FunctionTypeFacts::builder(FunctionTypeFactInputs {
         merged_signature: merged_signature.clone(),
@@ -777,9 +752,8 @@ fn build_type_analysis_inner(
         noreturn: input.parsed_context.noreturn,
         register_params: input.parsed_context.register_params.clone(),
         callee_facts,
-        external_type_db: type_db,
         program_data_objects: input.parsed_context.program_data_objects.clone(),
-        field_access_certificates,
+        field_access_certificates: local_structs.source_fields.clone(),
         array_index_certificates,
         scalar_array_render_candidates,
         out_param_certificates,
@@ -874,8 +848,6 @@ pub fn build_source_owned_type_analysis(
     let inferred_signature = crate::infer_signature_from_prepared_ssa(source.as_ref(), &solved);
     let diagnostics = TypeAnalysisDiagnostics::default();
     let local_structs = infer_local_struct_artifacts_from_prepared_ssa(source.as_ref());
-    // The exact certificates own member naming: one name per (parameter, offset) they certify.
-    let exact_source_fields = field_access_certificates_from_source_aggregate_accesses(&source);
     let derived_input = DerivedTypeAnalysisInput {
         function_name: &function_name,
         ptr_bits,
@@ -892,17 +864,6 @@ pub fn build_source_owned_type_analysis(
     }
     if derived.type_facts != *function_facts.type_facts() {
         return Err(TypeAnalysisError::DerivedTypeFactsMismatch);
-    }
-    if !exact_source_fields.is_empty() {
-        let mut type_facts = function_facts.type_facts().clone();
-        for certificate in exact_source_fields {
-            type_facts.field_access_certificates.retain(|existing| {
-                existing.slot != certificate.slot
-                    || existing.field_offset != certificate.field_offset
-            });
-            type_facts.field_access_certificates.push(certificate);
-        }
-        function_facts.replace_type_facts(type_facts);
     }
     if crate::prepare::prepared_arch_display_name(source.as_ref()).is_none() {
         return Err(TypeAnalysisError::SourceEnrichmentFailed);
@@ -938,7 +899,7 @@ fn require_current_interproc_report_for_source_owned(
 /// parameter provenance, memory occurrence, and access width. r2types only
 /// publishes projections whose logical member type retains that exact width;
 /// it does not recover a field from address syntax or a rendered name.
-fn field_access_certificates_from_source_aggregate_accesses(
+pub(crate) fn field_access_certificates_from_source_aggregate_accesses(
     source: &r2ssa::SsaArtifact,
 ) -> Vec<crate::FieldAccessCertificate> {
     let Some(interface) = source.machine_context().function_interface() else {
@@ -947,19 +908,14 @@ fn field_access_certificates_from_source_aggregate_accesses(
     let Some(graph) = interface.type_graph() else {
         return Vec::new();
     };
-    let Some(projections) = source
-        .aggregate_accesses()
-        .projections_for_revision(interface.revision_identity())
-    else {
-        return Vec::new();
-    };
     let ptr_bits = source
         .machine_context()
         .memory_model()
         .default_address_bits();
     let mut by_location = BTreeMap::<(usize, u64), Option<crate::FieldAccessCertificate>>::new();
-    for projection in projections.values() {
-        let Ok(slot) = usize::try_from(projection.source_parameter_index) else {
+    let projections = source.aggregate_accesses();
+    for (slot, projection) in projections.parameter_projections(interface.revision_identity()) {
+        let Ok(slot) = usize::try_from(slot) else {
             continue;
         };
         let Some(field_type) = crate::convert::source_type_like(graph, projection.member_type_id)
@@ -992,11 +948,11 @@ fn field_access_certificates_from_source_aggregate_accesses(
     by_location.into_values().flatten().collect::<Vec<_>>()
 }
 
+/// An indexed access certifies an array where the element stride (scalar or the graph's aggregate
+/// size) is the coefficient and it reads a whole element or a projected member. O(accesses x fields).
 fn exact_indexed_access_certificates_from_local_artifacts(
     local_structs: &LocalStructArtifacts,
-    layout_certificates: &[ArrayIndexCertificate],
     merged_signature: Option<&FunctionSignatureSpec>,
-    type_db: &ExternalTypeDb,
     ptr_bits: u32,
 ) -> ScalarArrayAccessCertificates {
     let mut certificates = ScalarArrayAccessCertificates::default();
@@ -1004,46 +960,34 @@ fn exact_indexed_access_certificates_from_local_artifacts(
         if candidate.access_width == 0 || candidate.element_stride == 0 {
             continue;
         }
-        let layout_certified = layout_certificates.iter().any(|certificate| {
-            certificate.slot == candidate.slot
-                && certificate.field_offset == candidate.field_offset
-                && certificate.element_stride == candidate.element_stride
-                && matches!(
-                    certificate.base,
-                    Some(ArrayIndexBase::Param { index }) if index == candidate.slot
-                )
-        });
-        if layout_certified {
-            certificates.render_candidates.push(*candidate);
-            continue;
-        }
-        let Some(signature) = merged_signature else {
-            continue;
-        };
-        let Some(param_ty) = signature
-            .params
-            .get(candidate.slot)
+        let Some(param_ty) = merged_signature
+            .and_then(|signature| signature.params.get(candidate.slot))
             .and_then(|param| param.ty.as_ref())
         else {
             continue;
         };
-        if pointer_element_stride(param_ty, type_db, ptr_bits) != Some(candidate.element_stride) {
+        let scalar = match param_ty {
+            CTypeLike::Pointer(inner) | CTypeLike::Array(inner, _) => {
+                scalar_element_stride(inner, ptr_bits)
+            }
+            _ => continue,
+        };
+        let aggregate = || {
+            local_structs
+                .pointee_strides
+                .get(candidate.slot)
+                .copied()
+                .flatten()
+        };
+        if scalar.or_else(aggregate) != Some(candidate.element_stride) {
             continue;
         }
-        let field_layout = aggregate_pointee_type_names_from_type(param_ty)
-            .into_iter()
-            .find_map(|type_name| {
-                external_layout_field_access_for_offset(
-                    type_db,
-                    &type_name,
-                    candidate.field_offset,
-                    u64::from(candidate.access_width),
-                    ptr_bits,
-                )
-            });
         let full_element_access = candidate.field_offset == 0
             && u64::from(candidate.access_width) == candidate.element_stride;
-        if !full_element_access && field_layout.is_none() {
+        let named = local_structs.source_fields.iter().any(|field| {
+            field.slot == candidate.slot && field.field_offset == candidate.field_offset
+        });
+        if !full_element_access && !named {
             continue;
         }
         certificates.array_index.push(ArrayIndexCertificate {
@@ -1054,22 +998,10 @@ fn exact_indexed_access_certificates_from_local_artifacts(
             field_offset: candidate.field_offset,
             element_stride: candidate.element_stride,
         });
-        if let Some(field) = field_layout {
-            certificates
-                .field_access
-                .push(crate::FieldAccessCertificate {
-                    slot: candidate.slot,
-                    field_offset: candidate.field_offset,
-                    field_name: field.name,
-                    field_type: field.ty,
-                });
-        }
         certificates.render_candidates.push(*candidate);
     }
     certificates.array_index.sort();
     certificates.array_index.dedup();
-    certificates.field_access.sort();
-    certificates.field_access.dedup();
     certificates.render_candidates.sort();
     certificates.render_candidates.dedup();
     certificates
@@ -1129,37 +1061,6 @@ fn out_param_certificates_from_projection(
     certificates.sort();
     certificates.dedup();
     certificates
-}
-
-fn dedup_struct_decls(mut decls: Vec<StructDeclCandidate>) -> Vec<StructDeclCandidate> {
-    decls.sort_by(|a, b| {
-        a.name
-            .to_ascii_lowercase()
-            .cmp(&b.name.to_ascii_lowercase())
-    });
-    let mut merged: Vec<StructDeclCandidate> = Vec::new();
-    for decl in decls {
-        if let Some(existing) = merged
-            .iter_mut()
-            .find(|existing| existing.name.eq_ignore_ascii_case(&decl.name))
-        {
-            if should_replace_struct_decl(existing, &decl) {
-                *existing = decl;
-            }
-        } else {
-            merged.push(decl);
-        }
-    }
-    merged
-}
-
-fn should_replace_struct_decl(
-    existing: &StructDeclCandidate,
-    candidate: &StructDeclCandidate,
-) -> bool {
-    candidate.source == StructDeclSource::LocalInferred
-        && is_generated_local_struct_name(&candidate.name)
-        && existing.name.eq_ignore_ascii_case(&candidate.name)
 }
 
 #[cfg(test)]

@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::convert::CTypeLike;
-use crate::external::ExternalTypeDb;
 use crate::facts::{CalleeFact, CalleeLinkage, FunctionParamSpec, FunctionSignatureSpec};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -22,7 +21,6 @@ pub struct ParsedExternalContext {
     pub current_signature: Option<FunctionSignatureSpec>,
     pub merged_signature: Option<FunctionSignatureSpec>,
     pub register_params: Vec<ExternalRegisterParamSpec>,
-    pub external_type_db: ExternalTypeDb,
     pub program_data_objects: crate::ProgramDataObjectTypeFacts,
     /// Where the program's loaded sections lie, which is where a constant can name one of its objects.
     pub program_extents: ProgramExtents,

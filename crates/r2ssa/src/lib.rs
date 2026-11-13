@@ -101,7 +101,7 @@ pub use address::{
 };
 pub use aggregate_access::{
     AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION, AggregateAccessBinding, AggregateAccessProjection,
-    AggregateAccessProjectionFacts, AggregateElementIndexProjection,
+    AggregateAccessProjectionFacts, AggregateElementIndexProjection, AggregateRoot, GraphOf,
 };
 pub use arena::{OpArena, OpId, OpOrigin, OpSlot, Pass};
 pub use assumption::{
@@ -157,19 +157,19 @@ pub use machine::{
     MachineZeroDivisorBehavior, float_width_is_supported, machine_address_provenance,
 };
 pub use machine_context::{
-    MACHINE_CONTEXT_SCHEMA_VERSION, MachineAbiModel, MachineMemoryEndianness, MachineMemoryModel,
-    MachineMemorySpace, MachineRegisterGeometryState, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
-    SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION,
-    SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceArity,
-    SourceArityFloor, SourceCallArgumentSpec, SourceCallResult, SourceCallSiteIdentity,
-    SourceCallSiteInterface, SourceCallSiteInterfaceError, SourceCarrierKind,
-    SourceCarrierProjection, SourceCodeSignature, SourceFloorCause, SourceFormatParameterRule,
-    SourceFunctionInterface, SourceFunctionInterfaceError, SourceFunctionReturn,
-    SourceLogicalValue, SourceMachineContext, SourceMachineRoles, SourceMachineRolesError,
-    SourceOpaqueTag, SourceParameterLocation, SourceResultCause, SourceResultSeed,
-    SourceResultWidth, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
-    SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure,
-    SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
+    DataStructs, MACHINE_CONTEXT_SCHEMA_VERSION, MachineAbiModel, MachineMemoryEndianness,
+    MachineMemoryModel, MachineMemorySpace, MachineRegisterGeometryState,
+    SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION, SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION,
+    SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiParameterSpec, SourceAggregateLayout,
+    SourceAggregateMember, SourceArity, SourceArityFloor, SourceCallArgumentSpec, SourceCallResult,
+    SourceCallSiteIdentity, SourceCallSiteInterface, SourceCallSiteInterfaceError,
+    SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature, SourceFloorCause,
+    SourceFormatParameterRule, SourceFunctionInterface, SourceFunctionInterfaceError,
+    SourceFunctionReturn, SourceLogicalValue, SourceMachineContext, SourceMachineRoles,
+    SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation, SourceResultCause,
+    SourceResultSeed, SourceResultWidth, SourceStackAllocationContract, SourceStackGrowth,
+    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
+    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
     SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, loaded_target_slot,
     terminal_indirect_loaded_slot,
 };

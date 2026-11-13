@@ -10,7 +10,6 @@ pub(crate) mod constraint;
 pub(crate) mod context;
 pub(crate) mod convert;
 pub(crate) mod evidence;
-pub(crate) mod external;
 pub(crate) mod facts;
 pub mod function_facts;
 pub(crate) mod lattice;
@@ -20,7 +19,6 @@ pub(crate) mod signature_infer;
 mod signedness;
 pub(crate) mod solver;
 
-pub(crate) use external::ExternalAggregateKind;
 pub(crate) use facts::{
     SignatureCertificate, is_generic_signature_type, signature_hint_can_replace_existing,
     signature_param_count_is_authoritative, signature_param_name_is_weak,
@@ -49,7 +47,6 @@ pub use data_object::{
     DataObjectTypeFact, DataObjectTypeProvenance, DataObjectTypeRefusal, ProgramDataObjectTypeFacts,
 };
 pub use evidence::{DeclaredBound, EvidenceTypes};
-pub use external::{ExternalField, ExternalStruct, ExternalTypeDb, normalize_external_type_name};
 pub use facts::{
     CalleeFact, CalleeLinkage, CalleeModelPolicyEvidence, CalleeReturnRelation,
     FieldAccessCertificate, FunctionParamSpec, FunctionSignatureSpec, FunctionType,
@@ -62,9 +59,9 @@ pub use function_facts::{
     CertifiedEntity, ControlBlockAssumptionFact, DecompileRouteFacts, DecompileRouteKind,
     FunctionCallRenderFacts, FunctionCallResultFacts, FunctionCallsiteFacts, FunctionControlFacts,
     FunctionFacts, FunctionInputQualityFacts, FunctionRenderFacts, ImportStub,
-    InterprocSummaryView, MemberAccessRenderFact, MemberAccessSource, MemoryAccessRenderFact,
-    PredicateComparisonFact, RegisterCallArgumentLocationFact, ReturnTypeEvidence, ReturnTypeFact,
-    ReturnTypeRefusal, ReturnValueRenderFact, SourceOwnedCalleeSignature, SourceOwnedFunctionFacts,
+    InterprocSummaryView, MemoryAccessRenderFact, PredicateComparisonFact,
+    RegisterCallArgumentLocationFact, ReturnTypeEvidence, ReturnTypeFact, ReturnTypeRefusal,
+    ReturnValueRenderFact, SourceOwnedCalleeSignature, SourceOwnedFunctionFacts,
     StackCallArgumentLocationFact, UnprovenCause, admissible_declaration_type,
     admit_declaration_type, aggregate_is_definable, aggregate_members, declaration_type_width_bits,
     unread_slot,

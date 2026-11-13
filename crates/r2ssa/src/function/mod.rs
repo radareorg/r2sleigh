@@ -1600,12 +1600,15 @@ impl SsaArtifact {
         )
         .expect("assumptions reach no fixpoint, and this function's collection settled");
         facts.body_boundary.clone_from(&self.facts.body_boundary);
-        let aggregate_accesses = collect_aggregate_access_projections(
-            self.graph(),
-            &facts.addresses,
-            &facts.structured.memory_accesses,
-            &self.machine_context,
-        );
+        let aggregate_accesses =
+            collect_aggregate_access_projections(&crate::aggregate_access::ProjectionSources {
+                graph: self.graph(),
+                views: &self.decompile_prep_facts().views,
+                addresses: &facts.addresses,
+                accesses: &facts.structured.memory_accesses,
+                stack_slots: &facts.certificates.stack_slots,
+                machine_context: &self.machine_context,
+            });
         let member_calls = crate::member_call::collect_member_calls(
             self.graph(),
             &facts.call_sites,
@@ -3031,6 +3034,7 @@ impl TrustedSsaArtifact {
         );
         machine_context.bind_source_string_literals(source.image().string_literals());
         machine_context.bind_read_only(source.image().read_only());
+        machine_context.bind_data_structs(source.image());
         let function = match built {
             Some(built) => built,
             None => {

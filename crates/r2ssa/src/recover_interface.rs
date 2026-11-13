@@ -2186,7 +2186,7 @@ fn recover_interface_inner(
             .count()
     );
     let Some(observations) =
-        crate::deadphi::ProvenProgramObservations::find(graph, &live_out, &facts)
+        crate::deadphi::ProvenProgramObservations::find(graph, &live_out, &facts, machine_context)
     else {
         r2il::refusal_evidence!(
             "interface-recovery",

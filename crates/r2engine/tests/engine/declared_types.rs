@@ -302,3 +302,50 @@ fn a_conflict_between_declared_pointees_stays_one() {
         "{text}"
     );
 }
+
+/// `int i_call(int x) { return isalpha(x) + 1; }` after `.plt`: `x` moves through `rbx` and is
+/// handed on whole, never read.
+const I_CALL: [u8; 0x32] = plt_then(&[
+    0x53, // 1020 push rbx
+    0x48, 0x89, 0xfb, // 1021 mov rbx, rdi
+    0x48, 0x89, 0xdf, // 1024 mov rdi, rbx
+    0xe8, 0xe4, 0xff, 0xff, 0xff, // 1027 call stub
+    0x83, 0xc0, 0x01, // 102c add eax, 1
+    0x5b, // 102f pop rbx
+    0xc3, // 1030 ret
+    0xcc, // 1031
+]);
+
+/// D266 rule 2: a value handed to a declared `int` slot is read at that slot's width, so the
+/// formal is 32 bits, never the register's 64.
+#[test]
+fn a_value_handed_to_a_declared_int_is_as_wide_as_the_int() {
+    let text = on(Libc::Glibc, "isalpha", &I_CALL);
+    let parameters = header_parameters(&text, &format!("fcn_{PLT_CALLER:x}"));
+    assert_eq!(parameters.len(), 1, "{text}");
+    assert!(parameters[0].0.contains("32"), "{text}");
+}
+
+/// `I_CALL`, then `g(x)` where `g` reads all of `rdi`: the second call reads the whole register.
+const I_CALL_THEN_WHOLE: [u8; 0x3c] = plt_then(&[
+    0x53, // 1020 push rbx
+    0x48, 0x89, 0xfb, // 1021 mov rbx, rdi
+    0x48, 0x89, 0xdf, // 1024 mov rdi, rbx
+    0xe8, 0xe4, 0xff, 0xff, 0xff, // 1027 call stub
+    0x48, 0x89, 0xdf, // 102c mov rdi, rbx
+    0xe8, 0x04, 0x00, 0x00, 0x00, // 102f call g
+    0x5b, // 1034 pop rbx
+    0xc3, // 1035 ret
+    0xcc, 0xcc, // 1036
+    0x48, 0x89, 0xf8, // 1038 g: mov rax, rdi
+    0xc3, // 103b ret
+]);
+
+/// D266 rule 2 is default-deny: a call that takes the same value whole keeps the formal 64 bits.
+#[test]
+fn a_value_also_handed_whole_keeps_its_register_width() {
+    let text = on(Libc::Glibc, "isalpha", &I_CALL_THEN_WHOLE);
+    let parameters = header_parameters(&text, &format!("fcn_{PLT_CALLER:x}"));
+    assert_eq!(parameters.len(), 1, "{text}");
+    assert!(parameters[0].0.contains("64"), "{text}");
+}

@@ -38,12 +38,11 @@ pub(crate) fn maybe_upgrade_param_to_pointer(
     merged_signature: &mut Option<FunctionSignatureSpec>,
     inferred_signature: &mut InferredSignature,
     ptr_bits: u32,
-    type_db: &ExternalTypeDb,
 ) {
     let pointer_ty = CTypeLike::Pointer(Box::new(CTypeLike::Void));
 
     if merged_signature.is_none() {
-        *merged_signature = inferred_signature_to_spec(inferred_signature, ptr_bits);
+        *merged_signature = inferred_signature_to_spec(inferred_signature);
     }
 
     let Some(signature) = merged_signature.as_mut() else {
@@ -60,10 +59,10 @@ pub(crate) fn maybe_upgrade_param_to_pointer(
 
         if merged_param
             .as_ref()
-            .is_some_and(|param| param_has_authoritative_named_scalar_role(param, type_db))
-            || inferred_param.as_ref().is_some_and(|param| {
-                inferred_param_has_authoritative_named_scalar_role(param, ptr_bits, type_db)
-            })
+            .is_some_and(|param| param_has_authoritative_named_scalar_role(param))
+            || inferred_param
+                .as_ref()
+                .is_some_and(|param| inferred_param_has_authoritative_named_scalar_role(param))
         {
             continue;
         }
@@ -101,12 +100,11 @@ pub(crate) fn upgrade_param_indices_to_pointer(
     merged_signature: &mut Option<FunctionSignatureSpec>,
     inferred_signature: &mut InferredSignature,
     ptr_bits: u32,
-    type_db: &ExternalTypeDb,
 ) {
     let pointer_ty = CTypeLike::Pointer(Box::new(CTypeLike::Void));
 
     if merged_signature.is_none() {
-        *merged_signature = inferred_signature_to_spec(inferred_signature, ptr_bits);
+        *merged_signature = inferred_signature_to_spec(inferred_signature);
     }
 
     let Some(signature) = merged_signature.as_mut() else {
@@ -119,10 +117,10 @@ pub(crate) fn upgrade_param_indices_to_pointer(
 
         if merged_param
             .as_ref()
-            .is_some_and(|param| param_has_authoritative_named_scalar_role(param, type_db))
-            || inferred_param.as_ref().is_some_and(|param| {
-                inferred_param_has_authoritative_named_scalar_role(param, ptr_bits, type_db)
-            })
+            .is_some_and(|param| param_has_authoritative_named_scalar_role(param))
+            || inferred_param
+                .as_ref()
+                .is_some_and(|param| inferred_param_has_authoritative_named_scalar_role(param))
         {
             continue;
         }
@@ -155,46 +153,37 @@ pub(crate) fn upgrade_param_indices_to_pointer(
     }
 }
 
-pub(crate) fn type_is_authoritative_named_scalar_role(
-    ty: &CTypeLike,
-    type_db: &ExternalTypeDb,
-) -> bool {
+pub(crate) fn type_is_authoritative_named_scalar_role(ty: &CTypeLike) -> bool {
     match ty {
         CTypeLike::Bool | CTypeLike::Enum(_) => true,
-        CTypeLike::Typedef { name, ty } => type_db_resolves_type_name(type_db, name, ty),
+        CTypeLike::Typedef { name, ty } => typedef_resolves(name, ty),
         _ => false,
     }
 }
 
-pub(crate) fn param_has_authoritative_named_scalar_role(
-    param: &FunctionParamSpec,
-    type_db: &ExternalTypeDb,
-) -> bool {
+pub(crate) fn param_has_authoritative_named_scalar_role(param: &FunctionParamSpec) -> bool {
     !semantic_role_param_name_is_weak(&param.name)
         && param
             .ty
             .as_ref()
-            .is_some_and(|ty| type_is_authoritative_named_scalar_role(ty, type_db))
+            .is_some_and(type_is_authoritative_named_scalar_role)
 }
 
 pub(crate) fn inferred_param_has_authoritative_named_scalar_role(
     param: &InferredSignatureParam,
-    ptr_bits: u32,
-    type_db: &ExternalTypeDb,
 ) -> bool {
     if semantic_role_param_name_is_weak(&param.name) {
         return false;
     }
-    type_is_authoritative_named_scalar_role(&preserving_c_typedefs(&param.ty, ptr_bits), type_db)
+    type_is_authoritative_named_scalar_role(&preserving_c_typedefs(&param.ty))
 }
 
 pub(crate) fn summary_hint_can_replace_weak_existing(
     existing: &CTypeLike,
     hint: &CTypeLike,
     ptr_bits: u32,
-    type_db: &ExternalTypeDb,
 ) -> bool {
-    crate::summary_hint_can_replace_weak_existing(existing, hint, ptr_bits, type_db)
+    crate::summary_hint_can_replace_weak_existing(existing, hint, ptr_bits)
 }
 
 pub(crate) fn upgrade_param_type_hints(
@@ -202,20 +191,19 @@ pub(crate) fn upgrade_param_type_hints(
     merged_signature: &mut Option<FunctionSignatureSpec>,
     inferred_signature: &mut InferredSignature,
     ptr_bits: u32,
-    type_db: &ExternalTypeDb,
 ) {
     if hints.is_empty() {
         return;
     }
     if merged_signature.is_none() {
-        *merged_signature = inferred_signature_to_spec(inferred_signature, ptr_bits);
+        *merged_signature = inferred_signature_to_spec(inferred_signature);
     }
 
     if let Some(signature) = merged_signature.as_mut() {
         for (idx, hint) in hints {
             if let Some(param) = signature.params.get_mut(*idx) {
                 let should_replace = param.ty.as_ref().is_none_or(|existing| {
-                    summary_hint_can_replace_weak_existing(existing, hint, ptr_bits, type_db)
+                    summary_hint_can_replace_weak_existing(existing, hint, ptr_bits)
                 });
                 if should_replace {
                     param.ty = Some(hint.clone());
@@ -227,7 +215,7 @@ pub(crate) fn upgrade_param_type_hints(
     for (idx, hint) in hints {
         if let Some(param) = inferred_signature.params.get_mut(*idx) {
             let should_replace = inferred_type_is_generic(Some(&param.ty), ptr_bits)
-                || summary_hint_can_replace_weak_existing(&param.ty, hint, ptr_bits, type_db);
+                || summary_hint_can_replace_weak_existing(&param.ty, hint, ptr_bits);
             if should_replace {
                 param.ty = hint.clone();
             }
@@ -240,25 +228,23 @@ pub(crate) fn upgrade_return_type_hint(
     merged_signature: &mut Option<FunctionSignatureSpec>,
     inferred_signature: &mut InferredSignature,
     ptr_bits: u32,
-    type_db: &ExternalTypeDb,
 ) -> bool {
     let Some(hint) = hint else {
         return false;
     };
     if merged_signature.is_none() {
-        *merged_signature = inferred_signature_to_spec(inferred_signature, ptr_bits);
+        *merged_signature = inferred_signature_to_spec(inferred_signature);
     }
 
     let mut changed = false;
     if let Some(signature) = merged_signature.as_mut() {
         let should_replace = signature.ret_type.as_ref().is_none_or(|existing| {
-            summary_hint_can_replace_weak_existing(existing, hint, ptr_bits, type_db)
+            summary_hint_can_replace_weak_existing(existing, hint, ptr_bits)
                 || matches!(hint, CTypeLike::Void)
                     && crate::signature_return_hint_can_replace_existing(
                         existing,
                         Some(hint),
                         ptr_bits,
-                        type_db,
                     )
         });
         if should_replace && signature.ret_type.as_ref() != Some(hint) {
@@ -270,13 +256,12 @@ pub(crate) fn upgrade_return_type_hint(
     let existing_ty = inferred_signature.ret_type.clone();
     let should_replace = inferred_type_is_generic(existing_ty.as_ref(), ptr_bits)
         || existing_ty.as_ref().is_some_and(|existing| {
-            summary_hint_can_replace_weak_existing(existing, hint, ptr_bits, type_db)
+            summary_hint_can_replace_weak_existing(existing, hint, ptr_bits)
                 || matches!(hint, CTypeLike::Void)
                     && crate::signature_return_hint_can_replace_existing(
                         existing,
                         Some(hint),
                         ptr_bits,
-                        type_db,
                     )
         });
     if should_replace && inferred_signature.ret_type.as_ref() != Some(hint) {
@@ -290,13 +275,12 @@ pub(crate) fn upgrade_param_name_hints(
     hints: &BTreeMap<usize, String>,
     merged_signature: &mut Option<FunctionSignatureSpec>,
     inferred_signature: &mut InferredSignature,
-    ptr_bits: u32,
 ) {
     if hints.is_empty() {
         return;
     }
     if merged_signature.is_none() {
-        *merged_signature = inferred_signature_to_spec(inferred_signature, ptr_bits);
+        *merged_signature = inferred_signature_to_spec(inferred_signature);
     }
     if let Some(signature) = merged_signature.as_mut() {
         for (idx, hint) in hints {
@@ -338,7 +322,6 @@ pub(crate) fn apply_interproc_summary_to_signature(
     summary_view: &InterprocSummaryView,
     semantic_projection: Option<&SemanticTypeProjection>,
     ptr_bits: u32,
-    type_db: &ExternalTypeDb,
 ) {
     let Some(summary) = summary_view.root_summary() else {
         if let Some(projection) = semantic_projection {
@@ -347,65 +330,51 @@ pub(crate) fn apply_interproc_summary_to_signature(
                 merged_signature,
                 inferred_signature,
                 ptr_bits,
-                type_db,
             );
             upgrade_param_name_hints(
                 &projection.param_name_hints,
                 merged_signature,
                 inferred_signature,
-                ptr_bits,
             );
             upgrade_param_indices_to_pointer(
                 projection_pointer_upgrade_indices(projection),
                 merged_signature,
                 inferred_signature,
                 ptr_bits,
-                type_db,
             );
             upgrade_param_type_hints(
                 &projection.param_type_hints,
                 merged_signature,
                 inferred_signature,
                 ptr_bits,
-                type_db,
             );
         }
         return;
     };
-    maybe_upgrade_param_to_pointer(
-        summary,
-        merged_signature,
-        inferred_signature,
-        ptr_bits,
-        type_db,
-    );
+    maybe_upgrade_param_to_pointer(summary, merged_signature, inferred_signature, ptr_bits);
     if let Some(projection) = semantic_projection {
         upgrade_return_type_hint(
             projection.return_type_hint.as_ref(),
             merged_signature,
             inferred_signature,
             ptr_bits,
-            type_db,
         );
         upgrade_param_name_hints(
             &projection.param_name_hints,
             merged_signature,
             inferred_signature,
-            ptr_bits,
         );
         upgrade_param_indices_to_pointer(
             projection_pointer_upgrade_indices(projection),
             merged_signature,
             inferred_signature,
             ptr_bits,
-            type_db,
         );
         upgrade_param_type_hints(
             &projection.param_type_hints,
             merged_signature,
             inferred_signature,
             ptr_bits,
-            type_db,
         );
     }
     let Some(ret_ty) =
@@ -419,17 +388,15 @@ pub(crate) fn apply_interproc_summary_to_signature(
         .and_then(|signature| signature.ret_type.as_ref())
         .is_none_or(|ty| {
             is_generic_signature_type(Some(ty))
-                || summary_hint_can_replace_weak_existing(ty, &ret_ty, ptr_bits, type_db)
+                || summary_hint_can_replace_weak_existing(ty, &ret_ty, ptr_bits)
                 || matches!(summary.return_relation, SummaryReturnRelation::HeapAlloc)
                     && crate::signature_hint_can_replace_existing(ty, Some(&ret_ty), ptr_bits,
-                type_db,
             )
                 || matches!(ret_ty, CTypeLike::Void)
                     && crate::signature_return_hint_can_replace_existing(
                         ty,
                         Some(&ret_ty),
                         ptr_bits,
-                type_db,
             )
                 || matches!(
                     (&ret_ty, ty),
@@ -460,7 +427,7 @@ pub(crate) fn apply_interproc_summary_to_signature(
     }
 
     if merged_signature.is_none() {
-        *merged_signature = inferred_signature_to_spec(inferred_signature, ptr_bits);
+        *merged_signature = inferred_signature_to_spec(inferred_signature);
     }
     if let Some(signature) = merged_signature.as_mut() {
         signature.ret_type = Some(ret_ty.clone());
@@ -468,21 +435,14 @@ pub(crate) fn apply_interproc_summary_to_signature(
 
     let existing = inferred_signature.ret_type.as_ref();
     if inferred_type_is_generic(existing, ptr_bits)
-        || existing.is_some_and(|ty| {
-            summary_hint_can_replace_weak_existing(ty, &ret_ty, ptr_bits, type_db)
-        })
+        || existing.is_some_and(|ty| summary_hint_can_replace_weak_existing(ty, &ret_ty, ptr_bits))
         || matches!(summary.return_relation, SummaryReturnRelation::HeapAlloc)
             && existing.is_some_and(|ty| {
-                crate::signature_hint_can_replace_existing(ty, Some(&ret_ty), ptr_bits, type_db)
+                crate::signature_hint_can_replace_existing(ty, Some(&ret_ty), ptr_bits)
             })
         || matches!(ret_ty, CTypeLike::Void)
             && existing.is_some_and(|ty| {
-                crate::signature_return_hint_can_replace_existing(
-                    ty,
-                    Some(&ret_ty),
-                    ptr_bits,
-                    type_db,
-                )
+                crate::signature_return_hint_can_replace_existing(ty, Some(&ret_ty), ptr_bits)
             })
         || inferred_type_is_word(existing, ptr_bits)
     {
@@ -644,7 +604,6 @@ pub(crate) fn apply_signature_context_overrides(
     signature_out: &mut InferredSignature,
     signature: Option<&FunctionSignatureSpec>,
     ptr_bits: u32,
-    type_db: &ExternalTypeDb,
 ) {
     let Some(signature) = signature else {
         return;
@@ -678,7 +637,7 @@ pub(crate) fn apply_signature_context_overrides(
     for (idx, param) in signature.params.iter().enumerate() {
         if let Some(ty) = param.ty.as_ref()
             && (!inferred_type_is_generic(Some(ty), ptr_bits)
-                || param_has_authoritative_named_scalar_role(param, type_db))
+                || param_has_authoritative_named_scalar_role(param))
             && let Some(inferred_param) = signature_out.params.get_mut(idx)
         {
             inferred_param.ty = ty.clone();

@@ -668,6 +668,160 @@ impl SourceConversion<'_> {
     }
 }
 
+/// radare2's type-name spellings, read only by the test fixtures' parser (D347).
+#[cfg(test)]
+mod spelling {
+    fn normalize_prefixed_aggregate_type(ty: &str, prefix: &str) -> Option<String> {
+        let dotted = format!("{prefix}.");
+        if !ty.to_ascii_lowercase().starts_with(&dotted) {
+            return None;
+        }
+        let rest = &ty[dotted.len()..];
+        let ident_len = rest
+            .char_indices()
+            .find_map(|(idx, ch)| {
+                if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+                    None
+                } else {
+                    Some(idx)
+                }
+            })
+            .unwrap_or(rest.len());
+        if ident_len == 0 {
+            return None;
+        }
+        let raw_name = &rest[..ident_len];
+        let name = raw_name.replace('.', "_");
+        if name.is_empty() {
+            return None;
+        }
+        let suffix = rest[ident_len..].trim_start();
+        if suffix.is_empty() {
+            Some(format!("{prefix} {name}"))
+        } else {
+            Some(format!("{prefix} {name} {suffix}"))
+        }
+    }
+
+    fn normalize_primitive_alias(base: &str) -> Option<&'static str> {
+        match base.to_ascii_lowercase().as_str() {
+            "idx" => Some("idx_t"),
+            "long" | "long int" | "longint" => Some("long"),
+            "longu" | "unsigned long" | "unsigned long int" | "unsignedlong"
+            | "unsignedlongint" => Some("unsigned long"),
+            "long long" | "long long int" | "longlong" | "longlongint" => Some("long long"),
+            "long long unsigned"
+            | "unsigned long long"
+            | "unsigned long long int"
+            | "unsignedlonglong"
+            | "unsignedlonglongint"
+            | "longlongu" => Some("unsigned long long"),
+            "bool" | "_bool" => Some("bool"),
+            "boolean" => Some("bool"),
+            "uintptr_t" => Some("size_t"),
+            "intptr_t" => Some("ssize_t"),
+            _ => None,
+        }
+    }
+
+    fn is_type_qualifier(token: &str) -> bool {
+        matches!(
+            token.to_ascii_lowercase().as_str(),
+            "const"
+                | "volatile"
+                | "restrict"
+                | "register"
+                | "__const"
+                | "__const__"
+                | "__volatile"
+                | "__volatile__"
+                | "__restrict"
+                | "__restrict__"
+        )
+    }
+
+    fn strip_type_qualifiers(spelling: &str) -> String {
+        let mut normalized = String::with_capacity(spelling.len());
+        let mut start = 0usize;
+        for (idx, ch) in spelling.char_indices() {
+            if ch == '_' || ch.is_ascii_alphanumeric() {
+                continue;
+            }
+            let token = &spelling[start..idx];
+            if !is_type_qualifier(token) {
+                normalized.push_str(token);
+            }
+            normalized.push(ch);
+            start = idx + ch.len_utf8();
+        }
+        let token = &spelling[start..];
+        if !is_type_qualifier(token) {
+            normalized.push_str(token);
+        }
+        normalized
+    }
+
+    pub(super) fn normalize(ty: &str) -> String {
+        let mut normalized = strip_type_qualifiers(ty.trim()).trim().to_string();
+
+        loop {
+            let lower = normalized.to_ascii_lowercase();
+            if lower.starts_with("type.") {
+                normalized = normalized[5..].trim_start().to_string();
+                continue;
+            }
+            if lower.starts_with("struct type.") {
+                normalized = format!("struct {}", normalized["struct type.".len()..].trim_start());
+                continue;
+            }
+            if lower.starts_with("union type.") {
+                normalized = format!("union {}", normalized["union type.".len()..].trim_start());
+                continue;
+            }
+            if lower.starts_with("enum type.") {
+                normalized = format!("enum {}", normalized["enum type.".len()..].trim_start());
+                continue;
+            }
+            break;
+        }
+
+        if let Some(tagged) = normalize_prefixed_aggregate_type(&normalized, "struct") {
+            normalized = tagged;
+        } else if let Some(tagged) = normalize_prefixed_aggregate_type(&normalized, "union") {
+            normalized = tagged;
+        } else if let Some(tagged) = normalize_prefixed_aggregate_type(&normalized, "enum") {
+            normalized = tagged;
+        }
+
+        let mut ptr_suffix = String::new();
+        while normalized.trim_end().ends_with('*') {
+            normalized = normalized.trim_end_matches('*').trim_end().to_string();
+            if ptr_suffix.is_empty() {
+                ptr_suffix.push_str(" *");
+            } else {
+                ptr_suffix.push('*');
+            }
+        }
+
+        let lower = normalized.to_ascii_lowercase();
+        if lower.starts_with("struct ") || lower.starts_with("union ") || lower.starts_with("enum ")
+        {
+            normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+            if normalized.contains('.') {
+                let mut parts = normalized.splitn(2, ' ');
+                let prefix = parts.next().unwrap_or("struct");
+                let ident = parts.next().unwrap_or("").replace('.', "_");
+                normalized = format!("{prefix} {}", ident.trim());
+            }
+        } else if let Some(alias) = normalize_primitive_alias(&normalized) {
+            normalized = alias.to_string();
+        }
+
+        normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+        format!("{normalized}{ptr_suffix}")
+    }
+}
+
 /// A spelling read back as a type, for test fixtures. Production types arrive as
 /// `SourceTypeGraph` (ADR call-boundary, Types on the wire).
 #[cfg(test)]
@@ -688,7 +842,7 @@ pub(crate) fn parse_c_type_like(spelling: &str, ptr_bits: u32) -> Option<CTypeLi
         };
         return Some(CTypeLike::Pointer(Box::new(pointee)));
     }
-    let normalized = crate::external::normalize_type_spelling(spelling);
+    let normalized = spelling::normalize(spelling);
     parse_normalized(normalized.trim(), ptr_bits)
 }
 

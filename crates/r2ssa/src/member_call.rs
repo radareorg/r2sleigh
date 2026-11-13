@@ -8,6 +8,11 @@ use crate::dense::IdVec;
 use crate::semantic::{CallSiteFacts, CallSiteId, CallSiteTransfer};
 
 type Projected = std::collections::BTreeMap<StructuredAccessId, crate::AggregateAccessProjection>;
+/// The interface's graph and, where the image binds struct data, the image's.
+type Graphs<'a> = (
+    &'a r2source::SourceTypeGraph,
+    Option<&'a r2source::SourceTypeGraph>,
+);
 use crate::{
     AggregateAccessBinding, AggregateAccessProjectionFacts, SourceMachineContext, SsaGraph,
     StructuredAccessId,
@@ -17,9 +22,11 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MemberCall {
     pub identity: SourceCallSiteIdentity,
-    /// The projected load; its projection names the root, so a later root needs no new field.
+    /// The projected load; its projection names the root (D348).
     pub access: StructuredAccessId,
-    /// The member's `Code` signature in the function interface's graph.
+    /// The graph the member's type lives in: the interface's, or the image's for a data object.
+    pub graph: crate::GraphOf,
+    /// The member's `Code` signature in `graph`.
     pub signature_id: u32,
 }
 
@@ -56,7 +63,7 @@ impl MemberCalls {
     /// signature and refusal per row; `access` is seal-local and is not compared.
     pub fn agrees(&self, other: &Self) -> bool {
         let key = |row: &Option<Result<MemberCall, MemberCallRefusal>>| {
-            row.map(|row| row.map(|call| (call.identity, call.signature_id)))
+            row.map(|row| row.map(|call| (call.identity, call.graph, call.signature_id)))
         };
         self.0.len() == other.0.len()
             && (self.0.iter().zip(other.0.iter())).all(|((_, a), (_, b))| key(a) == key(b))
@@ -79,7 +86,8 @@ pub(crate) fn collect_member_calls(
     let typed = interface.and_then(|interface| {
         let type_graph = interface.type_graph()?;
         let projected = projections.projections_for_revision(interface.revision_identity())?;
-        Some((type_graph, projected))
+        let image = machine_context.data_structs().map(|image| &image.graph);
+        Some(((type_graph, image), projected))
     });
     let rows = IdVec::from_fn(call_sites.by_id.len(), |id| {
         let row = row(graph, call_sites.by_id.get(&id)?, typed, machine_context);
@@ -95,14 +103,14 @@ pub(crate) fn collect_member_calls(
 fn row(
     graph: &SsaGraph,
     site: &crate::semantic::CallSiteFact,
-    typed: Option<(&r2source::SourceTypeGraph, &Projected)>,
+    typed: Option<(Graphs<'_>, &Projected)>,
     machine_context: &SourceMachineContext,
 ) -> Option<Result<MemberCall, MemberCallRefusal>> {
     let identity = site.raw_identity?;
     if site.direct_target.is_some() || site.transfer != CallSiteTransfer::Call {
         return None;
     }
-    let Some((type_graph, projected)) = typed else {
+    let Some(((interface_graph, image_graph), projected)) = typed else {
         return Some(Err(MemberCallRefusal::NoTypeGraph));
     };
     let access = (graph.def_inst(site.target)).map(|inst| StructuredAccessId { inst, ordinal: 0 });
@@ -114,6 +122,13 @@ fn row(
     });
     let Some(projection) = projection else {
         return Some(Err(MemberCallRefusal::TargetNotProjected));
+    };
+    let type_graph = match projection.graph {
+        crate::GraphOf::Interface => interface_graph,
+        crate::GraphOf::Image => match image_graph {
+            Some(graph) => graph,
+            None => return Some(Err(MemberCallRefusal::NoTypeGraph)),
+        },
     };
     let node = |id: u32| type_graph.types().get(usize::try_from(id).ok()?);
     let code = match node(projection.member_type_id).map(|ty| ty.kind()) {
@@ -138,6 +153,7 @@ fn row(
     Some(Ok(MemberCall {
         identity,
         access: projection.access,
+        graph: projection.graph,
         signature_id,
     }))
 }
