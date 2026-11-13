@@ -48,6 +48,9 @@ KEEP int falls_off(int k) {
 /* long: returns its argument, an input's entry byte (any entry byte taken as undefined) */
 KEEP long identity(long x) { return x; }
 
+/* long: returns its second argument, another input's entry byte; on AArch64 X0 is itself an input (the same mutant) */
+KEEP long second(long x, long y) { return y; }
+
 /* void and variadic: the prologue reads AL to save the vector registers, so RAX's entry byte is an input */
 KEEP void sum_args(int n, ...) {
     __builtin_va_list ap;
@@ -65,6 +68,7 @@ int main(int argc, char **argv) {
     sink = some_path(malloc(4), argc);
     sink = falls_off(argc);
     sink = identity(argc);
+    sink = second(argc, (long)argv);
     sum_args(2, (double)argc, 0.5);
     return 0;
 }
