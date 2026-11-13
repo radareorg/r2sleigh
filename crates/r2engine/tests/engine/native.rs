@@ -7426,7 +7426,7 @@ fn an_escaped_run_a_callee_indexes_without_a_bound_is_one_object_to_the_save() {
     // `rows` at entry -104 runs to the `x29` save at -48: the three scalars at -72 to -56 are in it.
     assert!(
         (slots.values()).any(|slot| slot.offset == -104 && slot.size == Some(56)),
-        "{slots:?}"
+        "no 56-byte object at entry -104"
     );
     let response = decompile(&target, &program, BASE + 0x18).expect("decompile");
     let output = response.output.text();
