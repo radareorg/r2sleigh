@@ -145,6 +145,12 @@ impl Prototype {
         names: &dyn Fn(&str, bool) -> bool,
     ) -> Option<Self> {
         let mut prototype = Self::of(signature, fixed, names)?;
+        // A body-proven pointer whose pointee the unit cannot spell is `void *`, as its header says.
+        for (param, ty) in prototype.params.iter_mut().zip(&signature.params) {
+            if param.is_none() {
+                *param = analysed_pointer(ty);
+            }
+        }
         if let Some(bits) = unproven.filter(|bits| crate::prelude::carrier(*bits).is_some()) {
             prototype.ret = Some(crate::prelude::result_carrier(bits));
         }
@@ -153,6 +159,11 @@ impl Prototype {
             _ => Some(prototype),
         }
     }
+}
+
+/// A pointer r2types states from the body, as `void *` where its pointee is not spellable here.
+pub(super) fn analysed_pointer(ty: &CType) -> Option<CType> {
+    matches!(ty.unaliased(), CType::Pointer(_)).then(|| CType::Pointer(Box::new(CType::Void)))
 }
 
 /// An argument of type `from` passed as the declared `to`: the cast C performs at a prototype.

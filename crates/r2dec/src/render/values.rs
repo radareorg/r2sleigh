@@ -923,7 +923,10 @@ impl<'a> Values<'a> {
                 Some(declared) => calls::spellable(&declared, &|tag, union| tags.names(tag, union))
                     .or_else(|| calls::untagged_pointer(&declared)),
                 None => (input.parameter_declaration(index as usize, ty.width_bits())).and_then(
-                    |analysed| calls::spellable(&analysed, &|tag, union| tags.defines(tag, union)),
+                    |analysed| {
+                        calls::spellable(&analysed, &|tag, union| tags.defines(tag, union))
+                            .or_else(|| calls::analysed_pointer(&analysed))
+                    },
                 ),
             }
             .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
