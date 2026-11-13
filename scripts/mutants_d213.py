@@ -94,6 +94,11 @@ MUTANTS = [
     ("kept-past-a-register-space-store", [(LIVENESS, "                || operation.memory_accesses().any(through)\n",
                                            "                || operation.memory_accesses().any(|_| false)\n")], [SITES]),
     ("kept-ignores-writes", [(LIVENESS, ".for_each(|at| written.insert(at));", ".for_each(|_| ());")], [SITES]),
+    # A deposit after the deep read (9003eacd7) stamps the row with other rows: the guard counts a defect.
+    ("a-deposit-after-the-deep-read", [(FATES, "            let held = db.held::<RegisterEffects>(&(caller, thumb));",
+                                        "            let _ = read.deep.effects(read.body);\n"
+                                        "            let held = db.held::<RegisterEffects>(&(caller, thumb));")],
+     ["cargo test -p r2engine --test engine result_lanes"]),
     ("a-kept-lane-is-doubted", [(LIVENESS, "unkept(self.lanes.every(), call.kept)", "self.lanes.every()")],
      [SITES, "cargo test -p r2engine --test engine result_lanes"]),
 ]

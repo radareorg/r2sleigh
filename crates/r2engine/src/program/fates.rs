@@ -975,51 +975,38 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
     const NAME: &'static str = "site-fates";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: one backward pass over the body, `O((B + E) × lanes)` within its budget, one held
-    /// register effect per distinct callee not yet read, and the body's own effect, deposited.
+    /// Work: the body's own register effect, deposited, then one backward pass over the body,
+    /// `O((B + E) × lanes)` within its budget, and one held register effect per distinct callee.
     fn compute(db: &Db<ProgramInputs<S>>, &(caller, thumb): &(u64, bool)) -> Self::Value {
-        let view = View::new(db, true);
-        let walker = super::returns::Walking::new(view.clone(), true).ok()?;
-        let stated = stated_target(&view, &walker, caller, thumb);
-        let target = stated.as_ref().unwrap_or(walker.target(thumb));
-        let slots = target.convention.convention_slots().ok()?;
-        let walking = db.get::<Walked>(&(caller, thumb)).ok()?;
-        let body = walking.0.as_ref().ok()?.body();
-        let reading = Reading {
-            db,
-            view: &view,
-            lanes: lanes_of(target, &slots),
-            slots: &slots,
-            unstated: r2ssa::call_reads::CallReads::every_location(&target.convention),
-            call: target.call.call_effect().ok(),
-            depth: Depth::Deep,
-        };
-        let direct = direct_calls(body).collect::<Vec<_>>();
-        let sites = (direct.iter())
-            .map(|call| (call.block, call.op))
-            .collect::<Vec<_>>();
-        let flow = flow_of(body, target.disasm.arch_spec().memory_endianness);
-        let fates = flow.site_fates(reading.lanes, &reading.effects(body), &sites);
-        let mut calls = (direct.iter().zip(fates))
-            .map(|(call, boundary)| AfterCall {
-                callee: call.callee,
-                instruction: call.instruction,
-                boundary,
-            })
-            .collect::<Vec<_>>();
-        calls.sort_by_key(|call| (call.callee, call.instruction));
-        calls.dedup_by_key(|call| (call.callee, call.instruction));
-        // While it holds the walk and its flow, the body's own register effect is deposited.
-        let held = db.held::<RegisterEffects>(&(caller, thumb));
-        if held.is_ok_and(|held| held.is_none()) {
-            let shallow = Reading {
-                depth: Depth::Shallow,
-                ..reading
-            };
-            let effect = effect_on_flow(&shallow, &walker, target, (caller, body, &flow));
-            db.deposit::<RegisterEffects>([((caller, thumb), effect)]);
-        }
-        Some(calls.into())
+        read_body(db, (caller, thumb), |read| {
+            // Deposited before any deep read, so the row depends on what a computed row reads (ADR).
+            let held = db.held::<RegisterEffects>(&(caller, thumb));
+            if held.is_ok_and(|held| held.is_none()) {
+                let effect = read.effect(caller);
+                match db.has_read::<RegisterEffects>() {
+                    true => db.defect(format_args!(
+                        "register-effects {caller:#x} deposited after a row"
+                    )),
+                    false => db.deposit::<RegisterEffects>([((caller, thumb), effect)]),
+                }
+            }
+            let direct = direct_calls(read.body).collect::<Vec<_>>();
+            let sites = (direct.iter())
+                .map(|call| (call.block, call.op))
+                .collect::<Vec<_>>();
+            let deep = &read.deep;
+            let fates = (read.flow).site_fates(deep.lanes, &deep.effects(read.body), &sites);
+            let mut calls = (direct.iter().zip(fates))
+                .map(|(call, boundary)| AfterCall {
+                    callee: call.callee,
+                    instruction: call.instruction,
+                    boundary,
+                })
+                .collect::<Vec<_>>();
+            calls.sort_by_key(|call| (call.callee, call.instruction));
+            calls.dedup_by_key(|call| (call.callee, call.instruction));
+            calls.into()
+        })
     }
 }
 
@@ -1036,24 +1023,63 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for RegisterEffects {
     /// Work: one backward pass over the body and one scan of the blocks a return is reached from;
     /// `SiteFates` deposits the row of each body it walks, so only a body it did not walk is lifted here.
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
-        let view = View::new(db, true);
-        let walker = super::returns::Walking::new(view.clone(), true).ok()?;
-        let stated = stated_target(&view, &walker, entry, thumb);
-        let target = stated.as_ref().unwrap_or(walker.target(thumb));
-        let slots = target.convention.convention_slots().ok()?;
-        let walking = db.get::<Walked>(&(entry, thumb)).ok()?;
-        let body = walking.0.as_ref().ok()?.body();
-        let reading = Reading {
-            db,
-            view: &view,
-            lanes: lanes_of(target, &slots),
-            slots: &slots,
-            unstated: r2ssa::call_reads::CallReads::every_location(&target.convention),
-            call: target.call.call_effect().ok(),
-            depth: Depth::Shallow,
-        };
-        let flow = flow_of(body, target.disasm.arch_spec().memory_endianness);
-        effect_on_flow(&reading, &walker, target, (entry, body, &flow))
+        read_body(db, (entry, thumb), |read| read.effect(entry)).flatten()
+    }
+}
+
+/// One walked body as the site fates and the register effect read it: the one prefix both share.
+struct BodyRead<'a, S: Source + 'static> {
+    walker: &'a super::returns::Walking<'a, S>,
+    target: &'a NativeTarget<'a>,
+    body: &'a Body,
+    flow: CallerFlow<'a, BodyBlock>,
+    /// Its calls read without another body, as the register effect reads them.
+    shallow: Reading<'a, S>,
+    /// Its calls read by each callee's register effect, as the site fates read them.
+    deep: Reading<'a, S>,
+}
+
+/// The walked body at `key` with its target and flow, handed to `then`; none where it has no walk.
+fn read_body<S: Source + 'static, R>(
+    db: &Db<ProgramInputs<S>>,
+    (entry, thumb): (u64, bool),
+    then: impl FnOnce(&BodyRead<'_, S>) -> R,
+) -> Option<R> {
+    let view = View::new(db, true);
+    let walker = super::returns::Walking::new(view.clone(), true).ok()?;
+    let stated = stated_target(&view, &walker, entry, thumb);
+    let target = stated.as_ref().unwrap_or(walker.target(thumb));
+    let slots = target.convention.convention_slots().ok()?;
+    let walking = db.get::<Walked>(&(entry, thumb)).ok()?;
+    let body = walking.0.as_ref().ok()?.body();
+    let reading = |depth| Reading {
+        db,
+        view: &view,
+        lanes: lanes_of(target, &slots),
+        slots: &slots,
+        unstated: r2ssa::call_reads::CallReads::every_location(&target.convention),
+        call: target.call.call_effect().ok(),
+        depth,
+    };
+    Some(then(&BodyRead {
+        walker: &walker,
+        target,
+        body,
+        flow: flow_of(body, target.disasm.arch_spec().memory_endianness),
+        shallow: reading(Depth::Shallow),
+        deep: reading(Depth::Deep),
+    }))
+}
+
+impl<S: Source + 'static> BodyRead<'_, S> {
+    /// The body's register effect, its calls read shallowly.
+    fn effect(&self, entry: u64) -> Option<RegisterEffect> {
+        effect_on_flow(
+            &self.shallow,
+            self.walker,
+            self.target,
+            (entry, self.body, &self.flow),
+        )
     }
 }
 
