@@ -163,7 +163,7 @@ FILE=tests/fixtures/float_calls_zig_aarch64_O2g
 CMDS=aa; pdd @ 0x01010640
 EXPECT=<<EOF
 /* r2sleigh: import stub at 0x1010640; this symbol is the import `__libc_start_main` and has no body of its own. */
-extern int32_t __libc_start_main(void*, int32_t, char**, void*, void*, void*, void*);
+extern int32_t __libc_start_main(int32_t(*)(int32_t, char**, char**), int32_t, char**, void*, void*, void*, void*);
 
 EOF
 EXPECT_ERR=<<EOF

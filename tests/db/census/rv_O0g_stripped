@@ -708,7 +708,7 @@ NAME=0x00001549
 FILE=tests/fixtures/rv_O0g_stripped
 CMDS=aa; pdd @ 0x00001549
 EXPECT=<<EOF
-r2sleigh_result_u32 fcn_1549(int32_t arg0, r2sleigh_word_u64* arg1)
+r2sleigh_word_u32 fcn_1549(int32_t arg0, r2sleigh_word_u64* arg1)
 {
     r2sleigh_word_u32 fcn_11a9(r2sleigh_word_u32, r2sleigh_word_u32);
     r2sleigh_word_u32 fcn_11c1(r2sleigh_word_u32*, int32_t);
@@ -768,7 +768,7 @@ r2sleigh_result_u32 fcn_1549(int32_t arg0, r2sleigh_word_u64* arg1)
     uint32_t tmp_lane_17ac_0_1_1;
     _Alignas(16) uint8_t frame[248];
 
-    /* r2dec proof: 1 construct is marked below; 332 source obligations: 203 rendered, 94 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 31 assumed (frame extent unproven), 1 residual; 73 statements rendered; 1 callee prototype supplied by the source; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: 1 construct is marked below; 332 source obligations: 203 rendered, 94 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 31 assumed (frame extent unproven), 1 residual; 73 statements rendered; 1 callee prototype supplied by the source; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u32((void*)(uint64_t)(frame + 28U), (uint32_t)arg0);
         r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)arg1);
@@ -846,7 +846,7 @@ r2sleigh_result_u32 fcn_1549(int32_t arg0, r2sleigh_word_u64* arg1)
             tmp_17a6_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 44U));
             tmp_lane_17ac_0_1_1 = (uint32_t)(uint8_t)((uint32_t)tmp_17a6_8_1 >> 0U);
             {
-                return r2sleigh_carrier_u32((uint32_t)tmp_lane_17ac_0_1_1);
+                return (uint32_t)tmp_lane_17ac_0_1_1;
             }
         }
     }

@@ -321,7 +321,7 @@ int32_t main(int32_t argc, char** argv)
     uint32_t tmp_1237_8_1;
     uint32_t tmp_1241_8_1;
     uint64_t rax_4;
-    __uint128_t xmm0_6;
+    __uint128_t xmm0_5;
     uint64_t tmp_lane_125e_2_0_1;
     uint8_t tmp_125e_12_1;
     double tmp_125e_1b_1;
@@ -338,8 +338,8 @@ int32_t main(int32_t argc, char** argv)
         r2sleigh_store_u64((void*)((uint64_t)(frame + 32U) + (uint64_t)8U), (uint64_t)r2sleigh_float_to_bits_64((double)(int32_t)tmp_1237_8_1));
         tmp_1241_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 28U));
         rax_4 = (uint64_t)(uint32_t)from_a((int32_t)tmp_1241_8_1);
-        xmm0_6 = (__uint128_t)r2sleigh_float_to_bits_64(from_b((const double*)(uint64_t)(frame + 32U), 2));
-        tmp_lane_125e_2_0_1 = (uint64_t)((__uint128_t)xmm0_6 >> 0U);
+        xmm0_5 = (__uint128_t)r2sleigh_float_to_bits_64(from_b((const double*)(uint64_t)(frame + 32U), 2));
+        tmp_lane_125e_2_0_1 = (uint64_t)((__uint128_t)xmm0_5 >> 0U);
         tmp_125e_12_1 = (uint8_t)((uint32_t)(uint8_t)((double)(int64_t)0xffffffff7fffffffU < r2sleigh_float_from_bits_64(tmp_lane_125e_2_0_1)) & (uint32_t)(uint8_t)(r2sleigh_float_from_bits_64(tmp_lane_125e_2_0_1) < (double)(int64_t)0x80000000U));
         tmp_125e_1b_1 = (double)(int32_t)0U;
         tmp_125e_13_2 = tmp_125e_12_1 ? (uint64_t)tmp_lane_125e_2_0_1 : (uint64_t)r2sleigh_float_to_bits_64(tmp_125e_1b_1);
