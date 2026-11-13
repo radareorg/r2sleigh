@@ -1562,3 +1562,28 @@ fn a_take_into_a_slot_that_states_no_return_reads_nothing() {
     let init = handler_rendered(at_exit(STARTS_HANDLER_AS_INIT, "__libc_start_main"), true);
     assert!(init.contains("the result is unproven"), "{init}");
 }
+
+/// `p1` at 0x1000 calls `p2` and `x`; `p2` at 0x1010 calls `x`; `x` at 0x1020 is `mov eax, 1; ret`.
+const CALLERS_CALLING_EACH_OTHER: &[u8] = &[
+    0xe8, 0x0b, 0x00, 0x00, 0x00, 0xe8, 0x16, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3,
+];
+
+/// `x`'s calls are read from `p2`'s site fates before `p1`'s, which reads `p2`'s register effect:
+/// that effect is then the deposited one, and no body is lifted twice (D354).
+#[test]
+fn a_caller_that_calls_another_caller_is_read_after_it() {
+    let functions = [
+        ("p1", BASE, 0x0b),
+        ("p2", BASE + 0x10, 6),
+        ("x", BASE + 0x20, 6),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(CALLERS_CALLING_EACH_OTHER, &functions));
+    open.analyse_program().expect("it surveys");
+    let before = open.analysis_stats().walked.computed;
+    open.rendered(BASE + 0x20).expect("it renders");
+    let walked = open.analysis_stats().walked.computed - before;
+    // `x` for its own render and for its register effect, `p2` and `p1` once each.
+    assert_eq!(walked, 4, "walks during the request");
+}

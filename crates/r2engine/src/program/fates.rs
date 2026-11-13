@@ -326,6 +326,12 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
     // A call two bodies hold (one walk enters the other's tail) is one call, read once.
     let mut seen = BTreeSet::new();
     let mut returned = BTreeSet::new();
+    // A caller's site fates deposit its register effect, so a caller calling it reads it held (D354).
+    for caller in callee_first(&survey, survey.callers_of(callee)) {
+        if let Some(Ok(thumb)) = survey.walked_in(caller) {
+            let _ = db.get::<SiteFates>(&(caller, thumb));
+        }
+    }
     for &caller in survey.callers_of(callee) {
         let Some(Ok(thumb)) = survey.walked_in(caller) else {
             unread = true;
@@ -383,6 +389,45 @@ fn slot_reads<S: Source + 'static>(
     let lane = &mut lanes[usize::from(LaneId::INTEGER.0)];
     join(lane, Some(Forwarded::Fate(LaneFate::Read(read))));
     true
+}
+
+/// `callers` (ascending) ordered so each comes after every other one it calls, a cycle broken where
+/// the search enters it: a post-order over the calls among them, `O(E log k)` for `E` calls into them.
+fn callee_first(survey: &super::requests::Survey, callers: &[u64]) -> Vec<u64> {
+    let mut calls = vec![Vec::new(); callers.len()];
+    for (to, called) in callers.iter().enumerate() {
+        for caller in survey.callers_of(*called) {
+            if let Ok(from) = callers.binary_search(caller)
+                && from != to
+            {
+                calls[from].push(to);
+            }
+        }
+    }
+    let mut seen = vec![false; callers.len()];
+    let mut order = Vec::with_capacity(callers.len());
+    // Each caller enters the stack once, and each of its calls is stepped past once.
+    for root in 0..callers.len() {
+        if std::mem::replace(&mut seen[root], true) {
+            continue;
+        }
+        let mut stack = vec![(root, 0usize)];
+        while let Some((at, next)) = stack.last_mut() {
+            match calls[*at].get(*next).copied() {
+                Some(to) => {
+                    *next += 1;
+                    if !std::mem::replace(&mut seen[to], true) {
+                        stack.push((to, 0));
+                    }
+                }
+                None => {
+                    order.push(callers[*at]);
+                    stack.pop();
+                }
+            }
+        }
+    }
+    order
 }
 
 /// The loader's calls to `callee` a cited row states, each read joined into `lanes` (D237, D240):

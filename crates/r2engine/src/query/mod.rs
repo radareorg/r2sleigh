@@ -37,6 +37,8 @@ pub struct AnalysisStats {
     pub call_boundaries: db::QueryStats,
     /// The calls to one function joined, one per node of the forwarder graph.
     pub direct_sites: db::QueryStats,
+    /// Bodies walked, a body lifted again counted again (D354).
+    pub walked: db::QueryStats,
     /// Dependencies the query graph forbids that a computation reached; zero in a sound engine.
     pub defects: u64,
 }
