@@ -39,7 +39,8 @@ pub(crate) fn promote(
         func.note_exhausted(exhausted);
     }
     let (walked, promotable) = walk(func, &defs, machine, calls_refund_stack, |walked| {
-        if walked.points.unplaced() {
+        // An entry block something branches back to runs its prologue again: no place is fixed.
+        if walked.points.unplaced() || func.cfg().has_entry_edge() {
             return BTreeMap::new();
         }
         let saves = saves(func, &defs, &walked.accesses, machine);

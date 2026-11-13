@@ -283,14 +283,28 @@ pub(crate) fn escape_spans(
             (!canary || !interior(at)).then_some(at)
         })
         .collect::<BTreeSet<_>>();
+    // An opaque access no stack root places is in the unknown object: what it points at leaves
+    // (S27), read here from the prep roots since no object exists yet.
+    let unplaced_accesses = (points.opaque.iter())
+        .filter(|access| {
+            let op = graph.inst_for_op(access.op).and_then(|inst| graph.op(inst));
+            op.is_some_and(|op| {
+                (access_addresses(op).iter())
+                    .any(|(value, _)| entry_offset(facts, *value).is_none())
+            })
+        })
+        .flat_map(|access| match &access.origin {
+            Origin::Points(points) => points.as_slice(),
+            Origin::Unplaced => &[],
+        });
     let opens = (points.escaped.iter())
+        .chain(unplaced_accesses)
         .filter(|point| point.at < 0)
         .map(|point| {
-            let start = widths
-                .range(..=point.at)
-                .next_back()
-                .map(|(start, _)| *start);
-            start.unwrap_or(point.at)
+            // An interior address opens the run at the place it lies inside.
+            let inside = (widths.range(..=point.at).next_back())
+                .filter(|(start, width)| point.at < start.saturating_add(**width));
+            inside.map_or(point.at, |(start, _)| *start)
         })
         .collect::<BTreeSet<_>>();
     let mut spans = Vec::<(i64, i64)>::new();

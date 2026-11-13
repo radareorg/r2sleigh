@@ -23,6 +23,9 @@ pub enum Extent {
     Upward,
     /// Either way.
     Either,
+    /// Computed from the address by more than offset arithmetic (a mask, a mix, a merge that moves
+    /// again): the seal keeps it in its object; promotion and the canary place it nowhere.
+    Derived,
 }
 
 /// An entry offset an address points at, and which way it may move from there.
@@ -33,7 +36,7 @@ pub struct FramePoint {
 }
 
 /// Where an access the walk does not take as one exact load or store points.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Origin {
     Points(Vec<FramePoint>),
     /// A frame address no offset places.
@@ -74,7 +77,9 @@ impl FramePoints {
 
     /// Whether an address no offset places escapes or is accessed.
     pub(crate) fn unplaced(&self) -> bool {
-        self.whole || (self.opaque.iter()).any(|access| matches!(access.origin, Origin::Unplaced))
+        self.whole
+            || (self.opaque.iter()).any(|access| matches!(access.origin, Origin::Unplaced))
+            || self.reaching().any(|point| point.extent == Extent::Derived)
     }
 
     /// The points that escape or are accessed opaquely.
@@ -134,6 +139,8 @@ enum Point {
         from: i64,
         up: bool,
     },
+    /// Computed from the address at this offset by more than offset arithmetic.
+    Derived(i64),
 }
 
 impl Point {
@@ -150,6 +157,10 @@ impl Point {
             Self::Indexed { from, up: true } => FramePoint {
                 at: from,
                 extent: Extent::Upward,
+            },
+            Self::Derived(at) => FramePoint {
+                at,
+                extent: Extent::Derived,
             },
         }
     }
@@ -177,6 +188,18 @@ impl Value {
                 _ => None,
             },
             _ => None,
+        }
+    }
+
+    /// The same places, computed from by more than offset arithmetic.
+    fn degraded(&self) -> Self {
+        match self {
+            Self::Points(points) => Self::Points(
+                (points.iter())
+                    .map(|point| Point::Derived(point.frame_point().at))
+                    .collect(),
+            ),
+            Self::Top => Self::Top,
         }
     }
 
@@ -230,10 +253,6 @@ pub(crate) fn walk(
     let Some(stack_pointer) = machine.stack_pointer_carrier() else {
         return refused(FramePoints::whole_frame());
     };
-    // An entry block something branches back to runs its prologue more than once: no place is fixed.
-    if func.cfg().has_entry_edge() {
-        return refused(FramePoints::whole_frame());
-    }
     let entry_sp = (0..func.values().len())
         .map(VarId::from_index)
         .find(|id| func.var(*id).version == 0 && func.storage_of(*id) == Some(stack_pointer));
@@ -249,13 +268,18 @@ pub(crate) fn walk(
     loop {
         let walked = Walker::new(func, defs, entry_sp, &sinks, carried.as_ref()).run();
         let promoted = promotable(&walked);
-        if (walked.carriers.iter()).all(|place| promoted.contains_key(place)) {
+        // An unplaced round is the answer: withdrawing a carrier only hides the flow through it.
+        let settled = walked.points.unplaced()
+            || (walked.carriers.iter()).all(|place| promoted.contains_key(place));
+        if settled {
             r2il::refusal_evidence!(
                 "frame-reach",
-                "{:#x}: escaped {:?}, {} opaque accesses, whole {}",
+                "{:#x}: escaped {:?}, opaque {:?}, unplaced {}",
                 func.entry,
                 walked.points.escaped,
-                walked.points.opaque.len(),
+                (walked.points.opaque.iter())
+                    .map(|access| &access.origin)
+                    .collect::<BTreeSet<_>>(),
                 walked.points.unplaced()
             );
             return (walked, promoted);
@@ -560,14 +584,15 @@ impl<'a> Walker<'a> {
             while let Some(var) = self.pending.pop() {
                 self.visit(var);
             }
-            // A merge some of whose sources are frame addresses and some not is one no offset
-            // places: a load through it reads another place on some path.
+            // A merge some of whose sources are frame addresses and some not reads another place
+            // on some path: its points, at no exact place.
             let partial = self.partial_merges();
             if partial.is_empty() {
                 break;
             }
             for dst in partial {
-                self.set(dst, Value::Top);
+                let known = self.known_sources(dst);
+                self.set(dst, known.degraded());
             }
         }
         self.finish()
@@ -590,9 +615,12 @@ impl<'a> Walker<'a> {
                 // Handed on, an address may be indexed either way.
                 self.points
                     .escaped
-                    .extend(points.iter().map(|point| FramePoint {
-                        at: point.frame_point().at,
-                        extent: Extent::Either,
+                    .extend(points.iter().map(|point| match point {
+                        Point::Derived(_) => point.frame_point(),
+                        _ => FramePoint {
+                            at: point.frame_point().at,
+                            extent: Extent::Either,
+                        },
                     }));
             }
             Value::Top => self.points.whole = true,
@@ -641,6 +669,10 @@ impl<'a> Walker<'a> {
             let (root, offset) = self.defs.affine(self.func, dst);
             let merged = if root == self.entry_sp {
                 Some(Value::one(Point::Exact(offset)))
+            } else if self.values.get(dst).is_some() {
+                // A merge that moves again is carried round a loop or past a partial source: its
+                // places at no exact offset, so a stepped pointer settles (the widening).
+                Some(self.known_sources(dst).degraded())
             } else {
                 self.merged_sources(dst)
             };
@@ -672,6 +704,15 @@ impl<'a> Walker<'a> {
             joined = Some(joined.map_or_else(|| value.clone(), |known| known.join(value)));
         }
         joined
+    }
+
+    /// The join of a merge's sources that are frame addresses.
+    fn known_sources(&self, phi: VarId) -> Value {
+        (self.defs.phi_sources(phi).iter())
+            .filter_map(|source| self.values.get(*source))
+            .fold(Value::Points(BTreeSet::new()), |joined, value| {
+                joined.join(value)
+            })
     }
 
     /// One operation reading `var`, which holds `value`.
@@ -731,11 +772,11 @@ impl<'a> Walker<'a> {
             // A truth value or a count: the address is only tested, and nothing of it is carried.
             SSAOp::CBranch { target, .. } if *target != var => {}
             _ if op.value_use() == r2il::ValueUse::Tests => {}
-            // Masked or measured, it is a number: it is an address again only if what it makes
-            // reaches an access or a sink, which its own uses decide.
+            // Masked, mixed or narrowed, it points into what the address did, at no exact place
+            // (the seal's provenance rule): its own uses decide what it reaches.
             _ if op.value_use() != r2il::ValueUse::Consumes => {
                 if let Some(dst) = op.dst() {
-                    self.set(*dst, Value::Top);
+                    self.set(*dst, value.degraded());
                 }
             }
             // Default deny: a target, a return or an unmodelled use reaches every place.
@@ -760,16 +801,21 @@ impl<'a> Walker<'a> {
         };
         let carries = |place: i64| self.carried.is_none_or(|carried| carried.contains(&place));
         let place = self.values.get(addr).map(Value::exact);
+        // A place stored again holds what it held and the new address at no exact offset, so a
+        // cursor stepped through memory settles (the widening).
+        let widened = |known: Option<&Value>| match known {
+            Some(known) if known.join(&address) != *known => known.join(&address.degraded()),
+            Some(known) => known.clone(),
+            None => address.clone(),
+        };
         if let Some(Some(place)) = place {
-            let joined = (self.stored.get(&place))
-                .map_or_else(|| address.clone(), |known| known.join(&address));
+            let joined = widened(self.stored.get(&place));
             self.stored.insert(place, joined);
         }
         match place {
             Some(Some(place)) if carries(place) => {
                 self.carriers.insert(place);
-                let joined = (self.held.get(&place))
-                    .map_or_else(|| address.clone(), |known| known.join(&address));
+                let joined = widened(self.held.get(&place));
                 if self.held.insert(place, joined.clone()).as_ref() != Some(&joined) {
                     for dst in self.loaded.get(&place).cloned().unwrap_or_default() {
                         self.set(dst, joined.clone());
@@ -794,7 +840,7 @@ impl<'a> Walker<'a> {
             return Value::Top;
         };
         if subtract && b == var {
-            return Value::Top;
+            return value.degraded();
         }
         let amount = self.defs.constant(self.func, other);
         let up = !subtract && non_negative(self.func, self.defs, other);
@@ -805,7 +851,8 @@ impl<'a> Walker<'a> {
             } else {
                 offset.wrapping_add(amount)
             }),
-            (indexed @ Point::Indexed { .. }, Some(_)) => indexed,
+            (kept @ (Point::Indexed { .. } | Point::Derived(_)), Some(_)) => kept,
+            (derived @ Point::Derived(_), None) => derived,
             (Point::Exact(from) | Point::Indexed { from, .. }, None) => Point::Indexed { from, up },
         });
         Value::Points(moved.collect())
@@ -914,5 +961,59 @@ fn non_negative(func: &SSAFunction, defs: &Definitions, var: VarId) -> bool {
             .var(var)
             .constant_bits()
             .is_some_and(|bits| width >= 1 && bits >> (width - 1) & 1 == 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn escaped(points: &[(i64, Extent)]) -> FramePoints {
+        FramePoints {
+            escaped: (points.iter())
+                .map(|(at, extent)| FramePoint {
+                    at: *at,
+                    extent: *extent,
+                })
+                .collect(),
+            ..FramePoints::default()
+        }
+    }
+
+    /// A compiler slot is no object an index below it spans: only a point inside it names it.
+    #[test]
+    fn an_indexed_point_below_a_slot_does_not_name_it() {
+        let points = escaped(&[(-64, Extent::Upward)]);
+        assert!(!points.names(-16, -8));
+        assert!(points.names(-64, -56));
+        assert!(escaped(&[(-12, Extent::Either)]).names(-16, -8));
+    }
+
+    /// An escape reaches out to a save on either side, and upward only from an upward point.
+    #[test]
+    fn a_save_bounds_what_an_escape_reaches() {
+        let saves = BTreeSet::from([-24]);
+        let either = escaped(&[(-40, Extent::Either)]);
+        assert!(either.reaches(-48, &saves) && either.reaches(-32, &saves));
+        assert!(!either.reaches(-16, &saves));
+        let upward = escaped(&[(-40, Extent::Upward)]);
+        assert!(!upward.reaches(-48, &saves) && upward.reaches(-32, &saves));
+    }
+
+    /// Default deny: a derived point, an unplaced access or the whole frame reach every place.
+    #[test]
+    fn a_derived_or_unplaced_point_reaches_every_place() {
+        let none = BTreeSet::new();
+        assert!(escaped(&[(-40, Extent::Derived)]).reaches(-200, &none));
+        assert!(FramePoints::whole_frame().names(-16, -8));
+        let opaque = FramePoints {
+            opaque: vec![OpaqueAccess {
+                op: OpId::from_index(0),
+                origin: Origin::Unplaced,
+            }],
+            ..FramePoints::default()
+        };
+        assert!(opaque.unplaced() && opaque.reaches(-8, &none));
+        assert!(!FramePoints::default().reaches(-8, &none));
     }
 }
