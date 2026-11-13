@@ -1453,8 +1453,17 @@ fn handler_answer(
 /// under the closed world, though its RAX is written; cold, it stays unproven (S30, D205).
 #[test]
 fn a_handler_only_atexit_takes_is_void_under_the_closed_world() {
-    let closed = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), true);
+    let (closed, premises) = handler_answer(at_exit(TAKES_HANDLER, "atexit"), true);
     assert!(closed.contains("void handler(void)"), "{closed}");
+    // The slot's type is how every caller calls only where no call is undefined (D227).
+    assert!(
+        closed.contains("no call reads the result (assuming closed-world, ub-free)"),
+        "{closed}"
+    );
+    assert!(
+        premises.contains(&r2source::Premise::UbFreeSource),
+        "{premises:?}"
+    );
     let cold = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), false);
     assert!(!cold.contains("void handler("), "{cold}");
 }
@@ -1546,8 +1555,12 @@ fn a_main_only_libc_start_main_takes_returns_its_int_under_the_closed_world() {
         "{closed}"
     );
     assert!(
-        closed.contains("reads the result (assuming closed-world)"),
+        closed.contains("reads the result (assuming closed-world, ub-free)"),
         "{closed}"
+    );
+    assert!(
+        premises.contains(&r2source::Premise::UbFreeSource),
+        "{premises:?}"
     );
     let cold = handler_rendered(at_exit(STARTS_HANDLER, "__libc_start_main"), false);
     assert!(cold.contains("the result is unproven"), "{cold}");

@@ -120,7 +120,7 @@ pub struct NativeFunction {
     /// `size_t` or a parameter's own name survives.
     pub signature: Option<SourceSignaturePresentation>,
     /// What the program's calls to this function read of its result registers.
-    pub closed_result: Option<crate::SourceClosedResult>,
+    pub closed_result: Option<crate::SourceClosedDecision>,
     /// The register saves the container's call-frame information states for
     /// this function.
     pub frame_saves: Vec<crate::SourceFrameSave>,
@@ -219,7 +219,7 @@ pub fn capture(
         },
         FunctionIdentity {
             address: function.address,
-            closed_result: function.closed_result,
+            closed: function.closed_result,
         },
         FunctionPresentation {
             display_name: function.name.as_str().into(),

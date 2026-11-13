@@ -585,8 +585,8 @@ struct Constructed {
     finish: Finish,
     source_block_count: usize,
     arch: crate::Arch,
-    /// Whether the recovered result is void on the premise that no caller outside the image reads it.
-    closed_world: bool,
+    /// What the recovered result's closed-world decision takes for granted.
+    closed_premises: &'static [r2source::Premise],
     exits: AssumedExits,
     /// The build recovery read, where it recovered the interface: what a restatement reuses.
     reuse: Option<Reuse>,
@@ -809,7 +809,7 @@ impl Constructed {
             finish,
             source_block_count,
             arch,
-            closed_world,
+            closed_premises,
             exits,
             reuse,
             kept: _,
@@ -823,8 +823,8 @@ impl Constructed {
             }
         }
         let mut function = function.with_assumed_exits(&exits);
-        if closed_world {
-            function = function.assuming(r2source::Premise::ClosedWorld);
+        for premise in closed_premises {
+            function = function.assuming(*premise);
         }
         control.poll()?;
         let entry_bytes = r2il::allocation::live_bytes();
@@ -854,7 +854,7 @@ impl Constructed {
             Some("provisional facts")
         } else if boundary(&self.finish) != boundary(&other.finish) {
             Some("body boundary")
-        } else if (self.closed_world, &self.exits) != (other.closed_world, &other.exits) {
+        } else if (self.closed_premises, &self.exits) != (other.closed_premises, &other.exits) {
             Some("premises")
         } else {
             None
@@ -2831,7 +2831,7 @@ impl TrustedSsaArtifact {
         let mut reuse = None;
         let mut kept = false;
         // Whether the recovered result is void on the premise that no caller outside the image reads it.
-        let mut closed_world = false;
+        let mut closed_premises: &'static [r2source::Premise] = &[];
         let mut body_boundary = None;
         let function_interface = match source.function_interface().cloned() {
             Some(interface) => Some(interface),
@@ -2967,7 +2967,7 @@ impl TrustedSsaArtifact {
                         break 'recovered None;
                     }
                 };
-                closed_world = recovered.assumes_closed_world();
+                closed_premises = recovered.closed_premises();
                 body_boundary = Some(Arc::new(recovered.boundary().clone()));
                 let minted = crate::recover_interface::mint_recovered_interface(
                     &recovered,
@@ -3109,7 +3109,7 @@ impl TrustedSsaArtifact {
         control.poll()?;
         Ok(Constructed {
             function,
-            closed_world,
+            closed_premises,
             exits: exits.clone(),
             reuse: reuse.map(|(key, provisional)| Reuse { key, provisional }),
             kept,

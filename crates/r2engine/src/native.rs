@@ -118,7 +118,7 @@ pub trait Program: crate::body::Program {
 
     /// What the closed world's `CallBoundary` decided of the result of the function at `entry`, from
     /// its open read's supply; none outside `aa` (doc/adr-result-side.md, section 3; D317).
-    fn closed_result(&self, _entry: u64) -> Option<r2source::SourceClosedResult> {
+    fn closed_result(&self, _entry: u64) -> Option<r2source::SourceClosedDecision> {
         None
     }
 
@@ -2073,7 +2073,7 @@ impl<'a> Native<'a> {
     fn first_capture<'t>(
         walk: &'t Walk,
         declared_root: &Restatement,
-        closed_result: Option<r2source::SourceClosedResult>,
+        closed_result: Option<r2source::SourceClosedDecision>,
     ) -> Capture<'t> {
         let (tables, calls) = (&walk.tables[..], &walk.calls[..]);
         let (restatement, tables) = match (declared_root.interface.is_some(), tables.is_empty()) {
@@ -2095,7 +2095,7 @@ impl<'a> Native<'a> {
         walk: &Walk,
         callees: &Callees,
         declared_root: &Restatement,
-        reads: Option<r2source::SourceClosedResult>,
+        reads: Option<r2source::SourceClosedDecision>,
     ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Self::first_capture(walk, declared_root, reads);
         self.seal_captured(&walk.root, callees, capture)
@@ -2626,7 +2626,7 @@ impl<'a> Native<'a> {
         extra_literals: Vec<(u64, String)>,
         restatement: Restatement,
         (tables, calls): (&[NativePointerTable], &[NativePointerTable]),
-        closed_result: Option<r2source::SourceClosedResult>,
+        closed_result: Option<r2source::SourceClosedDecision>,
     ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Capture {
             extra_literals,
@@ -2819,7 +2819,7 @@ struct Capture<'t> {
     restatement: Restatement,
     tables: &'t [NativePointerTable],
     calls: &'t [NativePointerTable],
-    closed_result: Option<r2source::SourceClosedResult>,
+    closed_result: Option<r2source::SourceClosedDecision>,
 }
 
 /// Every function this body reaches by a call, tail jump, loaded slot or folded target, each once

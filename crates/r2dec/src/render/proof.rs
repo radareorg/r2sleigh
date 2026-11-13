@@ -180,8 +180,16 @@ pub(crate) fn note_unproven_constructs(
         );
     }
     note_floor(&mut detail, floor);
-    if ledger.is_some_and(|ledger| ledger.premises().contains(&r2source::Premise::ClosedWorld)) {
-        detail.push_str(closed_world(func, unproven));
+    if let Some(premises) = ledger.map(crate::ledger::ObligationLedger::result_premises)
+        && !premises.is_empty()
+    {
+        let assumed = premises.iter().map(|premise| premise.spelled());
+        let assumed = assumed.collect::<Vec<_>>().join(", ");
+        let _ = write!(
+            &mut detail,
+            "{} (assuming {assumed})",
+            closed_world(func, unproven)
+        );
     }
     if open_second_result {
         detail.push_str("; the result's second register is open: no call read decides it");
@@ -236,13 +244,11 @@ fn closed_world(
 ) -> &'static str {
     match unproven {
         Some(Some(r2types::UnprovenCause::ForwardCycle)) => {
-            "; a call returns the result on through a cycle (assuming closed-world)"
+            "; a call returns the result on through a cycle"
         }
         // A value no body proves, decided only by its reading calls.
-        None if func.ret_type != crate::ast::CType::Void => {
-            "; a call reads the result (assuming closed-world)"
-        }
-        _ => "; no call reads the result (assuming closed-world)",
+        None if func.ret_type != crate::ast::CType::Void => "; a call reads the result",
+        _ => "; no call reads the result",
     }
 }
 
