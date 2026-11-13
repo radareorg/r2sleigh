@@ -424,6 +424,34 @@ fn a_call_to_a_function_that_executes_ud2_ends_its_caller() {
     assert_eq!(extent(&mut program, caller), (caller + 5, true));
 }
 
+/// `trap: int3`, then `caller: call trap; mov eax, 1; ret`.
+const BREAKS: &[u8] = &[0xcc, 0xe8, 0xfa, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3];
+
+/// `int3` raises #BP, which Sleigh ends with `return [0]`: a trap, so a call to a function that
+/// executes it ends its caller (D352).
+#[test]
+fn a_call_to_a_function_that_executes_int3_ends_its_caller() {
+    let (trap, caller) = (BASE, BASE + 1);
+    let functions = [("trap", trap, 1), ("caller", caller, 11)];
+    let mut program = OpenProgram::of(Literal::of_code(BREAKS, &functions));
+    assert_eq!(extent(&mut program, trap), (caller, true));
+    assert_eq!(extent(&mut program, caller), (caller + 5, true));
+}
+
+/// `sys: int 0x80; ret`, then `caller: call sys; mov eax, 1; ret`.
+const INTERRUPTS: &[u8] = &[
+    0xcd, 0x80, 0xc3, 0xe8, 0xf8, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,
+];
+
+/// Any other vector stays the call through it Sleigh writes, which comes back (D352).
+#[test]
+fn a_call_to_a_function_that_interrupts_through_another_vector_comes_back() {
+    let (sys, caller) = (BASE, BASE + 3);
+    let functions = [("sys", sys, 3), ("caller", caller, 11)];
+    let mut program = OpenProgram::of(Literal::of_code(INTERRUPTS, &functions));
+    assert_eq!(extent(&mut program, caller), (caller + 11, false));
+}
+
 /// `spin: b spin`, then `caller: cmp r0, #0; blne spin; bx lr`.
 const PREDICATED: &[u8] = &[
     0xfe, 0xff, 0xff, 0xea, 0x00, 0x00, 0x50, 0xe3, 0xfc, 0xff, 0xff, 0x1b, 0x1e, 0xff, 0x2f, 0xe1,
