@@ -915,9 +915,13 @@ pub(crate) fn field_access_certificates_from_source_aggregate_accesses(
     let mut by_location = BTreeMap::<(usize, u64), Option<crate::FieldAccessCertificate>>::new();
     let projections = source.aggregate_accesses();
     for (slot, projection) in projections.parameter_projections(interface.revision_identity()) {
+        // An indexed array member names no field at one offset (D360).
         let Ok(slot) = usize::try_from(slot) else {
             continue;
         };
+        if projection.member_indexed() {
+            continue;
+        }
         let Some(field_type) = crate::convert::source_type_like(graph, projection.member_type_id)
         else {
             continue;

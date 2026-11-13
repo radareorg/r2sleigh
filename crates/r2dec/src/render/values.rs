@@ -941,6 +941,7 @@ impl<'a> Values<'a> {
                 matches!(projection.root, r2ssa::AggregateRoot::Member(_))
                     && projection.graph == r2ssa::GraphOf::Interface
                     && projection.element_index.is_none()
+                    && !projection.member_indexed()
             })
             .filter_map(|projection| {
                 let layout = (graph.aggregates().get(projection.aggregate_id as usize))
@@ -1010,7 +1011,8 @@ impl<'a> Values<'a> {
                 let projection = projections.get(id)?;
                 let named = projection.root == r2ssa::AggregateRoot::Parameter(slot as u32)
                     && projection.graph == r2ssa::GraphOf::Interface
-                    && projection.element_index.is_none();
+                    && projection.element_index.is_none()
+                    && !projection.member_indexed();
                 let cell = self.roots.access(*id)?.canonical;
                 let member = CExpr::PtrMember {
                     base: Box::new(base.clone()),

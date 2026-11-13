@@ -1650,6 +1650,7 @@ impl SsaArtifact {
                 accesses: &facts.structured.memory_accesses,
                 stack_slots: &facts.certificates.stack_slots,
                 machine_context: &self.machine_context,
+                values: &facts.values,
             });
         let member_calls = crate::member_call::collect_member_calls(
             self.graph(),

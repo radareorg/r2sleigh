@@ -16,7 +16,7 @@ use crate::{
     SourceTypeKind, SsaGraph, StructuredAccessId, StructuredMemoryAccessFact, ValueId,
 };
 
-pub const AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION: u32 = 6;
+pub const AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION: u32 = 7;
 
 /// What holds the struct a projection reads (D348). Each constructor is proven, never assumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -47,6 +47,8 @@ pub enum PathStep {
     Member(u32),
     /// An element of a fixed-count array at a constant index the access offset proves.
     Element(u64),
+    /// Element `first + index` of a fixed-count array, whose range keeps it below the count.
+    Indexed { index: ValueId, first: u64 },
 }
 
 /// Exact scalar value carried by one projected memory effect.
@@ -77,7 +79,7 @@ pub struct AggregateAccessProjection {
     pub aggregate_id: u32,
     /// The steps from the outermost aggregate to the scalar leaf the access reads (D346).
     pub path: Box<[PathStep]>,
-    /// The path spelled as C (`top_left.x`, `a[2].y`), so a consumer needs no graph.
+    /// The path spelled as C (`top_left.x`, `a[2].y`); a variable index spells `[]`.
     pub member_name: Box<str>,
     /// The leaf's type.
     pub member_type_id: u32,
@@ -89,6 +91,13 @@ pub struct AggregateAccessProjection {
     pub access: StructuredAccessId,
     pub producer: InstId,
     pub binding: AggregateAccessBinding,
+}
+
+impl AggregateAccessProjection {
+    /// Whether an index value steps an array member, so the leaf's offset is not fixed (D360).
+    pub fn member_indexed(&self) -> bool {
+        (self.path.iter()).any(|step| matches!(step, PathStep::Indexed { .. }))
+    }
 }
 
 /// Revision-sealed aggregate access projections keyed by canonical access ID.
@@ -188,13 +197,22 @@ struct ScalarLeaf {
     type_id: u32,
 }
 
+/// A variable term of an access address: `value * stride` bytes, and what `value` can be.
+#[derive(Clone, Copy)]
+struct VariableIndex {
+    value: ValueId,
+    stride_bytes: u64,
+    /// The largest `value` can be; `None` where no range bounds it.
+    upper: Option<u64>,
+}
+
 /// The one scalar the access covers, through by-value structs and fixed-count arrays; a union,
 /// bit-field, unsized element or overlap refuses. O(depth x m) (ADR "ExtTypeDb as built").
 fn scalar_leaf(
     graph: &crate::SourceTypeGraph,
     aggregate: &crate::SourceAggregateLayout,
-    offset_bits: u64,
-    size_bits: u64,
+    (offset_bits, size_bits): (u64, u64),
+    mut variable: Option<VariableIndex>,
 ) -> Option<ScalarLeaf> {
     let mut leaf = ScalarLeaf {
         path: Vec::new(),
@@ -237,8 +255,25 @@ fn scalar_leaf(
                 if index >= count || leaf.name.is_empty() {
                     return None;
                 }
-                leaf.path.push(PathStep::Element(index));
-                leaf.name.push_str(&format!("[{index}]"));
+                // The variable term steps this array where its stride is the element (D360).
+                match variable.filter(|term| term.stride_bytes.checked_mul(8) == Some(element)) {
+                    Some(term) => {
+                        let last = index.checked_add(term.upper?)?;
+                        if last >= count {
+                            return None;
+                        }
+                        leaf.path.push(PathStep::Indexed {
+                            index: term.value,
+                            first: index,
+                        });
+                        leaf.name.push_str("[]");
+                        variable = None;
+                    }
+                    None => {
+                        leaf.path.push(PathStep::Element(index));
+                        leaf.name.push_str(&format!("[{index}]"));
+                    }
+                }
                 offset_bits -= index * element;
                 leaf.type_id = element_type_id;
             }
@@ -247,6 +282,7 @@ fn scalar_leaf(
             // a store to `s->next` projects onto the pointer.
             _ => {
                 return (offset_bits == 0
+                    && variable.is_none()
                     && !leaf.path.is_empty()
                     && !leaf.name.is_empty()
                     && current.size_bits() == size_bits)
@@ -280,6 +316,8 @@ struct Target<'g> {
     struct_type_id: u32,
     byte_offset: u64,
     element_index: Option<AggregateElementIndexProjection>,
+    /// A term no element of the root's own array steps, which an array member must (D360).
+    variable: Option<VariableIndex>,
 }
 
 /// The struct node `type_id` names, by value: its aggregate, checked against the node.
@@ -336,6 +374,8 @@ pub(crate) struct ProjectionSources<'a> {
     pub accesses: &'a BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
     pub stack_slots: &'a BTreeMap<ObjectId, crate::semantic::StackSlotCertificate>,
     pub machine_context: &'a SourceMachineContext,
+    /// What each value can be: the bound a variable index into an array member needs.
+    pub values: &'a crate::values::ValueRanges,
 }
 
 /// Every access's projection. Direct roots first; then a worklist over projected pointer-member
@@ -350,6 +390,7 @@ pub(crate) fn collect_aggregate_access_projections(
         accesses,
         stack_slots,
         machine_context,
+        values,
     } = *sources;
     let Some(interface) = machine_context.function_interface() else {
         return AggregateAccessProjectionFacts::default();
@@ -377,7 +418,7 @@ pub(crate) fn collect_aggregate_access_projections(
         let Some(binding) = exact_access_binding(graph, access, access.space) else {
             continue;
         };
-        let target = parameter_target(addresses, interface, type_graph, access)
+        let target = parameter_target(addresses, interface, type_graph, (access, values))
             .or_else(|| frame_target(stack_slots, type_graph, access))
             .or_else(|| data_target(views, image, access));
         let Some(target) = target else {
@@ -426,6 +467,7 @@ pub(crate) fn collect_aggregate_access_projections(
                 struct_type_id,
                 byte_offset: offset,
                 element_index: None,
+                variable: None,
             };
             if let Some(projection) = project(&revision, access, binding, target) {
                 record(projection, &mut projections, &mut pointers);
@@ -439,12 +481,13 @@ pub(crate) fn collect_aggregate_access_projections(
     }
 }
 
-/// A parameter declared a struct pointer, the access at a constant offset or one exact stride.
+/// A parameter declared a struct pointer, the access at a constant offset plus one term: a stride
+/// of the struct (`p[i]`), or of an array member the term's range keeps inside (`p->a[i]`).
 fn parameter_target<'g>(
     addresses: &AddressProvenanceFacts,
     interface: &crate::SourceFunctionInterface,
     type_graph: &'g crate::SourceTypeGraph,
-    access: &StructuredMemoryAccessFact,
+    (access, values): (&StructuredMemoryAccessFact, &crate::values::ValueRanges),
 ) -> Option<Target<'g>> {
     let expression = addresses.parameter_expression(access.address)?;
     let parameter_index = u32::try_from(expression.parameter).ok()?;
@@ -457,14 +500,23 @@ fn parameter_target<'g>(
     }
     let struct_type_id = pointee_struct(type_graph, logical_value.type_id())?;
     let size_bytes = struct_layout(type_graph, struct_type_id)?.size_bits() / 8;
-    let element_index = match expression.terms.as_slice() {
-        [] => None,
-        [term] if term.coefficient > 0 && u64::try_from(term.coefficient) == Ok(size_bytes) => {
+    let (element_index, variable) = match expression.terms.as_slice() {
+        [] => (None, None),
+        [term] if term.coefficient > 0 && u64::try_from(term.coefficient) == Ok(size_bytes) => (
             Some(AggregateElementIndexProjection {
                 value: term.value,
                 stride_bytes: size_bytes,
-            })
-        }
+            }),
+            None,
+        ),
+        [term] if term.coefficient > 0 => (
+            None,
+            Some(VariableIndex {
+                value: term.value,
+                stride_bytes: u64::try_from(term.coefficient).ok()?,
+                upper: values.upper_bound(term.value),
+            }),
+        ),
         _ => return None,
     };
     Some(Target {
@@ -474,6 +526,7 @@ fn parameter_target<'g>(
         struct_type_id,
         byte_offset: u64::try_from(expression.offset).ok()?,
         element_index,
+        variable,
     })
 }
 
@@ -493,6 +546,7 @@ fn frame_target<'g>(
         struct_type_id,
         byte_offset: u64::try_from(access.object_offset?).ok()?,
         element_index: None,
+        variable: None,
     })
 }
 
@@ -513,6 +567,7 @@ fn data_target<'g>(
         struct_type_id,
         byte_offset,
         element_index: None,
+        variable: None,
     })
 }
 
@@ -526,7 +581,12 @@ fn project(
     let aggregate = struct_layout(target.graph, target.struct_type_id)?;
     let offset_bits = target.byte_offset.checked_mul(8)?;
     let size_bits = u64::from(access.width) * 8;
-    let leaf = scalar_leaf(target.graph, aggregate, offset_bits, size_bits)?;
+    let leaf = scalar_leaf(
+        target.graph,
+        aggregate,
+        (offset_bits, size_bits),
+        target.variable,
+    )?;
     Some(AggregateAccessProjection {
         schema_version: AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION,
         source_revision_identity: revision.into(),
@@ -794,8 +854,13 @@ mod tests {
     fn a_read_inside_an_array_member_names_its_element() {
         let graph = array_member_graph();
         let leaf = |offset_bits, size_bits| {
-            scalar_leaf(&graph, &graph.aggregates()[0], offset_bits, size_bits)
-                .map(|leaf| (leaf.path, leaf.name))
+            scalar_leaf(
+                &graph,
+                &graph.aggregates()[0],
+                (offset_bits, size_bits),
+                None,
+            )
+            .map(|leaf| (leaf.path, leaf.name))
         };
         let a2 = vec![PathStep::Member(1), PathStep::Element(2)];
         assert_eq!(leaf(128 + 64, 32), Some((a2, "a[2]".to_string())));
@@ -834,7 +899,7 @@ mod tests {
             ));
         }
         let graph = SourceTypeGraph::new(types, aggregates).expect("nested graph");
-        let leaf = scalar_leaf(&graph, &graph.aggregates()[0], 0, 32).expect("a leaf");
+        let leaf = scalar_leaf(&graph, &graph.aggregates()[0], (0, 32), None).expect("a leaf");
         assert_eq!(
             leaf.name,
             format!("{}leaf", "inner.".repeat(LEVELS as usize - 1))
@@ -1178,6 +1243,7 @@ mod tests {
             accesses: &ambiguous_accesses,
             stack_slots: &positive.certificates().stack_slots,
             machine_context: positive.machine_context(),
+            values: &positive.facts().values,
         });
         assert!(recollected.projection(REVISION, load_id).is_none());
 
@@ -1197,6 +1263,7 @@ mod tests {
             accesses: &positive.structured().memory_accesses,
             stack_slots: &positive.certificates().stack_slots,
             machine_context: positive.machine_context(),
+            values: &positive.facts().values,
         });
         assert!(
             recollected.projection(REVISION, load_id).is_none(),
