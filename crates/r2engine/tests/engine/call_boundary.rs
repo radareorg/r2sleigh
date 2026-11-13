@@ -1512,3 +1512,53 @@ fn the_atexit_extern_spells_its_slot() {
         .into_text();
     assert!(text.contains("int32_t atexit(void(*)(void));"), "{text}");
 }
+
+/// `_start`'s shape: `lea rdi, [rip + 9]: handler; call __libc_start_main; hlt`.
+const STARTS_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, 0xe8, 0x84, 0x00, 0x00, 0x00, 0xf4,
+];
+
+/// [`STARTS_HANDLER`] handing the address in RCX, `__libc_start_main`'s `init`: `lea rcx, [rip + 9]`.
+const STARTS_HANDLER_AS_INIT: &[u8] = &[
+    0x48, 0x8d, 0x0d, 0x09, 0x00, 0x00, 0x00, 0xe8, 0x84, 0x00, 0x00, 0x00, 0xf4,
+];
+
+/// A function only `__libc_start_main`'s cited `int (*)(int, char **, char **)` slot takes returns
+/// that `int` under the closed world, though its RAX is a call's: LSB passes it to `exit` (D227).
+#[test]
+fn a_main_only_libc_start_main_takes_returns_its_int_under_the_closed_world() {
+    let closed = handler_rendered(at_exit(STARTS_HANDLER, "__libc_start_main"), true);
+    assert!(
+        closed.contains("r2sleigh_word_u32 handler(void)"),
+        "{closed}"
+    );
+    assert!(
+        closed.contains("reads the result (assuming closed-world)"),
+        "{closed}"
+    );
+    let cold = handler_rendered(at_exit(STARTS_HANDLER, "__libc_start_main"), false);
+    assert!(cold.contains("the result is unproven"), "{cold}");
+}
+
+/// A non-PIE `_start` forms the address as an immediate, `mov edi, 0x1010`: the word inside that
+/// instruction is the take itself, so it is no stored word and `main` is no escape (D227).
+#[test]
+fn a_main_an_immediate_hands_to_libc_start_main_returns_its_int() {
+    const STARTS_BY_IMMEDIATE: &[u8] = &[
+        0xbf, 0x10, 0x10, 0x00, 0x00, // 1000 mov edi, 0x1010
+        0xe8, 0x86, 0x00, 0x00, 0x00, // 1005 call the stub
+        0xf4, // 100a hlt
+    ];
+    let closed = handler_rendered(at_exit(STARTS_BY_IMMEDIATE, "__libc_start_main"), true);
+    assert!(
+        closed.contains("r2sleigh_word_u32 handler(void)"),
+        "{closed}"
+    );
+}
+
+/// `init`'s slot is `func`, which states no return, so a function taken into it keeps its residual.
+#[test]
+fn a_take_into_a_slot_that_states_no_return_reads_nothing() {
+    let init = handler_rendered(at_exit(STARTS_HANDLER_AS_INIT, "__libc_start_main"), true);
+    assert!(init.contains("the result is unproven"), "{init}");
+}
