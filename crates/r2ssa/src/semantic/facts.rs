@@ -1786,7 +1786,6 @@ impl<'a> ObjectModelBuilder<'a> {
 
     pub(crate) fn build(
         mut self,
-        function: &SSAFunction,
         graph: &SsaGraph,
         values: &'a crate::values::ValueRanges,
         inputs: Option<&BuildInputs>,

@@ -91,7 +91,6 @@ fn same_value_id_is_space_keyed_for_global_stack_parameter_and_unknown_objects()
         Some(stack.machine_context()),
     )
     .build(
-        stack.function(),
         stack.graph(),
         super::super::empty_value_ranges(),
         Some(&super::super::BuildInputs::of(
