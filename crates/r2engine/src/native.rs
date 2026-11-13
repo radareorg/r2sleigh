@@ -1880,9 +1880,8 @@ impl Walked {
     }
 }
 
-/// `keep` less every block but `entry` that a block outside it enters, and what those reach: a
-/// path from outside the region would carry values the region's seal never sees. A worklist that
-/// only removes, so each block leaves once: O(blocks + edges).
+/// `keep` less every block but `entry` entered from outside it, and what those reach, since the
+/// seal never sees such a path's values. A removal-only worklist: O(blocks + edges).
 fn closed_under_entry(mut keep: Vec<bool>, preceding: &[Vec<usize>], entry: usize) -> Vec<bool> {
     let mut succeeding = vec![Vec::new(); keep.len()];
     for (to, from) in preceding.iter().enumerate() {

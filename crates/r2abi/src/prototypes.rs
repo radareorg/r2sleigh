@@ -179,9 +179,8 @@ pub enum Arrival {
 }
 
 impl Parameter {
-    /// The return type of the function this parameter points to, where its type is a pointer to
-    /// code; `None` for any other type. A constant in such a slot is a function address on the
-    /// declaration's authority; a refused return (`func`) states no return type (S30).
+    /// The return type of the code this parameter points to; `None` for a data pointer or a
+    /// refused return (`func`, S30). A constant in such a slot is a function address.
     pub fn code_returns(&self, graph: &crate::TypeGraph) -> Option<crate::TypeId> {
         let crate::types::Type::Pointer { target } = graph.resolved(self.ty)? else {
             return None;

@@ -157,9 +157,8 @@ impl FrameReach {
     }
 }
 
-/// The points that leave, and whether one leaves no offset places. An opaque access the model
-/// places in no frame object, or in the unknown object, hands on what it points at (S27). An
-/// access preparation removed reads nothing. O(opaque accesses x log objects).
+/// The points that leave, and whether one leaves unplaced; an opaque access outside every frame
+/// object hands on what it points at (S27). O(opaque accesses x log objects).
 fn leaving(
     points: &FramePoints,
     graph: &SsaGraph,
@@ -217,10 +216,8 @@ fn access_addresses(op: &SSAOp<ValueId>) -> Vec<(ValueId, SpaceId)> {
     }
 }
 
-/// Each run of the frame an escaped address may reach, from the lowest place whose own address
-/// escapes up to a compiler slot or the frame's top, as one span: C's pointer arithmetic across
-/// it is defined (doc/adr-frame-model.md, extent rule and "Escape spans"). Read by the one build
-/// from the walk's offsets, before any object exists. O(points + accesses x log places).
+/// Each frame run an escaped address may reach, lowest escaping place to a compiler slot or the
+/// top (doc/adr-frame-model.md, "Escape spans"). O(points + accesses x log places).
 pub(crate) fn escape_spans(
     function: &SSAFunction,
     graph: &SsaGraph,
@@ -380,9 +377,8 @@ fn compiler_slots(
         .collect()
 }
 
-/// The addresses of stores that fill a compiler slot, and whether each is the canary's: a save
-/// of a preserved register, the canary, and with `entries` any non-argument register's entry
-/// value (the return address, the frame pointer).
+/// Stores that fill a compiler slot (a preserved save, the canary, with `entries` any
+/// non-argument entry value), each marked whether it is the canary's.
 fn compiler_slot_stores(
     function: &SSAFunction,
     graph: &SsaGraph,

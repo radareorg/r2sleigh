@@ -249,10 +249,8 @@ fn a_parameter_reloaded_from_its_stack_home_is_still_the_base() {
     assert!(matches!(arena.term(index).kind, TermKind::Leaf(_)));
 }
 
-/// The count parameter is not a pointer, and the base is chosen because of
-/// that: with every parameter called a pointer the sum has two candidates
-/// with unit coefficients and the rule refuses. With no convention model the
-/// home is no save (D276), so the promoted parameter is read at each use.
+/// The count parameter is no pointer, so the base is chosen; with both called pointers the
+/// sum has two unit candidates and the rule refuses. No model: the home is promoted (D276).
 #[test]
 fn a_scalar_parameter_is_not_a_candidate_base() {
     let artifact = artifact_with_parameters(parameter_home_ops(4, 4), &[RDI, RSI]);

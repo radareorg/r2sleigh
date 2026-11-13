@@ -7857,9 +7857,8 @@ fn a_loop_phi_reaching_only_a_residual_has_that_site() {
     assert!(text.contains("r2sleigh_residual_"), "{text}");
 }
 
-/// gcc -O2 `shape_byte_indexed_buffer`: the edge into the vector loop carries `rax = r9`, a frame
-/// address the loop walks in the unknown object, so the frame escapes as one array (S27). The run
-/// opens at `rsp + 8`, the lowest place whose address leaves (D290); `rsp + 0` is no part of it.
+/// gcc -O2 `shape_byte_indexed_buffer`: the loop walks frame address `r9` in the unknown object
+/// (S27), so one run escapes from `rsp + 8`, the lowest place whose address leaves (D290).
 const EDGE_COPY_GAP: &[u8] = &[
     0xf3, 0x0f, 0x1e, 0xfa, 0x48, 0x83, 0xec, 0x68, 0x49, 0x89, 0xf0, 0x64, 0x48, 0x8b, 0x04, 0x25,
     0x28, 0x00, 0x00, 0x00, 0x48, 0x89, 0x44, 0x24, 0x58, 0x31, 0xc0, 0x4c, 0x8d, 0x4c, 0x24, 0x10,

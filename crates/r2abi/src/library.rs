@@ -518,9 +518,8 @@ impl LibraryRows {
     }
 }
 
-/// `none`, `variadic`, `format(printf,2)`, `va_list(2)`, `va_list(2,printf,1)` or
-/// `flagged(1,open_needs_mode,1)`.
-/// The last comma outside parentheses: where a row's parameter name begins.
+/// The last comma outside parentheses, where a row's parameter name begins: after `none`,
+/// `variadic`, `format(printf,2)`, `va_list(2,printf,1)` or `flagged(1,open_needs_mode,1)`.
 fn outer_comma(value: &str) -> Option<usize> {
     let mut depth = 0i32;
     let mut last = None;

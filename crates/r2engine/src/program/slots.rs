@@ -141,9 +141,8 @@ fn into_void_slots<S: Source + 'static>(
     least
 }
 
-/// What each transfer of one body reads and overwrites of a register: an import's placed reads
-/// and its convention's clobbers; a body or an unknown target reads everything and overwrites
-/// nothing (a body's `overwrites` covers result lanes only).
+/// What each transfer reads and overwrites: an import's placed reads and clobbers; a body or an
+/// unknown target reads everything and overwrites nothing beyond its result lanes.
 struct SiteReads<'r> {
     /// Each transfer's target as the walk read it, and what it is, by block and operation.
     callees: Vec<Vec<Option<(u64, Callee)>>>,

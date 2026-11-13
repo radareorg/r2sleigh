@@ -238,10 +238,8 @@ pub(crate) struct Walked {
     carriers: BTreeSet<i64>,
 }
 
-/// Walk `func`'s frame addresses once. `promotable` decides, from one round's points and
-/// accesses, which places promotion takes; a place it refuses carries no address in the next
-/// round. The set only shrinks, so at most one round per place. Returns the last round with
-/// the places it promotes.
+/// Walk `func`'s frame addresses; `promotable` picks each round's promoted places and the set
+/// only shrinks, so at most one round per place. Returns the last round and its places.
 pub(crate) fn walk(
     func: &SSAFunction,
     defs: &Definitions,

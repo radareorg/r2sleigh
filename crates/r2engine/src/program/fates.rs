@@ -814,9 +814,8 @@ impl BoundaryResult {
     }
 }
 
-/// `DeclaredVoid` (S30): no call reads, takes, loses or returns on a held lane, every call the
-/// index claims was read, and every other way in hands the address only into cited `void` slots.
-/// Under `UbFreeSource` a function called through `void (*)(...)` returns nothing (C17 6.3.2.3p8).
+/// `DeclaredVoid`: every way in hands the address only into cited `void (*)(...)` slots, so
+/// under `UbFreeSource` nothing reads the result (doc/adr-result-side.md, S30 as built).
 fn declared_void<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     entry: u64,
@@ -1449,9 +1448,8 @@ impl<S: Source + 'static> Reading<'_, S> {
         (effect, None)
     }
 
-    /// What the import's placement reads (S8 `Placement::reads`); its count register bounds the
-    /// vector registers. An import no row binds takes what an unknown callee does. The third part
-    /// is what it certainly reads: a cited fixed row's float parameters (D228).
+    /// What the import's placement reads, the vector registers bounded by its count register,
+    /// and what it certainly reads (D228); an unbound import takes what an unknown callee does.
     fn import_takes(
         &self,
         reads: Option<r2ssa::call_reads::CallReads>,
