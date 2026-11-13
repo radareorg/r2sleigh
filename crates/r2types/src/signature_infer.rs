@@ -123,9 +123,8 @@ fn certified_memory_parameter(
         })
 }
 
-/// Each parameter a certified memory access addresses, as a pointer to the structure its
-/// accesses lay out, else to the one width every such access reads, signed as its loads seed it
-/// (D265), or to `void`.
+/// Each parameter a certified access addresses, as a pointer to the structure its accesses lay
+/// out, else to the one width they read, signed or float as they use it (D265, D353), or `void`.
 pub(crate) fn certified_parameter_pointers(
     prepared: &SsaArtifact,
     aggregates: &BTreeMap<usize, crate::aggregates::InferredAggregate>,
@@ -166,58 +165,14 @@ pub(crate) fn certified_parameter_pointers(
         .collect()
 }
 
-/// Whether every certified access through each parameter at `(parameter, bits)` carries a float:
-/// a load whose every use, through copies and merges, is a float operation, a store of one's
-/// result. A float operation decodes the bits as IEEE 754 (D353). O(accesses + uses reached).
+/// Whether every certified access at `(parameter, bits)` carries a float: each load used only by
+/// float operations (through copies and merges), each store of one's result (D353). O(uses).
 fn pointee_floats(prepared: &SsaArtifact) -> BTreeMap<(usize, u32), bool> {
     let graph = prepared.graph();
-    let float_op = |op: &SSAOp<r2ssa::ValueId>| {
-        matches!(
-            op,
-            SSAOp::FloatAdd { .. }
-                | SSAOp::FloatSub { .. }
-                | SSAOp::FloatMult { .. }
-                | SSAOp::FloatDiv { .. }
-                | SSAOp::FloatNeg { .. }
-                | SSAOp::FloatAbs { .. }
-                | SSAOp::FloatSqrt { .. }
-                | SSAOp::FloatCeil { .. }
-                | SSAOp::FloatFloor { .. }
-                | SSAOp::FloatRound { .. }
-                | SSAOp::FloatNaN { .. }
-                | SSAOp::FloatEqual { .. }
-                | SSAOp::FloatNotEqual { .. }
-                | SSAOp::FloatLess { .. }
-                | SSAOp::FloatLessEqual { .. }
-                | SSAOp::Float2Int { .. }
-                | SSAOp::FloatFloat { .. }
-                | SSAOp::Trunc { .. }
-        )
-    };
-    // Every use reached through copies and merges is a float operation, and one is reached.
-    let read_as_float = |value: r2ssa::ValueId| {
-        let mut seen = r2ssa::dense::IdSet::new(graph.values.len());
-        let (mut pending, mut any) = (vec![value], false);
-        while let Some(value) = pending.pop() {
-            if !seen.insert(value) {
-                continue;
-            }
-            for site in graph.use_sites(value) {
-                let Some(inst) = graph.inst(site.inst) else {
-                    return false;
-                };
-                match &inst.payload {
-                    r2ssa::InstPayload::Op(SSAOp::Copy { dst, .. }) => pending.push(*dst),
-                    r2ssa::InstPayload::Phi { .. } => pending.extend(inst.output),
-                    r2ssa::InstPayload::Op(op) if float_op(op) => any = true,
-                    _ => return false,
-                }
-            }
-        }
-        any
-    };
+    // One visited set for every load, cleared of what each walk touched: O(uses reached).
+    let mut seen = r2ssa::dense::IdSet::new(graph.values.len());
     let written_as_float = |value: r2ssa::ValueId| {
-        (graph.def_inst(value).and_then(|inst| graph.op(inst))).is_some_and(float_op)
+        (graph.def_inst(value).and_then(|inst| graph.op(inst))).is_some_and(is_float_op)
     };
     let mut floats = BTreeMap::<(usize, u32), bool>::new();
     for access in prepared.certificates().memory_accesses.values() {
@@ -226,7 +181,7 @@ fn pointee_floats(prepared: &SsaArtifact) -> BTreeMap<(usize, u32), bool> {
         };
         let float = access.value.is_some_and(|value| match access.is_write {
             true => written_as_float(value),
-            false => read_as_float(value),
+            false => read_as_float(graph, value, &mut seen),
         });
         let cell = floats
             .entry((index, access.width.saturating_mul(8)))
@@ -234,6 +189,62 @@ fn pointee_floats(prepared: &SsaArtifact) -> BTreeMap<(usize, u32), bool> {
         *cell &= float;
     }
     floats
+}
+
+/// An operation that decodes its operands as IEEE 754.
+fn is_float_op(op: &SSAOp<r2ssa::ValueId>) -> bool {
+    matches!(
+        op,
+        SSAOp::FloatAdd { .. }
+            | SSAOp::FloatSub { .. }
+            | SSAOp::FloatMult { .. }
+            | SSAOp::FloatDiv { .. }
+            | SSAOp::FloatNeg { .. }
+            | SSAOp::FloatAbs { .. }
+            | SSAOp::FloatSqrt { .. }
+            | SSAOp::FloatCeil { .. }
+            | SSAOp::FloatFloor { .. }
+            | SSAOp::FloatRound { .. }
+            | SSAOp::FloatNaN { .. }
+            | SSAOp::FloatEqual { .. }
+            | SSAOp::FloatNotEqual { .. }
+            | SSAOp::FloatLess { .. }
+            | SSAOp::FloatLessEqual { .. }
+            | SSAOp::Float2Int { .. }
+            | SSAOp::FloatFloat { .. }
+            | SSAOp::Trunc { .. }
+    )
+}
+
+/// Whether every use of `value`, through copies and merges, is a float operation and one is
+/// reached; `seen` is left as it was found.
+fn read_as_float(
+    graph: &r2ssa::SsaGraph,
+    value: r2ssa::ValueId,
+    seen: &mut r2ssa::dense::IdSet<r2ssa::ValueId>,
+) -> bool {
+    let (mut pending, mut touched, mut any, mut other) = (vec![value], Vec::new(), false, false);
+    while let Some(value) = pending.pop().filter(|_| !other) {
+        if !seen.insert(value) {
+            continue;
+        }
+        touched.push(value);
+        for site in graph.use_sites(value) {
+            match graph
+                .inst(site.inst)
+                .map(|inst| (&inst.payload, inst.output))
+            {
+                Some((r2ssa::InstPayload::Op(SSAOp::Copy { dst, .. }), _)) => pending.push(*dst),
+                Some((r2ssa::InstPayload::Phi { .. }, output)) => pending.extend(output),
+                Some((r2ssa::InstPayload::Op(op), _)) if is_float_op(op) => any = true,
+                _ => other = true,
+            }
+        }
+    }
+    for value in touched {
+        seen.remove(value);
+    }
+    any && !other
 }
 
 /// The sign each parameter's pointee is read at, by `(parameter, bits)`: the evidence on every

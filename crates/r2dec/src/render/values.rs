@@ -152,18 +152,33 @@ fn needed<T>(value: Option<T>, inst: InstId, why: CallRefusal) -> Result<T, Call
     })
 }
 
+/// An integer class as the unstated word over it; any other type as it is.
+fn unstated_class(ty: &CType) -> CType {
+    match ty {
+        CType::Int {
+            bits: bits @ (8 | 16 | 32 | 64),
+            signedness: r2types::Signedness::Unsigned,
+        } => r2types::unstated_word(*bits),
+        ty => ty.clone(),
+    }
+}
+
 /// The declaration a call to a named callee states, `types` its arguments' types, the prototype's
 /// where the plan has one: none for a call through a value.
 fn extern_decl(plan: &CallPlan, mut types: Vec<CType>, ret_type: CType) -> Option<CExternDecl> {
     let calls::Callee::Named { name, address, .. } = &plan.callee else {
         return None;
     };
-    if let Some(declared) = &plan.declared {
-        let declared = types.iter_mut().zip(&declared.params);
-        for (ty, to) in declared.filter(|(ty, _)| !crate::prelude::is_unread_slot(ty)) {
-            if let Some(to) = to {
-                *ty = to.clone();
-            }
+    let declared = plan
+        .declared
+        .as_ref()
+        .map_or(&[][..], |declared| &declared.params[..]);
+    for (at, ty) in types.iter_mut().enumerate() {
+        match declared.get(at).cloned().flatten() {
+            Some(to) if !crate::prelude::is_unread_slot(ty) => *ty = to,
+            Some(_) => {}
+            // A class no declaration types states no sign: the header's unstated word (D265).
+            None => *ty = unstated_class(ty),
         }
     }
     types.truncate(plan.fixed);
@@ -919,7 +934,7 @@ impl<'a> Values<'a> {
             let hole = (input.parameter_declaration(index as usize, ty.width_bits()))
                 .filter(crate::prelude::is_unread_slot);
             let differs = differs && hole.is_none();
-            let c = hole.or(declared).unwrap_or(class);
+            let c = hole.or(declared).unwrap_or_else(|| unstated_class(&class));
             let named = crate::ast::c_identifier(&input.parameter_name(index as usize));
             // The body reads the unstated word as its integer; only the header spells the word.
             let name = self.symbols.borrow_mut().declare(

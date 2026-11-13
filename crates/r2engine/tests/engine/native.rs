@@ -8552,7 +8552,8 @@ fn a_call_to_a_void_callee_leaves_the_exit_returning_it_no_value_in_either_layou
         };
         let response = decompile(&target, &program, BASE).expect("decompile");
         let text = response.output.text();
-        let declaration = format!("r2sleigh_result_u64 fcn_{callee:x}(uint64_t, uint64_t);");
+        let declaration =
+            format!("r2sleigh_result_u64 fcn_{callee:x}(r2sleigh_word_u64, r2sleigh_word_u64);");
         assert_eq!(
             text.matches(&declaration).count(),
             1,

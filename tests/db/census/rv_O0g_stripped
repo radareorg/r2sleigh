@@ -723,7 +723,7 @@ r2sleigh_result_u32 fcn_1549(int32_t arg0, r2sleigh_word_u64* arg1)
     r2sleigh_word_u32 fcn_146d(r2sleigh_word_u32, r2sleigh_word_u8);
     r2sleigh_word_u32 fcn_1489(r2sleigh_word_u32);
     r2sleigh_word_u32 fcn_14b5(int32_t*, int32_t, int32_t);
-    uint64_t fcn_1521(uint64_t, uint64_t);
+    uint64_t fcn_1521(r2sleigh_word_u64, r2sleigh_word_u64);
     int32_t printf(const char*, ...);
 
     uint32_t tmp_161e_8_1;

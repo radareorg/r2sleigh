@@ -113,9 +113,8 @@ pub(crate) fn infer_scalar_signedness<'a, V: DenseId + 'a>(
     signedness
 }
 
-/// The values an effect reads: an operation with no output (a store, branch, call or return), a
-/// returned value, and every value they are computed from through definitions and merges. One
-/// worklist, each value queued once: O(operations + aliases).
+/// The values an effect reads (an operation with no output, a returned value) and every value they
+/// are computed from through definitions and merges; each queued once, O(operations + aliases).
 fn live_values<V: DenseId>(
     operations: &[(&SSAOp<V>, bool)],
     aliases: &[(V, V)],

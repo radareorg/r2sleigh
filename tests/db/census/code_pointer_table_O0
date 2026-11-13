@@ -108,7 +108,7 @@ CMDS=aa; pdd @ 0x1000004b8
 EXPECT=<<EOF
 r2sleigh_result_u64 _main(void)
 {
-    r2sleigh_result_u64 _table_dispatch(uint64_t, uint64_t);
+    r2sleigh_result_u64 _table_dispatch(r2sleigh_word_u64, r2sleigh_word_u64);
 
     /* r2dec proof: 1 construct is marked below; 12 source obligations: 5 rendered, 5 elided, 0 refused, 2 residual; 2 statements rendered; the result's second register is open: no call read decides it; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
     {
