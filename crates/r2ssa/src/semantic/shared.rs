@@ -998,7 +998,7 @@ pub(crate) fn call_read_bytes(
     };
     let (instruction, interface) = call_after(graph, read, machine_context)?;
     let reads = machine_context.call_reads(Some(instruction))?;
-    let stated = |storage: &CanonicalStorageId| storage_overlaps(*storage, *carrier);
+    let stated = |storage: &CanonicalStorageId| register_storages_overlap(*storage, *carrier);
     // Only the convention's argument registers: a hidden-result pointer (x8) is no argument.
     let argument = (machine_context.calls()).is_some_and(|model| {
         crate::call_reads::CallReads::every_location(model)
@@ -1019,12 +1019,6 @@ pub(crate) fn call_read_bytes(
         .map(|lane| lane.map(|lane| lane.size));
     let first = lanes.next()??;
     lanes.try_fold(first, |widest, lane| Some(widest.max(lane?)))
-}
-
-fn storage_overlaps(a: CanonicalStorageId, b: CanonicalStorageId) -> bool {
-    a.space == b.space
-        && a.offset < b.offset.saturating_add(u64::from(b.size))
-        && b.offset < a.offset.saturating_add(u64::from(a.size))
 }
 
 /// The interface of the call a `CallUse` precedes in its block: the reads run up to the call.
