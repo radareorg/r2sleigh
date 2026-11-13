@@ -191,6 +191,24 @@ impl Parameter {
         }
     }
 
+    /// What a caller through this code pointer reads of the code's result, by its declared return:
+    /// nothing for `void`, the low bytes for a fixed-width integer; `None` for anything else.
+    pub fn code_result(&self, graph: &crate::TypeGraph) -> Option<crate::ResultRead> {
+        use crate::types::{Scalar, ScalarKind, Type, Width};
+        let returns = self.code_returns(graph)?;
+        match graph.resolved(returns)? {
+            Type::Void => Some(crate::ResultRead::Nothing),
+            Type::Scalar(Scalar {
+                kind: ScalarKind::Signed | ScalarKind::Unsigned,
+                width: Width::Bits(bits @ (8 | 16 | 32 | 64)),
+                ..
+            }) => Some(crate::ResultRead::Integer {
+                bytes: u8::try_from(bits / 8).ok()?,
+            }),
+            _ => None,
+        }
+    }
+
     pub fn new(ty: TypeId, spelling: impl Into<Spelled>, name: Option<impl Into<String>>) -> Self {
         Self {
             spelling: spelling.into(),

@@ -2,15 +2,12 @@ mod prepared;
 mod returns;
 /// The type a hole spells: `r2sleigh_unread_uN` or `_fN` over its class at `width_bits`, a typedef
 /// the renderer's prelude declares and that claims no C type (doc/adr-call-boundary.md, Refusals).
-pub fn unread_slot(
-    class: Option<r2source::convention::SlotClass>,
-    width_bits: u32,
-) -> Option<CTypeLike> {
+pub fn unread_slot(class: r2source::convention::SlotClass, width_bits: u32) -> Option<CTypeLike> {
     let (tag, ty) = match class {
-        Some(r2source::convention::SlotClass::Float) if matches!(width_bits, 32 | 64) => {
+        r2source::convention::SlotClass::Float if matches!(width_bits, 32 | 64) => {
             ('f', CTypeLike::Float(width_bits))
         }
-        Some(r2source::convention::SlotClass::Float) => return None,
+        r2source::convention::SlotClass::Float => return None,
         _ if matches!(width_bits, 8 | 16 | 32 | 64) => ('u', CTypeLike::machine_bits(width_bits)),
         _ => return None,
     };
@@ -2225,13 +2222,8 @@ impl FunctionFacts {
         };
         // A width-only slot takes a declared callee slot's pointer (D262), else a certified access's;
         // the solver's own guesses at pointers and signedness are not proof.
-        let slot_basis = |index: usize| {
-            (interface.parameters().get(index))
-                .and_then(r2source::SourceAbiParameterSpec::basis)
-                .unwrap_or(interface.types().basis)
-        };
-        let widths =
-            (0..interface.parameters().len()).any(|index| !slot_basis(index).states_type());
+        let slot_basis = |index: usize| interface.parameters()[index].basis();
+        let widths = (interface.parameters().iter()).any(|spec| !spec.basis().states_type());
         let certified_pointers = widths.then(|| {
             let signs = &solved.signedness;
             crate::signature_infer::certified_parameter_pointers(source, aggregates, signs)

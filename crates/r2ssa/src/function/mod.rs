@@ -618,7 +618,37 @@ impl Prior {
         };
         let unread = !self.function.argument_areas_read() && !below(&self.key) && !below(key);
         let areas = unread || self.key.argument_areas == key.argument_areas;
-        areas && self.key.without_areas() == key.without_areas()
+        let reach = same_where_asked(self.function.asked_reach(), &self.key.upward, &key.upward);
+        areas && reach && self.key.without_areas() == key.without_areas()
+    }
+}
+
+/// Whether two keys' upward positions agree at every (callee, position) promotion asked: a
+/// callee's other positions decide nothing in the build (D365). `O(asked x log)`.
+fn same_where_asked(
+    asked: &BTreeSet<(u64, usize)>,
+    built: &BTreeMap<u64, BTreeSet<usize>>,
+    now: &BTreeMap<u64, BTreeSet<usize>>,
+) -> bool {
+    let upward = |key: &BTreeMap<u64, BTreeSet<usize>>, (target, position): &(u64, usize)| {
+        (key.get(target)).is_some_and(|positions| positions.contains(position))
+    };
+    (asked.iter()).all(|pair| upward(built, pair) == upward(now, pair))
+}
+
+#[cfg(test)]
+mod asked_reach_tests {
+    use super::*;
+
+    #[test]
+    fn a_reach_moves_the_build_only_where_promotion_asked() {
+        let asked = BTreeSet::from([(0x2000, 0)]);
+        let built = BTreeMap::from([(0x2000, BTreeSet::from([0]))]);
+        let elsewhere = BTreeMap::from([(0x2000, BTreeSet::from([0, 1])), (0x3000, [0].into())]);
+        assert!(same_where_asked(&asked, &built, &elsewhere));
+        let flipped = BTreeMap::from([(0x2000, BTreeSet::from([1]))]);
+        assert!(!same_where_asked(&asked, &built, &flipped));
+        assert!(!same_where_asked(&asked, &BTreeMap::new(), &built));
     }
 }
 
@@ -639,6 +669,9 @@ struct BuildKey {
     reentering: BTreeSet<u64>,
     unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
     conventions: SiteConventions,
+    /// The argument positions through which each callee reaches only upward: all the frame walk
+    /// reads of its reach, compared only where it asked (D365).
+    upward: BTreeMap<u64, BTreeSet<usize>>,
     premises: BTreeSet<r2source::Premise>,
 }
 
@@ -708,10 +741,12 @@ impl BuildKey {
             "security check".to_owned()
         } else if self.narrow_results != other.narrow_results {
             "result width".to_owned()
+        } else if self.without_areas() != other.without_areas() {
+            "premise or import".to_owned()
         } else if self.argument_areas != other.argument_areas {
             "argument area".to_owned()
         } else {
-            "premise or import".to_owned()
+            "argument reach".to_owned()
         }
     }
 
@@ -753,6 +788,13 @@ impl BuildKey {
             reentering: evidence.reentering.clone(),
             unstated_imports: evidence.unstated_imports.clone(),
             conventions: callees.conventions.clone(),
+            upward: (evidence.reach.iter())
+                .map(|(target, reach)| {
+                    let upward = reach.iter().filter(|(_, reach)| reach.is_upward());
+                    (*target, upward.map(|(position, _)| *position).collect())
+                })
+                .filter(|(_, positions): &(u64, BTreeSet<usize>)| !positions.is_empty())
+                .collect(),
             premises: premises.clone(),
         }
     }
@@ -980,7 +1022,7 @@ fn release_undemanded_bytes(
         );
         return EditPlan::new();
     }
-    let demand = crate::demand::DemandedBytes::of(graph, &live_out);
+    let demand = crate::demand::DemandedBytes::of(graph, &live_out, Some(machine_context));
     function.release_undemanded_insert_bases(graph, &demand)
 }
 
@@ -2733,6 +2775,7 @@ impl TrustedSsaArtifact {
         .with_conventions(site_conventions.clone());
         let correlated_call_sites =
             correlate_call_site_interfaces(&source, (&blocks, &calls), callee_interfaces, &callees);
+        let callees = callees.with_slots(&correlated_call_sites.slot_targets);
         // Every call target the source named, whether or not a prototype was
         // recovered for it: a name and a prototype are independent facts.
         let mut display_names = r2source::DisplayNames::new();
@@ -2831,6 +2874,10 @@ impl TrustedSsaArtifact {
                     .set_member_call_sites(correlated_call_sites.member_sites.clone());
                 provisional_machine_context.set_reentering_callees(reentering.clone());
                 provisional_machine_context.set_unstated_imports(unstated_imports.clone());
+                // Promotion's frame walk reads what each callee reaches, by the site's model.
+                provisional_machine_context
+                    .set_callee_argument_reach(callee_argument_reach.clone());
+                provisional_machine_context.set_site_conventions(site_conventions.clone());
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
                 // A build against callees that state the same to it is this build.
@@ -2985,6 +3032,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
+        machine_context.set_site_conventions(site_conventions.clone());
         machine_context.set_callee_library(library.clone());
         machine_context.set_reentering_callees(reentering.clone());
         machine_context.set_unstated_imports(unstated_imports.clone());
@@ -3366,15 +3414,8 @@ pub(crate) fn same_content_reads(
     pairs
 }
 
-/// A call's conventional reads of registers the certified call does not
-/// pass. The graph states a read of every register the convention lets a
-/// callee read, so that liveness before the facts exist errs safe; once the
-/// call boundary says which values are arguments, the rest are not reads.
-///
-/// A read is passed when it has the bits of a passed argument, not only its
-/// id: the boundary names the value that reached the argument register, and
-/// copy forwarding may have left the call reading the value that copy
-/// carried. Both are one class (`view::class_values`), and the text reads it.
+/// The reads a call's text does not perform: each `CallUse` whose register a proven argument list
+/// leaves out; an unproven list passes every read, no boundary none (D283). `O(insts x arguments)`.
 #[cfg_attr(
     dylint_lib = "r2sleigh_lints",
     allow(
@@ -3382,44 +3423,66 @@ pub(crate) fn same_content_reads(
         reason = "a use site is an (instruction, operand) pair, not a dense id"
     )
 )]
-pub(crate) fn uncertified_call_reads(
+pub(crate) fn unpassed_call_reads(
     graph: &SsaGraph,
-    views: Option<&crate::view::ValueViews<ValueId>>,
     boundaries: &crate::semantic::SourceBoundaryFacts,
 ) -> std::collections::BTreeSet<crate::graph::UseSite> {
-    let class = crate::view::class_values(graph, views);
-    let class_of = |value: crate::graph::ValueId| class.get(value.0 as usize).copied();
-    let mut passed = std::collections::BTreeSet::new();
+    // `None`: no statement bounds the callee's reads, so it may read every register (default-deny).
+    let mut passed =
+        crate::dense::IdMap::<crate::InstId, Option<Vec<CanonicalStorageId>>>::default();
     for boundary in boundaries.calls.values() {
-        for argument in &boundary.arguments {
-            if let crate::semantic::SourceCallArgumentValue::Value(value) = argument.value
-                && !boundary.ignores(argument)
-            {
-                passed.insert(class_of(value).unwrap_or(value));
-            }
+        if boundary.may_read_unlisted() {
+            passed.insert(boundary.at, None);
+            continue;
         }
+        let registers = (boundary.arguments.iter())
+            .filter(|argument| !boundary.ignores(argument))
+            .filter(|argument| {
+                matches!(
+                    argument.value,
+                    crate::semantic::SourceCallArgumentValue::Value(_)
+                )
+            })
+            .filter_map(|argument| match argument.slot {
+                crate::semantic::CallBoundarySlot::Register { storage, .. } => Some(storage),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        passed.insert(boundary.at, Some(registers));
     }
-    graph
-        .insts
-        .iter()
-        .filter(|inst| {
-            matches!(
-                inst.payload,
-                crate::graph::InstPayload::Op(SSAOp::CallUse { .. })
-            )
+    // A call with no boundary passes nothing; `None` passes every register.
+    let passes = |registers: Option<&Option<Vec<CanonicalStorageId>>>, storage| {
+        registers.is_some_and(|registers| {
+            (registers.as_deref()).is_none_or(|registers| {
+                (registers.iter())
+                    .any(|register| crate::semantic::register_storages_overlap(*register, storage))
+            })
         })
-        .flat_map(|inst| {
-            graph
-                .inputs(inst.id)
-                .iter()
-                .enumerate()
-                .filter(|(_, input)| !passed.contains(&class_of(**input).unwrap_or(**input)))
-                .map(move |(input_idx, _)| crate::graph::UseSite {
-                    inst: inst.id,
-                    input_idx,
-                })
-        })
-        .collect()
+    };
+    // The reads minted just before a call are its own; any other run passes nothing.
+    let mut unpassed = std::collections::BTreeSet::new();
+    for block in &graph.blocks {
+        let mut run = Vec::new();
+        for &inst in &block.insts {
+            let op = graph.op(inst);
+            if let Some(SSAOp::CallUse { storage, .. }) = op {
+                run.push((inst, *storage));
+                continue;
+            }
+            let registers = op
+                .filter(|op| op.call().is_some())
+                .and_then(|_| passed.get(inst));
+            let unread = run
+                .drain(..)
+                .filter(|(_, storage)| !passes(registers, *storage));
+            unpassed.extend(unread.map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 }));
+        }
+        unpassed.extend(
+            run.into_iter()
+                .map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 }),
+        );
+    }
+    unpassed
 }
 
 fn block_at_mut<'a, V>(
@@ -4035,6 +4098,8 @@ pub(crate) struct CalleeBoundaries {
     preserved: CalleePreservedCarriers,
     /// The convention each stated callee runs under; the rest run under the calls' model.
     conventions: SiteConventions,
+    /// The import slot each `CallSlot` site calls through, by instruction (D364).
+    slots: BTreeMap<u64, u64>,
     results: BTreeMap<u64, CallBoundaryDef>,
     /// The storage of each of `results`.
     result_storages: BTreeMap<u64, CanonicalStorageId>,
@@ -4099,6 +4164,7 @@ impl CalleeBoundaries {
         Self {
             preserved,
             conventions: SiteConventions::new(),
+            slots: BTreeMap::new(),
             results,
             result_storages,
             return_addresses,
@@ -4109,6 +4175,13 @@ impl CalleeBoundaries {
     /// The same statements with the convention each stated callee runs under.
     pub(crate) fn with_conventions(mut self, conventions: SiteConventions) -> Self {
         self.conventions = conventions;
+        self
+    }
+
+    /// The same statements with the slot each correlated `CallSlot` site calls through.
+    fn with_slots(mut self, slots: &BTreeMap<SourceCallSiteIdentity, u64>) -> Self {
+        let by_instruction = slots.iter().map(|(site, slot)| (site.instruction(), *slot));
+        self.slots = by_instruction.collect();
         self
     }
 
@@ -4174,6 +4247,7 @@ fn decompile_call_boundary_config(
         stack_pointer_restored_by_callee,
         preserved_by_target: callees.preserved,
         convention_by_target: callees.conventions,
+        slot_by_instruction: callees.slots,
         result_by_target: callees.results,
         argument_regs: match calls {
             true => arch.call_reads(model).to_vec(),
@@ -4218,6 +4292,12 @@ impl SSAFunction {
     /// Whether what promotion decided read some call's argument area.
     pub(crate) fn argument_areas_read(&self) -> bool {
         (self.frame_points.as_deref()).is_some_and(crate::semantic::FramePoints::by_area)
+    }
+
+    /// The (callee, argument position) pairs whose upward reach promotion's walk asked (D365).
+    pub(crate) fn asked_reach(&self) -> &BTreeSet<(u64, usize)> {
+        static NONE: BTreeSet<(u64, usize)> = BTreeSet::new();
+        (self.frame_points.as_deref()).map_or(&NONE, crate::semantic::FramePoints::asked_reach)
     }
 
     /// What the frame's addresses do, by entry offset; none where no walk ran (the whole frame).

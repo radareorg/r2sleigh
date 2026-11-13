@@ -876,7 +876,7 @@ impl<'a> Values<'a> {
     fn members_of(
         &self,
         input: &RenderInput<'_>,
-        pointing: Vec<(usize, String, CExpr)>,
+        pointing: Vec<(usize, String, CExpr, bool)>,
     ) -> Vec<Option<CExpr>> {
         let mut members = Vec::new();
         // A member is read and written by a byte copy, which only a little-endian target matches.
@@ -884,7 +884,15 @@ impl<'a> Values<'a> {
             return members;
         }
         let fields = &self.artifact.certificates().parameter_fields;
-        for (slot, tag, base) in pointing {
+        let through = self.accesses_by_parameter(&pointing);
+        for (slot, tag, base, stated) in pointing {
+            if let Some(cells) = stated
+                .then(|| self.projected_members(slot, &base, through.get(slot)?))
+                .flatten()
+            {
+                self.place(&mut members, cells);
+                continue;
+            }
             let Some(structure) = input.parameter_structures().get(&slot) else {
                 continue;
             };
@@ -910,19 +918,96 @@ impl<'a> Values<'a> {
                 };
                 Some((cell, CExpr::addr_of(member)))
             });
-            let Some(cells) = cells.collect::<Option<Vec<_>>>() else {
-                continue;
-            };
-            if members.is_empty() {
-                members = vec![None; self.roots.arena().len()];
-            }
-            for (cell, address) in cells {
-                if let Some(at) = members.get_mut(cell.index()) {
-                    *at = Some(address);
-                }
+            if let Some(cells) = cells.collect::<Option<Vec<_>>>() {
+                self.place(&mut members, cells);
             }
         }
         members
+    }
+
+    /// Each cell's member address in `members`, a table over the arena allocated at the first.
+    fn place(&self, members: &mut Vec<Option<CExpr>>, cells: Vec<(TermId, CExpr)>) {
+        if members.is_empty() {
+            *members = vec![None; self.roots.arena().len()];
+        }
+        for (cell, address) in cells {
+            if let Some(at) = members.get_mut(cell.index()) {
+                *at = Some(address);
+            }
+        }
+    }
+
+    /// The accesses through each stated pointing parameter, indexed by slot, in one pass over the
+    /// body's accesses: O(accesses + slots).
+    fn accesses_by_parameter(
+        &self,
+        pointing: &[(usize, String, CExpr, bool)],
+    ) -> Vec<Vec<r2ssa::StructuredAccessId>> {
+        let stated = (pointing.iter()).filter(|(_, _, _, stated)| *stated);
+        let Some(slots) = stated.map(|(slot, ..)| slot + 1).max() else {
+            return Vec::new();
+        };
+        let mut through = vec![Vec::new(); slots];
+        let facts = self.artifact.facts();
+        for access in facts.structured.memory_accesses.values() {
+            if let Some(expression) = facts.addresses.parameter_expression(access.address)
+                && let Some(accesses) = through.get_mut(expression.parameter)
+            {
+                accesses.push(access.id);
+            }
+        }
+        through
+    }
+
+    /// Each cell an access through parameter `slot` (`through`), declared a pointer to the struct
+    /// its root projects into, addresses as `&base->member` (D359); `None` where one is unprojected.
+    fn projected_members(
+        &self,
+        slot: usize,
+        base: &CExpr,
+        through: &[r2ssa::StructuredAccessId],
+    ) -> Option<Vec<(TermId, CExpr)>> {
+        let interface = self.artifact.machine_context().function_interface()?;
+        let projections = (self.artifact.aggregate_accesses())
+            .projections_for_revision(interface.revision_identity())?;
+        let cells = (through.iter())
+            .map(|id| {
+                // A parameter root's struct is the declared pointee's node (`parameter_target`).
+                let projection = projections.get(id)?;
+                let named = projection.root == r2ssa::AggregateRoot::Parameter(slot as u32)
+                    && projection.graph == r2ssa::GraphOf::Interface
+                    && projection.element_index.is_none();
+                let cell = self.roots.access(*id)?.canonical;
+                let member = CExpr::PtrMember {
+                    base: Box::new(base.clone()),
+                    member: projection.member_name.to_string(),
+                };
+                named.then(|| (cell, CExpr::addr_of(member)))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!cells.is_empty()).then_some(cells)
+    }
+
+    /// A declared type is spelled as stated, a tag the graph states incomplete; an analysed one
+    /// naming only tags the unit defines, an unstated sign as its word (D265).
+    fn parameter_type(
+        &self,
+        input: &RenderInput<'_>,
+        tags: &super::tags::Tags,
+        (index, ty): (u32, &MachineType),
+        stated: Option<&CType>,
+    ) -> Option<CType> {
+        match stated {
+            Some(declared) => calls::spellable(declared, &|tag, union| tags.names(tag, union))
+                .or_else(|| calls::untagged_pointer(declared)),
+            None => (input.parameter_declaration(index as usize, ty.width_bits())).and_then(
+                |analysed| {
+                    calls::spellable(&analysed, &|tag, union| tags.defines(tag, union))
+                        .or_else(|| calls::analysed_pointer(&analysed))
+                },
+            ),
+        }
+        .filter(|declared| calls::held_as(declared, ty, self.ptr_bits))
     }
 
     /// Parameters in their ABI order, then a local per bound value. A parameter the source declares
@@ -936,26 +1021,18 @@ impl<'a> Values<'a> {
         let mut pointing = Vec::new();
         for (index, home, ty) in parameters.into_iter().flatten() {
             let class = terms::c_type(&ty).expect("a classed parameter has a C type");
-            // A declared type is spelled as stated, a tag the graph states incomplete; an analysed
-            // one naming only tags the unit defines, an unstated sign as its word (D265).
-            let declared = match input.declared_parameter(index as usize, ty.width_bits()) {
-                Some(declared) => calls::spellable(&declared, &|tag, union| tags.names(tag, union))
-                    .or_else(|| calls::untagged_pointer(&declared)),
-                None => (input.parameter_declaration(index as usize, ty.width_bits())).and_then(
-                    |analysed| {
-                        calls::spellable(&analysed, &|tag, union| tags.defines(tag, union))
-                            .or_else(|| calls::analysed_pointer(&analysed))
-                    },
-                ),
-            }
-            .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
-            // The word is the class the body reads through: no read is cast.
-            let differs = (declared.as_ref())
-                .is_some_and(|declared| *declared != class && !r2types::is_unstated_word(declared));
+            let stated = input.declared_parameter(index as usize, ty.width_bits());
+            let declared = self.parameter_type(input, tags, (index, &ty), stated.as_ref());
             // A hole states no type: r2types spells its class's typedef, which claims none (D165).
             let hole = (input.parameter_declaration(index as usize, ty.width_bits()))
                 .filter(crate::prelude::is_unread_slot);
-            let differs = differs && hole.is_none();
+            // The word is the class the body reads through: no read is cast.
+            let differs = hole.is_none()
+                && (declared.as_ref()).is_some_and(|declared| {
+                    *declared != class && !r2types::is_unstated_word(declared)
+                });
+            // The source's own declaration, so its struct is the node r2ssa projects into (D359).
+            let stated = stated.is_some() && hole.is_none() && declared.is_some();
             let c = hole.or(declared).unwrap_or_else(|| unstated_class(&class));
             let named = crate::ast::c_identifier(&input.parameter_name(index as usize));
             // The body reads the unstated word as its integer; only the header spells the word.
@@ -981,7 +1058,7 @@ impl<'a> Values<'a> {
                 && let CType::Struct(tag) = pointee.as_ref()
                 && tags.defines(tag, false)
             {
-                pointing.push((index as usize, tag.clone(), CExpr::Var(name)));
+                pointing.push((index as usize, tag.clone(), CExpr::Var(name), stated));
             }
             self.params.push(CParam { ty: c, name });
         }

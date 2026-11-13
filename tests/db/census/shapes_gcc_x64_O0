@@ -1464,7 +1464,7 @@ NAME=0x00402206
 FILE=tests/coverage/pinned/shapes_gcc_x64_O0
 CMDS=aa; pdd @ 0x00402206
 EXPECT=<<EOF
-r2sleigh_result_u32 fcn_402206(void)
+r2sleigh_word_u32 fcn_402206(void)
 {
     int32_t printf(const char*, ...);
     r2sleigh_word_u64 shape_bool_caller(r2sleigh_word_u64, r2sleigh_word_u64);
@@ -1497,7 +1497,7 @@ r2sleigh_result_u32 fcn_402206(void)
     uint64_t rax_52;
     uint64_t rax_56;
 
-    /* r2dec proof: no individual construct is marked; 318 source obligations: 227 rendered, 91 elided, 0 refused; 29 statements rendered; 14 callee prototypes supplied by the source; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 318 source obligations: 227 rendered, 91 elided, 0 refused; 29 statements rendered; 14 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
     /* symbol `main`; C allows that name no other prototype */
     {
         rax_4 = shape_variadic((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
@@ -1528,7 +1528,7 @@ r2sleigh_result_u32 fcn_402206(void)
         printf("%016llx\n", rax_52);
         rax_56 = shape_bool_caller((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
         printf("%016llx\n", rax_56);
-        return r2sleigh_carrier_u32(0);
+        return 0;
     }
 }
 

@@ -401,6 +401,30 @@ fn a_cited_callback_slot_returns_void_and_func_states_no_return() {
     assert_eq!(on_exit, Some(r2abi::TypeId::VOID));
     let cxa = slot(r2abi::LibraryId::CxxRuntime, "__cxa_atexit", 0);
     assert_eq!(cxa, Some(r2abi::TypeId::VOID));
-    let main = slot(r2abi::LibraryId::Glibc, "__libc_start_main", 0).expect("a code pointer");
-    assert!(matches!(graph.get(main), Some(r2abi::Type::Refused(_))));
+    let init = slot(r2abi::LibraryId::Glibc, "__libc_start_main", 3).expect("a code pointer");
+    assert!(matches!(graph.get(init), Some(r2abi::Type::Refused(_))));
+}
+
+/// LSB's `__libc_start_main` passes `main`'s `int` to `exit`: its slot reads four integer bytes
+/// (D227's ELF half); `func` and a data pointer read nothing a slot states.
+#[test]
+fn a_cited_slot_returning_int_reads_its_integer_bytes() {
+    let rows = LibraryRows::embedded(CLibrary::Glibc);
+    let graph = rows.graph();
+    let row = rows
+        .row(LibraryId::Glibc, "__libc_start_main")
+        .expect("cited");
+    assert!(
+        row.citation.contains("LSB-Core-generic 5.0"),
+        "{}",
+        row.citation
+    );
+    let parameters = &rows.prototype(row).parameters;
+    let read = |index: usize| parameters[index].code_result(graph);
+    assert_eq!(read(0), Some(r2abi::ResultRead::Integer { bytes: 4 }));
+    assert_eq!(read(3), None);
+    assert_eq!(read(6), None);
+    let atexit = rows.row(LibraryId::Portable, "atexit").expect("cited");
+    let handler = rows.prototype(atexit).parameters[0].code_result(graph);
+    assert_eq!(handler, Some(r2abi::ResultRead::Nothing));
 }

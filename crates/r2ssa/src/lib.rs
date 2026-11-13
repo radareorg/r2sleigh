@@ -102,6 +102,7 @@ pub use address::{
 pub use aggregate_access::{
     AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION, AggregateAccessBinding, AggregateAccessProjection,
     AggregateAccessProjectionFacts, AggregateElementIndexProjection, AggregateRoot, GraphOf,
+    PathStep,
 };
 pub use arena::{OpArena, OpId, OpOrigin, OpSlot, Pass};
 pub use assumption::{
@@ -167,11 +168,11 @@ pub use machine_context::{
     SourceFormatParameterRule, SourceFunctionInterface, SourceFunctionInterfaceError,
     SourceFunctionReturn, SourceLogicalValue, SourceMachineContext, SourceMachineRoles,
     SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation, SourceResultCause,
-    SourceResultSeed, SourceResultWidth, SourceStackAllocationContract, SourceStackGrowth,
-    SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias,
-    SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
-    SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, loaded_target_slot,
-    terminal_indirect_loaded_slot,
+    SourceResultSeed, SourceResultWidth, SourceSlot, SourceStackAllocationContract,
+    SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType,
+    SourceTypeAlias, SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError,
+    SourceTypeGraphParts, SourceTypeKind, SourceUnprovenCall, SourceUnprovenResult,
+    SourceUnstatedCall, loaded_target_slot, terminal_indirect_loaded_slot,
 };
 pub use obligation::{
     CanonicalInstructionId, CanonicalInstructionSite, NamedObligation, ObligationInventoryFailure,

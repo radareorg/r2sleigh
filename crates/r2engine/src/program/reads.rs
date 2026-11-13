@@ -87,6 +87,8 @@ pub(super) struct Take {
     pub(super) target: u64,
     pub(super) from: u64,
     pub(super) owner: u64,
+    /// The end of the instruction's bytes: an immediate inside them is this take, no other way in.
+    pub(super) end: u64,
 }
 
 impl WaysIn {
@@ -179,10 +181,12 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
         for (fact, claimant) in index.claimed() {
             // An address a body's instruction forms is a take, which S30 follows (`DeclaredSlot`).
             if fact.role == Role::Value && !claimant.owners.is_empty() {
+                let end = claimant.line.address + claimant.line.bytes.len() as u64;
                 let take = |owner: &u64| Take {
                     target: fact.to,
                     from: fact.from,
                     owner: *owner,
+                    end,
                 };
                 takes.extend(claimant.owners.iter().map(take));
                 continue;
@@ -215,11 +219,15 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
                 .filter(|symbol| exported(container.format, symbol))
                 .map(|symbol| symbol.vaddr),
         );
-        stored_words(source, &survey.entries(), &stated, &mut escaped);
-        escaped.sort_unstable();
-        escaped.dedup();
         takes.sort_unstable();
         takes.dedup();
+        let words = Words {
+            stated: &stated,
+            takes: &takes,
+        };
+        stored_words(source, &survey.entries(), &words, &mut escaped);
+        escaped.sort_unstable();
+        escaped.dedup();
         Some(Arc::new(WaysIn {
             escaped: escaped.into(),
             takes: takes.into(),
@@ -415,9 +423,28 @@ fn exported(format: Format, symbol: &Symbol) -> bool {
         }
 }
 
+/// The mapped words that name no other way in: the loader's slots at `stated` (D237), and each
+/// take's own immediate inside its instruction's bytes (D227), both ascending.
+struct Words<'a> {
+    stated: &'a [u64],
+    takes: &'a [Take],
+}
+
+impl Words<'_> {
+    /// Whether the word of `width` bytes at `at` naming `value` is one of these. `O(log n)`.
+    fn known(&self, at: u64, width: u64, value: u64, pointer: u64) -> bool {
+        let first = self.takes.partition_point(|take| take.target < value);
+        let mut takes = self.takes[first..]
+            .iter()
+            .take_while(|take| take.target == value);
+        in_slot(self.stated, at, pointer)
+            || takes.any(|take| take.from <= at && at + width <= take.end)
+    }
+}
+
 /// Each of `entries` a mapped word names, pointer-wide or (64-bit) 32 bits, bit 0 cleared as Thumb
-/// sets it; a word starting in a slot at one of `stated` (ascending) is the loader's (D237).
-fn stored_words<S: Source>(source: &S, entries: &[u64], stated: &[u64], escaped: &mut Vec<u64>) {
+/// sets it, unless `words` accounts for it.
+fn stored_words<S: Source>(source: &S, entries: &[u64], words: &Words<'_>, escaped: &mut Vec<u64>) {
     let (Some(&low), Some(&high)) = (entries.first(), entries.last()) else {
         return;
     };
@@ -448,7 +475,7 @@ fn stored_words<S: Source>(source: &S, entries: &[u64], stated: &[u64], escaped:
                 for value in [word, word & !1] {
                     if (low..=high).contains(&value)
                         && entries.binary_search(&value).is_ok()
-                        && !in_slot(stated, segment.vaddr + at as u64, pointer)
+                        && !words.known(segment.vaddr + at as u64, width as u64, value, pointer)
                     {
                         escaped.push(value);
                     }
@@ -466,7 +493,7 @@ fn in_slot(slots: &[u64], at: u64, pointer: u64) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{every_call_read, stored_words};
+    use super::{Words, every_call_read, stored_words};
     use crate::program::{Arch, Container, Endian, Segment, Source};
 
     /// A 64-bit image of one segment at `vaddr` holding `bytes`.
@@ -524,7 +551,11 @@ mod tests {
             container,
         };
         let mut escaped = Vec::new();
-        stored_words(&image, &[vaddr], &[], &mut escaped);
+        let words = Words {
+            stated: &[],
+            takes: &[],
+        };
+        stored_words(&image, &[vaddr], &words, &mut escaped);
         assert!(escaped.contains(&vaddr), "{escaped:?}");
     }
 

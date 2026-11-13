@@ -2211,7 +2211,7 @@ fn a_merge_of_two_frame_addresses_is_a_variable() {
 }
 
 /// A shrink-wrapped AArch64 return (ls-toybox `0x58a30`): `cbz` reaches the `ret` before the
-/// prologue, so no exit stack pointer is proven (D356) and X1's merge keeps the unproven-exit taint.
+/// prologue, and the epilogue unwinds the frame, so both ways in hold the entry stack pointer.
 const SHRINK_WRAPPED_RETURN: &[u8] = &[
     0xc0, 0x00, 0x00, 0x34, // 1000 cbz w0, 0x1018
     0xfd, 0x7b, 0xbf, 0xa9, // 1004 stp x29, x30, [sp, #-16]!
@@ -2222,13 +2222,41 @@ const SHRINK_WRAPPED_RETURN: &[u8] = &[
     0xc0, 0x03, 0x5f, 0xd6, // 1018 ret
 ];
 
+/// `SHRINK_WRAPPED_RETURN` whose epilogue leaves the frame (`ldp x29, x30, [sp]`): the two ways
+/// into the `ret` hold different stack pointers, so no exit stack pointer is proven.
+const UNBALANCED_RETURN: &[u8] = &[
+    0xc0, 0x00, 0x00, 0x34, // 1000 cbz w0, 0x1018
+    0xfd, 0x7b, 0xbf, 0xa9, // 1004 stp x29, x30, [sp, #-16]!
+    0x41, 0x00, 0x00, 0x34, // 1008 cbz w1, 0x1010
+    0xa1, 0x00, 0x80, 0xd2, // 100c mov x1, #5
+    0xfd, 0x7b, 0x40, 0xa9, // 1010 ldp x29, x30, [sp]
+    0x1f, 0x20, 0x03, 0xd5, // 1014 nop
+    0xc0, 0x03, 0x5f, 0xd6, // 1018 ret
+];
+
+/// A phi-less merge of the entry stack pointer and the unwound one is the entry pointer, so the
+/// shrink-wrapped return's machine state is proven and X1's merge is no unproven-exit seed (D356).
+#[test]
+fn a_shrink_wrapped_return_restores_the_entry_stack_pointer() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: SHRINK_WRAPPED_RETURN.to_vec(),
+        name: "pick",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(response.output.function().is_some(), "{output}");
+    assert!(response.undecided.is_empty(), "{:?}", response.undecided);
+}
+
 /// A refusal names each obligation it leaves undecided by its operation and its seed (D174, D253).
 #[test]
 fn a_refusal_names_each_undecided_obligation_by_its_operation_and_seed() {
     let machine = Machine::new("aarch64", "aarch64", 64);
     let target = machine.target();
     let program = Fixture {
-        bytes: SHRINK_WRAPPED_RETURN.to_vec(),
+        bytes: UNBALANCED_RETURN.to_vec(),
         name: "pick",
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
@@ -6824,10 +6852,8 @@ const COPY_INTO_AN_ARGUMENT: &[u8] = &[
     0xc3, // 0x1013 ret
 ];
 
-/// The boundary passes the value that reached `rdi`, the copy; copy
-/// forwarding leaves the call reading `rsi`, the value the copy carried. The
-/// two have one class of bits, so the call's read of `rsi` is a read the text
-/// performs, and liveness must not ignore it.
+/// Copy forwarding leaves both of the call's reads naming `rsi`'s value. No statement bounds the
+/// undeclared import's reads, so neither read is ignored (D283, default-deny).
 #[test]
 fn a_call_reading_the_value_its_copied_argument_carried_reads_it() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -6863,11 +6889,11 @@ fn a_call_reading_the_value_its_copied_argument_carried_reads_it() {
             )
         })
         .collect::<Vec<_>>();
-    assert!(!call_reads.is_empty(), "{}", artifact.dump());
+    assert_eq!(call_reads.len(), 2, "{}", artifact.dump());
     for site in call_reads {
         assert!(
             !artifact.ignored_reads().contains(site),
-            "{site:?} is the argument's read\n{}",
+            "{site:?} is a read the undeclared callee may perform\n{}",
             artifact.dump()
         );
     }
@@ -8931,4 +8957,42 @@ fn an_import_reads_past_its_fixed_parameters_unless_its_citation_fixes_them() {
     let microsoft = Machine::new("x86-64", "x86-64", 64);
     let (printf, _) = names(&microsoft, &microsoft.under("ms"), "printf");
     assert_eq!(printf.len(), 4 + 4, "{printf:?}");
+}
+
+/// `mov rdi, rsi; call rax; ret`: an indirect call nothing states.
+const INDIRECT_AFTER_A_COPY: &[u8] = &[
+    0x48, 0x89, 0xf7, // 0x1000 mov rdi, rsi
+    0xff, 0xd0, // 0x1003 call rax
+    0xc3, // 0x1005 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // padding to 0x1010
+];
+
+/// A call whose callee nothing states may read every argument register: liveness ignores none of
+/// its `CallUse` reads, though the arity scan lists `rdi` alone (D283, default-deny).
+#[test]
+fn an_unstated_indirect_call_reads_every_register_it_names() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = ImportCaller {
+        bytes: INDIRECT_AFTER_A_COPY,
+        stub: 0x1010,
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let artifact: &r2ssa::SsaArtifact = prepared.artifact();
+    let graph = artifact.graph();
+    let call = (artifact.facts().boundaries.calls.values().next()).expect("the call");
+    assert!(call.may_read_unlisted(), "{call:#?}");
+    let reads = graph.call_boundary_reads(call.at);
+    assert!(reads.len() >= 2, "{}", artifact.dump());
+    for read in reads {
+        let site = r2ssa::UseSite {
+            inst: read,
+            input_idx: 0,
+        };
+        assert!(
+            !artifact.ignored_reads().contains(&site),
+            "{:?}\n{}",
+            graph.op(read),
+            artifact.dump()
+        );
+    }
 }

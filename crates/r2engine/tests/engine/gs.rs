@@ -293,3 +293,36 @@ fn a_cookie_compare_that_also_tests_another_argument_is_no_check() {
     let text = rendered(&mut open, CALLER);
     assert!(text.contains("check("), "{text}");
 }
+
+/// [`GUARDED`] with `mov al, [rdx]; movzx eax, al` in place of `mov eax, 7`: the low byte replaces
+/// the save's in RAX, and only that byte is read (testapp `0x140006138`'s `movsx rax, al`, D230).
+const LANE_OVER_THE_SAVE: &[u8] = &{
+    let mut code = [0u8; 0xa8];
+    let mut at = 0;
+    while at < code.len() {
+        code[at] = GUARDED[at];
+        at += 1;
+    }
+    let lane = [0x8a, 0x02, 0x0f, 0xb6, 0xc0];
+    let mut at = 0;
+    while at < lane.len() {
+        code[0x33 + at] = lane[at];
+        at += 1;
+    }
+    code
+};
+
+/// The save's other seven bytes stay in RAX unread until the extension writes it whole, so the
+/// check is elided; the `<< 32`-free byte is the result.
+#[test]
+fn a_save_whose_unread_upper_bytes_stay_in_a_register_is_elided() {
+    let mut open = program(LANE_OVER_THE_SAVE, "check", Some(TEXT));
+    let text = rendered(&mut open, CALLER);
+    assert!(!text.contains("check("), "{text}");
+    assert!(!text.contains("0x10a0"), "{text}");
+    assert!(text.contains("compiler-inserted"), "{text}");
+    assert!(
+        text.contains("return r2sleigh_carrier_u32((uint32_t)(uint8_t)tmp_1033_0_1);"),
+        "{text}"
+    );
+}

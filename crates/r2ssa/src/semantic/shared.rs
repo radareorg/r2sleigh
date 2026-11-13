@@ -932,15 +932,16 @@ impl HeldLaneWidths {
     pub(crate) fn of(graph: &SsaGraph, machine_context: &SourceMachineContext) -> Self {
         let mut widths = crate::dense::IdMap::new(graph.values.len());
         for value in &graph.values {
-            let Some(storage) = value.canonical_storage.filter(|storage| {
+            let entry = value.canonical_storage.is_some_and(|storage| {
                 storage.space == CanonicalStorageSpace::Register
                     && value.var.version == 0
                     && graph.def_inst(value.id).is_none()
-            }) else {
+            });
+            if !entry {
                 continue;
-            };
+            }
             let widest = (graph.use_sites(value.id).iter()).try_fold(0, |widest, site| {
-                read_width(graph, machine_context, storage, site.inst).map(|read| widest.max(read))
+                read_width(graph, machine_context, site.inst).map(|read| widest.max(read))
             });
             widths.insert(value.id, widest);
         }
@@ -967,26 +968,56 @@ impl HeldLaneWidths {
     }
 }
 
-/// The low bytes of entry register `storage` one use reads: a subpiece's end, or the narrowest lane
-/// a call's callee holds of it; `None` where the use may read the whole register.
+/// The low bytes of an entry register one use reads: a subpiece's end, or what its call takes
+/// (`call_read_bytes`); `None` where the use may read the whole register.
 fn read_width(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
-    storage: CanonicalStorageId,
     reader: crate::graph::InstId,
 ) -> Option<u32> {
     match graph.op(reader)? {
         SSAOp::Subpiece { dst, offset, .. } => Some(offset.saturating_add(graph.var(*dst).size)),
-        SSAOp::CallUse { .. } => {
-            let interface = call_after(graph, reader, machine_context)?;
-            (interface.arguments().iter())
-                .filter(|argument| argument.register_storage() == Some(storage))
-                .filter_map(|argument| callee_held_lane(interface, argument.index(), storage))
-                .map(|lane| lane.size)
-                .min()
-        }
+        SSAOp::CallUse { .. } => call_read_bytes(graph, machine_context, reader),
         _ => None,
     }
+}
+
+/// The low bytes of a `CallUse`'s carrier its call takes: none for an argument register a stated
+/// `CallReads` leaves out, else the callee's widest held lane (D266 rule 2); `None`: whole.
+pub(crate) fn call_read_bytes(
+    graph: &SsaGraph,
+    machine_context: &SourceMachineContext,
+    read: crate::graph::InstId,
+) -> Option<u32> {
+    let SSAOp::CallUse {
+        storage: carrier, ..
+    } = graph.op(read)?
+    else {
+        return None;
+    };
+    let (instruction, interface) = call_after(graph, read, machine_context)?;
+    let reads = machine_context.call_reads(Some(instruction))?;
+    let stated = |storage: &CanonicalStorageId| register_storages_overlap(*storage, *carrier);
+    // Only the convention's argument registers: a hidden-result pointer (x8) is no argument.
+    let argument = (machine_context.calls()).is_some_and(|model| {
+        crate::call_reads::CallReads::every_location(model)
+            .registers
+            .iter()
+            .any(stated)
+    });
+    if argument && reads.stated && !reads.registers.iter().any(stated) {
+        return Some(0);
+    }
+    let interface = interface?;
+    let mut lanes = (interface.arguments().iter())
+        .filter(|argument| argument.register_storage().as_ref().is_some_and(stated))
+        .map(|argument| {
+            let storage = argument.register_storage()?;
+            (storage == *carrier).then(|| callee_held_lane(interface, argument.index(), storage))?
+        })
+        .map(|lane| lane.map(|lane| lane.size));
+    let first = lanes.next()??;
+    lanes.try_fold(first, |widest, lane| Some(widest.max(lane?)))
 }
 
 /// The interface of the call a `CallUse` precedes in its block: the reads run up to the call.
@@ -994,13 +1025,17 @@ fn call_after<'a>(
     graph: &SsaGraph,
     read: crate::graph::InstId,
     machine_context: &'a SourceMachineContext,
-) -> Option<&'a crate::SourceCallSiteInterface> {
+) -> Option<(u64, Option<&'a crate::SourceCallSiteInterface>)> {
     let inst = graph.inst(read)?;
     let block = graph.block(inst.block)?;
     let instruction = (block.insts.get(inst.ordinal..)?.iter())
         .find_map(|inst| graph.op(*inst)?.transfer().filter(|flow| flow.call))?
         .instruction?;
-    machine_context.call_site_interface(machine_context.raw_call_site_at(instruction)?)
+    let identity = machine_context.raw_call_site_at(instruction);
+    Some((
+        instruction,
+        identity.and_then(|identity| machine_context.call_site_interface(identity)),
+    ))
 }
 
 /// Whether `lane` is this function's own entry value of the low lane of `carrier`, its entry
@@ -1066,7 +1101,7 @@ pub(crate) fn reaching_abi_value_before(
     let ReachingAbi {
         function,
         machine_context,
-        prep,
+        prep: _,
         graph,
         storage,
         policy,
@@ -1233,15 +1268,8 @@ pub(crate) fn reaching_abi_value_before(
         if rest.iter().all(|input| input == first) {
             return Some(ReachingAbiPath::Reaches(ReachingAbiState::Value(*first)));
         }
-        // A merge of the transfer carrier whose every input is the entry's
-        // own stack pointer is that pointer: an early return that never
-        // built the frame meets the epilogue that has unwound it.
-        if policy.stack_pointer == Some(storage)
-            && graph
-                .inputs(phi.id)
-                .iter()
-                .all(|input| value_is_entry_stack_pointer(prep, graph, *input, storage))
-        {
+        let inputs = graph.inputs(phi.id).iter().copied();
+        if entry_pointer_merge(search, inputs.map(ReachingAbiState::Value)) {
             return Some(ReachingAbiPath::Reaches(ReachingAbiState::PreservedEntry));
         }
         r2il::refusal_evidence!(
@@ -1306,16 +1334,35 @@ pub(crate) fn reaching_abi_value_before(
         // through itself, and nothing outside it defined the storage.
         return Some(ReachingAbiPath::Cycle);
     };
-    if !rest.iter().all(|value| value == first) {
-        r2il::refusal_evidence!(
-            "reaching-abi-value",
-            "{block_addr:#x} has no phi for {:?} and its predecessors disagree: {:?}",
-            storage,
-            values
-        );
-        return None;
+    if rest.iter().all(|value| value == first) {
+        return Some(ReachingAbiPath::Reaches(*first));
     }
-    Some(ReachingAbiPath::Reaches(*first))
+    if entry_pointer_merge(search, values.iter().copied()) {
+        return Some(ReachingAbiPath::Reaches(ReachingAbiState::PreservedEntry));
+    }
+    r2il::refusal_evidence!(
+        "reaching-abi-value",
+        "{block_addr:#x} has no phi for {:?} and its predecessors disagree: {:?}",
+        storage,
+        values
+    );
+    None
+}
+
+/// Whether every state a merge of the stack pointer joins is the entry's own pointer, with or
+/// without a phi: an early return that never built the frame meets the unwound epilogue (D356).
+fn entry_pointer_merge(
+    search: ReachingAbi<'_>,
+    mut states: impl Iterator<Item = ReachingAbiState>,
+) -> bool {
+    let storage = search.storage;
+    search.policy.stack_pointer == Some(storage)
+        && states.all(|state| match state {
+            ReachingAbiState::PreservedEntry => true,
+            ReachingAbiState::Value(value) => {
+                value_is_entry_stack_pointer(search.prep, search.graph, value, storage)
+            }
+        })
 }
 
 /// Whether `value` is the stack pointer the function was entered with: the
@@ -1460,11 +1507,9 @@ pub(crate) fn callee_write_spans(
     let Some(machine_context) = machine_context else {
         return CalleeSpans::default();
     };
-    // What a call is handed in each argument position is what the convention
-    // puts there, whatever this function itself takes: a caller of one
-    // parameter hands `buf` to `f(x, buf)` in the second slot all the same.
-    let registers = machine_context
-        .convention()
+    // What a call is handed in each position is what the site's convention puts there (D365),
+    // whatever this function itself takes.
+    let calls = (machine_context.calls())
         .map(|model| model.arguments(r2source::convention::SlotClass::Integer))
         .unwrap_or_default();
     let mut reaching = BTreeMap::<CanonicalStorageId, ReachingStorage<'_>>::new();
@@ -1492,6 +1537,9 @@ pub(crate) fn callee_write_spans(
                 .unwrap_or("");
             let target =
                 target.and_then(|target| resolve_graph_literal_value(graph, Some(facts), *target));
+            let registers = target.map_or(calls, |target| {
+                machine_context.site_integer_arguments(target)
+            });
             let mut argument = |index: usize| -> Option<ValueId> {
                 let storage = *registers.get(index)?;
                 let states = reaching

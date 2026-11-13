@@ -2424,12 +2424,7 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O1::main": {
-   "cause": "[D214, D227] D214 fixed the never-assigned ECX: table_walk takes two parameters and main passes two. The return traps on D227's unproven two-register result: main writes both result registers, so `return manual_sink == 0` is an unproven-return residual.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2engine/src/program/fates.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::clang-O1::mem_scan2": {
    "status": "equal"
@@ -2482,12 +2477,7 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::gcc-O0::main": {
-   "cause": "main zeroes XMM0 for a local (`pxor xmm0, xmm0`, stored to its frame) and its callees pass XMM0, so at its return a written float lane stands beside the written RAX. Both result registers are written and nothing in the program calls main to read one, so the result is Unproven (Ambiguous, ROADMAP D227; doc/adr-call-boundary.md, \"S16 as built\") and the return is a counted residual. The old `equal` returned RAX's `sete` through `r2sleigh_carrier_u32`, which rested on reading the float lane as no value. The trap is at the return, in the outermost activation, with memory compared: demand roots nothing at an unproven return (D340), so no call's upper half is a residual.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::gcc-O0::mem_scan2": {
    "status": "equal"
@@ -2535,12 +2525,7 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::gcc-O2::main": {
-   "cause": "main loads XMM0 for its local initialisers (`movdqa xmm0, [0x402030]`, `movq xmm0, rcx`) and writes RAX, so both result registers are written at its return and nothing in the program calls main to read one: the result is Unproven (Ambiguous, ROADMAP D227) and the return is a counted residual. Before D340 this record trapped earlier, at the unread upper half of a uint32_t call result (unspecified-above, owner B). Demand now roots nothing at an unproven return, so the trap is the return itself, with memory compared.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::gcc-O2::mem_scan2": {
    "status": "equal"

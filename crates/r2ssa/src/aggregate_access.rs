@@ -16,7 +16,7 @@ use crate::{
     SourceTypeKind, SsaGraph, StructuredAccessId, StructuredMemoryAccessFact, ValueId,
 };
 
-pub const AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION: u32 = 5;
+pub const AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION: u32 = 6;
 
 /// What holds the struct a projection reads (D348). Each constructor is proven, never assumed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -38,6 +38,15 @@ pub enum GraphOf {
     Interface,
     /// The image's `data_types`.
     Image,
+}
+
+/// One step from an aggregate to the scalar a projection reads (D346, D360).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub enum PathStep {
+    /// A struct member, by member id.
+    Member(u32),
+    /// An element of a fixed-count array at a constant index the access offset proves.
+    Element(u64),
 }
 
 /// Exact scalar value carried by one projected memory effect.
@@ -66,9 +75,9 @@ pub struct AggregateAccessProjection {
     pub graph: GraphOf,
     pub struct_type_id: u32,
     pub aggregate_id: u32,
-    /// Member ids from the outermost aggregate to the scalar leaf the access reads (D346).
-    pub path: Box<[u32]>,
-    /// The path's member names joined by `.` (`top_left.x`), so a consumer needs no graph.
+    /// The steps from the outermost aggregate to the scalar leaf the access reads (D346).
+    pub path: Box<[PathStep]>,
+    /// The path spelled as C (`top_left.x`, `a[2].y`), so a consumer needs no graph.
     pub member_name: Box<str>,
     /// The leaf's type.
     pub member_type_id: u32,
@@ -172,15 +181,15 @@ fn exact_access_binding(
     }
 }
 
-/// The scalar member an access of `size_bits` at `offset_bits` reads, by member path.
+/// The scalar member an access of `size_bits` at `offset_bits` reads, by path.
 struct ScalarLeaf {
-    path: Vec<u32>,
+    path: Vec<PathStep>,
     name: String,
     type_id: u32,
 }
 
-/// The one scalar member the access covers, through by-value structs; a union, array, bit-field
-/// or overlap refuses. O(depth x m), depth bounded by the aggregate count (ADR "ExtTypeDb as built").
+/// The one scalar the access covers, through by-value structs and fixed-count arrays; a union,
+/// bit-field, unsized element or overlap refuses. O(depth x m) (ADR "ExtTypeDb as built").
 fn scalar_leaf(
     graph: &crate::SourceTypeGraph,
     aggregate: &crate::SourceAggregateLayout,
@@ -190,48 +199,58 @@ fn scalar_leaf(
     let mut leaf = ScalarLeaf {
         path: Vec::new(),
         name: String::new(),
-        type_id: 0,
+        type_id: aggregate.type_id(),
     };
-    let (mut aggregate, mut offset_bits) = (aggregate, offset_bits);
-    for _ in 0..=graph.aggregates().len() {
-        let mut containing = aggregate.members().iter().filter(|member| {
-            member.offset_bits() <= offset_bits
-                && offset_bits - member.offset_bits() < member.size_bits()
-        });
-        let member = containing.next()?;
-        if containing.next().is_some() || member.is_bit_field() {
-            return None;
-        }
-        let member_type = graph_type(graph, member.type_id())?;
-        leaf.path.push(member.member_id());
-        // An anonymous struct member adds no name: C spells its members as the outer's.
-        if !member.name().is_empty() {
-            if !leaf.name.is_empty() {
-                leaf.name.push('.');
-            }
-            leaf.name.push_str(member.name());
-        }
-        let inner = offset_bits - member.offset_bits();
-        match member_type.kind() {
+    let mut offset_bits = offset_bits;
+    for _ in 0..=graph.types().len() {
+        let current = graph_type(graph, leaf.type_id)?;
+        match current.kind() {
             SourceTypeKind::Struct { aggregate_id } => {
-                aggregate = usize::try_from(aggregate_id)
+                let aggregate = usize::try_from(aggregate_id)
                     .ok()
                     .and_then(|index| graph.aggregates().get(index))
                     .filter(|nested| nested.id() == aggregate_id)?;
-                offset_bits = inner;
+                let mut containing = aggregate.members().iter().filter(|member| {
+                    member.offset_bits() <= offset_bits
+                        && offset_bits - member.offset_bits() < member.size_bits()
+                });
+                let member = containing.next()?;
+                if containing.next().is_some() || member.is_bit_field() {
+                    return None;
+                }
+                graph_type(graph, member.type_id())?;
+                leaf.path.push(PathStep::Member(member.member_id()));
+                // An anonymous struct member adds no name: C spells its members as the outer's.
+                if !member.name().is_empty() && !leaf.name.is_empty() {
+                    leaf.name.push('.');
+                }
+                leaf.name.push_str(member.name());
+                offset_bits -= member.offset_bits();
+                leaf.type_id = member.type_id();
+            }
+            SourceTypeKind::Array {
+                element_type_id,
+                count: Some(count),
+            } => {
+                let element = graph_type(graph, element_type_id)?.size_bits();
+                let index = offset_bits.checked_div(element)?;
+                if index >= count || leaf.name.is_empty() {
+                    return None;
+                }
+                leaf.path.push(PathStep::Element(index));
+                leaf.name.push_str(&format!("[{index}]"));
+                offset_bits -= index * element;
+                leaf.type_id = element_type_id;
             }
             SourceTypeKind::Union { .. } | SourceTypeKind::Array { .. } => return None,
             // Where an access lands and how wide it is decide the member, not its kind:
             // a store to `s->next` projects onto the pointer.
             _ => {
-                return (inner == 0
-                    && !member.name().is_empty()
-                    && member.size_bits() == size_bits
-                    && member_type.size_bits() == size_bits)
-                    .then(|| ScalarLeaf {
-                        type_id: member.type_id(),
-                        ..leaf
-                    });
+                return (offset_bits == 0
+                    && !leaf.path.is_empty()
+                    && !leaf.name.is_empty()
+                    && current.size_bits() == size_bits)
+                    .then_some(leaf);
             }
         }
     }
@@ -671,8 +690,16 @@ mod tests {
             REVISION.to_vec(),
             r2source::ConventionId::Aapcs64,
             [
-                SourceAbiParameterSpec::new(0, register_storage(0)),
-                SourceAbiParameterSpec::new(1, register_storage(8)),
+                SourceAbiParameterSpec::new(
+                    0,
+                    register_storage(0),
+                    r2source::SourceSlot::integer(0),
+                ),
+                SourceAbiParameterSpec::new(
+                    1,
+                    register_storage(8),
+                    r2source::SourceSlot::integer(1),
+                ),
             ],
             SourceFunctionReturn::Void,
             [],
@@ -702,12 +729,83 @@ mod tests {
                 .map(|projection| (projection.path.to_vec(), projection.member_name.to_string()))
                 .collect::<Vec<_>>()
         };
-        assert_eq!(projected(8), [(vec![1, 0], "br.x".to_string())]);
-        assert_eq!(projected(4), [(vec![0, 1], "tl.y".to_string())]);
+        let path = |steps: &[u32]| {
+            steps
+                .iter()
+                .map(|id| PathStep::Member(*id))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(projected(8), [(path(&[1, 0]), "br.x".to_string())]);
+        assert_eq!(projected(4), [(path(&[0, 1]), "tl.y".to_string())]);
         assert!(
             projected(16).is_empty(),
             "a union member names no single leaf"
         );
+    }
+
+    /// `struct S { struct P p[2]; int a[4]; }` over `nested_struct_graph`'s `P` (type 3).
+    fn array_member_graph() -> SourceTypeGraph {
+        let array = |id, element, count, bits| {
+            let kind = SourceTypeKind::Array {
+                element_type_id: element,
+                count: Some(count),
+            };
+            SourceType::new(id, kind, bits, 32)
+        };
+        SourceTypeGraph::new(
+            [
+                SourceType::new(0, SourceTypeKind::Struct { aggregate_id: 0 }, 256, 32),
+                SourceType::new(1, SourceTypeKind::SignedInteger, 32, 32),
+                array(2, 3, 2, 128),
+                SourceType::new(3, SourceTypeKind::Struct { aggregate_id: 1 }, 64, 32),
+                array(4, 1, 4, 128),
+            ],
+            [
+                SourceAggregateLayout::new(
+                    0,
+                    0,
+                    256,
+                    32,
+                    "S",
+                    [
+                        SourceAggregateMember::new(0, 2, 0, 128, "p"),
+                        SourceAggregateMember::new(1, 4, 128, 128, "a"),
+                    ],
+                ),
+                SourceAggregateLayout::new(
+                    1,
+                    3,
+                    64,
+                    32,
+                    "P",
+                    [
+                        SourceAggregateMember::new(0, 1, 0, 32, "x"),
+                        SourceAggregateMember::new(1, 1, 32, 32, "y"),
+                    ],
+                ),
+            ],
+        )
+        .expect("valid array member graph")
+    }
+
+    /// D360: a read inside a fixed-count array member names the element its offset lands in, down
+    /// to the scalar; a read wider than one element names none.
+    #[test]
+    fn a_read_inside_an_array_member_names_its_element() {
+        let graph = array_member_graph();
+        let leaf = |offset_bits, size_bits| {
+            scalar_leaf(&graph, &graph.aggregates()[0], offset_bits, size_bits)
+                .map(|leaf| (leaf.path, leaf.name))
+        };
+        let a2 = vec![PathStep::Member(1), PathStep::Element(2)];
+        assert_eq!(leaf(128 + 64, 32), Some((a2, "a[2]".to_string())));
+        let p1y = vec![
+            PathStep::Member(0),
+            PathStep::Element(1),
+            PathStep::Member(1),
+        ];
+        assert_eq!(leaf(96, 32), Some((p1y, "p[1].y".to_string())));
+        assert_eq!(leaf(128, 64), None);
     }
 
     /// Nine single-member levels around one `int`: the leaf's path names every level.
@@ -753,9 +851,13 @@ mod tests {
         pointer_offset: u64,
     ) -> SourceFunctionInterface {
         let parameters = [
-            SourceAbiParameterSpec::new(0, register_storage(pointer_offset)),
-            SourceAbiParameterSpec::new(1, register_storage(8)),
-            SourceAbiParameterSpec::new(2, register_storage(16)),
+            SourceAbiParameterSpec::new(
+                0,
+                register_storage(pointer_offset),
+                r2source::SourceSlot::integer(0),
+            ),
+            SourceAbiParameterSpec::new(1, register_storage(8), r2source::SourceSlot::integer(1)),
+            SourceAbiParameterSpec::new(2, register_storage(16), r2source::SourceSlot::integer(2)),
         ];
         if !exact_graph {
             return SourceFunctionInterface::new(
@@ -892,7 +994,7 @@ mod tests {
         assert_eq!(load.graph, GraphOf::Interface);
         assert_eq!(load.struct_type_id, 0);
         assert_eq!(load.aggregate_id, 0);
-        assert_eq!(load.path.as_ref(), [2]);
+        assert_eq!(load.path.as_ref(), [PathStep::Member(2)]);
         assert_eq!(load.member_name.as_ref(), "member_2");
         assert_eq!(load.member_type_id, 1);
         assert_eq!(load.element_index, None);
@@ -915,7 +1017,7 @@ mod tests {
         let store = facts
             .projection(REVISION, store_access)
             .expect("fourteenth-member store projection");
-        assert_eq!(store.path.as_ref(), [13]);
+        assert_eq!(store.path.as_ref(), [PathStep::Member(13)]);
         assert_eq!((store.byte_offset, store.byte_width), (52, 4));
         assert_eq!(store.producer, store_inst);
         let AggregateAccessBinding::Write { value } = store.binding else {

@@ -2911,9 +2911,9 @@ r2sleigh_word_u64 _main(r2sleigh_word_u32 arg0, r2sleigh_word_u64* arg1)
     uint32_t tmp_100000c9c_8_1;
     _Alignas(16) uint8_t frame[160];
 
-    /* r2dec proof: 1 construct is marked below; 172 source obligations: 151 rendered, 20 elided, 0 refused, 1 residual; 49 statements rendered; 1 argument slot read with no parameter, read as residuals (X0_0); 1 data object type refused; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 171 source obligations: 151 rendered, 20 elided, 0 refused; 49 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
     {
-        x0_1 = (uint64_t)((uint64_t)(uint32_t)((uint64_t)r2sleigh_residual_u64(1) >> 32U) << 32U | (uint64_t)arg0);
+        x0_1 = (uint64_t)(uint32_t)arg0;
         tmp_lane_100000b70_5_0_1 = r2sleigh_load_u128((void*)(uint64_t)0x100004030U);
         r2sleigh_store_u128((void*)(uint64_t)((uint64_t)(frame + 0U) + (uint64_t)64U), (__uint128_t)r2sleigh_load_u128((void*)(uint64_t)0x100004020U));
         r2sleigh_store_u128((void*)(uint64_t)((uint64_t)(frame + 0U) + (uint64_t)80U), (__uint128_t)tmp_lane_100000b70_5_0_1);
@@ -2927,7 +2927,7 @@ r2sleigh_word_u64 _main(r2sleigh_word_u32 arg0, r2sleigh_word_u64* arg1)
         r2sleigh_store_u128((void*)(uint64_t)(frame + 0U), (__uint128_t)tmp_lane_100000b8c_1_0_1);
         r2sleigh_store_u128((void*)(uint64_t)((uint64_t)(frame + 0U) + (uint64_t)16U), (__uint128_t)tmp_lane_100000b8c_1_0_1);
         r2sleigh_store_u64((void*)((uint64_t)(frame + 0U) + (uint64_t)64U), (uint64_t)((uint64_t)(frame + 0U) + (uint64_t)72U));
-        x0_2 = (uint64_t)_struct_nested_array((void*)(uint64_t)((uint64_t)(frame + 0U) + (uint64_t)32U), (int32_t)((uint32_t)((uint64_t)x0_1 >> 0U) & (uint32_t)1U), (uint32_t)x0_1);
+        x0_2 = (uint64_t)_struct_nested_array((void*)(uint64_t)((uint64_t)(frame + 0U) + (uint64_t)32U), (int32_t)((uint32_t)((uint64_t)x0_1 >> 0U) & (uint32_t)1U), (uint32_t)arg0);
         tmp_100000bb4_8_1 = r2sleigh_load_u32((void*)&_manual_sink);
         r2sleigh_store_u32((void*)&_manual_sink, (uint32_t)((uint32_t)((uint64_t)x0_2 >> 0U) + (uint32_t)tmp_100000bb4_8_1));
         if ((uint8_t)((int32_t)((uint64_t)x0_1 >> 0U) < (int32_t)2U)) {

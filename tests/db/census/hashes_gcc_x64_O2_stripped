@@ -78,7 +78,7 @@ NAME=0x00401050
 FILE=tests/fixtures/hashes_gcc_x64_O2_stripped
 CMDS=aa; pdd @ 0x00401050
 EXPECT=<<EOF
-r2sleigh_result_u32 fcn_401050(void)
+r2sleigh_word_u32 fcn_401050(void)
 {
     int32_t __printf_chk(int32_t, const char*, ...);
     r2sleigh_word_u32 fcn_401330(r2sleigh_word_u64, r2sleigh_word_u64);
@@ -110,7 +110,7 @@ r2sleigh_result_u32 fcn_401050(void)
     uint64_t rax_35;
     uint64_t rax_38;
 
-    /* r2dec proof: no individual construct is marked; 320 source obligations: 233 rendered, 87 elided, 0 refused; 28 statements rendered; 13 callee prototypes supplied by the source; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 320 source obligations: 233 rendered, 87 elided, 0 refused; 28 statements rendered; 13 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
     {
         fcn_401580();
         rax_2 = (uint64_t)fcn_401330(0x402060, 61);
@@ -139,7 +139,7 @@ r2sleigh_result_u32 fcn_401050(void)
         __printf_chk(2, "pearson     %02x\n", (uint64_t)(uint8_t)((uint64_t)rax_35 >> 0U));
         rax_38 = fcn_401b50(0x402060, 61);
         __printf_chk(2, "combined    %016llx\n", rax_38);
-        return r2sleigh_carrier_u32(0);
+        return 0;
     }
 }
 

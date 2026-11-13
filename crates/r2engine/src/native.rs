@@ -1968,13 +1968,13 @@ fn closed_under_entry(mut keep: Vec<bool>, preceding: &[Vec<usize>], entry: usiz
     keep
 }
 
-/// The parameter of import `name` placed at `storage` whose cited row types it a pointer to code
-/// returning `void` (S30); none where no cited row places one there.
-pub(crate) fn void_slot(
+/// The parameter of import `name` placed at `storage` whose cited row types it a pointer to code,
+/// and what a call through it reads of the result (S30, D227); none where no cited row states one.
+pub(crate) fn code_slot(
     target: &NativeTarget<'_>,
     name: &str,
     storage: r2source::CanonicalStorageId,
-) -> Option<u8> {
+) -> Option<(u8, r2abi::ResultRead)> {
     let declared = Declared::import(target, name)?;
     if declared.row.is_none_or(|row| row.citation.is_empty()) {
         return None;
@@ -1982,8 +1982,10 @@ pub(crate) fn void_slot(
     let placed = placing_imports(target, None, |placement| placement.registers(declared))?;
     let index = placed.iter().position(|at| *at == Some(storage))?;
     let parameter = declared.prototype.parameters.get(index)?;
-    let void = parameter.code_returns(declared.graph) == Some(r2abi::TypeId::VOID);
-    void.then(|| u8::try_from(index).ok()).flatten()
+    Some((
+        u8::try_from(index).ok()?,
+        parameter.code_result(declared.graph)?,
+    ))
 }
 
 /// One program, one machine, and the walk over it.
@@ -2935,7 +2937,7 @@ impl Native<'_> {
         body: &crate::body::Body,
     ) -> (Vec<SourceDataObject>, Option<r2source::SourceTypeGraph>) {
         let declarations = self.target.declarations;
-        let named = referenced(body)
+        let referenced = referenced(body)
             .into_iter()
             .filter(|address| !body.calls.contains(address))
             // An import's slot is a word the loader fills, not an object the source names: its
@@ -2944,7 +2946,15 @@ impl Native<'_> {
                 self.program.import_at(*address).is_none()
                     || r2abi::statement::write_at(self.program.loader_writes(), *address)
                         .is_none_or(|write| write.place != *address)
-            })
+            });
+        // A reference inside a declared object also names the object at its start (D361).
+        let starts = referenced.flat_map(|address| {
+            let start = declarations
+                .object_containing(address)
+                .map(|(start, _)| start);
+            std::iter::once(address).chain(start.filter(|start| *start != address))
+        });
+        let named = (starts.collect::<BTreeSet<_>>().into_iter())
             .filter_map(|address| Some((address, self.program.name_at(address)?)))
             .collect::<Vec<_>>();
         let types = (named.iter())
@@ -3553,9 +3563,29 @@ fn duties(
         };
         into.extend(covered_runs(storage, duty));
     }
+    // Both duties say the value survives a call; a reserved lane is the platform's (D274).
+    preserved.retain(|lanes| !covered_by(&reserved, lanes));
     preserved.sort_unstable();
     preserved.dedup();
     (preserved.into(), reserved.into())
+}
+
+/// Whether `runs` cover every byte of `lanes`. `O(n log n)` in the runs.
+fn covered_by(runs: &[LaneSet], lanes: &LaneSet) -> bool {
+    let wanted = lanes.narrowed();
+    let mut held = (runs.iter().map(LaneSet::narrowed))
+        .filter(|run| run.space == wanted.space)
+        .collect::<Vec<_>>();
+    held.sort_unstable_by_key(|run| run.offset);
+    let end = wanted.offset + u64::from(wanted.size);
+    let mut covered = wanted.offset;
+    for run in &held {
+        if run.offset > covered {
+            break;
+        }
+        covered = covered.max(run.offset + u64::from(run.size));
+    }
+    covered >= end && wanted.size > 0
 }
 
 /// What the row states beyond locations, its registers placed.

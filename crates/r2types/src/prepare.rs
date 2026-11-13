@@ -149,7 +149,11 @@ mod tests {
             r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
                 b"prepare-source-pointer".to_vec(),
                 r2source::ConventionId::Aapcs64,
-                [r2ssa::SourceAbiParameterSpec::new(0, storage(0))],
+                [r2ssa::SourceAbiParameterSpec::new(
+                    0,
+                    storage(0),
+                    r2source::SourceSlot::integer(0),
+                )],
                 r2ssa::SourceFunctionReturn::Void,
                 [],
                 [Some(r2ssa::SourceLogicalValue::new(
@@ -163,7 +167,11 @@ mod tests {
             r2ssa::SourceFunctionInterface::new_exact(
                 b"prepare-source-scalar".to_vec(),
                 r2source::ConventionId::Aapcs64,
-                [r2ssa::SourceAbiParameterSpec::new(0, storage(0))],
+                [r2ssa::SourceAbiParameterSpec::new(
+                    0,
+                    storage(0),
+                    r2source::SourceSlot::integer(0),
+                )],
                 r2ssa::SourceFunctionReturn::Void,
                 [],
             )

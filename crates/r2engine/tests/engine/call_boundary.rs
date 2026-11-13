@@ -1432,12 +1432,21 @@ const READS_HANDLER: &[u8] = &[
 const HANDLER: u64 = BASE + 0x10;
 
 fn handler_rendered(literal: Literal, survey: bool) -> String {
+    handler_answer(literal, survey).0
+}
+
+/// The handler's text and the premises its answer takes.
+fn handler_answer(
+    literal: Literal,
+    survey: bool,
+) -> (String, std::collections::BTreeSet<r2source::Premise>) {
     let mut open = OpenProgram::of(literal);
     if survey {
         open.analyse_program().expect("it surveys");
     }
     let rendered = open.rendered(HANDLER).expect("it renders");
-    rendered.response.output.into_text()
+    let premises = rendered.response.premises.clone();
+    (rendered.response.output.into_text(), premises)
 }
 
 /// A handler whose address only reaches `atexit`'s cited `void (*)(void)` slot returns nothing
@@ -1511,4 +1520,85 @@ fn the_atexit_extern_spells_its_slot() {
         .output
         .into_text();
     assert!(text.contains("int32_t atexit(void(*)(void));"), "{text}");
+}
+
+/// `_start`'s shape: `lea rdi, [rip + 9]: handler; call __libc_start_main; hlt`.
+const STARTS_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, 0xe8, 0x84, 0x00, 0x00, 0x00, 0xf4,
+];
+
+/// [`STARTS_HANDLER`] handing the address in RCX, `__libc_start_main`'s `init`: `lea rcx, [rip + 9]`.
+const STARTS_HANDLER_AS_INIT: &[u8] = &[
+    0x48, 0x8d, 0x0d, 0x09, 0x00, 0x00, 0x00, 0xe8, 0x84, 0x00, 0x00, 0x00, 0xf4,
+];
+
+/// A function only `__libc_start_main`'s cited `int (*)(int, char **, char **)` slot takes returns
+/// that `int` under the closed world, though its RAX is a call's: LSB passes it to `exit` (D227).
+#[test]
+fn a_main_only_libc_start_main_takes_returns_its_int_under_the_closed_world() {
+    let (closed, premises) = handler_answer(at_exit(STARTS_HANDLER, "__libc_start_main"), true);
+    assert!(
+        premises.contains(&r2source::Premise::ClosedWorld),
+        "{premises:?}"
+    );
+    assert!(
+        closed.contains("r2sleigh_word_u32 handler(void)"),
+        "{closed}"
+    );
+    assert!(
+        closed.contains("reads the result (assuming closed-world)"),
+        "{closed}"
+    );
+    let cold = handler_rendered(at_exit(STARTS_HANDLER, "__libc_start_main"), false);
+    assert!(cold.contains("the result is unproven"), "{cold}");
+}
+
+/// A non-PIE `_start` forms the address as an immediate, `mov edi, 0x1010`: the word inside that
+/// instruction is the take itself, so it is no stored word and `main` is no escape (D227).
+#[test]
+fn a_main_an_immediate_hands_to_libc_start_main_returns_its_int() {
+    const STARTS_BY_IMMEDIATE: &[u8] = &[
+        0xbf, 0x10, 0x10, 0x00, 0x00, // 1000 mov edi, 0x1010
+        0xe8, 0x86, 0x00, 0x00, 0x00, // 1005 call the stub
+        0xf4, // 100a hlt
+    ];
+    let closed = handler_rendered(at_exit(STARTS_BY_IMMEDIATE, "__libc_start_main"), true);
+    assert!(
+        closed.contains("r2sleigh_word_u32 handler(void)"),
+        "{closed}"
+    );
+}
+
+/// `init`'s slot is `func`, which states no return, so a function taken into it keeps its residual.
+#[test]
+fn a_take_into_a_slot_that_states_no_return_reads_nothing() {
+    let init = handler_rendered(at_exit(STARTS_HANDLER_AS_INIT, "__libc_start_main"), true);
+    assert!(init.contains("the result is unproven"), "{init}");
+}
+
+/// `p1` at 0x1000 calls `p2` and `x`; `p2` at 0x1010 calls `x`; `x` at 0x1020 is `mov eax, 1; ret`.
+const CALLERS_CALLING_EACH_OTHER: &[u8] = &[
+    0xe8, 0x0b, 0x00, 0x00, 0x00, 0xe8, 0x16, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3,
+];
+
+/// `x`'s calls are read from `p2`'s site fates before `p1`'s, which reads `p2`'s register effect:
+/// that effect is then the deposited one, and no body is lifted twice (D354).
+#[test]
+fn a_caller_that_calls_another_caller_is_read_after_it() {
+    let functions = [
+        ("p1", BASE, 0x0b),
+        ("p2", BASE + 0x10, 6),
+        ("x", BASE + 0x20, 6),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(CALLERS_CALLING_EACH_OTHER, &functions));
+    open.analyse_program().expect("it surveys");
+    let before = open.analysis_stats().walked.computed;
+    open.rendered(BASE + 0x20).expect("it renders");
+    let stats = open.analysis_stats();
+    assert_eq!(stats.defects, 0);
+    let walked = stats.walked.computed - before;
+    // `x` for its own render and for its register effect, `p2` and `p1` once each.
+    assert_eq!(walked, 4, "walks during the request");
 }

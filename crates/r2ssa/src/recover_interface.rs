@@ -2260,11 +2260,7 @@ fn recover_interface_inner(
         observed = observed_reads(None);
     }
     // A call's read of a register its certified boundary does not pass is no read (`liveness`).
-    let ignored_reads = crate::function::uncertified_call_reads(
-        graph,
-        prep.map(|prep| &prep.views),
-        &facts.boundaries,
-    );
+    let ignored_reads = crate::function::unpassed_call_reads(graph, &facts.boundaries);
     // The call of unproven arity a `CallUse` at `inst` reads for: the first after it in its block.
     let handed_to = |inst: crate::InstId| {
         let used = graph.inst(inst)?;
@@ -3735,10 +3731,11 @@ fn mint_recovered_interface_inner(
         .enumerate()
         .map(|(index, parameter)| {
             let slotted = SourceParameterLocation::Register(parameter.slot());
-            Some(
-                SourceAbiParameterSpec::new(u32::try_from(index).ok()?, parameter.location())
-                    .at_slot(slot(slotted, parameter.class(), parameter.basis())?),
-            )
+            Some(SourceAbiParameterSpec::new(
+                u32::try_from(index).ok()?,
+                parameter.location(),
+                slot(slotted, parameter.class(), parameter.basis())?,
+            ))
         })
         .chain(
             recovered
@@ -3751,17 +3748,11 @@ fn mint_recovered_interface_inner(
                         size_bytes: parameter.slot_bytes(),
                         callee_offset: parameter.offset(),
                     };
-                    Some(
-                        SourceAbiParameterSpec::with_location(
-                            u32::try_from(register_count.checked_add(index)?).ok()?,
-                            location,
-                        )
-                        .at_slot(slot(
-                            location,
-                            SlotClass::Stack,
-                            parameter.basis(),
-                        )?),
-                    )
+                    Some(SourceAbiParameterSpec::with_location(
+                        u32::try_from(register_count.checked_add(index)?).ok()?,
+                        location,
+                        slot(location, SlotClass::Stack, parameter.basis())?,
+                    ))
                 }),
         )
         .collect::<Option<Vec<_>>>()?;

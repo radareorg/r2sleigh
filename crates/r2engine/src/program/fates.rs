@@ -250,6 +250,8 @@ pub struct Direct {
     calls: u32,
     /// The loader's own calls a cited row states (r2abi `loader_call`, D237, D240); their reads are in `lanes`.
     loader_calls: u32,
+    /// Every take hands the address into cited slots, one of which reads the result (D227).
+    slot_read: bool,
     /// Some caller the survey names was not read, so these calls may not be every call.
     unread: bool,
     /// Each lane a call returns on into its caller, which that caller's own calls decide.
@@ -324,6 +326,12 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
     // A call two bodies hold (one walk enters the other's tail) is one call, read once.
     let mut seen = BTreeSet::new();
     let mut returned = BTreeSet::new();
+    // A caller's site fates deposit its register effect, so a caller calling it reads it held (D354).
+    for caller in callee_first(&survey, survey.callers_of(callee)) {
+        if let Some(Ok(thumb)) = survey.walked_in(caller) {
+            let _ = db.get::<SiteFates>(&(caller, thumb));
+        }
+    }
     for &caller in survey.callers_of(callee) {
         let Some(Ok(thumb)) = survey.walked_in(caller) else {
             unread = true;
@@ -343,6 +351,7 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
         }
     }
     let loader_calls = loader_reads(db.inputs().source.container(), callee, &mut lanes);
+    let slot_read = slot_reads(db, callee, &mut lanes);
     let returned = forwarded_lanes(&mut lanes, returned, float_second).into();
     r2il::refusal_evidence!(
         "call-boundary",
@@ -352,9 +361,72 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
         lanes,
         calls,
         loader_calls,
+        slot_read,
         unread,
         returned,
     })
+}
+
+/// Whether every take of `callee` hands it into cited slots one of which reads an integer result,
+/// that read joined into `lanes` (D227): `O(log takes)` where nothing takes it.
+fn slot_reads<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    callee: u64,
+    lanes: &mut [JoinedLane; LANES],
+) -> bool {
+    let escapes = db.get::<super::reads::Escapes>(&()).ok();
+    let ways = escapes.as_deref().and_then(Option::as_ref);
+    if ways.is_none_or(|ways| ways.takes_of(callee).is_empty()) {
+        return false;
+    }
+    let proof = db.get::<super::slots::DeclaredSlot>(&callee).ok();
+    let Some(r2abi::ResultRead::Integer { bytes }) =
+        proof.and_then(|proof| *proof).map(|p| p.reads)
+    else {
+        return false;
+    };
+    let read = ByteMask((1u128 << bytes) - 1);
+    let lane = &mut lanes[usize::from(LaneId::INTEGER.0)];
+    join(lane, Some(Forwarded::Fate(LaneFate::Read(read))));
+    true
+}
+
+/// `callers` (ascending) ordered so each comes after every other one it calls, a cycle broken where
+/// the search enters it: a post-order over the calls among them, `O(E log k)` for `E` calls into them.
+fn callee_first(survey: &super::requests::Survey, callers: &[u64]) -> Vec<u64> {
+    let mut calls = vec![Vec::new(); callers.len()];
+    for (to, called) in callers.iter().enumerate() {
+        for caller in survey.callers_of(*called) {
+            if let Ok(from) = callers.binary_search(caller)
+                && from != to
+            {
+                calls[from].push(to);
+            }
+        }
+    }
+    let mut seen = vec![false; callers.len()];
+    let mut order = Vec::with_capacity(callers.len());
+    // Each caller enters the stack once, and each of its calls is stepped past once.
+    for root in 0..callers.len() {
+        if std::mem::replace(&mut seen[root], true) {
+            continue;
+        }
+        let mut stack = vec![(root, 0usize)];
+        while let Some((at, next)) = stack.last_mut() {
+            match calls[*at].get(*next).copied() {
+                Some(to) => {
+                    *next += 1;
+                    let fresh = !std::mem::replace(&mut seen[to], true);
+                    stack.extend(fresh.then_some((to, 0)));
+                }
+                None => {
+                    order.push(callers[*at]);
+                    stack.pop();
+                }
+            }
+        }
+    }
+    order
 }
 
 /// The loader's calls to `callee` a cited row states, each read joined into `lanes` (D237, D240):
@@ -401,6 +473,8 @@ pub struct Forwarding {
     pub lanes: [JoinedLane; LANES],
     pub calls: u32,
     pub loader_calls: u32,
+    /// A cited slot every take reaches reads the result (D227).
+    pub slot_read: bool,
     pub unread: bool,
     /// The callers a returned lane is dead in only if their own calls are every way in.
     pub forwarders: Box<[u64]>,
@@ -533,6 +607,7 @@ fn solve<S: Source + 'static>(
             lanes,
             calls: direct.calls,
             loader_calls: direct.loader_calls,
+            slot_read: direct.slot_read,
             unread: direct.unread,
             forwarders: std::mem::take(&mut forwarders[at]).into_iter().collect(),
         })
@@ -797,8 +872,11 @@ impl BoundaryResult {
             lane if lane.dead && dead => LaneDecision::Dead,
             _ => LaneDecision::Open,
         });
+        // A slot's declared return is how every caller calls, given no undefined call (C17 6.3.2.3p8).
+        let slotted = matches!(result, Some(SourceClosedResult::DeclaredVoid(_)))
+            || (result.is_some() && forwarding.slot_read);
         let premises = match result {
-            Some(SourceClosedResult::DeclaredVoid(_)) => vec![
+            Some(_) if slotted => vec![
                 r2source::Premise::ClosedWorld,
                 r2source::Premise::UbFreeSource,
             ],
@@ -832,8 +910,9 @@ fn declared_void<S: Source + 'static>(
     if !(0..LANES).all(quiet) || !super::reads::calls_claimed(db, entry, forwarding.calls) {
         return None;
     }
-    let origin = (*db.get::<super::slots::DeclaredSlot>(&entry).ok()?)?;
-    Some(SourceClosedResult::DeclaredVoid(origin))
+    let proof = (*db.get::<super::slots::DeclaredSlot>(&entry).ok()?)?;
+    (proof.reads == r2abi::ResultRead::Nothing)
+        .then_some(SourceClosedResult::DeclaredVoid(proof.origin))
 }
 
 /// Which lanes the body may hold a result in: an integer register no return defines holds none, and
@@ -1016,7 +1095,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
     const RETENTION: Retention = Retention::Held;
 
     /// Work: the body's own register effect, deposited, then one backward pass over the body,
-    /// `O((B + E) × lanes)` within its budget, and one held register effect per distinct callee.
+    /// `O((B + E) × lanes)` within its budget, and one held effect and `KeptAcross` per callee.
     fn compute(db: &Db<ProgramInputs<S>>, &(caller, thumb): &(u64, bool)) -> Self::Value {
         read_body(db, (caller, thumb), |read| {
             // Deposited before any deep read, so the row depends on what a computed row reads (ADR).
@@ -1064,6 +1143,29 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for RegisterEffects {
     /// `SiteFates` deposits the row of each body it walks, so only a body it did not walk is lifted here.
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
         read_body(db, (entry, thumb), |read| read.effect(entry)).flatten()
+    }
+}
+
+/// What a call to a body keeps: its register effect closed over each pending callee's own answer
+/// (D363). A cycle, a callee with no row or another machine keeps nothing. `O(p × r / 64)` per row.
+pub(super) struct KeptAcross;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for KeptAcross {
+    type Key = (u64, bool);
+    type Value = Option<r2ssa::site_boundary::Kept>;
+    const NAME: &'static str = "kept-across";
+    const RETENTION: Retention = Retention::Held;
+
+    /// Work: one row, then each pending callee's answer until nothing is left; worst case the
+    /// bodies a return path reaches, each lifted once.
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
+        let effect = db.get::<RegisterEffects>(&(entry, thumb)).ok()?;
+        let effect = (*effect).as_ref()?;
+        let view = View::new(db, true);
+        Some(effect.closed(|callee| {
+            let key = (callee, view.thumb_at(callee));
+            (*db.get::<KeptAcross>(&key).ok()?).clone()
+        }))
     }
 }
 
@@ -1151,18 +1253,29 @@ fn effect_on_flow<S: Source + 'static>(
         .is_none()
         .then_some(&*target.call);
     let clobbers = model.map(|model| move |storage| model.clobbers(storage));
+    // An import has no row, so a call to one keeps nothing without asking.
+    let callee = |block: usize, op: usize| {
+        let entered = effects.callee_at(block, op)?;
+        crate::native::Program::import_at(reading.view, entered)
+            .is_none()
+            .then_some(entered)
+    };
     let by = r2ssa::site_boundary::KeptBy {
         machine: target.arch,
         clobbers: (clobbers.as_ref())
             .map(|clobbers| clobbers as &dyn Fn(CanonicalStorageId) -> bool),
         never: &never,
+        callee: &callee,
     };
     let effect = flow.register_effect(entry, reading.lanes, &effects, &by);
     r2il::refusal_evidence!(
         "register-effect",
         "{entry:#x}: {}",
         (effect.as_ref()).map_or("none".into(), |effect| {
-            r2ssa::site_boundary::spelled(effect.kept_registers())
+            let pending = effect.pending.iter().map(|callee| format!("{callee:#x}"));
+            let pending = pending.collect::<Vec<_>>().join(" ");
+            let unwritten = r2ssa::site_boundary::spelled(effect.unwritten_registers());
+            format!("{unwritten} pending [{pending}]")
         })
     );
     effect
@@ -1422,19 +1535,20 @@ impl<S: Source + 'static> Reading<'_, S> {
             };
             return (effect, formatted);
         }
-        // A row reads no other row, so one costs one pass over one body (ADR, Cost).
+        // A row reads no other row, so one costs one pass over one body (ADR, Cost); what the call
+        // keeps is the row closed over its callees' (D363).
+        let key = (callee, self.view.thumb_at(callee));
         let row = (self.depth == Depth::Deep)
-            .then(|| {
-                let thumb = self.view.thumb_at(callee);
-                self.db.get::<RegisterEffects>(&(callee, thumb))
-            })
+            .then(|| self.db.get::<RegisterEffects>(&key))
             .and_then(Result::ok);
         let effect = match row.as_deref().and_then(Option::as_ref) {
             Some(row) => CallEffect {
                 takes: row.takes,
                 counted: None,
                 overwrites: Overwrites::Bytes(row.overwrites),
-                kept: row.kept_lanes(self.lanes),
+                kept: (self.db.get::<KeptAcross>(&key).ok())
+                    .and_then(|kept| (*kept).as_ref().map(|kept| kept.kept_lanes(self.lanes)))
+                    .unwrap_or_default(),
                 reads: LaneBytes::default(),
             },
             None => CallEffect {

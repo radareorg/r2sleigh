@@ -13,6 +13,15 @@ const NEXT_VAL: &[u8] = &[
     0xc3, // 1006 ret
 ];
 
+/// `int two(struct node *a, struct node *b) { return a->next->val + b->next->val; }`.
+const TWO_NODES: &[u8] = &[
+    0x48, 0x8b, 0x47, 0x08, // 1000 mov rax, [rdi + 8]
+    0x48, 0x8b, 0x4e, 0x08, // 1004 mov rcx, [rsi + 8]
+    0x8b, 0x00, // 1008 mov eax, [rax]
+    0x03, 0x01, // 100a add eax, [rcx]
+    0xc3, // 100c ret
+];
+
 /// `void use(struct holder *h) { h->ops->f(h->ops->o, h->ops->o); }`.
 const LOADED_MEMBER_CALL: &[u8] = &[
     0x48, 0x83, 0xec, 0x08, // 1000 sub rsp, 8
@@ -77,6 +86,19 @@ const GLOBAL_MEMBER_CALL: &[u8] = &[
     0x48, 0x83, 0xc4, 0x08, // 1019 add rsp, 8
     0xc3, // 101d ret
     0x90, 0x90, // 101e
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 1020 g_ops
+];
+
+/// `void use(void) { g_ops.f(0, 0); }`: only `g_ops + 8` is referenced, then `g_ops`'s 16 bytes.
+const GLOBAL_MEMBER_ONLY: &[u8] = &[
+    0x48, 0x83, 0xec, 0x08, // 1000 sub rsp, 8
+    0x31, 0xff, // 1004 xor edi, edi
+    0x31, 0xf6, // 1006 xor esi, esi
+    0x48, 0x8b, 0x04, 0x25, 0x28, 0x10, 0x00, 0x00, // 1008 mov rax, [0x1028]
+    0xff, 0xd0, // 1010 call rax
+    0x48, 0x83, 0xc4, 0x08, // 1012 add rsp, 8
+    0xc3, // 1016 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1017
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 1020 g_ops
 ];
 
@@ -236,6 +258,40 @@ fn a_loaded_pointer_member_roots_the_next_projection() {
     );
 }
 
+/// D359: the projected `next`, read through the declared `struct node *`, spells as that member.
+#[test]
+fn a_projected_member_read_spells_as_the_member() {
+    let types = types();
+    let declared = declaring(
+        "next_val",
+        Some((types.node_pointer, "struct node *")),
+        types.int,
+    );
+    let mut open = program(NEXT_VAL, declared);
+    let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
+    assert!(text.contains("->next"), "{text}");
+}
+
+/// D359: each declared `struct node *` parameter spells its own `next`, from one grouping pass.
+#[test]
+fn two_projected_parameters_each_spell_their_member() {
+    use r2abi::{Parameter, Prototype};
+    let types = types();
+    let node = |name: &str| Parameter::new(types.node_pointer, "struct node *", Some(name));
+    let prototype = Prototype {
+        name: "two".to_owned(),
+        parameters: vec![node("a"), node("b")],
+        returns: "int".into(),
+        return_type: types.int,
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(types.graph);
+    declarations.declare_function(BASE, prototype);
+    let mut open = program(TWO_NODES, declarations);
+    let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
+    assert_eq!(text.matches("->next").count(), 2, "{text}");
+}
+
 /// D348 gate 7: `h->ops->f(...)` takes the member's two declared parameters.
 #[test]
 fn a_call_through_a_loaded_members_member_takes_its_type_as_contract() {
@@ -282,6 +338,40 @@ fn a_call_through_a_global_structs_member_takes_its_type_as_contract() {
     assert_eq!(member_call(&mut open), (true, 2, true));
     let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
     assert!(!text.contains("r2dec gap"), "{text}");
+}
+
+/// `code` with `g_ops` declared a `struct ops` and named by a 16-byte data symbol.
+fn global_ops(code: &'static [u8], length: u64) -> OpenProgram<Literal> {
+    let types = types();
+    let mut declarations = declaring("use", None, TypeId::VOID);
+    declarations.declare_object(
+        G_OPS,
+        r2abi::DataObject {
+            name: "g_ops".to_owned(),
+            ty: types.ops,
+            size_bytes: Some(16),
+        },
+    );
+    let literal = Literal::of_code(code, &[("use", BASE, length)])
+        .writable_data_after(G_OPS)
+        .declaring(Symbol {
+            name: "g_ops".into(),
+            vaddr: G_OPS,
+            size: 16,
+            kind: SymbolKind::Data,
+            defined: true,
+            ..Symbol::default()
+        })
+        .with_declarations(declarations);
+    OpenProgram::of(literal)
+}
+
+/// D361: `call [g_ops + 8]` with `g_ops` itself never referenced still roots `g_ops`.
+#[test]
+fn a_member_read_alone_roots_its_declared_object() {
+    let mut open = global_ops(GLOBAL_MEMBER_ONLY, 0x17);
+    let roots = projected(&mut open);
+    assert_eq!(roots, [("f".to_string(), "data")]);
 }
 
 /// D348 gate 7: `o.f(...)`, a member of a struct the frame declares by value.
