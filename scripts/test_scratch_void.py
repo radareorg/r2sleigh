@@ -256,18 +256,19 @@ class Mutants(unittest.TestCase):
     def test_every_mutant_edit_applies_once_to_the_tree(self):
         import mutants_d203
         root = pathlib.Path(__file__).resolve().parent.parent
-        for name, edits, must_die, why, targets in mutants_d203.MUTANTS:
+        for name, edits, must_die, why, lives_on in mutants_d203.MUTANTS:
             for path, old, _ in edits:
                 self.assertEqual((root / path).read_text().count(old), 1, f"{name}: {path}")
             self.assertTrue(must_die or why, f"{name} may live only with a reason")
-            self.assertTrue(set(targets) <= set(mutants_d203.ALL) and "x86-64" in targets, name)
+            self.assertTrue(set(lives_on) <= set(mutants_d203.ALL) - {"x86-64"} and all(lives_on.values()), name)
 
-    def test_arm64_grades_the_entry_byte_alone(self):
+    def test_arm64_kills_two_mutants_and_names_why_two_live(self):
         import mutants_d203
         self.assertEqual(mutants_d203.target_of(["--known", "k", "--target", "aarch64"]), "aarch64")
         self.assertEqual(mutants_d203.target_of(["--target=aarch64"]), "aarch64")
         self.assertEqual(mutants_d203.target_of([]), "x86-64")
-        self.assertEqual([m[0] for m in mutants_d203.MUTANTS if "aarch64" in m[4]], ["entry-byte"])
+        self.assertEqual([m[0] for m in mutants_d203.MUTANTS if "aarch64" not in m[4]],
+                         ["void-row", "inserted-write-unread"])
 
 
 if __name__ == "__main__":
