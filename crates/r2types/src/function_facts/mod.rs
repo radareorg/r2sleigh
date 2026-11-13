@@ -1536,8 +1536,8 @@ impl FunctionFacts {
             };
             // A call that takes a pair takes the type of both halves, whatever the callee's own
             // signature says of its first register.
-            let float_slot = (source.machine_context().convention_slots())
-                .and_then(r2ssa::SourceConventionSlots::float_result_slot);
+            let float_slot =
+                (source.machine_context().convention()).and_then(|model| model.results().float);
             let pair_callee = matches!(
                 signature.interface.return_kind(),
                 r2ssa::SourceFunctionReturn::Pair { .. }

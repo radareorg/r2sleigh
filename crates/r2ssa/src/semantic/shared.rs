@@ -1568,8 +1568,8 @@ pub(crate) fn callee_write_spans(
     // puts there, whatever this function itself takes: a caller of one
     // parameter hands `buf` to `f(x, buf)` in the second slot all the same.
     let registers = machine_context
-        .convention_slots()
-        .map(r2source::SourceConventionSlots::argument_slots)
+        .convention()
+        .map(|model| model.arguments(r2source::convention::SlotClass::Integer))
         .unwrap_or_default();
     let mut reaching = BTreeMap::<CanonicalStorageId, ReachingStorage<'_>>::new();
     let mut spans = Vec::new();
@@ -1785,7 +1785,7 @@ impl FrameBoundaries {
         for slot in declared {
             boundaries.insert_entry(slot.offset(), i64::from(slot.size_bytes()));
         }
-        let Some(effect) = machine_context.call_effect() else {
+        let Some(effect) = machine_context.calls() else {
             return boundaries;
         };
         let stack_pointer = machine_context.stack_pointer_carrier();

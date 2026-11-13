@@ -172,11 +172,11 @@ impl<'a, S: Source + 'static> View<'a, S> {
         })
     }
 
-    /// What a call does under the program's default convention: a view of its held call model.
-    pub(super) fn default_call_effect(&self) -> Option<r2ssa::SourceCallEffect> {
+    /// What a call runs under from the program's default convention: its held `AnyCall` model.
+    pub(super) fn default_calls(&self) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
         let assembled = self.db.inputs().assembled()?;
         let model = self.db.get::<super::AnyCall>(&assembled.convention).ok()?;
-        (*model).as_ref().ok()?.call_effect().ok()
+        (*model).as_ref().ok().cloned()
     }
 
     /// The machine under one convention, its model the program's held one.
@@ -294,9 +294,7 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
 
     fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
         let ((index, handle), model) = self.import_through(slot, |row| row.halts_on)?;
-        let register = model
-            .argument_registers(r2abi::SlotClass::Integer)
-            .nth(index.into());
+        let register = model.argument(r2abi::SlotClass::Integer, index.into());
         register.map(|register| (register, handle))
     }
 

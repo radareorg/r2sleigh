@@ -158,7 +158,7 @@ impl FrameReach {
         // Without the convention's saves nothing bounds a run below the return address.
         if self.whole
             || machine_context
-                .and_then(SourceMachineContext::call_effect)
+                .and_then(SourceMachineContext::calls)
                 .is_none()
         {
             return Vec::new();
@@ -167,12 +167,12 @@ impl FrameReach {
         // An entry value of a register no argument arrives in, stored whole, is the compiler's: a
         // save, the return address, the frame pointer. An argument's may be a local's initial value.
         let arguments = machine_context
-            .and_then(SourceMachineContext::convention_slots)
+            .and_then(SourceMachineContext::convention)
             .map(|slots| {
                 slots
-                    .argument_slots()
+                    .arguments(r2source::convention::SlotClass::Integer)
                     .iter()
-                    .chain(slots.float_argument_slots())
+                    .chain(slots.arguments(r2source::convention::SlotClass::Float))
                     .copied()
                     .collect::<Vec<_>>()
             })
@@ -335,7 +335,7 @@ fn compiler_slots(
     model: &ObjectModel,
     machine_context: Option<&SourceMachineContext>,
 ) -> BTreeSet<ObjectId> {
-    let effect = machine_context.and_then(SourceMachineContext::call_effect);
+    let effect = machine_context.and_then(SourceMachineContext::calls);
     let canary = function
         .compiler_inserted()
         .iter()
@@ -352,7 +352,7 @@ fn compiler_slots(
     // The low lane of an entry register the convention preserves: AArch64's `d8` of `z8`.
     let preserved_low_lane = |root: CanonicalStorageId, size: u32| {
         effect.is_some_and(|effect| {
-            effect.preserved().iter().any(|lane| {
+            effect.preserved_registers().iter().any(|lane| {
                 lane.size == size
                     && machine_context.is_some_and(|context| context.is_low_lane_of(*lane, root))
             })

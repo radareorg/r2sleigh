@@ -378,8 +378,8 @@ impl FormatForwardingLookup<'_> {
 /// like any other.
 fn variadic_tail_on_stack(machine_context: &SourceMachineContext) -> bool {
     machine_context
-        .convention_slots()
-        .is_some_and(r2source::SourceConventionSlots::variadic_tail_on_stack)
+        .convention()
+        .is_some_and(|model| model.forms.variadic_on_stack)
 }
 
 /// Whether the convention places a floating tail operand: on the stack, or at a shared position.
@@ -502,10 +502,10 @@ pub(crate) fn variadic_callsite_arguments(
 ) -> Result<Vec<SourceCallArgumentFact>, VariadicCallsiteArgumentCountRefusal> {
     let convention = recovery
         .machine_context
-        .convention_slots()
+        .convention()
         .ok_or(VariadicCallsiteArgumentCountRefusal::CallingConventionMismatch)?;
-    let slots = convention.argument_slots();
-    if convention.convention() != interface.convention()
+    let slots = convention.arguments(r2source::convention::SlotClass::Integer);
+    if convention.id != interface.convention()
         || interface.arguments().len() > slots.len()
         || interface
             .arguments()
@@ -524,7 +524,7 @@ pub(crate) fn variadic_callsite_arguments(
     // stack. Apple's arm64 ABI puts the whole variadic tail on the stack from
     // its first slot, whatever registers the prefix left free.
     let fixed = interface.arguments().len();
-    let tail_on_stack = convention.variadic_tail_on_stack();
+    let tail_on_stack = convention.forms.variadic_on_stack;
     let stack_index_of = |position: usize| -> Option<usize> {
         if tail_on_stack && position >= fixed {
             Some(position - fixed)
@@ -628,11 +628,7 @@ fn shared_float_slot(
 ) -> Result<CanonicalStorageId, VariadicCallsiteArgumentCountRefusal> {
     (machine_context.convention())
         .filter(|model| model.shares_positions())
-        .and_then(|model| {
-            model
-                .argument_registers(r2source::convention::SlotClass::Float)
-                .nth(position)
-        })
+        .and_then(|model| model.argument(r2source::convention::SlotClass::Float, position))
         .ok_or(VariadicCallsiteArgumentCountRefusal::FloatingVariadicArgument)
 }
 
@@ -966,11 +962,10 @@ pub(crate) fn convention_call_boundary(
     arrival_merges: &crate::dense::IdSet<ValueId>,
     mut stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> Result<ConventionCallBoundary, CallBoundaryRefusal> {
-    let convention =
-        (machine_context.convention_slots()).ok_or(CallBoundaryRefusal::NoConvention)?;
-    let results = |convention: &r2source::SourceConventionSlots| {
+    let convention = (machine_context.convention()).ok_or(CallBoundaryRefusal::NoConvention)?;
+    let results = |convention: &r2source::ConventionModel| {
         convention
-            .result_slot()
+            .result()
             .and_then(|storage| {
                 observed_convention_call_result_after_call(
                     graph, live_out, block_addr, op_index, storage,
@@ -990,7 +985,7 @@ pub(crate) fn convention_call_boundary(
         let (arguments, arguments_proven) =
             stated_call_arguments(at, machine_context, count, entry_values, stack_pointer);
         return Ok(ConventionCallBoundary {
-            convention: convention.convention(),
+            convention: convention.id,
             arguments,
             unproven: (!arguments_proven).then_some(CallBoundaryRefusal::StatedArgumentUnreached {
                 count: position(count),
@@ -1023,7 +1018,7 @@ pub(crate) fn convention_call_boundary(
     // function, which nothing could pass, proves the count ends below it.
     let written_later = |position: usize| {
         for slot in convention
-            .argument_slots()
+            .arguments(r2source::convention::SlotClass::Integer)
             .iter()
             .skip(position + 1)
             .copied()
@@ -1074,7 +1069,11 @@ pub(crate) fn convention_call_boundary(
     };
     let mut arguments = Vec::new();
     let mut unproven = None;
-    for (position, slot) in convention.argument_slots().iter().enumerate() {
+    for (position, slot) in convention
+        .arguments(r2source::convention::SlotClass::Integer)
+        .iter()
+        .enumerate()
+    {
         let Ok(index) = u32::try_from(position) else {
             break;
         };
@@ -1168,7 +1167,10 @@ pub(crate) fn convention_call_boundary(
     // stack. A slot this function stored into before the call is one the call
     // reads, which is the same evidence the register scan takes, and the first
     // slot with no store ends the count exactly as an untouched register does.
-    if arguments.len() == convention.argument_slots().len()
+    if arguments.len()
+        == convention
+            .arguments(r2source::convention::SlotClass::Integer)
+            .len()
         && let Some(placement) = convention.stack_arguments()
     {
         // Where the area is depends on where the stack pointer stands. Without
@@ -1242,7 +1244,7 @@ pub(crate) fn convention_call_boundary(
         });
     }
     Ok(ConventionCallBoundary {
-        convention: convention.convention(),
+        convention: convention.id,
         arguments,
         unproven,
         results: results(convention),
@@ -1263,10 +1265,10 @@ fn stated_call_arguments(
     entry_values: &BTreeMap<CanonicalStorageId, Option<ValueId>>,
     mut stack_pointer: Option<&mut ReachingStorage<'_>>,
 ) -> (Vec<SourceCallArgumentFact>, bool) {
-    let Some(convention) = machine_context.convention_slots() else {
+    let Some(convention) = machine_context.convention() else {
         return (Vec::new(), false);
     };
-    let registers = convention.argument_slots();
+    let registers = convention.arguments(r2source::convention::SlotClass::Integer);
     let mut arguments = Vec::with_capacity(count);
     for (position, slot) in registers.iter().take(count).enumerate() {
         // The callee reads the slot whatever merges into it.
@@ -2219,8 +2221,11 @@ fn left_undefined(
 
 /// Whether the convention passes an argument in `storage`, or states no convention.
 fn carries_input(machine_context: &SourceMachineContext, storage: CanonicalStorageId) -> bool {
-    (machine_context.convention_slots()).is_none_or(|slots| {
-        (slots.argument_slots().iter()).any(|slot| slot.location() == storage.location())
+    (machine_context.convention()).is_none_or(|slots| {
+        (slots
+            .arguments(r2source::convention::SlotClass::Integer)
+            .iter())
+        .any(|slot| slot.location() == storage.location())
     })
 }
 
@@ -2610,7 +2615,7 @@ fn count_register_set(at: CallPosition<'_>, machine_context: &SourceMachineConte
     } = at;
     let (Some(prep), Some(count)) = (
         prep,
-        (machine_context.convention_slots()).and_then(|slots| slots.variadic_count_register()),
+        (machine_context.convention()).and_then(|slots| slots.forms.count_register),
     ) else {
         return false;
     };

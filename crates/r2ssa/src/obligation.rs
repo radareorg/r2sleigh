@@ -2751,8 +2751,8 @@ mod tests {
     }
 
     /// The call arch's call effect: argument and result registers clobbered, the program counter preserved.
-    fn x86_64_call_effect() -> Option<crate::SourceCallEffect> {
-        crate::testing::call_effect(
+    fn x86_64_call_effect() -> Option<crate::Conventions> {
+        crate::testing::conventions(
             [0, 8, 16, 32, 40, 48, 56].map(|offset| register_storage(offset, 8)),
             [register_storage(24, 8)],
         )
@@ -3027,7 +3027,7 @@ mod tests {
             &crate::Arch::new(arch),
             Some(function),
             vec![call],
-            crate::testing::call_effect(
+            crate::testing::conventions(
                 [0, 8, 16, 32, 40, 48, 56].map(|offset| register_storage(offset, 8)),
                 [register_storage(24, 8), register_storage(64, 8)],
             ),
@@ -3642,7 +3642,7 @@ mod tests {
             crate::DecompileInputs {
                 arch: Some(&x86_64_call_arch()),
                 // The convention: a call reads rdi, the register written below.
-                call_effect: crate::testing::call_effect_reading(
+                conventions: crate::testing::conventions_reading(
                     [0, 8, 16, 32, 40, 48, 56].map(|offset| register_storage(offset, 8)),
                     [register_storage(24, 8)],
                     [register_storage(8, 8)],
@@ -3739,7 +3739,7 @@ mod tests {
         let clobbered = [0, 8, 16, 32, 40, 48, 56].map(|offset| register_storage(offset, 8));
         let reads = [register_storage(8, 8), register_storage(16, 8)];
         let effect =
-            crate::testing::call_effect_reading(clobbered, [register_storage(24, 8)], reads);
+            crate::testing::conventions_reading(clobbered, [register_storage(24, 8)], reads);
         let artifact =
             crate::testing::prepared_under(&[block], &x86_64_call_arch(), None, Vec::new(), effect)
                 .expect("call artifact");

@@ -5,7 +5,7 @@ use r2source::convention::SlotClass;
 use std::collections::{BTreeMap, BTreeSet};
 
 use r2source::{
-    CanonicalStorageId, SourceConventionSlots, SourceRegisterSaveArea, SourceSaveAreaAnchor,
+    CanonicalStorageId, ConventionModel, SourceRegisterSaveArea, SourceSaveAreaAnchor,
     StackAddressBase,
 };
 
@@ -30,11 +30,11 @@ pub(crate) struct SaveArea {
 pub(crate) fn register_save_area(
     graph: &SsaGraph,
     prep: &crate::DecompilePrepFacts,
-    slots: &SourceConventionSlots,
+    slots: &ConventionModel,
     observations: &crate::deadphi::ProvenProgramObservations,
 ) -> Option<SaveArea> {
-    let area = slots.register_save_area()?;
-    let arguments = slots.argument_slots();
+    let area = slots.forms.save_area?;
+    let arguments = slots.arguments(r2source::convention::SlotClass::Integer);
     let width = i64::from(arguments.first()?.size);
     if arguments.iter().any(|slot| i64::from(slot.size) != width) {
         return None;
@@ -118,12 +118,12 @@ pub(crate) fn register_save_area(
 pub(crate) fn home_va_list(
     (graph, prep): (&SsaGraph, &crate::DecompilePrepFacts),
     facts: &crate::semantic::PreparedFunctionFacts,
-    slots: &SourceConventionSlots,
+    slots: &ConventionModel,
     machine: &crate::SourceMachineContext,
     observations: &crate::deadphi::ProvenProgramObservations,
 ) -> Option<SaveArea> {
-    let model = machine.convention().filter(|_| slots.shared_positions())?;
-    let arguments = slots.argument_slots();
+    let model = machine.convention().filter(|_| slots.shares_positions())?;
+    let arguments = slots.arguments(r2source::convention::SlotClass::Integer);
     let at_entry = |value: ValueId| {
         prep.entry_stack_address_root_of(value)
             .filter(|root| root.base == StackAddressBase::StackPointer)
@@ -176,7 +176,7 @@ pub(crate) fn home_cursor(
     let model = machine
         .convention()
         .filter(|model| model.shares_positions())?;
-    let positions = model.argument_registers(SlotClass::Integer).count();
+    let positions = model.arguments(SlotClass::Integer).len();
     let homes = (0..positions)
         .map(|position| Some(model.home(u8::try_from(position).ok()?)?.start))
         .collect::<Option<Vec<_>>>()?;
@@ -216,10 +216,7 @@ fn homed_tail(
     observations: &crate::deadphi::ProvenProgramObservations,
     named: usize,
 ) -> Option<SaveArea> {
-    let arguments = model
-        .argument_registers(SlotClass::Integer)
-        .collect::<Vec<_>>();
-    let arguments = arguments.as_slice();
+    let arguments = model.arguments(SlotClass::Integer);
     let at_entry = |value: ValueId| {
         prep.entry_stack_address_root_of(value)
             .filter(|root| root.base == StackAddressBase::StackPointer)
@@ -396,19 +393,21 @@ mod tests {
 
     /// Three argument slots `x0`..`x2`, a `va_list` holding the byte past the area and, 16 bytes
     /// on, the first unnamed slot's distance from it.
-    fn slots() -> SourceConventionSlots {
-        SourceConventionSlots::new(
-            r2source::ConventionId::SysVAmd64,
-            [register(0), register(8), register(16)],
-            None,
-        )
-        .expect("slots")
-        .with_register_save_area(Some(SourceRegisterSaveArea {
-            anchor: SourceSaveAreaAnchor::End,
-            offset_field: 16,
-            offset_width: 4,
-            stack_field: -8,
-        }))
+    fn slots() -> std::sync::Arc<ConventionModel> {
+        r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+            .arguments(
+                r2source::convention::SlotClass::Integer,
+                [register(0), register(8), register(16)],
+            )
+            .forms(|forms| {
+                forms.save_area = Some(SourceRegisterSaveArea {
+                    anchor: SourceSaveAreaAnchor::End,
+                    offset_field: 16,
+                    offset_width: 4,
+                    stack_field: -8,
+                })
+            })
+            .build()
     }
 
     /// The `va_list` offset field of `named == 1` beside a bound stored at `sp + 0x28`.

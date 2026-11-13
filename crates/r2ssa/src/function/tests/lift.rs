@@ -250,15 +250,16 @@ fn call_result_certificates_require_a_complete_machine_boundary() {
         offset,
         size: 8,
     });
-    let convention =
-        SourceConventionSlots::new(r2source::ConventionId::SysVAmd64, [], Some(full_result))
-            .expect("result convention");
+    let convention = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+        .result(r2source::convention::SlotClass::Integer, full_result)
+        .killed([full_result])
+        .preserved(callee_saved)
+        .conventions();
     let prepared = SsaArtifact::for_decompile_with(
         &blocks,
         DecompileInputs {
             arch: Some(&crate::Arch::from(arch.clone())),
-            convention_slots: Some(convention),
-            call_effect: clobbering([full_result], callee_saved),
+            conventions: Some(convention),
             ..Default::default()
         },
     )
@@ -408,7 +409,7 @@ fn a_callee_proven_to_preserve_a_register_leaves_it_undefined_by_the_call() {
         std::slice::from_ref(&block),
         DecompileInputs {
             arch: Some(&arch),
-            call_effect: call_preservation_effect(),
+            conventions: call_preservation_effect(),
             callee_preserved_carriers: preserved,
             ..Default::default()
         },
@@ -482,7 +483,7 @@ fn a_callee_that_returns_an_unaffected_register_defines_it_at_the_call() {
         std::slice::from_ref(&block),
         DecompileInputs {
             arch: Some(&crate::Arch::from(arch.clone())),
-            call_effect: call_preservation_effect(),
+            conventions: call_preservation_effect(),
             callee_interfaces: BTreeMap::from([(0x2000u64, returns_rbx)]),
             ..Default::default()
         },

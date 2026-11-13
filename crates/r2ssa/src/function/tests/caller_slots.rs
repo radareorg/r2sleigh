@@ -101,10 +101,11 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
     .and_then(|interface| interface.with_stack_pointer_storage(storage(SP)))
     .and_then(|interface| interface.with_exact_stacked_return(0, 8, 8, 8))
     .expect("stacked-return interface");
-    let convention =
-        SourceConventionSlots::new(r2source::ConventionId::SysVAmd64, [], Some(storage(0)))
-            .expect("stack-only convention")
-            .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(8, 8));
+    let convention = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+        .result(r2source::convention::SlotClass::Integer, storage(0))
+        .stack(8, 8)
+        .preserved([storage(SP)])
+        .conventions();
     let artifact = SsaArtifact::for_decompile_with(
         &[block],
         DecompileInputs {
@@ -112,8 +113,7 @@ fn caller_slots() -> BTreeMap<i64, CallerSlotSupply> {
             function_interface: Some(interface),
             machine_roles: SourceMachineRoles::new(Some(storage(RA)), Some(storage(SP)))
                 .expect("machine roles"),
-            convention_slots: Some(convention),
-            call_effect: preserving([storage(SP)]),
+            conventions: Some(convention),
             ..Default::default()
         },
     )

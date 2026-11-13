@@ -182,7 +182,7 @@ impl BlockOrigins {
     }
 
     /// Apply one operation where the convention says what a call leaves standing; without one a call forgets everything.
-    pub fn step_under(&mut self, op: &R2ILOp, call_effect: Option<&crate::SourceCallEffect>) {
+    pub fn step_under(&mut self, op: &R2ILOp, call_effect: Option<&crate::ConventionModel>) {
         match call_effect {
             Some(effect) if op.is_call() => {
                 self.origins.retain(|storage, _| !effect.clobbers(*storage));
@@ -570,12 +570,12 @@ mod tests {
     #[test]
     fn a_call_under_a_convention_keeps_only_what_it_preserves() {
         let register = |offset| Varnode::register(offset, 8);
-        let effect = crate::SourceCallEffect::new(
+        let effect = crate::testing::conventions(
             [CanonicalStorageId::from_varnode(&register(0))],
             [CanonicalStorageId::from_varnode(&register(24))],
-            crate::SourceBoundaryReads::new([], []).expect("no reads"),
         )
-        .expect("a consistent effect");
+        .expect("a consistent effect")
+        .calls;
         let mut origins = BlockOrigins::default();
         for (offset, value) in [(0, 0x1000), (8, 0x2000), (24, 0x3000)] {
             let op = R2ILOp::Copy {

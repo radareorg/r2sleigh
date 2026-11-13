@@ -376,10 +376,11 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
     .and_then(|interface| interface.with_return_address_storage(storage(16)))
     .and_then(|interface| interface.with_stack_pointer_storage(storage(0)))
     .expect("exact dual-coordinate interface");
-    let artifact = SsaArtifact::for_decompile_with_interface(
+    let artifact = keeping_every_register(
         &[block.clone()],
-        Some(&crate::Arch::from(arch.clone())),
-        interface.clone(),
+        &crate::Arch::from(arch.clone()),
+        Some(interface.clone()),
+        SourceMachineRoles::default(),
     )
     .expect("dual-coordinate artifact");
 
@@ -511,12 +512,11 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
             ))
         })
         .expect("exact downward allocation contract");
-    let allocated = SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+    let allocated = keeping_every_register(
         &[block.clone()],
-        Some(&crate::Arch::from(arch.clone())),
+        &crate::Arch::from(arch.clone()),
         Some(interface.clone()),
         allocated_roles,
-        Vec::new(),
     )
     .expect("allocated dual-coordinate artifact");
     let [allocated_save] = allocated
@@ -634,12 +634,11 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
             ))
         })
         .expect("exact upward allocation contract");
-    let wrong_direction = SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+    let wrong_direction = keeping_every_register(
         &[block],
-        Some(&crate::Arch::from(arch.clone())),
+        &crate::Arch::from(arch.clone()),
         Some(interface),
         wrong_direction_roles,
-        Vec::new(),
     )
     .expect("opposite-direction artifact");
     let [wrong_direction_save] = wrong_direction

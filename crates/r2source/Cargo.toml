@@ -10,5 +10,9 @@ r2abi = { path = "../r2abi" }
 r2il = { path = "../r2il" }
 serde.workspace = true
 
+[features]
+# A model builder for downstream tests (`convention::testing`).
+testing = []
+
 [lints]
 workspace = true

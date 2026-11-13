@@ -630,19 +630,22 @@ fn a_register_an_earlier_call_clobbered_is_not_an_argument_of_the_next_call() {
             target: make_const(0, 8),
         },
     ]);
-    let convention = SourceConventionSlots::new(
-        r2source::ConventionId::SysVAmd64,
-        vec![slot(8), slot(16), slot(24)],
-        Some(slot(0)),
-    )
-    .expect("convention slots");
+    let clobbered = [0, 8, 16, 24].map(|offset| call_preservation_storage(offset, 8));
+    let convention = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+        .arguments(
+            r2source::convention::SlotClass::Integer,
+            [slot(8), slot(16), slot(24)],
+        )
+        .result(r2source::convention::SlotClass::Integer, slot(0))
+        .killed(clobbered)
+        .preserved([call_preservation_storage(32, 8)])
+        .conventions();
     let machine_context = SourceMachineContext::from_blocks_with_interfaces(
         std::slice::from_ref(&block),
         Some(&arch),
         None,
         SourceMachineRoles::default(),
         Some(convention),
-        call_preservation_effect(),
         Vec::new(),
     );
     let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
@@ -755,10 +758,11 @@ fn a_convention_with_no_argument_registers_reads_the_area_it_passes_on() {
     .and_then(|interface| interface.with_return_address_storage(storage(16, 8)))
     .and_then(|interface| interface.with_stack_pointer_storage(storage(32, 8)))
     .expect("caller interface");
-    let convention =
-        SourceConventionSlots::new(r2source::ConventionId::SysVAmd64, [], Some(storage(0, 8)))
-            .expect("stack-only convention")
-            .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(0, 8));
+    let convention = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+        .result(r2source::convention::SlotClass::Integer, storage(0, 8))
+        .stack(0, 8)
+        .preserved([storage(32, 8)])
+        .conventions();
     let artifact = SsaArtifact::for_decompile_with(
         &[block],
         DecompileInputs {
@@ -766,8 +770,7 @@ fn a_convention_with_no_argument_registers_reads_the_area_it_passes_on() {
             function_interface: Some(interface),
             machine_roles: SourceMachineRoles::new(Some(storage(16, 8)), Some(storage(32, 8)))
                 .expect("machine roles"),
-            convention_slots: Some(convention),
-            call_effect: preserving([storage(32, 8)]),
+            conventions: Some(convention),
             ..Default::default()
         },
     )

@@ -193,19 +193,19 @@ fn a_call_in_a_program_stating_sysv_abi_keeps_no_register_sysv_clobbers() {
     let mut open = pe(StatedConvention::LlvmX8664SysV);
     assert_eq!(arriving(&mut open), ["rdi", "rsi"]);
     let target = r2engine::native::Program::target_at(&open, TWICE).expect("a machine");
-    let effect = target.call.call_effect().expect("an effect");
+    let effect = &*target.call;
     for name in ["rsi", "rdi", "xmm6"] {
         assert!(effect.clobbers(register(&target, name)), "{name}");
     }
     assert!(effect.preserves(register(&target, "rbx")));
-    let reads = effect.reads().call();
+    let reads = effect.call_reads().expect("the join's reads");
     assert!(reads.contains(&register(&target, "rdi")), "SysV's first");
     // `add rax, rsi` past the call reads an rsi the call may have written, never `a`.
     let text = rendered(&mut open, TWICE);
     assert!(!text.contains("+ (uint64_t)arg0"), "{text}");
     let mut unstated = pe(StatedConvention::Normal);
     let target = r2engine::native::Program::target_at(&unstated, TWICE).expect("a machine");
-    let effect = target.call.call_effect().expect("an effect");
+    let effect = &*target.call;
     assert!(effect.preserves(register(&target, "rsi")));
     let text = rendered(&mut unstated, TWICE);
     assert!(text.contains("+ (uint64_t)arg0"), "{text}");

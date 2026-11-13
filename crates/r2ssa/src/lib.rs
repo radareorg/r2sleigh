@@ -160,17 +160,17 @@ pub use machine_context::{
     MachineMemorySpace, MachineRegisterGeometryState, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
     SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION,
     SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceArity,
-    SourceArityFloor, SourceBoundaryReads, SourceCallArgumentSpec, SourceCallEffect,
-    SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
-    SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature,
-    SourceConventionSlots, SourceFloorCause, SourceFormatParameterRule, SourceFunctionInterface,
-    SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineContext,
-    SourceMachineRoles, SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation,
-    SourceResultCause, SourceResultSeed, SourceResultWidth, SourceStackAllocationContract,
-    SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType,
-    SourceTypeAlias, SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError,
-    SourceTypeGraphParts, SourceTypeKind, SourceUnprovenCall, SourceUnprovenResult,
-    SourceUnstatedCall, loaded_target_slot, terminal_indirect_loaded_slot,
+    SourceArityFloor, SourceCallArgumentSpec, SourceCallResult, SourceCallSiteIdentity,
+    SourceCallSiteInterface, SourceCallSiteInterfaceError, SourceCarrierKind,
+    SourceCarrierProjection, SourceCodeSignature, SourceFloorCause, SourceFormatParameterRule,
+    SourceFunctionInterface, SourceFunctionInterfaceError, SourceFunctionReturn,
+    SourceLogicalValue, SourceMachineContext, SourceMachineRoles, SourceMachineRolesError,
+    SourceOpaqueTag, SourceParameterLocation, SourceResultCause, SourceResultSeed,
+    SourceResultWidth, SourceStackAllocationContract, SourceStackGrowth, SourceStackSlotRole,
+    SourceStackSlotSpec, SourceTagKeyword, SourceType, SourceTypeAlias, SourceTypeClosure,
+    SourceTypeGraph, SourceTypeGraphError, SourceTypeGraphParts, SourceTypeKind,
+    SourceUnprovenCall, SourceUnprovenResult, SourceUnstatedCall, loaded_target_slot,
+    terminal_indirect_loaded_slot,
 };
 pub use obligation::{
     CanonicalInstructionId, CanonicalInstructionSite, NamedObligation, ObligationInventoryFailure,
@@ -186,7 +186,9 @@ pub use r2sleigh_lift::{
     GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineLiftedFunction, GenuineLiftedFunctionAuthority,
     TrustedLiftedFunction,
 };
-pub use r2source::{ConventionId, OwnedFunctionSnapshot};
+pub use r2source::{
+    CallRegisterEffect, ConventionId, ConventionModel, Conventions, OwnedFunctionSnapshot,
+};
 pub use semantic::{
     BlockAssumption, ByDirection, CallArgumentCertificate, CallArgumentLocation,
     CallBoundaryRefusal, CallBoundarySlot, CallBoundaryValueFact, CallFrameReach, CallMemoryEffect,

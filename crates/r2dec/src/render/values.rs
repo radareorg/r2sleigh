@@ -1244,10 +1244,12 @@ impl<'a> Values<'a> {
             .get(value.0 as usize)?
             .canonical_storage);
         let context = self.artifact.machine_context();
-        let slots = context.convention_slots();
+        let slots = context.convention();
         let position = storage.zip(slots).and_then(|(storage, slots)| {
-            (slots.argument_slots().iter())
-                .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
+            (slots
+                .arguments(r2source::convention::SlotClass::Integer)
+                .iter())
+            .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
         });
         // A variadic body's tail: an argument slot past its parameters, or the vector count.
         // The integer section's own parameters: a float one takes no integer slot.
@@ -1255,8 +1257,10 @@ impl<'a> Values<'a> {
             (interface.parameters().iter())
                 .filter_map(r2source::SourceAbiParameterSpec::register_storage)
                 .filter(|storage| {
-                    (slots.into_iter().flat_map(|slots| slots.argument_slots()))
-                        .any(|slot| slot.space == storage.space && slot.offset == storage.offset)
+                    (slots.into_iter().flat_map(|slots| {
+                        slots.arguments(r2source::convention::SlotClass::Integer)
+                    }))
+                    .any(|slot| slot.space == storage.space && slot.offset == storage.offset)
                 })
                 .count()
         };
@@ -1264,7 +1268,7 @@ impl<'a> Values<'a> {
             interface.is_variadic()
                 && (position.is_some_and(|slot| slot >= integers(interface))
                     || storage
-                        .zip(slots.and_then(r2ssa::SourceConventionSlots::variadic_count_register))
+                        .zip(slots.and_then(|model| model.forms.count_register))
                         .is_some_and(|(storage, count)| {
                             storage.space == count.space
                                 && storage.offset < count.offset + u64::from(count.size)
@@ -2787,16 +2791,13 @@ pub(super) fn class_of(ty: &r2types::CTypeLike, width_bits: u32) -> Option<Machi
 }
 
 /// The type a value `width_bits` wide spells in `storage`, of the class the convention gives it
-/// (`SourceConventionSlots::class_of`); `None` outside every slot.
+/// (`ConventionModel::class_of`); `None` outside every slot.
 pub(super) fn located_class(
     artifact: &SsaArtifact,
     storage: r2source::CanonicalStorageId,
     width_bits: u32,
 ) -> Option<MachineType> {
-    let class = artifact
-        .machine_context()
-        .convention_slots()?
-        .class_of(storage)?;
+    let class = artifact.machine_context().convention()?.class_of(storage)?;
     match class {
         r2source::convention::SlotClass::Integer if matches!(width_bits, 8 | 16 | 32 | 64) => {
             Some(MachineType::Integer {

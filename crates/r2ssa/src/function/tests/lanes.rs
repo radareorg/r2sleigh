@@ -168,7 +168,7 @@ fn sealed_lane_call(lane_in_the_merge: bool) -> Result<SsaArtifact, crate::SsaPr
         Some(interface),
         crate::SourceMachineRoles::default(),
         vec![call],
-        crate::testing::call_effect([], [storage(0x88, 8)]),
+        crate::testing::conventions([], [storage(0x88, 8)]),
         &crate::control::UncheckedSsaWorkControl,
     )
 }
@@ -493,7 +493,7 @@ fn entry_read(reads: Vec<R2ILOp>) -> SsaArtifact {
         Some(interface),
         crate::SourceMachineRoles::default(),
         Vec::new(),
-        crate::testing::call_effect([], [storage(0x88, 8)]),
+        crate::testing::conventions([], [storage(0x88, 8)]),
         &crate::control::UncheckedSsaWorkControl,
     )
     .expect("the entry read prepares")

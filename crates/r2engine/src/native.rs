@@ -1487,7 +1487,7 @@ fn declared_parameter_names(
 
 /// Where each integer argument arrives under this machine's convention, by index.
 pub(crate) fn argument_slots(target: &NativeTarget<'_>) -> Vec<CanonicalStorageId> {
-    (target.convention.argument_registers(SlotClass::Integer)).collect()
+    target.convention.arguments(SlotClass::Integer).to_vec()
 }
 
 /// Where an import's declaration says it takes a pointer.
@@ -2865,22 +2865,19 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
             .map_err(|_| NativeRefusal::Machine("the frame pointer is not a register storage"))?,
         None => roles,
     };
-    let slots = model
-        .convention_slots()
-        .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?;
-    let call_effect = target.call.call_effect().inspect_err(|error| {
-        r2il::refusal_evidence!("call-effect", "{:?}: {error:?}", model.id);
-    });
+    if let Some(refused) = target.call.effect_refused() {
+        r2il::refusal_evidence!("call-effect", "{:?}: {refused:?}", model.id);
+    }
     Ok(NativeMachine {
         arch_id: family.to_owned(),
         cpu_id: target.cpu.to_owned(),
         bits,
         endianness,
         roles,
-        slots,
-        // Asked in the first pass, before an interface exists; without it a caller loses its frame facts.
-        call_effect: call_effect.ok(),
-        convention: Some(Arc::clone(&target.convention)),
+        conventions: r2source::Conventions {
+            own: Arc::clone(&target.convention),
+            calls: Arc::clone(&target.call),
+        },
     })
 }
 

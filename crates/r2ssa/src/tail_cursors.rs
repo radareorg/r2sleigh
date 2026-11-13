@@ -407,7 +407,8 @@ impl Prover<'_> {
         let slot = i64::from(self.width);
         let entry = self
             .slots
-            .entry_stack()
+            .forms
+            .entry_stack
             .ok_or("the entry stack is not aligned by the convention")?;
         let stated = i64::from(entry.alignment) % slot == 0;
         match stated && (i64::from(entry.residue) + overflow_init).rem_euclid(slot) == 0 {

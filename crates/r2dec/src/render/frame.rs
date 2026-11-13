@@ -57,10 +57,7 @@ impl Frame {
     /// The frame of the objects whose entry-SP coordinates r2ssa states, where the convention states
     /// the entry stack's alignment: every byte below the entry stack pointer is the function's own.
     pub(super) fn of(artifact: &SsaArtifact) -> Option<Self> {
-        let entry = artifact
-            .machine_context()
-            .convention_slots()?
-            .entry_stack()?;
+        let entry = artifact.machine_context().convention()?.forms.entry_stack?;
         let roots = &artifact.facts().objects.entry_stack_roots;
         let placed = artifact
             .certificates()

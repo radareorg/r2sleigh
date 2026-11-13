@@ -6,8 +6,7 @@ use std::sync::Arc;
 
 use r2il::R2ILOp;
 use r2source::{
-    CanonicalStorageId, SourceClosedResult, SourceConventionSlots, SourceReadLanes,
-    SourceResultCause,
+    CanonicalStorageId, ConventionModel, SourceClosedResult, SourceReadLanes, SourceResultCause,
 };
 use r2ssa::dense::{Csr, DenseId, IdMap};
 use r2ssa::site_boundary::{
@@ -665,9 +664,9 @@ fn held_lanes<S: Source + 'static>(
     let thumb = view.thumb_at(callee);
     let stated = stated_target(&view, &walker, callee, thumb);
     let target = stated.as_ref().unwrap_or(walker.target(thumb));
-    let slots = target.convention.convention_slots().ok()?;
-    let slots_of = lanes_of(target, &slots).slots();
-    let arguments = argument_registers(&slots);
+    let slots = &*target.convention;
+    let slots_of = lanes_of(target, slots).slots();
+    let arguments = argument_registers(slots);
     let input = |lane: &CanonicalStorageId| {
         arguments.iter().any(|argument| {
             argument.space == lane.space
@@ -675,7 +674,7 @@ fn held_lanes<S: Source + 'static>(
                 && lane.offset < argument.offset + u64::from(argument.size)
         })
     };
-    let lanes = lanes_of(target, &slots);
+    let lanes = lanes_of(target, slots);
     let second = (lanes.after_float(&target.convention.results)).map(|(_, id)| id);
     let held = std::array::from_fn(|at| slots_of[at].is_some_and(|lane| at < 3 || input(&lane)));
     Some((held, second))
@@ -1049,16 +1048,16 @@ fn read_body<S: Source + 'static, R>(
     let walker = super::returns::Walking::new(view.clone(), true).ok()?;
     let stated = stated_target(&view, &walker, entry, thumb);
     let target = stated.as_ref().unwrap_or(walker.target(thumb));
-    let slots = target.convention.convention_slots().ok()?;
+    let slots = &*target.convention;
     let walking = db.get::<Walked>(&(entry, thumb)).ok()?;
     let body = walking.0.as_ref().ok()?.body();
     let reading = |depth| Reading {
         db,
         view: &view,
-        lanes: lanes_of(target, &slots),
-        slots: &slots,
+        lanes: lanes_of(target, slots),
+        slots,
         unstated: r2ssa::call_reads::CallReads::every_location(&target.convention),
-        call: target.call.call_effect().ok(),
+        call: std::sync::Arc::clone(&target.call),
         depth,
     };
     Some(then(&BodyRead {
@@ -1136,7 +1135,7 @@ fn stated_target<'p, S: Source + 'static>(
 }
 
 /// The convention's result lanes: the typed three, then the rest of its return set.
-fn lanes_of(target: &NativeTarget<'_>, slots: &SourceConventionSlots) -> ResultLanes {
+fn lanes_of(target: &NativeTarget<'_>, slots: &ConventionModel) -> ResultLanes {
     let results = (target.convention.results.iter())
         .map(|lane| lane.storage)
         .collect::<Vec<CanonicalStorageId>>();
@@ -1201,11 +1200,11 @@ struct Reading<'a, S: Source + 'static> {
     db: &'a Db<ProgramInputs<S>>,
     view: &'a View<'a, S>,
     lanes: ResultLanes,
-    slots: &'a SourceConventionSlots,
+    slots: &'a ConventionModel,
     /// What a call to a callee nothing states may read: the convention's every location.
     unstated: r2ssa::call_reads::CallReads,
-    /// What the convention says a call leaves standing: a format held in a preserved register.
-    call: Option<r2source::SourceCallEffect>,
+    /// What a call leaves standing under the calls' model: a format held in a preserved register.
+    call: std::sync::Arc<ConventionModel>,
     depth: Depth,
 }
 
@@ -1272,7 +1271,7 @@ impl<S: Source + 'static> Reading<'_, S> {
                     .and_then(|callee| formatted.get(&callee));
                 let effect = format.and_then(|format| self.unfloated(&origins, format));
                 sites.extend(effect.map(|effect| ((at, op), effect)));
-                origins.step_under(operation, self.call.as_ref());
+                origins.step_under(operation, Some(&self.call));
             }
         }
         sites
@@ -1372,7 +1371,7 @@ impl<S: Source + 'static> Reading<'_, S> {
         let Some(register) = reads.count_register else {
             return (LaneBytes::covered_by(self.lanes, &reads.registers), None);
         };
-        let floats = self.slots.float_argument_slots();
+        let floats = self.slots.arguments(r2source::convention::SlotClass::Float);
         let overlaps = |a: &CanonicalStorageId, b: &CanonicalStorageId| {
             a.space == b.space
                 && a.offset < b.offset + u64::from(b.size)

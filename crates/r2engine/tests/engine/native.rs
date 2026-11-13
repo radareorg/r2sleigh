@@ -5076,9 +5076,8 @@ fn every_register_a_default_prototype_names_is_one_of_its_machine() {
             })
             .collect::<Vec<_>>();
         assert!(!named.is_empty(), "{sleigh}");
-        let effect = (machine.conventions[machine.default].convention)
-            .call_effect()
-            .expect("the default prototype states a call effect");
+        let effect = &*machine.conventions[machine.default].convention;
+        assert_eq!(effect.effect_refused(), None, "{sleigh}");
         for register in named {
             let placed = machine
                 .embedded
@@ -5094,7 +5093,8 @@ fn every_register_a_default_prototype_names_is_one_of_its_machine() {
                 .collect::<Vec<_>>();
             assert_eq!(placed.len(), 1, "{sleigh}: {register}");
             assert!(
-                effect.clobbered().contains(&placed[0]) || effect.preserved().contains(&placed[0]),
+                effect.clobbered().is_some_and(|it| it.contains(&placed[0]))
+                    || effect.preserved_registers().contains(&placed[0]),
                 "{sleigh}: {register} is in neither list"
             );
         }
@@ -7436,17 +7436,23 @@ fn microsoft_x64_states_four_positional_register_pairs() {
     };
     let prepared =
         r2engine::native::prepared(&machine.under("ms"), &program, BASE).expect("prepared");
-    let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
+    let slots = (prepared.artifact().machine_context().convention()).expect("slots");
     let integers = ["RCX", "RDX", "R8", "R9"].map(place);
     let floats = ["XMM0_Qa", "XMM1_Qa", "XMM2_Qa", "XMM3_Qa"].map(place);
-    assert_eq!(slots.argument_slots(), integers);
-    assert_eq!(slots.float_argument_slots(), floats);
-    assert!(slots.shared_positions());
+    assert_eq!(
+        slots.arguments(r2source::convention::SlotClass::Integer),
+        integers
+    );
+    assert_eq!(
+        slots.arguments(r2source::convention::SlotClass::Float),
+        floats
+    );
+    assert!(slots.shares_positions());
     // System V counts its two classes apart.
     let prepared =
         r2engine::native::prepared(&machine.under("amd64"), &program, BASE).expect("prepared");
-    let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
-    assert!(!slots.shared_positions());
+    let slots = (prepared.artifact().machine_context().convention()).expect("slots");
+    assert!(!slots.shares_positions());
 }
 
 /// Apple's arm64 sends every variadic argument to the stack because its compiler specification
@@ -7460,8 +7466,8 @@ fn an_arm64_variadic_tail_is_on_the_stack_where_the_compiler_specification_says(
     let on_stack = |platform| {
         let machine = Machine::on("aarch64", "aarch64", 64, platform);
         let prepared = r2engine::native::prepared(&machine.target(), &ret, BASE).expect("prepared");
-        let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
-        slots.variadic_tail_on_stack()
+        let slots = (prepared.artifact().machine_context().convention()).expect("slots");
+        slots.forms.variadic_on_stack
     };
     assert!(on_stack(Platform::Darwin));
     assert!(!on_stack(Platform::Linux));
@@ -7962,9 +7968,7 @@ fn go_machine_on(arch: &str) -> Machine {
     )
     .expect("ABIInternal's model");
     assert!(
-        (model.call_effect().ok())
-            .and_then(|effect| effect.stack_bound().copied())
-            .is_some(),
+        model.stack_bound().is_some(),
         "the convention states g.stackguard0"
     );
     machine.conventions.insert(

@@ -17,7 +17,7 @@ pub mod convention;
 pub mod display_names;
 pub mod native;
 pub use confidence::{Basis, Confidence, Fact, Grade, Premise};
-pub use convention::{ConventionId, ConventionModel};
+pub use convention::{CallRegisterEffect, ConventionId, ConventionModel, Conventions};
 pub use display_names::{
     DisplayNames, positional_parameter_name, unnamed_function, unnamed_identifier,
 };
@@ -827,11 +827,8 @@ struct SnapshotState {
     source_revision_identity: Box<[u8]>,
     function_interface: Option<SourceFunctionInterface>,
     machine_roles: SourceMachineRoles,
-    convention_slots: SourceConventionSlots,
-    /// What the convention says a call does to the registers, where it says.
-    call_effect: Option<SourceCallEffect>,
-    /// The model `convention_slots` is a view of, where the capture holds one.
-    convention: Option<Arc<ConventionModel>>,
+    /// The function's convention and its calls', where the capture holds them.
+    conventions: Option<convention::Conventions>,
     /// Contracts an earlier seal minted for calls through a typed member (S32), one per site.
     member_calls: Box<[SourceCallSiteInterface]>,
     captured_fields: CapturedSourceFields,
@@ -887,8 +884,7 @@ impl OwnedFunctionSnapshot {
         source_revision_identity: Box<[u8]>,
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
-        convention_slots: SourceConventionSlots,
-        call_effect: Option<SourceCallEffect>,
+        conventions: Option<convention::Conventions>,
         captured_fields: CapturedSourceFields,
         diagnostics: DiagnosticIdentity,
     ) -> Result<Self, SnapshotValidationError> {
@@ -1009,9 +1005,7 @@ impl OwnedFunctionSnapshot {
             source_revision_identity,
             function_interface,
             machine_roles,
-            convention_slots,
-            call_effect,
-            convention: None,
+            conventions,
             member_calls: Box::default(),
             captured_fields,
             diagnostics,
@@ -1080,33 +1074,14 @@ impl OwnedFunctionSnapshot {
         &self.0.machine_roles
     }
 
-    /// Where this function's calling convention would place arguments and the
-    /// result. Present regardless of whether a prototype was recovered.
-    pub fn convention_slots(&self) -> &SourceConventionSlots {
-        &self.0.convention_slots
+    /// The function's convention and its calls', where the capture holds them.
+    pub fn conventions(&self) -> Option<&convention::Conventions> {
+        self.0.conventions.as_ref()
     }
 
-    /// What the convention says a call does to the registers, where it says.
-    pub fn call_effect(&self) -> Option<&SourceCallEffect> {
-        self.0.call_effect.as_ref()
-    }
-
-    /// The convention model the slots are a view of, where the capture holds one.
+    /// The function's own convention model, where the capture holds one.
     pub fn convention(&self) -> Option<&ConventionModel> {
-        self.0.convention.as_deref()
-    }
-
-    /// The model, shared with whatever keeps it beside the capture.
-    pub fn shared_convention(&self) -> Option<Arc<ConventionModel>> {
-        self.0.convention.clone()
-    }
-
-    /// The same capture with the model its slots view; a model of another convention is ignored.
-    pub(crate) fn with_convention(mut self, model: Arc<ConventionModel>) -> Self {
-        if model.id == self.0.convention_slots.convention() {
-            Arc::make_mut(&mut self.0).convention = Some(model);
-        }
-        self
+        self.0.conventions.as_ref().map(|it| &*it.own)
     }
 
     /// The same capture stating a contract for each call through a typed member. Each is about
@@ -1229,8 +1204,6 @@ mod tests {
             Box::from([7]),
             None,
             SourceMachineRoles::default(),
-            SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                .expect("empty convention slots"),
             None,
             CapturedSourceFields {
                 bounded_function_image: true,
@@ -1330,8 +1303,7 @@ mod tests {
                 valid.source_revision_identity().into(),
                 valid.function_interface().cloned(),
                 *valid.machine_roles(),
-                valid.convention_slots().clone(),
-                valid.call_effect().cloned(),
+                valid.conventions().cloned(),
                 valid.captured_fields(),
                 valid.diagnostic_identity(),
             ),
@@ -1365,8 +1337,6 @@ mod tests {
             Box::from([7]),
             Some(interface.clone()),
             exact_machine_roles(),
-            SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                .expect("empty convention slots"),
             None,
             captured_fields,
             valid.diagnostic_identity(),
@@ -1418,8 +1388,6 @@ mod tests {
                 Box::from([7]),
                 Some(wrong_machine_width),
                 exact_machine_roles(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 narrow_fields,
                 valid.diagnostic_identity()
@@ -1439,8 +1407,6 @@ mod tests {
                 Box::from([7]),
                 Some(interface.clone()),
                 exact_machine_roles(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 missing_frame_pointer,
                 valid.diagnostic_identity()
@@ -1460,8 +1426,6 @@ mod tests {
                 Box::from([7]),
                 Some(interface.clone()),
                 exact_machine_roles(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 missing_stack_allocation_contract,
                 valid.diagnostic_identity()
@@ -1501,8 +1465,6 @@ mod tests {
                 Box::from([7]),
                 Some(interface_without_frame_pointer.clone()),
                 exact_machine_roles(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 captured_fields,
                 valid.diagnostic_identity()
@@ -1520,8 +1482,6 @@ mod tests {
             Box::from([7]),
             Some(interface_without_frame_pointer),
             exact_machine_roles(),
-            SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                .expect("empty convention slots"),
             None,
             fields_without_frame_pointer,
             valid.diagnostic_identity(),
@@ -1546,8 +1506,6 @@ mod tests {
                 Box::from([7]),
                 Some(interface),
                 exact_machine_roles(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 missing_return_mechanism,
                 valid.diagnostic_identity()
@@ -1567,8 +1525,6 @@ mod tests {
                 Box::from([7]),
                 None,
                 SourceMachineRoles::default(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 mechanism_without_interface,
                 valid.diagnostic_identity()
@@ -1588,8 +1544,6 @@ mod tests {
                 Box::from([7]),
                 None,
                 SourceMachineRoles::default(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 frame_pointer_without_interface,
                 valid.diagnostic_identity()
@@ -1620,8 +1574,6 @@ mod tests {
                 Box::from([7]),
                 Some(wrong_revision),
                 exact_machine_roles(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 captured_fields,
                 valid.diagnostic_identity()

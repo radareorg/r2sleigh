@@ -92,11 +92,11 @@ pub(crate) fn promote(
     // A call may read the convention's argument registers (every register, with no convention),
     // so a frame address one of those holds is handed on.
     let calls = has_call(func);
-    let arguments = machine.convention_slots().map(|slots| {
+    let arguments = machine.convention().map(|slots| {
         slots
-            .argument_slots()
+            .arguments(r2source::convention::SlotClass::Integer)
             .iter()
-            .chain(slots.float_argument_slots())
+            .chain(slots.arguments(r2source::convention::SlotClass::Float))
             .copied()
             .collect::<Vec<_>>()
     });
@@ -115,8 +115,12 @@ pub(crate) fn promote(
     };
     // An address a direct callee is proven to reach only upward through escapes only upward.
     let integer_arguments = machine
-        .convention_slots()
-        .map(|slots| slots.argument_slots().to_vec())
+        .convention()
+        .map(|slots| {
+            slots
+                .arguments(r2source::convention::SlotClass::Integer)
+                .to_vec()
+        })
         .unwrap_or_default();
     let upward_at = |block: u64, index: usize, src: VarId| {
         let Some(ops) = func.get_block(block).map(|block| block.ops()) else {
@@ -791,7 +795,7 @@ fn saves(
     accesses: &BTreeMap<i64, Vec<Access>>,
     machine: &SourceMachineContext,
 ) -> BTreeSet<i64> {
-    let (effect, stack_pointer) = (machine.call_effect(), machine.stack_pointer_carrier());
+    let (effect, stack_pointer) = (machine.calls(), machine.stack_pointer_carrier());
     let saved = |access: &Access| {
         let val = match func.get_block(access.block)?.ops().get(access.index)? {
             SSAOp::Store { val, .. } => *val,

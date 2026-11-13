@@ -42,8 +42,8 @@ use crate::integrity::{SsaIntegrityError, validate_ssa_function};
 #[cfg(test)]
 use crate::machine_context::{SourceCallArgumentSpec, SourceCallResult};
 use crate::machine_context::{
-    SourceCallSiteIdentity, SourceCallSiteInterface, SourceConventionSlots,
-    SourceFunctionInterface, SourceMachineContext, SourceMachineRoles,
+    SourceCallSiteIdentity, SourceCallSiteInterface, SourceFunctionInterface, SourceMachineContext,
+    SourceMachineRoles,
 };
 use crate::op::SSAOp;
 use crate::phi::{PhiPlacement, collect_defs_from_cfg_with_names_storage_and_control};
@@ -219,7 +219,7 @@ pub(crate) struct InterfaceQuestions<'a> {
     return_boundary: bool,
     argument_placement: bool,
     frame_geometry: bool,
-    convention: Option<&'a SourceConventionSlots>,
+    convention: Option<&'a r2source::ConventionModel>,
 }
 
 impl<'a> InterfaceQuestions<'a> {
@@ -246,9 +246,9 @@ impl<'a> InterfaceQuestions<'a> {
     }
 
     /// No interface the source states: construction asks the convention.
-    fn before_recovery(convention: &'a SourceConventionSlots) -> Self {
+    fn before_recovery(convention: Option<&'a r2source::ConventionModel>) -> Self {
         Self {
-            convention: Some(convention),
+            convention,
             ..Self::none()
         }
     }
@@ -262,9 +262,9 @@ impl<'a> InterfaceQuestions<'a> {
         };
         if let Some(convention) = self.convention {
             return convention
-                .argument_slots()
+                .arguments(r2source::convention::SlotClass::Integer)
                 .iter()
-                .chain(convention.result_slot().as_ref())
+                .chain(convention.result().as_ref())
                 .filter_map(register)
                 .collect();
         }
@@ -289,9 +289,9 @@ impl<'a> InterfaceQuestions<'a> {
     pub(crate) fn return_carriers(self) -> Vec<CanonicalStorageId> {
         match self.convention {
             Some(convention) => convention
-                .result_slot()
+                .result()
                 .into_iter()
-                .chain(convention.second_result_slot())
+                .chain(convention.results().second)
                 .filter(|slot| slot.space == CanonicalStorageSpace::Register)
                 .collect(),
             None => self
@@ -902,12 +902,9 @@ pub struct DecompileInputs<'a> {
     pub arch: Option<&'a crate::Arch>,
     pub function_interface: Option<SourceFunctionInterface>,
     pub machine_roles: SourceMachineRoles,
-    /// Where the calling convention places arguments. A variadic call needs
-    /// them: its prototype names only the fixed arguments, so where argument
-    /// `n + 1` would go is a question only the convention answers.
-    pub convention_slots: Option<SourceConventionSlots>,
-    /// What a call does to the registers; a body that calls is refused without it.
-    pub call_effect: Option<r2source::SourceCallEffect>,
+    /// The function's convention and its calls'; without them a call reads and clobbers every
+    /// outermost register (RULING 2.1).
+    pub conventions: Option<r2source::Conventions>,
     pub call_site_interfaces: Vec<SourceCallSiteInterface>,
     /// Call sites the source proved are tail calls, by identity. A tail call
     /// through a relocated slot is a `BranchInd` that only a context knowing
@@ -1165,7 +1162,6 @@ impl SsaArtifact {
                 function_interface,
                 SourceMachineRoles::default(),
                 None,
-                None,
                 call_site_interfaces,
             ),
         ))
@@ -1252,8 +1248,7 @@ impl SsaArtifact {
             arch,
             function_interface,
             machine_roles,
-            convention_slots,
-            call_effect,
+            conventions,
             call_site_interfaces,
             tail_call_identities,
             callee_preserved_carriers,
@@ -1266,8 +1261,7 @@ impl SsaArtifact {
             arch,
             function_interface,
             machine_roles,
-            convention_slots,
-            call_effect,
+            conventions,
             call_site_interfaces,
             tail_call_identities,
         );
@@ -1300,7 +1294,7 @@ impl SsaArtifact {
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
         call_site_interfaces: Vec<SourceCallSiteInterface>,
-        call_effect: Option<r2source::SourceCallEffect>,
+        conventions: Option<r2source::Conventions>,
         control: &C,
     ) -> Result<Self, SsaPrepareError> {
         let machine_context = SourceMachineContext::from_blocks_with_interfaces(
@@ -1308,8 +1302,7 @@ impl SsaArtifact {
             arch,
             function_interface,
             machine_roles,
-            None,
-            call_effect,
+            conventions,
             call_site_interfaces,
         );
         let function = SSAFunction::from_blocks_for_decompile_with_interface_and_control(
@@ -1360,7 +1353,6 @@ impl SsaArtifact {
                 arch,
                 function_interface,
                 SourceMachineRoles::default(),
-                None,
                 None,
                 call_site_interfaces,
             ),
@@ -2797,8 +2789,7 @@ impl TrustedSsaArtifact {
                         Some(&arch),
                         None,
                         *source.machine_roles(),
-                        Some(source.convention_slots().clone()),
-                        source.call_effect().cloned(),
+                        source.conventions().cloned(),
                         correlated_call_sites.interfaces.clone(),
                         correlated_call_sites.tail_calls.clone(),
                     );
@@ -2816,7 +2807,6 @@ impl TrustedSsaArtifact {
                 provisional_machine_context.set_unstated_imports(unstated_imports.clone());
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
-                provisional_machine_context.set_convention(source.shared_convention());
                 // A build against callees that state the same to it is this build.
                 let key = BuildKey::of(
                     (&provisional_machine_context, &arch),
@@ -2843,7 +2833,7 @@ impl TrustedSsaArtifact {
                         SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                             &blocks,
                             Some(&arch),
-                            InterfaceQuestions::before_recovery(source.convention_slots()),
+                            InterfaceQuestions::before_recovery(source.convention()),
                             &provisional_machine_context,
                             &callees,
                             Some(&declared_successors),
@@ -2885,10 +2875,14 @@ impl TrustedSsaArtifact {
                 if let Some(exhausted) = preliminary_prep.facts.exhausted {
                     preliminary.note_exhausted(exhausted);
                 }
+                // Without a model no register is an argument or a result: nothing is recovered.
+                let Some(model) = source.convention() else {
+                    break 'recovered None;
+                };
                 let recovered = crate::recover_interface::recover_interface_with_context(
                     preliminary,
                     preliminary_prep,
-                    source.convention_slots(),
+                    model,
                     &provisional_machine_context,
                     crate::recover_interface::Stated::of(&source),
                 );
@@ -2906,8 +2900,8 @@ impl TrustedSsaArtifact {
                     &recovered,
                     source.machine_roles(),
                     source.source_revision_identity(),
-                    source.convention_slots().convention(),
-                    source.convention(),
+                    model.id,
+                    Some(model),
                 );
                 if minted.is_none() {
                     r2il::refusal_evidence!(
@@ -2916,7 +2910,7 @@ impl TrustedSsaArtifact {
                          parameters={} result={:?} convention={:?}",
                         recovered.parameters().len(),
                         recovered.result(),
-                        source.convention_slots().convention()
+                        model.id
                     );
                 }
                 minted
@@ -2957,8 +2951,7 @@ impl TrustedSsaArtifact {
                 Some(&arch),
                 function_interface,
                 *source.machine_roles(),
-                Some(source.convention_slots().clone()),
-                source.call_effect().cloned(),
+                source.conventions().cloned(),
                 call_interfaces,
                 correlated_call_sites.tail_calls,
                 &declared_successors.terminal_blocks(),
@@ -2984,7 +2977,6 @@ impl TrustedSsaArtifact {
         machine_context.set_member_call_sites(correlated_call_sites.member_sites);
         machine_context.set_frame_saves(source.image().frame_saves());
         machine_context.set_accepted_premises(premises.clone());
-        machine_context.set_convention(source.shared_convention());
         // What each entry of a captured code pointer table names, recorded
         // before the facts are collected: a load of such a slot is proven
         // from this, and the collection is what proves it.
@@ -3021,7 +3013,7 @@ impl TrustedSsaArtifact {
             None => {
                 let questions = match stated_interface {
                     true => InterfaceQuestions::new(&machine_context),
-                    false => InterfaceQuestions::before_recovery(source.convention_slots()),
+                    false => InterfaceQuestions::before_recovery(source.convention()),
                 };
                 SSAFunction::from_blocks_for_decompile_with_interface_and_control(
                     blocks.as_slice(),
@@ -4098,7 +4090,7 @@ impl CalleeBoundaries {
 /// stated that the convention restores it; see the field's own documentation
 /// for why the caller's stack pointer is otherwise wrong from its first call
 /// onward.
-/// A body that calls under no stated call effect is refused rather than read as if a register survived.
+/// Under no calls' model a call reads and clobbers every outermost register (RULING 2.1).
 fn decompile_call_boundary_config(
     blocks: &[R2ILBlock],
     arch: Option<&crate::Arch>,
@@ -4106,50 +4098,43 @@ fn decompile_call_boundary_config(
     stack_pointer_restored_by_callee: Option<CanonicalStorageId>,
     callees: CalleeBoundaries,
 ) -> Result<Option<CallBoundaryConfig>, SsaPrepareError> {
+    let Some(arch) = arch else {
+        return Ok(None);
+    };
     let calls = blocks
         .iter()
         .flat_map(|block| &block.ops)
         .any(R2ILOp::is_call);
-    if calls && machine_context.call_effect().is_none() {
-        r2il::refusal_evidence!(
-            "call-effect",
-            "{:#x}: the body calls and its convention states nothing a call leaves standing",
-            blocks.first().map_or(0, |block| block.addr)
-        );
-        return Err(SsaPrepareError::NoCallEffect);
-    }
-    if arch.is_none() {
-        return Ok(None);
-    }
-    // A body that never calls has no call to clobber anything.
-    // What a call keeps is what the convention preserves and what the
-    // platform reserves to the system alike: neither is a definition the call
-    // makes, so both are gaps in any wider root it does write.
-    let (clobbered, preserved) = match machine_context.call_effect().filter(|_| calls) {
-        Some(effect) => (
+    let model = machine_context.calls();
+    // A body that never calls has no call to clobber anything. What a call keeps is what the
+    // convention preserves and what the platform reserves alike: neither is a call's definition.
+    let (clobbered, preserved) = match calls {
+        true => (
             machine_context.call_clobbered_carriers().to_vec(),
-            effect
-                .preserved()
-                .iter()
-                .chain(effect.system_reserved())
-                .copied()
-                .collect::<BTreeSet<_>>()
-                .into_iter()
-                .collect(),
+            (model
+                .map(|model| (model.preserved_registers().iter()).chain(model.system_reserved())))
+            .into_iter()
+            .flatten()
+            .copied()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect(),
         ),
-        None => (Vec::new(), Vec::new()),
+        false => (Vec::new(), Vec::new()),
     };
-    let reads = machine_context
-        .call_effect()
-        .map(crate::SourceCallEffect::reads);
+    // No register is a result under no model: the result is unproven, never void (S34).
+    let returned = (model.and_then(r2source::ConventionModel::result_reads)).unwrap_or(&[]);
     let config = CallBoundaryConfig {
         clobbered,
         preserved,
         stack_pointer_restored_by_callee,
         preserved_by_target: callees.preserved,
         result_by_target: callees.results,
-        argument_regs: reads.map(|reads| reads.call().to_vec()).unwrap_or_default(),
-        return_regs: reads.map(|reads| reads.ret().to_vec()).unwrap_or_default(),
+        argument_regs: match calls {
+            true => arch.call_reads(model).to_vec(),
+            false => Vec::new(),
+        },
+        return_regs: returned.to_vec(),
     };
     let inert = config.clobbered.is_empty()
         && config.stack_pointer_restored_by_callee.is_none()

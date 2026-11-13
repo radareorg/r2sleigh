@@ -1935,19 +1935,16 @@ fn x86_stack_home_under(
         })
     };
     // The calls under test pass their arguments on the stack: no register is read.
-    let reads = r2ssa::SourceBoundaryReads::new([], []).expect("no reads");
-    let call_effect = r2ssa::SourceCallEffect::new(
-        storages([0x00, 0x10, 0x18]),
-        storages([0x20, 0x28, 0x30]),
-        reads,
-    )
-    .expect("a call effect");
+    let conventions = r2source::convention::testing::model(r2ssa::ConventionId::SysVAmd64)
+        .killed(storages([0x00, 0x10, 0x18]))
+        .preserved(storages([0x20, 0x28, 0x30]))
+        .conventions();
     r2ssa::SsaArtifact::for_decompile_with(
         blocks,
         r2ssa::DecompileInputs {
             arch: Some(&x86_stack_home_arch()),
             function_interface,
-            call_effect: Some(call_effect),
+            conventions: Some(conventions),
             call_site_interfaces,
             ..Default::default()
         },

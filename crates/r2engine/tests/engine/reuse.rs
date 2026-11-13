@@ -190,21 +190,20 @@ fn amd64(embedded: &r2sleigh_lift::EmbeddedMachine) -> r2source::native::NativeM
             Some("RSP"),
             None,
         ));
-    let slots = r2source::SourceConventionSlots::new(
-        r2source::ConventionId::SysVAmd64,
-        ["RDI", "RSI", "RDX", "RCX", "R8", "R9"].map(register),
-        Some(register("RAX")),
-    )
-    .expect("convention slots");
+    let conventions = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+        .arguments(
+            r2source::convention::SlotClass::Integer,
+            ["RDI", "RSI", "RDX", "RCX", "R8", "R9"].map(register),
+        )
+        .result(r2source::convention::SlotClass::Integer, register("RAX"))
+        .conventions();
     r2source::native::NativeMachine {
         arch_id: "x86".to_owned(),
         cpu_id: embedded.cpu.to_owned(),
         bits: 64,
         endianness: r2source::SourceEndianness::Little,
         roles,
-        slots,
-        call_effect: None,
-        convention: None,
+        conventions,
     }
 }
 

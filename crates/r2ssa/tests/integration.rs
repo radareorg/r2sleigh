@@ -17,7 +17,7 @@ mod tests {
     }
 
     /// System V's call effect over the general registers, placed against the lifted arch.
-    fn system_v(arch: &r2il::ArchSpec) -> r2ssa::SourceCallEffect {
+    fn system_v(arch: &r2il::ArchSpec) -> r2ssa::Conventions {
         let place = |names: &[&str]| {
             names
                 .iter()
@@ -37,12 +37,15 @@ mod tests {
         };
         let clobbered = place(&["rax", "rcx", "rdx", "rsi", "rdi", "r8", "r9", "r10", "r11"]);
         let preserved = place(&["rbx", "rbp", "rsp", "r12", "r13", "r14", "r15"]);
-        let reads = r2ssa::SourceBoundaryReads::new(
-            place(&["rdi", "rsi", "rdx", "rcx", "r8", "r9", "rax"]),
-            place(&["rax", "rdx"]),
-        )
-        .expect("register reads");
-        r2ssa::SourceCallEffect::new(clobbered, preserved, reads).expect("a call effect")
+        let integer = r2source::convention::SlotClass::Integer;
+        let model = r2source::convention::testing::model(r2ssa::ConventionId::SysVAmd64)
+            .arguments(integer, place(&["rdi", "rsi", "rdx", "rcx", "r8", "r9"]))
+            .forms(|forms| forms.count_register = place(&["al"]).first().copied())
+            .result(integer, place(&["rax"])[0])
+            .result(integer, place(&["rdx"])[0])
+            .killed(clobbered)
+            .preserved(preserved);
+        model.conventions()
     }
 
     /// Decompile-prepared SSA under System V.
@@ -52,7 +55,7 @@ mod tests {
             blocks,
             r2ssa::DecompileInputs {
                 arch: Some(&r2ssa::Arch::from(arch.clone())),
-                call_effect: Some(system_v(&arch)),
+                conventions: Some(system_v(&arch)),
                 ..Default::default()
             },
         )
@@ -287,9 +290,9 @@ mod tests {
         );
     }
 
-    /// A body that calls under no stated call effect refuses; a leaf needs none.
+    /// A body that calls under no model builds with every register clobbered (RULING 2.1).
     #[test]
-    fn a_calling_body_without_a_call_effect_refuses_and_a_leaf_builds() {
+    fn a_calling_body_without_a_model_clobbers_every_register_and_a_leaf_builds() {
         let disasm = create_x86_64_disasm();
         let arch = r2sleigh_lift::create_x86_64_spec();
         let prepare = |hex: &str, size: usize| {
@@ -307,9 +310,16 @@ mod tests {
             )
         };
         // mov rax, rdi; call 0x2000; ret
-        assert_eq!(
-            prepare("4889f8e8f80f0000c3", 9).err(),
-            Some(r2ssa::SsaPrepareError::NoCallEffect)
+        let called = prepare("4889f8e8f80f0000c3", 9).expect("a calling body");
+        let rbx = called
+            .machine_context()
+            .register_storage("rbx")
+            .expect("rbx");
+        assert!(
+            called
+                .machine_context()
+                .call_clobbered_carriers()
+                .contains(&rbx)
         );
         // mov rax, rdi; ret
         assert!(prepare("4889f8c3", 4).is_ok());
