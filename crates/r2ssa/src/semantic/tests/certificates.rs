@@ -769,6 +769,55 @@ fn a_slot_whose_address_escapes_is_not_a_dead_store() {
     assert_eq!(store_ownership(&artifact), (true, false));
 }
 
+/// A round that reads an unplaced address keeps every store, so an address stored into a slot
+/// leaves with it: the byte buffer at `sp` stays live though a save parts it from the derived
+/// escape at `sp + 24` (doc/adr-frame-model.md, "Carried places").
+#[test]
+fn an_address_stored_in_an_unplaced_round_leaves_with_its_slot() {
+    let artifact = framed_artifact(|block, sp| {
+        let buffer = indexed_address(block, sp, (0, true), 0x100);
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: buffer,
+            val: Varnode::register(40, 1),
+        });
+        let save = Varnode::unique(0x200, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: save.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(16, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: save,
+            val: Varnode::register(16, 8),
+        });
+        let slot = Varnode::unique(0x208, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: slot.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(24, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: slot.clone(),
+            val: sp.clone(),
+        });
+        let derived = Varnode::unique(0x210, 8);
+        block.push(R2ILOp::IntAnd {
+            dst: derived.clone(),
+            a: slot,
+            b: Varnode::constant(!7, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x9000, 8),
+            val: derived,
+        });
+    });
+    assert_eq!(store_ownership(&artifact), (true, false));
+}
+
 #[test]
 fn a_slot_a_call_may_reach_is_not_a_dead_store() {
     let artifact = framed_artifact(|block, sp| {
