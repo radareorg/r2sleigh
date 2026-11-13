@@ -639,6 +639,8 @@ struct BuildKey {
     reentering: BTreeSet<u64>,
     unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
     conventions: SiteConventions,
+    /// What each callee reaches through each pointer argument: the frame walk reads it (D365).
+    reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
     premises: BTreeSet<r2source::Premise>,
 }
 
@@ -689,7 +691,7 @@ impl BuildKey {
             &self.return_addresses,
             (&self.security_checks, &self.narrow_results),
             (&self.reentering, &self.unstated_imports, &self.premises),
-            &self.conventions,
+            (&self.conventions, &self.reach),
         )
     }
 
@@ -710,6 +712,8 @@ impl BuildKey {
             "result width".to_owned()
         } else if self.argument_areas != other.argument_areas {
             "argument area".to_owned()
+        } else if self.reach != other.reach {
+            "argument reach".to_owned()
         } else {
             "premise or import".to_owned()
         }
@@ -753,6 +757,7 @@ impl BuildKey {
             reentering: evidence.reentering.clone(),
             unstated_imports: evidence.unstated_imports.clone(),
             conventions: callees.conventions.clone(),
+            reach: evidence.reach.clone(),
             premises: premises.clone(),
         }
     }
@@ -2831,6 +2836,10 @@ impl TrustedSsaArtifact {
                     .set_member_call_sites(correlated_call_sites.member_sites.clone());
                 provisional_machine_context.set_reentering_callees(reentering.clone());
                 provisional_machine_context.set_unstated_imports(unstated_imports.clone());
+                // Promotion's frame walk reads what each callee reaches, by the site's model.
+                provisional_machine_context
+                    .set_callee_argument_reach(callee_argument_reach.clone());
+                provisional_machine_context.set_site_conventions(site_conventions.clone());
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
                 // A build against callees that state the same to it is this build.
@@ -2985,6 +2994,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
+        machine_context.set_site_conventions(site_conventions.clone());
         machine_context.set_callee_library(library.clone());
         machine_context.set_reentering_callees(reentering.clone());
         machine_context.set_unstated_imports(unstated_imports.clone());

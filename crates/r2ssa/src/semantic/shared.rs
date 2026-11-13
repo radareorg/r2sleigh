@@ -1493,11 +1493,9 @@ pub(crate) fn callee_write_spans(
     let Some(machine_context) = machine_context else {
         return CalleeSpans::default();
     };
-    // What a call is handed in each argument position is what the convention
-    // puts there, whatever this function itself takes: a caller of one
-    // parameter hands `buf` to `f(x, buf)` in the second slot all the same.
-    let registers = machine_context
-        .convention()
+    // What a call is handed in each position is what the site's convention puts there (D365),
+    // whatever this function itself takes.
+    let calls = (machine_context.calls())
         .map(|model| model.arguments(r2source::convention::SlotClass::Integer))
         .unwrap_or_default();
     let mut reaching = BTreeMap::<CanonicalStorageId, ReachingStorage<'_>>::new();
@@ -1525,6 +1523,9 @@ pub(crate) fn callee_write_spans(
                 .unwrap_or("");
             let target =
                 target.and_then(|target| resolve_graph_literal_value(graph, Some(facts), *target));
+            let registers = target.map_or(calls, |target| {
+                machine_context.site_integer_arguments(target)
+            });
             let mut argument = |index: usize| -> Option<ValueId> {
                 let storage = *registers.get(index)?;
                 let states = reaching
