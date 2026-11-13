@@ -878,12 +878,10 @@ impl Spell<'_> {
                 Some(at) => self.load(&ty, at),
                 None => self.load_of(&ty, object, address),
             },
-            TermKind::Subscript { .. } if (self.member)(id).is_some() => {
-                self.load(&ty, self.member_address(id, None)?)
-            }
-            TermKind::Subscript { base, index } => {
-                self.load(&ty, self.subscript((base, index), bits / 8, None)?)
-            }
+            TermKind::Subscript { base, index } => match self.member_address(id, None) {
+                Some(at) => self.load(&ty, at),
+                None => self.load(&ty, self.subscript((base, index), bits / 8, None)?),
+            },
             TermKind::Arithmetic { op, left, right } => {
                 wrapping(arithmetic(op), bits, child(left)?, child(right)?)
             }

@@ -160,9 +160,8 @@ fn a_call_to_a_proven_check_of_the_load_config_cookie_is_elided() {
     assert!(text.contains("compiler-inserted"), "{text}");
 }
 
-/// D230: i386's check takes the saved `[cookie] ^ ebp` in `ecx`, which the UCRT row cites; the
-/// save, reload and call are compiler-inserted under the UB-free premise, as on x86-64 (no x86
-/// 32-bit C renders, so the prepared body is the gate). Without the cookie nothing is.
+/// D230: i386's check takes `[cookie] ^ ebp` in the cited `ecx`; save, reload and call are
+/// compiler-inserted (x86 32-bit renders no C, so the prepared body is the gate).
 #[test]
 fn an_i386_check_of_the_cookie_in_ecx_is_compiler_inserted() {
     let inserted = |cookie: Option<u64>| {

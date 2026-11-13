@@ -211,13 +211,14 @@ const I386_BIONIC_GUARD: GuardRow = GuardRow::ThreadSlot(StackGuard {
 });
 const UCRT_X86_64_GUARD: GuardRow = GuardRow::LoadConfigCookie(CookieCheck {
     argument: RegName("rcx"),
-    citation: "MSVC CRT amdsecgs.asm (x64): `__security_check_cookie` compares rcx, Microsoft \
-        x64's first integer argument, with `__security_cookie`",
+    citation: "MSVC's x64 `__security_check_cookie` as linked into radare2 \
+        test/bins/pe/hello_gs_x64.exe 0x140011c90: `cmp rcx, [__security_cookie]; jne; rol rcx, 0x10`",
 });
 const UCRT_I386_GUARD: GuardRow = GuardRow::LoadConfigCookie(CookieCheck {
     argument: RegName("ecx"),
-    citation: "MSVC CRT secchk.c (x86): `void __declspec(naked) __fastcall \
-        __security_check_cookie(UINT_PTR cookie)`, `cmp ecx, __security_cookie`",
+    citation: "MSVC's i386 `__security_check_cookie` as linked into radare2 \
+        test/bins/pe/hello_gs_x86.exe 0x401ab2: `cmp ecx, [__security_cookie]; jne; ret; \
+        jmp __report_gsfailure`; its callers load ecx and push no argument",
 });
 
 /// The C library's guard row for an architecture; a library no row cites states none.
