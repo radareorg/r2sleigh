@@ -15,6 +15,15 @@ pub(super) struct BodyWalk {
     entry: u64,
     trace: Trace,
     pub(super) thumb: bool,
+    /// How far the survey has read the body's tables.
+    tables: Tabled,
+}
+
+/// The tables a survey's walk followed: none asked yet, none to ask, or the read it followed.
+enum Tabled {
+    Unread,
+    Untabled,
+    Read(super::analysis::Shared<crate::native::Tables>),
 }
 
 impl BodyWalk {
@@ -198,6 +207,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
             entry: address,
             trace,
             thumb,
+            tables: Tabled::Unread,
         };
         Ok((walk, transfers))
     }
@@ -229,20 +239,41 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         walk: &mut BodyWalk,
         returns: &dyn Fn(u64, bool) -> bool,
     ) -> Option<Transfers> {
-        walk.trace.dispatches().next()?;
-        let tables = super::analysis::dispatch_tables(self.program.db, (walk.entry, walk.thumb));
-        let arms = tables.0.dispatched();
-        if arms.is_empty() {
-            return None;
-        }
+        // The first read is the first round; every round is asked only where the trace through the
+        // first round's arms stops at a dispatch that round did not see. At most two reads per body.
+        let key = (walk.entry, walk.thumb);
+        let mut tables = match &walk.tables {
+            Tabled::Unread if walk.trace.dispatches().next().is_none() => {
+                walk.tables = Tabled::Untabled;
+                return None;
+            }
+            Tabled::Unread => super::analysis::dispatch_tables(self.program.db, key),
+            Tabled::Read(first) if first.0.later_reached(walk.trace.dispatches()) => {
+                super::analysis::later_tables(self.program.db, key)
+            }
+            Tabled::Read(_) | Tabled::Untabled => return None,
+        };
         let knowing = Knowing {
             program: &self.program,
             thumb: walk.thumb,
             returns,
         };
-        walk.trace
-            .dispatch(&arms, self.target(walk.thumb).disasm, &knowing);
-        Some(Self::step(&mut walk.trace, walk.thumb))
+        let disasm = self.target(walk.thumb).disasm;
+        let mut followed = false;
+        loop {
+            let arms = tables.0.dispatched();
+            if !arms.is_empty() {
+                walk.trace.dispatch(&arms, disasm, &knowing);
+                followed = true;
+            }
+            let later = tables.0.later_reached(walk.trace.dispatches());
+            walk.tables = Tabled::Read(tables);
+            if !later {
+                break;
+            }
+            tables = super::analysis::later_tables(self.program.db, key);
+        }
+        followed.then(|| Self::step(&mut walk.trace, walk.thumb))
     }
 
     fn handed(&self, walk: &BodyWalk, returns: &dyn Fn(u64, bool) -> bool) -> Vec<(u64, bool)> {

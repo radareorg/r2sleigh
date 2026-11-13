@@ -864,11 +864,19 @@ fn listed_walk<S: Source + 'static>(
 ) -> Result<crate::native::ListedWalk, NativeRefusal> {
     let target = super::analysis::target(view, entry, thumb)?;
     let key = (entry, thumb);
-    let held = view.db.held::<super::analysis::DispatchTables>(&key);
-    let held = held.ok().flatten().map(|tables| (*tables.0).clone());
-    let tables = || (*super::analysis::dispatch_tables(view.db, key).0).clone();
+    let held = (view
+        .db
+        .held::<super::analysis::LaterTables>(&key)
+        .ok()
+        .flatten())
+    .or_else(|| (view.db.held::<super::analysis::DispatchTables>(&key).ok()).flatten());
+    let held = held.map(|tables| (*tables.0).clone());
+    let rounds = crate::native::TableRounds {
+        first: &|| (*super::analysis::dispatch_tables(view.db, key).0).clone(),
+        later: &|_| (*super::analysis::later_tables(view.db, key).0).clone(),
+    };
     let walked = crate::isolation::isolated(|| {
-        crate::native::listed_walk(&target, view, entry, held, &tables)
+        crate::native::listed_walk(&target, view, entry, held, &rounds)
     });
     walked.unwrap_or_else(|panicked| Err(panicked.into()))
 }

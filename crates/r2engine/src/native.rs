@@ -603,9 +603,22 @@ pub fn walk(
     program: &dyn Program,
     entry: u64,
 ) -> Result<Walk, NativeRefusal> {
-    walk_reading(target, program, entry, &|| {
-        dispatch_tables(target, program, entry)
-    })
+    walk_reading(
+        target,
+        program,
+        entry,
+        &TableRounds {
+            first: &|| dispatch_tables(target, program, entry),
+            later: &|first| later_tables(target, program, entry, first),
+        },
+    )
+}
+
+/// Where a walk asks for a body's tables: the first round, and every round where its walk through
+/// the first round's arms stops at a dispatch the first round did not see (D367).
+pub(crate) struct TableRounds<'a> {
+    pub(crate) first: &'a dyn Fn() -> Tables,
+    pub(crate) later: &'a dyn Fn(&Tables) -> Tables,
 }
 
 /// The same walk, asking `read` for the tables only where the body stops at a dispatch.
@@ -613,19 +626,30 @@ pub(crate) fn walk_reading(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     entry: u64,
-    read: &dyn Fn() -> Tables,
+    read: &TableRounds<'_>,
 ) -> Result<Walk, NativeRefusal> {
     let native = Native::over(target, program)?;
     let root = native.walk(entry)?;
     if !(root.body.unresolved.iter()).any(Tables::stops) {
         return Ok(Walk::of(root, Tables::default()));
     }
-    let tables = read();
+    let tables = (read.first)();
     if tables.read.is_empty() {
         return Ok(Walk::of(root, tables));
     }
     let through = native.walk_dispatched(entry, &tables.dispatched())?;
-    Ok(Walk::of(through, tables))
+    if !tables.later_reached(through.indirect_stops()) {
+        return Ok(Walk::of(through, tables));
+    }
+    let all = (read.later)(&tables);
+    if all.read.is_empty() {
+        return Ok(Walk::of(root, all));
+    }
+    let through = match all.read.len() == tables.read.len() {
+        true => through,
+        false => native.walk_dispatched(entry, &all.dispatched())?,
+    };
+    Ok(Walk::of(through, all))
 }
 
 /// One body as the reference index lists it: walked once, through the tables `read` gives.
@@ -643,7 +667,7 @@ pub(crate) fn listed_walk(
     program: &dyn Program,
     entry: u64,
     held: Option<Tables>,
-    read: &dyn Fn() -> Tables,
+    read: &TableRounds<'_>,
 ) -> Result<ListedWalk, NativeRefusal> {
     Native::over(target, program)?;
     let walk = |dispatched: &BTreeMap<u64, Vec<u64>>| {
@@ -651,23 +675,31 @@ pub(crate) fn listed_walk(
             .map_err(NativeRefusal::Body)
     };
     // Tables already read were read because the body stops at a dispatch: one walk through them.
-    let (walked, tables) = match held {
-        Some(tables) => (walk(&tables.dispatched())?, tables.read),
+    let (mut walked, mut tables) = match held {
+        Some(tables) => (walk(&tables.dispatched())?, tables),
         None => {
             let root = walk(&BTreeMap::new())?;
             let tables = match (root.0.unresolved.iter()).any(Tables::stops) {
-                true => read().read,
-                false => Vec::new(),
+                true => (read.first)(),
+                false => Tables::default(),
             };
-            match tables.is_empty() {
+            match tables.read.is_empty() {
                 true => (root, tables),
-                false => (walk(&dispatched(&tables))?, tables),
+                false => (walk(&tables.dispatched())?, tables),
             }
         }
     };
+    let stops = (walked.0.unresolved.iter()).filter(|stop| Tables::stops(stop));
+    if tables.later_reached(stops.map(|stop| stop.addr)) {
+        let all = (read.later)(&tables);
+        if all.read.len() != tables.read.len() {
+            walked = walk(&all.dispatched())?;
+        }
+        tables = all;
+    }
     let (mut body, decodes) = walked;
     let blocks = std::mem::take(&mut body.blocks).into_iter();
-    let lifted = switched(blocks.map(|block| block.lifted).collect(), &tables);
+    let lifted = switched(blocks.map(|block| block.lifted).collect(), &tables.read);
     Ok(ListedWalk {
         body,
         lifted,
@@ -675,8 +707,8 @@ pub(crate) fn listed_walk(
     })
 }
 
-/// The tables the dispatches of the body at `entry` read, off a preparation against the imports' declarations alone.
-/// A refused read leaves the walk no table and says why.
+/// The tables the dispatches of the body at `entry` read in the first round, off a preparation
+/// against the imports' declarations alone; no arm is lifted. A refused read leaves the walk no table and says why.
 pub(crate) fn dispatch_tables(
     target: &NativeTarget<'_>,
     program: &dyn Program,
@@ -686,27 +718,47 @@ pub(crate) fn dispatch_tables(
         Ok(native) => native,
         Err(refusal) => return Tables::refused(refusal),
     };
-    // One lifting walk continued through each round's tables: a round lifts only what its arms newly reach.
-    let Ok(mut walk) = crate::body::Lifting::start(entry, target.disasm, program) else {
+    let Ok(walk) = crate::body::Lifting::start(entry, target.disasm, program) else {
         return Tables::default();
     };
     if walk.dispatches().next().is_none() {
         return Tables::default();
     }
-    let root = native.walked(walk.body());
-    let restatement = native.declaration(entry);
-    let restatement = match restatement.interface.is_some() {
-        true => restatement,
-        false => Restatement::default(),
-    };
-    let (cut, mut stopped) = (
+    let root = native.walked(walk.into_body());
+    let (cut, stops) = (
         root.reaching_unresolved(),
         root.indirect_stops().collect::<BTreeSet<_>>(),
     );
     drop(root);
-    let mut tables = native.read_tables(&cut, &[], restatement.clone());
-    drop(cut);
-    let first = tables.read.len();
+    let mut tables = native.read_tables(&cut, &[], native.restatement(entry));
+    tables.stopped = stops;
+    tables
+}
+
+/// Every round of the body's tables past `first` (D285): one lifting walk continued through each
+/// round's tables, so a round lifts only what its arms newly reach (D367).
+pub(crate) fn later_tables(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    entry: u64,
+    first: &Tables,
+) -> Tables {
+    if first.read.is_empty() || first.whole {
+        return first.clone();
+    }
+    let native = match Native::over(target, program) {
+        Ok(native) => native,
+        Err(refusal) => return Tables::refused(refusal),
+    };
+    let Ok(mut walk) = crate::body::Lifting::start(entry, target.disasm, program) else {
+        return first.clone();
+    };
+    let restatement = native.restatement(entry);
+    let mut tables = Tables {
+        whole: true,
+        ..first.clone()
+    };
+    let mut stopped = first.stopped.clone();
     // Each round reads the dispatches the last one's arms newly reach, sealing only the region after
     // each last-read dispatch; a round reading no new instruction ends it: at most one per indirect branch.
     let mut last = (tables.read.iter())
@@ -743,7 +795,12 @@ pub(crate) fn dispatch_tables(
         tables.read.extend(fresh);
     }
     // A table a later round read stands only where the whole body, walked through every table, reads it so.
-    let later = tables.read.split_off(first.min(tables.read.len()));
+    let later = tables.read.split_off(first.read.len());
+    // A walk that does not ask reaches no first-round stop past the first round's arms.
+    debug_assert!(
+        (later.iter()).all(|table| !first.stopped.contains(&table.instruction)),
+        "{entry:#x}: a later round read a first-round stop"
+    );
     if later.is_empty() {
         return tables;
     }
@@ -786,11 +843,7 @@ pub(crate) fn convention_seal_of(
         ptr_bits,
         &mut imports,
     );
-    let declared = native.declaration(body.entry);
-    let restatement = match declared.interface.is_some() {
-        false => Restatement::default(),
-        true => declared,
-    };
+    let restatement = native.restatement(body.entry);
     // Sealed through the tables the walk followed, as Ge's whole-body seal reads them (D285).
     native.convention_seal(&walked.root, &imports, restatement, &walked.tables)
 }
@@ -807,6 +860,10 @@ fn dispatched(tables: &[NativePointerTable]) -> BTreeMap<u64, Vec<u64>> {
 pub(crate) struct Tables {
     read: Vec<NativePointerTable>,
     refusal: Option<NativeRefusal>,
+    /// Where the first round's walk stopped at a dispatch.
+    stopped: BTreeSet<u64>,
+    /// Whether every round was read, so no later round is asked.
+    whole: bool,
 }
 
 impl std::fmt::Debug for Tables {
@@ -818,9 +875,15 @@ impl std::fmt::Debug for Tables {
 impl Tables {
     pub(crate) fn refused(refusal: NativeRefusal) -> Self {
         Self {
-            read: Vec::new(),
             refusal: Some(refusal),
+            ..Self::default()
         }
+    }
+
+    /// Whether a walk through the first round's arms stopping at `stops` asks the later rounds:
+    /// it stops at a dispatch the first round did not see. O(stops log stops).
+    pub(crate) fn later_reached(&self, mut stops: impl Iterator<Item = u64>) -> bool {
+        !self.whole && !self.read.is_empty() && stops.any(|stop| !self.stopped.contains(&stop))
     }
 
     fn stops(stop: &crate::body::Unresolved) -> bool {
@@ -2204,7 +2267,7 @@ impl<'a> Native<'a> {
         match self.table_reads(region, held, restatement) {
             Ok(reads) => Tables {
                 read: self.pointer_tables(reads.iter().filter(fresh)),
-                refusal: None,
+                ..Tables::default()
             },
             Err(refusal) => Tables::refused(refusal),
         }
@@ -2534,6 +2597,15 @@ impl<'a> Native<'a> {
             declared.to_vec(),
             interface.revision_identity().to_vec(),
         )
+    }
+
+    /// The declaration a table read seals against: none unless it states an interface.
+    fn restatement(&self, address: u64) -> Restatement {
+        let declared = self.declaration(address);
+        match declared.interface.is_some() {
+            true => declared,
+            false => Restatement::default(),
+        }
     }
 
     /// What the binary's debug information declares about the body at this

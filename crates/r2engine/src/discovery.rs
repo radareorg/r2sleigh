@@ -132,7 +132,8 @@ pub trait Walker {
     /// dispatch is read, so that reading one finds its callees decided.
     fn answered(&self, _returns: BTreeMap<(u64, bool), Return>) {}
 
-    /// Walk a finished body on through the arms of its dispatch tables, read once; what the arms reach, or `None` where there is nothing to follow.
+    /// Walk a finished body on through the arms of its dispatch tables; what the arms reach, or
+    /// `None` where there is nothing new to follow, which a walker says after finitely many reads.
     fn dispatch(
         &self,
         _walk: &mut Self::Walk,
@@ -306,8 +307,6 @@ struct Fixpoint<'w, W: Walker> {
     joined: Vec<u64>,
     /// Who waits on each callee, and for what.
     waiting: BTreeMap<u64, BTreeSet<(u64, Wait)>>,
-    /// Bodies already walked on through their dispatch tables.
-    tabled: BTreeSet<u64>,
     /// Bodies already read for the functions they hand on.
     read: BTreeSet<u64>,
 }
@@ -331,7 +330,6 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             returning: BTreeSet::new(),
             joined: Vec::new(),
             waiting: BTreeMap::new(),
-            tabled: BTreeSet::new(),
             read: BTreeSet::new(),
         }
     }
@@ -537,7 +535,7 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
     }
 
     /// Read the tables of each body, final once every callee is walked, and walk on through their arms; whether any body moved.
-    /// Each walk is read once, so this ends when every walk has been.
+    /// A walker reads each walk finitely often, so this ends.
     fn dispatch_on(&mut self) -> bool {
         if self.seed.is_some() {
             return false;
@@ -548,9 +546,6 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             let Some(Ok(walk)) = self.walks.get_mut(&address) else {
                 continue;
             };
-            if !self.tabled.insert(address) {
-                continue;
-            }
             let (walker, known, returning) = (self.walker, self.known, &self.returning);
             let returns = |callee, thumb| comes_back(walker, known, returning, callee, thumb);
             if let Some(transfers) = walker.dispatch(walk, &returns) {
@@ -693,6 +688,7 @@ mod tests {
     struct At {
         address: u64,
         next: usize,
+        tabled: bool,
     }
 
     impl Bodies {
@@ -750,7 +746,11 @@ mod tests {
             returns: &dyn Fn(u64, bool) -> bool,
         ) -> Result<(At, Transfers), ()> {
             self.0.get(&address).ok_or(())?;
-            let mut at = At { address, next: 0 };
+            let mut at = At {
+                address,
+                next: 0,
+                tabled: false,
+            };
             let transfers = self.go(&mut at, returns);
             Ok((at, transfers))
         }
@@ -770,6 +770,9 @@ mod tests {
             walk: &mut At,
             _returns: &dyn Fn(u64, bool) -> bool,
         ) -> Option<Transfers> {
+            if std::mem::replace(&mut walk.tabled, true) {
+                return None;
+            }
             let arms = self.0[&walk.address].iter().filter_map(|step| match step {
                 Step::Table(target) => Some(*target),
                 _ => None,
