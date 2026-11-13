@@ -108,7 +108,7 @@ r2sleigh_result_u64 deregister_tm_clones(void)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered; the parameters are a floor: at least 0 (a transfer is unresolved); the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered; the parameters are a floor: at least 0 (a transfer is unresolved); no call reads the result (assuming closed-world); the result is unproven (Unread): 1 unproven-return carried */
     {
         rax_3 = 0x4010;
         {

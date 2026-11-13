@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use r2abi::statement::{Binding, EntryKind, Format, SectionRole, SourceLanguage, Symbol};
+use r2abi::statement::{Applies, Binding, EntryKind, Format, SectionRole, SourceLanguage, Symbol};
 
 use super::requests::{ReferenceIndex, SurveyQuery};
 use super::{ProgramInputs, Source, View};
@@ -69,8 +69,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
     const NAME: &'static str = "escapes";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: one pass over the references, symbols and entries, and one over every mapped file byte
-    /// (a range check per word, a search per word in range): `O(R + S + B log F)`.
+    /// Work: one pass over the references, symbols, entries and relocation records, a search of the
+    /// loader's slots per reference and record, and one over every mapped file byte: `O(R log L + S + B log F)`.
     fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
         let source = &db.inputs().source;
         let container = source.container();
@@ -106,32 +106,53 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
             r2il::refusal_evidence!("closed-world", "{at:#x}: a loader write no record states");
             return None;
         }
+        // A loader call a cited row states is a call whose read the row states, which `DirectSites`
+        // joins; the slot stating it, and the loader's word there, name no other way in (D237, D240).
+        let library = super::c_library(container);
+        let mut slots = Vec::new();
+        for entry in &container.entries {
+            match r2abi::loader_call(container.format, library, entry.kind) {
+                Some(call) => {
+                    r2il::refusal_evidence!(
+                        "closed-world",
+                        "{:#x}: the loader's {:?} call reads {:?} ({})",
+                        entry.vaddr,
+                        entry.kind,
+                        call.reads_result,
+                        call.citation
+                    );
+                    slots.extend(
+                        (entry.stated_at.and_then(|at| at.vaddr)).map(|at| (at, entry.vaddr)),
+                    );
+                }
+                None if matches!(entry.kind, EntryKind::Symbol | EntryKind::Declared) => {}
+                None => escaped.push(entry.vaddr),
+            }
+        }
+        slots.sort_unstable();
         for (fact, claimant) in index.claimed() {
             // A jump inside a function to its own entry is a loop, no way in.
             let looping = fact.role == Role::Jump && claimant.owners.contains(&fact.to);
-            if fact.role != Role::Call && !looping {
+            // A PIE's slot is a loader write: the reference is the slot's own word.
+            let slot =
+                claimant.owners.is_empty() && slots.binary_search(&(fact.from, fact.to)).is_ok();
+            if fact.role != Role::Call && !looping && !slot {
                 escaped.push(fact.to);
             }
         }
-        // A loader call a cited row states passes nothing and reads nothing, so it is no way in a
-        // caller's read must count; the slot stating it names no other (D237).
-        let mut stated = Vec::new();
-        for entry in &container.entries {
-            match r2abi::loader_call(container.format, entry.kind) {
-                Some(call) if call.adds_no_read() => {
-                    r2il::refusal_evidence!(
-                        "closed-world",
-                        "{:#x}: the loader's {:?} call reads nothing ({})",
-                        entry.vaddr,
-                        entry.kind,
-                        call.citation
-                    );
-                    stated.extend(entry.stated_at.and_then(|at| at.vaddr));
-                }
-                _ if matches!(entry.kind, EntryKind::Symbol | EntryKind::Declared) => {}
-                _ => escaped.push(entry.vaddr),
-            }
-        }
+        let mut stated = slots.iter().map(|(at, _)| *at).collect::<Vec<_>>();
+        // A relative `RELA` record writing such a slot states the entry in its own addend word (D239).
+        let addends = (container.relocations.iter())
+            .filter(|record| {
+                let entry = (slots
+                    .binary_search_by_key(&record.vaddr, |(at, _)| *at)
+                    .ok())
+                .map(|at| slots[at].1);
+                record.applies == Applies::Relative
+                    && entry.is_some_and(|entry| record.addend == i64::try_from(entry).ok())
+            })
+            .filter_map(|record| record.addend_at.and_then(|at| at.vaddr));
+        stated.extend(addends);
         stated.sort_unstable();
         escaped.extend(
             (container.symbols.iter())

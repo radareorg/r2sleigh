@@ -1046,9 +1046,116 @@ fn a_termination_function_the_loader_alone_calls_is_void() {
         .expect("it renders");
     let cold = cold.response.output.into_text();
     assert!(cold.contains("return r2sleigh_residual_"), "{cold}");
-    // An initialiser has no row: glibc passes it `argc, argv, envp`, and the gABI states no type.
+    // A library no container evidence names states no initialiser row (D240).
     let init = analysed(entered(EntryKind::InitHook));
     assert!(init.contains("return r2sleigh_residual_"), "{init}");
+}
+
+/// glibc calls each constructor as a statement (`elf/dl-init.c`, `csu/libc-start.c`), so a body
+/// that reads none of `argc, argv, envp` is `void f(void)` under `aa`, keyed by the library (D240).
+#[test]
+fn a_glibc_constructor_reading_no_argument_is_void() {
+    use r2abi::statement::EntryKind;
+    for kind in [EntryKind::InitHook, EntryKind::Init, EntryKind::Preinit] {
+        let text = analysed(entered(kind).running_on(common::GLIBC));
+        assert!(text.starts_with("void f(void)"), "{kind:?}: {text}");
+        assert!(
+            text.contains("; no call reads the result (assuming closed-world)"),
+            "{kind:?}: {text}"
+        );
+    }
+}
+
+/// musl's `do_init_fini` calls a constructor with no argument and drops its value (D240).
+#[test]
+fn a_musl_constructor_is_void() {
+    use r2abi::statement::EntryKind;
+    use r2engine::program::{Libc, PlatformEvidence};
+    let musl = [PlatformEvidence::Interpreter(Libc::Musl)];
+    let text = analysed(entered(EntryKind::Init).running_on(&musl));
+    assert!(text.starts_with("void f(void)"), "{text}");
+    // musl runs no preinit array: no row, so the entry stays a way in.
+    let preinit = analysed(entered(EntryKind::Preinit).running_on(&musl));
+    assert!(preinit.contains("return r2sleigh_residual_"), "{preinit}");
+}
+
+/// Bionic's linker and a library the container does not name have no cited row: the entry is a
+/// way in whose read nothing states, so the result stays unproven (D240).
+#[test]
+fn an_unknown_library_constructor_escapes() {
+    use r2abi::statement::EntryKind;
+    use r2engine::program::{Libc, PlatformEvidence};
+    let bionic = [PlatformEvidence::Interpreter(Libc::Bionic)];
+    for program in [
+        entered(EntryKind::Init),
+        entered(EntryKind::Init).running_on(&bionic),
+    ] {
+        let text = analysed(program);
+        assert!(text.contains("return r2sleigh_residual_"), "{text}");
+    }
+}
+
+/// The row states what glibc reads, never what it passes: a constructor storing RDI keeps it as
+/// its one parameter, and its result is still void (D240).
+#[test]
+fn a_constructor_reading_rdi_keeps_one_parameter() {
+    use r2abi::statement::EntryKind;
+    let mut program = Literal::of_code(FINI, &[("f", BASE, 0x09)])
+        .writable_data_after(BASE + 0x20)
+        .text_ending(BASE + 0x20)
+        .entering_from(BASE, EntryKind::Init, BASE + 0x20)
+        .running_on(common::GLIBC);
+    // 1000 mov [rip + 0x21], rdi (0x1028); 1007 nop; 1008 ret
+    program.write(
+        BASE,
+        &[0x48, 0x89, 0x3d, 0x21, 0x00, 0x00, 0x00, 0x90, 0xc3],
+    );
+    let text = analysed(program);
+    assert!(text.starts_with("void f(r2sleigh_word_u64 arg0)"), "{text}");
+}
+
+/// A PIE's fini array slot is a `RELA` record's place: the loader's word there and the record's
+/// addend word both name the entry, and both are the slot's, so the loader's call is the one way in (D239).
+#[test]
+fn a_pie_fini_entry_named_by_a_relative_addend_is_unread() {
+    use r2abi::statement::{Applies, EntryKind, Relocation, StatedAt};
+    let relative = |place: u64| Relocation {
+        vaddr: place,
+        ntype: 8,
+        width: 8,
+        addend: Some(BASE as i64),
+        addend_at: Some(StatedAt {
+            offset: 0x28,
+            vaddr: Some(BASE + 0x28),
+        }),
+        applies: Applies::Relative,
+        ..Relocation::default()
+    };
+    let slot = BASE + 0x20;
+    let addended = |record: Relocation| {
+        let mut program = (entered(EntryKind::Fini).relocated(record)).loader_written(
+            r2engine::program::LoaderWrite {
+                place: slot,
+                width: 8,
+                kind: r2engine::program::WriteKind::Relative(BASE),
+                encoding: r2abi::statement::Encoding::Word,
+            },
+        );
+        program.write(BASE + 0x28, &BASE.to_le_bytes());
+        program
+    };
+    let text = analysed(addended(relative(slot)));
+    assert!(text.starts_with("void f(void)"), "{text}");
+    // The addend word of a record writing elsewhere, or not stating `f`, names `f` once more.
+    let elsewhere = relative(BASE + 0x30);
+    let other = Relocation {
+        addend: Some(BASE as i64 + 1),
+        ..relative(slot)
+    };
+    for record in [elsewhere, other] {
+        let text = analysed(addended(record));
+        assert!(text.contains("return r2sleigh_residual_"), "{text}");
+    }
 }
 
 /// The row speaks for the loader's call alone: another word naming `f` is a way in it does not
@@ -1083,6 +1190,42 @@ fn a_termination_function_another_way_reaches_keeps_its_result() {
         text.contains("; a call reads the result (assuming closed-world)"),
         "{text}"
     );
+}
+
+/// dyld hands `main`'s `int` to `exit` (r2abi `loader_call`, D227): a Mach-O `LC_MAIN` body
+/// writing EAX and XMM0 returns its integer lane under `aa`; cold, both stay a residual.
+#[test]
+fn dyld_reads_the_integer_lane_of_the_main_a_mach_o_names() {
+    use r2abi::statement::EntryKind;
+    let program = |format_mach_o: bool| {
+        let mut program = Literal::of_code(FINI, &[("f", BASE, 0x09)])
+            .data_mapped_after(BASE + 0x20)
+            .text_ending(BASE + 0x20)
+            .entering(BASE, EntryKind::CMain);
+        // 1000 xorps xmm0, xmm0; 1003 mov eax, 7; 1008 ret
+        program.write(
+            BASE,
+            &[0x0f, 0x57, 0xc0, 0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3],
+        );
+        match format_mach_o {
+            true => program.mach_o(),
+            false => program,
+        }
+    };
+    let cold = OpenProgram::of(program(true))
+        .rendered(BASE)
+        .expect("it renders");
+    let cold = cold.response.output.into_text();
+    assert!(cold.contains("unproven"), "{cold}");
+    let text = analysed(program(true));
+    assert!(text.starts_with("r2sleigh_word_u32 f(void)"), "{text}");
+    assert!(
+        text.contains("; a call reads the result (assuming closed-world)"),
+        "{text}"
+    );
+    // No ELF row states a `CMain`: nothing reads either lane.
+    let elf = analysed(program(false));
+    assert!(elf.contains("unproven"), "{elf}");
 }
 
 /// `f` is `fld1; ret`: its result is x87 st0, a lane no typed lane covers; `caller` stores st0 and

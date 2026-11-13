@@ -30,3 +30,25 @@ fn the_dynamic_table_states_the_loaders_own_hooks() {
         assert_eq!(word, entry.vaddr, "{entry:?}");
     }
 }
+
+/// A PIE's fini array slot is a `RELA` record's place, and the record states the entry again in
+/// its `r_addend` word: rv_O0g's `.rela.dyn` entry at `0x608` writes `0x3da8`, its addend at `0x618`.
+#[test]
+fn a_rela_record_states_where_its_addend_word_is() {
+    let bytes = include_bytes!("../../../tests/fixtures/rv_O0g");
+    let image = r2image::Image::parse(bytes.to_vec()).expect("the fixture parses");
+    let fini = (image.entry_points().iter())
+        .find(|entry| entry.kind == EntryKind::Fini)
+        .expect("a fini array entry");
+    let slot = fini
+        .stated_at
+        .and_then(|at| at.vaddr)
+        .expect("a mapped slot");
+    let record = (image.relocations().iter())
+        .find(|record| record.vaddr == slot)
+        .expect("a record writes the slot");
+    let at = record.addend_at.expect("a RELA addend word");
+    assert_eq!((at.offset, at.vaddr), (0x618, Some(0x618)));
+    let word = u64::from_le_bytes(bytes[0x618..0x620].try_into().expect("eight bytes"));
+    assert_eq!(word, fini.vaddr);
+}

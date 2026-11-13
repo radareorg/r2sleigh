@@ -291,6 +291,24 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
         header.p_offset(endian).into().checked_add(into)
     }
 
+    /// Where a loaded segment maps `size` file bytes from `offset`; `None` where none loads them.
+    fn vaddr_of(&self, offset: u64, size: u64) -> Option<u64> {
+        let endian = self.endian;
+        let header = self.file.elf_program_headers().iter().find(|header| {
+            let (start, filesz): (u64, u64) = (
+                header.p_offset(endian).into(),
+                header.p_filesz(endian).into(),
+            );
+            header.p_type(endian) == elf::PT_LOAD
+                && offset >= start
+                && (offset - start)
+                    .checked_add(size)
+                    .is_some_and(|end| end <= filesz)
+        })?;
+        let into = offset - header.p_offset(endian).into();
+        header.p_vaddr(endian).into().checked_add(into)
+    }
+
     fn bytes(&self, offset: u64, size: u64) -> &'data [u8] {
         self.file
             .data()
@@ -386,12 +404,22 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                 let symbol = (symbol != 0)
                     .then(|| self.symbol(view.symbols, symbol))
                     .flatten();
+                // `r_addend` is an entry's last word.
+                let addend_at = (view.form == Form::Rela).then(|| {
+                    let offset =
+                        record.table + std::mem::size_of::<E::Rela>() as u64 - self.pointer;
+                    StatedAt {
+                        offset,
+                        vaddr: self.vaddr_of(offset, self.pointer),
+                    }
+                });
                 Some(Relocation {
                     vaddr,
                     record,
                     ntype: ntype.0,
                     width,
                     addend,
+                    addend_at,
                     symbol: symbol.map(Box::new),
                     applies,
                     encoding,
@@ -832,6 +860,11 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                     .then(|| self.implicit(word, width))
                     .flatten()
             };
+            // An object's tables are not loaded: the addend is a file word only.
+            let addend_at = (form == Form::Rela).then(|| StatedAt {
+                offset: record.table + std::mem::size_of::<E::Rela>() as u64 - self.pointer,
+                vaddr: None,
+            });
             binds.push(Bind {
                 record: Relocation {
                     vaddr: base.wrapping_add(offset),
@@ -839,6 +872,7 @@ impl<'f, 'data, E: FileHeader, R: object::ReadRef<'data>> Elf<'f, 'data, E, R> {
                     ntype: ntype.0,
                     width,
                     addend,
+                    addend_at,
                     symbol: symbol.map(Box::new),
                     applies,
                     encoding,

@@ -2871,7 +2871,7 @@ static inline struct r2sleigh_bits_256 r2sleigh_bits_zero_extend_64_256(uint64_t
     return carrier;
 }
 
-r2sleigh_result_u64 _main(r2sleigh_word_u64 arg0, r2sleigh_word_u64* arg1)
+r2sleigh_word_u64 _main(r2sleigh_word_u64 arg0, r2sleigh_word_u64* arg1)
 {
     r2sleigh_word_u64 _fnv_fold(r2sleigh_word_u64, r2sleigh_word_u64);
     r2sleigh_word_u64 _mem_scan2(r2sleigh_word_u64, uint64_t, r2sleigh_word_u32, r2sleigh_word_u32);
@@ -2910,7 +2910,7 @@ r2sleigh_result_u64 _main(r2sleigh_word_u64 arg0, r2sleigh_word_u64* arg1)
     uint32_t tmp_100000c9c_8_1;
     _Alignas(16) uint8_t frame[160];
 
-    /* r2dec proof: no individual construct is marked; 172 source obligations: 152 rendered, 20 elided, 0 refused; 48 statements rendered; 1 data object type refused; the result's second register is open: no call read decides it; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 172 source obligations: 152 rendered, 20 elided, 0 refused; 48 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
     {
         tmp_lane_100000b70_5_0_1 = r2sleigh_load_u128((void*)(uint64_t)0x100004030U);
         r2sleigh_store_u128((void*)(uint64_t)((uint64_t)(frame + 0U) + (uint64_t)64U), (__uint128_t)r2sleigh_load_u128((void*)(uint64_t)0x100004020U));
@@ -2968,7 +2968,7 @@ r2sleigh_result_u64 _main(r2sleigh_word_u64 arg0, r2sleigh_word_u64* arg1)
                     tmp_100000c90_8_1 = r2sleigh_load_u32((void*)&_manual_sink);
                     r2sleigh_store_u32((void*)&_manual_sink, (uint32_t)((uint32_t)((uint64_t)x0_22 >> 0U) + (uint32_t)tmp_100000c90_8_1));
                     tmp_100000c9c_8_1 = r2sleigh_load_u32((void*)&_manual_sink);
-                    return r2sleigh_carrier_u64((uint64_t)(uint8_t)((uint32_t)tmp_100000c9c_8_1 == (uint32_t)0U));
+                    return (uint64_t)(uint8_t)((uint32_t)tmp_100000c9c_8_1 == (uint32_t)0U);
                 }
             }
         }

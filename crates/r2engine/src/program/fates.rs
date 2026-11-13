@@ -249,7 +249,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for CallBoundary {
 pub struct Direct {
     lanes: [JoinedLane; LANES],
     calls: u32,
-    /// The loader's own calls a cited row states read nothing (r2abi `loader_call`, D237).
+    /// The loader's own calls a cited row states (r2abi `loader_call`, D237, D240); their reads are in `lanes`.
     loader_calls: u32,
     /// Some caller the survey names was not read, so these calls may not be every call.
     unread: bool,
@@ -343,15 +343,8 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
             join_site(&mut lanes, caller, &site.boundary, &mut returned);
         }
     }
+    let loader_calls = loader_reads(db.inputs().source.container(), callee, &mut lanes);
     let returned = forwarded_lanes(&mut lanes, returned, float_second).into();
-    let container = db.inputs().source.container();
-    let loader_calls = (container.entries.iter())
-        .filter(|entry| entry.vaddr == callee)
-        .filter(|entry| {
-            r2abi::loader_call(container.format, entry.kind).is_some_and(|call| call.adds_no_read())
-        })
-        .count();
-    let loader_calls = u32::try_from(loader_calls).unwrap_or(u32::MAX);
     r2il::refusal_evidence!(
         "call-boundary",
         "{callee:#x}: {calls} calls, unread callers {unread}, lanes {lanes:?}"
@@ -363,6 +356,27 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
         unread,
         returned,
     })
+}
+
+/// The loader's calls to `callee` a cited row states, each read joined into `lanes` (D237, D240):
+/// `O(entries)`.
+fn loader_reads(container: &super::Container, callee: u64, lanes: &mut [JoinedLane; LANES]) -> u32 {
+    let library = super::c_library(container);
+    let mut calls = 0u32;
+    for entry in (container.entries.iter()).filter(|entry| entry.vaddr == callee) {
+        let Some(call) = r2abi::loader_call(container.format, library, entry.kind) else {
+            continue;
+        };
+        calls = calls.saturating_add(1);
+        if let r2abi::ResultRead::Integer { bytes } = call.reads_result {
+            let read = ByteMask((1u128 << bytes) - 1);
+            join(
+                &mut lanes[usize::from(LaneId::INTEGER.0)],
+                Some(Forwarded::Fate(LaneFate::Read(read))),
+            );
+        }
+    }
+    calls
 }
 
 /// One call's fate on each lane joined into `lanes`; a lane it returns on waits for its caller.
