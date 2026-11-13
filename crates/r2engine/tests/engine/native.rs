@@ -6852,8 +6852,8 @@ const COPY_INTO_AN_ARGUMENT: &[u8] = &[
     0xc3, // 0x1013 ret
 ];
 
-/// Copy forwarding leaves both of the call's reads naming `rsi`'s value; the read whose `CallUse`
-/// names `rdi` is performed and the `rsi` one is not: liveness asks the register (D283).
+/// Copy forwarding leaves both of the call's reads naming `rsi`'s value. No statement bounds the
+/// undeclared import's reads, so neither read is ignored (D283, default-deny).
 #[test]
 fn a_call_reading_the_value_its_copied_argument_carried_reads_it() {
     let machine = Machine::new("x86-64", "x86-64", 64);
@@ -6890,17 +6890,10 @@ fn a_call_reading_the_value_its_copied_argument_carried_reads_it() {
         })
         .collect::<Vec<_>>();
     assert_eq!(call_reads.len(), 2, "{}", artifact.dump());
-    let r2ssa::CallBoundarySlot::Register { storage: rdi, .. } = call.arguments[0].slot else {
-        panic!("{call:#?}");
-    };
     for site in call_reads {
-        let Some(SSAOp::CallUse { storage, .. }) = graph.op(site.inst) else {
-            panic!("{site:?}");
-        };
-        assert_eq!(
-            artifact.ignored_reads().contains(site),
-            *storage != rdi,
-            "{site:?} reads {storage:?}\n{}",
+        assert!(
+            !artifact.ignored_reads().contains(site),
+            "{site:?} is a read the undeclared callee may perform\n{}",
             artifact.dump()
         );
     }
@@ -8964,4 +8957,42 @@ fn an_import_reads_past_its_fixed_parameters_unless_its_citation_fixes_them() {
     let microsoft = Machine::new("x86-64", "x86-64", 64);
     let (printf, _) = names(&microsoft, &microsoft.under("ms"), "printf");
     assert_eq!(printf.len(), 4 + 4, "{printf:?}");
+}
+
+/// `mov rdi, rsi; call rax; ret`: an indirect call nothing states.
+const INDIRECT_AFTER_A_COPY: &[u8] = &[
+    0x48, 0x89, 0xf7, // 0x1000 mov rdi, rsi
+    0xff, 0xd0, // 0x1003 call rax
+    0xc3, // 0x1005 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // padding to 0x1010
+];
+
+/// A call whose callee nothing states may read every argument register: liveness ignores none of
+/// its `CallUse` reads, though the arity scan lists `rdi` alone (D283, default-deny).
+#[test]
+fn an_unstated_indirect_call_reads_every_register_it_names() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let program = ImportCaller {
+        bytes: INDIRECT_AFTER_A_COPY,
+        stub: 0x1010,
+    };
+    let prepared = r2engine::native::prepared(&machine.target(), &program, BASE).expect("prepared");
+    let artifact: &r2ssa::SsaArtifact = prepared.artifact();
+    let graph = artifact.graph();
+    let call = (artifact.facts().boundaries.calls.values().next()).expect("the call");
+    assert!(call.may_read_unlisted(), "{call:#?}");
+    let reads = graph.call_boundary_reads(call.at);
+    assert!(reads.len() >= 2, "{}", artifact.dump());
+    for read in reads {
+        let site = r2ssa::UseSite {
+            inst: read,
+            input_idx: 0,
+        };
+        assert!(
+            !artifact.ignored_reads().contains(&site),
+            "{:?}\n{}",
+            graph.op(read),
+            artifact.dump()
+        );
+    }
 }

@@ -3377,8 +3377,8 @@ pub(crate) fn same_content_reads(
     pairs
 }
 
-/// The reads a call's text does not perform: each `CallUse` whose register no argument its call's
-/// boundary passes names, a call with no boundary passing none (D283). One pass, `O(insts x arguments)`.
+/// The reads a call's text does not perform: each `CallUse` whose register a proven argument list
+/// leaves out; an unproven list passes every read, no boundary none (D283). `O(insts x arguments)`.
 #[cfg_attr(
     dylint_lib = "r2sleigh_lints",
     allow(
@@ -3390,8 +3390,14 @@ pub(crate) fn unpassed_call_reads(
     graph: &SsaGraph,
     boundaries: &crate::semantic::SourceBoundaryFacts,
 ) -> std::collections::BTreeSet<crate::graph::UseSite> {
-    let mut passed = crate::dense::IdMap::<crate::InstId, Vec<CanonicalStorageId>>::default();
+    // `None`: no statement bounds the callee's reads, so it may read every register (default-deny).
+    let mut passed =
+        crate::dense::IdMap::<crate::InstId, Option<Vec<CanonicalStorageId>>>::default();
     for boundary in boundaries.calls.values() {
+        if boundary.may_read_unlisted() {
+            passed.insert(boundary.at, None);
+            continue;
+        }
         let registers = (boundary.arguments.iter())
             .filter(|argument| !boundary.ignores(argument))
             .filter(|argument| {
@@ -3405,7 +3411,7 @@ pub(crate) fn unpassed_call_reads(
                 _ => None,
             })
             .collect::<Vec<_>>();
-        passed.insert(boundary.at, registers);
+        passed.insert(boundary.at, Some(registers));
     }
     // The reads minted just before a call are its own; any other run passes nothing.
     let mut unpassed = std::collections::BTreeSet::new();
@@ -3422,8 +3428,10 @@ pub(crate) fn unpassed_call_reads(
                 .and_then(|_| passed.get(inst));
             for (read, storage) in run.drain(..) {
                 let read_passed = registers.is_some_and(|registers| {
-                    (registers.iter()).any(|register| {
-                        crate::semantic::register_storages_overlap(*register, storage)
+                    registers.as_ref().is_none_or(|registers| {
+                        (registers.iter()).any(|register| {
+                            crate::semantic::register_storages_overlap(*register, storage)
+                        })
                     })
                 });
                 if !read_passed {
