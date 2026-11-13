@@ -86,24 +86,12 @@ impl FrameReach {
     /// The build's points as objects: no walk, and so no points, is the whole frame.
     pub(crate) fn of(
         function: &SSAFunction,
-        prep: Option<&crate::DecompilePrepFacts>,
         graph: &SsaGraph,
         model: &ObjectModel,
         machine_context: Option<&SourceMachineContext>,
     ) -> Self {
         let frame = FrameIndex::of(model);
-        let areas = match (prep, machine_context) {
-            (Some(facts), Some(context)) => call_areas(function, graph, facts, context),
-            _ => crate::dense::IdMap::default(),
-        };
-        let by_call = (areas.iter())
-            .map(|(call, area)| {
-                let reach = area.as_ref().map_or(CallFrameReach::Whole, |area| {
-                    CallFrameReach::Objects(objects_in(&frame, area))
-                });
-                (call, reach)
-            })
-            .collect::<crate::dense::IdMap<_, _>>();
+        let by_call = call_reaches(function, graph, &frame, machine_context);
         let Some(points) = function.frame_points() else {
             return Self {
                 by_call,
@@ -545,44 +533,42 @@ fn entry_offset(facts: &DecompilePrepFacts, value: ValueId) -> Option<i64> {
         .map(|root| root.offset)
 }
 
-/// Each call's argument area at the entry offset of its stack pointer, or `None` where nothing
-/// bounds it. One `ReachingStorage` walk, `O(ops)`.
-fn call_areas(
+/// What each call reaches of the frame: its `CallReads::stack` from the base the walk placed, as
+/// objects; the whole frame where either is missing. `O(insts + calls x log objects)`.
+fn call_reaches(
     function: &SSAFunction,
     graph: &SsaGraph,
-    facts: &DecompilePrepFacts,
-    machine_context: &SourceMachineContext,
-) -> crate::dense::IdMap<InstId, Option<Vec<(i64, i64)>>> {
-    let mut out = crate::dense::IdMap::default();
-    let Some(stack_pointer) = machine_context.stack_pointer_carrier() else {
-        return out;
-    };
-    let mut states = ReachingStorage::new(function, graph, stack_pointer);
-    for block in &graph.blocks {
-        for &call in graph.op_insts(block.id) {
-            let Some(op) = graph.op(call) else {
-                continue;
-            };
-            let Some(transfer) = op.call() else {
-                continue;
-            };
-            let instruction = transfer.instruction;
-            let sp = match states.before(call) {
-                Some(ReachingStorageState::Value(value)) => graph
-                    .value(value)
-                    .and_then(|value| entry_offset(facts, value.id)),
-                _ => None,
-            };
-            let area = (machine_context.call_reads(instruction)).and_then(|reads| reads.stack);
-            let area = sp.zip(area).map(|(sp, area)| {
-                (area.iter())
-                    .map(|(low, high)| (sp.saturating_add(*low), sp.saturating_add(*high)))
-                    .collect::<Vec<_>>()
-            });
-            out.insert(call, area);
+    frame: &FrameIndex,
+    machine_context: Option<&SourceMachineContext>,
+) -> crate::dense::IdMap<InstId, CallFrameReach> {
+    let bases = function
+        .frame_points()
+        .map_or(&[][..], |points| &points.call_bases[..]);
+    let mut by_call = crate::dense::IdMap::default();
+    for inst in &graph.insts {
+        if graph.op(inst.id).is_some_and(|op| op.call().is_some()) {
+            by_call.insert(inst.id, CallFrameReach::Whole);
         }
     }
-    out
+    for (op, base) in bases {
+        let Some((call, base)) = graph.inst_for_op(*op).zip(*base) else {
+            continue;
+        };
+        let instruction = graph
+            .op(call)
+            .and_then(|op| op.call())
+            .map(|call| call.instruction);
+        let area = machine_context
+            .zip(instruction)
+            .and_then(|(context, instruction)| context.call_reads(instruction)?.stack);
+        if let Some(area) = area {
+            let area = (area.iter())
+                .map(|(low, high)| (base.saturating_add(*low), base.saturating_add(*high)))
+                .collect::<Vec<_>>();
+            by_call.insert(call, CallFrameReach::Objects(objects_in(frame, &area)));
+        }
+    }
+    by_call
 }
 
 /// The frame objects any byte of these entry-relative ranges lies in; an

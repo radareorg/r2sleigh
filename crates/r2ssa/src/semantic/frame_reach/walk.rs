@@ -60,6 +60,9 @@ pub struct FramePoints {
     pub(crate) handed: BTreeSet<i64>,
     /// Some place holding an address lies where a call's argument area could reach (D226).
     pub(crate) by_area: bool,
+    /// The entry offset each call's argument area is measured from, in operation order; `None`
+    /// where no offset places the stack pointer (D351: the one reading of it).
+    pub(crate) call_bases: Vec<(OpId, Option<i64>)>,
 }
 
 impl FramePoints {
@@ -389,6 +392,7 @@ struct StackArguments {
 
 /// One call's argument area, from the stack pointer it is measured at.
 struct CallArguments {
+    op: OpId,
     pointer: VarId,
     /// What the transfer spends where no restore records the pointer entering it.
     shift: i64,
@@ -422,7 +426,7 @@ impl StackArguments {
             if let Some((_, phi)) = block.sited_phis().find(|(_, phi)| site.is_pointer(phi.dst)) {
                 pointer = phi.dst;
             }
-            pointer = site.calls(block.ops(), pointer, &mut calls);
+            pointer = site.calls(block, pointer, &mut calls);
             let children = func.domtree().children(address);
             steps.extend(children.iter().rev().map(|child| (*child, pointer)));
         }
@@ -431,12 +435,16 @@ impl StackArguments {
 
     /// Each call's area base, where every call is at a placed pointer.
     fn bases(&self, values: &IdMap<VarId, Value>) -> Option<Vec<i64>> {
-        (self.calls.iter())
-            .map(|call| {
-                let base = values.get(call.pointer)?.exact()?;
-                Some(base.wrapping_add(call.shift))
-            })
-            .collect()
+        (self.calls.iter()).map(|call| call.base(values)).collect()
+    }
+
+    /// Each call's area base, by operation.
+    fn by_call(&self, values: &IdMap<VarId, Value>) -> Vec<(OpId, Option<i64>)> {
+        let mut bases = (self.calls.iter())
+            .map(|call| (call.op, call.base(values)))
+            .collect::<Vec<_>>();
+        bases.sort_by_key(|(op, _)| *op);
+        bases
     }
 
     /// Whether `read` could differ under other argument areas: every call is at a placed pointer
@@ -452,11 +460,10 @@ impl StackArguments {
     fn read(&self, values: &IdMap<VarId, Value>, stored: &BTreeMap<i64, u32>) -> BTreeSet<i64> {
         let mut read = BTreeSet::new();
         for call in &self.calls {
-            let Some(base) = values.get(call.pointer).and_then(Value::exact) else {
-                // A call at a pointer no offset places may read any place.
+            // A call at a pointer no offset places may read any place.
+            let Some(base) = call.base(values) else {
                 return stored.keys().copied().collect();
             };
-            let base = base.wrapping_add(call.shift);
             let within = |place: i64, width: u32| match &call.area {
                 Some(area) => area.iter().any(|(low, high)| {
                     base.wrapping_add(*low) < place.saturating_add(i64::from(width))
@@ -475,6 +482,14 @@ impl StackArguments {
     }
 }
 
+impl CallArguments {
+    /// The entry offset the call's area is measured from, where an offset places its pointer.
+    fn base(&self, values: &IdMap<VarId, Value>) -> Option<i64> {
+        let base = values.get(self.pointer)?.exact()?;
+        Some(base.wrapping_add(self.shift))
+    }
+}
+
 /// What every call of one function shares: the machine, and what a transfer spends.
 struct Site<'a> {
     func: &'a SSAFunction,
@@ -488,15 +503,16 @@ impl Site<'_> {
         self.func.storage_of(var) == Some(self.stack_pointer)
     }
 
-    /// Each call of a block's `ops`, entered at the stack `pointer`; the pointer leaving it.
+    /// Each call of a block, entered at the stack `pointer`; the pointer leaving it.
     fn calls(
         &self,
-        ops: &[SSAOp<VarId>],
+        block: &crate::block::SSABlock<VarId>,
         mut pointer: VarId,
         out: &mut Vec<CallArguments>,
     ) -> VarId {
-        for (index, op) in ops.iter().enumerate() {
-            out.extend(self.call(&ops[index..], pointer));
+        let ops = block.ops();
+        for (index, (id, op)) in block.sited().enumerate() {
+            out.extend(self.call(id, &ops[index..], pointer));
             pointer = op
                 .dst()
                 .copied()
@@ -508,7 +524,7 @@ impl Site<'_> {
 
     /// The call `ops` starts with, in the boundary's coordinates: the pointer a restore records
     /// entering the transfer, else the one reaching it past what the transfer spends.
-    fn call(&self, ops: &[SSAOp<VarId>], pointer: VarId) -> Option<CallArguments> {
+    fn call(&self, op: OpId, ops: &[SSAOp<VarId>], pointer: VarId) -> Option<CallArguments> {
         let call = ops.first()?.call()?;
         let entering = (ops[1..].iter())
             .take_while(|op| matches!(op, SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. }))
@@ -518,6 +534,7 @@ impl Site<'_> {
             });
         let (pointer, shift) = entering.map_or((pointer, self.spent), |src| (src, 0));
         Some(CallArguments {
+            op,
             pointer,
             shift,
             area: (self.machine.call_reads(call.instruction)).and_then(|reads| reads.stack),
@@ -917,6 +934,7 @@ impl<'a> Walker<'a> {
             }
         }
         self.points.handed = handed;
+        self.points.call_bases = arguments.by_call(&self.values);
         Walked {
             points: self.points,
             accesses: self.accesses,
