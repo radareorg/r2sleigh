@@ -168,6 +168,9 @@ pub struct Rendering {
     /// Why nothing was analysed to render, where nothing was: the response is then that record's
     /// comment alone (ROADMAP D29).
     pub refused: Option<NativeRefusal>,
+    /// Each member call's instruction and the parameter count its contract's exact callee
+    /// declares, sorted by instruction (D272).
+    pub member_arities: Vec<(r2ssa::InstId, usize)>,
 }
 
 impl Rendering {
@@ -190,6 +193,7 @@ impl Rendering {
             unread: Vec::new(),
             language,
             refused: Some(refusal),
+            member_arities: Vec::new(),
         }
     }
 

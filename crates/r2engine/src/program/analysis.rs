@@ -438,6 +438,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
             unread,
             language,
             refused: None,
+            member_arities: member_arities(prepared.artifact().artifact()),
         };
         let stopped = control.stopped();
         Render(Rc::new(Drawn { rendering, stopped }))
@@ -449,4 +450,20 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
             false => Hold::Held,
         }
     }
+}
+
+/// Each proven member call's instruction and its contract's declared parameter count (D272).
+/// A floor states no exact callee, so it names no arity. O(member calls x log).
+fn member_arities(artifact: &r2ssa::SsaArtifact) -> Vec<(r2ssa::InstId, usize)> {
+    let mut arities = (artifact.member_calls().proven())
+        .filter_map(|(site, _)| {
+            let at = artifact.facts().call_sites.by_id.get(&site)?.at;
+            let callee = artifact
+                .call_site_interface(site)?
+                .exact_callee_interface()?;
+            Some((at, callee.parameters().len()))
+        })
+        .collect::<Vec<_>>();
+    arities.sort_unstable();
+    arities
 }

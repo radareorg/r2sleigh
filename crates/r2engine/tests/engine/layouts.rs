@@ -296,3 +296,33 @@ fn a_stripped_member_call_stays_residual() {
     let mut open = OpenProgram::of(Literal::of_code(LOADED_MEMBER_CALL, &functions));
     assert!(!member_call(&mut open).0);
 }
+
+/// D272: `pddj` states a member call's declared arity, so the certifier grades it; the
+/// stripped copy states none.
+#[test]
+fn pddj_states_a_member_calls_declared_arity() {
+    let types = types();
+    let declarations = declaring(
+        "use",
+        Some((types.holder_pointer, "struct holder *")),
+        TypeId::VOID,
+    );
+    let declared = |mut open: OpenProgram<Literal>| {
+        let rendering = open.rendered(BASE).expect("it renders");
+        let answer = rendering.answer("use", BASE);
+        (answer.calls.iter())
+            .map(|call| (call.kind, call.arguments, call.declared))
+            .collect::<Vec<_>>()
+    };
+    let typed = declared(program(LOADED_MEMBER_CALL, declarations));
+    assert_eq!(typed, [("pointer", 2, Some(2))]);
+    let functions = [("use", BASE, LOADED_MEMBER_CALL.len() as u64)];
+    let stripped = declared(OpenProgram::of(Literal::of_code(
+        LOADED_MEMBER_CALL,
+        &functions,
+    )));
+    assert!(
+        stripped.iter().all(|(_, _, declared)| declared.is_none()),
+        "{stripped:?}"
+    );
+}
