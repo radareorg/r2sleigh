@@ -134,7 +134,7 @@ r2sleigh_result_u32 fcn_10c0(int32_t arg0, r2sleigh_word_u64* arg1)
 {
     int32_t __printf_chk(int32_t, const char*, ...);
     r2sleigh_word_u32 add(r2sleigh_word_u32, r2sleigh_word_u32);
-    double avg(r2sleigh_word_u64*, int32_t);
+    double avg(double*, int32_t);
     r2sleigh_word_u32 bit_count(r2sleigh_word_u32);
     r2sleigh_word_u32 classify(uint32_t);
     r2sleigh_word_u64 copy_name(r2sleigh_word_u8*, const char*, r2sleigh_word_u64);
@@ -201,7 +201,7 @@ r2sleigh_result_u32 fcn_10c0(int32_t arg0, r2sleigh_word_u64* arg1)
         rax_8 = (uint64_t)classify((uint32_t)arg0);
         rax_9 = (uint64_t)list_len((uint64_t)((uint64_t)(frame + 16U) + (uint64_t)80U));
         rax_10 = mul_div((uint64_t)(int32_t)((uint64_t)((uint64_t)(int32_t)arg0 * (uint64_t)100U) >> 0U), 3);
-        xmm0_4 = (__uint128_t)r2sleigh_float_to_bits_64(avg((r2sleigh_word_u64*)(uint64_t)((uint64_t)(frame + 16U) + (uint64_t)112U), 3));
+        xmm0_4 = (__uint128_t)r2sleigh_float_to_bits_64(avg((double*)(uint64_t)((uint64_t)(frame + 16U) + (uint64_t)112U), 3));
         rax_12 = (uint64_t)fact(5);
         tmp_lane_11a4_2_0_1 = (uint64_t)((__uint128_t)xmm0_4 >> 0U);
         tmp_11a4_12_1 = (uint8_t)((uint32_t)(uint8_t)((double)(int64_t)0xffffffff7fffffffU < r2sleigh_float_from_bits_64(tmp_lane_11a4_2_0_1)) & (uint32_t)(uint8_t)(r2sleigh_float_from_bits_64(tmp_lane_11a4_2_0_1) < (double)(int64_t)0x80000000U));
@@ -563,7 +563,7 @@ NAME=0x00001430
 FILE=tests/fixtures/rv_O2
 CMDS=aa; pdd @ 0x00001430
 EXPECT=<<EOF
-double avg(r2sleigh_word_u64* arg0, int32_t arg1)
+double avg(double* arg0, int32_t arg1)
 {
     uint32_t tmp_1434_0_1;
     uint8_t zf_1;

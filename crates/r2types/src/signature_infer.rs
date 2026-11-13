@@ -132,6 +132,7 @@ pub(crate) fn certified_parameter_pointers(
     signedness: &IdMap<r2ssa::ValueId, BTreeSet<ScalarSignednessEvidence>>,
 ) -> BTreeMap<usize, CTypeLike> {
     let signs = pointee_signs(prepared, signedness);
+    let floats = pointee_floats(prepared);
     certified_parameter_memory_widths(prepared)
         .into_iter()
         .map(|(index, widths)| {
@@ -141,6 +142,13 @@ pub(crate) fn certified_parameter_pointers(
             }
             let pointer = match certified_parameter_pointer_type(CTypeLike::Void, Some(&widths)) {
                 CTypeLike::Pointer(inner) => match *inner {
+                    // A pointee every access carries as a float of its width is that float (D353).
+                    CTypeLike::Int {
+                        bits: bits @ (32 | 64),
+                        ..
+                    } if floats.get(&(index, bits)) == Some(&true) => {
+                        CTypeLike::Pointer(Box::new(CTypeLike::Float(bits)))
+                    }
                     CTypeLike::Int { bits, .. } => {
                         let sign = (signs.get(&(index, bits)).copied())
                             .unwrap_or(crate::SignFact::Unstated);
@@ -156,6 +164,76 @@ pub(crate) fn certified_parameter_pointers(
             (index, pointer)
         })
         .collect()
+}
+
+/// Whether every certified access through each parameter at `(parameter, bits)` carries a float:
+/// a load whose every use, through copies and merges, is a float operation, a store of one's
+/// result. A float operation decodes the bits as IEEE 754 (D353). O(accesses + uses reached).
+fn pointee_floats(prepared: &SsaArtifact) -> BTreeMap<(usize, u32), bool> {
+    let graph = prepared.graph();
+    let float_op = |op: &SSAOp<r2ssa::ValueId>| {
+        matches!(
+            op,
+            SSAOp::FloatAdd { .. }
+                | SSAOp::FloatSub { .. }
+                | SSAOp::FloatMult { .. }
+                | SSAOp::FloatDiv { .. }
+                | SSAOp::FloatNeg { .. }
+                | SSAOp::FloatAbs { .. }
+                | SSAOp::FloatSqrt { .. }
+                | SSAOp::FloatCeil { .. }
+                | SSAOp::FloatFloor { .. }
+                | SSAOp::FloatRound { .. }
+                | SSAOp::FloatNaN { .. }
+                | SSAOp::FloatEqual { .. }
+                | SSAOp::FloatNotEqual { .. }
+                | SSAOp::FloatLess { .. }
+                | SSAOp::FloatLessEqual { .. }
+                | SSAOp::Float2Int { .. }
+                | SSAOp::FloatFloat { .. }
+                | SSAOp::Trunc { .. }
+        )
+    };
+    // Every use reached through copies and merges is a float operation, and one is reached.
+    let read_as_float = |value: r2ssa::ValueId| {
+        let mut seen = r2ssa::dense::IdSet::new(graph.values.len());
+        let (mut pending, mut any) = (vec![value], false);
+        while let Some(value) = pending.pop() {
+            if !seen.insert(value) {
+                continue;
+            }
+            for site in graph.use_sites(value) {
+                let Some(inst) = graph.inst(site.inst) else {
+                    return false;
+                };
+                match &inst.payload {
+                    r2ssa::InstPayload::Op(SSAOp::Copy { dst, .. }) => pending.push(*dst),
+                    r2ssa::InstPayload::Phi { .. } => pending.extend(inst.output),
+                    r2ssa::InstPayload::Op(op) if float_op(op) => any = true,
+                    _ => return false,
+                }
+            }
+        }
+        any
+    };
+    let written_as_float = |value: r2ssa::ValueId| {
+        (graph.def_inst(value).and_then(|inst| graph.op(inst))).is_some_and(float_op)
+    };
+    let mut floats = BTreeMap::<(usize, u32), bool>::new();
+    for access in prepared.certificates().memory_accesses.values() {
+        let Some(index) = certified_memory_parameter(prepared, access) else {
+            continue;
+        };
+        let float = access.value.is_some_and(|value| match access.is_write {
+            true => written_as_float(value),
+            false => read_as_float(value),
+        });
+        let cell = floats
+            .entry((index, access.width.saturating_mul(8)))
+            .or_insert(true);
+        *cell &= float;
+    }
+    floats
 }
 
 /// The sign each parameter's pointee is read at, by `(parameter, bits)`: the evidence on every
@@ -878,6 +956,12 @@ mod tests {
         block.push(r2il::R2ILOp::IntZExt {
             dst: r2il::Varnode::unique(0x40, 4),
             src: r2il::Varnode::unique(0x30, 1),
+        });
+        // The widened byte is observed: a dead extension states no sign (D265).
+        block.push(r2il::R2ILOp::Store {
+            space: r2il::SpaceId::Ram,
+            addr: r2il::Varnode::register(8, 8),
+            val: r2il::Varnode::unique(0x40, 4),
         });
         let prepared = aarch64_prepared_with_stack_slot(
             block,

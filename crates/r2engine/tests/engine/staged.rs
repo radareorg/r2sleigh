@@ -190,7 +190,7 @@ fn a_wrapper_that_computes_the_stub_s_argument_is_a_body_not_the_stub() {
     assert!(!text.contains("import stub at"), "{text}");
     // zlib's `zcalloc(opaque, items, size)`: `opaque` is a hole, the product its two read slots.
     assert!(
-        text.contains("(r2sleigh_unread_u64 arg0, int32_t arg1, int32_t arg2)"),
+        text.contains("(r2sleigh_unread_u64 arg0, r2sleigh_word_u32 arg1, r2sleigh_word_u32 arg2)"),
         "{text}"
     );
     assert!(

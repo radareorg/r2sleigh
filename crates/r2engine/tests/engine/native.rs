@@ -4289,7 +4289,7 @@ fn a_packed_extension_of_an_argument_takes_the_argument() {
     assert_packed_extension_rendered(&text);
     // The packed result is left in XMM0, a written float lane no reading call decides (D200).
     assert!(
-        text.starts_with("r2sleigh_result_u64 sign_extend_argument(uint32_t "),
+        text.starts_with("r2sleigh_result_u64 sign_extend_argument(r2sleigh_word_u32 "),
         "{text}"
     );
     run_rendered(
