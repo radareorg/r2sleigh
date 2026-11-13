@@ -325,15 +325,13 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
     }
 
     fn halts_on(&self, callee: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
-        // The stub `declared_return` reads a noreturn row through: the import the program states there.
-        let name = crate::native::Program::import_at(self, callee)?;
-        let walker = super::returns::Walking::new(self.clone(), false).ok()?;
-        let target = walker.target(false);
-        let (index, halt) = target.imports.row(&name)?.halts_on?;
-        let register = target
-            .convention
-            .argument(r2abi::SlotClass::Integer, index.into());
-        register.map(|register| (register, halt))
+        let halting = self.db.get::<super::HaltingStubs>(&()).ok()?;
+        halting.get(&callee).copied()
+    }
+
+    fn holds_values(&self) -> bool {
+        let halting = self.db.get::<super::HaltingStubs>(&()).ok();
+        self.binds_handles() || halting.is_some_and(|halting| !halting.is_empty())
     }
 
     fn binds_handles(&self) -> bool {

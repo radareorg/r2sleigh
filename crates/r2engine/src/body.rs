@@ -120,6 +120,11 @@ pub trait Program {
         false
     }
 
+    /// Whether a walk holds register values at all: a row yields a handle or halts on a value.
+    fn holds_values(&self) -> bool {
+        false
+    }
+
     /// The register a call through `slot` leaves holding a handle the import states.
     fn yields_through(&self, _slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
         None
@@ -389,15 +394,23 @@ impl Handles {
                 && a.offset < b.offset + u64::from(b.size)
                 && b.offset < a.offset + u64::from(a.size)
         };
+        let mut conditional = false;
         for (index, op) in lifted.ops.iter().enumerate() {
             // An unstated operation stands for writes the lift dropped.
             if matches!(op, r2il::R2ILOp::Unimplemented) {
                 self.held.clear();
                 continue;
             }
+            // A value written past a branch inside the instruction is conditional (`moveq r0, #1`).
+            if op.is_control_flow() && !op.is_call() {
+                self.held.clear();
+                conditional = true;
+                continue;
+            }
             if op.is_call() {
                 self.held.clear();
                 let slot = r2ssa::loaded_target_slot(lifted, index).map(|slot| slot.offset);
+                let slot = slot.filter(|_| program.binds_handles());
                 let yielded = slot
                     .filter(|slot| crate::stated::sealed_import(program, *slot).is_some())
                     .and_then(|slot| program.yields_through(slot));
@@ -437,10 +450,11 @@ impl Handles {
                 _ => None,
             };
             self.held.retain(|held| !overlaps(held.storage, written));
-            self.held.extend(copied.map(|held| Held {
-                storage: written,
-                ..held
-            }));
+            self.held
+                .extend(copied.filter(|_| !conditional).map(|held| Held {
+                    storage: written,
+                    ..held
+                }));
         }
     }
 }
@@ -711,6 +725,8 @@ struct Walk {
     proven: Vec<(u64, u64, Option<u64>)>,
     /// Ends no statement proves: a trap, or a call with no next instruction.
     ends_unproven: usize,
+    /// Whether the program's rows read a held register value (`Program::holds_values`).
+    holds_values: bool,
     falls_into: BTreeSet<u64>,
     /// Whether each address the lift states context for decodes in another context than this walk's.
     target_contexts: BTreeMap<u64, bool>,
@@ -760,6 +776,7 @@ impl Walk {
             handles: Handles::default(),
             proven: Vec::new(),
             ends_unproven: 0,
+            holds_values: program.holds_values(),
             falls_into: BTreeSet::new(),
             target_contexts: BTreeMap::new(),
             unresolved: Vec::new(),
@@ -1078,8 +1095,10 @@ impl Walk {
             self.handles = Handles::default();
         }
         let handles_before = self.handles.held.clone();
-        self.handles.step(&instruction.lifted, program);
-        self.handles.at = Some(next);
+        if self.holds_values {
+            self.handles.step(&instruction.lifted, program);
+            self.handles.at = Some(next);
+        }
         if let BlockTerminator::IndirectCall { fallthrough } = instruction.terminator
             && let Some(target) = self.folded_call(&instruction, previous)
         {
@@ -1577,6 +1596,47 @@ fn successors_of(
 #[cfg(test)]
 mod transfer_tests {
     use super::*;
+
+    struct Nothing;
+
+    impl Program for Nothing {
+        fn read(&self, _vaddr: u64, _max: usize) -> Option<Vec<u8>> {
+            None
+        }
+        fn region(&self, _vaddr: u64) -> Option<Region> {
+            None
+        }
+        fn is_entry(&self, _vaddr: u64) -> bool {
+            false
+        }
+    }
+
+    /// `mov edi, 2` holds a constant a halting row reads; ARM's `moveq r0, #1` writes it only past
+    /// the instruction's own branch, so it holds nothing (D211).
+    #[test]
+    fn a_constant_written_past_a_branch_inside_the_instruction_is_not_held() {
+        let rdi = r2il::Varnode::register(0x38, 8);
+        let plain = |lifted: &mut R2ILBlock| {
+            lifted.push(r2il::R2ILOp::Copy {
+                dst: rdi.clone(),
+                src: r2il::Varnode::constant(2, 8),
+            });
+        };
+        let mut unconditional = R2ILBlock::new(0x1000, 5);
+        plain(&mut unconditional);
+        let mut handles = Handles::default();
+        handles.step(&unconditional, &Nothing);
+        assert_eq!(handles.held.len(), 1);
+        let mut predicated = R2ILBlock::new(0x1000, 4);
+        predicated.push(r2il::R2ILOp::CBranch {
+            target: r2il::Varnode::constant(0x1004, 8),
+            cond: r2il::Varnode::unique(0x10, 1),
+        });
+        plain(&mut predicated);
+        let mut handles = Handles::default();
+        handles.step(&predicated, &Nothing);
+        assert!(handles.held.is_empty(), "{:?}", handles.held);
+    }
 
     /// A conditional branch whose arm is another function's entry (`jne g`, ARM's `bne g`) is a
     /// tail jump at the operation naming that arm.

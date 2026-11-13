@@ -103,6 +103,10 @@ impl crate::body::Program for Knowing<'_> {
         self.program.halts_on(callee)
     }
 
+    fn holds_values(&self) -> bool {
+        self.program.holds_values()
+    }
+
     fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
         self.program.interrupt_returns(arch, vector)
     }

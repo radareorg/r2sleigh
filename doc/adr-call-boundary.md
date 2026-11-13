@@ -1415,3 +1415,13 @@ A function every take hands only into cited code-pointer slots, one of which ret
 - `Escapes`. The stored-word scan read the immediate of a non-PIE `_start`'s `mov rdi, main` as a stored word, so `main` escaped. A `Take` records its instruction's end; a word inside a take's own bytes naming its target is that take (`Words::known`, `O(log takes)` per matching word). A take writing a narrow register the instruction widens (`mov edi, imm`) is one write of the wide one.
 - Measured by hand: member_call gcc x64 O2 `aa; s 0x401050; pdd` prints `r2sleigh_word_u32 fcn_401050(int32_t arg0)`, `closed world decides Some(Read(Integer))`.
 - Open: glibc AArch64's `_start` takes `__wrap_main` (`nop; b main`); `main` is then reached by a tail jump, which `Escapes` counts as a way in. musl has no cited row.
+
+## rd3-returns3 as built (2026-11-14)
+
+What this changes in the sections above, and the owner of each rule:
+
+- S2's tail rule: a tail whose boundary is complete with fixed arguments names its exit for every stated result. A narrower result reads the lane's logical bytes as S2 built. A `void` or whole-width result need not write a byte, so the tail reads what reaches our own result registers in the bytes a caller reads; nothing where our return reads no register (D340). A variadic, incomplete or unstated tail stays unnamed (D373). Owner r2ssa `tail_reads`.
+- A cited row may halt on a value: r2abi `Halt::{Handle, NonZero}`; glibc `error` and `error_at_line` cite error(3). The walk holds constants beside handles only where some row reads one (r2engine `HaltingStubs`, a held query), and drops a value written past a branch inside its instruction.
+- `NeverProof::Composed`: a body no return reaches whose every end is proven (a halting transfer, or a wait on a declared or composed callee), with no trap and at least one end; a least fixpoint over the wait edges. `proves_never` stays declared-only, since S31b's register effect reads no other body.
+- The closed decision's premises are one fact: r2source `SourceClosedDecision { result, through_slot }::premises`. r2ssa records them at the seal and r2dec spells them on the proof line.
+- A direct branch into a function returns its held lanes to the branching body (`Survey::tail_callers_of`); `Escapes` still counts the branch as a way in.
