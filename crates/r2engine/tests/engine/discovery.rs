@@ -557,3 +557,71 @@ fn a_call_to_a_function_that_fastfails_ends_its_caller_in_a_pe() {
     let mut elf = OpenProgram::of(Literal::of_code(FASTFAILS, &functions));
     assert_eq!(extent(&mut elf, caller), (caller + 11, false));
 }
+
+/// A table switch whose arms return `g()` (`mov eax, 1`) and whose default arm calls `ends`:
+/// the import `exit` at the stub, or the body `trap` (`ud2`) at 0x1036.
+///
+/// ```text
+///   1000  cmp edi, 3; ja 0x1020; mov edi, edi; jmp [rdi*8 + 0x1040]
+///   100e  call g; ret                ; cases 0, 1, 2 at 100e, 1014, 101a; case 3 at 1028
+///   1020  xor edi, edi; call ends    ; the default arm
+///   1030  g: mov eax, 1; ret
+///   1036  trap: ud2
+/// ```
+fn switch_ending_at(ends: u64) -> &'static [u8] {
+    let mut code = vec![0xcc; 0xa0];
+    code[..0x0e].copy_from_slice(&[
+        0x83, 0xff, 0x03, 0x77, 0x1b, 0x89, 0xff, 0xff, 0x24, 0xfd, 0x40, 0x10, 0x00, 0x00,
+    ]);
+    for arm in [0x0e, 0x14, 0x1a, 0x28] {
+        let call = (0x30 - (arm + 5)) as u8;
+        code[arm..arm + 6].copy_from_slice(&[0xe8, call, 0, 0, 0, 0xc3]);
+    }
+    let call = (ends - (BASE + 0x27)) as u32;
+    code[0x20..0x22].copy_from_slice(&[0x31, 0xff]);
+    code[0x22] = 0xe8;
+    code[0x23..0x27].copy_from_slice(&call.to_le_bytes());
+    code[0x30..0x38].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x0f, 0x0b]);
+    for (at, target) in [0x100e_u64, 0x1014, 0x101a, 0x1028].iter().enumerate() {
+        code[0x40 + 8 * at..0x48 + 8 * at].copy_from_slice(&target.to_le_bytes());
+    }
+    code[0x90..0x96].copy_from_slice(&[0xff, 0x25, 0x02, 0x00, 0x00, 0x00]); // jmp [rip + 2]
+    code[0x98..0xa0].fill(0);
+    Box::leak(code.into_boxed_slice())
+}
+
+fn switch_rendered(ends: u64) -> String {
+    let functions = [
+        ("pick", BASE, 0x30),
+        ("g", BASE + 0x30, 6),
+        ("trap", BASE + 0x36, 2),
+    ];
+    let literal = Literal::of_code(switch_ending_at(ends), &functions)
+        .importing("exit")
+        .running_on(GLIBC);
+    let mut open = OpenProgram::of(literal);
+    let rendered = open.rendered(BASE).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// A switch arm ending at a call to `exit`, whose cited row states noreturn, names its exit: the
+/// other arms' 32-bit `g()` is the whole result, with no undefined upper bytes (S23 D255, D211).
+#[test]
+fn a_switch_arm_that_calls_a_cited_noreturn_names_its_exit() {
+    let text = switch_rendered(common::STUB);
+    assert!(text.contains("r2sleigh_result_u32 pick("), "{text}");
+    assert!(!text.contains("<< 32"), "{text}");
+    assert!(!text.contains("unproven)"), "{text}");
+}
+
+/// The same arm ending at a body only the walk finds reaching no return names no exit: the "never"
+/// is a bound, and the proof line counts the call as unproven (S23 D255; RULING 1.4).
+#[test]
+fn a_block_ended_at_an_unstated_call_names_no_exit() {
+    let text = switch_rendered(BASE + 0x36);
+    assert!(
+        text.contains("1 call ends where no return was reached (unproven)"),
+        "{text}"
+    );
+    assert!(text.contains("r2sleigh_result_u32 pick("), "{text}");
+}
