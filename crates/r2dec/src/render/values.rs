@@ -885,6 +885,17 @@ impl<'a> Values<'a> {
         }
         let fields = &self.artifact.certificates().parameter_fields;
         for (slot, tag, base) in pointing {
+            if let Some(cells) = self.projected_members(slot, &tag, &base) {
+                if members.is_empty() {
+                    members = vec![None; self.roots.arena().len()];
+                }
+                for (cell, address) in cells {
+                    if let Some(at) = members.get_mut(cell.index()) {
+                        *at = Some(address);
+                    }
+                }
+                continue;
+            }
             let Some(structure) = input.parameter_structures().get(&slot) else {
                 continue;
             };
@@ -923,6 +934,43 @@ impl<'a> Values<'a> {
             }
         }
         members
+    }
+
+    /// Each cell an access through parameter `slot` addresses, as `&base->member` where r2ssa
+    /// projects every such access onto a member of `tag` (D359); `None` where one is not.
+    fn projected_members(
+        &self,
+        slot: usize,
+        tag: &str,
+        base: &CExpr,
+    ) -> Option<Vec<(TermId, CExpr)>> {
+        let interface = self.artifact.machine_context().function_interface()?;
+        let graph = interface.type_graph()?;
+        let projections = (self.artifact.aggregate_accesses())
+            .projections_for_revision(interface.revision_identity())?;
+        let facts = self.artifact.facts();
+        let through = (facts.structured.memory_accesses.values()).filter(|access| {
+            (facts.addresses.parameter_expression(access.address))
+                .is_some_and(|expression| expression.parameter == slot)
+        });
+        let cells = through
+            .map(|access| {
+                let projection = projections.get(&access.id)?;
+                let aggregate = graph.aggregates().get(projection.aggregate_id as usize)?;
+                let named = projection.root == r2ssa::AggregateRoot::Parameter(slot as u32)
+                    && projection.graph == r2ssa::GraphOf::Interface
+                    && projection.element_index.is_none()
+                    && aggregate.id() == projection.aggregate_id
+                    && aggregate.name() == tag;
+                let cell = self.roots.access(access.id)?.canonical;
+                let member = CExpr::PtrMember {
+                    base: Box::new(base.clone()),
+                    member: projection.member_name.to_string(),
+                };
+                named.then(|| (cell, CExpr::addr_of(member)))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!cells.is_empty()).then_some(cells)
     }
 
     /// Parameters in their ABI order, then a local per bound value. A parameter the source declares

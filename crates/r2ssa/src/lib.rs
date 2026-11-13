@@ -102,6 +102,7 @@ pub use address::{
 pub use aggregate_access::{
     AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION, AggregateAccessBinding, AggregateAccessProjection,
     AggregateAccessProjectionFacts, AggregateElementIndexProjection, AggregateRoot, GraphOf,
+    PathStep,
 };
 pub use arena::{OpArena, OpId, OpOrigin, OpSlot, Pass};
 pub use assumption::{
