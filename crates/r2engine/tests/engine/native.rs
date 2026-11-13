@@ -1748,6 +1748,125 @@ fn a_later_round_entering_an_earlier_rounds_guarded_arm_drops_the_rounds() {
     assert!(!output.contains("r2sleigh_carrier_u32(20)"), "{output}");
 }
 
+/// [`NESTED_SWITCH`]'s shape whose outer case 1 runs `filler` diamonds on `edx`, on no path to a
+/// dispatch; where `nested` is false the outer case 0 returns, so no later round runs.
+fn arm_switch(nested: bool, filler: usize) -> Vec<u8> {
+    let rel32 = |code: &mut Vec<u8>, at: usize, value: u64| {
+        let value = u32::try_from(value).expect("fits").to_le_bytes();
+        code[at..at + 4].copy_from_slice(&value);
+    };
+    // cmp edi, 1; ja default; mov edi, edi; jmp [rdi*8 + outer]
+    let mut code = vec![
+        0x83, 0xff, 0x01, 0x0f, 0x87, 0, 0, 0, 0, 0x89, 0xff, 0xff, 0x24, 0xfd,
+    ];
+    code.extend([0; 4]);
+    let case0 = code.len();
+    if nested {
+        // cmp esi, 1; ja default; mov esi, esi; jmp [rsi*8 + inner]
+        code.extend([
+            0x83, 0xfe, 0x01, 0x0f, 0x87, 0, 0, 0, 0, 0x89, 0xf6, 0xff, 0x24, 0xf5,
+        ]);
+        code.extend([0; 4]);
+    }
+    let inner = [code.len(), code.len() + 6];
+    code.extend([0xb8, 10, 0, 0, 0, 0xc3, 0xb8, 20, 0, 0, 0, 0xc3]);
+    let case1 = code.len();
+    code.extend([0xb8, 30, 0, 0, 0]);
+    for _ in 0..filler {
+        code.extend([0x85, 0xd2, 0x74, 0x02, 0xff, 0xc0]); // test edx, edx; jz +2; inc eax
+    }
+    code.push(0xc3);
+    let default = code.len();
+    code.extend([0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3]);
+    code.resize(code.len().next_multiple_of(8), 0);
+    let tables = code.len();
+    for arm in [case0, case1, inner[0], inner[1]] {
+        code.extend((BASE + arm as u64).to_le_bytes());
+    }
+    rel32(&mut code, 5, (default - 9) as u64);
+    rel32(&mut code, 14, BASE + tables as u64);
+    if nested {
+        rel32(&mut code, case0 + 5, (default - case0 - 9) as u64);
+        rel32(&mut code, case0 + 14, BASE + tables as u64 + 16);
+    }
+    code
+}
+
+/// A fixture whose execution control is one held meter, so a test reads the work its requests spent.
+struct Metered {
+    fixture: Fixture,
+    control: r2engine::EngineExecutionControl,
+}
+
+impl r2engine::body::Program for Metered {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        self.fixture.read(vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        self.fixture.region(vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        self.fixture.is_entry(vaddr)
+    }
+}
+
+impl Program for Metered {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        self.fixture.holds_static_data(vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        self.fixture.extents()
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.name_at(vaddr)
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.import_at(vaddr)
+    }
+
+    fn control(&self) -> r2engine::EngineExecutionControl {
+        self.control.clone()
+    }
+}
+
+/// The SSA work a decompile of `bytes` spends, and how many switches it renders.
+fn decompile_work(bytes: Vec<u8>) -> (u64, usize) {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Metered {
+        fixture: Fixture {
+            bytes,
+            name: "arms",
+        },
+        control: r2engine::EngineExecutionControl::default(),
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let switches = response.output.text().matches("switch (").count();
+    (program.control.work_spent(), switches)
+}
+
+#[test]
+fn the_later_rounds_check_seals_no_block_on_no_path_to_a_dispatch() {
+    let arm = |nested: bool, switches: usize| {
+        let (short, long) = (arm_switch(nested, 0), arm_switch(nested, 40));
+        let ((short, short_switches), (long, long_switches)) =
+            (decompile_work(short), decompile_work(long));
+        assert_eq!((short_switches, long_switches), (switches, switches));
+        long - short
+    };
+    // The decompile seals the arm once either way; a check sealing the whole body seals it again (D367).
+    let (once, checked) = (arm(false, 1), arm(true, 2));
+    assert!(
+        checked * 4 < once * 5,
+        "the arm cost {checked} with a later round, {once} without"
+    );
+}
+
 /// clang -O2's `switch (op) { case 1: .. case 5: }` (sw3.c `base1`): `dec edi` biases the selector and
 /// zero-extends it in the guard's block, and only the dispatch reads that widening.
 const BIASED_TABLE_SWITCH: &[u8] = &[
