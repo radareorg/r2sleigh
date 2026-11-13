@@ -1147,7 +1147,7 @@ r2sleigh_result_u32 fcn_401764(void)
         r2sleigh_store_u64((void*)((uint64_t)(frame + 48U) + (uint64_t)8U), (uint64_t)0U);
         {
             uint64_t transferred = 0U;
-            uint64_t to = (uint64_t)((uint64_t)(frame + 80U) + (uint64_t)32U);
+            uint64_t to = (uint64_t)((uint64_t)(frame + 48U) + (uint64_t)64U);
             uint64_t from = (uint64_t)0x4020a0U;
             uint64_t count = (uint64_t)48U;
             while (transferred != count) {
@@ -1155,15 +1155,15 @@ r2sleigh_result_u32 fcn_401764(void)
                 transferred = transferred + 1U;
             }
         }
-        r2sleigh_store_u32((void*)((uint64_t)(frame + 80U) + (uint64_t)0x1a0U), (uint32_t)r2sleigh_load_u32((void*)(uint64_t)0x402220U));
-        r2sleigh_store_u32((void*)(uint64_t)(frame + 80U), (uint32_t)1U);
-        r2sleigh_store_u32((void*)((uint64_t)(frame + 80U) + (uint64_t)4U), (uint32_t)2U);
-        r2sleigh_store_u32((void*)((uint64_t)(frame + 80U) + (uint64_t)8U), (uint32_t)3U);
-        r2sleigh_store_u32((void*)((uint64_t)(frame + 80U) + (uint64_t)12U), (uint32_t)4U);
-        r2sleigh_store_u32((void*)((uint64_t)(frame + 80U) + (uint64_t)16U), (uint32_t)5U);
-        r2sleigh_store_u32((void*)((uint64_t)(frame + 80U) + (uint64_t)20U), (uint32_t)6U);
-        r2sleigh_store_u32((void*)((uint64_t)(frame + 80U) + (uint64_t)24U), (uint32_t)7U);
-        r2sleigh_store_u32((void*)((uint64_t)(frame + 80U) + (uint64_t)28U), (uint32_t)8U);
+        r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)0x1c0U), (uint32_t)r2sleigh_load_u32((void*)(uint64_t)0x402220U));
+        r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)32U), (uint32_t)1U);
+        r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)36U), (uint32_t)2U);
+        r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)40U), (uint32_t)3U);
+        r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)44U), (uint32_t)4U);
+        r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)48U), (uint32_t)5U);
+        r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)52U), (uint32_t)6U);
+        r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)56U), (uint32_t)7U);
+        r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)60U), (uint32_t)8U);
         r2sleigh_store_u16((void*)((uint64_t)(frame + 48U) + (uint64_t)16U), (uint16_t)9U);
         r2sleigh_store_u16((void*)((uint64_t)(frame + 48U) + (uint64_t)18U), (uint16_t)8U);
         r2sleigh_store_u16((void*)((uint64_t)(frame + 48U) + (uint64_t)20U), (uint16_t)7U);
@@ -1173,7 +1173,7 @@ r2sleigh_result_u32 fcn_401764(void)
         r2sleigh_store_u16((void*)((uint64_t)(frame + 48U) + (uint64_t)28U), (uint16_t)3U);
         r2sleigh_store_u16((void*)((uint64_t)(frame + 48U) + (uint64_t)30U), (uint16_t)2U);
         r2sleigh_store_u32((void*)(uint64_t)(frame + 44U), (uint32_t)5U);
-        rax_6 = (uint64_t)bounded_fetch((uint32_t*)(uint64_t)(frame + 80U), 3, 8);
+        rax_6 = (uint64_t)bounded_fetch((uint32_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), 3, 8);
         rbx_1 = (uint64_t)(uint32_t)((uint64_t)rax_6 >> 0U);
         rax_7 = (uint64_t)mask_probe(69);
         rax_8 = (uint64_t)paired_sum_diff(140, 110);
@@ -1195,12 +1195,12 @@ r2sleigh_result_u32 fcn_401764(void)
         rax_23 = narrow64((uint64_t)0x1122334455667788U);
         printf("%u %llu %d %d %d\n", (uint64_t)(uint32_t)((uint64_t)rax_23 >> 0U), rax_21, (uint64_t)(uint32_t)((uint64_t)rax_20 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_19 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_17 >> 0U));
         rax_26 = (uint64_t)narrow8(0x1234);
-        rax_28 = (uint64_t)elem_before((uint32_t*)(uint64_t)(frame + 80U), 2);
-        rax_30 = (uint64_t)elem_at((uint32_t*)(uint64_t)(frame + 80U), 2);
+        rax_28 = (uint64_t)elem_before((uint32_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), 2);
+        rax_30 = (uint64_t)elem_at((uint32_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)32U), 2);
         rax_31 = (uint64_t)slot_eq_guard(11);
         rax_32 = (uint64_t)global_eq_guard(11);
         printf("%d %d %d %d %u\n", (uint64_t)(uint32_t)((uint64_t)rax_32 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_31 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_30 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_28 >> 0U), (uint64_t)(uint8_t)((uint64_t)rax_26 >> 0U));
-        rax_36 = (uint64_t)wide_tail((uint32_t*)(uint64_t)((uint64_t)(frame + 80U) + (uint64_t)32U), 8);
+        rax_36 = (uint64_t)wide_tail((uint32_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)64U), 8);
         rbx_4 = (uint64_t)(uint32_t)((uint64_t)rax_36 >> 0U);
         rax_38 = (uint64_t)rec_index((uint32_t*)(uint64_t)(frame + 48U), 0, 6);
         rax_40 = (uint64_t)half_stride((uint16_t*)(uint64_t)((uint64_t)(frame + 48U) + (uint64_t)16U), 1);
