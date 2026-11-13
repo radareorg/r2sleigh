@@ -1247,6 +1247,7 @@ impl<S: Source + 'static> Reading<'_, S> {
                 counted: None,
                 overwrites: Overwrites::All,
                 kept: LaneBytes::default(),
+                reads: LaneBytes::default(),
             },
         };
         if !formatted.is_empty() {
@@ -1263,6 +1264,8 @@ impl<S: Source + 'static> Reading<'_, S> {
         formatted: &BTreeMap<u64, Formatted>,
     ) -> BTreeMap<(usize, usize), CallEffect> {
         let mut sites = BTreeMap::new();
+        // Asked once, only where the block fold leaves a format unknown (Gb).
+        let mut seal = None;
         for (at, block) in effects.body.blocks.iter().enumerate() {
             let mut origins = r2ssa::origin::BlockOrigins::default();
             for (op, operation) in block.lifted.ops.iter().enumerate() {
@@ -1270,12 +1273,36 @@ impl<S: Source + 'static> Reading<'_, S> {
                     .then(|| effects.callee_at(at, op))
                     .flatten()
                     .and_then(|callee| formatted.get(&callee));
-                let effect = format.and_then(|format| self.unfloated(&origins, format));
+                let effect = format.and_then(|format| {
+                    self.unfloated(&origins, format).or_else(|| {
+                        let seal = seal.get_or_insert_with(|| self.convention_seal(effects.body));
+                        let sealed = seal.as_deref()?;
+                        let instruction = block.lifted.instruction_of(op)?;
+                        let address = sealed.folded_before_call(instruction, format.register)?;
+                        self.unfloated_at(address, format)
+                    })
+                });
                 sites.extend(effect.map(|effect| ((at, op), effect)));
                 origins.step_under(operation, self.call.as_ref());
             }
         }
         sites
+    }
+
+    /// The caller sealed against the convention, where it seals: a spilled format reloaded in
+    /// another block folds through its promoted slot, and an escaped slot stays in memory (D217).
+    fn convention_seal(&self, body: &Body) -> Option<Arc<r2ssa::TrustedSeal>> {
+        let key = (body.entry, self.view.thumb_at(body.entry));
+        let sealing = self.db.get::<super::analysis::ConventionSeal>(&key).ok()?;
+        sealing.0.as_ref().ok().cloned()
+    }
+
+    /// The call's effect without its tail vector registers, where the format at `address` is a
+    /// literal the printf reader parses whole and finds no floating conversion in.
+    fn unfloated_at(&self, address: u64, format: &Formatted) -> Option<CallEffect> {
+        let text = crate::native::immutable_text_at(self.view, address)?;
+        let consumed = r2ssa::printf::printf_consumed_arguments(&text).ok()?;
+        (!consumed.any_floating).then_some(format.unfloated)
     }
 
     /// The call's effect without its tail vector registers, where `origins` fold its format to a
@@ -1287,9 +1314,7 @@ impl<S: Source + 'static> Reading<'_, S> {
     ) -> Option<CallEffect> {
         let register = r2il::Varnode::register(format.register.offset, format.register.size);
         let address = origins.of(&register)?.constant()?;
-        let text = crate::native::immutable_text_at(self.view, address)?;
-        let consumed = r2ssa::printf::printf_consumed_arguments(&text).ok()?;
-        (!consumed.any_floating).then_some(format.unfloated)
+        self.unfloated_at(address, format)
     }
 
     /// What a call to a callee nothing is known of may take: an effect's own calls set the variadic
@@ -1316,7 +1341,7 @@ impl<S: Source + 'static> Reading<'_, S> {
                     unfloated
                         .registers
                         .retain(|read| !format.floats.contains(read));
-                    let (takes, counted) = self.import_takes(Some(unfloated));
+                    let (takes, counted, reads) = self.import_takes(Some(unfloated));
                     Formatted {
                         register: format.format,
                         unfloated: CallEffect {
@@ -1324,15 +1349,17 @@ impl<S: Source + 'static> Reading<'_, S> {
                             counted,
                             overwrites: Overwrites::All,
                             kept: LaneBytes::default(),
+                            reads,
                         },
                     }
                 });
-            let (takes, counted) = self.import_takes(reads);
+            let (takes, counted, reads) = self.import_takes(reads);
             let effect = CallEffect {
                 takes,
                 counted,
                 overwrites: Overwrites::All,
                 kept: LaneBytes::default(),
+                reads,
             };
             return (effect, formatted);
         }
@@ -1349,34 +1376,43 @@ impl<S: Source + 'static> Reading<'_, S> {
                 counted: None,
                 overwrites: Overwrites::Bytes(row.overwrites),
                 kept: row.kept_lanes(self.lanes),
+                reads: LaneBytes::default(),
             },
             None => CallEffect {
                 takes: self.unknown(),
                 counted: None,
                 overwrites: Overwrites::Nothing,
                 kept: LaneBytes::default(),
+                reads: LaneBytes::default(),
             },
         };
         (effect, None)
     }
 
     /// What the import's placement reads (S8 `Placement::reads`); its count register bounds the
-    /// vector registers. An import no row binds takes what an unknown callee does.
+    /// vector registers. An import no row binds takes what an unknown callee does. The third part
+    /// is what it certainly reads: a cited fixed row's float parameters (D228).
     fn import_takes(
         &self,
         reads: Option<r2ssa::call_reads::CallReads>,
-    ) -> (LaneBytes, Option<Counted>) {
+    ) -> (LaneBytes, Option<Counted>, LaneBytes) {
         let Some(reads) = reads else {
-            return (self.unknown(), None);
-        };
-        let Some(register) = reads.count_register else {
-            return (LaneBytes::covered_by(self.lanes, &reads.registers), None);
+            return (self.unknown(), None, LaneBytes::default());
         };
         let floats = self.slots.float_argument_slots();
         let overlaps = |a: &CanonicalStorageId, b: &CanonicalStorageId| {
             a.space == b.space
                 && a.offset < b.offset + u64::from(b.size)
                 && b.offset < a.offset + u64::from(a.size)
+        };
+        let Some(register) = reads.count_register else {
+            let fixed = reads.stated && reads.format.is_none();
+            let certain = (reads.registers.iter())
+                .filter(|read| fixed && floats.iter().any(|float| overlaps(read, float)))
+                .copied()
+                .collect::<Vec<_>>();
+            let takes = LaneBytes::covered_by(self.lanes, &reads.registers);
+            return (takes, None, LaneBytes::covered_by(self.lanes, &certain));
         };
         let mut integers = (reads.registers.iter())
             .filter(|read| !floats.iter().any(|float| overlaps(read, float)))
@@ -1391,7 +1427,8 @@ impl<S: Source + 'static> Reading<'_, S> {
             takes: LaneBytes::covered_by(self.lanes, floats),
             stated: None,
         };
-        (LaneBytes::covered_by(self.lanes, &integers), Some(counted))
+        let takes = LaneBytes::covered_by(self.lanes, &integers);
+        (takes, Some(counted), LaneBytes::default())
     }
 }
 

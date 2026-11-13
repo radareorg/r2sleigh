@@ -179,6 +179,57 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for DispatchTables {
     }
 }
 
+/// One function sealed against the convention and its imports alone, by its entry and whether it
+/// is Thumb (Gb): the format fold reads what a spilled format folds to through a promoted slot.
+pub(super) struct ConventionSeal;
+
+/// A convention seal, or why there is none; compared by identity, as an analysis is.
+#[derive(Clone)]
+pub(super) struct ConventionSealing(pub(super) Result<Arc<r2ssa::TrustedSeal>, NativeRefusal>);
+
+impl PartialEq for ConventionSealing {
+    fn eq(&self, other: &Self) -> bool {
+        matches!((&self.0, &other.0), (Ok(one), Ok(other)) if Arc::ptr_eq(one, other))
+    }
+}
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for ConventionSeal {
+    type Key = (u64, bool);
+    type Value = ConventionSealing;
+    const NAME: &'static str = "convention-seal";
+    /// A per-function answer that holds a sealed body: the newest only (RULING 1.8).
+    const RETENTION: Retention = Retention::Newest;
+
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> ConventionSealing {
+        let view = View::new(db, true);
+        let target = match target(&view, entry, thumb) {
+            Ok(target) => target,
+            Err(refusal) => return ConventionSealing(Err(refusal)),
+        };
+        let walk = db
+            .get::<Walked>(&(entry, thumb))
+            .expect("a walk asks for no seal");
+        let walk = match walk.resolved() {
+            Ok(walk) => walk,
+            Err(refusal) => return ConventionSealing(Err(refusal)),
+        };
+        let sealed =
+            crate::isolation::isolated(|| crate::native::convention_seal_of(&target, &view, walk));
+        ConventionSealing(
+            sealed
+                .unwrap_or_else(|panicked| Err(panicked.into()))
+                .map(Arc::new),
+        )
+    }
+
+    fn hold(value: &ConventionSealing) -> Hold {
+        match value.0.as_ref().is_err_and(NativeRefusal::stopped) {
+            true => Hold::Stopped,
+            false => Hold::Held,
+        }
+    }
+}
+
 /// The tables read for a body; a cycle reads as none, which is a walk following no table.
 pub(super) fn dispatch_tables<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,

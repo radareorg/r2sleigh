@@ -1639,27 +1639,6 @@ pub struct PreparedAssumptionBinding {
     pub binding: PreparedAssumptionBindingKind,
 }
 
-/// What the object model's build reads that no escape span changes, read once per collection.
-pub(crate) struct BuildInputs {
-    callee_spans: CalleeSpans,
-    boundaries: FrameBoundaries,
-}
-
-impl BuildInputs {
-    pub(crate) fn of(
-        facts: &DecompilePrepFacts,
-        function: &SSAFunction,
-        graph: &SsaGraph,
-        machine_context: Option<&SourceMachineContext>,
-        values: &crate::values::ValueRanges,
-    ) -> Self {
-        Self {
-            callee_spans: callee_write_spans(facts, function, graph, machine_context, values),
-            boundaries: FrameBoundaries::of(facts, graph, machine_context),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct ObjectModelBuilder<'a> {
     pub(crate) facts: Option<&'a DecompilePrepFacts>,
@@ -1789,16 +1768,15 @@ impl<'a> ObjectModelBuilder<'a> {
 
     pub(crate) fn build(
         mut self,
+        function: &SSAFunction,
         graph: &SsaGraph,
         values: &'a crate::values::ValueRanges,
-        inputs: Option<&BuildInputs>,
     ) -> ObjectModel {
         self.values = values;
-        if let (Some(facts), Some(inputs)) = (self.facts, inputs) {
-            let BuildInputs {
-                callee_spans,
-                boundaries,
-            } = inputs;
+        if let Some(facts) = self.facts {
+            let callee_spans =
+                callee_write_spans(facts, function, graph, self.machine_context, values);
+            let boundaries = FrameBoundaries::of(facts, graph, self.machine_context);
             for (start, end) in callee_spans.spans.iter().copied() {
                 self.callee_write_spans
                     .entry(start)
@@ -1813,9 +1791,9 @@ impl<'a> ObjectModelBuilder<'a> {
                 values,
                 &self.callee_write_spans,
                 &callee_spans.unbounded,
-                boundaries,
+                &boundaries,
             );
-            self.frame_boundaries = boundaries.clone();
+            self.frame_boundaries = boundaries;
             self.covering = super::covering::CoveringSpans::of(&evidenced.spans, &evidenced.roots);
             self.evidenced_roots = evidenced.roots;
             self.evidenced_spans = evidenced.spans;
@@ -2461,7 +2439,7 @@ impl DeclaredStackSlots {
     ///
     /// A member of a declared aggregate is that aggregate at an offset, not an
     /// object of its own, so the address resolves to the slot that contains it.
-    fn containing(&self, root: StackAddressRoot) -> Option<(StackAddressRoot, i64)> {
+    pub(crate) fn containing(&self, root: StackAddressRoot) -> Option<(StackAddressRoot, i64)> {
         self.by_key.iter().find_map(|((base, offset), slot)| {
             if *base != root.base || slot.size_bytes() == 0 {
                 return None;

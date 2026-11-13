@@ -887,3 +887,52 @@ fn an_aarch64_float_beside_a_handed_back_argument_is_the_result_callers_read() {
     );
     assert!(f.starts_with("double f("), "{f}");
 }
+
+/// `f` at `BASE` (`pxor xmm0, xmm0; mov eax, 7; ret` writes both, or `mov eax, 7; ret` leaves XMM0),
+/// then `caller`: `call f; call sqrt; ret`, `sqrt` at the import stub.
+fn handed_to_sqrt(writes_xmm0: bool) -> &'static [u8] {
+    let mut code = vec![0xccu8; 0xa0];
+    let f: &[u8] = match writes_xmm0 {
+        true => &[0x66, 0x0f, 0xef, 0xc0, 0xb8, 0x07, 0, 0, 0, 0xc3],
+        false => &[0xb8, 0x07, 0, 0, 0, 0xc3],
+    };
+    code[..f.len()].copy_from_slice(f);
+    let caller = [
+        0x48, 0x83, 0xec, 0x08, // 1010 sub rsp, 8
+        0xe8, 0xe7, 0xff, 0xff, 0xff, // 1014 call 0x1000
+        0xe8, 0x72, 0x00, 0x00, 0x00, // 1019 call 0x1090: sqrt
+        0x48, 0x83, 0xc4, 0x08, // 101e add rsp, 8
+        0xc3, // 1022 ret
+    ];
+    code[0x10..0x10 + caller.len()].copy_from_slice(&caller);
+    code[0x90..0x96].copy_from_slice(&[0xff, 0x25, 0x02, 0x00, 0x00, 0x00]);
+    Box::leak(code.into_boxed_slice())
+}
+
+/// D228: `sqrt`'s cited `double` parameter reads XMM0 at the call, so the `f` before it returns
+/// a `double` its caller hands on.
+#[test]
+fn a_cited_float_parameter_after_a_call_that_writes_xmm0_reads_its_result() {
+    let functions = [("f", BASE, 0x0a), ("caller", BASE + 0x10, 0x13)];
+    let program = Literal::of_code(handed_to_sqrt(true), &functions).importing("sqrt");
+    let f = rendered(program);
+    assert!(f.starts_with("double f("), "{f}");
+}
+
+/// A callee that leaves XMM0 as found hands `sqrt` its caller's bytes: no `double` of its own.
+#[test]
+fn a_cited_float_parameter_after_a_call_that_passes_xmm0_reads_no_result_of_it() {
+    let functions = [("f", BASE, 0x06), ("caller", BASE + 0x10, 0x13)];
+    let program = Literal::of_code(handed_to_sqrt(false), &functions).importing("sqrt");
+    let f = rendered(program);
+    assert!(!f.starts_with("double f("), "{f}");
+}
+
+/// `sqrtf`'s cited `float` reads XMM0's low four bytes: `f` is no `double`.
+#[test]
+fn a_cited_float_parameter_reads_only_its_own_width() {
+    let functions = [("f", BASE, 0x0a), ("caller", BASE + 0x10, 0x13)];
+    let program = Literal::of_code(handed_to_sqrt(true), &functions).importing("sqrtf");
+    let f = rendered(program);
+    assert!(!f.starts_with("double f("), "{f}");
+}

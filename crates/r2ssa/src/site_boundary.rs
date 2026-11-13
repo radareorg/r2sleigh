@@ -208,6 +208,9 @@ pub struct CallEffect {
     /// The bytes its callee leaves as found on every path to a return: a read after the call reads
     /// what was there before it.
     pub kept: LaneBytes,
+    /// The bytes the callee certainly reads: a cited fixed float parameter's, a read at the call
+    /// (D228). An integer argument a callee may leave alone is no read.
+    pub reads: LaneBytes,
 }
 
 /// The vector registers a variadic callee takes by the count its caller states in `register`
@@ -247,6 +250,7 @@ impl CallEffects for TakeOnly {
             counted: None,
             overwrites: Overwrites::Nothing,
             kept: LaneBytes::default(),
+            reads: LaneBytes::default(),
         }
     }
 }
@@ -1021,6 +1025,7 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
         }
         if let Some(call) = &call {
             merge(&mut live.open, call.takes.0);
+            merge(&mut live.read, call.reads.0);
         }
         // Reads the lift does not state may be of any lane: open, never dead.
         if operation.reads_unstated() {
@@ -1722,6 +1727,7 @@ mod tests {
                 }),
                 overwrites: Overwrites::All,
                 kept: LaneBytes::default(),
+                reads: LaneBytes::default(),
             }
         }
     }
@@ -1779,6 +1785,7 @@ mod tests {
                 takes: LaneBytes::default(),
                 overwrites,
                 kept: LaneBytes::default(),
+                reads: LaneBytes::default(),
             });
             integer(fates_with(&blocks, &[], &[], &later))
         };
@@ -1802,6 +1809,7 @@ mod tests {
                 takes,
                 overwrites: Overwrites::All,
                 kept: LaneBytes::default(),
+                reads: LaneBytes::default(),
             })
         };
         let fate = fates_with(&blocks, &[], &[], &later(takes));
@@ -2021,6 +2029,7 @@ mod tests {
                 takes: LaneBytes::default(),
                 overwrites: Overwrites::Bytes(LaneBytes::covered_by(LANES, &[RAX])),
                 kept: LaneBytes::covered_by(LANES, kept),
+                reads: LaneBytes::default(),
             });
             let fate = fates_with(&blocks, &[], &[], &later);
             (shape(fate.fates[0]), shape(fate.fates[FLOAT_LANE]))
