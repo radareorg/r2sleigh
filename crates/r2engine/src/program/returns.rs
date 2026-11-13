@@ -47,6 +47,11 @@ impl BodyWalk {
         self.trace.calls()
     }
 
+    /// Every function entry the walk leaves for by a direct branch.
+    pub(super) fn tail_calls(&self) -> impl Iterator<Item = u64> + '_ {
+        self.trace.tail_calls().iter().copied()
+    }
+
     /// The bytes the walk decoded as this body's instructions.
     pub(super) fn spans(&self) -> Vec<std::ops::Range<u64>> {
         self.trace.spans()
