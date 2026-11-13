@@ -1,0 +1,80 @@
+{
+ "totals": {
+  "unproven:EntryInput": {
+   "value": 2,
+   "void": 3
+  },
+  "unproven:Written": {
+   "value": 11,
+   "void": 1
+  },
+  "unproven:unstated": {
+   "value": 9,
+   "void": 1
+  },
+  "void-open": {
+   "void": 2
+  }
+ },
+ "builds": {
+  "aarch64-clones": {
+   "counts": {
+    "unproven:Written": {
+     "value": 3
+    },
+    "unproven:unstated": {
+     "value": 5
+    }
+   },
+   "voids": [],
+   "false": [],
+   "unanswered": []
+  },
+  "aarch64-returns": {
+   "counts": {
+    "unproven:EntryInput": {
+     "void": 3
+    },
+    "unproven:Written": {
+     "value": 7,
+     "void": 1
+    },
+    "unproven:unstated": {
+     "value": 1
+    }
+   },
+   "voids": [],
+   "false": [],
+   "unanswered": []
+  },
+  "aarch64-scratch": {
+   "counts": {
+    "unproven:EntryInput": {
+     "value": 2
+    },
+    "unproven:Written": {
+     "value": 1
+    },
+    "unproven:unstated": {
+     "value": 3,
+     "void": 1
+    },
+    "void-open": {
+     "void": 2
+    }
+   },
+   "voids": [
+    "canary_void",
+    "tail_free"
+   ],
+   "false": [],
+   "unanswered": []
+  }
+ },
+ "target": "aarch64",
+ "floors": {
+  "open": 2,
+  "closed": 2
+ },
+ "recorded_at": "531c6b798"
+}

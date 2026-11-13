@@ -171,6 +171,7 @@ class Main(unittest.TestCase):
             self.assertEqual(self.run_main({"b": graded("b")}, "--target", "aarch64", "--baseline", str(path),
                                            "--accept-baseline")[0], 0)
             self.assertEqual(json.loads(path.read_text())["target"], "aarch64")
+            self.assertRegex(json.loads(path.read_text())["recorded_at"], r"^[0-9a-f]{9}$|^unknown$")
             self.assertEqual(self.run_main({"b": graded("b")}, "--target", "aarch64", "--baseline", str(path))[0], 0)
 
     def test_the_binutils_prefix_overrides_the_targets_own(self):

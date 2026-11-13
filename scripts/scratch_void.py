@@ -27,6 +27,7 @@ import argparse
 import dataclasses
 import json
 import re
+import subprocess
 import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -218,6 +219,13 @@ def summary(results: list[Graded]) -> dict:
     }
 
 
+def recorded_at() -> str:
+    """The commit a baseline is recorded at (S19 gate 6): a stale baseline names where it went stale."""
+    done = subprocess.run(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short=9", "HEAD"],
+                          capture_output=True, text=True, check=False)
+    return done.stdout.strip() or "unknown"
+
+
 def builds_from(args) -> list[Build]:
     found = [Build(name, Path(debug), Path(stripped)) for name, debug, stripped in args.build or []]
     for line in args.manifest.read_text().splitlines() if args.manifest else []:
@@ -287,6 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         open_voids = totals.get("void-open", {}).get("void", 0)
         report["floors"] = {"open": open_voids,
                             "closed": open_voids + totals.get("void-closed", {}).get("void", 0)}
+        report["recorded_at"] = recorded_at()
         args.baseline.write_text(json.dumps(report, indent=1) + "\n")
         print(f"baseline recorded: {args.baseline}", file=sys.stderr)
         return 0
