@@ -84,12 +84,9 @@ fn an_owner_that_moves_the_build_has_it_built_again() {
     let text = rendered(&mut open, BASE + 0x20);
     // The leaf's `mov eax, 7` states zero above its 32-bit result (D322).
     assert!(text.contains("= (uint64_t)middle()"), "{text}");
-    // `middle` calls on its returning path, so its register effect keeps nothing and the store's
-    // rsi stays a residual until a call keeps what its callee keeps (D363).
-    assert!(
-        text.contains("never assigned, read as residuals (RSI_1)"),
-        "{text}"
-    );
+    // `middle` keeps what `leaf` keeps across its call, so the store's rsi is the root's (D363).
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
+    assert!(!text.contains("never assigned"), "{text}");
     let stats = open.analysis_stats();
     assert_eq!(stats.callee_reads.computed, 0, "{stats:?}");
     assert_eq!(stats.defects, 0, "{stats:?}");
