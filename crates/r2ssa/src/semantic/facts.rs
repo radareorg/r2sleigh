@@ -1778,6 +1778,10 @@ impl<'a> ObjectModelBuilder<'a> {
                     .and_modify(|known| *known = (*known).max(end))
                     .or_insert(end);
             }
+            // A MAY write stops at the next compiler slot: the spans and the reach read one end (D368).
+            for (start, end) in &mut self.callee_write_spans {
+                *end = clipped(&boundaries, *start, *end);
+            }
             let evidenced = evidenced_stack_roots(
                 facts,
                 self.declared_slots,
@@ -1879,7 +1883,14 @@ impl<'a> ObjectModelBuilder<'a> {
                     .into_iter()
                     .flatten()
                     .max()?;
-                let reach = u32::try_from(end.checked_sub(key.root.offset)?).ok()?;
+                let reach = end.checked_sub(key.root.offset).filter(|reach| *reach >= 0)?;
+                let Ok(reach) = u32::try_from(reach) else {
+                    r2il::refusal_evidence!(
+                        "frame-callee-reach",
+                        "{key:?} reaches {end} past every boundary: the object keeps its accesses' extent"
+                    );
+                    return None;
+                };
                 Some((*object, reach))
             })
             .collect();

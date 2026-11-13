@@ -1755,7 +1755,7 @@ impl FrameBoundaries {
 /// UB-free premise the reach stops at the first one above the span's start;
 /// a bound looser than that is the range analysis's imprecision, not the
 /// buffer's size. One ordered lookup per span.
-fn clipped(boundaries: &FrameBoundaries, start: StackAddressRoot, end: i64) -> i64 {
+pub(crate) fn clipped(boundaries: &FrameBoundaries, start: StackAddressRoot, end: i64) -> i64 {
     match boundaries.ceiling(start) {
         Some(ceiling) if ceiling < end => {
             r2il::refusal_evidence!(
@@ -1954,12 +1954,12 @@ pub(crate) fn evidenced_stack_roots(
             .and_modify(|known| *known = (*known).max(end))
             .or_insert(end);
     }
+    // The builder clipped these to the boundaries already: its reach and these spans agree.
     for (start, end) in callee_write_spans {
-        let end = clipped(boundaries, *start, *end);
         spans
             .entry(*start)
-            .and_modify(|known| *known = (*known).max(end))
-            .or_insert(end);
+            .and_modify(|known| *known = (*known).max(*end))
+            .or_insert(*end);
     }
     // A callee that reaches through a frame address without a bound reaches
     // the object the address is in, and nothing states where that object
