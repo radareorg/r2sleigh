@@ -3264,9 +3264,8 @@ pub struct SSAFunction {
     supervisor_calls: BTreeSet<u32>,
     /// What each direct callee proves it leaves as found, less its result: a call to it passes those (D212).
     callee_passes: Arc<CalleePreservedCarriers>,
-    /// Whether promotion's answer read the stack a call may read: a frame address stored where
-    /// some call's argument area could reach (`BuildKey`).
-    argument_areas_read: bool,
+    /// The frame's one escape walk, run before promotion (D290); none reads as the whole frame.
+    frame_points: Option<Arc<crate::semantic::FramePoints>>,
     /// The lifted memory operations promotion took out of memory.
     ///
     /// A promoted slot access is a copy of a variable in the prepared
@@ -3688,7 +3687,7 @@ impl Clone for SSAFunction {
             call_preserved_carriers: self.call_preserved_carriers,
             supervisor_calls: self.supervisor_calls.clone(),
             callee_passes: Arc::clone(&self.callee_passes),
-            argument_areas_read: self.argument_areas_read,
+            frame_points: self.frame_points.clone(),
             promoted_slots: self.promoted_slots.clone(),
             compiler_inserted: self.compiler_inserted.clone(),
             compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
@@ -4253,15 +4252,23 @@ impl SSAFunction {
     }
 
     /// Whether what promotion decided read some call's argument area.
-    pub(crate) const fn argument_areas_read(&self) -> bool {
-        self.argument_areas_read
+    pub(crate) fn argument_areas_read(&self) -> bool {
+        (self.frame_points.as_deref()).is_some_and(crate::semantic::FramePoints::by_area)
+    }
+
+    /// What the frame's addresses do, by entry offset; none where no walk ran (the whole frame).
+    pub fn frame_points(&self) -> Option<&crate::semantic::FramePoints> {
+        self.frame_points.as_deref()
     }
 
     pub(crate) fn record_promoted_slots(
         &mut self,
-        (ops, by_area): (crate::dense::IdSet<crate::arena::OpId>, bool),
+        (ops, points): (
+            crate::dense::IdSet<crate::arena::OpId>,
+            crate::semantic::FramePoints,
+        ),
     ) {
-        self.argument_areas_read = by_area;
+        self.frame_points = Some(Arc::new(points));
         let arena = self.arena();
         self.promoted_slots = (ops.iter())
             .filter_map(|op| match arena.origin(op)? {
