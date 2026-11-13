@@ -17,7 +17,7 @@ mod transfer;
 
 use super::RenderInput;
 use super::calls::{self, CallPlan};
-use super::terms::{self, Spell};
+use super::terms::{self, MemberCell, Spell};
 use crate::ast::{
     CExpr, CExternDecl, CLocal, CParam, CStmt, CType, CallGap, CallRefusal, GapCallee, GapKind,
     GapMarker,
@@ -39,8 +39,8 @@ pub(super) struct Values<'a> {
     /// read converts it to the class.
     declared: Vec<bool>,
     /// The structure member each cell term is, by term index: the accesses through a parameter
-    /// that points to its inferred structure.
-    members: Vec<Option<CExpr>>,
+    /// that points to its structure, and through a projected pointer member (D359).
+    members: Vec<Option<MemberCell>>,
     /// By value index: the definitions a named value owes before a read of it is a variable; a merge
     /// owes one per early forward edge in, and a back edge pays none (doc/adr-decompiler-rewrite.md, Merges).
     owed: RefCell<Vec<u32>>,
@@ -876,8 +876,9 @@ impl<'a> Values<'a> {
     fn members_of(
         &self,
         input: &RenderInput<'_>,
+        tags: &super::tags::Tags,
         pointing: Vec<(usize, String, CExpr, bool)>,
-    ) -> Vec<Option<CExpr>> {
+    ) -> Vec<Option<MemberCell>> {
         let mut members = Vec::new();
         // A member is read and written by a byte copy, which only a little-endian target matches.
         if !self.little_endian {
@@ -916,17 +917,50 @@ impl<'a> Values<'a> {
                     base: Box::new(base.clone()),
                     member: name.clone(),
                 };
-                Some((cell, CExpr::addr_of(member)))
+                Some((cell, MemberCell::At(CExpr::addr_of(member))))
             });
             if let Some(cells) = cells.collect::<Option<Vec<_>>>() {
                 self.place(&mut members, cells);
             }
         }
+        if let Some(cells) = self.member_rooted(tags) {
+            self.place(&mut members, cells);
+        }
         members
     }
 
+    /// Each cell a projection roots at a loaded pointer member, as a member of the struct that
+    /// member points at, where the unit defines its tag (D359). O(projections).
+    fn member_rooted(&self, tags: &super::tags::Tags) -> Option<Vec<(TermId, MemberCell)>> {
+        let interface = self.artifact.machine_context().function_interface()?;
+        let graph = interface.type_graph()?;
+        let projections = (self.artifact.aggregate_accesses())
+            .projections_for_revision(interface.revision_identity())?;
+        let cells = (projections.values())
+            .filter(|projection| {
+                matches!(projection.root, r2ssa::AggregateRoot::Member(_))
+                    && projection.graph == r2ssa::GraphOf::Interface
+                    && projection.element_index.is_none()
+            })
+            .filter_map(|projection| {
+                let layout = (graph.aggregates().get(projection.aggregate_id as usize))
+                    .filter(|layout| layout.id() == projection.aggregate_id)?;
+                let tag = tags.defines(layout.name(), false).then(|| layout.name())?;
+                let cell = self.roots.access(projection.access)?.canonical;
+                Some((
+                    cell,
+                    MemberCell::Through {
+                        pointer: CType::Pointer(Box::new(CType::Struct(tag.to_owned()))),
+                        member: projection.member_name.to_string(),
+                        offset: projection.byte_offset,
+                    },
+                ))
+            });
+        Some(cells.collect())
+    }
+
     /// Each cell's member address in `members`, a table over the arena allocated at the first.
-    fn place(&self, members: &mut Vec<Option<CExpr>>, cells: Vec<(TermId, CExpr)>) {
+    fn place(&self, members: &mut Vec<Option<MemberCell>>, cells: Vec<(TermId, MemberCell)>) {
         if members.is_empty() {
             *members = vec![None; self.roots.arena().len()];
         }
@@ -966,7 +1000,7 @@ impl<'a> Values<'a> {
         slot: usize,
         base: &CExpr,
         through: &[r2ssa::StructuredAccessId],
-    ) -> Option<Vec<(TermId, CExpr)>> {
+    ) -> Option<Vec<(TermId, MemberCell)>> {
         let interface = self.artifact.machine_context().function_interface()?;
         let projections = (self.artifact.aggregate_accesses())
             .projections_for_revision(interface.revision_identity())?;
@@ -982,7 +1016,7 @@ impl<'a> Values<'a> {
                     base: Box::new(base.clone()),
                     member: projection.member_name.to_string(),
                 };
-                named.then(|| (cell, CExpr::addr_of(member)))
+                named.then(|| (cell, MemberCell::At(CExpr::addr_of(member))))
             })
             .collect::<Option<Vec<_>>>()?;
         (!cells.is_empty()).then_some(cells)
@@ -1062,7 +1096,7 @@ impl<'a> Values<'a> {
             }
             self.params.push(CParam { ty: c, name });
         }
-        self.members = self.members_of(input, pointing);
+        self.members = self.members_of(input, tags, pointing);
         let mut forward = vec![None; self.graph.blocks.len()];
         for inst in &self.graph.insts {
             let Some(output) = inst.output.filter(|_| self.bound[inst.id.0 as usize]) else {
@@ -2273,11 +2307,11 @@ impl<'a> Values<'a> {
             Some(access) => {
                 let cell = arena.term(access.canonical);
                 let bytes = cell.ty.width_bits() / 8;
-                let member = self
-                    .members
-                    .get(access.canonical.index())
-                    .cloned()
-                    .flatten();
+                let at = match cell.kind {
+                    TermKind::Load { address, .. } => Some(address),
+                    _ => None,
+                };
+                let member = self.spelling(|spell| spell.member_address(access.canonical, at));
                 let address = match cell.kind {
                     _ if member.is_some() => member?,
                     TermKind::Load { object, address } => {

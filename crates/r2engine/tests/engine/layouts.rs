@@ -272,6 +272,30 @@ fn a_projected_member_read_spells_as_the_member() {
     assert!(text.contains("->next"), "{text}");
 }
 
+/// D359: `val`, read through the loaded `next`, spells as a member of the `struct node` `next`
+/// points at; a read no member covers and a load through `void *` keep the byte spelling.
+#[test]
+fn a_member_read_through_a_loaded_pointer_spells_as_the_member() {
+    let types = types();
+    let node = || declaring("f", Some((types.node_pointer, "struct node *")), types.int);
+    let text = |code, declarations| {
+        let mut open = program(code, declarations);
+        (open.rendered(BASE).expect("it renders").response.output).into_text()
+    };
+    let next_val = text(NEXT_VAL, node());
+    assert!(next_val.contains("(struct node*)"), "{next_val}");
+    assert!(next_val.contains("->val"), "{next_val}");
+    let narrow = text(NARROW_VAL, node());
+    assert!(!narrow.contains("->val"), "{narrow}");
+    let holder = declaring(
+        "f",
+        Some((types.holder_pointer, "struct holder *")),
+        types.int,
+    );
+    let through_void = text(THROUGH_VOID, holder);
+    assert_eq!(through_void.matches("->").count(), 2, "{through_void}");
+}
+
 /// D359: each declared `struct node *` parameter spells its own `next`, from one grouping pass.
 #[test]
 fn two_projected_parameters_each_spell_their_member() {
