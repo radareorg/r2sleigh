@@ -43,3 +43,6 @@ tests/equiv/artifacts/
 __pycache__/
 
 .claude/settings.local.json
+
+# The arm64 scratch-void sample, rebuilt by tests/gold/scratch_void/build_aarch64_sample.sh (D247)
+tests/gold/scratch_void/aarch64/

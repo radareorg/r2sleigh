@@ -1,6 +1,6 @@
 # ADR: one owner of the call boundary
 
-Status: proposed (ROADMAP P7, with P4 and T slices; decisions D160 to D172 and D209; hand audit 3.2, 3.5 to 3.8; amended 2026-11-10 after round 6 of the typed-values tracks)
+Status: accepted and built in slices, each in its "as built" section below; what is left is ROADMAP's open P7 rows and "Gap rows" (ROADMAP P7, with P4 and T slices; decisions D160 to D172 and D209; hand audit 3.2, 3.5 to 3.8; amended 2026-11-10 after round 6 of the typed-values tracks)
 
 ## Problem
 

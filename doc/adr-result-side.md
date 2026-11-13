@@ -1,6 +1,6 @@
 # ADR: the result side of the call boundary
 
-Status: proposed (ROADMAP P7; D206's ruling; rows D310 to D313; the design S15, S16, S24, S25, S26, S30, S31a, S31b and S36 build). It amends doc/adr-call-boundary.md "The callee's boundary" and the as-built sections listed under "Amendments". Read at origin/s10-win64 `d8487d42d`, with an independent design review folded in.
+Status: accepted and built in slices, each in its "as built" section; "Decided, pending the maintainer" 1 to 5 await the maintainer (D280) (ROADMAP P7; D206's ruling; rows D310 to D313; the design S15, S16, S24, S25, S26, S30, S31a, S31b and S36 build). It amends doc/adr-call-boundary.md "The callee's boundary" and the as-built sections listed under "Amendments". Read at origin/s10-win64 `d8487d42d`, with an independent design review folded in.
 
 ## Problem
 
