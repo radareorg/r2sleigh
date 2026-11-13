@@ -124,6 +124,8 @@ pub struct StackGeometryCertificate {
     /// The stack-pointer arithmetic that only locates the frame: the geometry, and the adjustments
     /// whose other reads form the address of an object of this function's own frame.
     pub frame_setup: crate::dense::IdSet<InstId>,
+    /// Instructions whose value addresses one own-frame object at one offset on every path (D254).
+    pub object_addresses: crate::dense::IdSet<InstId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -986,22 +988,30 @@ pub(crate) fn collect_stack_geometry_certificate(
             machine.stack_owner(offset).callee_owned()
         })
     };
+    // The own frame object `value` addresses, at a callee-owned offset.
+    let own_object = |value: ValueId| {
+        let object = objects.object_for_value(value, SpaceId::Ram)?;
+        let kind = objects.object(object).map(|fact| &fact.kind);
+        let own = matches!(
+            kind,
+            Some(ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. })
+        );
+        let root = objects.entry_stack_roots.get(&object)?;
+        (grows_down(*machine_context)
+            && own
+            && root.base == StackAddressBase::StackPointer
+            && callee_owned(root.offset))
+        .then_some(object)
+    };
+    // The object and the constant offset into it `value` addresses: no index.
+    let exact_object = |value: ValueId| {
+        let offset = objects.interior_offset(value).unwrap_or(0);
+        (!objects.address_is_indexed(value))
+            .then(|| Some((own_object(value)?, offset)))
+            .flatten()
+    };
     let names_own_object = |site: &UseSite| {
-        grows_down(*machine_context)
-            && geometry_outputs.get(site.inst).is_some_and(|output| {
-                objects
-                    .object_for_value(*output, SpaceId::Ram)
-                    .filter(|object| {
-                        matches!(
-                            objects.object(*object).map(|fact| &fact.kind),
-                            Some(ObjectKind::StackSlot { .. } | ObjectKind::FrameObject { .. })
-                        )
-                    })
-                    .and_then(|object| objects.entry_stack_roots.get(&object))
-                    .is_some_and(|root| {
-                        root.base == StackAddressBase::StackPointer && callee_owned(root.offset)
-                    })
-            })
+        (geometry_outputs.get(site.inst)).is_some_and(|output| own_object(*output).is_some())
     };
     // A call's read of the stack pointer carrier says where the frame stands, never a value the
     // program uses: it neither makes the frame's arithmetic a program value nor names an object.
@@ -1027,6 +1037,20 @@ pub(crate) fn collect_stack_geometry_certificate(
     let frame_setup = (geometry_outputs.iter())
         .filter_map(|(inst, output)| setup.contains(*output).then_some(inst))
         .collect::<crate::dense::IdSet<_>>();
+    // A merge joins only when every arm states the object it does; one pass, `O(I + phi inputs)`.
+    let object_addresses = (graph.insts.iter())
+        .filter(|inst| {
+            geometry_outputs.contains(inst.id) || matches!(inst.payload, InstPayload::Phi { .. })
+        })
+        .filter(|inst| {
+            let Some(object) = inst.output.and_then(exact_object) else {
+                return false;
+            };
+            !matches!(inst.payload, InstPayload::Phi { .. })
+                || (graph.inputs(inst.id).iter()).all(|input| exact_object(*input) == Some(object))
+        })
+        .map(|inst| inst.id)
+        .collect::<crate::dense::IdSet<_>>();
     let insts = geometry_outputs
         .into_iter()
         .filter_map(|(inst, output)| values.contains(output).then_some(inst))
@@ -1049,6 +1073,7 @@ pub(crate) fn collect_stack_geometry_certificate(
         values,
         uses,
         frame_setup,
+        object_addresses,
     }
 }
 

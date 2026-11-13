@@ -69,6 +69,8 @@ pub(super) struct Values<'a> {
     rendered: RefCell<Vec<bool>>,
     /// By instruction index: frame teardown a spelled C `return` performs.
     restored: RefCell<Vec<bool>>,
+    /// By instruction index: a value the kept text spells as `&object` where it is read (D254).
+    addressed: RefCell<Vec<bool>>,
     /// The instructions whose rendered text evaluates a residual: their obligations are residual.
     residual: RefCell<Vec<bool>>,
     /// By instruction index: a gap stands for its atomic effect beside the value the text assigns.
@@ -108,6 +110,8 @@ pub(super) struct Values<'a> {
 struct Attempt {
     reads: Vec<super::proof::UnassignedRead>,
     marks: Vec<InstId>,
+    /// Producers whose values the text spells as the frame object each addresses.
+    addressed: Vec<InstId>,
 }
 
 struct Own {
@@ -630,6 +634,20 @@ fn discharged_insts<'g>(
     })
 }
 
+/// The instruction a canonical id names: an operation, or the merge of its storage in its block.
+fn canonical_inst(graph: &SsaGraph, id: &r2ssa::CanonicalInstructionId) -> Option<InstId> {
+    match id.site {
+        r2ssa::CanonicalInstructionSite::Op(op) => graph.inst_for_op(op),
+        r2ssa::CanonicalInstructionSite::Phi(storage) => {
+            let block = graph.block_id_for_addr(id.block_addr)?;
+            (graph.phi_insts(block).iter().copied()).find(|phi| {
+                (graph.inst(*phi)).and_then(|inst| graph.written_storage(inst)) == Some(storage)
+            })
+        }
+        r2ssa::CanonicalInstructionSite::NativeSpan { .. } => None,
+    }
+}
+
 /// Who reads each value, as the obligation inventory says ([`r2ssa::ValueReaders`]).
 struct Readers<'a> {
     graph: &'a SsaGraph,
@@ -817,6 +835,7 @@ impl<'a> Values<'a> {
             locals: RefCell::new(Vec::new()),
             rendered: RefCell::new(vec![false; graph.insts.len()]),
             restored: RefCell::new(vec![false; graph.insts.len()]),
+            addressed: RefCell::new(vec![false; graph.insts.len()]),
             residual: RefCell::new(vec![false; graph.insts.len()]),
             effect: RefCell::new(vec![false; graph.insts.len()]),
             unassigned: RefCell::new(Vec::new()),
@@ -1130,6 +1149,9 @@ impl<'a> Values<'a> {
         for inst in discharged_insts(self.graph, discharges.iter()) {
             self.mark(inst);
         }
+        let addressed = self.roots.addressed(value);
+        let addressed = (addressed.iter()).filter_map(|id| canonical_inst(self.graph, id));
+        self.pending.borrow_mut().addressed.extend(addressed);
     }
 
     /// `value` as `reader` reads it: its term where it is absorbed, else its name.
@@ -1339,10 +1361,18 @@ impl<'a> Values<'a> {
 
     /// Keep what the text just written reads and absorbs.
     fn keep(&self) {
-        let Attempt { reads, marks } = std::mem::take(&mut *self.pending.borrow_mut());
+        let Attempt {
+            reads,
+            marks,
+            addressed,
+        } = std::mem::take(&mut *self.pending.borrow_mut());
         self.unassigned.borrow_mut().extend(reads);
         for inst in marks {
             self.commit(inst);
+        }
+        let mut held = self.addressed.borrow_mut();
+        for inst in addressed {
+            held[inst.0 as usize] = true;
         }
     }
 
@@ -2624,10 +2654,11 @@ impl<'a> Values<'a> {
     pub(super) fn close(&self, ledger: &mut crate::ledger::ObligationLedger) {
         use crate::ledger::{ElisionReason, Outcome};
         let (rendered, restored) = (self.rendered.borrow(), self.restored.borrow());
-        let effect = self.effect.borrow();
+        let (effect, addressed) = (self.effect.borrow(), self.addressed.borrow());
         let covered = self.covered_by_residuals();
         let certificates = self.artifact.certificates();
         let frame_setup = &certificates.stack_geometry.frame_setup;
+        let object_addresses = &certificates.stack_geometry.object_addresses;
         for obligation in self.inventory.obligations().values() {
             let index = obligation.source.graph_inst().map(|inst| inst.0 as usize);
             let certified = obligation.source.graph_inst().and_then(|inst| {
@@ -2655,6 +2686,17 @@ impl<'a> Values<'a> {
                 }
                 _ if index.is_some_and(|i| restored[i]) => {
                     Outcome::Elided(ElisionReason::StackFrame)
+                }
+                // One frame object's address on every path, spelled `&object` where the text reads it.
+                (
+                    SemanticObligationKind::LiveValueProducer
+                    | SemanticObligationKind::LoopCarriedState
+                    | SemanticObligationKind::LiveStateTransition,
+                    _,
+                ) if (obligation.source.graph_inst())
+                    .is_some_and(|i| object_addresses.contains(i) && addressed[i.0 as usize]) =>
+                {
+                    Outcome::Elided(ElisionReason::FrameAddress)
                 }
                 // Stack-pointer arithmetic r2ssa states only locates the frame the array names.
                 (

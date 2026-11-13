@@ -2018,9 +2018,10 @@ const FRAME_ADDRESS_MERGE: &[u8] = &[
     0x48, 0x89, 0x3d, 0x00, 0x10, 0x00, 0x00, 0xc3, // 1040 sink: mov [rip + 0x1000], rdi; ret
 ];
 
-/// A refusal names each obligation it leaves undecided by its operation and its seed (D174, D253).
+/// D254: the merge is one frame object's address on both arms, so each call spells it `&object`
+/// and the merge owes nothing more.
 #[test]
-fn a_refusal_names_each_undecided_obligation_by_its_operation_and_seed() {
+fn a_merge_of_one_frame_address_read_by_two_calls_renders() {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = WithSink {
@@ -2029,14 +2030,84 @@ fn a_refusal_names_each_undecided_obligation_by_its_operation_and_seed() {
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     let output = response.output.text();
+    assert!(response.output.function().is_some(), "{output}");
+    assert_eq!(
+        output.matches("sink((uint64_t)(frame + ").count(),
+        2,
+        "{output}"
+    );
+    let ledger = response.obligation_ledger.expect("ledger");
+    let framed = (ledger.entries()).filter(|(_, outcome)| {
+        *outcome == r2dec::ledger::Outcome::Elided(r2dec::ledger::ElisionReason::FrameAddress)
+    });
+    assert_eq!(framed.count(), 1, "{output}");
+}
+
+/// `FRAME_ADDRESS_MERGE` with one arm at `rsp + 0`: the merge holds two objects' addresses.
+const TWO_FRAME_ADDRESSES: &[u8] = &[
+    0x53, 0x48, 0x83, 0xec, 0x10, // 1000 push rbx; sub rsp, 0x10
+    0x85, 0xff, 0x74, 0x07, // 1005 test edi, edi; je 0x1010
+    0x48, 0x8d, 0x5c, 0x24, 0x08, 0xeb, 0x05, // 1009 lea rbx, [rsp + 8]; jmp 0x1015
+    0x48, 0x8d, 0x5c, 0x24, 0x00, // 1010 lea rbx, [rsp + 0]
+    0x48, 0x89, 0xdf, 0xe8, 0x23, 0x00, 0x00, 0x00, // 1015 mov rdi, rbx; call sink
+    0x48, 0x89, 0xdf, 0xe8, 0x1b, 0x00, 0x00, 0x00, // 101d mov rdi, rbx; call sink
+    0x48, 0x83, 0xc4, 0x10, 0x5b, 0xc3, // 1025 add rsp, 0x10; pop rbx; ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 102b padding
+    0x48, 0x89, 0x3d, 0x00, 0x10, 0x00, 0x00, 0xc3, // 1040 sink: mov [rip + 0x1000], rdi; ret
+];
+
+/// A merge of two objects' addresses is no frame address: it is a variable holding either (D254).
+#[test]
+fn a_merge_of_two_frame_addresses_is_a_variable() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = WithSink {
+        bytes: TWO_FRAME_ADDRESSES,
+        sink: 0x1040,
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(response.output.function().is_some(), "{output}");
+    assert!(output.contains("? (uint64_t)(frame + 16U) : "), "{output}");
+    let ledger = response.obligation_ledger.expect("ledger");
+    let framed = (ledger.entries()).filter(|(_, outcome)| {
+        *outcome == r2dec::ledger::Outcome::Elided(r2dec::ledger::ElisionReason::FrameAddress)
+    });
+    assert_eq!(framed.count(), 0, "{output}");
+}
+
+/// A shrink-wrapped AArch64 return (ls-toybox `0x58a30`): `cbz` reaches the `ret` before the
+/// prologue, so no exit stack pointer is proven (D356) and X1's merge keeps the unproven-exit taint.
+const SHRINK_WRAPPED_RETURN: &[u8] = &[
+    0xc0, 0x00, 0x00, 0x34, // 1000 cbz w0, 0x1018
+    0xfd, 0x7b, 0xbf, 0xa9, // 1004 stp x29, x30, [sp, #-16]!
+    0x41, 0x00, 0x00, 0x34, // 1008 cbz w1, 0x1010
+    0xa1, 0x00, 0x80, 0xd2, // 100c mov x1, #5
+    0xfd, 0x7b, 0xc1, 0xa8, // 1010 ldp x29, x30, [sp], #16
+    0x1f, 0x20, 0x03, 0xd5, // 1014 nop
+    0xc0, 0x03, 0x5f, 0xd6, // 1018 ret
+];
+
+/// A refusal names each obligation it leaves undecided by its operation and its seed (D174, D253).
+#[test]
+fn a_refusal_names_each_undecided_obligation_by_its_operation_and_seed() {
+    let machine = Machine::new("aarch64", "aarch64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: SHRINK_WRAPPED_RETURN.to_vec(),
+        name: "pick",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
     assert!(output.contains("r2sleigh refused"), "{output}");
     let named = (response.undecided.iter()).map(ToString::to_string);
     let named = named.collect::<Vec<_>>();
     assert!(
         named.iter().any(|named| {
-            named.starts_with("live-value-producer at 0x1015:phi:Register:0x18:8 (RBX_")
+            named.starts_with("volatile-or-unknown at 0x1010:phi:Register:0x4008:8 (X1_")
                 && named.contains(" = PHI(")
-                && named.ends_with("seeded by a live reader")
+                && named.contains("seeded by the unproven exit 0x1018:op:")
         }),
         "{named:#?}\n{output}"
     );

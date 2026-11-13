@@ -98,6 +98,9 @@ pub enum ElisionReason {
     /// certificate claims it, so no statement here assigns it; where every read
     /// of it is itself elided there is no occurrence to render.
     UnclaimedCallClobber,
+    /// A value r2ssa proves is one own-frame object's address on every path, which the text spells
+    /// as `&object` where it is read (D254).
+    FrameAddress,
 }
 
 impl std::fmt::Display for ElisionReason {
@@ -115,6 +118,7 @@ impl std::fmt::Display for ElisionReason {
             Self::DeadStackBase => "dead-stack-base",
             Self::CallerSuppliedEntryValue => "caller-supplied-entry-value",
             Self::UnclaimedCallClobber => "unclaimed-call-clobber",
+            Self::FrameAddress => "frame-address",
         })
     }
 }
