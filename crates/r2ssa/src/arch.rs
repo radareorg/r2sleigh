@@ -6,6 +6,7 @@ use std::ops::Deref;
 use std::sync::Arc;
 
 use r2il::{ArchSpec, RegisterProjection, RegisterProjectionQuery, RegisterStorage};
+use r2source::{ConventionModel, SourceCallRegisterEffect};
 
 use crate::function::RegisterFamilyInfo;
 use crate::machine_context::{MachineMemoryModel, MachineRegisterGeometryState};
@@ -120,7 +121,8 @@ impl Arch {
     }
 
     /// Each register no wider one contains, by offset: what a call may change, before its effect.
-    pub(crate) fn outermost_registers(&self) -> &[CanonicalStorageId] {
+    /// Starts and ends both ascend, so the registers one storage overlaps are one run.
+    pub fn outermost_registers(&self) -> &[CanonicalStorageId] {
         &self.0.outermost_registers
     }
 
@@ -156,6 +158,35 @@ impl Arch {
     /// Where the architecture returns a value, when it says.
     pub(crate) fn result_slot(&self) -> Option<CanonicalStorageId> {
         self.0.result_slot
+    }
+
+    /// What a call under `model` reads without an operand naming it; under none or a refused
+    /// effect, every outermost register (ruling 2.1: no model states no argument dead).
+    pub fn call_reads<'a>(
+        &'a self,
+        model: Option<&'a ConventionModel>,
+    ) -> &'a [CanonicalStorageId] {
+        (model.and_then(ConventionModel::call_reads)).unwrap_or(self.outermost_registers())
+    }
+
+    /// What a call under `model` names clobbered; under none or a refused effect, every outermost
+    /// register.
+    pub fn call_clobbered<'a>(
+        &'a self,
+        model: Option<&'a ConventionModel>,
+    ) -> &'a [CanonicalStorageId] {
+        (model.and_then(ConventionModel::clobbered)).unwrap_or(self.outermost_registers())
+    }
+
+    /// What a call under `model` does to `storage`; under none it may leave anything there.
+    pub fn call_effect_on(
+        &self,
+        model: Option<&ConventionModel>,
+        storage: CanonicalStorageId,
+    ) -> SourceCallRegisterEffect {
+        model.map_or(SourceCallRegisterEffect::Clobbered, |model| {
+            model.effect_on(storage)
+        })
     }
 }
 
@@ -262,5 +293,27 @@ mod tests {
         let mut returning = spec();
         returning.return_registers = vec![r2il::RegisterDef::new("r1", 8, 8)];
         assert_ne!(Arch::new(spec()), Arch::new(returning));
+    }
+
+    /// A call under no convention reads and clobbers every outermost register, and keeps none.
+    #[test]
+    fn a_call_under_no_model_reads_and_clobbers_every_outermost_register() {
+        let mut spec = ArchSpec::new("deny");
+        spec.add_register(r2il::RegisterDef::new("r0", 0, 8));
+        spec.add_register(r2il::RegisterDef::new("r0l", 0, 4));
+        spec.add_register(r2il::RegisterDef::new("r1", 8, 8));
+        let arch = Arch::new(spec);
+        let register = |offset, size| CanonicalStorageId {
+            space: CanonicalStorageSpace::Register,
+            offset,
+            size,
+        };
+        let file = [register(0, 8), register(8, 8)];
+        assert_eq!(arch.call_reads(None), file);
+        assert_eq!(arch.call_clobbered(None), file);
+        for storage in [register(0, 4), register(8, 8)] {
+            let effect = arch.call_effect_on(None, storage);
+            assert_eq!(effect, SourceCallRegisterEffect::Clobbered, "{storage:?}");
+        }
     }
 }

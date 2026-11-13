@@ -207,7 +207,7 @@ fn terminating_another_handle_may_return() {
     let mut open = terminating(TERMINATES_ANOTHER);
     let text = rendered(&mut open, BASE + 0x20);
     assert!(!text.contains("noreturn"), "{text}");
-    assert!(text.contains("return r2sleigh_carrier_u64(5)"), "{text}");
+    assert!(text.contains("return r2sleigh_carrier_u32(5)"), "{text}");
 }
 
 /// [`TERMINATES`] with a branch past the handle's copy: on that path `rcx` is the caller's, so the
@@ -248,7 +248,7 @@ fn a_branch_past_the_handle_s_copy_may_return() {
     let mut open = terminating_from(BRANCHED_INTO, &functions);
     let text = rendered(&mut open, BASE + 0x30);
     assert!(!text.contains("noreturn"), "{text}");
-    assert!(text.contains("return r2sleigh_carrier_u64(5)"), "{text}");
+    assert!(text.contains("return r2sleigh_carrier_u32(5)"), "{text}");
 }
 
 /// A check that also tests another argument may end the process with the cookie intact: no check.

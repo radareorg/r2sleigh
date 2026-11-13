@@ -60,10 +60,10 @@ fn a_described_call_is_written_from_the_callsite_facts() {
         .expect("the staged pipeline renders");
     let text = rendering.response.output.text().to_owned();
     // `call one; ret`: the result register the call leaves is what `caller` returns.
-    assert!(text.contains("r2sleigh_result_u64 one(void);"), "{text}");
-    assert!(text.contains("rax_1 = one();"), "{text}");
+    assert!(text.contains("r2sleigh_result_u32 one(void);"), "{text}");
+    assert!(text.contains("rax_1 = (uint64_t)one();"), "{text}");
     assert!(
-        text.contains("return r2sleigh_carrier_u64((uint64_t)rax_1);"),
+        text.contains("return r2sleigh_carrier_u32((uint32_t)rax_1);"),
         "{text}"
     );
     // `one` returns, so nothing may tell C otherwise; its return push writes nothing.
@@ -190,7 +190,7 @@ fn a_wrapper_that_computes_the_stub_s_argument_is_a_body_not_the_stub() {
     assert!(!text.contains("import stub at"), "{text}");
     // zlib's `zcalloc(opaque, items, size)`: `opaque` is a hole, the product its two read slots.
     assert!(
-        text.contains("(r2sleigh_unread_u64 arg0, uint32_t arg1, uint32_t arg2)"),
+        text.contains("(r2sleigh_unread_u64 arg0, r2sleigh_word_u32 arg1, r2sleigh_word_u32 arg2)"),
         "{text}"
     );
     assert!(
@@ -211,7 +211,8 @@ fn a_function_that_only_jumps_to_a_stub_is_a_body_not_the_stub() {
         .output
         .into_text();
     assert!(!text.contains("import stub at"), "{text}");
-    assert!(text.contains("free((void*)arg0);"), "{text}");
+    // The parameter handed to `free` is its `void *` (D262).
+    assert!(text.contains("free(arg0);"), "{text}");
 }
 
 /// The container states a stub of `free` whose jump goes through the slot bound to `malloc`: a body, not a

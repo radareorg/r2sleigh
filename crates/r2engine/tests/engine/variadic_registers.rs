@@ -180,9 +180,17 @@ fn rendered(open: &mut OpenProgram<Literal>, at: u64) -> String {
 fn bounds_the_tail(vfold: &[u8], target: Target) {
     let mut open = program(vfold, target);
     let callee = rendered(&mut open, BASE);
-    assert!(callee.contains("vfold(uint32_t arg0, ...)"), "{callee}");
+    // The count's sign is the build's: an unsigned compare of it states one (D265).
+    assert!(
+        (callee.contains("vfold(r2sleigh_word_u32 arg0, ...)")
+            || callee.contains("vfold(uint32_t arg0, ...)")),
+        "{callee}"
+    );
     let two = rendered(&mut open, BASE + TWO as u64);
-    assert!(two.contains("two(uint64_t arg0, uint64_t arg1)"), "{two}");
+    assert!(
+        two.contains("two(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)"),
+        "{two}"
+    );
     assert!(two.contains("vfold(2, arg0, arg1)"), "{two}");
     assert!(!two.contains("argument count unproven"), "{two}");
     let dynamic = rendered(&mut open, BASE + DYNAMIC as u64);
@@ -199,7 +207,12 @@ fn bounds_the_tail(vfold: &[u8], target: Target) {
 fn leaves_the_tail_unproven(vfold: &[u8], target: Target) {
     let mut open = program(vfold, target);
     let callee = rendered(&mut open, BASE);
-    assert!(callee.contains("vfold(uint32_t arg0, ...)"), "{callee}");
+    // The count's sign is the build's: an unsigned compare of it states one (D265).
+    assert!(
+        (callee.contains("vfold(r2sleigh_word_u32 arg0, ...)")
+            || callee.contains("vfold(uint32_t arg0, ...)")),
+        "{callee}"
+    );
     let two = rendered(&mut open, BASE + TWO as u64);
     assert!(two.contains("argument count unproven"), "{two}");
     assert!(!two.contains("vfold(2, arg0"), "{two}");

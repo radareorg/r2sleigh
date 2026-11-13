@@ -50,6 +50,9 @@ graded through the same path an engine rendering takes:
 * under ``instructions`` a rendering sees no SIGPROF handler and no CPU timer.
 * a rendering that raises the allowance's own signal (SIGPWR) or the CPU
   timer's (SIGPROF) is not ``slow``: only the measure decides.
+* when the run counts instructions (perf, or qemu's plugin for an emulated
+  guest, ADR D343), the real counter stops a rendering that spins as ``slow``,
+  and a SIGPWR the rendering raises under it is not ``slow``.
 """
 
 from __future__ import annotations
@@ -108,11 +111,15 @@ class Case:
     cost: Cost | None = None
     # The build a `slow` names.
     expect_build: str | None = None
+    # Graded only when the run counts instructions, by its own counter at _COUNTED_BUDGET.
+    counted: bool = False
 
 
 _BUDGET = 1600
 _K = RENDERING_FACTOR
 _FLOOR = _BUDGET // (_K * _K)
+# Above the thunk's and raise()'s instructions, far below a spin's (ADR D343).
+_COUNTED_BUDGET = 1_600_000
 _IDENTITY_ADD = (
     "#include <stdint.h>\n#include <stddef.h>\n"
     "int32_t sub_add(int32_t a, int32_t b)\n{\n"
@@ -397,6 +404,17 @@ CASES = [
         "#include <signal.h>\nint32_t sub_add(int32_t a, int32_t b)\n{\n"
         "    raise(SIGPWR);\n    return (int32_t)((uint32_t)a + (uint32_t)b);\n}\n"),
         cost=Cost("instructions", _BUDGET, fake_rendering=1)),
+    # No fake: the run's own counter (ADR D343) stops a spin, through its overflow signal.
+    Case("a-rendering-the-counter-stops", "st_add", "slow", _tu(
+        "int32_t sub_add(int32_t a, int32_t b)\n{\n"
+        "    volatile uint32_t spin = (uint32_t)a + (uint32_t)b;\n"
+        "    for (;;)\n        spin = spin + 1u;\n}\n"),
+        expect_build="O2", counted=True),
+    # A SIGPWR the rendering raises is not the counter's overflow, which the count decides.
+    Case("a-budget-signal-the-rendering-raises-while-counted", "st_add", "differs", _tu(
+        "#include <signal.h>\nint32_t sub_add(int32_t a, int32_t b)\n{\n"
+        "    raise(SIGPWR);\n    return (int32_t)((uint32_t)a + (uint32_t)b);\n}\n"),
+        counted=True),
 ]
 
 
@@ -467,8 +485,12 @@ def run_self_tests(config: gate.Config, workdir: Path,
         if by_name.get(sub.name) is None or symbols.get(sub.name) != by_name[sub.name].low_pc:
             by_name[sub.name] = sub
     outcomes: list[Outcome] = []
+    counting = config.cost.measure == "instructions" and not (
+        config.cost.fake_original or config.cost.fake_rendering)
     for case in CASES:
         if only and case.name not in only:
+            continue
+        if case.counted and not counting:
             continue
         sub = by_name[case.function]
         spec = call_spec(dwarf, sub, functions, target.abi)
@@ -480,8 +502,9 @@ def run_self_tests(config: gate.Config, workdir: Path,
                             refusal=case.refused)
         else:
             answer = Answer(sub.low_pc, "output", record=record)
+        cost = replace(config.cost, budget=_COUNTED_BUDGET) if case.counted else case.cost
         graded = gate.grade(f"selftest::{case.name}", workdir / case.name, binary, dwarf, spec,
-                            answer, replace(config, cost=case.cost) if case.cost else config)
+                            answer, replace(config, cost=cost) if cost else config)
         ok = graded.status == case.expect
         why = f"expected {case.expect}, got {graded.status}"
         if not ok and graded.evidence.get("cause"):

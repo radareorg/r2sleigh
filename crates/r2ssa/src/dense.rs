@@ -37,6 +37,7 @@ macro_rules! dense_id {
 dense_id!(crate::graph::ValueId);
 dense_id!(crate::graph::InstId);
 dense_id!(crate::graph::BlockId);
+dense_id!(crate::semantic::CallSiteId);
 
 /// A value for every id below a bound.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -73,6 +74,7 @@ impl<I: DenseId, T> IdVec<I, T> {
         self.cells.is_empty()
     }
 
+    #[inline]
     pub fn get(&self, id: I) -> Option<&T> {
         self.cells.get(id.index())
     }
@@ -143,21 +145,25 @@ impl<I: DenseId, T> IdMap<I, T> {
         }
     }
 
+    #[inline]
     pub fn get(&self, id: I) -> Option<&T> {
         self.slot(id).map(|slot| &self.entries[slot].1)
     }
 
+    #[inline]
     pub fn get_mut(&mut self, id: I) -> Option<&mut T> {
         let slot = self.slot(id)?;
         Some(&mut self.entries[slot].1)
     }
 
+    #[inline]
     pub fn contains(&self, id: I) -> bool {
         self.slot(id).is_some()
     }
 
     /// Set `id`'s value, returning the one it replaces. An id at or past
     /// the bound grows the map to hold it.
+    #[inline]
     pub fn insert(&mut self, id: I, value: T) -> Option<T> {
         if let Some(slot) = self.slot(id) {
             return Some(std::mem::replace(&mut self.entries[slot].1, value));
@@ -173,6 +179,7 @@ impl<I: DenseId, T> IdMap<I, T> {
     }
 
     /// `id`'s value, inserting `value()` first where it has none.
+    #[inline]
     pub fn get_or_insert_with(&mut self, id: I, value: impl FnOnce() -> T) -> &mut T {
         if self.slot(id).is_none() {
             self.insert(id, value());
@@ -180,6 +187,7 @@ impl<I: DenseId, T> IdMap<I, T> {
         self.get_mut(id).expect("inserted above")
     }
 
+    #[inline]
     pub fn remove(&mut self, id: I) -> Option<T> {
         let slot = self.slot(id)?;
         self.slots[id.index()] = VACANT;
@@ -324,6 +332,7 @@ impl<I: DenseId> IdSet<I> {
         }
     }
 
+    #[inline]
     pub fn contains(&self, id: I) -> bool {
         let index = id.index();
         self.words
@@ -332,6 +341,7 @@ impl<I: DenseId> IdSet<I> {
     }
 
     /// Add `id`; whether it was absent.
+    #[inline]
     pub fn insert(&mut self, id: I) -> bool {
         let index = id.index();
         if index / 64 >= self.words.len() {
@@ -345,6 +355,7 @@ impl<I: DenseId> IdSet<I> {
     }
 
     /// Remove `id`; whether it was present.
+    #[inline]
     pub fn remove(&mut self, id: I) -> bool {
         let index = id.index();
         let Some(word) = self.words.get_mut(index / 64) else {
@@ -472,6 +483,7 @@ impl<I: DenseId> Default for IdWorklist<I> {
 
 impl<I: DenseId> IdWorklist<I> {
     /// Queue `id`; whether it was not already waiting.
+    #[inline]
     pub fn insert(&mut self, id: I) -> bool {
         let fresh = self.queued.insert(id);
         if fresh {
@@ -574,6 +586,7 @@ impl<I: DenseId, T> Csr<I, T> {
     }
 
     /// `id`'s items; empty for an id at or past the bound.
+    #[inline]
     pub fn get(&self, id: I) -> &[T] {
         let index = id.index();
         match (self.starts.get(index), self.starts.get(index + 1)) {
@@ -630,6 +643,7 @@ impl HashIndex {
     }
 
     /// Index `row`, the next row, which hashes to `row_hash`; growing rehashes every row by `hash`.
+    #[inline]
     pub fn insert(&mut self, row: u32, row_hash: u64, hash: impl Fn(u32) -> u64) {
         debug_assert_eq!(row as usize, self.rows, "rows are indexed in order");
         if (self.rows + 1) * 2 > self.slots.len() {
@@ -691,17 +705,20 @@ impl<I: DenseId, T> SparseMap<I, T> {
         self.entries.binary_search_by(|(at, _)| at.cmp(&id))
     }
 
+    #[inline]
     pub fn get(&self, id: I) -> Option<&T> {
         let at = self.position(id).ok()?;
         Some(&self.entries[at].1)
     }
 
+    #[inline]
     pub fn get_mut(&mut self, id: I) -> Option<&mut T> {
         let at = self.position(id).ok()?;
         Some(&mut self.entries[at].1)
     }
 
     /// Set `id`'s value, returning the one it replaces.
+    #[inline]
     pub fn insert(&mut self, id: I, value: T) -> Option<T> {
         match self.position(id) {
             Ok(at) => Some(std::mem::replace(&mut self.entries[at].1, value)),

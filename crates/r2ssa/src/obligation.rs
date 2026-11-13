@@ -420,6 +420,95 @@ pub struct SemanticObligation {
     pub edge_use: Option<UseSite>,
 }
 
+/// Why an obligation was seeded: the one cause a refusal names (doc/adr-semantic-preservation-kernel.md,
+/// seeds). Where several seed one obligation, the later variant here wins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum SeedReason {
+    /// A live instruction reads the value.
+    Producer,
+    /// The instruction owes it by what it is, or a boundary names its value.
+    Root,
+    /// The definition may reach this return, whose interface is unproven.
+    UnprovenExit(InstId),
+    /// A loop carrier's update that does not validate.
+    LoopUpdate,
+    /// A memory access whose provenance is incomplete.
+    Provenance,
+    /// No rule models the operation: a user operation, an unproven call, a storage-less merge.
+    Unmodelled,
+}
+
+impl SeedReason {
+    /// The reason a kind is seeded for unless another is given: liveness is a reader's.
+    const fn usual(kind: SemanticObligationKind) -> Self {
+        match kind {
+            SemanticObligationKind::LiveValueProducer
+            | SemanticObligationKind::LoopCarriedState
+            | SemanticObligationKind::LiveStateTransition => Self::Producer,
+            _ => Self::Root,
+        }
+    }
+
+    /// This seed as a refusal spells it, an exit by its place and operation.
+    pub fn spelled(self, graph: &SsaGraph) -> String {
+        match self {
+            Self::Producer => "a live reader".to_owned(),
+            Self::Root => "a root".to_owned(),
+            Self::UnprovenExit(exit) => {
+                format!("the unproven exit {}", spell_instruction(graph, exit))
+            }
+            Self::LoopUpdate => "an unvalidated loop update".to_owned(),
+            Self::Provenance => "incomplete provenance".to_owned(),
+            Self::Unmodelled => "an unmodelled operation".to_owned(),
+        }
+    }
+}
+
+/// An instruction as a refusal names it: its place, then its operation with each value named,
+/// `0x{block}:op:{n} (RDI_5 = ZEXT(EDI_4))`.
+fn spell_instruction(graph: &SsaGraph, inst: InstId) -> String {
+    let Some(at) = graph.inst(inst) else {
+        return format!("{inst:?}");
+    };
+    let place = CanonicalInstructionId::of(graph, at)
+        .map_or_else(|_| format!("{inst:?}"), |id| id.spelled(graph).to_string());
+    let operation = match (&at.payload, graph.op(inst)) {
+        (_, Some(op)) => graph.named_op(op).to_string(),
+        (InstPayload::Phi { .. }, None) => {
+            let inputs = graph
+                .inputs(inst)
+                .iter()
+                .map(|input| graph.var(*input).to_string());
+            let output = at.output.map(|output| graph.var(output).to_string());
+            format!(
+                "{} = PHI({})",
+                output.unwrap_or_default(),
+                inputs.collect::<Vec<_>>().join(", ")
+            )
+        }
+        (InstPayload::Op(_), None) => String::new(),
+    };
+    format!("{place} ({operation})")
+}
+
+/// An obligation as a refusal names it (D174): its kind and place, its operation, and its seed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NamedObligation {
+    kind: SemanticObligationKind,
+    instruction: String,
+    seed: String,
+}
+
+impl std::fmt::Display for NamedObligation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} at {}, seeded by {}",
+            self.kind, self.instruction, self.seed
+        )
+    }
+}
+
 /// Every obligation of one function, sorted by identity: one vector searched by halving, where
 /// a tree held each eighty-byte identity twice (key and value) beside its node overhead.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -570,6 +659,13 @@ pub struct SemanticObligationInventory {
     /// run only where one does.
     #[serde(skip)]
     narrows: bool,
+    /// The calls that read only their listed arguments: complete, their callee bounding what
+    /// they read (D326). A carrier read at any other call is that call's (`ValueReaders`).
+    #[serde(skip)]
+    bounded: crate::dense::IdSet<InstId>,
+    /// Why each obligation was seeded, where its kind's usual reason does not say (`seed`).
+    #[serde(skip)]
+    seeds: Seeds,
     /// Whether the inventory closes, decided when it was built.
     ///
     /// Deciding it is a walk of every instruction and every obligation with a
@@ -595,6 +691,8 @@ impl SemanticObligationInventory {
             read_under: Vec::new(),
             narrows: false,
             split_runs: false,
+            bounded: crate::dense::IdSet::default(),
+            seeds: Seeds::default(),
             complete: false,
         }
     }
@@ -613,6 +711,76 @@ impl SemanticObligationInventory {
             Ok(at) => self.read_under[at].1,
             Err(_) => crate::edge_fold::ALL,
         }
+    }
+}
+
+/// Who reads each value (doc/adr-semantic-preservation-kernel.md, readers): one CSR over dense
+/// `ValueId`s, built by the pass that asks, never held by the inventory.
+pub struct ValueReaders {
+    readers: crate::dense::Csr<ValueId, InstId>,
+}
+
+impl ValueReaders {
+    /// Who reads each value under `inventory`; a `CallUse` is its call's read unless the call
+    /// is bounded. O(V + uses + boundary inputs · log).
+    pub fn of(inventory: &SemanticObligationInventory, graph: &SsaGraph) -> Self {
+        let mut boundary = (inventory.obligations.0.iter())
+            .filter(|obligation| {
+                matches!(
+                    obligation.id.kind,
+                    SemanticObligationKind::ReturnValue | SemanticObligationKind::CallArgument
+                )
+            })
+            .filter_map(|obligation| Some((obligation.source.graph_inst()?, &obligation.inputs)))
+            .flat_map(|(inst, inputs)| inputs.iter().map(move |input| (*input, inst)))
+            .collect::<Vec<_>>();
+        boundary.sort_unstable();
+        let mut readers = crate::dense::Csr::with_capacity(graph.values.len(), boundary.len());
+        let mut row = Vec::new();
+        let mut at = 0;
+        for index in 0..graph.values.len() {
+            let value = ValueId(index as u32);
+            row.clear();
+            let sites = graph.use_sites(value).iter();
+            row.extend(sites.filter_map(|site| Self::reader_at(inventory, graph, site.inst)));
+            while boundary.get(at).is_some_and(|(read, _)| *read == value) {
+                row.push(boundary[at].1);
+                at += 1;
+            }
+            row.sort_unstable();
+            row.dedup();
+            readers.push_row(row.iter().copied());
+        }
+        Self { readers }
+    }
+
+    /// Who the use at `inst` is a read by: a live or unknown instruction itself, a carrier read
+    /// its call unless the call is bounded.
+    fn reader_at(
+        inventory: &SemanticObligationInventory,
+        graph: &SsaGraph,
+        inst: InstId,
+    ) -> Option<InstId> {
+        if !matches!(graph.op(inst), Some(SSAOp::CallUse { .. })) {
+            let state = inventory.state_of(inst);
+            return matches!(
+                state,
+                Some(
+                    SemanticInstructionState::LiveObligation
+                        | SemanticInstructionState::UnsupportedUnknown
+                )
+            )
+            .then_some(inst);
+        }
+        match graph.call_of_boundary_read(inst) {
+            Some(call) => (!inventory.bounded.contains(call)).then_some(call),
+            None => Some(inst),
+        }
+    }
+
+    /// The instructions that read `value`, sorted. O(1).
+    pub fn get(&self, value: ValueId) -> &[InstId] {
+        self.readers.get(value)
     }
 }
 
@@ -772,12 +940,7 @@ impl SemanticObligationInventory {
                 }
                 InstPayload::Phi { .. } if graph.written_storage(inst).is_none() => {
                     unsupported.insert(inst.id);
-                    seed_instruction(
-                        inst.id,
-                        SemanticObligationKind::VolatileOrUnknownEffect,
-                        SemanticObligationComponent::Whole,
-                        &mut required,
-                    );
+                    seed_because(inst.id, UNKNOWN, SeedReason::Unmodelled, &mut required);
                 }
                 InstPayload::Phi { .. } => {}
             }
@@ -860,10 +1023,13 @@ impl SemanticObligationInventory {
             );
             if !access.provenance_complete {
                 unsupported.insert(access.id.inst);
-                seed_instruction(
+                seed_because(
                     access.id.inst,
-                    SemanticObligationKind::VolatileOrUnknownEffect,
-                    SemanticObligationComponent::MemoryAccess(access.id.ordinal),
+                    (
+                        SemanticObligationKind::VolatileOrUnknownEffect,
+                        SemanticObligationComponent::MemoryAccess(access.id.ordinal),
+                    ),
+                    SeedReason::Provenance,
                     &mut required,
                 );
             }
@@ -905,7 +1071,7 @@ impl SemanticObligationInventory {
                 seed_value_definition(
                     graph,
                     logical_value,
-                    SemanticObligationKind::LiveValueProducer,
+                    (SemanticObligationKind::LiveValueProducer, SeedReason::Root),
                     &mut required,
                 );
             }
@@ -913,7 +1079,7 @@ impl SemanticObligationInventory {
                 seed_value_definition(
                     graph,
                     return_address.value,
-                    SemanticObligationKind::LiveValueProducer,
+                    (SemanticObligationKind::LiveValueProducer, SeedReason::Root),
                     &mut required,
                 );
             }
@@ -925,22 +1091,18 @@ impl SemanticObligationInventory {
                 seed_value_definition(
                     graph,
                     value,
-                    SemanticObligationKind::LiveValueProducer,
+                    (SemanticObligationKind::LiveValueProducer, SeedReason::Root),
                     &mut required,
                 );
             }
             if !boundary.complete {
                 unproven_exits.insert(boundary.at);
-                seed_instruction(
-                    boundary.at,
-                    SemanticObligationKind::VolatileOrUnknownEffect,
-                    SemanticObligationComponent::Whole,
-                    &mut required,
-                );
+                let exit = SeedReason::UnprovenExit(boundary.at);
+                seed_because(boundary.at, UNKNOWN, exit, &mut required);
                 incomplete_returns.push(boundary.at);
             }
         }
-        taint_incomplete_boundary_inputs(
+        let exits = taint_incomplete_boundary_inputs(
             graph,
             &incomplete_returns,
             &mut required,
@@ -985,7 +1147,7 @@ impl SemanticObligationInventory {
                     seed_value_definition(
                         graph,
                         value,
-                        SemanticObligationKind::LiveValueProducer,
+                        (SemanticObligationKind::LiveValueProducer, SeedReason::Root),
                         &mut required,
                     );
                 }
@@ -1003,7 +1165,7 @@ impl SemanticObligationInventory {
                 seed_value_definition(
                     graph,
                     value.value,
-                    SemanticObligationKind::LiveValueProducer,
+                    (SemanticObligationKind::LiveValueProducer, SeedReason::Root),
                     &mut required,
                 );
             }
@@ -1014,12 +1176,7 @@ impl SemanticObligationInventory {
                 // function computes, and a gap over the call is the whole of
                 // what cannot be rendered.
                 unsupported.insert(boundary.at);
-                seed_instruction(
-                    boundary.at,
-                    SemanticObligationKind::VolatileOrUnknownEffect,
-                    SemanticObligationComponent::Whole,
-                    &mut required,
-                );
+                seed_because(boundary.at, UNKNOWN, SeedReason::Unmodelled, &mut required);
             }
         }
 
@@ -1042,7 +1199,7 @@ impl SemanticObligationInventory {
                     seed_value_definition(
                         graph,
                         *input,
-                        SemanticObligationKind::LiveValueProducer,
+                        (SemanticObligationKind::LiveValueProducer, SeedReason::Root),
                         &mut required,
                     );
                 }
@@ -1073,7 +1230,10 @@ impl SemanticObligationInventory {
                 seed_value_definition(
                     graph,
                     carrier.phi,
-                    SemanticObligationKind::LoopCarriedState,
+                    (
+                        SemanticObligationKind::LoopCarriedState,
+                        SeedReason::Producer,
+                    ),
                     &mut required,
                 );
                 let carrier_storage = carrier_inst
@@ -1110,12 +1270,8 @@ impl SemanticObligationInventory {
                             .or_insert(update.site);
                     } else if let Some(carrier_inst) = carrier_inst {
                         unsupported.insert(carrier_inst);
-                        seed_instruction(
-                            carrier_inst,
-                            SemanticObligationKind::VolatileOrUnknownEffect,
-                            SemanticObligationComponent::Whole,
-                            &mut required,
-                        );
+                        let update = SeedReason::LoopUpdate;
+                        seed_because(carrier_inst, UNKNOWN, update, &mut required);
                     }
                 }
             }
@@ -1205,6 +1361,10 @@ impl SemanticObligationInventory {
             });
         }
         inventory.unmodelled = unsupported;
+        inventory.seeds = Seeds {
+            unusual: required.reasons(),
+            exits,
+        };
         inventory.narrows = narrows;
         inventory.obligations = ObligationTable::of(obligations);
         inventory.read_under = (read_under.iter())
@@ -1212,6 +1372,12 @@ impl SemanticObligationInventory {
             .map(|(inst, edges)| (inst, *edges))
             .collect();
         inventory.index_runs();
+        // A call reads only its listed arguments where its callee bounds what it reads (D326).
+        let bounded = (boundaries.calls.values())
+            .filter(|boundary| boundary.complete && !boundary.may_read_unlisted())
+            .map(|boundary| boundary.at)
+            .collect();
+        inventory.bounded = bounded;
         inventory.complete = inventory.derive_is_complete();
         inventory
     }
@@ -1306,6 +1472,46 @@ impl SemanticObligationInventory {
     /// The state of `inst`'s disposition. O(1).
     pub fn state_of(&self, inst: InstId) -> Option<SemanticInstructionState> {
         Some(self.owed(inst)?.state)
+    }
+
+    /// Why obligation `id` was seeded; none for an obligation this inventory does not hold.
+    /// O(log unusual seeds).
+    pub fn seed(&self, graph: &SsaGraph, id: &SemanticObligationId) -> Option<SeedReason> {
+        let obligation = self.obligations.get(id)?;
+        let Some(inst) = obligation.source.graph_inst() else {
+            let span = id.kind == SemanticObligationKind::NoNativeSemantics;
+            return Some(if span {
+                SeedReason::Unmodelled
+            } else {
+                SeedReason::Root
+            });
+        };
+        let seed = (inst, id.kind, id.component);
+        let unusual = &self.seeds.unusual;
+        Some(
+            match unusual.binary_search_by_key(&seed, |(seed, _)| *seed) {
+                Ok(at) => unusual[at].1,
+                // An unknown effect no other cause names is the unproven-exit taint's.
+                Err(_) if (id.kind, id.component) == UNKNOWN => (graph.inst(inst))
+                    .and_then(|inst| self.seeds.exits.exit(inst))
+                    .map_or(SeedReason::Root, SeedReason::UnprovenExit),
+                Err(_) => SeedReason::usual(id.kind),
+            },
+        )
+    }
+
+    /// Obligation `id` as a refusal names it: its operation and its seed (D174).
+    pub fn name(&self, graph: &SsaGraph, id: &SemanticObligationId) -> Option<NamedObligation> {
+        let obligation = self.obligations.get(id)?;
+        let instruction = match obligation.source.graph_inst() {
+            Some(inst) => spell_instruction(graph, inst),
+            None => id.spelled(graph).instruction().to_string(),
+        };
+        Some(NamedObligation {
+            kind: id.kind,
+            instruction,
+            seed: self.seed(graph, id)?.spelled(graph),
+        })
     }
 
     fn owed(&self, inst: InstId) -> Option<&Owed> {
@@ -1681,13 +1887,25 @@ fn collect_canonical_instruction_ids(
 struct ObligationSeeds {
     whole: crate::dense::IdVec<InstId, u32>,
     parts: crate::dense::IdMap<InstId, Vec<(SemanticObligationKind, SemanticObligationComponent)>>,
+    /// Each reason given that is not its kind's usual one, unsorted.
+    reasons: Vec<(Seed, SeedReason)>,
 }
+
+/// The whole-instruction refusal evidence an unknown effect owes.
+const UNKNOWN: (SemanticObligationKind, SemanticObligationComponent) = (
+    SemanticObligationKind::VolatileOrUnknownEffect,
+    SemanticObligationComponent::Whole,
+);
+
+/// One seed: an instruction, the kind it owes, and of what component.
+type Seed = (InstId, SemanticObligationKind, SemanticObligationComponent);
 
 impl ObligationSeeds {
     fn new(instructions: usize) -> Self {
         Self {
             whole: crate::dense::IdVec::filled(instructions, 0),
             parts: crate::dense::IdMap::default(),
+            reasons: Vec::new(),
         }
     }
 
@@ -1696,9 +1914,14 @@ impl ObligationSeeds {
         inst: InstId,
         kind: SemanticObligationKind,
         component: SemanticObligationComponent,
+        reason: SeedReason,
     ) {
         // A kind past `ALL` would be dropped by `take`.
         debug_assert_eq!(SemanticObligationKind::ALL.get(kind as usize), Some(&kind));
+        // A kind's usual reason is not held; any other outranks it (`SeedReason::usual`).
+        if reason != SeedReason::usual(kind) {
+            self.reasons.push(((inst, kind, component), reason));
+        }
         if component == SemanticObligationComponent::Whole {
             self.whole[inst] |= 1 << kind as u32;
             return;
@@ -1707,6 +1930,14 @@ impl ObligationSeeds {
         if let Err(at) = parts.binary_search(&(kind, component)) {
             parts.insert(at, (kind, component));
         }
+    }
+
+    /// Each seed's reason, the greatest given, sorted by seed. O(R log R).
+    fn reasons(&mut self) -> Vec<(Seed, SeedReason)> {
+        let mut reasons = std::mem::take(&mut self.reasons);
+        reasons.sort_unstable_by(|(a, x), (b, y)| a.cmp(b).then(y.cmp(x)));
+        reasons.dedup_by_key(|(seed, _)| *seed);
+        reasons
     }
 
     fn contains(&self, inst: InstId) -> bool {
@@ -1749,46 +1980,73 @@ impl ObligationSeeds {
     }
 }
 
-/// Every definition that may reach a return whose interface is unproven, none provably dead: one
-/// backward walk from all of them, `O(B + E + I)` (doc/adr-memory-model.md, MM.10).
+/// Every definition that may reach a return whose interface is unproven, none provably dead, seeded
+/// with the first such return that reaches it: one backward walk, `O(B + E + I)` (MM.10).
 fn taint_incomplete_boundary_inputs(
     graph: &SsaGraph,
     returns: &[InstId],
     required: &mut ObligationSeeds,
     unsupported: &mut crate::dense::IdSet<InstId>,
-) {
-    let mut last = crate::dense::IdMap::<crate::graph::BlockId, usize>::default();
-    for inst in returns.iter().filter_map(|inst| graph.inst(*inst)) {
-        let at = last.get_or_insert_with(inst.block, || inst.ordinal);
-        *at = (*at).max(inst.ordinal);
+) -> ExitLabels {
+    // Each block's last unproven return, and each block that reaches one, labelled by the first
+    // return in `returns` that reaches it: every block is labelled once.
+    if returns.is_empty() {
+        return ExitLabels::default();
     }
-    let mut reaching = crate::dense::IdSet::default();
-    let mut ready = (last.keys().filter_map(|block| graph.block(block)))
-        .flat_map(|block| block.predecessors.iter().copied())
-        .collect::<Vec<_>>();
-    while let Some(block) = ready.pop() {
-        if reaching.insert(block)
-            && let Some(block) = graph.block(block)
-        {
-            ready.extend(block.predecessors.iter().copied());
+    let mut last = vec![None::<(usize, InstId)>; graph.blocks.len()];
+    for inst in returns.iter().filter_map(|inst| graph.inst(*inst)) {
+        let at = &mut last[inst.block.0 as usize];
+        *at = (*at).max(Some((inst.ordinal, inst.id)));
+    }
+    let mut reaching = vec![None; graph.blocks.len()];
+    for exit in returns.iter().filter_map(|inst| graph.inst(*inst)) {
+        let mut ready = (graph.block(exit.block))
+            .map(|block| block.predecessors.clone())
+            .unwrap_or_default();
+        while let Some(block) = ready.pop() {
+            if reaching[block.0 as usize].is_none()
+                && let Some(block) = graph.block(block)
+            {
+                reaching[block.id.0 as usize] = Some(exit.id);
+                ready.extend(block.predecessors.iter().copied());
+            }
         }
     }
+    let labels = ExitLabels { last, reaching };
     for candidate in &graph.insts {
-        let kept = reaching.contains(candidate.block)
-            || last
-                .get(candidate.block)
-                .is_some_and(|last| candidate.ordinal < *last);
-        if candidate.output.is_none() || !kept {
+        if candidate.output.is_none() || labels.exit(candidate).is_none() {
             continue;
         }
         unsupported.insert(candidate.id);
-        seed_instruction(
-            candidate.id,
-            SemanticObligationKind::VolatileOrUnknownEffect,
-            SemanticObligationComponent::Whole,
-            required,
-        );
+        // Its seed is read off the labels when asked (`SemanticObligationInventory::seed`).
+        seed_instruction(candidate.id, UNKNOWN.0, UNKNOWN.1, required);
     }
+    labels
+}
+
+/// Each block's last unproven return, and the first such return each block reaches, by block.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ExitLabels {
+    last: Vec<Option<(usize, InstId)>>,
+    reaching: Vec<Option<InstId>>,
+}
+
+impl ExitLabels {
+    /// The unproven return `inst`'s definition may reach first, if any. O(1).
+    fn exit(&self, inst: &GraphInst) -> Option<InstId> {
+        let at = inst.block.0 as usize;
+        let own = (self.last.get(at).copied().flatten())
+            .filter(|(last, _)| inst.ordinal < *last)
+            .map(|(_, exit)| exit);
+        own.or_else(|| self.reaching.get(at).copied().flatten())
+    }
+}
+
+/// The seeds an obligation's kind does not explain, sorted, and the unproven-exit labels.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Seeds {
+    unusual: Vec<(Seed, SeedReason)>,
+    exits: ExitLabels,
 }
 
 #[cfg_attr(
@@ -1928,12 +2186,7 @@ fn seed_direct_obligations(
         | SSAOp::CpuId { .. }
         | SSAOp::New { .. } => {
             unsupported.insert(inst.id);
-            seed_instruction(
-                inst.id,
-                Kind::VolatileOrUnknownEffect,
-                Component::Whole,
-                required,
-            );
+            seed_because(inst.id, UNKNOWN, SeedReason::Unmodelled, required);
         }
         SSAOp::Phi { .. }
         | SSAOp::Copy { .. }
@@ -2026,7 +2279,17 @@ fn seed_instruction(
     component: SemanticObligationComponent,
     required: &mut ObligationSeeds,
 ) {
-    required.insert(inst, kind, component);
+    required.insert(inst, kind, component, SeedReason::Root);
+}
+
+/// Seed what `inst` owes for a reason other than what it is.
+fn seed_because(
+    inst: InstId,
+    (kind, component): (SemanticObligationKind, SemanticObligationComponent),
+    reason: SeedReason,
+    required: &mut ObligationSeeds,
+) {
+    required.insert(inst, kind, component, reason);
 }
 
 #[cfg_attr(
@@ -2048,7 +2311,14 @@ fn seed_instruction_with_inputs(
     >,
     duplicate_seeds: &mut BTreeSet<(InstId, SemanticObligationKind, SemanticObligationComponent)>,
 ) {
-    seed_instruction(inst, kind, component, required);
+    // A value's liveness or an edge's transition is owed because a live instruction reads it.
+    let reason = match kind {
+        SemanticObligationKind::LiveValueProducer | SemanticObligationKind::LiveStateTransition => {
+            SeedReason::Producer
+        }
+        _ => SeedReason::Root,
+    };
+    seed_because(inst, (kind, component), reason, required);
     let identity = (inst, kind, component);
     if let std::collections::btree_map::Entry::Vacant(entry) = explicit_inputs.entry(identity) {
         entry.insert(inputs);
@@ -2060,11 +2330,12 @@ fn seed_instruction_with_inputs(
 fn seed_value_definition(
     graph: &SsaGraph,
     value: ValueId,
-    kind: SemanticObligationKind,
+    (kind, reason): (SemanticObligationKind, SeedReason),
     required: &mut ObligationSeeds,
 ) {
     if let Some(inst) = graph.def_inst(value) {
-        seed_instruction(inst, kind, SemanticObligationComponent::Whole, required);
+        let whole = SemanticObligationComponent::Whole;
+        seed_because(inst, (kind, whole), reason, required);
     }
 }
 
@@ -2112,12 +2383,11 @@ fn propagate_live_dependencies(
                 continue;
             }
             let was_live = required.contains(definition);
-            seed_instruction(
-                definition,
+            let producer = (
                 SemanticObligationKind::LiveValueProducer,
                 SemanticObligationComponent::Whole,
-                required,
             );
+            seed_because(definition, producer, SeedReason::Producer, required);
             let rose = narrows && {
                 let edges = under.get_or_insert_with(definition, || 0);
                 let grown = *edges | read;
@@ -2191,7 +2461,7 @@ mod tests {
             (Kind::ReturnValue, Component::Index(2)),
             (Kind::Call, Component::Whole),
         ] {
-            seeds.insert(inst, seed.0, seed.1);
+            seeds.insert(inst, seed.0, seed.1, super::SeedReason::Root);
             ordered.insert(seed);
         }
         assert!(seeds.contains(inst) && !seeds.contains(crate::InstId(0)));
@@ -3128,6 +3398,34 @@ mod tests {
         assert!(!returned.complete);
         assert!(returned.values.is_empty());
         assert!(artifact.obligations().is_complete());
+        // The producer and the return itself name that return as their seed (D253).
+        let unknown = |id: CanonicalInstructionId| SemanticObligationId {
+            instruction: id,
+            kind: SemanticObligationKind::VolatileOrUnknownEffect,
+            component: SemanticObligationComponent::Whole,
+        };
+        let exit = super::SeedReason::UnprovenExit(returned.at);
+        assert_eq!(
+            artifact
+                .obligations()
+                .seed(artifact.graph(), &unknown(producer.id)),
+            Some(exit)
+        );
+        let graph = artifact.graph();
+        let at = CanonicalInstructionId::of(graph, graph.inst(returned.at).expect("return"));
+        let at = at.expect("return identity");
+        assert_eq!(artifact.obligations().seed(graph, &unknown(at)), Some(exit));
+        let named = (artifact.obligations().name(graph, &unknown(producer.id)))
+            .expect("named")
+            .to_string();
+        assert!(
+            named.starts_with("volatile-or-unknown at 0x3100:op:0 ("),
+            "{named}"
+        );
+        assert!(
+            named.contains("seeded by the unproven exit 0x3100:op:1"),
+            "{named}"
+        );
     }
 
     #[test]
@@ -3291,6 +3589,122 @@ mod tests {
                 .any(|id| { id.kind == SemanticObligationKind::VolatileOrUnknownEffect })
         );
         assert!(artifact.obligations().is_complete());
+    }
+
+    #[test]
+    fn the_greatest_seed_reason_names_an_obligation() {
+        let unknown = SemanticObligationKind::VolatileOrUnknownEffect;
+        let producer = SemanticObligationKind::LiveValueProducer;
+        let whole = SemanticObligationComponent::Whole;
+        let (phi, value, exit) = (crate::InstId(0), crate::InstId(1), crate::InstId(2));
+        let mut seeds = super::ObligationSeeds::new(3);
+        // The unproven-exit taint and a failed loop update seed one phi: the update is named.
+        seeds.insert(phi, unknown, whole, super::SeedReason::UnprovenExit(exit));
+        seeds.insert(phi, unknown, whole, super::SeedReason::LoopUpdate);
+        // A boundary's value a live instruction also reads is a root, whichever came first.
+        seeds.insert(value, producer, whole, super::SeedReason::Producer);
+        seeds.insert(value, producer, whole, super::SeedReason::Root);
+        seeds.insert(value, producer, whole, super::SeedReason::Producer);
+        assert_eq!(
+            seeds.reasons(),
+            [
+                ((phi, unknown, whole), super::SeedReason::LoopUpdate),
+                ((value, producer, whole), super::SeedReason::Root),
+            ]
+        );
+    }
+
+    /// `rdi = 0x11; rsi = 0x22; call`, whose boundary lists RDI alone: who reads RSI's value.
+    fn readers_of_an_unlisted_carrier(
+        arguments_proven: bool,
+    ) -> (Vec<InstId>, Vec<InstId>, InstId) {
+        let mut block = R2ILBlock::new(0x3200, 4);
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(8, 8),
+            src: Varnode::constant(0x11, 8),
+        });
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(16, 8),
+            src: Varnode::constant(0x22, 8),
+        });
+        block.push(R2ILOp::Call {
+            target: Varnode::ram(0x4000, 8),
+        });
+        let clobbered = [0, 8, 16, 32, 40, 48, 56].map(|offset| register_storage(offset, 8));
+        let reads = [register_storage(8, 8), register_storage(16, 8)];
+        let effect =
+            crate::testing::call_effect_reading(clobbered, [register_storage(24, 8)], reads);
+        let artifact =
+            crate::testing::prepared_under(&[block], &x86_64_call_arch(), None, Vec::new(), effect)
+                .expect("call artifact");
+        let graph = artifact.graph();
+        let value = |at| graph.inst(graph.inst_spelled_at(0x3200, at)?)?.output;
+        let (listed, unlisted) = (value(0).expect("rdi"), value(1).expect("rsi"));
+        let call_inst = (graph.insts.iter())
+            .find(|inst| graph.op(inst.id).is_some_and(SSAOp::is_call))
+            .expect("call instruction")
+            .id;
+        let mut sites = graph.use_sites(unlisted).iter();
+        assert!(sites.any(|site| matches!(graph.op(site.inst), Some(SSAOp::CallUse { .. }))));
+        let call_site = crate::semantic::CallSiteId(0);
+        let slot = crate::semantic::CallBoundarySlot::Register {
+            index: 0,
+            storage: register_storage(8, 8),
+        };
+        let mut boundaries = SourceBoundaryFacts::default();
+        boundaries.calls.insert(
+            call_site,
+            crate::semantic::SourceCallBoundaryFact {
+                call_site,
+                at: call_inst,
+                convention: Some(r2source::ConventionId::SysVAmd64),
+                variadic: Some(false),
+                noreturn: Some(false),
+                result_kind: Some(crate::SourceCallResult::Void),
+                unstated_lanes: Box::default(),
+                unstated_carrier: None,
+                ignored: Box::default(),
+                arguments: vec![crate::semantic::SourceCallArgumentFact {
+                    slot,
+                    value: crate::semantic::SourceCallArgumentValue::Value(listed),
+                    lane_of: None,
+                }],
+                fixed_argument_count: Some(1),
+                variadic_argument_count_evidence: None,
+                variadic_argument_count_refusal: None,
+                results: Vec::new(),
+                complete: true,
+                arguments_complete: true,
+                results_complete: true,
+                arguments_proven,
+                refusal: None,
+            },
+        );
+        let inventory = SemanticObligationInventory::collect(
+            graph,
+            artifact.structured(),
+            &boundaries,
+            None,
+            &SeedingFacts::new(
+                &BTreeSet::new(),
+                &BTreeMap::new(),
+                &BTreeSet::new(),
+                crate::dense::IdSet::default(),
+            ),
+        );
+        let index = super::ValueReaders::of(&inventory, graph);
+        let readers = |value| index.get(value).to_vec();
+        (readers(listed), readers(unlisted), call_inst)
+    }
+
+    #[test]
+    fn a_carrier_a_bounded_call_does_not_list_is_no_read_and_any_other_call_reads_it() {
+        // The callee's statement bounds its reads: the listed argument alone is read (D326).
+        let (listed, unlisted, call) = readers_of_an_unlisted_carrier(true);
+        assert_eq!((listed, unlisted), (vec![call], vec![]));
+        // The arguments are the registers the caller wrote: every carrier stays a read.
+        let (listed, unlisted, call) = readers_of_an_unlisted_carrier(false);
+        assert_eq!((listed, unlisted), (vec![call], vec![call]));
     }
 
     #[test]

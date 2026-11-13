@@ -390,6 +390,7 @@ pub struct SsaArtifact {
     facts: PreparedFunctionFacts,
     machine_context: SourceMachineContext,
     aggregate_accesses: AggregateAccessProjectionFacts,
+    member_calls: crate::member_call::MemberCalls,
     spellings: ArtifactSpellings,
 }
 
@@ -560,11 +561,328 @@ enum Recovery {
 
 /// A trusted lift built and prepared, before the seal.
 struct Constructed {
+    /// The function as built: its name, exits and premises are written at the seal.
     function: Prepared,
     machine_context: SourceMachineContext,
     finish: Finish,
     source_block_count: usize,
     arch: crate::Arch,
+    /// Whether the recovered result is void on the premise that no caller outside the image reads it.
+    closed_world: bool,
+    exits: AssumedExits,
+    /// The build recovery read, where it recovered the interface: what a restatement reuses.
+    reuse: Option<Reuse>,
+    /// Whether that build is a prior construction's, taken as it stood.
+    kept: bool,
+}
+
+/// The build a recovery read and what that build read of the callees (doc/adr-callee-builds.md).
+struct Reuse {
+    key: BuildKey,
+    provisional: Provisional,
+}
+
+/// A build offered to a construction: taken where the callees state the same to it.
+struct Prior {
+    key: BuildKey,
+    function: Prepared,
+    provisional: Provisional,
+}
+
+impl Prior {
+    /// Whether the callees `key` reads state to this build what it was built against: every part
+    /// equal, the argument areas only where promotion read them.
+    fn builds(&self, key: &BuildKey) -> bool {
+        // An area that begins below its call's pointer is outside what promotion's record covers.
+        let below = |key: &BuildKey| {
+            let mut ranges = key.argument_areas.iter().flat_map(|(_, area)| area);
+            ranges.any(|(low, _)| *low < 0)
+        };
+        let unread = !self.function.argument_areas_read() && !below(&self.key) && !below(key);
+        let areas = unread || self.key.argument_areas == key.argument_areas;
+        areas && self.key.without_areas() == key.without_areas()
+    }
+}
+
+/// Everything the build before recovery reads of the callees' statements: equal keys over one lift
+/// build equal functions (doc/adr-callee-builds.md).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BuildKey {
+    /// The carriers a call defines.
+    clobbered: Box<[CanonicalStorageId]>,
+    /// The carriers each callee keeps that a call would otherwise define.
+    kept: BTreeMap<u64, Vec<CanonicalStorageId>>,
+    results: BTreeMap<u64, CallBoundaryDef>,
+    return_addresses: BTreeMap<u64, CanonicalStorageId>,
+    security_checks: BTreeSet<u64>,
+    narrow_results: crate::lanes::CallResults,
+    /// The argument area each call's complete interface states, by its instruction.
+    argument_areas: Vec<(u64, Vec<(i64, i64)>)>,
+    reentering: BTreeSet<u64>,
+    unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
+    premises: BTreeSet<r2source::Premise>,
+}
+
+/// Which result carriers a call defines whole without its callee naming one: the same root, no
+/// byte of which the convention keeps.
+struct DefinedWhole<'a> {
+    /// What the convention keeps or reserves; none where it has no model, and then no carrier is.
+    stays: Option<Vec<CanonicalStorageId>>,
+    families: &'a RegisterFamilyInfo,
+}
+
+impl<'a> DefinedWhole<'a> {
+    fn of(context: &SourceMachineContext, arch: &'a crate::Arch) -> Self {
+        let stays = context.convention().map(|model| {
+            let stays = model.preserved.iter().chain(model.reserved.iter());
+            stays.map(|lanes| lanes.storage).collect()
+        });
+        Self {
+            stays,
+            families: arch.register_families(),
+        }
+    }
+
+    /// Whether a carrier of `clobbered` holds `result` and the convention keeps none of its family.
+    fn defines(&self, clobbered: &[CanonicalStorageId], result: CanonicalStorageId) -> bool {
+        let Some(stays) = &self.stays else {
+            return false;
+        };
+        let within =
+            (clobbered.iter()).any(|carrier| crate::semantic::storage_contains(*carrier, result));
+        let Some((start, end)) = self.families.family_extent(result.offset, result.size) else {
+            return false;
+        };
+        let kept = |kept: &CanonicalStorageId| {
+            kept.space == CanonicalStorageSpace::Register
+                && kept.offset < end
+                && start < kept.offset + u64::from(kept.size)
+        };
+        within && !stays.iter().any(kept)
+    }
+}
+
+impl BuildKey {
+    /// Every part but the argument areas.
+    fn without_areas(&self) -> impl PartialEq + '_ {
+        (
+            (&self.clobbered, &self.kept, &self.results),
+            &self.return_addresses,
+            (&self.security_checks, &self.narrow_results),
+            (&self.reentering, &self.unstated_imports, &self.premises),
+        )
+    }
+
+    /// The first part `other` states differently, for the trace.
+    fn difference(&self, other: &Self) -> String {
+        if self.kept != other.kept {
+            format!("kept set: {:?} against {:?}", self.kept, other.kept)
+        } else if self.results != other.results {
+            format!(
+                "result carrier: {:?} against {:?}",
+                self.results, other.results
+            )
+        } else if self.return_addresses != other.return_addresses {
+            "return address".to_owned()
+        } else if self.security_checks != other.security_checks {
+            "security check".to_owned()
+        } else if self.narrow_results != other.narrow_results {
+            "result width".to_owned()
+        } else if self.argument_areas != other.argument_areas {
+            "argument area".to_owned()
+        } else {
+            "premise or import".to_owned()
+        }
+    }
+
+    /// O(callees x clobbered + call sites).
+    fn of(
+        (context, arch): (&SourceMachineContext, &crate::Arch),
+        callees: &CalleeBoundaries,
+        evidence: &CalleeEvidence,
+        premises: &BTreeSet<r2source::Premise>,
+    ) -> Self {
+        let clobbered = context.call_clobbered_carriers();
+        let whole = DefinedWhole::of(context, arch);
+        let results = (callees.results.iter()).filter(|(target, _)| {
+            let result = callees.result_storages.get(*target);
+            !result.is_some_and(|result| whole.defines(clobbered, *result))
+        });
+        let results = results
+            .map(|(target, def)| (*target, def.clone()))
+            .collect();
+        let defined = |kept: &CanonicalStorageId| {
+            (clobbered.iter())
+                .any(|carrier| crate::semantic::register_storages_overlap(*kept, *carrier))
+        };
+        let kept = callees.preserved.iter().filter_map(|(target, carriers)| {
+            let kept = carriers.iter().copied().filter(defined).collect::<Vec<_>>();
+            (!kept.is_empty()).then_some((*target, kept))
+        });
+        let areas = context.raw_call_sites().keys().filter_map(|instruction| {
+            Some((*instruction, context.call_reads(Some(*instruction))?.stack?))
+        });
+        Self {
+            clobbered: clobbered.into(),
+            kept: kept.collect(),
+            results,
+            return_addresses: callees.return_addresses.clone(),
+            security_checks: callees.security_checks.clone(),
+            narrow_results: crate::lanes::CallResults::of(context),
+            argument_areas: areas.collect(),
+            reentering: evidence.reentering.clone(),
+            unstated_imports: evidence.unstated_imports.clone(),
+            premises: premises.clone(),
+        }
+    }
+}
+
+impl Constructed {
+    /// The function named, its exits and premises recorded, and sealed in its context.
+    fn seal<C: SsaWorkControl + ?Sized>(self, control: &C) -> Result<TrustedSeal, SsaPrepareError> {
+        let Self {
+            mut function,
+            machine_context,
+            finish,
+            source_block_count,
+            arch,
+            closed_world,
+            exits,
+            reuse,
+            kept: _,
+        } = self;
+        drop(reuse);
+        // A name radare2 derived from the entry address restates the address and is left absent.
+        if let SsaArtifactProvenance::TrustedSource(source) = &finish.provenance {
+            let presented = source.presentation().display_name();
+            if !r2source::display_names::is_generated_function_name(presented) {
+                function = function.named(presented.to_string());
+            }
+        }
+        let mut function = function.with_assumed_exits(&exits);
+        if closed_world {
+            function = function.assuming(r2source::Premise::ClosedWorld);
+        }
+        control.poll()?;
+        let entry_bytes = r2il::allocation::live_bytes();
+        let sealed = function.seal(&machine_context)?;
+        control.poll()?;
+        Ok(TrustedSeal {
+            sealed,
+            machine_context,
+            finish,
+            source_block_count,
+            arch,
+            entry_bytes,
+        })
+    }
+
+    /// The first part of this construction that `other` states differently, by name.
+    fn difference(&self, other: &Self) -> Option<&'static str> {
+        let text = |value: &dyn std::fmt::Debug| format!("{value:?}");
+        let facts =
+            |reuse: &Option<Reuse>| reuse.as_ref().map(|held| text(&held.provisional.facts));
+        let boundary = |finish: &Finish| finish.body_boundary.clone();
+        if text(&self.function) != text(&other.function) {
+            Some("function")
+        } else if text(&self.machine_context) != text(&other.machine_context) {
+            Some("machine context")
+        } else if facts(&self.reuse) != facts(&other.reuse) {
+            Some("provisional facts")
+        } else if boundary(&self.finish) != boundary(&other.finish) {
+            Some("body boundary")
+        } else if (self.closed_world, &self.exits) != (other.closed_world, &other.exits) {
+            Some("premises")
+        } else {
+            None
+        }
+    }
+}
+
+/// A trusted lift built and its interface recovered, not yet sealed: what a restatement of its
+/// callees updates (doc/adr-callee-builds.md).
+pub struct TrustedConstruction {
+    constructed: Constructed,
+    lifted: TrustedLiftedFunction,
+}
+
+impl TrustedConstruction {
+    /// The context the function was built in: its interface, recovered or stated.
+    pub const fn machine_context(&self) -> &SourceMachineContext {
+        &self.constructed.machine_context
+    }
+
+    /// Whether a restatement of the callees can keep this build: its interface was recovered and
+    /// no pass over it exhausted.
+    pub const fn restatable(&self) -> bool {
+        self.constructed.reuse.is_some()
+    }
+
+    /// The construction sealed, its facts not yet collected.
+    pub fn seal<C: SsaWorkControl + ?Sized>(
+        self,
+        control: &C,
+    ) -> Result<TrustedSeal, SsaPrepareError> {
+        let Self {
+            constructed,
+            lifted,
+        } = self;
+        drop(lifted);
+        constructed.seal(control)
+    }
+
+    /// This construction against other callee statements, and whether its build was kept
+    /// (`BuildKey`); equal to `construct` over the same lift, which a debug build checks.
+    pub fn restated<C: SsaWorkControl + ?Sized>(
+        self,
+        arch: Option<&crate::Arch>,
+        control: &C,
+        evidence: &CalleeEvidence,
+        premises: &BTreeSet<r2source::Premise>,
+    ) -> Result<(Self, bool), SsaPrepareError> {
+        let Self {
+            constructed,
+            lifted,
+        } = self;
+        let Constructed {
+            function, reuse, ..
+        } = constructed;
+        let prior = reuse.map(|Reuse { key, provisional }| Prior {
+            key,
+            function,
+            provisional,
+        });
+        let recovery = Recovery::Recover;
+        let constructed = TrustedSsaArtifact::construct(
+            &lifted, arch, control, evidence, premises, recovery, prior,
+        )?;
+        let kept = constructed.kept;
+        #[cfg(debug_assertions)]
+        if kept {
+            let full = TrustedSsaArtifact::construct(
+                &lifted, arch, control, evidence, premises, recovery, None,
+            )?;
+            if let Some(part) = constructed.difference(&full) {
+                panic!(
+                    "{:#x}: a restated construction differs from a rebuild in its {part}",
+                    constructed.function.entry
+                );
+            }
+        }
+        Ok((
+            Self {
+                constructed,
+                lifted,
+            },
+            kept,
+        ))
+    }
+
+    /// The first part of this construction that `other` states differently, by name: a test's
+    /// comparison of a restated construction with one built anew.
+    pub fn difference(&self, other: &Self) -> Option<&'static str> {
+        self.constructed.difference(&other.constructed)
+    }
 }
 
 /// See [`SsaArtifact::register_identity_census`].
@@ -764,6 +1082,7 @@ impl SsaArtifact {
     /// caller correlated against it and the signature derived from it see one
     /// interface rather than the capture's and a promoted copy of it.
     fn seal_body_proven_interface(&mut self) {
+        self.seal_body_result();
         let Some(index) = body_proven_format_parameter(self) else {
             return;
         };
@@ -773,6 +1092,24 @@ impl SsaArtifact {
         if let Ok(sealed) = interface.clone().with_body_proven_format_parameter(index) {
             self.machine_context.seal_function_interface(sealed);
         }
+    }
+
+    /// What the body's returns leave in the result lanes of a function a declaration states, which
+    /// recovery never read (doc/adr-result-side.md, "Declaration against body").
+    fn seal_body_result(&mut self) {
+        let context = &self.machine_context;
+        let declared = (context.function_interface()).filter(|own| own.types_are_declared());
+        let (Some(interface), Some(model)) = (declared, context.convention()) else {
+            return;
+        };
+        let body = crate::recover_interface::body_result_lanes(
+            self.function(),
+            self.graph(),
+            self.facts(),
+            model,
+        );
+        let sealed = interface.clone().with_body_result(body);
+        self.machine_context.seal_function_interface(sealed);
     }
 
     /// Run-local identity shared by every clone and downstream proof derived
@@ -1234,6 +1571,11 @@ impl SsaArtifact {
         &self.aggregate_accesses
     }
 
+    /// Each call site's member-call row, derived beside the projections (S32).
+    pub const fn member_calls(&self) -> &crate::member_call::MemberCalls {
+        &self.member_calls
+    }
+
     pub fn with_assumptions(&self, assumptions: &AssumptionSet) -> Self {
         let mut facts = PreparedFunctionFacts::collect_with_context(
             self.function(),
@@ -1251,6 +1593,12 @@ impl SsaArtifact {
             &facts.structured.memory_accesses,
             &self.machine_context,
         );
+        let member_calls = crate::member_call::collect_member_calls(
+            self.graph(),
+            &facts.call_sites,
+            &aggregate_accesses,
+            &self.machine_context,
+        );
         let mut assumed = Self {
             authority: SsaArtifactAuthority::new(),
             provenance: SsaArtifactProvenance::Manual,
@@ -1260,6 +1608,7 @@ impl SsaArtifact {
             facts,
             machine_context: self.machine_context.clone(),
             aggregate_accesses,
+            member_calls,
             spellings: self.spellings.clone(),
         };
         assumed.seal_dead_frame_stores();
@@ -1928,6 +2277,8 @@ struct CorrelatedCallSites {
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
     /// The sealed import slot each correlated `CallSlot` site calls through.
     slot_targets: BTreeMap<SourceCallSiteIdentity, u64>,
+    /// The sites whose contract is one the snapshot states for a typed member (S32).
+    member_sites: BTreeSet<SourceCallSiteIdentity>,
 }
 
 fn correlate_call_site_interfaces(
@@ -2058,12 +2409,27 @@ fn correlate_call_site_interfaces(
         }
         interfaces.push(interface);
     }
+    // A member's contract states a site no advisory call names; one the source states wins.
+    let members = source.member_calls();
+    let stated = (interfaces.iter())
+        .filter(|_| !members.is_empty())
+        .map(SourceCallSiteInterface::identity)
+        .collect::<BTreeSet<_>>();
+    let mut member_sites = BTreeSet::new();
+    for member in members {
+        let identity = member.identity();
+        if !stated.contains(&identity) {
+            member_sites.insert(identity);
+            interfaces.push(member.clone());
+        }
+    }
     CorrelatedCallSites {
         tail_calls,
         interfaces,
         callee_linkages,
         callee_names,
         slot_targets,
+        member_sites,
     }
 }
 
@@ -2321,6 +2687,24 @@ impl TrustedSsaArtifact {
         )
     }
 
+    /// Build and recover as `seal_with_callee_interfaces` does, and stop before the seal: a reader
+    /// of the interface alone pays for no seal, and a restatement of the callees updates the build.
+    pub fn construct_with_callee_interfaces<C: SsaWorkControl + ?Sized>(
+        lifted: TrustedLiftedFunction,
+        arch: Option<&crate::Arch>,
+        control: &C,
+        evidence: &CalleeEvidence,
+        premises: &BTreeSet<r2source::Premise>,
+    ) -> Result<TrustedConstruction, SsaPrepareError> {
+        let recovery = Recovery::Recover;
+        let constructed =
+            Self::construct(&lifted, arch, control, evidence, premises, recovery, None)?;
+        Ok(TrustedConstruction {
+            constructed,
+            lifted,
+        })
+    }
+
     /// The trusted lift built under `recovery` and sealed, its facts not yet collected.
     fn sealed<C: SsaWorkControl + ?Sized>(
         lifted: TrustedLiftedFunction,
@@ -2329,25 +2713,10 @@ impl TrustedSsaArtifact {
         (evidence, premises): (&CalleeEvidence, &BTreeSet<r2source::Premise>),
         recovery: Recovery,
     ) -> Result<TrustedSeal, SsaPrepareError> {
-        let Constructed {
-            function,
-            machine_context,
-            finish,
-            source_block_count,
-            arch,
-        } = Self::construct(lifted, arch, control, evidence, premises, recovery)?;
-        control.poll()?;
-        let entry_bytes = r2il::allocation::live_bytes();
-        let sealed = function.seal(&machine_context)?;
-        control.poll()?;
-        Ok(TrustedSeal {
-            sealed,
-            machine_context,
-            finish,
-            source_block_count,
-            arch,
-            entry_bytes,
-        })
+        let constructed =
+            Self::construct(&lifted, arch, control, evidence, premises, recovery, None)?;
+        drop(lifted);
+        constructed.seal(control)
     }
 
     /// The function built against its interface, stated or recovered, and the context it is sealed in.
@@ -2356,12 +2725,13 @@ impl TrustedSsaArtifact {
         reason = "the trusted lift, its tables, the work budget, the callees' evidence, the accepted premises and the recovery are construction's independent inputs"
     )]
     fn construct<C: SsaWorkControl + ?Sized>(
-        lifted: TrustedLiftedFunction,
+        lifted: &TrustedLiftedFunction,
         arch: Option<&crate::Arch>,
         control: &C,
         evidence: &CalleeEvidence,
         premises: &BTreeSet<r2source::Premise>,
         recovery: Recovery,
+        prior: Option<Prior>,
     ) -> Result<Constructed, SsaPrepareError> {
         let CalleeEvidence {
             interfaces: callee_interfaces,
@@ -2463,6 +2833,9 @@ impl TrustedSsaArtifact {
         // nothing construction reads differs between the two contexts.
         let stated_interface = source.function_interface().is_some();
         let mut built = None;
+        // The build recovery read, its prep facts and what it read of the callees.
+        let mut reuse = None;
+        let mut kept = false;
         // Whether the recovered result is void on the premise that no caller outside the image reads it.
         let mut closed_world = false;
         let mut body_boundary = None;
@@ -2504,22 +2877,49 @@ impl TrustedSsaArtifact {
                 provisional_machine_context.set_callee_statements(&callee_statements);
                 provisional_machine_context
                     .set_slot_targets(correlated_call_sites.slot_targets.clone());
+                provisional_machine_context
+                    .set_member_call_sites(correlated_call_sites.member_sites.clone());
                 provisional_machine_context.set_reentering_callees(reentering.clone());
                 provisional_machine_context.set_unstated_imports(unstated_imports.clone());
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
                 provisional_machine_context.set_convention(source.shared_convention());
-                let Ok(preliminary) =
-                    SSAFunction::from_blocks_for_decompile_with_interface_and_control(
-                        &blocks,
-                        Some(&arch),
-                        InterfaceQuestions::before_recovery(source.convention_slots()),
-                        &provisional_machine_context,
-                        &callees,
-                        Some(&declared_successors),
-                        control,
-                    )
-                else {
+                // A build against callees that state the same to it is this build.
+                let key = BuildKey::of(
+                    (&provisional_machine_context, &arch),
+                    &callees,
+                    evidence,
+                    premises,
+                );
+                if let Some(prior) = prior.as_ref().filter(|prior| !prior.builds(&key)) {
+                    r2il::refusal_evidence!(
+                        "build-key",
+                        "{:#x}: the callees state another {}",
+                        source.image().entry_address(),
+                        prior.key.difference(&key)
+                    );
+                }
+                let (preliminary, held) = match prior.filter(|prior| prior.builds(&key)) {
+                    Some(prior) => {
+                        kept = true;
+                        let mut function = prior.function;
+                        function.set_callee_passes(callees.preserved());
+                        (Ok(function), Some(prior.provisional))
+                    }
+                    None => (
+                        SSAFunction::from_blocks_for_decompile_with_interface_and_control(
+                            &blocks,
+                            Some(&arch),
+                            InterfaceQuestions::before_recovery(source.convention_slots()),
+                            &provisional_machine_context,
+                            &callees,
+                            Some(&declared_successors),
+                            control,
+                        ),
+                        None,
+                    ),
+                };
+                let Ok(preliminary) = preliminary else {
                     r2il::refusal_evidence!(
                         "interface-recovery",
                         "the decompile-normalized preliminary SSA needed to read the ABI off \
@@ -2539,9 +2939,14 @@ impl TrustedSsaArtifact {
                 // (boundary constants, lane projections, demand) and derives
                 // its facts afresh from the rewritten function.
                 let preliminary = built.insert(preliminary);
-                let Ok(preliminary_prep) = preliminary.provisional_prep_facts(control) else {
-                    break 'recovered None;
+                let preliminary_prep = match held {
+                    Some(held) => held,
+                    None => match preliminary.provisional_prep_facts(control) {
+                        Ok(facts) => facts,
+                        Err(_) => break 'recovered None,
+                    },
                 };
+                let preliminary_prep = &reuse.insert((key, preliminary_prep)).1;
                 // The preliminary build may be the one sealed: its provisional facts and
                 // recovery's own are passes over it, and an exhausted one refuses it.
                 if let Some(exhausted) = preliminary_prep.facts.exhausted {
@@ -2549,7 +2954,7 @@ impl TrustedSsaArtifact {
                 }
                 let recovered = crate::recover_interface::recover_interface_with_context(
                     preliminary,
-                    &preliminary_prep,
+                    preliminary_prep,
                     source.convention_slots(),
                     &provisional_machine_context,
                     crate::recover_interface::Stated::of(&source),
@@ -2643,6 +3048,7 @@ impl TrustedSsaArtifact {
         }
         machine_context.set_callee_statements(&callee_statements);
         machine_context.set_slot_targets(correlated_call_sites.slot_targets);
+        machine_context.set_member_call_sites(correlated_call_sites.member_sites);
         machine_context.set_frame_saves(source.image().frame_saves());
         machine_context.set_accepted_premises(premises.clone());
         machine_context.set_convention(source.shared_convention());
@@ -2677,7 +3083,7 @@ impl TrustedSsaArtifact {
         );
         machine_context.bind_source_string_literals(source.image().string_literals());
         machine_context.bind_read_only(source.image().read_only());
-        let mut function = match built {
+        let function = match built {
             Some(built) => built,
             None => {
                 let questions = match stated_interface {
@@ -2695,24 +3101,18 @@ impl TrustedSsaArtifact {
                 )?
             }
         };
-        // What the source calls this function. A name radare2 derived from the
-        // entry address restates the address and is left absent, so consumers
-        // that would only spell it back out are not misled into thinking the
-        // function was named.
-        let presented = source.presentation().display_name();
-        if !r2source::display_names::is_generated_function_name(presented) {
-            function = function.named(presented.to_string());
-        }
         if function.entry != source.image().entry_address() {
             return Err(malformed_ssa_input());
         }
-        let mut function = function.with_assumed_exits(exits);
-        if closed_world {
-            function = function.assuming(r2source::Premise::ClosedWorld);
-        }
+        // A build an exhausted pass marked is not offered again.
+        let reuse = reuse.filter(|_| function.exhausted().is_none());
         control.poll()?;
         Ok(Constructed {
             function,
+            closed_world,
+            exits: exits.clone(),
+            reuse: reuse.map(|(key, provisional)| Reuse { key, provisional }),
+            kept,
             machine_context,
             finish: Finish {
                 provenance: SsaArtifactProvenance::TrustedSource(source),
@@ -2864,6 +3264,9 @@ pub struct SSAFunction {
     supervisor_calls: BTreeSet<u32>,
     /// What each direct callee proves it leaves as found, less its result: a call to it passes those (D212).
     callee_passes: Arc<CalleePreservedCarriers>,
+    /// Whether promotion's answer read the stack a call may read: a frame address stored where
+    /// some call's argument area could reach (`BuildKey`).
+    argument_areas_read: bool,
     /// The lifted memory operations promotion took out of memory.
     ///
     /// A promoted slot access is a copy of a variable in the prepared
@@ -3285,6 +3688,7 @@ impl Clone for SSAFunction {
             call_preserved_carriers: self.call_preserved_carriers,
             supervisor_calls: self.supervisor_calls.clone(),
             callee_passes: Arc::clone(&self.callee_passes),
+            argument_areas_read: self.argument_areas_read,
             promoted_slots: self.promoted_slots.clone(),
             compiler_inserted: self.compiler_inserted.clone(),
             compiler_inserted_blocks: self.compiler_inserted_blocks.clone(),
@@ -3670,6 +4074,8 @@ pub struct AssumedExits {
 pub(crate) struct CalleeBoundaries {
     preserved: CalleePreservedCarriers,
     results: BTreeMap<u64, CallBoundaryDef>,
+    /// The storage of each of `results`.
+    result_storages: BTreeMap<u64, CanonicalStorageId>,
     /// Callees whose body proves the result carrier holds the return address.
     return_addresses: BTreeMap<u64, CanonicalStorageId>,
     /// Callees whose body is a proven `/GS` check, which returns no result.
@@ -3686,6 +4092,7 @@ impl CalleeBoundaries {
         let names = arch.map(crate::Arch::register_names);
         let mut preserved = preserved.clone();
         let mut results = BTreeMap::new();
+        let mut result_storages = BTreeMap::new();
         let mut return_addresses = BTreeMap::new();
         let mut security_checks = BTreeSet::new();
         for (address, interface) in interfaces {
@@ -3722,6 +4129,7 @@ impl CalleeBoundaries {
                     size: storage.size,
                 },
             );
+            result_storages.insert(*address, storage);
             if interface.body_proven_return_address() && returned.len() == 1 {
                 return_addresses.insert(*address, storage);
             }
@@ -3729,6 +4137,7 @@ impl CalleeBoundaries {
         Self {
             preserved,
             results,
+            result_storages,
             return_addresses,
             security_checks,
         }
@@ -3822,12 +4231,17 @@ impl SSAFunction {
         self.stack_pointer_carrier
     }
 
-    /// Whether this user operation enters the supervisor, whose kernel-written result no contract names.
+    /// State what each direct callee leaves as found, for a build kept against other statements.
+    pub(crate) fn set_callee_passes(&mut self, preserved: &CalleePreservedCarriers) {
+        self.callee_passes = Arc::new(preserved.clone());
+    }
+
     /// Whether the direct callee at `target` leaves every byte of `storage` as it found it.
     pub(crate) fn call_passes(&self, target: u64, storage: CanonicalStorageId) -> bool {
         (self.callee_passes.get(&target)).is_some_and(|kept| crate::semantic::covers(kept, storage))
     }
 
+    /// Whether this user operation enters the supervisor, whose kernel-written result no contract names.
     pub fn enters_supervisor<V>(&self, op: &SSAOp<V>) -> bool {
         matches!(op, SSAOp::CallOther { userop, .. } if self.supervisor_calls.contains(userop))
     }
@@ -3838,7 +4252,16 @@ impl SSAFunction {
         &self.promoted_slots
     }
 
-    pub(crate) fn record_promoted_slots(&mut self, ops: crate::dense::IdSet<crate::arena::OpId>) {
+    /// Whether what promotion decided read some call's argument area.
+    pub(crate) const fn argument_areas_read(&self) -> bool {
+        self.argument_areas_read
+    }
+
+    pub(crate) fn record_promoted_slots(
+        &mut self,
+        (ops, by_area): (crate::dense::IdSet<crate::arena::OpId>, bool),
+    ) {
+        self.argument_areas_read = by_area;
         let arena = self.arena();
         self.promoted_slots = (ops.iter())
             .filter_map(|op| match arena.origin(op)? {
@@ -3879,6 +4302,11 @@ impl SSAFunction {
         self.checked_differences.extend(differences);
         self.checked_differences.sort_unstable();
         self.checked_differences.dedup();
+    }
+
+    /// Whether a decided check wrote anything: its residue is no C expression's (case 3).
+    pub(crate) fn has_compiler_inserted_writes(&self) -> bool {
+        !self.compiler_inserted.is_empty() || !self.checked_differences.is_empty()
     }
 
     /// Whether `var` is a decided canary check's difference (doc/adr-scratch-result.md, case 3).
@@ -4469,6 +4897,14 @@ impl RegisterFamilyInfo {
                 root.offset <= offset && end <= root.offset.saturating_add(u64::from(root.width))
             })
             .or_else(|| self.widest_slot_containing(member))
+    }
+
+    /// Where the family a storage range belongs to begins and ends in the register file.
+    pub(crate) fn family_extent(&self, offset: u64, size: u32) -> Option<(u64, u64)> {
+        let end = offset.checked_add(u64::from(size))?;
+        let index = (self.family_ranges).partition_point(|(start, _, _)| *start <= offset);
+        let (start, family_end, _) = *self.family_ranges[..index].iter().next_back()?;
+        (start <= offset && end <= family_end).then_some((start, family_end))
     }
 
     fn widest_slot_containing(&self, member: RegisterFamilyMember) -> Option<RegisterFamilySlot> {

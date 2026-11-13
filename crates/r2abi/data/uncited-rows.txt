@@ -25,8 +25,6 @@ getprogname | no glibc 2.39 header declares it
 strlcpy | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 usleep | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 bind | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-open | variadic with no format: a `Tail::Variadic` call renders as a residual, where radare2's fixed list renders
-openat | variadic with no format: a `Tail::Variadic` call renders as a residual, where radare2's fixed list renders
 imaxdiv | a record or an array typedef by value, which the row reader does not spell
 maskrune | no glibc 2.39 header declares it
 fesetexceptflag | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
@@ -59,14 +57,12 @@ fts_read_INODE64 | no glibc 2.39 header declares it
 fts_close_INODE64 | no glibc 2.39 header declares it
 fts_set_INODE64 | no glibc 2.39 header declares it
 fts_children_INODE64 | no glibc 2.39 header declares it
-fstat | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 mktime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 asctime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 gmtime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 localtime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 strftime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 wcsftime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
-lstat | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 gets | ISO C11 removed it, and no mode of glibc 2.39's <stdio.h> declares it
 signal | a function pointer parameter, which the row reader does not spell
 inet_aton | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
@@ -108,7 +104,6 @@ getbsize | no glibc 2.39 header declares it
 fflagtostr | no glibc 2.39 header declares it
 sigprocmask | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 fflush_unlocked | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
-stat | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 utime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 utimes | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 
@@ -116,11 +111,9 @@ utimes | its header names a record radare2 spelled otherwise, and a prototype na
 xalloc_die | no glibc 2.39 header declares it
 __libc_start_main | glibc's start-up entry, which no installed header declares
 atexit | a function pointer parameter, which the row reader does not spell
-prctl | variadic with no format: a `Tail::Variadic` call renders as a residual, where radare2's fixed list renders
 ctype_b_loc | no glibc 2.39 header declares it
 ctype_toupper_loc | no glibc 2.39 header declares it
 ctype_tolower_loc | no glibc 2.39 header declares it
-open64 | variadic with no format: a `Tail::Variadic` call renders as a residual, where radare2's fixed list renders
 stat64 | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 lstat64 | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 fstat64 | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)

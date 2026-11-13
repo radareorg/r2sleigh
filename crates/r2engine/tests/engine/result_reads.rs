@@ -50,7 +50,7 @@ fn a_caller_reading_the_integer_register_decides_the_result() {
         )
     };
     let text = rendered(program());
-    assert!(text.starts_with("uint64_t f("), "{text}");
+    assert!(text.starts_with("r2sleigh_word_u32 f("), "{text}");
     assert!(text.contains("7"), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
@@ -423,7 +423,7 @@ fn a_value_in_two_registers_is_one_result_where_callers_read_the_second() {
     assert!(f.contains("<< 64U"), "the high half above the low: {f}");
     assert!(!f.contains("r2sleigh_residual"), "{f}");
     assert!(
-        caller.contains("__uint128_t f(uint64_t, uint64_t);"),
+        caller.contains("__uint128_t f(r2sleigh_word_u64, r2sleigh_word_u64);"),
         "{caller}"
     );
     assert!(
@@ -609,7 +609,10 @@ const BYTE_OVER_THE_CALLERS: &[u8] = &[
 fn a_byte_written_over_the_callers_register_is_no_half_of_the_result() {
     let functions = [("f", BASE, 0x0a), ("caller", BASE + 0x10, 9)];
     let f = rendered(Literal::of_code(BYTE_OVER_THE_CALLERS, &functions));
-    assert!(f.starts_with("r2sleigh_result_u64 f(uint64_t arg0)"), "{f}");
+    assert!(
+        f.starts_with("r2sleigh_result_u64 f(r2sleigh_word_u64 arg0)"),
+        "{f}"
+    );
     assert!(!f.contains("second register is open"), "{f}");
 }
 
@@ -733,7 +736,7 @@ fn a_call_in_a_switch_arm_reads_the_result_as_any_call_does() {
         &[("f", BASE, 0x0a), ("caller", BASE + 0x10, 0x52)],
     );
     let text = rendered(program);
-    assert!(text.starts_with("uint64_t f("), "{text}");
+    assert!(text.starts_with("r2sleigh_word_u32 f("), "{text}");
     assert!(!text.contains("r2sleigh_residual"), "{text}");
 }
 

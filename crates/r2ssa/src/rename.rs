@@ -32,17 +32,27 @@ impl From<&RenameIdentity> for RenameProjection {
     }
 }
 
+/// One identity's renaming state.
+#[derive(Debug)]
+struct Versions {
+    /// The top of the stack is the current version.
+    stack: Vec<u32>,
+    /// Dense deterministic discriminator among exact identities whose public name/width
+    /// projection is otherwise identical; none until the identity is initialized.
+    disambiguator: Option<u32>,
+    /// Which of `RenameContext::counters` numbers its versions.
+    counter: usize,
+}
+
 /// Context for SSA renaming.
 #[derive(Debug)]
 pub struct RenameContext {
-    /// Stack of versions for each exact semantic-name/width/storage identity.
-    /// The top of the stack is the current version.
-    stacks: FxHashMap<RenameIdentity, Vec<u32>>,
-    /// Collision-free version namespace for the user-facing SSAVar projection.
-    counters: FxHashMap<RenameProjection, u32>,
-    /// Dense deterministic discriminator for exact identities whose public
-    /// name/width projection is otherwise identical.
-    disambiguators: FxHashMap<RenameIdentity, u32>,
+    /// Each exact semantic-name/width/storage identity's versions: one lookup serves a read or
+    /// a write.
+    states: FxHashMap<RenameIdentity, Versions>,
+    /// Collision-free version namespace for the user-facing SSAVar projection, by `counter_of`.
+    counters: Vec<u32>,
+    counter_of: FxHashMap<RenameProjection, usize>,
     next_disambiguator: FxHashMap<RenameProjection, u32>,
     /// The register geometry: a lane renames as a projection of its family's
     /// root (doc/adr-register-identity.md). `None` keeps exact-varnode identities.
@@ -213,9 +223,9 @@ impl RenameContext {
 
     pub fn with_families(families: Option<Arc<RegisterFamilyInfo>>) -> Self {
         Self {
-            stacks: FxHashMap::default(),
-            counters: FxHashMap::default(),
-            disambiguators: FxHashMap::default(),
+            states: FxHashMap::default(),
+            counters: Vec::new(),
+            counter_of: FxHashMap::default(),
             next_disambiguator: FxHashMap::default(),
             families,
             lanes: LaneState::default(),
@@ -363,80 +373,105 @@ impl RenameContext {
         }
     }
 
+    /// The counter that numbers the versions of one name and width.
+    fn counter_index(&mut self, projection: RenameProjection) -> usize {
+        let next = self.counters.len();
+        let index = *self.counter_of.entry(projection).or_insert(next);
+        if index == next {
+            self.counters.push(0);
+        }
+        index
+    }
+
     /// Initialize one exact rename identity.
     pub fn init_identity(&mut self, identity: RenameIdentity) {
-        let projection = RenameProjection::from(&identity);
-        if !self.disambiguators.contains_key(&identity) {
-            let next = self
-                .next_disambiguator
-                .entry(projection.clone())
-                .or_insert(0);
-            self.disambiguators.insert(identity.clone(), *next);
-            *next = next.checked_add(1).expect("rename discriminator exhausted");
+        if self.initialized(&identity) {
+            return;
         }
-        // Start with version 0 on the stack (representing "undefined" or function entry)
-        self.stacks.entry(identity).or_insert_with(|| vec![0]);
-        self.counters.entry(projection).or_insert(0);
+        let projection = RenameProjection::from(&identity);
+        let counter = self.counter_index(projection.clone());
+        let next = self.next_disambiguator.entry(projection).or_insert(0);
+        let disambiguator = Some(*next);
+        *next = next.checked_add(1).expect("rename discriminator exhausted");
+        match self.states.get_mut(&identity) {
+            Some(state) => state.disambiguator = disambiguator,
+            None => {
+                // Start with version 0 on the stack (representing "undefined" or function entry)
+                let state = Versions {
+                    stack: vec![0],
+                    disambiguator,
+                    counter,
+                };
+                self.states.insert(identity, state);
+            }
+        }
     }
 
-    /// Get the current version of a variable (for reading).
-    pub fn current_version(&self, identity: &RenameIdentity) -> u32 {
-        self.stacks
-            .get(identity)
-            .and_then(|stack| stack.last().copied())
-            .unwrap_or(0)
+    fn initialized(&self, identity: &RenameIdentity) -> bool {
+        (self.states.get(identity)).is_some_and(|state| state.disambiguator.is_some())
     }
 
-    /// Generate a new version of a variable (for writing).
-    pub fn new_version(&mut self, identity: &RenameIdentity) -> u32 {
-        let counter = self
-            .counters
-            .entry(RenameProjection::from(identity))
-            .or_insert(0);
+    /// Initialize an identity a call defines: one lookup where an earlier call already did.
+    fn init_call_identity(&mut self, identity: &RenameIdentity) {
+        if !self.initialized(identity) {
+            self.init_identity(identity.clone());
+        }
+    }
+
+    /// A new version of a variable pushed, and its disambiguator: one lookup where it is known.
+    fn push_version(&mut self, identity: &RenameIdentity) -> (u32, u32) {
+        if !self.states.contains_key(identity) {
+            let state = Versions {
+                stack: Vec::new(),
+                disambiguator: None,
+                counter: self.counter_index(RenameProjection::from(identity)),
+            };
+            self.states.insert(identity.clone(), state);
+        }
+        let state = (self.states.get_mut(identity)).expect("the state just ensured");
+        let counter = &mut self.counters[state.counter];
         *counter += 1;
-        let version = *counter;
-        self.stacks
-            .entry(identity.clone())
-            .or_default()
-            .push(version);
-        version
+        state.stack.push(*counter);
+        (*counter, state.disambiguator.unwrap_or(0))
     }
 
     /// Pop a version from a variable's stack (when leaving a block's scope).
     pub fn pop_version(&mut self, identity: &RenameIdentity) {
-        if let Some(stack) = self.stacks.get_mut(identity) {
-            stack.pop();
+        if let Some(state) = self.states.get_mut(identity) {
+            state.stack.pop();
         }
     }
 
     /// Create an SSAVar for reading one exact rename identity.
     pub fn read_var(&self, identity: &RenameIdentity) -> SSAVar {
-        self.var_at(identity, self.current_version(identity))
+        let state = self.states.get(identity);
+        let version = state.and_then(|state| state.stack.last().copied());
+        let disambiguator = state.and_then(|state| state.disambiguator);
+        identity.as_var(version.unwrap_or(0), disambiguator.unwrap_or(0))
     }
 
     fn var_at(&self, identity: &RenameIdentity, version: u32) -> SSAVar {
-        identity.as_var(
-            version,
-            self.disambiguators.get(identity).copied().unwrap_or(0),
-        )
+        let state = self.states.get(identity);
+        let disambiguator = state.and_then(|state| state.disambiguator);
+        identity.as_var(version, disambiguator.unwrap_or(0))
     }
 
     /// Create an SSAVar for writing one exact rename identity.
     pub fn write_var(&mut self, identity: &RenameIdentity) -> SSAVar {
-        let disambiguator = self.disambiguators.get(identity).copied().unwrap_or(0);
-        identity.as_var(self.new_version(identity), disambiguator)
+        let (version, disambiguator) = self.push_version(identity);
+        identity.as_var(version, disambiguator)
     }
 
     /// Whether this identity has a version stack, meaning the body defines it.
     pub fn knows_identity(&self, identity: &RenameIdentity) -> bool {
-        self.stacks.contains_key(identity)
+        self.states.contains_key(identity)
     }
 
     /// Find initialized identities with this register spelling and exact width.
     pub fn matching_identities_ci(&self, name: &str, size: u32) -> Vec<RenameIdentity> {
         let needle = name.to_ascii_lowercase();
         let mut matches: Vec<RenameIdentity> = self
-            .stacks
+            .states
             .keys()
             .filter(|candidate| {
                 candidate.size == size && candidate.name.to_ascii_lowercase() == needle
@@ -1024,7 +1059,7 @@ fn append_call_boundary_defs(
         {
             continue;
         }
-        ctx.init_identity(identity.clone());
+        ctx.init_call_identity(identity);
         if !results.contains(identity)
             && let Some(lanes) = define_written_lanes(block_ops, ctx, call_boundaries, storage)
         {

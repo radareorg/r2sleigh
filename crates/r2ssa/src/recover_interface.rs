@@ -85,14 +85,18 @@ impl RecoveredParameter {
 pub struct RecoveredResult {
     slot: CanonicalStorageId,
     observed: CanonicalStorageId,
-    /// Every return path sign-extends the observed bytes into the byte above
-    /// them: the function computed a signed value of the observed width.
-    signed: bool,
     /// The carrier is the float result register, read by callers as a float of the observed width.
     float: bool,
+    /// What every return path leaves above the observed bytes (doc/adr-result-side.md, section 2).
+    above: r2source::SourceAbove,
 }
 
 impl RecoveredResult {
+    /// The fill every return path leaves above the observed bytes, `Undefined` where they differ.
+    pub const fn above(self) -> r2source::SourceAbove {
+        self.above
+    }
+
     /// The convention's result register.
     pub const fn slot(self) -> CanonicalStorageId {
         self.slot
@@ -101,11 +105,6 @@ impl RecoveredResult {
     /// The widest definition that contributes to the result.
     pub const fn observed(self) -> CanonicalStorageId {
         self.observed
-    }
-
-    /// Whether every return path sign-extends the result above its width.
-    pub const fn signed(self) -> bool {
-        self.signed
     }
 
     /// Whether the result is a float in the float result register.
@@ -217,6 +216,8 @@ pub struct RecoveredInterface {
     closed: Option<r2source::SourceClosedResult>,
     /// Whether some return hands back a parameter through a merge: an entry input, spelled.
     result_holds_input: bool,
+    /// No return path is reached, so the `Void` result states what a call leaves, never a type.
+    unreached: bool,
     /// How the body uses each slot and the bytes it leaves in each result lane.
     boundary: crate::body_boundary::BodyBoundary,
     /// Whether the body is a proven `/GS` check (`security_cookie::proves_check`).
@@ -673,6 +674,7 @@ fn observed_entry_read_storages(
             reads.push(storage);
         }
     };
+    let mut lanes = ReadLanes::new(graph, observations);
     for value in &graph.values {
         if observations.contains(value.id)
             && graph.def_inst(value.id).is_none()
@@ -690,10 +692,8 @@ fn observed_entry_read_storages(
             // lane, and six take the whole register. Covering a byte the
             // program did not read is the side a formal may err on; a lane
             // no register has would leave the interface unmintable.
-            let storage = observations
-                .observed_extent_bytes(value.id)
-                .map(u32::next_power_of_two)
-                .filter(|bytes| *bytes < root.size)
+            let storage = Some(lanes.lane(value.id))
+                .filter(|bytes| *bytes > 0 && *bytes < root.size)
                 .map_or(root, |size| CanonicalStorageId { size, ..root });
             // Which observation this parameter rests on is the whole question
             // when the count is wrong, and it is knowable only here.
@@ -732,6 +732,82 @@ fn observed_entry_read_storages(
         }
     }
     reads
+}
+
+/// The widest offset-0 lane of an entry value an operation reads whole, which is the width it is
+/// read at; the bytes it demands are narrower under a mask (`and edi, 1` reads `edi`; D266).
+struct ReadLanes<'a> {
+    graph: &'a SsaGraph,
+    observations: &'a crate::deadphi::ProvenProgramObservations,
+    /// Bytes per value, `UNSEEN` before it is asked and `ASKING` on a cycle through merges.
+    lanes: Vec<u32>,
+}
+
+impl<'a> ReadLanes<'a> {
+    const UNSEEN: u32 = u32::MAX;
+    const ASKING: u32 = u32::MAX - 1;
+
+    fn new(
+        graph: &'a SsaGraph,
+        observations: &'a crate::deadphi::ProvenProgramObservations,
+    ) -> Self {
+        let lanes = vec![Self::UNSEEN; graph.values.len()];
+        Self {
+            graph,
+            observations,
+            lanes,
+        }
+    }
+
+    /// `value`'s lane in bytes, a power of two that covers every byte observed of it; 0 where
+    /// nothing observes it. Each value is answered once: O(uses reached through merges).
+    fn lane(&mut self, value: crate::ValueId) -> u32 {
+        match self.lanes.get(value.0 as usize).copied() {
+            Some(Self::ASKING) | None => return 0,
+            Some(Self::UNSEEN) => {}
+            Some(known) => return known,
+        }
+        self.lanes[value.0 as usize] = Self::ASKING;
+        let size = self.graph.var(value).size;
+        let extent = (self.observations.observed_extent_bytes(value)).unwrap_or(0);
+        let mut lane = extent;
+        for site in self.graph.use_sites(value).to_vec() {
+            lane = lane.max(self.read_at(site, size));
+        }
+        let lane = match lane {
+            0 => 0,
+            lane => lane.next_power_of_two().min(size.next_power_of_two()),
+        };
+        self.lanes[value.0 as usize] = lane;
+        lane
+    }
+
+    /// The bytes of a `size`-byte value the use at `site` reads beyond what it demands: a merge, a
+    /// copy or an offset-0 SUBPIECE reads its output's lane, and a constant mask its output's bytes.
+    fn read_at(&mut self, site: crate::graph::UseSite, size: u32) -> u32 {
+        let Some(inst) = self.graph.inst(site.inst) else {
+            return 0;
+        };
+        let Some(dst) = inst.output else {
+            return 0;
+        };
+        let op = match &inst.payload {
+            crate::graph::InstPayload::Phi { .. } => return self.lane(dst),
+            crate::graph::InstPayload::Op(op) => op,
+        };
+        match op {
+            crate::SSAOp::Copy { .. } | crate::SSAOp::Subpiece { offset: 0, .. } => self.lane(dst),
+            crate::SSAOp::IntAnd { a, b, .. }
+            | crate::SSAOp::IntOr { a, b, .. }
+            | crate::SSAOp::IntXor { a, b, .. }
+                if self.observations.contains(dst)
+                    && [a, b].iter().any(|mask| self.graph.var(**mask).is_const()) =>
+            {
+                (self.observations.observed_extent_bytes(dst)).map_or(size, |bytes| bytes.min(size))
+            }
+            _ => 0,
+        }
+    }
 }
 
 /// Storages this function hands to a call without ever defining them.
@@ -1030,6 +1106,7 @@ fn returned_result(
     let untouched = !entry_undefined
         && (live_out.unresolved_blocks().next().is_some() || (merged_entry && !input));
     let result = if !live_out.has_returns() {
+        // A call leaves nothing where control never comes back; the header reads `unreached`.
         if closed_by_calls_that_do_not_return(func) {
             RecoveredFunctionResult::Void
         } else {
@@ -1466,10 +1543,17 @@ fn recovered_result_over(
     } = *returns;
     let written = func.written_or_captured();
     let mut observed = None;
-    let mut signed = true;
+    // Each path's bytes above its own width; a path that leaves none states no fill.
+    let mut above = Vec::new();
+    // A return no write reaches leaves the caller's bytes above: no fill is stated.
+    let mut every_path_writes = live_out.unresolved_blocks().next().is_none();
     for value in live_out.iter() {
         match returned_by_call(graph, facts, value) {
-            ReturnedByCall::Void => continue,
+            ReturnedByCall::Void => {
+                every_path_writes = false;
+                continue;
+            }
+            // A seed starts a cycle's fixpoint from its own paths: the calls' reads raise it.
             ReturnedByCall::Unstated(_) | ReturnedByCall::Undecided(_) if skip_unstated => continue,
             ReturnedByCall::Unstated(_) | ReturnedByCall::Undecided(_) => {
                 return RecoveredFunctionResult::Unproven;
@@ -1485,6 +1569,7 @@ fn recovered_result_over(
         let bytes = written_bytes(&written, graph, value, &mut BTreeSet::new());
         // Undefined joined with data is data; a path of undefined bytes alone leaves no result.
         if crate::lanes::defines_nothing(&bytes, storage, entry_undefined) {
+            every_path_writes = false;
             continue;
         }
         // A path that writes no byte of the carrier hands back what the
@@ -1493,7 +1578,8 @@ fn recovered_result_over(
         // carrier's. Whether that hands-back is a result at all is decided
         // above, by the definitions that reach the return.
         let observed_size = crate::lanes::written_width(&bytes, storage).unwrap_or(storage.size);
-        signed &= crate::lanes::signed(&bytes, observed_size);
+        every_path_writes &= storage.size == slot.size;
+        above.push(bytes);
         let storage = CanonicalStorageId {
             space: slot.space,
             offset: slot.offset,
@@ -1504,11 +1590,15 @@ fn recovered_result_over(
         }
     }
     observed.map_or(RecoveredFunctionResult::Void, |observed| {
+        let above = match every_path_writes {
+            true => crate::lanes::above(&above, observed.size),
+            false => r2source::SourceAbove::Undefined,
+        };
         RecoveredFunctionResult::Register(RecoveredResult {
             slot,
             observed,
-            signed,
             float: false,
+            above,
         })
     })
 }
@@ -1681,13 +1771,11 @@ fn recover_interface_inner(
         }
     };
     let facts = if let Some(machine_context) = machine_context {
-        crate::semantic::PreparedFunctionFacts::collect_with_context(
+        crate::semantic::PreparedFunctionFacts::collect_for_recovery(
             func,
             prep,
             graph,
-            &crate::AssumptionSet::default(),
             machine_context,
-            "recover",
         )?
     } else {
         crate::semantic::PreparedFunctionFacts::collect(func, graph)?
@@ -1762,9 +1850,10 @@ fn recover_interface_inner(
     let mut beside_void_tails = None;
     let mut result = match tail {
         // A group states no exact tail result (`stated_result`).
-        TailResult::Unproven | TailResult::Exact(SourceCallResult::Unproven { .. }) => {
-            RecoveredFunctionResult::Unproven
-        }
+        TailResult::Unproven
+        | TailResult::Exact(
+            SourceCallResult::Unproven { .. } | SourceCallResult::Unstated { .. },
+        ) => RecoveredFunctionResult::Unproven,
         // The tail callee's value is this function's, at the width the callee states.
         TailResult::Exact(SourceCallResult::Register {
             storage: slot,
@@ -1774,15 +1863,15 @@ fn recover_interface_inner(
                 size: u32::from(width.logical),
                 ..slot
             };
-            let observed = match width.fills(slot) {
-                true => slot,
-                false => joined_with_direct_returns(func, graph, &facts, (slot, narrow)),
+            let (observed, above) = match width.fills(slot) {
+                true => (slot, r2source::SourceAbove::Undefined),
+                false => joined_with_direct_returns(func, graph, &facts, (slot, narrow), width),
             };
             RecoveredFunctionResult::Register(RecoveredResult {
                 slot,
                 observed,
-                signed: observed == narrow && width.above == r2source::SourceAbove::Sign,
                 float: false,
+                above,
             })
         }
         TailResult::Exact(SourceCallResult::Pair { low, high }) => {
@@ -1807,6 +1896,7 @@ fn recover_interface_inner(
     };
     let mut applied = None;
     let mut result_holds_input = false;
+    let mut unreached = false;
     // An exact tail-call interface owns this boundary. Looking at the value
     // present before the branch would instead mistake a call argument for the
     // value the callee returns into the same register.
@@ -1816,6 +1906,7 @@ fn recover_interface_inner(
         let (recovered, returned) =
             returned_result(func, graph, &facts, &candidate_live_out, slots);
         result = recovered;
+        unreached = !candidate_live_out.has_returns();
         let handed_back = returned == Returned::HandedBack;
         result_holds_input = returned == Returned::Input;
         if result == RecoveredFunctionResult::Unproven {
@@ -1833,6 +1924,7 @@ fn recover_interface_inner(
                 float: None,
                 second: None,
                 integer_undefined: false,
+                float_second: None,
             });
         }
         // A body that writes both result registers on its way out hands back one of them: the
@@ -1852,8 +1944,8 @@ fn recover_interface_inner(
                     result = RecoveredFunctionResult::Register(RecoveredResult {
                         slot: observed,
                         observed,
-                        signed: false,
                         float: true,
+                        above: r2source::SourceAbove::Undefined,
                     });
                     candidate_live_out = float_live_out;
                     applied = closed;
@@ -1864,6 +1956,7 @@ fn recover_interface_inner(
                         float: Some(float),
                         second: None,
                         integer_undefined: false,
+                        float_second: None,
                     });
                     result = RecoveredFunctionResult::Unproven;
                     result_causes.insert(SourceResultCause::Ambiguous);
@@ -1883,8 +1976,8 @@ fn recover_interface_inner(
                     result = RecoveredFunctionResult::Register(RecoveredResult {
                         slot: observed,
                         observed,
-                        signed: false,
                         float: true,
+                        above: r2source::SourceAbove::Undefined,
                     });
                     result_carriers = None;
                     candidate_live_out = float_live_out;
@@ -1906,6 +1999,7 @@ fn recover_interface_inner(
                         float: Some(float),
                         second: None,
                         integer_undefined: true,
+                        float_second: None,
                     });
                 }
                 // An argument handed back beside a written float: the callers' reads choose.
@@ -1915,6 +2009,7 @@ fn recover_interface_inner(
                         float: Some(float),
                         second: None,
                         integer_undefined: false,
+                        float_second: None,
                     });
                 }
                 None => {}
@@ -1945,6 +2040,7 @@ fn recover_interface_inner(
                     float: None,
                     second: Some(high),
                     integer_undefined: false,
+                    float_second: None,
                 });
                 candidate_live_out = both();
             }
@@ -1989,6 +2085,7 @@ fn recover_interface_inner(
                 float: Some(float),
                 second: None,
                 integer_undefined: true,
+                float_second: None,
             });
         }
     }
@@ -2010,8 +2107,21 @@ fn recover_interface_inner(
                 float,
                 second,
                 integer_undefined: false,
+                float_second: None,
             });
         }
+    }
+    // The lane after the float one, written at a return, makes a float result one group with it.
+    if let Some(carriers) = &mut result_carriers
+        && let (Some(_), Some(context)) = (carriers.float, machine_context)
+    {
+        let results = convention_results(context.convention());
+        let lanes = crate::site_boundary::ResultLanes::of(slots, &results);
+        let model = context.convention().map(|model| &model.results[..]);
+        carriers.float_second = model
+            .and_then(|model| lanes.after_float(model))
+            .filter(|(lane, _)| lane_supply(func, graph, &facts, (context, *lane), false).is_some())
+            .and_then(|(_, id)| u8::try_from(id).ok());
     }
     // Void only where every lane of the return set holds nothing (S36): asked only of a `Void` the
     // body or the closed world would decide, whose cause then keeps it `Unproven`.
@@ -2489,6 +2599,7 @@ fn recover_interface_inner(
         tail_count,
         closed: applied,
         result_holds_input,
+        unreached: unreached && result == RecoveredFunctionResult::Void,
         boundary,
         security_check: machine_context
             .is_some_and(|machine| crate::security_cookie::proves_check(func, machine)),
@@ -2896,7 +3007,7 @@ fn seed_result(
     (storage_bits(result.slot()).is_some()).then_some(SourceResultSeed {
         slot: result.slot(),
         bits,
-        signed: result.signed(),
+        above: result.above(),
     })
 }
 
@@ -2959,18 +3070,23 @@ fn direct_return_result(
     (direct.by_return().next().is_some() && defines).then_some(candidate)
 }
 
-/// The tail callee's `narrow` width joined with every direct return's written width: a wider
-/// direct return widens it, and one whose width is unknown keeps the whole `slot`.
+/// The tail callee's `narrow` width joined with every direct return's written width (an unknown
+/// one keeps the whole `slot`), and the fill above that the tail and every direct return state alike.
 fn joined_with_direct_returns(
     func: &SSAFunction,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
     (slot, narrow): (CanonicalStorageId, CanonicalStorageId),
-) -> CanonicalStorageId {
+    tail: SourceResultWidth,
+) -> (CanonicalStorageId, r2source::SourceAbove) {
+    let undefined = r2source::SourceAbove::Undefined;
     let tails = owned_tail_blocks(func, graph, facts, slot);
     let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]).without(&tails);
     if live_out.unresolved_blocks().next().is_some() {
-        return slot;
+        return (slot, undefined);
+    }
+    if !live_out.has_returns() {
+        return (narrow, tail.above);
     }
     let returns = Returns {
         func,
@@ -2980,14 +3096,15 @@ fn joined_with_direct_returns(
         entry_undefined: false,
     };
     match recovered_result_over(&returns, slot, false) {
-        RecoveredFunctionResult::Void => narrow,
+        RecoveredFunctionResult::Void => (narrow, undefined),
         RecoveredFunctionResult::Register(direct) if !direct.float() => {
-            match direct.observed().size > narrow.size {
-                true => direct.observed(),
-                false => narrow,
+            match direct.observed().size.cmp(&narrow.size) {
+                std::cmp::Ordering::Greater => (direct.observed(), undefined),
+                std::cmp::Ordering::Equal if direct.above() == tail.above => (narrow, tail.above),
+                _ => (narrow, undefined),
             }
         }
-        _ => slot,
+        _ => (slot, undefined),
     }
 }
 
@@ -3023,6 +3140,149 @@ fn direct_returns_beside_void_tails(
         entry_undefined,
     };
     (recovered_result_over(&returns, slot, false), None)
+}
+
+/// What a declared body's returns leave in its integer and float result lanes, default deny: `None`
+/// and `Written` are proven, else `Open` (D331). O(blocks + values reaching a return) per lane.
+pub(crate) fn body_result_lanes(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    model: &r2source::ConventionModel,
+) -> r2source::SourceBodyResult {
+    use r2source::SourceBodyLane as Lane;
+    use r2source::convention::Location;
+    let arguments = (model.sections.iter()).flat_map(|section| section.locations.iter());
+    let inputs = arguments
+        .filter_map(|location| match location {
+            Location::Register { storage, .. } => Some(*storage),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let read = |slot: CanonicalStorageId| {
+        // A tail whose callee may write the lane proves nothing of it.
+        if !owned_tail_blocks(func, graph, facts, slot).is_empty() {
+            return Lane::Open;
+        }
+        let reach = crate::liveout::FunctionLiveOut::over_every_return(func, graph, slot);
+        if !reach.returns || reach.clobbered {
+            return Lane::Open;
+        }
+        // The lane's entry byte at a return is the caller's, unless it defines nothing (case 1).
+        let input = inputs.iter().any(|input| overlaps(*input, slot));
+        let entry_undefined = !input && !read_on_entry(graph, slot);
+        if reach.unwritten && !entry_undefined {
+            return Lane::Open;
+        }
+        let walk = LaneWalk {
+            slot,
+            inputs: &inputs,
+            entry_undefined,
+        };
+        let lane = lane_at_returns(func, graph, facts, &reach, &walk);
+        r2il::refusal_evidence!("declared-body-result", "{slot:?}: {lane:?}");
+        lane
+    };
+    let lanes = model.typed_results();
+    r2source::SourceBodyResult {
+        integer: lanes.integer.map(|slot| (slot, read(slot))),
+        float: lanes.float.map(|slot| (slot, read(slot))),
+    }
+}
+
+/// What reaches a return in one lane, read by `lane_at_returns`.
+struct LaneWalk<'a> {
+    slot: CanonicalStorageId,
+    /// The convention's argument registers: an entry value in one is a parameter.
+    inputs: &'a [CanonicalStorageId],
+    /// The lane's own entry byte defines nothing (doc/adr-scratch-result.md, case 1).
+    entry_undefined: bool,
+}
+
+/// One lane over each value a return's bytes come from, once: `Written` by a stated call, a
+/// parameter or a computed byte, `None` by none, `Open` at anything unstated. O(values reached).
+fn lane_at_returns(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    facts: &crate::semantic::PreparedFunctionFacts,
+    reach: &crate::liveout::LaneReach,
+    walk: &LaneWalk<'_>,
+) -> r2source::SourceBodyLane {
+    use crate::bytes::Rule;
+    use crate::graph::InstPayload;
+    use r2source::SourceBodyLane as Lane;
+    // The seal keeps no per-operation record, so a check's residue would read as data.
+    let checked = func.has_compiler_inserted_writes();
+    let written = func.written();
+    let var_facts = |id: &crate::ValueId| crate::op::var_facts(graph.var(*id));
+    // `defined`: some byte is a C value. `moved`: a slice, concat or insert may hide which.
+    let (mut defined, mut moved) = (false, false);
+    let mut seen = crate::dense::IdSet::default();
+    let mut pending = reach.values.iter().collect::<Vec<_>>();
+    while let Some(value) = pending.pop() {
+        if !seen.insert(value) {
+            continue;
+        }
+        if var_facts(&value).1.is_some() {
+            defined = true;
+            continue;
+        }
+        let storage = graph.value(value).and_then(|value| value.canonical_storage);
+        let inst = graph.def_inst(value).and_then(|inst| graph.inst(inst));
+        let Some(inst) = inst.filter(|_| graph.written_by_body(value)) else {
+            // The caller's value: the lane's own entry byte, a parameter, or nothing stated.
+            let own = storage.is_some_and(|held| overlaps(held, walk.slot));
+            let parameter =
+                storage.is_some_and(|held| walk.inputs.iter().any(|input| overlaps(*input, held)));
+            match (own, parameter) {
+                (true, _) if walk.entry_undefined => {}
+                (false, true) => defined = true,
+                _ => return Lane::Open,
+            }
+            continue;
+        };
+        let op = match &inst.payload {
+            InstPayload::Phi { .. } => {
+                pending.extend(graph.inputs(inst.id).iter().copied());
+                continue;
+            }
+            InstPayload::Op(crate::op::SSAOp::CallDefine { .. }) => {
+                match returned_by_call(graph, facts, value) {
+                    ReturnedByCall::Void => {}
+                    ReturnedByCall::Stated => defined = true,
+                    _ => return Lane::Open,
+                }
+                continue;
+            }
+            InstPayload::Op(op) => op,
+        };
+        if checked {
+            return Lane::Open;
+        }
+        let sources = op.sources();
+        let conventional = graph
+            .op_for_inst(inst.id)
+            .is_some_and(|id| written.is_conventional_extension(id));
+        // An operation that moves bytes hands on its sources'; any other computes data.
+        match crate::bytes::rule(op, var_facts) {
+            Rule::Copy => pending.extend(sources.first().copied()),
+            Rule::Extend { .. } if conventional => pending.extend(sources.first().copied()),
+            Rule::Slice { .. } => {
+                moved = true;
+                pending.extend(sources.first().copied());
+            }
+            Rule::Concat { .. } | Rule::Insert { .. } => {
+                moved = true;
+                pending.extend(sources.iter().take(2).copied());
+            }
+            _ => defined = true,
+        }
+    }
+    match (defined, moved) {
+        (false, _) => Lane::None,
+        (true, false) => Lane::Written,
+        (true, true) => Lane::Open,
+    }
 }
 
 /// The tail transfers that own the result: every one but a tail to a callee that leaves each result
@@ -3147,7 +3407,7 @@ pub fn mint_recovered_interface(
             false => interface,
         })
         .map(|interface| match recovered.tail_count {
-            Some(count) => match interface.clone().with_body_proven_tail_count(count) {
+            Some(count) => match interface.clone().with_tail_count(count) {
                 Ok(counted) => counted,
                 Err(why) => {
                     r2il::refusal_evidence!("tail-count", "the proven count is refused: {why}");
@@ -3166,6 +3426,10 @@ pub fn mint_recovered_interface(
         })
         .map(|interface| match recovered.result_holds_input {
             true => interface.with_result_holding_input(),
+            false => interface,
+        })
+        .map(|interface| match recovered.unreached {
+            true => interface.with_no_return_reached(),
             false => interface,
         })
         .map(|interface| match &recovered.unproven_result {
@@ -3336,14 +3600,11 @@ fn mint_recovered_interface_inner(
     // graph describes exactly what is referenced and nothing more. The
     // constructor enforces that literally: a graph carrying a type no logical
     // value names is rejected outright.
-    // Keyed by width and sign: only a result the body sign-extends is signed.
-    let mut widths: Vec<(u32, bool)> = Vec::new();
-    fn note_bits(widths: &mut Vec<(u32, bool)>, bits: u32) {
-        note_type(widths, bits, false);
-    }
-    fn note_type(widths: &mut Vec<(u32, bool)>, bits: u32, signed: bool) {
-        if !widths.contains(&(bits, signed)) {
-            widths.push((bits, signed));
+    // Every integer is unsigned: its C sign is r2types' to state from the body (D265, RULING 1.7).
+    let mut widths: Vec<u32> = Vec::new();
+    fn note_bits(widths: &mut Vec<u32>, bits: u32) {
+        if !widths.contains(&bits) {
+            widths.push(bits);
         }
     }
     // The logical value is typed by what the function read, not by the size of
@@ -3375,15 +3636,15 @@ fn mint_recovered_interface_inner(
     let result_width = match recovered.result() {
         RecoveredFunctionResult::Register(result) if !result.float() => {
             let bits = storage_bits(result.observed())?;
-            note_type(&mut widths, bits, result.signed());
-            Some((bits, result.signed()))
+            note_bits(&mut widths, bits);
+            Some(bits)
         }
         // One integer as wide as both halves (doc/adr-language-profile.md, item 1).
         RecoveredFunctionResult::Pair { low, high } => {
             let half = storage_bits(low).filter(|bits| Some(*bits) == storage_bits(high))?;
             let bits = half.checked_mul(2)?;
-            note_type(&mut widths, bits, false);
-            Some((bits, false))
+            note_bits(&mut widths, bits);
+            Some(bits)
         }
         _ => None,
     };
@@ -3392,13 +3653,10 @@ fn mint_recovered_interface_inner(
     let mut types = widths
         .iter()
         .enumerate()
-        .map(|(index, (bits, signed))| {
+        .map(|(index, bits)| {
             SourceType::new(
                 u32::try_from(index).ok()?,
-                match signed {
-                    true => SourceTypeKind::SignedInteger,
-                    false => SourceTypeKind::UnsignedInteger,
-                },
+                SourceTypeKind::UnsignedInteger,
                 u64::from(*bits),
                 u64::from(*bits),
             )
@@ -3408,37 +3666,48 @@ fn mint_recovered_interface_inner(
     let float_type = float_type(recovered, &mut types)?;
     let float_ids = float_nodes(floats, float_type, &mut types)?;
     let type_graph = SourceTypeGraph::new(types, []).ok()?;
-    let type_id = |bits: u32, signed: bool| -> Option<u32> {
+    let type_id = |bits: u32| -> Option<u32> {
         widths
             .iter()
-            .position(|candidate| *candidate == (bits, signed))
+            .position(|candidate| *candidate == bits)
             .and_then(|index| u32::try_from(index).ok())
     };
     // `Full` where the read is the whole register, `LowBits` where it is the
     // register's low half. The second is what an `int` parameter looks like in
     // a 64-bit argument register, and it is the projection the parameter-fact
     // collector already knows how to narrow.
-    let logical = |bits: u32, signed: bool, carrier_bits: u32| -> Option<SourceLogicalValue> {
+    let logical = |bits: u32, carrier_bits: u32| -> Option<SourceLogicalValue> {
         let kind = if bits < carrier_bits {
             SourceCarrierKind::LowBits
         } else {
             SourceCarrierKind::Full
         };
         Some(SourceLogicalValue::new(
-            type_id(bits, signed)?,
+            type_id(bits)?,
             SourceCarrierProjection::new(kind, 0, u64::from(bits)),
         ))
     };
 
     let register_count = recovered.parameters().len();
+    // Each parameter is at the boundary slot of its location. O(parameters x slots).
+    let slot = |location: SourceParameterLocation, class, basis| {
+        let (id, _) =
+            (recovered.boundary().locations.iter()).find(|(_, at)| at.location == location)?;
+        Some(r2source::SourceSlot {
+            id: id.0,
+            class,
+            basis,
+        })
+    };
     let parameters = recovered
         .parameters()
         .iter()
         .enumerate()
         .map(|(index, parameter)| {
+            let slotted = SourceParameterLocation::Register(parameter.slot());
             Some(
                 SourceAbiParameterSpec::new(u32::try_from(index).ok()?, parameter.location())
-                    .in_section(parameter.class(), parameter.basis()),
+                    .at_slot(slot(slotted, parameter.class(), parameter.basis())?),
             )
         })
         .chain(
@@ -3447,16 +3716,21 @@ fn mint_recovered_interface_inner(
                 .iter()
                 .enumerate()
                 .map(|(index, parameter)| {
+                    let location = SourceParameterLocation::Stack {
+                        offset: parameter.offset(),
+                        size_bytes: parameter.slot_bytes(),
+                        callee_offset: parameter.offset(),
+                    };
                     Some(
                         SourceAbiParameterSpec::with_location(
                             u32::try_from(register_count.checked_add(index)?).ok()?,
-                            SourceParameterLocation::Stack {
-                                offset: parameter.offset(),
-                                size_bytes: parameter.slot_bytes(),
-                                callee_offset: parameter.offset(),
-                            },
+                            location,
                         )
-                        .in_section(SlotClass::Stack, parameter.basis()),
+                        .at_slot(slot(
+                            location,
+                            SlotClass::Stack,
+                            parameter.basis(),
+                        )?),
                     )
                 }),
         )
@@ -3498,22 +3772,22 @@ fn mint_recovered_interface_inner(
         .zip(classes)
         .map(|((bits, carrier_bits), class)| match class {
             SlotClass::Float => float_logical(*bits).map(Some),
-            _ => logical(*bits, false, *carrier_bits).map(Some),
+            _ => logical(*bits, *carrier_bits).map(Some),
         })
         .collect::<Option<Vec<_>>>()?;
     let (return_kind, return_logical_value) = match (recovered.result(), result_width) {
-        (RecoveredFunctionResult::Register(result), Some((bits, signed))) => (
+        (RecoveredFunctionResult::Register(result), Some(bits)) => (
             SourceFunctionReturn::Register {
                 storage: result.slot(),
             },
-            Some(logical(bits, signed, result.slot().size.checked_mul(8)?)?),
+            Some(logical(bits, result.slot().size.checked_mul(8)?)?),
         ),
         (RecoveredFunctionResult::Register(result), None) if result.float() => {
             float_return(result, float_type?)?
         }
-        (RecoveredFunctionResult::Pair { low, high }, Some((bits, signed))) => (
+        (RecoveredFunctionResult::Pair { low, high }, Some(bits)) => (
             SourceFunctionReturn::Pair { low, high },
-            Some(logical(bits, signed, bits)?),
+            Some(logical(bits, bits)?),
         ),
         // A pair is typed or the interface is not minted: no half of it stands for the whole.
         (RecoveredFunctionResult::Pair { .. }, None) => return None,
@@ -3549,6 +3823,9 @@ fn mint_recovered_interface_inner(
     // a conflict with the machine.
     .with_role_register_names(roles.role_register_names())
     .with_types(r2source::Confidence::of(r2source::Basis::CarrierWidth));
+    let above = (recovered.result().register())
+        .map_or(r2source::SourceAbove::Undefined, |held| held.above());
+    let interface = interface.with_result_above(above);
     let interface = if recovered.result_is_return_address() {
         interface.with_body_proven_return_address().ok()?
     } else {
@@ -3715,9 +3992,13 @@ pub fn mint_recovered_call_site_interface(
             width: (callee.result_width()).unwrap_or(SourceResultWidth::whole(storage)),
         },
         SourceFunctionReturn::Pair { low, high } => SourceCallResult::Pair { low, high },
-        SourceFunctionReturn::Unproven => match call_lanes(callee, passes, results) {
-            Some(lanes) => lanes.result,
-            None => {
+        SourceFunctionReturn::Unproven => match (
+            callee.unstated_carrier(),
+            call_lanes(callee, passes, results),
+        ) {
+            (Some(carrier), _) => SourceCallResult::Unstated { carrier },
+            (None, Some(lanes)) => lanes.result,
+            (None, None) => {
                 r2il::refusal_evidence!(
                     "call-site-minting",
                     "the callee's result is unproven ({:?}), so its body describes no call contract",
@@ -3895,6 +4176,7 @@ mod tests {
             float: Some(q0),
             second: None,
             integer_undefined: true,
+            float_second: None,
         };
         let callee = lane_interface(handed_back);
         let every = BTreeSet::from([x0, x1, q0]);
@@ -4132,8 +4414,8 @@ mod tests {
             RecoveredFunctionResult::Register(RecoveredResult {
                 slot: register(0, 8),
                 observed: register(0, 8),
-                signed: false,
                 float: false,
+                above: r2source::SourceAbove::Undefined,
             })
         );
     }

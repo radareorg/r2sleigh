@@ -91,9 +91,15 @@ fn same_value_id_is_space_keyed_for_global_stack_parameter_and_unknown_objects()
         Some(stack.machine_context()),
     )
     .build(
-        stack.function(),
         stack.graph(),
         super::super::empty_value_ranges(),
+        Some(&super::super::BuildInputs::of(
+            &stack_facts,
+            stack.function(),
+            stack.graph(),
+            Some(stack.machine_context()),
+            super::super::empty_value_ranges(),
+        )),
     );
     let ram_stack = super::super::memory_location_for_addr(
         Some(&stack_facts),
@@ -555,6 +561,7 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
             predicates: &allocated_facts.predicates,
             call_sites: &allocated_facts.call_sites,
             structured: &incomplete_structured,
+            obligations: &allocated_facts.obligations,
         },
         allocated.unobserved_merges(),
         allocated.live_out(),
@@ -601,6 +608,7 @@ fn memory_ssa_separates_saved_sp_slot_from_frame_relative_local() {
             predicates: &allocated_facts.predicates,
             call_sites: &allocated_facts.call_sites,
             structured: &allocated_facts.structured,
+            obligations: &allocated_facts.obligations,
         },
         allocated.unobserved_merges(),
         allocated.live_out(),

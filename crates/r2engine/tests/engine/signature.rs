@@ -102,7 +102,7 @@ fn a_body_named_after_a_library_function_takes_nothing_from_the_table() {
         .iter()
         .map(|argument| r2types::c_object_declaration(&argument.ty.value, "_"))
         .collect::<Vec<_>>();
-    assert_eq!(declared, ["uint64_t _"]);
+    assert_eq!(declared, ["r2sleigh_word_u64 _"]);
     // Recovered, so nothing declares it: the type is no more than the body's reading of it.
     let bases = (info.arguments.iter()).map(|argument| argument.ty.confidence.basis);
     assert_eq!(bases.collect::<Vec<_>>(), [Basis::CarrierWidth]);
@@ -171,7 +171,7 @@ fn a_parameter_the_body_reads_through_rests_on_the_dereference() {
     let declared = (info.arguments.iter())
         .map(|argument| r2types::c_object_declaration(&argument.ty.value, "_"))
         .collect::<Vec<_>>();
-    assert_eq!(declared, ["uint32_t* _"]);
+    assert_eq!(declared, ["r2sleigh_word_u32* _"]);
     let bases = (info.arguments.iter()).map(|argument| argument.ty.confidence.basis);
     assert_eq!(bases.collect::<Vec<_>>(), [Basis::Dereferenced]);
 }
@@ -236,8 +236,8 @@ fn x86_64_declared(import: &str) -> String {
     declared.map(str::trim).unwrap_or(&text).to_owned()
 }
 
-/// A row's `wchar_t` and `char` take the target's sign: unsigned under AAPCS64 glibc, signed
-/// under SysV x86-64; with no C library stated, nothing states `wchar_t` and it renders as base.
+/// A row's `wchar_t` and `char` take the target's sign (AAPCS64 glibc unsigned, SysV x86-64
+/// signed); with no C library, nothing states `wchar_t` and its pointer passes as `void*` (D263).
 #[test]
 fn a_rows_wchar_t_and_char_are_the_targets() {
     assert_eq!(
@@ -255,10 +255,7 @@ fn a_rows_wchar_t_and_char_are_the_targets() {
     assert_eq!(x86_64_declared("strlen"), "uint64_t strlen(const char*);");
     assert_eq!(
         [a64_declared("wcslen", false), a64_declared("strlen", false)],
-        [
-            "uint64_t wcslen(uint64_t);",
-            "uint64_t strlen(const char*);"
-        ]
+        ["uint64_t wcslen(void*);", "uint64_t strlen(const char*);"]
     );
 }
 

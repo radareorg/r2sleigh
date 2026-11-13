@@ -11,6 +11,8 @@ use crate::model::Signedness;
 pub struct FunctionType {
     pub return_type: CTypeLike,
     pub params: Vec<CTypeLike>,
+    /// The basis each parameter's type rests on; only `DebugInfo` and `Declared` state one (D261).
+    pub bases: Vec<r2source::Basis>,
     pub variadic: bool,
 }
 
@@ -149,13 +151,7 @@ impl SignatureCertificate {
             && !self.signature.params.iter().any(|param| {
                 signature_param_type_uncertified(
                     param.ty.as_ref(),
-                    self.sources.iter().any(|source| {
-                        matches!(
-                            source,
-                            SignatureCertificateSource::ExternalContext
-                                | SignatureCertificateSource::TypeAssumption
-                        )
-                    }),
+                    (self.sources).contains(&SignatureCertificateSource::ExternalContext),
                 )
             })
     }
@@ -182,7 +178,6 @@ pub enum SignatureCertificateSource {
     ExternalContext,
     LocalInference,
     CalleeSignature,
-    TypeAssumption,
     SlotTypeOverride,
     SummaryRole,
     SummaryKind,
@@ -206,7 +201,6 @@ impl SignatureCertificateSource {
             Self::ExternalContext => "external_context",
             Self::LocalInference => "local_inference",
             Self::CalleeSignature => "callee_signature",
-            Self::TypeAssumption => "type_assumption",
             Self::SlotTypeOverride => "slot_type_override",
             Self::SummaryRole => "summary_role",
             Self::SummaryKind => "summary_kind",
@@ -228,7 +222,6 @@ impl SignatureCertificateSource {
             self,
             Self::ExternalContext
                 | Self::SourceInterface
-                | Self::TypeAssumption
                 | Self::SlotTypeOverride
                 | Self::SemanticProjection
                 | Self::InterprocSummary
@@ -478,9 +471,9 @@ pub struct InterprocFactDiagnostics {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FunctionTypeFacts {
     pub merged_signature: Option<FunctionSignatureSpec>,
-    /// What each parameter's type in the merged signature rests on, where a step that wrote the
-    /// slot stated it (doc/adr-provenance.md, C2).
-    pub parameter_bases: BTreeMap<usize, r2source::Basis>,
+    /// What each parameter's type in the merged signature rests on, one row per convention slot
+    /// (doc/adr-provenance.md, C2; D261).
+    pub parameter_types: crate::ParameterTypes,
     /// The structures this function's parameters' accesses lay out, by tag (doc/adr-aggregates.md).
     pub inferred_aggregates: BTreeMap<String, crate::AggregateDefinition>,
     /// Each parameter that points to an inferred structure: its tag, and the member at each
@@ -504,7 +497,7 @@ pub struct FunctionTypeFacts {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FunctionTypeFactInputs {
     pub merged_signature: Option<FunctionSignatureSpec>,
-    pub parameter_bases: BTreeMap<usize, r2source::Basis>,
+    pub parameter_types: crate::ParameterTypes,
     pub inferred_aggregates: BTreeMap<String, crate::AggregateDefinition>,
     /// Each parameter that points to an inferred structure: its tag, and the member at each
     /// accessed offset (doc/adr-aggregates.md).
@@ -553,7 +546,7 @@ impl FunctionTypeFacts {
     pub fn canonicalized(self) -> Self {
         FunctionTypeFacts::builder(FunctionTypeFactInputs {
             merged_signature: self.merged_signature,
-            parameter_bases: self.parameter_bases,
+            parameter_types: self.parameter_types,
             inferred_aggregates: self.inferred_aggregates,
             parameter_structures: self.parameter_structures,
             callconv: self.callconv,
@@ -686,6 +679,7 @@ pub fn signature_hint_can_replace_existing(
     ptr_bits: u32,
     type_db: &crate::ExternalTypeDb,
 ) -> bool {
+    let existing = crate::word_free(existing);
     if is_generic_signature_type(Some(existing)) {
         return true;
     }
@@ -814,6 +808,7 @@ pub fn summary_hint_can_replace_weak_existing(
     ptr_bits: u32,
     type_db: &crate::ExternalTypeDb,
 ) -> bool {
+    let existing = crate::word_free(existing);
     if is_generic_signature_type(Some(existing)) {
         return true;
     }
@@ -876,7 +871,7 @@ pub fn type_is_generated_local_struct_pointer(ty: &CTypeLike) -> bool {
 }
 
 pub fn is_weak_storage_scalar_type(ty: &CTypeLike, ptr_bits: u32) -> bool {
-    match ty {
+    match crate::word_free(ty) {
         CTypeLike::Int { .. } => true,
         CTypeLike::Typedef { name, .. } => is_weak_storage_scalar_typedef(name, ptr_bits),
         _ => false,
@@ -965,7 +960,7 @@ impl FunctionTypeFactsBuilder {
 
         let FunctionTypeFactInputs {
             mut merged_signature,
-            parameter_bases,
+            parameter_types,
             inferred_aggregates,
             parameter_structures,
             callconv,
@@ -992,7 +987,7 @@ impl FunctionTypeFactsBuilder {
 
         FunctionTypeFacts {
             merged_signature,
-            parameter_bases,
+            parameter_types,
             inferred_aggregates,
             parameter_structures,
             callconv,

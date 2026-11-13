@@ -102,10 +102,20 @@ pub(super) fn literal(value: MachineBitVector) -> Option<CExpr> {
     Some(cast(ty, CExpr::UIntLit(value.bits())))
 }
 
+/// `ty`, the unstated word as its integer (D265).
+pub(super) fn word_free(ty: &CType) -> &CType {
+    match ty {
+        CType::Typedef { ty: inner, .. } if r2types::is_unstated_word(ty) => inner,
+        ty => ty,
+    }
+}
+
 /// `expr` converted to `sink` as by assignment (return, assignment, prototyped argument): an
 /// integer literal under value-keeping unsigned casts becomes the plain literal.
 pub(super) fn at_sink(sink: &CType, expr: CExpr) -> CExpr {
-    let holds = |ty: &CType, value: u64| match ty {
+    // The unstated word holds what its integer holds (D265).
+    let sink = word_free(sink);
+    let holds = |ty: &CType, value: u64| match word_free(ty) {
         CType::Int { bits, signedness } => {
             let bits = bits - u32::from(*signedness == Signedness::Signed);
             bits >= 64 || value < 1 << bits
@@ -128,7 +138,7 @@ pub(super) fn at_sink(sink: &CType, expr: CExpr) -> CExpr {
     };
     let unsigned = |ty: &CType| {
         matches!(
-            ty,
+            word_free(ty),
             CType::Int {
                 signedness: Signedness::Unsigned,
                 ..

@@ -1,7 +1,7 @@
 //! The stack-protector check, decided under `Premise::UbFreeSource` (doc/adr-frame-model.md, P4.4).
 //!
-//! The guard is the memory the platform states it at (`r2abi::stack_guard`), addressed from the
-//! entry value of a register the platform reserves. A
+//! The guard is the memory the platform states it at (`r2abi::guard_row`): a word addressed from
+//! the entry value of a register the platform reserves, or a global the container binds. A
 //! check compares two reads of it, each direct or through a frame slot written once from one, and
 //! a mismatch leaves for a block that only calls a function that does not return. A UB-free source
 //! writes neither the guard nor outside its own objects, so both reads agree and the check passes.
@@ -40,11 +40,8 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     if !machine.accepts(r2source::Premise::UbFreeSource) {
         return;
     }
-    // Only the slot the platform states: a thread-local variable read twice is no guard.
-    let Some(guard) = machine
-        .call_effect()
-        .and_then(r2source::SourceCallEffect::stack_guard)
-    else {
+    // Only the word the platform states: a thread-local variable read twice is no guard.
+    let Some(guard) = Guard::of(machine) else {
         return;
     };
     let defs = Definitions::of(func);
@@ -116,6 +113,15 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
         }
     }
     inserted.extend(unchecked.iter());
+    let words = guard_words(func, &defs, guard, &inserted);
+    // The rereads become copies below; their addresses are still the compiler's.
+    let reread_addresses = (checks.iter())
+        .flat_map(|check| check.rereads.iter())
+        .filter_map(|(_, dst)| match defs.op(*dst) {
+            Some((_, SSAOp::Load { addr, .. })) => Some(*addr),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
     // A failure block no other edge reaches goes with the edges into it.
     let failed = checks
         .iter()
@@ -138,8 +144,15 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     }
     decided.reorder();
     func.apply_edits(decided);
-    let addresses = inserted_addresses(func, &inserted);
+    let addresses = inserted_addresses(func, &inserted, &reread_addresses);
     inserted.extend(addresses.iter());
+    // A word load is the compiler's once its readers are: the guard reads and their addresses.
+    let words = unread_words(func, &inserted, &words);
+    if !words.is_empty() {
+        inserted.extend(words);
+        let addresses = inserted_addresses(func, &inserted, &[]);
+        inserted.extend(addresses.iter());
+    }
     func.record_compiler_inserted(inserted, removed, removed_edges);
     func.record_passing_differences(passing);
     func.record_checked_differences(checks.iter().filter_map(|check| check.difference));
@@ -152,7 +165,7 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
 fn unchecked(
     func: &SSAFunction,
     defs: &Definitions,
-    guard: &r2source::SourceStackGuard,
+    guard: Guard<'_>,
     stack_pointer: Option<crate::CanonicalStorageId>,
     checked: &IdSet<OpId>,
 ) -> IdSet<OpId> {
@@ -195,8 +208,8 @@ fn unchecked(
             if let SSAOp::Load { dst, addr, .. } = op {
                 let (root, offset) = defs.affine(func, *addr);
                 let width = func.var(*dst).size;
-                let read_of_guard =
-                    !checked.contains(id) && is_guard(func, guard, (root, offset), width);
+                let read_of_guard = !checked.contains(id)
+                    && guard.read(func, defs, (root, offset), width).is_some();
                 loads.extend(read_of_guard.then_some((id, *dst)));
                 read.get_or_insert_with(root, Vec::new)
                     .push((offset, offset + i64::from(width)));
@@ -341,13 +354,17 @@ fn escapes(
     escaped
 }
 
-/// The temporary address arithmetic only inserted operations read: the guard's address the
-/// compiler computed for its reads. One pass counts reads; each operation is taken once.
-pub(crate) fn inserted_addresses(func: &SSAFunction, inserted: &IdSet<OpId>) -> IdSet<OpId> {
+/// The temporary address arithmetic only inserted operations read, from their loads and `from`
+/// (the addresses of rewritten reads). One pass counts reads; each operation is taken once.
+pub(crate) fn inserted_addresses(
+    func: &SSAFunction,
+    inserted: &IdSet<OpId>,
+    from: &[VarId],
+) -> IdSet<OpId> {
     let values = func.values().len();
     let mut reads = IdMap::<VarId, usize>::new(values);
     let mut arithmetic = IdMap::<VarId, (OpId, Vec<VarId>)>::new(values);
-    let mut work = Vec::new();
+    let mut work = from.to_vec();
     for block in (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr)) {
         for (_, phi) in block.sited_phis() {
             for (_, source) in &phi.sources {
@@ -424,10 +441,9 @@ impl SlotStores {
     }
 }
 
-/// One side of a check: the guard it reads, the first read of it, the operations it took, and
-/// the rereads the premise equates with the first read.
+/// One side of a check: the first read of the guard, the operations it took, and the rereads the
+/// premise equates with the first read.
 struct GuardRead {
-    guard: Affine,
     first: (OpId, VarId),
     ops: Vec<OpId>,
     rereads: Vec<(OpId, VarId)>,
@@ -437,14 +453,13 @@ fn guard_read(
     func: &SSAFunction,
     defs: &Definitions,
     slots: &SlotStores,
-    guard: &r2source::SourceStackGuard,
+    guard: Guard<'_>,
     var: VarId,
 ) -> Option<GuardRead> {
     let (load, address, width) = defs.load(func, var)?;
     let loaded = defs.op(defs.copied(var))?.1.dst().copied()?;
-    if is_guard(func, guard, address, width) {
+    if guard.read(func, defs, address, width).is_some() {
         return Some(GuardRead {
-            guard: address,
             first: (load, loaded),
             ops: vec![load],
             rereads: Vec::new(),
@@ -453,29 +468,122 @@ fn guard_read(
     // A reload of a frame slot whose only writer, run before it, stored a direct read of the guard.
     let (store, stored) = slots.sole_writer(address, width)?;
     let (guard_load, stored_address, stored_width) = defs.load(func, stored)?;
-    if !is_guard(func, guard, stored_address, stored_width) || !defs.precedes(func, store, load) {
+    let direct = guard
+        .read(func, defs, stored_address, stored_width)
+        .is_some();
+    if !direct || !defs.precedes(func, store, load) {
         return None;
     }
     let first = defs.op(defs.copied(stored))?.1.dst().copied()?;
     Some(GuardRead {
-        guard: stored_address,
         first: (guard_load, first),
         ops: vec![load, store, guard_load],
         rereads: vec![(load, loaded)],
     })
 }
 
-/// Whether a read of `width` bytes at `address` is a read of the platform's stack guard.
-fn is_guard(
+/// The one guard a function's checks read: the platform's slot, or the global the container binds.
+#[derive(Clone, Copy)]
+enum Guard<'m> {
+    Slot(&'m r2source::SourceStackGuard),
+    Linked(&'m r2source::SourceLinkedGuard),
+}
+
+/// A read of the guard: direct, or through the load of a sealed word holding its address.
+type Through = Option<OpId>;
+
+impl<'m> Guard<'m> {
+    /// The model's guard: the platform's slot, else the library's global the container binds.
+    fn of(machine: &'m SourceMachineContext) -> Option<Self> {
+        let forms = &machine.convention()?.forms;
+        (forms.guard.as_ref().map(Self::Slot))
+            .or_else(|| forms.linked_guard.as_ref().map(Self::Linked))
+    }
+
+    /// Whether a read of `width` bytes at `address` reads the guard, and how. Every load of one
+    /// sealed word holds one address, so two loads of it reach one guard.
+    fn read(
+        self,
+        func: &SSAFunction,
+        defs: &Definitions,
+        (root, offset): Affine,
+        width: u32,
+    ) -> Option<Through> {
+        match self {
+            Self::Slot(guard) => (func.var(root).version == 0
+                && func.storage_of(root) == Some(guard.base)
+                && u64::try_from(offset).ok() == Some(guard.offset)
+                && width == guard.width)
+                .then_some(None),
+            Self::Linked(guard) if width != guard.width => None,
+            Self::Linked(guard) => {
+                if guard.copy.is_some() && defs.absolute(func, (root, offset)) == guard.copy {
+                    return Some(None);
+                }
+                let (word, slot, slot_width) = defs.load(func, root)?;
+                let slot = defs.absolute(func, slot)?;
+                (offset == 0
+                    && slot_width == guard.slot_width
+                    && guard.slots.binary_search(&slot).is_ok())
+                .then_some(Some(word))
+            }
+        }
+    }
+}
+
+/// The sealed-word loads the guard's inserted reads went through. O(ops).
+fn guard_words(
     func: &SSAFunction,
-    guard: &r2source::SourceStackGuard,
-    (root, offset): Affine,
-    width: u32,
-) -> bool {
-    func.var(root).version == 0
-        && func.storage_of(root) == Some(guard.base)
-        && u64::try_from(offset).ok() == Some(guard.offset)
-        && width == guard.width
+    defs: &Definitions,
+    guard: Guard<'_>,
+    inserted: &IdSet<OpId>,
+) -> Vec<OpId> {
+    if matches!(guard, Guard::Slot(_)) {
+        return Vec::new();
+    }
+    let mut words = (func.block_addrs().iter())
+        .filter_map(|addr| func.get_block(*addr))
+        .flat_map(|block| block.sited())
+        .filter(|(id, _)| inserted.contains(*id))
+        .filter_map(|(_, op)| match op {
+            SSAOp::Load { dst, addr, .. } => {
+                let address = defs.affine(func, *addr);
+                guard.read(func, defs, address, func.var(*dst).size)?
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    words.sort_unstable();
+    words.dedup();
+    words
+}
+
+/// The word loads whose value only inserted operations read: the compiler's own address of the
+/// guard. A word another reader sees stays. O(ops).
+fn unread_words(func: &SSAFunction, inserted: &IdSet<OpId>, words: &[OpId]) -> Vec<OpId> {
+    if words.is_empty() {
+        return Vec::new();
+    }
+    let mut read = IdSet::new(func.values().len());
+    let mut loaded = Vec::new();
+    let blocks = || (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr));
+    for (_, phi) in blocks().flat_map(|block| block.sited_phis()) {
+        read.extend(phi.sources.iter().map(|(_, source)| *source));
+    }
+    for (id, op) in blocks().flat_map(|block| block.sited()) {
+        if words.binary_search(&id).is_ok() {
+            loaded.extend(op.dst().map(|dst| (id, *dst)));
+        }
+        if !inserted.contains(id) {
+            op.for_each_source(|source| {
+                read.insert(*source);
+            });
+        }
+    }
+    (loaded.into_iter())
+        .filter(|(_, dst)| !read.contains(*dst))
+        .map(|(id, _)| id)
+        .collect()
 }
 
 /// The check that ends one block, when it compares two reads of one guard.
@@ -483,7 +591,7 @@ fn check(
     func: &SSAFunction,
     defs: &Definitions,
     slots: &SlotStores,
-    guard: &r2source::SourceStackGuard,
+    guard: Guard<'_>,
     addr: u64,
 ) -> Option<Check> {
     let BlockTerminator::ConditionalBranch {
@@ -501,9 +609,6 @@ fn check(
     let (left, right, equal_when_true, difference) = equality(func, defs, cond)?;
     let left = guard_read(func, defs, slots, guard, left)?;
     let right = guard_read(func, defs, slots, guard, right)?;
-    if left.guard != right.guard {
-        return None;
-    }
     let (pass, fail) = if equal_when_true {
         (true_target, false_target)
     } else {
@@ -528,13 +633,17 @@ fn check(
         rereads.insert(second.0, second.1);
     }
     // Every other read of the guard in the checking block is the check's: a compare may read it once per flag.
-    rereads.extend(block.sited().filter_map(|(id, op)| match op {
-        SSAOp::Load { dst, addr, .. }
-            if id != first.0 && defs.affine(func, *addr) == left.guard =>
-        {
-            Some((id, *dst))
+    rereads.extend(block.sited().filter_map(|(id, op)| {
+        match op {
+            SSAOp::Load { dst, addr, .. }
+                if id != first.0
+                    && (guard.read(func, defs, defs.affine(func, *addr), func.var(*dst).size))
+                        .is_some() =>
+            {
+                Some((id, *dst))
+            }
+            _ => None,
         }
-        _ => None,
     }));
     if !rereads
         .iter()

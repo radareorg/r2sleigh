@@ -92,7 +92,7 @@ fn analysed(at: u64) -> String {
 #[test]
 fn a_call_that_passes_the_lane_keeps_the_callers_bytes() {
     let text = cold(BASE + 0x20);
-    assert!(text.contains("return r2sleigh_carrier_u64(7);"), "{text}");
+    assert!(text.contains("return r2sleigh_carrier_u32(7);"), "{text}");
     assert!(text.contains("r2sleigh_result_u64 pass(void);"), "{text}");
 }
 
@@ -154,6 +154,59 @@ fn a_callee_with_two_written_lanes_mints_a_call_and_its_float_forwarder_is_not_v
     }
 }
 
+/// `two` writes XMM0 and XMM1 from its arguments and `reads_two` adds both after the call; `one`
+/// writes XMM0 alone and `reads_one` doubles it.
+const GROUPS: &[u8] = &[
+    0x66, 0x0f, 0xef, 0xc0, // 1000 pxor xmm0, xmm0
+    0xf2, 0x48, 0x0f, 0x2a, 0xc7, // 1004 cvtsi2sd xmm0, rdi
+    0x66, 0x0f, 0xef, 0xc9, // 1009 pxor xmm1, xmm1
+    0xf2, 0x48, 0x0f, 0x2a, 0xce, // 100d cvtsi2sd xmm1, rsi
+    0xc3, // 1012 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1013
+    0x48, 0x83, 0xec, 0x08, // 1020 sub rsp, 8
+    0xe8, 0xd7, 0xff, 0xff, 0xff, // 1024 call 0x1000
+    0xf2, 0x0f, 0x58, 0xc1, // 1029 addsd xmm0, xmm1
+    0x48, 0x83, 0xc4, 0x08, // 102d add rsp, 8
+    0xc3, // 1031 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1032
+    0x66, 0x0f, 0xef, 0xc0, // 1040 pxor xmm0, xmm0
+    0xf2, 0x48, 0x0f, 0x2a, 0xc7, // 1044 cvtsi2sd xmm0, rdi
+    0xc3, // 1049 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 104a
+    0x48, 0x83, 0xec, 0x08, // 1050 sub rsp, 8
+    0xe8, 0xe7, 0xff, 0xff, 0xff, // 1054 call 0x1040
+    0xf2, 0x0f, 0x58, 0xc0, // 1059 addsd xmm0, xmm0
+    0x48, 0x83, 0xc4, 0x08, // 105d add rsp, 8
+    0xc3, // 1061 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+];
+
+const GROUP_FUNCTIONS: &[(&str, u64, u64)] = &[
+    ("two", BASE, 0x13),
+    ("reads_two", BASE + 0x20, 0x12),
+    ("one", BASE + 0x40, 0x0a),
+    ("reads_one", BASE + 0x50, 0x12),
+];
+
+/// A float result whose following lane the body writes and a call reads is one group across both
+/// lanes: no read of XMM0 alone decides `double`, and each lane stays a residual (S24, Decided 1).
+#[test]
+fn a_float_result_beside_a_written_and_read_second_lane_is_no_double() {
+    let analysed = |at: u64| {
+        let mut open = OpenProgram::of(Literal::of_code(GROUPS, GROUP_FUNCTIONS));
+        open.analyse_program().expect("it surveys");
+        let rendered = open.rendered(at).expect("it renders");
+        rendered.response.output.into_text()
+    };
+    let one = analysed(BASE + 0x40);
+    assert!(one.starts_with("double one("), "{one}");
+    let two = analysed(BASE);
+    assert!(!two.starts_with("double "), "{two}");
+    assert!(!two.starts_with("void "), "{two}");
+    assert!(two.contains("the result is unproven (Written)"), "{two}");
+}
+
 /// AArch64 `fwd`: `mov x9, x30; bl pass; mov x30, x9; ret`; `pass` is `ret`, so x0 is the caller's own
 /// past the call: an input handed back, EntryInput in the open world, never void.
 const AARCH64: &[u8] = &[
@@ -180,13 +233,15 @@ fn an_aarch64_argument_passed_through_a_call_is_never_void() {
     assert!(text.contains("EntryInput"), "{text}");
 }
 
-/// `narrow` is `mov eax, edi; ret`. `stores` zeroes XMM0, calls it, stores EAX and writes EAX: RAX
-/// and XMM0 are both written at its return, so its result is unproven. `stores_whole` stores RAX.
+/// `narrow` writes EAX on one return path and leaves RAX unwritten on the other: no fill above.
+/// `stores` writes XMM0 and EAX, so its result is unproven; `stores_whole` stores RAX whole.
 const UNREAD_ABOVE: &[u8] = &[
-    0x89, 0xf8, // 1000 mov eax, edi
-    0xc3, // 1002 ret
-    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0x66, 0x0f, 0xef,
-    0xc0, // 1010 pxor xmm0, xmm0
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x04, // 1002 je 0x1008
+    0x8d, 0x04, 0x7f, // 1004 lea eax, [rdi + rdi*2]
+    0xc3, // 1007 ret
+    0xc3, // 1008 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0x66, 0x0f, 0xef, 0xc0, // 1010 pxor xmm0, xmm0
     0xe8, 0xe7, 0xff, 0xff, 0xff, // 1014 call 0x1000
     0x89, 0x06, // 1019 mov dword ptr [rsi], eax
     0xb8, 0x01, 0x00, 0x00, 0x00, // 101b mov eax, 0x1
@@ -202,7 +257,7 @@ const UNREAD_ABOVE: &[u8] = &[
 
 fn unread_above(at: u64) -> String {
     let functions = &[
-        ("narrow", BASE, 0x03),
+        ("narrow", BASE, 0x09),
         ("stores", BASE + 0x10, 0x11),
         ("stores_whole", BASE + 0x30, 0x12),
     ];
@@ -226,4 +281,66 @@ fn bits_above_a_call_result_a_store_reads_stay_a_residual_where_the_return_is_un
     let text = unread_above(BASE + 0x30);
     assert!(text.starts_with("r2sleigh_result_u64 "), "{text}");
     assert!(text.contains("| r2sleigh_residual_u64(1) << 32"), "{text}");
+}
+
+/// `leaf` writes EAX alone; `f` writes XMM0; `caller` calls `f`, then `leaf`, then stores XMM0;
+/// `top` calls `caller`.
+const KEPT: &[u8] = &[
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 1000 mov eax, 1
+    0xc3, // 1005 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0x66, 0x0f, 0xef,
+    0xc0, // 1010 pxor xmm0, xmm0
+    0xf2, 0x0f, 0x58, 0xc1, // 1014 addsd xmm0, xmm1
+    0xc3, // 1018 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xe8, 0xeb, 0xff, 0xff,
+    0xff, // 1020 call 0x1010
+    0xe8, 0xd6, 0xff, 0xff, 0xff, // 1025 call 0x1000
+    0xf2, 0x0f, 0x11, 0x07, // 102a movsd qword ptr [rdi], xmm0
+    0xc3, // 102e ret
+    0xcc, 0xe8, 0xeb, 0xff, 0xff, 0xff, // 1030 call 0x1020
+    0xc3, // 1035 ret
+    0xcc, 0xcc,
+];
+
+/// `call f; call leaf; movsd [rdi], xmm0`: `leaf` keeps XMM0 on every path to its return, so the
+/// store reads what `f` left, and the closed world decides `f`'s result is the double it wrote.
+#[test]
+fn a_read_past_a_callee_that_keeps_the_lane_is_the_earlier_calls_read() {
+    let functions = [
+        ("leaf", BASE, 0x06),
+        ("f", BASE + 0x10, 0x09),
+        ("caller", BASE + 0x20, 0x0f),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(KEPT, &functions));
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    let text = rendered.response.output.into_text();
+    assert!(text.starts_with("double f("), "{text}");
+    assert_eq!(open.analysis_stats().defects, 0);
+}
+
+/// `caller`'s register effect is deposited by its own site fates where `f` is decided first, and
+/// asked directly where `top` is: each order renders every function alike (ADR, "S31b as built").
+#[test]
+fn a_deposited_register_effect_renders_as_the_one_asked_directly() {
+    let functions = [
+        ("leaf", BASE, 0x06),
+        ("f", BASE + 0x10, 0x09),
+        ("caller", BASE + 0x20, 0x0f),
+        ("top", BASE + 0x30, 0x06),
+    ];
+    let rendered = |order: [u64; 4]| {
+        let mut open = OpenProgram::of(Literal::of_code(KEPT, &functions));
+        open.analyse_program().expect("it surveys");
+        let mut texts = order.map(|at| {
+            let rendered = open.rendered(at).expect("it renders");
+            (at, rendered.response.output.into_text())
+        });
+        texts.sort();
+        assert_eq!(open.analysis_stats().defects, 0);
+        texts
+    };
+    let deposited = rendered([BASE + 0x10, BASE + 0x20, BASE + 0x30, BASE]);
+    let asked = rendered([BASE + 0x20, BASE + 0x10, BASE + 0x30, BASE]);
+    assert_eq!(deposited, asked);
 }

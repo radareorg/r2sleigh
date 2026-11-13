@@ -126,6 +126,21 @@ then miscompile a valid program. The byte copy at the member's address
 asserts neither. Like every byte copy, it is spelled only for a
 little-endian target.
 
+Declared pointers (2026-11-12, after the S9 graph converter): a pointer
+spells what it points at through a typedef, so `pool *` with
+`typedef struct pool pool` is `struct pool*`. S9 began wrapping each named
+type in its alias, and `pointee_spelling` refused the wrap, which took pigz
+from 30 headers naming `struct T*` to 1. A pointer may also name a tag the
+declared graph states, laid out or opaque, that the unit does not define:
+`render::tags` declares it incomplete (`struct lock_s;`), which C allows
+behind a pointer, and a definition holding such a pointer stays definable.
+An inferred `fcn_*` tag is never declared incomplete, since no source states
+it. A tag the unit's graphs (its own and each callee's) state as both a
+struct and a union has no one declaration: no pointer names it, each falls
+to its class, and the proof line names the tag. A call to the function's own entry passes the header's types, and a
+declared callee prototype spells each parameter it can, the rest at their
+class, so a typed pointer never meets an integer at a call.
+
 ### Cost
 
 - r2ssa's reach fact is one forward pass over each formal's def-use closure,

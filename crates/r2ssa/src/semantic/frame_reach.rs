@@ -97,7 +97,7 @@ impl FrameReach {
         prep: Option<&crate::DecompilePrepFacts>,
         graph: &SsaGraph,
         model: &ObjectModel,
-        machine_context: Option<&SourceMachineContext>,
+        (machine_context, areas): (Option<&SourceMachineContext>, &CallAreas),
     ) -> Self {
         let Some(facts) = prep else {
             // Nothing places a frame address, so nothing is proven private.
@@ -113,7 +113,14 @@ impl FrameReach {
         let direct = escaped.clone();
         let barriers = compiler_slots(function, graph, model, machine_context);
         close_upward(&mut escaped, &frame, &barriers);
-        let by_call = call_reaches(function, graph, facts, &frame, machine_context);
+        let by_call = (areas.0.iter())
+            .map(|(call, area)| {
+                let reach = area.as_ref().map_or(CallFrameReach::Whole, |area| {
+                    CallFrameReach::Objects(objects_in(&frame, area))
+                });
+                (call, reach)
+            })
+            .collect::<crate::dense::IdMap<_, _>>();
         r2il::refusal_evidence!(
             "frame-reach",
             "{:#x}: {} of {} frame objects escape (whole frame: {whole}), {} calls bounded",
@@ -385,7 +392,9 @@ fn compiler_slots(
                     *graph.inputs(inst.id).first()?,
                     *graph.inputs(inst.id).get(1)?,
                 );
-                (saved(value) || canary.contains(inst.id)).then_some(MemoryObjectKey {
+                // A canary store inside a wider object is that object's interior, not a slot.
+                let own_slot = canary.contains(inst.id) && model.interior_offset(address).is_none();
+                (saved(value) || own_slot).then_some(MemoryObjectKey {
                     value: address,
                     space: *space,
                 })
@@ -464,12 +473,14 @@ fn escaped_objects(
         frame_addresses(facts, graph, frame, &mut incoming);
     let mut escaped = BTreeSet::new();
     let mut whole = false;
+    let unknown = model.escaped_unknown_object(SpaceId::Ram);
     let placed = |value: ValueId| {
         let key = MemoryObjectKey {
             value,
             space: SpaceId::Ram,
         };
-        model.value_objects.contains_key(&key)
+        // The unknown object names no frame object: an access there escapes what flows into it.
+        (model.value_objects.get(&key)).is_some_and(|object| Some(*object) != unknown)
     };
     while let Some(value) = pending.pop() {
         let from = origins.get(value).cloned().unwrap_or_default();
@@ -663,18 +674,32 @@ fn carries(inst: &crate::graph::GraphInst, input: usize, placed: bool) -> Carry 
     }
 }
 
-/// The frame objects each call reaches through its argument area.
-fn call_reaches(
+/// Each call's argument area at the entry offset of its stack pointer, or `None` where nothing
+/// bounds it: what no object model changes, walked once per collection.
+#[derive(Default)]
+pub(crate) struct CallAreas(crate::dense::IdMap<InstId, Option<Vec<(i64, i64)>>>);
+
+impl CallAreas {
+    pub(crate) fn of(
+        function: &SSAFunction,
+        graph: &SsaGraph,
+        prep: Option<&DecompilePrepFacts>,
+        machine_context: Option<&SourceMachineContext>,
+    ) -> Self {
+        match (prep, machine_context) {
+            (Some(facts), Some(context)) => Self(call_areas(function, graph, facts, context)),
+            _ => Self::default(),
+        }
+    }
+}
+
+fn call_areas(
     function: &SSAFunction,
     graph: &SsaGraph,
     facts: &DecompilePrepFacts,
-    frame: &FrameIndex,
-    machine_context: Option<&SourceMachineContext>,
-) -> crate::dense::IdMap<InstId, CallFrameReach> {
+    machine_context: &SourceMachineContext,
+) -> crate::dense::IdMap<InstId, Option<Vec<(i64, i64)>>> {
     let mut out = crate::dense::IdMap::default();
-    let Some(machine_context) = machine_context else {
-        return out;
-    };
     let Some(stack_pointer) = machine_context.stack_pointer_carrier() else {
         return out;
     };
@@ -695,14 +720,12 @@ fn call_reaches(
                 _ => None,
             };
             let area = (machine_context.call_reads(instruction)).and_then(|reads| reads.stack);
-            let (Some(sp), Some(area)) = (sp, area) else {
-                out.insert(call, CallFrameReach::Whole);
-                continue;
-            };
-            let area = (area.iter())
-                .map(|(low, high)| (sp.saturating_add(*low), sp.saturating_add(*high)))
-                .collect::<Vec<_>>();
-            out.insert(call, CallFrameReach::Objects(objects_in(frame, &area)));
+            let area = sp.zip(area).map(|(sp, area)| {
+                (area.iter())
+                    .map(|(low, high)| (sp.saturating_add(*low), sp.saturating_add(*high)))
+                    .collect::<Vec<_>>()
+            });
+            out.insert(call, area);
         }
     }
     out

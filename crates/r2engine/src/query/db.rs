@@ -396,6 +396,15 @@ impl<I: Inputs + 'static> Db<I> {
         Ok(Some(value))
     }
 
+    /// Whether the running computation has read some answer of `Q`: what it deposits then depends on it.
+    pub fn has_read<Q: Query<I>>(&self) -> bool {
+        let table = TypeId::of::<Q>();
+        (self.frames.borrow().last()).is_some_and(|frame| {
+            (frame.deps.iter())
+                .any(|dep| matches!(dep, Dep::Query { table: read, .. } if *read == table))
+        })
+    }
+
     /// Hold answers a computation found besides its own, depending on what it has read; each must equal a direct computation.
     pub fn deposit<Q: Query<I>>(&self, answers: impl IntoIterator<Item = (Q::Key, Q::Value)>) {
         let deps: Rc<[Dep]> = match self.frames.borrow().last() {

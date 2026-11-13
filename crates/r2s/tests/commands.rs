@@ -597,7 +597,9 @@ fn a_staged_call_passes_its_stack_arguments() {
     assert!(
         staged
             .out
-            .contains("tmp_40133c_8_1, tmp_401335_8_1, rax_45, tmp_401320_8_1, rax_42);"),
+            .contains(
+                "tmp_40133c_8_1, tmp_401335_8_1, (uint64_t)((uint64_t)tmp_401324_8_1 ^ (uint64_t)tmp_40132b_8_1), tmp_401320_8_1, rax_42);"
+            ),
         "{}",
         staged.out
     );
@@ -850,7 +852,7 @@ fn a_staged_recursive_call_agrees_with_its_own_definition() {
     assert!(
         staged
             .out
-            .contains("= (uint64_t)(uint32_t)fact((uint32_t)((uint32_t)n - (uint32_t)1U));"),
+            .contains("= (uint64_t)(uint32_t)fact((int32_t)((uint32_t)n - (uint32_t)1U));"),
         "{}",
         staged.out
     );
@@ -879,7 +881,7 @@ fn the_staged_frame_is_one_array_a_call_may_be_passed_into() {
 fn pdd_writes_from_the_sealed_facts() {
     let staged = r2s(&format!("pdd @ {FNV1A32}"));
     for line in [
-        "return r2sleigh_carrier_u64((uint64_t)0x811c9dc5U);",
+        "return r2sleigh_carrier_u32((uint32_t)0x811c9dc5U);",
         "r2sleigh_load_u8((void*)rdi_1)",
         "* (uint64_t)0x1000193U",
     ] {
@@ -1317,9 +1319,9 @@ mod dispatch_table {
         assert_eq!(
             frame,
             // The loaded table leaves q0 written on the path that skips the loop, so the body does
-            // not say whether x0 or v0 is the result, and no returned use makes the arguments unsigned.
-            "arg int64_t arg0 @ x0\n\
-             arg int64_t arg1 @ x1\n\
+            // not say whether x0 or v0 is the result, and no operation states the arguments' sign.
+            "arg r2sleigh_word_u64 arg0 @ x0\n\
+             arg r2sleigh_word_u64 arg1 @ x1\n\
              var uint32_t stack_m76 @ entry.sp-0x4c\n\
              var uint64_t stack_m72 @ entry.sp-0x48\n\
              var struct r2sleigh_bits_192 stack_m64 @ entry.sp-0x40\n\

@@ -50,6 +50,8 @@ pub(crate) mod integrity;
 pub mod interproc;
 pub mod lanes;
 pub mod liveness;
+pub mod member_call;
+pub use member_call::{MemberCall, MemberCallRefusal, MemberCalls};
 pub(crate) mod liveout;
 pub(crate) mod machine;
 pub mod site_boundary;
@@ -120,7 +122,7 @@ pub use function::{
     PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot, RegisterIdentityCensus,
     RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction, Sealed, SourceRef, SourceSite,
     SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind, StackAddressBase,
-    StackAddressRoot, TrustedSeal, TrustedSsaArtifact, def_use_graph,
+    StackAddressRoot, TrustedConstruction, TrustedSeal, TrustedSsaArtifact, def_use_graph,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
@@ -171,12 +173,12 @@ pub use machine_context::{
     SourceUnstatedCall, loaded_target_slot, terminal_indirect_loaded_slot,
 };
 pub use obligation::{
-    CanonicalInstructionId, CanonicalInstructionSite, ObligationInventoryFailure,
-    ObligationInventoryFailureKind, SEMANTIC_OBLIGATION_SCHEMA_VERSION,
+    CanonicalInstructionId, CanonicalInstructionSite, NamedObligation, ObligationInventoryFailure,
+    ObligationInventoryFailureKind, SEMANTIC_OBLIGATION_SCHEMA_VERSION, SeedReason,
     SemanticInstructionDisposition, SemanticInstructionState, SemanticMemoryOrdering,
     SemanticObligation, SemanticObligationComponent, SemanticObligationId,
     SemanticObligationInventory, SemanticObligationKind, SemanticSourceSite, SpelledInstruction,
-    SpelledObligation,
+    SpelledObligation, ValueReaders,
 };
 pub use op::{AtomicOp, AtomicUpdateOp, BlockTransferOp, InsertOp, OpTransfer, SSAOp, SelectOp};
 pub use optimize::{DecompilePrepConfig, OptimizationConfig, OptimizationStats, SccpMode};

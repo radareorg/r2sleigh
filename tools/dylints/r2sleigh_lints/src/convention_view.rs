@@ -94,12 +94,7 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     ("crates/r2engine/src/lib.rs", "trusted_parsed_context"),
     ("crates/r2engine/src/lib.rs", "trusted_source_signature"),
-    ("crates/r2engine/src/native.rs", "convention_model"),
     ("crates/r2engine/src/native.rs", "machine"),
-    (
-        "crates/r2engine/src/program/fates.rs",
-        "CalleeEntry::compute",
-    ),
     ("crates/r2engine/src/program/fates.rs", "Reading"),
     (
         "crates/r2engine/src/program/fates.rs",
@@ -109,9 +104,9 @@ const ALLOWLIST: &[(&str, &str)] = &[
         "crates/r2engine/src/program/fates.rs",
         "Reading::import_takes",
     ),
-    ("crates/r2engine/src/program/fates.rs", "SiteFates::compute"),
     ("crates/r2engine/src/program/fates.rs", "held_lanes"),
     ("crates/r2engine/src/program/fates.rs", "lanes_of"),
+    ("crates/r2engine/src/program/fates.rs", "read_body"),
     ("crates/r2engine/src/program/info.rs", "FunctionInfo::read"),
     (
         "crates/r2engine/src/program/info.rs",
@@ -233,10 +228,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/r2ssa/src/machine_context.rs",
-        "SourceMachineContext::argument_register_names",
-    ),
-    (
-        "crates/r2ssa/src/machine_context.rs",
         "SourceMachineContext::call_effect",
     ),
     (
@@ -337,16 +328,11 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/r2ssa/src/slot_promotion.rs", "promote"),
     ("crates/r2ssa/src/slot_promotion.rs", "saves"),
     ("crates/r2ssa/src/stack_bound.rs", "decide"),
-    ("crates/r2ssa/src/stack_protector.rs", "decide"),
     ("crates/r2ssa/src/tail_count.rs", "Prover"),
     ("crates/r2ssa/src/tail_count.rs", "Prover::argument_slot"),
     ("crates/r2ssa/src/tail_count.rs", "Prover::saved"),
     ("crates/r2ssa/src/tail_count.rs", "tail_count"),
     ("crates/r2ssa/src/tail_cursors.rs", "Prover::aligned"),
-    (
-        "crates/r2types/src/analysis/assumptions.rs",
-        "apply_type_hint_assumptions_to_context",
-    ),
     (
         "crates/r2types/src/analysis/mod.rs",
         "build_type_analysis_inner",
@@ -368,26 +354,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/r2types/src/function_facts/mod.rs",
         "FunctionFacts::apply_callsite_callee_signatures",
-    ),
-    (
-        "crates/r2types/src/register_identity.rs",
-        "RegisterIdentity::argument_registers",
-    ),
-    (
-        "crates/r2types/src/register_identity.rs",
-        "RegisterIdentity::from_prepared",
-    ),
-    (
-        "crates/r2types/src/register_identity.rs",
-        "RegisterIdentity::from_register_storages",
-    ),
-    (
-        "crates/r2types/src/register_identity.rs",
-        "RegisterIdentity::with_argument_registers",
-    ),
-    (
-        "crates/r2types/src/signature_infer.rs",
-        "build_inferred_signature",
     ),
 ];
 

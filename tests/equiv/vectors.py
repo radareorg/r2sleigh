@@ -31,7 +31,7 @@ import random
 import struct
 from dataclasses import dataclass, field
 
-from cost import MEASURES, Cost
+from cost import COUNTERS, MEASURES, Cost
 from dwarf import Dwarf
 from spec import CallSpec, Param
 from target import SYSV_X86_64, Abi
@@ -47,7 +47,7 @@ POINTER_TABLE = 64
 MASK64 = (1 << 64) - 1
 
 RET_KINDS = {"void": 0, "int": 1, "f32": 2, "f64": 3, "int128": 4}
-JOB_MAGIC = b"EQVJOB04"
+JOB_MAGIC = b"EQVJOB05"
 
 
 def int_pool(size: int, signed: bool, constants: tuple[int, ...] | list[int] = ()) -> list[int]:
@@ -314,7 +314,7 @@ def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
     out = bytearray()
     guard_start, guard_end = spec.guard()
     out += struct.pack(
-        "<8sQQQQ8IQQQQ",
+        "<8sQQQQ10IQQQQ",
         JOB_MAGIC,
         ARENA_BASE,
         ARENA_SIZE,
@@ -328,6 +328,8 @@ def encode_job(spec: CallSpec, runs: list[Run], pairs: list[tuple[int, int]],
         spec.ret_bytes,
         out_cap,
         MEASURES.index(cost.measure),
+        COUNTERS.index(cost.counter),
+        cost.guard_ticks_per_ms(),
         cost.original_guard(),
         cost.floor(),
         cost.ticks(cost.fake_original),

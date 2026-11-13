@@ -107,6 +107,15 @@ pub(crate) struct CollectionOver<'a> {
     pub(crate) machine_context: Option<&'a SourceMachineContext>,
     /// Which caller asked, so a trace says which of the three collections it is.
     pub(crate) site: &'static str,
+    pub(crate) certified: Certified,
+}
+
+/// Which certificates a collection derives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Certified {
+    Whole,
+    /// The return controls alone, which is all interface recovery reads (doc/adr-callee-builds.md).
+    ReturnControls,
 }
 
 /// What each phase of the collector cost, and how much it produced.
@@ -180,6 +189,7 @@ impl PreparedFunctionFacts {
             assumptions: &AssumptionSet::default(),
             machine_context: None,
             site: "collect",
+            certified: Certified::Whole,
         })
     }
 
@@ -198,6 +208,25 @@ impl PreparedFunctionFacts {
             assumptions,
             machine_context: Some(machine_context),
             site,
+            certified: Certified::Whole,
+        })
+    }
+
+    /// The facts interface recovery reads of a function built but not sealed.
+    pub(crate) fn collect_for_recovery(
+        function: &SSAFunction,
+        prep: Option<&crate::function::DecompilePrepFacts>,
+        graph: &SsaGraph,
+        machine_context: &SourceMachineContext,
+    ) -> Result<Self, crate::fixpoint::Exhausted> {
+        Self::collect_unchecked(CollectionOver {
+            function,
+            prep,
+            graph,
+            assumptions: &AssumptionSet::default(),
+            machine_context: Some(machine_context),
+            site: "recover",
+            certified: Certified::ReturnControls,
         })
     }
 
@@ -232,6 +261,7 @@ impl PreparedFunctionFacts {
             assumptions,
             machine_context,
             site,
+            certified,
         } = over;
         let mut phases = PhaseRecorder::open(site, function);
         let MemoryPrefix {
@@ -369,17 +399,35 @@ impl PreparedFunctionFacts {
             predicates: &predicates,
             call_sites: &call_sites,
             structured: &structured,
+            obligations: &obligations,
         };
-        let certificates = collect_prepared_function_certificates(
-            body,
-            derived,
-            &unobserved,
-            &live_out,
-            &private_stack_objects,
-            &declared_slots,
-            memory_round_trips,
-            &addresses,
-        )?;
+        let certificates = match certified {
+            Certified::Whole => collect_prepared_function_certificates(
+                body,
+                derived,
+                &unobserved,
+                &live_out,
+                &private_stack_objects,
+                &declared_slots,
+                memory_round_trips,
+                &addresses,
+            )?,
+            Certified::ReturnControls => {
+                let (machine_return_controls, machine_return_control_by_inst) =
+                    collect_machine_return_control_certificates(
+                        &boundaries,
+                        graph,
+                        &objects,
+                        &structured,
+                        &unobserved,
+                    );
+                PreparedFunctionCertificates {
+                    machine_return_controls,
+                    machine_return_control_by_inst,
+                    ..PreparedFunctionCertificates::default()
+                }
+            }
+        };
         phase!("certificates", certificates.stack_slots.len());
         let (applied_assumption_bindings, assumption_usage) = collect_prepared_assumption_usage(
             graph,

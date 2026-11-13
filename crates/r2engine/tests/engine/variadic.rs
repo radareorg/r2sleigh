@@ -160,7 +160,10 @@ fn rendered(open: &mut OpenProgram<Literal>, at: u64) -> String {
 fn a_register_save_area_is_a_variadic_tail_not_six_parameters() {
     let mut open = sysv();
     let callee = rendered(&mut open, BASE);
-    assert!(callee.contains("vf(uint32_t arg0, ...)"), "{callee}");
+    assert!(
+        callee.contains("vf(r2sleigh_word_u32 arg0, ...)"),
+        "{callee}"
+    );
     assert!(!callee.contains("arg1"), "{callee}");
     let caller = rendered(&mut open, BASE + 0x70);
     assert!(
@@ -185,7 +188,7 @@ fn a_call_handed_a_vector_count_counts_no_argument_from_registers() {
     assert!(outer.contains("wrapper(3, 4)"), "{outer}");
     let wrapper = rendered(&mut open, BASE + 0x1a0);
     assert!(
-        wrapper.contains("wrapper(uint64_t arg0, uint64_t arg1)"),
+        wrapper.contains("wrapper(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)"),
         "{wrapper}"
     );
 }
@@ -195,7 +198,7 @@ fn a_call_handed_a_vector_count_counts_no_argument_from_registers() {
 fn an_o0_body_spilling_its_six_parameters_stays_exact() {
     let mut open = sysv();
     let callee = rendered(&mut open, BASE + 0x90);
-    assert!(callee.contains("uint64_t arg5)"), "{callee}");
+    assert!(callee.contains("r2sleigh_word_u64 arg5)"), "{callee}");
     let caller = rendered(&mut open, BASE + 0xf0);
     assert!(caller.contains("six(1, 2, 3, 4, 5, 6)"), "{caller}");
 }
@@ -251,7 +254,10 @@ fn an_aapcs64_save_area_is_a_variadic_tail() {
         .in_aarch64(),
     );
     let callee = rendered(&mut open, BASE);
-    assert!(callee.contains("vf(uint32_t arg0, ...)"), "{callee}");
+    assert!(
+        callee.contains("vf(r2sleigh_word_u32 arg0, ...)"),
+        "{callee}"
+    );
     let caller = rendered(&mut open, BASE + 0x50);
     assert!(
         caller.contains("call to vf: variadic, its argument count unproven"),
@@ -655,7 +661,7 @@ fn a_loop_bounded_by_a_named_count_passes_exactly_that_many_tail_arguments() {
     assert!(callee.contains("vfold(uint32_t arg0, ...)"), "{callee}");
     let local = rendered(&mut open, BASE + 0x2f0);
     assert!(
-        local.contains("local(uint64_t arg0, uint64_t arg1)"),
+        local.contains("local(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)"),
         "{local}"
     );
     assert!(local.contains("vfold(1, arg0)"), "{local}");

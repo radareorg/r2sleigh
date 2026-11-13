@@ -37,7 +37,8 @@ size: 5
 reads:
 writes: rax
 il:
-    0: RAX = COPY 0x811c9dc5:8
+    0: EAX = COPY 0x811c9dc5:4
+    1: RAX = ZEXT(EAX)
 address: 0x401341
 opcode: nop dword [rax]
 disasm: nop dword [rax]

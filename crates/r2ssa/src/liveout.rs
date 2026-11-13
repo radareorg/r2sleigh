@@ -93,16 +93,7 @@ impl FunctionLiveOut {
     ) -> Self {
         let mut live = Self::default();
         for block in &graph.blocks {
-            // A predicated return (`bxeq lr`) ends its block in a return the terminator does not name.
-            let last = graph.op_insts(block.id).last();
-            let last = last.and_then(|inst| graph.op(*inst));
-            let returns = func
-                .cfg()
-                .get_block(block.addr)
-                .is_some_and(|cfg| cfg.is_return())
-                || matches!(last, Some(crate::op::SSAOp::Return { .. }))
-                || last.is_some_and(|last| passing_tail(func, graph, last, return_storages));
-            if !returns {
+            if !returns(func, graph, block, return_storages) {
                 continue;
             }
             // A returning block often holds no write to the return register at
@@ -116,7 +107,7 @@ impl FunctionLiveOut {
             let mut here = BTreeSet::new();
             for storage in return_storages {
                 let (found, clobbered_here) =
-                    live.collect_reaching(func, graph, *storage, block.addr, Some(&mut here));
+                    live.collect_reaching(func, graph, *storage, [block.addr], Some(&mut here));
                 complete &= found && !clobbered_here;
                 clobbered |= clobbered_here;
             }
@@ -153,7 +144,7 @@ impl FunctionLiveOut {
         func: &SSAFunction,
         graph: &SsaGraph,
         return_storage: CanonicalStorageId,
-        from: u64,
+        from: impl IntoIterator<Item = u64>,
         mut here: Option<&mut BTreeSet<ValueId>>,
     ) -> (bool, bool) {
         let mut found = false;
@@ -161,7 +152,8 @@ impl FunctionLiveOut {
         let mut reaches_entry = false;
         // Each block is walked at most twice: once on a path nothing has written yet, once on one written.
         let mut seen = BTreeSet::new();
-        let mut pending = std::collections::VecDeque::from([(from, false)]);
+        let mut pending =
+            (from.into_iter().map(|addr| (addr, false))).collect::<std::collections::VecDeque<_>>();
         while let Some((addr, mut written)) = pending.pop_front() {
             if !seen.insert((addr, written)) {
                 continue;
@@ -256,6 +248,28 @@ impl FunctionLiveOut {
         (found && !reaches_entry, clobbered_any)
     }
 
+    /// What reaches any return in `lane`, in one backward walk from every returning block: each
+    /// block at most twice, O(blocks + edges), where `compute` walks once per return.
+    pub(crate) fn over_every_return(
+        func: &SSAFunction,
+        graph: &SsaGraph,
+        lane: CanonicalStorageId,
+    ) -> LaneReach {
+        let from = (graph.blocks.iter())
+            .filter(|block| returns(func, graph, block, &[lane]))
+            .map(|block| block.addr)
+            .collect::<Vec<_>>();
+        let returns = !from.is_empty();
+        let mut live = Self::default();
+        let (written, clobbered) = live.collect_reaching(func, graph, lane, from, None);
+        LaneReach {
+            values: live.values,
+            returns,
+            clobbered,
+            unwritten: !written,
+        }
+    }
+
     /// The same, with the returning `blocks` set aside.
     pub(crate) fn without(&self, blocks: &BTreeSet<u64>) -> Self {
         let mut kept = Self::default();
@@ -278,7 +292,7 @@ impl FunctionLiveOut {
         from: u64,
     ) -> crate::dense::IdSet<ValueId> {
         let mut live = Self::default();
-        live.collect_reaching(func, graph, storage, from, None);
+        live.collect_reaching(func, graph, storage, [from], None);
         live.values
     }
 
@@ -322,6 +336,32 @@ impl FunctionLiveOut {
     pub fn has_returns(&self) -> bool {
         !self.by_return.is_empty() || !self.unresolved.is_empty()
     }
+}
+
+/// One lane over every return of a function (`FunctionLiveOut::over_every_return`).
+pub(crate) struct LaneReach {
+    /// Each definition that reaches some return.
+    pub(crate) values: crate::dense::IdSet<ValueId>,
+    pub(crate) returns: bool,
+    /// A call or a supervisor call leaves the lane on some path.
+    pub(crate) clobbered: bool,
+    /// Some path reaches a return from the entry with no write, or no definition was found.
+    pub(crate) unwritten: bool,
+}
+
+/// Whether `block` returns; a predicated return (`bxeq lr`) is one the terminator does not name.
+#[inline]
+fn returns(
+    func: &SSAFunction,
+    graph: &SsaGraph,
+    block: &crate::graph::GraphBlock,
+    return_storages: &[CanonicalStorageId],
+) -> bool {
+    let last = graph.op_insts(block.id).last();
+    let last = last.and_then(|inst| graph.op(*inst));
+    (func.cfg().get_block(block.addr)).is_some_and(|cfg| cfg.is_return())
+        || matches!(last, Some(crate::op::SSAOp::Return { .. }))
+        || last.is_some_and(|last| passing_tail(func, graph, last, return_storages))
 }
 
 /// Whether anything at all reads a value: an operation in the body, or the caller.

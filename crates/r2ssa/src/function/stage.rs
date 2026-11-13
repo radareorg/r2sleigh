@@ -156,6 +156,11 @@ impl Prepared {
         self.ir.note_exhausted(exhausted);
     }
 
+    /// State what each direct callee leaves as found, for a build kept against other statements.
+    pub(crate) fn set_callee_passes(&mut self, preserved: &super::CalleePreservedCarriers) {
+        self.ir.set_callee_passes(preserved);
+    }
+
     /// The same function, one of its facts resting on `premise`.
     pub(crate) fn assuming(mut self, premise: r2source::Premise) -> Self {
         self.ir.record_premise(premise);
@@ -355,6 +360,7 @@ impl Sealed {
                     assumptions: &crate::AssumptionSet::default(),
                     machine_context: Some(&machine_context),
                     site: "prepare",
+                    certified: crate::semantic::Certified::Whole,
                 },
                 control,
             )?;
@@ -387,6 +393,12 @@ impl Sealed {
             &facts.structured.memory_accesses,
             &machine_context,
         );
+        let member_calls = crate::member_call::collect_member_calls(
+            &self.graph,
+            &facts.call_sites,
+            &aggregate_accesses,
+            &machine_context,
+        );
         // The obligations are about the native instructions of the lift the
         // function came from; a span the obligations cannot bind means the
         // lift and the function disagree.
@@ -410,6 +422,7 @@ impl Sealed {
             facts,
             machine_context,
             aggregate_accesses,
+            member_calls,
             spellings: finish.spellings,
         })
     }

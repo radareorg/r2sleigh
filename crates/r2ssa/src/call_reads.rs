@@ -52,7 +52,7 @@ impl CallReads {
     /// the callee and each stack slot it places. O(arguments).
     pub fn exact(interface: &SourceCallSiteInterface, model: Option<&ConventionModel>) -> Self {
         let reserved = model
-            .and_then(ConventionModel::stack_arguments)
+            .and_then(|model| model.stack_arguments())
             .map_or(0, |placement| placement.first_offset().max(0));
         let (mut registers, mut stack) = (Vec::new(), vec![(0, reserved)]);
         for argument in interface.arguments() {

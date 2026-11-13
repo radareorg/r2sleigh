@@ -227,19 +227,6 @@ func.bind.arg.1=struct sockaddr*,address
 func.bind.arg.2=socklen_t,address_len
 func.bind.ret=int
 
-open=func
-func.open.args=2
-func.open.arg.0=const char *,path
-func.open.arg.1=int,oflag
-func.open.ret=int
-
-openat=func
-func.openat.args=3
-func.openat.arg.0=int,fd
-func.openat.arg.1=const char *,path
-func.openat.arg.2=int,oflag
-func.openat.ret=int
-
 imaxdiv=func
 func.imaxdiv.args=2
 func.imaxdiv.arg.0=intmax_t,numer
@@ -426,12 +413,6 @@ func.fts_children_INODE64.arg.0=void*,ftsp
 func.fts_children_INODE64.arg.1=int,opotions
 func.fts_children_INODE64.ret=void *
 
-fstat=func
-func.fstat.args=2
-func.fstat.arg.0=int,fildes
-func.fstat.arg.1=void *,buf
-func.fstat.ret=int
-
 mktime=func
 func.mktime.args=1
 func.mktime.arg.0=tm *,timeptr
@@ -467,12 +448,6 @@ func.wcsftime.arg.1=size_t,maxsize
 func.wcsftime.arg.2=const wchar_t *,format
 func.wcsftime.arg.3=const tm *,timeptr
 func.wcsftime.ret=size_t
-
-lstat=func
-func.lstat.args=2
-func.lstat.arg.0=const char *,path
-func.lstat.arg.1=void *,buf
-func.lstat.ret=int
 
 gets=func
 func.gets.args=1
@@ -742,12 +717,6 @@ func.fflush_unlocked.ret=int
 func=type
 type.func=p
 type.func.size=8
-
-stat=func
-func.stat.args=2
-func.stat.arg.0=const char *,path
-func.stat.arg.1=void *,buf
-func.stat.ret=int
 
 utime=func
 func.utime.args=2

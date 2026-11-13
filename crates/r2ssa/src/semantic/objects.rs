@@ -18,10 +18,14 @@ pub(crate) fn collect_object_and_memory_facts(
     values: &crate::values::ValueRanges,
 ) -> Result<(ObjectModel, MemorySSAFacts), crate::fixpoint::Exhausted> {
     let facts = prep;
+    // What both builds read that no span changes is read once (doc/adr-frame-model.md, "Escape spans").
+    let inputs =
+        facts.map(|facts| BuildInputs::of(facts, function, graph, machine_context, values));
+    let areas = super::frame_reach::CallAreas::of(function, graph, prep, machine_context);
+    let reach = (machine_context, &areas);
     let builder = ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
-    let mut object_model = builder.build(function, graph, values);
-    object_model.frame_reach =
-        FrameReach::of(function, prep, graph, &object_model, machine_context);
+    let mut object_model = builder.build(graph, values, inputs.as_ref());
+    object_model.frame_reach = FrameReach::of(function, prep, graph, &object_model, reach);
     // A run of objects an escaped address may reach is one object: built again with each run as
     // a span, once, since a merged run escapes as the run did.
     let spans =
@@ -32,9 +36,8 @@ pub(crate) fn collect_object_and_memory_facts(
         let mut builder =
             ObjectModelBuilder::new(facts, addresses, declared_slots, machine_context);
         builder.escape_spans(&spans);
-        object_model = builder.build(function, graph, values);
-        object_model.frame_reach =
-            FrameReach::of(function, prep, graph, &object_model, machine_context);
+        object_model = builder.build(graph, values, inputs.as_ref());
+        object_model.frame_reach = FrameReach::of(function, prep, graph, &object_model, reach);
     }
     let access_summaries = collect_access_summaries(graph, facts, addresses, &object_model);
     let memory = build_memory_ssa(function, graph, &object_model, access_summaries)?;

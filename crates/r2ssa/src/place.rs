@@ -2,7 +2,10 @@
 //! (doc/adr-call-boundary.md, "The function's parameters").
 
 use r2source::convention::{ConventionModel, OwnedRange, SectionClass, SlotClass};
-use r2source::{CanonicalStorageId, ConventionId, SourceParameterLocation, SourceUnplacedClass};
+use r2source::{
+    CanonicalStorageId, ConventionId, SourceParameterLocation, SourceType, SourceTypeGraph,
+    SourceTypeKind, SourceUnplacedClass,
+};
 
 /// The class one parameter travels in, as its type states it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,10 +18,49 @@ pub enum ParamClass {
     Unplaced(SourceUnplacedClass),
 }
 
+impl ParamClass {
+    /// The class a value of node `id` travels in, the one classifier of a declared type (S32a);
+    /// an integer wider than `pointer_bits` takes no register. O(1).
+    pub fn of(graph: &SourceTypeGraph, id: u32, pointer_bits: u32) -> Self {
+        let node = usize::try_from(id)
+            .ok()
+            .and_then(|id| graph.types().get(id));
+        node.map_or(Self::Unplaced(SourceUnplacedClass::Unsized), |ty| {
+            Self::of_type(ty, pointer_bits)
+        })
+    }
+
+    /// `of` for a node of a graph still being interned, whose kind and size are already final.
+    pub fn of_type(ty: &SourceType, pointer_bits: u32) -> Self {
+        let bits = u32::try_from(ty.size_bits()).unwrap_or(u32::MAX);
+        let bytes = u8::try_from(bits / 8).unwrap_or(u8::MAX);
+        match ty.kind() {
+            SourceTypeKind::Float if matches!(bits, 32 | 64) => Self::Float(bytes),
+            SourceTypeKind::Float => Self::Unplaced(SourceUnplacedClass::Float(bits)),
+            SourceTypeKind::SignedInteger
+            | SourceTypeKind::UnsignedInteger
+            | SourceTypeKind::Char { .. }
+            | SourceTypeKind::Pointer { .. } => match bits {
+                0 => Self::Unplaced(SourceUnplacedClass::Unsized),
+                bits if bits <= pointer_bits => Self::Integer(bytes),
+                bits => Self::Unplaced(SourceUnplacedClass::WideInteger(bits)),
+            },
+            SourceTypeKind::Struct { .. }
+            | SourceTypeKind::Union { .. }
+            | SourceTypeKind::Array { .. } => Self::Unplaced(SourceUnplacedClass::Aggregate),
+            SourceTypeKind::Void | SourceTypeKind::Code { .. } | SourceTypeKind::Opaque { .. } => {
+                Self::Unplaced(SourceUnplacedClass::Unsized)
+            }
+        }
+    }
+}
+
 /// Where the parameters arrive: the placed prefix, and why the rest have no location.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Placement {
     pub locations: Vec<SourceParameterLocation>,
+    /// Each placed location's slot and section, numbered as `body_boundary` numbers a body's.
+    pub slots: Vec<(crate::body_boundary::SlotId, SlotClass)>,
     /// The class at `locations.len()` that no location takes.
     pub floor: Option<SourceUnplacedClass>,
 }
@@ -70,8 +112,21 @@ pub fn place(model: &ConventionModel, classes: &[ParamClass]) -> Placement {
     let (mut taken_integers, mut taken_floats, mut stack_bytes) = (0usize, 0usize, 0u32);
     let mut placement = Placement {
         locations: Vec::with_capacity(classes.len()),
+        slots: Vec::with_capacity(classes.len()),
         floor: None,
     };
+    // Slots run integer registers, float registers, then the stack; shared positions are one run.
+    let registers_before = |class: &ParamClass| match (shared, class) {
+        (false, ParamClass::Float(_)) => integers.len(),
+        _ => 0,
+    };
+    let register_slots = if shared {
+        integers.len()
+    } else {
+        integers.len() + floats.len()
+    };
+    let mut stacked = 0usize;
+    let slot = |at: usize| crate::body_boundary::SlotId(u32::try_from(at).unwrap_or(u32::MAX));
     for (position, class) in classes.iter().enumerate() {
         let (pool, taken, bytes) = match *class {
             ParamClass::Integer(bytes) => (&integers, &mut taken_integers, bytes),
@@ -83,6 +138,10 @@ pub fn place(model: &ConventionModel, classes: &[ParamClass]) -> Placement {
         };
         let index = if shared { position } else { *taken };
         *taken += 1;
+        let section = match class {
+            ParamClass::Float(_) => SlotClass::Float,
+            _ => SlotClass::Integer,
+        };
         if let Some(register) = pool.get(index) {
             let lane = match class {
                 ParamClass::Float(_) => low_lane(*register, u32::from(bytes)),
@@ -91,6 +150,7 @@ pub fn place(model: &ConventionModel, classes: &[ParamClass]) -> Placement {
             placement
                 .locations
                 .push(SourceParameterLocation::Register(lane));
+            (placement.slots).push((slot(registers_before(class) + index), section));
             continue;
         }
         let Some((first, step)) = stack else {
@@ -109,6 +169,8 @@ pub fn place(model: &ConventionModel, classes: &[ParamClass]) -> Placement {
             size_bytes: u32::from(bytes),
             callee_offset: offset,
         });
+        (placement.slots).push((slot(register_slots + stacked), SlotClass::Stack));
+        stacked += 1;
     }
     placement
 }
@@ -155,7 +217,7 @@ mod tests {
     use super::*;
     use r2source::CanonicalStorageSpace;
     use r2source::convention::Extension;
-    use r2source::convention::{BoundaryForms, Location, Section};
+    use r2source::convention::{BoundaryForms, ConventionParts, Location, Section};
 
     fn register(offset: u64, size: u32) -> CanonicalStorageId {
         CanonicalStorageId {
@@ -183,7 +245,7 @@ mod tests {
     }
 
     fn sysv() -> ConventionModel {
-        ConventionModel {
+        ConventionModel::new(ConventionParts {
             id: ConventionId::SysVAmd64,
             sections: Box::new([
                 section(
@@ -217,9 +279,11 @@ mod tests {
                 guard: None,
                 stack_bound: None,
                 security_cookie: None,
+                linked_guard: None,
             },
             refused: None,
-        }
+        })
+        .expect("a model")
     }
 
     #[test]
@@ -242,6 +306,22 @@ mod tests {
             callee_offset: offset,
         };
         assert_eq!(placed.locations[7..], [stack(8, 4), stack(16, 8)]);
+        let slots = placed.slots.iter().map(|(id, _)| id.0).collect::<Vec<_>>();
+        assert_eq!(slots, [0, 1, 2, 3, 4, 5, 6, 8, 9]);
+    }
+
+    /// `f(double, int)`: the slots run integer registers, float registers, then the stack, as a
+    /// body's boundary numbers them, so formal 1 is slot 0 (D261).
+    #[test]
+    fn a_slot_is_numbered_in_convention_order_whatever_the_formal_order() {
+        let placed = place(&sysv(), &[ParamClass::Float(8), ParamClass::Integer(4)]);
+        assert_eq!(
+            placed.slots,
+            [
+                (crate::body_boundary::SlotId(6), SlotClass::Float),
+                (crate::body_boundary::SlotId(0), SlotClass::Integer)
+            ]
+        );
     }
 
     #[test]

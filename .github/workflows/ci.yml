@@ -758,6 +758,8 @@ jobs:
   # The AArch64 shards install these packages from here: eighteen of them
   # fetching the same files from one mirror at once stalled it (2026-10-22), so
   # one job fetches the files, with its own tries, and the shards unpack them.
+  # It also builds the qemu-aarch64 whose TCG plugin counts guest instructions
+  # (D343): Ubuntu 24.04's qemu-user 8.2.2 has no -plugin.
   aarch64-toolchain:
     name: AArch64 toolchain packages
     runs-on: ubuntu-24.04
@@ -765,7 +767,32 @@ jobs:
     if: needs.plan.outputs.full == 'true'
     timeout-minutes: 20
     steps:
-      - name: Download the cross toolchain and qemu-user with their dependencies
+      - name: Cache qemu-aarch64 8.2.2 with plugins
+        id: qemu
+        uses: actions/cache@v4
+        with:
+          path: qemu
+          key: qemu-8.2.2-aarch64-linux-user-plugins-ubuntu-24.04-v1
+      - name: Build qemu-aarch64 8.2.2 with plugins
+        if: steps.qemu.outputs.cache-hit != 'true'
+        run: |
+          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20"
+          for attempt in 1 2 3; do
+            timeout -k 10 60 $apt update -qq &&
+              timeout -k 10 180 $apt install --no-install-recommends -y ninja-build libglib2.0-dev zlib1g-dev python3-venv &&
+              break
+            [ "$attempt" = 3 ] && exit 1
+          done
+          curl -sSfL --retry 4 -o qemu.tar.xz https://download.qemu.org/qemu-8.2.2.tar.xz
+          echo "847346c1b82c1a54b2c38f6edbd85549edeb17430b7d4d3da12620e2962bc4f3  qemu.tar.xz" | sha256sum -c
+          tar xf qemu.tar.xz
+          mkdir qemu-8.2.2/build && cd qemu-8.2.2/build
+          ../configure --prefix="$GITHUB_WORKSPACE/qemu" --target-list=aarch64-linux-user \
+            --enable-plugins --disable-system --disable-tools --disable-docs --disable-werror
+          make -j"$(nproc)" qemu-aarch64
+          make install
+          "$GITHUB_WORKSPACE/qemu/bin/qemu-aarch64" -h | grep -- -plugin
+      - name: Download the cross toolchain with its dependencies
         run: |
           apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20"
           hosts=(azure.archive.ubuntu.com archive.ubuntu.com mirrors.edge.kernel.org)
@@ -774,7 +801,7 @@ jobs:
             echo "try $attempt from $host"
             sudo sed -i -E "s#(mirror\+file:/etc/apt/apt-mirrors\.txt|https?://(([a-z]+\.)?(archive|security)\.ubuntu\.com|mirrors\.edge\.kernel\.org)/ubuntu/?)#http://$host/ubuntu/#g" /etc/apt/sources.list.d/*.sources
             timeout -k 10 60 $apt update -qq &&
-              timeout -k 10 90 $apt install --download-only --no-install-recommends -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross qemu-user &&
+              timeout -k 10 90 $apt install --download-only --no-install-recommends -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross &&
               break
             [ "$attempt" = 6 ] && exit 1
             echo "try $attempt did not finish; trying again"
@@ -788,11 +815,20 @@ jobs:
           path: debs
           retention-days: 1
           if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        with:
+          name: aarch64-qemu
+          path: |
+            qemu/bin/qemu-aarch64
+            qemu/include/qemu-plugin.h
+          retention-days: 1
+          if-no-files-found: error
 
   # The same ratchet for AArch64 (D6): built with Ubuntu 24.04's cross gcc 13 and
-  # clang 18 `--target=aarch64-linux-gnu`, run under qemu-user, which is the
-  # toolchain baseline-aarch64.json was blessed on. Emulation makes each
-  # configuration slower, so the sources split three ways.
+  # clang 18 `--target=aarch64-linux-gnu`, run under qemu-user 8.2.2, whose plugin
+  # counts each call's guest instructions (D343): the toolchain and measure
+  # baseline-aarch64.json was blessed on. Emulation makes each configuration
+  # slower, so the sources split three ways.
   equivalence-shard-aarch64:
     name: Equivalence aarch64 ${{ matrix.compiler }}-${{ matrix.opt }} ${{ matrix.part.name }}
     runs-on: ubuntu-24.04
@@ -822,18 +858,27 @@ jobs:
         with:
           name: aarch64-toolchain
           path: debs
+      - uses: actions/download-artifact@v8
+        with:
+          name: aarch64-qemu
+          path: qemu
       - name: Install the AArch64 cross toolchain and qemu-user
-        run: sudo dpkg -i debs/*.deb
+        run: |
+          sudo dpkg -i debs/*.deb
+          chmod +x qemu/bin/qemu-aarch64
+          ldd qemu/bin/qemu-aarch64
       - name: Print the compilers
         run: |
           aarch64-linux-gnu-gcc --version | head -n 1
           clang --version | head -n 1
-          qemu-aarch64 --version | head -n 1
+          qemu/bin/qemu-aarch64 --version | head -n 1
       - name: Grade the shard
         run: |
           timeout -s ABRT 22m python3 tests/equiv/run_equiv.py \
             --r2s target/ci/r2s \
             --target aarch64 \
+            --emulator qemu/bin/qemu-aarch64 \
+            --measure instructions \
             --sources ${{ matrix.part.sources }} \
             --compilers ${{ matrix.compiler }} \
             --opts ${{ matrix.opt }} \

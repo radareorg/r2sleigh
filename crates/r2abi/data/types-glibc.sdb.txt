@@ -716,3 +716,45 @@ getpagesize=func
 func.getpagesize.args=0
 func.getpagesize.ret=int
 func.getpagesize.include=unistd.h
+
+# fcntl.h: glibc 2.39, the declarations under _GNU_SOURCE. open, open64 and openat read their mode
+# only where __OPEN_NEEDS_MODE (fcntl.h) holds of the flag: O_CREAT, or every bit of __O_TMPFILE
+# (sysdeps/unix/sysv/linux/open64.c and openat64.c, `if (__OPEN_NEEDS_MODE (oflag))` before
+# `va_arg (arg, int)`). The bits are each architecture's (r2abi `FlagTest::OpenNeedsMode`).
+open=func
+func.open.args=3
+func.open.arg.0=const char *,file
+func.open.arg.1=int,oflag
+func.open.arg.2=,...
+func.open.ret=int
+func.open.include=fcntl.h
+func.open.tail=flagged(1,open_needs_mode,1)
+
+open64=func
+func.open64.args=3
+func.open64.arg.0=const char *,file
+func.open64.arg.1=int,oflag
+func.open64.arg.2=,...
+func.open64.ret=int
+func.open64.include=fcntl.h
+func.open64.tail=flagged(1,open_needs_mode,1)
+
+openat=func
+func.openat.args=4
+func.openat.arg.0=int,fd
+func.openat.arg.1=const char *,file
+func.openat.arg.2=int,oflag
+func.openat.arg.3=,...
+func.openat.ret=int
+func.openat.include=fcntl.h
+func.openat.tail=flagged(2,open_needs_mode,1)
+
+# sys/prctl.h: glibc 2.39 declares `int prctl (int __option, ...)`. Which arguments the kernel
+# reads depends on the option, which no row counts.
+prctl=func
+func.prctl.args=2
+func.prctl.arg.0=int,option
+func.prctl.arg.1=,...
+func.prctl.ret=int
+func.prctl.include=sys/prctl.h
+func.prctl.tail=variadic

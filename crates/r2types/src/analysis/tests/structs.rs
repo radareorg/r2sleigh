@@ -4,30 +4,6 @@ use super::super::*;
 use super::*;
 
 #[test]
-fn signature_type_parser_preserves_source_width_typedefs() {
-    assert_eq!(
-        crate::convert::operator_type_hint("long", 64),
-        Some(typedef_type("long"))
-    );
-    assert_eq!(
-        crate::convert::operator_type_hint("unsigned long int", 64),
-        Some(typedef_type("unsigned long"))
-    );
-    assert_eq!(
-        crate::convert::operator_type_hint("short", 64),
-        Some(typedef_type("short"))
-    );
-    assert_eq!(
-        crate::convert::operator_type_hint("size_t", 64),
-        Some(typedef_type("size_t"))
-    );
-    assert_eq!(
-        crate::convert::operator_type_hint("ptrdiff_t", 64),
-        Some(typedef_type("ptrdiff_t"))
-    );
-}
-
-#[test]
 fn local_struct_decl_preserves_sparse_offsets_with_padding() {
     let decl = build_struct_decl(
         "sla_struct_sparse",
@@ -51,67 +27,6 @@ fn local_struct_decl_preserves_sparse_offsets_with_padding() {
     assert!(decl.contains("int32_t f_8;"), "{decl}");
     assert!(decl.contains("uint8_t _pad_c[40];"), "{decl}");
     assert!(decl.contains("int32_t f_34;"), "{decl}");
-}
-
-#[test]
-fn imported_size_t_type_hint_matches_preserved_source_typedef() {
-    let mut parsed_context = ParsedExternalContext {
-        assumptions: r2ssa::AssumptionSet::new(vec![r2ssa::AnalysisAssumption {
-            id: Some("rsi-size".to_string()),
-            subject: r2ssa::AssumptionSubject::Register {
-                name: "rsi".to_string(),
-            },
-            value: r2ssa::AssumptionValue::TypeHint {
-                ty: "size_t".to_string(),
-            },
-            scope: r2ssa::AssumptionScope::Function,
-            provenance: r2ssa::AssumptionProvenance::ImportedContext,
-        }]),
-        register_params: vec![crate::context::ExternalRegisterParamSpec {
-            name: "n".to_string(),
-            ty: Some(CTypeLike::typedef("size_t")),
-            reg: "rsi".to_string(),
-        }],
-        merged_signature: Some(FunctionSignatureSpec {
-            ret_type: Some(CTypeLike::typedef("size_t")),
-            params: vec![FunctionParamSpec {
-                name: "n".to_string(),
-                ty: Some(CTypeLike::typedef("size_t")),
-            }],
-        }),
-        ..ParsedExternalContext::default()
-    };
-    let mut inferred_signature = InferredSignature {
-        function_name: "sym.scan_example".to_string(),
-        signature: "size_t sym.scan_example(size_t n)".to_string(),
-        ret_type: Some(parse_test_type("size_t", 64)),
-        params: vec![InferredSignatureParam {
-            name: "n".to_string(),
-            ty: parse_test_type("size_t", 64),
-        }],
-        callconv: "amd64".to_string(),
-        arch: "x86-64".to_string(),
-    };
-
-    let usage = apply_type_hint_assumptions_to_context(
-        &mut parsed_context,
-        &mut inferred_signature,
-        64,
-        Some(&SemanticTypeProjection::default()),
-        &x86_64_register_identity(),
-    );
-
-    assert_eq!(usage.applied.len(), 1);
-    assert!(usage.ignored.is_empty());
-    assert!(usage.conflicts.is_empty());
-    assert_eq!(
-        parsed_context.register_params[0]
-            .ty
-            .as_ref()
-            .map(|ty| render_signature_type(ty, 64))
-            .as_deref(),
-        Some("size_t")
-    );
 }
 
 /// Parameter 0 points at a declared `Buffer { data, len }`; parameter 1 is a

@@ -746,6 +746,7 @@ mod tests {
                 signedness: crate::Signedness::Signed,
             },
             params: Vec::new(),
+            bases: Vec::new(),
             variadic: true,
         }
     }
@@ -760,6 +761,7 @@ mod tests {
                 };
                 param_count
             ],
+            bases: vec![r2source::Basis::Declared; param_count],
             variadic: false,
         }
     }

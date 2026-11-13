@@ -56,13 +56,12 @@ impl<'a> RenderInput<'a> {
         self.facts.parameter_declaration(slot, width_bits)
     }
 
-    /// What parameter `slot` is declared, where a declaration states the function's own types: its
-    /// debug information or a library's prototype, never a reading of its body.
+    /// What parameter `slot` is declared, where its row's basis states a type: debug information
+    /// or a library's prototype, its own or a declared callee slot's (D261), never a body reading.
     pub fn declared_parameter(&self, slot: usize, width_bits: u32) -> Option<r2types::CTypeLike> {
-        let interface = self.facts.source().machine_context().function_interface()?;
-        (interface.types().grade() <= r2source::Grade::Declared)
-            .then(|| self.parameter_declaration(slot, width_bits))
-            .flatten()
+        (self.facts.parameter_declaration_fact(slot, width_bits))
+            .filter(|fact| fact.confidence.basis.states_type())
+            .map(|fact| fact.value)
     }
 
     /// The one name of parameter `slot` (r2types `FunctionFacts::parameter_name`).
@@ -101,6 +100,18 @@ impl<'a> RenderInput<'a> {
             .type_graph()
     }
 
+    /// The type graph each call site's callee declares, in call-site order.
+    pub fn callee_type_graphs(&self) -> impl Iterator<Item = &'a r2ssa::SourceTypeGraph> + '_ {
+        let sites = (self.facts.report().callsites()).into_iter();
+        sites
+            .flat_map(|callsites| callsites.by_callsite.values())
+            .filter_map(|facts| {
+                (self.facts.source().call_site_interface(facts.call_site_id))?
+                    .exact_callee_interface()?
+                    .type_graph()
+            })
+    }
+
     /// How many parameters the function takes at least, where its interface states only a floor
     /// (D37), with the causes it names; the proof line carries it to the header (D100).
     pub fn arity_floor(&self) -> Option<(usize, &'a r2source::SourceArityFloor)> {
@@ -122,6 +133,15 @@ impl<'a> RenderInput<'a> {
         (self.artifact().machine_context().function_interface())
             .and_then(r2source::SourceFunctionInterface::result_carriers)
             .is_some_and(|carriers| carriers.second.is_some())
+    }
+
+    /// The result lanes where the body's returns contradict the declaration, which is kept (D331).
+    pub fn body_disputed_lanes(
+        &self,
+    ) -> Vec<(r2source::SourceTypedLane, r2source::SourceBodyLane)> {
+        (self.artifact().machine_context().function_interface())
+            .map(|own| own.body_disputed_lanes().collect())
+            .unwrap_or_default()
     }
 
     /// How many call sites take a prototype the source declares (a library table's or the binary's).
@@ -161,6 +181,13 @@ impl<'a> RenderInput<'a> {
             })
             .and_then(|identity| identity.signature.as_ref());
         graded.or(identity)
+    }
+
+    /// The carrier's bits where the callee of the call at `inst` states no result (D201, D330).
+    pub fn callee_unproven_bits(&self, inst: r2ssa::InstId) -> Option<u32> {
+        (self.facts.report().callsites())
+            .and_then(|callsites| callsites.by_callsite.get(inst))
+            .and_then(|facts| facts.callee_unproven_bits)
     }
 
     /// The callee's own projection for the call at `inst`, from a callee body the capture holds,

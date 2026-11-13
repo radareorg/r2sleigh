@@ -11,7 +11,7 @@ use crate::types::TypeGraph;
 pub enum CLibrary {
     Glibc,
     Bionic,
-    /// Reads only the portable rows until a cited musl table exists.
+    /// musl, whose cited table is small: it reads the portable rows besides.
     Musl,
     /// Apple's libSystem, which every Mach-O links.
     LibSystem,
@@ -37,6 +37,7 @@ pub enum LibraryId {
     Portable,
     Glibc,
     Bionic,
+    Musl,
     LibSystem,
     /// objc4's runtime, `libobjc.A.dylib`: bound only by an import that names that dylib.
     Objc,
@@ -99,6 +100,41 @@ pub enum Tail {
         index: u8,
         format: Option<(u8, FormatKind)>,
     },
+    /// `...` the library's body reads `then` arguments of where the flag at this fixed parameter
+    /// passes `test`, and none where it does not (glibc `open`'s mode).
+    Flagged { index: u8, test: FlagTest, then: u8 },
+}
+
+/// A test a library body makes of a flag argument before it reads its tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlagTest {
+    /// glibc's `__OPEN_NEEDS_MODE` (`<fcntl.h>`): `O_CREAT`, or every bit of `__O_TMPFILE`.
+    OpenNeedsMode,
+}
+
+/// A flag passes where it holds any bit of `any` or every bit of `all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlagBits {
+    pub any: u64,
+    pub all: u64,
+}
+
+impl FlagTest {
+    /// The bits the test reads for this C library on this architecture, where a header read
+    /// states them. O(1).
+    pub fn bits(self, library: CLibrary, arch: &str, bits: u32) -> Option<FlagBits> {
+        // glibc 2.39 `bits/fcntl-linux.h`: `O_CREAT` 0100, `__O_TMPFILE` (020000000 |
+        // __O_DIRECTORY); `__O_DIRECTORY` 0200000 there and 040000 in aarch64's `bits/fcntl.h`.
+        let directory = match (self, library, crate::family(arch), bits) {
+            (Self::OpenNeedsMode, CLibrary::Glibc, Some("x86"), 64) => 0o200000,
+            (Self::OpenNeedsMode, CLibrary::Glibc, Some("arm"), 64) => 0o40000,
+            _ => return None,
+        };
+        Some(FlagBits {
+            any: 0o100,
+            all: 0o20000000 | directory,
+        })
+    }
 }
 
 impl Tail {
@@ -139,6 +175,8 @@ pub struct LibraryRow {
     /// Whether the parameters are all a call passes before its arguments: a row read from a
     /// mangled name may not know of a hidden result pointer or a VTT.
     pub passing: crate::mangled::Passing,
+    /// Whether the row states what the function returns.
+    pub result: RowResult,
     pub noreturn: bool,
     /// A parameter that, holding this handle, makes the call not return.
     pub halts_on: Option<(u8, Handle)>,
@@ -146,6 +184,15 @@ pub struct LibraryRow {
     pub yields: Option<Handle>,
     /// The standard and header the row is read from; empty for a row radare2's tables state.
     pub citation: Box<str>,
+}
+
+/// Whether a row states its function's result (doc/adr-result-side.md, "Imports with an unstated result").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RowResult {
+    /// The row's return type is the function's, `void` included.
+    Stated,
+    /// The row is read from a mangled name, which states parameters only.
+    Unstated,
 }
 
 /// A handle a Microsoft row names by what it refers to, not by its value.
@@ -178,6 +225,7 @@ const GLIBC: &str = include_str!("../data/types-linux.sdb.txt");
 const GLIBC_CITED: &str = include_str!("../data/types-glibc.sdb.txt");
 const BIONIC: &str = include_str!("../data/types-android.sdb.txt");
 const BIONIC_CITED: &str = include_str!("../data/types-bionic.sdb.txt");
+const MUSL_CITED: &str = include_str!("../data/types-musl.sdb.txt");
 const LIBSYSTEM: &str = include_str!("../data/types-darwin.sdb.txt");
 const OBJC: &str = include_str!("../data/types-objc.sdb.txt");
 const KERNEL32: &str = include_str!("../data/types-kernel32.sdb.txt");
@@ -201,7 +249,7 @@ const fn table(library: LibraryId, cited: bool, text: &'static str) -> Embedded 
 }
 
 /// The sources a cited row's comment may name.
-pub const SOURCES: [&str; 9] = [
+pub const SOURCES: [&str; 10] = [
     "ISO C17",
     "POSIX.1-2017",
     "POSIX.1-2024",
@@ -210,6 +258,7 @@ pub const SOURCES: [&str; 9] = [
     "LSB 5.0",
     "GCC",
     "bionic",
+    "musl",
     "Microsoft",
 ];
 
@@ -224,7 +273,8 @@ impl CLibrary {
             Self::Glibc => &[LibraryId::Glibc, CxxRuntime, Portable],
             Self::Bionic => &[LibraryId::Bionic, CxxRuntime, Portable],
             Self::LibSystem => &[LibraryId::LibSystem, CxxRuntime, Portable],
-            Self::Musl | Self::Ucrt | Self::Unknown => &[CxxRuntime, Portable],
+            Self::Musl => &[LibraryId::Musl, CxxRuntime, Portable],
+            Self::Ucrt | Self::Unknown => &[CxxRuntime, Portable],
         }
     }
 }
@@ -243,7 +293,7 @@ impl Default for LibraryRows {
 impl LibraryRows {
     /// The rows a program on this C library can bind, each table read once.
     pub fn embedded(library: CLibrary) -> Self {
-        use LibraryId::{Bionic, CxxRuntime, Glibc, LibSystem, Portable};
+        use LibraryId::{Bionic, CxxRuntime, Glibc, LibSystem, Musl, Portable};
         let own: &[Embedded] = match library {
             CLibrary::Glibc => &[table(Glibc, false, GLIBC), table(Glibc, true, GLIBC_CITED)],
             CLibrary::Bionic => &[
@@ -258,7 +308,8 @@ impl LibraryRows {
                 table(LibraryId::Dll(Dll::Kernel32), true, KERNEL32),
                 table(LibraryId::Dll(Dll::Ucrt), true, UCRT),
             ],
-            CLibrary::Musl | CLibrary::Unknown => &[],
+            CLibrary::Musl => &[table(Musl, true, MUSL_CITED)],
+            CLibrary::Unknown => &[],
         };
         let shared = [
             table(Portable, false, PORTABLE),
@@ -346,6 +397,7 @@ impl LibraryRows {
                 false => Tail::None,
             },
             passing: mangled.passing,
+            result: RowResult::Unstated,
             noreturn: false,
             halts_on: None,
             yields: None,
@@ -422,6 +474,7 @@ impl LibraryRows {
             prototype: id,
             tail,
             passing: crate::mangled::Passing::Stated,
+            result: RowResult::Stated,
             noreturn: declared.noreturn,
             halts_on: declared.halts_on,
             yields: declared.yields,
@@ -462,7 +515,8 @@ impl LibraryRows {
     }
 }
 
-/// `none`, `variadic`, `format(printf,2)`, `va_list(2)` or `va_list(2,printf,1)`.
+/// `none`, `variadic`, `format(printf,2)`, `va_list(2)`, `va_list(2,printf,1)` or
+/// `flagged(1,open_needs_mode,1)`.
 fn parse_tail(text: &str) -> Option<Tail> {
     let text = text.trim();
     let call = |name: &str| {
@@ -484,6 +538,19 @@ fn parse_tail(text: &str) -> Option<Tail> {
         let (kind, index) = arguments.split_once(',')?;
         let (index, kind) = format(kind, index)?;
         return Some(Tail::Format { index, kind });
+    }
+    if let Some(arguments) = call("flagged") {
+        let mut parts = arguments.split(',').map(str::trim);
+        let index = parts.next()?.parse().ok()?;
+        let test = match parts.next()? {
+            "open_needs_mode" => FlagTest::OpenNeedsMode,
+            _ => return None,
+        };
+        let then = parts.next()?.parse().ok()?;
+        return parts
+            .next()
+            .is_none()
+            .then_some(Tail::Flagged { index, test, then });
     }
     if let Some(arguments) = call("va_list") {
         let mut parts = arguments.splitn(3, ',');
@@ -653,6 +720,15 @@ mod tests {
                 format: None
             })
         );
+        assert_eq!(
+            parse_tail("flagged(1, open_needs_mode, 1)"),
+            Some(Tail::Flagged {
+                index: 1,
+                test: FlagTest::OpenNeedsMode,
+                then: 1
+            })
+        );
+        assert_eq!(parse_tail("flagged(1,o_creat,1)"), None);
         let vfprintf = parse_tail("va_list(2,printf,1)").expect("vfprintf");
         assert_eq!(vfprintf.printf_format(), Some(1));
         assert_eq!(parse_tail("format(strftime,1)"), None);

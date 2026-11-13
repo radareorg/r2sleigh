@@ -128,8 +128,9 @@ pub fn render(
         0,
         (
             unassigned.as_deref().unwrap_or_default(),
-            input.open_second_result(),
+            (input.open_second_result(), &input.body_disputed_lanes()),
             input.inferred_aggregates().len(),
+            &tags.conflicting(),
         ),
         (input.return_type())
             .filter(|fact| fact.is_unproven())
@@ -161,10 +162,10 @@ fn spell_function<'a>(
 ) -> Result<(CFunction, Option<values::Values<'a>>, spelled::Spelled), DecompileExecutionStop> {
     let mut forced = r2ssa::dense::IdSet::new(input.graph().values.len());
     loop {
-        let mut c = CFunction::new(name.to_owned(), result_type(input));
+        let mut c = CFunction::new(name.to_owned(), result_type(input, tags));
         spell_unproven_carrier(&mut c, input);
         let values = values::Values::new(input, tags, std::rc::Rc::clone(&c.symbols), &forced);
-        let spelled = spelled::spell(input, values.as_ref(), order, work)?;
+        let spelled = spelled::spell(input, tags, values.as_ref(), order, work)?;
         let broken = values
             .as_ref()
             .map(values::Values::broken)
@@ -409,13 +410,19 @@ fn traps(stmt: &CStmt) -> bool {
         || matches!(stmt, CStmt::Expr(CExpr::Call { func, .. }) if crate::prelude::is_residual_callee(func).is_some())
 }
 
-/// The function's result type: what the analysis decided, else the machine word.
-fn result_type(input: &RenderInput<'_>) -> CType {
-    input
+/// The function's result type: what the analysis decided, spelled as a parameter is where C spells
+/// it, else the machine word.
+fn result_type(input: &RenderInput<'_>, tags: &tags::Tags) -> CType {
+    let declared = input
         .return_type()
-        .and_then(r2types::ReturnTypeFact::declared)
-        .cloned()
-        .unwrap_or_else(|| word(input))
+        .and_then(r2types::ReturnTypeFact::declared);
+    declared.map_or_else(
+        || word(input),
+        |declared| {
+            calls::spellable(declared, &|tag, union| tags.names(tag, union))
+                .unwrap_or_else(|| declared.clone())
+        },
+    )
 }
 
 /// The bits of an unproven result's carrier, where it is an integer C names.

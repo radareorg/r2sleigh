@@ -488,9 +488,14 @@ impl Trace {
         &self.0.loads
     }
 
-    /// How many basic blocks the walk reached and how many bytes their
-    /// instructions occupy.
-    ///
+    /// The address after each call the walk ended a block at because its callee never comes back.
+    pub fn exits_after(&self) -> impl Iterator<Item = u64> + '_ {
+        let walk = &self.0;
+        let through = (walk.halting.iter())
+            .filter_map(|call| Some(call.saturating_add(u64::from(*walk.decoded.get(call)?))));
+        (walk.gated.values().flatten().map(|(_, after)| *after)).chain(through)
+    }
+
     /// The instructions the walk reached that enter the supervisor.
     pub fn supervisor_calls(&self) -> &BTreeSet<u64> {
         &self.0.supervisor

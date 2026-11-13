@@ -11,7 +11,7 @@ specifications do (ROADMAP D33). Each pin is in the table under Upstream pins.
 
 | Processor | Ghidra | Carried on that text (below) |
 |---|---|---|
-| x86 | master `918acd744d` | AF; RDRAND r32's r/m register; SHR/SHRD OF at count 1; CVTTSD2SI/CVTTSS2SI's integer indefinite; VEX VPEXTRW 0F3A 15's r/m register; PREFETCHh and MPX decoded where the `0F 18`-`0F 1F` hint NOP took them, with BNDLDX and BNDSTX user operations (`bndldx_op`, `bndstx_op`) where Ghidra reads and writes the effective address (fork pull request and Ghidra issue owed); the Go cspec's RDX (fork #2) |
+| x86 | master `918acd744d` | AF; RDRAND r32's r/m register; `MOV r32, imm32` (B8+r) writes r32 and widens it; SHR/SHRD OF at count 1; CVTTSD2SI/CVTTSS2SI's integer indefinite; VEX VPEXTRW 0F3A 15's r/m register; PREFETCHh and MPX decoded where the `0F 18`-`0F 1F` hint NOP took them, with BNDLDX and BNDSTX user operations (`bndldx_op`, `bndstx_op`) where Ghidra reads and writes the effective address (fork pull request and Ghidra issue owed); the Go cspec's RDX (fork #2) |
 | ARM | master `918acd744d` | the hidden scratch marks; `ARM.cspec`'s `<returnaddress>` (fork #1) |
 | AARCH64 | master `918acd744d` | the fork's #2 to #15; #16 and #17; `AtomicBegin`/`AtomicEnd` on the LSE atomics; `fcvtzu`'s full-width scale; CSSC's W forms; the hidden scratch marks; `AARCH64_apple.cspec`'s `<returnaddress>` x30, which Ghidra master omits (fork pull request owed) |
 | MIPS | master `918acd744d` | none |
@@ -87,6 +87,13 @@ VEX `VPEXTRW reg, xmm, imm8` (0F3A 15) writes its ModRM r/m register, where
 GP-7017 wrote the reg field's (`vpextrw ecx, xmm0, 1` wrote EAX); AArch64
 CSSC's W forms (`abs`, `cnt`, `smax`, `smin`, `umax`, `umin`) write X
 zero-extended, as GP-6448's own `ctz` does (the AArch64 oracle).
+
+Carried in this tree for the engine's lane record, with no Ghidra defect behind it (no
+issue owed; a sleigh-config pull request is): `MOV r32, imm32` (B8+r, `ia.sinc`) is
+`Rmr32 = imm32; build check_Rmr32_dest`, the text of its `C7 /0` sibling, where Ghidra's
+`CRmr32` exports the 64-bit register and writes it the constant in one copy. Both leave
+the same machine state; only the first states that the instruction wrote four bytes
+(ROADMAP D74, `crates/r2sleigh-lift/tests/zero_extension.rs`).
 
 Carried in this tree, not yet in the fork or in Ghidra (a sleigh-config pull
 request and a Ghidra issue owed; 918acd744d still decodes both as NOP): x86's catch-all

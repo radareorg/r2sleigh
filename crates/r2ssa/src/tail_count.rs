@@ -405,20 +405,20 @@ impl Prover<'_> {
         let header_block = (self.graph.block_id_for_addr(header)).ok_or("no header block")?;
         self.fresh(&cursors, header_block)?;
         match counting {
-            Counting::Trips { parameter, width } => Ok(SourceTailCount {
-                parameter_index: u32::try_from(parameter).map_err(|_| "a parameter index")?,
-                width_bytes: width,
-                signed: false,
-            }),
+            Counting::Trips { parameter, width } => Ok(SourceTailCount::trips(
+                u32::try_from(parameter).map_err(|_| "a parameter index")?,
+                width,
+                false,
+            )),
             Counting::Memory(bound) => {
                 self.dominating(header, &stores)?;
                 let (_, stored) = stores.count_store.ok_or("the count is not kept")?;
                 let parameter = self.parameter(stored, bound.count)?;
-                Ok(SourceTailCount {
-                    parameter_index: u32::try_from(parameter).map_err(|_| "a parameter index")?,
-                    width_bytes: bound.count.size,
-                    signed: bound.signed,
-                })
+                Ok(SourceTailCount::trips(
+                    u32::try_from(parameter).map_err(|_| "a parameter index")?,
+                    bound.count.size,
+                    bound.signed,
+                ))
             }
         }
     }

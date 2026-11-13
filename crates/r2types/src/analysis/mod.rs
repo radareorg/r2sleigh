@@ -1,16 +1,14 @@
 mod arrays;
-mod assumptions;
 mod shared;
 mod signature;
 mod structs;
 
 pub(crate) use arrays::*;
-pub(crate) use assumptions::*;
 pub(crate) use shared::*;
 pub(crate) use signature::*;
 pub(crate) use structs::*;
 
-use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_hash::FxHashMap;
 use std::collections::{BTreeMap, BTreeSet};
 
 use std::sync::Arc;
@@ -20,10 +18,7 @@ use r2ssa::{
     SummaryMemoryEffect, SummaryMemoryEffectKind, SummaryMemoryRegion, SummaryReturnRelation,
 };
 
-use crate::context::{
-    ExternalRegisterParamSpec, ParsedExternalContext, apply_main_signature_override,
-    is_generic_arg_name,
-};
+use crate::context::{ParsedExternalContext, apply_main_signature_override, is_generic_arg_name};
 use crate::convert::CTypeLike;
 use crate::external::{
     ExternalField, ExternalStruct, ExternalTypeDb, ExternalUnion, normalize_external_type_name,
@@ -169,24 +164,24 @@ impl TypeAnalysis {
                     }
                 };
                 let width_bits = carrier_width.checked_mul(8)?;
-                let ty = crate::admit_declaration_type(parameter.ty.clone()?, width_bits, ptr_bits);
-                // The header declares a body-read integer unsigned, as its own definition does
-                // (D156: no byte states the sign), so a caller's extern spells it alike (W46).
-                Some(match ty {
-                    CTypeLike::Int { bits, .. } if !prototype => CTypeLike::Int {
-                        bits,
-                        signedness: crate::Signedness::Unsigned,
-                    },
-                    ty => ty,
-                })
+                // The header's own type, its sign the slot's row (D265), so an extern spells it alike.
+                Some(crate::admit_declaration_type(
+                    parameter.ty.clone()?,
+                    width_bits,
+                    ptr_bits,
+                ))
             })
             .collect::<Option<Vec<_>>>()?;
         let unproven = self.unproven_carrier_bits();
+        // A body's slots bound no caller's type: a callee's derived facts read none of its own
+        // callees, so a type reached through one would disagree with its extern (D262).
+        let bases = vec![r2source::Basis::CarrierWidth; params.len()];
         crate::SourceOwnedCalleeSignature::new(
             &self.source,
             crate::FunctionType {
                 return_type,
                 params,
+                bases,
                 // Function interfaces own fixed carriers. Variadicity belongs
                 // to the exact callsite prototype and is attached there.
                 variadic: false,
@@ -660,7 +655,6 @@ fn merged_context_and_summary_callee_facts(
 
 fn build_type_analysis_inner(
     mut input: DerivedTypeAnalysisInput<'_>,
-    registers: &crate::RegisterIdentity,
     callee_facts: BTreeMap<u64, CalleeFact>,
 ) -> DerivedTypeAnalysis {
     // This inner projection builder is also used by detached report-only
@@ -679,33 +673,13 @@ fn build_type_analysis_inner(
         .chain(input.parsed_context.merged_signature.as_ref())
         .any(signature_param_count_is_authoritative);
 
-    let type_assumption_usage = apply_type_hint_assumptions_to_context(
-        &mut input.parsed_context,
-        &mut input.inferred_signature,
-        input.ptr_bits,
-        Some(&semantic_projection),
-        registers,
-    );
-
-    // Borrowed after the last mutation of the context, and not copied: the
-    // database is per binary while this runs per function.
+    // Borrowed, not copied: the database is per binary while this runs per function.
     let type_db = &input.parsed_context.external_type_db;
-    let type_assumption_parameter_slots = applied_type_assumption_parameter_slots(
-        &type_assumption_usage,
-        &input.parsed_context,
-        registers,
-    );
     let mut signature_certificate_sources = Vec::new();
     if authoritative_external_arity {
         push_signature_certificate_source(
             &mut signature_certificate_sources,
             SignatureCertificateSource::ExternalContext,
-        );
-    }
-    if !type_assumption_parameter_slots.is_empty() {
-        push_signature_certificate_source(
-            &mut signature_certificate_sources,
-            SignatureCertificateSource::TypeAssumption,
         );
     }
     let inferred_signature_spec =
@@ -797,7 +771,7 @@ fn build_type_analysis_inner(
     let type_facts = FunctionTypeFacts::builder(FunctionTypeFactInputs {
         merged_signature: merged_signature.clone(),
         // Enrichment states these as it writes each slot.
-        parameter_bases: BTreeMap::new(),
+        parameter_types: crate::ParameterTypes::default(),
         // Enrichment states these from the solve, beside the exact signature.
         inferred_aggregates: BTreeMap::new(),
         parameter_structures: BTreeMap::new(),
@@ -831,53 +805,9 @@ fn build_type_analysis_inner(
         function_facts: FunctionFacts::new(type_facts.clone())
             .with_assumptions(input.parsed_context.assumptions.clone())
             .with_summary_view(summary_view)
-            .with_diagnostics(type_facts.diagnostics.clone())
-            .with_assumption_usage(type_assumption_usage),
+            .with_diagnostics(type_facts.diagnostics.clone()),
         type_facts,
     }
-}
-
-#[cfg(test)]
-fn register_identity_from(registers: &[(&str, u64, u32)]) -> crate::RegisterIdentity {
-    let storages = registers
-        .iter()
-        .map(|(name, offset, size)| {
-            (
-                (*name).to_string(),
-                r2ssa::CanonicalStorageId {
-                    space: r2ssa::CanonicalStorageSpace::Register,
-                    offset: *offset,
-                    size: *size,
-                },
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
-    crate::RegisterIdentity::from_register_storages(&storages)
-}
-
-#[cfg(test)]
-fn x86_64_register_identity() -> crate::RegisterIdentity {
-    register_identity_from(&[
-        ("rax", 0x00, 8),
-        ("eax", 0x00, 4),
-        ("ax", 0x00, 2),
-        ("al", 0x00, 1),
-        ("ah", 0x01, 1),
-        ("rdx", 0x10, 8),
-        ("edx", 0x10, 4),
-        ("dx", 0x10, 2),
-        ("dl", 0x10, 1),
-        ("dh", 0x11, 1),
-        ("rdi", 0x38, 8),
-        ("edi", 0x38, 4),
-        ("dil", 0x38, 1),
-        ("rsi", 0x30, 8),
-        ("esi", 0x30, 4),
-        ("sil", 0x30, 1),
-        ("rcx", 0x08, 8),
-        ("ecx", 0x08, 4),
-    ])
-    .with_argument_registers(tests::system_v_argument_registers())
 }
 
 #[cfg(test)]
@@ -886,7 +816,7 @@ fn build_type_analysis(input: DerivedTypeAnalysisInput<'_>) -> DerivedTypeAnalys
         &input.parsed_context.callee_facts,
         input.interproc_summary_set.as_ref(),
     );
-    build_type_analysis_inner(input, &x86_64_register_identity(), callee_facts)
+    build_type_analysis_inner(input, callee_facts)
 }
 
 #[cfg(test)]
@@ -957,11 +887,7 @@ pub fn build_source_owned_type_analysis(
         interproc_summary_set: interproc_report,
         diagnostics,
     };
-    let derived = build_type_analysis_inner(
-        derived_input,
-        &crate::RegisterIdentity::from_prepared(source.as_ref()),
-        callee_facts,
-    );
+    let derived = build_type_analysis_inner(derived_input, callee_facts);
     let mut function_facts = derived.function_facts;
     if let Some(interproc_summary) = interproc_summary {
         function_facts = function_facts.with_prepared_interproc_summary(interproc_summary);

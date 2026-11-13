@@ -200,9 +200,11 @@ pub(crate) fn function_type_matches_source_interface(
     }
     match (interface.return_kind(), &signature.return_type) {
         (r2ssa::SourceFunctionReturn::Void, CTypeLike::Void) => true,
+        // No return is reached: the header spells the carrier word, and a call leaves nothing.
+        (r2ssa::SourceFunctionReturn::Void, CTypeLike::Int { .. }) => interface.no_return_reached(),
         // Typed at each call by the carrier its caller reads (`call_result_type`).
         (r2ssa::SourceFunctionReturn::Unproven, CTypeLike::Unknown) => {
-            interface.result_carriers().is_some()
+            interface.result_carriers().is_some() || interface.unstated_carrier().is_some()
         }
         (r2ssa::SourceFunctionReturn::Register { storage }, ty) => {
             let actual_bits = declaration_type_width_bits(ty, ptr_bits).map(u64::from);
@@ -1115,7 +1117,7 @@ pub(crate) fn recovered_scalar_signedness_outranks(
     recovered: &CTypeLike,
     ptr_bits: u32,
 ) -> bool {
-    let scalar = |ty: &CTypeLike| match ty {
+    let scalar = |ty: &CTypeLike| match crate::word_free(ty) {
         CTypeLike::Int { bits, signedness } => Some((*bits, *signedness)),
         CTypeLike::Typedef { name, ty } => match crate::convert::typedef_target(name, ty, ptr_bits)
         {
@@ -1366,7 +1368,8 @@ pub(crate) fn prepared_call_render_facts(prepared: &r2ssa::SsaArtifact) -> Funct
                     Some(
                         r2ssa::SourceCallResult::Register { .. }
                         | r2ssa::SourceCallResult::Pair { .. }
-                        | r2ssa::SourceCallResult::Unproven { .. },
+                        | r2ssa::SourceCallResult::Unproven { .. }
+                        | r2ssa::SourceCallResult::Unstated { .. },
                     ) => CallsiteRenderDisposition::TerminalReturn,
                     Some(r2ssa::SourceCallResult::Void) => {
                         CallsiteRenderDisposition::TerminalVoidReturn

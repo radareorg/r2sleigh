@@ -20,6 +20,51 @@ pub fn unread_slot(
     })
 }
 
+/// The sign of formal `index`'s lane at `ty`'s width: the seeds on its entry value and on each
+/// offset-0 SUBPIECE of it at that width (D265, RULING 2.4). O(uses of the entry value).
+fn formal_sign(
+    source: &r2ssa::SsaArtifact,
+    signedness: &r2ssa::dense::IdMap<
+        r2ssa::ValueId,
+        BTreeSet<crate::signedness::ScalarSignednessEvidence>,
+    >,
+    index: usize,
+    ty: &CTypeLike,
+) -> crate::SignFact {
+    use crate::signedness::ScalarSignednessEvidence as Seed;
+    let CTypeLike::Int { bits, .. } = ty.unaliased() else {
+        return crate::SignFact::Unstated;
+    };
+    let graph = source.graph();
+    let Some(entry) = u32::try_from(index)
+        .ok()
+        .and_then(|index| source.facts().boundaries.parameters.get(&index))
+        .and_then(|parameter| parameter.value())
+    else {
+        return crate::SignFact::Unstated;
+    };
+    let at_width = |value: r2ssa::ValueId| graph.var(value).size.saturating_mul(8) == *bits;
+    let lanes = (graph.use_sites(entry).iter())
+        .filter_map(|site| {
+            let inst = graph.inst(site.inst)?;
+            matches!(
+                inst.payload,
+                r2ssa::InstPayload::Op(r2ssa::SSAOp::Subpiece { offset: 0, .. })
+            )
+            .then_some(inst.output?)
+        })
+        .chain(std::iter::once(entry))
+        .filter(|value| at_width(*value));
+    let (mut signed, mut unsigned) = (false, false);
+    for lane in lanes {
+        if let Some(seeds) = signedness.get(lane) {
+            signed |= seeds.contains(&Seed::Signed);
+            unsigned |= seeds.contains(&Seed::Unsigned);
+        }
+    }
+    crate::SignFact::of(signed, unsigned)
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -809,7 +854,8 @@ pub(super) fn float_lane(
 fn carrier_word(result: Option<r2ssa::SourceCallResult>, bits: Option<u32>) -> Option<CTypeLike> {
     let bits = match result? {
         r2ssa::SourceCallResult::Void => bits?,
-        r2ssa::SourceCallResult::Unproven { integer, .. } => integer.size.checked_mul(8)?,
+        r2ssa::SourceCallResult::Unproven { integer, .. }
+        | r2ssa::SourceCallResult::Unstated { carrier: integer } => integer.size.checked_mul(8)?,
         _ => return None,
     };
     Some(CTypeLike::Int {
@@ -929,11 +975,15 @@ impl SourceOwnedCalleeSignature {
             );
             return None;
         }
+        // A result the declaration does not state is the carrier its interface seeds (D330).
+        let unstated = signature.return_type == CTypeLike::Unknown;
+        let seed = (interface.unproven_result()).and_then(r2ssa::SourceUnprovenResult::seed);
+        let unproven_bits = seed.filter(|_| unstated).map(|seed| seed.bits);
         Some(Self {
             address,
             interface,
             signature,
-            unproven_bits: None,
+            unproven_bits,
         })
     }
 
@@ -1047,8 +1097,8 @@ impl SourceOwnedFunctionFacts {
             |interface| interface.types().clone(),
         );
         // A slot a step rewrote rests on that step's basis; the rest on the interface's types.
-        let types = (self.report.type_facts().parameter_bases.get(&slot))
-            .map_or(types, |basis| Confidence::of(*basis));
+        let types =
+            (self.report.type_facts().parameter_types.basis(slot)).map_or(types, Confidence::of);
         let signed = self
             .report
             .type_facts()
@@ -1159,7 +1209,7 @@ impl SourceOwnedFunctionFacts {
         // Exact immutable interface evidence outranks advisory propagation.
         // Apply it after recovered call evidence so the latter cannot rewrite
         // a declared signedness or logical projection through a weak scalar.
-        enriched.apply_exact_source_signature(source, &solved.aggregates);
+        enriched.apply_exact_source_signature(source, solved);
         enriched.types.inferred_aggregates = (solved.aggregates.values())
             .map(|aggregate| (aggregate.tag.clone(), aggregate.definition.clone()))
             .collect();
@@ -1320,12 +1370,12 @@ impl SolvedFunction {
         let params = crate::prepare::recover_signature_params_from_prepared_ssa(source, ptr_bits);
         let signedness = crate::signedness::scalar_signedness_of(
             source,
-            true,
             crate::signature_infer::signedness_aliases(source, &params),
         );
         let evidence =
             crate::evidence::solve_evidence_types(source, signatures, &signedness, ptr_bits);
-        let returns = ReturnTypeFact::decide(source, signatures, &evidence);
+        let returns =
+            ReturnTypeFact::decide(source, signatures, &evidence).signed_by(source, &signedness);
         let aggregates = crate::aggregates::parameter_aggregates(source, &evidence);
         Self {
             signedness,
@@ -2158,7 +2208,7 @@ impl FunctionFacts {
         };
         self.types.merged_signature = Some(signature);
         self.types.signature_certificate = override_facts.signature_certificate;
-        self.types.parameter_bases = override_facts.parameter_bases;
+        self.types.parameter_types = override_facts.parameter_types;
         true
     }
 
@@ -2513,8 +2563,9 @@ impl FunctionFacts {
     fn apply_exact_source_signature(
         &mut self,
         source: &r2ssa::SsaArtifact,
-        aggregates: &BTreeMap<usize, crate::aggregates::InferredAggregate>,
+        solved: &SolvedFunction,
     ) -> bool {
+        let (aggregates, evidence) = (&solved.aggregates, &solved.evidence);
         let context = source.machine_context();
         let Some(interface) = context.function_interface() else {
             return false;
@@ -2522,16 +2573,28 @@ impl FunctionFacts {
         let Some(graph) = interface.type_graph() else {
             return false;
         };
-        // A graph a body recovery minted holds each carrier's width and
-        // declares nothing more. A parameter the body certifiably accesses
-        // memory through is a pointer to what it reads; read as the exact
-        // signature, the width alone declared every such parameter an integer.
-        // Nothing weaker than that certificate upgrades a width: the evidence
-        // solver's own guesses at pointers and signedness are not proof.
-        let certified_pointers = (interface.types().basis == r2source::Basis::CarrierWidth)
-            .then(|| crate::signature_infer::certified_parameter_pointers(source, aggregates));
+        // A width-only slot takes a declared callee slot's pointer (D262), else a certified access's;
+        // the solver's own guesses at pointers and signedness are not proof.
+        let slot_basis = |index: usize| {
+            (interface.parameters().get(index))
+                .and_then(r2source::SourceAbiParameterSpec::basis)
+                .unwrap_or(interface.types().basis)
+        };
+        let widths =
+            (0..interface.parameters().len()).any(|index| !slot_basis(index).states_type());
+        let certified_pointers = widths.then(|| {
+            let signs = &solved.signedness;
+            crate::signature_infer::certified_parameter_pointers(source, aggregates, signs)
+        });
         let logical = interface.parameter_logical_values();
         if logical.len() != interface.parameters().len() {
+            r2il::refusal_evidence!(
+                "exact-source-signature",
+                "{:#x}: {} logical values for {} parameters",
+                source.function().entry,
+                logical.len(),
+                interface.parameters().len()
+            );
             return false;
         }
         let spelled = self.types.merged_signature.clone();
@@ -2547,7 +2610,7 @@ impl FunctionFacts {
             });
         let ptr_bits = context.memory_model().default_address_bits();
         let mut params = Vec::with_capacity(logical.len());
-        let mut bases = BTreeMap::new();
+        let mut rows = crate::ParameterTypes::of_interface(interface);
         for (index, value) in logical.iter().enumerate() {
             // An exact signature is exact in every parameter. One the capture
             // could not place leaves the signature to radare2's spelling,
@@ -2567,19 +2630,51 @@ impl FunctionFacts {
                 );
                 return false;
             };
-            let ty = match certified_pointers
-                .as_ref()
-                .and_then(|pointers| pointers.get(&index))
-            {
-                Some(pointer) if declaration_type_width_bits(&ty, ptr_bits) == Some(ptr_bits) => {
-                    bases.insert(index, r2source::Basis::Dereferenced);
-                    pointer.clone()
-                }
-                _ => {
-                    bases.insert(index, interface.types().basis);
-                    ty
-                }
+            // A width-only slot's type rests on what states the interface's carriers.
+            let basis = Some(slot_basis(index))
+                .filter(|basis| basis.states_type())
+                .unwrap_or(interface.types().basis);
+            let pointer_wide = declaration_type_width_bits(&ty, ptr_bits) == Some(ptr_bits);
+            let declared = (!basis.states_type())
+                .then(|| source.facts().boundaries.parameters.get(&(index as u32)))
+                .flatten()
+                .and_then(|parameter| evidence.declared_bound(parameter.value()?));
+            let certified = (certified_pointers.as_ref()).and_then(|pointers| pointers.get(&index));
+            let integer = |basis| {
+                let sign = formal_sign(source, &solved.signedness, index, &ty);
+                crate::SlotType::of(&ty, basis, sign)
             };
+            let row = match (declared, certified) {
+                // A declared `void *` says less than the pointee a certified access reads.
+                (Some(crate::DeclaredBound::Pointer(pointer, by)), certified)
+                    if pointer_wide
+                        && !(certified.is_some()
+                            && crate::evidence::is_untyped_pointer(pointer)) =>
+                {
+                    crate::ParameterType::stated(crate::SlotType::Pointer(pointer.clone(), *by))
+                }
+                (Some(_), None) if !basis.states_type() => {
+                    let refused = match declared {
+                        Some(crate::DeclaredBound::Integer) => crate::PointerRefusal::IntegerBound,
+                        _ => crate::PointerRefusal::NotPointerWide,
+                    };
+                    r2il::refusal_evidence!("declared-pointer", "parameter {index}: {refused:?}");
+                    crate::ParameterType::refused(integer(basis), refused)
+                }
+                (_, Some(pointer)) if pointer_wide => crate::ParameterType::stated(
+                    crate::SlotType::Pointer(pointer.clone(), r2source::Basis::Dereferenced),
+                ),
+                (_, Some(pointer)) => {
+                    r2il::refusal_evidence!(
+                        "exact-source-signature",
+                        "parameter {index}: {pointer:?} is no pointer at {ty:?}'s width"
+                    );
+                    crate::ParameterType::stated(integer(basis))
+                }
+                (_, None) => crate::ParameterType::stated(integer(basis)),
+            };
+            let ty = row.ty.spelled();
+            rows.set(index, row);
             let name = names
                 .as_ref()
                 .and_then(|names| names.get(index).cloned())
@@ -2620,7 +2715,7 @@ impl FunctionFacts {
         };
         self.types.merged_signature = Some(signature);
         self.types.signature_certificate = Some(certificate);
-        self.types.parameter_bases = bases;
+        self.types.parameter_types = rows;
         true
     }
 
@@ -2707,6 +2802,11 @@ impl FunctionFacts {
             return;
         };
         let mut changed = false;
+        if self.types.parameter_types.is_empty()
+            && let Some(interface) = source.machine_context().function_interface()
+        {
+            self.types.parameter_types = crate::ParameterTypes::of_interface(interface);
+        }
         for (slot, parameter) in &source.facts().boundaries.parameters {
             if parameter.index != *slot {
                 continue;
@@ -2733,9 +2833,11 @@ impl FunctionFacts {
             if replace {
                 param.ty = Some(candidate.clone());
                 changed = true;
+                let sign = crate::SignFact::Unstated;
+                let row = crate::SlotType::of(candidate, r2source::Basis::Solved, sign);
                 self.types
-                    .parameter_bases
-                    .insert(index, r2source::Basis::Solved);
+                    .parameter_types
+                    .set(index, crate::ParameterType::stated(row));
             }
         }
         if changed {

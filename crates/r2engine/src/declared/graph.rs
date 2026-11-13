@@ -38,6 +38,8 @@ pub(crate) struct Interned<'a> {
     aliased: BTreeSet<u32>,
     /// A named copy of a pointer still being placed, resynced at `finish`.
     copies: Vec<(u32, u32)>,
+    /// The structure each named copy stands for, so a signature can tell a merged name (S32).
+    copy_of: BTreeMap<u32, u32>,
     /// Every record's node, which a name binds to even while its layout is placed.
     records: BTreeSet<u32>,
 }
@@ -55,6 +57,7 @@ impl<'a> Interned<'a> {
             named: BTreeMap::new(),
             aliased: BTreeSet::new(),
             copies: Vec::new(),
+            copy_of: BTreeMap::new(),
             records: BTreeSet::new(),
         }
     }
@@ -110,6 +113,16 @@ impl<'a> Interned<'a> {
                 r2il::refusal_evidence!("declared-types", "the interned graph refused: {error:?}");
             })
             .ok()
+    }
+
+    /// The class a value of `ty` travels in (`ParamClass::of`), read off its structure by `TypeId`:
+    /// a name binds by spelling, so two scoped typedefs `T` share one node. None has no size.
+    pub(crate) fn class(&mut self, ty: TypeId) -> r2ssa::place::ParamClass {
+        let bits = self.model.pointer_bits;
+        match self.structure(ty) {
+            Some(id) => r2ssa::place::ParamClass::of_type(&self.parts.types[id as usize], bits),
+            None => r2ssa::place::ParamClass::Unplaced(r2source::SourceUnplacedClass::Unsized),
+        }
     }
 
     /// One declared node's place: its structure, under the name it is declared by.
@@ -176,6 +189,7 @@ impl<'a> Interned<'a> {
             _ => {
                 let copy = self.push(kind, size, align);
                 self.copies.push((copy, structure));
+                self.copy_of.insert(copy, structure);
                 self.aliased.insert(copy);
                 copy
             }
@@ -354,17 +368,41 @@ impl<'a> Interned<'a> {
         self.push(SourceTypeKind::Opaque { tag_id: row }, 0, 0)
     }
 
+    /// The sized node `ty` is declared by, where it stands for `ty`'s own structure: a name bound
+    /// first to another structure (two scoped typedefs of one spelling) would misstate its class.
+    fn faithful(&mut self, ty: TypeId) -> Option<u32> {
+        let node = self.object(ty)?;
+        let structure = self.structure(ty)?;
+        let own = node == structure || self.copy_of.get(&node) == Some(&structure);
+        if !own {
+            r2il::refusal_evidence!(
+                "declared-types",
+                "a signature's {ty:?} is named by node {node}, another structure's than {structure}"
+            );
+        }
+        own.then_some(node)
+    }
+
     /// Code whose every stated part has a place. Anything less is code this
     /// graph cannot describe, and a pointer to it points at `void`.
     fn code(&mut self, signature: &Signature) -> Option<u32> {
+        // A convention the type states is not the caller's, so nothing places a call to it (S32).
+        if signature.convention != r2abi::StatedConvention::Normal {
+            r2il::refusal_evidence!(
+                "declared-types",
+                "code under {:?} is described as void",
+                signature.convention
+            );
+            return None;
+        }
         let returns = match self.graph.peel(signature.returns).0 {
             TypeId::VOID => self.leaf(SourceTypeKind::Void, 0, 0),
-            returns => self.object(returns)?,
+            returns => self.faithful(returns)?,
         };
         let parameters = signature
             .parameters
             .iter()
-            .map(|parameter| self.object(*parameter))
+            .map(|parameter| self.faithful(*parameter))
             .collect::<Option<Vec<_>>>()?;
         let row = self.parts.signatures.len() as u32;
         self.parts.signatures.push(SourceCodeSignature::new(
@@ -763,5 +801,83 @@ mod tests {
             converted(&graph, parameter, CDataModel::unix(64)),
             CTypeLike::Pointer(Box::new(named))
         );
+    }
+
+    /// `struct A { using T = int; }; using T = double;`: two typedefs spelled `T` share one
+    /// presentation node, and each still travels in its own structure's class.
+    #[test]
+    fn two_typedefs_of_one_spelling_keep_their_own_class() {
+        use r2ssa::place::ParamClass;
+        let mut graph = TypeGraph::new();
+        let integer = int(&mut graph);
+        let double = graph.add(Type::Scalar(Scalar {
+            kind: ScalarKind::Float,
+            width: Width::Bits(64),
+            name: Some("double".to_owned()),
+        }));
+        let scoped = graph.add(Type::Typedef {
+            name: "T".to_owned(),
+            target: integer,
+        });
+        let outer = graph.add(Type::Typedef {
+            name: "T".to_owned(),
+            target: double,
+        });
+        let mut interned = Interned::new(&graph, CDataModel::unix(64));
+        assert_eq!(
+            interned.node(scoped),
+            interned.node(outer),
+            "one spelling, one node"
+        );
+        assert_eq!(interned.class(scoped), ParamClass::Integer(4));
+        assert_eq!(interned.class(outer), ParamClass::Float(8));
+    }
+
+    /// A signature naming the second of two typedefs spelled `T` is code the graph cannot state:
+    /// its node would carry the first `T`'s class, so a pointer to it points at `void` (S32).
+    #[test]
+    fn a_signature_through_a_merged_typedef_name_is_not_code() {
+        let mut graph = TypeGraph::new();
+        let integer = int(&mut graph);
+        let double = graph.add(Type::Scalar(Scalar {
+            kind: ScalarKind::Float,
+            width: Width::Bits(64),
+            name: Some("double".to_owned()),
+        }));
+        let scoped = graph.add(Type::Typedef {
+            name: "T".to_owned(),
+            target: integer,
+        });
+        let outer = graph.add(Type::Typedef {
+            name: "T".to_owned(),
+            target: double,
+        });
+        let code = |graph: &mut TypeGraph, parameter| {
+            let code = graph.add(Type::Code(r2abi::Signature {
+                returns: TypeId::VOID,
+                parameters: vec![parameter],
+                variadic: false,
+                prototyped: true,
+                convention: r2abi::StatedConvention::Normal,
+            }));
+            graph.add(Type::Pointer { target: code })
+        };
+        let (through_scoped, through_outer) = (code(&mut graph, scoped), code(&mut graph, outer));
+        let mut interned = Interned::new(&graph, CDataModel::unix(64));
+        interned.node(scoped);
+        let target = |interned: &mut Interned<'_>, pointer| {
+            let id = interned.node(pointer).expect("a pointer");
+            match interned.parts.types[id as usize].kind() {
+                SourceTypeKind::Pointer { target_type_id, .. } => {
+                    interned.parts.types[target_type_id as usize].kind()
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(matches!(
+            target(&mut interned, through_scoped),
+            SourceTypeKind::Code { .. }
+        ));
+        assert_eq!(target(&mut interned, through_outer), SourceTypeKind::Void);
     }
 }

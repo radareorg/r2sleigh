@@ -144,17 +144,50 @@ fn layout(
     Ok((definition, at))
 }
 
-/// A scalar a field can be spelled at: C aligns it to its own width.
+/// A scalar a field can be spelled at: C aligns it to its own width. A sign the solve left
+/// unstated has no C spelling, so the field stays unsolved and the structure stays definable (D74).
 fn field_type(ty: &CTypeLike) -> bool {
-    matches!(
-        ty,
-        CTypeLike::Int { .. } | CTypeLike::Float(_) | CTypeLike::Pointer(_) | CTypeLike::Bool
-    )
+    match ty {
+        CTypeLike::Int { signedness, .. } => *signedness != Signedness::Unknown,
+        CTypeLike::Pointer(pointee) => !matches!(
+            pointee.as_ref(),
+            CTypeLike::Int {
+                signedness: Signedness::Unknown,
+                ..
+            }
+        ),
+        CTypeLike::Float(_) | CTypeLike::Bool => true,
+        _ => false,
+    }
 }
 
 fn byte() -> CTypeLike {
     CTypeLike::Int {
         bits: 8,
         signedness: Signedness::Unsigned,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// pigz `free_pool` stripped: `f_8` solved as a pointer to an integer of no stated sign, which
+    /// left `struct fcn_403da0_arg0` undefined and its parameter `uint64_t`.
+    #[test]
+    fn a_field_of_no_stated_sign_is_not_solved() {
+        let int = |signedness| CTypeLike::Int {
+            bits: 64,
+            signedness,
+        };
+        assert!(!field_type(&int(Signedness::Unknown)));
+        assert!(!field_type(&CTypeLike::Pointer(Box::new(int(
+            Signedness::Unknown
+        )))));
+        assert!(field_type(&int(Signedness::Unsigned)));
+        assert!(field_type(&CTypeLike::Pointer(Box::new(int(
+            Signedness::Signed
+        )))));
+        assert!(field_type(&CTypeLike::Pointer(Box::new(CTypeLike::Void))));
     }
 }

@@ -737,9 +737,7 @@ fn stack_assumption_certificate_uses_the_typed_stack_base() {
             base: StackAddressBase::StackPointer,
             offset: -8,
         },
-        value: AssumptionValue::TypeHint {
-            ty: "uint64_t".to_string(),
-        },
+        value: AssumptionValue::Constant { value: 0 },
         scope: AssumptionScope::Function,
         provenance: AssumptionProvenance::ImportedContext,
     };

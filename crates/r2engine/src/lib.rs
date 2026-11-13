@@ -972,7 +972,10 @@ pub struct CalleeFacts {
 impl CalleeFacts {
     /// Derive a callee's contribution from the body that owns it. The body is
     /// read here and not retained.
-    pub fn derive(callee: &Arc<r2ssa::TrustedSsaArtifact>) -> Option<Self> {
+    pub fn derive(
+        callee: &Arc<r2ssa::TrustedSsaArtifact>,
+        declared: Vec<r2types::SourceOwnedCalleeSignature>,
+    ) -> Option<Self> {
         let shared = callee.shared_artifact();
         let address = shared.function().entry;
         let interface = shared.machine_context().function_interface()?.clone();
@@ -981,11 +984,13 @@ impl CalleeFacts {
             r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared)
                 .ok()?;
         let context = trusted_parsed_context(callee);
-        let signature = r2types::build_source_owned_type_analysis(
-            r2types::TypeAnalysisRequest::new(Arc::clone(&shared), context).ok()?,
-        )
-        .ok()
-        .and_then(|analysis| analysis.source_owned_callee_signature());
+        // The imports' declarations the callee's own rendering reads, so its header and every
+        // caller's extern type a slot it hands to one alike (D262).
+        let request = r2types::TypeAnalysisRequest::new(Arc::clone(&shared), context).ok()?;
+        let request = request.with_source_owned_callee_signatures(declared).ok()?;
+        let signature = r2types::build_source_owned_type_analysis(request)
+            .ok()
+            .and_then(|analysis| analysis.source_owned_callee_signature());
         Some(Self {
             address,
             interface,
@@ -1486,6 +1491,9 @@ pub struct EngineDecompileResponse {
     pub diagnostics: EngineDiagnostics,
     /// The premises the analysis relied on, whatever the rendering kept of what they decided.
     pub premises: BTreeSet<r2source::Premise>,
+    /// Where effect accounting refused, each refused or unaccounted obligation with its
+    /// operation and seed, in reading order (D174, D253).
+    pub undecided: Vec<r2ssa::NamedObligation>,
 }
 
 impl EngineDecompileResponse {
@@ -1959,7 +1967,9 @@ impl EngineSession {
                 EnginePhaseStatus::Refused,
                 render_time,
             );
-            return refused_decompile_response_with_metrics_and_audits(
+            let artifact = sealed.trusted_ssa.as_ref().map(|ssa| ssa.artifact());
+            let undecided = undecided_obligations(obligation_ledger.as_ref(), artifact);
+            let mut response = refused_decompile_response_with_metrics_and_audits(
                 &sealed.function_name,
                 &reason,
                 input_quality,
@@ -1968,6 +1978,8 @@ impl EngineSession {
                 Some(response_function_facts),
                 obligation_ledger,
             );
+            response.undecided = undecided;
+            return response;
         }
         if let Err(refusal) =
             poll_engine_execution(&request.execution, EnginePhase::FfiConversion, &metrics)
@@ -1996,6 +2008,7 @@ impl EngineSession {
             metrics,
             diagnostics,
             premises,
+            undecided: Vec::new(),
         }
     }
 }
@@ -2339,7 +2352,28 @@ fn refused_decompile_response_with_metrics_and_audits(
         metrics,
         diagnostics,
         premises: BTreeSet::new(),
+        undecided: Vec::new(),
     }
+}
+
+/// The ledger's refused and unaccounted obligations, each named by the sealed inventory.
+fn undecided_obligations(
+    ledger: Option<&r2dec::ledger::ObligationLedger>,
+    artifact: Option<&r2ssa::SsaArtifact>,
+) -> Vec<r2ssa::NamedObligation> {
+    let (Some(ledger), Some(artifact)) = (ledger, artifact) else {
+        return Vec::new();
+    };
+    let undecided = (ledger.entries()).filter(|(_, outcome)| {
+        matches!(
+            outcome,
+            r2dec::ledger::Outcome::Refused | r2dec::ledger::Outcome::Unattributed
+        )
+    });
+    let (graph, inventory) = (artifact.graph(), artifact.obligations());
+    undecided
+        .filter_map(|(id, _)| inventory.name(graph, id))
+        .collect()
 }
 
 fn seal_refused_decompile_function_facts(

@@ -1226,6 +1226,23 @@ impl<V> SSAOp<V> {
             Select(op) => Select(Box::new(op.map(f))),
         }
     }
+    /// Where this operation reads or writes IEEE 754 bits, as r2il states it of the same op.
+    pub fn float_op(&self) -> Option<r2il::FloatOp> {
+        use SSAOp::*;
+        use r2il::FloatOp as F;
+        Some(match self {
+            FloatAdd { .. } | FloatSub { .. } | FloatMult { .. } | FloatDiv { .. } => F::Arithmetic,
+            FloatNeg { .. } | FloatAbs { .. } | FloatSqrt { .. } => F::Arithmetic,
+            FloatCeil { .. } | FloatFloor { .. } | FloatRound { .. } => F::Arithmetic,
+            FloatNaN { .. } | FloatEqual { .. } | FloatNotEqual { .. } => F::Test,
+            FloatLess { .. } | FloatLessEqual { .. } => F::Test,
+            Int2Float { .. } => F::FromInteger,
+            FloatFloat { .. } => F::Convert,
+            Float2Int { .. } | Trunc { .. } => F::ToInteger,
+            _ => return None,
+        })
+    }
+
     /// What `r2il::eval` computes this operation's value with, from its `sources` in order.
     pub fn operation(&self) -> Option<r2il::eval::Operation> {
         use SSAOp::*;

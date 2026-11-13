@@ -7,43 +7,9 @@ use crate::convert::CTypeLike;
 
 use crate::analysis::{InferredSignature, InferredSignatureParam};
 use crate::model::Signedness;
-use crate::prepare::{prepared_arch_display_name, recover_signature_params_from_prepared_ssa};
+use crate::prepare::recover_signature_params_from_prepared_ssa;
 use crate::signedness::ScalarSignednessEvidence;
 use r2ssa::dense::IdMap;
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SignatureTypeEvidence {
-    pub pointer_proven: u8,
-    pub pointer_likely: u8,
-    pub scalar_proven: u8,
-    pub scalar_likely: u8,
-    pub bool_like: u8,
-    pub width_bits: u32,
-}
-
-impl SignatureTypeEvidence {
-    pub fn pointer_score(&self) -> u16 {
-        (self.pointer_proven as u16) * 4 + (self.pointer_likely as u16) * 2
-    }
-
-    pub fn scalar_score(&self) -> u16 {
-        (self.scalar_proven as u16) * 4
-            + (self.scalar_likely as u16) * 2
-            + (self.bool_like as u16) * 3
-    }
-
-    pub fn has_pointer_signal(&self) -> bool {
-        self.pointer_proven > 0 || self.pointer_likely > 0
-    }
-
-    pub fn has_scalar_signal(&self) -> bool {
-        self.scalar_proven > 0 || self.scalar_likely > 0 || self.bool_like > 0
-    }
-
-    pub fn has_conflict(&self) -> bool {
-        self.has_pointer_signal() && self.has_scalar_signal()
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureParamCandidate {
@@ -51,7 +17,6 @@ pub struct SignatureParamCandidate {
     pub ty: CTypeLike,
     pub arg_index: usize,
     pub size_bytes: u32,
-    pub evidence: SignatureTypeEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,7 +45,6 @@ pub(crate) fn infer_signature_from_prepared_ssa(
         .memory_model()
         .default_address_bits();
     let recovered_params = recover_signature_params_from_prepared_ssa(prepared, ptr_bits);
-    let arch_name = prepared_arch_display_name(prepared).unwrap_or("");
     let certified_parameter_widths = certified_parameter_memory_widths(prepared);
 
     let mut canonical_params = recovered_params
@@ -93,41 +57,21 @@ pub(crate) fn infer_signature_from_prepared_ssa(
             let aggregate = (solved.aggregates.get(&param.arg_index)).map(|aggregate| {
                 CTypeLike::Pointer(Box::new(CTypeLike::Struct(aggregate.tag.clone())))
             });
-            let initial_ty = aggregate.unwrap_or_else(|| {
+            let ty = aggregate.unwrap_or_else(|| {
                 param
                     .value
                     .and_then(|value| evidence_types.value_type(value))
                     .cloned()
                     .unwrap_or(certified_ty)
             });
-            let mut evidence = exact_signature_type_evidence(&initial_ty);
-            if certified_parameter_widths.contains_key(&param.arg_index) {
-                evidence.pointer_proven = evidence.pointer_proven.max(1);
-            }
-            let ty = resolve_evidence_driven_signature_type(
-                initial_ty,
-                param.size_bytes,
-                ptr_bits,
-                &evidence,
-            );
             SignatureParamCandidate {
                 name: param.name.clone(),
                 ty,
                 arg_index: param.arg_index,
                 size_bytes: param.size_bytes,
-                evidence,
             }
         })
         .collect::<Vec<_>>();
-
-    for param in &mut canonical_params {
-        param.ty = resolve_evidence_driven_signature_type(
-            param.ty.clone(),
-            param.size_bytes,
-            ptr_bits,
-            &param.evidence,
-        );
-    }
     refine_parameter_signedness(
         prepared,
         &recovered_params,
@@ -135,17 +79,11 @@ pub(crate) fn infer_signature_from_prepared_ssa(
         &mut canonical_params,
     );
 
-    let callconv = prepared.machine_context().function_interface().map_or_else(
-        || "unknown".to_string(),
-        |interface| interface.convention().radare2_name().to_string(),
-    );
     build_inferred_signature(
         &function_name,
-        arch_name,
         ptr_bits,
         &canonical_params,
         solved.returns.decided(),
-        callconv,
     )
 }
 
@@ -185,12 +123,15 @@ fn certified_memory_parameter(
         })
 }
 
-/// Each parameter a certified memory access addresses, as a pointer to the structure its
-/// accesses lay out, else to the one width every such access reads, or to `void`.
+/// Each parameter a certified access addresses, as a pointer to the structure its accesses lay
+/// out, else to the one width they read, signed or float as they use it (D265, D353), or `void`.
 pub(crate) fn certified_parameter_pointers(
     prepared: &SsaArtifact,
     aggregates: &BTreeMap<usize, crate::aggregates::InferredAggregate>,
+    signedness: &IdMap<r2ssa::ValueId, BTreeSet<ScalarSignednessEvidence>>,
 ) -> BTreeMap<usize, CTypeLike> {
+    let signs = pointee_signs(prepared, signedness);
+    let floats = pointee_floats(prepared);
     certified_parameter_memory_widths(prepared)
         .into_iter()
         .map(|(index, widths)| {
@@ -200,16 +141,126 @@ pub(crate) fn certified_parameter_pointers(
             }
             let pointer = match certified_parameter_pointer_type(CTypeLike::Void, Some(&widths)) {
                 CTypeLike::Pointer(inner) => match *inner {
-                    CTypeLike::Int { bits, .. } => CTypeLike::Pointer(Box::new(CTypeLike::Int {
-                        bits,
-                        signedness: Signedness::Unsigned,
-                    })),
+                    // A pointee every access carries as a float of its width is that float (D353).
+                    CTypeLike::Int {
+                        bits: bits @ (32 | 64),
+                        ..
+                    } if floats.get(&(index, bits)) == Some(&true) => {
+                        CTypeLike::Pointer(Box::new(CTypeLike::Float(bits)))
+                    }
+                    CTypeLike::Int { bits, .. } => {
+                        let sign = (signs.get(&(index, bits)).copied())
+                            .unwrap_or(crate::SignFact::Unstated);
+                        let bits = u8::try_from(bits).unwrap_or(u8::MAX);
+                        let width = r2source::Basis::Dereferenced;
+                        let pointee = crate::IntegerDecl { bits, width, sign };
+                        CTypeLike::Pointer(Box::new(pointee.spelled()))
+                    }
                     inner => CTypeLike::Pointer(Box::new(inner)),
                 },
                 other => other,
             };
             (index, pointer)
         })
+        .collect()
+}
+
+/// Whether every certified access at `(parameter, bits)` carries a float: each load used only by
+/// float operations (through copies and merges), each store of one's result (D353). O(uses).
+fn pointee_floats(prepared: &SsaArtifact) -> BTreeMap<(usize, u32), bool> {
+    let graph = prepared.graph();
+    // One visited set for every load, cleared of what each walk touched: O(uses reached).
+    let mut seen = r2ssa::dense::IdSet::new(graph.values.len());
+    let written_as_float = |value: r2ssa::ValueId| {
+        (graph.def_inst(value).and_then(|inst| graph.op(inst)))
+            .and_then(SSAOp::float_op)
+            .is_some_and(r2il::FloatOp::writes_float)
+    };
+    let mut floats = BTreeMap::<(usize, u32), bool>::new();
+    for access in prepared.certificates().memory_accesses.values() {
+        let Some(index) = certified_memory_parameter(prepared, access) else {
+            continue;
+        };
+        let float = access.value.is_some_and(|value| match access.is_write {
+            true => written_as_float(value),
+            false => read_as_float(graph, value, &mut seen),
+        });
+        let cell = floats
+            .entry((index, access.width.saturating_mul(8)))
+            .or_insert(true);
+        *cell &= float;
+    }
+    floats
+}
+
+/// Whether an operation reads its operands as IEEE 754 bits (r2il's `FloatOp`).
+fn reads_float(op: &SSAOp<r2ssa::ValueId>) -> bool {
+    op.float_op().is_some_and(r2il::FloatOp::reads_float)
+}
+
+/// Whether every use of `value`, through copies and merges, reads it as a float and one is
+/// reached; `seen` is left as it was found.
+fn read_as_float(
+    graph: &r2ssa::SsaGraph,
+    value: r2ssa::ValueId,
+    seen: &mut r2ssa::dense::IdSet<r2ssa::ValueId>,
+) -> bool {
+    let (mut pending, mut touched, mut any, mut other) = (vec![value], Vec::new(), false, false);
+    while let Some(value) = pending.pop().filter(|_| !other) {
+        if !seen.insert(value) {
+            continue;
+        }
+        touched.push(value);
+        for site in graph.use_sites(value) {
+            match graph
+                .inst(site.inst)
+                .map(|inst| (&inst.payload, inst.output))
+            {
+                Some((r2ssa::InstPayload::Op(SSAOp::Copy { dst, .. }), _)) => pending.push(*dst),
+                Some((r2ssa::InstPayload::Phi { .. }, output)) => pending.extend(output),
+                Some((r2ssa::InstPayload::Op(op), _)) if reads_float(op) => any = true,
+                _ => other = true,
+            }
+        }
+    }
+    for value in touched {
+        seen.remove(value);
+    }
+    any && !other
+}
+
+/// The sign each parameter's pointee is read at, by `(parameter, bits)`: the evidence on every
+/// certified load through it at that width. O(certified accesses).
+fn pointee_signs(
+    prepared: &SsaArtifact,
+    inferred: &IdMap<r2ssa::ValueId, BTreeSet<ScalarSignednessEvidence>>,
+) -> BTreeMap<(usize, u32), crate::SignFact> {
+    let graph = prepared.graph();
+    let mut seen = BTreeMap::<(usize, u32), (bool, bool)>::new();
+    for access in prepared.certificates().memory_accesses.values() {
+        let Some(index) = certified_memory_parameter(prepared, access) else {
+            continue;
+        };
+        let Some(value) = access.value else {
+            continue;
+        };
+        if graph
+            .value(value)
+            .is_none_or(|value| value.var.size != access.width)
+        {
+            continue;
+        }
+        let Some(observed) = inferred.get(value) else {
+            continue;
+        };
+        let cell = seen
+            .entry((index, access.width.saturating_mul(8)))
+            .or_default();
+        cell.0 |= observed.contains(&ScalarSignednessEvidence::Signed);
+        cell.1 |= observed.contains(&ScalarSignednessEvidence::Unsigned);
+    }
+    (seen.into_iter())
+        .map(|(key, (signed, unsigned))| (key, crate::SignFact::of(signed, unsigned)))
         .collect()
 }
 
@@ -246,65 +297,38 @@ fn refine_parameter_signedness(
     inferred: &IdMap<r2ssa::ValueId, BTreeSet<ScalarSignednessEvidence>>,
     params: &mut [SignatureParamCandidate],
 ) {
-    let graph = prepared.graph();
-    let mut pointee_evidence =
-        FxHashMap::<(usize, u32), BTreeSet<ScalarSignednessEvidence>>::default();
-    for access in prepared.certificates().memory_accesses.values() {
-        let Some(index) = certified_memory_parameter(prepared, access) else {
-            continue;
-        };
-        let Some(value) = access.value else {
-            continue;
-        };
-        if graph
-            .value(value)
-            .is_none_or(|value| value.var.size != access.width)
-        {
-            continue;
-        }
-        let Some(observed) = inferred.get(value) else {
-            continue;
-        };
-        pointee_evidence
-            .entry((index, access.width.saturating_mul(8)))
-            .or_default()
-            .extend(observed.iter().copied());
-    }
-
+    let pointees = pointee_signs(prepared, inferred);
     for param in params {
-        let scalar_observed = recovered_params
-            .iter()
-            .find(|recovered| recovered.arg_index == param.arg_index)
-            .and_then(|recovered| recovered.value)
-            .and_then(|value| inferred.get(value));
-        let observed = match &mut param.ty {
+        let scalar = || {
+            let observed = recovered_params
+                .iter()
+                .find(|recovered| recovered.arg_index == param.arg_index)
+                .and_then(|recovered| recovered.value)
+                .and_then(|value| inferred.get(value));
+            observed.map(|observed| {
+                crate::SignFact::of(
+                    observed.contains(&ScalarSignednessEvidence::Signed),
+                    observed.contains(&ScalarSignednessEvidence::Unsigned),
+                )
+            })
+        };
+        let target = match &mut param.ty {
             CTypeLike::Int { signedness, .. } if *signedness == Signedness::Unknown => {
-                scalar_observed
+                scalar().map(|sign| (sign, signedness))
             }
             CTypeLike::Pointer(inner) => match inner.as_mut() {
                 CTypeLike::Int { bits, signedness } if *signedness == Signedness::Unknown => {
-                    pointee_evidence.get(&(param.arg_index, *bits))
+                    (pointees.get(&(param.arg_index, *bits)).copied())
+                        .map(|sign| (sign, signedness))
                 }
                 _ => None,
             },
             _ => None,
         };
-        let Some(signedness) = singleton_signedness(observed) else {
-            continue;
-        };
-        match &mut param.ty {
-            CTypeLike::Int {
-                signedness: target, ..
-            } => *target = signedness,
-            CTypeLike::Pointer(inner) => {
-                if let CTypeLike::Int {
-                    signedness: target, ..
-                } = inner.as_mut()
-                {
-                    *target = signedness;
-                }
-            }
-            _ => {}
+        if let Some((sign, target)) = target
+            && let Some(signedness) = sign.signedness()
+        {
+            *target = signedness;
         }
     }
 }
@@ -451,87 +475,6 @@ fn transparent_same_width_source(prepared: &SsaArtifact, start: r2ssa::ValueId) 
     None
 }
 
-fn singleton_signedness(
-    observed: Option<&BTreeSet<ScalarSignednessEvidence>>,
-) -> Option<Signedness> {
-    let observed = observed?.iter();
-    if observed.len() != 1 {
-        return None;
-    }
-    match observed.copied().next()? {
-        ScalarSignednessEvidence::Signed => Some(Signedness::Signed),
-        ScalarSignednessEvidence::Unsigned => Some(Signedness::Unsigned),
-    }
-}
-
-pub fn merge_initial_signature_type_evidence(
-    initial_ty: &CTypeLike,
-    evidence: &mut SignatureTypeEvidence,
-) {
-    match initial_ty {
-        CTypeLike::Pointer(_) => evidence.pointer_likely = evidence.pointer_likely.max(1),
-        CTypeLike::Bool => evidence.bool_like = evidence.bool_like.max(1),
-        CTypeLike::Int { bits, .. } => {
-            evidence.scalar_likely = evidence.scalar_likely.max(1);
-            if !(evidence.has_scalar_signal()
-                && !evidence.has_pointer_signal()
-                && evidence.width_bits > 0
-                && evidence.width_bits < *bits)
-            {
-                evidence.width_bits = evidence.width_bits.max(*bits);
-            }
-        }
-        CTypeLike::Float(bits) => {
-            evidence.scalar_proven = evidence.scalar_proven.max(1);
-            evidence.width_bits = evidence.width_bits.max(*bits);
-        }
-        _ => {}
-    }
-}
-
-fn fallback_scalar_type_like(
-    var_size_bytes: u32,
-    evidence: &SignatureTypeEvidence,
-    ptr_bits: u32,
-) -> CTypeLike {
-    if evidence.bool_like > 0
-        && evidence.pointer_score() == 0
-        && evidence.scalar_proven == 0
-        && evidence.scalar_likely <= 1
-    {
-        return CTypeLike::Bool;
-    }
-
-    let carrier_bits = var_size_bytes.saturating_mul(8);
-    let width_bits = if evidence.has_scalar_signal()
-        && !evidence.has_pointer_signal()
-        && evidence.width_bits > 0
-    {
-        evidence.width_bits
-    } else {
-        evidence.width_bits.max(carrier_bits)
-    };
-    let width_bits = match width_bits {
-        0 => {
-            if ptr_bits >= 64 {
-                64
-            } else {
-                32
-            }
-        }
-        1 => 8,
-        2..=8 => 8,
-        9..=16 => 16,
-        17..=32 => 32,
-        _ => 64,
-    };
-
-    CTypeLike::Int {
-        bits: width_bits,
-        signedness: Signedness::Signed,
-    }
-}
-
 fn is_unmaterialized_aggregate_name(name: &str) -> bool {
     let lower = name.trim().to_ascii_lowercase();
     lower.is_empty() || lower == "anon" || lower.starts_with("anon_")
@@ -568,49 +511,39 @@ pub fn materialize_signature_type_like(ty: CTypeLike, ptr_bits: u32) -> CTypeLik
                 len,
             )
         }
-        CTypeLike::Unknown => {
-            fallback_scalar_type_like((ptr_bits / 8).max(1), &Default::default(), ptr_bits)
-        }
+        CTypeLike::Unknown => crate::unstated_word(ptr_bits.max(8)),
         CTypeLike::Struct(name) if is_unmaterialized_aggregate_name(&name) => {
-            fallback_scalar_type_like((ptr_bits / 8).max(1), &Default::default(), ptr_bits)
+            crate::unstated_word(ptr_bits.max(8))
         }
         CTypeLike::Union(name) if is_unmaterialized_aggregate_name(&name) => {
-            fallback_scalar_type_like((ptr_bits / 8).max(1), &Default::default(), ptr_bits)
+            crate::unstated_word(ptr_bits.max(8))
         }
         CTypeLike::Enum(name) if is_unmaterialized_aggregate_name(&name) => {
-            fallback_scalar_type_like((ptr_bits / 8).max(1), &Default::default(), ptr_bits)
+            crate::unstated_word(ptr_bits.max(8))
         }
         CTypeLike::Typedef { name, .. } if name.trim().is_empty() => {
-            fallback_scalar_type_like((ptr_bits / 8).max(1), &Default::default(), ptr_bits)
+            crate::unstated_word(ptr_bits.max(8))
         }
+        // No owner stated the sign, so C spells none (D265).
+        CTypeLike::Int {
+            bits: bits @ (8 | 16 | 32 | 64),
+            signedness: Signedness::Unknown,
+        } => crate::unstated_word(bits),
         other => other,
     }
 }
 
-/// Whether two signature types are the same type for signature purposes.
-///
-/// Both operands are already `CTypeLike`. This was written at six sites as
-/// `render_signature_type(a) == render_signature_type(b)` -- two structured
-/// values compared by the text they print to. That is only correct if the
-/// renderer is injective over the types that reach it, which nothing checked,
-/// and it silently imposed one equivalence of its own: `Signedness::Unknown`
-/// prints as signed, so a width whose signedness is not yet established
-/// compared equal to the signed type of that width and unequal to the unsigned
-/// one.
-///
-/// The equivalence is kept here rather than corrected, because removing a round
-/// trip through text should not also change which types are considered the
-/// same. It is stated instead of implied, so the next reader can see it and
-/// decide it on its merits.
+/// Whether two signature types are the same type for signature purposes: equal once materialized
+/// and builtin names folded; an unstated sign is its word, equal only to itself (D265).
 pub fn signature_types_are_equivalent(left: &CTypeLike, right: &CTypeLike, ptr_bits: u32) -> bool {
     normalized_signature_type(left, ptr_bits) == normalized_signature_type(right, ptr_bits)
 }
 
 fn normalized_signature_type(ty: &CTypeLike, ptr_bits: u32) -> CTypeLike {
-    settle_unknown_signedness(resolve_builtin_typedefs(
+    resolve_builtin_typedefs(
         materialize_signature_type_like(ty.clone(), ptr_bits),
         ptr_bits,
-    ))
+    )
 }
 
 /// Fold a typedef whose name spells its own type (`int32_t`) into that type.
@@ -641,26 +574,6 @@ pub(crate) fn resolve_builtin_typedefs(ty: CTypeLike, ptr_bits: u32) -> CTypeLik
         }
         CTypeLike::Const(inner) => {
             CTypeLike::Const(Box::new(resolve_builtin_typedefs(*inner, ptr_bits)))
-        }
-        other => other,
-    }
-}
-
-/// Resolve the one distinction a C spelling cannot express.
-fn settle_unknown_signedness(ty: CTypeLike) -> CTypeLike {
-    match ty {
-        CTypeLike::Int {
-            bits,
-            signedness: Signedness::Unknown,
-        } => CTypeLike::Int {
-            bits,
-            signedness: Signedness::Signed,
-        },
-        CTypeLike::Pointer(inner) => {
-            CTypeLike::Pointer(Box::new(settle_unknown_signedness(*inner)))
-        }
-        CTypeLike::Array(inner, len) => {
-            CTypeLike::Array(Box::new(settle_unknown_signedness(*inner)), len)
         }
         other => other,
     }
@@ -739,128 +652,6 @@ pub fn render_signature_type(ty: &CTypeLike, ptr_bits: u32) -> String {
     }
 }
 
-fn sanitize_signature_type_like(
-    mut ty: CTypeLike,
-    var_size_bytes: u32,
-    ptr_bits: u32,
-) -> CTypeLike {
-    if matches!(ty, CTypeLike::Void | CTypeLike::Unknown) {
-        ty = match var_size_bytes {
-            1 => CTypeLike::Int {
-                bits: 8,
-                signedness: Signedness::Signed,
-            },
-            2 => CTypeLike::Int {
-                bits: 16,
-                signedness: Signedness::Signed,
-            },
-            4 => CTypeLike::Int {
-                bits: 32,
-                signedness: Signedness::Signed,
-            },
-            8 => CTypeLike::Int {
-                bits: 64,
-                signedness: Signedness::Signed,
-            },
-            _ => CTypeLike::Unknown,
-        };
-    }
-
-    if matches!(ty, CTypeLike::Void | CTypeLike::Unknown) {
-        ty = CTypeLike::Int {
-            bits: if ptr_bits >= 64 { 64 } else { 32 },
-            signedness: Signedness::Signed,
-        };
-    }
-
-    ty
-}
-
-pub fn resolve_evidence_driven_signature_type(
-    initial_ty: CTypeLike,
-    var_size_bytes: u32,
-    ptr_bits: u32,
-    evidence: &SignatureTypeEvidence,
-) -> CTypeLike {
-    if matches!(initial_ty, CTypeLike::Float(_)) {
-        return initial_ty;
-    }
-
-    let pointer_score = evidence.pointer_score();
-    let scalar_score = evidence.scalar_score();
-    let initial_is_pointer = matches!(initial_ty, CTypeLike::Pointer(_));
-    let initial_is_scalar = matches!(initial_ty, CTypeLike::Bool | CTypeLike::Int { .. });
-    let preferred_scalar = fallback_scalar_type_like(var_size_bytes, evidence, ptr_bits);
-    let scalar_width_narrows = match (&initial_ty, &preferred_scalar) {
-        (
-            CTypeLike::Int {
-                bits: initial_bits, ..
-            },
-            CTypeLike::Int {
-                bits: preferred_bits,
-                ..
-            },
-        ) => preferred_bits < initial_bits,
-        (CTypeLike::Int { .. }, CTypeLike::Bool) => true,
-        _ => false,
-    };
-
-    if initial_is_pointer && pointer_score.saturating_add(1) >= scalar_score {
-        return initial_ty;
-    }
-    if initial_is_scalar && scalar_score.saturating_add(1) >= pointer_score {
-        if scalar_width_narrows
-            && evidence.has_scalar_signal()
-            && !evidence.has_pointer_signal()
-            && !evidence.has_conflict()
-        {
-            return preferred_scalar;
-        }
-        return initial_ty;
-    }
-
-    match initial_ty {
-        CTypeLike::Struct(_)
-        | CTypeLike::Union(_)
-        | CTypeLike::Enum(_)
-        | CTypeLike::Typedef { .. } => {
-            if pointer_score > scalar_score.saturating_add(1) {
-                return CTypeLike::Pointer(Box::new(CTypeLike::Void));
-            }
-            if scalar_score > pointer_score.saturating_add(2) {
-                return fallback_scalar_type_like(var_size_bytes, evidence, ptr_bits);
-            }
-            return initial_ty;
-        }
-        _ => {}
-    }
-
-    if pointer_score > scalar_score.saturating_add(1) {
-        return CTypeLike::Pointer(Box::new(CTypeLike::Void));
-    }
-    if scalar_score > pointer_score || matches!(initial_ty, CTypeLike::Void | CTypeLike::Unknown) {
-        return preferred_scalar;
-    }
-
-    sanitize_signature_type_like(initial_ty, var_size_bytes, ptr_bits)
-}
-
-fn exact_signature_type_evidence(ty: &CTypeLike) -> SignatureTypeEvidence {
-    let mut evidence = SignatureTypeEvidence::default();
-    merge_initial_signature_type_evidence(ty, &mut evidence);
-    match ty {
-        CTypeLike::Pointer(_) => evidence.pointer_proven = 1,
-        CTypeLike::Bool => evidence.bool_like = 1,
-        CTypeLike::Float(bits) => {
-            evidence.scalar_proven = 1;
-            evidence.width_bits = *bits;
-        }
-        CTypeLike::Int { bits, .. } => evidence.width_bits = *bits,
-        _ => {}
-    }
-    evidence
-}
-
 use crate::context::sanitize_c_identifier;
 
 fn uniquify_name(base: String, used: &mut FxHashSet<String>) -> String {
@@ -888,37 +679,16 @@ fn normalize_inferred_param_name(
     uniquify_name(clean, used)
 }
 
-pub(crate) fn format_signature_prototype(
-    function_name: &str,
-    ret_type: Option<&CTypeLike>,
-    params: &[InferredSignatureParam],
-    ptr_bits: u32,
-) -> String {
-    let params_str = if params.is_empty() {
-        "void".to_string()
-    } else {
-        params
-            .iter()
-            .map(|p| format!("{} {}", render_signature_type(&p.ty, ptr_bits), p.name))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let ret_type = ret_type.map_or_else(String::new, |ty| render_signature_type(ty, ptr_bits));
-    format!("{ret_type} {function_name} ({params_str})")
-}
-
-/// A type as an inferred signature states it: materialized, an unstated sign spelled signed.
+/// A type as an inferred signature states it: materialized, an unstated sign its word (D265).
 fn signature_type(ty: &CTypeLike, ptr_bits: u32) -> CTypeLike {
-    settle_unknown_signedness(materialize_signature_type_like(ty.clone(), ptr_bits))
+    materialize_signature_type_like(ty.clone(), ptr_bits)
 }
 
 pub(crate) fn build_inferred_signature(
     function_name: &str,
-    arch_name: &str,
     ptr_bits: u32,
     params: &[SignatureParamCandidate],
     ret_type: Option<&CTypeLike>,
-    callconv: String,
 ) -> InferredSignature {
     let mut ordered = params.to_vec();
     ordered.sort_by(|a, b| {
@@ -960,16 +730,8 @@ pub(crate) fn build_inferred_signature(
     let ret_type = ret_type.map(|ty| signature_type(ty, ptr_bits));
     InferredSignature {
         function_name: function_name.to_string(),
-        signature: format_signature_prototype(
-            function_name,
-            ret_type.as_ref(),
-            &json_params,
-            ptr_bits,
-        ),
         ret_type,
         params: json_params,
-        callconv,
-        arch: arch_name.to_string(),
     }
 }
 
@@ -1161,6 +923,53 @@ mod tests {
         .expect("prepared exact AArch64 stack fixture")
     }
 
+    /// The pointee `f(p) { *p = op(5); }` is typed at, `op` written into an 8-byte temporary.
+    fn pointee_of_a_store(op: fn(r2il::Varnode, r2il::Varnode) -> r2il::R2ILOp) -> CTypeLike {
+        let mut block = r2il::R2ILBlock::new(0x1000, 4);
+        block.push(op(
+            r2il::Varnode::unique(0x40, 8),
+            r2il::Varnode::constant(5, 8),
+        ));
+        block.push(r2il::R2ILOp::Store {
+            space: r2il::SpaceId::Ram,
+            addr: r2il::Varnode::register(0, 8),
+            val: r2il::Varnode::unique(0x40, 8),
+        });
+        let slot = r2ssa::SourceStackSlotSpec::new_local(
+            r2ssa::StackAddressBase::StackPointer,
+            r2ssa::CanonicalStorageId {
+                space: r2ssa::CanonicalStorageSpace::Register,
+                offset: 16,
+                size: 8,
+            },
+            -8,
+            1,
+        );
+        let prepared = aarch64_prepared_with_stack_slot(block, slot);
+        let signedness = crate::signedness::scalar_signedness_of(&prepared, []);
+        let pointers = certified_parameter_pointers(&prepared, &BTreeMap::new(), &signedness);
+        pointers
+            .get(&0)
+            .cloned()
+            .expect("the store certifies a pointer")
+    }
+
+    /// A store of a float's result is a float pointee; a float converted to an integer is not
+    /// one (D353: r2il's `FloatOp` states which results are IEEE 754 bits).
+    #[test]
+    fn a_stored_float_result_types_its_pointee_and_an_integer_conversion_does_not() {
+        let from_integer = pointee_of_a_store(|dst, src| r2il::R2ILOp::Int2Float { dst, src });
+        assert_eq!(
+            from_integer,
+            CTypeLike::Pointer(Box::new(CTypeLike::Float(64)))
+        );
+        let to_integer = pointee_of_a_store(|dst, src| r2il::R2ILOp::Float2Int { dst, src });
+        assert!(
+            !matches!(&to_integer, CTypeLike::Pointer(inner) if matches!(**inner, CTypeLike::Float(_))),
+            "{to_integer:?}"
+        );
+    }
+
     #[test]
     fn prepared_signature_recovers_unsigned_byte_pointee_through_certified_stack_reload() {
         let mut block = r2il::R2ILBlock::new(0x1000, 4);
@@ -1188,6 +997,12 @@ mod tests {
             dst: r2il::Varnode::unique(0x40, 4),
             src: r2il::Varnode::unique(0x30, 1),
         });
+        // The widened byte is observed: a dead extension states no sign (D265).
+        block.push(r2il::R2ILOp::Store {
+            space: r2il::SpaceId::Ram,
+            addr: r2il::Varnode::register(8, 8),
+            val: r2il::Varnode::unique(0x40, 4),
+        });
         let prepared = aarch64_prepared_with_stack_slot(
             block,
             r2ssa::SourceStackSlotSpec::new_local(
@@ -1203,7 +1018,6 @@ mod tests {
         );
         let inferred = inferred(&prepared);
 
-        assert_eq!(inferred.arch, "aarch64");
         assert_eq!(
             render_signature_type(&inferred.params[0].ty, 64),
             "uint8_t*"
@@ -1385,16 +1199,6 @@ mod tests {
     }
 
     #[test]
-    fn prepared_signature_callconv_is_source_owned_and_rename_invariant() {
-        let expected = r2source::ConventionId::Win64;
-        let ordinary = inferred(&prepared_x86_scalar_return("rax", expected));
-        let renamed = inferred(&prepared_x86_scalar_return("xmm0_misleading", expected));
-
-        assert_eq!(ordinary.callconv, expected.radare2_name());
-        assert_eq!(renamed.callconv, expected.radare2_name());
-    }
-
-    #[test]
     fn misleading_xmm0_spelling_does_not_manufacture_a_float_return() {
         let inferred = inferred(&prepared_x86_scalar_return(
             "xmm0_misleading",
@@ -1486,7 +1290,6 @@ mod tests {
                 },
                 arg_index: 0,
                 size_bytes: 8,
-                evidence: SignatureTypeEvidence::default(),
             },
             SignatureParamCandidate {
                 name: "arg6".to_string(),
@@ -1496,28 +1299,20 @@ mod tests {
                 },
                 arg_index: 6,
                 size_bytes: 4,
-                evidence: SignatureTypeEvidence {
-                    scalar_proven: 1,
-                    width_bits: 32,
-                    ..SignatureTypeEvidence::default()
-                },
             },
         ];
 
-        let inferred = build_inferred_signature(
-            "stack_arg",
-            "x86-64",
-            64,
-            &params,
-            Some(&CTypeLike::Void),
-            "amd64".to_string(),
-        );
+        let inferred = build_inferred_signature("stack_arg", 64, &params, Some(&CTypeLike::Void));
 
         assert_eq!(inferred.params.len(), 7);
         for (slot, param) in inferred.params.iter().enumerate() {
             assert_eq!(param.name, format!("arg{slot}"));
         }
-        assert_eq!(render_signature_type(&inferred.params[1].ty, 64), "int64_t");
+        // A gap and a parameter no seed signs spell the unstated word (D265).
+        assert_eq!(
+            render_signature_type(&inferred.params[1].ty, 64),
+            "r2sleigh_word_u64"
+        );
         assert_eq!(render_signature_type(&inferred.params[6].ty, 64), "int32_t");
     }
 }

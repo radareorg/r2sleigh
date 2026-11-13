@@ -346,6 +346,58 @@ Owner: GT.
   `test_a_slow_blessed_under_instructions_is_exact` and
   `test_a_bless_under_time_keeps_a_slow_entry_a_processor_reads_equal`.
 
+**D343 as built for aarch64. Under qemu a cost counts the guest's instructions.**
+Owner: GT.
+- Problem: under `time` the aarch64 shards graded qemu's CPU time, which moved
+  four to five times between runs on one processor model. #377 and #379 read
+  review.c clang `-O1` `fact` `slow` against a baseline `equal`, with the same
+  r2s and the same graded binary as their parents. On EPYC 9V74 the identity,
+  a trampoline into the original's own code, read 0.57 and 3.98 times it on
+  #377 and 4.00, 0.34 and 0.25 on #379; one vector's original took 4.34 s on
+  one run and 0.84 s on the other. The denominator moved, so D341's tolerance
+  for a `slow` that reads `equal` did not cover an `equal` that reads `slow`.
+- Counter: `tests/equiv/rt/qemu_count.c`, a qemu-user TCG plugin. Each
+  translation block adds its instruction count when it starts (an inline add
+  in the generated code, `O(1)` a block), so a count is a function of the guest
+  code and the qemu build, the same on every host and run. The runtime asks through a syscall
+  number no kernel defines (`0x4551`), which the plugin sees and qemu answers
+  `ENOSYS`: `ARM` zeroes the count and sets the allowance, `SETTLE` stops it
+  and writes it to a memfd the guest names (a guest descriptor is the host's
+  under qemu-user; qemu 8.2's API writes neither guest memory nor a syscall's
+  result). qemu 8.2 has no conditional callback, so a thread of the plugin's,
+  started in each forked child at its first `ARM`, reads the count every
+  millisecond and past the allowance sends `SIGPWR` to the thread that armed.
+  The runtime calls a `SIGPWR` the budget only when the count it reads is past
+  the allowance, and `SETTLE` raises it when the call ends past it, so the
+  verdict is the count and the millisecond only delays the stop; a `SIGPWR`
+  the rendering raises stays a signal. Every vCPU of the child counts (perf
+  counts the calling thread; no graded function starts one). A count of 0 is
+  a counter that failed (`unavailable`), never a cost.
+- Toolchain: Ubuntu 24.04's qemu-user 8.2.2 has no `-plugin`. CI builds qemu
+  8.2.2 (`--enable-plugins`, `aarch64-linux-user` only, the tarball pinned by
+  its sha256) in the `aarch64-toolchain` job, cached by version and flags; the
+  shards run it by path (`--emulator`), and the harness builds the plugin
+  against the `qemu-plugin.h` installed beside it. A baseline states its
+  `counter` (`perf` or `qemu`); `cost.departure` and `merge_shards.py` refuse a
+  run counted by the other. The budget is `--budget-instructions`' 4 billion,
+  Win64's.
+- Strictness: the ratchet is exact under `instructions` (D341), so a baseline
+  `slow` no longer holds by `equal`. A count misses what CPU time saw beyond
+  the guest's instructions: kernel time, qemu's translation and helpers.
+- Measured at 410b29d22: CI run 43282330723 held all 828 records unmoved
+  under the count on six runner models (EPYC 9V45, 9V74, 7763; Xeon 8370C,
+  8573C, 6975P-C), and contabo's review.c and shapes.c gcc `-O2` agree.
+  clang `-O1` `fact` reads `equal` on four counted vectors, its identity and
+  `-O2` build 1.00 times the original and its `-O0`, pattern and UBSan builds
+  4.25 times, inside 16 (D339's x86-64 count read the same 4.25). clang `-O2`
+  `fact` stays `slow`, its `-O2` build stopped on three vectors. gcc `-O2`
+  `fact` reads 1.00 and 3.40.
+- Cost: qemu ran 2.1 billion guest instructions of a loop in 1.70 s with the
+  plugin and 1.56 s without (1.09 times); a callback per block took 2.20 s,
+  and shapes.c gcc `-O2` ran past 22 minutes with it on contabo. The wall
+  guard adds a millisecond per 100,000 counted instructions of the allowance,
+  under a tenth of that rate.
+
 **D39. Upstream drift is a gate, not a discovery.** Owner: GT, with VC.
 - A scheduled CI job reports how far each pin is behind its upstream (the
   Ghidra fork's base against Ghidra master, `TESTBINS_REF` against

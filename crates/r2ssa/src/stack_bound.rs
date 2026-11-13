@@ -84,7 +84,7 @@ pub(crate) fn decide(func: &mut SSAFunction, machine: &SourceMachineContext) {
     let removed = remove_failing_blocks(func, &checks, &mut decided, &mut edges);
     decided.reorder();
     func.apply_edits(decided);
-    let addresses = crate::stack_protector::inserted_addresses(func, &inserted);
+    let addresses = crate::stack_protector::inserted_addresses(func, &inserted, &[]);
     inserted.extend(addresses.iter());
     func.record_compiler_inserted(inserted, removed, edges);
     func.record_premise(r2source::Premise::GoRuntime);

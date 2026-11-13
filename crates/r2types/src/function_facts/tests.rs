@@ -1428,6 +1428,7 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
             bits: 32,
             signedness: crate::Signedness::Signed,
         }],
+        bases: vec![r2source::Basis::Solved],
         variadic: false,
     };
     let source_owned_signature =

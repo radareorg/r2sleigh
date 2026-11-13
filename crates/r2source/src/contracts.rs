@@ -184,9 +184,18 @@ impl SourceParameterLocation {
 pub struct SourceAbiParameterSpec {
     index: u32,
     location: SourceParameterLocation,
-    /// The section the slot belongs to and where the parameter comes from, where its producer
-    /// states them (doc/adr-call-boundary.md, "The function's parameters").
-    slot: Option<(crate::convention::SlotClass, crate::Basis)>,
+    /// The convention slot the parameter is at and what its declared type rests on, where its
+    /// producer states them (doc/adr-call-boundary.md, "The function's parameters").
+    slot: Option<SourceSlot>,
+}
+
+/// One parameter's convention slot (r2ssa `body_boundary::SlotId`), its section, and its type's
+/// basis: `DebugInfo` or `Declared` state a type, any other only a width (D261).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct SourceSlot {
+    pub id: u32,
+    pub class: crate::convention::SlotClass,
+    pub basis: crate::Basis,
 }
 
 impl SourceAbiParameterSpec {
@@ -223,24 +232,25 @@ impl SourceAbiParameterSpec {
         }
     }
 
-    /// The same parameter, stated in `class`'s section on `basis`.
-    pub const fn in_section(
-        mut self,
-        class: crate::convention::SlotClass,
-        basis: crate::Basis,
-    ) -> Self {
-        self.slot = Some((class, basis));
+    /// The same parameter, stated at `slot`.
+    pub const fn at_slot(mut self, slot: SourceSlot) -> Self {
+        self.slot = Some(slot);
         self
+    }
+
+    /// The slot, where the producer states it.
+    pub const fn slot(&self) -> Option<SourceSlot> {
+        self.slot
     }
 
     /// The section's class, where the producer states it.
     pub fn class(&self) -> Option<crate::convention::SlotClass> {
-        self.slot.map(|(class, _)| class)
+        self.slot.map(|slot| slot.class)
     }
 
     /// Where the parameter comes from: `Convention` for a hole below a read slot.
     pub fn basis(&self) -> Option<crate::Basis> {
-        self.slot.map(|(_, basis)| basis)
+        self.slot.map(|slot| slot.basis)
     }
 
     /// An unread slot below a read one: a parameter only by the convention's order.
@@ -404,15 +414,18 @@ pub enum SourceResultCause {
     ForwardCycle,
     /// No citation states the convention's result lanes complete, so no lane is proven empty (S36).
     LanesUnbounded,
+    /// The declaration states parameters and no result (a mangled name): every killed lane is open.
+    Unstated,
 }
 
-/// What the direct paths of a body prove of an unproven result: the convention's carrier, at the
-/// width those paths write and whether they sign-extend; the start of a cycle's fixpoint.
+/// What the direct paths of a body prove of an unproven result: the convention's carrier at the
+/// width those paths write; the start of a cycle's fixpoint. It states no C sign (RULING 1.7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 pub struct SourceResultSeed {
     pub slot: CanonicalStorageId,
     pub bits: u32,
-    pub signed: bool,
+    /// What every such path leaves above `bits`.
+    pub above: SourceAbove,
 }
 
 /// Every cause a function's result is unproven, sorted; never empty.
@@ -549,6 +562,7 @@ impl SourceCallResult {
             Self::Register { storage, .. } => (Some(storage), None),
             Self::Pair { low, high } => (Some(low), Some(high)),
             Self::Unproven { integer, float } => (Some(integer), Some(float)),
+            Self::Unstated { carrier } => (Some(carrier), None),
         };
         first.into_iter().chain(second)
     }
@@ -974,6 +988,33 @@ impl SourceRoleRegisterNames {
     }
 }
 
+/// What a declared body's own returns leave in one result lane (doc/adr-result-side.md,
+/// "Declaration against body"); `None` and `Written` are proven.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+pub enum SourceBodyLane {
+    /// Nothing proves either.
+    #[default]
+    Open,
+    /// No return leaves a byte the body defines, or an input's entry byte.
+    None,
+    /// Every return's value is stated, and one leaves a byte the body defines.
+    Written,
+}
+
+/// A typed result lane the body of a declared function is read in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum SourceTypedLane {
+    Integer,
+    Float,
+}
+
+/// A declared body's integer and float result lanes, each with its register (D331).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize)]
+pub struct SourceBodyResult {
+    pub integer: Option<(CanonicalStorageId, SourceBodyLane)>,
+    pub float: Option<(CanonicalStorageId, SourceBodyLane)>,
+}
+
 /// The registers a result may be in beyond what is proven: the integer result register and the
 /// float one where the body writes both, and the second integer register where the body also
 /// writes it on every return. A call takes what its caller reads.
@@ -987,6 +1028,9 @@ pub struct SourceResultCarriers {
     /// No return leaves in the integer register a byte the body defines or an input's entry byte
     /// (doc/adr-scratch-result.md, cases 1 to 3), so neither it nor the second register holds a result.
     pub integer_undefined: bool,
+    /// The dense lane id of the lane the convention fills after the float one (XMM1, q1), where a
+    /// return leaves a written byte there: a call reading both reads one group (result-side ADR).
+    pub float_second: Option<u8>,
 }
 
 impl SourceResultCarriers {
@@ -1001,22 +1045,49 @@ impl SourceResultCarriers {
     }
 }
 
-/// The fixed parameter that bounds a variadic body's tail: it consumes at most that many tail
-/// arguments (doc/adr-resolved-bodies.md, "Count-driven tail").
+/// The fixed parameter that bounds a variadic callee's tail, and how its value counts the tail
+/// (doc/adr-resolved-bodies.md, "Count-driven tail").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct SourceTailCount {
     pub parameter_index: u32,
-    /// The width of the value the body compares, in bytes.
-    pub width_bytes: u32,
-    /// Whether the body compares it signed, so a negative count bounds the tail at none.
-    pub signed: bool,
+    pub rule: SourceTailRule,
+}
+
+/// How a counting parameter's value bounds the tail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum SourceTailRule {
+    /// The body runs one trip per tail argument while the value, `width_bytes` wide, is above the
+    /// trip count; `signed` compares it signed, so a negative count bounds the tail at none.
+    Trips { width_bytes: u32, signed: bool },
+    /// A library body reads `then` tail arguments where the flag holds any bit of `any` or every
+    /// bit of `all`, and none otherwise (glibc `__OPEN_NEEDS_MODE`).
+    Flagged { any: u64, all: u64, then: u8 },
 }
 
 impl SourceTailCount {
+    pub const fn trips(parameter_index: u32, width_bytes: u32, signed: bool) -> Self {
+        Self {
+            parameter_index,
+            rule: SourceTailRule::Trips {
+                width_bytes,
+                signed,
+            },
+        }
+    }
+
     /// The tail arguments a call passing `argument` (its register's bits) may be read for.
     pub fn bound(self, argument: u64) -> Option<usize> {
-        let bits = self
-            .width_bytes
+        let (width_bytes, signed) = match self.rule {
+            SourceTailRule::Trips {
+                width_bytes,
+                signed,
+            } => (width_bytes, signed),
+            SourceTailRule::Flagged { any, all, then } => {
+                let reads = argument & any != 0 || argument & all == all;
+                return Some(if reads { usize::from(then) } else { 0 });
+            }
+        };
+        let bits = width_bytes
             .checked_mul(8)
             .filter(|bits| (1..=64).contains(bits))?;
         let value = if bits == 64 {
@@ -1024,10 +1095,15 @@ impl SourceTailCount {
         } else {
             argument & ((1u64 << bits) - 1)
         };
-        if self.signed && value >> (bits - 1) != 0 {
+        if signed && value >> (bits - 1) != 0 {
             return Some(0);
         }
         usize::try_from(value).ok()
+    }
+
+    /// Whether the count is a flag test, which a call that does not fix the flag cannot decide.
+    pub const fn is_flagged(self) -> bool {
+        matches!(self.rule, SourceTailRule::Flagged { .. })
     }
 }
 
@@ -1083,6 +1159,9 @@ pub struct SourceFunctionInterface {
     /// Whether the body proves its result is the return address it was called
     /// with, which is what a position-independent code thunk returns.
     body_proven_return_address: bool,
+    /// What every return path of the body leaves above a narrower integer result; a declaration
+    /// states `Undefined` (doc/adr-result-side.md, section 2).
+    result_above: SourceAbove,
     /// Whether the body is a `/GS` check: it returns only past its first argument equalling the
     /// load-config cookie, with no memory effect, and otherwise reaches a call that never returns.
     security_check: bool,
@@ -1097,6 +1176,10 @@ pub struct SourceFunctionInterface {
     closed_result: Option<crate::SourceClosedResult>,
     /// Whether a return hands back a parameter through a merge: its cause is an entry input.
     result_holds_input: bool,
+    /// The body reaches no return: its `Void` states what a call leaves, and no type (S24).
+    no_return_reached: bool,
+    /// What the body's returns leave in the result lanes, where a declaration states the result.
+    body_result: SourceBodyResult,
     /// What the logical types are read from (doc/adr-provenance.md):
     /// `DebugInfo` where the binary declares the body, `Declared` where a
     /// library's prototype was found by an import's name, `CarrierWidth`
@@ -1571,12 +1654,18 @@ impl SourceFunctionInterface {
             tail_count: None,
             va_list_parameter: None,
             body_proven_return_address: false,
+            result_above: SourceAbove::Undefined,
             security_check: false,
             arity_floor: None,
             unproven_result: None,
             result_carriers: None,
             closed_result: None,
             result_holds_input: false,
+            no_return_reached: false,
+            body_result: SourceBodyResult {
+                integer: None,
+                float: None,
+            },
             types: crate::confidence::Confidence::of(crate::confidence::Basis::Convention),
         })
     }
@@ -1629,12 +1718,15 @@ impl SourceFunctionInterface {
             tail_count: self.tail_count,
             va_list_parameter: self.va_list_parameter,
             body_proven_return_address: self.body_proven_return_address,
+            result_above: self.result_above,
             security_check: self.security_check,
             arity_floor: self.arity_floor.clone(),
             unproven_result: self.unproven_result.clone(),
             result_carriers: self.result_carriers,
             closed_result: self.closed_result,
             result_holds_input: self.result_holds_input,
+            no_return_reached: self.no_return_reached,
+            body_result: self.body_result,
             types: self.types.clone(),
             ..rebuilt
         })
@@ -1797,9 +1889,9 @@ impl SourceFunctionInterface {
         self
     }
 
-    /// Record the parameter a variadic body's tail is bounded by. Checked against the parameters
-    /// the interface has, and against its tail.
-    pub fn with_body_proven_tail_count(
+    /// Record the parameter a variadic callee's tail is bounded by: a body's proven count, or a
+    /// cited library row's flag test. Checked against the parameters and the tail.
+    pub fn with_tail_count(
         mut self,
         count: SourceTailCount,
     ) -> Result<Self, SourceFunctionInterfaceError> {
@@ -1813,7 +1905,7 @@ impl SourceFunctionInterface {
         Ok(self)
     }
 
-    /// The parameter the body proves its tail is bounded by.
+    /// The parameter the callee's tail is bounded by, and how.
     pub const fn tail_count(&self) -> Option<SourceTailCount> {
         self.tail_count
     }
@@ -1842,6 +1934,14 @@ impl SourceFunctionInterface {
         self.unproven_result.as_ref()
     }
 
+    /// The lane a call's extern spells where a declaration states the parameters and no result:
+    /// the call then states none, and every killed lane is unproven (D330).
+    pub fn unstated_carrier(&self) -> Option<CanonicalStorageId> {
+        let result = self.unproven_result.as_ref()?;
+        let unstated = result.causes() == [SourceResultCause::Unstated];
+        result.seed().filter(|_| unstated).map(|seed| seed.slot)
+    }
+
     /// What a cycle's fixpoint assumes of a member: these parameters, exactly or as a floor, and
     /// the result `seed` states or none (doc/adr-resolved-bodies.md, "Arity" and "A cycle's results").
     #[must_use]
@@ -1856,13 +1956,15 @@ impl SourceFunctionInterface {
         self.return_logical_value = None;
         self.result_carriers = None;
         self.body_proven_return_address = false;
+        self.result_above = SourceAbove::Undefined;
+        self.no_return_reached = false;
         if let Some(seed) = seed {
             self.state_result(seed);
         }
         self
     }
 
-    /// The integer result this interface states, as a seed would: its carrier, width and sign.
+    /// The integer result this interface states, as a seed would: its carrier and width.
     pub fn stated_result(&self) -> Option<SourceResultSeed> {
         let SourceFunctionReturn::Register { storage } = self.return_kind else {
             return None;
@@ -1873,30 +1975,35 @@ impl SourceFunctionInterface {
             .as_ref()?
             .types()
             .get(usize::try_from(logical.type_id()).ok()?)?;
-        let signed = match held.kind() {
-            SourceTypeKind::SignedInteger => true,
-            SourceTypeKind::UnsignedInteger => false,
-            _ => return None,
-        };
+        if !matches!(
+            held.kind(),
+            SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger
+        ) {
+            return None;
+        }
         Some(SourceResultSeed {
             slot: storage,
             bits: u32::try_from(held.size_bits()).ok()?,
-            signed,
+            above: self.result_above,
         })
     }
 
-    /// Return `seed.slot`, read at its `bits`: the type is one the graph names or gains.
+    /// Return `seed.slot`, read at its `bits`: an integer the graph names at that width, else an
+    /// unsigned one it gains; the C sign is r2types' (RULING 1.7).
     fn state_result(&mut self, seed: SourceResultSeed) {
-        let kind = match seed.signed {
-            true => SourceTypeKind::SignedInteger,
-            false => SourceTypeKind::UnsignedInteger,
-        };
+        let kind = SourceTypeKind::UnsignedInteger;
         let bits = u64::from(seed.bits);
         let graph = self.type_graph.as_ref();
         let mut types = graph.map_or_else(Vec::new, |graph| graph.types().to_vec());
+        let integer = |kind| {
+            matches!(
+                kind,
+                SourceTypeKind::SignedInteger | SourceTypeKind::UnsignedInteger
+            )
+        };
         let named = types
             .iter()
-            .position(|held| held.kind() == kind && held.size_bits() == bits);
+            .position(|held| integer(held.kind()) && held.size_bits() == bits);
         let id = named.unwrap_or(types.len());
         if named.is_none()
             && let Ok(id) = u32::try_from(id)
@@ -1913,6 +2020,7 @@ impl SourceFunctionInterface {
             false => SourceCarrierKind::Full,
         };
         self.return_kind = SourceFunctionReturn::Register { storage: seed.slot };
+        self.result_above = seed.above;
         self.return_logical_value = Some(SourceLogicalValue::new(
             id,
             SourceCarrierProjection::new(carrier, 0, bits),
@@ -1954,9 +2062,52 @@ impl SourceFunctionInterface {
         self
     }
 
+    /// Record what the body's returns leave in the result lanes of a declared function.
+    #[must_use]
+    pub const fn with_body_result(mut self, body: SourceBodyResult) -> Self {
+        self.body_result = body;
+        self
+    }
+
+    /// The lanes where the body's returns contradict the declared result, which stays: a declared
+    /// lane no return defines, or a lane a declared `void` leaves written (D331). O(lanes).
+    pub fn body_disputed_lanes(
+        &self,
+    ) -> impl Iterator<Item = (SourceTypedLane, SourceBodyLane)> + '_ {
+        let lanes = [
+            (SourceTypedLane::Integer, self.body_result.integer),
+            (SourceTypedLane::Float, self.body_result.float),
+        ];
+        let declared = self.types_are_declared();
+        let holds = |lane: CanonicalStorageId| {
+            (self.return_kind.storages()).any(|held| held.location() == lane.location())
+        };
+        lanes.into_iter().filter_map(move |(lane, body)| {
+            let (storage, body) = body.filter(|_| declared)?;
+            let disputed = match (self.return_kind, body) {
+                (SourceFunctionReturn::Void, SourceBodyLane::Written) => true,
+                (_, SourceBodyLane::None) => holds(storage),
+                _ => false,
+            };
+            disputed.then_some((lane, body))
+        })
+    }
+
     /// Whether a return hands back a parameter: the result is an entry input, not a written value.
     pub const fn result_holds_input(&self) -> bool {
         self.result_holds_input
+    }
+
+    /// Record that the body reaches no return path (doc/adr-result-side.md, section 3).
+    #[must_use]
+    pub fn with_no_return_reached(mut self) -> Self {
+        self.no_return_reached = true;
+        self
+    }
+
+    /// Whether the body reaches no return path: a `Void` result then proves no `void` type.
+    pub const fn no_return_reached(&self) -> bool {
+        self.no_return_reached
     }
 
     /// What the closed world decided of the result, where a `CallBoundary` decided it.
@@ -2010,6 +2161,13 @@ impl SourceFunctionInterface {
     /// Whether the result is the return address the caller pushed.
     pub const fn body_proven_return_address(&self) -> bool {
         self.body_proven_return_address
+    }
+
+    /// Record what every return path of the body leaves above its narrower integer result.
+    #[must_use]
+    pub fn with_result_above(mut self, above: SourceAbove) -> Self {
+        self.result_above = above;
+        self
     }
 
     /// Record that the body is a proven `/GS` check (r2ssa `security_cookie::proves_check`).
@@ -2372,7 +2530,7 @@ impl SourceFunctionInterface {
     }
 
     /// The bytes of the result register the stated integer result occupies: its logical value's
-    /// low bytes, with nothing stated above them; the whole register where no integer is stated.
+    /// low bytes and the fill a body leaves above them; the whole register where no integer is stated.
     pub fn result_width(&self) -> Option<SourceResultWidth> {
         let SourceFunctionReturn::Register { storage } = self.return_kind else {
             return None;
@@ -2400,7 +2558,7 @@ impl SourceFunctionInterface {
         Some(match (integer && narrower, u8::try_from(bits / 8)) {
             (true, Ok(logical)) => SourceResultWidth {
                 logical,
-                above: SourceAbove::Undefined,
+                above: self.result_above,
             },
             _ => whole,
         })
@@ -2415,7 +2573,7 @@ impl SourceFunctionInterface {
     }
 }
 
-fn valid_register_storage(storage: CanonicalStorageId) -> bool {
+pub(crate) fn valid_register_storage(storage: CanonicalStorageId) -> bool {
     storage.space == CanonicalStorageSpace::Register
         && storage.size > 0
         && storage
@@ -2424,7 +2582,10 @@ fn valid_register_storage(storage: CanonicalStorageId) -> bool {
             .is_some()
 }
 
-fn register_storages_overlap(left: CanonicalStorageId, right: CanonicalStorageId) -> bool {
+pub(crate) fn register_storages_overlap(
+    left: CanonicalStorageId,
+    right: CanonicalStorageId,
+) -> bool {
     let Some(left_end) = left.offset.checked_add(u64::from(left.size)) else {
         return true;
     };
@@ -2543,6 +2704,11 @@ pub enum SourceCallResult {
     Unproven {
         integer: CanonicalStorageId,
         float: CanonicalStorageId,
+    },
+    /// The callee's declaration states no result: every result lane the call kills is unproven,
+    /// and `carrier` is the lane its extern spells (D330).
+    Unstated {
+        carrier: CanonicalStorageId,
     },
 }
 
@@ -2802,6 +2968,12 @@ impl SourceCallSiteInterface {
                 SourceCallResult::Unproven { integer, float },
             ) if carriers.integer == integer && carriers.float == Some(float) => {
                 SourceCallResult::Unproven { integer, float }
+            }
+            // A declaration with no stated result: the call states none, at the seeded carrier.
+            (SourceFunctionReturn::Unproven, _, SourceCallResult::Unstated { carrier })
+                if callee.unstated_carrier() == Some(carrier) =>
+            {
+                SourceCallResult::Unstated { carrier }
             }
             // An unproven result is no claim, so no exact contract holds it.
             (SourceFunctionReturn::Unproven, ..) => {
@@ -3081,43 +3253,38 @@ mod tests {
 
     #[test]
     fn a_tail_count_bounds_its_tail_at_its_width_and_sign() {
-        let unsigned = SourceTailCount {
-            parameter_index: 0,
-            width_bytes: 4,
-            signed: false,
-        };
+        let unsigned = SourceTailCount::trips(0, 4, false);
         // A register holds the argument's high bits too, which the body never compared.
         assert_eq!(unsigned.bound(3), Some(3));
         assert_eq!(unsigned.bound(0xdead_beef_0000_0002), Some(2));
         assert_eq!(unsigned.bound(0xffff_ffff), Some(0xffff_ffff));
-        let signed = SourceTailCount {
-            signed: true,
-            ..unsigned
-        };
+        let signed = SourceTailCount::trips(0, 4, true);
         assert_eq!(signed.bound(3), Some(3));
         assert_eq!(signed.bound(0xffff_ffff), Some(0), "-1 runs no trip");
         assert_eq!(signed.bound(0x8000_0000), Some(0));
-        let wide = SourceTailCount {
-            width_bytes: 8,
-            ..unsigned
-        };
+        let wide = SourceTailCount::trips(0, 8, false);
         assert_eq!(wide.bound(u64::MAX), usize::try_from(u64::MAX).ok());
-        assert_eq!(
-            SourceTailCount {
-                width_bytes: 0,
-                ..unsigned
-            }
-            .bound(1),
-            None
-        );
-        assert_eq!(
-            SourceTailCount {
-                width_bytes: 9,
-                ..unsigned
-            }
-            .bound(1),
-            None
-        );
+        assert_eq!(SourceTailCount::trips(0, 0, false).bound(1), None);
+        assert_eq!(SourceTailCount::trips(0, 9, false).bound(1), None);
+    }
+
+    /// glibc x86-64 `open`: `O_CREAT` (0100) or all of `__O_TMPFILE` (020200000) reads the mode.
+    #[test]
+    fn a_flag_test_passes_its_tail_only_where_the_flag_holds() {
+        let open = SourceTailCount {
+            parameter_index: 1,
+            rule: SourceTailRule::Flagged {
+                any: 0o100,
+                all: 0o20200000,
+                then: 1,
+            },
+        };
+        assert!(open.is_flagged());
+        assert_eq!(open.bound(0), Some(0), "O_RDONLY");
+        assert_eq!(open.bound(0o101), Some(1), "O_CREAT | O_WRONLY");
+        assert_eq!(open.bound(0o20200002), Some(1), "O_TMPFILE | O_RDWR");
+        assert_eq!(open.bound(0o20000002), Some(0), "__O_TMPFILE's bit alone");
+        assert_eq!(open.bound(0o200000), Some(0), "O_DIRECTORY");
     }
 
     #[test]
@@ -3995,6 +4162,17 @@ pub struct SourceSecurityCookie {
     pub width: u32,
 }
 
+/// A stack protector's global word where the container binds it (`r2abi::GuardRow::LinkedGlobal`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SourceLinkedGuard {
+    /// The copy of it in this image (`R_*_COPY`), read at its own address.
+    pub copy: Option<u64>,
+    /// Each sealed word the loader writes its address into, ascending.
+    pub slots: Box<[u64]>,
+    pub slot_width: u32,
+    pub width: u32,
+}
+
 /// Memory at a constant offset from a register's entry value: a stack protector's guard, or a
 /// convention's stack bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -4187,7 +4365,7 @@ impl SourceCallEffect {
     }
 }
 
-fn sorted_storages(
+pub(crate) fn sorted_storages(
     storages: impl IntoIterator<Item = CanonicalStorageId>,
 ) -> Box<[CanonicalStorageId]> {
     let mut storages = storages.into_iter().collect::<Vec<_>>();
@@ -4196,7 +4374,10 @@ fn sorted_storages(
     storages.into_boxed_slice()
 }
 
-fn storage_sets_overlap(left: &[CanonicalStorageId], right: &[CanonicalStorageId]) -> bool {
+pub(crate) fn storage_sets_overlap(
+    left: &[CanonicalStorageId],
+    right: &[CanonicalStorageId],
+) -> bool {
     left.iter().any(|left| {
         right
             .iter()
@@ -4207,7 +4388,10 @@ fn storage_sets_overlap(left: &[CanonicalStorageId], right: &[CanonicalStorageId
 /// Whether every byte of a register storage lies in `ranges`, sorted by offset.
 ///
 /// One sweep over the ranges in offset order, extending the covered prefix.
-fn covers_every_byte(ranges: &[CanonicalStorageId], storage: CanonicalStorageId) -> bool {
+pub(crate) fn covers_every_byte(
+    ranges: &[CanonicalStorageId],
+    storage: CanonicalStorageId,
+) -> bool {
     let Some(end) = storage.offset.checked_add(u64::from(storage.size)) else {
         return false;
     };

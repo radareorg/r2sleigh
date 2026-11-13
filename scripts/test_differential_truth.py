@@ -482,6 +482,30 @@ class TruthIsDwarf(unittest.TestCase):
         self.assertEqual(report["silent_buckets"]["return"], {"void_vs_value": 1})
         self.assertEqual(report["silent_buckets"]["parameter"], {"sign": 6})
 
+    def test_an_unstated_sign_is_marked_and_counted(self) -> None:
+        # D265: the word typedef states a width and no sign, as a scalar and as a pointee.
+        word = ", ".join(f"r2sleigh_word_u32 arg{i}" for i in range(5))
+        said = fn(f"void seven({word}, r2sleigh_word_u32* arg5)")
+        truth = "void seven(int32_t a, int32_t b, int32_t c, int32_t d, int32_t e, int32_t *f)"
+        code, report, _ = run_main({0x1000: truth}, {0x1000: said})
+        self.assertEqual(code, 0)
+        self.assertEqual(report["facts"], {"correct": 1, "missing": 0, "marked_wrong": 6, "silently_wrong": 0})
+        self.assertEqual(report["marked_buckets"]["parameter"], {"unstated_sign": 6})
+        self.assertEqual(report["marked_sign"], 6)
+
+    def test_the_word_where_the_source_has_no_integer_of_its_width_is_its_integer(self) -> None:
+        # A word claims its unsigned integer: as a pointer, or at another pointer depth, the error stays silent.
+        said = fn("void seven(r2sleigh_word_u64 arg0, r2sleigh_word_u32* arg1, r2sleigh_word_u64 arg2)")
+        truth = "void seven(char *a, int32_t b, int16_t c)"
+        code, report, _ = run_main({0x1000: truth}, {0x1000: said})
+        self.assertEqual(code, 1)
+        self.assertEqual(report["facts"]["silently_wrong"], 3)
+        self.assertEqual(report["marked_sign"], 0)
+        self.assertEqual(
+            report["silent_buckets"]["parameter"],
+            {"pointer_as_integer": 1, "integer_as_pointer": 1, "width_wider": 1},
+        )
+
     def test_the_engine_that_agrees_with_dwarf_is_correct(self) -> None:
         said = fn("void seven(int32_t arg0, int32_t arg1, int32_t arg2, int32_t arg3, int32_t arg4, int32_t arg5)")
         code, report, _ = run_main({0x1000: self.SEVEN}, {0x1000: said})
@@ -1439,7 +1463,7 @@ class ReportShape(unittest.TestCase):
         self.assertEqual(list(report), [
             "functions_in_dwarf", "functions_in_truth", "functions_recovered", "ungradable", "without_dwarf",
             "facts", "recovery_rate", "soundness_rate", "soundness_without_qualifier", "silent", "silent_buckets",
-            "marked_buckets", "return_presence"])
+            "marked_buckets", "marked_sign", "return_presence"])
         self.assertEqual(list(report["return_presence"]), list(dt.PRESENCE))
 
     def test_every_function_dwarf_declares_is_graded_or_named(self) -> None:

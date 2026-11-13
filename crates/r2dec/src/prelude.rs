@@ -677,13 +677,33 @@ pub(crate) fn is_unread_slot(ty: &CType) -> bool {
     matches!(ty, CType::Typedef { name, .. } if name.starts_with(UNREAD_TYPEDEF))
 }
 
+/// Every prelude typedef `ty` spells, through pointers, arrays, qualifiers and function types.
+pub(crate) fn typedefs_within(ty: &CType, out: &mut std::collections::BTreeSet<String>) {
+    out.extend(result_typedef(ty));
+    match ty {
+        CType::Pointer(inner) | CType::Array(inner, _) | CType::Const(inner) => {
+            typedefs_within(inner, out);
+        }
+        CType::Function { ret, params } => {
+            typedefs_within(ret, out);
+            params.iter().for_each(|param| typedefs_within(param, out));
+        }
+        CType::UnprototypedFunction(ret) => typedefs_within(ret, out),
+        _ => {}
+    }
+}
+
 /// The prelude's declaration of `ty`, where it is an unproven result's carrier typedef or a hole's.
 pub(crate) fn result_typedef(ty: &CType) -> Option<String> {
     match ty {
-        CType::Typedef { name, ty } if name.starts_with(RESULT_TYPEDEF) => match ty.as_ref() {
-            CType::Int { bits, .. } => Some(format!("typedef uint{bits}_t {name};\n")),
-            _ => None,
-        },
+        CType::Typedef { name, ty }
+            if name.starts_with(RESULT_TYPEDEF) || name.starts_with(r2types::UNSTATED_WORD) =>
+        {
+            match ty.as_ref() {
+                CType::Int { bits, .. } => Some(format!("typedef uint{bits}_t {name};\n")),
+                _ => None,
+            }
+        }
         CType::Typedef { name, ty } if name.starts_with(UNREAD_TYPEDEF) => match ty.as_ref() {
             CType::Int { bits, .. } => Some(format!("typedef uint{bits}_t {name};\n")),
             CType::Float(32) => Some(format!("typedef float {name};\n")),

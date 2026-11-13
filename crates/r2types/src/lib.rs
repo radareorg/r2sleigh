@@ -16,7 +16,6 @@ pub mod function_facts;
 pub(crate) mod lattice;
 pub(crate) mod model;
 pub(crate) mod prepare;
-mod register_identity;
 pub(crate) mod signature_infer;
 mod signedness;
 pub(crate) mod solver;
@@ -35,10 +34,7 @@ pub use callee::{
     normalize_callee_name,
 };
 pub use constraint::{Constraint, ConstraintSource, SolverNode};
-pub(crate) use register_identity::RegisterIdentity;
-pub(crate) use signature_infer::{
-    format_signature_prototype, infer_signature_from_prepared_ssa, render_signature_type,
-};
+pub(crate) use signature_infer::{infer_signature_from_prepared_ssa, render_signature_type};
 pub use solver::{SolvedTypes, solve_constraints};
 
 pub use context::{
@@ -52,7 +48,7 @@ pub use convert::{
 pub use data_object::{
     DataObjectTypeFact, DataObjectTypeProvenance, DataObjectTypeRefusal, ProgramDataObjectTypeFacts,
 };
-pub use evidence::EvidenceTypes;
+pub use evidence::{DeclaredBound, EvidenceTypes};
 pub use external::{ExternalField, ExternalStruct, ExternalTypeDb, normalize_external_type_name};
 pub use facts::{
     CalleeFact, CalleeLinkage, CalleeModelPolicyEvidence, CalleeReturnRelation,
@@ -73,6 +69,10 @@ pub use function_facts::{
     admit_declaration_type, aggregate_is_definable, aggregate_members, declaration_type_width_bits,
     unread_slot,
 };
+pub use parameter_types::{
+    IntegerDecl, ParameterType, ParameterTypes, PointerRefusal, SignFact, SlotType, UNSTATED_WORD,
+    is_unstated_word, unstated_word, word_free,
+};
 
 pub use model::{Signedness, Type};
 pub use prepare::{TypeHint, merge_type_hint};
@@ -85,3 +85,4 @@ pub use analysis::{
 };
 
 mod data_object;
+mod parameter_types;

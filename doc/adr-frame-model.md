@@ -64,6 +64,12 @@ declarations.
   frame objects, with phis keyed by `BlockId`), r2types, the renderer, and
   `afv`/`afi`, so the shell and the C name the same objects the same way.
 
+### Escape spans
+
+`FrameReach::escape_spans` names each run of escaped objects an address may reach. `collect_object_and_memory_facts` then builds the object model a second time, with those runs as spans; that build owns the merge. Two inputs of a build are the same for both builds, because no span changes them: what calls write through the frame (`callee_write_spans`, `FrameBoundaries`), and each call's argument area at its stack pointer's entry offset (`CallAreas`, a `ReachingStorage` walk). Both are read once per collection (`BuildInputs`, `CallAreas`). The second build still runs where a span opens.
+
+The second build changes the model even where the rendering does not move. Cold pumasim `0x23fdf0` shows this after S27: a decided canary inside a frame object is no barrier, which opens a single-object run in 19 callees (`0x2312c0`: span (-56, -32), absent before). Their models gain the span, their C does not move, and each was built twice. Skipping a build whose spans the first already reaches never fired on those 19: every span was new. D290 (one escape walk before promotion) deletes the second build.
+
 ## Reloads
 
 Value ranges narrow by copy class, and two loads of one slot are two values. `r2ssa::reload` names, for
@@ -76,8 +82,20 @@ whichever load of the slot the compare read. A slot nothing escapes is promoted 
 none of this. Memory SSA cannot own the fact: the object model it is built over reads the value ranges. Cost
 `O(ops log h)` for `h` held slots: one table is walked down the chains with an undo trail, so a branch copies
 nothing, a clobber moves the table into the trail in `O(1)`, and a store to an exact slot keeps what it
-misses, looking only at the slots within 64 bytes of it; any other write drops all of it. Stack slots only: a pointer's reload is the
-same fact but a volatile or device read is not, and nothing in the IR says which.
+misses, looking only at the slots within 64 bytes of it; any other write drops all of it.
+
+A word outside the exact frame is held too (D244, 2026-11-11; this replaces "stack slots only"). Two loads of
+one width whose addresses are one constant, or one copy class plus one constant, read one place. The later is
+the earlier's bits along the same chains, and any store, call or opaque operation between them ends that:
+nothing says a pointer is outside the frame, so a frame store drops every place, in `O(1)` by starting a new
+era. The proof obligation: both loads read one address value, and no operation between them on the one path
+that joins them may write memory at all. An operation the walk cannot prove writes nothing ends the fact, and
+an unproven pair is two values (`a_store_through_an_unknown_pointer_keeps_the_pointed_loads_apart`). Places are numbered densely over the loads that share one (`O(L log L)`), so a lookup is one index. The
+premise is that no other agent writes the word between two reads no operation separates. The compiler that
+emitted `cmpl $0x16, (%rax); ja; mov (%rax), %edx; jmp *table(,%rdx,4)` took it: its table has 23 entries, and
+a volatile read is never duplicated. A program that breaks the premise reads past its own table. Measured: gzip
+`printf_fetchargs` `0x10f89`, find `0x94af` and `0xa9b0`, diff `0x76c0` (a static address) each read `4294967296
+entries` before.
 
 ## Done
 

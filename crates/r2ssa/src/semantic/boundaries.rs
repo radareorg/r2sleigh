@@ -142,11 +142,14 @@ fn counted_tail_argument_count(
         .get(index)
         .and_then(Option::as_ref)
         .ok_or(VariadicCallsiteArgumentCountRefusal::CountArgumentUnavailable)?;
-    let SourceCallArgumentValue::Value(value) = argument.value else {
-        return Err(VariadicCallsiteArgumentCountRefusal::CountArgumentNotConstant);
+    let not_constant = match bound.is_flagged() {
+        true => VariadicCallsiteArgumentCountRefusal::FlagNotConstant,
+        false => VariadicCallsiteArgumentCountRefusal::CountArgumentNotConstant,
     };
-    let bits = resolve_const_value(graph, prep, value)
-        .ok_or(VariadicCallsiteArgumentCountRefusal::CountArgumentNotConstant)?;
+    let SourceCallArgumentValue::Value(value) = argument.value else {
+        return Err(not_constant);
+    };
+    let bits = resolve_const_value(graph, prep, value).ok_or(not_constant)?;
     let tail_arguments = bound
         .bound(bits)
         .filter(|tail| *tail <= LONGEST_TAIL)
@@ -382,7 +385,7 @@ fn variadic_tail_on_stack(machine_context: &SourceMachineContext) -> bool {
 /// Whether the convention places a floating tail operand: on the stack, or at a shared position.
 fn floating_tail_placed(machine_context: &SourceMachineContext) -> bool {
     variadic_tail_on_stack(machine_context)
-        || (machine_context.convention()).is_some_and(r2source::ConventionModel::shares_positions)
+        || (machine_context.convention()).is_some_and(|model| model.shares_positions())
 }
 
 /// Prove a merged variadic count from formats that agree.
@@ -1364,7 +1367,7 @@ fn state_unstated_result(
         .map(|slot| r2source::SourceResultSeed {
             slot,
             bits: slot.size.saturating_mul(8),
-            signed: false,
+            above: r2source::SourceAbove::Undefined,
         });
     boundary.unstated_carrier = (!boundary.unstated_lanes.is_empty())
         .then(|| stated.and_then(|statement| statement.seed).or(integer))
@@ -1508,6 +1511,17 @@ pub(crate) fn collect_source_boundary_facts(
             boundary.noreturn = Some(interface.is_noreturn());
             boundary.result_kind = Some(interface.result());
             boundary.unstated_lanes = unproven_lanes(machine_context, call_site, interface);
+            // The contract states no result: none here, and every killed lane unstated (D330).
+            if let SourceCallResult::Unstated { carrier } = interface.result() {
+                boundary.result_kind = None;
+                state_unstated_result(&mut boundary, machine_context, None);
+                let seeded = |seed: r2source::SourceResultSeed| r2source::SourceResultSeed {
+                    slot: carrier,
+                    bits: carrier.size.saturating_mul(8),
+                    ..seed
+                };
+                boundary.unstated_carrier = boundary.unstated_carrier.map(seeded);
+            }
             boundary.refusal = Some(CallBoundaryRefusal::InterfaceIncomplete);
             boundary.ignored = (interface.exact_callee_interface().into_iter())
                 .flat_map(|callee| callee.parameters())
@@ -1652,7 +1666,8 @@ pub(crate) fn collect_source_boundary_facts(
                         SourceCallResult::Register { storage, .. }
                         | SourceCallResult::Unproven {
                             integer: storage, ..
-                        },
+                        }
+                        | SourceCallResult::Unstated { carrier: storage },
                     ) => call_result_values_after_call(
                         graph,
                         machine_context,
@@ -1849,6 +1864,12 @@ pub(crate) fn collect_source_boundary_facts(
 
     if let Some(machine_context) = machine_context {
         facts.preserved_call_carriers = preserved_call_carriers(function, graph, machine_context);
+        r2il::refusal_evidence!(
+            "preserved-carriers",
+            "{:#x}: {}",
+            function.entry,
+            crate::site_boundary::spelled(facts.preserved_call_carriers.iter().copied())
+        );
         if trace_call_definitions() {
             eprintln!(
                 "  preserved across calls to {:#x}: {:?}",

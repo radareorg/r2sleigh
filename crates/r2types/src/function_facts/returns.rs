@@ -251,6 +251,12 @@ impl ReturnTypeFact {
         if let Some(ty) = declared(source) {
             return Self::decided_by(ty, ReturnTypeEvidence::Declared);
         }
+        // No return path is reached: nothing proves `void` (doc/adr-result-side.md, section 3).
+        if interface.is_some_and(r2ssa::SourceFunctionInterface::no_return_reached) {
+            let word = source.machine_context().result_slot();
+            let bits = word.map(|slot| slot.size.saturating_mul(8));
+            return Self::unproven_at(source, bits, None, true);
+        }
         // r2ssa owns the result boundary: one it proved void leaves no type to agree on.
         if interface.map(r2ssa::SourceFunctionInterface::return_kind)
             == Some(r2ssa::SourceFunctionReturn::Void)
@@ -284,6 +290,56 @@ impl ReturnTypeFact {
 
     const fn decided_by(ty: CTypeLike, by: ReturnTypeEvidence) -> Self {
         Self::Decided { ty, by }
+    }
+
+    /// A carrier's integer, signed as every returned value's seeds state at its width, else the
+    /// unstated word; r2ssa's fill states no C sign (D265, RULING 1.7). O(returns).
+    pub(crate) fn signed_by(
+        self,
+        source: &r2ssa::SsaArtifact,
+        signedness: &r2ssa::dense::IdMap<
+            r2ssa::ValueId,
+            std::collections::BTreeSet<crate::signedness::ScalarSignednessEvidence>,
+        >,
+    ) -> Self {
+        use crate::signedness::ScalarSignednessEvidence as Seed;
+        let Self::Decided {
+            ty: CTypeLike::Int { bits, .. },
+            by: ReturnTypeEvidence::Carrier,
+        } = self
+        else {
+            return self;
+        };
+        let graph = source.graph();
+        let at_width = |value: r2ssa::ValueId| graph.var(value).size.saturating_mul(8) == bits;
+        // The value itself, or the lane a conventional zero extension widened into the carrier.
+        let lane = |value: r2ssa::ValueId| {
+            let widened =
+                (graph.def_inst(value).and_then(|inst| graph.op(inst))).and_then(|op| match op {
+                    r2ssa::SSAOp::IntZExt { src, .. } => Some(*src),
+                    _ => None,
+                });
+            Some(value)
+                .filter(|value| at_width(*value))
+                .or(widened.filter(|src| at_width(*src)))
+        };
+        let (mut signed, mut unsigned) = (false, false);
+        for certificate in &source.certificates().returns {
+            let seeds = lane(certificate.value).and_then(|value| signedness.get(value));
+            if let Some(seeds) = seeds {
+                signed |= seeds.contains(&Seed::Signed);
+                unsigned |= seeds.contains(&Seed::Unsigned);
+            }
+        }
+        let Ok(width) = u8::try_from(bits) else {
+            return self;
+        };
+        let integer = crate::IntegerDecl {
+            bits: width,
+            width: r2source::Basis::CarrierWidth,
+            sign: crate::SignFact::of(signed, unsigned),
+        };
+        Self::decided_by(integer.spelled(), ReturnTypeEvidence::Carrier)
     }
 }
 
@@ -355,7 +411,8 @@ fn tail_result(
         r2ssa::SourceCallResult::Void => Ok(Exit::Typed(CTypeLike::Void)),
         r2ssa::SourceCallResult::Register { .. }
         | r2ssa::SourceCallResult::Pair { .. }
-        | r2ssa::SourceCallResult::Unproven { .. } => signatures
+        | r2ssa::SourceCallResult::Unproven { .. }
+        | r2ssa::SourceCallResult::Unstated { .. } => signatures
             .get(&call_site)
             .map(|signature| signature.return_type.clone())
             .filter(|ty| *ty != CTypeLike::Unknown)

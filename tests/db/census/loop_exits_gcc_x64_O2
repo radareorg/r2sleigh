@@ -19,8 +19,8 @@ CMDS=aa; pdd @ 0x00401000
 EXPECT=<<EOF
 r2sleigh_result_u32 fcn_401000(void)
 {
-    uint64_t find_then_choose(uint64_t, uint32_t, uint32_t);
-    uint64_t skip_then_find(uint64_t, uint32_t, uint32_t);
+    r2sleigh_word_u32 find_then_choose(r2sleigh_word_u64, r2sleigh_word_u32, r2sleigh_word_u32);
+    r2sleigh_word_u32 skip_then_find(r2sleigh_word_u64, r2sleigh_word_u32, int32_t);
 
     uint64_t rax_1;
     uint64_t rax_2;
@@ -28,8 +28,8 @@ r2sleigh_result_u32 fcn_401000(void)
     /* r2dec proof: no individual construct is marked; 33 source obligations: 23 rendered, 10 elided, 0 refused; 3 statements rendered; the result is unproven (Written): 1 unproven-return carried */
     /* symbol `main`; C allows that name no other prototype */
     {
-        rax_1 = find_then_choose(0x402000, 98, 1);
-        rax_2 = skip_then_find(0x402004, 120, 4);
+        rax_1 = (uint64_t)find_then_choose(0x402000, 98, 1);
+        rax_2 = (uint64_t)skip_then_find(0x402004, 120, 4);
         return r2sleigh_carrier_u32((uint32_t)((uint32_t)((uint64_t)rax_1 >> 0U) + (uint32_t)((uint64_t)rax_2 >> 0U)));
     }
 }
@@ -43,7 +43,7 @@ NAME=0x00401040
 FILE=tests/fixtures/loop_exits_gcc_x64_O2
 CMDS=aa; pdd @ 0x00401040
 EXPECT=<<EOF
-uint64_t find_then_choose(uint64_t arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_word_u32 find_then_choose(r2sleigh_word_u64 arg0, r2sleigh_word_u32 arg1, r2sleigh_word_u32 arg2)
 {
     extern char sink[];
 
@@ -90,7 +90,7 @@ NAME=0x004010a0
 FILE=tests/fixtures/loop_exits_gcc_x64_O2
 CMDS=aa; pdd @ 0x004010a0
 EXPECT=<<EOF
-uint64_t skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
+r2sleigh_word_u32 skip_then_find(r2sleigh_word_u64 arg0, r2sleigh_word_u32 arg1, int32_t arg2)
 {
     extern char sink[];
 
@@ -104,7 +104,7 @@ uint64_t skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
     uint8_t tmp_4010d0_8_1;
     uint32_t tmp_lane_4010b0_6_0_1;
 
-    /* r2dec proof: no individual construct is marked; 79 source obligations: 69 rendered, 10 elided, 0 refused; 26 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 78 source obligations: 68 rendered, 10 elided, 0 refused; 26 statements rendered; 1 data object type refused; a call reads the result (assuming closed-world) */
     {
         rcx_2 = 0;
         rdi_1 = arg0;
@@ -115,7 +115,7 @@ uint64_t skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
                 tmp_lane_4010b0_6_0_1 = (uint32_t)((uint32_t)((uint64_t)rcx_2 >> 0U) + (uint32_t)1U);
                 if ((uint8_t)((int32_t)arg2 < (int32_t)tmp_lane_4010b0_6_0_1)) {
                     r2sleigh_store_u32((void*)&sink, (uint32_t)tmp_lane_4010b0_6_0_1);
-                    return (uint64_t)0xffffffffU;
+                    return (uint32_t)0xffffffffU;
                 } else {
                     rcx_2 = (uint64_t)(uint32_t)tmp_lane_4010b0_6_0_1;
                     rdi_1 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
@@ -141,7 +141,7 @@ uint64_t skip_then_find(uint64_t arg0, uint32_t arg1, uint32_t arg2)
                 {
                     tmp_lane_4010e2_2_0_1 = (uint32_t)((uint64_t)((uint64_t)(uint32_t)((uint32_t)((uint64_t)rcx_2 >> 0U) - (uint32_t)((uint64_t)rdi_1 >> 0U)) + (uint64_t)rdx_2) >> 0U);
                     r2sleigh_store_u32((void*)&sink, (uint32_t)tmp_lane_4010e2_2_0_1);
-                    return (uint64_t)(uint32_t)((uint32_t)tmp_lane_4010e2_2_0_1 + (uint32_t)100U);
+                    return (uint32_t)((uint32_t)tmp_lane_4010e2_2_0_1 + (uint32_t)100U);
                 }
             }
             {

@@ -152,16 +152,33 @@ fn needed<T>(value: Option<T>, inst: InstId, why: CallRefusal) -> Result<T, Call
     })
 }
 
+/// An integer class as the unstated word over it; any other type as it is.
+fn unstated_class(ty: &CType) -> CType {
+    match ty {
+        CType::Int {
+            bits: bits @ (8 | 16 | 32 | 64),
+            signedness: r2types::Signedness::Unsigned,
+        } => r2types::unstated_word(*bits),
+        ty => ty.clone(),
+    }
+}
+
 /// The declaration a call to a named callee states, `types` its arguments' types, the prototype's
 /// where the plan has one: none for a call through a value.
 fn extern_decl(plan: &CallPlan, mut types: Vec<CType>, ret_type: CType) -> Option<CExternDecl> {
     let calls::Callee::Named { name, address, .. } = &plan.callee else {
         return None;
     };
-    if let Some(declared) = &plan.declared {
-        let declared = types.iter_mut().zip(&declared.params);
-        for (ty, to) in declared.filter(|(ty, _)| !crate::prelude::is_unread_slot(ty)) {
-            *ty = to.clone();
+    let declared = plan
+        .declared
+        .as_ref()
+        .map_or(&[][..], |declared| &declared.params[..]);
+    for (at, ty) in types.iter_mut().enumerate() {
+        match declared.get(at).cloned().flatten() {
+            Some(to) if !crate::prelude::is_unread_slot(ty) => *ty = to,
+            Some(_) => {}
+            // A class no declaration types states no sign: the header's unstated word (D265).
+            None => *ty = unstated_class(ty),
         }
     }
     types.truncate(plan.fixed);
@@ -491,26 +508,6 @@ impl Demand<'_> {
     }
 }
 
-/// Each `CALLUSE` of `block` and the call it hands its carrier to, the next in the block.
-fn call_uses(
-    graph: &SsaGraph,
-    block: &r2ssa::GraphBlock,
-    used_by: &mut r2ssa::dense::IdMap<InstId, InstId>,
-) {
-    let mut pending = Vec::new();
-    for inst in block.insts.iter().filter_map(|id| graph.inst(*id)) {
-        match &inst.payload {
-            InstPayload::Op(SSAOp::CallUse { .. }) => pending.push(inst.id),
-            InstPayload::Op(op) if calls::plans_a_call(op) => {
-                for using in pending.drain(..) {
-                    used_by.insert(using, inst.id);
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
 /// The canonical terms: a value is inlined where it is duplicable, or where its one reader can
 /// move it there; any other is bound.
 fn canonical_roots(
@@ -532,7 +529,7 @@ fn canonical_roots(
             return true;
         }
         let read_by = readers.of(query.value);
-        let (Some(def), [only]) = (graph.def_inst(query.value), read_by.as_slice()) else {
+        let (Some(def), [only]) = (graph.def_inst(query.value), read_by) else {
             return false;
         };
         readers.movable(
@@ -581,11 +578,14 @@ fn plan_calls(
         if matches!(plan.callee, calls::Callee::Named { .. }) {
             let signature = input.declared_callee_signature(inst.id);
             let callee = input.callee_type_graph(inst.id);
-            let defines = |tag: &str, is_union| tags.agrees(tag, is_union, callee);
+            let declares = |tag: &str, is_union| tags.declares(tag, is_union, callee);
             plan.declared = signature
-                .and_then(|signature| calls::Prototype::of(signature, plan.fixed, &defines));
-            if let (Some(signature), None) = (signature, &plan.declared) {
-                r2il::refusal_evidence!("staged-call-prototype", "{:?}: {signature:?}", inst.id);
+                .and_then(|signature| calls::Prototype::of(signature, plan.fixed, &declares));
+            // A declaration that states no result names its carrier, whatever its types spell.
+            plan.carrier = (signature.and(input.callee_unproven_bits(inst.id)))
+                .filter(|bits| crate::prelude::carrier(*bits).is_some());
+            if let Some(signature) = signature {
+                classed_evidence(inst.id, signature, plan.declared.as_ref());
             }
             // No declaration: the callee's own projection, as its header spells it (W46).
             if signature.is_none() {
@@ -605,6 +605,20 @@ fn plan_calls(
     (planned, unplanned, results)
 }
 
+/// Evidence for each parameter `signature` declares that the call passes at its class.
+fn classed_evidence(
+    inst: InstId,
+    signature: &r2types::FunctionType,
+    declared: Option<&calls::Prototype>,
+) {
+    let spelled = |at: usize| declared.and_then(|declared| declared.params.get(at)?.as_ref());
+    for (at, ty) in signature.params.iter().enumerate() {
+        if spelled(at).is_none() {
+            r2il::refusal_evidence!("staged-call-prototype", "{inst:?}: {at} {ty:?}");
+        }
+    }
+}
+
 /// The instructions a term computes in place of reading their values.
 fn discharged_insts<'g>(
     graph: &'g SsaGraph,
@@ -616,67 +630,25 @@ fn discharged_insts<'g>(
     })
 }
 
-/// Who reads each value: its live graph readers, and the returns whose boundary reads it with no
-/// graph use. A dead reader computes nothing, so it does not count.
+/// Who reads each value, as the obligation inventory says ([`r2ssa::ValueReaders`]).
 struct Readers<'a> {
     graph: &'a SsaGraph,
     inventory: &'a SemanticObligationInventory,
-    /// The returns and calls whose boundary reads a value, by value.
-    boundary: r2ssa::dense::IdMap<ValueId, Vec<InstId>>,
-    /// The call a `CALLUSE` hands its carrier to: the next call in its block.
-    used_by: r2ssa::dense::IdMap<InstId, InstId>,
+    index: r2ssa::ValueReaders,
 }
 
 impl<'a> Readers<'a> {
     fn new(graph: &'a SsaGraph, inventory: &'a SemanticObligationInventory) -> Self {
-        let mut boundary = r2ssa::dense::IdMap::new(graph.values.len());
-        for obligation in inventory.obligations().values() {
-            if !matches!(
-                obligation.id.kind,
-                SemanticObligationKind::ReturnValue | SemanticObligationKind::CallArgument
-            ) {
-                continue;
-            }
-            let Some(inst) = obligation.source.graph_inst() else {
-                continue;
-            };
-            for input in &obligation.inputs {
-                boundary.get_or_insert_with(*input, Vec::new).push(inst);
-            }
-        }
-        let mut used_by = r2ssa::dense::IdMap::new(graph.insts.len());
-        for block in &graph.blocks {
-            call_uses(graph, block, &mut used_by);
-        }
+        let index = r2ssa::ValueReaders::of(inventory, graph);
         Self {
             graph,
             inventory,
-            boundary,
-            used_by,
+            index,
         }
     }
 
-    fn of(&self, value: ValueId) -> Vec<InstId> {
-        let live = self
-            .graph
-            .use_sites(value)
-            .iter()
-            .map(|site| self.used_by.get(site.inst).copied().unwrap_or(site.inst))
-            .filter(|inst| {
-                matches!(
-                    self.inventory.state_of(*inst),
-                    Some(
-                        SemanticInstructionState::LiveObligation
-                            | SemanticInstructionState::UnsupportedUnknown
-                    )
-                )
-            });
-        let mut readers = live
-            .chain(self.boundary.get(value).into_iter().flatten().copied())
-            .collect::<Vec<_>>();
-        readers.sort_unstable();
-        readers.dedup();
-        readers
+    fn of(&self, value: ValueId) -> &[InstId] {
+        self.index.get(value)
     }
 
     /// Whether `reader` may compute the producer's term in place of `def`: later in its block, no
@@ -945,27 +917,34 @@ impl<'a> Values<'a> {
         let mut pointing = Vec::new();
         for (index, home, ty) in parameters.into_iter().flatten() {
             let class = terms::c_type(&ty).expect("a classed parameter has a C type");
-            // A declared type is spelled as stated; an analysed one only where it is a pointer.
-            let analysed = (input.parameter_declaration(index as usize, ty.width_bits()))
-                .filter(|ty| matches!(ty.unaliased(), r2types::CTypeLike::Pointer(_)));
-            let declared = (input.declared_parameter(index as usize, ty.width_bits()))
-                .or(analysed)
-                .and_then(|declared| {
-                    calls::spellable(&declared, &|tag, union| tags.defines(tag, union))
-                })
-                .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
-            let differs = declared.as_ref().is_some_and(|declared| *declared != class);
+            // A declared type is spelled as stated, a tag the graph states incomplete; an analysed
+            // one naming only tags the unit defines, an unstated sign as its word (D265).
+            let declared = match input.declared_parameter(index as usize, ty.width_bits()) {
+                Some(declared) => calls::spellable(&declared, &|tag, union| tags.names(tag, union))
+                    .or_else(|| calls::untagged_pointer(&declared)),
+                None => (input.parameter_declaration(index as usize, ty.width_bits())).and_then(
+                    |analysed| {
+                        calls::spellable(&analysed, &|tag, union| tags.defines(tag, union))
+                            .or_else(|| calls::analysed_pointer(&analysed))
+                    },
+                ),
+            }
+            .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
+            // The word is the class the body reads through: no read is cast.
+            let differs = (declared.as_ref())
+                .is_some_and(|declared| *declared != class && !r2types::is_unstated_word(declared));
             // A hole states no type: r2types spells its class's typedef, which claims none (D165).
             let hole = (input.parameter_declaration(index as usize, ty.width_bits()))
                 .filter(crate::prelude::is_unread_slot);
             let differs = differs && hole.is_none();
-            let c = hole.or(declared).unwrap_or(class);
+            let c = hole.or(declared).unwrap_or_else(|| unstated_class(&class));
             let named = crate::ast::c_identifier(&input.parameter_name(index as usize));
+            // The body reads the unstated word as its integer; only the header spells the word.
             let name = self.symbols.borrow_mut().declare(
                 Some(named)
                     .filter(|name| spells_an_identifier(name))
                     .unwrap_or_else(|| r2source::positional_parameter_name(index as usize)),
-                c.clone(),
+                terms::word_free(&c).clone(),
                 SymbolRole::Parameter(index),
             );
             match home {
@@ -978,8 +957,10 @@ impl<'a> Values<'a> {
                     self.frame_formals.push((index, name, ty, differs))
                 }
             }
+            // An incomplete tag has no member to name.
             if let CType::Pointer(pointee) = &c
                 && let CType::Struct(tag) = pointee.as_ref()
+                && tags.defines(tag, false)
             {
                 pointing.push((index as usize, tag.clone(), CExpr::Var(name)));
             }
@@ -1748,6 +1729,13 @@ impl<'a> Values<'a> {
 
     /// The C type the call returns: its declared prototype's, else its result's class, else `void`.
     fn return_type(&self, inst: InstId, plan: &CallPlan) -> Result<CType, CallRefusal> {
+        // An unstated result is the carrier typedef at every call; a read at another class is no C.
+        if let Some(bits) = plan.carrier {
+            let read = plan.returns().map(terms::c_type);
+            let held = read.is_none_or(|ty| ty == Some(CType::uint(bits)));
+            let carrier = held.then(|| crate::prelude::result_carrier(bits));
+            return needed(carrier, inst, CallRefusal::ResultNotSpelled);
+        }
         let ret = match (plan.returns(), plan.unread) {
             (Some(class), _) => needed(terms::c_type(class), inst, CallRefusal::ResultNotSpelled)?,
             (None, Some(bits)) if plan.tail.is_none() => crate::prelude::result_carrier(bits),
@@ -1756,7 +1744,8 @@ impl<'a> Values<'a> {
         Ok(plan
             .declared
             .as_ref()
-            .map_or(ret, |declared| declared.ret.clone()))
+            .and_then(|declared| declared.ret.clone())
+            .unwrap_or(ret))
     }
 
     /// What the call at `inst` declares of its named callee, a function of its plan alone: the same
@@ -1822,7 +1811,9 @@ impl<'a> Values<'a> {
         let ret_type = self.return_type(inst, plan)?;
         // A declared prototype passes and returns at the types the source states.
         if let Some(declared) = &plan.declared {
-            let passed = (arguments.iter_mut().zip(&mut types).zip(&declared.params))
+            let passed = (arguments.iter_mut().zip(&mut types))
+                .zip(declared.params.iter().map(Option::as_ref))
+                .filter_map(|(passed, to)| Some((passed, to?)))
                 .filter(|((_, ty), _)| !crate::prelude::is_unread_slot(ty));
             for ((argument, ty), to) in passed {
                 let taken = std::mem::replace(argument, CExpr::IntLit(0));
@@ -1940,8 +1931,8 @@ impl<'a> Values<'a> {
                 )?;
                 // A call is returned as it is where it is declared the function's own type, or an
                 // integer where the function returns one: `return` converts it as the cast would.
-                let declared = match &plan.declared {
-                    Some(declared) => declared.ret.clone(),
+                let declared = match plan.declared.as_ref().and_then(|d| d.ret.as_ref()) {
+                    Some(declared) => declared.clone(),
                     None => terms::c_type(class)?,
                 };
                 let returned = match returned_call(spelled, ty) {
@@ -1958,7 +1949,7 @@ impl<'a> Values<'a> {
             ) if plan
                 .declared
                 .as_ref()
-                .is_some_and(|declared| declared.ret == CType::Void) =>
+                .is_some_and(|declared| declared.ret == Some(CType::Void)) =>
             {
                 let call = self.call_expr(inst, plan).ok()?;
                 let undefined =
@@ -2067,8 +2058,8 @@ impl<'a> Values<'a> {
         Some(stmts)
     }
 
-    /// A call to the function's own entry: by its own name and at its own parameters' classes, so
-    /// the call agrees with the definition it stands in.
+    /// A call to the function's own entry: by its own name and at the types its header declares,
+    /// so the call agrees with the definition it stands in.
     fn recursive_call(&self, inst: InstId, plan: &CallPlan) -> Option<CStmt> {
         let params = self.own.params.as_ref()?;
         if params.len() != plan.arguments.len() {
@@ -2082,7 +2073,12 @@ impl<'a> Values<'a> {
                 continue;
             }
             let held = self.value_type(*argument)?;
-            arguments.push(fit(self.operand(*argument, inst)?, &held, class)?);
+            let fitted = fit(self.operand(*argument, inst)?, &held, class)?;
+            let (classed, declared) = (terms::c_type(class)?, &self.params.get(position)?.ty);
+            arguments.push(match self.declared_variable(&fitted, declared) {
+                Some(variable) => variable,
+                None => calls::to_declared(fitted, &classed, declared),
+            });
         }
         let callee = CExpr::External {
             name: self.own.name.clone(),
@@ -2339,7 +2335,9 @@ impl<'a> Values<'a> {
             },
         };
         let spelled = fit(self.operand(*value, inst)?, &held, &class)?;
-        Some(Some(terms::at_sink(&ty, CExpr::cast(ty.clone(), spelled))))
+        // The word is its integer: the cast converts to that (D265).
+        let to = terms::word_free(&ty).clone();
+        Some(Some(terms::at_sink(&ty, CExpr::cast(to, spelled))))
     }
 
     /// A pair's return: its two registers' values joined, the high half above the low, as the one
@@ -2373,7 +2371,10 @@ impl<'a> Values<'a> {
             Some(ty) => ty.clone(),
             None => CType::uint(bits),
         };
-        Some(terms::at_sink(&ty, CExpr::cast(ty.clone(), joined)))
+        Some(terms::at_sink(
+            &ty,
+            CExpr::cast(terms::word_free(&ty).clone(), joined),
+        ))
     }
 
     fn terminator(&self, addr: u64) -> Option<(InstId, &'a SSAOp<ValueId>)> {

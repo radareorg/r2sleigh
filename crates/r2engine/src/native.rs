@@ -18,8 +18,8 @@ use r2il::ArchSpec;
 use r2sleigh_lift::Disassembler;
 use r2sleigh_lift::profile::{LanguageProfile, ParamEntry, SlotClass, SpecStorage};
 use r2source::convention::{
-    BoundaryForms, LaneEntry, LaneSet, LaneSource, Location, OwnedRange, ResultLane, Section,
-    SectionClass,
+    BoundaryForms, ConventionParts, LaneEntry, LaneSet, LaneSource, Location, OwnedRange,
+    ResultLane, Section, SectionClass,
 };
 use r2source::{
     CanonicalStorageId, CanonicalStorageSpace, ConventionModel, SourceDataObject, SourceEndianness,
@@ -1137,11 +1137,7 @@ fn resolved_alone(
     let targets = reached(&walked.root.body, native.program);
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
     // Each resolved owner of its result or arity, read as any callee's statement.
-    for (owner, read) in stated.owners {
-        if let Ok(facts) = &read.facts {
-            imports.record(*owner, facts);
-        }
-    }
+    imports.state(stated.owners);
     // An assumed member states its interface alone: nothing it preserves or reaches.
     for (member, interface) in stated.assumed {
         imports.interfaces.insert(*member, interface.clone());
@@ -1210,7 +1206,121 @@ pub(crate) fn callee_read(
     let resolved = crate::isolation::isolated(|| {
         resolved_alone(&native, target, address, ptr_bits, walked, stated)
     });
-    read_of(resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked))))
+    read_of(
+        &native,
+        resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked))),
+    )
+}
+
+/// A callee built against its imports alone, before its seal, with those imports: its interface
+/// names the owners of its result (doc/adr-callee-builds.md).
+pub(crate) struct Built {
+    address: u64,
+    construction: r2ssa::TrustedConstruction,
+    imports: Callees,
+    declared_root: Restatement,
+}
+
+/// A body's first seal, by its entry, and the declaration it was captured under.
+struct First {
+    entry: u64,
+    declared_root: Restatement,
+    seal: r2ssa::TrustedSeal,
+}
+
+impl Built {
+    /// The interface the build recovered or was stated.
+    pub(crate) fn interface(&self) -> Option<&r2ssa::SourceFunctionInterface> {
+        self.construction.machine_context().function_interface()
+    }
+
+    /// Whether its owners' statements can update this build instead of building it again.
+    pub(crate) const fn restatable(&self) -> bool {
+        self.construction.restatable()
+    }
+}
+
+/// One callee built against its imports alone, or why it has no build: the first step of
+/// `callee_read`.
+pub(crate) fn callee_built(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    address: u64,
+    walked: &Walk,
+) -> Result<Built, Unreadable> {
+    let native = Native::over(target, program).map_err(|_| Unreadable::NotPrepared)?;
+    let ptr_bits = crate::engine_effective_ptr_bits(target.arch);
+    let built = crate::isolation::isolated(|| {
+        let mut imports = Callees::default();
+        let targets = reached(&walked.root.body, native.program);
+        declare_imports(&native, target, &targets, ptr_bits, &mut imports);
+        let declared_root = native.declaration(address);
+        let construction = native.construct_first(walked, &imports, &declared_root)?;
+        Ok(Built {
+            address,
+            construction,
+            imports,
+            declared_root,
+        })
+    });
+    match built {
+        Ok(built) => built.map_err(|refusal: NativeRefusal| unreadable(&refusal)),
+        Err(panicked) => Err(Unreadable::Panicked(panicked)),
+    }
+}
+
+/// Why a refused resolution is unread.
+fn unreadable(refusal: &NativeRefusal) -> Unreadable {
+    match refusal.stopped() {
+        true => Unreadable::Stopped,
+        false => Unreadable::NotPrepared,
+    }
+}
+
+/// `callee_read` against `owners` from a build their statements update, and whether its answer
+/// is another seal than that build's (doc/adr-callee-builds.md).
+pub(crate) fn built_read(
+    target: &NativeTarget<'_>,
+    program: &dyn Program,
+    walked: &Walk,
+    built: Built,
+    owners: &[(u64, Arc<CalleeRead>)],
+) -> (CalleeRead, bool) {
+    let Ok(native) = Native::over(target, program) else {
+        let unread = CalleeRead {
+            interface: None,
+            facts: Err(Unreadable::NotPrepared),
+        };
+        return (unread, false);
+    };
+    let resolved = crate::isolation::isolated(|| native.resolve_built(walked, built, owners));
+    let resolved = resolved.map(|resolved| resolved.map_err(|refusal| unreadable(&refusal)));
+    let resolved = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)));
+    let again = resolved.as_ref().is_ok_and(|(_, again)| *again);
+    (
+        read_of(&native, resolved.map(|(artifact, _)| artifact)),
+        again,
+    )
+}
+
+/// The declarations of the imports a resolved body calls directly. O(call sites x log rows).
+fn declared_callees(
+    native: &Native<'_>,
+    artifact: &Resolution,
+) -> Vec<r2types::SourceOwnedCalleeSignature> {
+    let shared = artifact.shared_artifact();
+    let sites = shared.facts().call_sites.by_id.values();
+    let targets =
+        (sites.filter_map(|site| site.direct_target)).collect::<std::collections::BTreeSet<_>>();
+    let targets = targets.into_iter().collect::<Vec<_>>();
+    let ptr_bits = crate::engine_effective_ptr_bits(native.target.arch);
+    declare_imports(
+        native,
+        native.target,
+        &targets,
+        ptr_bits,
+        &mut Callees::default(),
+    )
 }
 
 /// What one callee's body proves, read under the same isolation boundary as its preparation.
@@ -1220,11 +1330,11 @@ fn read_callee(
     address: u64,
     ptr_bits: u32,
 ) -> CalleeRead {
-    read_of(prepared_callee(native, target, address, ptr_bits))
+    read_of(native, prepared_callee(native, target, address, ptr_bits))
 }
 
-/// What a resolved callee proves, derived under isolation.
-fn read_of(resolved: Result<Resolution, Unreadable>) -> CalleeRead {
+/// What a resolved callee proves, derived under isolation against the imports it calls.
+fn read_of(native: &Native<'_>, resolved: Result<Resolution, Unreadable>) -> CalleeRead {
     let artifact = match resolved {
         Ok(resolved) => resolved,
         Err(reason) => {
@@ -1242,7 +1352,8 @@ fn read_of(resolved: Result<Resolution, Unreadable>) -> CalleeRead {
         .machine_context()
         .function_interface()
         .cloned();
-    let facts = match crate::isolation::isolated(|| CalleeFacts::derive(&artifact)) {
+    let declared = declared_callees(native, &artifact);
+    let facts = match crate::isolation::isolated(|| CalleeFacts::derive(&artifact, declared)) {
         Ok(Some(derived)) => Ok(derived),
         Ok(None) => Err(Unreadable::NothingProved),
         Err(panicked) => Err(Unreadable::Panicked(panicked)),
@@ -1453,6 +1564,15 @@ impl Callees {
         }
     }
 
+    /// Each resolved owner that proved facts, read as any callee's statement.
+    fn state(&mut self, owners: &[(u64, Arc<CalleeRead>)]) {
+        for (owner, read) in owners {
+            if let Ok(facts) = &read.facts {
+                self.record(*owner, facts);
+            }
+        }
+    }
+
     fn record(&mut self, address: u64, facts: &CalleeFacts) {
         self.interfaces.insert(address, facts.interface().clone());
         self.preserved
@@ -1623,26 +1743,132 @@ impl<'a> Native<'a> {
         callees: &Callees,
         world: crate::program::World,
     ) -> Result<Resolution, NativeRefusal> {
+        let declared_root = self.declaration(entry);
+        let seal = self.seal_first(walk, callees, &declared_root, None)?;
+        let first = First {
+            entry,
+            declared_root,
+            seal,
+        };
+        Ok(self.finish(walk, callees, world, first)?.0)
+    }
+
+    /// A built body resolved against `owners` in the open world: its build sealed as it stands
+    /// with none, else updated by their statements.
+    fn resolve_built(
+        &self,
+        walk: &Walk,
+        built: Built,
+        owners: &[(u64, Arc<CalleeRead>)],
+    ) -> Result<(Resolution, bool), NativeRefusal> {
+        let Built {
+            address,
+            mut construction,
+            mut imports,
+            declared_root,
+        } = built;
+        if !owners.is_empty() {
+            imports.state(owners);
+            let evidence = self.evidence(&walk.root, &imports);
+            let arch = Some(self.target.arch);
+            let restated =
+                construction.restated(arch, &self.control, &evidence, &premises_reading(false));
+            let (restated, kept) = restated.map_err(NativeRefusal::of_preparation)?;
+            r2il::refusal_evidence!(
+                "restated",
+                "{address:#x}: build {} against {} owners",
+                if kept { "kept" } else { "rebuilt" },
+                owners.len()
+            );
+            construction = restated;
+        }
+        let seal = construction.seal(&self.control);
+        let first = First {
+            entry: address,
+            declared_root,
+            seal: seal.map_err(NativeRefusal::of_preparation)?,
+        };
+        self.finish(walk, &imports, crate::program::World::Open, first)
+    }
+
+    /// What a body's first build captures: its declaration where it states an interface or the
+    /// body reads tables.
+    fn first_capture<'t>(
+        walk: &'t Walk,
+        declared_root: &Restatement,
+        closed_result: Option<r2source::SourceClosedResult>,
+    ) -> Capture<'t> {
+        let (tables, calls) = (&walk.tables[..], &walk.calls[..]);
+        let (restatement, tables) = match (declared_root.interface.is_some(), tables.is_empty()) {
+            (false, true) => (Restatement::default(), &[][..]),
+            _ => (declared_root.clone(), tables),
+        };
+        Capture {
+            extra_literals: Vec::new(),
+            restatement,
+            tables,
+            calls,
+            closed_result,
+        }
+    }
+
+    /// A body's first build, sealed.
+    fn seal_first(
+        &self,
+        walk: &Walk,
+        callees: &Callees,
+        declared_root: &Restatement,
+        reads: Option<r2source::SourceClosedResult>,
+    ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
+        let capture = Self::first_capture(walk, declared_root, reads);
+        self.seal_captured(&walk.root, callees, capture)
+    }
+
+    /// A body's first build in the open world, before its seal: its interface names the owners
+    /// of its result, and their statements update it (doc/adr-callee-builds.md).
+    fn construct_first(
+        &self,
+        walk: &Walk,
+        callees: &Callees,
+        declared_root: &Restatement,
+    ) -> Result<r2ssa::TrustedConstruction, NativeRefusal> {
+        let capture = Self::first_capture(walk, declared_root, None);
+        let (lifted, evidence) = self.lifted(&walk.root, callees, capture)?;
+        TrustedSsaArtifact::construct_with_callee_interfaces(
+            lifted,
+            Some(self.target.arch),
+            &self.control,
+            &evidence,
+            &premises_reading(false),
+        )
+        .map_err(NativeRefusal::of_preparation)
+    }
+
+    /// The callees' evidence as a capture of this body states it.
+    fn evidence(&self, walked: &Walked, callees: &Callees) -> r2ssa::CalleeEvidence {
+        let calls = call_sites(&walked.body, self.program);
+        let library = library_evidence(self.program, &calls);
+        callees.evidence(library, reentering_calls(&calls), walked.body.exits.clone())
+    }
+
+    /// A body resolved from its first seal, and whether another seal is the answer: one restating
+    /// its declared frame or folded text, or the closed world's.
+    fn finish(
+        &self,
+        walk: &Walk,
+        callees: &Callees,
+        world: crate::program::World,
+        first: First,
+    ) -> Result<(Resolution, bool), NativeRefusal> {
+        let First {
+            entry,
+            declared_root,
+            seal: mut first,
+        } = first;
         let (root, tables, calls) = (&walk.root, &walk.tables[..], &walk.calls[..]);
         // The binary's debug information declares the body as a library declares an import.
         let declared_prototype =
             Declared::body(self.target, entry).map(|declared| declared.prototype);
-        let declared_root = self.declaration(entry);
-        let seal_first = |reads| match (declared_root.interface.is_some(), tables.is_empty()) {
-            (false, true) => {
-                let restatement = Restatement::default();
-                self.seal(root, callees, Vec::new(), restatement, (&[], calls), reads)
-            }
-            _ => self.seal(
-                root,
-                callees,
-                Vec::new(),
-                declared_root.clone(),
-                (tables, calls),
-                reads,
-            ),
-        };
-        let mut first = seal_first(None)?;
         // The closed world's held decision, from the open read's supply (doc/adr-result-side.md, D317).
         let open = first.machine_context().function_interface().is_some();
         let reads = (world == crate::program::World::Closed && open)
@@ -1650,7 +1876,7 @@ impl<'a> Native<'a> {
             .flatten();
         if reads.is_some() {
             drop(first);
-            first = seal_first(reads)?;
+            first = self.seal_first(walk, callees, &declared_root, reads)?;
         }
         // aarch64 forms an address from a page and an offset: its text is captured once folded.
         let folded = self.folded_literals(&first, root);
@@ -1670,21 +1896,72 @@ impl<'a> Native<'a> {
             .map(|interface| interface.stack_slots().to_vec())
             .unwrap_or_default();
         let restated = (first.as_ref()).and_then(|first| self.restated(first, &declared_slots));
+        // A member's type is a declaration's (D166), so only a declared body mints from it.
+        let declared = declared_root.interface.is_some();
+        let members = (first.as_ref().filter(|_| declared))
+            .map_or_else(Vec::new, |first| self.member_calls(first));
+        let alone = restated.is_none() && folded.is_empty();
         let artifact = match first {
-            Some(first) if restated.is_none() && folded.is_empty() => first,
+            Some(first) if alone && members.is_empty() => (first, reads.is_some()),
             first => {
+                let rows = (first.as_ref()).map(|first| first.artifact().member_calls().clone());
                 drop(first);
+                let minted = !members.is_empty();
+                if minted {
+                    r2il::refusal_evidence!(
+                        "member-calls",
+                        "{entry:#x}: sealed again for {} member calls",
+                        members.len()
+                    );
+                }
                 // A body that proved no frame slot restates nothing, and the declaration stands.
                 let restatement = Restatement {
                     interface: restated.or(declared_root.interface),
                     signature: declared_root.signature,
                     slot_names: declared_root.slot_names,
+                    member_calls: members,
                 };
+                let retry = minted.then(|| (restatement.clone(), folded.clone()));
                 let seal = self.seal(root, callees, folded, restatement, (tables, calls), reads)?;
-                self.collected(seal)?
+                let second = self.collected(seal)?;
+                // A contract adds no provenance, so the second seal proves the rows it was minted
+                // from; where it does not, the contracts are a defect and the body seals without.
+                let agrees = (rows.as_ref())
+                    .is_some_and(|rows| rows.agrees(second.artifact().member_calls()));
+                match retry.filter(|_| !agrees) {
+                    None => (second, true),
+                    Some((mut restatement, folded)) => {
+                        r2il::refusal_evidence!(
+                            "member-calls-defect",
+                            "{entry:#x}: a member contract moved the member calls it was minted from"
+                        );
+                        drop(second);
+                        restatement.member_calls.clear();
+                        let seal =
+                            self.seal(root, callees, folded, restatement, (tables, calls), reads)?;
+                        (self.collected(seal)?, true)
+                    }
+                }
             }
         };
         Ok(artifact)
+    }
+
+    /// The contract of each call the first seal proves goes through a typed member (S32).
+    fn member_calls(&self, first: &TrustedSsaArtifact) -> Vec<r2source::SourceCallSiteInterface> {
+        let artifact = first.artifact();
+        let Some(interface) = artifact.machine_context().function_interface() else {
+            return Vec::new();
+        };
+        let Some(graph) = interface.type_graph() else {
+            return Vec::new();
+        };
+        let placement = Placement::new(self.target, &self.machine);
+        (artifact.member_calls().proven())
+            .filter_map(|(_, call)| {
+                placement.member_call(graph, &call, interface.revision_identity())
+            })
+            .collect()
     }
 
     fn over(target: &'a NativeTarget<'a>, program: &'a dyn Program) -> Result<Self, NativeRefusal> {
@@ -2032,13 +2309,24 @@ impl<'a> Native<'a> {
             calls,
             closed_result,
         };
+        self.seal_captured(walked, callees, capture)
+    }
+
+    /// One capture of a body built and sealed, its facts not yet collected.
+    fn seal_captured(
+        &self,
+        walked: &Walked,
+        callees: &Callees,
+        capture: Capture<'_>,
+    ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
+        let closed = capture.closed_result.is_some();
         let (lifted, evidence) = self.lifted(walked, callees, capture)?;
         TrustedSsaArtifact::seal_with_callee_interfaces(
             lifted,
             Some(self.target.arch),
             &self.control,
             &evidence,
-            &premises_reading(closed_result.is_some()),
+            &premises_reading(closed),
         )
         .map_err(NativeRefusal::of_preparation)
     }
@@ -2117,6 +2405,7 @@ impl<'a> Native<'a> {
             interface,
             signature,
             slot_names,
+            member_calls,
         } = restatement;
         let arity = interface.as_ref().map_or(0, |i| i.parameters().len());
         let blocks = walked
@@ -2196,6 +2485,7 @@ impl<'a> Native<'a> {
             interface,
             closed_result,
             frame_saves: self.program.frame_saves(walked.body.entry),
+            member_calls,
         };
 
         let snapshot =
@@ -2597,6 +2887,15 @@ fn register_named(arch: &ArchSpec, storage: CanonicalStorageId) -> Option<&str> 
     named.map(|register| register.name.as_str())
 }
 
+/// Where the container places the guard words a C library's row names; the row says which applies.
+#[derive(Debug, Clone, Default)]
+pub struct ContainerGuards {
+    /// The PE load configuration's `/GS` cookie.
+    pub cookie: Option<u64>,
+    /// The `GuardRow::LinkedGlobal` word, where the container binds it (`stated::linked_guard`).
+    pub linked: Option<r2source::SourceLinkedGuard>,
+}
+
 /// One convention's model on this machine: the specification's default prototype joined with
 /// the ABI's row, every register resolved once (doc/adr-call-boundary.md, "The joined model").
 ///
@@ -2605,7 +2904,7 @@ fn register_named(arch: &ArchSpec, storage: CanonicalStorageId) -> Option<&str> 
 pub fn convention_model(
     arch: &ArchSpec,
     bits: u32,
-    (kernel, library, cookie): (r2abi::Kernel, r2abi::CLibrary, Option<u64>),
+    (kernel, library, guards): (r2abi::Kernel, r2abi::CLibrary, ContainerGuards),
     profile: &LanguageProfile,
     row: &r2abi::ConventionRow,
 ) -> Result<ConventionModel, NativeRefusal> {
@@ -2618,7 +2917,7 @@ pub fn convention_model(
     let (preserved, reserved) = duties(&at, prototype, link, bits, kernel);
     let owned = owned(prototype, row.home, &sections, profile.return_address_slot);
     let results = results(&at, prototype, row, &sections)?;
-    let model = ConventionModel {
+    let parts = ConventionParts {
         id: row.id,
         sections,
         hidden_return,
@@ -2630,14 +2929,10 @@ pub fn convention_model(
         likely_trash: at.lanes(&prototype.likely_trash),
         reserved,
         link,
-        forms: forms(&at, prototype, row, bits, (library, cookie)),
+        forms: forms(&at, prototype, row, bits, (library, guards)),
         refused: row.refused,
     };
-    // The slots are a view; one that does not hold refuses the model, as it refused each function.
-    model
-        .convention_slots()
-        .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?;
-    Ok(model)
+    ConventionModel::new(parts).map_err(|why| NativeRefusal::Machine(why.why()))
 }
 
 /// Where a convention's register names are placed on one architecture.
@@ -2957,7 +3252,7 @@ fn forms(
     prototype: &r2sleigh_lift::profile::ProtoModel,
     row: &r2abi::ConventionRow,
     bits: u32,
-    (library, cookie): (r2abi::CLibrary, Option<u64>),
+    (library, guards): (r2abi::CLibrary, ContainerGuards),
 ) -> BoundaryForms {
     let guard = |guard: Option<&r2abi::StackGuard>| {
         let guard = guard?;
@@ -2993,12 +3288,16 @@ fn forms(
         stack_bound: guard(row.stack_bound.as_ref()),
         // The row says the C library checks a load-config cookie; the container says where.
         security_cookie: matches!(guard_row, Some(r2abi::GuardRow::LoadConfigCookie))
-            .then_some(cookie)
+            .then_some(guards.cookie)
             .flatten()
             .map(|address| r2source::SourceSecurityCookie {
                 address,
                 width: bits / 8,
             }),
+        // The row names the library's global; only the container's binding places it.
+        linked_guard: matches!(guard_row, Some(r2abi::GuardRow::LinkedGlobal(_)))
+            .then_some(guards.linked)
+            .flatten(),
     }
 }
 
@@ -3152,7 +3451,11 @@ mod tests {
         let convention = convention_model(
             &embedded.arch,
             64,
-            (r2abi::Kernel::Unknown, r2abi::CLibrary::Unknown, None),
+            (
+                r2abi::Kernel::Unknown,
+                r2abi::CLibrary::Unknown,
+                Default::default(),
+            ),
             &compiler,
             r2abi::ConventionId::SysVAmd64.row(),
         )

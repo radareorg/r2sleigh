@@ -12,6 +12,8 @@ pub struct Imports {
     rows: LibraryRows,
     library: CLibrary,
     linkage: Linkage,
+    /// The architecture and address width a row's flag test reads its bits for; none reads none.
+    target: Option<(Box<str>, u32)>,
 }
 
 /// What the container states about how its imports bind, read once per program.
@@ -182,7 +184,21 @@ impl Imports {
             rows,
             library,
             linkage,
+            target: None,
         }
+    }
+
+    /// The same rows, on this architecture and address width.
+    #[must_use]
+    pub fn on(mut self, arch: &str, bits: u32) -> Self {
+        self.target = Some((arch.into(), bits));
+        self
+    }
+
+    /// The bits a row's flag test reads on this target, where a cited header states them. O(1).
+    pub fn flag_bits(&self, test: r2abi::FlagTest) -> Option<r2abi::FlagBits> {
+        let (arch, bits) = self.target.as_ref()?;
+        test.bits(self.library, arch, *bits)
     }
 
     /// The program's C library.

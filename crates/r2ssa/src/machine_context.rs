@@ -433,6 +433,8 @@ pub struct SourceMachineContext {
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
     /// The sealed import slot each `CallSlot` site calls through (audit W8).
     slot_targets: BTreeMap<SourceCallSiteIdentity, u64>,
+    /// The sites whose contract an earlier seal minted from a member's type (S32).
+    member_call_sites: BTreeSet<SourceCallSiteIdentity>,
     /// The name the source gave each raw call site's callee.
     callee_names: BTreeMap<SourceCallSiteIdentity, String>,
     /// How far each callee is proven to touch through each pointer argument,
@@ -488,19 +490,11 @@ fn observed_register_storages(blocks: &[R2ILBlock]) -> BTreeSet<RegisterStorage>
         .collect()
 }
 
-/// Every register a call may change: each register of the file that no
-/// wider one contains, less what the call effect preserves or reserves.
-///
-/// The effect is exhaustive -- every register it neither preserves nor
-/// reserves may come back changed -- so this is the set a callee's summary
-/// has to answer for, whatever list of clobbers the convention spells.
-/// `O(r)` over the file's outermost registers.
+/// Every register a call may change: each register of the file that no wider one contains, less
+/// what the call effect preserves or reserves (`site_boundary::CallUniverse`). `O(r)`.
 fn call_universe(effect: &SourceCallEffect, machine: &Arch) -> Box<[CanonicalStorageId]> {
-    machine
-        .outermost_registers()
-        .iter()
-        .copied()
-        .filter(|storage| effect.clobbers(*storage))
+    crate::site_boundary::CallUniverse::of(&|storage| effect.clobbers(storage), machine)
+        .registers()
         .collect()
 }
 
@@ -832,6 +826,7 @@ impl SourceMachineContext {
             tail_call_sites,
             callee_linkages: BTreeMap::new(),
             slot_targets: BTreeMap::new(),
+            member_call_sites: BTreeSet::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
             callee_library: BTreeMap::new(),
@@ -970,22 +965,6 @@ impl SourceMachineContext {
         self.register_storages_by_name()
             .get(&name.trim().to_ascii_lowercase())
             .copied()
-    }
-
-    /// The registers the calling convention would place arguments in, in order.
-    ///
-    /// The convention is stated by the lifter that knows the target. Deriving it
-    /// from a pointer width instead answers the same ABI for every 64-bit
-    /// architecture, which is how arm64 came to be told it uses `rdi`.
-    pub fn argument_register_names(&self) -> Vec<String> {
-        let Some(slots) = self.convention_slots.as_ref() else {
-            return Vec::new();
-        };
-        slots
-            .argument_slots()
-            .iter()
-            .filter_map(|storage| self.register_name(*storage))
-            .collect()
     }
 
     /// The name the architecture gives this storage, when it names it exactly.
@@ -1266,6 +1245,15 @@ impl SourceMachineContext {
 
     pub(crate) fn set_slot_targets(&mut self, slots: BTreeMap<SourceCallSiteIdentity, u64>) {
         self.slot_targets = slots;
+    }
+
+    pub(crate) fn set_member_call_sites(&mut self, sites: BTreeSet<SourceCallSiteIdentity>) {
+        self.member_call_sites = sites;
+    }
+
+    /// Whether the site's contract is a member's, minted from an earlier seal's `MemberCalls`.
+    pub fn is_member_call_site(&self, identity: SourceCallSiteIdentity) -> bool {
+        self.member_call_sites.contains(&identity)
     }
 
     /// The sealed import slot a call through memory reaches, where the source states one.
@@ -1747,7 +1735,7 @@ mod tests {
     }
 
     #[test]
-    fn argument_registers_come_from_the_convention_not_the_pointer_width() {
+    fn a_register_is_named_by_its_storage() {
         let mut arch = ArchSpec::new("AARCH64:LE:64:v8A");
         arch.addr_size = 8;
         arch.add_space(AddressSpace::ram(8));
@@ -1775,18 +1763,10 @@ mod tests {
             Vec::new(),
         );
 
-        assert_eq!(context.argument_register_names(), vec!["x0", "x1", "x2"]);
         assert_eq!(
             context.register_name(register_storage(8, 8)).as_deref(),
             Some("x1")
         );
-    }
-
-    #[test]
-    fn argument_registers_are_absent_when_no_convention_was_supplied() {
-        let arch = ArchSpec::new("AARCH64:LE:64:v8A");
-        let context = SourceMachineContext::from_blocks(&[], Some(&crate::Arch::from(arch)));
-        assert!(context.argument_register_names().is_empty());
     }
 
     #[test]

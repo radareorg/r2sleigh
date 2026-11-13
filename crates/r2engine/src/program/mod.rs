@@ -160,7 +160,7 @@ impl Machines {
             go_abi0,
             go_unstated,
             stated,
-            imports: crate::imports::Imports::new(rows, library, linkage),
+            imports: crate::imports::Imports::new(rows, library, linkage).on(&arch, bits),
             data_model: r2abi::CDataModel::of(&arch, bits, library),
         })
     }
@@ -244,14 +244,20 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Convention {
             .map_err(|why| NativeRefusal::Unassembled(why.clone()))?;
         let container = inputs.source.container();
         let (arch, bits) = (&machines.machine.arch, container.arch.bits);
+        let library = c_library(container);
+        let guards = crate::native::ContainerGuards {
+            cookie: container.security_cookie,
+            linked: match r2abi::guard_row(&arch.name, bits, library) {
+                Some(r2abi::GuardRow::LinkedGlobal(row)) => {
+                    crate::stated::linked_guard(container, row, bits / 8)
+                }
+                _ => None,
+            },
+        };
         let model = crate::native::convention_model(
             arch,
             bits,
-            (
-                kernel(container),
-                c_library(container),
-                container.security_cookie,
-            ),
+            (kernel(container), library, guards),
             &assembled.compiler,
             id.row(),
         );
@@ -286,7 +292,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for AnyCall {
         let stated = stated.filter_map(|(id, built)| built.is_ok().then_some(*id));
         let mut joined = own;
         for other in default.into_iter().chain(stated).filter(|it| it != id) {
-            joined = std::sync::Arc::new(joined.either(&*held(&other)?));
+            let either = joined.either(&*held(&other)?);
+            joined = std::sync::Arc::new(either.map_err(|why| NativeRefusal::Machine(why.why()))?);
         }
         Ok(joined)
     }

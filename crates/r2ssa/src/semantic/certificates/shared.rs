@@ -148,6 +148,7 @@ pub(crate) struct Derived<'a> {
     pub(crate) predicates: &'a PredicateFacts,
     pub(crate) call_sites: &'a CallSiteFacts,
     pub(crate) structured: &'a StructuredDataflowFacts,
+    pub(crate) obligations: &'a crate::SemanticObligationInventory,
 }
 
 pub(crate) fn expression_phi_is_identity(graph: &SsaGraph, inst: &crate::graph::GraphInst) -> bool {

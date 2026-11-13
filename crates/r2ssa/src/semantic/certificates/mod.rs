@@ -81,11 +81,9 @@ pub struct ForLoopCertificate {
 
 /// The operations a certified dispatch performs to reach its target.
 ///
-/// Grown backwards from the transfer to a fixpoint: an operation belongs to the
-/// dispatch when everything that reads it is already in the dispatch, which can
-/// only be decided once its readers are known. The selector stops the walk
-/// twice over -- the switch spells it, and the guard that bounds the index
-/// reads it too.
+/// Grown backwards from the transfer: an operation joins once every read of its value is in the
+/// dispatch, and one outside the dispatch's block only when it owes nothing but that value. The
+/// selector stops the walk: the switch spells it (doc/adr-semantic-preservation-kernel.md, dispatch).
 #[cfg_attr(
     dylint_lib = "r2sleigh_lints",
     allow(
@@ -95,7 +93,7 @@ pub struct ForLoopCertificate {
 )]
 fn dispatch_operations(
     graph: &crate::SsaGraph,
-    unobserved: &crate::deadphi::DeadPhis,
+    (obligations, readers): (&crate::SemanticObligationInventory, &crate::ValueReaders),
     block_addr: u64,
     selector: Option<ValueId>,
 ) -> Vec<InstId> {
@@ -116,10 +114,7 @@ fn dispatch_operations(
     }) else {
         return Vec::new();
     };
-    // The operations of this block the transfer is computed by, other than
-    // the selector: a definition joins once every use of its value is an
-    // operation already found. A worklist: each value keeps the uses not
-    // yet found, and its definition joins when the last one is.
+    // A worklist: each value keeps the reads not yet found, and its definition joins when the last one is.
     let mut found = crate::dense::IdSet::<InstId>::default();
     found.insert(transfer);
     let mut outstanding = crate::dense::IdMap::<ValueId, Vec<InstId>>::default();
@@ -136,17 +131,11 @@ fn dispatch_operations(
                 continue;
             };
             if found.contains(definition)
-                || graph.inst(definition).map(|inst| inst.block) != Some(block.id)
+                || !joins_dispatch(graph, obligations, definition, block.id)
             {
                 continue;
             }
-            // A use no observation depends on (a flag the add also computes) keeps nothing outside.
-            let uses = outstanding.get_or_insert_with(value, || {
-                (graph.use_sites(value).iter())
-                    .filter(|site| !unobserved.unobserved_uses().contains(site))
-                    .map(|site| site.inst)
-                    .collect()
-            });
+            let uses = outstanding.get_or_insert_with(value, || readers.get(value).to_vec());
             uses.retain(|user| *user != inst);
             if uses.iter().all(|user| found.contains(*user)) && found.insert(definition) {
                 pending.push(definition);
@@ -154,6 +143,29 @@ fn dispatch_operations(
         }
     }
     found.iter().collect()
+}
+
+/// Whether `definition` may be part of a dispatch ending `block`: any operation of that block, or
+/// elsewhere an operation (no merge) that owes nothing but its whole value.
+fn joins_dispatch(
+    graph: &crate::SsaGraph,
+    obligations: &crate::SemanticObligationInventory,
+    definition: InstId,
+    block: crate::graph::BlockId,
+) -> bool {
+    let Some(inst) = graph.inst(definition) else {
+        return false;
+    };
+    inst.block == block
+        || (matches!(inst.payload, crate::graph::InstPayload::Op(_))
+            && obligations.state_of(definition)
+                == Some(crate::SemanticInstructionState::LiveObligation)
+            && obligations
+                .obligations_for_inst(definition)
+                .all(|obligation| {
+                    obligation.id.kind == crate::SemanticObligationKind::LiveValueProducer
+                        && obligation.id.component == crate::SemanticObligationComponent::Whole
+                }))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -785,6 +797,7 @@ pub(crate) fn collect_prepared_function_certificates(
         predicates,
         call_sites,
         structured,
+        obligations,
     } = derived;
     let DeclaredStackSlots {
         by_key: exact_stack_slots,
@@ -812,6 +825,12 @@ pub(crate) fn collect_prepared_function_certificates(
         })
         .collect();
 
+    // Who reads each value, built only where a switch asks.
+    let readers = (predicates
+        .switches
+        .values()
+        .any(|fact| !fact.cases.is_empty()))
+    .then(|| crate::ValueReaders::of(obligations, graph));
     let switches = predicates
         .switches
         .iter()
@@ -825,7 +844,12 @@ pub(crate) fn collect_prepared_function_certificates(
                     selector: fact.selector,
                     cases: fact.cases.clone(),
                     default: fact.default,
-                    dispatch: dispatch_operations(graph, unobserved, *block_addr, fact.selector),
+                    dispatch: dispatch_operations(
+                        graph,
+                        (obligations, readers.as_ref().expect("built for a switch")),
+                        *block_addr,
+                        fact.selector,
+                    ),
                     guard: switch_guard(function, graph, predicates, fact),
                 },
             )

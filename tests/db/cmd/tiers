@@ -22,7 +22,7 @@ Block 0x401330 (9 bytes, 10 ops)
   -> 0x401360 (Direct)
   -> 0x401339 (Fallthrough)
 
-Block 0x401339 (15 bytes, 14 ops)
+Block 0x401339 (15 bytes, 15 ops)
     0: CF = CARRY(RSI, RDI)
     1: OF = SCARRY(RSI, RDI)
     2: uniq:0x0[8] = RSI & 0xf:8
@@ -36,7 +36,8 @@ Block 0x401339 (15 bytes, 14 ops)
    10: uniq:0x20[1] = POPCOUNT(uniq:0x18[8])
    11: uniq:0x21[1] = uniq:0x20[1] & 0x1:1
    12: PF = uniq:0x21[1] == 0x0:1
-   13: RAX = COPY 0x811c9dc5:8
+   13: EAX = COPY 0x811c9dc5:4
+   14: RAX = ZEXT(EAX)
   -> 0x401348 (Fallthrough)
 
 Block 0x401348 (20 bytes, 50 ops)
@@ -98,11 +99,12 @@ Block 0x40135c (1 bytes, 3 ops)
     1: RSP = RSP + 0x8:8
     2: RETURN RIP
 
-Block 0x401360 (6 bytes, 4 ops)
-    0: RAX = COPY 0x811c9dc5:8
-    1: RIP = LOAD [ram]RSP
-    2: RSP = RSP + 0x8:8
-    3: RETURN RIP
+Block 0x401360 (6 bytes, 5 ops)
+    0: EAX = COPY 0x811c9dc5:4
+    1: RAX = ZEXT(EAX)
+    2: RIP = LOAD [ram]RSP
+    3: RSP = RSP + 0x8:8
+    4: RETURN RIP
 
 EOF
 RUN
@@ -111,19 +113,19 @@ NAME=fnv1a32 C
 FILE=tests/coverage/pinned/hashes_gcc_x64_O2
 CMDS=s 0x401330; pdd
 EXPECT=<<EOF
-r2sleigh_result_u64 fnv1a32(uint64_t arg0, uint64_t arg1)
+r2sleigh_result_u32 fnv1a32(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
     uint64_t rsi_1;
     uint64_t rax_2;
     uint64_t rdi_1;
     uint8_t tmp_401348_0_1;
     uint64_t rdi_2;
-    uint64_t rax_4;
+    uint32_t tmp_lane_401351_3_0_1;
 
     /* r2dec proof: no individual construct is marked; 40 source obligations: 32 rendered, 8 elided, 0 refused; 12 statements rendered; the result is unproven (Written): 2 unproven-return carried */
     {
         if ((uint8_t)((uint64_t)arg1 == (uint64_t)0U)) {
-            return r2sleigh_carrier_u64((uint64_t)0x811c9dc5U);
+            return r2sleigh_carrier_u32((uint32_t)0x811c9dc5U);
         } else {
             rsi_1 = (uint64_t)((uint64_t)arg1 + (uint64_t)arg0);
             rax_2 = (uint64_t)0x811c9dc5U;
@@ -131,12 +133,12 @@ r2sleigh_result_u64 fnv1a32(uint64_t arg0, uint64_t arg1)
             do {
                 tmp_401348_0_1 = r2sleigh_load_u8((void*)rdi_1);
                 rdi_2 = (uint64_t)((uint64_t)rdi_1 + (uint64_t)1U);
-                rax_4 = (uint64_t)(uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)(uint8_t)tmp_401348_0_1 ^ (uint32_t)((uint64_t)rax_2 >> 0U)) * (uint64_t)0x1000193U) >> 0U);
-                rax_2 = rax_4;
+                tmp_lane_401351_3_0_1 = (uint32_t)((uint64_t)((uint64_t)(int32_t)((uint32_t)(uint8_t)tmp_401348_0_1 ^ (uint32_t)((uint64_t)rax_2 >> 0U)) * (uint64_t)0x1000193U) >> 0U);
+                rax_2 = (uint64_t)(uint32_t)tmp_lane_401351_3_0_1;
                 rdi_1 = rdi_2;
             } while ((uint8_t)((uint64_t)rsi_1 != (uint64_t)rdi_2));
             {
-                return r2sleigh_carrier_u64((uint64_t)rax_4);
+                return r2sleigh_carrier_u32((uint32_t)tmp_lane_401351_3_0_1);
             }
         }
     }

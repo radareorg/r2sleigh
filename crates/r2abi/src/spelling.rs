@@ -161,6 +161,7 @@ fn unqualified(words: &[&str], graph: &mut TypeGraph, library: CLibrary) -> Resu
                 parameters: Vec::new(),
                 variadic: false,
                 prototyped: false,
+                convention: crate::StatedConvention::Normal,
             }));
             Ok(graph.add(Type::Pointer { target: code }))
         }

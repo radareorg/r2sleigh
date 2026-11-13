@@ -242,6 +242,7 @@ fn rendered_returning_object(declared: bool) -> String {
         signature: None,
         closed_result: None,
         frame_saves: Vec::new(),
+        member_calls: Vec::new(),
     };
     let snapshot = r2source::native::capture(&machine, function).expect("a capture");
     let lifted = r2sleigh_lift::Disassembler::lift_owned_function(snapshot).expect("a lift");
@@ -322,9 +323,13 @@ fn two_callers_of_one_callee_prepare_it_once_and_both_see_a_write_to_it() {
     program.prepared(CALLER).expect("it prepares");
     program.prepared(PASSES).expect("it prepares");
     let stats = program.analysis_stats();
+    // The callee is resolved from its one build, which no alone read precedes (D226).
     assert_eq!(
-        (stats.callee_reads.computed, stats.resolved.reused),
-        (1, 1),
+        (stats.callee_reads.computed, stats.resolved.computed),
+        (0, 1)
+    );
+    assert_eq!(
+        stats.resolved.reused, 1,
         "the second caller prepared the shared callee again"
     );
     // `mov eax, 1` becomes `mov eax, 3` in the callee alone.
@@ -332,7 +337,7 @@ fn two_callers_of_one_callee_prepare_it_once_and_both_see_a_write_to_it() {
     program.prepared(PASSES).expect("it prepares");
     let stats = program.analysis_stats();
     assert_eq!(
-        (stats.analysed.recomputed, stats.callee_reads.computed),
+        (stats.analysed.recomputed, stats.resolved.computed),
         (1, 2),
         "a root that read a held callee did not see a write to that callee"
     );
@@ -354,15 +359,16 @@ fn a_listing_asks_a_held_callee_what_its_parameters_take_without_preparing_it() 
         OpenProgram::of(Literal::of_code(code.leak(), &functions).with_data_after(common::HANDED));
     program.prepared(common::HANDS).expect("it prepares");
     let before = program.analysis_stats();
+    // `ident`'s alone read is the one its resolution deposited (D226): none is computed.
     assert_eq!(
-        (before.callee_reads.computed, before.callee_reads.reused),
-        (1, 0)
+        (before.callee_reads.computed, before.resolved.computed),
+        (0, 1)
     );
     program.function_listing(common::HANDS).expect("it lists");
     let after = program.analysis_stats();
     assert_eq!(
         (after.callee_reads.computed, after.callee_reads.reused),
-        (1, 1),
+        (0, before.callee_reads.reused + 1),
         "the listing prepared a callee whose summary was held"
     );
 }
@@ -497,7 +503,7 @@ fn a_tail_thunk_returns_what_its_target_returns_once_the_target_is_resolved() {
     let rendering = program.rendered(base + 0x20).expect("it renders");
     let text = rendering.response.output.into_text();
     assert!(
-        text.contains("r2sleigh_result_u32 thunk(uint32_t);"),
+        text.contains("r2sleigh_result_u32 thunk(r2sleigh_word_u32);"),
         "{text}"
     );
     assert!(text.contains("= (uint64_t)thunk(5);"), "{text}");

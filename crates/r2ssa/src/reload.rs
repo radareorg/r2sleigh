@@ -1,5 +1,5 @@
-//! Loads that reread an exact frame slot no write has touched since an earlier load, so are its bits.
-//! Along single-predecessor chains, `O(ops log slots)` (doc/adr-frame-model.md, "Reloads").
+//! Loads that reread a word no write has touched since an earlier load, so are its bits: an exact frame
+//! slot, or one address read twice. Along single-predecessor chains, `O(ops log slots)` (doc/adr-frame-model.md, "Reloads").
 
 use std::collections::BTreeMap;
 
@@ -32,13 +32,25 @@ enum Undo {
     Added(usize, Slot),
     Removed(usize, Slot, ValueId),
     Dropped(usize, BTreeMap<Slot, ValueId>),
+    /// A place's first load, and what the place held before.
+    Read(usize, (u32, ValueId)),
+    /// A write ended the era the places were read in.
+    Forgot(u32),
 }
+
+/// A word outside the exact frame: the value its address is built on, the constant added, and the width read.
+type Place = (Option<ValueId>, i64, u32);
 
 /// The first load of each exact frame slot on the path being walked. Not `Clone`: a branch is entered by
 /// noting the trail's length and left by rewinding it (doc/adr-frame-model.md, "Reloads").
 #[derive(Default)]
 struct Held {
     by_origin: [BTreeMap<Slot, ValueId>; ORIGINS],
+    /// Per place, the era its first load was read in and that load; held only while the era lasts.
+    places: Vec<(u32, ValueId)>,
+    /// The era since the last write, and the next one unused: a write starts a new era in `O(1)`.
+    era: u32,
+    eras: u32,
     trail: Vec<Undo>,
 }
 
@@ -58,6 +70,27 @@ impl Held {
     /// Whatever the operation may have written, or left unstated: nothing is held.
     fn clear(&mut self) {
         (0..ORIGINS).for_each(|origin| self.drop_origin(origin));
+        self.forget_places();
+    }
+
+    /// A write may reach any word outside the exact frame: no place read before it is held.
+    fn forget_places(&mut self) {
+        if !self.places.is_empty() {
+            self.trail.push(Undo::Forgot(self.era));
+            self.eras += 1;
+            self.era = self.eras;
+        }
+    }
+
+    /// The load this place was first read by since the last write, else `load` becomes it.
+    fn reread(&mut self, place: usize, load: ValueId) -> Option<ValueId> {
+        let held = self.places[place];
+        if held.0 == self.era {
+            return Some(held.1);
+        }
+        self.trail.push(Undo::Read(place, held));
+        self.places[place] = (self.era, load);
+        None
     }
 
     fn drop_origin(&mut self, origin: usize) {
@@ -73,6 +106,7 @@ impl Held {
         let Some((root, size)) = stored else {
             return self.clear();
         };
+        self.forget_places();
         let mine = origin(root.base);
         (0..ORIGINS)
             .filter(|origin| *origin != mine)
@@ -102,6 +136,8 @@ impl Held {
                     self.by_origin[origin].insert(slot, value);
                 }
                 Some(Undo::Dropped(origin, table)) => self.by_origin[origin] = table,
+                Some(Undo::Read(place, held)) => self.places[place] = held,
+                Some(Undo::Forgot(era)) => self.era = era,
                 None => return,
             }
         }
@@ -118,7 +154,70 @@ enum Visit {
 struct Rereads<'a> {
     graph: &'a SsaGraph,
     prep: Option<&'a DecompilePrepFacts>,
+    /// The place each load outside the exact frame reads, where another load reads the same one.
+    places: IdMap<ValueId, usize>,
     found: IdMap<ValueId, ValueId>,
+}
+
+/// The exact frame slot an address is, where it is one.
+fn frame_slot(
+    prep: Option<&DecompilePrepFacts>,
+    addr: ValueId,
+    space: r2il::SpaceId,
+) -> Option<StackAddressRoot> {
+    (space == r2il::SpaceId::Ram)
+        .then(|| resolve_entry_stack_root(prep, addr))
+        .flatten()
+}
+
+/// The place an address names: a constant is itself, a sum with a constant is its other side's copy
+/// class and the constant, anything else its own class.
+fn place_of(graph: &SsaGraph, prep: &DecompilePrepFacts, addr: ValueId, size: u32) -> Place {
+    let literal = |value: ValueId| graph.value(value)?.var.constant_bits();
+    let class = |value: ValueId| crate::view::class_value(graph, Some(&prep.views), value);
+    if let Some(bits) = literal(addr) {
+        return (None, bits as i64, size);
+    }
+    let sum = graph.def_inst(addr).and_then(|inst| {
+        let SSAOp::IntAdd { a, b, .. } = graph.op(inst)? else {
+            return None;
+        };
+        match (literal(*a), literal(*b)) {
+            (None, Some(bits)) => Some((*a, bits as i64)),
+            (Some(bits), None) => Some((*b, bits as i64)),
+            _ => None,
+        }
+    });
+    let (base, offset) = sum.unwrap_or((addr, 0));
+    (Some(class(base)), offset, size)
+}
+
+/// A dense number for each place two loads or more read, by the load: `O(L log L)` over the loads.
+fn shared_places(graph: &SsaGraph, prep: &DecompilePrepFacts) -> (IdMap<ValueId, usize>, usize) {
+    let mut loads = Vec::new();
+    for inst in &graph.insts {
+        let (Some(SSAOp::Load { space, addr, .. }), Some(out)) = (graph.op(inst.id), inst.output)
+        else {
+            continue;
+        };
+        let size = graph.value(out).map_or(0, |value| value.var.size);
+        let outside =
+            *space == r2il::SpaceId::Ram && frame_slot(Some(prep), *addr, *space).is_none();
+        if outside && size > 0 && size <= WIDEST {
+            loads.push((place_of(graph, prep, *addr, size), out));
+        }
+    }
+    loads.sort_unstable();
+    let mut places = IdMap::new(graph.values.len());
+    let mut count = 0;
+    for run in loads.chunk_by(|left, right| left.0 == right.0) {
+        if run.len() > 1 {
+            run.iter()
+                .for_each(|(_, out)| _ = places.insert(*out, count));
+            count += 1;
+        }
+    }
+    (places, count)
 }
 
 /// For each load that rereads a slot unchanged, the value of the load it rereads.
@@ -126,9 +225,14 @@ pub(crate) fn reloads(
     graph: &SsaGraph,
     prep: Option<&DecompilePrepFacts>,
 ) -> IdMap<ValueId, ValueId> {
+    let (places, count) = match prep {
+        Some(prep) => shared_places(graph, prep),
+        None => (IdMap::new(0), 0),
+    };
     let mut rereads = Rereads {
         graph,
         prep,
+        places,
         found: IdMap::new(graph.values.len()),
     };
     if prep.is_none() {
@@ -140,7 +244,12 @@ pub(crate) fn reloads(
     };
     // A sole-predecessor block continues its parent's slots, the rest start empty: each block is entered
     // once, and the table is empty again when its tree is left.
-    let mut held = Held::default();
+    let mut held = Held {
+        places: vec![(0, ValueId(0)); count],
+        era: 1,
+        eras: 1,
+        ..Held::default()
+    };
     let mut pending: Vec<Visit> = (graph.blocks.iter())
         .filter(|block| sole_predecessor(block.id).is_none())
         .map(|block| Visit::Enter(block.id))
@@ -204,17 +313,24 @@ pub(crate) fn unite_classes(class: &mut [ValueId], reloads: &IdMap<ValueId, Valu
 }
 
 impl Rereads<'_> {
+    /// A load outside the exact frame: the load of its place since the last write, where there is one.
+    fn reread_place(&mut self, out: ValueId, held: &mut Held) {
+        let first = (self.places.get(out)).and_then(|place| held.reread(*place, out));
+        if let Some(first) = first {
+            self.found.insert(out, first);
+        }
+    }
+
     fn step(&mut self, op: &SSAOp<ValueId>, output: Option<ValueId>, held: &mut Held) {
         let (graph, prep) = (self.graph, self.prep);
-        let slot = |addr: ValueId, space: r2il::SpaceId| {
-            (space == r2il::SpaceId::Ram)
-                .then(|| resolve_entry_stack_root(prep, addr))
-                .flatten()
-        };
+        let slot = |addr: ValueId, space: r2il::SpaceId| frame_slot(prep, addr, space);
         match op {
             SSAOp::Load { space, addr, .. } => {
-                let (Some(root), Some(out)) = (slot(*addr, *space), output) else {
+                let Some(out) = output else {
                     return;
+                };
+                let Some(root) = slot(*addr, *space) else {
+                    return self.reread_place(out, held);
                 };
                 let size = graph.value(out).map_or(0, |value| value.var.size);
                 if size == 0 || size > WIDEST {

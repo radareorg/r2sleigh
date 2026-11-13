@@ -185,6 +185,27 @@ func.fstatat.arg.3=int,flag
 func.fstatat.ret=int
 func.fstatat.include=sys/stat.h
 
+stat=func
+func.stat.args=2
+func.stat.arg.0=const char *,path
+func.stat.arg.1=struct stat *,buf
+func.stat.ret=int
+func.stat.include=sys/stat.h
+
+lstat=func
+func.lstat.args=2
+func.lstat.arg.0=const char *,path
+func.lstat.arg.1=struct stat *,buf
+func.lstat.ret=int
+func.lstat.include=sys/stat.h
+
+fstat=func
+func.fstat.args=2
+func.fstat.arg.0=int,fildes
+func.fstat.arg.1=struct stat *,buf
+func.fstat.ret=int
+func.fstat.include=sys/stat.h
+
 futimens=func
 func.futimens.args=2
 func.futimens.arg.0=int,fd

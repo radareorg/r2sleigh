@@ -41,11 +41,14 @@ pub(super) struct CallPlan {
     /// The carrier's bits where the call reads no result and its boundary does not state `void`:
     /// a result no contract states is still one (S36), so its extern is never `void`.
     pub(super) unread: Option<u32>,
+    /// The carrier's bits where the callee's declaration states no result: every call declares
+    /// it, read or not (D330).
+    pub(super) carrier: Option<u32>,
     pub(super) noreturn: bool,
     /// For a tail transfer, the register and class its callee returns in; `Some(None)` where the
     /// facts state no result.
     pub(super) tail: Option<Option<(CanonicalStorageId, MachineType)>>,
-    /// The callee's declared prototype, where C spells every type in it with no definition.
+    /// The callee's declared prototype, where it states the call's fixed arity.
     pub(super) declared: Option<Prototype>,
     /// Each argument the callee's interface states it ignores: a hole below a read slot (D165).
     pub(super) holes: Vec<bool>,
@@ -104,27 +107,31 @@ impl CallResult {
     }
 }
 
-/// A callee's fixed parameters and result at the types its declaration states.
+/// A callee's fixed parameters and result at the types its declaration states, each where C
+/// spells it; a `None` passes or returns at its class, as the callee's header falls back.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Prototype {
-    pub(super) params: Vec<CType>,
-    pub(super) ret: CType,
+    pub(super) params: Vec<Option<CType>>,
+    pub(super) ret: Option<CType>,
 }
 
 impl Prototype {
-    /// `signature` as C spells it, where it names `fixed` parameters and every type is spellable.
+    /// `signature` as C spells it, where it names `fixed` parameters.
     pub(super) fn of(
         signature: &r2types::FunctionType,
         fixed: usize,
-        defines: &dyn Fn(&str, bool) -> bool,
+        names: &dyn Fn(&str, bool) -> bool,
     ) -> Option<Self> {
         if signature.params.len() != fixed {
             return None;
         }
         let params = (signature.params.iter())
-            .map(|ty| spellable(ty, defines).filter(|ty| *ty != CType::Void))
-            .collect::<Option<Vec<_>>>()?;
-        let ret = spellable(&signature.return_type, defines)?;
+            .map(|ty| {
+                (spellable(ty, names).or_else(|| untagged_pointer(ty)))
+                    .filter(|ty| *ty != CType::Void)
+            })
+            .collect();
+        let ret = spellable(&signature.return_type, names);
         Some(Self { params, ret })
     }
 
@@ -135,21 +142,37 @@ impl Prototype {
         fixed: usize,
         returns: bool,
         unproven: Option<u32>,
-        defines: &dyn Fn(&str, bool) -> bool,
+        names: &dyn Fn(&str, bool) -> bool,
     ) -> Option<Self> {
-        let mut prototype = Self::of(signature, fixed, defines)?;
+        let mut prototype = Self::of(signature, fixed, names)?;
+        // A body-proven pointer whose pointee the unit cannot spell is `void *`, as its header says.
+        for (param, ty) in prototype.params.iter_mut().zip(&signature.params) {
+            if param.is_none() {
+                *param = analysed_pointer(ty);
+            }
+        }
         if let Some(bits) = unproven.filter(|bits| crate::prelude::carrier(*bits).is_some()) {
-            prototype.ret = crate::prelude::result_carrier(bits);
+            prototype.ret = Some(crate::prelude::result_carrier(bits));
         }
         match (&prototype.ret, returns) {
-            (CType::Void, true) => None,
+            (Some(CType::Void), true) => None,
             _ => Some(prototype),
         }
     }
 }
 
+/// A pointer r2types states from the body, as `void *` where its pointee is not spellable here.
+pub(super) fn analysed_pointer(ty: &CType) -> Option<CType> {
+    matches!(ty.unaliased(), CType::Pointer(_)).then(|| CType::Pointer(Box::new(CType::Void)))
+}
+
 /// An argument of type `from` passed as the declared `to`: the cast C performs at a prototype.
 pub(super) fn to_declared(argument: CExpr, from: &CType, to: &CType) -> CExpr {
+    // The unstated word is its integer: the conversion is to that integer (D265).
+    let to = match to {
+        CType::Typedef { ty, .. } if r2types::is_unstated_word(to) => ty.as_ref(),
+        to => to,
+    };
     if from == to {
         return argument;
     }
@@ -192,7 +215,10 @@ pub(super) fn read_result(
     class: &MachineType,
     demanded: u64,
 ) -> Option<CExpr> {
-    let ty = plan.declared.as_ref().map(|declared| &declared.ret);
+    let ty = plan
+        .declared
+        .as_ref()
+        .and_then(|declared| declared.ret.as_ref());
     let width = plan.width.unwrap_or(SourceResultWidth {
         logical: u8::try_from(class.width_bits() / 8).ok()?,
         above: SourceAbove::Undefined,
@@ -225,7 +251,8 @@ fn at_width(
     demanded: u64,
 ) -> Option<CExpr> {
     let target = super::terms::c_type(class)?;
-    let ty = ty.unwrap_or(&target);
+    // The unstated word is read as its integer (D265).
+    let ty = ty.map_or(&target, super::terms::word_free);
     // An unproven result's carrier typedef is its integer: assigning it converts nothing.
     let same = *ty == target
         || (crate::prelude::result_typedef(ty).is_some() && *ty.unaliased() == target);
@@ -289,42 +316,63 @@ pub(super) fn held_as(declared: &CType, class: &MachineType, ptr_bits: u32) -> b
     matches!(class, MachineType::Float { .. }) == float && class.width_bits() == bits
 }
 
-/// `ty` as C spells it: a standard scalar, a pointer to one, `void`, `char` or a tag the unit
-/// `defines`, or a function pointer of such types; a typedef is its target, `char` excepted.
-pub(super) fn spellable(ty: &CType, defines: &dyn Fn(&str, bool) -> bool) -> Option<CType> {
+/// `ty` as C spells it: a standard scalar, a pointer to one, `void`, `char` or a tag `names`
+/// admits there, or a function pointer of such types; a typedef is its target, `char` excepted.
+pub(super) fn spellable(ty: &CType, names: &dyn Fn(&str, bool) -> bool) -> Option<CType> {
     match ty {
         CType::Void | CType::Bool | CType::Float(32 | 64) => Some(ty.clone()),
         CType::Int {
             bits: 8 | 16 | 32 | 64,
             signedness: r2types::Signedness::Signed | r2types::Signedness::Unsigned,
         } => Some(ty.clone()),
-        CType::Typedef { name, .. } if name == "char" => Some(ty.clone()),
-        CType::Typedef { ty, .. } => spellable(ty, defines),
-        CType::Pointer(pointee) => Some(CType::Pointer(Box::new(pointee_spelling(
-            pointee, defines,
-        )?))),
-        CType::Const(inner) => Some(CType::Const(Box::new(spellable(inner, defines)?))),
+        CType::Typedef { name, .. } if name == "char" || r2types::is_unstated_word(ty) => {
+            Some(ty.clone())
+        }
+        CType::Typedef { ty, .. } => spellable(ty, names),
+        CType::Pointer(pointee) => {
+            Some(CType::Pointer(Box::new(pointee_spelling(pointee, names)?)))
+        }
+        CType::Const(inner) => Some(CType::Const(Box::new(spellable(inner, names)?))),
         CType::Function { ret, params } => Some(CType::Function {
-            ret: Box::new(spellable(ret, defines)?),
+            ret: Box::new(spellable(ret, names)?),
             params: (params.iter())
-                .map(|ty| spellable(ty, defines).filter(|ty| *ty != CType::Void))
+                .map(|ty| spellable(ty, names).filter(|ty| *ty != CType::Void))
                 .collect::<Option<_>>()?,
         }),
         CType::UnprototypedFunction(ret) => Some(CType::UnprototypedFunction(Box::new(spellable(
-            ret, defines,
+            ret, names,
         )?))),
         _ => None,
     }
 }
 
-/// What a pointer points at, as C spells it: a tag the unit `defines`, qualified or not, or any
-/// spellable type.
-fn pointee_spelling(ty: &CType, defines: &dyn Fn(&str, bool) -> bool) -> Option<CType> {
+/// A declared pointer to an opaque name (a mangled row's `this`) as `void *`: the pointer, and
+/// nothing of the pointee (D332); any other unspelled pointee keeps its class.
+pub(super) fn untagged_pointer(ty: &CType) -> Option<CType> {
+    let CType::Pointer(pointee) = ty.unaliased() else {
+        return None;
+    };
+    let mut pointee = pointee.as_ref();
+    while let CType::Const(inner) | CType::Typedef { ty: inner, .. } = pointee {
+        pointee = inner;
+    }
+    (*pointee == CType::Unknown).then(|| {
+        r2il::refusal_evidence!("pointee-unspelled", "{ty:?} passes as void*");
+        CType::Pointer(Box::new(CType::Void))
+    })
+}
+
+/// What a pointer points at, as C spells it: a tag `names` admits behind a pointer, qualified,
+/// typedef'd or neither, or any spellable type.
+fn pointee_spelling(ty: &CType, names: &dyn Fn(&str, bool) -> bool) -> Option<CType> {
     match ty {
-        CType::Struct(tag) => defines(tag, false).then(|| ty.clone()),
-        CType::Union(tag) => defines(tag, true).then(|| ty.clone()),
-        CType::Const(inner) => Some(CType::Const(Box::new(pointee_spelling(inner, defines)?))),
-        ty => spellable(ty, defines),
+        CType::Struct(tag) => names(tag, false).then(|| ty.clone()),
+        CType::Union(tag) => names(tag, true).then(|| ty.clone()),
+        CType::Const(inner) => Some(CType::Const(Box::new(pointee_spelling(inner, names)?))),
+        CType::Typedef { name, ty: inner } if name != "char" && !r2types::is_unstated_word(ty) => {
+            pointee_spelling(inner, names)
+        }
+        ty => spellable(ty, names),
     }
 }
 
@@ -497,6 +545,7 @@ fn planned(
             || never_comes_back(artifact, inst),
         tail,
         declared: None,
+        carrier: None,
     })
 }
 
@@ -849,15 +898,16 @@ mod tests {
         let signature = r2types::FunctionType {
             return_type: CType::uint(64),
             params: vec![int32.clone(), CType::Float(64)],
+            bases: vec![r2source::Basis::Declared; 2],
             variadic: false,
         };
         let none = |_: &str, _: bool| false;
         let header = Prototype::of_projection(&signature, 2, true, None, &none).expect("spelled");
-        assert_eq!(header.params, vec![int32, CType::Float(64)]);
-        assert_eq!(header.ret, CType::uint(64));
+        assert_eq!(header.params, vec![Some(int32), Some(CType::Float(64))]);
+        assert_eq!(header.ret, Some(CType::uint(64)));
         let unproven = Prototype::of_projection(&signature, 2, true, Some(64), &none);
         let unproven = unproven.expect("spelled");
-        assert_eq!(unproven.ret, crate::prelude::result_carrier(64));
+        assert_eq!(unproven.ret, Some(crate::prelude::result_carrier(64)));
         assert_eq!(
             Prototype::of_projection(&signature, 1, true, None, &none),
             None
@@ -870,10 +920,10 @@ mod tests {
         assert!(Prototype::of_projection(&void, 2, false, None, &none).is_some());
     }
 
-    /// A tag is spelled behind a pointer only where the unit defines it, and a function pointer
-    /// only where each of its types is spelled.
+    /// A tag is spelled behind a pointer only where the unit names it, through a typedef too, and
+    /// a function pointer only where each of its types is spelled; the rest pass at their class.
     #[test]
-    fn a_prototype_names_a_struct_only_where_the_unit_defines_it() {
+    fn a_prototype_names_a_struct_only_where_the_unit_names_it() {
         let node = CType::Pointer(Box::new(CType::Const(Box::new(CType::Struct(
             "node".to_string(),
         )))));
@@ -888,15 +938,39 @@ mod tests {
         let signature = r2types::FunctionType {
             return_type: CType::Void,
             params: vec![node.clone(), binary.clone()],
+            bases: vec![r2source::Basis::Declared; 2],
             variadic: false,
         };
-        assert_eq!(Prototype::of(&signature, 2, &|_, _| false), None);
-        let defined = Prototype::of(&signature, 2, &|tag, union| tag == "node" && !union);
-        assert_eq!(defined.map(|p| p.params), Some(vec![node, binary]));
+        let unnamed = Prototype::of(&signature, 2, &|_, _| false).map(|p| p.params);
+        assert_eq!(unnamed, Some(vec![None, Some(binary.clone())]));
+        let named = Prototype::of(&signature, 2, &|tag, union| tag == "node" && !union);
+        assert_eq!(
+            named.map(|p| p.params),
+            Some(vec![Some(node), Some(binary)])
+        );
+        // `Node *` where `typedef struct Node Node`: the pointer names the struct.
+        let typedefed = CType::Pointer(Box::new(CType::named(
+            "Node",
+            CType::Struct("Node".to_string()),
+        )));
+        let spelled = spellable(&typedefed, &|tag, union| tag == "Node" && !union);
+        assert_eq!(
+            spelled,
+            Some(CType::Pointer(Box::new(CType::Struct("Node".to_string()))))
+        );
         let by_value = r2types::FunctionType {
             params: vec![CType::Struct("node".to_string())],
+            bases: vec![r2source::Basis::Declared],
             ..signature
         };
-        assert_eq!(Prototype::of(&by_value, 1, &|_, _| true), None);
+        let by_value = Prototype::of(&by_value, 1, &|_, _| true).map(|p| p.params);
+        assert_eq!(by_value, Some(vec![None]));
+        assert_eq!(
+            spellable(
+                &CType::named("Node", CType::Struct("Node".into())),
+                &|_, _| true
+            ),
+            None
+        );
     }
 }

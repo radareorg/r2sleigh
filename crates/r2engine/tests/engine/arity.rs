@@ -450,7 +450,7 @@ fn under_aa_a_recursive_root_calls_itself_with_its_resolved_arity() {
         .response
         .output
         .into_text();
-    assert!(text.contains("= fact("), "{text}");
+    assert!(text.contains("= (uint64_t)(uint32_t)fact("), "{text}");
     assert!(!text.contains("vector count"), "{text}");
 }
 
@@ -649,7 +649,7 @@ fn an_unread_slot_below_a_read_one_is_a_hole_spelled_as_its_typedef() {
         .find(|line| line.contains("f("))
         .unwrap_or_default();
     assert!(
-        header.contains("(r2sleigh_unread_u64 arg0, uint32_t arg1)"),
+        header.contains("(r2sleigh_unread_u64 arg0, r2sleigh_word_u32 arg1)"),
         "{text}"
     );
 }
@@ -828,7 +828,7 @@ fn fcntl_caller_parameters(code: &'static [u8]) -> (String, Vec<(String, String)
 fn a_declared_integer_is_read_at_its_width_not_the_registers() {
     let (text, parameters) = fcntl_caller_parameters(&DECLARED_INT_MOVED);
     assert_eq!(parameters.len(), 1, "{text}");
-    assert_eq!(parameters[0].0, "uint32_t", "{text}");
+    assert_eq!(parameters[0].0, "r2sleigh_word_u32", "{text}");
 }
 
 /// A declared integer handed on untouched is the lane its callee holds (ROADMAP D105).
@@ -836,7 +836,7 @@ fn a_declared_integer_is_read_at_its_width_not_the_registers() {
 fn a_declared_integer_handed_on_is_a_parameter_at_its_width() {
     let (text, parameters) = fcntl_caller_parameters(&DECLARED_INT);
     assert_eq!(parameters.len(), 1, "{text}");
-    assert_eq!(parameters[0].0, "uint32_t", "{text}");
+    assert_eq!(parameters[0].0, "r2sleigh_word_u32", "{text}");
 }
 
 /// `int p_fcntl2(int fd, int flags) { return fcntl(fd, F_SETFL, flags); }` at clang -O0, after
