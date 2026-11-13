@@ -1,11 +1,6 @@
 #!/usr/bin/env bash
-# The arm64 DecBench sample for the scratch-void gate (ROADMAP D247): the 35 x86 builds' projects, versions and flags
-# (DecBench projects/sailr), cross-built with aarch64-linux-gnu-gcc into aarch64/ beside decbench_aarch64.manifest.
-#
-#   build_aarch64_sample.sh [WORK]    WORK holds the sources and build trees (default: a temporary directory)
-#
-# Grade: scripts/scratch_void.py --target aarch64 --manifest tests/gold/scratch_void/decbench_aarch64.manifest
-#        --known tests/gold/scratch_void/known.txt --baseline tests/gold/scratch_void/decbench_aarch64_baseline.json
+# The arm64 DecBench sample (ROADMAP D247): `build_aarch64_sample.sh [WORK]` cross-builds the x86 sample's projects,
+# versions and flags (DecBench projects/sailr) into aarch64/ and writes decbench_aarch64.manifest; D247 names the grade.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)

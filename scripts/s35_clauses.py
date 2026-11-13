@@ -7,6 +7,8 @@
     s35_clauses.py sweep {tail,win64} --r2s BASE --r2s HEAD BINARY...
         3.7.3 (`tail`): `TailTransferNotRendered` gaps per function, base and head; fails where head has more.
         D210 (`win64`): `import-unplaced` gaps per function; fails where head has any.
+    s35_clauses.py probes --r2s R2S BINARY
+        D209: every function of an aarch64 build of tests/gold/s35/probes.c; fails on a `int8_t *` or `int32_t *`.
     s35_clauses.py named-type BASE.jsonl HEAD.jsonl
         D167: `fp:library_named_type` verdicts in `tests/decbench/type_causes.py collect` rows; fails unless head falls.
 
@@ -29,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SWEEP = ROOT / "tests" / "coverage" / "sweep_binary.sh"
 START_GAP = re.compile(r"call to __libc_start_main: (.*?) \*/")
 UNPLACED = "declaration has an argument this convention does not place"
+SIGNED_POINTER = re.compile(r"(?<![\w])int(8|32)_t\s*\*")
 PATTERNS = {"tail": "r2dec gap: TailTransferNotRendered", "win64": UNPLACED}
 BEGIN = "R2SLEIGH_COV_BEGIN__"
 END = "R2SLEIGH_COV_END__"
@@ -113,6 +116,16 @@ def sweep(clause: str, sides: list[str], binaries: list[Path]) -> int:
     return 1 if worse else 0
 
 
+def probes(r2s: str, binary: Path) -> int:
+    out = subprocess.run(["bash", str(SWEEP), str(binary)], capture_output=True, text=True, check=False,
+                         env={**os.environ, "R2SLEIGH_R2S": r2s}).stdout
+    found = [line.strip() for line in out.splitlines() if SIGNED_POINTER.search(line)]
+    for line in found:
+        print(line)
+    print(f"{len(found)} lines spell int8_t* or int32_t*")
+    return 1 if found else 0
+
+
 def named_type(base: Path, head: Path) -> int:
     def count(path: Path) -> int:
         return sum(json.loads(line).get("verdict") == "fp:library_named_type"
@@ -132,6 +145,9 @@ def main(argv: list[str] | None = None) -> int:
     two.add_argument("kind", choices=sorted(PATTERNS))
     two.add_argument("--r2s", action="append", required=True)
     two.add_argument("binaries", nargs="+", type=Path)
+    four = sub.add_parser("probes")
+    four.add_argument("--r2s", required=True)
+    four.add_argument("binary", type=Path)
     three = sub.add_parser("named-type")
     three.add_argument("base", type=Path)
     three.add_argument("head", type=Path)
@@ -140,6 +156,8 @@ def main(argv: list[str] | None = None) -> int:
         return seventh(args.r2s, args.census)
     if args.clause == "sweep":
         return sweep(args.kind, args.r2s, args.binaries)
+    if args.clause == "probes":
+        return probes(args.r2s, args.binary)
     return named_type(args.base, args.head)
 
 

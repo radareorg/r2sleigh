@@ -25,7 +25,7 @@ LANES = "crates/r2ssa/src/lanes.rs"
 
 ALL = ("x86-64", "aarch64")
 # Measured on the gcc 13.3 arm64 corpus (2026-11-13): why each mutant that lives there does (D246).
-SOME_PATH_A64 = "untraced: gcc's arm64 `some_path` calls `free` and returns, and stays Unproven(Written) (D246)"
+SOME_PATH_A64 = "it reaches arm64 `some_path` (the value path becomes a residual), and EntryInput keeps X0 Unproven"
 ENTRY_A64 = "every entry byte C can reach X0 with is an input's, so EntryInput keeps it Unproven (S19: no case 1)"
 
 # (name, edits, whether it must die, why it may live, {target: why it lives there})

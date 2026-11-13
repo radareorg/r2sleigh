@@ -102,6 +102,15 @@ class Sweep(unittest.TestCase):
         self.assertEqual(quiet(s35_clauses.sweep, "tail", ["one"], b)[0], 2)
 
 
+class Probes(unittest.TestCase):
+    def test_a_signed_pointer_fails_and_an_unsigned_one_passes(self):
+        good = "extern uint32_t* wcsdup(const uint32_t*);\nint32_t mkdir(const char*, uint32_t);\n"
+        with mock.patch.object(s35_clauses.subprocess, "run", return_value=done(good)):
+            self.assertEqual(quiet(s35_clauses.probes, "r2s", pathlib.Path("b"))[0], 0)
+        with mock.patch.object(s35_clauses.subprocess, "run", return_value=done(good + "size_t strnlen(const int8_t *, size_t);\n")):
+            self.assertEqual(quiet(s35_clauses.probes, "r2s", pathlib.Path("b"))[0], 1)
+
+
 class NamedType(unittest.TestCase):
     def rows(self, n):
         path = pathlib.Path(tempfile.mkdtemp()) / "rows.jsonl"
