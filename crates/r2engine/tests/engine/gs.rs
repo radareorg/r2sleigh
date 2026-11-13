@@ -321,4 +321,8 @@ fn a_save_whose_unread_upper_bytes_stay_in_a_register_is_elided() {
     assert!(!text.contains("check("), "{text}");
     assert!(!text.contains("0x10a0"), "{text}");
     assert!(text.contains("compiler-inserted"), "{text}");
+    assert!(
+        text.contains("return r2sleigh_carrier_u32((uint32_t)(uint8_t)tmp_1033_0_1);"),
+        "{text}"
+    );
 }

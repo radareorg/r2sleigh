@@ -1432,12 +1432,21 @@ const READS_HANDLER: &[u8] = &[
 const HANDLER: u64 = BASE + 0x10;
 
 fn handler_rendered(literal: Literal, survey: bool) -> String {
+    handler_answer(literal, survey).0
+}
+
+/// The handler's text and the premises its answer takes.
+fn handler_answer(
+    literal: Literal,
+    survey: bool,
+) -> (String, std::collections::BTreeSet<r2source::Premise>) {
     let mut open = OpenProgram::of(literal);
     if survey {
         open.analyse_program().expect("it surveys");
     }
     let rendered = open.rendered(HANDLER).expect("it renders");
-    rendered.response.output.into_text()
+    let premises = rendered.response.premises.clone();
+    (rendered.response.output.into_text(), premises)
 }
 
 /// A handler whose address only reaches `atexit`'s cited `void (*)(void)` slot returns nothing
@@ -1527,7 +1536,11 @@ const STARTS_HANDLER_AS_INIT: &[u8] = &[
 /// that `int` under the closed world, though its RAX is a call's: LSB passes it to `exit` (D227).
 #[test]
 fn a_main_only_libc_start_main_takes_returns_its_int_under_the_closed_world() {
-    let closed = handler_rendered(at_exit(STARTS_HANDLER, "__libc_start_main"), true);
+    let (closed, premises) = handler_answer(at_exit(STARTS_HANDLER, "__libc_start_main"), true);
+    assert!(
+        premises.contains(&r2source::Premise::ClosedWorld),
+        "{premises:?}"
+    );
     assert!(
         closed.contains("r2sleigh_word_u32 handler(void)"),
         "{closed}"
@@ -1583,7 +1596,9 @@ fn a_caller_that_calls_another_caller_is_read_after_it() {
     open.analyse_program().expect("it surveys");
     let before = open.analysis_stats().walked.computed;
     open.rendered(BASE + 0x20).expect("it renders");
-    let walked = open.analysis_stats().walked.computed - before;
+    let stats = open.analysis_stats();
+    assert_eq!(stats.defects, 0);
+    let walked = stats.walked.computed - before;
     // `x` for its own render and for its register effect, `p2` and `p1` once each.
     assert_eq!(walked, 4, "walks during the request");
 }
