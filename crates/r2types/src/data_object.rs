@@ -149,9 +149,8 @@ impl ProgramDataObjectTypeFacts {
     }
 }
 
-/// Whether the graph lays a type out: scalars, pointers to placeable types or `void`, arrays
-/// of placeable elements, and aggregates with a size. An opaque tag or code refuses. A chain
-/// longer than the graph's type count is a cycle and refuses; each step is O(1).
+/// Whether the graph lays a type out; an opaque tag, code, or a chain longer than the type count
+/// (a cycle) refuses. O(chain).
 fn placeable(graph: &SourceTypeGraph, type_id: u32, behind_pointer: bool) -> bool {
     let (mut type_id, mut behind_pointer) = (type_id, behind_pointer);
     for _ in 0..=graph.types().len() {

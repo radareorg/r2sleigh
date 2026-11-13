@@ -950,9 +950,8 @@ pub(crate) fn field_access_certificates_from_source_aggregate_accesses(
     by_location.into_values().flatten().collect::<Vec<_>>()
 }
 
-/// An indexed parameter access certifies an array where the parameter's element stride, scalar
-/// or the graph's aggregate size, equals the index's coefficient, and the access reads a whole
-/// element or a member r2ssa's projection names. O(accesses x fields).
+/// An indexed access certifies an array where the element stride (scalar or the graph's aggregate
+/// size) is the coefficient and it reads a whole element or a projected member. O(accesses x fields).
 fn exact_indexed_access_certificates_from_local_artifacts(
     local_structs: &LocalStructArtifacts,
     merged_signature: Option<&FunctionSignatureSpec>,

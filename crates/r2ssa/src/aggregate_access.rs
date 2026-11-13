@@ -179,9 +179,8 @@ struct ScalarLeaf {
     type_id: u32,
 }
 
-/// Descends by-value struct members to the one scalar member the access covers exactly.
-/// A union, an array, a bit-field or two containing members refuse. The graph refuses
-/// self-containment, so the descent ends within `aggregates().len()` levels; each level is O(m).
+/// The one scalar member the access covers, through by-value structs; a union, array, bit-field
+/// or overlap refuses. O(depth x m), depth bounded by the aggregate count (ADR "ExtTypeDb as built").
 fn scalar_leaf(
     graph: &crate::SourceTypeGraph,
     aggregate: &crate::SourceAggregateLayout,
