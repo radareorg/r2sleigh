@@ -37,6 +37,33 @@ const FRAME_MEMBER_CALL: &[u8] = &[
     0xc3, // 101a ret
 ];
 
+/// `int last(struct node *p) { while (p->next) p = p->next; return p->val; }`: `p` merges the
+/// parameter with a load.
+const WALKED: &[u8] = &[
+    0x48, 0x8b, 0x47, 0x08, // 1000 mov rax, [rdi + 8]
+    0x48, 0x85, 0xc0, // 1004 test rax, rax
+    0x74, 0x05, // 1007 je 0x100e
+    0x48, 0x89, 0xc7, // 1009 mov rdi, rax
+    0xeb, 0xf2, // 100c jmp 0x1000
+    0x8b, 0x07, // 100e mov eax, [rdi]
+    0xc3, // 1010 ret
+];
+
+/// `cur->next` then a 2-byte read of the 4-byte `val`: no member is that read.
+const NARROW_VAL: &[u8] = &[
+    0x48, 0x8b, 0x47, 0x08, // 1000 mov rax, [rdi + 8]
+    0x0f, 0xb7, 0x00, // 1004 movzx eax, word [rax]
+    0xc3, // 1007 ret
+];
+
+/// `h->ops->o` then a read 8 bytes into what `o` points at: `void *` names no struct.
+const THROUGH_VOID: &[u8] = &[
+    0x48, 0x8b, 0x07, // 1000 mov rax, [rdi]
+    0x48, 0x8b, 0x00, // 1003 mov rax, [rax]
+    0x8b, 0x40, 0x08, // 1006 mov eax, [rax + 8]
+    0xc3, // 1009 ret
+];
+
 /// Where `GLOBAL_MEMBER_CALL`'s `g_ops` lies, after its code.
 const G_OPS: u64 = BASE + 0x20;
 
@@ -253,6 +280,8 @@ fn a_call_through_a_global_structs_member_takes_its_type_as_contract() {
     let roots = projected(&mut open);
     assert!(roots.contains(&("f".to_string(), "data")), "{roots:?}");
     assert_eq!(member_call(&mut open), (true, 2, true));
+    let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
+    assert!(!text.contains("r2dec gap"), "{text}");
 }
 
 /// D348 gate 7: `o.f(...)`, a member of a struct the frame declares by value.
@@ -286,7 +315,39 @@ fn a_call_through_a_frame_structs_member_takes_its_type_as_contract() {
     let mut open = program(FRAME_MEMBER_CALL, declarations);
     let roots = projected(&mut open);
     assert!(roots.contains(&("f".to_string(), "frame")), "{roots:?}");
+    // `o.f` is never written, so the read has no C spelling and the call stays a gap; the contract is the gate.
     assert_eq!(member_call(&mut open), (true, 2, true));
+}
+
+/// D348 default-deny: a merged base, a read no member covers, and a load through `void *` root
+/// nothing.
+#[test]
+fn a_root_no_projection_proves_projects_nothing() {
+    let types = types();
+    let node = || declaring("f", Some((types.node_pointer, "struct node *")), types.int);
+    let holder = declaring(
+        "f",
+        Some((types.holder_pointer, "struct holder *")),
+        types.int,
+    );
+    let roots = |code, declarations| projected(&mut program(code, declarations));
+    let walked = roots(WALKED, node());
+    assert!(
+        walked.iter().all(|(_, root)| *root == "parameter"),
+        "{walked:?}"
+    );
+    assert!(!walked.iter().any(|(name, _)| name == "val"), "{walked:?}");
+    assert_eq!(
+        roots(NARROW_VAL, node()),
+        [("next".to_string(), "parameter")]
+    );
+    assert_eq!(
+        roots(THROUGH_VOID, holder),
+        [
+            ("ops".to_string(), "parameter"),
+            ("o".to_string(), "member")
+        ]
+    );
 }
 
 /// The stripped copy of a member call keeps its gap: no graph roots anything.

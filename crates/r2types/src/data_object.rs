@@ -172,13 +172,18 @@ fn placeable(graph: &SourceTypeGraph, type_id: u32, behind_pointer: bool) -> boo
             SourceTypeKind::Array {
                 element_type_id, ..
             } => (type_id, behind_pointer) = (element_type_id, false),
-            SourceTypeKind::Struct { aggregate_id } | SourceTypeKind::Union { aggregate_id } => {
+            SourceTypeKind::Struct { aggregate_id } => {
                 return usize::try_from(aggregate_id)
                     .ok()
                     .and_then(|index| graph.aggregates().get(index))
                     .is_some_and(|aggregate| aggregate.size_bits() > 0);
             }
-            SourceTypeKind::Code { .. } | SourceTypeKind::Opaque { .. } => return false,
+            // No reader defines a union's tag for a global, so a union places nothing.
+            SourceTypeKind::Union { .. }
+            | SourceTypeKind::Code { .. }
+            | SourceTypeKind::Opaque { .. } => {
+                return false;
+            }
         }
     }
     false

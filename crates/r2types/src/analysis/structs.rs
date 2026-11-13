@@ -31,9 +31,7 @@ fn parameter_pointee_strides(prepared: &SsaArtifact) -> Vec<Option<u64>> {
             let SourceTypeKind::Pointer { target_type_id, .. } = pointer.kind() else {
                 return None;
             };
-            let (SourceTypeKind::Struct { aggregate_id } | SourceTypeKind::Union { aggregate_id }) =
-                node(target_type_id)?.kind()
-            else {
+            let SourceTypeKind::Struct { aggregate_id } = node(target_type_id)?.kind() else {
                 return None;
             };
             let aggregate = graph

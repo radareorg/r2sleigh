@@ -178,9 +178,7 @@ impl HeldArgumentLanes {
                 .and_then(|site| site.raw_identity)
                 .zip(machine_context)
                 .and_then(|(identity, context)| context.call_site_interface(identity));
-            let Some(interface) = interface else {
-                continue;
-            };
+            // A call no exact callee states reads the whole register, so its row is `All`.
             for argument in &boundary.arguments {
                 let (
                     SourceCallArgumentValue::Value(value),
@@ -189,7 +187,9 @@ impl HeldArgumentLanes {
                 else {
                     continue;
                 };
-                let held = crate::semantic::callee_held_lane(interface, index, storage);
+                let held = interface.and_then(|interface| {
+                    crate::semantic::callee_held_lane(interface, index, storage)
+                });
                 let mask = held.map_or(ByteMask::All, |lane| ByteMask::whole(lane.size));
                 lanes.push(((value, index, storage), mask));
             }
