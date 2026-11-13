@@ -927,3 +927,12 @@ fn a_cited_float_parameter_after_a_call_that_passes_xmm0_reads_no_result_of_it()
     let f = rendered(program);
     assert!(!f.starts_with("double f("), "{f}");
 }
+
+/// `sqrtf`'s cited `float` reads XMM0's low four bytes: `f` is no `double`.
+#[test]
+fn a_cited_float_parameter_reads_only_its_own_width() {
+    let functions = [("f", BASE, 0x0a), ("caller", BASE + 0x10, 0x13)];
+    let program = Literal::of_code(handed_to_sqrt(true), &functions).importing("sqrtf");
+    let f = rendered(program);
+    assert!(!f.starts_with("double f("), "{f}");
+}

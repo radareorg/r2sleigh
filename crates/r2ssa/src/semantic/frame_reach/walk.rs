@@ -70,6 +70,17 @@ impl FramePoints {
         }
     }
 
+    /// Both rounds' points: what either states leaves or is accessed.
+    fn absorb(&mut self, other: Self) {
+        self.whole |= other.whole;
+        self.escaped.extend(other.escaped);
+        self.opaque.extend(other.opaque);
+        self.opaque.sort_by_key(|access| access.op);
+        self.opaque.dedup();
+        self.handed.extend(other.handed);
+        self.by_area |= other.by_area;
+    }
+
     /// Whether an address no offset places escapes or is accessed.
     pub(crate) fn unplaced(&self) -> bool {
         self.whole
@@ -260,12 +271,25 @@ pub(crate) fn walk(
     }
     let sinks = Sinks::of(func, machine, stack_pointer, entry_sp, calls_refund_stack);
     let mut carried: Option<BTreeSet<i64>> = None;
+    // An entry edge runs the prologue again: an offset names a place per pass, so any escape or
+    // opaque access reaches the whole frame.
+    let reentered = func.cfg().has_entry_edge();
     loop {
-        let walked = Walker::new(func, defs, entry_sp, &sinks, carried.as_ref()).run();
+        let mut walked = Walker::new(func, defs, entry_sp, &sinks, carried.as_ref()).run();
         let promoted = promotable(&walked);
-        // An unplaced round is the answer: withdrawing a carrier only hides the flow through it.
-        let settled = walked.points.unplaced()
-            || (walked.carriers.iter()).all(|place| promoted.contains_key(place));
+        let unplaced = walked.points.unplaced();
+        // An unplaced round promotes nothing: its places keep their stores, so each stored
+        // address also leaves, as the round where no place carries states.
+        if unplaced && carried.as_ref().is_none_or(|carried| !carried.is_empty()) {
+            let kept = BTreeSet::new();
+            let stored = Walker::new(func, defs, entry_sp, &sinks, Some(&kept)).run();
+            walked.points.absorb(stored.points);
+        }
+        if reentered && !(walked.points.escaped.is_empty() && walked.points.opaque.is_empty()) {
+            walked.points.whole = true;
+        }
+        let settled =
+            unplaced || (walked.carriers.iter()).all(|place| promoted.contains_key(place));
         if settled {
             r2il::refusal_evidence!(
                 "frame-reach",

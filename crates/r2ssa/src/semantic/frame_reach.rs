@@ -172,6 +172,7 @@ fn leaving(
         (model.value_objects.get(&key)).is_some_and(|object| Some(*object) != unknown)
     };
     for access in &points.opaque {
+        // Preparation mints no memory operation, so an access with no operation was deleted.
         let Some(op) = graph.inst_for_op(access.op).and_then(|inst| graph.op(inst)) else {
             continue;
         };
