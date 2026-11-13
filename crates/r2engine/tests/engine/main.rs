@@ -18,6 +18,7 @@ mod discovery;
 mod gs;
 mod imports;
 mod language;
+mod layouts;
 mod legacy_route_interlock;
 mod linked_guard;
 mod listing;

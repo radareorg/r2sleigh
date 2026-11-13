@@ -2155,8 +2155,8 @@ rustc_lint::declare_lint!(
 );
 
 rustc_lint::declare_lint!(
-    /// A reference to `parse_c_type_like` outside the module that defines it reads a type back from
-    /// its spelling; types reach r2types as `SourceTypeGraph` (doc/adr-call-boundary.md, D168).
+    /// A production reference to `parse_c_type_like` outside its own body reads a type back from
+    /// its spelling; types reach r2types as `SourceTypeGraph` (doc/adr-call-boundary.md, D168, D347).
     pub TYPE_SPELLING_REPARSED,
     Deny,
     "a type reaches r2types through `SourceTypeGraph`, never by reparsing its spelling"
@@ -4971,7 +4971,6 @@ fn r2dec_direct_type_facts_mutator_impl_item(cx: &LateContext<'_>, item: &ImplIt
             | "with_type_facts"
             | "set_type_facts"
             | "set_known_function_signatures"
-            | "set_external_type_db"
     ) {
         return false;
     }
@@ -5973,10 +5972,7 @@ fn exhausted_read_through_sealed_stage<'tcx>(
     }
 }
 
-/// Files that may still reference `parse_c_type_like` outside its module. The list only falls (D168).
-const TYPE_SPELLING_REPARSE_ALLOWLIST: &[&str] = &[];
-
-/// Whether `expr` names `parse_c_type_like` outside its defining module, in production code.
+/// Whether `expr` names `parse_c_type_like` in production code outside its own body (D347).
 fn reparses_a_type_spelling(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     let ExprKind::Path(qpath) = &expr.kind else {
         return false;
@@ -5986,16 +5982,12 @@ fn reparses_a_type_spelling(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     else {
         return false;
     };
-    if cx.tcx.item_name(def_id).as_str() != "parse_c_type_like"
-        || cx.tcx.parent_module(expr.hir_id).to_def_id() == cx.tcx.parent(def_id)
-        || clippy_utils::is_in_test(cx.tcx, expr.hir_id)
-    {
-        return false;
-    }
-    let filename = format!("{:?}", cx.sess().source_map().span_to_filename(expr.span));
-    !TYPE_SPELLING_REPARSE_ALLOWLIST
-        .iter()
-        .any(|allowed| filename.contains(allowed))
+    let in_definition = cx
+        .enclosing_body
+        .is_some_and(|body| cx.tcx.hir_body_owner_def_id(body).to_def_id() == def_id);
+    cx.tcx.item_name(def_id).as_str() == "parse_c_type_like"
+        && !in_definition
+        && !clippy_utils::is_in_test(cx.tcx, expr.hir_id)
 }
 
 #[test]

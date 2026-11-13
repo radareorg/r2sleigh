@@ -1078,17 +1078,11 @@ pub(crate) fn recovered_type_outranks(
     existing: &CTypeLike,
     recovered: &CTypeLike,
     ptr_bits: u32,
-    type_db: &crate::ExternalTypeDb,
 ) -> bool {
     if crate::signature_infer::signature_types_are_equivalent(existing, recovered, ptr_bits) {
         return false;
     }
-    if crate::facts::signature_hint_can_replace_existing(
-        existing,
-        Some(recovered),
-        ptr_bits,
-        type_db,
-    ) {
+    if crate::facts::signature_hint_can_replace_existing(existing, Some(recovered), ptr_bits) {
         return true;
     }
     crate::facts::is_weak_storage_scalar_type(existing, ptr_bits)
@@ -1134,16 +1128,6 @@ pub(crate) fn recovered_scalar_signedness_outranks(
     existing_bits == recovered_bits
         && existing_signedness != recovered_signedness
         && recovered_signedness != crate::Signedness::Unknown
-}
-
-pub(crate) fn struct_name_from_pointer_type(ty: Option<&CTypeLike>) -> Option<&str> {
-    let CTypeLike::Pointer(inner) = ty? else {
-        return None;
-    };
-    match inner.as_ref() {
-        CTypeLike::Struct(name) | CTypeLike::Typedef { name, .. } => Some(name),
-        _ => None,
-    }
 }
 
 pub(crate) fn prepared_callee_resolution_facts(

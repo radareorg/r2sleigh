@@ -1,7 +1,6 @@
 use super::*;
 use rustc_hash::FxHashMap;
 use std::cell::Cell;
-use std::collections::BTreeMap;
 
 fn register_assumption(id: &str, name: &str, value: u64) -> r2ssa::AnalysisAssumption {
     r2ssa::AnalysisAssumption {
@@ -1638,58 +1637,6 @@ fn function_identity_keeps_ordered_aliases_for_summary_and_type_routes() {
 }
 
 #[test]
-fn external_layout_names_rewrite_placeholder_field_certificates() {
-    let signature = r2types::FunctionSignatureSpec {
-        ret_type: None,
-        params: vec![r2types::FunctionParamSpec {
-            name: "arg0".to_string(),
-            ty: Some(r2types::CTypeLike::Pointer(Box::new(
-                r2types::CTypeLike::Struct("DemoStruct".to_string()),
-            ))),
-        }],
-    };
-    let type_facts = FunctionTypeFacts {
-        merged_signature: Some(signature),
-        external_type_db: r2types::ExternalTypeDb {
-            structs: BTreeMap::from([(
-                "demostruct".to_string(),
-                r2types::ExternalStruct {
-                    name: "DemoStruct".to_string(),
-                    fields: BTreeMap::from([(
-                        48,
-                        r2types::ExternalField {
-                            name: "thirteenth".to_string(),
-                            offset: 48,
-                            ty: Some(r2types::CTypeLike::i32()),
-                        },
-                    )]),
-                },
-            )]),
-            ..r2types::ExternalTypeDb::default()
-        },
-        field_access_certificates: vec![r2types::FieldAccessCertificate {
-            slot: 0,
-            field_offset: 48,
-            field_name: "f_30".to_string(),
-            field_type: None,
-        }],
-        ..FunctionTypeFacts::default()
-    };
-    let mut facts = FunctionFacts::new(type_facts);
-
-    facts.normalize_field_certificates_from_external_layout();
-
-    assert_eq!(
-        facts.type_facts().field_access_certificates[0].field_name,
-        "thirteenth"
-    );
-    assert_eq!(
-        facts.type_facts().field_access_certificates[0].field_type,
-        Some(r2types::CTypeLike::i32())
-    );
-}
-
-#[test]
 fn function_analysis_artifact_request_builder_owns_analysis_policy() {
     let request = EngineFunctionAnalysisArtifactRequest::full_semantics_for_function(
         EngineFunctionAnalysisArtifactRequestInput {
@@ -2377,54 +2324,4 @@ fn a_panic_caught_at_rendering_refuses_from_its_own_phase_and_claims_none_before
     }
     let text = response.output.text();
     assert!(text.contains("a defect in the renderer"), "{text}");
-}
-
-/// Each scalar of an aggregate is named by the dotted path that reaches it,
-/// however deeply the source nests the structs on the way.
-#[test]
-fn every_scalar_of_a_nested_aggregate_is_named_at_any_depth() {
-    // `struct level0 { struct level1 { ... struct levelN { int32_t leaf; } } }`,
-    // each level one member wide.
-    const LEVELS: u32 = 9;
-    let mut types = vec![r2ssa::SourceType::new(
-        0,
-        r2ssa::SourceTypeKind::SignedInteger,
-        32,
-        32,
-    )];
-    let mut aggregates = Vec::new();
-    for level in 0..LEVELS {
-        types.push(r2ssa::SourceType::new(
-            level + 1,
-            r2ssa::SourceTypeKind::Struct {
-                aggregate_id: level,
-            },
-            32,
-            32,
-        ));
-        let (member, name) = if level + 1 == LEVELS {
-            (0, "leaf")
-        } else {
-            (level + 2, "inner")
-        };
-        aggregates.push(r2ssa::SourceAggregateLayout::new(
-            level,
-            level + 1,
-            32,
-            32,
-            format!("level{level}"),
-            [r2ssa::SourceAggregateMember::new(0, member, 0, 32, name)],
-        ));
-    }
-    let graph = r2ssa::SourceTypeGraph::new(types, aggregates).expect("nested graph");
-
-    let fields = external_struct_fields(&graph, &graph.aggregates()[0]);
-
-    let expected = format!("{}leaf", "inner.".repeat(LEVELS as usize - 1));
-    assert_eq!(
-        fields.get(&0).map(|field| field.name.as_str()),
-        Some(expected.as_str()),
-        "the scalar {} structs down lost its name",
-        LEVELS
-    );
 }

@@ -77,12 +77,12 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::CTypeLike;
 use crate::callee::{CalleeIdentityContext, CalleeResolutionFacts};
 use crate::facts::{
     CalleeFact, CalleeLinkage, FunctionTypeFacts, OutParamCertificateEvidence,
     OutParamCertificateSource, SignatureCertificateSource,
 };
-use crate::{CTypeLike, normalize_external_type_name};
 use r2ssa::InstId;
 use r2ssa::dense::IdMap;
 
@@ -1199,7 +1199,6 @@ impl SourceOwnedFunctionFacts {
         usage.extend(enriched.assumption_usage());
         enriched.assumption_usage = usage;
         enriched.display_names.absorb(source.display_names());
-        enriched.normalize_field_certificates_from_external_layout();
         enriched.install_calls(calls);
         let ptr_bits = source
             .machine_context()
@@ -1224,7 +1223,6 @@ impl SourceOwnedFunctionFacts {
             .collect();
         enriched.apply_return_type_fact(solved.returns.clone());
         // The types are final here; the projection the seal holds is built from them once.
-        enriched.normalize_field_certificates_from_external_layout();
         enriched.canonicalize_type_facts();
         Self::project_render(source, &mut enriched);
         ProjectedFacts { report: enriched }
@@ -1737,37 +1735,6 @@ impl FunctionFacts {
 
     pub fn replace_type_facts(&mut self, types: FunctionTypeFacts) {
         self.types = types.canonicalized();
-    }
-
-    pub fn normalize_field_certificates_from_external_layout(&mut self) {
-        let Some(signature) = self.types.merged_signature.as_ref() else {
-            return;
-        };
-        let type_db = &self.types.external_type_db;
-        if type_db.structs.is_empty() {
-            return;
-        }
-
-        for cert in &mut self.types.field_access_certificates {
-            let Some(param) = signature.params.get(cert.slot) else {
-                continue;
-            };
-            let Some(struct_name) = struct_name_from_pointer_type(param.ty.as_ref()) else {
-                continue;
-            };
-            let key = normalize_external_type_name(struct_name).to_ascii_lowercase();
-            let Some(field) = type_db
-                .structs
-                .get(&key)
-                .and_then(|structure| structure.fields.get(&cert.field_offset))
-            else {
-                continue;
-            };
-            cert.field_name = field.name.clone();
-            if cert.field_type.is_none() {
-                cert.field_type = field.ty.clone();
-            }
-        }
     }
 
     /// A member of an aggregate the source declared in a frame slot.
@@ -2797,7 +2764,6 @@ impl FunctionFacts {
         recovered: &crate::EvidenceTypes,
         ptr_bits: u32,
     ) {
-        let type_db = &self.types.external_type_db;
         let Some(signature) = self.types.merged_signature.as_mut() else {
             return;
         };
@@ -2826,7 +2792,7 @@ impl FunctionFacts {
             let replace = match param.ty.as_ref() {
                 None => true,
                 Some(existing) => {
-                    recovered_type_outranks(existing, candidate, ptr_bits, type_db)
+                    recovered_type_outranks(existing, candidate, ptr_bits)
                         || recovered_scalar_signedness_outranks(existing, candidate, ptr_bits)
                 }
             };

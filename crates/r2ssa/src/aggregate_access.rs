@@ -523,6 +523,40 @@ mod tests {
         );
     }
 
+    /// Nine single-member levels around one `int`: the leaf's path names every level.
+    #[test]
+    fn a_scalar_nested_at_any_depth_is_named_by_its_whole_path() {
+        const LEVELS: u32 = 9;
+        let mut types = vec![SourceType::new(0, SourceTypeKind::SignedInteger, 32, 32)];
+        let mut aggregates = Vec::new();
+        for level in 0..LEVELS {
+            let kind = SourceTypeKind::Struct {
+                aggregate_id: level,
+            };
+            types.push(SourceType::new(level + 1, kind, 32, 32));
+            let (member, name) = match level + 1 == LEVELS {
+                true => (0, "leaf"),
+                false => (level + 2, "inner"),
+            };
+            let members = [SourceAggregateMember::new(0, member, 0, 32, name)];
+            aggregates.push(SourceAggregateLayout::new(
+                level,
+                level + 1,
+                32,
+                32,
+                format!("level{level}"),
+                members,
+            ));
+        }
+        let graph = SourceTypeGraph::new(types, aggregates).expect("nested graph");
+        let leaf = scalar_leaf(&graph, &graph.aggregates()[0], 0, 32).expect("a leaf");
+        assert_eq!(
+            leaf.name,
+            format!("{}leaf", "inner.".repeat(LEVELS as usize - 1))
+        );
+        assert_eq!(leaf.path.len(), LEVELS as usize);
+    }
+
     fn source_interface(exact_graph: bool) -> SourceFunctionInterface {
         source_interface_with_pointer_storage(exact_graph, 0)
     }

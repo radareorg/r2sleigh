@@ -2,12 +2,6 @@
 
 use super::*;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum StructDeclSource {
-    LocalInferred,
-    ExternalTypeDb,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct InferredSignatureParam {
     pub name: String,
@@ -20,23 +14,6 @@ pub(crate) struct InferredSignature {
     /// `None` until something decides the result.
     pub ret_type: Option<CTypeLike>,
     pub params: Vec<InferredSignatureParam>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StructFieldCandidate {
-    pub name: String,
-    pub offset: u64,
-    /// The field's type, as a type.
-    pub field_type: CTypeLike,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct StructDeclCandidate {
-    pub name: String,
-    pub decl: String,
-    pub confidence: u8,
-    pub source: StructDeclSource,
-    pub fields: Vec<StructFieldCandidate>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -52,7 +29,10 @@ pub(crate) struct TypeAnalysisDiagnostics {
 /// This detached projection is not certificate authority. Authoritative
 /// the analysis derives it internally from a retained [`SsaArtifact`] owner.
 pub(crate) struct LocalStructArtifacts {
-    pub slot_element_strides: FxHashMap<usize, u64>,
+    /// Each slot's pointee aggregate size in bytes, read from the interface graph by type id (D345).
+    pub pointee_strides: Vec<Option<u64>>,
+    /// The member certificates r2ssa's projection states; the only member names (D345).
+    pub source_fields: Vec<crate::FieldAccessCertificate>,
     pub indexed_accesses: Vec<ScalarArrayRenderCandidate>,
 }
 
@@ -222,43 +202,16 @@ pub(crate) fn summary_suggests_pointer_param(
         || summary.sync_effects.iter().any(|effect| effect.arg == idx)
 }
 
-pub(crate) fn aggregate_lookup_keys(name: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut push = |candidate: &str| {
-        let key = candidate.trim().to_ascii_lowercase();
-        if !key.is_empty() && !out.contains(&key) {
-            out.push(key);
-        }
-    };
-
-    let trimmed = name.trim();
-    push(trimmed);
-    for prefix in ["struct ", "union ", "enum "] {
-        if let Some(rest) = trimmed.strip_prefix(prefix) {
-            push(rest);
-        }
-    }
-
-    let normalized = normalize_external_type_name(trimmed);
-    if normalized != "void *" {
-        push(&normalized);
-        for prefix in ["struct ", "union ", "enum "] {
-            if let Some(rest) = normalized.strip_prefix(prefix) {
-                push(rest);
-            }
-        }
-    }
-
-    out
-}
-
 /// An inferred type with C's own integer names kept as names, so a declared
 /// `int` or `size_t` is not mistaken for a width the body can refine.
-pub(crate) fn preserving_c_typedefs(ty: &CTypeLike, ptr_bits: u32) -> CTypeLike {
-    let rendered = render_signature_type(ty, ptr_bits);
-    match normalize_external_type_name(&rendered)
-        .trim()
-        .to_ascii_lowercase()
+pub(crate) fn preserving_c_typedefs(ty: &CTypeLike) -> CTypeLike {
+    let CTypeLike::Typedef { name, ty: target } = ty else {
+        return ty.clone();
+    };
+    match name
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
         .as_str()
     {
         "int" => c_int_type(),
@@ -268,7 +221,7 @@ pub(crate) fn preserving_c_typedefs(ty: &CTypeLike, ptr_bits: u32) -> CTypeLike 
         "long" | "long int" => typedef_type("long"),
         "unsigned long" | "unsigned long int" => typedef_type("unsigned long"),
         name @ ("size_t" | "ssize_t" | "ptrdiff_t" | "uintptr_t" | "intptr_t") => {
-            CTypeLike::named(name, ty.unaliased().clone())
+            CTypeLike::named(name, target.unaliased().clone())
         }
         _ => ty.clone(),
     }
@@ -276,18 +229,14 @@ pub(crate) fn preserving_c_typedefs(ty: &CTypeLike, ptr_bits: u32) -> CTypeLike 
 
 pub(crate) fn inferred_signature_to_spec(
     signature: &InferredSignature,
-    ptr_bits: u32,
 ) -> Option<FunctionSignatureSpec> {
-    let ret_type = signature
-        .ret_type
-        .as_ref()
-        .map(|ty| preserving_c_typedefs(ty, ptr_bits));
+    let ret_type = signature.ret_type.as_ref().map(preserving_c_typedefs);
     let params = signature
         .params
         .iter()
         .map(|param| FunctionParamSpec {
             name: param.name.clone(),
-            ty: Some(preserving_c_typedefs(&param.ty, ptr_bits)),
+            ty: Some(preserving_c_typedefs(&param.ty)),
         })
         .collect::<Vec<_>>();
     if ret_type.is_none() && params.is_empty() {
@@ -300,43 +249,12 @@ pub(crate) fn is_generic_signature_type(ty: Option<&CTypeLike>) -> bool {
     crate::is_generic_signature_type(ty)
 }
 
-/// Whether a typedef resolves: a stated target, a name C or `<stdint.h>` defines,
-/// a layout the type database holds, or a name this decompiler mints.
-pub(crate) fn type_db_resolves_type_name(
-    type_db: &ExternalTypeDb,
-    name: &str,
-    target: &CTypeLike,
-) -> bool {
+/// Whether a typedef resolves: a stated target, a name C or `<stdint.h>` defines, or a name
+/// this decompiler mints. A name some aggregate shares proves nothing (D345).
+pub(crate) fn typedef_resolves(name: &str, target: &CTypeLike) -> bool {
     !matches!(target, CTypeLike::Unknown)
         || matches!(name.trim(), "allocation_ptr" | "memory_ptr")
         || crate::convert::names_a_standard_type(name)
-        || external_named_aggregate_has_real_layout(type_db, name)
-}
-
-pub(crate) fn external_named_aggregate_has_real_layout(
-    type_db: &ExternalTypeDb,
-    name: &str,
-) -> bool {
-    ExternalTypeDb::lookup_keys(name).iter().any(|key| {
-        type_db
-            .structs
-            .get(key)
-            .is_some_and(|st| !st.fields.is_empty())
-            || type_db
-                .unions
-                .get(key)
-                .is_some_and(|un| !un.fields.is_empty())
-            || type_db
-                .enums
-                .get(key)
-                .is_some_and(|en| !en.variants.is_empty())
-    })
-}
-
-pub(crate) fn estimate_c_type_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> u64 {
-    estimate_type_like_size_bytes(ty, ptr_bits)
-        .filter(|size| *size > 0)
-        .unwrap_or(1)
 }
 
 pub(crate) fn estimate_type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64> {

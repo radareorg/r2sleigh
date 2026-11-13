@@ -897,12 +897,7 @@ fn a_recovered_pointer_replaces_a_storage_width_scalar() {
         signedness: crate::Signedness::Signed,
     };
     let recovered = CTypeLike::Pointer(Box::new(CTypeLike::Void));
-    assert!(recovered_type_outranks(
-        &existing,
-        &recovered,
-        64,
-        &crate::ExternalTypeDb::default()
-    ));
+    assert!(recovered_type_outranks(&existing, &recovered, 64));
 }
 
 /// A name carries what it stands for, so a width can be measured through
@@ -965,7 +960,7 @@ fn a_recovered_type_never_demotes_a_structured_one() {
         CTypeLike::typedef("int64_t"),
     ] {
         assert!(
-            !recovered_type_outranks(&existing, &recovered, 64, &crate::ExternalTypeDb::default()),
+            !recovered_type_outranks(&existing, &recovered, 64),
             "{recovered:?} must not replace a struct pointer"
         );
     }
@@ -978,12 +973,7 @@ fn a_recovered_type_that_renders_the_same_is_not_a_replacement() {
         bits: 32,
         signedness: crate::Signedness::Signed,
     };
-    assert!(!recovered_type_outranks(
-        &existing,
-        &recovered,
-        64,
-        &crate::ExternalTypeDb::default()
-    ));
+    assert!(!recovered_type_outranks(&existing, &recovered, 64));
 }
 
 #[test]
@@ -996,12 +986,7 @@ fn a_storage_width_scalar_is_not_evidence_for_replacing_another_one() {
         bits: 32,
         signedness: crate::Signedness::Unsigned,
     };
-    assert!(!recovered_type_outranks(
-        &existing,
-        &recovered,
-        64,
-        &crate::ExternalTypeDb::default()
-    ));
+    assert!(!recovered_type_outranks(&existing, &recovered, 64));
 }
 
 #[test]
