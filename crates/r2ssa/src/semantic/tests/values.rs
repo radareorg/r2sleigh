@@ -1190,3 +1190,63 @@ fn return_boundary_refusal_is_deterministic_name_and_address_independent() {
         assert!(refused.exit_stack_pointer.is_none());
     }
 }
+
+/// D254: a proven machine return with unproven values reads each register reaching it, no more: a
+/// register written over before it is dead, where the unproven-exit taint made it unknown.
+#[test]
+fn an_unproven_machine_return_reads_only_the_registers_reaching_it() {
+    let mut arch = composed_return_arch_spec("whole", "slice", "pc");
+    arch.add_register(RegisterDef::new("partial", 3, 2));
+    arch.add_register(RegisterDef::new("sp", 32, 8));
+    arch.add_register(RegisterDef::new("other", 40, 8));
+    let mut block = R2ILBlock::new(0x5180, 4);
+    for (dst, value, size) in [(40, 1, 8), (40, 2, 8), (0, 0, 4), (3, 1, 2)] {
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(dst, size),
+            src: Varnode::constant(value, size),
+        });
+    }
+    block.push(R2ILOp::Return {
+        target: Varnode::register(16, 8),
+    });
+    let interface = (composed_return_interface())
+        .with_return_address_storage(register_storage(16, 8))
+        .and_then(|interface| interface.with_stack_pointer_storage(register_storage(32, 8)))
+        .expect("typed machine roles");
+    let artifact =
+        SsaArtifact::raw_with_interface(&[block], Some(&crate::Arch::from(arch)), interface)
+            .expect("unproven machine return");
+    let boundary = (artifact.facts().boundaries.returns.values().next()).expect("return");
+    assert!(
+        !boundary.complete && boundary.machine_state_complete,
+        "{boundary:?}"
+    );
+    let graph = artifact.graph();
+    let other = (graph.insts.iter())
+        .filter(|inst| graph.written_storage(inst) == Some(register_storage(40, 8)))
+        .map(|inst| inst.id)
+        .collect::<Vec<_>>();
+    let [overwritten, reaching] = other[..] else {
+        panic!("two writes of `other`: {other:?}");
+    };
+    let live = |inst: InstId| graph.inst(inst).and_then(|inst| inst.output);
+    assert!(
+        boundary
+            .live_registers
+            .contains(&live(reaching).expect("value"))
+    );
+    assert!(
+        !boundary
+            .live_registers
+            .contains(&live(overwritten).expect("value"))
+    );
+    let state = |inst| artifact.obligations().state_of(inst);
+    assert_eq!(
+        state(overwritten),
+        Some(crate::obligation::SemanticInstructionState::ProvenDead)
+    );
+    assert_eq!(
+        state(reaching),
+        Some(crate::obligation::SemanticInstructionState::LiveObligation)
+    );
+}

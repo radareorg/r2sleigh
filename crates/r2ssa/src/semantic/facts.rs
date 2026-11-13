@@ -841,6 +841,9 @@ pub struct SourceReturnBoundaryFact {
     pub machine_state_complete: bool,
     /// The interface proves no result, so what a caller reads in the result carrier here is unproven.
     pub result_unproven: bool,
+    /// Where the interface is unproven and the machine state complete: every register definition
+    /// that may reach this return, a call's clobber left out (D254). Empty otherwise.
+    pub live_registers: Vec<ValueId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1885,6 +1885,9 @@ pub(crate) fn collect_source_boundary_facts(
         }
     }
 
+    let call_results = (facts.calls.values())
+        .flat_map(|call| call.results.iter().map(|result| result.value))
+        .collect::<crate::dense::IdSet<ValueId>>();
     for inst in &graph.insts {
         if matches!(inst.payload, InstPayload::Op(SSAOp::Return { .. })) {
             let mut values = Vec::new();
@@ -2012,6 +2015,17 @@ pub(crate) fn collect_source_boundary_facts(
                     .is_some_and(|interface| {
                         interface.return_kind() == SourceFunctionReturn::Unproven
                     });
+            // A proven machine return whose values are unproven hands the caller every register.
+            let live_registers = match (!complete && machine_state_complete, machine_context) {
+                (true, Some(machine)) => {
+                    let state = [
+                        machine.stack_pointer_carrier(),
+                        machine.return_address_carrier(),
+                    ];
+                    registers_reaching(graph, inst.id, &call_results, state.iter().flatten())
+                }
+                _ => Vec::new(),
+            };
             facts.returns.insert(
                 inst.id,
                 SourceReturnBoundaryFact {
@@ -2022,11 +2036,83 @@ pub(crate) fn collect_source_boundary_facts(
                     complete,
                     machine_state_complete,
                     result_unproven,
+                    live_registers,
                 },
             );
         }
     }
     facts
+}
+
+/// Every register definition that may reach `at`, a call's clobber and the `state` carriers left
+/// out: `O(R · (B + I))` for `R` register bytes (doc/adr-semantic-preservation-kernel.md, D254).
+fn registers_reaching<'a>(
+    graph: &SsaGraph,
+    at: InstId,
+    call_results: &crate::dense::IdSet<ValueId>,
+    state: impl Iterator<Item = &'a CanonicalStorageId>,
+) -> Vec<ValueId> {
+    use crate::graph::InstPayload;
+    let register_bytes = |inst: &crate::graph::GraphInst| {
+        (graph.written_storage(inst))
+            .filter(|storage| storage.space == CanonicalStorageSpace::Register)
+            .map(|storage| storage.offset..storage.offset + u64::from(storage.size))
+    };
+    let mut all = (graph.insts.iter())
+        .filter_map(register_bytes)
+        .flatten()
+        .collect::<BTreeSet<u64>>();
+    for carrier in state {
+        all.retain(|byte| {
+            !(carrier.offset..carrier.offset + u64::from(carrier.size)).contains(byte)
+        });
+    }
+    let Some(exit) = graph.inst(at) else {
+        return Vec::new();
+    };
+    let mut live = crate::dense::IdSet::<ValueId>::default();
+    let mut walked = vec![BTreeSet::<u64>::new(); graph.blocks.len()];
+    let mut work = vec![(exit.block, Some(at), all)];
+    while let Some((block, before, mut pending)) = work.pop() {
+        let Some(held) = graph.block(block) else {
+            continue;
+        };
+        let end = before
+            .and_then(|at| held.insts.iter().position(|inst| *inst == at))
+            .unwrap_or(held.insts.len());
+        for inst in held.insts[..end]
+            .iter()
+            .rev()
+            .filter_map(|id| graph.inst(*id))
+        {
+            let Some(bytes) = register_bytes(inst) else {
+                continue;
+            };
+            let before = pending.len();
+            for byte in bytes {
+                pending.remove(&byte);
+            }
+            let killed = matches!(inst.payload, InstPayload::Op(SSAOp::CallDefine { .. }))
+                && inst
+                    .output
+                    .is_none_or(|value| !call_results.contains(value));
+            if pending.len() < before && !killed {
+                live.extend(inst.output);
+            }
+            if pending.is_empty() {
+                break;
+            }
+        }
+        for predecessor in &held.predecessors {
+            let seen = &mut walked[predecessor.0 as usize];
+            let fresh = pending.difference(seen).copied().collect::<BTreeSet<_>>();
+            if !fresh.is_empty() {
+                seen.extend(fresh.iter().copied());
+                work.push((*predecessor, None, fresh));
+            }
+        }
+    }
+    live.iter().collect()
 }
 
 /// Whether `storage` still holds its entry byte at a return, on every path that reaches it.
