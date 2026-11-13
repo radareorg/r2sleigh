@@ -1775,10 +1775,17 @@ impl<'a> ObjectModelBuilder<'a> {
             }
             // A run an escaped address reaches is one object, seeded as a write span (D290); a
             // canary inside a declared slot or a write span is no compiler slot ending it.
+            // A write whose extent nothing bounds reaches the next boundary, or past every slot.
+            let mut reach = self.callee_write_spans.clone();
+            for root in &callee_spans.unbounded {
+                let end = boundaries.ceiling(*root).unwrap_or(i64::MAX);
+                let known = reach.entry(*root).or_insert(end);
+                *known = (*known).max(end);
+            }
             self.interior_canaries = super::frame_reach::interior_canaries(
                 (function, graph, facts),
                 self.declared_slots,
-                &self.callee_write_spans,
+                &reach,
                 self.machine_context,
             );
             let escapes = super::frame_reach::escape_spans(

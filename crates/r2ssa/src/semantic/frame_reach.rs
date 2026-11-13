@@ -303,8 +303,9 @@ pub(crate) fn escape_spans(
     spans
 }
 
-/// The canary stores inside a declared slot or a write span, each by its address: the one rule
-/// for "a canary inside an object", read before any escape run is seeded. `O(stores x spans)`.
+/// The canary stores inside a declared slot or a write span (an unbounded write's to its boundary),
+/// by address: the one rule for "a canary inside an object", read before any escape run is seeded.
+/// `O(stores x spans)`.
 pub(crate) fn interior_canaries(
     (function, graph, facts): (&SSAFunction, &SsaGraph, &crate::DecompilePrepFacts),
     declared: &DeclaredStackSlots,

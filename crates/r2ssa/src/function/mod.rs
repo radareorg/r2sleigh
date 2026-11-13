@@ -3367,7 +3367,7 @@ pub(crate) fn same_content_reads(
 }
 
 /// The reads a call's text does not perform: each `CallUse` whose register no argument its call's
-/// boundary passes names, a call with no boundary passing none (D283). `O(reads x arguments)`.
+/// boundary passes names, a call with no boundary passing none (D283). One pass, `O(insts x arguments)`.
 #[cfg_attr(
     dylint_lib = "r2sleigh_lints",
     allow(
@@ -3394,27 +3394,41 @@ pub(crate) fn unpassed_call_reads(
                 _ => None,
             })
             .collect::<Vec<_>>();
-        for read in graph.call_boundary_reads(boundary.at) {
-            passed.insert(read, registers.clone());
-        }
+        passed.insert(boundary.at, registers);
     }
-    let unpassed = |inst: crate::InstId, storage: CanonicalStorageId| {
-        !passed.get(inst).is_some_and(|registers| {
-            (registers.iter())
-                .any(|register| crate::semantic::register_storages_overlap(*register, storage))
-        })
-    };
-    (graph.insts.iter())
-        .filter_map(|inst| match inst.payload {
-            crate::graph::InstPayload::Op(SSAOp::CallUse { storage, .. }) => {
-                unpassed(inst.id, storage).then_some(crate::graph::UseSite {
-                    inst: inst.id,
-                    input_idx: 0,
-                })
+    // The reads minted just before a call are its own; any other run passes nothing.
+    let mut unpassed = std::collections::BTreeSet::new();
+    for block in &graph.blocks {
+        let mut run = Vec::new();
+        for &inst in &block.insts {
+            let op = graph.op(inst);
+            if let Some(SSAOp::CallUse { storage, .. }) = op {
+                run.push((inst, *storage));
+                continue;
             }
-            _ => None,
-        })
-        .collect()
+            let registers = op
+                .filter(|op| op.call().is_some())
+                .and_then(|_| passed.get(inst));
+            for (read, storage) in run.drain(..) {
+                let read_passed = registers.is_some_and(|registers| {
+                    (registers.iter()).any(|register| {
+                        crate::semantic::register_storages_overlap(*register, storage)
+                    })
+                });
+                if !read_passed {
+                    unpassed.insert(crate::graph::UseSite {
+                        inst: read,
+                        input_idx: 0,
+                    });
+                }
+            }
+        }
+        unpassed.extend(
+            run.into_iter()
+                .map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 }),
+        );
+    }
+    unpassed
 }
 
 fn block_at_mut<'a, V>(
