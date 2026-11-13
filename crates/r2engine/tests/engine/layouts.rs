@@ -13,6 +13,15 @@ const NEXT_VAL: &[u8] = &[
     0xc3, // 1006 ret
 ];
 
+/// `int two(struct node *a, struct node *b) { return a->next->val + b->next->val; }`.
+const TWO_NODES: &[u8] = &[
+    0x48, 0x8b, 0x47, 0x08, // 1000 mov rax, [rdi + 8]
+    0x48, 0x8b, 0x4e, 0x08, // 1004 mov rcx, [rsi + 8]
+    0x8b, 0x00, // 1008 mov eax, [rax]
+    0x03, 0x01, // 100a add eax, [rcx]
+    0xc3, // 100c ret
+];
+
 /// `void use(struct holder *h) { h->ops->f(h->ops->o, h->ops->o); }`.
 const LOADED_MEMBER_CALL: &[u8] = &[
     0x48, 0x83, 0xec, 0x08, // 1000 sub rsp, 8
@@ -261,6 +270,26 @@ fn a_projected_member_read_spells_as_the_member() {
     let mut open = program(NEXT_VAL, declared);
     let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
     assert!(text.contains("->next"), "{text}");
+}
+
+/// D359: each declared `struct node *` parameter spells its own `next`, from one grouping pass.
+#[test]
+fn two_projected_parameters_each_spell_their_member() {
+    use r2abi::{Parameter, Prototype};
+    let types = types();
+    let node = |name: &str| Parameter::new(types.node_pointer, "struct node *", Some(name));
+    let prototype = Prototype {
+        name: "two".to_owned(),
+        parameters: vec![node("a"), node("b")],
+        returns: "int".into(),
+        return_type: types.int,
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(types.graph);
+    declarations.declare_function(BASE, prototype);
+    let mut open = program(TWO_NODES, declarations);
+    let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
+    assert_eq!(text.matches("->next").count(), 2, "{text}");
 }
 
 /// D348 gate 7: `h->ops->f(...)` takes the member's two declared parameters.

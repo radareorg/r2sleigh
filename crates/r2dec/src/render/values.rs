@@ -884,9 +884,10 @@ impl<'a> Values<'a> {
             return members;
         }
         let fields = &self.artifact.certificates().parameter_fields;
+        let through = self.accesses_by_parameter(&pointing);
         for (slot, tag, base, stated) in pointing {
             if let Some(cells) = stated
-                .then(|| self.projected_members(slot, &base))
+                .then(|| self.projected_members(slot, &base, through.get(slot)?))
                 .flatten()
             {
                 if members.is_empty() {
@@ -939,25 +940,47 @@ impl<'a> Values<'a> {
         members
     }
 
-    /// Each cell an access through parameter `slot`, declared a pointer to the struct its root
-    /// projects into, addresses as `&base->member` (D359); `None` where one access is unprojected.
-    fn projected_members(&self, slot: usize, base: &CExpr) -> Option<Vec<(TermId, CExpr)>> {
+    /// The accesses through each stated pointing parameter, indexed by slot, in one pass over the
+    /// body's accesses: O(accesses + slots).
+    fn accesses_by_parameter(
+        &self,
+        pointing: &[(usize, String, CExpr, bool)],
+    ) -> Vec<Vec<r2ssa::StructuredAccessId>> {
+        let stated = (pointing.iter()).filter(|(_, _, _, stated)| *stated);
+        let Some(slots) = stated.map(|(slot, ..)| slot + 1).max() else {
+            return Vec::new();
+        };
+        let mut through = vec![Vec::new(); slots];
+        let facts = self.artifact.facts();
+        for access in facts.structured.memory_accesses.values() {
+            if let Some(expression) = facts.addresses.parameter_expression(access.address)
+                && let Some(accesses) = through.get_mut(expression.parameter)
+            {
+                accesses.push(access.id);
+            }
+        }
+        through
+    }
+
+    /// Each cell an access through parameter `slot` (`through`), declared a pointer to the struct
+    /// its root projects into, addresses as `&base->member` (D359); `None` where one is unprojected.
+    fn projected_members(
+        &self,
+        slot: usize,
+        base: &CExpr,
+        through: &[r2ssa::StructuredAccessId],
+    ) -> Option<Vec<(TermId, CExpr)>> {
         let interface = self.artifact.machine_context().function_interface()?;
         let projections = (self.artifact.aggregate_accesses())
             .projections_for_revision(interface.revision_identity())?;
-        let facts = self.artifact.facts();
-        let through = (facts.structured.memory_accesses.values()).filter(|access| {
-            (facts.addresses.parameter_expression(access.address))
-                .is_some_and(|expression| expression.parameter == slot)
-        });
-        let cells = through
-            .map(|access| {
+        let cells = (through.iter())
+            .map(|id| {
                 // A parameter root's struct is the declared pointee's node (`parameter_target`).
-                let projection = projections.get(&access.id)?;
+                let projection = projections.get(id)?;
                 let named = projection.root == r2ssa::AggregateRoot::Parameter(slot as u32)
                     && projection.graph == r2ssa::GraphOf::Interface
                     && projection.element_index.is_none();
-                let cell = self.roots.access(access.id)?.canonical;
+                let cell = self.roots.access(*id)?.canonical;
                 let member = CExpr::PtrMember {
                     base: Box::new(base.clone()),
                     member: projection.member_name.to_string(),
