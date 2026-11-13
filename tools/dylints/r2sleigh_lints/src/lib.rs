@@ -5982,9 +5982,11 @@ fn reparses_a_type_spelling(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
     else {
         return false;
     };
-    let in_definition = cx
-        .enclosing_body
-        .is_some_and(|body| cx.tcx.hir_body_owner_def_id(body).to_def_id() == def_id);
+    // A closure's body is its enclosing function's, so the definition's own closures recurse freely.
+    let in_definition = cx.enclosing_body.is_some_and(|body| {
+        let owner = cx.tcx.hir_body_owner_def_id(body).to_def_id();
+        cx.tcx.typeck_root_def_id(owner) == def_id
+    });
     cx.tcx.item_name(def_id).as_str() == "parse_c_type_like"
         && !in_definition
         && !clippy_utils::is_in_test(cx.tcx, expr.hir_id)
