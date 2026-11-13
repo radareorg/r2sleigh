@@ -1362,12 +1362,12 @@ const CALLS_HANDLER: &[u8] = &[
     0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, 0xff, 0xd7, 0x31, 0xc0, 0xc3,
 ];
 
-/// `main: lea rdi, [handler]; call wrapper`, and `wrapper` at 0x1020 as libc_nonshared's `atexit`
-/// (find `0x278e0`): `xor edx, edx; xor esi, esi; jmp __cxa_atexit`.
+/// `main: lea rdi, [handler]; call wrapper; xor edi, edi; ret`, and `wrapper` at 0x1020 as
+/// libc_nonshared's `atexit` (find `0x278e0`): `xor edx, edx; xor esi, esi; jmp __cxa_atexit`.
 const WRAPS_HANDLER: &[u8] = &[
     0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, // 1000 lea rdi, [rip + 9]: handler
     0xe8, 0x14, 0x00, 0x00, 0x00, // 1007 call 0x1020
-    0x31, 0xc0, 0xc3, // 100c xor eax, eax; ret
+    0x31, 0xff, 0xc3, // 100c xor edi, edi; ret
     0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
     0xcc, // 100f the handler's room
     0x31, 0xd2, 0x31, 0xf6, // 1020 xor edx, edx; xor esi, esi
@@ -1425,4 +1425,46 @@ fn a_take_into_no_void_slot_keeps_the_result() {
 fn a_handler_a_wrapper_hands_to_cxa_atexit_is_void_under_the_closed_world() {
     let closed = handler_rendered(at_exit(WRAPS_HANDLER, "__cxa_atexit"), true);
     assert!(closed.contains("void handler(void)"), "{closed}");
+}
+
+/// `main: lea rdi, [handler]; call 0x1020`; `0x1020: jmp 0x1028` and `0x1028: jmp 0x1020`: two
+/// wrappers forwarding to each other hand the address nowhere, so no slot is proven.
+const CYCLES_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, // 1000 lea rdi, [rip + 9]: handler
+    0xe8, 0x14, 0x00, 0x00, 0x00, // 1007 call 0x1020
+    0x31, 0xff, 0xc3, // 100c xor edi, edi; ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 100f the handler's room
+    0xeb, 0x06, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1020 jmp 0x1028
+    0xeb, 0xf6, // 1028 jmp 0x1020
+];
+
+#[test]
+fn wrappers_forwarding_to_each_other_prove_no_slot() {
+    let mut literal = at_exit(CYCLES_HANDLER, "atexit");
+    literal = literal.stating("other", BASE + 0x28);
+    let mut open = OpenProgram::of(literal);
+    open.analyse_program().expect("it surveys");
+    let text = open
+        .rendered(HANDLER)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(!text.contains("void handler("), "{text}");
+    assert_eq!(open.analysis_stats().defects, 0);
+}
+
+/// `main`'s extern for `atexit` spells the cited slot's code pointer.
+#[test]
+fn the_atexit_extern_spells_its_slot() {
+    let mut open = OpenProgram::of(at_exit(TAKES_HANDLER, "atexit"));
+    open.analyse_program().expect("it surveys");
+    let text = open
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(text.contains("int32_t atexit(void(*)(void));"), "{text}");
 }

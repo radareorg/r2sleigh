@@ -209,18 +209,4 @@ impl CallReadsAt for SiteReads<'_> {
                 .clobbering
                 .is_some_and(|model| model.clobbers(register))
     }
-
-    /// A register the convention clobbers and returns nothing in is no caller's after the return.
-    fn returned(&self, register: CanonicalStorageId) -> bool {
-        let Some(model) = self.clobbering else {
-            return true;
-        };
-        let result = (model.results.iter()).any(|lane| {
-            let lane = lane.storage;
-            lane.space == register.space
-                && lane.offset < register.offset + u64::from(register.size)
-                && register.offset < lane.offset + u64::from(lane.size)
-        });
-        result || !model.clobbers(register)
-    }
 }

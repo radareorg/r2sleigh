@@ -739,11 +739,11 @@ pub(crate) fn dispatch_tables(
         .chain(&later)
         .cloned()
         .collect::<Vec<_>>();
-    match native.rounds_hold(entry, &all, &later, restatement) {
+    match native.rounds_hold(entry, &all, restatement) {
         Ok(true) => tables.read = all,
         Ok(false) => r2il::refusal_evidence!(
             "dispatch-table",
-            "{entry:#x}: the whole body reads a later round's table otherwise; rounds dropped"
+            "{entry:#x}: the whole body reads a round's table otherwise; later rounds dropped"
         ),
         Err(refusal) if refusal.stopped() => return Tables::refused(refusal),
         Err(refusal) => r2il::refusal_evidence!(
@@ -2181,13 +2181,12 @@ impl<'a> Native<'a> {
         read.unwrap_or_else(|panicked| Err(panicked.into()))
     }
 
-    /// Whether the whole body walked through `tables` reads each of `later` as its round did: a
-    /// later round can add an edge into a region an earlier round sealed. One seal.
+    /// Whether the whole body walked through `tables` reads each of them as its round did: a later
+    /// round can add an edge into a region any earlier round sealed, the first included. One seal.
     fn rounds_hold(
         &self,
         entry: u64,
         tables: &[NativePointerTable],
-        later: &[NativePointerTable],
         restatement: Restatement,
     ) -> Result<bool, NativeRefusal> {
         let whole = self.walk_dispatched(entry, &dispatched(tables))?;
@@ -2199,7 +2198,7 @@ impl<'a> Native<'a> {
                 && read.size == table.table.entry_size()
                 && usize::try_from(read.count).is_ok_and(|count| count == table.targets.len())
         };
-        Ok((later.iter()).all(|table| reads.iter().any(|read| same(table, read))))
+        Ok((tables.iter()).all(|table| reads.iter().any(|read| same(table, read))))
     }
 
     /// The same request over another machine of this program.

@@ -1161,9 +1161,6 @@ pub trait CallReadsAt {
     fn reads(&self, block: usize, op: usize, register: CanonicalStorageId) -> bool;
     /// Whether the call overwrites `register` on every path back, so a later read is the call's.
     fn overwrites(&self, block: usize, op: usize, register: CanonicalStorageId) -> bool;
-    /// Whether a return hands `register` to the caller: a result or preserved register, or any
-    /// where the convention states no call effect.
-    fn returned(&self, register: CanonicalStorageId) -> bool;
 }
 
 impl<B: Lifted> CallerFlow<'_, B> {
@@ -1286,15 +1283,14 @@ impl<B: Lifted> CallerFlow<'_, B> {
                 }
             }
             if matches!(operation, R2ILOp::Return { .. }) {
-                return match reads.returned(register) {
-                    true => Walked::Other,
-                    false => Walked::Ends,
-                };
+                return Walked::Other;
             }
             if mode.inert {
                 continue;
             }
-            if (operation.inputs().into_iter()).any(|input| covers_any(input, register)) {
+            // An instruction cancelling a register against itself reads no value of it.
+            let read = (operation.inputs().into_iter()).any(|input| covers_any(input, register));
+            if read && !mode.blind {
                 return Walked::Other;
             }
             let written = operation
@@ -2444,10 +2440,6 @@ mod tests {
 
         fn overwrites(&self, _block: usize, _op: usize, _register: CanonicalStorageId) -> bool {
             self.overwritten
-        }
-
-        fn returned(&self, _register: CanonicalStorageId) -> bool {
-            true
         }
     }
 
