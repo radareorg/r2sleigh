@@ -250,6 +250,8 @@ pub struct Direct {
     calls: u32,
     /// The loader's own calls a cited row states (r2abi `loader_call`, D237, D240); their reads are in `lanes`.
     loader_calls: u32,
+    /// Every take hands the address into cited slots, one of which reads the result (D227).
+    slot_read: bool,
     /// Some caller the survey names was not read, so these calls may not be every call.
     unread: bool,
     /// Each lane a call returns on into its caller, which that caller's own calls decide.
@@ -324,6 +326,12 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
     // A call two bodies hold (one walk enters the other's tail) is one call, read once.
     let mut seen = BTreeSet::new();
     let mut returned = BTreeSet::new();
+    // A caller's site fates deposit its register effect, so a caller calling it reads it held (D354).
+    for caller in callee_first(&survey, survey.callers_of(callee)) {
+        if let Some(Ok(thumb)) = survey.walked_in(caller) {
+            let _ = db.get::<SiteFates>(&(caller, thumb));
+        }
+    }
     for &caller in survey.callers_of(callee) {
         let Some(Ok(thumb)) = survey.walked_in(caller) else {
             unread = true;
@@ -343,6 +351,7 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
         }
     }
     let loader_calls = loader_reads(db.inputs().source.container(), callee, &mut lanes);
+    let slot_read = slot_reads(db, callee, &mut lanes);
     let returned = forwarded_lanes(&mut lanes, returned, float_second).into();
     r2il::refusal_evidence!(
         "call-boundary",
@@ -352,9 +361,73 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
         lanes,
         calls,
         loader_calls,
+        slot_read,
         unread,
         returned,
     })
+}
+
+/// Whether every take of `callee` hands it into cited slots one of which reads an integer result,
+/// that read joined into `lanes` (D227): `O(log takes)` where nothing takes it.
+fn slot_reads<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    callee: u64,
+    lanes: &mut [JoinedLane; LANES],
+) -> bool {
+    let escapes = db.get::<super::reads::Escapes>(&()).ok();
+    let ways = escapes.as_deref().and_then(Option::as_ref);
+    if ways.is_none_or(|ways| ways.takes_of(callee).is_empty()) {
+        return false;
+    }
+    let proof = db.get::<super::slots::DeclaredSlot>(&callee).ok();
+    let Some(r2abi::ResultRead::Integer { bytes }) =
+        proof.and_then(|proof| *proof).map(|p| p.reads)
+    else {
+        return false;
+    };
+    let read = ByteMask((1u128 << bytes) - 1);
+    let lane = &mut lanes[usize::from(LaneId::INTEGER.0)];
+    join(lane, Some(Forwarded::Fate(LaneFate::Read(read))));
+    true
+}
+
+/// `callers` (ascending) ordered so each comes after every other one it calls, a cycle broken where
+/// the search enters it: a post-order over the calls among them, `O(E log k)` for `E` calls into them.
+fn callee_first(survey: &super::requests::Survey, callers: &[u64]) -> Vec<u64> {
+    let mut calls = vec![Vec::new(); callers.len()];
+    for (to, called) in callers.iter().enumerate() {
+        for caller in survey.callers_of(*called) {
+            if let Ok(from) = callers.binary_search(caller)
+                && from != to
+            {
+                calls[from].push(to);
+            }
+        }
+    }
+    let mut seen = vec![false; callers.len()];
+    let mut order = Vec::with_capacity(callers.len());
+    // Each caller enters the stack once, and each of its calls is stepped past once.
+    for root in 0..callers.len() {
+        if std::mem::replace(&mut seen[root], true) {
+            continue;
+        }
+        let mut stack = vec![(root, 0usize)];
+        while let Some((at, next)) = stack.last_mut() {
+            match calls[*at].get(*next).copied() {
+                Some(to) => {
+                    *next += 1;
+                    if !std::mem::replace(&mut seen[to], true) {
+                        stack.push((to, 0));
+                    }
+                }
+                None => {
+                    order.push(callers[*at]);
+                    stack.pop();
+                }
+            }
+        }
+    }
+    order
 }
 
 /// The loader's calls to `callee` a cited row states, each read joined into `lanes` (D237, D240):
@@ -401,6 +474,8 @@ pub struct Forwarding {
     pub lanes: [JoinedLane; LANES],
     pub calls: u32,
     pub loader_calls: u32,
+    /// A cited slot every take reaches reads the result (D227).
+    pub slot_read: bool,
     pub unread: bool,
     /// The callers a returned lane is dead in only if their own calls are every way in.
     pub forwarders: Box<[u64]>,
@@ -533,6 +608,7 @@ fn solve<S: Source + 'static>(
             lanes,
             calls: direct.calls,
             loader_calls: direct.loader_calls,
+            slot_read: direct.slot_read,
             unread: direct.unread,
             forwarders: std::mem::take(&mut forwarders[at]).into_iter().collect(),
         })
@@ -797,8 +873,11 @@ impl BoundaryResult {
             lane if lane.dead && dead => LaneDecision::Dead,
             _ => LaneDecision::Open,
         });
+        // A slot's declared return is how every caller calls, given no undefined call (C17 6.3.2.3p8).
+        let slotted = matches!(result, Some(SourceClosedResult::DeclaredVoid(_)))
+            || (result.is_some() && forwarding.slot_read);
         let premises = match result {
-            Some(SourceClosedResult::DeclaredVoid(_)) => vec![
+            Some(_) if slotted => vec![
                 r2source::Premise::ClosedWorld,
                 r2source::Premise::UbFreeSource,
             ],
@@ -832,8 +911,9 @@ fn declared_void<S: Source + 'static>(
     if !(0..LANES).all(quiet) || !super::reads::calls_claimed(db, entry, forwarding.calls) {
         return None;
     }
-    let origin = (*db.get::<super::slots::DeclaredSlot>(&entry).ok()?)?;
-    Some(SourceClosedResult::DeclaredVoid(origin))
+    let proof = (*db.get::<super::slots::DeclaredSlot>(&entry).ok()?)?;
+    (proof.reads == r2abi::ResultRead::Nothing)
+        .then_some(SourceClosedResult::DeclaredVoid(proof.origin))
 }
 
 /// Which lanes the body may hold a result in: an integer register no return defines holds none, and
