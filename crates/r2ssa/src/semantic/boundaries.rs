@@ -1888,6 +1888,7 @@ pub(crate) fn collect_source_boundary_facts(
     let call_results = (facts.calls.values())
         .flat_map(|call| call.results.iter().map(|result| result.value))
         .collect::<crate::dense::IdSet<ValueId>>();
+    let mut register_walk = None::<RegisterWalk<'_>>;
     for inst in &graph.insts {
         if matches!(inst.payload, InstPayload::Op(SSAOp::Return { .. })) {
             let mut values = Vec::new();
@@ -2016,16 +2017,9 @@ pub(crate) fn collect_source_boundary_facts(
                         interface.return_kind() == SourceFunctionReturn::Unproven
                     });
             // A proven machine return whose values are unproven hands the caller every register.
-            let live_registers = match (!complete && machine_state_complete, machine_context) {
-                (true, Some(machine)) => {
-                    let state = [
-                        machine.stack_pointer_carrier(),
-                        machine.return_address_carrier(),
-                    ];
-                    registers_reaching(graph, inst.id, &call_results, state.iter().flatten())
-                }
-                _ => Vec::new(),
-            };
+            let unproven = machine_context.filter(|_| !complete && machine_state_complete);
+            let reads = (graph, &call_results);
+            let live_registers = live_registers(&mut register_walk, reads, unproven, inst.id);
             facts.returns.insert(
                 inst.id,
                 SourceReturnBoundaryFact {
@@ -2044,75 +2038,158 @@ pub(crate) fn collect_source_boundary_facts(
     facts
 }
 
-/// Every register definition that may reach `at`, a call's clobber and the `state` carriers left
-/// out: `O(R · (B + I))` for `R` register bytes (doc/adr-semantic-preservation-kernel.md, D254).
-fn registers_reaching<'a>(
-    graph: &SsaGraph,
-    at: InstId,
-    call_results: &crate::dense::IdSet<ValueId>,
-    state: impl Iterator<Item = &'a CanonicalStorageId>,
-) -> Vec<ValueId> {
-    use crate::graph::InstPayload;
-    let register_bytes = |inst: &crate::graph::GraphInst| {
-        (graph.written_storage(inst))
-            .filter(|storage| storage.space == CanonicalStorageSpace::Register)
-            .map(|storage| storage.offset..storage.offset + u64::from(storage.size))
-    };
-    let mut all = (graph.insts.iter())
-        .filter_map(register_bytes)
-        .flatten()
-        .collect::<BTreeSet<u64>>();
-    for carrier in state {
-        all.retain(|byte| {
-            !(carrier.offset..carrier.offset + u64::from(carrier.size)).contains(byte)
-        });
+#[cfg(test)]
+thread_local! {
+    /// How many register walks this thread built: one per function with an unproven machine return.
+    pub(crate) static REGISTER_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The register bytes a function writes, the machine-state carriers left out, and one per-block
+/// table of the bytes walked through, built once for every unproven machine return (D254).
+struct RegisterWalk<'g> {
+    graph: &'g SsaGraph,
+    call_results: &'g crate::dense::IdSet<ValueId>,
+    all: BTreeSet<u64>,
+    walked: Vec<BTreeSet<u64>>,
+    touched: Vec<usize>,
+}
+
+impl<'g> RegisterWalk<'g> {
+    /// One pass over the instructions: `O(I + R)` for `R` register bytes.
+    fn of<'a>(
+        graph: &'g SsaGraph,
+        call_results: &'g crate::dense::IdSet<ValueId>,
+        state: impl Iterator<Item = &'a CanonicalStorageId>,
+    ) -> Self {
+        #[cfg(test)]
+        REGISTER_WALKS.with(|walks| walks.set(walks.get() + 1));
+        let mut all = (graph.insts.iter())
+            .filter_map(|inst| register_bytes(graph, inst))
+            .flatten()
+            .collect::<BTreeSet<u64>>();
+        for carrier in state {
+            let carried = carrier.offset..carrier.offset + u64::from(carrier.size);
+            all.retain(|byte| !carried.contains(byte));
+        }
+        let walked = vec![BTreeSet::new(); graph.blocks.len()];
+        Self {
+            graph,
+            call_results,
+            all,
+            walked,
+            touched: Vec::new(),
+        }
     }
-    let Some(exit) = graph.inst(at) else {
-        return Vec::new();
-    };
-    let mut live = crate::dense::IdSet::<ValueId>::default();
-    let mut walked = vec![BTreeSet::<u64>::new(); graph.blocks.len()];
-    let mut work = vec![(exit.block, Some(at), all)];
-    while let Some((block, before, mut pending)) = work.pop() {
-        let Some(held) = graph.block(block) else {
-            continue;
+
+    /// Every register definition that may reach `at`, a call's clobber left out; only the blocks
+    /// a walk marked are cleared after it: `O(R · (B_r + I_r))` over what this return reaches.
+    fn reaching(&mut self, at: InstId) -> Vec<ValueId> {
+        let Some(exit) = self.graph.inst(at) else {
+            return Vec::new();
         };
+        let mut live = Vec::new();
+        let mut work = vec![(exit.block, Some(at), self.all.clone())];
+        while let Some((block, before, pending)) = work.pop() {
+            let Some(held) = self.graph.block(block) else {
+                continue;
+            };
+            let pending = self.scan(held, before, pending, &mut live);
+            self.spread(held, &pending, &mut work);
+        }
+        for at in self.touched.drain(..) {
+            self.walked[at].clear();
+        }
+        live.sort_unstable();
+        live.dedup();
+        live
+    }
+
+    /// Walk `held` back from `before`, keeping each definition of a pending byte; what is pending at
+    /// its head.
+    fn scan(
+        &self,
+        held: &crate::graph::GraphBlock,
+        before: Option<InstId>,
+        mut pending: BTreeSet<u64>,
+        live: &mut Vec<ValueId>,
+    ) -> BTreeSet<u64> {
         let end = before
             .and_then(|at| held.insts.iter().position(|inst| *inst == at))
             .unwrap_or(held.insts.len());
-        for inst in held.insts[..end]
-            .iter()
-            .rev()
-            .filter_map(|id| graph.inst(*id))
-        {
-            let Some(bytes) = register_bytes(inst) else {
+        let insts = held.insts[..end].iter().rev();
+        for inst in insts.filter_map(|id| self.graph.inst(*id)) {
+            let Some(bytes) = register_bytes(self.graph, inst) else {
                 continue;
             };
             let before = pending.len();
-            for byte in bytes {
-                pending.remove(&byte);
-            }
-            let killed = matches!(inst.payload, InstPayload::Op(SSAOp::CallDefine { .. }))
-                && inst
-                    .output
-                    .is_none_or(|value| !call_results.contains(value));
-            if pending.len() < before && !killed {
+            bytes.for_each(|byte| _ = pending.remove(&byte));
+            if pending.len() < before && !self.killed(inst) {
                 live.extend(inst.output);
             }
             if pending.is_empty() {
                 break;
             }
         }
+        pending
+    }
+
+    /// Whether `inst` is a call's clobber: a `CallDefine` no boundary states as a result.
+    fn killed(&self, inst: &crate::graph::GraphInst) -> bool {
+        matches!(inst.payload, InstPayload::Op(SSAOp::CallDefine { .. }))
+            && inst
+                .output
+                .is_none_or(|value| !self.call_results.contains(value))
+    }
+
+    /// Hand each predecessor of `held` the pending bytes not yet walked through it.
+    fn spread(
+        &mut self,
+        held: &crate::graph::GraphBlock,
+        pending: &BTreeSet<u64>,
+        work: &mut Vec<(crate::graph::BlockId, Option<InstId>, BTreeSet<u64>)>,
+    ) {
         for predecessor in &held.predecessors {
-            let seen = &mut walked[predecessor.0 as usize];
+            let at = predecessor.0 as usize;
+            let seen = &mut self.walked[at];
             let fresh = pending.difference(seen).copied().collect::<BTreeSet<_>>();
-            if !fresh.is_empty() {
-                seen.extend(fresh.iter().copied());
-                work.push((*predecessor, None, fresh));
+            if fresh.is_empty() {
+                continue;
             }
+            if seen.is_empty() {
+                self.touched.push(at);
+            }
+            seen.extend(fresh.iter().copied());
+            work.push((*predecessor, None, fresh));
         }
     }
-    live.iter().collect()
+}
+
+/// The registers reaching unproven machine return `at`, from the function's one walk (D254).
+fn live_registers<'g>(
+    walk: &mut Option<RegisterWalk<'g>>,
+    (graph, call_results): (&'g SsaGraph, &'g crate::dense::IdSet<ValueId>),
+    machine: Option<&SourceMachineContext>,
+    at: InstId,
+) -> Vec<ValueId> {
+    let Some(machine) = machine else {
+        return Vec::new();
+    };
+    let state = [
+        machine.stack_pointer_carrier(),
+        machine.return_address_carrier(),
+    ];
+    let of = || RegisterWalk::of(graph, call_results, state.iter().flatten());
+    walk.get_or_insert_with(of).reaching(at)
+}
+
+/// The register bytes `inst` writes.
+fn register_bytes(
+    graph: &SsaGraph,
+    inst: &crate::graph::GraphInst,
+) -> Option<std::ops::Range<u64>> {
+    (graph.written_storage(inst))
+        .filter(|storage| storage.space == CanonicalStorageSpace::Register)
+        .map(|storage| storage.offset..storage.offset + u64::from(storage.size))
 }
 
 /// Whether `storage` still holds its entry byte at a return, on every path that reaches it.

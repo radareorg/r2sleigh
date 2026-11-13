@@ -1250,3 +1250,44 @@ fn an_unproven_machine_return_reads_only_the_registers_reaching_it() {
         Some(crate::obligation::SemanticInstructionState::LiveObligation)
     );
 }
+
+/// D254: one function's unproven machine returns share one register walk, built once.
+#[test]
+fn every_unproven_machine_return_of_a_function_shares_one_register_walk() {
+    let mut arch = composed_return_arch_spec("whole", "slice", "pc");
+    arch.add_register(RegisterDef::new("partial", 3, 2));
+    arch.add_register(RegisterDef::new("sp", 32, 8));
+    arch.add_register(RegisterDef::new("cond", 48, 1));
+    let mut entry = R2ILBlock::new(0x5300, 4);
+    entry.push(R2ILOp::CBranch {
+        target: Varnode::ram(0x5320, 8),
+        cond: Varnode::register(48, 1),
+    });
+    let exit = |addr| {
+        let mut block = R2ILBlock::new(addr, 4);
+        for (dst, size) in [(0, 4), (3, 2)] {
+            block.push(R2ILOp::Copy {
+                dst: Varnode::register(dst, size),
+                src: Varnode::constant(1, size),
+            });
+        }
+        block.push(R2ILOp::Return {
+            target: Varnode::register(16, 8),
+        });
+        block
+    };
+    let interface = (composed_return_interface())
+        .with_return_address_storage(register_storage(16, 8))
+        .and_then(|interface| interface.with_stack_pointer_storage(register_storage(32, 8)))
+        .expect("typed machine roles");
+    super::super::boundaries::REGISTER_WALKS.with(|walks| walks.set(0));
+    let blocks = [entry, exit(0x5304), exit(0x5320)];
+    let artifact =
+        SsaArtifact::raw_with_interface(&blocks, Some(&crate::Arch::from(arch)), interface)
+            .expect("two unproven machine returns");
+    let returns = artifact.facts().boundaries.returns.values();
+    let unproven = returns.filter(|boundary| !boundary.complete && boundary.machine_state_complete);
+    assert_eq!(unproven.count(), 2);
+    let walks = super::super::boundaries::REGISTER_WALKS.with(std::cell::Cell::get);
+    assert_eq!(walks, 1);
+}
