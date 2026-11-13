@@ -69,9 +69,6 @@ pub enum AssumptionValue {
         name: Option<String>,
         values: Vec<i64>,
     },
-    TypeHint {
-        ty: String,
-    },
     Branch {
         truth: bool,
     },
@@ -229,9 +226,9 @@ impl AssumptionUsageReport {
 mod tests {
     use super::*;
 
-    fn reg_type_assumption(
+    fn reg_assumption(
         reg: &str,
-        ty: &str,
+        value: u64,
         provenance: AssumptionProvenance,
     ) -> AnalysisAssumption {
         AnalysisAssumption {
@@ -239,7 +236,7 @@ mod tests {
             subject: AssumptionSubject::Register {
                 name: reg.to_string(),
             },
-            value: AssumptionValue::TypeHint { ty: ty.to_string() },
+            value: AssumptionValue::Constant { value },
             scope: AssumptionScope::Function,
             provenance,
         }
@@ -247,19 +244,15 @@ mod tests {
 
     #[test]
     fn assumption_set_deduplicates_same_binding_and_keeps_strongest_provenance() {
-        let mut assumptions = AssumptionSet::new(vec![reg_type_assumption(
+        let mut assumptions = AssumptionSet::new(vec![reg_assumption(
             "rdi",
-            "int32_t",
+            32,
             AssumptionProvenance::ImportedContext,
         )]);
-        assumptions.push(reg_type_assumption(
-            "rdi",
-            "int32_t",
-            AssumptionProvenance::User,
-        ));
+        assumptions.push(reg_assumption("rdi", 32, AssumptionProvenance::User));
         assumptions.extend([
-            reg_type_assumption("rsi", "size_t", AssumptionProvenance::ImportedContext),
-            reg_type_assumption("rsi", "size_t", AssumptionProvenance::Derived),
+            reg_assumption("rsi", 64, AssumptionProvenance::ImportedContext),
+            reg_assumption("rsi", 64, AssumptionProvenance::Derived),
         ]);
 
         assert_eq!(assumptions.items.len(), 2);

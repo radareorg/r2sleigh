@@ -3,41 +3,6 @@
 use super::super::*;
 use super::*;
 
-/// Parameters take the convention's argument registers in order, whatever the architecture.
-#[test]
-fn abi_register_params_are_the_stated_argument_registers() {
-    let signature = super::InferredSignature {
-        function_name: "f".to_string(),
-        signature: "int f(long a, long b, long c)".to_string(),
-        ret_type: Some(parse_test_type("int", 64)),
-        params: ["a", "b", "c"]
-            .map(|name| super::InferredSignatureParam {
-                name: name.to_string(),
-                ty: parse_test_type("int64_t", 64),
-            })
-            .to_vec(),
-        callconv: String::new(),
-        arch: String::new(),
-    };
-    let regs = |stated: &[&str]| {
-        let stated = stated
-            .iter()
-            .map(|name| name.to_string())
-            .collect::<Vec<_>>();
-        super::inferred_signature_abi_register_params(&signature, &stated)
-            .into_iter()
-            .map(|param| param.reg)
-            .collect::<Vec<_>>()
-    };
-
-    assert_eq!(regs(&["x0", "x1", "x2", "x3"]), vec!["x0", "x1", "x2"]);
-    assert_eq!(regs(&["rdi", "rsi"]), vec!["rdi", "rsi"]);
-    assert!(
-        regs(&[]).is_empty(),
-        "a convention that states none binds none"
-    );
-}
-
 #[test]
 fn source_owned_enrichment_without_interface_claims_no_parameters() {
     let mut arch = r2il::ArchSpec::new("x86-64");
@@ -67,55 +32,6 @@ fn source_owned_enrichment_without_interface_claims_no_parameters() {
 }
 
 #[test]
-fn same_parameter_storage_follows_the_machine_not_the_spelling() {
-    let x86 = x86_64_register_identity();
-
-    // A low alias is the same parameter, at every width.
-    assert!(x86.same_parameter_storage("rdi", "edi"));
-    assert!(x86.same_parameter_storage("rdi", "dil"));
-    assert!(x86.same_parameter_storage("rdi", "RDI"));
-
-    // `dh` is a byte of `rdx` and is not the byte `rdx` is passed in. The
-    // name table this replaced gave both the key "dx" and said yes, so an
-    // externally supplied type assumption for `dh` was applied to the
-    // `rdx` parameter and a stack slot was named after it.
-    assert!(!x86.same_parameter_storage("rdx", "dh"));
-    assert!(x86.same_parameter_storage("rdx", "dl"));
-    assert!(!x86.same_parameter_storage("rax", "ah"));
-    assert!(x86.same_parameter_storage("rax", "al"));
-
-    // Different registers stay different however they are spelled.
-    assert!(!x86.same_parameter_storage("rdi", "rdx"));
-    assert!(!x86.same_parameter_storage("al", "dl"));
-}
-
-#[test]
-fn same_parameter_storage_needs_no_per_architecture_table() {
-    // The same predicate, with no arm64 case written anywhere: `w0` is the
-    // low half of `x0`, and `s7` the low quarter of `v7`, because that is
-    // where the machine puts them.
-    let arm64 = register_identity_from(&[
-        ("x0", 0x00, 8),
-        ("w0", 0x00, 4),
-        ("x8", 0x40, 8),
-        ("w8", 0x40, 4),
-        ("x29", 0xe8, 8),
-        ("v7", 0x100, 16),
-        ("d7", 0x100, 8),
-        ("s7", 0x100, 4),
-    ]);
-    assert!(arm64.same_parameter_storage("x0", "w0"));
-    assert!(arm64.same_parameter_storage("v7", "s7"));
-    assert!(arm64.same_parameter_storage("v7", "d7"));
-    assert!(!arm64.same_parameter_storage("x0", "w8"));
-
-    // A name the machine does not declare is only ever itself.
-    assert!(!arm64.same_parameter_storage("foo", "bar"));
-    assert!(arm64.same_parameter_storage("foo", "FOO"));
-    assert!(!arm64.same_parameter_storage("x0", "foo"));
-}
-
-#[test]
 fn main_name_without_signature_evidence_does_not_fabricate_signature_output() {
     let parsed_context = ParsedExternalContext::default();
     let root = r2ssa::InterprocFunctionId(0x401000);
@@ -138,11 +54,8 @@ fn main_name_without_signature_evidence_does_not_fabricate_signature_output() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.main".to_string(),
-            signature: "void sym.main ()".to_string(),
             ret_type: Some(parse_test_type("void", 64)),
             params: Vec::new(),
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
@@ -164,66 +77,6 @@ fn main_name_without_signature_evidence_does_not_fabricate_signature_output() {
                 .sources
                 .contains(&SignatureCertificateSource::ExternalContext)),
         "name-only main canonicalization must not create external-context authority"
-    );
-}
-
-#[test]
-fn user_type_hint_replaces_weak_pointer_sized_generic_arg() {
-    let mut parsed_context = ParsedExternalContext {
-        assumptions: r2ssa::AssumptionSet::new(vec![r2ssa::AnalysisAssumption {
-            id: Some("rdi-int32".to_string()),
-            subject: r2ssa::AssumptionSubject::Register {
-                name: "rdi".to_string(),
-            },
-            value: r2ssa::AssumptionValue::TypeHint {
-                ty: "int32_t".to_string(),
-            },
-            scope: r2ssa::AssumptionScope::Function,
-            provenance: r2ssa::AssumptionProvenance::User,
-        }]),
-        register_params: vec![crate::context::ExternalRegisterParamSpec {
-            name: "arg1".to_string(),
-            ty: Some(CTypeLike::Int {
-                bits: 64,
-                signedness: Signedness::Signed,
-            }),
-            reg: "EDI".to_string(),
-        }],
-        ..ParsedExternalContext::default()
-    };
-    let mut inferred_signature = InferredSignature {
-        function_name: "sym.demo".to_string(),
-        signature: "int64_t sym.demo(int64_t)".to_string(),
-        ret_type: Some(parse_test_type("int64_t", 64)),
-        params: vec![InferredSignatureParam {
-            name: "arg1".to_string(),
-            ty: parse_test_type("int64_t", 64),
-        }],
-        callconv: "amd64".to_string(),
-        arch: "x86-64".to_string(),
-    };
-
-    let usage = apply_type_hint_assumptions_to_context(
-        &mut parsed_context,
-        &mut inferred_signature,
-        64,
-        Some(&SemanticTypeProjection::default()),
-        &x86_64_register_identity(),
-    );
-
-    assert_eq!(usage.applied.len(), 1);
-    assert!(usage.ignored.is_empty());
-    assert!(usage.conflicts.is_empty());
-    assert_eq!(spelled(&inferred_signature.params[0].ty), "int32_t");
-    assert_eq!(
-        render_signature_type(
-            parsed_context.register_params[0]
-                .ty
-                .as_ref()
-                .expect("register type"),
-            64
-        ),
-        "int32_t"
     );
 }
 
@@ -264,11 +117,8 @@ fn interproc_heap_alloc_summary_upgrades_pointer_sized_scalar_return() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.alloc_wrapper".to_string(),
-            signature: "int64_t sym.alloc_wrapper ()".to_string(),
             ret_type: Some(parse_test_type("int64_t", 64)),
             params: Vec::new(),
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -362,14 +212,11 @@ fn interproc_returned_arg_summary_propagates_param_type_and_callee_facts() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.identity".to_string(),
-            signature: "int64_t sym.identity (char * src)".to_string(),
             ret_type: Some(parse_test_type("int64_t", 64)),
             params: vec![InferredSignatureParam {
                 name: "src".to_string(),
                 ty: parse_test_type("char *", 64),
             }],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -417,14 +264,11 @@ fn local_inferred_scalar_param_narrows_external_wide_signature() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym._check_secret".to_string(),
-            signature: "int64_t sym._check_secret (int32_t arg1)".to_string(),
             ret_type: Some(parse_test_type("int64_t", 64)),
             params: vec![InferredSignatureParam {
                 name: "arg1".to_string(),
                 ty: parse_test_type("int32_t", 64),
             }],
-            callconv: String::new(),
-            arch: "aarch64".to_string(),
         },
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
@@ -493,8 +337,6 @@ fn exact_named_external_size_signature_blocks_local_byte_narrowing() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "dbg.scan_example".to_string(),
-            signature: "uint8_t dbg.scan_example (uint8_t* buf, uint8_t n, uint8_t a, uint8_t b)"
-                .to_string(),
             ret_type: Some(parse_test_type("uint8_t", 64)),
             params: vec![
                 InferredSignatureParam {
@@ -514,8 +356,6 @@ fn exact_named_external_size_signature_blocks_local_byte_narrowing() {
                     ty: parse_test_type("uint8_t", 64),
                 },
             ],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
@@ -578,7 +418,6 @@ fn authoritative_external_signature_keeps_param_count_over_longer_local_signatur
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.alloc_and_copy".to_string(),
-            signature: "int8_t * sym.alloc_and_copy (int8_t * src, uint8_t len, int64_t arg3, int64_t arg4)".to_string(),
             ret_type: Some(parse_test_type("int8_t *", 64)),
             params: vec![
                 InferredSignatureParam {
@@ -598,8 +437,6 @@ fn authoritative_external_signature_keeps_param_count_over_longer_local_signatur
                     ty: parse_test_type("int64_t", 64),
                 },
             ],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context,
         local_structs: LocalStructArtifacts::default(),
@@ -711,14 +548,11 @@ fn inferred_signature_certificate_records_local_source() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.local_exact".to_string(),
-            signature: "int32_t sym.local_exact (int32_t value)".to_string(),
             ret_type: Some(parse_test_type("int32_t", 64)),
             params: vec![InferredSignatureParam {
                 name: "value".to_string(),
                 ty: parse_test_type("int32_t", 64),
             }],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -734,46 +568,6 @@ fn inferred_signature_certificate_records_local_source() {
     assert_eq!(
         signature_certificate.sources,
         vec![SignatureCertificateSource::LocalInference]
-    );
-}
-
-#[test]
-fn stack_local_type_assumption_does_not_claim_signature_authority() {
-    let stack_assumption = r2ssa::AnalysisAssumption {
-        id: None,
-        subject: r2ssa::AssumptionSubject::StackSlot {
-            base: r2ssa::StackAddressBase::StackPointer,
-            offset: -8,
-        },
-        value: r2ssa::AssumptionValue::TypeHint {
-            ty: "int64_t".to_string(),
-        },
-        scope: r2ssa::AssumptionScope::Function,
-        provenance: r2ssa::AssumptionProvenance::ImportedContext,
-    };
-    let mut usage = r2ssa::AssumptionUsageReport {
-        applied: vec![stack_assumption],
-        ..Default::default()
-    };
-    let context = ParsedExternalContext::default();
-
-    assert!(
-        applied_type_assumption_parameter_slots(&usage, &context, &x86_64_register_identity())
-            .is_empty()
-    );
-
-    usage.applied.push(r2ssa::AnalysisAssumption {
-        id: None,
-        subject: r2ssa::AssumptionSubject::Parameter { index: 1 },
-        value: r2ssa::AssumptionValue::TypeHint {
-            ty: "uint64_t".to_string(),
-        },
-        scope: r2ssa::AssumptionScope::Function,
-        provenance: r2ssa::AssumptionProvenance::ImportedContext,
-    });
-    assert_eq!(
-        applied_type_assumption_parameter_slots(&usage, &context, &x86_64_register_identity()),
-        FxHashSet::from_iter([1])
     );
 }
 
@@ -820,14 +614,11 @@ fn interproc_heap_alloc_summary_upgrades_generic_return_type() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.alloc_wrapper".to_string(),
-            signature: "void * sym.alloc_wrapper (int64_t n)".to_string(),
             ret_type: Some(parse_test_type("unknown_t", 64)),
             params: vec![InferredSignatureParam {
                 name: "n".to_string(),
                 ty: parse_test_type("int64_t", 64),
             }],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -881,14 +672,11 @@ fn interproc_void_return_summary_replaces_weak_scalar_return_type() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.side_effect_worker".to_string(),
-            signature: "int64_t sym.side_effect_worker (int64_t arg1)".to_string(),
             ret_type: Some(parse_test_type("int64_t", 64)),
             params: vec![InferredSignatureParam {
                 name: "arg1".to_string(),
                 ty: parse_test_type("int64_t", 64),
             }],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -990,14 +778,11 @@ fn interproc_escape_only_does_not_certify_out_param() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.escape_user".to_string(),
-            signature: "void sym.escape_user (int64_t p)".to_string(),
             ret_type: Some(parse_test_type("void", 64)),
             params: vec![InferredSignatureParam {
                 name: "p".to_string(),
                 ty: parse_test_type("int64_t", 64),
             }],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -1036,14 +821,11 @@ fn interproc_arg_write_out_param_certificate_records_write_evidence() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.write_user".to_string(),
-            signature: "void sym.write_user (void *out)".to_string(),
             ret_type: Some(parse_test_type("void", 64)),
             params: vec![InferredSignatureParam {
                 name: "out".to_string(),
                 ty: parse_test_type("void *", 64),
             }],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -1101,14 +883,11 @@ fn interproc_memory_write_out_param_certificate_records_memory_write_evidence() 
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.write_user".to_string(),
-            signature: "void sym.write_user (void *out)".to_string(),
             ret_type: Some(parse_test_type("void", 64)),
             params: vec![InferredSignatureParam {
                 name: "out".to_string(),
                 ty: parse_test_type("void *", 64),
             }],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -1142,8 +921,6 @@ fn interproc_summary_name_does_not_project_role_signature() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.limfield.isra.0".to_string(),
-            signature: "int64_t sym.limfield.isra.0(int64_t arg1, int64_t arg2, int64_t arg3)"
-                .to_string(),
             ret_type: Some(parse_test_type("int64_t", 64)),
             params: (0..3)
                 .map(|idx| InferredSignatureParam {
@@ -1151,8 +928,6 @@ fn interproc_summary_name_does_not_project_role_signature() {
                     ty: parse_test_type("int64_t", 64),
                 })
                 .collect(),
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -1179,8 +954,6 @@ fn semantic_role_signature_hint_does_not_truncate_named_authoritative_signature(
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.printf_fetchargs".to_string(),
-            signature: "int32_t sym.printf_fetchargs (struct parser *parser, struct slot *slot, uint32_t flags)"
-                .to_string(),
             ret_type: Some(parse_test_type("int32_t", 64)),
             params: vec![
                 InferredSignatureParam {
@@ -1196,8 +969,6 @@ fn semantic_role_signature_hint_does_not_truncate_named_authoritative_signature(
                     ty: parse_test_type("uint32_t", 64),
                 },
             ],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext {
             merged_signature: Some(FunctionSignatureSpec {
@@ -1247,14 +1018,11 @@ fn interproc_summary_name_does_not_truncate_weak_entry_signature() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "entry.init0".to_string(),
-            signature: "int64_t entry.init0(void *arg1)".to_string(),
             ret_type: Some(parse_test_type("int64_t", 64)),
             params: vec![InferredSignatureParam {
                 name: "arg1".to_string(),
                 ty: parse_test_type("void *", 64),
             }],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -1297,9 +1065,6 @@ fn interproc_summary_name_does_not_replace_weak_scalar_return() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "dbg.verror_at_line".to_string(),
-            signature:
-                "int64_t dbg.verror_at_line(int status, int errnum, int8_t *file_name, unsigned int line_number, int8_t *message, struct __va_list_tag *args)"
-                    .to_string(),
             ret_type: Some(parse_test_type("int64_t", 64)),
             params: vec![
                 InferredSignatureParam {
@@ -1327,8 +1092,6 @@ fn interproc_summary_name_does_not_replace_weak_scalar_return() {
                     ty: parse_test_type("struct __va_list_tag *", 64),
                 },
             ],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -1518,7 +1281,6 @@ fn interproc_returned_arg_summary_exports_callee_facts() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.wrapper_user".to_string(),
-            signature: "void * sym.wrapper_user (void * dst, void * src)".to_string(),
             ret_type: Some(parse_test_type("void *", 64)),
             params: vec![
                 InferredSignatureParam {
@@ -1530,8 +1292,6 @@ fn interproc_returned_arg_summary_exports_callee_facts() {
                     ty: parse_test_type("void *", 64),
                 },
             ],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -1626,11 +1386,8 @@ fn interproc_summary_name_does_not_export_role_callee_type_facts() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.sort_driver".to_string(),
-            signature: "void sym.sort_driver(void)".to_string(),
             ret_type: Some(parse_test_type("void", 64)),
             params: Vec::new(),
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),
@@ -1742,14 +1499,11 @@ fn interproc_memory_effect_summary_upgrades_generic_pointer_like_params() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "sym.ptr_user".to_string(),
-            signature: "void sym.ptr_user (int64_t p)".to_string(),
             ret_type: Some(parse_test_type("void", 64)),
             params: vec![InferredSignatureParam {
                 name: "p".to_string(),
                 ty: parse_test_type("int64_t", 64),
             }],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts::default(),

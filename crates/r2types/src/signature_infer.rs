@@ -7,7 +7,7 @@ use crate::convert::CTypeLike;
 
 use crate::analysis::{InferredSignature, InferredSignatureParam};
 use crate::model::Signedness;
-use crate::prepare::{prepared_arch_display_name, recover_signature_params_from_prepared_ssa};
+use crate::prepare::recover_signature_params_from_prepared_ssa;
 use crate::signedness::ScalarSignednessEvidence;
 use r2ssa::dense::IdMap;
 
@@ -80,7 +80,6 @@ pub(crate) fn infer_signature_from_prepared_ssa(
         .memory_model()
         .default_address_bits();
     let recovered_params = recover_signature_params_from_prepared_ssa(prepared, ptr_bits);
-    let arch_name = prepared_arch_display_name(prepared).unwrap_or("");
     let certified_parameter_widths = certified_parameter_memory_widths(prepared);
 
     let mut canonical_params = recovered_params
@@ -135,17 +134,11 @@ pub(crate) fn infer_signature_from_prepared_ssa(
         &mut canonical_params,
     );
 
-    let callconv = prepared.machine_context().function_interface().map_or_else(
-        || "unknown".to_string(),
-        |interface| interface.convention().radare2_name().to_string(),
-    );
     build_inferred_signature(
         &function_name,
-        arch_name,
         ptr_bits,
         &canonical_params,
         solved.returns.decided(),
-        callconv,
     )
 }
 
@@ -888,25 +881,6 @@ fn normalize_inferred_param_name(
     uniquify_name(clean, used)
 }
 
-pub(crate) fn format_signature_prototype(
-    function_name: &str,
-    ret_type: Option<&CTypeLike>,
-    params: &[InferredSignatureParam],
-    ptr_bits: u32,
-) -> String {
-    let params_str = if params.is_empty() {
-        "void".to_string()
-    } else {
-        params
-            .iter()
-            .map(|p| format!("{} {}", render_signature_type(&p.ty, ptr_bits), p.name))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-    let ret_type = ret_type.map_or_else(String::new, |ty| render_signature_type(ty, ptr_bits));
-    format!("{ret_type} {function_name} ({params_str})")
-}
-
 /// A type as an inferred signature states it: materialized, an unstated sign spelled signed.
 fn signature_type(ty: &CTypeLike, ptr_bits: u32) -> CTypeLike {
     settle_unknown_signedness(materialize_signature_type_like(ty.clone(), ptr_bits))
@@ -914,11 +888,9 @@ fn signature_type(ty: &CTypeLike, ptr_bits: u32) -> CTypeLike {
 
 pub(crate) fn build_inferred_signature(
     function_name: &str,
-    arch_name: &str,
     ptr_bits: u32,
     params: &[SignatureParamCandidate],
     ret_type: Option<&CTypeLike>,
-    callconv: String,
 ) -> InferredSignature {
     let mut ordered = params.to_vec();
     ordered.sort_by(|a, b| {
@@ -960,16 +932,8 @@ pub(crate) fn build_inferred_signature(
     let ret_type = ret_type.map(|ty| signature_type(ty, ptr_bits));
     InferredSignature {
         function_name: function_name.to_string(),
-        signature: format_signature_prototype(
-            function_name,
-            ret_type.as_ref(),
-            &json_params,
-            ptr_bits,
-        ),
         ret_type,
         params: json_params,
-        callconv,
-        arch: arch_name.to_string(),
     }
 }
 
@@ -1203,7 +1167,6 @@ mod tests {
         );
         let inferred = inferred(&prepared);
 
-        assert_eq!(inferred.arch, "aarch64");
         assert_eq!(
             render_signature_type(&inferred.params[0].ty, 64),
             "uint8_t*"
@@ -1385,16 +1348,6 @@ mod tests {
     }
 
     #[test]
-    fn prepared_signature_callconv_is_source_owned_and_rename_invariant() {
-        let expected = r2source::ConventionId::Win64;
-        let ordinary = inferred(&prepared_x86_scalar_return("rax", expected));
-        let renamed = inferred(&prepared_x86_scalar_return("xmm0_misleading", expected));
-
-        assert_eq!(ordinary.callconv, expected.radare2_name());
-        assert_eq!(renamed.callconv, expected.radare2_name());
-    }
-
-    #[test]
     fn misleading_xmm0_spelling_does_not_manufacture_a_float_return() {
         let inferred = inferred(&prepared_x86_scalar_return(
             "xmm0_misleading",
@@ -1504,14 +1457,7 @@ mod tests {
             },
         ];
 
-        let inferred = build_inferred_signature(
-            "stack_arg",
-            "x86-64",
-            64,
-            &params,
-            Some(&CTypeLike::Void),
-            "amd64".to_string(),
-        );
+        let inferred = build_inferred_signature("stack_arg", 64, &params, Some(&CTypeLike::Void));
 
         assert_eq!(inferred.params.len(), 7);
         for (slot, param) in inferred.params.iter().enumerate() {

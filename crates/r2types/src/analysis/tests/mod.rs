@@ -1,5 +1,4 @@
 mod arrays;
-mod assumptions;
 mod signature;
 mod stack;
 mod structs;
@@ -12,16 +11,12 @@ pub(super) fn spelled_signature(analysis: &DerivedTypeAnalysis) -> InferredSigna
     let Some(signature) = analysis.type_facts.merged_signature.as_ref() else {
         return InferredSignature {
             function_name: String::new(),
-            signature: String::new(),
             ret_type: Some(parse_test_type("void", 64)),
             params: Vec::new(),
-            callconv: String::new(),
-            arch: String::new(),
         };
     };
     InferredSignature {
         function_name: String::new(),
-        signature: String::new(),
         ret_type: Some(signature.ret_type.clone().unwrap_or(CTypeLike::Void)),
         params: (signature.params.iter().enumerate())
             .map(|(index, param)| InferredSignatureParam {
@@ -33,17 +28,7 @@ pub(super) fn spelled_signature(analysis: &DerivedTypeAnalysis) -> InferredSigna
                     .unwrap_or_else(|| CTypeLike::Pointer(Box::new(CTypeLike::Void))),
             })
             .collect(),
-        callconv: String::new(),
-        arch: String::new(),
     }
-}
-
-/// The operation a fixture names by its block and its place in the block.
-/// System V's integer argument registers, in order, as a prepared machine spells them.
-pub(super) fn system_v_argument_registers() -> Vec<String> {
-    ["rdi", "rsi", "rdx", "rcx", "r8", "r9"]
-        .map(str::to_string)
-        .to_vec()
 }
 
 fn parse_test_type(spelling: &str, ptr_bits: u32) -> CTypeLike {
@@ -127,8 +112,14 @@ fn storage_of_every_width_is_a_type_c_spells() {
     }
     // A carrier states a width and nothing else, so any type outranks it. A
     // 128-bit integer is an integer, like the narrower ones.
-    assert!(type_name_is_generic("struct r2sleigh_bits_256"));
-    assert!(!type_name_is_generic("__int128_t"));
+    assert!(inferred_type_is_generic(
+        Some(&CTypeLike::BitVector(256)),
+        64
+    ));
+    assert!(!inferred_type_is_generic(
+        Some(&CTypeLike::machine_storage(128, Signedness::Signed)),
+        64
+    ));
 }
 
 #[test]
@@ -137,13 +128,22 @@ fn type_name_policy_matches_planner_guard() {
     assert!(type_name_is_opaque_placeholder("struct anon_field"));
     assert!(!type_name_is_opaque_placeholder("struct real_type *"));
 
-    for generic in ["void *", "const char *", "unsigned char*", "unsigned long"] {
+    let pointer = |ty: CTypeLike| CTypeLike::Pointer(Box::new(ty));
+    for generic in [
+        pointer(CTypeLike::Void),
+        pointer(CTypeLike::Const(Box::new(CTypeLike::typedef("char")))),
+        pointer(CTypeLike::typedef("unsigned char")),
+        CTypeLike::typedef("unsigned long"),
+    ] {
         assert!(
-            type_name_is_generic(generic),
+            inferred_type_is_generic(Some(&generic), 64),
             "{generic:?} should stay a weak planner type"
         );
     }
-    assert!(!type_name_is_generic("struct real_type *"));
+    assert!(!inferred_type_is_generic(
+        Some(&parse_test_type("struct real_type *", 64)),
+        64
+    ));
 }
 
 #[test]

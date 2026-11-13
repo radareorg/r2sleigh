@@ -668,25 +668,9 @@ impl SourceConversion<'_> {
     }
 }
 
-/// An operator's `TypeHint` assumption, the one type that arrives as text; C's
-/// integer names stay names. It has no production producer yet (ADR call-boundary, S9 as built).
-pub(crate) fn operator_type_hint(text: &str, ptr_bits: u32) -> Option<CTypeLike> {
-    let name = crate::external::normalize_external_type_name(text).to_ascii_lowercase();
-    let named = match name.trim() {
-        "int" => "int",
-        "unsigned int" => "unsigned int",
-        "short" | "short int" => "short",
-        "unsigned short" | "unsigned short int" => "unsigned short",
-        "long" | "long int" => "long",
-        "unsigned long" | "unsigned long int" => "unsigned long",
-        name @ ("size_t" | "ssize_t" | "ptrdiff_t" | "uintptr_t" | "intptr_t") => name,
-        _ => return parse_c_type_like(text, ptr_bits),
-    };
-    Some(CTypeLike::typedef(named))
-}
-
-/// A spelling read back as a type: the operator's hint and test fixtures. Production types
-/// arrive as `SourceTypeGraph` (ADR call-boundary, Types on the wire).
+/// A spelling read back as a type, for test fixtures. Production types arrive as
+/// `SourceTypeGraph` (ADR call-boundary, Types on the wire).
+#[cfg(test)]
 pub(crate) fn parse_c_type_like(spelling: &str, ptr_bits: u32) -> Option<CTypeLike> {
     // A pointer level is peeled before the qualifiers go, because the
     // qualifier of what it points at is part of the pointer's type. What
@@ -709,6 +693,7 @@ pub(crate) fn parse_c_type_like(spelling: &str, ptr_bits: u32) -> Option<CTypeLi
 }
 
 /// The width of the carrier a spelling names, if it names one.
+#[cfg(test)]
 pub(crate) fn bit_vector_spelling_bits(spelling: &str) -> Option<u32> {
     spelling
         .trim()
@@ -718,12 +703,14 @@ pub(crate) fn bit_vector_spelling_bits(spelling: &str) -> Option<u32> {
 }
 
 /// Whether a spelling carries `const` as a word of its own.
+#[cfg(test)]
 fn spells_const(spelling: &str) -> bool {
     spelling
         .split(|ch: char| !(ch == '_' || ch.is_ascii_alphanumeric()))
         .any(|token| matches!(token, "const" | "__const" | "__const__"))
 }
 
+#[cfg(test)]
 fn parse_normalized(spelling: &str, ptr_bits: u32) -> Option<CTypeLike> {
     let spelling = spelling.trim();
     if spelling.is_empty() {

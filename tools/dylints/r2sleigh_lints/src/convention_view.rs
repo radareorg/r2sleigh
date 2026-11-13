@@ -228,10 +228,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ),
     (
         "crates/r2ssa/src/machine_context.rs",
-        "SourceMachineContext::argument_register_names",
-    ),
-    (
-        "crates/r2ssa/src/machine_context.rs",
         "SourceMachineContext::call_effect",
     ),
     (
@@ -338,10 +334,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     ("crates/r2ssa/src/tail_count.rs", "tail_count"),
     ("crates/r2ssa/src/tail_cursors.rs", "Prover::aligned"),
     (
-        "crates/r2types/src/analysis/assumptions.rs",
-        "apply_type_hint_assumptions_to_context",
-    ),
-    (
         "crates/r2types/src/analysis/mod.rs",
         "build_type_analysis_inner",
     ),
@@ -362,26 +354,6 @@ const ALLOWLIST: &[(&str, &str)] = &[
     (
         "crates/r2types/src/function_facts/mod.rs",
         "FunctionFacts::apply_callsite_callee_signatures",
-    ),
-    (
-        "crates/r2types/src/register_identity.rs",
-        "RegisterIdentity::argument_registers",
-    ),
-    (
-        "crates/r2types/src/register_identity.rs",
-        "RegisterIdentity::from_prepared",
-    ),
-    (
-        "crates/r2types/src/register_identity.rs",
-        "RegisterIdentity::from_register_storages",
-    ),
-    (
-        "crates/r2types/src/register_identity.rs",
-        "RegisterIdentity::with_argument_registers",
-    ),
-    (
-        "crates/r2types/src/signature_infer.rs",
-        "build_inferred_signature",
     ),
 ];
 

@@ -10,7 +10,6 @@ fn interproc_summary_name_does_not_prune_generated_surplus_slots() {
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "dbg.or".to_string(),
-            signature: "bool dbg.or(void *arg1, struct sla_struct_deadbeef *arg2)".to_string(),
             ret_type: Some(parse_test_type("bool", 64)),
             params: vec![
                 InferredSignatureParam {
@@ -22,8 +21,6 @@ fn interproc_summary_name_does_not_prune_generated_surplus_slots() {
                     ty: parse_test_type("struct sla_struct_deadbeef *", 64),
                 },
             ],
-            callconv: "amd64".to_string(),
-            arch: "x86-64".to_string(),
         },
         parsed_context: ParsedExternalContext::default(),
         local_structs: LocalStructArtifacts {

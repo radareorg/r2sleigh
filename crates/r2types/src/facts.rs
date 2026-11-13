@@ -151,13 +151,7 @@ impl SignatureCertificate {
             && !self.signature.params.iter().any(|param| {
                 signature_param_type_uncertified(
                     param.ty.as_ref(),
-                    self.sources.iter().any(|source| {
-                        matches!(
-                            source,
-                            SignatureCertificateSource::ExternalContext
-                                | SignatureCertificateSource::TypeAssumption
-                        )
-                    }),
+                    (self.sources).contains(&SignatureCertificateSource::ExternalContext),
                 )
             })
     }
@@ -184,7 +178,6 @@ pub enum SignatureCertificateSource {
     ExternalContext,
     LocalInference,
     CalleeSignature,
-    TypeAssumption,
     SlotTypeOverride,
     SummaryRole,
     SummaryKind,
@@ -208,7 +201,6 @@ impl SignatureCertificateSource {
             Self::ExternalContext => "external_context",
             Self::LocalInference => "local_inference",
             Self::CalleeSignature => "callee_signature",
-            Self::TypeAssumption => "type_assumption",
             Self::SlotTypeOverride => "slot_type_override",
             Self::SummaryRole => "summary_role",
             Self::SummaryKind => "summary_kind",
@@ -230,7 +222,6 @@ impl SignatureCertificateSource {
             self,
             Self::ExternalContext
                 | Self::SourceInterface
-                | Self::TypeAssumption
                 | Self::SlotTypeOverride
                 | Self::SemanticProjection
                 | Self::InterprocSummary

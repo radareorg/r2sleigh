@@ -17,12 +17,9 @@ pub(crate) struct InferredSignatureParam {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InferredSignature {
     pub function_name: String,
-    pub signature: String,
     /// `None` until something decides the result.
     pub ret_type: Option<CTypeLike>,
     pub params: Vec<InferredSignatureParam>,
-    pub callconv: String,
-    pub arch: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,22 +146,6 @@ impl SemanticTypeProjection {
         projection
     }
 
-    pub(crate) fn corroborates_param_type_hint(&self, index: usize, hint: &CTypeLike) -> bool {
-        if self
-            .param_type_hints
-            .get(&index)
-            .is_some_and(|semantic_hint| semantic_hints_compatible(semantic_hint, hint))
-        {
-            return true;
-        }
-        if !matches!(hint, CTypeLike::Pointer(_)) {
-            return false;
-        }
-        self.pointer_param_indices.contains(&index)
-            || self.out_param_indices.contains(&index)
-            || self.slot_field_profiles.contains_key(&index)
-    }
-
     pub(crate) fn refusal_warnings(&self) -> Vec<String> {
         self.refused_param_projections
             .iter()
@@ -217,26 +198,6 @@ pub(crate) fn interproc_out_param_source(
         param_index,
         effect_index,
     }
-}
-
-pub(crate) fn semantic_hints_compatible(
-    semantic_hint: &CTypeLike,
-    requested_hint: &CTypeLike,
-) -> bool {
-    if semantic_hint == requested_hint {
-        return true;
-    }
-    matches!(
-        (semantic_hint, requested_hint),
-        (CTypeLike::Pointer(_), CTypeLike::Pointer(_))
-            | (
-                CTypeLike::Int {
-                    signedness: Signedness::Unsigned,
-                    ..
-                },
-                CTypeLike::Int { .. }
-            )
-    )
 }
 
 pub(crate) fn summary_suggests_pointer_param(
@@ -422,38 +383,4 @@ pub(crate) fn is_generated_local_struct_name(name: &str) -> bool {
     lower
         .trim_start_matches("struct ")
         .starts_with("sla_struct_")
-}
-
-pub(crate) fn type_name_is_generic(ty: &str) -> bool {
-    let normalized = normalize_external_type_name(ty);
-    let lower = normalized.trim().to_ascii_lowercase();
-    if lower.is_empty() {
-        return true;
-    }
-    // A carrier is storage of a width C has no integer for. It states the
-    // width and nothing else, which is what no type states too.
-    if crate::convert::bit_vector_spelling_bits(&lower).is_some() {
-        return true;
-    }
-    if type_name_is_opaque_placeholder(&lower) {
-        return true;
-    }
-    matches!(
-        lower.as_str(),
-        "void *"
-            | "void*"
-            | "char *"
-            | "char*"
-            | "const char *"
-            | "const char*"
-            | "signed char *"
-            | "signed char*"
-            | "unsigned char *"
-            | "unsigned char*"
-            | "int"
-            | "unsigned"
-            | "unsigned int"
-            | "long"
-            | "unsigned long"
-    )
 }

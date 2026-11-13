@@ -283,14 +283,6 @@ pub(crate) fn upgrade_return_type_hint(
         inferred_signature.ret_type = Some(hint.clone());
         changed = true;
     }
-    if changed {
-        inferred_signature.signature = format_signature(
-            &inferred_signature.function_name,
-            inferred_signature.ret_type.as_ref(),
-            &inferred_signature.params,
-            ptr_bits,
-        );
-    }
     changed
 }
 
@@ -322,12 +314,6 @@ pub(crate) fn upgrade_param_name_hints(
             param.name = hint.clone();
         }
     }
-    inferred_signature.signature = format_signature(
-        &inferred_signature.function_name,
-        inferred_signature.ret_type.as_ref(),
-        &inferred_signature.params,
-        ptr_bits,
-    );
 }
 
 pub(crate) fn projection_pointer_upgrade_indices(
@@ -703,31 +689,49 @@ pub(crate) fn apply_signature_context_overrides(
             inferred_param.name = param.name.clone();
         }
     }
-
-    signature_out.signature = format_signature(
-        &signature_out.function_name,
-        signature_out.ret_type.as_ref(),
-        &signature_out.params,
-        ptr_bits,
-    );
 }
 
 pub(crate) fn signature_param_count_is_authoritative(signature: &FunctionSignatureSpec) -> bool {
     crate::signature_param_count_is_authoritative(signature)
 }
 
-pub(crate) fn format_signature(
-    function_name: &str,
-    ret_type: Option<&CTypeLike>,
-    params: &[InferredSignatureParam],
-    ptr_bits: u32,
-) -> String {
-    crate::format_signature_prototype(function_name, ret_type, params, ptr_bits)
+/// Whether an inferred type says nothing a weaker hint may not replace: none, a carrier of a width
+/// C has no integer for, an opaque or `void`/`char` pointer, or a C integer name (D268).
+pub(crate) fn inferred_type_is_generic(ty: Option<&CTypeLike>, ptr_bits: u32) -> bool {
+    ty.is_none_or(|ty| {
+        type_is_generic(&crate::signature_infer::materialize_signature_type_like(
+            ty.clone(),
+            ptr_bits,
+        ))
+    })
 }
 
-/// Whether an inferred type says nothing: none, or one whose spelling is generic.
-pub(crate) fn inferred_type_is_generic(ty: Option<&CTypeLike>, ptr_bits: u32) -> bool {
-    ty.is_none_or(|ty| type_name_is_generic(&render_signature_type(ty, ptr_bits)))
+fn type_is_generic(ty: &CTypeLike) -> bool {
+    let named = |ty: &CTypeLike, names: &[&str]| matches!(ty, CTypeLike::Typedef { name, .. } if names.contains(&name.trim()));
+    let opaque = |ty: &CTypeLike| match ty {
+        CTypeLike::Struct(tag) | CTypeLike::Union(tag) | CTypeLike::Enum(tag) => {
+            type_name_is_opaque_placeholder(tag)
+        }
+        _ => false,
+    };
+    match ty {
+        CTypeLike::BitVector(_) => true,
+        CTypeLike::Pointer(pointee) => {
+            let pointee = match pointee.as_ref() {
+                CTypeLike::Const(inner) => inner.as_ref(),
+                pointee => pointee,
+            };
+            matches!(pointee, CTypeLike::Void | CTypeLike::Unknown)
+                || named(pointee, &["char", "signed char", "unsigned char"])
+                || opaque(pointee)
+        }
+        ty => {
+            named(
+                ty,
+                &["int", "unsigned", "unsigned int", "long", "unsigned long"],
+            ) || opaque(ty)
+        }
+    }
 }
 
 /// Whether an inferred type is generic or a bare machine word.

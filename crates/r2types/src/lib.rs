@@ -16,7 +16,6 @@ pub mod function_facts;
 pub(crate) mod lattice;
 pub(crate) mod model;
 pub(crate) mod prepare;
-mod register_identity;
 pub(crate) mod signature_infer;
 mod signedness;
 pub(crate) mod solver;
@@ -35,10 +34,7 @@ pub use callee::{
     normalize_callee_name,
 };
 pub use constraint::{Constraint, ConstraintSource, SolverNode};
-pub(crate) use register_identity::RegisterIdentity;
-pub(crate) use signature_infer::{
-    format_signature_prototype, infer_signature_from_prepared_ssa, render_signature_type,
-};
+pub(crate) use signature_infer::{infer_signature_from_prepared_ssa, render_signature_type};
 pub use solver::{SolvedTypes, solve_constraints};
 
 pub use context::{
