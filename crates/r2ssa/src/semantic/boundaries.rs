@@ -1864,29 +1864,6 @@ pub(crate) fn collect_source_boundary_facts(
         facts.calls.insert(call_site.id, boundary);
     }
 
-    if let Some(machine_context) = machine_context {
-        facts.preserved_call_carriers = preserved_call_carriers(function, graph, machine_context);
-        r2il::refusal_evidence!(
-            "preserved-carriers",
-            "{:#x}: {}",
-            function.entry,
-            crate::site_boundary::spelled(facts.preserved_call_carriers.iter().copied())
-        );
-        if trace_call_definitions() {
-            eprintln!(
-                "  preserved across calls to {:#x}: {:?}",
-                function.entry,
-                facts
-                    .preserved_call_carriers
-                    .iter()
-                    .map(|storage| machine_context
-                        .register_name(*storage)
-                        .unwrap_or_else(|| format!("{storage:?}")))
-                    .collect::<Vec<_>>()
-            );
-        }
-    }
-
     let call_results = (facts.calls.values())
         .flat_map(|call| call.results.iter().map(|result| result.value))
         .collect::<crate::dense::IdSet<ValueId>>();

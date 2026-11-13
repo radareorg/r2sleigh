@@ -92,6 +92,12 @@ pub trait Program: crate::body::Program {
         r2abi::statement::SourceLanguage::C
     }
 
+    /// The registers the body at `entry` leaves as it found them on every path to a return, from
+    /// its held register effect (D320); `None` where nothing proves any kept.
+    fn kept_at(&self, _entry: u64) -> Option<BTreeSet<CanonicalStorageId>> {
+        None
+    }
+
     /// The convention a call to `callee` runs under where its declaration states one (RULING 1.6);
     /// `None` runs the call under the calls' model.
     fn stated_convention_at(&self, _callee: u64) -> Option<Arc<ConventionModel>> {
@@ -1153,7 +1159,7 @@ fn resolved_alone(
     let targets = reached(&walked.root.body, native.program);
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
     // Each resolved owner of its result or arity, read as any callee's statement.
-    imports.state(stated.owners);
+    imports.state(stated.owners, native.program);
     // An assumed member states its interface alone: nothing it preserves or reaches.
     for (member, interface) in stated.assumed {
         imports.interfaces.insert(*member, interface.clone());
@@ -1414,7 +1420,7 @@ fn read_callees(
         }
         match &read.facts {
             Ok(derived) => {
-                callees.record(*address, derived);
+                callees.record(*address, derived, native.program);
                 facts.push(derived.clone());
             }
             Err(reason) => unread.push(Unread {
@@ -1601,18 +1607,19 @@ impl Callees {
     }
 
     /// Each resolved owner that proved facts, read as any callee's statement.
-    fn state(&mut self, owners: &[(u64, Arc<CalleeRead>)]) {
+    fn state(&mut self, owners: &[(u64, Arc<CalleeRead>)], program: &dyn Program) {
         for (owner, read) in owners {
             if let Ok(facts) = &read.facts {
-                self.record(*owner, facts);
+                self.record(*owner, facts, program);
             }
         }
     }
 
-    fn record(&mut self, address: u64, facts: &CalleeFacts) {
+    /// One callee's statement; what it keeps is its register effect's, the one owner (D320).
+    fn record(&mut self, address: u64, facts: &CalleeFacts, program: &dyn Program) {
         self.interfaces.insert(address, facts.interface().clone());
         self.preserved
-            .insert(address, facts.preserved_carriers().clone());
+            .insert(address, program.kept_at(address).unwrap_or_default());
         // Recorded even when empty: a body that touches nothing through its
         // arguments is described, and a callee with no entry is one nothing
         // describes.
@@ -1804,7 +1811,7 @@ impl<'a> Native<'a> {
             declared_root,
         } = built;
         if !owners.is_empty() {
-            imports.state(owners);
+            imports.state(owners, self.program);
             let evidence = self.evidence(&walk.root, &imports);
             let arch = Some(self.target.arch);
             let restated =

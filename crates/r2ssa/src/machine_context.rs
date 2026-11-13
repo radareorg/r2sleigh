@@ -412,10 +412,6 @@ pub struct SourceMachineContext {
     abi_model: MachineAbiModel,
     /// What a call in this body may leave changed: the set construction defines after every call.
     call_clobbered_carriers: Box<[CanonicalStorageId]>,
-    /// Every register a call may change: each register of the file no wider
-    /// one contains, that the call effect neither preserves nor reserves.
-    /// What a callee's body is asked to prove it leaves alone.
-    call_universe: Box<[CanonicalStorageId]>,
     /// What each direct callee's own body proves it leaves alone, by entry.
     callee_preserved: crate::function::CalleePreservedCarriers,
     /// How many arguments each callee whose result is unproven reads at least.
@@ -482,19 +478,6 @@ fn observed_register_storages(blocks: &[R2ILBlock]) -> BTreeSet<RegisterStorage>
             offset: varnode.offset,
             size: varnode.size,
         })
-        .collect()
-}
-
-/// Every register a call may change: each outermost register the call model does not keep
-/// (`site_boundary::CallUniverse`); every one under no model. `O(r)`.
-fn call_universe(
-    calls: Option<&r2source::ConventionModel>,
-    machine: &Arch,
-) -> Box<[CanonicalStorageId]> {
-    let clobbers =
-        |storage| machine.call_effect_on(calls, storage) == r2source::CallRegisterEffect::Clobbered;
-    crate::site_boundary::CallUniverse::of(&clobbers, machine)
-        .registers()
         .collect()
 }
 
@@ -800,9 +783,6 @@ impl SourceMachineContext {
             function_interface,
             machine_roles,
             call_clobbered_carriers: clobbered_by_a_call(calls, arch, &observed),
-            call_universe: arch
-                .map(|arch| call_universe(calls, arch))
-                .unwrap_or_default(),
             conventions,
             abi_model,
             callee_preserved: BTreeMap::new(),
@@ -951,11 +931,6 @@ impl SourceMachineContext {
     /// The registers a call in this body may leave changed; every one without a model.
     pub const fn call_clobbered_carriers(&self) -> &[CanonicalStorageId] {
         &self.call_clobbered_carriers
-    }
-
-    /// Every register a call may change; see the field.
-    pub(crate) const fn call_universe(&self) -> &[CanonicalStorageId] {
-        &self.call_universe
     }
 
     /// What the direct callee at `target` proves it leaves alone, where its

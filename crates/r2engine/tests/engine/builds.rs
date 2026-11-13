@@ -58,8 +58,8 @@ fn a_callee_resolved_from_its_build_reads_as_one_rendered_first() {
     assert_eq!(after, rendered(&mut OpenProgram::of(program()), ROOT));
 }
 
-/// `mov eax, 7; ret`, then `call 0x1000; ret`, then `call 0x1010; mov [rsi], eax; ret`: the leaf
-/// keeps every register but its result, so its statement builds its caller again.
+/// `mov eax, 7; ret`, then `call 0x1000; ret`, then `call 0x1010; mov [rsi], eax; ret`: the leaf's
+/// statement builds its caller again.
 const VALUE: &[u8] = &[
     0xb8, 0x07, 0x00, 0x00, 0x00, // 1000 mov eax, 7
     0xc3, // 1005 ret
@@ -84,8 +84,35 @@ fn an_owner_that_moves_the_build_has_it_built_again() {
     let text = rendered(&mut open, BASE + 0x20);
     // The leaf's `mov eax, 7` states zero above its 32-bit result (D322).
     assert!(text.contains("= (uint64_t)middle()"), "{text}");
-    assert!(!text.contains("r2sleigh_residual"), "{text}");
+    // `middle` calls on its returning path, so its register effect keeps nothing and the store's
+    // rsi stays a residual until a call keeps what its callee keeps (D363).
+    assert!(
+        text.contains("never assigned, read as residuals (RSI_1)"),
+        "{text}"
+    );
     let stats = open.analysis_stats();
     assert_eq!(stats.callee_reads.computed, 0, "{stats:?}");
     assert_eq!(stats.defects, 0, "{stats:?}");
+}
+
+/// `mov eax, 7; ret`, then `call 0x1000; mov [rsi], eax; ret`.
+const KEEPS_RSI: &[u8] = &[
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1000 mov eax, 7
+    0xc3, // 1005 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1006 padding
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1010 call 0x1000
+    0x89, 0x06, // 1015 mov [rsi], eax
+    0xc3, // 1017 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1018 padding
+];
+
+/// The leaf's register effect keeps rsi, so the call keeps it: the caller stores through its own
+/// rsi (D320: what a callee keeps is its `RegisterEffect.kept`, the one owner).
+#[test]
+fn a_callee_whose_register_effect_keeps_rsi_keeps_it_across_the_call() {
+    let functions = [("leaf", BASE, 0x06), ("root", BASE + 0x10, 0x08)];
+    let mut open = OpenProgram::of(Literal::of_code(KEEPS_RSI, &functions));
+    let text = rendered(&mut open, BASE + 0x10);
+    assert!(text.contains("leaf()"), "{text}");
+    assert!(!text.contains("r2sleigh_residual"), "{text}");
 }

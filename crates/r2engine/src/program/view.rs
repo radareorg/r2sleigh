@@ -409,6 +409,14 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.target(vaddr).ok()
     }
 
+    fn kept_at(&self, entry: u64) -> Option<std::collections::BTreeSet<r2ssa::CanonicalStorageId>> {
+        let key = (entry, self.thumb_at(entry));
+        let effect = self.db.get::<super::fates::RegisterEffects>(&key).ok()?;
+        (*effect)
+            .as_ref()
+            .map(|effect| effect.kept_registers().collect())
+    }
+
     fn stated_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
         let container = self.source().container();
         let declared = container.declarations.function_at(callee)?;

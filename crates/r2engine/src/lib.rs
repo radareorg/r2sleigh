@@ -952,9 +952,6 @@ pub struct CalleeFacts {
     interface: r2ssa::SourceFunctionInterface,
     summary: r2ssa::PreparedCalleeSummary,
     signature: Option<r2types::SourceOwnedCalleeSignature>,
-    /// Convention-clobbered registers this callee's body proves it leaves
-    /// untouched at every exit; a caller reads them after the call as its own.
-    preserved_carriers: BTreeSet<r2ssa::CanonicalStorageId>,
 }
 
 impl CalleeFacts {
@@ -967,7 +964,6 @@ impl CalleeFacts {
         let shared = callee.shared_artifact();
         let address = shared.function().entry;
         let interface = shared.machine_context().function_interface()?.clone();
-        let preserved_carriers = shared.facts().boundaries.preserved_call_carriers.clone();
         let summary =
             r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared)
                 .ok()?;
@@ -984,7 +980,6 @@ impl CalleeFacts {
             interface,
             summary,
             signature,
-            preserved_carriers,
         })
     }
 
@@ -1004,11 +999,6 @@ impl CalleeFacts {
     /// How far this callee is proven to touch through each pointer argument.
     pub fn argument_touch_reach(&self) -> std::collections::BTreeMap<usize, r2ssa::ArgumentReach> {
         self.summary.argument_touch_reach()
-    }
-
-    /// Registers this callee's body proves it leaves untouched at every exit.
-    pub const fn preserved_carriers(&self) -> &BTreeSet<r2ssa::CanonicalStorageId> {
-        &self.preserved_carriers
     }
 }
 

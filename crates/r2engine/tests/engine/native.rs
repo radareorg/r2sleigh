@@ -1984,18 +1984,27 @@ impl Program for WithSink {
 /// dispatch; a tail call from an unproven result is a gap naming `sink` (r2dec `tail_call`).
 #[test]
 fn a_widened_index_a_call_passes_is_not_part_of_the_dispatch() {
-    let x86 = Machine::new("x86-64", "x86-64", 64);
-    let arm = Machine::new("aarch64", "aarch64", 64);
-    for (machine, bytes, called, gaps) in [
-        (&x86, BIASED_INDEX_TAIL_CALLED, "call to sink", true),
-        (&x86, BIASED_INDEX_CALLED, "sink(", false),
-        (&arm, A64_BIASED_INDEX_TAIL_CALLED, "call to sink", true),
+    for (aarch64, bytes, called, gaps) in [
+        (false, BIASED_INDEX_TAIL_CALLED, "call to sink", true),
+        (false, BIASED_INDEX_CALLED, "sink(", false),
+        (true, A64_BIASED_INDEX_TAIL_CALLED, "call to sink", true),
     ] {
-        let target = machine.target();
-        let program = WithSink { bytes, sink: SINK };
-        let response = decompile(&target, &program, BASE).expect("decompile");
-        assert!(response.output.function().is_some(), "{}", response.output);
-        let output = response.output.text();
+        // Through the program, so what `sink` keeps is its register effect's (D320).
+        let size = bytes.len() as u64;
+        let functions = [
+            ("pick", BASE, SINK - BASE),
+            ("sink", SINK, BASE + size - SINK),
+        ];
+        let literal = common::Literal::of_code(bytes, &functions);
+        let literal = if aarch64 {
+            literal.in_aarch64()
+        } else {
+            literal
+        };
+        let mut open = r2engine::program::OpenProgram::of(literal);
+        let rendered = open.rendered(BASE).expect("it renders");
+        let output = rendered.response.output.into_text();
+        let output = output.as_str();
         assert!(output.contains("switch ("), "{output}");
         assert!(output.contains(called), "{output}");
         assert!(gaps || !output.contains("residual"), "{output}");
@@ -7545,55 +7554,15 @@ const CALL_TWICE: &[u8] = &[
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// `CALL_TWICE`, its callee named `arg0`: the caller's parameter holds that name, so no call is C.
-struct CalleeNamedLikeAParameter;
-
-impl r2engine::body::Program for CalleeNamedLikeAParameter {
-    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
-        let slice = CALL_TWICE.get(offset..)?;
-        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
-    }
-
-    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
-        code_region(CALL_TWICE.len(), vaddr)
-    }
-
-    fn is_entry(&self, vaddr: u64) -> bool {
-        matches!(vaddr, BASE | 0x1011)
-    }
-}
-
-impl Program for CalleeNamedLikeAParameter {
-    fn holds_static_data(&self, _vaddr: u64) -> bool {
-        false
-    }
-
-    fn extents(&self) -> &r2types::ProgramExtents {
-        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
-        NONE
-    }
-
-    fn name_at(&self, vaddr: u64) -> Option<String> {
-        match vaddr {
-            BASE => Some("caller".to_owned()),
-            0x1011 => Some("arg0".to_owned()),
-            _ => None,
-        }
-    }
-
-    fn import_at(&self, _vaddr: u64) -> Option<String> {
-        None
-    }
-}
-
 /// A call that spelled its argument and then failed is a gap, so the `lea` its argument absorbed
 /// reaches the text only through that gap: the ledger may not call any of its obligations rendered.
 #[test]
 fn an_absorbed_producer_of_an_unwritten_call_is_not_rendered() {
-    let machine = Machine::new("x86-64", "x86-64", 64);
-    let target = machine.target();
-    let program = CalleeNamedLikeAParameter;
+    // Through the program, so what the callee keeps is its register effect's (D320).
+    let functions = [("caller", BASE, 0x11), ("arg0", 0x1011, 3)];
+    let program =
+        r2engine::program::OpenProgram::of(common::Literal::of_code(CALL_TWICE, &functions));
+    let target = Program::target_at(&program, BASE).expect("a machine");
     let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text().to_owned();
     assert!(

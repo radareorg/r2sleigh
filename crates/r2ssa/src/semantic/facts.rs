@@ -956,11 +956,6 @@ pub struct SourceBoundaryFacts {
     pub parameters: BTreeMap<u32, SourceFormalParameterFact>,
     pub calls: BTreeMap<CallSiteId, SourceCallBoundaryFact>,
     pub returns: crate::dense::IdMap<InstId, SourceReturnBoundaryFact>,
-    /// Convention-clobbered registers this body leaves exactly as it found
-    /// them at every exit. A caller that reads one of these after calling
-    /// here is reading its own value, not a clobber; see
-    /// [`preserved_call_carriers`].
-    pub preserved_call_carriers: BTreeSet<CanonicalStorageId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
