@@ -376,9 +376,8 @@ fn importing_pe(dll: &str) -> OpenProgram<Literal> {
     OpenProgram::of(program)
 }
 
-/// A call to an import its container binds runs under the program's default, Microsoft x64,
-/// which keeps rsi though the stated SysV function clobbers it (RULING 1.6); an import no table
-/// binds runs under the join, which keeps no rsi (RULING 2.6).
+/// A bound import runs under the default, Microsoft x64, which keeps rsi though the stated SysV
+/// function clobbers it; an import no table binds runs under the join and keeps no rsi (D252).
 #[test]
 fn a_pe_stating_one_sysv_function_keeps_rsi_across_a_kernel32_call() {
     let mut bound = importing_pe("KERNEL32.dll");

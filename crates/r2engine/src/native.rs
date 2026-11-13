@@ -1555,9 +1555,8 @@ pub(crate) fn restate(
         .ok()
 }
 
-/// The convention a call to `address` runs under where the program states it (RULING 1.6, 2.6):
-/// an import its container binds runs under the program's default, a body its declaration states
-/// a convention for under that one; any other call runs under `AnyCall`. O(log imports).
+/// The model a call to `address` runs under where the program states it: a bound import's default,
+/// a declared body's own; else `AnyCall` (ADR call-boundary, "S34 as built"). O(log imports).
 fn site_convention(
     native: &Native<'_>,
     target: &NativeTarget<'_>,

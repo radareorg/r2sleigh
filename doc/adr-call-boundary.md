@@ -1241,6 +1241,18 @@ On S31a, S20 and S18 (rebased onto `f301c8646`, 2026-11-11; tests, goldens, Dyli
 - A call under no model (ruling 2.1): r2ssa `Arch::{call_reads, call_clobbered, call_effect_on}` take `Option<&ConventionModel>`. Under `None` or a refused effect every outermost register is read and clobbered, and none is preserved or reserved. `SourceMachineContext::result_slot`'s fallback to `Arch::result_slot` stays until step 8.
 - `native::convention_model` reads no view, so D309's allowlist falls from 131 to 130 (134 to 133 before S25 removed three readers).
 
+## S34 as built (2026-11-13)
+
+The views and strings are gone; one `ConventionModel` pair is the carrier (D275, D276), each stated call site holds its own model (D252), and what a callee keeps has one owner (D320). Built in the rebuild mode: carriers first, the compiler as the worklist, no allowlist stepping.
+
+- `r2source::Conventions { own, calls }`: `own` places the function's arguments and result, `calls` (the `AnyCall` join) says what a call reads, keeps and clobbers. `NativeMachine.conventions`, `OwnedFunctionSnapshot::conventions`, `EngineSourceSnapshot::conventions` and `SourceMachineContext::conventions` hold two `Arc`s and no copies. The context's `convention()` is `own`, `calls()` is `calls`; `DefinedWhole` now reads `calls`, where it read `own`.
+- `ConventionModel` holds `TypedResults` in its index (`results()`, `result()`), so `result_slot` reads it in O(1). `ConventionParts::argument_registers` is private; every reader takes `arguments(class)` or `argument(class, n)` off the index.
+- No model (RULING 2.1): a call reads and clobbers every outermost register, a return reads none, no lane is kept (`saved_register::preserved`, `follow_copies`), no register is a result. A calling body builds; `SsaPrepareError::NoCallEffect` is gone. A body with no call keeps an inert boundary config, so leaf tests are unmoved.
+- `afi` prints `callconv:` from the interface's `ConventionId` (`radare2_name()`), as radare2 does (`canal.c`).
+- Test models: `r2source::convention::testing::model(id)` builds through `ConventionModel::new` (feature `testing`, dev-dependencies only). The step 4 equivalence test went with the views; `every_native_model_and_join_builds_and_only_d274_refuses_its_effect` keeps its build and refusal half.
+- Per-site model (D252): `native::site_convention` keys a callee address to the default model where the container binds the import, to the stated model where the callee's declaration states one, and to nothing else; r2ssa `CalleeBoundary::keeps` skips a `CallDefine` of what that model keeps, unless the callee's interface returns it. The models join `BuildKey`. Slot calls are D364.
+- D320: the artifact no longer states `preserved_call_carriers`. r2engine asks the callee's held `RegisterEffects` row (`Program::kept_at`), so a wrapper whose returning path calls keeps nothing (D363) and a body ending in a tail or `syscall` keeps nothing, where the old set kept them on no proof.
+
 ## S27 as built (2026-11-12)
 
 `GuardRow::LinkedGlobal` (D257). AArch64 reads its canary from a global, and only a binding the container states places it.
