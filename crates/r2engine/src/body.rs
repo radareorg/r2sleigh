@@ -1143,12 +1143,8 @@ impl Walk {
         program: &dyn Program,
     ) -> Option<Option<u64>> {
         let ops = &instruction.lifted.ops;
-        let transfer = |op: &r2il::R2ILOp| {
-            matches!(
-                op,
-                r2il::R2ILOp::BranchInd { .. } | r2il::R2ILOp::CallInd { .. }
-            )
-        };
+        // An indirect branch or call: r2il's transfer names no direct target.
+        let transfer = |op: &r2il::R2ILOp| op.transfer().is_some_and(|transfer| !transfer.direct);
         let at = ops.iter().rposition(transfer)?;
         let slot = r2ssa::loaded_target_slot(&instruction.lifted, at)?.offset;
         crate::stated::sealed_import(program, slot)?;
