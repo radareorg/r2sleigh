@@ -1665,6 +1665,52 @@ fn a_dispatch_in_an_arm_is_read_in_the_next_round() {
     }
 }
 
+/// `NESTED_SWITCH` where the outer's second arm is a third switch whose arm 0 enters the inner
+/// dispatch past its guard: only the third round adds that edge, so the inner bound is no bound.
+const BYPASSED_SWITCH: &[u8] = &[
+    0x83, 0xff, 0x01, // 1000 cmp edi, 1
+    0x77, 0x4b, // 1003 ja 0x1050
+    0x89, 0xff, // 1005 mov edi, edi
+    0xff, 0x24, 0xfd, 0x60, 0x10, 0x00, 0x00, // 1007 jmp [rdi*8 + 0x1060]
+    0x83, 0xfe, 0x01, // 100e cmp esi, 1
+    0x77, 0x3d, // 1011 ja 0x1050
+    0x89, 0xf6, // 1013 mov esi, esi
+    0xff, 0x24, 0xf5, 0x70, 0x10, 0x00, 0x00, // 1015 jmp [rsi*8 + 0x1070]
+    0xb8, 0x0a, 0x00, 0x00, 0x00, 0xc3, // 101c inner case 0
+    0xb8, 0x14, 0x00, 0x00, 0x00, 0xc3, // 1022 inner case 1
+    0x83, 0xfa, 0x01, // 1028 cmp edx, 1
+    0x77, 0x23, // 102b ja 0x1050
+    0x89, 0xd2, // 102d mov edx, edx
+    0xff, 0x24, 0xd5, 0x80, 0x10, 0x00, 0x00, // 102f jmp [rdx*8 + 0x1080]
+    0xb8, 0x1e, 0x00, 0x00, 0x00, 0xc3, // 1036 third case 1
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 103c padding
+    0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3, // 1050 default
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // 1056 padding
+    0x0e, 0x10, 0, 0, 0, 0, 0, 0, // 1060 -> 0x100e
+    0x28, 0x10, 0, 0, 0, 0, 0, 0, // 1068 -> 0x1028
+    0x1c, 0x10, 0, 0, 0, 0, 0, 0, // 1070 -> 0x101c
+    0x22, 0x10, 0, 0, 0, 0, 0, 0, // 1078 -> 0x1022
+    0x13, 0x10, 0, 0, 0, 0, 0, 0, // 1080 -> 0x1013, past the inner guard
+    0x36, 0x10, 0, 0, 0, 0, 0, 0, // 1088 -> 0x1036
+];
+
+#[test]
+fn a_later_round_entering_an_earlier_rounds_guarded_arm_drops_the_rounds() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: BYPASSED_SWITCH.to_vec(),
+        name: "bypassed",
+    };
+    let output = match decompile(&target, &program, BASE) {
+        Ok(response) => response.output.text().to_string(),
+        Err(refused) => format!("{refused:?}"),
+    };
+    // The inner table's two entries are no bound on `esi` once the third switch's arm 0 runs.
+    assert!(!output.contains("r2sleigh_carrier_u32(10)"), "{output}");
+    assert!(!output.contains("r2sleigh_carrier_u32(20)"), "{output}");
+}
+
 /// clang -O2's `switch (op) { case 1: .. case 5: }` (sw3.c `base1`): `dec edi` biases the selector and
 /// zero-extends it in the guard's block, and only the dispatch reads that widening.
 const BIASED_TABLE_SWITCH: &[u8] = &[
