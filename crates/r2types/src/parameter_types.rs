@@ -82,6 +82,8 @@ pub enum SlotType {
         basis: Basis,
     },
     Pointer(CTypeLike, Basis),
+    /// A width-only type no other row states (a bit vector): the storage it is read as.
+    Carrier(CTypeLike, Basis),
 }
 
 impl SlotType {
@@ -104,16 +106,17 @@ impl SlotType {
                     sign,
                 })
             }
-            _ => Self::Declared(ty.clone(), basis),
+            _ => Self::Carrier(ty.clone(), basis),
         }
     }
 
     /// The basis the type rests on: an integer's on its width.
     pub const fn basis(&self) -> Basis {
         match self {
-            Self::Declared(_, basis) | Self::Pointer(_, basis) | Self::Float { basis, .. } => {
-                *basis
-            }
+            Self::Declared(_, basis)
+            | Self::Pointer(_, basis)
+            | Self::Carrier(_, basis)
+            | Self::Float { basis, .. } => *basis,
             Self::Integer(integer) => integer.width,
         }
     }
@@ -121,7 +124,7 @@ impl SlotType {
     /// The one C spelling `pdd`, `pddj` and `afi` give the slot.
     pub fn spelled(&self) -> CTypeLike {
         match self {
-            Self::Declared(ty, _) | Self::Pointer(ty, _) => ty.clone(),
+            Self::Declared(ty, _) | Self::Pointer(ty, _) | Self::Carrier(ty, _) => ty.clone(),
             Self::Integer(integer) => integer.spelled(),
             Self::Float { bits, .. } => CTypeLike::Float(u32::from(*bits)),
         }

@@ -51,12 +51,12 @@ pub use metadata::{
     FloatEncodingHint, InstructionRun, InstructionRuns, MemoryClass, OpMetadata, PointerHint,
     ScalarKind, StorageClass,
 };
-pub use opcode::ValueMovement;
 pub use opcode::{
     AtomicAccess, AtomicFetchOp, AtomicUpdate, BlockStop, BlockTransfer, BlockTransferKind,
     ControlTransfer, MemoryAccess, R2ILBlock, R2ILOp, SwitchCase, SwitchInfo, ValueUse,
     guarded_transfer, predicated_call, predicated_transfer, return_addresses, returns_to,
 };
+pub use opcode::{FloatOp, ValueMovement};
 pub use regname::select_register_name;
 pub use serialize::{
     ArchSpec, RegisterBitSlice, RegisterDef, RegisterProjection, RegisterProjectionDisposition,

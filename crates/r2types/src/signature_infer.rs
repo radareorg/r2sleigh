@@ -172,7 +172,9 @@ fn pointee_floats(prepared: &SsaArtifact) -> BTreeMap<(usize, u32), bool> {
     // One visited set for every load, cleared of what each walk touched: O(uses reached).
     let mut seen = r2ssa::dense::IdSet::new(graph.values.len());
     let written_as_float = |value: r2ssa::ValueId| {
-        (graph.def_inst(value).and_then(|inst| graph.op(inst))).is_some_and(is_float_op)
+        (graph.def_inst(value).and_then(|inst| graph.op(inst)))
+            .and_then(SSAOp::float_op)
+            .is_some_and(r2il::FloatOp::writes_float)
     };
     let mut floats = BTreeMap::<(usize, u32), bool>::new();
     for access in prepared.certificates().memory_accesses.values() {
@@ -191,32 +193,12 @@ fn pointee_floats(prepared: &SsaArtifact) -> BTreeMap<(usize, u32), bool> {
     floats
 }
 
-/// An operation that decodes its operands as IEEE 754.
-fn is_float_op(op: &SSAOp<r2ssa::ValueId>) -> bool {
-    matches!(
-        op,
-        SSAOp::FloatAdd { .. }
-            | SSAOp::FloatSub { .. }
-            | SSAOp::FloatMult { .. }
-            | SSAOp::FloatDiv { .. }
-            | SSAOp::FloatNeg { .. }
-            | SSAOp::FloatAbs { .. }
-            | SSAOp::FloatSqrt { .. }
-            | SSAOp::FloatCeil { .. }
-            | SSAOp::FloatFloor { .. }
-            | SSAOp::FloatRound { .. }
-            | SSAOp::FloatNaN { .. }
-            | SSAOp::FloatEqual { .. }
-            | SSAOp::FloatNotEqual { .. }
-            | SSAOp::FloatLess { .. }
-            | SSAOp::FloatLessEqual { .. }
-            | SSAOp::Float2Int { .. }
-            | SSAOp::FloatFloat { .. }
-            | SSAOp::Trunc { .. }
-    )
+/// Whether an operation reads its operands as IEEE 754 bits (r2il's `FloatOp`).
+fn reads_float(op: &SSAOp<r2ssa::ValueId>) -> bool {
+    op.float_op().is_some_and(r2il::FloatOp::reads_float)
 }
 
-/// Whether every use of `value`, through copies and merges, is a float operation and one is
+/// Whether every use of `value`, through copies and merges, reads it as a float and one is
 /// reached; `seen` is left as it was found.
 fn read_as_float(
     graph: &r2ssa::SsaGraph,
@@ -236,7 +218,7 @@ fn read_as_float(
             {
                 Some((r2ssa::InstPayload::Op(SSAOp::Copy { dst, .. }), _)) => pending.push(*dst),
                 Some((r2ssa::InstPayload::Phi { .. }, output)) => pending.extend(output),
-                Some((r2ssa::InstPayload::Op(op), _)) if is_float_op(op) => any = true,
+                Some((r2ssa::InstPayload::Op(op), _)) if reads_float(op) => any = true,
                 _ => other = true,
             }
         }
@@ -939,6 +921,53 @@ mod tests {
             interface,
         )
         .expect("prepared exact AArch64 stack fixture")
+    }
+
+    /// The pointee `f(p) { *p = op(5); }` is typed at, `op` written into an 8-byte temporary.
+    fn pointee_of_a_store(op: fn(r2il::Varnode, r2il::Varnode) -> r2il::R2ILOp) -> CTypeLike {
+        let mut block = r2il::R2ILBlock::new(0x1000, 4);
+        block.push(op(
+            r2il::Varnode::unique(0x40, 8),
+            r2il::Varnode::constant(5, 8),
+        ));
+        block.push(r2il::R2ILOp::Store {
+            space: r2il::SpaceId::Ram,
+            addr: r2il::Varnode::register(0, 8),
+            val: r2il::Varnode::unique(0x40, 8),
+        });
+        let slot = r2ssa::SourceStackSlotSpec::new_local(
+            r2ssa::StackAddressBase::StackPointer,
+            r2ssa::CanonicalStorageId {
+                space: r2ssa::CanonicalStorageSpace::Register,
+                offset: 16,
+                size: 8,
+            },
+            -8,
+            1,
+        );
+        let prepared = aarch64_prepared_with_stack_slot(block, slot);
+        let signedness = crate::signedness::scalar_signedness_of(&prepared, []);
+        let pointers = certified_parameter_pointers(&prepared, &BTreeMap::new(), &signedness);
+        pointers
+            .get(&0)
+            .cloned()
+            .expect("the store certifies a pointer")
+    }
+
+    /// A store of a float's result is a float pointee; a float converted to an integer is not
+    /// one (D353: r2il's `FloatOp` states which results are IEEE 754 bits).
+    #[test]
+    fn a_stored_float_result_types_its_pointee_and_an_integer_conversion_does_not() {
+        let from_integer = pointee_of_a_store(|dst, src| r2il::R2ILOp::Int2Float { dst, src });
+        assert_eq!(
+            from_integer,
+            CTypeLike::Pointer(Box::new(CTypeLike::Float(64)))
+        );
+        let to_integer = pointee_of_a_store(|dst, src| r2il::R2ILOp::Float2Int { dst, src });
+        assert!(
+            !matches!(&to_integer, CTypeLike::Pointer(inner) if matches!(**inner, CTypeLike::Float(_))),
+            "{to_integer:?}"
+        );
     }
 
     #[test]

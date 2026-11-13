@@ -880,6 +880,34 @@ macro_rules! output_of {
     };
 }
 
+/// What a float operation reads and writes: P-code's FLOAT_* operands are IEEE 754 bits, its
+/// results are floats except a test's boolean and a conversion to an integer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FloatOp {
+    /// `FLOAT_ADD` to `FLOAT_ROUND`: floats in, a float out.
+    Arithmetic,
+    /// `FLOAT_NAN` and the compares: floats in, a boolean out.
+    Test,
+    /// `INT2FLOAT`: an integer in, a float out.
+    FromInteger,
+    /// `FLOAT2FLOAT`: a float in, a float of another width out.
+    Convert,
+    /// `FLOAT2INT` and `TRUNC`: a float in, an integer out.
+    ToInteger,
+}
+
+impl FloatOp {
+    /// Whether the operands are IEEE 754 bits.
+    pub const fn reads_float(self) -> bool {
+        !matches!(self, Self::FromInteger)
+    }
+
+    /// Whether the result is IEEE 754 bits.
+    pub const fn writes_float(self) -> bool {
+        matches!(self, Self::Arithmetic | Self::FromInteger | Self::Convert)
+    }
+}
+
 /// What an operation does with the value it handles ([`R2ILOp::value_movement`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueMovement<'a> {
@@ -1145,6 +1173,32 @@ impl R2ILOp {
             self,
             R2ILOp::CallOther { .. } | R2ILOp::CpuId { .. } | R2ILOp::Unimplemented
         )
+    }
+
+    /// Where this operation reads or writes IEEE 754 bits (P-code's FLOAT_* ops); `None` for an
+    /// operation that handles no float.
+    pub fn float_op(&self) -> Option<FloatOp> {
+        Some(match self {
+            R2ILOp::FloatAdd { .. }
+            | R2ILOp::FloatSub { .. }
+            | R2ILOp::FloatMult { .. }
+            | R2ILOp::FloatDiv { .. }
+            | R2ILOp::FloatNeg { .. }
+            | R2ILOp::FloatAbs { .. }
+            | R2ILOp::FloatSqrt { .. }
+            | R2ILOp::FloatCeil { .. }
+            | R2ILOp::FloatFloor { .. }
+            | R2ILOp::FloatRound { .. } => FloatOp::Arithmetic,
+            R2ILOp::FloatNaN { .. }
+            | R2ILOp::FloatEqual { .. }
+            | R2ILOp::FloatNotEqual { .. }
+            | R2ILOp::FloatLess { .. }
+            | R2ILOp::FloatLessEqual { .. } => FloatOp::Test,
+            R2ILOp::Int2Float { .. } => FloatOp::FromInteger,
+            R2ILOp::FloatFloat { .. } => FloatOp::Convert,
+            R2ILOp::Float2Int { .. } | R2ILOp::Trunc { .. } => FloatOp::ToInteger,
+            _ => return None,
+        })
     }
 
     /// What this operation does with the value it handles, each operation in one class: the
@@ -1979,6 +2033,32 @@ impl R2ILBlock {
 
 #[cfg(test)]
 mod tests {
+    /// P-code's float conversions: only `INT2FLOAT` reads an integer, and a conversion to an
+    /// integer or a test writes no float.
+    #[test]
+    fn a_float_operation_states_which_side_is_ieee_754() {
+        let (dst, src) = (Varnode::unique(0, 8), Varnode::unique(8, 8));
+        let of = |op: R2ILOp| op.float_op().map(|f| (f.reads_float(), f.writes_float()));
+        let (d, s) = (dst.clone(), src.clone());
+        assert_eq!(
+            of(R2ILOp::Int2Float { dst: d, src: s }),
+            Some((false, true))
+        );
+        let (d, s) = (dst.clone(), src.clone());
+        assert_eq!(
+            of(R2ILOp::Float2Int { dst: d, src: s }),
+            Some((true, false))
+        );
+        let (d, s) = (dst.clone(), src.clone());
+        assert_eq!(of(R2ILOp::Trunc { dst: d, src: s }), Some((true, false)));
+        let (d, s) = (dst.clone(), src.clone());
+        assert_eq!(
+            of(R2ILOp::FloatFloat { dst: d, src: s }),
+            Some((true, true))
+        );
+        assert_eq!(of(R2ILOp::Copy { dst, src }), None);
+    }
+
     use super::*;
 
     /// A block transfer reads and writes where its kind says, at the first element of each pointer.
