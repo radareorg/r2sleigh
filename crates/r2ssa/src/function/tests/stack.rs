@@ -58,7 +58,6 @@ fn tail_slot_is_a_terminal_callsite_through_either_ssa_shape() {
             None,
             SourceMachineRoles::default(),
             None,
-            None,
             vec![interface],
             vec![identity],
         );
@@ -618,14 +617,12 @@ fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
     .expect("exact callsite interface")
     .with_radare2_format_parameter(0)
     .expect("format parameter belongs to the fixed prefix");
-    let convention = SourceConventionSlots::new(
-        r2source::ConventionId::Aapcs64,
-        (0..4).map(slot).collect::<Vec<_>>(),
-        None,
-    )
-    .expect("convention slots")
-    .with_stack_arguments(r2source::SourceStackArgumentPlacement::new(0, 8))
-    .with_variadic_tail_on_stack(true);
+    let convention = r2source::convention::testing::model(r2source::ConventionId::Aapcs64)
+        .arguments(r2source::convention::SlotClass::Integer, (0..4).map(slot))
+        .stack(0, 8)
+        .forms(|forms| forms.variadic_on_stack = true)
+        .preserved([register(64)])
+        .conventions();
     let roles =
         SourceMachineRoles::new(Some(register(72)), Some(register(64))).expect("machine roles");
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
@@ -634,7 +631,6 @@ fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
         None,
         roles,
         Some(convention),
-        preserving([register(64)]),
         vec![interface],
     );
     machine_context.bind_source_string_literals(&[(0x3000, "%d".to_string())]);

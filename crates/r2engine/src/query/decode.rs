@@ -475,7 +475,7 @@ mod tests {
                 program: &program,
                 endian: Endianness::Little,
             },
-            call_effect: None,
+            calls: None,
             proved: None,
             body: None,
             holdings: true,
@@ -525,7 +525,7 @@ mod tests {
                 program: &Mapped::new(BASE, bytes),
                 endian: Endianness::Little,
             },
-            call_effect: None,
+            calls: None,
             proved: None,
             body: None,
             holdings: true,
@@ -575,7 +575,7 @@ mod tests {
             proved: None,
             body: None,
             holdings: true,
-            call_effect: None,
+            calls: None,
             parameters: None,
         };
         let request = Listing {
@@ -755,7 +755,7 @@ mod tests {
                 program: &program,
                 endian: Endianness::Little,
             },
-            call_effect: None,
+            calls: None,
             proved: None,
             body: None,
             holdings: false,
@@ -810,7 +810,7 @@ mod tests {
                 program: &program,
                 endian: Endianness::Little,
             },
-            call_effect: None,
+            calls: None,
             proved: None,
             body: Some(&walked),
             holdings: false,
@@ -956,7 +956,7 @@ mod tests {
             proved: None,
             body: Some(&body),
             holdings: true,
-            call_effect: None,
+            calls: None,
             parameters: None,
         };
         let request = Listing {
@@ -1039,7 +1039,7 @@ mod tests {
             proved: None,
             body: None,
             holdings: true,
-            call_effect: None,
+            calls: None,
             parameters: None,
         };
         let request = Listing {

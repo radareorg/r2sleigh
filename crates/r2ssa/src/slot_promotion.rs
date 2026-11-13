@@ -78,7 +78,7 @@ fn saves(
     accesses: &BTreeMap<i64, Vec<Access>>,
     machine: &SourceMachineContext,
 ) -> BTreeSet<i64> {
-    let (effect, stack_pointer) = (machine.call_effect(), machine.stack_pointer_carrier());
+    let (effect, stack_pointer) = (machine.calls(), machine.stack_pointer_carrier());
     let saved = |access: &Access| {
         let val = match func.get_block(access.block)?.ops().get(access.index)? {
             SSAOp::Store { val, .. } => *val,

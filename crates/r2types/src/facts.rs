@@ -398,7 +398,6 @@ pub struct CalleeFact {
     pub name: Option<String>,
     pub linkage: CalleeLinkage,
     pub signature: Option<FunctionType>,
-    pub signature_callconv: Option<String>,
     pub signature_noreturn: bool,
     pub model_policy_evidence: BTreeSet<CalleeModelPolicyEvidence>,
     pub direct_callees: Vec<u64>,
@@ -431,7 +430,6 @@ impl CalleeFact {
             name,
             linkage,
             signature: None,
-            signature_callconv: None,
             signature_noreturn: false,
             model_policy_evidence: BTreeSet::new(),
             direct_callees: Vec::new(),
@@ -479,7 +477,6 @@ pub struct FunctionTypeFacts {
     /// Each parameter that points to an inferred structure: its tag, and the member at each
     /// accessed offset (doc/adr-aggregates.md).
     pub parameter_structures: BTreeMap<usize, ParameterStructure>,
-    pub callconv: Option<String>,
     pub noreturn: bool,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
@@ -502,7 +499,6 @@ pub struct FunctionTypeFactInputs {
     /// Each parameter that points to an inferred structure: its tag, and the member at each
     /// accessed offset (doc/adr-aggregates.md).
     pub parameter_structures: BTreeMap<usize, ParameterStructure>,
-    pub callconv: Option<String>,
     pub noreturn: bool,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
@@ -525,7 +521,6 @@ pub struct FunctionTypeFactsBuilder {
 impl FunctionTypeFacts {
     pub fn is_empty(&self) -> bool {
         self.merged_signature.is_none()
-            && self.callconv.is_none()
             && !self.noreturn
             && self.register_params.is_empty()
             && self.callee_facts.is_empty()
@@ -549,7 +544,6 @@ impl FunctionTypeFacts {
             parameter_types: self.parameter_types,
             inferred_aggregates: self.inferred_aggregates,
             parameter_structures: self.parameter_structures,
-            callconv: self.callconv,
             noreturn: self.noreturn,
             register_params: self.register_params,
             callee_facts: self.callee_facts,
@@ -963,7 +957,6 @@ impl FunctionTypeFactsBuilder {
             parameter_types,
             inferred_aggregates,
             parameter_structures,
-            callconv,
             noreturn,
             mut register_params,
             callee_facts,
@@ -990,7 +983,6 @@ impl FunctionTypeFactsBuilder {
             parameter_types,
             inferred_aggregates,
             parameter_structures,
-            callconv,
             noreturn,
             register_params,
             callee_facts,

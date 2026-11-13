@@ -139,6 +139,9 @@ pub struct CallBoundaryConfig {
     /// the value the caller held going in is the value it holds coming out,
     /// which is exactly what a compiler that has seen the callee relies on.
     pub preserved_by_target: BTreeMap<u64, BTreeSet<CanonicalStorageId>>,
+    /// The convention a call to each stated callee runs under (RULING 1.6): what it keeps, the
+    /// call does not define.
+    pub convention_by_target: crate::SiteConventions,
     /// The carrier a direct callee's own interface names as its result, by
     /// callee entry address. A convention's unaffected list describes a callee
     /// nothing is known about, and this callee's boundary has said it hands
@@ -193,6 +196,7 @@ impl CallBoundaryConfig {
         CalleeBoundary {
             target: Some(target),
             preserved: self.preserved_by_target.get(&target),
+            convention: self.convention_by_target.get(&target).map(|model| &**model),
             result: self.result_by_target.get(&target),
         }
     }
@@ -205,8 +209,18 @@ pub struct CalleeBoundary<'a> {
     pub target: Option<u64>,
     /// Carriers its body proves it leaves exactly as it found them.
     pub preserved: Option<&'a BTreeSet<CanonicalStorageId>>,
+    /// The convention the program states the call runs under, where it states one.
+    pub convention: Option<&'a r2source::ConventionModel>,
     /// The carrier its interface names as its result.
     pub result: Option<&'a CallBoundaryDef>,
+}
+
+impl CalleeBoundary<'_> {
+    /// Whether the convention the program states for this call keeps `storage`.
+    pub fn keeps(&self, storage: CanonicalStorageId) -> bool {
+        self.convention
+            .is_some_and(|model| !model.clobbers(storage))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1056,6 +1070,7 @@ fn append_call_boundary_defs(
         if callee
             .preserved
             .is_some_and(|preserved| crate::semantic::covers(preserved, storage))
+            || callee.keeps(storage) && !results.contains(identity)
         {
             continue;
         }

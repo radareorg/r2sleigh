@@ -709,6 +709,14 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     fn target_at(&self, vaddr: u64) -> Option<NativeTarget<'_>> {
         self.target(vaddr).ok()
     }
+
+    fn site_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
+        crate::native::Program::site_convention_at(&self.view(), callee)
+    }
+
+    fn kept_at(&self, entry: u64) -> Option<std::collections::BTreeSet<r2ssa::CanonicalStorageId>> {
+        crate::native::Program::kept_at(&self.view(), entry)
+    }
 }
 
 /// The C library a program runs against, as its container states it.

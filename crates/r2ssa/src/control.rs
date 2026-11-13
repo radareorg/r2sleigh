@@ -74,8 +74,6 @@ pub enum SsaPrepareError {
     MalformedInput,
     Cancelled,
     DeadlineExceeded,
-    /// The body calls and its convention states nothing a call leaves standing.
-    NoCallEffect,
     /// A pass moved a state past its stated lattice height: a defect in it, refused with the
     /// function (doc/adr-fixpoint.md).
     Exhausted(crate::fixpoint::Exhausted),
@@ -89,7 +87,6 @@ impl std::fmt::Display for SsaPrepareError {
             Self::MalformedInput => "malformed SSA source input",
             Self::Cancelled => "SSA preparation cancelled",
             Self::DeadlineExceeded => "SSA preparation deadline exceeded",
-            Self::NoCallEffect => "the convention states nothing a call leaves standing",
             Self::Exhausted(exhausted) => return write!(formatter, "{exhausted}"),
             Self::Integrity(rule) => return write!(formatter, "SSA integrity: {rule}"),
         })

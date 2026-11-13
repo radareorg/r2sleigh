@@ -113,7 +113,7 @@ fn cookie_and_argument(
     machine: &SourceMachineContext,
 ) -> Option<(r2source::SourceSecurityCookie, r2source::CanonicalStorageId)> {
     let model = machine.convention()?;
-    let argument = model.argument_registers(SlotClass::Integer).next()?;
+    let argument = model.argument(SlotClass::Integer, 0)?;
     Some((model.forms.security_cookie?, argument))
 }
 

@@ -3,7 +3,7 @@
 
 use r2il::eval::independence::{leaves_zero, reads_of};
 use r2il::{Endianness, R2ILBlock, R2ILOp, SpaceId, Varnode};
-use r2source::{CanonicalStorageId, SourceConventionSlots};
+use r2source::{CanonicalStorageId, ConventionModel};
 
 use crate::arch::Arch;
 
@@ -66,11 +66,11 @@ pub struct ResultLanes {
 impl ResultLanes {
     /// The result registers `slots` names, and each of `results` (the convention's return set) that
     /// overlaps none of them, past the first `OTHERS`, which no convention graded here has.
-    pub fn of(slots: &SourceConventionSlots, results: &[CanonicalStorageId]) -> Self {
+    pub fn of(slots: &ConventionModel, results: &[CanonicalStorageId]) -> Self {
         let mut lanes = Self {
-            integer: slots.result_slot(),
-            float: slots.float_result_slot(),
-            second: slots.second_result_slot(),
+            integer: slots.result(),
+            float: slots.results().float,
+            second: slots.results().second,
             ..Self::default()
         };
         let mut others = Vec::new();
@@ -111,8 +111,12 @@ impl ResultLanes {
     }
 }
 
-pub fn argument_registers(slots: &SourceConventionSlots) -> Vec<CanonicalStorageId> {
-    [slots.argument_slots(), slots.float_argument_slots()].concat()
+pub fn argument_registers(slots: &ConventionModel) -> Vec<CanonicalStorageId> {
+    [
+        slots.arguments(r2source::convention::SlotClass::Integer),
+        slots.arguments(r2source::convention::SlotClass::Float),
+    ]
+    .concat()
 }
 
 /// What becomes of the bytes of one result register after a call.

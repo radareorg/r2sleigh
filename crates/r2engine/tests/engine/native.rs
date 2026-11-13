@@ -1984,18 +1984,27 @@ impl Program for WithSink {
 /// dispatch; a tail call from an unproven result is a gap naming `sink` (r2dec `tail_call`).
 #[test]
 fn a_widened_index_a_call_passes_is_not_part_of_the_dispatch() {
-    let x86 = Machine::new("x86-64", "x86-64", 64);
-    let arm = Machine::new("aarch64", "aarch64", 64);
-    for (machine, bytes, called, gaps) in [
-        (&x86, BIASED_INDEX_TAIL_CALLED, "call to sink", true),
-        (&x86, BIASED_INDEX_CALLED, "sink(", false),
-        (&arm, A64_BIASED_INDEX_TAIL_CALLED, "call to sink", true),
+    for (aarch64, bytes, called, gaps) in [
+        (false, BIASED_INDEX_TAIL_CALLED, "call to sink", true),
+        (false, BIASED_INDEX_CALLED, "sink(", false),
+        (true, A64_BIASED_INDEX_TAIL_CALLED, "call to sink", true),
     ] {
-        let target = machine.target();
-        let program = WithSink { bytes, sink: SINK };
-        let response = decompile(&target, &program, BASE).expect("decompile");
-        assert!(response.output.function().is_some(), "{}", response.output);
-        let output = response.output.text();
+        // Through the program, so what `sink` keeps is its register effect's (D320).
+        let size = bytes.len() as u64;
+        let functions = [
+            ("pick", BASE, SINK - BASE),
+            ("sink", SINK, BASE + size - SINK),
+        ];
+        let literal = common::Literal::of_code(bytes, &functions);
+        let literal = if aarch64 {
+            literal.in_aarch64()
+        } else {
+            literal
+        };
+        let mut open = r2engine::program::OpenProgram::of(literal);
+        let rendered = open.rendered(BASE).expect("it renders");
+        let output = rendered.response.output.into_text();
+        let output = output.as_str();
         assert!(output.contains("switch ("), "{output}");
         assert!(output.contains(called), "{output}");
         assert!(gaps || !output.contains("residual"), "{output}");
@@ -5076,9 +5085,8 @@ fn every_register_a_default_prototype_names_is_one_of_its_machine() {
             })
             .collect::<Vec<_>>();
         assert!(!named.is_empty(), "{sleigh}");
-        let effect = (machine.conventions[machine.default].convention)
-            .call_effect()
-            .expect("the default prototype states a call effect");
+        let effect = &*machine.conventions[machine.default].convention;
+        assert_eq!(effect.effect_refused(), None, "{sleigh}");
         for register in named {
             let placed = machine
                 .embedded
@@ -5094,7 +5102,8 @@ fn every_register_a_default_prototype_names_is_one_of_its_machine() {
                 .collect::<Vec<_>>();
             assert_eq!(placed.len(), 1, "{sleigh}: {register}");
             assert!(
-                effect.clobbered().contains(&placed[0]) || effect.preserved().contains(&placed[0]),
+                effect.clobbered().is_some_and(|it| it.contains(&placed[0]))
+                    || effect.preserved_registers().contains(&placed[0]),
                 "{sleigh}: {register} is in neither list"
             );
         }
@@ -7436,17 +7445,23 @@ fn microsoft_x64_states_four_positional_register_pairs() {
     };
     let prepared =
         r2engine::native::prepared(&machine.under("ms"), &program, BASE).expect("prepared");
-    let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
+    let slots = (prepared.artifact().machine_context().convention()).expect("slots");
     let integers = ["RCX", "RDX", "R8", "R9"].map(place);
     let floats = ["XMM0_Qa", "XMM1_Qa", "XMM2_Qa", "XMM3_Qa"].map(place);
-    assert_eq!(slots.argument_slots(), integers);
-    assert_eq!(slots.float_argument_slots(), floats);
-    assert!(slots.shared_positions());
+    assert_eq!(
+        slots.arguments(r2source::convention::SlotClass::Integer),
+        integers
+    );
+    assert_eq!(
+        slots.arguments(r2source::convention::SlotClass::Float),
+        floats
+    );
+    assert!(slots.shares_positions());
     // System V counts its two classes apart.
     let prepared =
         r2engine::native::prepared(&machine.under("amd64"), &program, BASE).expect("prepared");
-    let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
-    assert!(!slots.shared_positions());
+    let slots = (prepared.artifact().machine_context().convention()).expect("slots");
+    assert!(!slots.shares_positions());
 }
 
 /// Apple's arm64 sends every variadic argument to the stack because its compiler specification
@@ -7460,8 +7475,8 @@ fn an_arm64_variadic_tail_is_on_the_stack_where_the_compiler_specification_says(
     let on_stack = |platform| {
         let machine = Machine::on("aarch64", "aarch64", 64, platform);
         let prepared = r2engine::native::prepared(&machine.target(), &ret, BASE).expect("prepared");
-        let slots = (prepared.artifact().machine_context().convention_slots()).expect("slots");
-        slots.variadic_tail_on_stack()
+        let slots = (prepared.artifact().machine_context().convention()).expect("slots");
+        slots.forms.variadic_on_stack
     };
     assert!(on_stack(Platform::Darwin));
     assert!(!on_stack(Platform::Linux));
@@ -7539,55 +7554,15 @@ const CALL_TWICE: &[u8] = &[
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
 ];
 
-/// `CALL_TWICE`, its callee named `arg0`: the caller's parameter holds that name, so no call is C.
-struct CalleeNamedLikeAParameter;
-
-impl r2engine::body::Program for CalleeNamedLikeAParameter {
-    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
-        let offset = usize::try_from(vaddr.checked_sub(BASE)?).ok()?;
-        let slice = CALL_TWICE.get(offset..)?;
-        (!slice.is_empty()).then(|| slice[..slice.len().min(max)].to_vec())
-    }
-
-    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
-        code_region(CALL_TWICE.len(), vaddr)
-    }
-
-    fn is_entry(&self, vaddr: u64) -> bool {
-        matches!(vaddr, BASE | 0x1011)
-    }
-}
-
-impl Program for CalleeNamedLikeAParameter {
-    fn holds_static_data(&self, _vaddr: u64) -> bool {
-        false
-    }
-
-    fn extents(&self) -> &r2types::ProgramExtents {
-        const NONE: &r2types::ProgramExtents = &r2types::ProgramExtents::none();
-        NONE
-    }
-
-    fn name_at(&self, vaddr: u64) -> Option<String> {
-        match vaddr {
-            BASE => Some("caller".to_owned()),
-            0x1011 => Some("arg0".to_owned()),
-            _ => None,
-        }
-    }
-
-    fn import_at(&self, _vaddr: u64) -> Option<String> {
-        None
-    }
-}
-
 /// A call that spelled its argument and then failed is a gap, so the `lea` its argument absorbed
 /// reaches the text only through that gap: the ledger may not call any of its obligations rendered.
 #[test]
 fn an_absorbed_producer_of_an_unwritten_call_is_not_rendered() {
-    let machine = Machine::new("x86-64", "x86-64", 64);
-    let target = machine.target();
-    let program = CalleeNamedLikeAParameter;
+    // Through the program, so what the callee keeps is its register effect's (D320).
+    let functions = [("caller", BASE, 0x11), ("arg0", 0x1011, 3)];
+    let program =
+        r2engine::program::OpenProgram::of(common::Literal::of_code(CALL_TWICE, &functions));
+    let target = Program::target_at(&program, BASE).expect("a machine");
     let response = decompile(&target, &program, BASE).expect("decompile");
     let text = response.output.text().to_owned();
     assert!(
@@ -7963,9 +7938,7 @@ fn go_machine_on(arch: &str) -> Machine {
     )
     .expect("ABIInternal's model");
     assert!(
-        (model.call_effect().ok())
-            .and_then(|effect| effect.stack_bound().copied())
-            .is_some(),
+        model.stack_bound().is_some(),
         "the convention states g.stackguard0"
     );
     machine.conventions.insert(

@@ -1544,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_use_after_a_stack_spill_types_the_parameter_and_home() {
+    fn unsigned_use_after_a_stack_spill_types_the_parameter() {
         let mut arch = r2il::ArchSpec::new("aarch64");
         arch.add_register(r2il::RegisterDef::new("x1", 8, 8));
         arch.add_register(r2il::RegisterDef::new("sp", 16, 8));
@@ -1613,15 +1613,9 @@ mod tests {
             signedness: Signedness::Unsigned,
         };
 
+        // Under no model x1 is kept by no call, so its spill is no save and promotes (S34): the
+        // use-proven type lands on the parameter the reload reads.
         assert_eq!(solved.value_type(parameter), Some(&unsigned));
-        assert_eq!(
-            solved
-                .stack_slot_types()
-                .find(|(slot, _)| slot.offset == -8)
-                .map(|(_, ty)| ty),
-            Some(&unsigned),
-            "one scalar memory cell must carry the use-proven type both ways"
-        );
 
         let signed = CTypeLike::typedef("int64_t");
         let signature = crate::FunctionSignatureSpec {

@@ -91,7 +91,7 @@ pub enum PlacementRefusal {
 /// Each class takes the next location of its own section, or of its position where positions
 /// are shared, then the next stack slot past the registers. O(classes + locations).
 pub fn place(model: &ConventionModel, classes: &[ParamClass]) -> Placement {
-    let registers = |of: SlotClass| model.argument_registers(of).collect::<Vec<_>>();
+    let registers = |of: SlotClass| model.arguments(of).to_vec();
     let (integers, floats) = (registers(SlotClass::Integer), registers(SlotClass::Float));
     let shared = model.shares_positions();
     // The stack section counts from the call; a parameter is placed from the entry, past the

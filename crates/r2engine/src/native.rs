@@ -92,6 +92,18 @@ pub trait Program: crate::body::Program {
         r2abi::statement::SourceLanguage::C
     }
 
+    /// The registers the body at `entry` leaves as it found them on every path to a return, from
+    /// its held register effect (D320); `None` where nothing proves any kept.
+    fn kept_at(&self, _entry: u64) -> Option<BTreeSet<CanonicalStorageId>> {
+        None
+    }
+
+    /// The model a call to `callee` runs under where the program states it: a bound import's
+    /// program default, a declared body's own; `None` runs it under `AnyCall` (RULING 1.6, 2.6).
+    fn site_convention_at(&self, _callee: u64) -> Option<Arc<ConventionModel>> {
+        None
+    }
+
     /// The machine the function at this address is written in, where the
     /// program has more than one; `None` keeps the caller's.
     fn target_at(&self, _vaddr: u64) -> Option<NativeTarget<'_>> {
@@ -1064,6 +1076,9 @@ fn declare_imports(
 ) -> Vec<r2types::SourceOwnedCalleeSignature> {
     let mut signatures = Vec::new();
     for address in targets {
+        if let Some(model) = native.program.site_convention_at(*address) {
+            callees.conventions.insert(*address, model);
+        }
         let Some(name) = native.program.import_at(*address) else {
             continue;
         };
@@ -1170,7 +1185,7 @@ fn resolved_alone(
     let targets = reached(&walked.root.body, native.program);
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
     // Each resolved owner of its result or arity, read as any callee's statement.
-    imports.state(stated.owners);
+    imports.state(stated.owners, native.program);
     // An assumed member states its interface alone: nothing it preserves or reaches.
     for (member, interface) in stated.assumed {
         imports.interfaces.insert(*member, interface.clone());
@@ -1431,7 +1446,7 @@ fn read_callees(
         }
         match &read.facts {
             Ok(derived) => {
-                callees.record(*address, derived);
+                callees.record(*address, derived, native.program);
                 facts.push(derived.clone());
             }
             Err(reason) => unread.push(Unread {
@@ -1513,7 +1528,7 @@ fn declared_parameter_names(
 
 /// Where each integer argument arrives under this machine's convention, by index.
 pub(crate) fn argument_slots(target: &NativeTarget<'_>) -> Vec<CanonicalStorageId> {
-    (target.convention.argument_registers(SlotClass::Integer)).collect()
+    target.convention.arguments(SlotClass::Integer).to_vec()
 }
 
 /// Where an import's declaration says it takes a pointer.
@@ -1576,6 +1591,8 @@ struct Callees {
     reach: BTreeMap<u64, BTreeMap<usize, ArgumentReach>>,
     /// The imports whose declaration states no interface: they have no body to read one off.
     unstated: BTreeMap<u64, r2ssa::UnstatedImport>,
+    /// The convention each call runs under where the program states it (`site_convention`).
+    conventions: r2ssa::SiteConventions,
 }
 
 impl Callees {
@@ -1594,22 +1611,24 @@ impl Callees {
             reentering,
             exits,
             unstated_imports: self.unstated.clone(),
+            conventions: self.conventions.clone(),
         }
     }
 
     /// Each resolved owner that proved facts, read as any callee's statement.
-    fn state(&mut self, owners: &[(u64, Arc<CalleeRead>)]) {
+    fn state(&mut self, owners: &[(u64, Arc<CalleeRead>)], program: &dyn Program) {
         for (owner, read) in owners {
             if let Ok(facts) = &read.facts {
-                self.record(*owner, facts);
+                self.record(*owner, facts, program);
             }
         }
     }
 
-    fn record(&mut self, address: u64, facts: &CalleeFacts) {
+    /// One callee's statement; what it keeps is its register effect's, the one owner (D320).
+    fn record(&mut self, address: u64, facts: &CalleeFacts, program: &dyn Program) {
         self.interfaces.insert(address, facts.interface().clone());
         self.preserved
-            .insert(address, facts.preserved_carriers().clone());
+            .insert(address, program.kept_at(address).unwrap_or_default());
         // Recorded even when empty: a body that touches nothing through its
         // arguments is described, and a callee with no entry is one nothing
         // describes.
@@ -1801,7 +1820,7 @@ impl<'a> Native<'a> {
             declared_root,
         } = built;
         if !owners.is_empty() {
-            imports.state(owners);
+            imports.state(owners, self.program);
             let evidence = self.evidence(&walk.root, &imports);
             let arch = Some(self.target.arch);
             let restated =
@@ -2891,22 +2910,19 @@ fn machine(target: &NativeTarget<'_>) -> Result<NativeMachine, NativeRefusal> {
             .map_err(|_| NativeRefusal::Machine("the frame pointer is not a register storage"))?,
         None => roles,
     };
-    let slots = model
-        .convention_slots()
-        .map_err(|_| NativeRefusal::Machine("the convention names one register twice"))?;
-    let call_effect = target.call.call_effect().inspect_err(|error| {
-        r2il::refusal_evidence!("call-effect", "{:?}: {error:?}", model.id);
-    });
+    if let Some(refused) = target.call.effect_refused() {
+        r2il::refusal_evidence!("call-effect", "{:?}: {refused:?}", model.id);
+    }
     Ok(NativeMachine {
         arch_id: family.to_owned(),
         cpu_id: target.cpu.to_owned(),
         bits,
         endianness,
         roles,
-        slots,
-        // Asked in the first pass, before an interface exists; without it a caller loses its frame facts.
-        call_effect: call_effect.ok(),
-        convention: Some(Arc::clone(&target.convention)),
+        conventions: r2source::Conventions {
+            own: Arc::clone(&target.convention),
+            calls: Arc::clone(&target.call),
+        },
     })
 }
 

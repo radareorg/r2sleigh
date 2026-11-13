@@ -13,9 +13,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use r2il::SpaceId;
 use r2source::{
-    CanonicalStorageId, CanonicalStorageSpace, SourceAbiParameterSpec, SourceArityFloor,
-    SourceCallArgumentSpec, SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
-    SourceCarrierKind, SourceCarrierProjection, SourceConventionSlots, SourceFloorCause,
+    CanonicalStorageId, CanonicalStorageSpace, ConventionModel, SourceAbiParameterSpec,
+    SourceArityFloor, SourceCallArgumentSpec, SourceCallResult, SourceCallSiteIdentity,
+    SourceCallSiteInterface, SourceCarrierKind, SourceCarrierProjection, SourceFloorCause,
     SourceFunctionInterface, SourceFunctionReturn, SourceLogicalValue, SourceMachineRoles,
     SourceParameterLocation, SourceResultCause, SourceResultSeed, SourceResultWidth,
     SourceStackSlotSpec, SourceType, SourceTypeGraph, SourceTypeKind, SourceUnprovenCall,
@@ -1014,13 +1014,13 @@ fn body_proven_result(
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
     machine_context: Option<&crate::SourceMachineContext>,
-    slots: &SourceConventionSlots,
+    slots: &ConventionModel,
 ) -> Option<(CanonicalStorageId, crate::liveout::FunctionLiveOut)> {
     let machine_context = machine_context?;
     let excluded = [
         machine_context.stack_pointer_carrier(),
         machine_context.return_address_carrier(),
-        slots.result_slot(),
+        slots.result(),
     ];
     let mut candidates = graph
         .values
@@ -1092,14 +1092,16 @@ fn returned_result(
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
     live_out: &crate::liveout::FunctionLiveOut,
-    slots: &SourceConventionSlots,
+    slots: &ConventionModel,
 ) -> (RecoveredFunctionResult, Returned) {
-    let Some(slot) = slots.result_slot() else {
+    let Some(slot) = slots.result() else {
         return (RecoveredFunctionResult::Unproven, Returned::Value);
     };
     let entry_undefined = entry_defines_nothing(graph, slots, slot);
-    let input =
-        (slots.argument_slots().iter()).any(|argument| argument.location() == slot.location());
+    let input = (slots
+        .arguments(r2source::convention::SlotClass::Integer)
+        .iter())
+    .any(|argument| argument.location() == slot.location());
     let merged_entry = returns_the_callers_value(graph, live_out, slot);
     // A path holding the caller's carrier is untouched, unless its byte defines nothing (case 1)
     // or a merge hands back the parameter in an argument register, a value the text spells.
@@ -1198,11 +1200,13 @@ fn returns_the_callers_value(
 /// (doc/adr-scratch-result.md, case 1).
 fn entry_defines_nothing(
     graph: &SsaGraph,
-    slots: &SourceConventionSlots,
+    slots: &ConventionModel,
     slot: CanonicalStorageId,
 ) -> bool {
-    let input =
-        (slots.argument_slots().iter()).any(|argument| argument.location() == slot.location());
+    let input = (slots
+        .arguments(r2source::convention::SlotClass::Integer)
+        .iter())
+    .any(|argument| argument.location() == slot.location());
     !input && !read_on_entry(graph, slot)
 }
 
@@ -1266,10 +1270,10 @@ fn float_result_written(
     func: &SSAFunction,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
-    slots: &SourceConventionSlots,
+    slots: &ConventionModel,
 ) -> Option<(CanonicalStorageId, crate::liveout::FunctionLiveOut)> {
     // A lane a callee's unproven result may be in is a carrier, as a body's own write is (D212).
-    let float = slots.float_result_slot()?;
+    let float = slots.results().float?;
     result_register_written(func, graph, float, Some(facts), (false, false))
 }
 
@@ -1699,7 +1703,7 @@ fn written_bytes(
 #[cfg(test)]
 pub(crate) fn recover_interface(
     func: &SSAFunction,
-    slots: &SourceConventionSlots,
+    slots: &ConventionModel,
 ) -> Option<RecoveredInterface> {
     let stated = Stated {
         closed: None,
@@ -1736,7 +1740,7 @@ impl Stated {
 pub(crate) fn recover_interface_with_context(
     func: &SSAFunction,
     prep: &crate::function::Provisional,
-    slots: &SourceConventionSlots,
+    slots: &ConventionModel,
     machine_context: &crate::SourceMachineContext,
     stated: Stated,
 ) -> Result<Option<RecoveredInterface>, crate::fixpoint::Exhausted> {
@@ -1746,14 +1750,18 @@ pub(crate) fn recover_interface_with_context(
 fn recover_interface_inner(
     func: &SSAFunction,
     provisional: Option<&crate::function::Provisional>,
-    slots: &SourceConventionSlots,
+    slots: &ConventionModel,
     machine_context: Option<&crate::SourceMachineContext>,
     Stated { closed, unseen }: Stated,
 ) -> Result<Option<RecoveredInterface>, crate::fixpoint::Exhausted> {
     // A convention with no argument registers still places its arguments: x86
     // cdecl puts every one on the stack. Only a convention that states neither
     // offers nothing to intersect the body's reads against.
-    if slots.argument_slots().is_empty() && slots.stack_arguments().is_none() {
+    if slots
+        .arguments(r2source::convention::SlotClass::Integer)
+        .is_empty()
+        && slots.stack_arguments().is_none()
+    {
         return Ok(None);
     }
     // Recovery is intentionally a bounded two-phase path used only when the
@@ -1790,9 +1798,9 @@ fn recover_interface_inner(
     }
 
     let lanes = r2source::convention::TypedResults {
-        integer: slots.result_slot(),
-        float: slots.float_result_slot(),
-        second: slots.second_result_slot(),
+        integer: slots.result(),
+        float: slots.results().float,
+        second: slots.results().second,
     };
     let tail = match tail_result_storage(func, &facts, lanes) {
         TailResult::NoTailBoundary => TailResult::NoTailBoundary,
@@ -1813,7 +1821,7 @@ fn recover_interface_inner(
         TailResult::Unproven
             if direct_return_result(func, graph, &facts, lanes.integer).is_some() =>
         {
-            let slot = slots.result_slot();
+            let slot = slots.result();
             r2il::refusal_evidence!(
                 "interface-recovery",
                 "a tail transfer owns one path and a direct return owns another; \
@@ -1900,7 +1908,7 @@ fn recover_interface_inner(
     // An exact tail-call interface owns this boundary. Looking at the value
     // present before the branch would instead mistake a call argument for the
     // value the callee returns into the same register.
-    if no_tail_boundary && let Some(candidate) = slots.result_slot() {
+    if no_tail_boundary && let Some(candidate) = slots.result() {
         let mut candidate_live_out =
             crate::liveout::FunctionLiveOut::compute(func, graph, &[candidate]);
         let (recovered, returned) =
@@ -1967,7 +1975,7 @@ fn recover_interface_inner(
         // or a callee's stated result fills, as the result where every reading call reads it there.
         let integer_unheld = handed_back || result == RecoveredFunctionResult::Void;
         if integer_unheld
-            && let Some(float) = slots.float_result_slot()
+            && let Some(float) = slots.results().float
             && let Some((float, float_live_out)) =
                 result_register_written(func, graph, float, Some(&facts), (true, true))
         {
@@ -2020,8 +2028,7 @@ fn recover_interface_inner(
         // item 1); unasked, it asks them.
         if let RecoveredFunctionResult::Register(low) = result
             && !low.float()
-            && let Some(high) =
-                written_on_every_return(func, graph, &facts, slots.second_result_slot())
+            && let Some(high) = written_on_every_return(func, graph, &facts, slots.results().second)
         {
             let both =
                 || crate::liveout::FunctionLiveOut::compute(func, graph, &[low.slot(), high]);
@@ -2068,7 +2075,7 @@ fn recover_interface_inner(
     // An entry byte of the float lane, an input, may be the result where the integer one holds none.
     if !tail_unproven
         && result == RecoveredFunctionResult::Void
-        && let Some(float) = slots.float_result_slot()
+        && let Some(float) = slots.results().float
     {
         let tails = owned_tail_blocks(func, graph, &facts, float);
         let float_live_out =
@@ -2080,7 +2087,7 @@ fn recover_interface_inner(
         {
             result = RecoveredFunctionResult::Unproven;
             result_causes.insert(SourceResultCause::HandedBack);
-            result_carriers = (slots.result_slot()).map(|integer| r2source::SourceResultCarriers {
+            result_carriers = (slots.result()).map(|integer| r2source::SourceResultCarriers {
                 integer,
                 float: Some(float),
                 second: None,
@@ -2094,13 +2101,13 @@ fn recover_interface_inner(
     if no_tail_boundary
         && result == RecoveredFunctionResult::Unproven
         && result_carriers.is_none()
-        && let Some(integer) = slots.result_slot()
+        && let Some(integer) = slots.result()
     {
-        let float = (slots.float_result_slot()).filter(|lane| {
+        let float = (slots.results().float).filter(|lane| {
             result_register_written(func, graph, *lane, Some(&facts), (true, true)).is_some()
         });
         let second =
-            (slots.second_result_slot()).filter(|lane| left_by_calls(func, graph, &facts, *lane));
+            (slots.results().second).filter(|lane| left_by_calls(func, graph, &facts, *lane));
         if float.is_some() || second.is_some() {
             result_carriers = Some(r2source::SourceResultCarriers {
                 integer,
@@ -2184,7 +2191,7 @@ fn recover_interface_inner(
         r2il::refusal_evidence!(
             "interface-recovery",
             "no proven program observations: result_slot={:?} live_out={} unresolved_blocks={}",
-            slots.result_slot(),
+            slots.result(),
             live_out.len(),
             live_out.unresolved_blocks().count()
         );
@@ -2237,7 +2244,7 @@ fn recover_interface_inner(
         .collect::<Vec<_>>();
     // A tail slot read past its save contradicts the area.
     if let Some(area) = &save_area
-        && slots.argument_slots()[area.named..]
+        && slots.arguments(r2source::convention::SlotClass::Integer)[area.named..]
             .iter()
             .any(|slot| read_at(&observed, *slot) || read_at(&handed_storages, *slot))
     {
@@ -2288,7 +2295,11 @@ fn recover_interface_inner(
     let use_of = |slot: CanonicalStorageId| {
         // The prologue saves every vector register under the count it is handed, and the area
         // records no float save apart from a named float's read: no float is named here.
-        if save_area.is_some() && slots.float_argument_slots().contains(&slot) {
+        if save_area.is_some()
+            && slots
+                .arguments(r2source::convention::SlotClass::Float)
+                .contains(&slot)
+        {
             return SlotUse::SaveArea;
         }
         let widest = |reads: &[CanonicalStorageId]| {
@@ -2300,7 +2311,10 @@ fn recover_interface_inner(
             .get(&slot.location())
             .map_or(&[][..], Vec::as_slice);
         let saved = save_area.as_ref().is_some_and(|area| {
-            (slots.argument_slots().get(area.named..)).is_some_and(|tail| tail.contains(&slot))
+            (slots
+                .arguments(r2source::convention::SlotClass::Integer)
+                .get(area.named..))
+            .is_some_and(|tail| tail.contains(&slot))
         });
         let home = (machine_context.and_then(crate::SourceMachineContext::convention))
             .zip(shared_position(slots, slot))
@@ -2348,12 +2362,18 @@ fn recover_interface_inner(
     };
     // The register sections in convention order: each slot's class and register, and its use.
     let (mut registers, mut uses, mut spans) = (Vec::new(), Vec::new(), Vec::new());
-    if slots.shared_positions() {
+    if slots.shares_positions() {
         // Microsoft x64 shares positions: a position is a float where only its float register is read.
-        for (position, integer) in slots.argument_slots().iter().enumerate() {
+        for (position, integer) in slots
+            .arguments(r2source::convention::SlotClass::Integer)
+            .iter()
+            .enumerate()
+        {
             let integer_use = use_of(*integer);
-            let float =
-                (slots.float_argument_slots().get(position)).map(|float| (*float, use_of(*float)));
+            let float = (slots
+                .arguments(r2source::convention::SlotClass::Float)
+                .get(position))
+            .map(|float| (*float, use_of(*float)));
             match float {
                 Some((float, float_use)) if float_use.proves() && !integer_use.proves() => {
                     registers.push((SlotClass::Float, float));
@@ -2368,11 +2388,15 @@ fn recover_interface_inner(
         spans.push((Section::Shared, 0..registers.len()));
     } else {
         for (section, class, section_slots) in [
-            (Section::Integer, SlotClass::Integer, slots.argument_slots()),
+            (
+                Section::Integer,
+                SlotClass::Integer,
+                slots.arguments(r2source::convention::SlotClass::Integer),
+            ),
             (
                 Section::Float,
                 SlotClass::Float,
-                slots.float_argument_slots(),
+                slots.arguments(r2source::convention::SlotClass::Float),
             ),
         ] {
             let start = registers.len();
@@ -2466,14 +2490,17 @@ fn recover_interface_inner(
     let argument_area = {
         // A convention with no argument registers takes its step from the
         // stack entry the specification declares instead.
-        let slot_bytes = slots.argument_slots().first().map_or_else(
-            || {
-                slots
-                    .stack_arguments()
-                    .map_or(0, |placement| placement.stride_bytes())
-            },
-            |slot| slot.size,
-        );
+        let slot_bytes = slots
+            .arguments(r2source::convention::SlotClass::Integer)
+            .first()
+            .map_or_else(
+                || {
+                    slots
+                        .stack_arguments()
+                        .map_or(0, |placement| placement.stride_bytes())
+                },
+                |slot| slot.size,
+            );
         // The area starts where the convention's stack section does: past Microsoft x64's home.
         let first = (slots.stack_arguments()).map_or(0, |placement| placement.first_offset());
         match return_mechanism {
@@ -2715,12 +2742,13 @@ fn low_bytes(size: u32) -> crate::site_boundary::ByteMask {
 }
 
 /// The shared position a register is a location of (Microsoft x64), integer or float.
-fn shared_position(slots: &SourceConventionSlots, slot: CanonicalStorageId) -> Option<u8> {
-    if !slots.shared_positions() {
+fn shared_position(slots: &ConventionModel, slot: CanonicalStorageId) -> Option<u8> {
+    if !slots.shares_positions() {
         return None;
     }
     let at = |section: &[CanonicalStorageId]| section.iter().position(|of| *of == slot);
-    let position = at(slots.argument_slots()).or_else(|| at(slots.float_argument_slots()))?;
+    let position = at(slots.arguments(r2source::convention::SlotClass::Integer))
+        .or_else(|| at(slots.arguments(r2source::convention::SlotClass::Float)))?;
     u8::try_from(position).ok()
 }
 
@@ -2777,9 +2805,8 @@ fn argument_place_escapes(
         .collect::<Vec<_>>();
     // Whether the home holds the entry value of a register passed at its position.
     let homed = |position: u8, home: &std::ops::Range<i64>| {
-        let registers = [SlotClass::Integer, SlotClass::Float].map(|class| {
-            model.and_then(|model| model.argument_registers(class).nth(usize::from(position)))
-        });
+        let registers = [SlotClass::Integer, SlotClass::Float]
+            .map(|class| model.and_then(|model| model.argument(class, usize::from(position))));
         let in_home = |object| {
             (facts.objects.entry_stack_roots.get(&object)).is_some_and(|root| {
                 root.base == StackAddressBase::StackPointer && home.contains(&root.offset)
@@ -2985,9 +3012,9 @@ fn seed_result(
     func: &SSAFunction,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
-    slots: &SourceConventionSlots,
+    slots: &ConventionModel,
 ) -> Option<SourceResultSeed> {
-    let slot = slots.result_slot()?;
+    let slot = slots.result()?;
     let live_out = crate::liveout::FunctionLiveOut::compute(func, graph, &[slot]);
     if !live_out.has_returns()
         || live_out.unresolved_blocks().next().is_some()
@@ -3114,9 +3141,9 @@ fn direct_returns_beside_void_tails(
     func: &SSAFunction,
     graph: &SsaGraph,
     facts: &crate::semantic::PreparedFunctionFacts,
-    slots: &SourceConventionSlots,
+    slots: &ConventionModel,
 ) -> (RecoveredFunctionResult, Option<SourceResultCause>) {
-    let Some(slot) = slots.result_slot() else {
+    let Some(slot) = slots.result() else {
         return (RecoveredFunctionResult::Void, None);
     };
     let tails = owned_tail_blocks(func, graph, facts, slot);
@@ -4079,13 +4106,17 @@ mod tests {
         .expect("settles")
     }
 
-    fn candidates() -> SourceConventionSlots {
-        SourceConventionSlots::new(
-            AAPCS64,
-            [register(0, 8), register(8, 8), register(16, 8)],
-            Some(register(0, 8)),
-        )
-        .expect("candidate slots")
+    fn candidate_model() -> r2source::convention::testing::Model {
+        r2source::convention::testing::model(AAPCS64)
+            .arguments(
+                r2source::convention::SlotClass::Integer,
+                [register(0, 8), register(8, 8), register(16, 8)],
+            )
+            .result(r2source::convention::SlotClass::Integer, register(0, 8))
+    }
+
+    fn candidates() -> std::sync::Arc<ConventionModel> {
+        candidate_model().build()
     }
 
     fn recovered(mut block: R2ILBlock) -> RecoveredInterface {
@@ -4116,9 +4147,9 @@ mod tests {
             target: Varnode::constant(0, 8),
         });
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch())).expect("ssa");
-        let slots = candidates()
-            .with_second_result_slot(Some(register(8, 8)))
-            .expect("x1 beside x0");
+        let slots = candidate_model()
+            .result(r2source::convention::SlotClass::Integer, register(8, 8))
+            .build();
         let stated = Stated {
             closed: Some(r2source::SourceClosedResult::Read(
                 r2source::SourceReadLanes::Pair,
@@ -4334,8 +4365,7 @@ mod tests {
             Some(&arch),
             None,
             SourceMachineRoles::default(),
-            Some(candidates()),
-            crate::testing::call_effect(clobbered, []),
+            Some(candidate_model().killed(clobbered).conventions()),
             vec![call_interface],
         );
         let function = SSAFunction::for_decompile_under(&blocks, Some(&arch), &machine_context)
@@ -4619,8 +4649,7 @@ mod tests {
             src: Varnode::register(0, 8),
         });
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch)).expect("ssa");
-        let empty =
-            SourceConventionSlots::new(r2source::ConventionId::SysVAmd64, [], None).expect("empty");
+        let empty = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64).build();
         assert!(recover_interface(&func, &empty).is_none());
     }
 
@@ -4655,8 +4684,7 @@ mod tests {
             Some(&arch),
             None,
             SourceMachineRoles::default(),
-            Some(candidates()),
-            None,
+            Some(candidate_model().conventions()),
             Vec::new(),
             vec![identity],
         );
@@ -4697,8 +4725,7 @@ mod tests {
             Some(&arch),
             None,
             SourceMachineRoles::default(),
-            Some(candidates()),
-            None,
+            Some(candidate_model().conventions()),
             vec![interface],
             vec![identity],
         );
@@ -4763,8 +4790,7 @@ mod tests {
             Some(&arch),
             None,
             SourceMachineRoles::default(),
-            Some(candidates()),
-            None,
+            Some(candidate_model().conventions()),
             Vec::new(),
             vec![identity],
         );

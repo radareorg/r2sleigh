@@ -29,7 +29,6 @@ pub struct ParsedExternalContext {
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub assumptions: r2ssa::AssumptionSet,
     pub diagnostics: Vec<String>,
-    pub callconv: Option<String>,
     pub noreturn: bool,
 }
 

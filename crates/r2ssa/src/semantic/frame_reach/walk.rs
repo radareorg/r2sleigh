@@ -10,6 +10,7 @@ use crate::function::SSAFunction;
 use crate::machine_context::SourceMachineContext;
 use crate::op::SSAOp;
 use crate::value_table::VarId;
+use r2source::convention::SlotClass;
 
 /// How far an address may move from where it points.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -330,7 +331,7 @@ impl<'a> Sinks<'a> {
             .blocks()
             .iter()
             .any(|block| block.ops().iter().any(SSAOp::is_call));
-        let convention = machine.convention_slots().is_some();
+        let convention = machine.convention().is_some();
         // The stack and frame pointers are the frame's own bases, not addresses handed on.
         let bases = [
             Some(stack_pointer),
@@ -343,8 +344,8 @@ impl<'a> Sinks<'a> {
                 && !bases.contains(&Some(storage))
         };
         let integer_arguments = machine
-            .convention_slots()
-            .map(|slots| slots.argument_slots().to_vec())
+            .convention()
+            .map(|slots| slots.arguments(SlotClass::Integer).to_vec())
             .unwrap_or_default();
         let upward_at = move |block: u64, index: usize, src: VarId| {
             let Some(ops) = func.get_block(block).map(|block| block.ops()) else {
