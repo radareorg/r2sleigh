@@ -858,23 +858,19 @@ impl<'a> Walker<'a> {
         Value::Points(moved.collect())
     }
 
-    #[cfg_attr(
-        dylint_lib = "r2sleigh_lints",
-        allow(
-            entity_keyed_map,
-            reason = "debt: keyed by a function's entity, to become an index over dense ids (ROADMAP LX2)"
-        )
-    )]
-    fn partial_merges(&self) -> BTreeSet<VarId> {
-        self.phi_uses
-            .iter()
+    /// The merges with no value yet some of whose sources are frame addresses, in id order.
+    fn partial_merges(&self) -> Vec<VarId> {
+        let mut partial = (self.phi_uses.iter())
             .flat_map(|(_, dsts)| dsts.iter().copied())
             .filter(|dst| self.values.get(*dst).is_none())
             .filter(|dst| {
                 (self.defs.phi_sources(*dst).iter())
                     .any(|source| self.values.get(*source).is_some())
             })
-            .collect()
+            .collect::<Vec<_>>();
+        partial.sort_unstable();
+        partial.dedup();
+        partial
     }
 
     fn finish(mut self) -> Walked {
