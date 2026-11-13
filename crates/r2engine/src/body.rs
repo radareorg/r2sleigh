@@ -674,8 +674,11 @@ impl Walk {
         disasm: &Disassembler,
         program: &dyn Program,
     ) {
+        let arms = arms.iter().filter(|(_, targets)| !targets.is_empty());
+        // Every arm is told first, so a dispatch first reached through an arm is followed too.
+        (self.dispatched).extend(arms.clone().map(|(addr, targets)| (*addr, targets.clone())));
         let mut pending = Vec::new();
-        for (&addr, targets) in arms.iter().filter(|(_, targets)| !targets.is_empty()) {
+        for (&addr, targets) in arms {
             let stopped = |stop: &Unresolved| {
                 (stop.addr, stop.reason) == (addr, UnresolvedReason::IndirectBranch)
             };
@@ -683,7 +686,6 @@ impl Walk {
                 continue;
             }
             self.retract(stopped);
-            self.dispatched.insert(addr, targets.clone());
             for target in targets.iter().collect::<BTreeSet<_>>() {
                 self.arms.insert(*target);
                 self.transfer(*target, &mut pending, program);

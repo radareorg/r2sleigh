@@ -1624,6 +1624,47 @@ fn a_jump_table_is_read_out_of_the_program_and_rendered_as_a_switch() {
     );
 }
 
+/// A switch in an arm of a switch (gnulib `quotearg_buffer_restyled`): the inner dispatch is first
+/// reached through the outer's arm, so only a second round reads its table (D285).
+const NESTED_SWITCH: &[u8] = &[
+    0x83, 0xff, 0x01, // 1000 cmp edi, 1
+    0x77, 0x29, // 1003 ja 0x102e
+    0x89, 0xff, // 1005 mov edi, edi
+    0xff, 0x24, 0xfd, 0x40, 0x10, 0x00, 0x00, // 1007 jmp [rdi*8 + 0x1040]
+    0x83, 0xfe, 0x01, // 100e cmp esi, 1
+    0x77, 0x1b, // 1011 ja 0x102e
+    0x89, 0xf6, // 1013 mov esi, esi
+    0xff, 0x24, 0xf5, 0x50, 0x10, 0x00, 0x00, // 1015 jmp [rsi*8 + 0x1050]
+    0xb8, 0x0a, 0x00, 0x00, 0x00, 0xc3, // 101c inner case 0
+    0xb8, 0x14, 0x00, 0x00, 0x00, 0xc3, // 1022 inner case 1
+    0xb8, 0x1e, 0x00, 0x00, 0x00, 0xc3, // 1028 outer case 1
+    0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3, // 102e default
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1034 padding
+    0x0e, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1040 -> 0x100e
+    0x28, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1048 -> 0x1028
+    0x1c, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1050 -> 0x101c
+    0x22, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // 1058 -> 0x1022
+];
+
+#[test]
+fn a_dispatch_in_an_arm_is_read_in_the_next_round() {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Fixture {
+        bytes: NESTED_SWITCH.to_vec(),
+        name: "nested",
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let output = response.output.text();
+    assert!(response.output.function().is_some(), "{output}");
+    assert_eq!(output.matches("switch (").count(), 2, "{output}");
+    assert!(!output.contains("r2dec gap"), "{output}");
+    for returns in ["10", "20", "30"] {
+        let carried = format!("return r2sleigh_carrier_u32({returns});");
+        assert!(output.contains(&carried), "{output}");
+    }
+}
+
 /// clang -O2's `switch (op) { case 1: .. case 5: }` (sw3.c `base1`): `dec edi` biases the selector and
 /// zero-extends it in the guard's block, and only the dispatch reads that widening.
 const BIASED_TABLE_SWITCH: &[u8] = &[

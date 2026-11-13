@@ -159,6 +159,19 @@ fn a_dispatch_told_it_goes_nowhere_is_still_unresolved() {
     assert!(body.blocks[0].successors.is_empty());
 }
 
+/// jmp rax; jmp rcx; ret: the first dispatch's arm is the second, whose arm is the `ret`.
+const NESTED: &[u8] = &[0xff, 0xe0, 0xff, 0xe1, 0xc3];
+
+#[test]
+fn a_trace_follows_a_dispatch_an_arm_reaches_from_the_same_tables() {
+    let (disasm, program) = (x86_64(), reader(NESTED));
+    let mut trace = r2engine::body::Trace::start(BASE, &disasm, &program).expect("trace");
+    let arms = BTreeMap::from([(BASE, vec![0x1002]), (0x1002, vec![0x1004])]);
+    trace.dispatch(&arms, &disasm, &program);
+    assert_eq!(trace.dispatches().collect::<Vec<_>>(), Vec::<u64>::new());
+    assert_eq!(trace.spans(), vec![0x1000..0x1005]);
+}
+
 /// jmp rax; add rsi, 0x20; ret: an arm at 0x1005 lands on the `0x20` immediate, inside the `add` at 0x1002.
 const OVERLAPPED: &[u8] = &[0xff, 0xe0, 0x48, 0x83, 0xc6, 0x20, 0xc3];
 

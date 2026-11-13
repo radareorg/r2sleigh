@@ -674,10 +674,61 @@ pub(crate) fn dispatch_tables(
         Ok(native) => native,
         Err(refusal) => return Tables::refused(refusal),
     };
-    match native.walk(entry) {
-        Ok(root) if root.body.unresolved.iter().any(Tables::stops) => native.read_tables(&root),
-        _ => Tables::default(),
+    let Ok(root) = native.walk(entry) else {
+        return Tables::default();
+    };
+    if !root.body.unresolved.iter().any(Tables::stops) {
+        return Tables::default();
     }
+    let restatement = native.declaration(entry);
+    let restatement = match restatement.interface.is_some() {
+        true => restatement,
+        false => Restatement::default(),
+    };
+    let mut tables = native.read_tables(&root.reaching_unresolved(), &[], restatement);
+    // Each round reads the dispatches the last one's arms reach, sealing only the region after each
+    // last-read dispatch; a round reading no new instruction ends it, so at most one per indirect branch.
+    let mut last = (tables.read.iter())
+        .map(|table| table.instruction)
+        .collect::<Vec<_>>();
+    while !last.is_empty() {
+        let dispatched = tables.dispatched();
+        // A trace decodes without lifting: most bodies' arms reach no dispatch, and pay only this.
+        let Ok(mut trace) = crate::body::Trace::start(entry, target.disasm, program) else {
+            break;
+        };
+        trace.dispatch(&dispatched, target.disasm, program);
+        if trace.dispatches().next().is_none() {
+            break;
+        }
+        let Ok(through) = native.walk_dispatched(entry, &dispatched) else {
+            break;
+        };
+        let mut fresh = Vec::new();
+        for region in last
+            .iter()
+            .filter_map(|dispatch| through.region_after(*dispatch))
+        {
+            let held = (tables.read.iter())
+                .chain(&fresh)
+                .cloned()
+                .collect::<Vec<_>>();
+            let read = native.read_tables(&region, &held, Restatement::default());
+            match &read.refusal {
+                Some(refusal) if refusal.stopped() => return read,
+                // A region the convention cannot seal leaves its dispatches unresolved, never a wrong table.
+                Some(refusal) => r2il::refusal_evidence!(
+                    "dispatch-table",
+                    "{:#x}: a round's region: {refusal:?}",
+                    region.body.entry
+                ),
+                None => fresh.extend(read.read),
+            }
+        }
+        last = fresh.iter().map(|table| table.instruction).collect();
+        tables.read.extend(fresh);
+    }
+    tables
 }
 
 /// Where each dispatch goes, by the instruction making it.
@@ -902,7 +953,7 @@ pub(crate) fn handed(
     };
     let walked = native.walked(body);
     // What reaches a call's argument is the body's: read off the convention's seal, as a table.
-    match native.convention_seal(&walked, &Callees::default(), Restatement::default()) {
+    match native.convention_seal(&walked, &Callees::default(), Restatement::default(), &[]) {
         Ok(seal) => native.handed_functions(&seal, &walked),
         Err(error) => {
             r2il::refusal_evidence!(
@@ -1666,48 +1717,88 @@ impl Walked {
     /// The same walk cut to the blocks an unresolved indirect branch is reachable from: a value there is built
     /// from the paths that arrive at it, and a kept block's edge to a cut one leaves the function. O(blocks + edges).
     fn reaching_unresolved(&self) -> Self {
+        let keep = self.reaching(None);
+        match keep.contains(&true) {
+            true => self.cut(self.body.entry, &keep),
+            false => self.clone(),
+        }
+    }
+
+    /// The blocks reachable from the dispatch at `dispatch` that reach an unresolved indirect branch,
+    /// entered at the dispatch's block: one round's region (D285). O(blocks + edges).
+    fn region_after(&self, dispatch: u64) -> Option<Self> {
+        let at = self.held(dispatch)?;
+        let keep = self.reaching(Some(at));
+        let stops = self.indirect_stops();
+        stops
+            .filter_map(|stop| self.held(stop))
+            .any(|block| keep[block])
+            .then(|| self.cut(self.body.blocks[at].lifted.addr, &keep))
+    }
+
+    /// The block holding `address`.
+    fn held(&self, address: u64) -> Option<usize> {
+        let blocks = &self.body.blocks;
+        let after = blocks.partition_point(|block| block.lifted.addr <= address);
+        after.checked_sub(1)
+    }
+
+    fn indirect_stops(&self) -> impl Iterator<Item = u64> + '_ {
+        let indirect = self.body.unresolved.iter();
+        let indirect =
+            indirect.filter(|stop| stop.reason == crate::body::UnresolvedReason::IndirectBranch);
+        indirect.map(|stop| stop.addr)
+    }
+
+    /// Each block that reaches an unresolved indirect branch and, given `from`, is reachable from it.
+    fn reaching(&self, from: Option<usize>) -> Vec<bool> {
         let blocks = &self.body.blocks;
         let block_at = |address: u64| {
             blocks
                 .binary_search_by_key(&address, |block| block.lifted.addr)
                 .ok()
         };
-        let held = |address: u64| {
-            let after = blocks.partition_point(|block| block.lifted.addr <= address);
-            after.checked_sub(1)
-        };
-        let edges = (blocks.iter().enumerate()).flat_map(|(from, block)| {
-            (block.successors.iter()).map(move |(_, target)| (from, *target))
-        });
+        let succeeding = (blocks.iter())
+            .map(|block| (block.successors.iter()).filter_map(|(_, target)| block_at(*target)))
+            .map(Iterator::collect)
+            .collect::<Vec<Vec<usize>>>();
         let mut preceding = vec![Vec::new(); blocks.len()];
-        for (from, target) in edges {
-            if let Some(to) = block_at(target) {
-                preceding[to].push(from);
+        for (from, targets) in succeeding.iter().enumerate() {
+            for to in targets {
+                preceding[*to].push(from);
             }
         }
-        let indirect = self.body.unresolved.iter();
-        let indirect =
-            indirect.filter(|stop| stop.reason == crate::body::UnresolvedReason::IndirectBranch);
-        let mut keep = vec![false; blocks.len()];
-        let mut pending = indirect
-            .filter_map(|stop| held(stop.addr))
-            .collect::<Vec<_>>();
-        while let Some(at) = pending.pop() {
-            if !std::mem::replace(&mut keep[at], true) {
-                pending.extend(preceding[at].iter().copied());
+        let visit = |starts: Vec<usize>, next: &[Vec<usize>]| {
+            let mut seen = vec![false; blocks.len()];
+            let mut pending = starts;
+            while let Some(at) = pending.pop() {
+                if !std::mem::replace(&mut seen[at], true) {
+                    pending.extend(next[at].iter().copied());
+                }
             }
+            seen
+        };
+        let stops = self.indirect_stops().filter_map(|stop| self.held(stop));
+        let mut keep = visit(stops.collect(), &preceding);
+        if let Some(from) = from {
+            let reached = visit(vec![from], &succeeding);
+            keep.iter_mut()
+                .zip(reached)
+                .for_each(|(keep, reached)| *keep &= reached);
         }
-        if !keep.contains(&true) {
-            return self.clone();
-        }
-        let kept = (blocks.iter().zip(&keep))
+        keep
+    }
+
+    /// The same walk holding only the `keep` blocks, entered at `entry`.
+    fn cut(&self, entry: u64, keep: &[bool]) -> Self {
+        let kept = (self.body.blocks.iter().zip(keep))
             .filter(|(_, kept)| **kept)
             .map(|(block, _)| block.clone())
             .collect();
         Self {
             name: self.name.clone(),
             body: crate::body::Body {
-                entry: self.body.entry,
+                entry,
                 blocks: kept,
                 calls: self.body.calls.clone(),
                 tail_calls: self.body.tail_calls.clone(),
@@ -1980,26 +2071,33 @@ impl<'a> Native<'a> {
         })
     }
 
-    /// The tables a walked body's dispatches read; a refused read says why and leaves the body following none.
-    fn read_tables(&self, root: &Walked) -> Tables {
+    /// The tables a walked region's dispatches read beyond the `held` ones it is sealed through; a
+    /// refused read says why and reads none.
+    fn read_tables(
+        &self,
+        region: &Walked,
+        held: &[NativePointerTable],
+        restatement: Restatement,
+    ) -> Tables {
         let ptr_bits = crate::engine_effective_ptr_bits(self.target.arch);
         let mut imports = Callees::default();
         declare_imports(
             self,
             self.target,
-            &reached(&root.body, self.program),
+            &reached(&region.body, self.program),
             ptr_bits,
             &mut imports,
         );
-        let declared = self.declaration(root.body.entry);
-        let restatement = match declared.interface.is_some() {
-            false => Restatement::default(),
-            true => declared,
+        let read = crate::isolation::isolated(|| {
+            let seal = self.convention_seal(region, &imports, restatement, held)?;
+            Ok(seal.dispatch_table_reads())
+        });
+        let fresh = |read: &&r2ssa::indirect::DispatchTableRead| {
+            !read.call && !(held.iter()).any(|table| Some(table.instruction) == read.instruction)
         };
-        let read = crate::isolation::isolated(|| self.dispatch_reads(root, &imports, restatement));
         match read {
             Ok(Ok(reads)) => Tables {
-                read: self.pointer_tables(reads.iter().filter(|read| !read.call)),
+                read: self.pointer_tables(reads.iter().filter(fresh)),
                 refusal: None,
             },
             Ok(Err(refusal)) => Tables::refused(refusal),
@@ -2349,29 +2447,19 @@ impl<'a> Native<'a> {
             .map_err(NativeRefusal::of_preparation)
     }
 
-    /// Where each dispatch of a body walked without its tables reads them, off its seal alone.
-    fn dispatch_reads(
-        &self,
-        walked: &Walked,
-        callees: &Callees,
-        restatement: Restatement,
-    ) -> Result<Vec<r2ssa::indirect::DispatchTableRead>, NativeRefusal> {
-        let seal = self.convention_seal(&walked.reaching_unresolved(), callees, restatement)?;
-        Ok(seal.dispatch_table_reads())
-    }
-
-    /// One body captured, built against the convention alone and sealed: what values inside it
-    /// read, which no interface decides.
+    /// One body captured through `tables`, built against the convention alone and sealed: what
+    /// values inside it read, which no interface decides.
     fn convention_seal(
         &self,
         walked: &Walked,
         callees: &Callees,
         restatement: Restatement,
+        tables: &[NativePointerTable],
     ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Capture {
             extra_literals: Vec::new(),
             restatement,
-            tables: &[],
+            tables,
             calls: &[],
             closed_result: None,
         };

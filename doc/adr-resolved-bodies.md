@@ -668,3 +668,10 @@ Tarjan, O(V + E) over the owner edges the demand names, each component deposited
   holders all read the body `Walked` walks. A lone `pdd` asks `DispatchTables` for its own function only,
   so it stays a lazy single-function request. One round: a dispatch first reached through an arm stays
   unresolved, as before.
+
+## Ge as built (2026-11-13, D285 (1))
+
+- A dispatch first reached through an arm is read in a later round. `native::dispatch_tables` reads round 1 off the body cut to the blocks reaching a stop, as before. Round k+1 seals, per dispatch round k read, only the region after it: the blocks its block reaches that reach a still-unresolved dispatch, entered at the dispatch's block, through every table read so far, with no declaration (the region's entry is no function's).
+- A round reads only instructions no earlier round read, so the rounds end within one per indirect branch. A decode-only `Trace` first checks that the arms reach a stop at all; most bodies pay that trace and nothing more. Cost: one walk and the regions' seals per round, `O(body)` decode plus `O(region)` lift per round.
+- Default-deny: a region's entry registers and frame are unknown, so a guard or base outside the region leaves the inner dispatch unresolved (fewer resolve, never a wrong table). A region seal the convention refuses records `dispatch-table` evidence and reads nothing; a cancelled one refuses the whole row.
+- `Trace::follow` tells the walk every table before walking, so a nested dispatch is followed in the same pass. `dispatch_reads` is deleted; `read_tables` seals the region it is handed.
