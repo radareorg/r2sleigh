@@ -252,6 +252,15 @@ class CountedBudget(unittest.TestCase):
         census.causes()
 
 
+class CountedInstructions(unittest.TestCase):
+    """D343: D365's adaef5bf0 against its parent, cold pumasim 0x23fdf0 under qemu-x86_64 (contabo)."""
+
+    def test_d365_fails_the_one_percent_budget(self) -> None:
+        rise = census.counted_rise("instructions", "pumasim pdd @ 0x0023fdf0", 21_615_983_388,
+                                   23_071_247_954, 1.01, {})
+        self.assertIn("1.0673x", rise)
+
+
 class TimedCases(unittest.TestCase):
     """D402: the chain's analysed cases are timed, and a missing binary fails the run."""
 
