@@ -48,6 +48,8 @@ pub struct Never {
 pub enum NeverProof {
     /// A cited row, a runtime model or the binary's debug information states it.
     Declared,
+    /// Every end of the body is a transfer a statement or a `Composed` callee proves halts (D229).
+    Composed,
     /// No walk of the body reached a return: a lower bound on what it does, never proof.
     NoReturnReached,
 }
@@ -148,6 +150,12 @@ pub trait Walker {
     /// Whether control comes back from the routine at this address as a declaration or a runtime
     /// model says; `None` for anything else.
     fn declared(&self, address: u64) -> Option<Return>;
+
+    /// How many ends of a walked body a statement proves halt, and how many none does; a walker
+    /// that cannot say reports one unproven end.
+    fn ends(&self, _walk: &Self::Walk) -> (usize, usize) {
+        (0, 1)
+    }
 }
 
 /// Which believed bodies hold each address.
@@ -399,13 +407,17 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
                 }
             }
         }
+        let composed = self.composed();
         addresses
             .map(|address| {
                 let answer = self.settled(address).unwrap_or_else(|| {
                     match self.returning.contains(&address) {
                         true => Return::Comes,
                         false => Return::Never(Never {
-                            proof: NeverProof::NoReturnReached,
+                            proof: match composed.contains(&address) {
+                                true => NeverProof::Composed,
+                                false => NeverProof::NoReturnReached,
+                            },
                             premises: premises.remove(&address).unwrap_or_default(),
                         }),
                     }
@@ -413,6 +425,55 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
                 (address, answer)
             })
             .collect()
+    }
+
+    /// One wait of `caller` met: the caller, once none is left.
+    fn settle_wait(open: &mut BTreeMap<u64, usize>, caller: u64) -> Option<u64> {
+        let waits = open.get_mut(&caller).filter(|waits| **waits > 0)?;
+        *waits -= 1;
+        (*waits == 0).then_some(caller)
+    }
+
+    /// Bodies whose every end halts or waits on a callee declared or composed never; a trap or a
+    /// wait cycle stays a bound. A least fixpoint over the wait edges, `O(V + E)`.
+    fn composed(&self) -> BTreeSet<u64> {
+        let candidate = |address: u64| {
+            !self.returning.contains(&address)
+                && self.settled(address).is_none()
+                && matches!(self.walks.get(&address), Some(Ok(walk)) if self.walker.ends(walk).1 == 0)
+        };
+        // Each candidate's waits on callees not yet proven never.
+        let mut open = BTreeMap::<u64, usize>::new();
+        let mut proven = Vec::new();
+        for (callee, waiters) in &self.waiting {
+            let settled = self.settled(*callee);
+            let declared = matches!(settled, Some(Return::Never(never)) if never.proof != NeverProof::NoReturnReached);
+            for (caller, _) in waiters.iter().filter(|(caller, _)| candidate(*caller)) {
+                *open.entry(*caller).or_default() += usize::from(!declared);
+            }
+        }
+        for (address, walk) in &self.walks {
+            let halts = matches!(walk, Ok(walk) if self.walker.ends(walk).0 > 0);
+            if candidate(*address) && (halts || open.contains_key(address)) {
+                open.entry(*address).or_default();
+            }
+        }
+        proven.extend(
+            (open.iter())
+                .filter(|(_, waits)| **waits == 0)
+                .map(|(at, _)| *at),
+        );
+        let mut composed = BTreeSet::new();
+        while let Some(callee) = proven.pop() {
+            if !composed.insert(callee) {
+                continue;
+            }
+            let callers = self.waiting.get(&callee).into_iter().flatten();
+            for (caller, _) in callers {
+                proven.extend(Self::settle_wait(&mut open, *caller));
+            }
+        }
+        composed
     }
 
     fn comes_back(&self, address: u64) -> bool {

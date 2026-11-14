@@ -108,7 +108,7 @@ int32_t main(int32_t argc, char** argv)
     uint64_t tmp_lane_101058c_1_0_1;
     _Alignas(16) uint8_t frame[32];
 
-    /* r2dec proof: 1 construct is marked below; 25 source obligations: 16 rendered, 7 elided, 0 refused, 2 residual; 4 statements rendered; 2 callee prototypes supplied by the source */
+    /* r2dec proof: 1 construct is marked below; 31 source obligations: 16 rendered, 13 elided, 0 refused, 2 residual; 4 statements rendered; 2 callee prototypes supplied by the source */
     {
         call_store((double*)(uint64_t)(frame + 8U));
         forward(r2sleigh_float_from_bits_64(r2sleigh_load_u64((void*)(uint64_t)(frame + 8U))), (double*)(uint64_t)(frame + 8U));
@@ -128,7 +128,7 @@ CMDS=aa; pdd @ 0x010105a0
 EXPECT=<<EOF
 void __libc_csu_init(int32_t argc, char** argv, char** envp)
 {
-    /* r2dec proof: no individual construct is marked; 17 source obligations: 2 rendered, 15 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 22 source obligations: 2 rendered, 20 elided, 0 refused; 1 statements rendered */
     {
         {
             return;

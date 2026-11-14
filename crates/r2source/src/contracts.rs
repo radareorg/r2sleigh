@@ -1180,7 +1180,7 @@ pub struct SourceFunctionInterface {
     /// caller reads.
     result_carriers: Option<SourceResultCarriers>,
     /// What the closed world decided of the result (doc/adr-call-boundary.md, D166).
-    closed_result: Option<crate::SourceClosedResult>,
+    closed_result: Option<crate::SourceClosedDecision>,
     /// Whether a return hands back a parameter through a merge: its cause is an entry input.
     result_holds_input: bool,
     /// The body reaches no return: its `Void` states what a call leaves, and no type (S24).
@@ -2057,7 +2057,7 @@ impl SourceFunctionInterface {
 
     /// Record what r2engine's closed-world boundary decided of the result.
     #[must_use]
-    pub const fn with_closed_result(mut self, closed: crate::SourceClosedResult) -> Self {
+    pub const fn with_closed_result(mut self, closed: crate::SourceClosedDecision) -> Self {
         self.closed_result = Some(closed);
         self
     }
@@ -2119,13 +2119,24 @@ impl SourceFunctionInterface {
 
     /// What the closed world decided of the result, where a `CallBoundary` decided it.
     pub const fn closed_result(&self) -> Option<crate::SourceClosedResult> {
-        self.closed_result
+        match self.closed_result {
+            Some(decision) => Some(decision.result),
+            None => None,
+        }
+    }
+
+    /// What the applied closed-world decision takes for granted; none where none was applied.
+    pub const fn closed_premises(&self) -> &'static [crate::Premise] {
+        match self.closed_result {
+            Some(decision) => decision.premises(),
+            None => &[],
+        }
     }
 
     /// Why a written result is unproven: the cause the closed world's decision names, else a
     /// handed-back input or a written value (doc/adr-result-side.md, section 3).
     pub const fn written_cause(&self) -> crate::SourceResultCause {
-        match (self.closed_result, self.result_holds_input) {
+        match (self.closed_result(), self.result_holds_input) {
             (Some(crate::SourceClosedResult::Unread), _) => crate::SourceResultCause::Unread,
             (Some(crate::SourceClosedResult::ForwardCycle), _) => {
                 crate::SourceResultCause::ForwardCycle
@@ -2138,7 +2149,10 @@ impl SourceFunctionInterface {
     /// Whether a closed-world call reads the result: a value at `Solved`, where the body alone
     /// proves only a written one (doc/adr-scratch-result.md, "Rendering of Unproven").
     pub const fn result_read_by_callers(&self) -> bool {
-        matches!(self.closed_result, Some(crate::SourceClosedResult::Read(_)))
+        matches!(
+            self.closed_result(),
+            Some(crate::SourceClosedResult::Read(_))
+        )
     }
 
     /// Whether arguments continue past the fixed ones, which `arity` does not count.
@@ -4041,6 +4055,8 @@ impl SourceCallPreservedCarriers {
 pub struct SourceSecurityCookie {
     pub address: u64,
     pub width: u32,
+    /// The register the check takes the saved word in (`r2abi::CookieCheck`).
+    pub argument: CanonicalStorageId,
 }
 
 /// A stack protector's global word where the container binds it (`r2abi::GuardRow::LinkedGlobal`).

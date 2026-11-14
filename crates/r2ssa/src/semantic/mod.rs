@@ -35,7 +35,7 @@ pub use control_domains::*;
 pub(crate) use declared_slots::*;
 pub use facts::*;
 pub(crate) use frame_reach::{Access, Walked, walk};
-pub use frame_reach::{CallFrameReach, FramePoints, FrameReach};
+pub use frame_reach::{CallFrameReach, DynamicFrame, FramePoints, FrameReach};
 pub(crate) use loops::*;
 pub(crate) use objects::*;
 pub(crate) use predicates::*;
@@ -53,6 +53,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::address::{AddressProvenanceFacts, collect_address_provenance};
 use crate::assumption::{AssumptionSet, AssumptionSubject, AssumptionUsageReport, AssumptionValue};
+use crate::bytes::ByteMask;
 use crate::cfg::BlockTerminator;
 use crate::function::{DecompilePrepFacts, SSAFunction, StackAddressBase, StackAddressRoot};
 use crate::graph::{InstId, InstPayload, SsaGraph, UseSite, ValueId};
@@ -313,7 +314,7 @@ impl PreparedFunctionFacts {
         // performs, and two reads of the same bytes the same memory versions
         // reach hold one content; both are known here, before anything reads
         // a span, so liveness is computed once, with them.
-        let ignored_reads = crate::function::unpassed_call_reads(graph, &boundaries);
+        let ignored_reads = crate::function::unpassed_call_reads(graph, machine_context);
         let mut content = crate::liveness::ValueContent::of(graph, machine_context);
         content.declare_same_content(&crate::function::same_content_reads(
             &memory_accesses,
@@ -485,7 +486,18 @@ fn demanded(
         false => live_out.without(&undefined),
     };
     let live_out = &without;
-    let (tails, reads) = tail_reads(body, calls).unwrap_or_default();
+    // A tail's callee may leave our result registers as it found them, unless no caller reads them.
+    let ours = match unread {
+        true => Some(Vec::new()),
+        false => interface.map(|interface| {
+            let read = |storage: CanonicalStorageId| match result {
+                Some(result) if result.location() == storage.location() => (storage, result.size),
+                _ => (storage, storage.size),
+            };
+            interface.return_kind().storages().map(read).collect()
+        }),
+    };
+    let (tails, reads) = tail_reads(body, calls, ours.as_deref()).unwrap_or_default();
     crate::demand::exits_are_named_beside(body.function, live_out, &tails).then(|| {
         let reads = (result, reads.as_slice());
         crate::demand::DemandedBytes::of_returning(
@@ -500,8 +512,8 @@ fn demanded(
 /// Blocks that leave by a tail transfer, and the bytes of each value their callees read.
 type TailReads = (BTreeSet<u64>, Vec<(ValueId, crate::bytes::ByteMask)>);
 
-/// Tail-transfer exits and what their callees read: each argument and the result lane's `logical`
-/// bytes; `None` where a tail states no narrower width (doc/adr-call-boundary.md, "S2 as built").
+/// Tail-transfer exits and the bytes their callees read (arguments, a narrower result's lane); `None`
+/// where a tail states no fixed arguments or no result (doc/adr-call-boundary.md, "S2 as built"; D211).
 #[cfg_attr(
     dylint_lib = "r2sleigh_lints",
     allow(
@@ -512,19 +524,42 @@ type TailReads = (BTreeSet<u64>, Vec<(ValueId, crate::bytes::ByteMask)>);
 fn tail_reads(
     body: Body<'_>,
     (call_sites, boundaries): (&CallSiteFacts, &SourceBoundaryFacts),
+    ours: Option<&[(CanonicalStorageId, u32)]>,
 ) -> Option<TailReads> {
     let mut tails = BTreeSet::new();
     let mut reads = Vec::new();
     let tail_calls =
         (call_sites.by_id.values()).filter(|call| call.transfer == CallSiteTransfer::TailCall);
     for call in tail_calls {
-        let boundary = boundaries.calls.get(&call.id)?;
-        let named =
-            boundary.complete && boundary.arguments_complete && boundary.variadic == Some(false);
-        let Some(SourceCallResult::Register { storage, width }) = boundary.result_kind else {
+        let refused = |why: &str| {
+            r2il::refusal_evidence!(
+                "exits-unnamed",
+                "{:#x}: tail {:?} {why}",
+                body.function.entry,
+                call.id
+            );
+        };
+        let Some(boundary) = boundaries.calls.get(&call.id) else {
+            refused("has no boundary");
             return None;
         };
-        if !named || width.fills(storage) {
+        let named =
+            boundary.complete && boundary.arguments_complete && boundary.variadic == Some(false);
+        let narrow = match boundary.result_kind {
+            Some(SourceCallResult::Register { storage, width }) if !width.fills(storage) => {
+                Some((storage, width))
+            }
+            Some(SourceCallResult::Register { .. } | SourceCallResult::Void) => None,
+            other => {
+                refused(&format!("states result {other:?}"));
+                return None;
+            }
+        };
+        if !named {
+            refused(&format!(
+                "complete {} arguments {} variadic {:?}",
+                boundary.complete, boundary.arguments_complete, boundary.variadic
+            ));
             return None;
         }
         let block = body
@@ -534,23 +569,37 @@ fn tail_reads(
         tails.insert(block.addr);
         for argument in &boundary.arguments {
             if let SourceCallArgumentValue::Value(value) = argument.value {
-                reads.push((value, crate::bytes::ByteMask::All));
+                reads.push((value, ByteMask::All));
             }
         }
-        let lane = crate::liveout::FunctionLiveOut::reaching(
-            body.function,
-            body.graph,
-            storage,
-            block.addr,
-        );
-        for value in lane.iter() {
+        let reaching = |storage| {
+            crate::liveout::FunctionLiveOut::reaching(
+                body.function,
+                body.graph,
+                storage,
+                block.addr,
+            )
+        };
+        let Some((storage, width)) = narrow else {
+            // A whole or `void` result need not write a byte: what reaches our result passes whole.
+            let Some(ours) = ours else {
+                refused("states no narrower result, and no interface names ours");
+                return None;
+            };
+            for (storage, bytes) in ours {
+                let mask = ByteMask::whole(*bytes);
+                reads.extend(reaching(*storage).iter().map(|value| (value, mask)));
+            }
+            continue;
+        };
+        for value in reaching(storage).iter() {
             let held = body
                 .graph
                 .value(value)
                 .and_then(|held| held.canonical_storage);
             let mask = match held.is_some_and(|held| held.offset == storage.offset) {
-                true => crate::bytes::ByteMask::whole(u32::from(width.logical)),
-                false => crate::bytes::ByteMask::All,
+                true => ByteMask::whole(u32::from(width.logical)),
+                false => ByteMask::All,
             };
             reads.push((value, mask));
         }

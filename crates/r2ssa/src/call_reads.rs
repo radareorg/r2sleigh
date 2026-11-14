@@ -16,6 +16,19 @@ pub struct FormatTail {
     pub floats: Vec<CanonicalStorageId>,
 }
 
+/// Stack ranges from a call's pointer; `None` where nothing bounds them.
+pub type StackArea = Option<Vec<(i64, i64)>>;
+
+/// What a call to one callee may write of its caller's stack beside its reads (D377); a callee
+/// with no entry may write any of it up to the caller's entry pointer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StackWrites {
+    /// A declaration's: only its argument area, which the convention gives the callee.
+    Arguments,
+    /// A walked body's: these ranges from the call's stack pointer.
+    Within(Box<[(i64, i64)]>),
+}
+
 /// The argument locations a call may read: an upper bound only where `stated`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallReads {
@@ -28,6 +41,8 @@ pub struct CallReads {
     /// The stack it may read, as ranges from the stack pointer before the transfer; none where
     /// nothing bounds it.
     pub stack: Option<Vec<(i64, i64)>>,
+    /// The stack it may write, from the same pointer; none where nothing bounds it (D377).
+    pub writes: Option<Vec<(i64, i64)>>,
     /// Whether the callee's statement bounds the registers; the every-location default does not.
     pub stated: bool,
 }
@@ -44,19 +59,61 @@ impl CallReads {
             count_register: model.forms.count_register,
             format: None,
             stack: None,
+            writes: None,
             stated: false,
         }
     }
 
-    /// A complete, fixed interface: its register arguments, the stack the convention reserves for
-    /// the callee and each stack slot it places. O(arguments).
+    /// A complete, fixed interface: its arguments, the slots its callee's body proves unread left
+    /// out (`is_hole`). O(arguments).
     pub fn exact(interface: &SourceCallSiteInterface, model: Option<&ConventionModel>) -> Self {
+        let holes = (interface.exact_callee_interface().into_iter())
+            .flat_map(|callee| callee.parameters())
+            .filter(|parameter| parameter.is_hole())
+            .map(r2source::SourceAbiParameterSpec::index)
+            .collect::<Vec<_>>();
+        let read = (interface.arguments().iter())
+            .filter(|argument| !holes.contains(&argument.index()))
+            .map(|argument| argument.location());
+        Self::of_locations(read, model)
+    }
+
+    /// The locations a callee whose body proves its arity reads: each parameter, a hole left out,
+    /// at the call's stack pointer (`CalleeStatement`). O(parameters).
+    pub(crate) fn callee_locations(
+        callee: &r2source::SourceFunctionInterface,
+    ) -> Vec<SourceParameterLocation> {
+        let spent = callee.return_mechanism().map_or(0, |mechanism| {
+            i64::from(mechanism.stack_pointer_delta_bytes())
+        });
+        (callee.parameters().iter())
+            .filter(|parameter| !parameter.is_hole())
+            .map(|parameter| match parameter.location() {
+                SourceParameterLocation::Stack {
+                    offset,
+                    size_bytes,
+                    callee_offset,
+                } => SourceParameterLocation::Stack {
+                    offset: offset.saturating_sub(spent),
+                    size_bytes,
+                    callee_offset,
+                },
+                register => register,
+            })
+            .collect()
+    }
+
+    /// The registers and stack slots read, with the stack the convention reserves for the callee.
+    pub(crate) fn of_locations(
+        read: impl Iterator<Item = SourceParameterLocation>,
+        model: Option<&ConventionModel>,
+    ) -> Self {
         let reserved = model
             .and_then(|model| model.stack_arguments())
             .map_or(0, |placement| placement.first_offset().max(0));
         let (mut registers, mut stack) = (Vec::new(), vec![(0, reserved)]);
-        for argument in interface.arguments() {
-            match argument.location() {
+        for location in read {
+            match location {
                 SourceParameterLocation::Register(storage) => registers.push(storage),
                 SourceParameterLocation::Stack {
                     offset, size_bytes, ..
@@ -67,9 +124,22 @@ impl CallReads {
             registers,
             count_register: None,
             format: None,
+            writes: Some(stack.clone()),
             stack: Some(stack),
             stated: true,
         }
+    }
+
+    /// These reads with what the callee may write of the stack: a declaration its argument area,
+    /// a body what it states, any where nothing states it (D377). O(ranges).
+    #[must_use]
+    pub fn writing(mut self, writes: Option<&StackWrites>) -> Self {
+        self.writes = match writes {
+            Some(StackWrites::Arguments) => self.writes,
+            Some(StackWrites::Within(spans)) => Some(spans.to_vec()),
+            None => None,
+        };
+        self
     }
 
     /// A placed library row (r2engine `Placement::reads`): `stated` where its citation fixes the
@@ -85,8 +155,21 @@ impl CallReads {
             count_register,
             format,
             stack: None,
+            writes: None,
             stated,
         }
+    }
+
+    /// Whether the call reads none of `carrier`: an argument or count register of `model` this
+    /// stated list leaves out (D283). Any other register may be read: x8, a static chain.
+    pub fn reads_none_of(&self, model: &ConventionModel, carrier: CanonicalStorageId) -> bool {
+        let overlaps = |storage: &CanonicalStorageId| {
+            crate::semantic::register_storages_overlap(*storage, carrier)
+        };
+        let every = Self::every_location(model);
+        let located = (every.registers.iter().chain(&every.count_register)).any(overlaps);
+        let listed = (self.registers.iter().chain(&self.count_register)).any(overlaps);
+        self.stated && located && !listed
     }
 
     /// The bytes of the result registers these registers cover, with the count register's where

@@ -73,6 +73,58 @@ const THROUGH_VOID: &[u8] = &[
     0xc3, // 1009 ret
 ];
 
+/// `int at(struct table *t, unsigned i) { return t->a[i & 3]; }`, `a` at offset 4.
+const MASKED_INDEX: &[u8] = &[
+    0x83, 0xe6, 0x03, // 1000 and esi, 3
+    0x8b, 0x44, 0xb7, 0x04, // 1003 mov eax, [rdi + rsi*4 + 4]
+    0xc3, // 1007 ret
+];
+
+/// `if (i <= 3) return t->a[i]; return 0;`: only the guard bounds `i`, and no range reads it (D370).
+const GUARDED_INDEX: &[u8] = &[
+    0x89, 0xf6, // 1000 mov esi, esi
+    0x31, 0xc0, // 1002 xor eax, eax
+    0x83, 0xfe, 0x03, // 1004 cmp esi, 3
+    0x77, 0x04, // 1007 ja 0x100d
+    0x8b, 0x44, 0xb7, 0x04, // 1009 mov eax, [rdi + rsi*4 + 4]
+    0xc3, // 100d ret
+];
+
+/// `return t->a[i];` with nothing bounding `i`.
+const UNBOUNDED_INDEX: &[u8] = &[
+    0x89, 0xf6, // 1000 mov esi, esi
+    0x8b, 0x44, 0xb7, 0x04, // 1002 mov eax, [rdi + rsi*4 + 4]
+    0xc3, // 1006 ret
+];
+
+/// `t->a[i & 3]` one element up: `a[1 + (i & 3)]` reaches past `a[3]`.
+const PAST_THE_END: &[u8] = &[
+    0x83, 0xe6, 0x03, // 1000 and esi, 3
+    0x8b, 0x44, 0xb7, 0x08, // 1003 mov eax, [rdi + rsi*4 + 8]
+    0xc3, // 1007 ret
+];
+
+/// `int third(unsigned i) { struct s3 arr[4]; return arr[i & 3].third; }`, `arr` at the frame's
+/// bottom: the read reaches `arr` from a base displaced by `third`'s offset.
+const FRAME_ARRAY_INDEX: &[u8] = &[
+    0x48, 0x83, 0xec, 0x38, // 1000 sub rsp, 0x38
+    0x83, 0xe7, 0x03, // 1004 and edi, 3
+    0x48, 0x8d, 0x04, 0x7f, // 1007 lea rax, [rdi + rdi*2]
+    0x8b, 0x44, 0x84, 0x08, // 100b mov eax, [rsp + rax*4 + 8]
+    0x48, 0x83, 0xc4, 0x38, // 100f add rsp, 0x38
+    0xc3, // 1013 ret
+];
+
+/// [`FRAME_ARRAY_INDEX`] without the mask: nothing bounds `i`.
+const FRAME_ARRAY_UNBOUNDED: &[u8] = &[
+    0x48, 0x83, 0xec, 0x38, // 1000 sub rsp, 0x38
+    0x89, 0xff, // 1004 mov edi, edi
+    0x48, 0x8d, 0x04, 0x7f, // 1006 lea rax, [rdi + rdi*2]
+    0x8b, 0x44, 0x84, 0x08, // 100a mov eax, [rsp + rax*4 + 8]
+    0x48, 0x83, 0xc4, 0x38, // 100e add rsp, 0x38
+    0xc3, // 1012 ret
+];
+
 /// Where `GLOBAL_MEMBER_CALL`'s `g_ops` lies, after its code.
 const G_OPS: u64 = BASE + 0x20;
 
@@ -272,6 +324,30 @@ fn a_projected_member_read_spells_as_the_member() {
     assert!(text.contains("->next"), "{text}");
 }
 
+/// D359: `val`, read through the loaded `next`, spells as a member of the `struct node` `next`
+/// points at; a read no member covers and a load through `void *` keep the byte spelling.
+#[test]
+fn a_member_read_through_a_loaded_pointer_spells_as_the_member() {
+    let types = types();
+    let node = || declaring("f", Some((types.node_pointer, "struct node *")), types.int);
+    let text = |code, declarations| {
+        let mut open = program(code, declarations);
+        (open.rendered(BASE).expect("it renders").response.output).into_text()
+    };
+    let next_val = text(NEXT_VAL, node());
+    assert!(next_val.contains("(struct node*)"), "{next_val}");
+    assert!(next_val.contains("->val"), "{next_val}");
+    let narrow = text(NARROW_VAL, node());
+    assert!(!narrow.contains("->val"), "{narrow}");
+    let holder = declaring(
+        "f",
+        Some((types.holder_pointer, "struct holder *")),
+        types.int,
+    );
+    let through_void = text(THROUGH_VOID, holder);
+    assert_eq!(through_void.matches("->").count(), 2, "{through_void}");
+}
+
 /// D359: each declared `struct node *` parameter spells its own `next`, from one grouping pass.
 #[test]
 fn two_projected_parameters_each_spell_their_member() {
@@ -407,6 +483,115 @@ fn a_call_through_a_frame_structs_member_takes_its_type_as_contract() {
     assert!(roots.contains(&("f".to_string(), "frame")), "{roots:?}");
     // `o.f` is never written, so the read has no C spelling and the call stays a gap; the contract is the gate.
     assert_eq!(member_call(&mut open), (true, 2, true));
+}
+
+/// `at(struct table *t, unsigned i)`, `struct table { int n; int a[4]; }`.
+fn table_index(code: &'static [u8]) -> OpenProgram<Literal> {
+    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Width};
+    let types = types();
+    let mut graph = types.graph;
+    let unsigned = graph.add(Type::Scalar(Scalar {
+        kind: ScalarKind::Unsigned,
+        width: Width::Bits(32),
+        name: Some("unsigned int".to_owned()),
+    }));
+    let four = graph.add(Type::Array {
+        element: types.int,
+        count: Some(4),
+    });
+    let field = |name: &str, ty, at| Member {
+        name: Some(name.to_owned()),
+        ty,
+        offset_bits: at,
+        bit_size: None,
+    };
+    let table = graph.add(Type::Record(Record {
+        kind: RecordKind::Struct,
+        tag: Some("table".to_owned()),
+        size_bytes: 20,
+        members: vec![field("n", types.int, 0), field("a", four, 32)],
+    }));
+    let table_pointer = graph.add(Type::Pointer { target: table });
+    let prototype = Prototype {
+        name: "at".to_owned(),
+        parameters: vec![
+            Parameter::new(table_pointer, "struct table *", Some("t")),
+            Parameter::new(unsigned, "unsigned int", Some("i")),
+        ],
+        returns: "int".into(),
+        return_type: types.int,
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(BASE, prototype);
+    program(code, declarations)
+}
+
+/// D360: an index a range keeps below the member array's count projects as that array's element;
+/// one no range bounds (a guard alone, D370), or past the last element, projects nothing.
+#[test]
+fn a_bounded_index_into_an_array_member_projects_its_element() {
+    let roots = |code| projected(&mut table_index(code));
+    assert_eq!(roots(MASKED_INDEX), [("a[]".to_string(), "parameter")]);
+    assert_eq!(roots(GUARDED_INDEX), []);
+    assert_eq!(roots(UNBOUNDED_INDEX), []);
+    assert_eq!(roots(PAST_THE_END), []);
+}
+
+/// `third(unsigned i)` declaring `struct s3 { int a, b, third; } arr[4]` at CFA - 0x40.
+fn frame_array(code: &'static [u8]) -> OpenProgram<Literal> {
+    use r2abi::{FrameBase, Local, Parameter, Prototype, Scalar, ScalarKind, Width};
+    let types = types();
+    let mut graph = types.graph;
+    let unsigned = graph.add(Type::Scalar(Scalar {
+        kind: ScalarKind::Unsigned,
+        width: Width::Bits(32),
+        name: Some("unsigned int".to_owned()),
+    }));
+    let field = |name: &str, at| Member {
+        name: Some(name.to_owned()),
+        ty: types.int,
+        offset_bits: at,
+        bit_size: None,
+    };
+    let s3 = graph.add(Type::Record(Record {
+        kind: RecordKind::Struct,
+        tag: Some("s3".to_owned()),
+        size_bytes: 12,
+        members: vec![field("a", 0), field("b", 32), field("third", 64)],
+    }));
+    let four = graph.add(Type::Array {
+        element: s3,
+        count: Some(4),
+    });
+    let prototype = Prototype {
+        name: "third".to_owned(),
+        parameters: vec![Parameter::new(unsigned, "unsigned int", Some("i"))],
+        returns: "int".into(),
+        return_type: types.int,
+        frame_base: Some(FrameBase::CallFrameCfa),
+        locals: vec![Local {
+            name: "arr".to_owned(),
+            spelling: None,
+            frame_offset: -0x40,
+            size_bytes: Some(48),
+            ty: four,
+            scopes: Vec::new(),
+        }],
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(BASE, prototype);
+    program(code, declarations)
+}
+
+/// D362: `arr[i & 3].third` in a declared frame array projects `third` through a bounded index;
+/// an unbounded index projects nothing.
+#[test]
+fn a_bounded_index_into_a_frame_struct_array_projects_its_member() {
+    let mut open = frame_array(FRAME_ARRAY_INDEX);
+    assert_eq!(projected(&mut open), [("[].third".to_string(), "frame")]);
+    assert_eq!(projected(&mut frame_array(FRAME_ARRAY_UNBOUNDED)), []);
 }
 
 /// D348 default-deny: a merged base, a read no member covers, and a load through `void *` root

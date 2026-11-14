@@ -1138,7 +1138,7 @@ r2sleigh_word_u32 fcn_401764(void)
     uint64_t rax_62;
     _Alignas(16) uint8_t frame[568];
 
-    /* r2dec proof: no individual construct is marked; 544 source obligations: 359 rendered, 170 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 12 assumed (frame extent unproven); 79 statements rendered; 6 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 544 source obligations: 359 rendered, 170 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 12 assumed (frame extent unproven); 79 statements rendered; 6 callee prototypes supplied by the source; a call reads the result (assuming closed-world, ub-free) */
     /* symbol `main`; C allows that name no other prototype */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 48U), (uint64_t)0U);

@@ -430,6 +430,7 @@ fn outside_resolved<S: Source + 'static>(
         owners: &resolved,
         assumed: &[],
         world: world_of(demand),
+        asks: true,
     };
     Shared(Arc::new(callee_read(db, node, stated)))
 }
@@ -460,6 +461,7 @@ fn closed_alone<S: Source + 'static>(
         owners: &[],
         assumed: &[],
         world: super::World::Closed,
+        asks: true,
     };
     Shared(Arc::new(callee_read(db, node, stated)))
 }
@@ -500,7 +502,12 @@ fn member_owned(read: &CalleeRead, members: &[Node], demand: Demand) -> bool {
 
 /// What a read states that a cycle's fixpoint moves: its parameters' count and whether that is a
 /// floor, and, where the member's result is open, the result it states.
-type State = (usize, bool, Option<Option<SourceResultSeed>>);
+type State = (
+    usize,
+    bool,
+    Option<Option<SourceResultSeed>>,
+    Option<Vec<(i64, i64)>>,
+);
 
 /// The arity and result a cycle's fixpoint assumes of a member, and the interface its callers are
 /// handed.
@@ -512,6 +519,10 @@ struct Assumed {
     /// The result an untracked member states in its own right, which no member can move.
     kept: Option<SourceResultSeed>,
     interface: SourceFunctionInterface,
+    /// What the member writes of its caller's stack: none at first, `None` the top (D377).
+    writes: Option<Vec<(i64, i64)>>,
+    /// Whether the writes rose once already: a second move is the top.
+    writes_rose: bool,
 }
 
 impl Assumed {
@@ -527,15 +538,33 @@ impl Assumed {
             floor: cause.is_some(),
             result,
             kept,
+            writes: Some(Vec::new()),
+            writes_rose: false,
             interface: interface
                 .clone()
                 .assumed(cause.cloned(), result.flatten().or(kept)),
         })
     }
 
+    /// A member stated as resolved: what its read states, its writes included.
+    fn resolved(read: &CalleeRead) -> Option<Self> {
+        let held = Self::of(read, false, false)?;
+        let writes = Self::writes_of(read);
+        Some(Self { writes, ..held })
+    }
+
     fn state(assumed: &Option<Self>) -> Option<State> {
         let held = assumed.as_ref()?;
-        Some((held.count, held.floor, held.result))
+        Some((held.count, held.floor, held.result, held.writes.clone()))
+    }
+
+    /// What a read states its body writes of its caller's stack.
+    fn writes_of(read: &CalleeRead) -> Option<Vec<(i64, i64)>> {
+        let facts = read.facts.as_ref().ok()?;
+        facts
+            .summary()
+            .incoming_writes()
+            .map(<[(i64, i64)]>::to_vec)
     }
 
     /// What a read of a member states, as far as the member's assumption tracks it.
@@ -543,7 +572,12 @@ impl Assumed {
         let interface = read.interface.as_ref()?;
         let arity = interface.arity();
         let result = tracked.then(|| interface.stated_result());
-        Some((arity.floor(), !arity.is_exact(), result))
+        Some((
+            arity.floor(),
+            !arity.is_exact(),
+            result,
+            Self::writes_of(read),
+        ))
     }
 
     /// Raise an assumption to what a read of its member states; whether it moved.
@@ -561,7 +595,15 @@ impl Assumed {
         let result = held
             .result
             .map(|seed| join(seed, interface.stated_result()));
-        if (count, floor, result) == (held.count, held.floor, held.result) {
+        // The writes rise once from none to what a read states; any later move bounds nothing.
+        let read_writes = Self::writes_of(read);
+        let writes = match held.writes.as_deref() {
+            _ if held.writes == read_writes => held.writes.clone(),
+            Some([]) if !held.writes_rose => read_writes,
+            _ => None,
+        };
+        let writes_rose = held.writes_rose || writes != held.writes;
+        if (count, floor, result, &writes) == (held.count, held.floor, held.result, &held.writes) {
             return false;
         }
         let cause = (interface.arity_floor()).or_else(|| held.interface.arity_floor());
@@ -577,6 +619,8 @@ impl Assumed {
             result,
             kept: held.kept,
             interface,
+            writes,
+            writes_rose,
         };
         true
     }
@@ -612,8 +656,8 @@ fn least_fixpoint<S: Source + 'static>(
     let mut pending = (0..members.len())
         .filter(|at| cycle.open[*at])
         .collect::<BTreeSet<_>>();
-    // Terminates: an assumption only rises (count, floor, none; result width, none), and each rise
-    // queues its callers once: O(k + (s + 6)·E) preparations.
+    // Terminates: an assumption only rises (count, floor, none; result width, none; writes twice),
+    // and each rise queues its callers once: O(k + (s + 8)·E) preparations.
     while let Some(at) = pending.pop_first() {
         let Some(rose) = cycle.resolve(db, view, at) else {
             return stopped_read();
@@ -725,7 +769,11 @@ impl<'m> Cycle<'m> {
         }
         let stated = self.callees[at].iter().filter_map(|callee| {
             let held = self.assumed[*callee].as_ref()?;
-            Some((self.members[*callee].0, held.interface.clone()))
+            Some((
+                self.members[*callee].0,
+                held.interface.clone(),
+                held.writes.clone(),
+            ))
         });
         let stated = stated.collect::<Vec<_>>();
         // A member is read in the world of the seal that consumes it, as one read alone is.
@@ -733,6 +781,7 @@ impl<'m> Cycle<'m> {
             owners: &self.outside[at],
             assumed: &stated,
             world: world_of(self.demand),
+            asks: true,
         };
         let read = callee_read(db, self.members[at], stated);
         if stopped(&read) {
@@ -773,7 +822,7 @@ impl<'m> Cycle<'m> {
             self.callers[callee].push(at);
             if !self.stated[callee] {
                 let read = resolved(db, members[callee], self.demand)?;
-                self.assumed[callee] = Assumed::of(&read.0, false, false);
+                self.assumed[callee] = Assumed::resolved(&read.0);
                 self.stated[callee] = true;
             }
         }

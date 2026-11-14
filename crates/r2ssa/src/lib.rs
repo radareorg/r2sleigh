@@ -96,7 +96,7 @@ pub mod view;
 
 pub use abi::Formals;
 pub use address::{
-    AddressProvenanceFacts, AffineAddressTerm, ParameterAddressExpression,
+    AddressProvenanceFacts, AffineAddressTerm, FrameAddressExpression, ParameterAddressExpression,
     PointeeAddressExpression, PointeeStep,
 };
 pub use aggregate_access::{
@@ -197,14 +197,14 @@ pub use semantic::{
     CallResultCertificate, CallResultValueRelation, CallSiteFact, CallSiteFacts, CallSiteId,
     CallSiteTransfer, CalleeStackAllocationCertificate, CallerSlotSupply,
     CallerStackSlotCertificate, CallsiteCertificate, CompareKind, CompareProvenance, ControlDomain,
-    ControlDomainFacts, ControlDomainId, ControlGuard, EntryAffineForm, ExtentAssumption,
-    ForLoopCertificate, FormalHome, FrameReach, GlobalObjectKey, InductionFact, InductionStep,
-    LoopCarrierEdgeValue, LoopCarrierFact, LoopCarrierMemberFact, LoopCarrierMemberRole,
-    LoopCarrierUpdateFact, LoopCertificate, LoopId, LoopTrips, MachineReturnControlCertificate,
-    MemberRunPlace, MemberRunSource, MemberRunStoreCertificate, MemberRunStoreMember,
-    MemoryAccessCertificate, MemoryDefFact, MemoryLocation, MemoryObjectKey, MemoryPhiFact,
-    MemorySSAFacts, MemoryUseFact, MemoryVersion, ObjectFact, ObjectId, ObjectKind, ObjectModel,
-    ObjectSpaceId, ParameterFieldAccess, ParameterFieldRefusal, ParameterFields,
+    ControlDomainFacts, ControlDomainId, ControlGuard, DynamicFrame, EntryAffineForm,
+    ExtentAssumption, ForLoopCertificate, FormalHome, FrameReach, GlobalObjectKey, InductionFact,
+    InductionStep, LoopCarrierEdgeValue, LoopCarrierFact, LoopCarrierMemberFact,
+    LoopCarrierMemberRole, LoopCarrierUpdateFact, LoopCertificate, LoopId, LoopTrips,
+    MachineReturnControlCertificate, MemberRunPlace, MemberRunSource, MemberRunStoreCertificate,
+    MemberRunStoreMember, MemoryAccessCertificate, MemoryDefFact, MemoryLocation, MemoryObjectKey,
+    MemoryPhiFact, MemorySSAFacts, MemoryUseFact, MemoryVersion, ObjectFact, ObjectId, ObjectKind,
+    ObjectModel, ObjectSpaceId, ParameterFieldAccess, ParameterFieldRefusal, ParameterFields,
     ParameterObjectKey, PredicateFact, PredicateFacts, PredicateId, PreparedAssumptionBinding,
     PreparedAssumptionBindingKind, PreparedFunctionCertificates, PreparedFunctionFacts,
     ProofNodeId, RelativeMemoryAddress, ReturnCarrier, ReturnValueCertificate, SemanticId,

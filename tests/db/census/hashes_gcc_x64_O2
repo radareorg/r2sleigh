@@ -111,7 +111,7 @@ r2sleigh_word_u32 fcn_401050(void)
     uint64_t rax_35;
     uint64_t rax_38;
 
-    /* r2dec proof: no individual construct is marked; 320 source obligations: 233 rendered, 87 elided, 0 refused; 28 statements rendered; 13 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 320 source obligations: 233 rendered, 87 elided, 0 refused; 28 statements rendered; 13 callee prototypes supplied by the source; a call reads the result (assuming closed-world, ub-free) */
     /* symbol `main`; C allows that name no other prototype */
     {
         crc32_init();

@@ -163,8 +163,8 @@ impl ProvenProgramObservations {
     }
 }
 
-/// Each register argument a declared callee holds in a low lane: the call reads that lane of the
-/// value, never the rest (D266 rule 2). Sorted by `(value, index, storage)`; O(arguments log).
+/// The bytes of each register argument its call reads (`register_read_bytes`, D283), sorted by
+/// `(value, index, storage)`; O(arguments log).
 struct HeldArgumentLanes(Vec<((ValueId, u32, crate::CanonicalStorageId), ByteMask)>);
 
 impl HeldArgumentLanes {
@@ -174,11 +174,12 @@ impl HeldArgumentLanes {
     ) -> Self {
         let mut lanes = Vec::new();
         for boundary in facts.boundaries.calls.values() {
-            let interface = (facts.call_sites.by_id.get(&boundary.call_site))
-                .and_then(|site| site.raw_identity)
-                .zip(machine_context)
-                .and_then(|(identity, context)| context.call_site_interface(identity));
-            // A call no exact callee states reads the whole register, so its row is `All`.
+            let identity = (facts.call_sites.by_id.get(&boundary.call_site))
+                .and_then(|site| site.raw_identity);
+            let reads = (machine_context.zip(identity)).and_then(|(context, identity)| {
+                let reads = context.call_reads(Some(identity.instruction()))?;
+                Some((context, reads, context.call_site_interface(identity)))
+            });
             for argument in &boundary.arguments {
                 let (
                     SourceCallArgumentValue::Value(value),
@@ -187,11 +188,13 @@ impl HeldArgumentLanes {
                 else {
                     continue;
                 };
-                let held = interface.and_then(|interface| {
-                    crate::semantic::callee_held_lane(interface, index, storage)
+                let bytes = (reads.as_ref()).and_then(|(context, reads, interface)| {
+                    crate::semantic::register_read_bytes(reads, context, *interface, storage)
                 });
-                let mask = held.map_or(ByteMask::All, |lane| ByteMask::whole(lane.size));
-                lanes.push(((value, index, storage), mask));
+                lanes.push((
+                    (value, index, storage),
+                    bytes.map_or(ByteMask::All, ByteMask::whole),
+                ));
             }
         }
         lanes.sort_unstable_by_key(|(key, _)| *key);

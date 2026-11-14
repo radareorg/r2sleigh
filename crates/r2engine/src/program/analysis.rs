@@ -389,7 +389,11 @@ pub(super) fn built_read<S: Source + 'static>(
         .expect("a walk asks for no callee");
     match (target, walked.resolved()) {
         (Some(Ok(target)), Ok(walked)) => {
-            crate::native::built_read(&target, &view, walked, built, owners)
+            let built = crate::native::built_read(&target, &view, walked, built, owners);
+            if built.rebuilt {
+                db.note_rebuilt();
+            }
+            (built.read, built.again)
         }
         _ => {
             let unread = CalleeRead {

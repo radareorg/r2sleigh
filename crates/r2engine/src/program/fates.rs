@@ -97,8 +97,8 @@ pub struct BoundaryResult {
     pub lanes: [LaneDecision; LANES],
     /// What the seal applies as a stated input; none where the calls decide nothing.
     pub result: Option<SourceClosedResult>,
-    /// What the decision assumes.
-    pub premises: Box<[r2source::Premise]>,
+    /// Whether a way in is a cited slot, which the decision's premises read (`SourceClosedDecision`).
+    pub through_slot: bool,
     /// The sources the authority order overrules: refusal evidence, never a decision.
     pub disputes: Box<[Dispute]>,
 }
@@ -350,6 +350,16 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
             join_site(&mut lanes, caller, &site.boundary, &mut returned);
         }
     }
+    // A body that leaves for `callee` by a branch returns what `callee` returns: each held lane is
+    // its own result, read as its callers read it (D227, `__wrap_main`'s `b main`).
+    for &caller in survey.tail_callers_of(callee) {
+        let held = (lanes.iter().enumerate()).filter(|(_, lane)| lane.held);
+        returned.extend(held.map(|(at, _)| Returned {
+            caller,
+            at,
+            bytes: ByteMask(u128::MAX),
+        }));
+    }
     let loader_calls = loader_reads(db.inputs().source.container(), callee, &mut lanes);
     let slot_read = slot_reads(db, callee, &mut lanes);
     let returned = forwarded_lanes(&mut lanes, returned, float_second).into();
@@ -547,6 +557,45 @@ impl DenseId for Member {
 /// Each lane can move this often: four flags, 128 byte bits and two width steps.
 const LANE_HEIGHT: usize = 4 + 128 + 2;
 
+/// Which members' reads rest on a callback slot: their own, or a caller's whose result returns
+/// theirs, outside or inside the component, to a fixpoint. Each member turns once: `O(V + E)`.
+fn slotted(
+    component: &Component<'_>,
+    outside: &impl Fn(u64) -> Option<Option<Forwarding>>,
+) -> Vec<bool> {
+    let count = component.members.len();
+    let mut slotted = vec![false; count];
+    let mut returned_to = vec![Vec::new(); count];
+    let mut pending = Vec::new();
+    for (at, direct) in component.directs.iter().enumerate() {
+        let Some(direct) = direct else { continue };
+        let mut own = direct.slot_read;
+        for returned in &direct.returned {
+            match component.member(returned.caller) {
+                Some(inside) => returned_to[inside.index()].push(at),
+                None => {
+                    own |= outside(returned.caller)
+                        .flatten()
+                        .is_some_and(|theirs| theirs.slot_read)
+                }
+            }
+        }
+        if own {
+            slotted[at] = true;
+            pending.push(at);
+        }
+    }
+    while let Some(caller) = pending.pop() {
+        for callee in std::mem::take(&mut returned_to[caller]) {
+            if !slotted[callee] {
+                slotted[callee] = true;
+                pending.push(callee);
+            }
+        }
+    }
+    slotted
+}
+
 /// One component's members solved together: the least fixpoint of the reads a lane forwarded inside
 /// the component takes, then each inside edge that reaches no read is a cycle, never dead.
 fn solve<S: Source + 'static>(
@@ -593,6 +642,7 @@ fn solve<S: Source + 'static>(
     let Ok(cells) = cells else {
         return members.iter().map(|member| (*member, None)).collect();
     };
+    let slotted = slotted(&component, &outside);
     let solved = (0..members.len()).map(|at| {
         let direct = component.directs[at].as_ref()?;
         let member = Member::from_index(at);
@@ -603,11 +653,12 @@ fn solve<S: Source + 'static>(
                 join(&mut lanes[lane], Some(Forwarded::Cycle));
             }
         }
+        let slot_read = slotted[at];
         Some(Forwarding {
             lanes,
             calls: direct.calls,
             loader_calls: direct.loader_calls,
-            slot_read: direct.slot_read,
+            slot_read,
             unread: direct.unread,
             forwarders: std::mem::take(&mut forwarders[at]).into_iter().collect(),
         })
@@ -872,22 +923,22 @@ impl BoundaryResult {
             lane if lane.dead && dead => LaneDecision::Dead,
             _ => LaneDecision::Open,
         });
-        // A slot's declared return is how every caller calls, given no undefined call (C17 6.3.2.3p8).
-        let slotted = matches!(result, Some(SourceClosedResult::DeclaredVoid(_)))
-            || (result.is_some() && forwarding.slot_read);
-        let premises = match result {
-            Some(_) if slotted => vec![
-                r2source::Premise::ClosedWorld,
-                r2source::Premise::UbFreeSource,
-            ],
-            Some(_) => vec![r2source::Premise::ClosedWorld],
-            None => Vec::new(),
-        };
         Self {
             lanes: decisions,
             result,
-            premises: premises.into(),
+            through_slot: result.is_some() && forwarding.slot_read,
             disputes: disputes.into(),
+        }
+    }
+
+    /// The decision the seal applies, with what it assumes.
+    pub const fn decision(&self) -> Option<r2source::SourceClosedDecision> {
+        match self.result {
+            Some(result) => Some(r2source::SourceClosedDecision {
+                result,
+                through_slot: self.through_slot,
+            }),
+            None => None,
         }
     }
 }

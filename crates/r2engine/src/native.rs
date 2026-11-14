@@ -118,7 +118,7 @@ pub trait Program: crate::body::Program {
 
     /// What the closed world's `CallBoundary` decided of the result of the function at `entry`, from
     /// its open read's supply; none outside `aa` (doc/adr-result-side.md, section 3; D317).
-    fn closed_result(&self, _entry: u64) -> Option<r2source::SourceClosedResult> {
+    fn closed_result(&self, _entry: u64) -> Option<r2source::SourceClosedDecision> {
         None
     }
 
@@ -133,6 +133,16 @@ pub trait Program: crate::body::Program {
         &self,
         _address: u64,
         _callers: crate::program::World,
+        read: &mut dyn FnMut() -> CalleeRead,
+    ) -> Arc<CalleeRead> {
+        Arc::new(read())
+    }
+
+    /// One callee read alone, against its imports (`CalleeReads`): the statement a caller build
+    /// asks for a call nothing else states, which never reads another statement (D376).
+    fn callee_statement(
+        &self,
+        _address: u64,
         read: &mut dyn FnMut() -> CalleeRead,
     ) -> Arc<CalleeRead> {
         Arc::new(read())
@@ -845,7 +855,47 @@ pub(crate) fn convention_seal_of(
     );
     let restatement = native.restatement(body.entry);
     // Sealed through the tables the walk followed, as Ge's whole-body seal reads them (D285).
-    native.convention_seal(&walked.root, &imports, restatement, &walked.tables)
+    let seal =
+        native.convention_seal(&walked.root, &imports, restatement.clone(), &walked.tables)?;
+    let asked = seal.unstated_rewriting_callees();
+    match state_asked(
+        (&native, target, ptr_bits),
+        (body.entry, asked),
+        &mut imports,
+    ) {
+        true => native.convention_seal(&walked.root, &imports, restatement, &walked.tables),
+        false => Ok(seal),
+    }
+}
+
+/// States each callee nothing states whose call's writes kept a loaded place in memory, from its
+/// alone read: depth one, since an alone read asks none (D376). Whether any did. O(asked) reads.
+fn state_asked(
+    (native, target, ptr_bits): (&Native<'_>, &NativeTarget<'_>, u32),
+    (entry, asked): (u64, BTreeSet<u64>),
+    callees: &mut Callees,
+) -> bool {
+    let program = native.program;
+    let asked = (asked.into_iter())
+        .filter(|address| *address != entry && !callees.interfaces.contains_key(address))
+        .filter(|address| !callees.writes.contains_key(address))
+        .filter(|address| program.import_at(*address).is_none())
+        .filter(|address| crate::stated::sealed_import(program, *address).is_none())
+        .collect::<Vec<_>>();
+    let mut stated = false;
+    for address in asked {
+        let read = program.callee_statement(address, &mut || {
+            read_callee(native, target, address, ptr_bits)
+        });
+        if let Some(interface) = &read.interface {
+            callees.interfaces.insert(address, interface.clone());
+        }
+        if let Ok(facts) = &read.facts {
+            callees.record(address, facts, program);
+            stated = true;
+        }
+    }
+    stated
 }
 
 /// Where each dispatch goes, by the instruction making it.
@@ -1252,6 +1302,8 @@ fn declare_imports(
             signatures.push(declaration);
         }
         callees.interfaces.insert(*address, interface);
+        // A declaration states its arguments, the area the convention gives the callee.
+        (callees.writes).insert(*address, r2ssa::call_reads::StackWrites::Arguments);
     }
     signatures
 }
@@ -1303,14 +1355,24 @@ fn prepare_callee(
 /// A resolved body, and the callees whose statement could prove what it leaves open.
 type Resolution = Arc<TrustedSsaArtifact>;
 
+/// A cycle member as its fixpoint assumes it: its interface, and the stack it writes (D377).
+pub(crate) type AssumedMember = (
+    u64,
+    r2source::SourceFunctionInterface,
+    Option<Vec<(i64, i64)>>,
+);
+
 /// What a body is resolved against beside its imports: its owners resolved, and the arities a
 /// cycle's least fixpoint assumes of its members (doc/adr-resolved-bodies.md, "Arity").
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Stated<'a> {
     pub(crate) owners: &'a [(u64, Arc<CalleeRead>)],
-    pub(crate) assumed: &'a [(u64, r2source::SourceFunctionInterface)],
+    pub(crate) assumed: &'a [AssumedMember],
     /// Under `aa` a callee's result is its closed-world `CallBoundary`'s, as the root's is.
     pub(crate) world: crate::program::World,
+    /// Whether the build asks each callee its walk finds unstated and rewriting to state itself
+    /// (D376); an alone read (`CalleeReads`) asks none, so a statement reads no statement.
+    pub(crate) asks: bool,
 }
 
 /// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md).
@@ -1327,11 +1389,23 @@ fn resolved_alone(
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
     // Each resolved owner of its result or arity, read as any callee's statement.
     imports.state(stated.owners, native.program);
-    // An assumed member states its interface alone: nothing it preserves or reaches.
-    for (member, interface) in stated.assumed {
+    // An assumed member states its interface and what it writes: nothing it preserves or reaches.
+    for (member, interface, writes) in stated.assumed {
+        if let Some(writes) = writes {
+            let within = r2ssa::call_reads::StackWrites::Within(writes.clone().into());
+            imports.writes.insert(*member, within);
+        }
         imports.interfaces.insert(*member, interface.clone());
     }
-    let resolved = native.resolve(address, walked, &imports, stated.world);
+    let mut resolved = native.resolve(address, walked, &imports, stated.world);
+    if let Ok(artifact) = resolved.as_ref()
+        && stated.asks
+    {
+        let asked = artifact.shared_artifact().unstated_rewriting_callees();
+        if state_asked((native, target, ptr_bits), (address, asked), &mut imports) {
+            resolved = native.resolve(address, walked, &imports, stated.world);
+        }
+    }
     resolved.map_err(|refusal| match refusal.stopped() {
         true => Unreadable::Stopped,
         false => Unreadable::NotPrepared,
@@ -1466,30 +1540,42 @@ fn unreadable(refusal: &NativeRefusal) -> Unreadable {
     }
 }
 
-/// `callee_read` against `owners` from a build their statements update, and whether its answer
-/// is another seal than that build's (doc/adr-callee-builds.md).
+/// `callee_read` against `owners` from a build their statements update (doc/adr-callee-builds.md).
+pub(crate) struct BuiltRead {
+    pub(crate) read: CalleeRead,
+    /// Its answer is another seal than that build's.
+    pub(crate) again: bool,
+    /// The statements moved what the build read, so it was built anew (`BuildKey`, D365).
+    pub(crate) rebuilt: bool,
+}
+
 pub(crate) fn built_read(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     walked: &Walk,
     built: Built,
     owners: &[(u64, Arc<CalleeRead>)],
-) -> (CalleeRead, bool) {
+) -> BuiltRead {
     let Ok(native) = Native::over(target, program) else {
-        let unread = CalleeRead {
-            interface: None,
-            facts: Err(Unreadable::NotPrepared),
+        return BuiltRead {
+            read: CalleeRead {
+                interface: None,
+                facts: Err(Unreadable::NotPrepared),
+            },
+            again: false,
+            rebuilt: false,
         };
-        return (unread, false);
     };
     let resolved = crate::isolation::isolated(|| native.resolve_built(walked, built, owners));
     let resolved = resolved.map(|resolved| resolved.map_err(|refusal| unreadable(&refusal)));
     let resolved = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)));
-    let again = resolved.as_ref().is_ok_and(|(_, again)| *again);
-    (
-        read_of(&native, resolved.map(|(artifact, _)| artifact)),
+    let (again, rebuilt) =
+        (resolved.as_ref()).map_or((false, false), |(_, again, rebuilt)| (*again, *rebuilt));
+    BuiltRead {
+        read: read_of(&native, resolved.map(|(artifact, ..)| artifact)),
         again,
-    )
+        rebuilt,
+    }
 }
 
 /// The declarations of the imports a resolved body calls directly. O(call sites x log rows).
@@ -1730,6 +1816,8 @@ struct Callees {
     /// What each callee reaches through each pointer it is handed, which is
     /// what makes the bytes one callee covers one object in the caller.
     reach: BTreeMap<u64, BTreeMap<usize, ArgumentReach>>,
+    /// What each stated callee may write of its caller's stack; one absent may write any (D377).
+    writes: BTreeMap<u64, r2ssa::call_reads::StackWrites>,
     /// The imports whose declaration states no interface: they have no body to read one off.
     unstated: BTreeMap<u64, r2ssa::UnstatedImport>,
     /// The convention each call runs under where the program states it (`site_convention`).
@@ -1748,6 +1836,7 @@ impl Callees {
             interfaces: self.interfaces.clone(),
             preserved: self.preserved.clone(),
             reach: self.reach.clone(),
+            writes: self.writes.clone(),
             library,
             reentering,
             exits,
@@ -1774,6 +1863,13 @@ impl Callees {
         // arguments is described, and a callee with no entry is one nothing
         // describes.
         self.reach.insert(address, facts.argument_touch_reach());
+        match facts.summary().incoming_writes() {
+            Some(spans) => {
+                let within = r2ssa::call_reads::StackWrites::Within(spans.into());
+                self.writes.insert(address, within);
+            }
+            None => _ = self.writes.remove(&address),
+        }
     }
 }
 
@@ -1852,8 +1948,14 @@ impl Walked {
     /// The same walk cut to the blocks an unresolved indirect branch is reachable from: a value there is built
     /// from the paths that arrive at it, and a kept block's edge to a cut one leaves the function. O(blocks + edges).
     fn reaching_unresolved(&self) -> Self {
-        let stops = self.indirect_stops().filter_map(|stop| self.held(stop));
-        let (keep, _) = self.reaching(stops.collect(), None);
+        self.reaching(self.indirect_stops())
+    }
+
+    /// The blocks on a path from the entry to one of the instructions `at`; the whole body where
+    /// none is held. O(blocks + edges).
+    fn reaching(&self, at: impl Iterator<Item = u64>) -> Self {
+        let stops = at.filter_map(|stop| self.held(stop));
+        let (keep, _) = self.reaching_blocks(stops.collect(), None);
         match keep.contains(&true) {
             true => self.cut(self.body.entry, &keep),
             false => self.clone(),
@@ -1865,7 +1967,7 @@ impl Walked {
     fn region_after(&self, dispatch: u64, stops: &BTreeSet<u64>) -> Option<Self> {
         let at = self.held(dispatch)?;
         let stops = stops.iter().filter_map(|stop| self.held(*stop));
-        let (keep, preceding) = self.reaching(stops.clone().collect(), Some(at));
+        let (keep, preceding) = self.reaching_blocks(stops.clone().collect(), Some(at));
         let keep = closed_under_entry(keep, &preceding, at);
         let mut kept = stops.filter(|block| keep[*block]);
         kept.next()
@@ -1888,7 +1990,11 @@ impl Walked {
 
     /// Each block that reaches one of the `stops` blocks and, given `from`, is reachable from it; and
     /// each block's predecessors.
-    fn reaching(&self, stops: Vec<usize>, from: Option<usize>) -> (Vec<bool>, Vec<Vec<usize>>) {
+    fn reaching_blocks(
+        &self,
+        stops: Vec<usize>,
+        from: Option<usize>,
+    ) -> (Vec<bool>, Vec<Vec<usize>>) {
         let blocks = &self.body.blocks;
         let block_at = |address: u64| {
             blocks
@@ -2037,13 +2143,14 @@ impl<'a> Native<'a> {
         walk: &Walk,
         built: Built,
         owners: &[(u64, Arc<CalleeRead>)],
-    ) -> Result<(Resolution, bool), NativeRefusal> {
+    ) -> Result<(Resolution, bool, bool), NativeRefusal> {
         let Built {
             address,
             mut construction,
             mut imports,
             declared_root,
         } = built;
+        let mut rebuilt = false;
         if !owners.is_empty() {
             imports.state(owners, self.program);
             let evidence = self.evidence(&walk.root, &imports);
@@ -2058,6 +2165,7 @@ impl<'a> Native<'a> {
                 owners.len()
             );
             construction = restated;
+            rebuilt = !kept;
         }
         let seal = construction.seal(&self.control);
         let first = First {
@@ -2065,7 +2173,9 @@ impl<'a> Native<'a> {
             declared_root,
             seal: seal.map_err(NativeRefusal::of_preparation)?,
         };
-        self.finish(walk, &imports, crate::program::World::Open, first)
+        let (resolution, again) =
+            self.finish(walk, &imports, crate::program::World::Open, first)?;
+        Ok((resolution, again, rebuilt))
     }
 
     /// What a body's first build captures: its declaration where it states an interface or the
@@ -2073,7 +2183,7 @@ impl<'a> Native<'a> {
     fn first_capture<'t>(
         walk: &'t Walk,
         declared_root: &Restatement,
-        closed_result: Option<r2source::SourceClosedResult>,
+        closed_result: Option<r2source::SourceClosedDecision>,
     ) -> Capture<'t> {
         let (tables, calls) = (&walk.tables[..], &walk.calls[..]);
         let (restatement, tables) = match (declared_root.interface.is_some(), tables.is_empty()) {
@@ -2095,7 +2205,7 @@ impl<'a> Native<'a> {
         walk: &Walk,
         callees: &Callees,
         declared_root: &Restatement,
-        reads: Option<r2source::SourceClosedResult>,
+        reads: Option<r2source::SourceClosedDecision>,
     ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Self::first_capture(walk, declared_root, reads);
         self.seal_captured(&walk.root, callees, capture)
@@ -2298,15 +2408,24 @@ impl<'a> Native<'a> {
         read.unwrap_or_else(|panicked| Err(panicked.into()))
     }
 
-    /// Whether the whole body walked through `tables` reads each of them as its round did: a later
-    /// round can add an edge into a region any earlier round sealed, the first included. One seal.
+    /// Whether the body walked through `tables` reads each as its round did: the whole body captures,
+    /// and one seal of the blocks on a path to a tabled dispatch, no other block being on one, reads them (D367).
     fn rounds_hold(
         &self,
         whole: &Walked,
         tables: &[NativePointerTable],
         restatement: Restatement,
     ) -> Result<bool, NativeRefusal> {
-        let reads = self.table_reads(whole, tables, restatement)?;
+        let capture = Capture {
+            extra_literals: Vec::new(),
+            restatement: restatement.clone(),
+            tables,
+            calls: &[],
+            closed_result: None,
+        };
+        drop(self.snapshot(whole, call_sites(&whole.body, self.program), capture)?);
+        let cut = whole.reaching(tables.iter().map(|table| table.instruction));
+        let reads = self.table_reads(&cut, tables, restatement)?;
         let same = |table: &NativePointerTable, read: &r2ssa::indirect::DispatchTableRead| {
             read.instruction == Some(table.instruction)
                 && !read.call
@@ -2626,7 +2745,7 @@ impl<'a> Native<'a> {
         extra_literals: Vec<(u64, String)>,
         restatement: Restatement,
         (tables, calls): (&[NativePointerTable], &[NativePointerTable]),
-        closed_result: Option<r2source::SourceClosedResult>,
+        closed_result: Option<r2source::SourceClosedDecision>,
     ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Capture {
             extra_literals,
@@ -2702,6 +2821,23 @@ impl<'a> Native<'a> {
         callees: &Callees,
         capture: Capture<'_>,
     ) -> Result<(r2sleigh_lift::TrustedLiftedFunction, r2ssa::CalleeEvidence), NativeRefusal> {
+        let calls = call_sites(&walked.body, self.program);
+        let library = library_evidence(self.program, &calls);
+        let reentering = reentering_calls(&calls);
+        let snapshot = self.snapshot(walked, calls, capture)?;
+        let lifted = Disassembler::lift_owned_function(snapshot)
+            .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
+        let exits = walked.body.exits.clone();
+        Ok((lifted, callees.evidence(library, reentering, exits)))
+    }
+
+    /// One walked body captured against what is stated about it: the function image r2source admits.
+    fn snapshot(
+        &self,
+        walked: &Walked,
+        calls: Vec<NativeCall>,
+        capture: Capture<'_>,
+    ) -> Result<r2source::OwnedFunctionSnapshot, NativeRefusal> {
         // A body the walk cut at its budget is no function's whole body: analysis refuses it, named.
         let cut = (walked.body.unresolved.iter())
             .any(|stop| stop.reason == crate::body::UnresolvedReason::Budget);
@@ -2760,10 +2896,6 @@ impl<'a> Native<'a> {
             let slots = interface.stack_slots().to_vec();
             restate(&interface, slots, identity.to_vec())
         });
-        let calls = call_sites(&walked.body, self.program);
-        let library = library_evidence(self.program, &calls);
-        let reentering = reentering_calls(&calls);
-        let exits = walked.body.exits.clone();
         let (data_symbols, data_types) = self.data_symbols(&walked.body);
         let function = NativeFunction {
             address: walked.body.entry,
@@ -2804,11 +2936,7 @@ impl<'a> Native<'a> {
             member_calls,
         };
 
-        let snapshot =
-            r2source::native::capture(&self.machine, function).map_err(NativeRefusal::Capture)?;
-        let lifted = Disassembler::lift_owned_function(snapshot)
-            .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
-        Ok((lifted, callees.evidence(library, reentering, exits)))
+        r2source::native::capture(&self.machine, function).map_err(NativeRefusal::Capture)
     }
 }
 
@@ -2819,7 +2947,7 @@ struct Capture<'t> {
     restatement: Restatement,
     tables: &'t [NativePointerTable],
     calls: &'t [NativePointerTable],
-    closed_result: Option<r2source::SourceClosedResult>,
+    closed_result: Option<r2source::SourceClosedDecision>,
 }
 
 /// Every function this body reaches by a call, tail jump, loaded slot or folded target, each once
@@ -3628,14 +3756,18 @@ fn forms(
             _ => None,
         }),
         stack_bound: guard(row.stack_bound.as_ref()),
-        // The row says the C library checks a load-config cookie; the container says where.
-        security_cookie: matches!(guard_row, Some(r2abi::GuardRow::LoadConfigCookie))
-            .then_some(guards.cookie)
-            .flatten()
-            .map(|address| r2source::SourceSecurityCookie {
-                address,
-                width: bits / 8,
-            }),
+        // The row says the C library checks a load-config cookie in a register; the container says where.
+        security_cookie: match guard_row {
+            Some(r2abi::GuardRow::LoadConfigCookie(check)) => {
+                guards.cookie.zip(at.resolve(check.argument.0))
+            }
+            _ => None,
+        }
+        .map(|(address, argument)| r2source::SourceSecurityCookie {
+            address,
+            width: bits / 8,
+            argument,
+        }),
         // The row names the library's global; only the container's binding places it.
         linked_guard: matches!(guard_row, Some(r2abi::GuardRow::LinkedGlobal(_)))
             .then_some(guards.linked)

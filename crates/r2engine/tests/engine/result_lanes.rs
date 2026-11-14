@@ -344,3 +344,31 @@ fn a_deposited_register_effect_renders_as_the_one_asked_directly() {
     let asked = rendered([BASE + 0x20, BASE + 0x10, BASE + 0x30, BASE]);
     assert_eq!(deposited, asked);
 }
+
+/// `stores` of [`UNREAD_ABOVE`], then `test eax, eax; jne 1f; jmp free; 1: mov eax, 1; ret`.
+fn tail_to_free() -> &'static [u8] {
+    let mut code = [0xcc_u8; 0xa0];
+    code[..9].copy_from_slice(&UNREAD_ABOVE[..9]);
+    code[0x10..0x1b].copy_from_slice(&UNREAD_ABOVE[0x10..0x1b]);
+    code[0x1b..0x2a].copy_from_slice(&[
+        0x85, 0xc0, 0x75, 0x05, 0xe9, 0x6c, 0, 0, 0, 0xb8, 1, 0, 0, 0, 0xc3,
+    ]);
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    code[0x98..].fill(0);
+    Box::leak(Box::new(code))
+}
+
+/// A tail transfer to a `void` import reads its arguments, and no caller reads an unproven
+/// result, so the bytes above `narrow`'s 32-bit result are no residual at the call (D211).
+#[test]
+fn a_tail_to_a_void_callee_names_its_exit() {
+    let functions = &[("narrow", BASE, 0x09), ("stores", BASE + 0x10, 0x1a)];
+    let literal = Literal::of_code(tail_to_free(), functions).importing("free");
+    let rendered = OpenProgram::of(literal).rendered(BASE + 0x10);
+    let text = rendered.expect("it renders").response.output.into_text();
+    assert!(!text.contains("<< 32"), "{text}");
+    assert!(
+        text.contains("rax_1 = (uint64_t)narrow((uint32_t)arg0);"),
+        "{text}"
+    );
+}

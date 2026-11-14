@@ -1748,6 +1748,125 @@ fn a_later_round_entering_an_earlier_rounds_guarded_arm_drops_the_rounds() {
     assert!(!output.contains("r2sleigh_carrier_u32(20)"), "{output}");
 }
 
+/// [`NESTED_SWITCH`]'s shape whose outer case 1 runs `filler` diamonds on `edx`, on no path to a
+/// dispatch; where `nested` is false the outer case 0 returns, so no later round runs.
+fn arm_switch(nested: bool, filler: usize) -> Vec<u8> {
+    let rel32 = |code: &mut Vec<u8>, at: usize, value: u64| {
+        let value = u32::try_from(value).expect("fits").to_le_bytes();
+        code[at..at + 4].copy_from_slice(&value);
+    };
+    // cmp edi, 1; ja default; mov edi, edi; jmp [rdi*8 + outer]
+    let mut code = vec![
+        0x83, 0xff, 0x01, 0x0f, 0x87, 0, 0, 0, 0, 0x89, 0xff, 0xff, 0x24, 0xfd,
+    ];
+    code.extend([0; 4]);
+    let case0 = code.len();
+    if nested {
+        // cmp esi, 1; ja default; mov esi, esi; jmp [rsi*8 + inner]
+        code.extend([
+            0x83, 0xfe, 0x01, 0x0f, 0x87, 0, 0, 0, 0, 0x89, 0xf6, 0xff, 0x24, 0xf5,
+        ]);
+        code.extend([0; 4]);
+    }
+    let inner = [code.len(), code.len() + 6];
+    code.extend([0xb8, 10, 0, 0, 0, 0xc3, 0xb8, 20, 0, 0, 0, 0xc3]);
+    let case1 = code.len();
+    code.extend([0xb8, 30, 0, 0, 0]);
+    for _ in 0..filler {
+        code.extend([0x85, 0xd2, 0x74, 0x02, 0xff, 0xc0]); // test edx, edx; jz +2; inc eax
+    }
+    code.push(0xc3);
+    let default = code.len();
+    code.extend([0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3]);
+    code.resize(code.len().next_multiple_of(8), 0);
+    let tables = code.len();
+    for arm in [case0, case1, inner[0], inner[1]] {
+        code.extend((BASE + arm as u64).to_le_bytes());
+    }
+    rel32(&mut code, 5, (default - 9) as u64);
+    rel32(&mut code, 14, BASE + tables as u64);
+    if nested {
+        rel32(&mut code, case0 + 5, (default - case0 - 9) as u64);
+        rel32(&mut code, case0 + 14, BASE + tables as u64 + 16);
+    }
+    code
+}
+
+/// A fixture whose execution control is one held meter, so a test reads the work its requests spent.
+struct Metered {
+    fixture: Fixture,
+    control: r2engine::EngineExecutionControl,
+}
+
+impl r2engine::body::Program for Metered {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        self.fixture.read(vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        self.fixture.region(vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        self.fixture.is_entry(vaddr)
+    }
+}
+
+impl Program for Metered {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        self.fixture.holds_static_data(vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        self.fixture.extents()
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.name_at(vaddr)
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.import_at(vaddr)
+    }
+
+    fn control(&self) -> r2engine::EngineExecutionControl {
+        self.control.clone()
+    }
+}
+
+/// The SSA work a decompile of `bytes` spends, and how many switches it renders.
+fn decompile_work(bytes: Vec<u8>) -> (u64, usize) {
+    let machine = Machine::new("x86-64", "x86-64", 64);
+    let target = machine.target();
+    let program = Metered {
+        fixture: Fixture {
+            bytes,
+            name: "arms",
+        },
+        control: r2engine::EngineExecutionControl::default(),
+    };
+    let response = decompile(&target, &program, BASE).expect("decompile");
+    let switches = response.output.text().matches("switch (").count();
+    (program.control.work_spent(), switches)
+}
+
+#[test]
+fn the_later_rounds_check_seals_no_block_on_no_path_to_a_dispatch() {
+    let arm = |nested: bool, switches: usize| {
+        let (short, long) = (arm_switch(nested, 0), arm_switch(nested, 40));
+        let ((short, short_switches), (long, long_switches)) =
+            (decompile_work(short), decompile_work(long));
+        assert_eq!((short_switches, long_switches), (switches, switches));
+        long - short
+    };
+    // The decompile seals the arm once either way; a check sealing the whole body seals it again (D367).
+    let (once, checked) = (arm(false, 1), arm(true, 2));
+    assert!(
+        checked * 4 < once * 5,
+        "the arm cost {checked} with a later round, {once} without"
+    );
+}
+
 /// clang -O2's `switch (op) { case 1: .. case 5: }` (sw3.c `base1`): `dec edi` biases the selector and
 /// zero-extends it in the guard's block, and only the dispatch reads that widening.
 const BIASED_TABLE_SWITCH: &[u8] = &[
@@ -6447,6 +6566,205 @@ fn an_unchecked_canary_whose_slot_address_escapes_stays() {
     assert!(output.contains("FS_OFFSET_0"), "{output}");
     assert!(!output.contains("compiler-inserted"), "{output}");
     assert!(response.premises.is_empty(), "{:?}", response.premises);
+}
+
+/// `buf` at entry - 0x28 goes to `clear`, which writes 16 bytes through it, over the canary at
+/// - 0x20; the function returns `buf`, so it escapes, and the local at - 0x18 is stored 5.
+const CANARY_INSIDE_A_WRITE: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 1000 sub rsp, 0x28
+    0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // 1004 mov rax, fs:[0x28]
+    0x48, 0x89, 0x44, 0x24, 0x08, // 100d mov [rsp + 8], rax
+    0xc7, 0x44, 0x24, 0x10, 0x05, 0x00, 0x00, 0x00, // 1012 mov dword [rsp + 0x10], 5
+    0x48, 0x89, 0xe7, // 101a mov rdi, rsp
+    0xe8, 0x2e, 0x00, 0x00, 0x00, // 101d call 0x1050
+    0x48, 0x8b, 0x54, 0x24, 0x08, // 1022 mov rdx, [rsp + 8]
+    0x64, 0x48, 0x2b, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00, // 1027 sub rdx, fs:[0x28]
+    0x75, 0x08, // 1030 jne 0x103a
+    0x48, 0x89, 0xe0, // 1032 mov rax, rsp
+    0x48, 0x83, 0xc4, 0x28, // 1035 add rsp, 0x28
+    0xc3, // 1039 ret
+    0xe8, 0x21, 0x00, 0x00, 0x00, // 103a call 0x1060
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, // 103f padding
+    0x48, 0xc7, 0x07, 0x00, 0x00, 0x00, 0x00, // 1050 clear: mov qword [rdi], 0
+    0x48, 0xc7, 0x47, 0x08, 0x00, 0x00, 0x00, 0x00, // 1057 mov qword [rdi + 8], 0
+    0xc3, // 105f ret
+    0xeb, 0xfe, // 1060 jmp 0x1060
+];
+
+/// The canary lies inside `clear`'s write, so it ends no escape run: `buf`'s run is one object up
+/// to the local. The declared-slot rule ended it at the canary, and the call had no C (D290).
+#[test]
+fn a_canary_inside_a_callee_write_ends_no_escape_run() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes: CANARY_INSIDE_A_WRITE.to_vec(),
+            name: "canary_inside_a_write",
+        },
+        halts: 0x1060,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("compiler-inserted"), "{text}");
+    assert!(text.contains("fcn_1050((r2sleigh_word_u64*)"), "{text}");
+    assert!(text.contains("(uint32_t)5U);"), "{text}");
+    assert!(!text.contains("CallNotRendered"), "{text}");
+}
+
+/// `r11`'s entry value at entry - 0x20, between `buf` (- 0x28), which `clear` writes through, and
+/// a local (- 0x18) read after the call. No convention keeps `r11`, so the slot is no compiler's.
+const SCRATCH_ENTRY_SAVED: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 1000 sub rsp, 0x28
+    0x4c, 0x89, 0x5c, 0x24, 0x08, // 1004 mov [rsp + 8], r11
+    0xc7, 0x44, 0x24, 0x10, 0x05, 0x00, 0x00, 0x00, // 1009 mov dword [rsp + 0x10], 5
+    0x48, 0x89, 0xe7, // 1011 mov rdi, rsp
+    0xe8, 0x27, 0x00, 0x00, 0x00, // 1014 call 0x1040
+    0x8b, 0x44, 0x24, 0x10, // 1019 mov eax, [rsp + 0x10]
+    0x48, 0x83, 0xc4, 0x28, // 101d add rsp, 0x28
+    0xc3, // 1021 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, // 1022
+    0x48, 0xc7, 0x07, 0x00, 0x00, 0x00, 0x00, // 1040 clear: mov qword [rdi], 0
+    0xc3, // 1047 ret
+];
+
+/// A scratch register's entry value bounds no escape run: the run reaches the local as one object
+/// and the store stays. Before, the slot was the compiler's and its store elided as assumed.
+#[test]
+fn a_scratch_registers_entry_value_ends_no_escape_run() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: SCRATCH_ENTRY_SAVED.to_vec(),
+        name: "scratch_entry_saved",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("R11_0"), "{text}");
+    assert!(!text.contains("frame extent unproven"), "{text}");
+    assert!(text.contains("(uint32_t)5U);"), "{text}");
+}
+
+/// `mov dword [rsp + 8], 5; call rdi; mov eax, [rsp + 8]`: an indirect call states no arity.
+const READ_BACK_PAST_AN_INDIRECT_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xff, 0xd7, // 100c call rdi
+    0x8b, 0x44, 0x24, 0x08, // 100e mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 1012 add rsp, 0x18
+    0xc3, // 1016 ret
+];
+
+/// A call nothing states may take its arguments on the stack up to the entry pointer and write
+/// them, so the local read after it is memory (D369, default-deny).
+#[test]
+fn a_place_an_unstated_call_may_rewrite_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: READ_BACK_PAST_AN_INDIRECT_CALL.to_vec(),
+        name: "read_back_past_an_indirect_call",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+}
+
+/// `mov dword [rsp + 8], 5; call clear; mov eax, [rsp + 8]`, where `clear` (no parameters) writes
+/// `[rsp + 0x10]` on its entry pointer: the caller's slot.
+const READ_BACK_PAST_A_CALLEE_WRITING_ITS_CALLERS_FRAME: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xe8, 0x0f, 0x00, 0x00, 0x00, // 100c call 0x1020
+    0x8b, 0x44, 0x24, 0x08, // 1011 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 1015 add rsp, 0x18
+    0xc3, // 1019 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 101a
+    0xc7, 0x44, 0x24, 0x10, 0x00, 0x00, 0x00, 0x00, // 1020 clear: mov dword [rsp + 0x10], 0
+    0xc3, // 1028 ret
+];
+
+/// A stated callee may write incoming stack bytes its parameters do not cover: the slot it writes
+/// is read back as memory, never the 5 stored before the call (D376, default-deny).
+#[test]
+fn a_place_a_stated_callee_writes_above_its_arguments_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: READ_BACK_PAST_A_CALLEE_WRITING_ITS_CALLERS_FRAME.to_vec(),
+        name: "read_back_past_a_callee_writing_its_callers_frame",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+    assert!(!text.contains("return 5"), "{text}");
+}
+
+/// The root of [`READ_BACK_PAST_A_CALLEE_WRITING_ITS_CALLERS_FRAME`] calls `middle` (`call clear;
+/// mov eax, 7; ret`), and `clear` writes `[rsp + 0x18]` on its entry pointer: the root's slot.
+const READ_BACK_PAST_A_CALLEE_WHOSE_CALLEE_WRITES_ITS_FRAME: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xe8, 0x0f, 0x00, 0x00, 0x00, // 100c call 0x1020
+    0x8b, 0x44, 0x24, 0x08, // 1011 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 1015 add rsp, 0x18
+    0xc3, // 1019 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 101a
+    0xe8, 0x0b, 0x00, 0x00, 0x00, // 1020 middle: call 0x1030
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1025 mov eax, 7
+    0xc3, // 102a ret
+    0x90, 0x90, 0x90, 0x90, 0x90, // 102b
+    0xc7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x00, // 1030 clear: mov dword [rsp + 0x18], 0
+    0xc3, // 1038 ret
+];
+
+/// `middle` writes nothing above its entry pointer itself, but its call to `clear` may: its
+/// statement bounds no write, so the root reads its slot back as memory (D377, default-deny).
+#[test]
+fn a_place_a_callees_callee_writes_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: READ_BACK_PAST_A_CALLEE_WHOSE_CALLEE_WRITES_ITS_FRAME.to_vec(),
+        name: "read_back_past_a_callee_whose_callee_writes_its_frame",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+    assert!(!text.contains("return 5"), "{text}");
+}
+
+/// `f` writes `[rsp + 0x100000]` and calls itself while `edi` is not zero; the root stores 5 at
+/// `[rsp + 8]`, calls `f` and reloads it.
+const READ_BACK_PAST_A_SELF_CALL_WHOSE_WRITES_MOVE: &[u8] = &[
+    0xc7, 0x84, 0x24, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
+    0x00, // 1000 f: mov dword [rsp + 0x100000], 0
+    0x85, 0xff, // 100b test edi, edi
+    0x74, 0x05, // 100d je 0x1014
+    0xe8, 0xec, 0xff, 0xff, 0xff, // 100f call 0x1000
+    0xc3, // 1014 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1015
+    0x48, 0x83, 0xec, 0x18, // 1020 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1024 mov dword [rsp + 8], 5
+    0xe8, 0xcf, 0xff, 0xff, 0xff, // 102c call 0x1000
+    0x8b, 0x44, 0x24, 0x08, // 1031 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 1035 add rsp, 0x18
+    0xc3, // 1039 ret
+];
+
+/// Each round of `f`'s own writes moves them 8 bytes: the fixpoint would run 131,072 rounds, so
+/// two rounds that disagree bound nothing and the root's slot stays a load (D377, default-deny).
+#[test]
+fn a_self_call_whose_writes_move_each_round_bounds_nothing() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: READ_BACK_PAST_A_SELF_CALL_WHOSE_WRITES_MOVE.to_vec(),
+        name: "read_back_past_a_self_call_whose_writes_move",
+    };
+    let started = std::time::Instant::now();
+    let response = decompile(&machine.target(), &program, BASE + 0x20).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
 }
 
 /// A body that returns and stores the guard without checking it is no prologue the bytes prove.

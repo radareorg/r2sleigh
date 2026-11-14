@@ -395,6 +395,8 @@ impl Sealed {
                 accesses: &facts.structured.memory_accesses,
                 stack_slots: &facts.certificates.stack_slots,
                 machine_context: &machine_context,
+                values: &facts.values,
+                objects: &facts.objects,
             },
         );
         let member_calls = crate::member_call::collect_member_calls(

@@ -609,7 +609,7 @@ fn an_escaped_frame_address_keeps_the_places_around_it_in_memory() {
 }
 
 #[test]
-fn a_calls_return_address_push_is_refunded_by_the_callee() {
+fn a_slot_read_back_past_an_unstated_call_stays_in_memory() {
     // sp -= 16; r2 = 7; [sp] = r2; sp -= 8; [sp] = return address; call; load [sp].
     let sp = make_reg(0, 8);
     let mut arch = ArchSpec::new("promotion-test");
@@ -682,10 +682,11 @@ fn a_calls_return_address_push_is_refunded_by_the_callee() {
         [storage(0)],
     )
     .expect("artifact");
+    // Nothing states the callee, so its area from the pushed slot up may be rewritten: the read
+    // of the pushed slot after the call stays a load (D369); `r2`'s slot, never read, promotes.
     assert_eq!(
         promoted_sites(artifact.function()),
-        BTreeSet::from([(0x4000, 2), (0x4000, 6)]),
-        "the slot is written before the call and read after it"
+        BTreeSet::from([(0x4000, 2)])
     );
 }
 

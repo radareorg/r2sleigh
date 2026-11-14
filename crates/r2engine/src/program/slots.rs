@@ -70,7 +70,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for DeclaredSlot {
         }
         let mut proof = None::<SlotProof>;
         for take in ways.takes_of(entry) {
-            let slot = taken_into_slots(db, take.owner, take.from)?;
+            let slot = taken_into_slots(db, take, entry)?;
             proof = Some(proof.map_or(slot, |known| known.join(slot)));
         }
         r2il::refusal_evidence!("declared-slot", "{entry:#x}: every take reaches {proof:?}");
@@ -101,13 +101,14 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SlotParameter {
     }
 }
 
-/// The slots the register `from` writes in `owner` reaches; `None` unless the instruction writes
-/// exactly one register and every path hands it only into cited slots.
+/// The slots the register the take's instruction leaves `target` in reaches; `None` unless one
+/// register holds it and every path hands it only into cited slots.
 fn taken_into_slots<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
-    owner: u64,
-    from: u64,
+    take: &super::reads::Take,
+    target: u64,
 ) -> Option<SlotProof> {
+    let (owner, from) = (take.owner, take.from);
     let thumb = View::new(db, true).thumb_at(owner);
     super::fates::read_body(db, (owner, thumb), |read| {
         let blocks = &read.body.blocks;
@@ -133,6 +134,18 @@ fn taken_into_slots<S: Source + 'static>(
         }
         written.sort_unstable();
         written.dedup();
+        // An instruction writing flags beside (`add x0, x0, #lo` on AArch64) leaves the address in
+        // the one register the block's constants fold to it: `O(ops in the block)`.
+        if written.len() > 1 {
+            let mut origins = r2ssa::origin::BlockOrigins::default();
+            lifted.ops[..=last].iter().for_each(|op| origins.step(op));
+            let holds = |register: &CanonicalStorageId| {
+                let varnode =
+                    r2il::Varnode::new(r2il::SpaceId::Register, register.offset, register.size);
+                origins.of(&varnode).and_then(|origin| origin.constant()) == Some(target)
+            };
+            written.retain(holds);
+        }
         let [register] = written.as_slice() else {
             r2il::refusal_evidence!("declared-slot", "{from:#x}: writes {written:?}");
             return None;

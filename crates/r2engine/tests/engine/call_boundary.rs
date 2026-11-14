@@ -909,8 +909,16 @@ fn printing(held: u32, format: &[u8]) -> String {
 
 /// [`printing`], the format's bytes mapped writable where `writable`.
 fn printing_from(held: u32, format: &[u8], writable: bool) -> String {
-    let code = aarch64_with_printf(&[
-        (F, 0xd65f_03c0),                              // ret
+    printing_after(held, format, (writable, false))
+}
+
+/// [`printing_from`]; `f` clears the held register before it returns where `clears`.
+fn printing_after(held: u32, format: &[u8], (writable, clears): (bool, bool)) -> String {
+    let mut words = vec![(F, 0xd65f_03c0)]; // ret
+    if clears {
+        words = vec![(F, 0xaa1f_03e0 | held), (F + 4, 0xd65f_03c0)]; // mov xN, xzr; ret
+    }
+    words.extend([
         (BASE + 0x10, 0xa9bf_7bfd),                    // stp x29, x30, [sp, #-16]!
         (BASE + 0x14, 0x9000_0000 | held),             // adrp xN, 0x1000
         (BASE + 0x18, 0x9102_8000 | held << 5 | held), // add xN, xN, #0xa0
@@ -921,7 +929,9 @@ fn printing_from(held: u32, format: &[u8], writable: bool) -> String {
         (BASE + 0x2c, 0xa8c1_7bfd),                    // ldp x29, x30, [sp], #16
         (BASE + 0x30, 0xd65f_03c0),                    // ret
     ]);
-    let program = Literal::of_code(code, &[("f", F, 0x04), ("caller", BASE + 0x10, 0x24)])
+    let code = aarch64_with_printf(&words);
+    let size = if clears { 0x08 } else { 0x04 };
+    let program = Literal::of_code(code, &[("f", F, size), ("caller", BASE + 0x10, 0x24)])
         .in_aarch64()
         .with_data()
         .importing("printf");
@@ -965,8 +975,8 @@ fn printing_spilled(format: &[u8], handed: bool) -> String {
     rendered.response.output.into_text()
 }
 
-/// Gb: the reload equals the spill, since no call may write a slot whose address stays in the
-/// function, so the format folds and `f`'s q0 to q3 die at `printf`.
+/// Gb: `f` (`ret`) reads no argument, so the reload is the spill and q0 to q3 die at `printf`.
+/// Fails (D376): `f`'s statement never reaches its caller's build, so the call is unstated (D369).
 #[test]
 fn a_spilled_format_reloaded_in_another_block_reads_no_vector_register() {
     let text = printing_spilled(b"%d\n\0", false);
@@ -996,12 +1006,20 @@ fn an_aarch64_printf_whose_format_has_a_float_keeps_q0_read() {
     assert!(!text.starts_with("void f("), "{text}");
 }
 
-/// x9 is caller-saved: the call to `f` may change it, so the format at `printf` is unknown and the
-/// call may read every vector argument register.
+/// x9 is caller-saved and `f` clears it: the format at `printf` is unknown and the call may read
+/// every vector argument register.
 #[test]
 fn an_aarch64_printf_whose_format_a_call_may_change_reads_every_vector_register() {
-    let text = printing(9, b"%d\n\0");
+    let text = printing_after(9, b"%d\n\0", (false, true));
     assert!(!text.starts_with("void f("), "{text}");
+}
+
+/// D376: the frame record `caller` reloads after `bl f` asks `f` (`ret`) to state itself, and its
+/// body keeps x9: the format is the literal and q0 to q3 die at `printf`. Unstated, it may change x9.
+#[test]
+fn an_aarch64_printf_whose_format_a_stated_call_keeps_reads_no_vector_register() {
+    let text = printing(9, b"%d\n\0");
+    assert!(text.starts_with("void f("), "{text}");
 }
 
 /// A format in writable data may change before the call (Codex review of #363): the call may read
@@ -1453,8 +1471,17 @@ fn handler_answer(
 /// under the closed world, though its RAX is written; cold, it stays unproven (S30, D205).
 #[test]
 fn a_handler_only_atexit_takes_is_void_under_the_closed_world() {
-    let closed = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), true);
+    let (closed, premises) = handler_answer(at_exit(TAKES_HANDLER, "atexit"), true);
     assert!(closed.contains("void handler(void)"), "{closed}");
+    // The slot's type is how every caller calls only where no call is undefined (D227).
+    assert!(
+        closed.contains("no call reads the result (assuming closed-world, ub-free)"),
+        "{closed}"
+    );
+    assert!(
+        premises.contains(&r2source::Premise::UbFreeSource),
+        "{premises:?}"
+    );
     let cold = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), false);
     assert!(!cold.contains("void handler("), "{cold}");
 }
@@ -1546,8 +1573,12 @@ fn a_main_only_libc_start_main_takes_returns_its_int_under_the_closed_world() {
         "{closed}"
     );
     assert!(
-        closed.contains("reads the result (assuming closed-world)"),
+        closed.contains("reads the result (assuming closed-world, ub-free)"),
         "{closed}"
+    );
+    assert!(
+        premises.contains(&r2source::Premise::UbFreeSource),
+        "{premises:?}"
     );
     let cold = handler_rendered(at_exit(STARTS_HANDLER, "__libc_start_main"), false);
     assert!(cold.contains("the result is unproven"), "{cold}");
@@ -1601,4 +1632,77 @@ fn a_caller_that_calls_another_caller_is_read_after_it() {
     let walked = stats.walked.computed - before;
     // `x` for its own render and for its register effect, `p2` and `p1` once each.
     assert_eq!(walked, 4, "walks during the request");
+}
+
+/// glibc AArch64's `_start` hands `__wrap_main` (`nop; b main`, 0x1020) to `__libc_start_main`'s
+/// stub (0x1080); `main` (0x1040) returns `helper`'s `w0`.
+fn wrapped_main() -> Literal {
+    let mut code = vec![0u8; 0x98];
+    let words: [(usize, u32); 13] = [
+        (0x00, 0x9000_0000), // adrp x0, 0x1000
+        (0x04, 0x9100_8000), // add x0, x0, #0x20
+        (0x08, 0x9400_001e), // bl 0x1080
+        (0x0c, 0x9400_001d), // bl 0x1080, as `bl abort`
+        (0x20, 0xd503_201f), // nop
+        (0x24, 0x1400_0007), // b 0x1040
+        (0x40, 0xa9bf_7bfd), // stp x29, x30, [sp, #-16]!
+        (0x44, 0x9400_0007), // bl 0x1060
+        (0x48, 0xa8c1_7bfd), // ldp x29, x30, [sp], #16
+        (0x4c, 0xd65f_03c0), // ret
+        (0x60, 0x5280_0020), // mov w0, #1
+        (0x80, 0x5800_0090), // ldr x16, 0x1090
+        (0x84, 0xd61f_0200), // br x16
+    ];
+    for (at, word) in words {
+        code[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    code[0x64..0x68].copy_from_slice(&0xd65f_03c0_u32.to_le_bytes()); // ret
+    let functions = [
+        ("_start", BASE, 0x10),
+        ("wrap", BASE + 0x20, 0x08),
+        ("main", BASE + 0x40, 0x10),
+        ("helper", BASE + 0x60, 0x08),
+    ];
+    Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
+        .in_aarch64()
+        .importing_through(BASE + 0x80..BASE + 0x88, BASE + 0x90, "__libc_start_main")
+        .running_on(common::GLIBC)
+}
+
+/// `main` reached only by `__wrap_main`'s tail branch returns what `__wrap_main` returns, which
+/// the cited slot reads as an `int` (D227): the branch forwards the read.
+#[test]
+fn a_main_a_wrapper_branches_to_returns_the_int_the_slot_reads() {
+    let mut open = OpenProgram::of(wrapped_main());
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(BASE + 0x40).expect("it renders");
+    let text = rendered.response.output.into_text();
+    // A word, no residual: the decision is `Read(Integer)` (cold, the result is unproven).
+    assert!(
+        text.starts_with("r2sleigh_word_u64 fcn_1040(void)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("reads the result (assuming closed-world, ub-free)"),
+        "{text}"
+    );
+}
+
+/// musl's `__libc_start_main` runs `exit(main(argc, argv, envp))` (its cited row): the same take
+/// decides `main`'s `int` on musl as on glibc (D227).
+#[test]
+fn a_main_musls_libc_start_main_takes_returns_its_int() {
+    let musl = [r2abi::statement::PlatformEvidence::Interpreter(
+        r2engine::program::Libc::Musl,
+    )];
+    let literal = at_exit(STARTS_HANDLER, "__libc_start_main").running_on(&musl);
+    let (closed, premises) = handler_answer(literal, true);
+    assert!(
+        closed.contains("r2sleigh_word_u32 handler(void)"),
+        "{closed}"
+    );
+    assert!(
+        premises.contains(&r2source::Premise::UbFreeSource),
+        "{premises:?}"
+    );
 }

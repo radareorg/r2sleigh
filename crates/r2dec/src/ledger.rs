@@ -244,6 +244,9 @@ pub struct ObligationLedger {
     /// Calls the body ends at where only a walk found the callee reaching no return.
     #[serde(default)]
     unproven_exits: usize,
+    /// What the result's closed-world decision takes for granted (`SourceClosedDecision`).
+    #[serde(default)]
+    result_premises: BTreeSet<r2source::Premise>,
 }
 
 /// A ledger as read back, before its columns are checked against one another.
@@ -262,6 +265,8 @@ struct LedgerColumns {
     /// Calls the body ends at where only a walk found the callee reaching no return.
     #[serde(default)]
     unproven_exits: usize,
+    #[serde(default)]
+    result_premises: BTreeSet<r2source::Premise>,
 }
 
 impl TryFrom<LedgerColumns> for ObligationLedger {
@@ -313,6 +318,7 @@ impl TryFrom<LedgerColumns> for ObligationLedger {
             exits: columns.exits,
             exit_premises: columns.exit_premises,
             unproven_exits: columns.unproven_exits,
+            result_premises: columns.result_premises,
         })
     }
 }
@@ -345,6 +351,7 @@ impl ObligationLedger {
             exits: 0,
             exit_premises: BTreeSet::new(),
             unproven_exits: 0,
+            result_premises: BTreeSet::new(),
         }
     }
 
@@ -363,6 +370,19 @@ impl ObligationLedger {
 
     pub const fn premises(&self) -> &BTreeSet<r2source::Premise> {
         &self.premises
+    }
+
+    /// The same ledger, stating what the result's closed-world decision takes for granted.
+    pub fn with_result_premises(self, premises: &[r2source::Premise]) -> Self {
+        let result_premises = premises.iter().copied().collect();
+        Self {
+            result_premises,
+            ..self
+        }
+    }
+
+    pub const fn result_premises(&self) -> &BTreeSet<r2source::Premise> {
+        &self.result_premises
     }
 
     /// The same ledger, stating the calls the body ends at on a model's word.

@@ -1059,6 +1059,14 @@ fn require_trusted_root_for_helper_scope(
     Ok(())
 }
 
+/// What a call to this body may write of its caller's stack (`FramePoints::call_writes`).
+fn incoming_writes(prepared: &SsaArtifact) -> Option<Box<[(i64, i64)]>> {
+    let points = prepared.function().frame_points()?;
+    points
+        .call_writes(prepared.machine_context())
+        .map(Vec::into_boxed_slice)
+}
+
 /// Solve interprocedural evidence owned by one exact prepared SSA root.
 ///
 /// Exactly one input must identify the root by function id, entry, and
@@ -1083,6 +1091,8 @@ pub struct PreparedCalleeSummary {
     /// Names of the bodiless callees this body reaches: a PLT stub's slot.
     /// The library model of each import this body calls directly.
     library: BTreeMap<u64, FunctionSemanticSummary>,
+    /// The caller's stack a call to this body may write, from the call's pointer (D377).
+    incoming_writes: Option<Box<[(i64, i64)]>>,
 }
 
 impl PreparedCalleeSummary {
@@ -1121,7 +1131,14 @@ impl PreparedCalleeSummary {
                 .collect(),
             local,
             library,
+            incoming_writes: incoming_writes(prepared),
         })
+    }
+
+    /// The caller's stack bytes a call to this body may write, as ranges from the stack pointer
+    /// before the transfer; `None` where nothing bounds them (D377).
+    pub fn incoming_writes(&self) -> Option<&[(i64, i64)]> {
+        self.incoming_writes.as_deref()
     }
 
     pub const fn id(&self) -> InterprocFunctionId {

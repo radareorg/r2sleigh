@@ -595,6 +595,7 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
         unstated_lanes: Box::default(),
         unstated_carrier: None,
         ignored: Box::default(),
+        reads_stated: true,
         arguments: Vec::new(),
         fixed_argument_count: Some(0),
         variadic_argument_count_evidence: None,
