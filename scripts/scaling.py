@@ -10,8 +10,9 @@ and a quadratic one 4; the budget is 2.3. A dimension another row owns that fail
 in OPEN: it fails until that row lands, and then once it passes.
 
 `--meter` grades a `work-meter` build the same way by its element visits (`r2s: stats: scans`,
-D417): P whole passes visit P*n elements and a rescan adds n^2, so the ratio is exact where Ir
-is noisy and a rescan reads above SCAN_BUDGET at sizes callgrind cannot see.
+D417) at `--meter-n`: P whole passes visit P*n elements and a rescan adds n^2, so the count is
+exact where Ir is noisy, and cheap enough to run at sizes where n^2 outgrows P*n. A failing
+dimension names each call site whose own visits more than triple from N to 2N.
 """
 import argparse
 import os
@@ -22,11 +23,17 @@ import tempfile
 from pathlib import Path
 
 BUDGET = 2.3
-# Element visits: a linear generator reads 2 exactly but for its constant terms (D417).
-SCAN_BUDGET = 2.1
+# Element visits at METER_N: a linear pass reads 2 exactly but for its constant terms (D417).
+SCAN_BUDGET = 2.05
+METER_N = 512
+# A site whose own visits more than triple from N to 2N grows faster than n^1.58.
+SITE_GROWTH = 3.0
 # A dimension that fails today, by the row that owns its cost; held exactly both ways.
 OPEN = {}
-SCAN_OPEN = {}
+# D422: a question about one frame object scans every structured access or return control.
+SCAN_OPEN = {name: "D422" for name in ("calls_in_one_block", "unproven_returns",
+                                         "struct_parameter_accesses", "halting_calls",
+                                         "escaped_locals")}
 START = "_start:\n    call f\n    mov $60, %eax\n    xor %edi, %edi\n    syscall\n"
 
 
@@ -107,13 +114,27 @@ def instructions(r2s, binary, address, work):
 
 
 def scans(r2s, binary, address):
-    """Element visits a `work-meter` build counts for one `aa; pdd @ address` process."""
+    """Element visits a `work-meter` build counts for one `aa; pdd @ address` process, in all and
+    by call site."""
     done = subprocess.run([r2s, "-q", "-c", f"aa; pdd @ {address}", str(binary)],
                           env={**os.environ, "R2S_STATS": "1"}, capture_output=True, text=True)
     found = re.search(r"^r2s: stats: scans (\d+)$", done.stderr, re.MULTILINE)
     if done.returncode != 0 or not found:
         sys.exit(f"{binary}: exited {done.returncode} with no scans line; is {r2s} a work-meter build?")
-    return int(found.group(1))
+    sites = {site: int(count) for site, count in
+             re.findall(r"^r2s: scans at (\S+) (\d+)$", done.stderr, re.MULTILINE)}
+    return int(found.group(1)), sites
+
+
+def superlinear(n, fixed, one, two):
+    """The sites whose visits beyond size 0 reach n at size N and more than triple at 2N."""
+    grown = []
+    for site in sorted(set(one) | set(two)):
+        at_n = one.get(site, 0) - fixed.get(site, 0)
+        at_2n = two.get(site, 0) - fixed.get(site, 0)
+        if at_n >= n and at_2n > SITE_GROWTH * at_n:
+            grown.append(f"{site} {at_n:,} to {at_2n:,} ({at_2n / at_n:.2f}x)")
+    return grown
 
 
 def growth(fixed, one, two):
@@ -140,6 +161,7 @@ def main():
     parser.add_argument("--r2s", help="a build to count under callgrind")
     parser.add_argument("--meter", help="a work-meter build to count by element visits")
     parser.add_argument("--n", type=int, default=64)
+    parser.add_argument("--meter-n", type=int, default=METER_N)
     parser.add_argument("--budget", type=float, default=BUDGET)
     parser.add_argument("--scan-budget", type=float, default=SCAN_BUDGET)
     parser.add_argument("--only", action="append", choices=sorted(DIMENSIONS))
@@ -147,30 +169,36 @@ def main():
     args = parser.parse_args()
     if not (args.r2s or args.meter):
         parser.error("give --r2s, --meter or both")
-    grades = []
-    if args.r2s:
-        grades.append(("Ir", lambda binary, address, work: instructions(args.r2s, binary, address, work),
-                       args.budget, OPEN))
-    if args.meter:
-        grades.append(("scans", lambda binary, address, work: scans(args.meter, binary, address),
-                       args.scan_budget, SCAN_OPEN))
     failed = []
     print("| dimension | count | size 0 | N | 2N | growth |\n|---|---|---|---|---|---|")
     with tempfile.TemporaryDirectory() as work:
         out = Path(args.out or work)
         out.mkdir(parents=True, exist_ok=True)
-        for name in args.only or DIMENSIONS:
-            built = []
-            for size in (0, args.n, 2 * args.n):
+
+        def built(name, n):
+            sizes = []
+            for size in (0, n, 2 * n):
                 binary = out / f"{name}-{size}"
                 kind, source = DIMENSIONS[name](size)
-                built.append((binary, build(kind, source, binary)))
-            for label, count, budget, open_rows in grades:
-                counts = [count(binary, address, work) for binary, address in built]
+                sizes.append((binary, build(kind, source, binary)))
+            return sizes
+
+        for name in args.only or DIMENSIONS:
+            rows = []
+            if args.r2s:
+                counts = [instructions(args.r2s, binary, address, work) for binary, address in built(name, args.n)]
+                rows.append(("Ir", counts, args.budget, OPEN, []))
+            if args.meter:
+                runs = [scans(args.meter, binary, address) for binary, address in built(name, args.meter_n)]
+                grown = superlinear(args.meter_n, *(sites for _, sites in runs))
+                rows.append(("scans", [total for total, _ in runs], args.scan_budget, SCAN_OPEN, grown))
+            for label, counts, budget, open_rows, grown in rows:
                 ratio = growth(*counts)
                 shown = "n/a" if ratio is None else f"{ratio:.3f}"
                 print(f"| {name} | {label} | {counts[0]:,} | {counts[1]:,} | {counts[2]:,} | {shown} |",
                       flush=True)
+                for site in grown:
+                    print(f"{name}: {site}", file=sys.stderr)
                 if reason := verdict(name, ratio, budget, open_rows):
                     failed.append(f"{label}: {reason}")
     for line in failed:
