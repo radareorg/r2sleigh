@@ -1382,7 +1382,6 @@ dependencies = [
  "libmimalloc-sys",
  "libtest-mimic",
  "mimalloc",
- "r2abi",
  "r2engine",
  "r2image",
  "r2s-tui",
