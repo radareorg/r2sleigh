@@ -21,8 +21,6 @@ const COLUMNS: &[&str] = &[
 /// this entry goes in the same change.
 const OPEN: &[(&str, &str, &str)] = &[
     ("tail_transfer", "incoming_writes", "D381"),
-    ("indirect_call", "pointer", "D382"),
-    ("unbound_import", "pointer", "D382"),
     ("walk_without_return", "never", "D379"),
 ];
 
@@ -81,7 +79,11 @@ fn returns(text: &str) -> Vec<&str> {
 fn cell(row: &str, column: &str, check: impl FnOnce() -> Result<(), String>) -> Option<String> {
     let open = OPEN.iter().find(|(r, c, _)| *r == row && *c == column);
     match (check(), open) {
-        (Ok(()), None) | (Err(_), Some(_)) => None,
+        (Ok(()), None) => None,
+        (Err(evidence), Some((_, _, owner))) => {
+            println!("{row} x {column} open ({owner}):\n{evidence}");
+            None
+        }
         (Err(evidence), None) => Some(format!("{row} x {column}: {evidence}")),
         (Ok(()), Some((_, _, owner))) => Some(format!(
             "{row} x {column} holds now: delete its OPEN entry ({owner})"
@@ -143,15 +145,28 @@ fn an_unknown_callee_keeps_no_register() {
     hold("kept", failures.into());
 }
 
-/// `mov edx, 5; call; ret`: an unknown callee may read RDX whole, so the setup is no dead store.
+/// `mov edx, 5; call; ret`: an unknown callee may read RDX, so the 5 reaches a read the call performs.
 #[test]
 fn an_unknown_callee_reads_each_argument_register() {
     let failures = Unknown::ALL.map(|row| {
         cell(row.name(), "call_read_bytes", || {
-            let text = rendered(row.around(&[0xba, 0x05, 0, 0, 0], &[0xc3]));
-            match text.contains('5') {
+            let (literal, entry) = row.around(&[0xba, 0x05, 0, 0, 0], &[0xc3]);
+            let prepared = OpenProgram::of(literal).prepared(entry).expect("it prepares");
+            let artifact = prepared.artifact().shared_artifact();
+            let graph = artifact.graph();
+            let call = (artifact.facts().boundaries.calls.values().next()).ok_or("no call")?;
+            let performed = (graph.call_boundary_reads(call.at).iter()).any(|read| {
+                let site = r2ssa::UseSite {
+                    inst: *read,
+                    input_idx: 0,
+                };
+                let rdx = matches!(graph.op(*read), Some(r2ssa::SSAOp::CallUse { storage, .. })
+                    if storage.space == r2ssa::CanonicalStorageSpace::Register && storage.offset == 0x10);
+                rdx && !artifact.ignored_reads().contains(&site)
+            });
+            match performed {
                 true => Ok(()),
-                false => Err(text),
+                false => Err(artifact.dump()),
             }
         })
     });
@@ -206,12 +221,14 @@ fn an_unknown_callee_comes_back() {
     hold("never", [failures.as_slice(), &[walk]].concat());
 }
 
-/// `call; ret` with RDI the caller's: an unknown callee's may-effects are no evidence of a pointer.
+/// `push rbx; mov rbx, rdi; call; mov rax, rbx; pop rbx; ret`: the parameter handed to an unknown
+/// callee is returned, and the callee's may-effects are no evidence that it is a pointer.
 #[test]
 fn an_unknown_callee_types_no_argument_a_pointer() {
     let failures = Unknown::ALL.map(|row| {
         cell(row.name(), "pointer", || {
-            let text = rendered(row.around(&[], &[0xc3]));
+            let before = [0x53, 0x48, 0x89, 0xfb]; // push rbx; mov rbx, rdi
+            let text = rendered(row.around(&before, &[0x48, 0x89, 0xd8, 0x5b, 0xc3]));
             match text.contains("void *") || text.contains("void*") {
                 true => Err(text),
                 false => Ok(()),
