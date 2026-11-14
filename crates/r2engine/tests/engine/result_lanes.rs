@@ -407,8 +407,13 @@ fn tail_to_unstated(between: &[u8]) -> &'static [u8] {
 
 /// The bytes demand reads of the RAX `call narrow` leaves, in `tails` of [`tail_to_unstated`].
 fn demanded_of_narrow(between: &[u8]) -> Option<u64> {
-    let functions = &[("narrow", BASE, 0x09), ("tails", BASE + 0x10, 0x20)];
-    let literal = Literal::of_code(tail_to_unstated(between), functions).importing("unstated");
+    demanded_tailing_into(between, "unstated")
+}
+
+/// [`demanded_of_narrow`], the stub `import`.
+fn demanded_tailing_into(between: &[u8], import: &str) -> Option<u64> {
+    let functions = &[("narrow", BASE, 0x09), ("tails", BASE + 0x10, 0x30)];
+    let literal = Literal::of_code(tail_to_unstated(between), functions).importing(import);
     let mut open = OpenProgram::of(literal);
     let prepared = open.prepared(BASE + 0x10).expect("it prepares");
     let artifact = prepared.artifact().shared_artifact();
@@ -442,4 +447,17 @@ fn a_tail_to_an_unstated_callee_reads_its_count_register() {
 #[test]
 fn a_tail_to_an_unstated_callee_reads_its_argument_registers_whole() {
     assert_eq!(demanded_of_narrow(&[0x48, 0x89, 0xc7]), Some(0xff));
+}
+
+/// `test edi, edi; je tail; movabs rax, imm64; ret`: a direct return proves a 64-bit result.
+const WIDE_BESIDE: &[u8] = &[
+    0x85, 0xff, 0x74, 0x0b, 0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0xc3,
+];
+
+/// A tail whose callee states no narrower result passes ours: beside a 64-bit return, all eight
+/// bytes of the RAX `narrow` leaves reach the caller (D373).
+#[test]
+fn a_tail_stating_no_narrower_result_passes_a_wide_result_whole() {
+    assert_eq!(demanded_tailing_into(WIDE_BESIDE, "unstated"), Some(0xff));
+    assert_eq!(demanded_tailing_into(WIDE_BESIDE, "free"), Some(0xff));
 }

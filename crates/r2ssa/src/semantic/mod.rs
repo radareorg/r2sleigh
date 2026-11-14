@@ -527,20 +527,15 @@ fn demanded(
     };
     let live_out = &without;
     // A tail's callee may leave our result registers as it found them, unless no caller reads them.
-    // With no interface, a caller may read each result register its model states, whole (D373).
-    let stated = (body.machine_context)
-        .and_then(SourceMachineContext::calls)
-        .and_then(r2source::ConventionModel::result_reads);
-    let ours = match (unread, interface) {
-        (true, _) => Some(Vec::new()),
-        (false, Some(interface)) => {
+    let ours = match unread {
+        true => Some(Vec::new()),
+        false => interface.map(|interface| {
             let read = |storage: CanonicalStorageId| match result {
                 Some(result) if result.location() == storage.location() => (storage, result.size),
                 _ => (storage, storage.size),
             };
-            Some(interface.return_kind().storages().map(read).collect())
-        }
-        (false, None) => stated.map(|every| every.iter().map(|it| (*it, it.size)).collect()),
+            interface.return_kind().storages().map(read).collect()
+        }),
     };
     let (tails, reads) = tail_reads(body, calls, ours.as_deref());
     crate::demand::exits_are_named_beside(body.function, live_out, &tails).then(|| {
@@ -557,8 +552,8 @@ fn demanded(
 /// Blocks that leave by a tail transfer, and the bytes of each value their callees read.
 type TailReads = (BTreeSet<u64>, Vec<(ValueId, crate::bytes::ByteMask)>);
 
-/// Tail exits and the bytes their callees read: fixed arguments, else every register a call reads
-/// unnamed (D373); a narrower result's lane, else ours. `O(tails x registers x (blocks + edges))`.
+/// Tail exits and what their callees read: fixed arguments, else each register a call reads unnamed;
+/// a narrower lane, else ours (adr-call-boundary.md "S2 as built", D373). O(tails x regs x blocks).
 #[cfg_attr(
     dylint_lib = "r2sleigh_lints",
     allow(
