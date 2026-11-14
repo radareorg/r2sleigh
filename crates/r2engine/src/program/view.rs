@@ -375,6 +375,10 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.db.inputs().control.clone()
     }
 
+    fn note_rebuilt(&self) {
+        self.db.note_rebuilt();
+    }
+
     /// A callee resolved against its result's owners; under `aa`, against its arity's too.
     fn read_callee(
         &self,

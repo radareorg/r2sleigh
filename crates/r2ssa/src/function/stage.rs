@@ -137,6 +137,11 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    /// The function as built, before its seal.
+    pub(crate) const fn function(&self) -> &SSAFunction {
+        &self.ir
+    }
+
     /// The function, given back as an IR with no stage: whatever is done to
     /// it next starts again from [`Lifted`].
     pub fn into_function(self) -> SSAFunction {

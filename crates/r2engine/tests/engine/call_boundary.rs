@@ -913,7 +913,19 @@ fn printing_from(held: u32, format: &[u8], writable: bool) -> String {
 }
 
 /// [`printing_from`]; `f` clears the held register before it returns where `clears`.
-fn printing_after(held: u32, format: &[u8], (writable, clears): (bool, bool)) -> String {
+fn printing_after(held: u32, format: &[u8], flags: (bool, bool)) -> String {
+    let mut open = printing_open(held, format, flags);
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(F).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// The program [`printing_after`] renders, opened and its format written.
+fn printing_open(
+    held: u32,
+    format: &[u8],
+    (writable, clears): (bool, bool),
+) -> OpenProgram<Literal> {
     let mut words = vec![(F, 0xd65f_03c0)]; // ret
     if clears {
         words = vec![(F, 0xaa1f_03e0 | held), (F + 4, 0xd65f_03c0)]; // mov xN, xzr; ret
@@ -941,9 +953,7 @@ fn printing_after(held: u32, format: &[u8], (writable, clears): (bool, bool)) ->
     };
     let mut open = OpenProgram::of(program);
     open.source_mut().write(common::TEXT, format);
-    open.analyse_program().expect("it surveys");
-    let rendered = open.rendered(F).expect("it renders");
-    rendered.response.output.into_text()
+    open
 }
 
 /// clang -O0's shape (D221, Gb): `caller` spills the format to `[sp, #16]`, calls `f`, and reloads
@@ -1047,6 +1057,23 @@ fn an_aarch64_printf_whose_format_a_call_may_change_reads_every_vector_register(
 fn an_aarch64_printf_whose_format_a_stated_call_keeps_reads_no_vector_register() {
     let text = printing(9, b"%d\n\0");
     assert!(text.starts_with("void f("), "{text}");
+}
+
+/// D399: `caller`'s build asks `f` to state itself (D376) and is restated against it, the build
+/// it read moved: counted as rebuilt, as every rebuild is.
+#[test]
+fn a_build_a_callee_s_statement_moves_is_counted_rebuilt() {
+    let mut open = printing_open(9, b"%d\n\0", (false, false));
+    open.analyse_program().expect("it surveys");
+    let text = open
+        .rendered(F)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(text.starts_with("void f("), "{text}");
+    let stats = open.analysis_stats();
+    assert!(stats.rebuilt >= 1, "{stats:?}");
 }
 
 /// A format in writable data may change before the call (Codex review of #363): the call may read
