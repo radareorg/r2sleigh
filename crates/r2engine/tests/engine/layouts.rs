@@ -688,3 +688,67 @@ fn a_member_through_a_loaded_pointer_reads_its_root_from_the_projection() {
     let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
     assert_eq!(text.matches("->next").count(), 1, "{text}");
 }
+
+/// i386 `int next_val(struct node *cur) { return cur->next->val; }`, `next` at offset 4.
+const NEXT_VAL_I386: &[u8] = &[
+    0x8b, 0x44, 0x24, 0x04, // 1000 mov eax, [esp + 4]
+    0x8b, 0x40, 0x04, // 1004 mov eax, [eax + 4]
+    0x8b, 0x00, // 1007 mov eax, [eax]
+    0xc3, // 1009 ret
+];
+
+/// D387: an i386 `struct node { int val; struct node *next; }` holds a 4-byte pointer, so C's
+/// natural layout at 32 bits reproduces the interface's layout; read at 64 bits it refuses.
+#[test]
+fn a_32_bit_struct_holding_a_pointer_is_laid_out_at_its_width() {
+    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Width};
+    let mut graph = TypeGraph::new();
+    let int = graph.add(Type::Scalar(Scalar {
+        kind: ScalarKind::Signed,
+        width: Width::Bits(32),
+        name: Some("int".to_owned()),
+    }));
+    let node = graph.reserve();
+    let node_pointer = graph.add(Type::Pointer { target: node });
+    let field = |name: &str, ty, at| Member {
+        name: Some(name.to_owned()),
+        ty,
+        offset_bits: at,
+        bit_size: None,
+    };
+    graph.define(
+        node,
+        Type::Record(Record {
+            kind: RecordKind::Struct,
+            tag: Some("node".to_owned()),
+            size_bytes: 8,
+            members: vec![field("val", int, 0), field("next", node_pointer, 32)],
+        }),
+    );
+    let prototype = Prototype {
+        name: "next_val".to_owned(),
+        parameters: vec![Parameter::new(node_pointer, "struct node *", Some("cur"))],
+        returns: "int".into(),
+        return_type: int,
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(BASE, prototype);
+    let functions = [("f", BASE, NEXT_VAL_I386.len() as u64)];
+    let literal = Literal::of_code(NEXT_VAL_I386, &functions).in_i386();
+    let mut open = OpenProgram::of(literal.with_declarations(declarations));
+    let prepared = open.prepared(BASE).expect("it prepares");
+    let shared = prepared.artifact().shared_artifact();
+    let interface = (shared.machine_context().function_interface()).expect("a declared interface");
+    let graph = interface.type_graph().expect("a type graph");
+    assert!(
+        r2types::AggregateDefinitions::of(graph, 32)
+            .get("node")
+            .is_some()
+    );
+    assert!(
+        r2types::AggregateDefinitions::of(graph, 64)
+            .get("node")
+            .is_none()
+    );
+}

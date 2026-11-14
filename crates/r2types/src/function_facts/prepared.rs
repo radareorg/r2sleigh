@@ -91,21 +91,16 @@ pub struct AggregateDefinitions(BTreeMap<String, AggregateDefinition>);
 impl AggregateDefinitions {
     /// One pass over the graph's layouts, grouped by name: O(members + layouts log layouts).
     pub fn of(graph: &r2ssa::SourceTypeGraph, ptr_bits: u32) -> Self {
-        let mut by_name = BTreeMap::<&str, Option<AggregateDefinition>>::new();
+        let mut by_name = BTreeMap::<&str, Vec<&r2ssa::SourceAggregateLayout>>::new();
         for layout in graph.aggregates() {
-            let definition = natural_definition(graph, layout, ptr_bits);
-            by_name
-                .entry(layout.name())
-                .and_modify(|held| {
-                    if *held != definition {
-                        *held = None;
-                    }
-                })
-                .or_insert(definition);
+            by_name.entry(layout.name()).or_default().push(layout);
         }
         Self(
             (by_name.into_iter())
-                .filter_map(|(name, definition)| Some((name.to_owned(), definition?)))
+                .filter_map(|(name, layouts)| {
+                    let definition = agreeing(graph, layouts.into_iter(), ptr_bits)?;
+                    Some((name.to_owned(), definition))
+                })
                 .collect(),
         )
     }
@@ -120,11 +115,8 @@ impl AggregateDefinitions {
         name: &str,
         ptr_bits: u32,
     ) -> Option<AggregateDefinition> {
-        let mut layouts = (graph.aggregates().iter()).filter(|layout| layout.name() == name);
-        let definition = natural_definition(graph, layouts.next()?, ptr_bits)?;
-        layouts
-            .all(|other| natural_definition(graph, other, ptr_bits).as_ref() == Some(&definition))
-            .then_some(definition)
+        let layouts = (graph.aggregates().iter()).filter(|layout| layout.name() == name);
+        agreeing(graph, layouts, ptr_bits)
     }
 }
 
@@ -135,6 +127,18 @@ impl IntoIterator for AggregateDefinitions {
     fn into_iter(self) -> Self::IntoIter {
         self.0.into_iter()
     }
+}
+
+/// The one natural definition every layout of a name has; none where one refuses or two differ.
+fn agreeing<'g>(
+    graph: &r2ssa::SourceTypeGraph,
+    mut layouts: impl Iterator<Item = &'g r2ssa::SourceAggregateLayout>,
+    ptr_bits: u32,
+) -> Option<AggregateDefinition> {
+    let definition = natural_definition(graph, layouts.next()?, ptr_bits)?;
+    layouts
+        .all(|other| natural_definition(graph, other, ptr_bits).as_ref() == Some(&definition))
+        .then_some(definition)
 }
 
 /// `layout` as C lays it out, where that is the stated layout: each member at the next offset its
