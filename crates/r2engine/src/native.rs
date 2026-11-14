@@ -2988,19 +2988,18 @@ impl<'a> Native<'a> {
             restate(&interface, slots, identity.to_vec())
         });
         let (data_symbols, data_types) = self.data_symbols(&walked.body);
+        let mut string_literals = self.literals(&walked.body);
+        string_literals.extend(extra_literals);
+        string_literals.sort_by_key(|(address, _)| *address);
+        string_literals.dedup_by_key(|(address, _)| *address);
+        let read_only = self.read_only(&walked.body, &string_literals);
         let function = NativeFunction {
             address: walked.body.entry,
             name: walked.name.clone(),
             blocks,
             calls,
-            string_literals: {
-                let mut literals = self.literals(&walked.body);
-                literals.extend(extra_literals);
-                literals.sort_by_key(|(address, _)| *address);
-                literals.dedup_by_key(|(address, _)| *address);
-                literals
-            },
-            read_only: self.read_only(&walked.body),
+            string_literals,
+            read_only,
             data_symbols,
             data_types,
             code_pointer_tables: (tables.iter().chain(call_tables))
@@ -3127,25 +3126,43 @@ impl Native<'_> {
             .collect()
     }
 
-    /// The bytes at each literal address the body loads from, where the program never writes
-    /// them and the loader does not (`TableBytes::ReadOnly`): what every such load reads (P5).
-    fn read_only(&self, body: &crate::body::Body) -> Vec<(u64, Vec<u8>)> {
+    /// The bytes at each literal address the body loads from, and each of `literals`' texts, where
+    /// the program never writes them and the loader does not (`TableBytes::ReadOnly`) (P5, D409).
+    fn read_only(
+        &self,
+        body: &crate::body::Body,
+        literals: &[(u64, String)],
+    ) -> Vec<(u64, Vec<u8>)> {
         let (loads, stores) = literal_accesses(body);
-        loads
-            .into_iter()
-            .filter_map(|(address, size)| {
-                let bytes = self.program.read(address, size)?;
-                let range = address..address.checked_add(bytes.len() as u64)?;
-                // A body that stores there says the container's statement is not this run's.
-                let stored = stores
-                    .iter()
-                    .any(|written| written.start < range.end && range.start < written.end);
-                (bytes.len() == size
-                    && !stored
-                    && TableBytes::of(self.program, range) == TableBytes::ReadOnly)
-                    .then_some((address, bytes))
-            })
-            .collect()
+        // A literal no write reaches is read-only bytes too, with its terminator: a format (D409).
+        let texts = literals.iter().filter_map(|(address, _)| {
+            let mut bytes = immutable_text_at(self.program, *address)?.into_bytes();
+            bytes.push(0);
+            Some((*address, bytes))
+        });
+        let loaded = loads.into_iter().filter_map(|(address, size)| {
+            let bytes = self.program.read(address, size)?;
+            let range = address..address.checked_add(bytes.len() as u64)?;
+            // A body that stores there says the container's statement is not this run's.
+            let stored = stores
+                .iter()
+                .any(|written| written.start < range.end && range.start < written.end);
+            (bytes.len() == size
+                && !stored
+                && TableBytes::of(self.program, range) == TableBytes::ReadOnly)
+                .then_some((address, bytes))
+        });
+        // Two windows at one address are one run's bytes: the longer is kept, as it sorts last.
+        let mut windows = loaded.chain(texts).collect::<Vec<_>>();
+        windows.sort_by_key(|(address, bytes)| (*address, bytes.len()));
+        windows.dedup_by(|later, earlier| {
+            let same = later.0 == earlier.0;
+            if same {
+                std::mem::swap(later, earlier);
+            }
+            same
+        });
+        windows
     }
 
     /// The named program data this body points at, each with the type the

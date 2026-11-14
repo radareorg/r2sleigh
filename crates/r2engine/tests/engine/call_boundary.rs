@@ -985,6 +985,115 @@ fn printing_spilled(format: &[u8], handed: bool) -> String {
     rendered.response.output.into_text()
 }
 
+/// clang -O0's shape (values.c `main`, D409): `caller` spills the format at `BASE + 0xb0` to
+/// `[sp, #16]`, calls `printf(format, 7)` with it, then reloads it for `printf(format, 8)`.
+fn printing_twice(format: &[u8], writable: bool) -> String {
+    const FORMAT: u64 = BASE + 0xb0;
+    let mut code = vec![0u8; 0x100];
+    let words: [(u64, u32); 14] = [
+        (BASE + 0x10, 0xa9be_7bfd), // stp x29, x30, [sp, #-32]!
+        (BASE + 0x14, 0x9000_0008), // adrp x8, 0x1000
+        (BASE + 0x18, 0x9102_c108), // add x8, x8, #0xb0
+        (BASE + 0x1c, 0xf900_0be8), // str x8, [sp, #16]
+        (BASE + 0x20, 0xaa08_03e0), // mov x0, x8
+        (BASE + 0x24, 0x5280_00e1), // mov w1, #7
+        (BASE + 0x28, 0x9400_001a), // bl printf
+        (BASE + 0x2c, 0xf940_0be0), // ldr x0, [sp, #16]
+        (BASE + 0x30, 0x5280_0101), // mov w1, #8
+        (BASE + 0x34, 0x9400_0017), // bl printf
+        (BASE + 0x38, 0xa8c2_7bfd), // ldp x29, x30, [sp], #32
+        (BASE + 0x3c, 0xd65f_03c0), // ret
+        (BASE + 0x90, 0x5800_0050), // printf: ldr x16, #8
+        (BASE + 0x94, 0xd61f_0200), // br x16
+    ];
+    for (at, word) in words {
+        let at = (at - BASE) as usize;
+        code[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("caller", BASE + 0x10, 0x30)])
+        .in_aarch64()
+        .with_data_after(FORMAT)
+        .importing("printf");
+    let program = match writable {
+        true => program.writable_data_after(FORMAT),
+        false => program,
+    };
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(FORMAT, format);
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// hashes clang -O1 `main`'s shape (D409): `push rax` aligns the stack, `printf("%d\n", 7)` runs,
+/// and the pushed slot is read back as the next `printf`'s operand.
+fn printing_after_a_push() -> String {
+    let mut code = vec![0x90u8; 0xb0];
+    code[..0x28].copy_from_slice(&[
+        0x50, // 1000 push rax
+        0x48, 0x8d, 0x3d, 0x98, 0x00, 0x00, 0x00, // 1001 lea rdi, [rip + 0x98]: 0x10a0
+        0xbe, 0x07, 0x00, 0x00, 0x00, // 1008 mov esi, 7
+        0x31, 0xc0, // 100d xor eax, eax
+        0xe8, 0x7c, 0x00, 0x00, 0x00, // 100f call 0x1090
+        0x48, 0x8b, 0x34, 0x24, // 1014 mov rsi, [rsp]
+        0x48, 0x8d, 0x3d, 0x81, 0x00, 0x00, 0x00, // 1018 lea rdi, [rip + 0x81]: 0x10a0
+        0x31, 0xc0, // 101f xor eax, eax
+        0xe8, 0x6a, 0x00, 0x00, 0x00, // 1021 call 0x1090
+        0x59, // 1026 pop rcx
+        0xc3, // 1027 ret
+    ]);
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("caller", BASE, 0x28)])
+        .with_data()
+        .importing("printf");
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(common::TEXT, b"%d\n\0");
+    let rendered = open.rendered(BASE).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// D409 on x86-64: the format counts one operand, in RSI, so `printf` reads and writes none of
+/// the caller's stack and the pushed slot still holds the entry RAX.
+#[test]
+fn a_printf_whose_format_counts_its_tail_leaves_a_pushed_slot_alone() {
+    let text = printing_after_a_push();
+    assert!(
+        text.contains("held from entry, read as residuals (RAX_0)"),
+        "{text}"
+    );
+    assert!(!text.contains("r2sleigh_load_u64("), "{text}");
+}
+
+/// D409: the first call's own format counts one operand, all in registers, so the call reads and
+/// writes no caller stack: the spill stays the format and the second call counts its tail too.
+#[test]
+fn a_printf_whose_format_counts_its_tail_leaves_the_callers_slot_alone() {
+    let text = printing_twice(b"%d\n\0", false);
+    assert!(text.contains(r#"printf("%d\n", (uint64_t)8U);"#), "{text}");
+}
+
+/// A format the program may write counts nothing for the whole run: the reload stays memory.
+#[test]
+fn a_printf_whose_format_the_program_may_write_bounds_no_stack() {
+    let text = printing_twice(b"%d\n\0", true);
+    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+}
+
+/// A `long double` operand takes no 8-byte slot this rule places: the reload stays memory.
+#[test]
+fn a_printf_whose_format_reads_a_long_double_bounds_no_stack() {
+    let text = printing_twice(b"%Lf\n\0", false);
+    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+}
+
+/// Ten operands put three on the stack, the third at the slot: the reload stays memory.
+#[test]
+fn a_printf_whose_counted_tail_covers_the_slot_keeps_it_a_load() {
+    let text = printing_twice(b"%d%d%d%d%d%d%d%d%d%d\0", false);
+    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+}
+
 /// Gb: `f` (`ret`) reads no argument, so the reload is the spill and q0 to q3 die at `printf`.
 /// Fails (D376): `f`'s statement never reaches its caller's build, so the call is unstated (D369).
 #[test]

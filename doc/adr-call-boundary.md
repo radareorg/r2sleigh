@@ -1437,3 +1437,12 @@ One "never comes back" fact, with its proof, from `ComesBack` to the C (D379, D3
 - r2dec. `CallPlan.ends` (the site's proof) ends control; `CallPlan.noreturn` (the callee's proof) is the declaration's attribute. Structuring reads a set of proven call instructions, never a callee's name.
 - `afi` prints `noreturn: true` only for a proof and spells a bound as `noreturn: unproven (…)`.
 
+## D409 as built (2026-11-14, rd5-dispatch)
+
+A cited printf `...` call bounds its stack by the operands its own format counts.
+
+- r2abi `format` owns the format model (C17 7.21.6.1, POSIX `%n$`, glibc `%m`), moved from r2ssa `printf.rs`. It also names an `L` floating conversion (`long_double`).
+- r2engine adds each captured literal whose bytes and terminator are mapped read-only and untouched by the loader (`immutable_text_at`) to the snapshot's `read_only` windows. Two windows at one address keep the longer.
+- r2ssa `SourceMachineContext::bind_format_tails` folds, per block in one forward pass (`BlockOrigins`), the format register of each variadic site whose format rule is the declaration's. A cited `Tail::Format { Printf }` row is the only source of that rule. The site keeps what its read-only literal consumes. `call_reads` places the fixed parameters and one pointer-wide slot per operand (C17 6.5.2.2p7) with `place::place`, and bounds `stack` and `writes` to that area. `registers` and `stated` stay the every-location default.
+- Refused, so the stack stays unbounded: a body-proven format, a format not in a register, a fold through a merge or another block, writable text, an unparsed conversion, `long double`, more than 64 operands, a 32-bit target, Apple arm64's stacked tail, and fixed parameters `place` does not put where the declaration does.
+- Tests (`call_boundary`): `a_printf_whose_format_counts_its_tail_leaves_the_callers_slot_alone` (aarch64 clang -O0 spill, values.c `main`) and `a_printf_whose_format_counts_its_tail_leaves_a_pushed_slot_alone` (x86-64 `push rax`, hashes `main`) fail on the parent. Writable text, `%Lf` and a ten-operand tail over the slot keep the reload. The late count in `boundaries.rs` debug-asserts that it agrees with the block's fold.

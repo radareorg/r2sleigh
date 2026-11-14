@@ -1446,6 +1446,7 @@ version = "0.1.0"
 dependencies = [
  "petgraph",
  "proptest",
+ "r2abi",
  "r2il",
  "r2sleigh-lift",
  "r2source",
