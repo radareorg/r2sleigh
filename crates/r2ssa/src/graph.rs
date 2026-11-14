@@ -237,16 +237,16 @@ pub struct GraphBlock {
     pub size: u32,
     pub predecessors: Vec<BlockId>,
     pub successors: Vec<BlockId>,
-    pub insts: Vec<InstId>,
+    pub insts: crate::dense::Metered<Vec<InstId>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SsaGraph {
     pub entry: BlockId,
     pub block_order: Vec<BlockId>,
-    pub blocks: Vec<GraphBlock>,
-    pub insts: Vec<GraphInst>,
-    pub values: Vec<GraphValue>,
+    pub blocks: crate::dense::Metered<Vec<GraphBlock>>,
+    pub insts: crate::dense::Metered<Vec<GraphInst>>,
+    pub values: crate::dense::Metered<Vec<GraphValue>>,
     pub def_of: Vec<Option<InstId>>,
     /// The values each instruction reads, in operand order: one array for the function.
     pub(crate) inputs: crate::dense::Csr<InstId, ValueId>,
@@ -428,7 +428,7 @@ impl SsaGraph {
                 size,
                 predecessors: Vec::new(),
                 successors: Vec::new(),
-                insts: Vec::new(),
+                insts: Default::default(),
             });
         }
 
@@ -564,9 +564,9 @@ impl SsaGraph {
         Self {
             entry,
             block_order,
-            blocks,
-            insts,
-            values,
+            blocks: blocks.into(),
+            insts: insts.into(),
+            values: values.into(),
             def_of,
             inputs,
             use_offsets: use_offsets_of(&uses_of),

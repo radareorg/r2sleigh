@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """The scaling bench (ROADMAP D404): how `aa; pdd` of one generated function grows along each dimension.
 
-  scaling.py --r2s R2S [--n N] [--budget R] [--only DIM] [--out DIR]
+  scaling.py [--r2s R2S] [--meter R2S] [--n N] [--budget R] [--only DIM] [--out DIR]
 
 Each dimension generates the same function at sizes 0, N and 2N, builds it with `cc`, and counts
 `r2s -q -c "aa; pdd @ f"` under callgrind. The size-0 count is the fixed cost (startup, the
 Sleigh load, the rest of the binary), so a linear pass reads (Ir(2N) - Ir(0)) / (Ir(N) - Ir(0)) = 2
 and a quadratic one 4; the budget is 2.3. A dimension another row owns that fails today is held
 in OPEN: it fails until that row lands, and then once it passes.
+
+`--meter` grades a `work-meter` build the same way by its element visits (`r2s: stats: scans`,
+D417): P whole passes visit P*n elements and a rescan adds n^2, so the ratio is exact where Ir
+is noisy and a rescan reads above SCAN_BUDGET at sizes callgrind cannot see.
 """
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -17,8 +22,11 @@ import tempfile
 from pathlib import Path
 
 BUDGET = 2.3
+# Element visits: a linear generator reads 2 exactly but for its constant terms (D417).
+SCAN_BUDGET = 2.1
 # A dimension that fails today, by the row that owns its cost; held exactly both ways.
 OPEN = {}
+SCAN_OPEN = {}
 START = "_start:\n    call f\n    mov $60, %eax\n    xor %edi, %edi\n    syscall\n"
 
 
@@ -98,6 +106,16 @@ def instructions(r2s, binary, address, work):
     return int(totals.group(1))
 
 
+def scans(r2s, binary, address):
+    """Element visits a `work-meter` build counts for one `aa; pdd @ address` process."""
+    done = subprocess.run([r2s, "-q", "-c", f"aa; pdd @ {address}", str(binary)],
+                          env={**os.environ, "R2S_STATS": "1"}, capture_output=True, text=True)
+    found = re.search(r"^r2s: stats: scans (\d+)$", done.stderr, re.MULTILINE)
+    if done.returncode != 0 or not found:
+        sys.exit(f"{binary}: exited {done.returncode} with no scans line; is {r2s} a work-meter build?")
+    return int(found.group(1))
+
+
 def growth(fixed, one, two):
     """Ir(2N) over Ir(N), each less the size-0 run: 2 for a linear pass, 4 for a quadratic one."""
     if one <= fixed:
@@ -111,7 +129,7 @@ def verdict(name, ratio, budget, open_rows=OPEN):
     if ratio is None:
         return f"{name}: size N cost no more than size 0; the generator does not reach the engine"
     if ratio > budget and owner is None:
-        return f"{name}: Ir grows {ratio:.2f}x from N to 2N, above {budget}"
+        return f"{name}: grows {ratio:.2f}x from N to 2N, above {budget}"
     if ratio <= budget and owner is not None:
         return f"{name}: grows {ratio:.2f}x, within {budget}; delete its OPEN entry ({owner})"
     return None
@@ -119,28 +137,42 @@ def verdict(name, ratio, budget, open_rows=OPEN):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--r2s", required=True)
+    parser.add_argument("--r2s", help="a build to count under callgrind")
+    parser.add_argument("--meter", help="a work-meter build to count by element visits")
     parser.add_argument("--n", type=int, default=64)
     parser.add_argument("--budget", type=float, default=BUDGET)
+    parser.add_argument("--scan-budget", type=float, default=SCAN_BUDGET)
     parser.add_argument("--only", action="append", choices=sorted(DIMENSIONS))
     parser.add_argument("--out", help="keep the generated binaries here")
     args = parser.parse_args()
+    if not (args.r2s or args.meter):
+        parser.error("give --r2s, --meter or both")
+    grades = []
+    if args.r2s:
+        grades.append(("Ir", lambda binary, address, work: instructions(args.r2s, binary, address, work),
+                       args.budget, OPEN))
+    if args.meter:
+        grades.append(("scans", lambda binary, address, work: scans(args.meter, binary, address),
+                       args.scan_budget, SCAN_OPEN))
     failed = []
-    print("| dimension | Ir(0) | Ir(N) | Ir(2N) | growth |\n|---|---|---|---|---|")
+    print("| dimension | count | size 0 | N | 2N | growth |\n|---|---|---|---|---|---|")
     with tempfile.TemporaryDirectory() as work:
         out = Path(args.out or work)
         out.mkdir(parents=True, exist_ok=True)
         for name in args.only or DIMENSIONS:
-            counts = []
+            built = []
             for size in (0, args.n, 2 * args.n):
                 binary = out / f"{name}-{size}"
                 kind, source = DIMENSIONS[name](size)
-                counts.append(instructions(args.r2s, binary, build(kind, source, binary), work))
-            ratio = growth(*counts)
-            shown = "n/a" if ratio is None else f"{ratio:.2f}"
-            print(f"| {name} | {counts[0]:,} | {counts[1]:,} | {counts[2]:,} | {shown} |", flush=True)
-            if reason := verdict(name, ratio, args.budget):
-                failed.append(reason)
+                built.append((binary, build(kind, source, binary)))
+            for label, count, budget, open_rows in grades:
+                counts = [count(binary, address, work) for binary, address in built]
+                ratio = growth(*counts)
+                shown = "n/a" if ratio is None else f"{ratio:.3f}"
+                print(f"| {name} | {label} | {counts[0]:,} | {counts[1]:,} | {counts[2]:,} | {shown} |",
+                      flush=True)
+                if reason := verdict(name, ratio, budget, open_rows):
+                    failed.append(f"{label}: {reason}")
     for line in failed:
         print(line, file=sys.stderr)
     if failed:

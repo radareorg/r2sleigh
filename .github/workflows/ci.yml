@@ -493,20 +493,29 @@ jobs:
   # ── Scaling: each dimension of one function at sizes 0, N and 2N ────
   #
   # A pass quadratic in calls, returns, parameters or escaped locals reads 4 where a linear one
-  # reads 2, once the size-0 run's fixed cost is taken off (ROADMAP D404).
+  # reads 2, once the size-0 run's fixed cost is taken off (ROADMAP D404). The metering shell
+  # grades the same functions by element visits, exact where Ir is noisy (D417).
   scaling:
     name: Scaling Bench
     runs-on: ubuntu-24.04
     needs: [plan, build]
     if: needs.plan.outputs.full == 'true'
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: actions/download-artifact@v8
         with:
           name: r2s
-          path: target/ci
-      - run: chmod +x target/ci/r2s
+          path: target/shell
+      - run: chmod +x target/shell/r2s
+      - name: Install the toolchain the repository pins
+        run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ci-shell
+          save-if: false
+      - name: Build the metering shell
+        run: cargo build --profile ci -p r2s --features sleigh,work-meter
       - name: Install valgrind
         run: |
           apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20"
@@ -519,7 +528,7 @@ jobs:
       - name: Scaling
         run: |
           set -o pipefail
-          python3 scripts/scaling.py --r2s target/ci/r2s | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 scripts/scaling.py --r2s target/shell/r2s --meter target/ci/r2s | tee -a "$GITHUB_STEP_SUMMARY"
 
   # ── Source-gold: graded against the source, not against another tool ──
   #

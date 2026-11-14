@@ -12,6 +12,7 @@
 //! - [`IdSet`]: a set of ids, as a bitset.
 //! - [`Csr`]: for each id, a slice of related items (def-use, predecessors),
 //!   in compressed sparse row form.
+//! - [`Metered`]: a function-scale table whose whole iterations the work meter counts (D417).
 
 use std::marker::PhantomData;
 
@@ -80,9 +81,9 @@ impl<I: DenseId, T> IdVec<I, T> {
     }
 
     /// Every id with its cell, in id order.
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn iter(&self) -> impl Iterator<Item = (I, &T)> {
-        self.cells
-            .iter()
+        visits(self.cells.iter())
             .enumerate()
             .map(|(index, cell)| (I::from_index(index), cell))
     }
@@ -212,22 +213,26 @@ impl<I: DenseId, T> IdMap<I, T> {
     }
 
     /// Every id with a value, in id order.
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn iter(&self) -> impl Iterator<Item = (I, &T)> {
         self.present
             .iter()
             .map(|id| (id, &self.entries[self.slots[id.index()] as usize].1))
     }
 
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn keys(&self) -> impl Iterator<Item = I> + '_ {
         self.present.iter()
     }
 
     /// Each value, to update in place, in no stated order: the updates must not depend on one
     /// another (removal swaps entries, so neither id nor insertion order holds).
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
-        self.entries.iter_mut().map(|(_, value)| value)
+        visits(self.entries.iter_mut()).map(|(_, value)| value)
     }
 
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn values(&self) -> impl Iterator<Item = &T> {
         self.iter().map(|(_, value)| value)
     }
@@ -237,6 +242,7 @@ impl<'a, I: DenseId, T> IntoIterator for &'a IdMap<I, T> {
     type Item = (I, &'a T);
     type IntoIter = Box<dyn Iterator<Item = (I, &'a T)> + 'a>;
 
+    #[cfg_attr(feature = "work-meter", track_caller)]
     fn into_iter(self) -> Self::IntoIter {
         Box::new(self.iter())
     }
@@ -266,6 +272,7 @@ impl<I: DenseId, T> IntoIterator for IdMap<I, T> {
     type Item = (I, T);
     type IntoIter = std::vec::IntoIter<(I, T)>;
 
+    #[cfg_attr(feature = "work-meter", track_caller)]
     fn into_iter(self) -> Self::IntoIter {
         let mut entries = self.entries;
         entries.sort_unstable_by_key(|(id, _)| id.index());
@@ -393,8 +400,9 @@ impl<I: DenseId> IdSet<I> {
     }
 
     /// The members, in id order.
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn iter(&self) -> impl Iterator<Item = I> + '_ {
-        self.words.iter().enumerate().flat_map(|(at, word)| {
+        visits(self.words.iter().enumerate().flat_map(|(at, word)| {
             let mut bits = *word;
             std::iter::from_fn(move || {
                 (bits != 0).then(|| {
@@ -403,7 +411,7 @@ impl<I: DenseId> IdSet<I> {
                     I::from_index(at * 64 + bit)
                 })
             })
-        })
+        }))
     }
 }
 
@@ -449,6 +457,7 @@ impl<I: DenseId> IntoIterator for IdSet<I> {
     type Item = I;
     type IntoIter = std::vec::IntoIter<I>;
 
+    #[cfg_attr(feature = "work-meter", track_caller)]
     fn into_iter(self) -> Self::IntoIter {
         self.iter().collect::<Vec<_>>().into_iter()
     }
@@ -458,6 +467,7 @@ impl<'a, I: DenseId> IntoIterator for &'a IdSet<I> {
     type Item = I;
     type IntoIter = Box<dyn Iterator<Item = I> + 'a>;
 
+    #[cfg_attr(feature = "work-meter", track_caller)]
     fn into_iter(self) -> Self::IntoIter {
         Box::new(self.iter())
     }
@@ -751,13 +761,288 @@ impl<I: DenseId, T> SparseMap<I, T> {
     }
 
     /// Every id with a value, in id order.
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn iter(&self) -> impl Iterator<Item = (I, &T)> {
-        self.entries.iter().map(|(id, value)| (*id, value))
+        visits(self.entries.iter()).map(|(id, value)| (*id, value))
     }
+}
+
+/// A function-scale table (a graph's instructions, values or blocks, a block's instructions, a
+/// registry): each whole iteration counts its element visits in a `work-meter` build (D417).
+/// Indexing and `len` pass through `Deref`; only `iter`, `values`, `keys` and `for` are counted.
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Metered<C>(C);
+
+impl<C> Metered<C> {
+    pub fn into_inner(self) -> C {
+        self.0
+    }
+}
+
+impl<C> From<C> for Metered<C> {
+    fn from(table: C) -> Self {
+        Self(table)
+    }
+}
+
+impl<C> std::ops::Deref for Metered<C> {
+    type Target = C;
+
+    fn deref(&self) -> &C {
+        &self.0
+    }
+}
+
+impl<C> std::ops::DerefMut for Metered<C> {
+    fn deref_mut(&mut self) -> &mut C {
+        &mut self.0
+    }
+}
+
+impl<C: std::fmt::Debug> std::fmt::Debug for Metered<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T> Metered<Vec<T>> {
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn iter(&self) -> Visits<std::slice::Iter<'_, T>> {
+        visits(self.0.iter())
+    }
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn iter_mut(&mut self) -> Visits<std::slice::IterMut<'_, T>> {
+        visits(self.0.iter_mut())
+    }
+}
+
+impl<T> FromIterator<T> for Metered<Vec<T>> {
+    fn from_iter<A: IntoIterator<Item = T>>(items: A) -> Self {
+        Self(items.into_iter().collect())
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Metered<Vec<T>> {
+    type Item = &'a T;
+    type IntoIter = Visits<std::slice::Iter<'a, T>>;
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut Metered<Vec<T>> {
+    type Item = &'a mut T;
+    type IntoIter = Visits<std::slice::IterMut<'a, T>>;
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl<T> IntoIterator for Metered<Vec<T>> {
+    type Item = T;
+    type IntoIter = Visits<std::vec::IntoIter<T>>;
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    fn into_iter(self) -> Self::IntoIter {
+        visits(self.0.into_iter())
+    }
+}
+
+impl<K, V> Metered<std::collections::BTreeMap<K, V>> {
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn iter(&self) -> Visits<std::collections::btree_map::Iter<'_, K, V>> {
+        visits(self.0.iter())
+    }
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn values(&self) -> Visits<std::collections::btree_map::Values<'_, K, V>> {
+        visits(self.0.values())
+    }
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn keys(&self) -> Visits<std::collections::btree_map::Keys<'_, K, V>> {
+        visits(self.0.keys())
+    }
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn values_mut(&mut self) -> Visits<std::collections::btree_map::ValuesMut<'_, K, V>> {
+        visits(self.0.values_mut())
+    }
+}
+
+impl<K: Ord, V> FromIterator<(K, V)> for Metered<std::collections::BTreeMap<K, V>> {
+    fn from_iter<A: IntoIterator<Item = (K, V)>>(items: A) -> Self {
+        Self(items.into_iter().collect())
+    }
+}
+
+impl<'a, K, V> IntoIterator for &'a Metered<std::collections::BTreeMap<K, V>> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = Visits<std::collections::btree_map::Iter<'a, K, V>>;
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// The element visits counted since the process began, in a `work-meter` build; `None` in any
+/// other build, never a zero that would claim no work was done.
+pub fn element_visits() -> Option<u64> {
+    #[cfg(feature = "work-meter")]
+    return Some(meter::VISITS.load(std::sync::atomic::Ordering::Relaxed));
+    #[cfg(not(feature = "work-meter"))]
+    None
+}
+
+/// An iterator over a function-scale table: itself unless the build meters work.
+#[cfg(not(feature = "work-meter"))]
+pub type Visits<I> = I;
+#[cfg(feature = "work-meter")]
+pub type Visits<I> = meter::Counted<I>;
+
+#[cfg(not(feature = "work-meter"))]
+#[inline(always)]
+fn visits<I: Iterator>(iter: I) -> Visits<I> {
+    iter
+}
+
+#[cfg(feature = "work-meter")]
+#[track_caller]
+fn visits<I: Iterator>(iter: I) -> Visits<I> {
+    meter::Counted {
+        iter,
+        at: std::panic::Location::caller(),
+        count: 0,
+    }
+}
+
+/// The element visits counted at each call site, most first, in a `work-meter` build.
+pub fn element_visits_by_site() -> Vec<(String, u64)> {
+    #[cfg(feature = "work-meter")]
+    return meter::by_site();
+    #[cfg(not(feature = "work-meter"))]
+    Vec::new()
+}
+
+#[cfg(feature = "work-meter")]
+mod meter {
+    use std::collections::HashMap;
+    use std::panic::Location;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub(super) static VISITS: AtomicU64 = AtomicU64::new(0);
+    static SITES: Mutex<Option<HashMap<&'static Location<'static>, u64>>> = Mutex::new(None);
+
+    pub(super) fn by_site() -> Vec<(String, u64)> {
+        let sites = SITES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sites = (sites.iter().flatten())
+            .map(|(at, count)| (format!("{}:{}", at.file(), at.line()), *count))
+            .collect::<Vec<_>>();
+        sites.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        sites
+    }
+
+    /// Counts each element it hands out, against the site that asked for the iteration.
+    #[derive(Debug)]
+    pub struct Counted<I> {
+        pub(super) iter: I,
+        pub(super) at: &'static Location<'static>,
+        pub(super) count: u64,
+    }
+
+    /// A copy counts only what it hands out itself.
+    impl<I: Clone> Clone for Counted<I> {
+        fn clone(&self) -> Self {
+            Self {
+                iter: self.iter.clone(),
+                at: self.at,
+                count: 0,
+            }
+        }
+    }
+
+    impl<I> Drop for Counted<I> {
+        fn drop(&mut self) {
+            if self.count > 0 {
+                let mut sites = SITES
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *sites
+                    .get_or_insert_with(HashMap::new)
+                    .entry(self.at)
+                    .or_default() += self.count;
+            }
+        }
+    }
+
+    impl<I: Iterator> Iterator for Counted<I> {
+        type Item = I::Item;
+
+        fn next(&mut self) -> Option<I::Item> {
+            let item = self.iter.next()?;
+            self.count += 1;
+            VISITS.fetch_add(1, Ordering::Relaxed);
+            Some(item)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.iter.size_hint()
+        }
+    }
+
+    impl<I: DoubleEndedIterator> DoubleEndedIterator for Counted<I> {
+        fn next_back(&mut self) -> Option<I::Item> {
+            let item = self.iter.next_back()?;
+            self.count += 1;
+            VISITS.fetch_add(1, Ordering::Relaxed);
+            Some(item)
+        }
+    }
+
+    impl<I: ExactSizeIterator> ExactSizeIterator for Counted<I> {}
+
+    impl<I: std::iter::FusedIterator> std::iter::FusedIterator for Counted<I> {}
 }
 
 #[cfg(test)]
 mod tests {
+    /// A whole pass over a metered table counts each element it hands out once, at its call site;
+    /// an early stop counts only what it read (D417).
+    #[cfg(feature = "work-meter")]
+    #[test]
+    fn the_meter_counts_each_element_a_pass_hands_out() {
+        let table = super::Metered::from(vec![1u32, 2, 3, 4]);
+        let mut whole = table.iter();
+        assert_eq!(whole.by_ref().count(), 4);
+        assert_eq!(whole.count, 4);
+        let mut early = table.iter();
+        assert_eq!(early.by_ref().position(|x| *x == 2), Some(1));
+        assert_eq!(early.count, 2);
+        let set = (0..130)
+            .map(crate::graph::InstId)
+            .collect::<super::IdSet<_>>();
+        let mut members = set.iter();
+        assert_eq!(members.by_ref().count(), 130);
+        drop(members);
+        let here = format!("{}:", file!());
+        assert!(
+            super::element_visits_by_site()
+                .iter()
+                .any(|(at, _)| at.starts_with(&here))
+        );
+        assert!(super::element_visits().is_some_and(|visits| visits >= 136));
+    }
+
     /// An index finds each row it was given, through growth and with colliding hashes.
     #[test]
     fn a_hash_index_finds_every_row_through_growth() {
