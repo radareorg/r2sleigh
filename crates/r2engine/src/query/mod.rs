@@ -54,6 +54,9 @@ pub struct AnalysisStats {
 }
 pub use proved::Proved;
 pub use r2ssa::InductionStep;
+/// The process's element visits, in all and by call site, in a `work-meter` build (D417): a count
+/// of the process, not of one program, so it stays out of [`AnalysisStats`].
+pub use r2ssa::dense::{element_visits as scans, element_visits_by_site as scan_sites};
 pub use records::{
     Annotation, AnnotationKind, Answered, ArgumentSlot, CallArgument, Callee, Decoders,
     Instruction, Line, Listing, Memory, Operand, Parameters, Register, Registers, Semantics, Stop,

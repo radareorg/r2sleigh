@@ -7,6 +7,7 @@
 //! source snapshot request.
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(cache_outside_query_database))]
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(scan_in_loop))]
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

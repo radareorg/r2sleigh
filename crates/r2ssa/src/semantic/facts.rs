@@ -1533,7 +1533,8 @@ pub struct StructuredDataflowFacts {
     pub inductions: crate::dense::IdMap<ValueId, InductionFact>,
     /// Cyclic CFG blocks not represented by a structured loop fact.
     pub unstructured_cycle_blocks: BTreeSet<u64>,
-    pub memory_accesses: BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
+    pub memory_accesses:
+        crate::dense::Metered<BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>>,
     /// Wide constant stores written out one declared member at a time.
     pub member_run_stores: crate::dense::IdMap<InstId, MemberRunStoreCertificate>,
     pub recursive_calls: BTreeMap<CallSiteId, StructuredRecursiveCallFact>,

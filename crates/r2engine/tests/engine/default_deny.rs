@@ -26,13 +26,16 @@ const OPEN: &[(&str, &str, &str)] = &[
 ];
 
 /// The unknown inputs: a call through a register nothing sets, a call to an import no row states,
-/// and one to an import only radare2's uncited row states (`xmalloc`, one parameter, D410).
+/// and one to an import only an uncited row states ([`UNCITED`]; D395: a bound, never a proof).
 #[derive(Clone, Copy, Debug)]
 enum Unknown {
     IndirectCall,
     UnboundImport,
     UncitedRow,
 }
+
+/// An import whose library row no header cites (`r2abi/data/uncited-rows.txt`).
+const UNCITED: &str = "xmalloc";
 
 impl Unknown {
     const ALL: [Self; 3] = [Self::IndirectCall, Self::UnboundImport, Self::UncitedRow];
@@ -49,7 +52,7 @@ impl Unknown {
     const fn import(self) -> &'static str {
         match self {
             Self::IndirectCall | Self::UnboundImport => "r2s_default_deny_unstated",
-            Self::UncitedRow => "xmalloc",
+            Self::UncitedRow => UNCITED,
         }
     }
 
@@ -233,32 +236,20 @@ fn an_unknown_callee_comes_back() {
 }
 
 /// `push rbx; mov rbx, rdi; call; mov rax, rbx; pop rbx; ret`: the parameter handed to an unknown
-/// callee is returned, and the callee's may-effects are no evidence that it is a pointer.
+/// callee is returned, and the callee's may-effects are no evidence that it is a pointer. The
+/// function states `arg0`, so a cell cannot pass on a signature with no parameter.
 #[test]
 fn an_unknown_callee_types_no_argument_a_pointer() {
     let failures = Unknown::ALL.map(|row| {
         cell(row.name(), "pointer", || {
             let before = [0x53, 0x48, 0x89, 0xfb]; // push rbx; mov rbx, rdi
             let text = rendered(row.around(&before, &[0x48, 0x89, 0xd8, 0x5b, 0xc3]));
-            // A declaration's return type (`void* xmalloc(uint64_t);`) is no argument: only the
-            // text past its first `(` is read.
-            let argued = |line: &str| {
-                let trimmed = line.trim();
-                let head = trimmed.split('(').next().unwrap_or_default();
-                let typed = head.contains(' ') || head.contains('*');
-                let declaration = trimmed.ends_with(");") && typed && !trimmed.contains('=');
-                match declaration && !head.starts_with("return") {
-                    true => trimmed
-                        .split_once('(')
-                        .map_or("", |(_, rest)| rest)
-                        .to_owned(),
-                    false => line.to_owned(),
-                }
-            };
-            let mut lines = text.lines().map(argued);
-            match lines.any(|line| line.contains("void *") || line.contains("void*")) {
-                true => Err(text),
-                false => Ok(()),
+            // The function's own parameters, not a callee's declaration (`void* xmalloc(...)`).
+            let signature = text.lines().next().unwrap_or_default();
+            let parameters = (signature.split_once('(')).map_or("", |(_, rest)| rest);
+            match parameters.contains("arg0") && !parameters.contains('*') {
+                true => Ok(()),
+                false => Err(text),
             }
         })
     });
@@ -373,4 +364,22 @@ fn every_tagged_negative_fact_has_a_column() {
             "no accessor is tagged default_deny_{column}"
         );
     }
+}
+
+/// The uncited row's cells test an uncited row: [`UNCITED`] stays in `uncited-rows.txt` and its row
+/// binds, so the call is declared. A citation of it fails here, and the row moves to another import.
+#[test]
+fn the_uncited_row_binds_an_uncited_declaration() {
+    let uncited =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../r2abi/data/uncited-rows.txt");
+    let uncited = std::fs::read_to_string(uncited).expect("it reads");
+    assert!(
+        (uncited.lines()).any(|line| line.split('|').next().map(str::trim) == Some(UNCITED)),
+        "{UNCITED} is cited now; pick an import uncited-rows.txt lists"
+    );
+    let text = rendered(Unknown::UncitedRow.around(&[], &[0xc3]));
+    assert!(
+        text.contains(&format!("{UNCITED}(uint64_t);")),
+        "the row does not bind:\n{text}"
+    );
 }

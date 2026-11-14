@@ -11,7 +11,8 @@ pub(crate) struct MemoryPrefix {
     pub(crate) values: crate::values::ValueRanges,
     pub(crate) objects: ObjectModel,
     pub(crate) memory: MemorySSAFacts,
-    pub(crate) memory_accesses: BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
+    pub(crate) memory_accesses:
+        crate::dense::Metered<BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>>,
     pub(crate) member_run_stores: crate::dense::IdMap<InstId, MemberRunStoreCertificate>,
 }
 
@@ -77,7 +78,7 @@ impl MemoryPrefix {
             values,
             objects,
             memory,
-            memory_accesses,
+            memory_accesses: memory_accesses.into(),
             member_run_stores,
         })
     }

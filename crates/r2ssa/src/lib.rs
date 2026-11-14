@@ -19,6 +19,7 @@
 // their dense ids (doc/adr-one-ir.md, ROADMAP D11). The exceptions say why
 // at the item that keeps one.
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(scan_in_loop))]
 
 pub(crate) mod abi;
 pub(crate) mod address;

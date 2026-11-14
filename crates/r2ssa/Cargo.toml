@@ -18,6 +18,8 @@ default = []
 # Test only: state the boundary facts unsoundly, so a reader's guard is shown to hold alone (ROADMAP D68).
 fact_mutants = []
 sleigh-config = ["dep:sleigh-config", "r2sleigh-lift/x86"]
+# Count each element a function-scale table hands out (`dense::element_visits`, ROADMAP D417).
+work-meter = []
 
 [dev-dependencies]
 r2source = { path = "../r2source", features = ["testing"] }
