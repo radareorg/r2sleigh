@@ -1780,6 +1780,10 @@ impl EngineSession {
             && let Some(reason) =
                 effect_obligation_refusal_reason(effect_obligations_of(obligation_ledger.as_ref()))
         {
+            // The frame model's typed refusal names the owner where the frame is dynamic (D355).
+            let dynamic = (sealed.trusted_ssa.as_ref())
+                .and_then(|ssa| ssa.artifact().function().frame_points()?.dynamic_frame());
+            let reason = dynamic.map_or(reason.clone(), |frame| format!("{frame}; {reason}"));
             metrics.record_phase(
                 EnginePhase::Rendering,
                 EnginePhaseStatus::Refused,

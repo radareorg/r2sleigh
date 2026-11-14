@@ -999,9 +999,8 @@ pub(crate) fn call_read_bytes(
     register_read_bytes(&reads, machine_context, interface, *carrier)
 }
 
-/// The low bytes of `carrier` a call reads, the one derivation (D283): none where its stated
-/// `CallReads` leaves the register out, else the callee's widest held lane (D266 rule 2), else
-/// `None`, the whole register.
+/// The low bytes of `carrier` a call reads (D283): none where a stated `CallReads` leaves it out,
+/// else the callee's widest held lane (D266 rule 2); `None`: the whole register.
 pub(crate) fn register_read_bytes(
     reads: &crate::call_reads::CallReads,
     machine_context: &SourceMachineContext,

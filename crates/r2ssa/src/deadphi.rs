@@ -163,9 +163,8 @@ impl ProvenProgramObservations {
     }
 }
 
-/// The bytes of each register argument its call reads (`register_read_bytes`, D283): none where
-/// a stated `CallReads` leaves it out, a held low lane, else all. Sorted by `(value, index,
-/// storage)`; O(arguments log).
+/// The bytes of each register argument its call reads (`register_read_bytes`, D283), sorted by
+/// `(value, index, storage)`; O(arguments log).
 struct HeldArgumentLanes(Vec<((ValueId, u32, crate::CanonicalStorageId), ByteMask)>);
 
 impl HeldArgumentLanes {

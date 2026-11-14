@@ -35,7 +35,7 @@ pub use control_domains::*;
 pub(crate) use declared_slots::*;
 pub use facts::*;
 pub(crate) use frame_reach::{Access, Walked, walk};
-pub use frame_reach::{CallFrameReach, FramePoints, FrameReach};
+pub use frame_reach::{CallFrameReach, DynamicFrame, FramePoints, FrameReach};
 pub(crate) use loops::*;
 pub(crate) use objects::*;
 pub(crate) use predicates::*;

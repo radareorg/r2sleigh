@@ -66,6 +66,25 @@ pub struct FramePoints {
     pub(crate) call_bases: Vec<(OpId, Option<i64>)>,
     /// Each (callee, argument position) whose upward reach the walk asked, in any round (D365).
     pub(crate) asked_reach: BTreeSet<(u64, usize)>,
+    /// The first instruction that moves the stack pointer by an amount no constant states (D355).
+    pub(crate) dynamic: Option<DynamicFrame>,
+}
+
+/// A frame no offset places past one instruction: `sub rsp, rax` after `__chkstk`, an `alloca`
+/// (D355). The frame model's typed refusal; the route prints it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DynamicFrame {
+    pub instruction: u64,
+}
+
+impl std::fmt::Display for DynamicFrame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "dynamic frame: the stack pointer at {:#x} moves by an amount no constant states",
+            self.instruction
+        )
+    }
 }
 
 impl FramePoints {
@@ -88,6 +107,12 @@ impl FramePoints {
         self.rewritten.extend(other.rewritten);
         self.by_area |= other.by_area;
         self.asked_reach.extend(other.asked_reach);
+        self.dynamic = self.dynamic.into_iter().chain(other.dynamic).min();
+    }
+
+    /// The frame's typed refusal, where the stack pointer moves by an unstated amount (D355).
+    pub const fn dynamic_frame(&self) -> Option<DynamicFrame> {
+        self.dynamic
     }
 
     /// Whether an address no offset places escapes or is accessed.
@@ -463,10 +488,8 @@ impl StackArguments {
         })
     }
 
-    /// The places a call's area covers that a load reads after that call: the callee owns its
-    /// argument area and may write it (D369). Calls are grouped by their entry-relative area, and
-    /// a group whose area covers a loaded place pays one forward closure:
-    /// `O(calls log + groups x (B + E + accesses log))`, groups being the distinct areas.
+    /// The places a call's area covers that a load reads after it, since a callee may write its
+    /// area (D369). One closure per distinct area: `O(calls log + areas x (B + E + accesses))`.
     fn rewritten(
         &self,
         func: &SSAFunction,
@@ -871,6 +894,15 @@ impl<'a> Walker<'a> {
             SSAOp::IntAdd { dst, a, b } | SSAOp::IntSub { dst, a, b } => {
                 let subtract = matches!(op, SSAOp::IntSub { .. });
                 let next = self.displaced(var, value, (*a, *b), subtract);
+                // The stack pointer moved by what no constant states: the frame is dynamic.
+                let pointer = self.func.storage_of(*dst) == self.func.storage_of(self.entry_sp);
+                if pointer && value.exact().is_some() && next.exact().is_none() {
+                    let instruction = self
+                        .func
+                        .instruction_of(id)
+                        .map(|at| DynamicFrame { instruction: at });
+                    self.points.dynamic = self.points.dynamic.into_iter().chain(instruction).min();
+                }
                 self.set(*dst, next);
             }
             SSAOp::CallUse { storage, .. } => {

@@ -436,3 +436,43 @@ fn a_stack_argument_read_back_after_its_call_stays_a_load() {
     assert!(!text.contains("r2sleigh_carrier_u64(119)"), "{text}");
     assert!(text.contains("= r2sleigh_load_u64("), "{text}");
 }
+
+/// `push rbp; mov rbp, rsp; mov eax, ecx; call chk; sub rsp, rax`: MSVC's `__chkstk` probe and an
+/// allocation of the size it returns, then a byte stored at the new `[rsp]` and read back.
+const DYNAMIC_FRAME: &[u8] = &[
+    0x55, // 1000 push rbp
+    0x48, 0x89, 0xe5, // 1001 mov rbp, rsp
+    0x89, 0xc8, // 1004 mov eax, ecx
+    0xe8, 0x25, 0x00, 0x00, 0x00, // 1006 call 0x1030
+    0x48, 0x29, 0xc4, // 100b sub rsp, rax
+    0xc6, 0x04, 0x24, 0x07, // 100e mov byte [rsp], 7
+    0x0f, 0xb6, 0x04, 0x24, // 1012 movzx eax, byte [rsp]
+    0x48, 0x89, 0xec, // 1016 mov rsp, rbp
+    0x5d, // 1019 pop rbp
+    0xc3, // 101a ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 101b padding
+    0xc3, // 1030 chk: ret
+];
+
+/// The frame below `sub rsp, rax` has no offset any constant states: the frame model names it,
+/// and a refusal says so (D355).
+#[test]
+fn a_frame_moved_by_a_returned_size_is_named_dynamic() {
+    let program = Literal::of_code(
+        DYNAMIC_FRAME,
+        &[("alloca", BASE, 0x1b), ("chk", BASE + 0x30, 1)],
+    )
+    .pe();
+    let mut open = OpenProgram::of(program);
+    let prepared = open.prepared(BASE).expect("it prepares");
+    let artifact = prepared.artifact().shared_artifact();
+    let dynamic = (artifact.function().frame_points()).and_then(|points| points.dynamic_frame());
+    assert_eq!(dynamic.map(|frame| frame.instruction), Some(BASE + 0xb));
+    // No offset places the new `[rsp]`: the store's address stays a residual, never a frame slot.
+    let text = rendered(&mut open, BASE);
+    assert!(
+        text.contains("r2sleigh_store_u8((void*)r2sleigh_residual_u64("),
+        "{text}"
+    );
+}

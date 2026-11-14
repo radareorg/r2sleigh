@@ -6493,9 +6493,8 @@ fn a_canary_inside_a_callee_write_ends_no_escape_run() {
     assert!(!text.contains("CallNotRendered"), "{text}");
 }
 
-/// `r11`'s entry value stored at entry - 0x20, between `buf` at - 0x28, which `clear` writes
-/// through, and a local at - 0x18 read after the call. No convention keeps `r11`, so nothing
-/// proves the slot is the compiler's: a C local may hold any value.
+/// `r11`'s entry value at entry - 0x20, between `buf` (- 0x28), which `clear` writes through, and
+/// a local (- 0x18) read after the call. No convention keeps `r11`, so the slot is no compiler's.
 const SCRATCH_ENTRY_SAVED: &[u8] = &[
     0x48, 0x83, 0xec, 0x28, // 1000 sub rsp, 0x28
     0x4c, 0x89, 0x5c, 0x24, 0x08, // 1004 mov [rsp + 8], r11

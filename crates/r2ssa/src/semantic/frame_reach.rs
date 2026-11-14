@@ -7,7 +7,7 @@ mod walk;
 
 use walk::Origin;
 pub(crate) use walk::{Access, Walked, walk};
-pub use walk::{FramePoint, FramePoints};
+pub use walk::{DynamicFrame, FramePoint, FramePoints};
 
 /// What one call reaches of the frame besides what has escaped.
 #[derive(Debug, Clone, PartialEq, Eq)]
