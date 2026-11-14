@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::arena::OpId;
 use crate::call_reads::StackArea;
 use crate::control::SsaWorkControl;
-use crate::dense::{Component, Condensation, Csr, DenseId, IdMap, IdVec, Node};
+use crate::dense::{Csr, DenseId, IdMap, IdVec, Node};
 use crate::frame_address::Definitions;
 use crate::function::SSAFunction;
 use crate::machine_context::SourceMachineContext;
@@ -535,10 +535,12 @@ struct WalkSite {
     reentered: bool,
     /// What a transfer spends at least and at most.
     spent: (i64, i64),
-    /// The lifted graph's blocks ascending, a [`Node`] indexing them, and each one's successors:
-    /// read by the writes reaching each block.
+    /// The lifted graph's blocks ascending, a [`Node`] indexing them, each one's successors and
+    /// predecessors, and the nodes in reverse postorder: read by the writes reaching each load.
     blocks: Vec<u64>,
     successors: Csr<Node, Node>,
+    predecessors: Csr<Node, Node>,
+    order: Vec<Node>,
 }
 
 impl WalkSite {
@@ -553,13 +555,22 @@ impl WalkSite {
             next.filter_map(|next| node_of(&blocks, next).map(|to| (from, to)))
                 .collect::<Vec<_>>()
         });
-        let successors = Csr::from_pairs(blocks.len(), edges.collect::<Vec<_>>());
+        let edges = edges.collect::<Vec<_>>();
+        let successors = Csr::from_pairs(blocks.len(), edges.iter().copied());
+        let predecessors =
+            Csr::from_pairs(blocks.len(), edges.iter().map(|(from, to)| (*to, *from)));
+        // `block_addrs` is the reverse postorder of the blocks the entry reaches.
+        let order = (func.block_addrs().iter())
+            .filter_map(|block| node_of(&blocks, *block))
+            .collect();
         Self {
             entry: func.entry,
             reentered: func.cfg().has_entry_edge(),
             spent: spent(machine),
             blocks,
             successors,
+            predecessors,
+            order,
             calls: arguments.calls,
             transfers: arguments.transfers,
         }
@@ -1077,56 +1088,221 @@ fn by_call(calls: &[CallArguments], values: &IdMap<VarId, Value>) -> Vec<CallBas
 /// A call's written area as spans from its pointer; `None` where nothing bounds it.
 type Area<'a> = Option<&'a [(i64, i64)]>;
 
-/// Places a call's written area covers that a load reads after it (D369), each call's `writes`
-/// by `site.calls`. A union dataflow; sets only grow: `O((B + E) x K log K + A log A)`.
+/// Places a call's write reaches with no exact store of theirs between (D369, D427); invariant,
+/// bound and equivalence in doc/adr-one-ir.md, "Reaching frame writes".
 fn rewritten(
     site: &WalkSite,
     (bases, writes): (&[Option<i64>], &[Area<'_>]),
     accesses: &Accesses,
 ) -> BTreeSet<i64> {
-    // Each call's area as entry-relative spans, by block and index; an unplaced call covers all.
-    let mut in_block = IdVec::from_fn(site.blocks.len(), |_: Node| Vec::<CallSpans>::new());
+    let every = || accesses.keys().copied().collect();
+    // One key per loaded place and width, sorted: a load's bit is its key's.
+    let mut keys = (accesses.iter())
+        .flat_map(|(place, list)| list.iter().map(move |access| (*place, access)))
+        .filter(|(_, access)| !access.store)
+        .map(|(place, access)| (place, access.width))
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    keys.dedup();
+    let key = |place: i64, width: u32| keys.binary_search(&(place, width)).ok();
+    let widest = keys
+        .iter()
+        .map(|(_, width)| i64::from(*width))
+        .max()
+        .unwrap_or(0);
+    let mut events = IdVec::from_fn(site.blocks.len(), |_: Node| Vec::<(usize, Event)>::new());
     let calls = (site.calls.iter()).zip(bases).zip(writes);
     for ((call, base), area) in calls.filter(|((call, _), _)| !call.tail) {
         let spans = match (base, area) {
             (None, _) => vec![(i64::MIN, i64::MAX)],
+            // The call's own push and its callee's frame lie below its pointer.
             (Some(base), Some(area)) => merged(
-                area.iter()
-                    .map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high))),
+                (area.iter())
+                    .map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high)))
+                    .chain([(i64::MIN, *base)]),
             ),
             // Unbounded, it is still this frame's: it ends at the entry pointer.
-            (Some(base), None) => merged([(*base, 0)].into_iter()),
+            (Some(base), None) => merged([(i64::MIN, *base), (*base, 0)].into_iter()),
         };
         // Default deny: a call outside the numbered blocks may rewrite every loaded place.
         let Some(node) = site.node(call.at.0) else {
-            return accesses.keys().copied().collect();
+            return every();
         };
-        in_block[node].push((call.at.1, spans));
+        events[node].push((call.at.1, Event::Write(covered(&keys, widest, &spans))));
     }
-    let entering = reaching_writes(&site.successors, &in_block);
-    // Each load against what reaches it: the block's entry and the calls before it there.
-    let mut loads = (accesses.iter())
-        .flat_map(|(place, list)| list.iter().map(move |access| (*place, access)))
-        .filter(|(_, access)| !access.store)
-        .map(|(place, access)| (access.block, access.index, place, access.width))
-        .collect::<Vec<_>>();
-    loads.sort_unstable();
+    let mut loads = Vec::new();
     let mut rewritten = BTreeSet::new();
-    for list in loads.chunk_by(|one, other| one.0 == other.0) {
-        let block = list[0].0;
-        // Default deny: a load outside the numbered blocks may read a rewritten place.
-        let Some(node) = site.node(block) else {
-            rewritten.extend(list.iter().map(|load| load.2));
+    // Only a place of one width has a store that covers every load of it.
+    let each = accesses.iter().flat_map(|(place, list)| {
+        let one = list.iter().all(|access| access.width == list[0].width);
+        list.iter().map(move |access| (*place, one, access))
+    });
+    for (place, one, access) in each {
+        let Some(at) = key(place, access.width) else {
             continue;
         };
-        rewritten_in_block(
-            list,
-            in_block[node].clone(),
-            entering[node].clone(),
-            &mut rewritten,
-        );
+        let Some(node) = site.node(access.block) else {
+            // Default deny: a load outside the numbered blocks may read a rewritten place.
+            if !access.store {
+                rewritten.insert(place);
+            }
+            continue;
+        };
+        let event = match access.store {
+            true if one => Event::Kill(at),
+            true => continue,
+            false => {
+                loads.push(place);
+                Event::Load(at, loads.len() - 1)
+            }
+        };
+        events[node].push((access.index, event));
     }
+    let solve = (site.order.as_slice(), &site.successors, &site.predecessors);
+    let Some(reached) = reaching_rewrites(solve, &mut events, keys.len()) else {
+        return every();
+    };
+    rewritten.extend((loads.iter().zip(reached)).filter_map(|(place, hit)| hit.then_some(*place)));
     rewritten
+}
+
+/// One event of a block, by its index there.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Event {
+    /// A call writes the keys set in these words.
+    Write(Vec<u64>),
+    /// An exact store of the key's place at its one width.
+    Kill(usize),
+    /// A load of the key, numbered.
+    Load(usize, usize),
+}
+
+/// The keys `spans` overlap, as words: each span's keys found by binary search and filled by
+/// word. `O(S (log P + P / 64 + W))` for `W` keys starting below a span's low end.
+fn covered(keys: &[(i64, u32)], widest: i64, spans: &[(i64, i64)]) -> Vec<u64> {
+    let mut words = vec![0u64; keys.len().div_ceil(64)];
+    for (low, high) in spans {
+        let from = keys.partition_point(|(place, _)| *place <= low.saturating_sub(widest));
+        let inside = keys.partition_point(|(place, _)| place < low);
+        let end = keys.partition_point(|(place, _)| place < high);
+        for at in from..inside {
+            let (place, width) = keys[at];
+            if place.saturating_add(i64::from(width)) > *low {
+                words[at / 64] |= 1 << (at % 64);
+            }
+        }
+        fill(&mut words, inside, end.max(inside));
+    }
+    words
+}
+
+/// Set bits `[from, to)`. `O((to - from) / 64 + 1)`.
+fn fill(words: &mut [u64], from: usize, to: usize) {
+    let mut at = from;
+    while at < to {
+        let bit = at % 64;
+        let take = (64 - bit).min(to - at);
+        let mask = match take {
+            64 => u64::MAX,
+            _ => ((1u64 << take) - 1) << bit,
+        };
+        words[at / 64] |= mask;
+        at += take;
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Blocks `reaching_rewrites` evaluated.
+    pub(crate) static REWRITE_EVALUATIONS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
+/// Whether a write reaches each numbered load with no kill between: `out = (in & !kill) | gen` on
+/// `fixpoint::sparse` in reverse postorder; `None` where the driver refuses (doc/adr-one-ir.md).
+fn reaching_rewrites(
+    (order, successors, predecessors): (&[Node], &Csr<Node, Node>, &Csr<Node, Node>),
+    events: &mut IdVec<Node, Vec<(usize, Event)>>,
+    keys: usize,
+) -> Option<Vec<bool>> {
+    let words = keys.div_ceil(64);
+    let mut loads = 0;
+    let gen_kill = IdVec::from_fn(events.len(), |node: Node| {
+        let list = &mut events[node];
+        list.sort_unstable_by_key(|(index, _)| *index);
+        let numbered = list.iter().filter_map(|(_, event)| match event {
+            Event::Load(_, number) => Some(number + 1),
+            _ => None,
+        });
+        loads = numbered.fold(loads, usize::max);
+        block_transfer(list, words)
+    });
+    let entering = |node: Node, cells: &IdMap<Node, Vec<u64>>| {
+        let mut state = vec![0u64; words];
+        for out in (predecessors.get(node).iter()).filter_map(|pred| cells.get(*pred)) {
+            or_into(&mut state, out);
+        }
+        state
+    };
+    let start = vec![0u64; words];
+    let cells = crate::fixpoint::sparse(
+        "rewritten",
+        keys,
+        order,
+        successors,
+        start,
+        |node, cells| {
+            #[cfg(test)]
+            REWRITE_EVALUATIONS.with(|count| count.set(count.get() + 1));
+            let (generated, killed) = &gen_kill[node];
+            let mut state = entering(node, cells);
+            for ((word, generated), killed) in state.iter_mut().zip(generated).zip(killed) {
+                *word = (*word & !killed) | generated;
+            }
+            state
+        },
+    )
+    .ok()?;
+    let mut reached = vec![false; loads];
+    for (node, list) in events.iter() {
+        let mut state = entering(node, &cells);
+        for (_, event) in list {
+            match event {
+                Event::Write(set) => or_into(&mut state, set),
+                Event::Kill(key) => state[key / 64] &= !(1 << (key % 64)),
+                Event::Load(key, number) => reached[*number] = bit(&state, *key),
+            }
+        }
+    }
+    Some(reached)
+}
+
+/// One block's `(gen, kill)` from its events in index order: the last write or kill of a key
+/// decides it. `O(events x words)`.
+fn block_transfer(list: &[(usize, Event)], words: usize) -> (Vec<u64>, Vec<u64>) {
+    let (mut generated, mut killed) = (vec![0u64; words], vec![0u64; words]);
+    for (_, event) in list {
+        match event {
+            Event::Write(set) => {
+                or_into(&mut generated, set);
+                (killed.iter_mut().zip(set)).for_each(|(word, set)| *word &= !set);
+            }
+            Event::Kill(key) => {
+                generated[key / 64] &= !(1 << (key % 64));
+                killed[key / 64] |= 1 << (key % 64);
+            }
+            Event::Load(..) => {}
+        }
+    }
+    (generated, killed)
+}
+
+fn or_into(words: &mut [u64], set: &[u64]) {
+    (words.iter_mut().zip(set)).for_each(|(word, set)| *word |= set);
+}
+
+fn bit(words: &[u64], key: usize) -> bool {
+    words[key / 64] >> (key % 64) & 1 == 1
 }
 
 /// The places of `stored` some call may read, given each place's widest access and each call's
@@ -1802,116 +1978,6 @@ fn non_negative(func: &SSAFunction, defs: &Definitions, var: VarId) -> bool {
     }
 }
 
-/// A call's index in its block and the entry-relative spans it may write.
-type CallSpans = (usize, Vec<(i64, i64)>);
-
-#[cfg(test)]
-thread_local! {
-    /// Spans `reaching_writes` read: each component's own, and each edge's out set once.
-    pub(crate) static REACHING_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// The merged write spans reaching each block's entry, one condensation and one union per edge:
-/// `O(B + E x K)` for `K` spans (doc/adr-one-ir.md, "Reaching frame writes").
-fn reaching_writes(
-    successors: &Csr<Node, Node>,
-    in_block: &IdVec<Node, Vec<CallSpans>>,
-) -> IdVec<Node, Vec<(i64, i64)>> {
-    let made = |block: Node| {
-        let spans = in_block[block]
-            .iter()
-            .flat_map(|(_, spans)| spans.iter().copied());
-        merged(spans)
-    };
-    let condensation = Condensation::of(successors, []);
-    let mut incoming = IdVec::from_fn(condensation.len(), |_: Component| Vec::<(i64, i64)>::new());
-    let mut entering = IdVec::from_fn(in_block.len(), |_: Node| Vec::<(i64, i64)>::new());
-    let ordered = (0..condensation.len()).rev().map(Component::from_index);
-    for component in ordered {
-        let members = condensation.members(component);
-        let mut reaching = std::mem::take(&mut incoming[component]);
-        if condensation.is_cyclic(component) {
-            for member in members {
-                reaching = union(&reaching, &made(*member));
-            }
-        }
-        #[cfg(test)]
-        REACHING_STEPS.with(|steps| steps.set(steps.get() + reaching.len() + members.len()));
-        for &member in members {
-            let leaving = union(&reaching, &made(member));
-            let out = (successors.get(member).iter())
-                .map(|next| condensation.component(*next))
-                .filter(|to| *to != component);
-            for to in out {
-                #[cfg(test)]
-                REACHING_STEPS.with(|steps| steps.set(steps.get() + leaving.len() + 1));
-                incoming[to] = union(&incoming[to], &leaving);
-            }
-            entering[member].clone_from(&reaching);
-        }
-    }
-    entering
-}
-
-/// Two merged span lists joined, merged: one linear pass, `O(|a| + |b|)`.
-fn union(a: &[(i64, i64)], b: &[(i64, i64)]) -> Vec<(i64, i64)> {
-    let mut out: Vec<(i64, i64)> = Vec::with_capacity(a.len() + b.len());
-    let (mut left, mut right) = (a.iter().peekable(), b.iter().peekable());
-    loop {
-        let next = match (left.peek(), right.peek()) {
-            (Some(l), Some(r)) if l <= r => left.next(),
-            (Some(_), Some(_)) | (None, Some(_)) => right.next(),
-            (Some(_), None) => left.next(),
-            (None, None) => break,
-        };
-        let &(low, high) = next.expect("one side holds a span");
-        match out.last_mut() {
-            Some(last) if low <= last.1 => last.1 = last.1.max(high),
-            _ => out.push((low, high)),
-        }
-    }
-    out
-}
-
-/// `known` joined with `more`; whether it grew.
-fn grow(known: &mut Vec<(i64, i64)>, more: &[(i64, i64)]) -> bool {
-    let grown = merged(known.iter().chain(more).copied());
-    let changed = grown != *known;
-    *known = grown;
-    changed
-}
-
-/// The loaded places of one block's `loads` (by index) that `live` or an earlier call there covers.
-fn rewritten_in_block(
-    loads: &[(u64, usize, i64, u32)],
-    mut calls: Vec<CallSpans>,
-    mut live: Vec<(i64, i64)>,
-    rewritten: &mut BTreeSet<i64>,
-) {
-    calls.sort_unstable_by_key(|(index, _)| *index);
-    let mut calls = calls.into_iter().peekable();
-    for (_, index, place, width) in loads {
-        let mut added = Vec::new();
-        while let Some((_, spans)) = calls.next_if(|(call, _)| call < index) {
-            added.extend(spans);
-        }
-        if !added.is_empty() {
-            grow(&mut live, &added);
-        }
-        if overlaps(&live, *place, place.saturating_add(i64::from(*width))) {
-            rewritten.insert(*place);
-        }
-    }
-}
-
-/// Whether merged `spans` share a byte with `[low, high)`. O(log n).
-fn overlaps(spans: &[(i64, i64)], low: i64, high: i64) -> bool {
-    let after = spans.partition_point(|(start, _)| *start < high);
-    after
-        .checked_sub(1)
-        .is_some_and(|index| spans[index].1 > low)
-}
-
 /// Spans sorted with overlapping and touching ones joined. O(n log n).
 fn merged(spans: impl Iterator<Item = (i64, i64)>) -> Vec<(i64, i64)> {
     let mut spans = spans.filter(|(low, high)| low < high).collect::<Vec<_>>();
@@ -1942,56 +2008,82 @@ mod tests {
         }
     }
 
-    /// `n` blocks, each edge `(from, to)`, and the calls' spans by block.
-    fn writes_over(
-        n: usize,
-        edges: &[(usize, usize)],
-        calls: &[(usize, (i64, i64))],
-    ) -> (Csr<Node, Node>, IdVec<Node, Vec<CallSpans>>) {
+    /// `n` blocks in id order, each edge `(from, to)`: successors and predecessors.
+    fn graph(n: usize, edges: &[(usize, usize)]) -> (Vec<Node>, Csr<Node, Node>, Csr<Node, Node>) {
         let pairs =
             (edges.iter()).map(|(from, to)| (Node::from_index(*from), Node::from_index(*to)));
-        let successors = Csr::from_pairs(n, pairs.collect::<Vec<_>>());
-        let mut in_block = IdVec::from_fn(n, |_: Node| Vec::<CallSpans>::new());
-        for (index, (block, span)) in calls.iter().enumerate() {
-            in_block[Node::from_index(*block)].push((index, vec![*span]));
-        }
-        (successors, in_block)
+        let successors = Csr::from_pairs(n, pairs.clone().collect::<Vec<_>>());
+        let predecessors =
+            Csr::from_pairs(n, pairs.map(|(from, to)| (to, from)).collect::<Vec<_>>());
+        (
+            (0..n).map(Node::from_index).collect(),
+            successors,
+            predecessors,
+        )
     }
 
-    /// The least fixpoint by its definition: each block's predecessors' reach, transitively.
-    fn reaching_by_paths(
+    fn one_key(key: usize, keys: usize) -> Vec<u64> {
+        let mut words = vec![0; keys.div_ceil(64)];
+        words[key / 64] |= 1 << (key % 64);
+        words
+    }
+
+    /// Whether a write of `key` reaches the event at `(block, at)` with no kill of it between, by
+    /// the definition: a search over the blocks every path crosses whole.
+    fn reached_by_paths(
         successors: &Csr<Node, Node>,
-        in_block: &IdVec<Node, Vec<CallSpans>>,
-    ) -> Vec<Vec<(i64, i64)>> {
-        let n = in_block.len();
-        let seen = (0..n)
-            .map(|start| beyond(successors, start))
-            .collect::<Vec<_>>();
-        (0..n)
-            .map(|target| {
-                let starts = (0..n).filter(|start| seen[*start][target]);
-                let made = starts.flat_map(|start| in_block[Node::from_index(start)].iter());
-                merged(made.flat_map(|(_, spans)| spans.iter().copied()))
-            })
-            .collect()
-    }
-
-    /// The blocks a path of one edge or more reaches from `start`.
-    fn beyond(successors: &Csr<Node, Node>, start: usize) -> Vec<bool> {
-        let mut seen = vec![false; successors.len()];
-        let mut stack = successors.get(Node::from_index(start)).to_vec();
-        while let Some(node) = stack.pop() {
-            if !std::mem::replace(&mut seen[node.index()], true) {
-                stack.extend(successors.get(node));
+        events: &IdVec<Node, Vec<(usize, Event)>>,
+        (block, at, key): (Node, usize, usize),
+    ) -> bool {
+        let kills = |event: &Event| matches!(event, Event::Kill(killed) if *killed == key);
+        let writes = |event: &Event| matches!(event, Event::Write(set) if set[key / 64] >> (key % 64) & 1 == 1);
+        let mut seen = vec![false; events.len()];
+        let mut pending = Vec::new();
+        for (node, list) in events.iter() {
+            // The last write or kill of the key in a block decides what leaves it.
+            let last = list
+                .iter()
+                .rev()
+                .map(|(_, event)| event)
+                .find(|event| kills(event) || writes(event));
+            if last.is_some_and(writes) {
+                pending.extend(successors.get(node).iter().copied());
+            }
+            // A write before the event in its own block, with no kill between.
+            let before = list.iter().take(at).rev().map(|(_, event)| event);
+            if node == block && before.take_while(|event| !kills(event)).any(writes) {
+                return true;
             }
         }
-        seen
+        while let Some(node) = pending.pop() {
+            let list = &events[node];
+            if node == block && !list.iter().take(at).any(|(_, event)| kills(event)) {
+                return true;
+            }
+            if !std::mem::replace(&mut seen[node.index()], true)
+                && !list.iter().any(|(_, event)| kills(event))
+            {
+                pending.extend(successors.get(node).iter().copied());
+            }
+        }
+        false
     }
 
-    /// The condensation order gives the path union on graphs with cycles, self edges, nesting
-    /// spans and blocks no edge reaches (rescans R3).
+    /// `key` and random others below `keys`.
+    fn random_set(next: &mut impl FnMut(u64) -> u64, key: usize, keys: usize) -> Vec<u64> {
+        let mut set = one_key(key, keys);
+        set.iter_mut().for_each(|word| *word |= next(u64::MAX));
+        let spare = keys % 64;
+        if let (Some(last), true) = (set.last_mut(), spare > 0) {
+            *last &= (1 << spare) - 1;
+        }
+        set
+    }
+
+    /// The fixpoint gives the kill-aware path union on graphs with cycles, self edges, blocks no
+    /// edge reaches and keys across a word boundary (D427).
     #[test]
-    fn reaching_writes_is_the_union_over_every_path() {
+    fn reaching_rewrites_is_the_kill_aware_union_over_every_path() {
         let mut seed = 0x2545_f491_4f6c_dd1d_u64;
         let mut next = move |bound: u64| {
             seed ^= seed << 13;
@@ -2001,45 +2093,71 @@ mod tests {
         };
         for _ in 0..200 {
             let n = 1 + next(12) as usize;
+            let keys = 1 + next(80) as usize;
             let edges = (0..next(24))
                 .map(|_| (next(n as u64) as usize, next(n as u64) as usize))
                 .collect::<Vec<_>>();
-            let calls = (0..next(6))
-                .map(|_| {
-                    let low = next(64) as i64 - 32;
-                    (next(n as u64) as usize, (low, low + 1 + next(16) as i64))
-                })
-                .collect::<Vec<_>>();
-            let (successors, in_block) = writes_over(n, &edges, &calls);
-            let solved = reaching_writes(&successors, &in_block);
-            let expected = reaching_by_paths(&successors, &in_block);
-            for (block, spans) in solved.iter() {
-                assert_eq!(spans, &expected[block.index()], "{edges:?} {calls:?}");
+            let (order, successors, predecessors) = graph(n, &edges);
+            let mut events = IdVec::from_fn(n, |_: Node| Vec::<(usize, Event)>::new());
+            let mut loads = Vec::new();
+            for _ in 0..next(16) {
+                let node = Node::from_index(next(n as u64) as usize);
+                let key = next(keys as u64) as usize;
+                let at = events[node].len();
+                let event = match next(3) {
+                    0 => Event::Write(random_set(&mut next, key, keys)),
+                    1 => Event::Kill(key),
+                    _ => Event::Load(key, loads.len()),
+                };
+                loads.extend(matches!(event, Event::Load(..)).then_some((node, at, key)));
+                events[node].push((at, event));
             }
+            let expected = (loads.iter())
+                .map(|load| reached_by_paths(&successors, &events, *load))
+                .collect::<Vec<_>>();
+            let solved = reaching_rewrites(
+                (order.as_slice(), &successors, &predecessors),
+                &mut events,
+                keys,
+            );
+            assert_eq!(solved, Some(expected), "{edges:?} {events:?}");
         }
     }
 
-    /// Four gapped areas, then a chain or a cycle of `n` blocks: the steps grow linearly in `n`.
-    fn reaching_steps(n: usize, cyclic: bool) -> usize {
+    /// A write and a load of one key in each of four blocks, then a chain or a cycle of `n`
+    /// blocks: the evaluations grow linearly in `n`.
+    fn rewrite_evaluations(n: usize, cyclic: bool) -> usize {
         let mut edges = (0..n - 1).map(|at| (at, at + 1)).collect::<Vec<_>>();
         if cyclic {
             edges.push((n - 1, 0));
         }
-        let calls = (0..4).map(|at| (at * n / 4, (20 * at as i64, 20 * at as i64 + 8)));
-        let (successors, in_block) = writes_over(n, &edges, &calls.collect::<Vec<_>>());
-        REACHING_STEPS.with(|steps| steps.set(0));
-        let _ = reaching_writes(&successors, &in_block);
-        REACHING_STEPS.with(std::cell::Cell::get)
+        let (order, successors, predecessors) = graph(n, &edges);
+        let mut events = IdVec::from_fn(n, |_: Node| Vec::<(usize, Event)>::new());
+        for at in 0..4 {
+            let node = Node::from_index(at * n / 4);
+            events[node].push((0, Event::Load(at, at)));
+            events[node].push((1, Event::Write(one_key(at, 4))));
+        }
+        REWRITE_EVALUATIONS.with(|count| count.set(0));
+        let solved = reaching_rewrites(
+            (order.as_slice(), &successors, &predecessors),
+            &mut events,
+            4,
+        );
+        assert!(solved.is_some());
+        REWRITE_EVALUATIONS.with(std::cell::Cell::get)
     }
 
     #[test]
-    fn reaching_writes_grows_linearly_in_the_blocks() {
+    fn reaching_rewrites_grows_linearly_in_the_blocks() {
         for cyclic in [false, true] {
-            let (one, two) = (reaching_steps(256, cyclic), reaching_steps(512, cyclic));
+            let (one, two) = (
+                rewrite_evaluations(256, cyclic),
+                rewrite_evaluations(512, cyclic),
+            );
             assert!(two < 3 * one, "cyclic {cyclic}: {one} then {two}");
         }
     }
-
     /// A compiler slot is no object an index below it spans: only a point inside it names it.
     #[test]
     fn an_indexed_point_below_a_slot_does_not_name_it() {
