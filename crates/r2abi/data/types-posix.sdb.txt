@@ -265,12 +265,14 @@ func.memcpy.arg.1=const void *,s2
 func.memcpy.arg.2=size_t,n
 func.memcpy.ret=void *
 func.memcpy.include=string.h
+func.memcpy.effects=writes(0, 2) reads(1, 2) returns(0)
 
 strlen=func
 func.strlen.args=1
 func.strlen.arg.0=const char *,s
 func.strlen.ret=size_t
 func.strlen.include=string.h
+func.strlen.effects=reads(0, str)
 
 # string.h and stdlib.h: POSIX.1-2017 (strnlen, strtok_r, strsignal, unsetenv, mkdtemp).
 strnlen=func
@@ -2421,6 +2423,7 @@ func.puts.args=1
 func.puts.arg.0=const char *,s
 func.puts.ret=int
 func.puts.include=stdio.h
+func.puts.effects=reads(0, str)
 
 remove=func
 func.remove.args=1
@@ -2562,12 +2565,14 @@ func.calloc.arg.0=size_t,nmeb
 func.calloc.arg.1=size_t,size
 func.calloc.ret=void *
 func.calloc.include=stdlib.h
+func.calloc.effects=allocates(zeroed)
 
 free=func
 func.free.args=1
 func.free.arg.0=void *,ptr
 func.free.ret=void
 func.free.include=stdlib.h
+func.free.effects=frees(0)
 
 getenv=func
 func.getenv.args=1
@@ -2592,6 +2597,7 @@ func.malloc.args=1
 func.malloc.arg.0=size_t,size
 func.malloc.ret=void *
 func.malloc.include=stdlib.h
+func.malloc.effects=allocates()
 
 mblen=func
 func.mblen.args=2
@@ -2775,6 +2781,7 @@ func.memcmp.arg.1=const void *,s2
 func.memcmp.arg.2=size_t,n
 func.memcmp.ret=int
 func.memcmp.include=string.h
+func.memcmp.effects=reads(0, 2) reads(1, 2)
 
 memmove=func
 func.memmove.args=3
@@ -2783,6 +2790,7 @@ func.memmove.arg.1=const void *,s2
 func.memmove.arg.2=size_t,n
 func.memmove.ret=void *
 func.memmove.include=string.h
+func.memmove.effects=writes(0, 2) reads(1, 2) returns(0)
 
 memset=func
 func.memset.args=3
@@ -2791,6 +2799,7 @@ func.memset.arg.1=int,c
 func.memset.arg.2=size_t,n
 func.memset.ret=void *
 func.memset.include=string.h
+func.memset.effects=writes(0, 2) returns(0)
 
 strcat=func
 func.strcat.args=2
@@ -2812,6 +2821,7 @@ func.strcmp.arg.0=const char *,s1
 func.strcmp.arg.1=const char *,s2
 func.strcmp.ret=int
 func.strcmp.include=string.h
+func.strcmp.effects=reads(0, str) reads(1, str)
 
 strcoll=func
 func.strcoll.args=2
@@ -2863,6 +2873,7 @@ func.strncpy.arg.1=const char *,src
 func.strncpy.arg.2=size_t,n
 func.strncpy.ret=char *
 func.strncpy.include=string.h
+func.strncpy.effects=writes(0, 2) reads(1, 2) returns(0)
 
 strpbrk=func
 func.strpbrk.args=2

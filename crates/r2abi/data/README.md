@@ -219,6 +219,16 @@ and `struct __dirstream` (`dirent.h`), libSystem's `struct __sFILE` (`_stdio.h`)
 `struct __sFILE` (`stdio.h`) and `struct DIR` (`dirent.h`). libSystem's `DIR` is a typedef of an
 anonymous struct, so it has no row and the name stays an opaque typedef.
 
+## Effects
+
+A cited row may state `func.<name>.effects=`, what the function does through its parameters,
+read from the standard the row cites: `reads(i, n)` and `writes(i, n)` reach from parameter `i`
+as many bytes as parameter `n` holds (`str`: up to the first zero byte), `frees(i)`,
+`allocates()` or `allocates(zeroed)` for a new heap block, `returns(i)`. The clauses are an upper
+bound: a parameter no clause names is used as a value only (malloc's size). An uncited table states
+no effects, and a row with a tail states none, since a tail argument may be written (`%n`).
+r2engine's `library.rs` reads them only through the row `Imports::bind` returns (ROADMAP D383).
+
 ## Binding
 
 A row applies only to an import, never to a body by its name (doc/adr-call-boundary.md, Refusals

@@ -6,6 +6,7 @@
 pub mod convention;
 pub mod data_model;
 pub mod declarations;
+pub mod effects;
 pub mod frames;
 pub mod library;
 pub mod loader;
@@ -24,6 +25,7 @@ pub use convention::{
 };
 pub use data_model::{CDataModel, KERNEL_MODE_CITATION};
 pub use declarations::{DataObject, Declarations};
+pub use effects::{Effect, Effects, Extent};
 pub use library::{
     CLibrary, Dll, FlagBits, FlagTest, FormatKind, Halt, Handle, Kernel, LibraryId, LibraryRow,
     LibraryRows, PrototypeId, RowResult, Tail,

@@ -2223,7 +2223,7 @@ impl<'a> Native<'a> {
     /// The callees' evidence as a capture of this body states it.
     fn evidence(&self, walked: &Walked, callees: &Callees) -> r2ssa::CalleeEvidence {
         let calls = call_sites(&walked.body, self.program);
-        let library = library_evidence(self.program, &calls);
+        let library = library_evidence(self.program, self.target.imports, &calls);
         callees.evidence(library, reentering_calls(&calls), walked.body.exits.clone())
     }
 
@@ -2811,7 +2811,7 @@ impl<'a> Native<'a> {
         capture: Capture<'_>,
     ) -> Result<(r2sleigh_lift::TrustedLiftedFunction, r2ssa::CalleeEvidence), NativeRefusal> {
         let calls = call_sites(&walked.body, self.program);
-        let library = library_evidence(self.program, &calls);
+        let library = library_evidence(self.program, self.target.imports, &calls);
         let reentering = reentering_calls(&calls);
         let snapshot = self.snapshot(walked, calls, capture)?;
         let lifted = Disassembler::lift_owned_function(snapshot)
@@ -2979,10 +2979,11 @@ fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall
     sites
 }
 
-/// The library model of each import a body calls, by the name the container
-/// binds it with; a local function is described by its body, not its name.
+/// The summary each import a body calls states through the row it binds (D383); an unbound import,
+/// or one whose row states no effects, has none.
 fn library_evidence(
     program: &dyn Program,
+    imports: &crate::imports::Imports,
     calls: &[NativeCall],
 ) -> BTreeMap<u64, r2ssa::interproc::FunctionSemanticSummary> {
     calls
@@ -2990,10 +2991,8 @@ fn library_evidence(
         .filter(|call| call.linkage == r2source::AdvisoryCalleeLinkage::Imported)
         .filter_map(|call| {
             let name = program.import_at(call.target)?;
-            Some((
-                call.target,
-                crate::library::import_summary(call.target, &name)?,
-            ))
+            let summary = crate::library::import_summary(call.target, &name, imports)?;
+            Some((call.target, summary))
         })
         .collect()
 }

@@ -184,6 +184,8 @@ pub struct LibraryRow {
     pub yields: Option<Handle>,
     /// The standard and header the row is read from; empty for a row radare2's tables state.
     pub citation: Box<str>,
+    /// What the function does through its parameters, where a cited row states it (D383).
+    pub effects: Option<crate::Effects>,
 }
 
 /// Whether a row states its function's result (doc/adr-result-side.md, "Imports with an unstated result").
@@ -423,6 +425,7 @@ impl LibraryRows {
             halts_on: None,
             yields: None,
             citation: citation.into(),
+            effects: None,
         })
     }
 
@@ -491,6 +494,10 @@ impl LibraryRows {
             halts_on: declared.halts_on,
             yields: declared.yields,
             citation: citation.into(),
+            // An uncited table states no effects: its rows cite nothing to bound them by.
+            effects: (declared.effects.as_deref())
+                .filter(|_| embedded.cited)
+                .and_then(crate::Effects::read),
         }
     }
 
@@ -607,6 +614,7 @@ struct Declared {
     /// The reference page and minimum version a Microsoft row cites.
     cite: Option<String>,
     tail: Option<String>,
+    effects: Option<String>,
     /// The first source the comment above the row names.
     source: Option<&'static str>,
 }
@@ -716,6 +724,7 @@ impl Table {
             "include" => declared.include = Some(value.to_owned()),
             "cite" => declared.cite = Some(value.to_owned()),
             "tail" => declared.tail = Some(value.to_owned()),
+            "effects" => declared.effects = Some(value.to_owned()),
             _ => {}
         }
     }
