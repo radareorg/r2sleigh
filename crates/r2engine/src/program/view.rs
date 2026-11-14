@@ -320,7 +320,8 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
     }
 
     fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
-        let ((index, halt), model) = self.import_through(slot, |row| row.halts_on)?;
+        let cited = |row: &r2abi::LibraryRow| row.halts_on.filter(|_| row.cited());
+        let ((index, halt), model) = self.import_through(slot, cited)?;
         let register = model.argument(r2abi::SlotClass::Integer, index.into());
         register.map(|register| (register, halt))
     }

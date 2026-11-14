@@ -598,9 +598,14 @@ impl Trace {
         &self.0.loads
     }
 
-    /// The walk's ends a statement proves halt (a halting transfer), and those none does (a trap).
+    /// The walk's ends a statement proves halt (a halting transfer), and those none does (a trap,
+    /// or a call through a slot whose "never" is a bound, D395).
     pub fn ends(&self) -> (usize, usize) {
-        (self.0.halting.len(), self.0.ends_unproven)
+        let walk = &self.0;
+        let bound = (walk.halting.iter())
+            .filter(|at| (walk.nevers.get(at)).is_some_and(|(never, _)| !never.proves()))
+            .count();
+        (walk.halting.len() - bound, walk.ends_unproven + bound)
     }
 
     /// The address after each call the walk ended a block at because its callee never comes back.
@@ -1284,7 +1289,11 @@ impl Walk {
         let at = ops.iter().rposition(transfer)?;
         let slot = r2ssa::loaded_target_slot(&instruction.lifted, at)?.offset;
         crate::stated::sealed_import(program, slot)?;
-        if program.exit_through(slot).is_some() {
+        // Only a proven "never" halts a transfer; a bound's call stays closed, and its tail goes on.
+        if program
+            .exit_through(slot)
+            .is_some_and(|never| never.proves())
+        {
             return Some(None);
         }
         holding(held, program.halts_on_through(slot)?).map(Some)

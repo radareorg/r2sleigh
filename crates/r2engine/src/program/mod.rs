@@ -956,7 +956,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for HaltingStubs {
         let target = walker.target(false);
         let imports = db.get::<Imports>(&()).expect("the imports ask for nothing");
         let halting = imports.stubs.iter().filter_map(|(at, stub)| {
-            let (index, halt) = target.imports.row(&stub.symbol)?.halts_on?;
+            // Only a cited row halts a call (D395).
+            let row = target.imports.row(&stub.symbol).filter(|row| row.cited())?;
+            let (index, halt) = row.halts_on?;
             let register = target
                 .convention
                 .argument(r2abi::SlotClass::Integer, index.into());

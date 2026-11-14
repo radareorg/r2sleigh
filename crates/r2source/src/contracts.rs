@@ -97,7 +97,7 @@ pub enum StackAddressBase {
 }
 
 pub const SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION: u32 = 12;
-pub const SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION: u32 = 3;
+pub const SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION: u32 = 4;
 
 /// Where one parameter or argument lives at a call boundary.
 ///
