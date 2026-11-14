@@ -617,34 +617,30 @@ struct Mode {
     /// It changes nothing the program keeps (a multi-byte `nop` forms an address and drops it), so
     /// what it reads is no read.
     inert: bool,
-    /// Registers its instruction cancels against itself (`sbb edx, edx`): no value read, only flags;
-    /// any other input is a read, and more than two drop no read (D393).
-    cancelled: [Option<CanonicalStorageId>; 2],
+    /// The inputs inside a register its instruction cancels against itself (`sbb edx, edx`), as
+    /// `ignored`'s bits: no value read; more than two cancelled registers drop no read (D393).
+    cancelled: u32,
     /// The inputs of the operation no effect of its instruction depends on (`r2il::eval::independence`).
     ignored: u32,
 }
 
-impl Mode {
-    /// Whether `input` lies inside the register the instruction cancels against itself.
-    fn cancels(self, input: &Varnode) -> bool {
+/// The inputs of `operation` inside one of `cancelled`, as bits; the first 32 inputs only.
+fn cancelled_inputs(operation: &R2ILOp, cancelled: &[CanonicalStorageId]) -> u32 {
+    if cancelled.is_empty() {
+        return 0;
+    }
+    let inside = |input: &Varnode| {
         let input = CanonicalStorageId::from_varnode(input);
-        self.cancelled.iter().flatten().any(|cancelled| {
+        cancelled.iter().any(|cancelled| {
             input.space == cancelled.space
                 && cancelled.offset <= input.offset
                 && input.offset + u64::from(input.size)
                     <= cancelled.offset + u64::from(cancelled.size)
         })
-    }
-
-    /// The inputs of `operation` the cancelled register holds, as `ignored`'s bits.
-    fn cancelled_inputs(self, operation: &R2ILOp) -> u32 {
-        if self.cancelled == [None; 2] {
-            return 0;
-        }
-        (operation.inputs().into_iter().enumerate().take(32))
-            .filter(|(_, input)| self.cancels(input))
-            .fold(0, |bits, (at, _)| bits | 1 << at)
-    }
+    };
+    (operation.inputs().into_iter().enumerate().take(32))
+        .filter(|(_, input)| inside(input))
+        .fold(0, |bits, (at, _)| bits | 1 << at)
 }
 
 /// The mode of each operation of `block`: whole instructions are weak, inert or cancelling as their
@@ -675,14 +671,17 @@ fn modes_of(block: &R2ILBlock, irregular: bool, endian: Endianness) -> Vec<Mode>
         let reads = reads_of(ops, true, endian);
         // Past two cancelled registers no read is dropped: each input of the instruction stays one.
         let cancelled = match reads.cancelled.as_slice() {
-            [one] => [Some(CanonicalStorageId::from_varnode(one)), None],
-            [one, two] => [one, two].map(|it| Some(CanonicalStorageId::from_varnode(it))),
-            _ => [None; 2],
+            cancelled @ ([_] | [_, _]) => cancelled
+                .iter()
+                .map(CanonicalStorageId::from_varnode)
+                .collect(),
+            _ => Vec::new(),
         };
-        for (mode, ignored) in modes[run..end].iter_mut().zip(reads.ignored) {
+        let each = (modes[run..end].iter_mut()).zip(reads.ignored).zip(ops);
+        for ((mode, ignored), op) in each {
             mode.weak |= weak;
             mode.inert |= inert;
-            mode.cancelled = cancelled;
+            mode.cancelled = cancelled_inputs(op, &cancelled);
             mode.ignored = ignored;
         }
         run = end;
@@ -1131,11 +1130,7 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
         if operation.reads_unstated() {
             merge(&mut live.open, self.lanes.every());
         }
-        self.read(
-            live,
-            operation,
-            mode.ignored | mode.cancelled_inputs(operation),
-        );
+        self.read(live, operation, mode.ignored | mode.cancelled);
     }
 
     /// The bytes `operation` overwrites: a call's by its callee, any other's by its output.
@@ -1396,8 +1391,9 @@ impl<B: Lifted> CallerFlow<'_, B> {
                 continue;
             }
             // An instruction cancelling a register against itself reads no value of it.
-            let read = (operation.inputs().into_iter())
-                .any(|input| covers_any(input, register) && !mode.cancels(input));
+            let read = (operation.inputs().into_iter().enumerate()).any(|(at, input)| {
+                covers_any(input, register) && (at >= 32 || mode.cancelled & 1 << at == 0)
+            });
             if read {
                 return Walked::Other;
             }

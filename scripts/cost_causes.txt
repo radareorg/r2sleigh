@@ -1,5 +1,3 @@
 # A counted rise past its budget (census.py `time` allocations, `count` instructions) stands only
-# on one line here for that exact base count: metric | case | base count | head ceiling | Dnnn | cause.
+# on one line for its base count (instructions within 1e-6): metric | case | base | head ceiling | Dnnn | cause.
 # The base count binds the line to one parent, so it excuses no later rise (ROADMAP D401).
-instructions | pumasim pdd @ 0x0023fdf0 | 36156969404 | 36686716718 | D381 | rd4-frame (bisected on Mac to the frame merge, +0.74%): every tail transfer is walked as a call at its stack pointer with its callee's statement, and a body without its pointer records tails at the entry
-instructions | bash aa; pdd @ 0x2e630 | 15473455802 | 15661594058 | D393 | rd4-frame (bisected on Mac to the frame merge, +0.86%): a cancelling instruction keeps every input but the cancelled register, so its operations' inputs are scanned (cut from +2.2% in 29c25b561)

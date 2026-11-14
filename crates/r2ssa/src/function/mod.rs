@@ -3525,36 +3525,60 @@ pub(crate) fn unpassed_call_reads(
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
 ) -> std::collections::BTreeSet<crate::graph::UseSite> {
-    // Each read is its call's, by the one link (`SsaGraph::call_reading`); one no call follows is
-    // read by none.
+    // Each read is its call's, the first call after it in its block (`SsaGraph::call_reading`):
+    // walked from each block's end, so each call's reads are built once, for the reads before it.
     let mut unpassed = std::collections::BTreeSet::new();
-    for inst in &graph.insts {
-        let Some(SSAOp::CallUse { storage, .. }) = graph.op(inst.id) else {
+    for block in &graph.blocks {
+        unpassed_in(graph, machine_context, &block.insts, &mut unpassed);
+    }
+    unpassed
+}
+
+/// What the call at `instruction` reads and every location its site's model may read.
+type SiteLists = Option<(crate::call_reads::CallReads, crate::call_reads::CallReads)>;
+
+/// [`unpassed_call_reads`] of one block's `insts`, from its end.
+fn unpassed_in(
+    graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
+    insts: &[crate::graph::InstId],
+    unpassed: &mut std::collections::BTreeSet<crate::graph::UseSite>,
+) {
+    let mut next: Option<(Option<u64>, Option<SiteLists>)> = None;
+    for inst in insts.iter().rev() {
+        let op = graph.op(*inst);
+        if let Some(call) = op.and_then(SSAOp::call) {
+            next = Some((call.instruction, None));
+            continue;
+        }
+        let Some(SSAOp::CallUse { storage, .. }) = op else {
             continue;
         };
-        let call = graph
-            .call_reading(inst.id)
-            .and_then(|call| graph.op(call)?.call());
-        let unread = match call {
-            Some(call) => machine_context.is_some_and(|context| {
-                // The site's model, the one `call_reads` built the reads from (D390).
-                let direct = (call.instruction)
-                    .and_then(|instruction| context.raw_call_site_at(instruction))
-                    .and_then(crate::semantic::direct_target_from_raw_identity);
-                let model = context.site_model(call.instruction, direct);
-                (context.call_reads(call.instruction).zip(model))
-                    .is_some_and(|(reads, model)| reads.reads_none_of(model, *storage))
-            }),
-            None => true,
-        };
+        let unread = next.as_mut().is_none_or(|(instruction, lists)| {
+            let lists = lists.get_or_insert_with(|| site_lists(machine_context, *instruction));
+            (lists.as_ref()).is_some_and(|(reads, every)| reads.reads_none_within(every, *storage))
+        });
         if unread {
             unpassed.insert(crate::graph::UseSite {
-                inst: inst.id,
+                inst: *inst,
                 input_idx: 0,
             });
         }
     }
-    unpassed
+}
+
+/// The [`SiteLists`] of the call at `instruction`, under the model `call_reads` built from (D390).
+fn site_lists(
+    machine_context: Option<&SourceMachineContext>,
+    instruction: Option<u64>,
+) -> SiteLists {
+    let context = machine_context?;
+    let direct = (instruction)
+        .and_then(|instruction| context.raw_call_site_at(instruction))
+        .and_then(crate::semantic::direct_target_from_raw_identity);
+    let model = context.site_model(instruction, direct)?;
+    let every = crate::call_reads::CallReads::every_location(model);
+    Some((context.call_reads(instruction)?, every))
 }
 
 fn block_at_mut<'a, V>(
