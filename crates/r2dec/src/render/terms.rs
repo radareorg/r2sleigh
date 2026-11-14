@@ -33,15 +33,16 @@ pub(super) struct Spell<'a> {
     pub(super) member: &'a dyn Fn(TermId) -> Option<MemberCell>,
 }
 
-/// The member a cell reads: a finished address, or a member of the struct a loaded word points at,
-/// found by stripping the member's offset from the cell's own address (D359).
+/// The member a cell reads: a finished address, or a member of the struct the word `result` points
+/// at, which the root load `word` read, as the projection states it (D359, D394).
 #[derive(Debug, Clone)]
 pub(super) enum MemberCell {
     At(CExpr),
     Through {
         pointer: CType,
         member: String,
-        offset: u64,
+        result: ValueId,
+        word: TermId,
     },
 }
 
@@ -813,38 +814,20 @@ impl Spell<'_> {
         }
     }
 
-    /// The address of the member cell `id` is: a member through a loaded word is that word, read
-    /// from `address` less the member's offset, cast to the projected struct pointer.
-    pub(super) fn member_address(&self, id: TermId, address: Option<TermId>) -> Option<CExpr> {
-        let (pointer, member, offset) = match (self.member)(id)? {
+    /// The address of the member cell `id` is: a member through a loaded word is that word cast to
+    /// the projected struct pointer.
+    pub(super) fn member_address(&self, id: TermId) -> Option<CExpr> {
+        let (pointer, member, result, word) = match (self.member)(id)? {
             MemberCell::At(at) => return Some(at),
             MemberCell::Through {
                 pointer,
                 member,
-                offset,
-            } => (pointer, member, offset),
+                result,
+                word,
+            } => (pointer, member, result, word),
         };
-        let address = address?;
-        let base = match self.arena.term(address).kind {
-            _ if offset == 0 => address,
-            TermKind::Arithmetic {
-                op: MachineArithmeticOp::Add,
-                left,
-                right,
-            } => {
-                let literal = |id: TermId| match self.arena.term(id).kind {
-                    TermKind::Literal(value) => Some(value.bits()),
-                    _ => None,
-                };
-                match (literal(left), literal(right)) {
-                    (_, Some(at)) if at == offset => left,
-                    (Some(at), _) if at == offset => right,
-                    _ => return None,
-                }
-            }
-            _ => return None,
-        };
-        let base = cast(pointer, self.term(base)?);
+        // Only the variable holding the word spells it: the load again could read a later store.
+        let base = cast(pointer, (self.bound)(result, &self.arena.term(word).ty)?);
         Some(CExpr::addr_of(CExpr::PtrMember {
             base: Box::new(base),
             member,
@@ -874,11 +857,11 @@ impl Spell<'_> {
                 Some(cast(integer(bits)?, (self.object)(object)?.base))
             }
             // A member is read by a byte copy at its address, as any cell is: no type is asserted.
-            TermKind::Load { object, address } => match self.member_address(id, Some(address)) {
+            TermKind::Load { object, address } => match self.member_address(id) {
                 Some(at) => self.load(&ty, at),
                 None => self.load_of(&ty, object, address),
             },
-            TermKind::Subscript { base, index } => match self.member_address(id, None) {
+            TermKind::Subscript { base, index } => match self.member_address(id) {
                 Some(at) => self.load(&ty, at),
                 None => self.load(&ty, self.subscript((base, index), bits / 8, None)?),
             },

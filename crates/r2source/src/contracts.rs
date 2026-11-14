@@ -97,7 +97,7 @@ pub enum StackAddressBase {
 }
 
 pub const SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION: u32 = 12;
-pub const SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION: u32 = 3;
+pub const SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION: u32 = 4;
 
 /// Where one parameter or argument lives at a call boundary.
 ///
@@ -145,6 +145,19 @@ impl SourceParameterLocation {
         match self {
             Self::Register(storage) => storage.size,
             Self::Stack { size_bytes, .. } => size_bytes,
+        }
+    }
+
+    /// A call-site slot `offset` bytes above the stack pointer before a transfer spending `spent`,
+    /// with the coordinate the callee finds it at; none on overflow (D386).
+    pub const fn before_transfer(offset: i64, size_bytes: u32, spent: i64) -> Option<Self> {
+        match offset.checked_add(spent) {
+            Some(callee_offset) => Some(Self::Stack {
+                offset,
+                size_bytes,
+                callee_offset,
+            }),
+            None => None,
         }
     }
 
@@ -468,6 +481,7 @@ impl SourceUnprovenResult {
 /// `Void` is therefore materially different from no return information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SourceFunctionReturn {
+    #[doc(alias = "default_deny_void")]
     Void,
     Register {
         storage: CanonicalStorageId,
@@ -691,6 +705,14 @@ impl SourceStackAllocationContract {
 }
 
 impl SourceReturnMechanism {
+    /// What a transfer spends of the stack pointer under `mechanism`: its return-address slot, or
+    /// nothing where the address travels in a register or no mechanism is stated (D386).
+    pub fn spent(mechanism: Option<Self>) -> i64 {
+        mechanism.map_or(0, |mechanism| {
+            i64::from(mechanism.stack_pointer_delta_bytes())
+        })
+    }
+
     pub const fn stack_offset(self) -> i64 {
         match self {
             Self::Stacked { stack_offset, .. } => stack_offset,
@@ -1778,12 +1800,30 @@ impl SourceFunctionInterface {
                     ..
                 },
             ) => {
-                let spent = self.return_mechanism.map_or(0, |mechanism| {
-                    i64::from(mechanism.stack_pointer_delta_bytes())
-                });
+                let spent = SourceReturnMechanism::spent(self.return_mechanism);
                 call_size == entry_size && call_offset.checked_add(spent) == Some(entry_offset)
             }
             _ => false,
+        }
+    }
+
+    /// `location`, a parameter named from the entry pointer, named from the call's pointer before the
+    /// transfer: the one translation of the return-address spend; none on overflow (D386).
+    pub fn at_call_site(
+        &self,
+        location: SourceParameterLocation,
+    ) -> Option<SourceParameterLocation> {
+        match location {
+            SourceParameterLocation::Stack {
+                offset,
+                size_bytes,
+                callee_offset,
+            } => Some(SourceParameterLocation::Stack {
+                offset: offset.checked_sub(SourceReturnMechanism::spent(self.return_mechanism))?,
+                size_bytes,
+                callee_offset,
+            }),
+            register => Some(register),
         }
     }
 
@@ -2832,7 +2872,6 @@ pub struct SourceCallSiteInterface {
     /// Set when this call's target hands back one of its own arguments as a
     /// format string, so a caller can count from the msgid it passed.
     format_forwarding: Option<SourceFormatForwardingRule>,
-    noreturn: bool,
     result: SourceCallResult,
     /// Exact callee-owned interface recovered from a body in the same capture.
     ///
@@ -2852,7 +2891,6 @@ pub enum SourceCallSiteInterfaceError {
     InvalidRegisterStorage,
     OverlappingRegisterStorages,
     InvalidFormatParameterIndex,
-    NoreturnWithResult,
     IncompatibleCalleeInterface,
 }
 
@@ -2865,7 +2903,6 @@ impl std::fmt::Display for SourceCallSiteInterfaceError {
             Self::InvalidRegisterStorage => "a register it names is not a register storage",
             Self::OverlappingRegisterStorages => "two of its registers overlap",
             Self::InvalidFormatParameterIndex => "its format argument is not one of its arguments",
-            Self::NoreturnWithResult => "a call that never returns states a result",
             Self::IncompatibleCalleeInterface => "the callee's own interface disagrees with it",
         };
         write!(f, "invalid source callsite interface: {why}")
@@ -2883,7 +2920,6 @@ impl SourceCallSiteInterface {
         convention: ConventionId,
         arguments: impl IntoIterator<Item = SourceCallArgumentSpec>,
         variadic: bool,
-        noreturn: bool,
         result: SourceCallResult,
     ) -> Result<Self, SourceCallSiteInterfaceError> {
         let revision_identity = revision_identity.into();
@@ -2917,9 +2953,6 @@ impl SourceCallSiteInterface {
         }) {
             return Err(SourceCallSiteInterfaceError::OverlappingRegisterStorages);
         }
-        if noreturn && !matches!(result, SourceCallResult::Void) {
-            return Err(SourceCallSiteInterfaceError::NoreturnWithResult);
-        }
         Ok(Self {
             schema_version: SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
             revision_identity: revision_identity.into_boxed_slice(),
@@ -2930,7 +2963,6 @@ impl SourceCallSiteInterface {
             variadic,
             format_parameter_rule: None,
             format_forwarding: None,
-            noreturn,
             result,
             exact_callee_interface: None,
         })
@@ -3002,7 +3034,6 @@ impl SourceCallSiteInterface {
             }
         };
         let carriers_match = self.complete
-            && !self.noreturn
             && self.convention == callee.convention()
             && self.result == expected_result
             && self.arguments.len() == callee.parameters().len()
@@ -3119,10 +3150,6 @@ impl SourceCallSiteInterface {
         self.format_parameter_rule
     }
 
-    pub const fn is_noreturn(&self) -> bool {
-        self.noreturn
-    }
-
     pub const fn result(&self) -> SourceCallResult {
         self.result
     }
@@ -3185,7 +3212,6 @@ mod tests {
             convention,
             [],
             false,
-            false,
             SourceCallResult::Void,
         )
         .expect("test callsite")
@@ -3230,7 +3256,6 @@ mod tests {
             crate::ConventionId::SysVAmd64,
             arguments,
             true,
-            false,
             SourceCallResult::Void,
         )
         .expect("variadic interface")
@@ -3251,7 +3276,6 @@ mod tests {
             true,
             crate::ConventionId::SysVAmd64,
             arguments,
-            false,
             false,
             SourceCallResult::Void,
         )
@@ -3323,7 +3347,6 @@ mod tests {
                 crate::ConventionId::SysVAmd64,
                 arguments,
                 true,
-                false,
                 SourceCallResult::Void,
             )
             .expect("variadic interface")
@@ -3454,6 +3477,46 @@ mod tests {
                 )],
             ),
             Err(SourceFunctionInterfaceError::InvalidStackSlot)
+        );
+    }
+
+    /// A call site names an entry slot below by what the transfer spends and keeps the callee's
+    /// coordinate; an offset past the address space is no location (D386).
+    #[test]
+    fn a_parameter_at_a_call_site_is_below_its_entry_offset_by_the_spend() {
+        let stack_pointer = register_storage(72, 8);
+        let slots = [SourceStackSlotSpec::new_local(
+            StackAddressBase::StackPointer,
+            stack_pointer,
+            -8,
+            8,
+        )];
+        let stacked = exact_return_interface(b"spend", ConventionId::SysVAmd64, slots)
+            .with_exact_stacked_return(0, 8, 8, 8)
+            .expect("exact stacked return");
+        let entry = |offset| SourceParameterLocation::Stack {
+            offset,
+            size_bytes: 8,
+            callee_offset: offset,
+        };
+        let at = stacked.at_call_site(entry(8)).expect("in range");
+        assert_eq!(
+            at,
+            SourceParameterLocation::before_transfer(0, 8, 8).expect("in range")
+        );
+        assert_eq!(
+            at,
+            SourceParameterLocation::Stack {
+                offset: 0,
+                size_bytes: 8,
+                callee_offset: 8
+            }
+        );
+        assert!(stacked.argument_location_matches_parameter(at, entry(8)));
+        assert_eq!(stacked.at_call_site(entry(i64::MIN)), None);
+        assert_eq!(
+            SourceParameterLocation::before_transfer(i64::MAX, 8, 8),
+            None
         );
     }
 

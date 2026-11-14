@@ -88,8 +88,9 @@ pub(super) struct Values<'a> {
     unplanned: r2ssa::dense::IdMap<InstId, CallGap>,
     /// The values a described call's statement assigns.
     results: r2ssa::dense::IdSet<ValueId>,
-    /// One declaration per callee, the first call's in address order, which every call must state.
-    prototypes: BTreeMap<String, CExternDecl>,
+    /// Each named callee's one declaration where every call stating one states it; `None` where
+    /// two disagree, so every call to it refuses (D350).
+    prototypes: BTreeMap<String, Option<CExternDecl>>,
     /// The declarations of the calls written, which the function declares.
     externs: RefCell<BTreeMap<String, CExternDecl>>,
     /// The text the capture proves at each address, which a passed constant address is.
@@ -936,27 +937,33 @@ impl<'a> Values<'a> {
         let graph = interface.type_graph()?;
         let projections = (self.artifact.aggregate_accesses())
             .projections_for_revision(interface.revision_identity())?;
-        let cells = (projections.values())
-            .filter(|projection| {
-                matches!(projection.root, r2ssa::AggregateRoot::Member(_))
-                    && projection.graph == r2ssa::GraphOf::Interface
-                    && projection.element_index.is_none()
-                    && !projection.member_indexed()
-            })
-            .filter_map(|projection| {
-                let layout = (graph.aggregates().get(projection.aggregate_id as usize))
-                    .filter(|layout| layout.id() == projection.aggregate_id)?;
-                let tag = tags.defines(layout.name(), false).then(|| layout.name())?;
-                let cell = self.roots.access(projection.access)?.canonical;
-                Some((
-                    cell,
-                    MemberCell::Through {
-                        pointer: CType::Pointer(Box::new(CType::Struct(tag.to_owned()))),
-                        member: projection.member_name.to_string(),
-                        offset: projection.byte_offset,
-                    },
-                ))
-            });
+        let cells = (projections.values()).filter_map(|projection| {
+            let r2ssa::AggregateRoot::Member(root) = projection.root else {
+                return None;
+            };
+            let whole = projection.graph == r2ssa::GraphOf::Interface
+                && projection.element_index.is_none()
+                && !projection.member_indexed();
+            let r2ssa::AggregateAccessBinding::Read { result } =
+                whole.then(|| projections.get(&root))??.binding
+            else {
+                return None;
+            };
+            let word = self.roots.access(root)?.canonical;
+            let layout = (graph.aggregates().get(projection.aggregate_id as usize))
+                .filter(|layout| layout.id() == projection.aggregate_id)?;
+            let tag = tags.defines(layout.name(), false).then(|| layout.name())?;
+            let cell = self.roots.access(projection.access)?.canonical;
+            Some((
+                cell,
+                MemberCell::Through {
+                    pointer: CType::Pointer(Box::new(CType::Struct(tag.to_owned()))),
+                    member: projection.member_name.to_string(),
+                    result,
+                    word,
+                },
+            ))
+        });
         Some(cells.collect())
     }
 
@@ -1923,29 +1930,10 @@ impl<'a> Values<'a> {
         Ok(extern_decl(plan, types, ret_type))
     }
 
-    /// Each named callee's declaration: its first call's in address order (block, then place in
-    /// the block) among the calls that state one, so no write order changes it. O(calls log callees).
-    fn decide_prototypes(&self) -> BTreeMap<String, CExternDecl> {
-        let mut first = BTreeMap::<String, ((u64, usize), CExternDecl)>::new();
-        for (inst, plan) in self.calls.iter() {
-            let (Some(at), Ok(Some(declaration))) =
-                (self.graph.inst(inst), self.declaration(inst, plan))
-            else {
-                continue;
-            };
-            let place = (
-                self.graph.block_addr_of(inst).unwrap_or(u64::MAX),
-                at.ordinal,
-            );
-            let name = declaration.name.clone();
-            if first.get(&name).is_none_or(|(held, _)| place < *held) {
-                first.insert(name, (place, declaration));
-            }
-        }
-        first
-            .into_iter()
-            .map(|(name, (_, declaration))| (name, declaration))
-            .collect()
+    /// Each named callee's declaration, joined over the calls that state one (D350).
+    fn decide_prototypes(&self) -> BTreeMap<String, Option<CExternDecl>> {
+        let stated = self.calls.iter();
+        joined(stated.filter_map(|(inst, plan)| self.declaration(inst, plan).ok().flatten()))
     }
 
     /// The call's expression: a named callee is declared as `prototypes` has it, one reached
@@ -1997,7 +1985,7 @@ impl<'a> Values<'a> {
         // One declaration describes every call to a callee, so calls that disagree cannot both be C.
         let declaration = extern_decl(plan, types, ret_type);
         match (declaration, self.prototypes.get(name)) {
-            (Some(declaration), Some(decided)) if declaration == *decided => {
+            (Some(declaration), Some(Some(decided))) if declaration == *decided => {
                 self.externs
                     .borrow_mut()
                     .entry(name.clone())
@@ -2040,7 +2028,7 @@ impl<'a> Values<'a> {
         let (inst, _) = self.terminator(addr)?;
         let plan = self.calls.get(inst)?;
         let tail = plan.tail.as_ref()?;
-        if plan.noreturn || self.calls_itself(plan) {
+        if plan.ends || self.calls_itself(plan) {
             return None;
         }
         let returns = self
@@ -2255,12 +2243,24 @@ impl<'a> Values<'a> {
         Some(assign(*name, value))
     }
 
-    /// The callees a written call declares never to return.
-    pub(super) fn never_returning(&self) -> std::collections::BTreeSet<String> {
-        (self.externs.borrow().values())
-            .filter(|declaration| declaration.noreturn)
-            .map(|declaration| declaration.name.clone())
-            .collect()
+    /// The written calls a proof says never come back, by call instruction (D384).
+    pub(super) fn never_returning(&self) -> r2ssa::dense::IdSet<InstId> {
+        let mut ends = r2ssa::dense::IdSet::new(self.graph.insts.len());
+        for (inst, plan) in self.calls.iter() {
+            if self.ends_here(inst, plan) {
+                ends.insert(inst);
+            }
+        }
+        ends
+    }
+
+    /// Whether the written call at `inst` is proven never to come back. Only a named callee says so
+    /// to C; a call through a pointer or to the own entry still ends its block at the trap.
+    fn ends_here(&self, inst: InstId, plan: &calls::CallPlan) -> bool {
+        plan.ends
+            && matches!(plan.callee, calls::Callee::Named { .. })
+            && !self.calls_itself(plan)
+            && self.rendered.borrow().get(inst.0 as usize) == Some(&true)
     }
 
     /// Whether the block at `addr` ends in a written call its callee is declared never to return from.
@@ -2270,14 +2270,8 @@ impl<'a> Values<'a> {
             return false;
         };
         let last_call = calls::last_call(self.graph, block);
-        // Only a named callee's declaration says so to C: a call through a pointer, or the
-        // function's own entry, declares nothing, so the trap still ends its block.
         last_call.is_some_and(|inst| {
-            self.calls.get(inst).is_some_and(|plan| {
-                plan.noreturn
-                    && matches!(plan.callee, calls::Callee::Named { .. })
-                    && !self.calls_itself(plan)
-            }) && self.rendered.borrow().get(inst.0 as usize) == Some(&true)
+            (self.calls.get(inst)).is_some_and(|plan| self.ends_here(inst, plan))
         })
     }
 
@@ -2309,11 +2303,7 @@ impl<'a> Values<'a> {
             Some(access) => {
                 let cell = arena.term(access.canonical);
                 let bytes = cell.ty.width_bits() / 8;
-                let at = match cell.kind {
-                    TermKind::Load { address, .. } => Some(address),
-                    _ => None,
-                };
-                let member = self.spelling(|spell| spell.member_address(access.canonical, at));
+                let member = self.spelling(|spell| spell.member_address(access.canonical));
                 let address = match cell.kind {
                     _ if member.is_some() => member?,
                     TermKind::Load { object, address } => {
@@ -3156,6 +3146,25 @@ fn variable_or_residual(
     }
 }
 
+/// Each name's declaration over `stated`: a join over none, one and disagreeing in which
+/// disagreeing absorbs, so no call order chooses one (D350). O(calls log callees).
+fn joined(stated: impl IntoIterator<Item = CExternDecl>) -> BTreeMap<String, Option<CExternDecl>> {
+    let mut decided = BTreeMap::<String, Option<CExternDecl>>::new();
+    for declaration in stated {
+        match decided.get_mut(&declaration.name) {
+            None => {
+                decided.insert(declaration.name.clone(), Some(declaration));
+            }
+            Some(held) => {
+                if held.as_ref().is_some_and(|held| *held != declaration) {
+                    *held = None;
+                }
+            }
+        }
+    }
+    decided
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::proof::UnassignedCause;
@@ -3185,5 +3194,29 @@ mod tests {
         for name in ["double", "char", "__x", "_Value", "r2sleigh_load_u8", "2x"] {
             assert!(!super::spells_an_identifier(name), "{name}");
         }
+    }
+
+    /// Two calls stating different declarations of one callee leave it none in either order, and
+    /// every call to it refuses; calls that agree declare it (D350).
+    #[test]
+    fn disagreeing_declarations_decide_none_in_any_order() {
+        use crate::ast::{CExternDecl, CType};
+        let declared = |ret: CType| CExternDecl {
+            name: "f".to_owned(),
+            ret_type: ret,
+            params: Some(Vec::new()),
+            variadic: false,
+            noreturn: false,
+            address: Some(0x1000),
+        };
+        let (void, word) = (declared(CType::Void), declared(CType::uint(64)));
+        for order in [[void.clone(), word.clone()], [word.clone(), void.clone()]] {
+            assert_eq!(super::joined(order).get("f"), Some(&None));
+        }
+        let agreed = super::joined([word.clone(), word.clone()]);
+        assert_eq!(agreed.get("f"), Some(&Some(word)));
+        // A third call that agrees with either one does not undo the disagreement.
+        let three = super::joined([void.clone(), declared(CType::uint(64)), void]);
+        assert_eq!(three.get("f"), Some(&None));
     }
 }

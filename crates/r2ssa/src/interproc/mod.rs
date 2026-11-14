@@ -24,7 +24,7 @@ use crate::{CallSiteId, SSAVar};
 
 /// The serialized interprocedural report schema: 1 is unversioned, 2 stamps the set and each
 /// function, 3 adds `SummaryAtomicOp::ReadModifyWrite`.
-pub const INTERPROC_SUMMARY_SCHEMA_VERSION: u32 = 3;
+pub const INTERPROC_SUMMARY_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterprocSummarySchemaError {
@@ -319,12 +319,16 @@ pub struct SummaryAtomicEffect {
     pub ordering: SummaryAtomicOrdering,
 }
 
+/// What a function does through one argument: `read`, `write`, `escape`, `free` proven by the body or
+/// a described callee; `assumed` only bounds an undescribed call or operation it reaches (D382).
+#[doc(alias = "default_deny_pointer")]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryArgEffect {
     pub read: bool,
     pub write: bool,
     pub escape: bool,
     pub free: bool,
+    pub assumed: bool,
 }
 
 impl SummaryArgEffect {
@@ -334,6 +338,7 @@ impl SummaryArgEffect {
         self.write |= other.write;
         self.escape |= other.escape;
         self.free |= other.free;
+        self.assumed |= other.assumed;
         *self != before
     }
 
@@ -790,25 +795,11 @@ fn mark_unknown_call_effects(
     args: Option<&[SummaryOperand]>,
 ) {
     *has_unknown_calls = true;
-    if let Some(args) = args {
-        for actual in args {
-            let SummaryOperand::Arg(idx) = actual else {
-                continue;
-            };
-            let effect = arg_effects.entry(*idx).or_default();
-            effect.mark_read();
-            effect.mark_write();
-            effect.escape = true;
-            for kind in [
-                SummaryMemoryEffectKind::Read,
-                SummaryMemoryEffectKind::Write,
-                SummaryMemoryEffectKind::Escape,
-            ] {
-                memory_effects.insert(SummaryMemoryEffect {
-                    kind,
-                    location: arg_location(*idx, None, None),
-                });
-            }
+    // An argument handed on is assumed, never proven, read or written: the callee may treat it
+    // as a number. The unknown location below states what it may touch.
+    for actual in args.into_iter().flatten() {
+        if let SummaryOperand::Arg(idx) = actual {
+            arg_effects.entry(*idx).or_default().assumed = true;
         }
     }
     for kind in [

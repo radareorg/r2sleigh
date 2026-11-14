@@ -211,6 +211,7 @@ pub struct CallEffect {
     pub overwrites: Overwrites,
     /// The bytes its callee leaves as found on every path to a return: a read after the call reads
     /// what was there before it.
+    #[doc(alias = "default_deny_kept")]
     pub kept: LaneBytes,
     /// The bytes the callee certainly reads: a cited fixed float parameter's, a read at the call
     /// (D228). An integer argument a callee may leave alone is no read.
@@ -379,6 +380,8 @@ pub struct RegisterEffect {
     pub overwrites: LaneBytes,
     /// The result bytes some path reads, forwards in a tail transfer or loses before writing them.
     pub takes: LaneBytes,
+    /// The lanes `overwrites` and `takes` index: the body's own convention's.
+    pub lanes: ResultLanes,
     /// The machine whose outermost registers `kept` indexes.
     machine: Arch,
 }
@@ -614,14 +617,33 @@ struct Mode {
     /// It changes nothing the program keeps (a multi-byte `nop` forms an address and drops it), so
     /// what it reads is no read.
     inert: bool,
-    /// Its instruction cancels a register against itself (`sbb edx, edx`), so no operation of it
-    /// reads a value of a register: only flags, from the register's bits.
-    blind: bool,
+    /// The inputs inside a register its instruction cancels against itself (`sbb edx, edx`), as
+    /// `ignored`'s bits: no value read; more than two cancelled registers drop no read (D393).
+    cancelled: u32,
     /// The inputs of the operation no effect of its instruction depends on (`r2il::eval::independence`).
     ignored: u32,
 }
 
-/// The mode of each operation of `block`: whole instructions are weak, inert or blind as their
+/// The inputs of `operation` inside one of `cancelled`, as bits; the first 32 inputs only.
+fn cancelled_inputs(operation: &R2ILOp, cancelled: &[CanonicalStorageId]) -> u32 {
+    if cancelled.is_empty() {
+        return 0;
+    }
+    let inside = |input: &Varnode| {
+        let input = CanonicalStorageId::from_varnode(input);
+        cancelled.iter().any(|cancelled| {
+            input.space == cancelled.space
+                && cancelled.offset <= input.offset
+                && input.offset + u64::from(input.size)
+                    <= cancelled.offset + u64::from(cancelled.size)
+        })
+    };
+    (operation.inputs().into_iter().enumerate().take(32))
+        .filter(|(_, input)| inside(input))
+        .fold(0, |bits, (at, _)| bits | 1 << at)
+}
+
+/// The mode of each operation of `block`: whole instructions are weak, inert or cancelling as their
 /// operations say; one the lift stamped with no instruction is a run alone, its write uncertain.
 fn modes_of(block: &R2ILBlock, irregular: bool, endian: Endianness) -> Vec<Mode> {
     let mut modes = vec![
@@ -647,10 +669,19 @@ fn modes_of(block: &R2ILBlock, irregular: bool, endian: Endianness) -> Vec<Mode>
         let inert = (ops.iter()).all(|op| !op.is_control_flow() && op.writes_only_temporaries());
         let weak = ops.iter().any(R2ILOp::is_local_branch);
         let reads = reads_of(ops, true, endian);
-        for (mode, ignored) in modes[run..end].iter_mut().zip(reads.ignored) {
+        // Past two cancelled registers no read is dropped: each input of the instruction stays one.
+        let cancelled = match reads.cancelled.as_slice() {
+            cancelled @ ([_] | [_, _]) => cancelled
+                .iter()
+                .map(CanonicalStorageId::from_varnode)
+                .collect(),
+            _ => Vec::new(),
+        };
+        let each = (modes[run..end].iter_mut()).zip(reads.ignored).zip(ops);
+        for ((mode, ignored), op) in each {
             mode.weak |= weak;
             mode.inert |= inert;
-            mode.blind |= reads.cancels_register;
+            mode.cancelled = cancelled_inputs(op, &cancelled);
             mode.ignored = ignored;
         }
         run = end;
@@ -854,6 +885,7 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
             pending,
             overwrites,
             takes,
+            lanes,
             machine: kept.machine.clone(),
         })
     }
@@ -1098,9 +1130,7 @@ impl<'p, 'a, B: Lifted> Pass<'p, 'a, B> {
         if operation.reads_unstated() {
             merge(&mut live.open, self.lanes.every());
         }
-        if !mode.blind {
-            self.read(live, operation, mode.ignored);
-        }
+        self.read(live, operation, mode.ignored | mode.cancelled);
     }
 
     /// The bytes `operation` overwrites: a call's by its callee, any other's by its output.
@@ -1361,8 +1391,10 @@ impl<B: Lifted> CallerFlow<'_, B> {
                 continue;
             }
             // An instruction cancelling a register against itself reads no value of it.
-            let read = (operation.inputs().into_iter()).any(|input| covers_any(input, register));
-            if read && !mode.blind {
+            let read = (operation.inputs().into_iter().enumerate()).any(|(at, input)| {
+                covers_any(input, register) && (at >= 32 || mode.cancelled & 1 << at == 0)
+            });
+            if read {
                 return Walked::Other;
             }
             let written = operation
@@ -1753,6 +1785,60 @@ mod tests {
         };
         assert_eq!(after(vec![compare, nibble.clone(), zero_eax()]), K::Dead);
         assert_eq!(after(vec![nibble, add]), K::Read);
+    }
+
+    /// `eor3 v0, v2, v1, v1` cancels v1 against itself and reads v2: an instruction cancelling EDX
+    /// still reads the EAX a call left (D393). Before, it read none of its inputs.
+    #[test]
+    fn an_instruction_cancelling_one_register_still_reads_another() {
+        let edx = || Varnode::register(0x10, 4);
+        let cancel = R2ILOp::IntXor {
+            dst: Varnode::unique(0x40, 4),
+            a: edx(),
+            b: edx(),
+        };
+        let add = R2ILOp::IntAdd {
+            dst: Varnode::register(0, 4),
+            a: Varnode::register(0, 4),
+            b: Varnode::unique(0x40, 4),
+        };
+        let mut block = R2ILBlock::new(0x1000, 16);
+        block.push_from(call(), 0x1000);
+        for op in [cancel, add] {
+            block.push_from(op, 0x1004);
+        }
+        block.push_from(zero_extend(), 0x1004);
+        block.push_from(ret(), 0x1008);
+        assert_eq!(integer(fates(&[block], &[], &[])), K::Read);
+    }
+
+    /// A vector self-xor lifted as two lane xors cancels both lanes; EAX beside them stays a read.
+    #[test]
+    fn an_instruction_cancelling_two_lanes_still_reads_another_register() {
+        let lane = |offset| Varnode::register(offset, 8);
+        let cancel = |offset, out| R2ILOp::IntXor {
+            dst: Varnode::unique(out, 8),
+            a: lane(offset),
+            b: lane(offset),
+        };
+        let both = R2ILOp::IntOr {
+            dst: Varnode::unique(0x50, 8),
+            a: Varnode::unique(0x40, 8),
+            b: Varnode::unique(0x48, 8),
+        };
+        let add = R2ILOp::IntAdd {
+            dst: Varnode::register(0, 8),
+            a: Varnode::register(0, 8),
+            b: Varnode::unique(0x50, 8),
+        };
+        let mut block = R2ILBlock::new(0x1000, 16);
+        block.push_from(call(), 0x1000);
+        for op in [cancel(0x1300, 0x40), cancel(0x1308, 0x48), both, add] {
+            block.push_from(op, 0x1004);
+        }
+        block.push_from(zero_extend(), 0x1004);
+        block.push_from(ret(), 0x1008);
+        assert_eq!(integer(fates(&[block], &[], &[])), K::Read);
     }
 
     /// `or eax, -1` gives -1 whatever EAX holds: it reads no value of the call's result. A mask that

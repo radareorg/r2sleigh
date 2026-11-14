@@ -983,6 +983,7 @@ fn read_width(
 }
 
 /// The low bytes of a `CallUse`'s carrier its call takes (`register_read_bytes`); `None`: whole.
+#[doc(alias = "default_deny_call_read_bytes")]
 pub(crate) fn call_read_bytes(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
@@ -1029,11 +1030,8 @@ fn call_after<'a>(
     read: crate::graph::InstId,
     machine_context: &'a SourceMachineContext,
 ) -> Option<(u64, Option<&'a crate::SourceCallSiteInterface>)> {
-    let inst = graph.inst(read)?;
-    let block = graph.block(inst.block)?;
-    let instruction = (block.insts.get(inst.ordinal..)?.iter())
-        .find_map(|inst| graph.op(*inst)?.transfer().filter(|flow| flow.call))?
-        .instruction?;
+    let call = graph.call_reading(read)?;
+    let instruction = graph.op(call)?.call()?.instruction?;
     let identity = machine_context.raw_call_site_at(instruction);
     Some((
         instruction,
@@ -1510,11 +1508,6 @@ pub(crate) fn callee_write_spans(
     let Some(machine_context) = machine_context else {
         return CalleeSpans::default();
     };
-    // What a call is handed in each position is what the site's convention puts there (D365),
-    // whatever this function itself takes.
-    let calls = (machine_context.calls())
-        .map(|model| model.arguments(r2source::convention::SlotClass::Integer))
-        .unwrap_or_default();
     let mut reaching = BTreeMap::<CanonicalStorageId, ReachingStorage<'_>>::new();
     let mut spans = Vec::new();
     let mut unbounded = BTreeSet::new();
@@ -1540,9 +1533,9 @@ pub(crate) fn callee_write_spans(
                 .unwrap_or("");
             let target =
                 target.and_then(|target| resolve_graph_literal_value(graph, Some(facts), *target));
-            let registers = target.map_or(calls, |target| {
-                machine_context.site_integer_arguments(target)
-            });
+            // What a call is handed in each position is what the site's convention puts there
+            // (D365), whatever this function itself takes.
+            let registers = machine_context.site_integer_arguments(Some(*instruction), target);
             let mut argument = |index: usize| -> Option<ValueId> {
                 let storage = *registers.get(index)?;
                 let states = reaching

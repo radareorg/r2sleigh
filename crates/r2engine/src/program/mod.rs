@@ -50,11 +50,12 @@ pub(super) struct Assembled {
     link: Option<r2il::Varnode>,
 }
 
-/// The convention chosen for one function, and the program's own where a declaration chose
-/// another (doc/adr-call-boundary.md, "S20 as built").
-pub(super) struct Chosen<'a> {
-    pub(super) assembled: &'a Assembled,
-    pub(super) program: Option<&'a Assembled>,
+/// The convention one function runs under, and whether a declaration or its language states it
+/// rather than the program's default standing for nothing stated (doc/adr-call-boundary.md, S20).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Ruled {
+    pub(super) id: r2abi::ConventionId,
+    pub(super) stated: bool,
 }
 
 /// The decoders for a program's instruction sets and what a native request needs of them.
@@ -166,42 +167,49 @@ impl Machines {
         })
     }
 
-    /// What a native request needs at `entry`: the convention its declaration states, else its
+    /// The convention the function at `entry` runs under: the one its declaration states, else its
     /// language's (Go: ABIInternal, ABI0 where pclntab marks assembly, else refused). O(log functions).
-    fn assembled_at(&self, container: &Container, entry: u64) -> Result<Chosen<'_>, Unassembled> {
+    fn convention_at(&self, container: &Container, entry: u64) -> Result<Ruled, Unassembled> {
         let declared = container.declarations.function_at(entry);
         let (arch, bits) = (&container.arch.name, container.arch.bits);
-        let stated = declared.map_or(Ok(None), |it| stated_convention(arch, bits, it.convention));
-        if let Some(id) = stated?
+        let stated =
+            declared.map_or(Ok(None), |it| stated_convention(arch, bits, it.convention))?;
+        let ruled = |held: &Result<Assembled, Unassembled>, stated| match held {
+            Ok(held) => Ok(Ruled {
+                id: held.convention,
+                stated,
+            }),
+            Err(why) => Err(why.clone()),
+        };
+        if let Some(id) = stated
             && let Some(held) = self.stated.get(&id)
         {
-            let program = self.assembled.as_ref().ok();
-            let assembled = held.as_ref().map_err(Clone::clone)?;
-            return Ok(Chosen { assembled, program });
+            return ruled(held, true);
         }
         let languages = &container.languages;
-        let chosen = match (&self.go, &self.go_abi0, languages.at(entry)) {
-            (Some(go), None, SourceLanguage::Go) => go,
+        match (&self.go, &self.go_abi0, languages.at(entry)) {
+            (Some(go), None, SourceLanguage::Go) => ruled(go, true),
             (Some(go), Some(abi0), SourceLanguage::Go) => match &languages.go_assembly {
-                Some(assembly) if assembly.contains(&entry) => abi0,
-                Some(_) => go,
-                None => self.go_unstated.as_ref().unwrap_or(abi0),
+                Some(assembly) if assembly.contains(&entry) => ruled(abi0, true),
+                Some(_) => ruled(go, true),
+                None => ruled(self.go_unstated.as_ref().unwrap_or(abi0), false),
             },
-            _ => &self.assembled,
-        };
-        let assembled = chosen.as_ref().map_err(Clone::clone)?;
-        Ok(Chosen {
-            assembled,
-            program: None,
-        })
+            // A declaration stating the default is a statement of it; no declaration is none.
+            _ => ruled(&self.assembled, stated.is_some()),
+        }
     }
 
-    /// What a native request needs under one convention, where the program assembled it.
-    fn of(&self, id: r2abi::ConventionId) -> Option<&Result<Assembled, Unassembled>> {
+    /// Every convention the program assembled: its default, Go's three, then each one stated.
+    fn conventions(&self) -> impl Iterator<Item = &Result<Assembled, Unassembled>> {
         let go = [&self.go, &self.go_abi0, &self.go_unstated];
         std::iter::once(&self.assembled)
             .chain(go.into_iter().flatten())
             .chain(self.stated.values())
+    }
+
+    /// What a native request needs under one convention, where the program assembled it.
+    fn of(&self, id: r2abi::ConventionId) -> Option<&Result<Assembled, Unassembled>> {
+        (self.conventions())
             .find(|assembled| assembled.as_ref().is_ok_and(|it| it.convention == id))
     }
 }
@@ -266,8 +274,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Convention {
     }
 }
 
-/// What a call from a function under one convention may run under: its model joined with every
-/// other the program states, as no site states its callee's. O(stated conventions x registers).
+/// What a call may run under where no site states its callee's convention: every model the program
+/// assembled, Go's among them, joined (D385). O(conventions x registers).
 pub(super) struct AnyCall;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for AnyCall {
@@ -282,21 +290,37 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for AnyCall {
             let model = model.map_err(|cycle| NativeRefusal::Prepare(format!("{cycle:?}")))?;
             (*model).clone()
         };
-        let own = held(id)?;
+        let mut joined = held(id)?;
         let machines = db.inputs().machines();
         let machines = machines.map_err(NativeRefusal::Unassembled)?;
-        if machines.stated.is_empty() {
-            return Ok(own);
-        }
-        let default = machines.assembled.as_ref().ok().map(|it| it.convention);
-        let stated = machines.stated.iter();
-        let stated = stated.filter_map(|(id, built)| built.is_ok().then_some(*id));
-        let mut joined = own;
-        for other in default.into_iter().chain(stated).filter(|it| it != id) {
+        let others = (machines.conventions()).filter_map(|built| built.as_ref().ok());
+        let others = others
+            .map(|built| built.convention)
+            .filter(|other| other != id);
+        for other in others.collect::<std::collections::BTreeSet<_>>() {
             let either = joined.either(&*held(&other)?);
             joined = std::sync::Arc::new(either.map_err(|why| NativeRefusal::Machine(why.why()))?);
         }
         Ok(joined)
+    }
+}
+
+/// The convention the function at `entry` runs under, the one answer `target_of`, the register
+/// effect and a call's site model read (D385). Held: the container decides it.
+pub(super) struct CalleeConvention;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for CalleeConvention {
+    type Key = u64;
+    type Value = Result<Ruled, Unassembled>;
+    const NAME: &'static str = "callee-convention";
+    const RETENTION: Retention = Retention::Held;
+
+    /// Work: one search of the declarations and one of the language ranges, O(log functions).
+    fn compute(db: &Db<ProgramInputs<S>>, &entry: &u64) -> Self::Value {
+        let inputs = db.inputs();
+        inputs
+            .machines()?
+            .convention_at(inputs.source.container(), entry)
     }
 }
 
@@ -558,6 +582,7 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// Start a request under the control a caller set, or a fresh one.
     fn start_request(&mut self) {
+        self.db.note_request(&self.db.inputs().control);
         self.db.inputs_mut().control = self.next.take().unwrap_or_default();
     }
 
@@ -592,8 +617,11 @@ impl<S: Source + 'static> OpenProgram<S> {
             call_boundaries: self.db.query_stats::<fates::CallBoundary>(),
             direct_sites: self.db.query_stats::<fates::DirectSites>(),
             walked: self.db.query_stats::<analysis::Walked>(),
+            owner_takes: self.db.query_stats::<slots::OwnerTakes>(),
             defects: self.db.stats().defects,
             rebuilt: self.db.stats().rebuilt,
+            frames_built: self.db.stats().frames_built + self.control().frames_built(),
+            table_seals: self.db.stats().table_seals + self.control().table_seals(),
         }
     }
 
@@ -650,8 +678,8 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         crate::body::Program::exit(&self.view(), callee, foreign)
     }
 
-    fn returns_through(&self, slot: u64) -> bool {
-        self.view().returns_through(slot)
+    fn exit_through(&self, slot: u64) -> Option<crate::discovery::Never> {
+        self.view().exit_through(slot)
     }
 
     fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
@@ -845,10 +873,13 @@ impl<S: Source> ProgramInputs<S> {
         self.machines().ok()?.assembled.as_ref().ok()
     }
 
-    /// What a native request needs for the function at `entry`.
-    fn assembled_at(&self, entry: u64) -> Result<Chosen<'_>, Unassembled> {
-        self.machines()?
-            .assembled_at(self.source.container(), entry)
+    /// What a native request needs under one convention the program assembled.
+    fn assembled_of(&self, id: r2abi::ConventionId) -> Result<&Assembled, Unassembled> {
+        let machines = self.machines()?;
+        let held = machines
+            .of(id)
+            .expect("a ruled convention is one the program assembled");
+        held.as_ref().map_err(Clone::clone)
     }
 
     /// Whether the code from here on is Thumb, as the nearest mapping symbol at or below it states.
@@ -956,7 +987,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for HaltingStubs {
         let target = walker.target(false);
         let imports = db.get::<Imports>(&()).expect("the imports ask for nothing");
         let halting = imports.stubs.iter().filter_map(|(at, stub)| {
-            let (index, halt) = target.imports.row(&stub.symbol)?.halts_on?;
+            // Only a cited row halts a call (D395).
+            let row = target.imports.row(&stub.symbol).filter(|row| row.cited())?;
+            let (index, halt) = row.halts_on?;
             let register = target
                 .convention
                 .argument(r2abi::SlotClass::Integer, index.into());

@@ -116,22 +116,32 @@ fn a_go_runtime_panic_ends_its_caller_under_the_runtime_s_contract() {
         "{go}"
     );
     let mut program = OpenProgram::of(throws().in_go(Some((1, 21)), Some(&[])).running_on(GLIBC));
-    let assumed = Some(std::collections::BTreeSet::from([
-        r2engine::discovery::Premise::GoRuntime,
-    ]));
-    for entry in [BASE, BASE + 0x40] {
+    // `runtime.throw` is the model's word; `main.f` composes it (D380).
+    let assumed = |proof| {
+        Some(r2engine::discovery::Never {
+            proof,
+            premises: std::collections::BTreeSet::from([r2engine::discovery::Premise::GoRuntime]),
+        })
+    };
+    for (entry, proof) in [
+        (BASE, r2engine::discovery::NeverProof::Composed),
+        (BASE + 0x40, r2engine::discovery::NeverProof::Declared),
+    ] {
         let info = program.function_info(entry).expect("described");
-        assert_eq!(info.noreturn, assumed, "{entry:#x}");
+        assert_eq!(info.noreturn, assumed(proof), "{entry:#x}");
     }
     let c = rendered(throws()).expect("C renders");
     assert!(!c.contains("never return"), "{c}");
-    // As C, `main.f` loops back to its entry and has no return: proven, on no premise.
+    // As C, `main.f` loops back to its entry and no walk reaches a return: a bound, never a proof (D380).
     let mut c = OpenProgram::of(throws().running_on(GLIBC));
     let noreturn =
         |c: &mut OpenProgram<Literal>, entry| c.function_info(entry).expect("described").noreturn;
     assert_eq!(
         noreturn(&mut c, BASE),
-        Some(std::collections::BTreeSet::new())
+        Some(r2engine::discovery::Never {
+            proof: r2engine::discovery::NeverProof::NoReturnReached,
+            premises: std::collections::BTreeSet::new(),
+        })
     );
     assert_eq!(noreturn(&mut c, BASE + 0x40), None);
 }
@@ -152,4 +162,29 @@ fn a_refused_convention_keeps_the_walks_facts() {
     assert_eq!((info.min_addr(), info.max_addr()), (BASE, BASE + 5));
     assert!(info.convention.is_none() && info.arguments.is_empty() && info.locals.is_empty());
     assert!(info.returns.is_none() && info.calls.is_empty());
+}
+
+/// C `keeps`: `push rbx; mov ebx, 7; call rsi; mov eax, ebx; pop rbx; ret`.
+const KEEPS_RBX: &[u8] = &[
+    0x53, // 0x00 push rbx
+    0xbb, 0x07, 0x00, 0x00, 0x00, // 0x01 mov ebx, 7
+    0xff, 0xd6, // 0x06 call rsi
+    0x89, 0xd8, // 0x08 mov eax, ebx
+    0x5b, // 0x0a pop rbx
+    0xc3, // 0x0b ret
+];
+
+/// A call through a value from C in a Go program may enter Go code, which keeps no rbx: the
+/// unstated callee's model joins Go's, so rbx past the call is no 7 (D385, default-deny).
+#[test]
+fn a_c_call_through_a_value_in_a_go_program_keeps_no_rbx() {
+    let keeps = || Literal::of_code(KEEPS_RBX, &[("keeps", BASE, 0x0c)]);
+    let c = rendered(keeps()).expect("C renders");
+    assert!(c.contains("_u32(7);"), "{c}");
+    let c_range = BASE..BASE + 0x0c;
+    let in_go = keeps()
+        .in_go(Some((1, 18)), Some(&[]))
+        .with_language_at(c_range, r2engine::program::SourceLanguage::C);
+    let go = rendered(in_go).expect("a C function in a Go program renders");
+    assert!(!go.contains("_u32(7);"), "{go}");
 }

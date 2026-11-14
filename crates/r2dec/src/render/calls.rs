@@ -44,6 +44,10 @@ pub(super) struct CallPlan {
     /// The carrier's bits where the callee's declaration states no result: every call declares
     /// it, read or not (D330).
     pub(super) carrier: Option<u32>,
+    /// Whether a statement or a composition proves this call never comes back (D379, D384).
+    pub(super) ends: bool,
+    /// Whether that proof is the callee's own, which its declaration states as `noreturn`; a
+    /// halting argument ends only this call.
     pub(super) noreturn: bool,
     /// For a tail transfer, the register and class its callee returns in; `Some(None)` where the
     /// facts state no result.
@@ -524,6 +528,11 @@ fn planned(
                 .collect()
         })
         .unwrap_or_default();
+    // The walk's closed call, where a statement or a composition proves it never comes back: a
+    // bound ends no C (D379).
+    let never = (artifact.facts().boundaries.calls.get(site))
+        .and_then(|boundary| boundary.never.as_ref())
+        .filter(|closed| closed.never.proves());
     Ok(CallPlan {
         holes,
         callee,
@@ -534,15 +543,9 @@ fn planned(
         unread: unread_result(artifact, *site, result.is_none()),
         result,
         width,
-        // C may drop what follows a call it believes never returns, so only the source says so.
-        noreturn: artifact
-            .facts()
-            .boundaries
-            .calls
-            .get(site)
-            .and_then(|boundary| boundary.noreturn)
-            == Some(true)
-            || never_comes_back(artifact, inst),
+        // C may drop what follows a call it believes never returns, so only a proof says so.
+        ends: never.is_some(),
+        noreturn: never.is_some_and(|never| never.callee),
         tail,
         declared: None,
         carrier: None,
@@ -558,29 +561,6 @@ fn unread_result(artifact: &SsaArtifact, site: r2ssa::CallSiteId, unread: bool) 
         _ => boundary.unstated_carrier?.bits,
     };
     (unread && crate::prelude::carrier(bits).is_some()).then_some(bits)
-}
-
-/// Whether the CFG gives the block the call at `inst` ends no successor: the source's block graph
-/// says its last call never comes back (r2engine's walk, from the callee's declaration).
-fn never_comes_back(artifact: &SsaArtifact, inst: InstId) -> bool {
-    let graph = artifact.graph();
-    let Some(block) = graph.inst(inst).and_then(|at| graph.block(at.block)) else {
-        return false;
-    };
-    let ends = matches!(
-        artifact
-            .function()
-            .cfg()
-            .get_block(block.addr)
-            .map(|cfg| &cfg.terminator),
-        Some(
-            r2ssa::BlockTerminator::Call {
-                fallthrough: None,
-                ..
-            } | r2ssa::BlockTerminator::IndirectCall { fallthrough: None }
-        )
-    );
-    ends && last_call(graph, block) == Some(inst)
 }
 
 /// The last call a block makes.

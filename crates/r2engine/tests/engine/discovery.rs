@@ -533,6 +533,15 @@ fn a_call_to_a_never_no_statement_makes_leaves_its_exit_unnamed() {
         derived.contains("1 call ends where no return was reached (unproven)"),
         "{derived}"
     );
+    // A bound states no `noreturn` to C (D379), and `afi` names it a bound (D380).
+    assert!(!derived.contains("noreturn"), "{derived}");
+    let mut open = OpenProgram::of(Literal::of_code(GUARDED_TRAP, &functions));
+    let info = open.function_info(BASE).expect("it is described");
+    let proof = info.noreturn.map(|never| never.proof);
+    assert_eq!(
+        proof,
+        Some(r2engine::discovery::NeverProof::NoReturnReached)
+    );
     assert!(
         declared.contains("__attribute__((noreturn)) void trap"),
         "{declared}"
@@ -583,13 +592,17 @@ fn switch_ending_at(ends: u64) -> &'static [u8] {
 }
 
 fn switch_rendered(ends: u64) -> String {
+    switch_rendered_importing(ends, "exit")
+}
+
+fn switch_rendered_importing(ends: u64, import: &str) -> String {
     let functions = [
         ("pick", BASE, 0x30),
         ("g", BASE + 0x30, 6),
         ("trap", BASE + 0x36, 2),
     ];
     let literal = Literal::of_code(switch_ending_at(ends), &functions)
-        .importing("exit")
+        .importing(import)
         .running_on(GLIBC);
     let mut open = OpenProgram::of(literal);
     let rendered = open.rendered(BASE).expect("it renders");
@@ -604,6 +617,19 @@ fn a_switch_arm_that_calls_a_cited_noreturn_names_its_exit() {
     assert!(text.contains("r2sleigh_result_u32 pick("), "{text}");
     assert!(!text.contains("<< 32"), "{text}");
     assert!(!text.contains("unproven)"), "{text}");
+}
+
+/// radare2's uncited row states `xalloc_die` noreturn; no cited source does, so the arm's call is a
+/// bound: no `noreturn` to C and no named exit (D395).
+#[test]
+fn a_switch_arm_that_calls_an_uncited_noreturn_names_no_exit() {
+    let text = switch_rendered_importing(common::STUB, "xalloc_die");
+    assert!(text.contains("xalloc_die("), "{text}");
+    assert!(!text.contains("noreturn"), "{text}");
+    assert!(
+        text.contains("1 call ends where only an uncited row says it never returns (unproven)"),
+        "{text}"
+    );
 }
 
 /// The switch of [`switch_ending_at`] whose default arm jumps to `arm` at 0x1060 (then `int3`s),
@@ -669,5 +695,6 @@ fn a_block_ended_at_an_unstated_call_names_no_exit() {
         text.contains("1 call ends where no return was reached (unproven)"),
         "{text}"
     );
+    assert!(!text.contains("noreturn"), "{text}");
     assert!(text.contains("r2sleigh_result_u32 pick("), "{text}");
 }

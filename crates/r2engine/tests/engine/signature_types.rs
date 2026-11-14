@@ -94,3 +94,42 @@ fn a_logical_shift_by_the_sign_bit_states_no_sign() {
     assert_eq!(types, [word(32)], "{text}");
     assert!(!text.contains("uint32_t arg0"), "{text}");
 }
+
+/// `f(x, g) { g(x); }`: `x` only reaches a call nothing describes.
+const HANDED_TO_UNKNOWN_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x08, // 1000 sub rsp, 8
+    0xff, 0xd6, // 1004 call rsi
+    0x48, 0x83, 0xc4, 0x08, // 1006 add rsp, 8
+    0xc3, // 100a ret
+];
+
+/// `f(x) { return crc32(0, x); }`: `x` only reaches a CALLOTHER.
+const HANDED_TO_CALLOTHER: &[u8] = &[
+    0x31, 0xc0, // 1000 xor eax, eax
+    0xf2, 0x48, 0x0f, 0x38, 0xf1, 0xc7, // 1002 crc32 rax, rdi
+    0xc3, // 1008 ret
+];
+
+/// `f(x) { return *x; }`: the body loads through `x`.
+const DEREFERENCED: &[u8] = &[
+    0x48, 0x8b, 0x07, // 1000 mov rax, [rdi]
+    0xc3, // 1003 ret
+];
+
+/// D382: an argument a call or CALLOTHER nothing describes is handed is assumed, not proven, read
+/// and written through, so it stays a word; one the body loads through is a pointer.
+#[test]
+fn an_argument_only_an_unknown_call_takes_is_no_pointer() {
+    for code in [HANDED_TO_UNKNOWN_CALL, HANDED_TO_CALLOTHER] {
+        let (text, types) = header_and_types(code);
+        assert!(
+            !matches!(types.first(), Some(CTypeLike::Pointer(_))),
+            "{types:?}\n{text}"
+        );
+    }
+    let (text, types) = header_and_types(DEREFERENCED);
+    assert!(
+        matches!(types.first(), Some(CTypeLike::Pointer(_))),
+        "{types:?}\n{text}"
+    );
+}

@@ -590,7 +590,7 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
         at,
         convention: Some(r2ssa::ConventionId::SysVAmd64),
         variadic: Some(false),
-        noreturn: Some(false),
+        never: None,
         result_kind: Some(r2ssa::SourceCallResult::register(storage)),
         unstated_lanes: Box::default(),
         unstated_carrier: None,
@@ -1258,7 +1258,6 @@ fn prepared_call_results_bind_certified_exprs_to_stable_call_ids() {
         r2source::ConventionId::SysVAmd64,
         [],
         false,
-        false,
         r2ssa::SourceCallResult::register(result_storage),
     )
     .expect("exact call-result interface");
@@ -1356,7 +1355,6 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
         true,
         r2source::ConventionId::SysVAmd64,
         [r2ssa::SourceCallArgumentSpec::new(0, parameter_storage)],
-        false,
         false,
         r2ssa::SourceCallResult::Void,
     )
@@ -2771,7 +2769,8 @@ fn pair_graph(i_at: u64, size: u64, align: u64) -> Option<r2ssa::SourceTypeGraph
 #[test]
 fn a_naturally_padded_aggregate_is_defined() {
     let graph = pair_graph(32, 64, 32).expect("a padded pair");
-    let definition = aggregate_members(&graph, "pair").expect("the natural layout");
+    let definitions = AggregateDefinitions::of(&graph, 64);
+    let definition = definitions.get("pair").expect("the natural layout");
     assert!(!definition.is_union);
     assert_eq!(definition.members.len(), 2);
     assert_eq!(definition.members[1], (CTypeLike::int(32), "i".to_owned()));
@@ -2781,10 +2780,9 @@ fn a_naturally_padded_aggregate_is_defined() {
 #[test]
 fn a_packed_aggregate_is_refused() {
     let graph = pair_graph(8, 40, 8).expect("a packed pair");
-    assert_eq!(aggregate_members(&graph, "pair"), None);
-    assert!(!aggregate_is_definable(&graph, "pair"));
+    assert_eq!(AggregateDefinitions::of(&graph, 64).get("pair"), None);
     let tail = pair_graph(32, 128, 64).expect("a pair padded past its alignment");
-    assert_eq!(aggregate_members(&tail, "pair"), None);
+    assert_eq!(AggregateDefinitions::of(&tail, 64).get("pair"), None);
 }
 
 /// Facts by instruction and direction, as the render facts hold them.

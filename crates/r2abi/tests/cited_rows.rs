@@ -101,29 +101,81 @@ fn every_row_cites_its_header() {
     }
 }
 
-/// The rows glibc's headers could speak for that are still radare2's, each with its reason; the
-/// list only falls (ROADMAP D242).
+/// Each uncited table's rows, with the most `uncited-rows.txt` may list for it: each only falls
+/// (ROADMAP D242, D395).
+const UNCITED_CAPS: [(&str, usize); 6] = [
+    ("types.sdb.txt", 99),
+    ("types-linux.sdb.txt", 13),
+    ("types-cxx.sdb.txt", 73),
+    ("types-darwin.sdb.txt", 42),
+    ("types-android.sdb.txt", 2),
+    ("types-objc.sdb.txt", 7),
+];
+
+/// Every row of an uncited table names why it is still uncited, under its table's heading; no
+/// line names a row its table lacks, and no table's list rises (ROADMAP D242, D395).
 #[test]
-fn every_uncited_glibc_facing_row_names_why() {
-    let listed = table("uncited-rows.txt")
-        .lines()
-        .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
-        .map(|line| {
-            let (name, why) = line.split_once(" | ").expect("`name | why`");
-            assert!(!why.trim().is_empty(), "`{name}` states no reason");
-            name.trim().to_owned()
-        })
-        .collect::<std::collections::BTreeSet<_>>();
-    let uncited = ["types.sdb.txt", "types-linux.sdb.txt"]
-        .iter()
-        .flat_map(|file| rows(&table(file)))
-        .map(|row| row.0)
-        .collect::<std::collections::BTreeSet<_>>();
-    let unnamed = uncited.difference(&listed).collect::<Vec<_>>();
-    assert!(unnamed.is_empty(), "uncited with no reason: {unnamed:?}");
-    let stale = listed.difference(&uncited).collect::<Vec<_>>();
-    assert!(stale.is_empty(), "listed, but no uncited row: {stale:?}");
-    assert!(listed.len() <= 116, "{} uncited rows", listed.len());
+fn every_uncited_row_names_why() {
+    let mut listed =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    let mut section = None;
+    for line in table("uncited-rows.txt").lines() {
+        if let Some(heading) = line.strip_prefix("# ")
+            && let Some((file, _)) = heading.split_once(", ")
+            && file.ends_with(".sdb.txt")
+        {
+            section = Some(file.to_owned());
+            continue;
+        }
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let (name, why) = line.split_once(" | ").expect("`name | why`");
+        assert!(!why.trim().is_empty(), "`{name}` states no reason");
+        let file = section
+            .clone()
+            .unwrap_or_else(|| panic!("`{name}` sits under no table"));
+        listed
+            .entry(file)
+            .or_default()
+            .insert(name.trim().to_owned());
+    }
+    assert_eq!(
+        listed.keys().map(String::as_str).collect::<Vec<_>>(),
+        UNCITED
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>(),
+        "each uncited table has its own list"
+    );
+    for (file, cap) in UNCITED_CAPS {
+        let names = &listed[file];
+        let rows = (rows(&table(file)).into_iter())
+            .map(|row| row.0)
+            .collect::<std::collections::BTreeSet<_>>();
+        let unnamed = rows.difference(names).collect::<Vec<_>>();
+        assert!(
+            unnamed.is_empty(),
+            "{file}: uncited with no reason: {unnamed:?}"
+        );
+        let stale = names.difference(&rows).collect::<Vec<_>>();
+        assert!(stale.is_empty(), "{file}: listed, but no row: {stale:?}");
+        assert!(names.len() <= cap, "{file}: {} uncited rows", names.len());
+    }
+}
+
+/// A row of an uncited table that states noreturn proves no "never": the row is not cited (D395).
+#[test]
+fn an_uncited_noreturn_row_is_not_cited() {
+    let rows = LibraryRows::embedded(CLibrary::Glibc);
+    let uncited = rows.rows().filter(|row| row.noreturn && !row.cited());
+    let names = uncited.map(|row| &*row.linked_name).collect::<Vec<_>>();
+    assert!(names.contains(&"xalloc_die"), "{names:?}");
+    assert!(names.contains(&"__cxa_throw"), "{names:?}");
+    let exit = rows.rows().find(|row| &*row.linked_name == "exit");
+    assert!(exit.is_some_and(|row| row.noreturn && row.cited()));
 }
 
 /// An uncited table states no tail: its rows are radare2's, `Unstated` until cited.

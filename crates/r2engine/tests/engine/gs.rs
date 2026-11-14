@@ -306,6 +306,16 @@ fn calling_terminate_on_the_current_process_does_not_return() {
     assert!(!text.contains("(5)"), "{text}");
 }
 
+/// `TerminateProcess(GetCurrentProcess(), …)` ends this call only: the import comes back for
+/// another handle, so its declaration states no `noreturn` while control ends at the call (D379).
+#[test]
+fn terminating_the_current_process_by_a_call_ends_the_call_and_declares_no_noreturn() {
+    let mut open = terminating(TERMINATES_BY_CALL);
+    let text = rendered(&mut open, BASE);
+    assert!(text.contains("TerminateProcess("), "{text}");
+    assert!(!text.contains("noreturn"), "{text}");
+}
+
 #[test]
 fn terminating_the_current_process_does_not_return() {
     let mut open = terminating(TERMINATES);

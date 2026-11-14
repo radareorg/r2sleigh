@@ -662,3 +662,93 @@ fn pddj_states_a_member_calls_declared_arity() {
         "{stripped:?}"
     );
 }
+
+/// `q = p->next; r = q + 8; p->val = r; p->next = q; return r->next`-shaped: the address `r` is held
+/// in a variable, so the second `next`'s cell address is that variable, not `q` plus a literal.
+const NEXT_THROUGH_HELD_ADDRESS: &[u8] = &[
+    0x48, 0x8b, 0x47, 0x08, // 1000 mov rax, [rdi + 8]
+    0x48, 0x8d, 0x48, 0x08, // 1004 lea rcx, [rax + 8]
+    0x48, 0x89, 0x0f, // 1008 mov [rdi], rcx
+    0x48, 0x89, 0x47, 0x08, // 100b mov [rdi + 8], rax
+    0x48, 0x8b, 0x01, // 100f mov rax, [rcx]
+    0xc3, // 1012 ret
+];
+
+/// D394: the last `next` is a member of the struct the first `next` points at, rooted at the load
+/// the projection states, though its cell's address is a held variable and no `Add` of a literal.
+#[test]
+fn a_member_through_a_loaded_pointer_reads_its_root_from_the_projection() {
+    let types = types();
+    let declared = declaring(
+        "f",
+        Some((types.node_pointer, "struct node *")),
+        types.node_pointer,
+    );
+    let mut open = program(NEXT_THROUGH_HELD_ADDRESS, declared);
+    let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
+    assert_eq!(text.matches("->next").count(), 1, "{text}");
+}
+
+/// i386 `int next_val(struct node *cur) { return cur->next->val; }`, `next` at offset 4.
+const NEXT_VAL_I386: &[u8] = &[
+    0x8b, 0x44, 0x24, 0x04, // 1000 mov eax, [esp + 4]
+    0x8b, 0x40, 0x04, // 1004 mov eax, [eax + 4]
+    0x8b, 0x00, // 1007 mov eax, [eax]
+    0xc3, // 1009 ret
+];
+
+/// D387: an i386 `struct node { int val; struct node *next; }` holds a 4-byte pointer, so C's
+/// natural layout at 32 bits reproduces the interface's layout; read at 64 bits it refuses.
+#[test]
+fn a_32_bit_struct_holding_a_pointer_is_laid_out_at_its_width() {
+    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Width};
+    let mut graph = TypeGraph::new();
+    let int = graph.add(Type::Scalar(Scalar {
+        kind: ScalarKind::Signed,
+        width: Width::Bits(32),
+        name: Some("int".to_owned()),
+    }));
+    let node = graph.reserve();
+    let node_pointer = graph.add(Type::Pointer { target: node });
+    let field = |name: &str, ty, at| Member {
+        name: Some(name.to_owned()),
+        ty,
+        offset_bits: at,
+        bit_size: None,
+    };
+    graph.define(
+        node,
+        Type::Record(Record {
+            kind: RecordKind::Struct,
+            tag: Some("node".to_owned()),
+            size_bytes: 8,
+            members: vec![field("val", int, 0), field("next", node_pointer, 32)],
+        }),
+    );
+    let prototype = Prototype {
+        name: "next_val".to_owned(),
+        parameters: vec![Parameter::new(node_pointer, "struct node *", Some("cur"))],
+        returns: "int".into(),
+        return_type: int,
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(BASE, prototype);
+    let functions = [("f", BASE, NEXT_VAL_I386.len() as u64)];
+    let literal = Literal::of_code(NEXT_VAL_I386, &functions).in_i386();
+    let mut open = OpenProgram::of(literal.with_declarations(declarations));
+    let prepared = open.prepared(BASE).expect("it prepares");
+    let shared = prepared.artifact().shared_artifact();
+    let interface = (shared.machine_context().function_interface()).expect("a declared interface");
+    let graph = interface.type_graph().expect("a type graph");
+    assert!(
+        r2types::AggregateDefinitions::of(graph, 32)
+            .get("node")
+            .is_some()
+    );
+    assert!(
+        r2types::AggregateDefinitions::of(graph, 64)
+            .get("node")
+            .is_none()
+    );
+}

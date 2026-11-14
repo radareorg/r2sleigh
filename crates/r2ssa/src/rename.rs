@@ -139,11 +139,9 @@ pub struct CallBoundaryConfig {
     /// the value the caller held going in is the value it holds coming out,
     /// which is exactly what a compiler that has seen the callee relies on.
     pub preserved_by_target: BTreeMap<u64, BTreeSet<CanonicalStorageId>>,
-    /// The convention a call to each stated callee runs under (RULING 1.6): what it keeps, the
-    /// call does not define.
-    pub convention_by_target: crate::SiteConventions,
-    /// The import slot each `CallSlot` site calls through, by instruction: its convention is the slot's (D364).
-    pub slot_by_instruction: BTreeMap<u64, u64>,
+    /// The convention each call runs under (RULING 1.6, D390): what it keeps, the call does not
+    /// define.
+    pub sites: std::sync::Arc<crate::function::SiteModels>,
     /// The carrier a direct callee's own interface names as its result, by
     /// callee entry address. A convention's unaffected list describes a callee
     /// nothing is known about, and this callee's boundary has said it hands
@@ -195,22 +193,21 @@ impl CallBoundaryConfig {
         instruction: Option<u64>,
     ) -> CalleeBoundary<'_> {
         let target = match op {
-            r2il::R2ILOp::Call { target } if target.is_ram() => target.offset,
-            _ => {
-                let slot = instruction.and_then(|at| self.slot_by_instruction.get(&at));
-                return CalleeBoundary {
-                    convention: slot
-                        .and_then(|slot| self.convention_by_target.get(slot))
-                        .map(|model| &**model),
-                    ..CalleeBoundary::default()
-                };
-            }
+            r2il::R2ILOp::Call { target } if target.is_ram() => Some(target.offset),
+            _ => None,
         };
-        CalleeBoundary {
-            target: Some(target),
-            preserved: self.preserved_by_target.get(&target),
-            convention: self.convention_by_target.get(&target).map(|model| &**model),
-            result: self.result_by_target.get(&target),
+        let convention = self.sites.stated(instruction, target);
+        match target {
+            Some(target) => CalleeBoundary {
+                target: Some(target),
+                preserved: self.preserved_by_target.get(&target),
+                convention,
+                result: self.result_by_target.get(&target),
+            },
+            None => CalleeBoundary {
+                convention,
+                ..CalleeBoundary::default()
+            },
         }
     }
 }

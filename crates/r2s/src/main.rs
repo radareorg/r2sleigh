@@ -43,6 +43,31 @@ struct Cli {
     config: Vec<String>,
 }
 
+/// The engine's work counts on stderr, one `r2s: stats: <name> <count>` line each, for the census
+/// ratchet (ROADMAP D403).
+fn report_stats(stats: r2engine::query::AnalysisStats) {
+    let queries = [
+        ("analysed", stats.analysed),
+        ("sealed", stats.sealed),
+        ("callee_reads", stats.callee_reads),
+        ("resolved", stats.resolved),
+        ("rendered", stats.rendered),
+        ("references", stats.references),
+        ("call_boundaries", stats.call_boundaries),
+        ("direct_sites", stats.direct_sites),
+        ("walked", stats.walked),
+    ];
+    for (name, query) in queries {
+        eprintln!("r2s: stats: {name}.computed {}", query.computed);
+        eprintln!("r2s: stats: {name}.reused {}", query.reused);
+        eprintln!("r2s: stats: {name}.recomputed {}", query.recomputed);
+    }
+    eprintln!("r2s: stats: defects {}", stats.defects);
+    eprintln!("r2s: stats: rebuilt {}", stats.rebuilt);
+    eprintln!("r2s: stats: frames_built {}", stats.frames_built);
+    eprintln!("r2s: stats: table_seals {}", stats.table_seals);
+}
+
 fn main() {
     allocator::install();
     let profile = allocator::profile();
@@ -76,6 +101,9 @@ fn main() {
     if let Some(script) = cli.command {
         // A quit is how a script ends, not a failure of it.
         let run = run_script(&mut session, &mut reader, &script);
+        if std::env::var_os("R2S_STATS").is_some() {
+            report_stats(session.program.analysis_stats());
+        }
         allocator::report(profile);
         std::process::exit(if run.failed { 1 } else { 0 });
     }

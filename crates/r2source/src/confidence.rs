@@ -179,6 +179,50 @@ impl Premise {
     }
 }
 
+/// What a "never comes back" rests on (doc/adr-call-boundary.md, "S30 as built"; RULING 1.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum NeverProof {
+    /// A cited row, a runtime model or the binary's debug information states it.
+    Declared,
+    /// Every end of the body is a transfer a statement or a `Composed` callee proves halts (D229).
+    Composed,
+    /// Only radare2's uncited table states it: a bound, never proof (D395).
+    Uncited,
+    /// No walk of the body reached a return: a lower bound on what it does, never proof.
+    NoReturnReached,
+}
+
+impl NeverProof {
+    /// Whether this proves the call never comes back; a bound proves nothing.
+    pub const fn proves(self) -> bool {
+        matches!(self, Self::Declared | Self::Composed)
+    }
+
+    /// The proof as answers spell it.
+    pub const fn spelled(self) -> &'static str {
+        match self {
+            Self::Declared => "declared",
+            Self::Composed => "composed",
+            Self::Uncited => "uncited row",
+            Self::NoReturnReached => "no return reached",
+        }
+    }
+}
+
+/// A call that never comes back: what states it, and what it takes for granted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Never {
+    pub proof: NeverProof,
+    pub premises: BTreeSet<Premise>,
+}
+
+impl Never {
+    /// Whether this proves the call never comes back, whatever it assumes.
+    pub const fn proves(&self) -> bool {
+        self.proof.proves()
+    }
+}
+
 /// Why a fact about a program is believed, and what that belief assumes.
 ///
 /// Ordered strongest first: by basis, then by how many premises it takes for

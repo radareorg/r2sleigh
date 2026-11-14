@@ -90,12 +90,10 @@ pub trait Program {
         None
     }
 
-    /// Whether control comes back from a call through the pointer held at
-    /// `slot` -- `call [slot]` -- where the program says what the slot holds:
-    /// an import the loader binds there, declared as never returning.
-    /// Unproven, it does.
-    fn returns_through(&self, _slot: u64) -> bool {
-        true
+    /// Why `call [slot]` never comes back: the program binds a never-returning import in `slot`.
+    /// `None` where nothing says so, and the call comes back.
+    fn exit_through(&self, _slot: u64) -> Option<crate::discovery::Never> {
+        None
     }
 
     /// Whether control comes back from interrupt `vector` on `arch`: false only where the kernel's
@@ -599,9 +597,14 @@ impl Trace {
         &self.0.loads
     }
 
-    /// The walk's ends a statement proves halt (a halting transfer), and those none does (a trap).
+    /// The walk's ends a statement proves halt (a halting transfer), and those none does (a trap,
+    /// or a call through a slot whose "never" is a bound, D395).
     pub fn ends(&self) -> (usize, usize) {
-        (self.0.halting.len(), self.0.ends_unproven)
+        let walk = &self.0;
+        let bound = (walk.halting.iter())
+            .filter(|at| (walk.nevers.get(at)).is_some_and(|(never, _)| !never.proves()))
+            .count();
+        (walk.halting.len() - bound, walk.ends_unproven + bound)
     }
 
     /// The address after each call the walk ended a block at because its callee never comes back.
@@ -731,8 +734,9 @@ struct Walk {
     unresolved: Vec<Unresolved>,
     /// Calls not known to return, by callee: each call instruction and the address after it.
     gated: BTreeMap<u64, Vec<(u64, u64)>>,
-    /// What each gated callee's "never returns" takes for granted, where it is a model's word.
-    assumed: BTreeMap<u64, crate::discovery::Never>,
+    /// Each closed call, by instruction: what says it never comes back, and whether that is the
+    /// callee's own "never" or only this site's (a halting argument).
+    nevers: BTreeMap<u64, (crate::discovery::Never, bool)>,
     /// The instructions that enter the supervisor, as the language's own
     /// user-operation table says.
     supervisor: BTreeSet<u64>,
@@ -779,7 +783,7 @@ impl Walk {
             target_contexts: BTreeMap::new(),
             unresolved: Vec::new(),
             gated: BTreeMap::new(),
-            assumed: BTreeMap::new(),
+            nevers: BTreeMap::new(),
             supervisor: BTreeSet::new(),
             context: None,
             reached: Reached::default(),
@@ -1031,6 +1035,7 @@ impl Walk {
         self.proven = kept;
         for (_, at, after) in entered {
             self.halting.remove(&at);
+            self.nevers.remove(&at);
             match after {
                 Some(after) => self.continues(Some(after), successors, program),
                 None => _ = self.stop(at, UnresolvedReason::IndirectBranch),
@@ -1142,16 +1147,13 @@ impl Walk {
                     _ if let Some(from) = halts => {
                         self.halting.insert(addr);
                         self.proven.push((from, addr, fallthrough));
+                        self.nevers.insert(addr, (declared(), false));
                     }
                     (true, _) => self.continues(fallthrough, &mut successors, program),
                     // The bytes after a call not known to return may be the next function's.
                     (false, Some(after)) => {
-                        // A "never" no statement makes is a bound, so its exit stays unnamed (D255).
-                        if let Some(never) = program.exit(target, foreign)
-                            && (!never.premises.is_empty()
-                                || never.proof == crate::discovery::NeverProof::NoReturnReached)
-                        {
-                            self.assumed.insert(target, never);
+                        if let Some(never) = program.exit(target, foreign) {
+                            self.nevers.insert(addr, (never, true));
                         }
                         self.gate(target, addr, after);
                     }
@@ -1163,6 +1165,7 @@ impl Walk {
             // program states, and what it states there never returns.
             BlockTerminator::IndirectCall { .. } if instruction.halts => {
                 self.halting.insert(addr);
+                self.nevers.insert(addr, (declared(), false));
             }
             BlockTerminator::IndirectCall { fallthrough } => {
                 let ops = &instruction.lifted.ops;
@@ -1177,14 +1180,22 @@ impl Walk {
                     self.slot_calls.insert(addr, slot);
                 }
                 let halts = self.halts_through(&instruction, &handles_before, program);
+                let exit = through.and_then(|slot| program.exit_through(slot));
                 if let Some(from) = halts {
                     // A call that terminates the current process (D229), as S17's tail jump.
                     self.halting.insert(addr);
                     self.proven.extend(from.map(|from| (from, addr, None)));
-                } else if through.is_none_or(|slot| program.returns_through(slot)) {
-                    self.continues(fallthrough, &mut successors, program)
-                } else {
+                    // Through a slot whose import never returns, the "never" is the callee's.
+                    let never = match from {
+                        Some(_) => Some((declared(), false)),
+                        None => exit.map(|never| (never, true)),
+                    };
+                    self.nevers.extend(never.map(|never| (addr, never)));
+                } else if let Some(never) = exit {
                     self.halting.insert(addr);
+                    self.nevers.insert(addr, (never, true));
+                } else {
+                    self.continues(fallthrough, &mut successors, program)
                 }
             }
             // A switch is an indirect branch through a table, so it is one
@@ -1277,7 +1288,11 @@ impl Walk {
         let at = ops.iter().rposition(transfer)?;
         let slot = r2ssa::loaded_target_slot(&instruction.lifted, at)?.offset;
         crate::stated::sealed_import(program, slot)?;
-        if !program.returns_through(slot) {
+        // Only a proven "never" halts a transfer; a bound's call stays closed, and its tail goes on.
+        if program
+            .exit_through(slot)
+            .is_some_and(|never| never.proves())
+        {
             return Some(None);
         }
         holding(held, program.halts_on_through(slot)?).map(Some)
@@ -1371,30 +1386,24 @@ impl Walk {
             blocks.push(finish(&mut parts, &ending, false));
         }
 
-        // A call still closed ends its block; one a model closed takes the model's premises.
-        // A call to a "never" only a walk derived ends a block that names no exit (D255).
+        // Each call still closed ends its block, with what says it never comes back (D384): one
+        // pass over the closed calls, each placed by binary search, `O(c log b)`.
+        let block_of = |call: u64| {
+            let after = blocks.partition_point(|block| block.lifted.addr <= call);
+            Some(blocks.get(after.checked_sub(1)?)?.lifted.addr)
+        };
         let mut exits = r2ssa::AssumedExits::default();
-        for (callee, never) in &self.assumed {
-            let calls = self
-                .gated
-                .get(callee)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            if !calls.is_empty() {
-                exits.premises.extend(never.premises.iter().copied());
-            }
-            if never.proof == crate::discovery::NeverProof::NoReturnReached {
-                let held = |(call, _): &(u64, u64)| {
-                    let after = blocks.partition_point(|block| block.lifted.addr <= *call);
-                    Some(blocks.get(after.checked_sub(1)?)?.lifted.addr)
-                };
-                exits.unproven.extend(calls.iter().filter_map(held));
-            } else {
-                exits.calls += calls.len();
+        for (call, (never, callee)) in &self.nevers {
+            if let Some(block) = block_of(*call).filter(|_| closed.contains(call)) {
+                exits.sites.push(r2ssa::ExitSite {
+                    block,
+                    never: never.clone(),
+                    callee: *callee,
+                });
             }
         }
-        exits.unproven.sort_unstable();
-        exits.unproven.dedup();
+        exits.sites.sort_unstable_by_key(|site| site.block);
+        exits.sites.dedup_by_key(|site| site.block);
         let body = Body {
             entry: self.entry,
             blocks,
@@ -1404,6 +1413,14 @@ impl Walk {
             exits,
         };
         (body, decodes)
+    }
+}
+
+/// A "never" a statement makes with no premise: a cited row, a kernel's row, a halting argument.
+fn declared() -> crate::discovery::Never {
+    crate::discovery::Never {
+        proof: crate::discovery::NeverProof::Declared,
+        premises: BTreeSet::new(),
     }
 }
 

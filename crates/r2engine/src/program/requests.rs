@@ -392,7 +392,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     pub fn function_info(&mut self, entry: u64) -> Result<super::info::FunctionInfo, String> {
         self.start_request();
         let view = self.view();
-        let noreturn = (view.exit(entry, view.thumb_at(entry))).map(|never| never.premises);
+        let noreturn = view.exit(entry, view.thumb_at(entry));
         let prepared = match self.analysed(entry) {
             Ok(prepared) => prepared,
             // A stop is the request's, and an address nothing maps names no function.

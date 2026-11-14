@@ -438,8 +438,8 @@ pub struct SourceMachineContext {
     callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
     /// What each stated callee may write of its caller's stack, by entry (D377).
     callee_writes: BTreeMap<u64, crate::call_reads::StackWrites>,
-    /// The convention each stated callee runs under, by entry; any other call runs under `calls`.
-    site_conventions: crate::SiteConventions,
+    /// The convention each call runs under (D390); any other call runs under `calls`.
+    sites: std::sync::Arc<crate::function::SiteModels>,
     /// The library models of the imports this body calls, by entry.
     callee_library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The callees a runtime model says re-enter their caller at its entry.
@@ -819,7 +819,7 @@ impl SourceMachineContext {
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
             callee_writes: BTreeMap::new(),
-            site_conventions: crate::SiteConventions::new(),
+            sites: std::sync::Arc::default(),
             callee_library: BTreeMap::new(),
             reentering_callees: BTreeSet::new(),
             unstated_imports: BTreeMap::new(),
@@ -1156,27 +1156,29 @@ impl SourceMachineContext {
         self.callee_writes = writes;
     }
 
-    pub(crate) fn set_site_conventions(&mut self, conventions: crate::SiteConventions) {
-        self.site_conventions = conventions;
+    pub(crate) fn set_site_models(&mut self, sites: std::sync::Arc<crate::function::SiteModels>) {
+        self.sites = sites;
     }
 
-    /// What a call to `target` runs under: the callee's stated model, else `calls`.
-    pub fn site_model(&self, target: u64) -> Option<&r2source::ConventionModel> {
-        (self.site_conventions.get(&target)).map_or_else(|| self.calls(), |model| Some(&**model))
+    /// What the call at `instruction` to `direct` runs under: its stated model, else `calls`.
+    pub fn site_model(
+        &self,
+        instruction: Option<u64>,
+        direct: Option<u64>,
+    ) -> Option<&r2source::ConventionModel> {
+        (self.sites.stated(instruction, direct)).or_else(|| self.calls())
     }
 
-    /// The integer argument registers a call to `target` hands, in the order the callee's own
-    /// summary numbers its reach (D365); none where no model states them.
-    pub fn site_integer_arguments(&self, target: u64) -> &[CanonicalStorageId] {
-        self.site_model(target)
+    /// The integer argument registers the call at `instruction` to `direct` hands, in the order
+    /// the callee's own summary numbers its reach (D365); none where no model states them.
+    pub fn site_integer_arguments(
+        &self,
+        instruction: Option<u64>,
+        direct: Option<u64>,
+    ) -> &[CanonicalStorageId] {
+        self.site_model(instruction, direct)
             .map(|model| model.arguments(r2source::convention::SlotClass::Integer))
             .unwrap_or_default()
-    }
-
-    /// The argument position `storage` holds in a call to `target`, by the site's model.
-    pub fn site_position(&self, target: u64, storage: CanonicalStorageId) -> Option<usize> {
-        (self.site_integer_arguments(target).iter())
-            .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
     }
 
     /// How far `target` reaches through what it is handed at `position`.
@@ -1324,8 +1326,10 @@ impl SourceMachineContext {
         };
         let interface = (identity.and_then(|identity| self.call_site_interface(identity)))
             .filter(|interface| interface.is_complete() && !interface.is_variadic());
+        // The site's own model, by the one lookup rename and the frame walk ask (D390).
+        let model = self.site_model(instruction, target.map(|target| target.offset));
         if let Some(interface) = interface {
-            let reads = crate::call_reads::CallReads::exact(interface, self.calls());
+            let reads = crate::call_reads::CallReads::exact(interface, model);
             return Some(reads.writing(writes));
         }
         // A walked callee that mints no contract still states its reads where its arity is exact.
@@ -1335,9 +1339,9 @@ impl SourceMachineContext {
         let reads = match stated {
             Some(read) => Some(crate::call_reads::CallReads::of_locations(
                 read.iter().copied(),
-                self.calls(),
+                model,
             )),
-            None => (self.calls()).map(crate::call_reads::CallReads::every_location),
+            None => model.map(crate::call_reads::CallReads::every_location),
         };
         reads.map(|reads| reads.writing(writes))
     }
@@ -2897,7 +2901,7 @@ mod tests {
     }
 
     #[test]
-    fn callsite_interface_rejects_bad_order_overlap_and_noreturn_result() {
+    fn callsite_interface_rejects_bad_order_and_overlap() {
         let identity = SourceCallSiteIdentity::new(
             0x1000,
             CanonicalStorageId {
@@ -2914,7 +2918,6 @@ mod tests {
                 r2source::ConventionId::SysVAmd64,
                 [SourceCallArgumentSpec::new(1, register_storage(0, 8))],
                 false,
-                false,
                 SourceCallResult::Void,
             ),
             Err(SourceCallSiteInterfaceError::InvalidArgumentOrder)
@@ -2930,23 +2933,9 @@ mod tests {
                     SourceCallArgumentSpec::new(1, register_storage(4, 8)),
                 ],
                 false,
-                false,
                 SourceCallResult::Void,
             ),
             Err(SourceCallSiteInterfaceError::OverlappingRegisterStorages)
-        );
-        assert_eq!(
-            SourceCallSiteInterface::new(
-                b"call-revision".to_vec(),
-                identity,
-                true,
-                r2source::ConventionId::SysVAmd64,
-                [],
-                false,
-                true,
-                SourceCallResult::register(register_storage(0, 8)),
-            ),
-            Err(SourceCallSiteInterfaceError::NoreturnWithResult)
         );
     }
 
@@ -3224,7 +3213,8 @@ impl CalleeStatement {
                 Self {
                     reads: (matches!(arity, crate::SourceArity::Exact(_))
                         && !interface.is_variadic())
-                    .then(|| crate::call_reads::CallReads::callee_locations(interface)),
+                    .then(|| crate::call_reads::CallReads::callee_locations(interface))
+                    .flatten(),
                     arity,
                     result: match interface.return_kind() {
                         crate::SourceFunctionReturn::Void => Some(crate::SourceCallResult::Void),

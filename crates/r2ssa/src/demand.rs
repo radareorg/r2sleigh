@@ -139,10 +139,10 @@ pub(crate) fn exits_are_named_beside(
         let named = match &block.terminator {
             BlockTerminator::Return => true,
             BlockTerminator::ConditionalExit { .. } => false,
-            // A call ending on a "never" no statement makes may come back (D255).
+            // A closed call ends the body only where a statement proves its "never" (D255, D384).
             BlockTerminator::Call { .. } | BlockTerminator::IndirectCall { .. } => {
-                let unproven = &function.assumed_exits().unproven;
-                (successors.is_empty() && unproven.binary_search(&block.addr).is_err()) || !leaves
+                let site = function.assumed_exits().site(block.addr);
+                (successors.is_empty() && site.is_some_and(|site| site.never.proves())) || !leaves
             }
             _ => !leaves,
         };
@@ -372,7 +372,8 @@ mod tests {
         }));
     }
 
-    /// A call that ends the body names its exit only where no walk alone derived its "never" (D255).
+    /// A call that ends the body names its exit only where a statement proves its "never": none,
+    /// or one only a walk derived, names none (D255, D384).
     #[test]
     fn a_call_ending_on_an_unproven_never_names_no_exit() {
         let block = R2ILBlock {
@@ -397,12 +398,26 @@ mod tests {
         let mut function = built.expect("ssa");
         let graph = SsaGraph::from_function(&function);
         let live_out = FunctionLiveOut::compute(&function, &graph, &[]);
-        assert!(exits_are_named(&function, &live_out));
-        function.record_assumed_exits(&crate::AssumedExits {
-            unproven: vec![0x1000],
-            ..crate::AssumedExits::default()
-        });
         assert!(!exits_are_named(&function, &live_out));
+        let closed = |proof| crate::AssumedExits {
+            sites: vec![crate::ExitSite {
+                block: 0x1000,
+                never: r2source::Never {
+                    proof,
+                    premises: BTreeSet::new(),
+                },
+                callee: true,
+            }],
+        };
+        function.record_assumed_exits(&closed(r2source::NeverProof::Declared));
+        assert!(exits_are_named(&function, &live_out));
+        for bound in [
+            r2source::NeverProof::NoReturnReached,
+            r2source::NeverProof::Uncited,
+        ] {
+            function.record_assumed_exits(&closed(bound));
+            assert!(!exits_are_named(&function, &live_out));
+        }
     }
 
     /// The target of a jump out of the body may take RDX as an argument, and

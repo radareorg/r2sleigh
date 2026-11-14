@@ -38,15 +38,9 @@ pub(crate) struct LocalStructArtifacts {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct SemanticTypeProjection {
-    pub(crate) return_type_hint: Option<CTypeLike>,
-    pub(crate) pointer_param_indices: BTreeSet<usize>,
     pub(crate) out_param_indices: BTreeSet<usize>,
     pub(crate) out_param_evidence: BTreeMap<usize, BTreeSet<OutParamCertificateEvidence>>,
     pub(crate) out_param_sources: BTreeMap<usize, BTreeSet<OutParamCertificateSource>>,
-    pub(crate) param_type_hints: BTreeMap<usize, CTypeLike>,
-    pub(crate) param_name_hints: BTreeMap<usize, String>,
-    pub(crate) slot_field_profiles: BTreeMap<usize, BTreeMap<u64, String>>,
-    pub(crate) refused_param_projections: BTreeMap<usize, String>,
 }
 
 /// What the interprocedural summary proves about this function's parameters.
@@ -59,11 +53,6 @@ impl SemanticTypeProjection {
     pub(crate) fn from_inputs(summary_view: &InterprocSummaryView) -> Self {
         let mut projection = Self::default();
         if let Some(summary) = summary_view.root_summary() {
-            for idx in 0..=summary.arg_effects.keys().copied().max().unwrap_or(0) {
-                if summary_suggests_pointer_param(summary, idx) {
-                    projection.pointer_param_indices.insert(idx);
-                }
-            }
             for (effect_index, (idx, effect)) in summary.arg_effects.iter().enumerate() {
                 if effect.write {
                     mark_projection_out_param(
@@ -83,7 +72,6 @@ impl SemanticTypeProjection {
                 if effect.kind == r2ssa::SummaryMemoryEffectKind::Write
                     && let r2ssa::SummaryMemoryRegion::Arg { index } = effect.location.region
                 {
-                    projection.pointer_param_indices.insert(index);
                     mark_projection_out_param(
                         &mut projection,
                         index,
@@ -99,7 +87,6 @@ impl SemanticTypeProjection {
             }
             for (effect_index, effect) in summary.transfer_effects.iter().enumerate() {
                 if let r2ssa::SummaryMemoryRegion::Arg { index } = effect.dst.region {
-                    projection.pointer_param_indices.insert(index);
                     mark_projection_out_param(
                         &mut projection,
                         index,
@@ -112,25 +99,9 @@ impl SemanticTypeProjection {
                         ),
                     );
                 }
-                if let r2ssa::SummaryMemoryRegion::Arg { index } = effect.src.region {
-                    projection.pointer_param_indices.insert(index);
-                }
-            }
-            for effect in &summary.lifetime_effects {
-                projection.pointer_param_indices.insert(effect.arg);
-            }
-            for effect in &summary.sync_effects {
-                projection.pointer_param_indices.insert(effect.arg);
             }
         }
         projection
-    }
-
-    pub(crate) fn refusal_warnings(&self) -> Vec<String> {
-        self.refused_param_projections
-            .iter()
-            .map(|(idx, reason)| format!("semantic type projection refused arg{idx}: {reason}"))
-            .collect()
     }
 }
 
@@ -163,7 +134,6 @@ pub(crate) fn mark_projection_out_param(
         .entry(index)
         .or_default()
         .insert(source);
-    projection.refused_param_projections.remove(&index);
 }
 
 pub(crate) fn interproc_out_param_source(
@@ -178,28 +148,6 @@ pub(crate) fn interproc_out_param_source(
         param_index,
         effect_index,
     }
-}
-
-pub(crate) fn summary_suggests_pointer_param(
-    summary: &FunctionSemanticSummary,
-    idx: usize,
-) -> bool {
-    summary
-        .arg_effects
-        .get(&idx)
-        .is_some_and(|effect| effect.read || effect.write || effect.escape || effect.free)
-        || summary.memory_effects.iter().any(|effect| {
-            matches!(effect.location.region, SummaryMemoryRegion::Arg { index } if index == idx)
-        })
-        || summary.transfer_effects.iter().any(|effect| {
-            matches!(effect.dst.region, r2ssa::SummaryMemoryRegion::Arg { index } if index == idx)
-                || matches!(effect.src.region, r2ssa::SummaryMemoryRegion::Arg { index } if index == idx)
-        })
-        || summary
-            .lifetime_effects
-            .iter()
-            .any(|effect| effect.arg == idx)
-        || summary.sync_effects.iter().any(|effect| effect.arg == idx)
 }
 
 /// An inferred type with C's own integer names kept as names, so a declared

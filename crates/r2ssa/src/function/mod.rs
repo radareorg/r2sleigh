@@ -329,6 +329,7 @@ impl ArtifactLiveness {
         &self.live_out
     }
 
+    #[doc(alias = "default_deny_ignored_reads")]
     pub const fn ignored_reads(&self) -> &std::collections::BTreeSet<crate::graph::UseSite> {
         &self.ignored_reads
     }
@@ -490,12 +491,6 @@ impl TrustedSeal {
     /// The context the function is sealed in: its interface, recovered or stated, and its owners.
     pub const fn machine_context(&self) -> &SourceMachineContext {
         &self.machine_context
-    }
-
-    /// The direct callees of unstated calls whose writes kept a place loaded after them in memory:
-    /// each is asked to state its own (D376). O(asked x log sites).
-    pub fn unstated_rewriting_callees(&self) -> BTreeSet<u64> {
-        rewriting_callees(self.sealed.function(), &self.machine_context)
     }
 
     /// Every constant a sealed value folds to with what preparation admitted, in value order.
@@ -833,7 +828,7 @@ impl BuildKey {
             areas: areas.collect(),
             reentering: evidence.reentering.clone(),
             unstated_imports: evidence.unstated_imports.clone(),
-            conventions: callees.conventions.clone(),
+            conventions: callees.sites.by_target().clone(),
             upward: (evidence.reach.iter())
                 .map(|(target, reach)| {
                     let upward = reach.iter().filter(|(_, reach)| reach.is_upward());
@@ -913,6 +908,7 @@ impl Constructed {
 pub struct TrustedConstruction {
     constructed: Constructed,
     lifted: TrustedLiftedFunction,
+    recovery: Recovery,
 }
 
 impl TrustedConstruction {
@@ -935,9 +931,21 @@ impl TrustedConstruction {
         let Self {
             constructed,
             lifted,
+            recovery: _,
         } = self;
         drop(lifted);
         constructed.seal(control)
+    }
+
+    /// The direct callees of unstated calls whose writes kept a place loaded after them in memory,
+    /// as the build reads them: each is asked to state its own (D376). O(asked x log sites).
+    pub fn unstated_rewriting_callees(&self) -> BTreeSet<u64> {
+        let Constructed {
+            function,
+            machine_context,
+            ..
+        } = &self.constructed;
+        rewriting_callees(function.function(), machine_context)
     }
 
     /// This construction against other callee statements, and whether its build was kept
@@ -952,6 +960,7 @@ impl TrustedConstruction {
         let Self {
             constructed,
             lifted,
+            recovery,
         } = self;
         let Constructed {
             function, reuse, ..
@@ -961,7 +970,6 @@ impl TrustedConstruction {
             function,
             provisional,
         });
-        let recovery = Recovery::Recover;
         let constructed = TrustedSsaArtifact::construct(
             &lifted, arch, control, evidence, premises, recovery, prior,
         )?;
@@ -982,6 +990,7 @@ impl TrustedConstruction {
             Self {
                 constructed,
                 lifted,
+                recovery,
             },
             kept,
         ))
@@ -1472,12 +1481,6 @@ impl SsaArtifact {
         self.sealed.function()
     }
 
-    /// The direct callees of unstated calls whose writes kept a place loaded after them in memory:
-    /// each is asked to state its own (D376). O(asked x log sites).
-    pub fn unstated_rewriting_callees(&self) -> BTreeSet<u64> {
-        rewriting_callees(self.sealed.function(), &self.machine_context)
-    }
-
     /// The decompiler-prep facts, collected once when the function was
     /// sealed.
     pub fn decompile_prep_facts(&self) -> &DecompilePrepFacts {
@@ -1633,6 +1636,7 @@ impl SsaArtifact {
     }
 
     /// Reads the text never performs, which hold nothing live.
+    #[doc(alias = "default_deny_ignored_reads")]
     pub const fn ignored_reads(&self) -> &std::collections::BTreeSet<crate::graph::UseSite> {
         self.liveness.ignored_reads()
     }
@@ -2741,12 +2745,46 @@ impl TrustedSsaArtifact {
         evidence: &CalleeEvidence,
         premises: &BTreeSet<r2source::Premise>,
     ) -> Result<TrustedConstruction, SsaPrepareError> {
-        let recovery = Recovery::Recover;
+        Self::constructed(
+            lifted,
+            arch,
+            control,
+            (evidence, premises),
+            Recovery::Recover,
+        )
+    }
+
+    /// Build against the convention alone, recovering nothing, and stop before the seal: a
+    /// restatement of the callees updates it as it does a recovered build.
+    pub fn construct_against_convention<C: SsaWorkControl + ?Sized>(
+        lifted: TrustedLiftedFunction,
+        arch: Option<&crate::Arch>,
+        control: &C,
+        evidence: &CalleeEvidence,
+        premises: &BTreeSet<r2source::Premise>,
+    ) -> Result<TrustedConstruction, SsaPrepareError> {
+        Self::constructed(
+            lifted,
+            arch,
+            control,
+            (evidence, premises),
+            Recovery::Convention,
+        )
+    }
+
+    fn constructed<C: SsaWorkControl + ?Sized>(
+        lifted: TrustedLiftedFunction,
+        arch: Option<&crate::Arch>,
+        control: &C,
+        (evidence, premises): (&CalleeEvidence, &BTreeSet<r2source::Premise>),
+        recovery: Recovery,
+    ) -> Result<TrustedConstruction, SsaPrepareError> {
         let constructed =
             Self::construct(&lifted, arch, control, evidence, premises, recovery, None)?;
         Ok(TrustedConstruction {
             constructed,
             lifted,
+            recovery,
         })
     }
 
@@ -2826,11 +2864,14 @@ impl TrustedSsaArtifact {
             Some(&arch),
             callee_preserved_carriers,
             callee_interfaces,
-        )
-        .with_conventions(site_conventions.clone());
+        );
         let correlated_call_sites =
             correlate_call_site_interfaces(&source, (&blocks, &calls), callee_interfaces, &callees);
-        let callees = callees.with_slots(&correlated_call_sites.slot_targets);
+        let sites = Arc::new(SiteModels::new(
+            site_conventions.clone(),
+            &correlated_call_sites.slot_targets,
+        ));
+        let callees = callees.with_sites(Arc::clone(&sites));
         // Every call target the source named, whether or not a prototype was
         // recovered for it: a name and a prototype are independent facts.
         let mut display_names = r2source::DisplayNames::new();
@@ -2933,7 +2974,7 @@ impl TrustedSsaArtifact {
                 provisional_machine_context
                     .set_callee_argument_reach(callee_argument_reach.clone());
                 provisional_machine_context.set_callee_writes(callee_writes.clone());
-                provisional_machine_context.set_site_conventions(site_conventions.clone());
+                provisional_machine_context.set_site_models(Arc::clone(&sites));
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
                 // A build against callees that state the same to it is this build.
@@ -3089,7 +3130,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
         machine_context.set_callee_writes(callee_writes.clone());
-        machine_context.set_site_conventions(site_conventions.clone());
+        machine_context.set_site_models(sites);
         machine_context.set_callee_library(library.clone());
         machine_context.set_reentering_callees(reentering.clone());
         machine_context.set_unstated_imports(unstated_imports.clone());
@@ -3484,39 +3525,60 @@ pub(crate) fn unpassed_call_reads(
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
 ) -> std::collections::BTreeSet<crate::graph::UseSite> {
-    let model = machine_context.and_then(SourceMachineContext::calls);
-    // The reads minted just before a call are its own; any other run is read by no call.
+    // Each read is its call's, the first call after it in its block (`SsaGraph::call_reading`):
+    // walked from each block's end, so each call's reads are built once, for the reads before it.
     let mut unpassed = std::collections::BTreeSet::new();
     for block in &graph.blocks {
-        let mut run = Vec::new();
-        for &inst in &block.insts {
-            let op = graph.op(inst);
-            if let Some(SSAOp::CallUse { storage, .. }) = op {
-                run.push((inst, *storage));
-                continue;
-            }
-            // A run no call ends is read by none.
-            let Some(call) = op.and_then(SSAOp::call) else {
-                let unread = run
-                    .drain(..)
-                    .map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 });
-                unpassed.extend(unread);
-                continue;
-            };
-            let reads = (machine_context.zip(call.instruction))
-                .and_then(|(context, instruction)| context.call_reads(Some(instruction)));
-            let unread = run.drain(..).filter(|(_, storage)| {
-                (reads.as_ref().zip(model))
-                    .is_some_and(|(reads, model)| reads.reads_none_of(model, *storage))
-            });
-            unpassed.extend(unread.map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 }));
-        }
-        unpassed.extend(
-            run.into_iter()
-                .map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 }),
-        );
+        unpassed_in(graph, machine_context, &block.insts, &mut unpassed);
     }
     unpassed
+}
+
+/// What the call at `instruction` reads and every location its site's model may read.
+type SiteLists = Option<(crate::call_reads::CallReads, crate::call_reads::CallReads)>;
+
+/// [`unpassed_call_reads`] of one block's `insts`, from its end.
+fn unpassed_in(
+    graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
+    insts: &[crate::graph::InstId],
+    unpassed: &mut std::collections::BTreeSet<crate::graph::UseSite>,
+) {
+    let mut next: Option<(Option<u64>, Option<SiteLists>)> = None;
+    for inst in insts.iter().rev() {
+        let op = graph.op(*inst);
+        if let Some(call) = op.and_then(SSAOp::call) {
+            next = Some((call.instruction, None));
+            continue;
+        }
+        let Some(SSAOp::CallUse { storage, .. }) = op else {
+            continue;
+        };
+        let unread = next.as_mut().is_none_or(|(instruction, lists)| {
+            let lists = lists.get_or_insert_with(|| site_lists(machine_context, *instruction));
+            (lists.as_ref()).is_some_and(|(reads, every)| reads.reads_none_within(every, *storage))
+        });
+        if unread {
+            unpassed.insert(crate::graph::UseSite {
+                inst: *inst,
+                input_idx: 0,
+            });
+        }
+    }
+}
+
+/// The [`SiteLists`] of the call at `instruction`, under the model `call_reads` built from (D390).
+fn site_lists(
+    machine_context: Option<&SourceMachineContext>,
+    instruction: Option<u64>,
+) -> SiteLists {
+    let context = machine_context?;
+    let direct = (instruction)
+        .and_then(|instruction| context.raw_call_site_at(instruction))
+        .and_then(crate::semantic::direct_target_from_raw_identity);
+    let model = context.site_model(instruction, direct)?;
+    let every = crate::call_reads::CallReads::every_location(model);
+    Some((context.call_reads(instruction)?, every))
 }
 
 fn block_at_mut<'a, V>(
@@ -4100,7 +4162,7 @@ pub struct CalleeEvidence {
     pub library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The callees a runtime model says re-enter their caller at its entry (Go's stack growth).
     pub reentering: BTreeSet<u64>,
-    /// The calls the walk ended the body at because a model says the callee never returns.
+    /// The calls the walk ended the body at, each with what says it never comes back.
     pub exits: AssumedExits,
     /// The imports called whose declaration states no interface, and why.
     pub unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
@@ -4112,15 +4174,122 @@ pub struct CalleeEvidence {
 /// The convention each stated callee runs under, by entry address.
 pub type SiteConventions = BTreeMap<u64, Arc<r2source::ConventionModel>>;
 
-/// Calls whose fall-through a body's walk ended because a model, not the program, says the callee
-/// never returns, and what that takes for granted.
+/// Each call's convention (RULING 1.6): its stated callee's, by direct target or `CallSlot` (D364),
+/// else the calls' model. One map for rename, the frame walk and argument reads (D390).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SiteModels {
+    by_target: SiteConventions,
+    /// The import slot each correlated `CallSlot` site calls through, by instruction.
+    slots: BTreeMap<u64, u64>,
+}
+
+impl SiteModels {
+    pub(crate) fn new(
+        by_target: SiteConventions,
+        slots: &BTreeMap<SourceCallSiteIdentity, u64>,
+    ) -> Self {
+        let slots = slots.iter().map(|(site, slot)| (site.instruction(), *slot));
+        Self {
+            by_target,
+            slots: slots.collect(),
+        }
+    }
+
+    /// The model stated for the call at `instruction` to `direct`, its direct target where it
+    /// names one; none where the calls' model holds. O(log sites).
+    pub fn stated(
+        &self,
+        instruction: Option<u64>,
+        direct: Option<u64>,
+    ) -> Option<&r2source::ConventionModel> {
+        let target = direct.or_else(|| self.slots.get(&instruction?).copied())?;
+        self.by_target.get(&target).map(|model| &**model)
+    }
+
+    pub(crate) const fn by_target(&self) -> &SiteConventions {
+        &self.by_target
+    }
+}
+
+#[cfg(test)]
+mod site_models_tests {
+    use super::*;
+
+    /// A direct call finds its callee's model, a `CallSlot` site its slot's, by one lookup; any
+    /// other call states none and runs under the calls' model.
+    #[test]
+    fn a_slot_call_and_a_direct_call_find_their_model_by_one_lookup() {
+        let win64 = r2source::convention::testing::model(r2source::ConventionId::Win64).build();
+        let by_target = SiteConventions::from([(0x2000, Arc::clone(&win64)), (0x3000, win64)]);
+        let slot = SourceCallSiteIdentity::new(
+            0x1010,
+            CanonicalStorageId {
+                space: CanonicalStorageSpace::Unique,
+                offset: 0x100,
+                size: 8,
+            },
+        );
+        let sites = SiteModels::new(by_target, &BTreeMap::from([(slot, 0x3000)]));
+        let id = |model: Option<&r2source::ConventionModel>| model.map(|model| model.id);
+        assert_eq!(
+            id(sites.stated(Some(0x1000), Some(0x2000))),
+            Some(r2source::ConventionId::Win64)
+        );
+        assert_eq!(
+            id(sites.stated(Some(0x1010), None)),
+            Some(r2source::ConventionId::Win64)
+        );
+        assert_eq!(id(sites.stated(Some(0x1020), None)), None);
+        assert_eq!(id(sites.stated(Some(0x1010), Some(0x4000))), None);
+    }
+}
+
+/// The calls whose fall-through a body's walk closed, one per block, ascending by block: the one
+/// statement of which calls never come back (D384). A closed call no site names proves nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AssumedExits {
-    pub calls: usize,
-    pub premises: BTreeSet<r2source::Premise>,
-    /// Blocks, ascending, ending at a call whose callee only a walk found reaching no return: a
-    /// bound, so neither an exit nor a `noreturn` (D255).
-    pub unproven: Vec<u64>,
+    pub sites: Vec<ExitSite>,
+}
+
+/// One closed call: the block it ends, what says it never comes back, and whether that is the
+/// callee's own "never" or only this site's (a halting argument, D211).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitSite {
+    pub block: u64,
+    pub never: r2source::Never,
+    pub callee: bool,
+}
+
+impl AssumedExits {
+    /// The closed call ending `block`, if one does. `O(log n)`.
+    pub fn site(&self, block: u64) -> Option<&ExitSite> {
+        let at = self
+            .sites
+            .binary_search_by_key(&block, |site| site.block)
+            .ok()?;
+        self.sites.get(at)
+    }
+
+    /// What every "never" here takes for granted.
+    pub fn premises(&self) -> BTreeSet<r2source::Premise> {
+        (self.sites.iter())
+            .flat_map(|site| site.never.premises.iter().copied())
+            .collect()
+    }
+
+    /// How many calls end the body on a proof that takes a premise: a model's word.
+    pub fn assumed(&self) -> usize {
+        (self.sites.iter())
+            .filter(|site| site.never.proves() && !site.never.premises.is_empty())
+            .count()
+    }
+
+    /// How many calls end the body on the bound `proof`, a "never" no statement proves (D255, D395).
+    pub fn bounded_by(&self, proof: r2source::NeverProof) -> usize {
+        (self.sites.iter())
+            .filter(|site| site.never.proof == proof)
+            .count()
+    }
 }
 
 /// What the callees this function calls said about their own boundaries.
@@ -4132,10 +4301,8 @@ pub struct AssumedExits {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CalleeBoundaries {
     preserved: CalleePreservedCarriers,
-    /// The convention each stated callee runs under; the rest run under the calls' model.
-    conventions: SiteConventions,
-    /// The import slot each `CallSlot` site calls through, by instruction (D364).
-    slots: BTreeMap<u64, u64>,
+    /// The convention each call runs under (D390).
+    sites: Arc<SiteModels>,
     results: BTreeMap<u64, CallBoundaryDef>,
     /// The storage of each of `results`.
     result_storages: BTreeMap<u64, CanonicalStorageId>,
@@ -4199,8 +4366,7 @@ impl CalleeBoundaries {
         }
         Self {
             preserved,
-            conventions: SiteConventions::new(),
-            slots: BTreeMap::new(),
+            sites: Arc::default(),
             results,
             result_storages,
             return_addresses,
@@ -4208,16 +4374,9 @@ impl CalleeBoundaries {
         }
     }
 
-    /// The same statements with the convention each stated callee runs under.
-    pub(crate) fn with_conventions(mut self, conventions: SiteConventions) -> Self {
-        self.conventions = conventions;
-        self
-    }
-
-    /// The same statements with the slot each correlated `CallSlot` site calls through.
-    fn with_slots(mut self, slots: &BTreeMap<SourceCallSiteIdentity, u64>) -> Self {
-        let by_instruction = slots.iter().map(|(site, slot)| (site.instruction(), *slot));
-        self.slots = by_instruction.collect();
+    /// The same statements with the convention each call runs under.
+    pub(crate) fn with_sites(mut self, sites: Arc<SiteModels>) -> Self {
+        self.sites = sites;
         self
     }
 
@@ -4282,8 +4441,7 @@ fn decompile_call_boundary_config(
         preserved,
         stack_pointer_restored_by_callee,
         preserved_by_target: callees.preserved,
-        convention_by_target: callees.conventions,
-        slot_by_instruction: callees.slots,
+        sites: callees.sites,
         result_by_target: callees.results,
         argument_regs: match calls {
             true => arch.call_reads(model).to_vec(),
@@ -4418,7 +4576,7 @@ impl SSAFunction {
     }
 
     pub(crate) fn record_assumed_exits(&mut self, exits: &AssumedExits) {
-        self.premises.extend(exits.premises.iter().copied());
+        self.premises.extend(exits.premises());
         self.assumed_exits = exits.clone();
     }
 

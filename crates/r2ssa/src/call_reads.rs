@@ -26,6 +26,7 @@ pub enum StackWrites {
     /// A declaration's: only its argument area, which the convention gives the callee.
     Arguments,
     /// A walked body's: these ranges from the call's stack pointer.
+    #[doc(alias = "default_deny_incoming_writes")]
     Within(Box<[(i64, i64)]>),
 }
 
@@ -78,28 +79,14 @@ impl CallReads {
         Self::of_locations(read, model)
     }
 
-    /// The locations a callee whose body proves its arity reads: each parameter, a hole left out,
-    /// at the call's stack pointer (`CalleeStatement`). O(parameters).
+    /// Each parameter a body-proven callee reads, holes left out, at the call's stack pointer; none
+    /// where one is past the address space. O(parameters).
     pub(crate) fn callee_locations(
         callee: &r2source::SourceFunctionInterface,
-    ) -> Vec<SourceParameterLocation> {
-        let spent = callee.return_mechanism().map_or(0, |mechanism| {
-            i64::from(mechanism.stack_pointer_delta_bytes())
-        });
+    ) -> Option<Vec<SourceParameterLocation>> {
         (callee.parameters().iter())
             .filter(|parameter| !parameter.is_hole())
-            .map(|parameter| match parameter.location() {
-                SourceParameterLocation::Stack {
-                    offset,
-                    size_bytes,
-                    callee_offset,
-                } => SourceParameterLocation::Stack {
-                    offset: offset.saturating_sub(spent),
-                    size_bytes,
-                    callee_offset,
-                },
-                register => register,
-            })
+            .map(|parameter| callee.at_call_site(parameter.location()))
             .collect()
     }
 
@@ -163,10 +150,15 @@ impl CallReads {
     /// Whether the call reads none of `carrier`: an argument or count register of `model` this
     /// stated list leaves out (D283). Any other register may be read: x8, a static chain.
     pub fn reads_none_of(&self, model: &ConventionModel, carrier: CanonicalStorageId) -> bool {
+        self.reads_none_within(&Self::every_location(model), carrier)
+    }
+
+    /// [`Self::reads_none_of`] against `every`, the model's [`Self::every_location`], built once
+    /// per call by a caller asking for several carriers.
+    pub fn reads_none_within(&self, every: &Self, carrier: CanonicalStorageId) -> bool {
         let overlaps = |storage: &CanonicalStorageId| {
             crate::semantic::register_storages_overlap(*storage, carrier)
         };
-        let every = Self::every_location(model);
         let located = (every.registers.iter().chain(&every.count_register)).any(overlaps);
         let listed = (self.registers.iter().chain(&self.count_register)).any(overlaps);
         self.stated && located && !listed

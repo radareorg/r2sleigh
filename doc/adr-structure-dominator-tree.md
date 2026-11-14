@@ -337,10 +337,12 @@ else arm took, in the same order, and the machine's edges are the same (the then
 `if` without an `else` falls to `rest` on the false edge). Owner: `structure/guard.rs`, the last stage of
 `render::structured` (after loop rotation, so it reads what the counterfactual measured and no earlier stage sees a
 changed tree). Evidence: `Evidence::never_returns`, the predicate the tails and the certificate already read, which is
-the callee's declaration (r2abi's prototype, or r2engine's walk finding no fall-through after the call), never its name.
-It takes the callee alone (`Option<&str>`, read off a call statement by `shape::callee_of`), so no decision can read a
-call's arguments or site; `tests/architecture.rs` fails a function deciding it that names one.
-`Evidence` holds the set of declared callees once (`Evidence::new`) and `never_returns` is its only reader. The stage
+the call site's proven `Never` (a `Declared` or `Composed` proof, D384), never the callee's name.
+It takes the site alone (`Option<InstId>`, read off a named callee's call statement by `shape::site_of`), so no decision
+can read a call's arguments; `tests/architecture.rs` fails a function deciding it that names one.
+`Evidence` holds the set of proven sites once (`Evidence::new`) and `never_returns` is its only reader; since D384 the
+mutation target's nine name-cut mutants are replaced by four site mutants (any proven site, an unsited call, a
+neighbouring instruction, a call through a pointer). The stage
 runs for every function: a skip for an empty set (`declares_noreturn`, gone in the fifth review) was a second reader that
 a name-keyed mutant could change unseen. `render::structured` ends in the stage as an expression with no early `return`.
 The stage is kept only while the control certificate holds and is reverted whole otherwise (section 5); the checker

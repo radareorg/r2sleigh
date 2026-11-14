@@ -158,7 +158,6 @@ fn sealed_lane_call(lane_in_the_merge: bool) -> Result<SsaArtifact, crate::SsaPr
         r2source::ConventionId::SysVAmd64,
         [SourceCallArgumentSpec::new(0, storage(VECTOR, 4))],
         false,
-        false,
         SourceCallResult::Void,
     )
     .expect("a call interface");

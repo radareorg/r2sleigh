@@ -184,6 +184,15 @@ pub struct LibraryRow {
     pub yields: Option<Handle>,
     /// The standard and header the row is read from; empty for a row radare2's tables state.
     pub citation: Box<str>,
+    /// What the function does through its parameters, where a cited row states it (D383).
+    pub effects: Option<crate::Effects>,
+}
+
+impl LibraryRow {
+    /// Whether a cited source states the row; radare2's tables state the rest, which prove nothing (D395).
+    pub fn cited(&self) -> bool {
+        !self.citation.is_empty()
+    }
 }
 
 /// Whether a row states its function's result (doc/adr-result-side.md, "Imports with an unstated result").
@@ -229,7 +238,8 @@ impl Halt {
 /// Every row one C library's program reads, and the graph their types are nodes of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryRows {
-    library: CLibrary,
+    /// The C library, and its handle tags read once for every spelling of every table (D391).
+    reading: crate::spelling::Reading,
     graph: TypeGraph,
     prototypes: Vec<Prototype>,
     rows: BTreeMap<LibraryId, BTreeMap<Box<str>, LibraryRow>>,
@@ -302,7 +312,7 @@ impl CLibrary {
 impl Default for LibraryRows {
     fn default() -> Self {
         Self {
-            library: CLibrary::Unknown,
+            reading: crate::spelling::Reading::of(CLibrary::Unknown),
             graph: TypeGraph::default(),
             prototypes: Vec::new(),
             rows: BTreeMap::new(),
@@ -338,11 +348,11 @@ impl LibraryRows {
             table(CxxRuntime, true, CXX_CITED),
         ];
         let mut rows = Self {
-            library,
+            reading: crate::spelling::Reading::of(library),
             ..Self::default()
         };
         for embedded in shared.iter().chain(own) {
-            rows.read(embedded, library);
+            rows.read_text(embedded, embedded.text);
         }
         rows
     }
@@ -355,7 +365,7 @@ impl LibraryRows {
             cited: false,
             text: "",
         };
-        rows.read_text(&embedded, text, CLibrary::Unknown);
+        rows.read_text(&embedded, text);
         rows
     }
 
@@ -384,7 +394,6 @@ impl LibraryRows {
                 (takes.then_some(this), format!("{MANGLING}; {header}"))
             }
         };
-        let library = self.library;
         let object = this.map(|this| (this, Some("this")));
         let explicit = mangled
             .parameters
@@ -393,7 +402,7 @@ impl LibraryRows {
         let parameters = object.into_iter().chain(explicit);
         let parameters = parameters
             .map(|(spelling, called)| {
-                let ty = crate::spelling::read(&spelling, &mut self.graph, library);
+                let ty = crate::spelling::read(&spelling, &mut self.graph, &self.reading);
                 Parameter::new(ty, spelling, called)
             })
             .collect();
@@ -423,29 +432,21 @@ impl LibraryRows {
             halts_on: None,
             yields: None,
             citation: citation.into(),
+            effects: None,
         })
     }
 
-    fn read(&mut self, embedded: &Embedded, library: CLibrary) {
-        self.read_text(embedded, embedded.text, library);
-    }
-
-    fn read_text(&mut self, embedded: &Embedded, text: &str, library: CLibrary) {
+    fn read_text(&mut self, embedded: &Embedded, text: &str) {
         for (name, declared) in Table::read(text).functions {
-            let row = self.typed(&name, declared, embedded, library);
+            let row = self.typed(&name, declared, embedded);
             (self.rows.entry(embedded.library).or_default()).insert(name.into(), row);
         }
     }
 
     /// One row's spellings, read into this table's graph.
-    fn typed(
-        &mut self,
-        name: &str,
-        declared: Declared,
-        embedded: &Embedded,
-        library: CLibrary,
-    ) -> LibraryRow {
-        let mut read = |spelling: &str| crate::spelling::read(spelling, &mut self.graph, library);
+    fn typed(&mut self, name: &str, declared: Declared, embedded: &Embedded) -> LibraryRow {
+        let reading = &self.reading;
+        let mut read = |spelling: &str| crate::spelling::read(spelling, &mut self.graph, reading);
         let returns = declared.returns.unwrap_or_else(|| "void".to_owned());
         let return_type = read(&returns);
         let mut parameters = Vec::new();
@@ -500,6 +501,10 @@ impl LibraryRows {
             halts_on: declared.halts_on,
             yields: declared.yields,
             citation: citation.into(),
+            // An uncited table states no effects: its rows cite nothing to bound them by.
+            effects: (declared.effects.as_deref())
+                .filter(|_| embedded.cited)
+                .and_then(crate::Effects::read),
         }
     }
 
@@ -616,6 +621,7 @@ struct Declared {
     /// The reference page and minimum version a Microsoft row cites.
     cite: Option<String>,
     tail: Option<String>,
+    effects: Option<String>,
     /// The first source the comment above the row names.
     source: Option<&'static str>,
 }
@@ -725,6 +731,7 @@ impl Table {
             "include" => declared.include = Some(value.to_owned()),
             "cite" => declared.cite = Some(value.to_owned()),
             "tail" => declared.tail = Some(value.to_owned()),
+            "effects" => declared.effects = Some(value.to_owned()),
             _ => {}
         }
     }
@@ -737,6 +744,50 @@ impl Table {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D383: every `effects` key reads, on a cited row with no tail; a typo or an uncited row would
+    /// drop a model silently.
+    #[test]
+    fn every_effects_key_reads_on_a_cited_row_with_no_tail() {
+        let tables = [
+            (PORTABLE, false),
+            (PORTABLE_CITED, true),
+            (CXX, false),
+            (CXX_CITED, true),
+            (GLIBC, false),
+            (GLIBC_CITED, true),
+            (BIONIC, false),
+            (BIONIC_CITED, true),
+            (MUSL_CITED, true),
+            (LIBSYSTEM, false),
+            (OBJC, false),
+            (KERNEL32, true),
+            (UCRT, true),
+        ];
+        let mut stated = 0;
+        for (text, cited) in tables {
+            for (name, declared) in Table::read(text).functions {
+                let Some(effects) = declared.effects else {
+                    continue;
+                };
+                stated += 1;
+                assert!(cited, "{name}: an uncited row states effects");
+                assert!(
+                    crate::Effects::read(&effects).is_some(),
+                    "{name}: {effects}"
+                );
+                let ellipsis = declared
+                    .parameters
+                    .values()
+                    .any(|(spelling, _)| spelling.is_empty());
+                assert!(
+                    declared.tail.is_none() && !ellipsis,
+                    "{name}: a row with a tail"
+                );
+            }
+        }
+        assert_eq!(stated, 12);
+    }
 
     #[test]
     fn a_tail_reads_as_its_citation_spells_it() {

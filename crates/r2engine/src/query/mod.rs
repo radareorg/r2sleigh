@@ -39,10 +39,16 @@ pub struct AnalysisStats {
     pub direct_sites: db::QueryStats,
     /// Bodies walked, a body lifted again counted again (D354).
     pub walked: db::QueryStats,
+    /// Take owners read for their takes' fates, each once for all its takes (D400).
+    pub owner_takes: db::QueryStats,
     /// Dependencies the query graph forbids that a computation reached; zero in a sound engine.
     pub defects: u64,
     /// Builds made anew against their owners' statements (D365).
     pub rebuilt: u64,
+    /// Frame object models built, one `FrameReach` each (D403).
+    pub frames_built: u64,
+    /// Convention seals made to read dispatch tables, every round (D403).
+    pub table_seals: u64,
 }
 pub use proved::Proved;
 pub use r2ssa::InductionStep;

@@ -913,7 +913,19 @@ fn printing_from(held: u32, format: &[u8], writable: bool) -> String {
 }
 
 /// [`printing_from`]; `f` clears the held register before it returns where `clears`.
-fn printing_after(held: u32, format: &[u8], (writable, clears): (bool, bool)) -> String {
+fn printing_after(held: u32, format: &[u8], flags: (bool, bool)) -> String {
+    let mut open = printing_open(held, format, flags);
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(F).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// The program [`printing_after`] renders, opened and its format written.
+fn printing_open(
+    held: u32,
+    format: &[u8],
+    (writable, clears): (bool, bool),
+) -> OpenProgram<Literal> {
     let mut words = vec![(F, 0xd65f_03c0)]; // ret
     if clears {
         words = vec![(F, 0xaa1f_03e0 | held), (F + 4, 0xd65f_03c0)]; // mov xN, xzr; ret
@@ -941,9 +953,7 @@ fn printing_after(held: u32, format: &[u8], (writable, clears): (bool, bool)) ->
     };
     let mut open = OpenProgram::of(program);
     open.source_mut().write(common::TEXT, format);
-    open.analyse_program().expect("it surveys");
-    let rendered = open.rendered(F).expect("it renders");
-    rendered.response.output.into_text()
+    open
 }
 
 /// clang -O0's shape (D221, Gb): `caller` spills the format to `[sp, #16]`, calls `f`, and reloads
@@ -1020,6 +1030,23 @@ fn an_aarch64_printf_whose_format_a_call_may_change_reads_every_vector_register(
 fn an_aarch64_printf_whose_format_a_stated_call_keeps_reads_no_vector_register() {
     let text = printing(9, b"%d\n\0");
     assert!(text.starts_with("void f("), "{text}");
+}
+
+/// D399: `caller`'s build asks `f` to state itself (D376) and is restated against it, the build
+/// it read moved: counted as rebuilt, as every rebuild is.
+#[test]
+fn a_build_a_callee_s_statement_moves_is_counted_rebuilt() {
+    let mut open = printing_open(9, b"%d\n\0", (false, false));
+    open.analyse_program().expect("it surveys");
+    let text = open
+        .rendered(F)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(text.starts_with("void f("), "{text}");
+    let stats = open.analysis_stats();
+    assert_eq!(stats.rebuilt, 1, "{stats:?}");
 }
 
 /// A format in writable data may change before the call (Codex review of #363): the call may read
@@ -1533,6 +1560,47 @@ fn wrappers_forwarding_to_each_other_prove_no_slot() {
         .into_text();
     assert!(!text.contains("void handler("), "{text}");
     assert_eq!(open.analysis_stats().defects, 0);
+}
+
+/// `main`: `lea rdi, [h1]; call atexit; lea rdi, [h2]; call atexit; xor eax, eax; ret`, then
+/// `h1` (`mov eax, 1; ret`) at 0x1030 and `h2` (`mov eax, 2; ret`) at 0x1040.
+const TAKES_TWO: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x29, 0x00, 0x00, 0x00, // 1000 lea rdi, [rip + 0x29]: h1
+    0xe8, 0x84, 0x00, 0x00, 0x00, // 1007 call the stub
+    0x48, 0x8d, 0x3d, 0x2d, 0x00, 0x00, 0x00, // 100c lea rdi, [rip + 0x2d]: h2
+    0xe8, 0x78, 0x00, 0x00, 0x00, // 1013 call the stub
+    0x31, 0xc0, 0xc3, // 1018 xor eax, eax; ret
+];
+
+/// Two takes in one owner read the owner once for both: each handler is void under the closed
+/// world, and the owner's walk, flow and transfers are built once (D400).
+#[test]
+fn two_takes_in_one_owner_read_the_owner_once() {
+    let mut code = vec![0xcc; 0xa0];
+    code[..TAKES_TWO.len()].copy_from_slice(TAKES_TWO);
+    code[0x30..0x36].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    code[0x40..0x46].copy_from_slice(&[0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3]);
+    code[0x90..0x96].copy_from_slice(&[0xff, 0x25, 0x02, 0x00, 0x00, 0x00]); // jmp [rip + 2]
+    code[0x98..0xa0].fill(0);
+    let code: &'static [u8] = Box::leak(code.into_boxed_slice());
+    let functions = [
+        ("main", BASE, 0x1b),
+        ("h1", BASE + 0x30, 6),
+        ("h2", BASE + 0x40, 6),
+    ];
+    let literal = Literal::of_code(code, &functions)
+        .importing("atexit")
+        .running_on(common::GLIBC);
+    let mut open = OpenProgram::of(literal);
+    open.analyse_program().expect("it surveys");
+    for (name, at) in [("h1", BASE + 0x30), ("h2", BASE + 0x40)] {
+        let text = open.rendered(at).expect("it renders");
+        let text = text.response.output.into_text();
+        assert!(text.contains(&format!("void {name}(")), "{text}");
+    }
+    let stats = open.analysis_stats();
+    assert_eq!(stats.owner_takes.computed, 1, "{stats:?}");
+    assert_eq!(stats.defects, 0, "{stats:?}");
 }
 
 /// `main`'s extern for `atexit` spells the cited slot's code pointer.

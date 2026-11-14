@@ -1,6 +1,6 @@
-# Why each row of `types.sdb.txt` and `types-linux.sdb.txt` is still radare2's and `Tail::Unstated`
-# (ROADMAP D242). `tests/cited_rows.rs` fails on a row of those tables with no line here, on a line
-# naming no row, and on a count above the one it records: the list only falls.
+# Why each row of an uncited table is still uncited and `Tail::Unstated` (ROADMAP D242, D395): such a
+# row proves no "never". `tests/cited_rows.rs` fails, per table, on a row with no line here, on a line
+# naming no row, and on a count above the one it records: each list only falls.
 #
 # name | why it is uncited
 
@@ -119,3 +119,135 @@ __read_chk | glibc declares it only inside its fortify headers
 __realpath_chk | glibc declares it only inside its fortify headers
 __longjmp_chk | glibc declares it only inside its fortify headers
 __fdelt_chk | glibc declares it only inside its fortify headers
+
+# types-cxx.sdb.txt, the C++ runtime's, read from the Itanium C++ ABI and the standard.
+_Znwm | no row names the header that declares it on `.include=`
+_ZnwmRKSt9nothrow_t | no row names the header that declares it on `.include=`
+_ZnwmSt11align_val_t | no row names the header that declares it on `.include=`
+_ZnwmSt11align_val_tRKSt9nothrow_t | no row names the header that declares it on `.include=`
+_Znam | no row names the header that declares it on `.include=`
+_ZnamRKSt9nothrow_t | no row names the header that declares it on `.include=`
+_ZnamSt11align_val_t | no row names the header that declares it on `.include=`
+_ZnamSt11align_val_tRKSt9nothrow_t | no row names the header that declares it on `.include=`
+_Znwj | no row names the header that declares it on `.include=`
+_ZnwjRKSt9nothrow_t | no row names the header that declares it on `.include=`
+_ZnwjSt11align_val_t | no row names the header that declares it on `.include=`
+_ZnwjSt11align_val_tRKSt9nothrow_t | no row names the header that declares it on `.include=`
+_Znaj | no row names the header that declares it on `.include=`
+_ZnajRKSt9nothrow_t | no row names the header that declares it on `.include=`
+_ZnajSt11align_val_t | no row names the header that declares it on `.include=`
+_ZnajSt11align_val_tRKSt9nothrow_t | no row names the header that declares it on `.include=`
+_ZdlPv | no row names the header that declares it on `.include=`
+_ZdlPvRKSt9nothrow_t | no row names the header that declares it on `.include=`
+_ZdlPvSt11align_val_t | no row names the header that declares it on `.include=`
+_ZdlPvSt11align_val_tRKSt9nothrow_t | no row names the header that declares it on `.include=`
+_ZdlPvm | no row names the header that declares it on `.include=`
+_ZdlPvmSt11align_val_t | no row names the header that declares it on `.include=`
+_ZdlPvj | no row names the header that declares it on `.include=`
+_ZdlPvjSt11align_val_t | no row names the header that declares it on `.include=`
+_ZdaPv | no row names the header that declares it on `.include=`
+_ZdaPvRKSt9nothrow_t | no row names the header that declares it on `.include=`
+_ZdaPvSt11align_val_t | no row names the header that declares it on `.include=`
+_ZdaPvSt11align_val_tRKSt9nothrow_t | no row names the header that declares it on `.include=`
+_ZdaPvm | no row names the header that declares it on `.include=`
+_ZdaPvmSt11align_val_t | no row names the header that declares it on `.include=`
+_ZdaPvj | no row names the header that declares it on `.include=`
+_ZdaPvjSt11align_val_t | no row names the header that declares it on `.include=`
+__cxa_finalize | no row names the header that declares it on `.include=`
+__cxa_guard_acquire | no row names the header that declares it on `.include=`
+__cxa_guard_release | no row names the header that declares it on `.include=`
+__cxa_guard_abort | no row names the header that declares it on `.include=`
+__cxa_pure_virtual | no row names the header that declares it on `.include=`
+__cxa_deleted_virtual | no row names the header that declares it on `.include=`
+__cxa_bad_cast | no row names the header that declares it on `.include=`
+__cxa_bad_typeid | no row names the header that declares it on `.include=`
+__cxa_throw_bad_array_new_length | no row names the header that declares it on `.include=`
+__dynamic_cast | no row names the header that declares it on `.include=`
+__cxa_demangle | no row names the header that declares it on `.include=`
+__cxa_allocate_exception | no row names the header that declares it on `.include=`
+__cxa_free_exception | no row names the header that declares it on `.include=`
+__cxa_throw | no row names the header that declares it on `.include=`
+__cxa_get_exception_ptr | no row names the header that declares it on `.include=`
+__cxa_begin_catch | no row names the header that declares it on `.include=`
+__cxa_end_catch | no row names the header that declares it on `.include=`
+__cxa_rethrow | no row names the header that declares it on `.include=`
+__cxa_call_unexpected | no row names the header that declares it on `.include=`
+_Unwind_Resume | no row names the header that declares it on `.include=`
+_ZSt9terminatev | no row names the header that declares it on `.include=`
+_ZSt21__throw_bad_exceptionv | no row names the header that declares it on `.include=`
+_ZSt17__throw_bad_allocv | no row names the header that declares it on `.include=`
+_ZSt28__throw_bad_array_new_lengthv | no row names the header that declares it on `.include=`
+_ZSt16__throw_bad_castv | no row names the header that declares it on `.include=`
+_ZSt18__throw_bad_typeidv | no row names the header that declares it on `.include=`
+_ZSt19__throw_logic_errorPKc | no row names the header that declares it on `.include=`
+_ZSt20__throw_domain_errorPKc | no row names the header that declares it on `.include=`
+_ZSt24__throw_invalid_argumentPKc | no row names the header that declares it on `.include=`
+_ZSt20__throw_length_errorPKc | no row names the header that declares it on `.include=`
+_ZSt20__throw_out_of_rangePKc | no row names the header that declares it on `.include=`
+_ZSt24__throw_out_of_range_fmtPKcz | no row names the header that declares it on `.include=`
+_ZSt21__throw_runtime_errorPKc | no row names the header that declares it on `.include=`
+_ZSt19__throw_range_errorPKc | no row names the header that declares it on `.include=`
+_ZSt22__throw_overflow_errorPKc | no row names the header that declares it on `.include=`
+_ZSt23__throw_underflow_errorPKc | no row names the header that declares it on `.include=`
+_ZSt19__throw_ios_failurePKc | no row names the header that declares it on `.include=`
+_ZSt19__throw_ios_failurePKci | no row names the header that declares it on `.include=`
+_ZSt20__throw_system_errori | no row names the header that declares it on `.include=`
+_ZSt20__throw_future_errori | no row names the header that declares it on `.include=`
+_ZSt25__throw_bad_function_callv | no row names the header that declares it on `.include=`
+
+# types-darwin.sdb.txt, libSystem's own.
+tputs | no libSystem header is read for it yet
+_exit | no libSystem header is read for it yet
+_Exit | no libSystem header is read for it yet
+xalloc_die | no libSystem header is read for it yet
+access | no libSystem header is read for it yet
+prctl | no libSystem header is read for it yet
+sigaction | no libSystem header is read for it yet
+select | no libSystem header is read for it yet
+nanosleep | no libSystem header is read for it yet
+getsockname | no libSystem header is read for it yet
+getsockopt | no libSystem header is read for it yet
+setsockopt | no libSystem header is read for it yet
+waitpid | no libSystem header is read for it yet
+wait | no libSystem header is read for it yet
+waitid | no libSystem header is read for it yet
+__bzero | no libSystem header is read for it yet
+__stack_chk_fail | no libSystem header is read for it yet
+acl_free | no libSystem header is read for it yet
+recvfrom | no libSystem header is read for it yet
+__assert_rtn | no libSystem header is read for it yet
+__maskrune | no libSystem header is read for it yet
+__tolower | no libSystem header is read for it yet
+__error | no libSystem header is read for it yet
+wcwidth | no libSystem header is read for it yet
+fts_open | no libSystem header is read for it yet
+fts_read | no libSystem header is read for it yet
+fts_children | no libSystem header is read for it yet
+fts_set | no libSystem header is read for it yet
+fts_close | no libSystem header is read for it yet
+acl_get_entry | no libSystem header is read for it yet
+acl_get_link_np | no libSystem header is read for it yet
+acl_get_tag_type | no libSystem header is read for it yet
+acl_get_qualifier | no libSystem header is read for it yet
+acl_get_permset | no libSystem header is read for it yet
+acl_get_perm_np | no libSystem header is read for it yet
+acl_get_flagset_np | no libSystem header is read for it yet
+acl_get_flag_np | no libSystem header is read for it yet
+getxattr | no libSystem header is read for it yet
+fflagstostr | no libSystem header is read for it yet
+uuid_unparse_upper | no libSystem header is read for it yet
+open | no libSystem header is read for it yet
+openat | no libSystem header is read for it yet
+
+# types-android.sdb.txt, bionic's own, radare2's spelling.
+__fgets_chk | no bionic header is read for it yet
+__fread_chk | no bionic header is read for it yet
+
+# types-objc.sdb.txt, objc4's `libobjc.A.dylib`.
+objc_msgSend | no row names the objc4 header that declares it on `.include=`
+objc_msgSendSuper2 | no row names the objc4 header that declares it on `.include=`
+objc_storeStrong | no row names the objc4 header that declares it on `.include=`
+objc_release | no row names the objc4 header that declares it on `.include=`
+objc_retain | no row names the objc4 header that declares it on `.include=`
+objc_retainAutoreleasedReturnValue | no row names the objc4 header that declares it on `.include=`
+objc_enumerationMutation | no row names the objc4 header that declares it on `.include=`

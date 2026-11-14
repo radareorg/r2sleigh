@@ -13,18 +13,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use r2ssa::{
-    FunctionSemanticSummary, InterprocSummarySet, SsaArtifact, SummaryArgEffect,
-    SummaryMemoryEffect, SummaryMemoryEffectKind, SummaryMemoryRegion, SummaryReturnRelation,
+    FunctionSemanticSummary, InterprocSummarySet, SsaArtifact, SummaryMemoryEffect,
+    SummaryMemoryEffectKind, SummaryMemoryRegion, SummaryReturnRelation,
 };
 
-use crate::context::{ParsedExternalContext, apply_main_signature_override, is_generic_arg_name};
+use crate::context::{ParsedExternalContext, is_generic_arg_name};
 use crate::convert::CTypeLike;
 use crate::facts::{
-    ArrayIndexBase, ArrayIndexCertificate, CalleeAllocationEffect, CalleeArgEffect,
-    CalleeAtomicEffect, CalleeAtomicOp, CalleeAtomicOrdering, CalleeFact, CalleeLifetimeEffect,
-    CalleeLifetimeOp, CalleeMemoryEffect, CalleeMemoryEffectKind, CalleeMemoryLocation,
-    CalleeMemoryRange, CalleeMemoryRegion, CalleeModelPolicyEvidence, CalleeReturnRelation,
-    CalleeSyncEffect, CalleeSyncOp, CalleeTransferEffect, CalleeTransferLength, FunctionParamSpec,
+    ArrayIndexBase, ArrayIndexCertificate, CalleeAllocationEffect, CalleeAtomicEffect,
+    CalleeAtomicOp, CalleeAtomicOrdering, CalleeFact, CalleeLifetimeEffect, CalleeLifetimeOp,
+    CalleeMemoryEffect, CalleeMemoryEffectKind, CalleeMemoryLocation, CalleeMemoryRange,
+    CalleeMemoryRegion, CalleeModelPolicyEvidence, CalleeReturnRelation, CalleeSyncEffect,
+    CalleeSyncOp, CalleeTransferEffect, CalleeTransferLength, FunctionParamSpec,
     FunctionSignatureSpec, FunctionTypeFactInputs, FunctionTypeFacts, InterprocFactDiagnostics,
     OutParamCertificate, OutParamCertificateEvidence, OutParamCertificateSource,
     ScalarArrayRenderCandidate, SignatureCertificate, SignatureCertificateSource,
@@ -300,8 +300,7 @@ struct DerivedTypeAnalysis {
     type_facts: FunctionTypeFacts,
 }
 
-struct DerivedTypeAnalysisInput<'a> {
-    function_name: &'a str,
+struct DerivedTypeAnalysisInput {
     ptr_bits: u32,
     inferred_signature: InferredSignature,
     parsed_context: ParsedExternalContext,
@@ -311,16 +310,7 @@ struct DerivedTypeAnalysisInput<'a> {
 }
 
 #[cfg(test)]
-type TypeAnalysisInput<'a> = DerivedTypeAnalysisInput<'a>;
-
-fn summary_arg_effect_to_callee(effect: &SummaryArgEffect) -> CalleeArgEffect {
-    CalleeArgEffect {
-        read: effect.read,
-        write: effect.write,
-        escape: effect.escape,
-        free: effect.free,
-    }
-}
+type TypeAnalysisInput = DerivedTypeAnalysisInput;
 
 fn summary_return_relation_to_callee(relation: &SummaryReturnRelation) -> CalleeReturnRelation {
     match relation {
@@ -441,33 +431,6 @@ fn summary_atomic_effect_to_callee(effect: &r2ssa::SummaryAtomicEffect) -> Calle
     }
 }
 
-fn summary_observed_param_count(summary: &FunctionSemanticSummary) -> usize {
-    let mut max_idx = summary.arg_effects.keys().copied().max();
-    for effect in &summary.memory_effects {
-        if let SummaryMemoryRegion::Arg { index } = effect.location.region {
-            max_idx = Some(max_idx.unwrap_or(0).max(index));
-        }
-    }
-    for effect in &summary.transfer_effects {
-        if let r2ssa::SummaryMemoryRegion::Arg { index } = effect.dst.region {
-            max_idx = Some(max_idx.unwrap_or(0).max(index));
-        }
-        if let r2ssa::SummaryMemoryRegion::Arg { index } = effect.src.region {
-            max_idx = Some(max_idx.unwrap_or(0).max(index));
-        }
-        if let r2ssa::SummaryTransferLength::Arg(index) = effect.len {
-            max_idx = Some(max_idx.unwrap_or(0).max(index));
-        }
-    }
-    for effect in &summary.lifetime_effects {
-        max_idx = Some(max_idx.unwrap_or(0).max(effect.arg));
-    }
-    for effect in &summary.sync_effects {
-        max_idx = Some(max_idx.unwrap_or(0).max(effect.arg));
-    }
-    max_idx.map_or(0, |idx| idx + 1)
-}
-
 fn summary_linkage_to_callee_linkage(
     linkage: r2ssa::FunctionSemanticLinkage,
 ) -> crate::CalleeLinkage {
@@ -478,52 +441,16 @@ fn summary_linkage_to_callee_linkage(
     }
 }
 
-/// Pointer hints the interprocedural summary itself proves for a callee's
-/// parameters.
-fn summary_param_type_hints(summary: &FunctionSemanticSummary) -> BTreeMap<usize, CTypeLike> {
-    let pointer_ty = CTypeLike::Pointer(Box::new(CTypeLike::Void));
-    let mut hints = BTreeMap::new();
-    let max_idx = summary_observed_param_count(summary);
-    for idx in 0..max_idx {
-        if summary_suggests_pointer_param(summary, idx) {
-            hints.entry(idx).or_insert_with(|| pointer_ty.clone());
-        }
-    }
-    hints
-}
-
-/// The return type the summary's own return relation gives, or nothing.
-fn summary_return_type_hint(
-    summary: &FunctionSemanticSummary,
-    param_type_hints: &BTreeMap<usize, CTypeLike>,
-) -> Option<CTypeLike> {
-    match summary.return_relation {
-        SummaryReturnRelation::Void => Some(CTypeLike::Void),
-        SummaryReturnRelation::HeapAlloc => Some(heap_allocation_return_type()),
-        SummaryReturnRelation::Arg(idx) => param_type_hints.get(&idx).cloned(),
-        _ => None,
-    }
-}
-
 fn summary_to_callee_fact(summary: &FunctionSemanticSummary) -> CalleeFact {
-    let param_type_hints = summary_param_type_hints(summary);
-    let return_type_hint = summary_return_type_hint(summary, &param_type_hints);
-    let arg_effects = summary
-        .arg_effects
-        .iter()
-        .map(|(idx, effect)| (*idx, summary_arg_effect_to_callee(effect)))
-        .collect::<BTreeMap<_, _>>();
     CalleeFact {
         function_id: summary.id.0,
         name: summary.name.clone(),
         linkage: summary_linkage_to_callee_linkage(summary.linkage),
         signature: None,
-        signature_noreturn: false,
         model_policy_evidence: BTreeSet::from([CalleeModelPolicyEvidence::InterprocSummary]),
         direct_callees: summary.direct_callees.iter().copied().collect(),
         callsite_count: summary.callsite_count,
         has_unknown_calls: summary.has_unknown_calls,
-        arg_effects,
         memory_effects: summary
             .memory_effects
             .iter()
@@ -554,8 +481,6 @@ fn summary_to_callee_fact(summary: &FunctionSemanticSummary) -> CalleeFact {
             .iter()
             .map(summary_atomic_effect_to_callee)
             .collect(),
-        param_type_hints,
-        return_type_hint,
         return_relation: summary_return_relation_to_callee(&summary.return_relation),
         reads_global_memory: summary.reads_global_memory,
         writes_global_memory: summary.writes_global_memory,
@@ -586,9 +511,6 @@ fn merge_callee_fact(existing: &mut CalleeFact, incoming: CalleeFact) {
     }
     existing.callsite_count = existing.callsite_count.max(incoming.callsite_count);
     existing.has_unknown_calls |= incoming.has_unknown_calls;
-    if existing.arg_effects.is_empty() {
-        existing.arg_effects = incoming.arg_effects;
-    }
     if existing.memory_effects.is_empty() {
         existing.memory_effects = incoming.memory_effects;
     }
@@ -606,12 +528,6 @@ fn merge_callee_fact(existing: &mut CalleeFact, incoming: CalleeFact) {
     }
     if existing.atomic_effects.is_empty() {
         existing.atomic_effects = incoming.atomic_effects;
-    }
-    if existing.param_type_hints.is_empty() {
-        existing.param_type_hints = incoming.param_type_hints;
-    }
-    if existing.return_type_hint.is_none() {
-        existing.return_type_hint = incoming.return_type_hint;
     }
     if matches!(
         existing.return_relation,
@@ -649,7 +565,7 @@ fn merged_context_and_summary_callee_facts(
 }
 
 fn build_type_analysis_inner(
-    mut input: DerivedTypeAnalysisInput<'_>,
+    mut input: DerivedTypeAnalysisInput,
     callee_facts: BTreeMap<u64, CalleeFact>,
 ) -> DerivedTypeAnalysis {
     // This inner projection builder is also used by detached report-only
@@ -683,31 +599,13 @@ fn build_type_analysis_inner(
         );
     }
 
-    let mut merged_signature = merge_local_signature_into_merged_signature(
+    let merged_signature = merge_local_signature_into_merged_signature(
         input.parsed_context.merged_signature.clone(),
         inferred_signature_spec,
     );
-    apply_main_signature_override(input.function_name, &mut merged_signature);
-    let before_interproc_signature = merged_signature.clone();
-    apply_interproc_summary_to_signature(
-        &mut merged_signature,
-        &mut input.inferred_signature,
-        &summary_view,
-        Some(&semantic_projection),
-        input.ptr_bits,
-    );
-    if merged_signature != before_interproc_signature {
-        push_signature_certificate_source(
-            &mut signature_certificate_sources,
-            SignatureCertificateSource::InterprocSummary,
-        );
-    }
 
     let mut diagnostics = input.diagnostics;
     diagnostics.solver_warnings = input.parsed_context.diagnostics.clone();
-    diagnostics
-        .warnings
-        .extend(semantic_projection.refusal_warnings());
     if summary_view
         .diagnostics()
         .is_some_and(|diagnostics| !diagnostics.converged)
@@ -749,7 +647,6 @@ fn build_type_analysis_inner(
         // Enrichment states these from the solve, beside the exact signature.
         inferred_aggregates: BTreeMap::new(),
         parameter_structures: BTreeMap::new(),
-        noreturn: input.parsed_context.noreturn,
         register_params: input.parsed_context.register_params.clone(),
         callee_facts,
         program_data_objects: input.parsed_context.program_data_objects.clone(),
@@ -783,7 +680,7 @@ fn build_type_analysis_inner(
 }
 
 #[cfg(test)]
-fn build_type_analysis(input: DerivedTypeAnalysisInput<'_>) -> DerivedTypeAnalysis {
+fn build_type_analysis(input: DerivedTypeAnalysisInput) -> DerivedTypeAnalysis {
     let callee_facts = merged_context_and_summary_callee_facts(
         &input.parsed_context.callee_facts,
         input.interproc_summary_set.as_ref(),
@@ -797,11 +694,6 @@ fn signed_int_type(bits: u32) -> CTypeLike {
         bits,
         signedness: Signedness::Signed,
     }
-}
-
-#[cfg(test)]
-fn void_pointer_type() -> CTypeLike {
-    CTypeLike::Pointer(Box::new(CTypeLike::Void))
 }
 
 pub fn build_source_owned_type_analysis(
@@ -824,11 +716,6 @@ pub fn build_source_owned_type_analysis(
     if ptr_bits == 0 {
         return Err(TypeAnalysisError::MissingMachinePointerWidth);
     }
-    let function_name = source
-        .function()
-        .name
-        .clone()
-        .unwrap_or_else(|| r2source::unnamed_function(source.function().entry));
     let interproc_report = interproc_summary
         .as_ref()
         .map(|summary| summary.report().clone());
@@ -849,7 +736,6 @@ pub fn build_source_owned_type_analysis(
     let diagnostics = TypeAnalysisDiagnostics::default();
     let local_structs = infer_local_struct_artifacts_from_prepared_ssa(source.as_ref());
     let derived_input = DerivedTypeAnalysisInput {
-        function_name: &function_name,
         ptr_bits,
         inferred_signature,
         parsed_context,

@@ -6767,6 +6767,226 @@ fn a_self_call_whose_writes_move_each_round_bounds_nothing() {
     assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
 }
 
+/// A fixture whose program states more entries than `BASE`: a branch to one is a tail transfer.
+struct Entered {
+    fixture: Fixture,
+    entries: &'static [u64],
+}
+
+impl r2engine::body::Program for Entered {
+    fn read(&self, vaddr: u64, max: usize) -> Option<Vec<u8>> {
+        self.fixture.read(vaddr, max)
+    }
+
+    fn region(&self, vaddr: u64) -> Option<r2engine::body::Region> {
+        self.fixture.region(vaddr)
+    }
+
+    fn is_entry(&self, vaddr: u64) -> bool {
+        vaddr == BASE || self.entries.contains(&vaddr)
+    }
+}
+
+impl Program for Entered {
+    fn holds_static_data(&self, vaddr: u64) -> bool {
+        self.fixture.holds_static_data(vaddr)
+    }
+
+    fn extents(&self) -> &r2types::ProgramExtents {
+        self.fixture.extents()
+    }
+
+    fn name_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.name_at(vaddr)
+    }
+
+    fn import_at(&self, vaddr: u64) -> Option<String> {
+        self.fixture.import_at(vaddr)
+    }
+}
+
+/// What `machine` renders of `BASE` in `bytes`, with `entries` stated as functions.
+fn rendered_entered(
+    machine: &Machine,
+    bytes: &[u8],
+    entries: &'static [u64],
+    name: &'static str,
+) -> String {
+    let mut bytes = bytes.to_vec();
+    bytes.resize(bytes.len() + 16, 0x90);
+    let program = Entered {
+        fixture: Fixture { bytes, name },
+        entries,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    response.output.text().to_owned()
+}
+
+/// `mov dword [rsp + 8], 5; call f; mov eax, [rsp + 8]`, where `f: jmp clear` and `clear` writes
+/// `[rsp + 0x10]` on its entry pointer, the caller's slot.
+const READ_BACK_PAST_A_TAIL_TO_A_WRITER: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xe8, 0x0f, 0x00, 0x00, 0x00, // 100c call 0x1020
+    0x8b, 0x44, 0x24, 0x08, // 1011 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 1015 add rsp, 0x18
+    0xc3, // 1019 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 101a
+    0xe9, 0x0b, 0x00, 0x00, 0x00, // 1020 f: jmp 0x1030
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1025
+    0xc7, 0x44, 0x24, 0x10, 0x00, 0x00, 0x00, 0x00, // 1030 clear: mov dword [rsp + 0x10], 0
+    0xc3, // 1038 ret
+];
+
+/// A tail transfer's callee writes what the body writes: `f` states no bound where `clear` is
+/// unstated to it, so the slot is read back as memory, never the 5 (D381, default-deny).
+#[test]
+fn a_place_a_tail_callee_writes_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let text = rendered_entered(
+        &machine,
+        READ_BACK_PAST_A_TAIL_TO_A_WRITER,
+        &[0x1030],
+        "tail",
+    );
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+}
+
+/// `f: test edi, edi; je clear; ret`: a conditional transfer to another entry the source names
+/// no site for still leaves the body, and its callee may write the caller's slot (D381).
+#[test]
+fn a_place_a_conditional_tail_callee_writes_stays_a_load() {
+    let mut bytes = READ_BACK_PAST_A_TAIL_TO_A_WRITER.to_vec();
+    bytes[0x20..0x25].copy_from_slice(&[0x85, 0xff, 0x74, 0x0c, 0xc3]);
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let text = rendered_entered(&machine, &bytes, &[0x1030], "conditional_tail");
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+}
+
+/// AArch64: `str w8, [sp, #8]; bl f; ldr w0, [sp, #8]`, where `f: b clear` and `clear` writes
+/// `[sp, #8]` on its entry pointer, the caller's slot.
+const ARM_READ_BACK_PAST_A_TAIL_TO_A_WRITER: &[u8] = &[
+    0xff, 0x83, 0x00, 0xd1, // 1000 sub sp, sp, #0x20
+    0xfd, 0x7b, 0x01, 0xa9, // 1004 stp x29, x30, [sp, #0x10]
+    0xa8, 0x00, 0x80, 0x52, // 1008 mov w8, #5
+    0xe8, 0x0b, 0x00, 0xb9, // 100c str w8, [sp, #8]
+    0x05, 0x00, 0x00, 0x94, // 1010 bl 0x1024
+    0xe0, 0x0b, 0x40, 0xb9, // 1014 ldr w0, [sp, #8]
+    0xfd, 0x7b, 0x41, 0xa9, // 1018 ldp x29, x30, [sp, #0x10]
+    0xff, 0x83, 0x00, 0x91, // 101c add sp, sp, #0x20
+    0xc0, 0x03, 0x5f, 0xd6, // 1020 ret
+    0x03, 0x00, 0x00, 0x14, // 1024 f: b 0x1030
+    0x1f, 0x20, 0x03, 0xd5, 0x1f, 0x20, 0x03, 0xd5, // 1028 nop; nop
+    0xff, 0x0b, 0x00, 0xb9, // 1030 clear: str wzr, [sp, #8]
+    0xc0, 0x03, 0x5f, 0xd6, // 1034 ret
+];
+
+#[test]
+fn an_aarch64_place_a_tail_callee_writes_stays_a_load() {
+    let machine = Machine::on("aarch64", "aarch64", 64, Platform::Linux);
+    let text = rendered_entered(
+        &machine,
+        ARM_READ_BACK_PAST_A_TAIL_TO_A_WRITER,
+        &[0x1030],
+        "arm_tail",
+    );
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+}
+
+/// `f: mov qword [rsp + 8], 0x2a; jmp g`, where `g` returns its first stack parameter: the tail
+/// hands `g` the pointer it found, so the argument sits at `g`'s own entry offset.
+const TAIL_PASSING_A_STACK_ARGUMENT: &[u8] = &[
+    0x48, 0xc7, 0x44, 0x24, 0x08, 0x2a, 0x00, 0x00, 0x00, // 1000 mov qword [rsp + 8], 0x2a
+    0xe9, 0x12, 0x00, 0x00, 0x00, // 1009 jmp 0x1020
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, // 100e
+    0x48, 0x8b, 0x44, 0x24, 0x08, // 1020 g: mov rax, [rsp + 8]
+    0x48, 0x01, 0xf8, 0x48, 0x01, 0xf0, 0x48, 0x01, 0xd0, // 1025 add rax, rdi; rsi; rdx
+    0x48, 0x01, 0xc8, 0x4c, 0x01, 0xc0, 0x4c, 0x01, 0xc8, // 102e add rax, rcx; r8; r9
+    0xc3, // 1037 ret
+];
+
+/// A minted call site keeps the callee's own coordinate of each stack argument: a tail transfer,
+/// which records no restore, reads the 42 at `g`'s entry + 8, never its return address (D386).
+#[test]
+fn a_tail_transfer_reads_a_stack_argument_at_the_callees_own_offset() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let text = rendered_entered(
+        &machine,
+        TAIL_PASSING_A_STACK_ARGUMENT,
+        &[0x1020],
+        "tail_arg",
+    );
+    assert!(
+        text.contains("fcn_1020(arg0, arg1, arg2, arg3, arg4, arg5, 42)"),
+        "{text}"
+    );
+}
+
+/// `mov dword [rsp + 8], 5; call rec; mov eax, [rsp + 8]`, where `rec` writes `[rsp + 0x18]`
+/// after calling itself one address lower: only the recursion reaches the caller's slot.
+const READ_BACK_PAST_A_RECURSIVE_WRITER: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xbf, 0x03, 0x00, 0x00, 0x00, // 100c mov edi, 3
+    0xe8, 0x0a, 0x00, 0x00, 0x00, // 1011 call 0x1020
+    0x8b, 0x44, 0x24, 0x08, // 1016 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 101a add rsp, 0x18
+    0xc3, 0x90, // 101e ret
+    0x85, 0xff, // 1020 rec: test edi, edi
+    0x74, 0x07, // 1022 je 0x102b
+    0xff, 0xcf, // 1024 dec edi
+    0xe8, 0xf5, 0xff, 0xff, 0xff, // 1026 call 0x1020
+    0xc7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x00, // 102b mov dword [rsp + 0x18], 0
+    0xc3, // 1033 ret
+];
+
+/// A self call writes the body's own incoming writes, each level one address lower: the least
+/// fixpoint reaches the caller's slot, which stays a load (D377's own writes, default-deny).
+#[test]
+fn a_place_only_a_recursion_writes_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let text = rendered_entered(
+        &machine,
+        READ_BACK_PAST_A_RECURSIVE_WRITER,
+        &[],
+        "recursive",
+    );
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+}
+
+/// `READ_BACK_PAST_A_RECURSIVE_WRITER` with the self call made above the entry pointer: each
+/// level writes higher, past any bound, so the caller's slot above `rec`'s store stays a load.
+const READ_BACK_PAST_A_RECURSION_ABOVE_ITS_SPEND: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 1000 sub rsp, 0x28
+    0xc7, 0x44, 0x24, 0x18, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 0x18], 5
+    0xbf, 0x03, 0x00, 0x00, 0x00, // 100c mov edi, 3
+    0xe8, 0x0a, 0x00, 0x00, 0x00, // 1011 call 0x1020
+    0x8b, 0x44, 0x24, 0x18, // 1016 mov eax, [rsp + 0x18]
+    0x48, 0x83, 0xc4, 0x28, // 101a add rsp, 0x28
+    0xc3, 0x90, // 101e ret
+    0x85, 0xff, // 1020 rec: test edi, edi
+    0x74, 0x0f, // 1022 je 0x1033
+    0xff, 0xcf, // 1024 dec edi
+    0x48, 0x83, 0xc4, 0x10, // 1026 add rsp, 0x10
+    0xe8, 0xf1, 0xff, 0xff, 0xff, // 102a call 0x1020
+    0x48, 0x83, 0xec, 0x10, // 102f sub rsp, 0x10
+    0xc7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x00, // 1033 mov dword [rsp + 0x18], 0
+    0xc3, // 103b ret
+];
+
+#[test]
+fn a_place_a_recursion_above_its_spend_writes_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let bytes = READ_BACK_PAST_A_RECURSION_ABOVE_ITS_SPEND;
+    let text = rendered_entered(&machine, bytes, &[], "recursive_above");
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+}
 /// A body that returns and stores the guard without checking it is no prologue the bytes prove.
 #[test]
 fn an_unchecked_canary_in_a_function_that_returns_stays() {
@@ -6888,8 +7108,11 @@ impl r2engine::body::Program for HaltingSlot {
         self.fixture.is_entry(vaddr)
     }
 
-    fn returns_through(&self, slot: u64) -> bool {
-        slot != self.slot
+    fn exit_through(&self, slot: u64) -> Option<r2engine::discovery::Never> {
+        (slot == self.slot).then(|| r2engine::discovery::Never {
+            proof: r2engine::discovery::NeverProof::Declared,
+            premises: std::collections::BTreeSet::new(),
+        })
     }
 }
 
