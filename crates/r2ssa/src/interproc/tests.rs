@@ -634,13 +634,10 @@ fn prepared_summary_set_models_missing_direct_callee_as_unknown() {
     assert!(summary.has_unknown_calls);
     assert!(summary.touches_unknown_memory);
     assert_eq!(summary.return_relation, SummaryReturnRelation::Unknown);
-    // Handed to a callee nothing describes: assumed, never proven, read or written (D382).
+    // Handed to a callee nothing describes: an entry, no proven read or write (D382).
     assert_eq!(
         summary.arg_effects.get(&0),
-        Some(&SummaryArgEffect {
-            assumed: true,
-            ..SummaryArgEffect::default()
-        })
+        Some(&SummaryArgEffect::default())
     );
     for kind in [
         SummaryMemoryEffectKind::Read,
@@ -1023,7 +1020,6 @@ fn malloc_summary(id: InterprocFunctionId) -> FunctionSemanticSummary {
             write: false,
             escape: false,
             free: false,
-            assumed: false,
         },
     );
     summary.allocation_effects.push(SummaryAllocationEffect {
@@ -1920,7 +1916,6 @@ fn callother_maps_explicit_argument_and_unknown_escape() {
     assert_eq!(
         local.arg_effects.get(&0),
         Some(&SummaryArgEffect {
-            assumed: true,
             ..SummaryArgEffect::default()
         })
     );

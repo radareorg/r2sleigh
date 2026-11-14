@@ -1498,7 +1498,7 @@ pub(crate) fn collect_source_boundary_facts(
             unstated_carrier: None,
             arguments: Vec::new(),
             ignored: Box::default(),
-            reads_stated: false,
+            reads_bound: None,
             fixed_argument_count: None,
             variadic_argument_count_evidence: None,
             variadic_argument_count_refusal: None,
@@ -1869,9 +1869,9 @@ pub(crate) fn collect_source_boundary_facts(
             boundary.complete && boundary.arguments_proven,
             "{boundary:?}"
         );
-        boundary.reads_stated = (machine_context.zip(call_site.raw_identity))
+        boundary.reads_bound = (machine_context.zip(call_site.raw_identity))
             .and_then(|(context, identity)| context.call_reads(Some(identity.instruction())))
-            .is_some_and(|reads| reads.stated);
+            .and_then(|reads| reads.bound);
         facts.calls.insert(call_site.id, boundary);
     }
 

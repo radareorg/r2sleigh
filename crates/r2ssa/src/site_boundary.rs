@@ -200,6 +200,10 @@ pub enum Overwrites {
     All,
 }
 
+impl r2source::Negative for CallEffect {
+    const FACTS: &'static [r2source::NegativeFact] = &[r2source::NegativeFact::Kept];
+}
+
 /// What one call does to the result registers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallEffect {
@@ -211,7 +215,6 @@ pub struct CallEffect {
     pub overwrites: Overwrites,
     /// The bytes its callee leaves as found on every path to a return: a read after the call reads
     /// what was there before it.
-    #[doc(alias = "default_deny_kept")]
     pub kept: LaneBytes,
     /// The bytes the callee certainly reads: a cited fixed float parameter's, a read at the call
     /// (D228). An integer argument a callee may leave alone is no read.
@@ -657,7 +660,7 @@ fn modes_of(block: &R2ILBlock, irregular: bool, endian: Endianness) -> Vec<Mode>
     while run < block.ops.len() {
         let Some(instruction) = block.instruction_of(run) else {
             modes[run].weak = true;
-            modes[run].ignored = reads_of(&block.ops[run..=run], false, endian).ignored[0];
+            modes[run].ignored = reads_of(&block.ops[run..=run], false, endian).ignored()[0];
             run += 1;
             continue;
         };
@@ -670,19 +673,19 @@ fn modes_of(block: &R2ILBlock, irregular: bool, endian: Endianness) -> Vec<Mode>
         let weak = ops.iter().any(R2ILOp::is_local_branch);
         let reads = reads_of(ops, true, endian);
         // Past two cancelled registers no read is dropped: each input of the instruction stays one.
-        let cancelled = match reads.cancelled.as_slice() {
+        let cancelled = match reads.cancelled().registers() {
             cancelled @ ([_] | [_, _]) => cancelled
                 .iter()
                 .map(CanonicalStorageId::from_varnode)
                 .collect(),
             _ => Vec::new(),
         };
-        let each = (modes[run..end].iter_mut()).zip(reads.ignored).zip(ops);
+        let each = (modes[run..end].iter_mut()).zip(reads.ignored()).zip(ops);
         for ((mode, ignored), op) in each {
             mode.weak |= weak;
             mode.inert |= inert;
             mode.cancelled = cancelled_inputs(op, &cancelled);
-            mode.ignored = ignored;
+            mode.ignored = *ignored;
         }
         run = end;
     }

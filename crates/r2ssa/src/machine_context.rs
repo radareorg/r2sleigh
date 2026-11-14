@@ -533,6 +533,9 @@ fn clobbered_by_a_call(
         .collect()
 }
 
+/// What a typed indirect call writes: its argument area.
+static ARGUMENT_AREA: crate::call_reads::StackWrites = crate::call_reads::StackWrites::arguments();
+
 impl SourceMachineContext {
     pub(crate) fn from_blocks(blocks: &[R2ILBlock], arch: Option<&Arch>) -> Self {
         Self::from_blocks_with_interfaces(
@@ -1326,7 +1329,7 @@ impl SourceMachineContext {
         // A direct callee writes the stack its entry states; a typed indirect call, its arguments.
         let writes = match target {
             Some(target) => self.callee_writes.get(&target.offset),
-            None => Some(&crate::call_reads::StackWrites::Arguments),
+            None => Some(&ARGUMENT_AREA),
         };
         let interface = (identity.and_then(|identity| self.call_site_interface(identity)))
             .filter(|interface| interface.is_complete());
@@ -1341,8 +1344,7 @@ impl SourceMachineContext {
             .zip(instruction.and_then(|at| self.format_tails.get(&at)))
             .and_then(|((interface, model), tail)| counted_stack(interface, model, tail));
         if let (Some(stack), Some(model)) = (counted, model) {
-            let mut reads = crate::call_reads::CallReads::every_location(model);
-            (reads.stack, reads.writes) = (Some(stack.clone()), Some(stack));
+            let reads = crate::call_reads::CallReads::every_location(model).on_stack(stack);
             return Some(reads.writing(writes));
         }
         // A walked callee that mints no contract still states its reads where its arity is exact.

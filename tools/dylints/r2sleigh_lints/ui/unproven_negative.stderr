@@ -1,0 +1,16 @@
+error: a public bool states a negative fact any caller sets; carry a witness its owner mints
+  --> $DIR/unproven_negative.rs:6:5
+   |
+LL |     pub arguments_proven: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[deny(unproven_negative)]` on by default
+
+error: a public bool states a negative fact any caller sets; carry a witness its owner mints
+  --> $DIR/unproven_negative.rs:5:5
+   |
+LL |     pub stated: bool,
+   |     ^^^^^^^^^^^^^^^^
+
+error: aborting due to 2 previous errors
+

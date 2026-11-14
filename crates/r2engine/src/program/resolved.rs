@@ -127,7 +127,8 @@ fn arity_owners(read: &CalleeRead) -> BTreeSet<u64> {
         | SourceFloorCause::ArgumentAreaEscapes
         | SourceFloorCause::RegisterRead
         | SourceFloorCause::Homed
-        | SourceFloorCause::Unplaced(_) => None,
+        | SourceFloorCause::Unplaced(_)
+        | SourceFloorCause::Uncited => None,
     });
     owners.collect::<Option<_>>().unwrap_or_default()
 }
@@ -572,6 +573,7 @@ impl Assumed {
         facts
             .summary()
             .incoming_writes()
+            .and_then(r2ssa::call_reads::StackWrites::spans)
             .map(<[(i64, i64)]>::to_vec)
     }
 

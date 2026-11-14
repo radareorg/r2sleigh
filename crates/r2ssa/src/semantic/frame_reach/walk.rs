@@ -103,6 +103,8 @@ pub struct FramePoints {
     /// The entry offset each call's or tail transfer's area is measured from, by instruction then
     /// operation; `None` where no offset places the stack pointer (D351, D398: the one table).
     pub(crate) call_bases: Vec<CallBase>,
+    /// The walk that found `call_bases` classified every operation's transfer (D411).
+    pub(crate) transfers: Option<crate::call_reads::Transfers>,
     /// The first instruction that moves the stack pointer by an amount no constant states (D355).
     pub(crate) dynamic: Option<DynamicFrame>,
     /// The entry-relative spans at or above the entry pointer its exact stores write (D377).
@@ -222,7 +224,11 @@ impl FramePoints {
 
     /// What a call to this body may write of its caller's stack, from the call's pointer; a self call
     /// in two rounds (doc/adr-callee-builds.md, D377, D381). `O(calls x spans)`.
-    pub fn call_writes(&self, context: &SourceMachineContext) -> Option<Vec<(i64, i64)>> {
+    pub fn call_writes(
+        &self,
+        context: &SourceMachineContext,
+    ) -> Option<crate::call_reads::StackWrites> {
+        let transfers = self.transfers?;
         // A tail transfer writes what its source-correlated callee states; any other, all.
         let stated = |_: usize, call: &CallBase, instruction: u64| {
             let stated = (!call.tail)
@@ -233,7 +239,8 @@ impl FramePoints {
                 .flatten()?
                 .writes
         };
-        self.writes_bound(spent(context), stated)
+        let spans = self.writes_bound(spent(context), stated)?;
+        Some(crate::call_reads::StackWrites::within(spans, transfers))
     }
 
     /// `call_writes` with each call's statement from `stated`, and what a transfer spends.
@@ -525,6 +532,7 @@ struct RoundTable {
 struct WalkSite {
     entry: u64,
     calls: Vec<CallArguments>,
+    transfers: crate::call_reads::Transfers,
     /// An entry edge runs the prologue again: an offset names a place per pass.
     reentered: bool,
     /// What a transfer spends at least and at most.
@@ -812,6 +820,7 @@ pub(crate) fn walk<C: SsaWorkControl + ?Sized>(
         blocks,
         successors,
         calls: arguments.calls,
+        transfers: arguments.transfers,
     };
     // No entry stack pointer value: no frame address exists, and every transfer is at entry (D381).
     let Some(entry_sp) = entry_sp else {
@@ -902,6 +911,7 @@ impl RoundTable {
         Self {
             points: FramePoints {
                 call_bases: by_call(&site.calls, values),
+                transfers: Some(site.transfers),
                 ..FramePoints::default()
             },
             sinks: Vec::new(),
@@ -982,6 +992,7 @@ impl<'a> Sinks<'a> {
 /// (doc/adr-call-boundary.md, "D217 as built").
 struct StackArguments {
     calls: Vec<CallArguments>,
+    transfers: crate::call_reads::Transfers,
 }
 
 /// One call or tail transfer, from the stack pointer its area is measured at; its areas are the
@@ -1033,7 +1044,9 @@ impl StackArguments {
             let children = func.domtree().children(address);
             steps.extend(children.iter().rev().map(|child| (*child, pointer)));
         }
-        Self { calls }
+        // Each operation of each block the walk reached went through `SSAOp::transfer`.
+        let transfers = crate::call_reads::Transfers::classified();
+        Self { calls, transfers }
     }
 }
 
@@ -1711,6 +1724,7 @@ impl<'a> Walker<'a> {
             .map(|(low, high)| (low.max(0), high));
         self.points.incoming_stores = merged(above);
         self.points.call_bases = by_call(&self.site.calls, &self.values);
+        self.points.transfers = Some(self.site.transfers);
         RoundTable {
             points: self.points,
             sinks,

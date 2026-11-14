@@ -109,15 +109,39 @@ fn fixes(operation: Operation, at: usize, (bits, bytes): (u128, u32), free: u32)
     }
 }
 
-/// What the operations of one instruction read.
+/// What the operations of one instruction read, minted only by [`reads_of`] (D411).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reads {
     /// Per operation, the bits of [`ignored_operands`] over `R2ILOp::inputs`; all of them for one
     /// that only feeds a temporary nothing reads.
-    pub ignored: Vec<u32>,
-    /// The registers a live operation cancels against itself (`xor eax, eax`, `sbb edx, edx`), each
-    /// once: the flags beside it read their bits, not their value; any other input stays a read.
-    pub cancelled: Vec<Varnode>,
+    ignored: Vec<u32>,
+    cancelled: Cancelled,
+}
+
+/// The registers a live operation cancels against itself (`xor eax, eax`, `sbb edx, edx`), each
+/// once: the flags beside it read their bits, not their value; any other input stays a read.
+///
+/// ```compile_fail,E0423
+/// let forged = r2il::eval::independence::Cancelled(Vec::new());
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Cancelled(Vec<Varnode>);
+
+impl Cancelled {
+    pub fn registers(&self) -> &[Varnode] {
+        &self.0
+    }
+}
+
+impl Reads {
+    /// Per operation, the operand bits its value does not depend on.
+    pub fn ignored(&self) -> &[u32] {
+        &self.ignored
+    }
+
+    pub const fn cancelled(&self) -> &Cancelled {
+        &self.cancelled
+    }
 }
 
 /// What the operations of one instruction read, following constants in temporaries (`imul edx, edx,
@@ -168,7 +192,10 @@ pub fn reads_of(ops: &[R2ILOp], whole: bool, endian: Endianness) -> Reads {
             cancelled.push(register);
         }
     }
-    Reads { ignored, cancelled }
+    Reads {
+        ignored,
+        cancelled: Cancelled(cancelled),
+    }
 }
 
 /// Whether `ops`, all of one instruction, leave every byte of the register `at` nought (`xor eax,
@@ -821,10 +848,11 @@ mod tests {
     #[test]
     fn an_instruction_that_cancels_a_register_against_itself_says_so() {
         let xor = |a: Varnode, b: Varnode| R2ILOp::IntXor { dst: eax(), a, b };
-        assert!(!reads_of(&[xor(eax(), eax())], true).cancelled.is_empty());
+        assert!(!reads_of(&[xor(eax(), eax())], true).cancelled.0.is_empty());
         assert!(
             reads_of(&[xor(eax(), reg(4, 4))], true)
                 .cancelled
+                .0
                 .is_empty()
         );
         let or = R2ILOp::IntOr {
@@ -832,20 +860,20 @@ mod tests {
             a: eax(),
             b: Varnode::constant(0xffff_ffff, 4),
         };
-        assert!(reads_of(&[or], true).cancelled.is_empty());
+        assert!(reads_of(&[or], true).cancelled.0.is_empty());
         // The address a multi-byte `nop` forms from a register twice is a dead temporary.
         let dropped = R2ILOp::IntAdd {
             dst: Varnode::unique(0, 8),
             a: reg(0, 8),
             b: reg(0, 8),
         };
-        assert!(reads_of(&[dropped], true).cancelled.is_empty());
+        assert!(reads_of(&[dropped], true).cancelled.0.is_empty());
         let temp = R2ILOp::IntSub {
             dst: Varnode::unique(0, 4),
             a: eax(),
             b: eax(),
         };
-        assert!(reads_of(&[temp], true).cancelled.is_empty());
+        assert!(reads_of(&[temp], true).cancelled.0.is_empty());
     }
 
     /// AL is nought where the operations state it, however spelled; not for another value, a
@@ -934,10 +962,11 @@ mod tests {
             a: operand.clone(),
             b: operand,
         };
-        assert!(!reads_of(&[xor(eax())], false).cancelled.is_empty());
+        assert!(!reads_of(&[xor(eax())], false).cancelled.0.is_empty());
         assert!(
             reads_of(&[xor(Varnode::unique(0, 4))], false)
                 .cancelled
+                .0
                 .is_empty()
         );
     }
@@ -1009,7 +1038,7 @@ mod tests {
     #[test]
     fn a_register_xored_by_a_copy_of_itself_is_cancelled() {
         let cancelled = reads_of(&xor_with_a_copy(0x1240, 4), true);
-        assert!(!cancelled.cancelled.is_empty());
+        assert!(!cancelled.cancelled.0.is_empty());
         // Every operand of the copy and the pieces is a read the cancel makes dead.
         assert_eq!(cancelled.ignored[0], u32::MAX);
         assert_eq!(cancelled.ignored[2], 0b11);
@@ -1017,11 +1046,12 @@ mod tests {
         assert!(
             reads_of(&xor_with_a_copy(0x1280, 4), true)
                 .cancelled
+                .0
                 .is_empty()
         );
         // A big-endian truncation takes the bytes from the other end: nothing is followed.
         let big = super::reads_of(&xor_with_a_copy(0x1240, 4), true, Endianness::Big);
-        assert!(big.cancelled.is_empty());
+        assert!(big.cancelled.0.is_empty());
     }
 
     /// A local branch makes the operations after it run on some paths only: no copy is followed.
@@ -1034,7 +1064,7 @@ mod tests {
                 target: Varnode::constant(1, 8),
             },
         );
-        assert!(reads_of(&branching, true).cancelled.is_empty());
+        assert!(reads_of(&branching, true).cancelled.0.is_empty());
     }
 
     /// The copy is the register's value as it was: written between the copy and the xor, the register
@@ -1049,7 +1079,7 @@ mod tests {
                 src: reg(0x1300, 4),
             },
         );
-        assert!(reads_of(&written, true).cancelled.is_empty());
+        assert!(reads_of(&written, true).cancelled.0.is_empty());
         let mut shifted = xor_with_a_copy(0x1240, 2);
         if let R2ILOp::Subpiece { offset, .. } = &mut shifted[1] {
             *offset = 4;
@@ -1070,6 +1100,6 @@ mod tests {
                 inputs: Vec::new(),
             },
         );
-        assert!(reads_of(&unstated, true).cancelled.is_empty());
+        assert!(reads_of(&unstated, true).cancelled.0.is_empty());
     }
 }

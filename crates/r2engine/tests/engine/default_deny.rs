@@ -5,25 +5,23 @@ use crate::common;
 
 use common::{BASE, Literal, PLT_CALLER};
 use r2engine::program::OpenProgram;
+use r2source::{Negative, NegativeFact};
 
-/// The negative facts, one per `#[doc(alias = "default_deny_<column>")]` tag in the sources.
-const COLUMNS: &[&str] = &[
-    "ignored_reads",
-    "kept",
-    "call_read_bytes",
-    "void",
-    "never",
-    "pointer",
-    "incoming_writes",
+/// Each type that states a negative fact, by the facts it states (D411): every column is some
+/// type's, so a fact no type carries has no column.
+const CARRIERS: &[&[NegativeFact]] = &[
+    <r2ssa::call_reads::ReadBound as Negative>::FACTS,
+    <r2ssa::call_reads::StackWrites as Negative>::FACTS,
+    <r2ssa::site_boundary::CallEffect as Negative>::FACTS,
+    <r2ssa::SummaryArgEffect as Negative>::FACTS,
+    <r2source::Never as Negative>::FACTS,
+    <r2source::SourceFunctionReturn as Negative>::FACTS,
+    <r2il::eval::independence::Cancelled as Negative>::FACTS,
 ];
 
 /// A cell another row owns and that fails today, held exactly: it fails until its row lands, then
 /// this entry goes in the same change.
-const OPEN: &[(&str, &str, &str)] = &[
-    // `CallReads::exact` bounds the reads by a complete site interface, which no citation backs.
-    ("uncited_row", "ignored_reads", "D411 ReadBound"),
-    ("uncited_row", "call_read_bytes", "D411 ReadBound"),
-];
+const OPEN: &[(&str, NegativeFact, &str)] = &[];
 
 /// The unknown inputs: a call through a register nothing sets, a call to an import no row states,
 /// and one to an import only an uncited row states ([`UNCITED`]; D395: a bound, never a proof).
@@ -90,8 +88,13 @@ fn returns(text: &str) -> Vec<&str> {
 }
 
 /// Each row's cell of `column`, `Err` with the evidence where the negative fact was stated.
-fn cell(row: &str, column: &str, check: impl FnOnce() -> Result<(), String>) -> Option<String> {
-    let open = OPEN.iter().find(|(r, c, _)| *r == row && *c == column);
+fn cell(
+    row: &str,
+    fact: NegativeFact,
+    check: impl FnOnce() -> Result<(), String>,
+) -> Option<String> {
+    let column = fact.column();
+    let open = OPEN.iter().find(|(r, c, _)| *r == row && *c == fact);
     match (check(), open) {
         (Ok(()), None) => None,
         (Err(evidence), Some((_, _, owner))) => {
@@ -105,8 +108,7 @@ fn cell(row: &str, column: &str, check: impl FnOnce() -> Result<(), String>) -> 
     }
 }
 
-fn hold(column: &str, failures: Vec<Option<String>>) {
-    assert!(COLUMNS.contains(&column), "{column} is no column");
+fn hold(failures: Vec<Option<String>>) {
     let failures = failures.into_iter().flatten().collect::<Vec<_>>();
     assert!(failures.is_empty(), "{}", failures.join("\n\n"));
 }
@@ -115,7 +117,7 @@ fn hold(column: &str, failures: Vec<Option<String>>) {
 #[test]
 fn an_unknown_callee_performs_every_read_it_names() {
     let failures = Unknown::ALL.map(|row| {
-        cell(row.name(), "ignored_reads", || {
+        cell(row.name(), NegativeFact::IgnoredReads, || {
             let (literal, entry) = row.around(&[0x48, 0x89, 0xf7], &[0xc3]);
             let prepared = OpenProgram::of(literal)
                 .prepared(entry)
@@ -141,14 +143,29 @@ fn an_unknown_callee_performs_every_read_it_names() {
             }
         })
     });
-    hold("ignored_reads", failures.into());
+    hold(failures.into());
+}
+
+/// `cmp rdi, rsi; sbb eax, eax; ret`: the instruction cancels EAX against itself, and still reads
+/// the carry the compare left, so the result is the parameters' (D393): a cancel ignores one register.
+#[test]
+fn a_cancelling_instruction_ignores_only_the_register_it_cancels() {
+    let failure = cell("cancelling_instruction", NegativeFact::IgnoredReads, || {
+        const CODE: &[u8] = &[0x48, 0x39, 0xf7, 0x19, 0xc0, 0xc3];
+        let text = rendered((Literal::of_code(CODE, &[("f", BASE, 6)]), BASE));
+        match returns(&text).iter().any(|line| line.contains("arg")) {
+            true => Ok(()),
+            false => Err(text),
+        }
+    });
+    hold(vec![failure]);
 }
 
 /// `mov esi, 7; call; mov eax, esi; ret`: an unknown callee keeps nothing, so 7 is not returned.
 #[test]
 fn an_unknown_callee_keeps_no_register() {
     let failures = Unknown::ALL.map(|row| {
-        cell(row.name(), "kept", || {
+        cell(row.name(), NegativeFact::Kept, || {
             let text = rendered(row.around(&[0xbe, 0x07, 0, 0, 0], &[0x89, 0xf0, 0xc3]));
             match returns(&text).iter().any(|line| line.contains('7')) {
                 true => Err(text),
@@ -156,14 +173,14 @@ fn an_unknown_callee_keeps_no_register() {
             }
         })
     });
-    hold("kept", failures.into());
+    hold(failures.into());
 }
 
 /// `mov edx, 5; call; ret`: an unknown callee may read RDX, so the 5 reaches a read the call performs.
 #[test]
 fn an_unknown_callee_reads_each_argument_register() {
     let failures = Unknown::ALL.map(|row| {
-        cell(row.name(), "call_read_bytes", || {
+        cell(row.name(), NegativeFact::CallReadBytes, || {
             let (literal, entry) = row.around(&[0xba, 0x05, 0, 0, 0], &[0xc3]);
             let prepared = OpenProgram::of(literal).prepared(entry).expect("it prepares");
             let artifact = prepared.artifact().shared_artifact();
@@ -184,14 +201,14 @@ fn an_unknown_callee_reads_each_argument_register() {
             }
         })
     });
-    hold("call_read_bytes", failures.into());
+    hold(failures.into());
 }
 
 /// `mov eax, 7; call; ret`: an unknown callee's result is unproven, never void and never the 7.
 #[test]
 fn an_unknown_callee_returns_an_unproven_result() {
     let failures = Unknown::ALL.map(|row| {
-        cell(row.name(), "void", || {
+        cell(row.name(), NegativeFact::Void, || {
             let text = rendered(row.around(&[0xb8, 0x07, 0, 0, 0], &[0xc3]));
             let seven = returns(&text).iter().any(|line| line.contains('7'));
             match text.trim_start().starts_with("void ") || seven {
@@ -200,14 +217,14 @@ fn an_unknown_callee_returns_an_unproven_result() {
             }
         })
     });
-    hold("void", failures.into());
+    hold(failures.into());
 }
 
 /// `call; mov eax, 1; ret`: an unknown callee comes back, so the 1 is returned and nothing is noreturn.
 #[test]
 fn an_unknown_callee_comes_back() {
     let failures = Unknown::ALL.map(|row| {
-        cell(row.name(), "never", || {
+        cell(row.name(), NegativeFact::Never, || {
             let text = rendered(row.around(&[], &[0xb8, 0x01, 0, 0, 0, 0xc3]));
             let one = returns(&text).iter().any(|line| line.contains('1'));
             match one && !text.contains("noreturn") {
@@ -216,7 +233,7 @@ fn an_unknown_callee_comes_back() {
             }
         })
     });
-    let walk = cell("walk_without_return", "never", || {
+    let walk = cell("walk_without_return", NegativeFact::Never, || {
         // `f: call g; mov eax, 1; ret`, `g: ud2`: only the walk finds g never returning (RULING 1.4).
         const CODE: &[u8] = &[
             0xe8, 0x0b, 0x00, 0x00, 0x00, // 1000 call 0x1010
@@ -232,7 +249,7 @@ fn an_unknown_callee_comes_back() {
             false => Ok(()),
         }
     });
-    hold("never", [failures.as_slice(), &[walk]].concat());
+    hold([failures.as_slice(), &[walk]].concat());
 }
 
 /// `push rbx; mov rbx, rdi; call; mov rax, rbx; pop rbx; ret`: the parameter handed to an unknown
@@ -241,7 +258,7 @@ fn an_unknown_callee_comes_back() {
 #[test]
 fn an_unknown_callee_types_no_argument_a_pointer() {
     let failures = Unknown::ALL.map(|row| {
-        cell(row.name(), "pointer", || {
+        cell(row.name(), NegativeFact::Pointer, || {
             let before = [0x53, 0x48, 0x89, 0xfb]; // push rbx; mov rbx, rdi
             let text = rendered(row.around(&before, &[0x48, 0x89, 0xd8, 0x5b, 0xc3]));
             // The function's own parameters, not a callee's declaration (`void* xmalloc(...)`).
@@ -253,7 +270,7 @@ fn an_unknown_callee_types_no_argument_a_pointer() {
             }
         })
     });
-    hold("pointer", failures.into());
+    hold(failures.into());
 }
 
 /// `main: sub rsp, 0x18; mov qword [rsp+8], 5; call f; mov rax, [rsp+8]; add rsp, 0x18; ret`,
@@ -276,7 +293,7 @@ const TAIL_WRITES: &[u8] = &[
 /// A tail transfer's writes are the callee's: the slot read back is not the 5 stored before the call.
 #[test]
 fn a_tail_transfer_writes_what_its_target_writes() {
-    let failure = cell("tail_transfer", "incoming_writes", || {
+    let failure = cell("tail_transfer", NegativeFact::IncomingWrites, || {
         let functions = [
             ("main", BASE, 0x1c),
             ("f", BASE + 0x20, 2),
@@ -288,7 +305,7 @@ fn a_tail_transfer_writes_what_its_target_writes() {
             false => Ok(()),
         }
     });
-    hold("incoming_writes", vec![failure]);
+    hold(vec![failure]);
 }
 
 /// `TAIL_WRITES` with `f: lea rdi, [rsp + 0x10]; jmp g`, where `g: mov qword [rdi], 0` states no
@@ -311,7 +328,7 @@ const TAIL_HANDED: &[u8] = &[
 /// A frame address a register holds at a tail transfer escapes to the tail's callee (D381).
 #[test]
 fn a_frame_address_handed_to_a_tail_is_written_through() {
-    let failure = cell("tail_handed", "incoming_writes", || {
+    let failure = cell("tail_handed", NegativeFact::IncomingWrites, || {
         let functions = [
             ("main", BASE, 0x1c),
             ("f", BASE + 0x20, 7),
@@ -323,45 +340,32 @@ fn a_frame_address_handed_to_a_tail_is_written_through() {
             false => Ok(()),
         }
     });
-    hold("incoming_writes", vec![failure]);
+    hold(vec![failure]);
 }
 
-/// Every `default_deny_<column>` tag on an accessor in the sources names a column here, and every
-/// column has a tagged accessor: a new negative fact joins the matrix (D405).
+/// Each column's test, by a match with no wildcard arm: a new [`NegativeFact`] does not compile
+/// until it has one (D411).
+fn column(fact: NegativeFact) -> fn() {
+    match fact {
+        NegativeFact::IgnoredReads => an_unknown_callee_performs_every_read_it_names,
+        NegativeFact::Kept => an_unknown_callee_keeps_no_register,
+        NegativeFact::CallReadBytes => an_unknown_callee_reads_each_argument_register,
+        NegativeFact::Void => an_unknown_callee_returns_an_unproven_result,
+        NegativeFact::Never => an_unknown_callee_comes_back,
+        NegativeFact::Pointer => an_unknown_callee_types_no_argument_a_pointer,
+        NegativeFact::IncomingWrites => a_tail_transfer_writes_what_its_target_writes,
+    }
+}
+
+/// Every negative fact has a column and a type that carries it.
 #[test]
-fn every_tagged_negative_fact_has_a_column() {
-    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
-    let mut tagged = std::collections::BTreeSet::new();
-    let mut pending = vec![crates];
-    while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(&dir).expect("it lists").flatten() {
-            let path = entry.path();
-            let name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            if path.is_dir() && name != "target" && name != "tests" {
-                pending.push(path);
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                let text = std::fs::read_to_string(&path).expect("it reads");
-                for (at, _) in text.match_indices("alias = \"default_deny_") {
-                    let rest = &text[at + "alias = \"default_deny_".len()..];
-                    let column = rest.split('"').next().unwrap_or_default().to_owned();
-                    tagged.insert((column, path.display().to_string()));
-                }
-            }
-        }
-    }
-    for (column, path) in &tagged {
+fn every_negative_fact_has_a_column_and_a_carrier() {
+    for fact in NegativeFact::ALL {
+        let _ = column(fact);
         assert!(
-            COLUMNS.contains(&column.as_str()),
-            "{path} tags {column}, which has no column"
-        );
-    }
-    for column in COLUMNS {
-        assert!(
-            tagged.iter().any(|(tag, _)| tag == column),
-            "no accessor is tagged default_deny_{column}"
+            CARRIERS.iter().any(|facts| facts.contains(&fact)),
+            "no type carries {}",
+            fact.column()
         );
     }
 }

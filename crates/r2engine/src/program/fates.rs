@@ -1418,7 +1418,9 @@ pub(super) fn import_reads<S: Source + 'static>(
     let key = (CalleeKey::Import(ImportId(callee)), World::Open);
     let boundary = db.get::<CallBoundary>(&key).ok()?;
     match boundary.as_ref() {
-        Some(CallBoundary::Import { reads }) => reads.as_ref().map(|reads| reads.registers.clone()),
+        Some(CallBoundary::Import { reads }) => {
+            reads.as_ref().map(|reads| reads.registers().to_vec())
+        }
         _ => None,
     }
 }
@@ -1571,12 +1573,9 @@ impl<S: Source + 'static> Reading<'_, S> {
                 _ => None,
             };
             let formatted = (reads.as_ref())
-                .and_then(|reads| Some((reads, reads.format.as_ref()?)))
+                .and_then(|reads| Some((reads, reads.format()?)))
                 .map(|(reads, format)| {
-                    let mut unfloated = reads.clone();
-                    unfloated
-                        .registers
-                        .retain(|read| !format.floats.contains(read));
+                    let unfloated = reads.without_format_floats();
                     let (takes, counted, reads) = self.import_takes(Some(unfloated));
                     Formatted {
                         register: format.format,
@@ -1643,16 +1642,16 @@ impl<S: Source + 'static> Reading<'_, S> {
                 && a.offset < b.offset + u64::from(b.size)
                 && b.offset < a.offset + u64::from(a.size)
         };
-        let Some(register) = reads.count_register else {
-            let fixed = reads.stated && reads.format.is_none();
-            let certain = (reads.registers.iter())
+        let Some(register) = reads.count_register() else {
+            let fixed = reads.bound().is_some() && reads.format().is_none();
+            let certain = (reads.registers().iter())
                 .filter(|read| fixed && floats.iter().any(|float| overlaps(read, float)))
                 .copied()
                 .collect::<Vec<_>>();
-            let takes = LaneBytes::covered_by(self.lanes, &reads.registers);
+            let takes = LaneBytes::covered_by(self.lanes, reads.registers());
             return (takes, None, LaneBytes::covered_by(self.lanes, &certain));
         };
-        let mut integers = (reads.registers.iter())
+        let mut integers = (reads.registers().iter())
             .filter(|read| !floats.iter().any(|float| overlaps(read, float)))
             .copied()
             .collect::<Vec<_>>();

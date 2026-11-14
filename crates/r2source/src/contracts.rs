@@ -352,6 +352,8 @@ pub enum SourceFloorCause {
     HandedOn(SourceUnprovenCall),
     /// A declared parameter of a class the convention places nowhere here; it and the rest drop.
     Unplaced(SourceUnplacedClass),
+    /// The declaration is a library row no header cites: its parameters are a lower bound (D411).
+    Uncited,
 }
 
 /// A declared class no location takes here (doc/adr-call-boundary.md, Refusals).
@@ -481,7 +483,6 @@ impl SourceUnprovenResult {
 /// `Void` is therefore materially different from no return information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SourceFunctionReturn {
-    #[doc(alias = "default_deny_void")]
     Void,
     Register {
         storage: CanonicalStorageId,

@@ -17,6 +17,7 @@ use rustc_lint::{LateContext, LateLintPass, LintContext};
 dylint_linting::dylint_library!();
 
 mod function_scale;
+mod unproven_negative;
 
 rustc_lint::declare_lint!(
     /// ### What it does
@@ -2345,11 +2346,15 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         EXHAUSTED_READ_THROUGH_SEALED_STAGE,
         TYPE_SPELLING_REPARSED,
         function_scale::SCAN_IN_LOOP,
+        unproven_negative::UNPROVEN_NEGATIVE,
         BUILD_FACTS_READS_A_CALLEE_FACT,
     ]);
     lint_store.register_late_lint_pass(Box::new(|_| Box::new(R2sleighLintPass)));
     lint_store.register_late_lint_pass(Box::new(|_| {
         Box::<function_scale::FunctionScale>::default()
+    }));
+    lint_store.register_late_lint_pass(Box::new(|_| {
+        Box::<unproven_negative::UnprovenNegative>::default()
     }));
 }
 
@@ -5218,7 +5223,7 @@ fn r2types_role_name_signature_hint_expr(expr: &Expr<'_>) -> bool {
     )
 }
 
-fn item_is_test_only(cx: &LateContext<'_>, item: &Item<'_>) -> bool {
+pub(crate) fn item_is_test_only(cx: &LateContext<'_>, item: &Item<'_>) -> bool {
     cx.sess()
         .source_map()
         .span_to_snippet(item.span)

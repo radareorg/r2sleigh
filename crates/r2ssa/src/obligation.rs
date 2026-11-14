@@ -3764,7 +3764,7 @@ mod tests {
                 unstated_lanes: Box::default(),
                 unstated_carrier: None,
                 ignored: Box::default(),
-                reads_stated: true,
+                reads_bound: Some(crate::call_reads::ReadBound::arity()),
                 arguments: vec![crate::semantic::SourceCallArgumentFact {
                     slot,
                     value: crate::semantic::SourceCallArgumentValue::Value(listed),
@@ -3856,7 +3856,7 @@ mod tests {
                 unstated_lanes: Box::default(),
                 unstated_carrier: None,
                 ignored: Box::default(),
-                reads_stated: true,
+                reads_bound: Some(crate::call_reads::ReadBound::arity()),
                 arguments: vec![
                     crate::semantic::SourceCallArgumentFact {
                         slot,

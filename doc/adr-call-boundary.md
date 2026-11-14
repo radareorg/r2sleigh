@@ -1446,6 +1446,17 @@ A proving "never" carries its witness (D410, designs/foundation proof-typed).
 - `composed(ends)` is `None` for no end or a bound end. Discovery builds each composed body callee first inside its fixpoint, from its callees' `Never`s and the walk's proving halts (`Walker::ends` returns them), `O(V + E)`. A halting tail branch now records its `Never` (`Closer::Branch`), which names no exit site.
 - The walk's halting argument and interrupt carry the row's or the document's `Citation` (`body::Halting`, `Program::interrupt_halts`); the three hand `.cited()` checks are gone. `Placement::reads` states a bound only for a cited row.
 
+## rd5-deny as built (2026-11-14, D411)
+
+Every negative fact on the call boundary is a type its owner mints (designs/foundation proof-typed).
+
+- r2ssa `ReadBound`: why a call's listed registers are all it reads. Minted by `cited(Citation)` (r2engine's cited row) or r2ssa's exact arity (a complete fixed site interface, a callee statement of exact arity). `CallReads` fields are private; `cited`, `unbounded` and `every_location` build it, `reads_none_of` needs `bound()`. `SourceCallBoundaryFact::reads_bound` carries the same witness.
+- An uncited row states a lower bound: r2engine `declared` adds `SourceFloorCause::Uncited`. Recovery mints no exact site contract from a floor, and the callee statement reads every location.
+- `StackWrites` is opaque. `within(spans, Transfers)` takes the frame walk's witness that each operation of each reached block went through `SSAOp::transfer`, a match with no wildcard arm. r2engine hands the minted value on, and a cycle's held assumption is `assumed(spans)`.
+- r2il `Reads` and `Cancelled` have private fields; `reads_of` alone mints them.
+- `SummaryArgEffect.assumed` is gone: an argument handed to an undescribed call keeps an empty entry, which counts toward arity and proves no effect.
+- The matrix's columns are `r2source::NegativeFact`, each carried by a `Negative` type; Dylint `UNPROVEN_NEGATIVE` denies a new public negative bool.
+
 ## D409 as built (2026-11-14, rd5-dispatch)
 
 A cited printf `...` call bounds its stack by the operands its own format counts.

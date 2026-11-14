@@ -16,11 +16,13 @@ pub mod confidence;
 pub mod convention;
 pub mod display_names;
 pub mod native;
+pub mod negative;
 pub use confidence::{Basis, Citation, Confidence, Fact, Grade, Never, NeverProof, Premise};
 pub use convention::{CallRegisterEffect, ConventionId, ConventionModel, Conventions};
 pub use display_names::{
     DisplayNames, positional_parameter_name, unnamed_function, unnamed_identifier,
 };
+pub use negative::{Negative, NegativeFact};
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

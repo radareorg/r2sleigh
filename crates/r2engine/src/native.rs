@@ -1333,7 +1333,7 @@ fn declare_imports(
         }
         callees.interfaces.insert(*address, interface);
         // A declaration states its arguments, the area the convention gives the callee.
-        (callees.writes).insert(*address, r2ssa::call_reads::StackWrites::Arguments);
+        (callees.writes).insert(*address, r2ssa::call_reads::StackWrites::arguments());
     }
     signatures
 }
@@ -1423,8 +1423,8 @@ fn resolved_alone(
     // An assumed member states its interface and what it writes: nothing it preserves or reaches.
     for (member, interface, writes) in stated.assumed {
         if let Some(writes) = writes {
-            let within = r2ssa::call_reads::StackWrites::Within(writes.clone().into());
-            imports.writes.insert(*member, within);
+            let assumed = r2ssa::call_reads::StackWrites::assumed(writes);
+            imports.writes.insert(*member, assumed);
         }
         imports.interfaces.insert(*member, interface.clone());
     }
@@ -1903,10 +1903,7 @@ impl Callees {
         // describes.
         self.reach.insert(address, facts.argument_touch_reach());
         match facts.summary().incoming_writes() {
-            Some(spans) => {
-                let within = r2ssa::call_reads::StackWrites::Within(spans.into());
-                self.writes.insert(address, within);
-            }
+            Some(writes) => _ = self.writes.insert(address, writes.clone()),
             None => _ = self.writes.remove(&address),
         }
     }
