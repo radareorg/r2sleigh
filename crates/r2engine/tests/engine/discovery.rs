@@ -626,7 +626,10 @@ fn a_switch_arm_that_calls_an_uncited_noreturn_names_no_exit() {
     let text = switch_rendered_importing(common::STUB, "xalloc_die");
     assert!(text.contains("xalloc_die("), "{text}");
     assert!(!text.contains("noreturn"), "{text}");
-    assert!(text.contains("unproven)"), "{text}");
+    assert!(
+        text.contains("1 call ends where only an uncited row says it never returns (unproven)"),
+        "{text}"
+    );
 }
 
 /// The switch of [`switch_ending_at`] whose default arm jumps to `arm` at 0x1060 (then `int3`s),

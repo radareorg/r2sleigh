@@ -4148,11 +4148,10 @@ impl AssumedExits {
             .count()
     }
 
-    /// How many calls end the body on a bound: a "never" no statement proves (D255, D395).
-    pub fn unproven(&self) -> usize {
-        self.sites
-            .iter()
-            .filter(|site| !site.never.proves())
+    /// How many calls end the body on the bound `proof`, a "never" no statement proves (D255, D395).
+    pub fn bounded_by(&self, proof: r2source::NeverProof) -> usize {
+        (self.sites.iter())
+            .filter(|site| site.never.proof == proof)
             .count()
     }
 }
