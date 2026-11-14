@@ -214,15 +214,10 @@ mod tests {
         super::noreturn(Some(never))
     }
 
-    /// `afi` says `noreturn: true` only for a proof; a bound is spelled as one (D380).
+    /// `afi` says `noreturn: true` only for a proof; a bound is spelled as one (D380). A cited
+    /// row's `noreturn: true` is read through `afi` in `tests/signatures.rs`.
     #[test]
     fn a_bound_is_never_spelled_noreturn_true() {
-        let rows = r2abi::LibraryRows::embedded(r2abi::CLibrary::Glibc);
-        let exit = rows
-            .find(r2abi::CLibrary::Glibc.scope(), "exit")
-            .expect("exit");
-        let cited = Never::cited(Citation::of(exit).expect("exit's row is cited"));
-        assert_eq!(spelled(&cited).as_deref(), Some("noreturn: true"));
         let go = Never::cited(Citation::runtime("runtime.gopanic").expect("the model names it"));
         assert_eq!(
             spelled(&Never::composed([&go]).expect("a proving end")).as_deref(),
