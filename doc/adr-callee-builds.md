@@ -97,3 +97,18 @@ Recovery's collection has 7 phases that read no callee statement: addresses, cal
 - Cost: Θ(C_dyn + T) per second recovery, where it was Θ(C + T); s = 0.225 to 0.255 of the round-2 collection on pumasim cold (round5-measure item 4), about 0.15 to 0.17 G. Peak RSS rises at most 3.9 MB.
 - Meter: `AnalysisStats::static_prefixes` counts each collection (a metered `SsaWorkControl::static_prefix_built`). `builds::a_kept_build_collects_its_static_phases_once` reads 9; the parent's flow reads 10.
 - Step B (re-solving the region a changed site reaches) is D420.
+
+## D365 as built (`rd5-recovery`): rebuild only where a decided output changes
+
+The frame walk factors into propagation and a decision. Each round's propagation (`Walker`) reads no callee: a `CallUse` handing a frame address to a callee's position records the sink (callee, position, value) instead of escaping it, and the round ends in a `RoundTable` (evidence-free escapes, opaque accesses, the dynamic frame, incoming stores, call bases, each stored address with its widest access, accesses, carriers, and promotion's `PlaceFacts`: saves and each candidate's width, overlap, save and declared bits). The decision (`decide`) reads the table, the walk's `WalkSite` (calls, entry edge, what a transfer spends, the lifted successors) and an `Evidence` view that exposes only `callee_reach_at` and `call_reads` areas. It takes no `SSAFunction` and no `SourceMachineContext`. A fresh walk is propagation then decision; a restatement is the decision alone over the held tables.
+
+Keep rule (`Prior::kept`):
+1. A `BuildKey` part other than `upward` and `areas` differs: build again (E_A or an unverified part moved).
+2. All parts equal: keep, no decision runs.
+3. Only `upward` or `areas` differ: decide every held round, the no-carrier round included. Keep where each round promotes the same places with the same `unplaced` flag and the final points' projection (`unplaced`, the set of `at` over escaped and opaque points, what `names` reads) is equal; the kept function takes the decided `FramePoints`. Otherwise build again.
+
+`same_where_asked`, `same_where_read`, `areas_alike`, `differing`, `Places`, `asked_reach`, `held_places` and `rewrite_decides` are deleted. The `FrameWalk` (tables per round) sits in `Reuse` beside `Provisional` and drops at the seal.
+
+- Equivalence: propagation is deterministic and reads no evidence, so equal raw SSA and an equal carried set give an equal table; the decision is pure, so equal promoted sets give equal next rounds; C reads `FramePoints` only through `names` (`stack_protector.rs`). The debug `difference` in `restated` stays the oracle, and now runs unmetered.
+- Cost: Θ(rounds x |D|) per restatement, |D| = O(sinks x 64 + calls x places + (B + E) K log K + places x points log saves), with no propagation. The bound Ω(changed coordinates read) is not met: a reach flip still decides every round.
+- Meters: `AnalysisStats::frame_walk_steps` (value visits) and `frame_decision_steps` (sink points and candidates). `builds::a_reach_that_moves_no_decision_keeps_the_build`: `middle` hands its slot to `clear`, which turns upward, and also stores it; 0 rebuilt and 34 walk steps where the parent rebuilt (47 steps).

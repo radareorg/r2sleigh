@@ -148,6 +148,10 @@ pub struct DbStats {
     pub frames_built: u64,
     /// Static prefixes collected, one per build recovery read (D289).
     pub static_prefixes: u64,
+    /// Value visits the frame walks propagated (D365).
+    pub frame_walk_steps: u64,
+    /// Sink points and candidate places the frame walks' decisions read (D365).
+    pub frame_decision_steps: u64,
     /// Dispatch-table convention seals made by requests that have ended (D403).
     pub table_seals: u64,
 }
@@ -335,6 +339,8 @@ impl<I: Inputs + 'static> Db<I> {
         let mut stats = self.stats.borrow_mut();
         stats.frames_built += control.frames_built();
         stats.static_prefixes += control.static_prefixes();
+        stats.frame_walk_steps += control.frame_walk_steps();
+        stats.frame_decision_steps += control.frame_decision_steps();
         stats.table_seals += control.table_seals();
     }
 

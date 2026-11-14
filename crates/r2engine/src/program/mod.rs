@@ -622,6 +622,9 @@ impl<S: Source + 'static> OpenProgram<S> {
             rebuilt: self.db.stats().rebuilt,
             frames_built: self.db.stats().frames_built + self.control().frames_built(),
             static_prefixes: self.db.stats().static_prefixes + self.control().static_prefixes(),
+            frame_walk_steps: self.db.stats().frame_walk_steps + self.control().frame_walk_steps(),
+            frame_decision_steps: self.db.stats().frame_decision_steps
+                + self.control().frame_decision_steps(),
             table_seals: self.db.stats().table_seals + self.control().table_seals(),
         }
     }

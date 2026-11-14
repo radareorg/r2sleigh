@@ -36,7 +36,7 @@ pub use certificates::*;
 pub use control_domains::*;
 pub(crate) use declared_slots::*;
 pub use facts::*;
-pub(crate) use frame_reach::{Access, Places, Walked, walk};
+pub(crate) use frame_reach::{Access, Accesses, Evidence, FrameWalk, PlaceBits, PlaceFacts, walk};
 pub use frame_reach::{CallFrameReach, DynamicFrame, FramePoints, FrameReach};
 pub(crate) use loops::*;
 pub(crate) use objects::*;
