@@ -270,6 +270,41 @@ fn a_tail_transfer_writes_what_its_target_writes() {
     hold("incoming_writes", vec![failure]);
 }
 
+/// `TAIL_WRITES` with `f: lea rdi, [rsp + 0x10]; jmp g`, where `g: mov qword [rdi], 0` states no
+/// stack write: only the register handed to the tail reaches the caller's slot.
+const TAIL_HANDED: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0x48, 0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov qword [rsp+8], 5
+    0xe8, 0x0e, 0x00, 0x00, 0x00, // 100d call 0x1020
+    0x48, 0x8b, 0x44, 0x24, 0x08, // 1012 mov rax, [rsp+8]
+    0x48, 0x83, 0xc4, 0x18, // 1017 add rsp, 0x18
+    0xc3, // 101b ret
+    0xcc, 0xcc, 0xcc, 0xcc, // padding to 0x1020
+    0x48, 0x8d, 0x7c, 0x24, 0x10, // 1020 lea rdi, [rsp+0x10]
+    0xeb, 0x09, // 1025 jmp 0x1030
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // padding to 0x1030
+    0x48, 0xc7, 0x07, 0x00, 0x00, 0x00, 0x00, // 1030 mov qword [rdi], 0
+    0xc3, // 1037 ret
+];
+
+/// A frame address a register holds at a tail transfer escapes to the tail's callee (D381).
+#[test]
+fn a_frame_address_handed_to_a_tail_is_written_through() {
+    let failure = cell("tail_handed", "incoming_writes", || {
+        let functions = [
+            ("main", BASE, 0x1c),
+            ("f", BASE + 0x20, 7),
+            ("g", BASE + 0x30, 8),
+        ];
+        let text = rendered((Literal::of_code(TAIL_HANDED, &functions), BASE));
+        match returns(&text).iter().any(|line| line.contains('5')) {
+            true => Err(text),
+            false => Ok(()),
+        }
+    });
+    hold("incoming_writes", vec![failure]);
+}
+
 /// Every `default_deny_<column>` tag on an accessor in the sources names a column here, and every
 /// column has a tagged accessor: a new negative fact joins the matrix (D405).
 #[test]
