@@ -559,6 +559,21 @@ impl StackArguments {
         rewritten
     }
 
+    /// Whether some place of `places` ends above the lowest placed call base: an unplaced call
+    /// leaves the placed ones' areas deciding (D369). O(calls + places).
+    fn reaches_placed_area(
+        &self,
+        values: &IdMap<VarId, Value>,
+        places: &BTreeMap<i64, u32>,
+    ) -> bool {
+        let lowest = (self.calls.iter())
+            .filter_map(|call| call.base(values))
+            .min();
+        lowest.is_some_and(|base| {
+            (places.iter()).any(|(place, width)| place.saturating_add(i64::from(*width)) > base)
+        })
+    }
+
     /// The places of `stored` some call may read, given each place's widest access.
     fn read(&self, values: &IdMap<VarId, Value>, stored: &BTreeMap<i64, u32>) -> BTreeSet<i64> {
         let mut read = BTreeSet::new();
@@ -1070,7 +1085,7 @@ impl<'a> Walker<'a> {
                 )
             })
             .collect();
-        self.points.by_area |= arguments.reads_by_area(&self.values, &loaded);
+        self.points.by_area |= arguments.reaches_placed_area(&self.values, &loaded);
         self.points.rewritten = arguments.rewritten(self.func, &self.values, &self.accesses);
         self.points.call_bases = arguments.by_call(&self.values);
         Walked {
