@@ -2080,6 +2080,15 @@ impl Iterator for BitsSet {
 /// A set of register classes, one bit each.
 type Classes = Vec<u64>;
 
+/// `id` writes `class` in a block: its last writer there, where no later one was seen.
+fn first_write((written, last): (&mut Classes, &mut Vec<(u32, InstId)>), class: u32, id: InstId) {
+    let (word, bit) = (class as usize / 64, 1u64 << (class % 64));
+    if written[word] & bit == 0 {
+        written[word] |= bit;
+        last.push((class, id));
+    }
+}
+
 /// A function's written register bytes cut into classes no instruction splits, each block's last
 /// writer per class (D254; doc/adr-one-ir.md, "Register classes").
 struct RegisterWalk<'g> {
@@ -2139,23 +2148,13 @@ impl<'g> RegisterWalk<'g> {
         walk.last = vec![Vec::new(); graph.blocks.len()];
         walk.walked = vec![vec![0; words]; graph.blocks.len()];
         for (at, block) in graph.blocks.iter().enumerate() {
-            for id in block.insts.iter().rev() {
-                for index in 0..walk.writes.get(*id).len() {
-                    walk.first_write(at, walk.writes.get(*id)[index], *id);
-                }
-            }
-            walk.last[at].sort_unstable();
+            let (written, last) = (&mut walk.written[at], &mut walk.last[at]);
+            let writes = (block.insts.iter().rev())
+                .flat_map(|id| walk.writes.get(*id).iter().map(move |class| (*class, *id)));
+            writes.for_each(|(class, id)| first_write((written, last), class, id));
+            last.sort_unstable();
         }
         walk
-    }
-
-    /// `id` writes `class` in block `at`: its last writer, where no later one was seen.
-    fn first_write(&mut self, at: usize, class: u32, id: InstId) {
-        let (word, bit) = (class as usize / 64, 1u64 << (class % 64));
-        if self.written[at][word] & bit == 0 {
-            self.written[at][word] |= bit;
-            self.last[at].push((class, id));
-        }
     }
 
     /// Cut the bytes into classes, one write at a time, each costing its width; classes are then

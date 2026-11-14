@@ -78,6 +78,29 @@ environment's compared sides. The renumbering test
 `values::a_renumbered_function_solves_to_the_same_ranges` failed on the FIFO
 it replaced (`p` read `[0,10]` or `[2,10]` by branch sense; base 46ce15d4a).
 
+## Semi-naive descent (D435, 2026-11-15)
+
+The ascent marks a cell when its last evaluation left its slot above what its
+inputs compute (`Evaluated::above`: `next != computed`, an environment's
+`next != now`), and the descent starts from those cells, `W'`, in place of every
+cell. A cell `x` outside `reach(W')` is unmarked, so its slot equals its last
+computed value; none of its inputs moved after that evaluation, since a move
+requeues `x` and the ascent ends with nothing waiting; so the descent would
+recompute that value, and `meet(x, x) = x`, `refine(x, x) = x` leave it unmoved.
+By induction over the descent's evaluations, the full descent's extra
+evaluations are no-ops and its moving evaluations, runs and `Exhausted` verdicts
+are the seeded descent's. The premises are the reader relation's completeness
+(Lemma 1's) and the two identities. For `meet`, identical progressions share
+the progression itself (`common_progression` with modulus 1); `refine` then
+meets `x` with its own bounds. Kani proves both at eight bits, bottom included
+(`strided::kani_proofs`, 90 s each; a full-width harness ran 20 minutes in CBMC
+without a verdict);
+`the_lattice_operations_hold_what_they_promise_at_small_widths` checks every
+element of widths 1 to 5 and the machine-width proptest checks 32 and 64 bits.
+Cost `O(|reach(W')| · repeats)` in place of `O(cells)`: the guarded counter
+test descends 7 cells of 36 (41 on the parent). A probe running both descents
+on every solve of the census corpus is recorded in ROADMAP D435.
+
 ## Left
 
 - r2types `globals` and `arrays` still stop after 6 rounds (`for _ in 0..6`). Exit: rewritten in C3 with a stated lattice or deleted.

@@ -171,6 +171,16 @@ blocks a walk marked are cleared after it. The test `register_class_visits`
 grows `2^depth` leaves, each writing the result and a register across its top
 byte, and the class visits grow as `T log T`.
 
+D438 (2026-11-15) builds the walk without a search or a list per instruction:
+`class_of` is indexed by register offset from the lowest written byte, a carrier
+or unwritten byte `UNWRITTEN`, so a write's bytes are a slice found in `O(1)`;
+after refinement each instruction's classes are listed once, deduplicated by a
+last-lister stamp per class, into one `Csr` dense over `InstId`, which the
+block pass and the exit scan read. A write's set of placed bytes, and so every
+class, is the one `partition_point` over the sorted bytes gave; a row holds the
+same classes in first-byte order, and both readers ignore order. Build
+`O(I x w + span)`, one buffer per walk (`REGISTER_CLASS_LISTS`).
+
 ## Reaching frame writes (D365, 2026-11-14)
 
 `frame_reach::walk`'s `reaching_writes` gives the merged write spans reaching

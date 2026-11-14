@@ -879,28 +879,26 @@ mod kani_proofs {
         )
     }
 
-    /// Any element of any width, bottom included: `strided` canonicalises whatever it is given.
-    fn any_canonical() -> StridedInterval {
-        let width: u32 = kani::any();
-        kani::assume((1..=StridedInterval::MAX_WIDTH_BITS).contains(&width));
+    /// An eight-bit element, bottom included.
+    fn any_eight_bit() -> StridedInterval {
         match kani::any() {
-            true => StridedInterval::bottom(width),
-            false => StridedInterval::strided(width, kani::any(), kani::any(), kani::any()),
+            true => StridedInterval::bottom(8),
+            false => any_element().0,
         }
     }
 
     /// The descent skips a cell whose slot equals what its inputs compute (doc/adr-fixpoint.md, "Semi-naive descent").
     #[kani::proof]
-    #[kani::unwind(4)]
-    fn a_meet_with_itself_is_itself() {
-        let element = any_canonical();
+    #[kani::unwind(20)]
+    fn eight_bit_meet_with_itself_is_itself() {
+        let element = any_eight_bit();
         assert!(element.meet(&element) == element);
     }
 
     #[kani::proof]
-    #[kani::unwind(4)]
-    fn a_refine_by_itself_is_itself() {
-        let element = any_canonical();
+    #[kani::unwind(20)]
+    fn eight_bit_refine_by_itself_is_itself() {
+        let element = any_eight_bit();
         assert!(element.refine(&element) == element);
     }
 
