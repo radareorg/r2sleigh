@@ -404,7 +404,6 @@ const STANDING_BLOCK_KEYS: &[(&str, usize)] = &[
     ("r2ssa::slot_promotion::walk_versions", 3),
     ("r2ssa::stack_bound::remove_failing_blocks", 1),
     ("r2ssa::stack_protector::decide", 1),
-    ("r2ssa::values::narrow_where_defined", 1),
 ];
 
 /// One finding, held until the crate's end compares its count with the standing list.
