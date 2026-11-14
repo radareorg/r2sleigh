@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::arena::OpId;
 use crate::call_reads::StackArea;
 use crate::control::SsaWorkControl;
-use crate::dense::{Csr, DenseId, IdMap, IdVec, Node};
+use crate::dense::{Component, Condensation, Csr, DenseId, IdMap, IdVec, Node};
 use crate::frame_address::Definitions;
 use crate::function::SSAFunction;
 use crate::machine_context::SourceMachineContext;
@@ -1795,29 +1795,75 @@ fn non_negative(func: &SSAFunction, defs: &Definitions, var: VarId) -> bool {
 /// A call's index in its block and the entry-relative spans it may write.
 type CallSpans = (usize, Vec<(i64, i64)>);
 
-/// The merged write spans reaching each block's entry. A worklist whose sets only grow, each at most
-/// K times (K the calls' spans): `O(K x (B + E) x K log K)` worst, one round where they nest.
+#[cfg(test)]
+thread_local! {
+    /// Spans `reaching_writes` read: each component's own, and each edge's out set once.
+    pub(crate) static REACHING_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// The merged write spans reaching each block's entry: the union of `gen(c)` over every block `c`
+/// with a path `c ->+ b`, since the transfer `out = in | gen` kills nothing (doc/adr-one-ir.md,
+/// "Condensation"). One Tarjan search, then components predecessors first: an acyclic one takes
+/// its in-edges' outs, a cyclic one adds its members' gen. One linear union per edge:
+/// `O(B + E x K)` for `K` spans, floor `Omega(B + E + sum |in(b)|)`. Every block is seeded.
 fn reaching_writes(
     successors: &Csr<Node, Node>,
     in_block: &IdVec<Node, Vec<CallSpans>>,
 ) -> IdVec<Node, Vec<(i64, i64)>> {
-    let mut entering = IdVec::from_fn(in_block.len(), |_: Node| Vec::<(i64, i64)>::new());
-    let mut pending = (in_block.iter())
-        .filter(|(_, calls)| !calls.is_empty())
-        .map(|(block, _)| block)
-        .collect::<Vec<_>>();
-    while let Some(block) = pending.pop() {
-        let made = in_block[block]
+    let made = |block: Node| {
+        let spans = in_block[block]
             .iter()
             .flat_map(|(_, spans)| spans.iter().copied());
-        let leaving = merged(entering[block].iter().copied().chain(made));
-        for &next in successors.get(block) {
-            if grow(&mut entering[next], &leaving) {
-                pending.push(next);
+        merged(spans)
+    };
+    let condensation = Condensation::of(successors, []);
+    let mut incoming = IdVec::from_fn(condensation.len(), |_: Component| Vec::<(i64, i64)>::new());
+    let mut entering = IdVec::from_fn(in_block.len(), |_: Node| Vec::<(i64, i64)>::new());
+    let ordered = (0..condensation.len()).rev().map(Component::from_index);
+    for component in ordered {
+        let members = condensation.members(component);
+        let mut reaching = std::mem::take(&mut incoming[component]);
+        if condensation.is_cyclic(component) {
+            for member in members {
+                reaching = union(&reaching, &made(*member));
             }
+        }
+        #[cfg(test)]
+        REACHING_STEPS.with(|steps| steps.set(steps.get() + reaching.len() + members.len()));
+        for &member in members {
+            let leaving = union(&reaching, &made(member));
+            for &next in successors.get(member) {
+                let to = condensation.component(next);
+                if to != component {
+                    #[cfg(test)]
+                    REACHING_STEPS.with(|steps| steps.set(steps.get() + leaving.len() + 1));
+                    incoming[to] = union(&incoming[to], &leaving);
+                }
+            }
+            entering[member] = reaching.clone();
         }
     }
     entering
+}
+
+/// Two merged span lists joined, merged: one linear pass, `O(|a| + |b|)`.
+fn union(a: &[(i64, i64)], b: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    let mut out: Vec<(i64, i64)> = Vec::with_capacity(a.len() + b.len());
+    let (mut left, mut right) = (a.iter().peekable(), b.iter().peekable());
+    loop {
+        let next = match (left.peek(), right.peek()) {
+            (Some(l), Some(r)) if l <= r => left.next(),
+            (Some(_), Some(_)) | (None, Some(_)) => right.next(),
+            (Some(_), None) => left.next(),
+            (None, None) => break,
+        };
+        let &(low, high) = next.expect("one side holds a span");
+        match out.last_mut() {
+            Some(last) if low <= last.1 => last.1 = last.1.max(high),
+            _ => out.push((low, high)),
+        }
+    }
+    out
 }
 
 /// `known` joined with `more`; whether it grew.
@@ -1886,6 +1932,101 @@ mod tests {
                 })
                 .collect(),
             ..FramePoints::default()
+        }
+    }
+
+    /// `n` blocks, each edge `(from, to)`, and the calls' spans by block.
+    fn writes_over(
+        n: usize,
+        edges: &[(usize, usize)],
+        calls: &[(usize, (i64, i64))],
+    ) -> (Csr<Node, Node>, IdVec<Node, Vec<CallSpans>>) {
+        let pairs =
+            (edges.iter()).map(|(from, to)| (Node::from_index(*from), Node::from_index(*to)));
+        let successors = Csr::from_pairs(n, pairs.collect::<Vec<_>>());
+        let mut in_block = IdVec::from_fn(n, |_: Node| Vec::<CallSpans>::new());
+        for (index, (block, span)) in calls.iter().enumerate() {
+            in_block[Node::from_index(*block)].push((index, vec![*span]));
+        }
+        (successors, in_block)
+    }
+
+    /// The least fixpoint by its definition: each block's predecessors' reach, transitively.
+    fn reaching_by_paths(
+        successors: &Csr<Node, Node>,
+        in_block: &IdVec<Node, Vec<CallSpans>>,
+    ) -> Vec<Vec<(i64, i64)>> {
+        let n = in_block.len();
+        (0..n)
+            .map(|target| {
+                let mut spans = Vec::new();
+                for start in 0..n {
+                    let mut seen = vec![false; n];
+                    let mut stack = successors.get(Node::from_index(start)).to_vec();
+                    while let Some(node) = stack.pop() {
+                        if !std::mem::replace(&mut seen[node.index()], true) {
+                            stack.extend(successors.get(node));
+                        }
+                    }
+                    if seen[target] {
+                        let made = in_block[Node::from_index(start)].iter();
+                        spans.extend(made.flat_map(|(_, spans)| spans.iter().copied()));
+                    }
+                }
+                merged(spans.into_iter())
+            })
+            .collect()
+    }
+
+    /// The condensation order gives the path union on graphs with cycles, self edges, nesting
+    /// spans and blocks no edge reaches (rescans R3).
+    #[test]
+    fn reaching_writes_is_the_union_over_every_path() {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64;
+        let mut next = move |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        for _ in 0..200 {
+            let n = 1 + next(12) as usize;
+            let edges = (0..next(24))
+                .map(|_| (next(n as u64) as usize, next(n as u64) as usize))
+                .collect::<Vec<_>>();
+            let calls = (0..next(6))
+                .map(|_| {
+                    let low = next(64) as i64 - 32;
+                    (next(n as u64) as usize, (low, low + 1 + next(16) as i64))
+                })
+                .collect::<Vec<_>>();
+            let (successors, in_block) = writes_over(n, &edges, &calls);
+            let solved = reaching_writes(&successors, &in_block);
+            let expected = reaching_by_paths(&successors, &in_block);
+            for (block, spans) in solved.iter() {
+                assert_eq!(spans, &expected[block.index()], "{edges:?} {calls:?}");
+            }
+        }
+    }
+
+    /// Four gapped areas, then a chain or a cycle of `n` blocks: the steps grow linearly in `n`.
+    fn reaching_steps(n: usize, cyclic: bool) -> usize {
+        let mut edges = (0..n - 1).map(|at| (at, at + 1)).collect::<Vec<_>>();
+        if cyclic {
+            edges.push((n - 1, 0));
+        }
+        let calls = (0..4).map(|at| (at * n / 4, (20 * at as i64, 20 * at as i64 + 8)));
+        let (successors, in_block) = writes_over(n, &edges, &calls.collect::<Vec<_>>());
+        REACHING_STEPS.with(|steps| steps.set(0));
+        let _ = reaching_writes(&successors, &in_block);
+        REACHING_STEPS.with(std::cell::Cell::get)
+    }
+
+    #[test]
+    fn reaching_writes_grows_linearly_in_the_blocks() {
+        for cyclic in [false, true] {
+            let (one, two) = (reaching_steps(256, cyclic), reaching_steps(512, cyclic));
+            assert!(two < 3 * one, "cyclic {cyclic}: {one} then {two}");
         }
     }
 
