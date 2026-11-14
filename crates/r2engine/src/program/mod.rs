@@ -274,9 +274,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Convention {
     }
 }
 
-/// What a call from a function under one convention may run under: its model joined with every
-/// other the program assembled, Go's among them, as no site states its callee's (D385).
-/// O(conventions x registers).
+/// What a call may run under where no site states its callee's convention: every model the program
+/// assembled, Go's among them, joined (D385). O(conventions x registers).
 pub(super) struct AnyCall;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for AnyCall {

@@ -2871,7 +2871,7 @@ impl TrustedSsaArtifact {
             site_conventions.clone(),
             &correlated_call_sites.slot_targets,
         ));
-        let callees = callees.with_sites(sites.clone());
+        let callees = callees.with_sites(Arc::clone(&sites));
         // Every call target the source named, whether or not a prototype was
         // recovered for it: a name and a prototype are independent facts.
         let mut display_names = r2source::DisplayNames::new();
@@ -2974,7 +2974,7 @@ impl TrustedSsaArtifact {
                 provisional_machine_context
                     .set_callee_argument_reach(callee_argument_reach.clone());
                 provisional_machine_context.set_callee_writes(callee_writes.clone());
-                provisional_machine_context.set_site_models(sites.clone());
+                provisional_machine_context.set_site_models(Arc::clone(&sites));
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
                 // A build against callees that state the same to it is this build.
@@ -3130,7 +3130,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
         machine_context.set_callee_writes(callee_writes.clone());
-        machine_context.set_site_models(sites.clone());
+        machine_context.set_site_models(sites);
         machine_context.set_callee_library(library.clone());
         machine_context.set_reentering_callees(reentering.clone());
         machine_context.set_unstated_imports(unstated_imports.clone());
@@ -4150,9 +4150,8 @@ pub struct CalleeEvidence {
 /// The convention each stated callee runs under, by entry address.
 pub type SiteConventions = BTreeMap<u64, Arc<r2source::ConventionModel>>;
 
-/// The convention each call runs under (RULING 1.6): a stated callee's, found by the call's direct
-/// target or the import slot its `CallSlot` site calls through (D364); else the calls' model. One
-/// map and one lookup for rename, the frame walk and argument reads (D390).
+/// Each call's convention (RULING 1.6): its stated callee's, by direct target or `CallSlot` (D364),
+/// else the calls' model. One map for rename, the frame walk and argument reads (D390).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SiteModels {
     by_target: SiteConventions,
@@ -4197,7 +4196,7 @@ mod site_models_tests {
     #[test]
     fn a_slot_call_and_a_direct_call_find_their_model_by_one_lookup() {
         let win64 = r2source::convention::testing::model(r2source::ConventionId::Win64).build();
-        let by_target = SiteConventions::from([(0x2000, win64.clone()), (0x3000, win64)]);
+        let by_target = SiteConventions::from([(0x2000, Arc::clone(&win64)), (0x3000, win64)]);
         let slot = SourceCallSiteIdentity::new(
             0x1010,
             CanonicalStorageId {

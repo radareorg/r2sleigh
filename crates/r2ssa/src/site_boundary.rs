@@ -617,9 +617,8 @@ struct Mode {
     /// It changes nothing the program keeps (a multi-byte `nop` forms an address and drops it), so
     /// what it reads is no read.
     inert: bool,
-    /// The registers its instruction cancels against itself (`sbb edx, edx`, a vector's two lanes):
-    /// no operation of it reads their value, only flags from their bits; any other input is a read
-    /// (D393). More than two drop no read.
+    /// Registers its instruction cancels against itself (`sbb edx, edx`): no value read, only flags;
+    /// any other input is a read, and more than two drop no read (D393).
     cancelled: [Option<CanonicalStorageId>; 2],
     /// The inputs of the operation no effect of its instruction depends on (`r2il::eval::independence`).
     ignored: u32,

@@ -262,9 +262,8 @@ impl FramePoints {
             && (written.into_iter()).all(|span| span.1 <= 0 && self.rewrite_decides.untouched(span))
     }
 
-    /// What a call to this body may write of its caller's stack, from the call's pointer, as `context`
-    /// states its calls and tail transfers; a self call in two rounds (doc/adr-callee-builds.md,
-    /// D377, D381). `O(calls x spans)`.
+    /// What a call to this body may write of its caller's stack, from the call's pointer; a self call
+    /// in two rounds (doc/adr-callee-builds.md, D377, D381). `O(calls x spans)`.
     pub fn call_writes(&self, context: &SourceMachineContext) -> Option<Vec<(i64, i64)>> {
         let writing = self.opaque.iter().any(|access| access.writes);
         if self.whole || !self.escaped.is_empty() || writing {
@@ -847,9 +846,8 @@ impl Site<'_> {
         pointer
     }
 
-    /// A transfer leaving the body at the stack `pointer`, as a call its callee returns from
-    /// would be: a source-correlated tail with its callee's statement; any other, a branch to code
-    /// the body does not hold or a register jump nothing follows, reads and writes all (D381).
+    /// A transfer leaving the body at `pointer`, as a returning call: a source-correlated tail takes
+    /// its callee's statement; any other tail reads and writes all (D381).
     fn tail(
         &self,
         (op, at): (OpId, (u64, usize)),
@@ -1403,7 +1401,7 @@ impl<'a> Walker<'a> {
         let arguments = &self.sinks.stack_arguments;
         self.hand_to_tails(arguments);
         let handed = arguments.read(&self.values, &widths);
-        self.points.held_places = Places::new(widths.clone());
+        self.points.held_places = Places::new(widths);
         for place in &handed {
             if let Some(address) = self.stored.get(place).cloned() {
                 self.escape(&address);

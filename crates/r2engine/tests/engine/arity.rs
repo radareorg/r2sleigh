@@ -241,9 +241,8 @@ fn a_call_through_a_writable_noreturn_slot_comes_back_and_a_sealed_one_does_not(
     assert!(!sealed.contains('7'), "{sealed}");
 }
 
-/// A sealed slot bound to `xalloc_die`, which only radare2's uncited row says never returns: the call
-/// stays closed, but the bound proves nothing, so the body is no `Composed` "never" and the call
-/// declares no `noreturn` (D395).
+/// A sealed slot bound to `xalloc_die`, never-returning by an uncited row only: the call stays closed,
+/// but the body is no `Composed` never and the call declares no `noreturn` (D395).
 #[test]
 fn a_call_through_a_sealed_slot_to_an_uncited_noreturn_composes_nothing() {
     let slot = BASE + 0x20;

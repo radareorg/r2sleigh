@@ -1807,9 +1807,8 @@ impl SourceFunctionInterface {
         }
     }
 
-    /// `location`, one of this function's parameters named from its entry pointer, as a call site
-    /// names it: from the stack pointer before the transfer, the callee's coordinate kept. The
-    /// one translation of the return-address spend; none on overflow (D386).
+    /// `location`, a parameter named from the entry pointer, named from the call's pointer before the
+    /// transfer: the one translation of the return-address spend; none on overflow (D386).
     pub fn at_call_site(
         &self,
         location: SourceParameterLocation,

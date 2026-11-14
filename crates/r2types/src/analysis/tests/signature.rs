@@ -102,7 +102,7 @@ fn main_name_keeps_its_stated_signature() {
     };
     let parsed_context = ParsedExternalContext {
         current_signature: Some(stated.clone()),
-        merged_signature: Some(stated.clone()),
+        merged_signature: Some(stated),
         ..ParsedExternalContext::default()
     };
     let analysis = build_type_analysis(TypeAnalysisInput {

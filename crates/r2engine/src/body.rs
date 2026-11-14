@@ -90,8 +90,7 @@ pub trait Program {
         None
     }
 
-    /// Why a call through the pointer held at `slot` -- `call [slot]` -- never comes back, where
-    /// the program says what the slot holds: an import the loader binds there that never returns.
+    /// Why `call [slot]` never comes back: the program binds a never-returning import in `slot`.
     /// `None` where nothing says so, and the call comes back.
     fn exit_through(&self, _slot: u64) -> Option<crate::discovery::Never> {
         None

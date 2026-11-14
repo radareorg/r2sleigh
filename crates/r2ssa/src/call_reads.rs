@@ -79,9 +79,8 @@ impl CallReads {
         Self::of_locations(read, model)
     }
 
-    /// The locations a callee whose body proves its arity reads: each parameter, a hole left out,
-    /// at the call's stack pointer (`CalleeStatement`); none where one is past the address space.
-    /// O(parameters).
+    /// Each parameter a body-proven callee reads, holes left out, at the call's stack pointer; none
+    /// where one is past the address space. O(parameters).
     pub(crate) fn callee_locations(
         callee: &r2source::SourceFunctionInterface,
     ) -> Option<Vec<SourceParameterLocation>> {

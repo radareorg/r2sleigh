@@ -2254,9 +2254,8 @@ impl<'a> Values<'a> {
         ends
     }
 
-    /// Whether the call at `inst` is written and a proof says it never comes back. Only a named
-    /// callee's line says so to C: a call through a pointer, or to the function's own entry,
-    /// still ends its block at the trap.
+    /// Whether the written call at `inst` is proven never to come back. Only a named callee says so
+    /// to C; a call through a pointer or to the own entry still ends its block at the trap.
     fn ends_here(&self, inst: InstId, plan: &calls::CallPlan) -> bool {
         plan.ends
             && matches!(plan.callee, calls::Callee::Named { .. })

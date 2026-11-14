@@ -82,9 +82,8 @@ pub struct AggregateDefinition {
     pub members: Vec<(CTypeLike, String)>,
 }
 
-/// Each aggregate name of one graph whose layouts C's natural layout at `ptr_bits` reproduces: every
-/// stated offset and the stated size; a bit field, a packed layout or two layouts of one name that
-/// differ leave the name out (D387).
+/// Each aggregate of one graph whose stated offsets and size C's layout at `ptr_bits` reproduces; a
+/// bit field, a packed layout or two differing layouts of one name leave it out (D387).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AggregateDefinitions(BTreeMap<String, AggregateDefinition>);
 

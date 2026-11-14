@@ -1900,10 +1900,8 @@ mod tests {
         crate::program::OpenProgram::of(image)
     }
 
-    /// Each Go body's register effect is in its own convention's lanes, never the program default's:
-    /// `g`'s row takes the lane RBX holds under ABIInternal (SysV has no such lane), and `h`'s ABI0
-    /// row is in other lanes (D385). Default-deny: `h`'s call to `g` is no read of `g`'s lanes, and
-    /// `h`'s refused row holds no lanes and states no site model.
+    /// A Go body's register effect is in its own convention's lanes (D385): ABIInternal `g` holds RBX,
+    /// ABI0 `h` others. Default-deny: `h`'s refused row holds no lanes and states no site model.
     #[test]
     fn a_go_body_s_register_effect_is_in_its_own_convention_s_lanes() {
         use super::RegisterEffects;
