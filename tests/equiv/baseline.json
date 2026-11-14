@@ -765,7 +765,12 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::clang-O1::main": {
-   "status": "equal"
+   "cause": "[P7, D369, D377] A variadic call's tail is uncounted at its site, so nothing bounds what the declaration writes of the caller's stack (default-deny): D369 keeps a frame place the call's area could cover in memory past the call. Here the slot of the alignment push of rax, which the epilogue's pop reloads, stays a load, so its entry value (RAX) is read: held-from-entry. Closing fact: a counted printf tail (the format literal's conversions) bounding the call's stack area.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/machine_context.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/hashes.c::clang-O1::murmur3_32": {
    "status": "equal"
@@ -818,7 +823,12 @@
    "status": "equal"
   },
   "tests/corpus/hashes.c::clang-O2::main": {
-   "status": "equal"
+   "cause": "[P7, D369, D377] A variadic call's tail is uncounted at its site, so nothing bounds what the declaration writes of the caller's stack (default-deny): D369 keeps a frame place the call's area could cover in memory past the call. Here the slot of the alignment push of rax, which the epilogue's pop reloads, stays a load, so its entry value (RAX) is read: held-from-entry. Closing fact: a counted printf tail (the format literal's conversions) bounding the call's stack area.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/machine_context.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/hashes.c::clang-O2::murmur3_32": {
    "status": "equal"
