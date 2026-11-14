@@ -124,3 +124,30 @@ Exit: one encoding of each operation live after the seal, the census
 byte-identical at each step, about 10 to 14 MB of 0pack's peak (5 to 8%).
 Bound: each step re-keys in `O(n)`. Stop rule: past 40 files or any semantic
 change beyond the three named above, stop and report.
+
+## Condensation (D412, 2026-11-14)
+
+One Tarjan search owns every strongly connected component in the workspace:
+`r2ssa::dense::Condensation` over a `Csr<I, I>`. It returns each node's
+component, numbered in close order (an edge `u → v` has
+`component(v) <= component(u)`), each node's depth-first finish index, each
+component's members ascending, and whether a component is cyclic (several
+members or a self edge). The start order and the row order of the successors
+fix every index, so two runs on one graph agree.
+
+`dense::Reached` numbers a graph the engine states on demand (owner edges,
+forwarders): it asks each node's successors once, in the preorder the search
+from the root takes, so the query asks run in the order the deleted
+`resolved::Search` asked them; nodes are numbered by ascending key, so members
+come out in address order.
+
+Cost: `O(V + E)` visits, metered (`Condensation::visits`, and
+`AnalysisStats::condensed` for the program graphs). `Reached` adds `O(V + E)`
+hash probes and `O(V log V)` to number. The engine search it replaced kept
+`BTreeMap`s, `O((V + E) log V)`.
+
+Deleted: `view::strongly_connected_components` (value views and unstructured
+cycle blocks read the condensation), `resolved::Search` (resolved components
+and component forwarding), and interproc's Kosaraju (`compute_summary_sccs`).
+Readers to come: relift order (component and finish rank), callee summaries,
+the WTO (D415) and the rescans' no-kill union (R3).

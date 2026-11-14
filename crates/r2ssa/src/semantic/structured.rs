@@ -160,23 +160,18 @@ pub(crate) fn collect_unstructured_cycle_blocks(
         .values()
         .flat_map(|loop_fact| loop_fact.body.iter().copied())
         .collect::<BTreeSet<_>>();
+    use crate::dense::{Condensation, Csr, DenseId};
     let count = graph.blocks.len();
-    let successors = (graph.blocks.iter())
-        .map(|block| {
-            (block.successors.iter())
-                .map(|successor| successor.0 as usize)
-                .filter(|successor| *successor < count)
-                .collect::<Vec<_>>()
-        })
-        .collect::<Vec<_>>();
-    let mut cyclic = vec![false; count];
-    for component in crate::view::strongly_connected_components(&successors) {
-        if component.len() > 1 || successors[component[0]].contains(&component[0]) {
-            component.into_iter().for_each(|block| cyclic[block] = true);
-        }
-    }
+    let edges = (graph.blocks.iter()).flat_map(|block| {
+        let successors = block.successors.iter().copied();
+        successors
+            .filter(|successor| successor.index() < count)
+            .map(move |successor| (block.id, successor))
+    });
+    let condensation = Condensation::of(&Csr::from_pairs(count, edges), []);
     (graph.blocks.iter())
-        .filter(|block| cyclic[block.id.0 as usize] && !covered.contains(&block.addr))
+        .filter(|block| condensation.is_cyclic(condensation.component(block.id)))
+        .filter(|block| !covered.contains(&block.addr))
         .map(|block| block.addr)
         .collect()
 }

@@ -148,6 +148,8 @@ pub struct DbStats {
     pub frames_built: u64,
     /// Dispatch-table convention seals made by requests that have ended (D403).
     pub table_seals: u64,
+    /// Nodes entered plus edges followed by program-graph condensations (D412).
+    pub condensed: u64,
 }
 
 /// A held answer found good, with what it depends on.
@@ -326,6 +328,11 @@ impl<I: Inputs + 'static> Db<I> {
     /// Count a build its owners' statements moved, so it was built anew (D365).
     pub fn note_rebuilt(&self) {
         self.stats.borrow_mut().rebuilt += 1;
+    }
+
+    /// Count a program-graph condensation's nodes entered and edges followed (D412).
+    pub fn note_condensed(&self, visits: u64) {
+        self.stats.borrow_mut().condensed += visits;
     }
 
     /// Add an ended request's frame builds and table seals (D403).

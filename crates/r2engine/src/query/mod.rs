@@ -49,6 +49,8 @@ pub struct AnalysisStats {
     pub frames_built: u64,
     /// Convention seals made to read dispatch tables, every round (D403).
     pub table_seals: u64,
+    /// Nodes entered plus edges followed by the program's condensations, `V + E` each (D412).
+    pub condensed: u64,
 }
 pub use proved::Proved;
 pub use r2ssa::InductionStep;
