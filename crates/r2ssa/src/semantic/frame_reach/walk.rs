@@ -496,6 +496,8 @@ impl<'a> Sinks<'a> {
 /// (doc/adr-call-boundary.md, "D217 as built").
 struct StackArguments {
     calls: Vec<CallArguments>,
+    /// The least and most a transfer spends: one address, or nothing, where no return states it.
+    spent: (i64, i64),
 }
 
 /// One call's argument area, from the stack pointer it is measured at.
@@ -510,6 +512,8 @@ struct CallArguments {
     area: Option<Vec<(i64, i64)>>,
     /// `CallReads::writes` of the call; none writes every place from the pointer to entry.
     writes: Option<Vec<(i64, i64)>>,
+    /// A direct call to the body itself that nothing else states.
+    own: bool,
     instruction: Option<u64>,
 }
 
@@ -543,7 +547,59 @@ impl StackArguments {
             let children = func.domtree().children(address);
             steps.extend(children.iter().rev().map(|child| (*child, pointer)));
         }
-        Self { calls }
+        let address = i64::from(machine.memory_model().default_address_bits() / 8);
+        let spent = machine
+            .return_mechanism()
+            .map_or((0, address), |mechanism| {
+                let spent = i64::from(mechanism.stack_pointer_delta_bytes());
+                (spent, spent)
+            });
+        Self { calls, spent }
+    }
+
+    /// What a call writes: the body's own writes for a call to itself (`own`), else its statement.
+    fn writes_of<'s>(
+        call: &'s CallArguments,
+        own: Option<&'s [(i64, i64)]>,
+    ) -> Option<&'s [(i64, i64)]> {
+        match call.own {
+            true => own,
+            false => call.writes.as_deref(),
+        }
+    }
+
+    /// What a call of the body to itself writes: the least fixpoint from none of its incoming writes
+    /// (D377). Rounds only grow and shift down, so it ends; `None` where `opaque` or unbounded.
+    fn own_writes(
+        &self,
+        values: &IdMap<VarId, Value>,
+        accesses: &Accesses,
+        opaque: bool,
+    ) -> Option<Vec<(i64, i64)>> {
+        if opaque || !self.calls.iter().any(|call| call.own) {
+            return None;
+        }
+        let (least, most) = self.spent;
+        // A call above what its transfer spends would move the spans up each round: unbounded.
+        let own_calls = self.calls.iter().filter(|call| call.own);
+        if own_calls
+            .map(|call| call.base(values))
+            .any(|base| base.is_none_or(|base| base > least))
+        {
+            return None;
+        }
+        let mut own = Vec::new();
+        loop {
+            let incoming = self.incoming(values, accesses, Some(&own))?;
+            let next = incoming
+                .iter()
+                .map(|(low, high)| ((low - most).max(0), high - least));
+            let next = merged(next);
+            if next == own {
+                return Some(own);
+            }
+            own = next;
+        }
     }
 
     /// Each call's area base, by operation.
@@ -560,13 +616,13 @@ impl StackArguments {
     fn rewritten(
         &self,
         func: &SSAFunction,
-        values: &IdMap<VarId, Value>,
-        accesses: &Accesses,
+        (values, accesses): (&IdMap<VarId, Value>, &Accesses),
+        own: Option<&[(i64, i64)]>,
     ) -> (BTreeSet<i64>, BTreeSet<u64>) {
         // Each call's area as entry-relative spans, by block and index; an unplaced call covers all.
         let mut in_block = BTreeMap::<u64, Vec<CallSpans>>::new();
         for call in &self.calls {
-            let spans = match (call.base(values), &call.writes) {
+            let spans = match (call.base(values), Self::writes_of(call, own)) {
                 (None, _) => vec![(i64::MIN, i64::MAX)],
                 (Some(base), Some(area)) => merged(
                     area.iter()
@@ -596,7 +652,7 @@ impl StackArguments {
             rewritten_in_block(list, calls, live, &mut rewritten);
         }
         let asked = (self.calls.iter())
-            .filter(|call| call.writes.is_none())
+            .filter(|call| Self::writes_of(call, own).is_none())
             .filter_map(|call| Some((call.instruction?, call.base(values)?)))
             .filter(|(_, base)| rewritten.range(*base..0).next().is_some())
             .map(|(instruction, _)| instruction)
@@ -610,6 +666,7 @@ impl StackArguments {
         &self,
         values: &IdMap<VarId, Value>,
         accesses: &Accesses,
+        own: Option<&[(i64, i64)]>,
     ) -> Option<Vec<(i64, i64)>> {
         let stores = (accesses.iter()).flat_map(|(place, list)| {
             let stored = list.iter().filter(|access| access.store);
@@ -618,7 +675,7 @@ impl StackArguments {
         let mut spans = stores.collect::<Vec<_>>();
         for call in &self.calls {
             let base = call.base(values)?;
-            let area = call.writes.iter().flatten();
+            let area = Self::writes_of(call, own).into_iter().flatten();
             spans.extend(
                 area.map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high))),
             );
@@ -713,12 +770,21 @@ impl Site<'_> {
             });
         let (pointer, shift) = entering.map_or((pointer, self.spent), |src| (src, 0));
         let reads = self.machine.call_reads(call.instruction);
+        let target = (call
+            .instruction
+            .and_then(|at| self.machine.raw_call_site_at(at)))
+        .map(r2source::SourceCallSiteIdentity::target);
+        let entry = target.is_some_and(|target| {
+            target.space == crate::CanonicalStorageSpace::Ram && target.offset == self.func.entry
+        });
+        let writes = reads.as_ref().and_then(|reads| reads.writes.clone());
         Some(CallArguments {
+            own: entry && writes.is_none(),
             op,
             at,
             pointer,
             shift,
-            writes: reads.as_ref().and_then(|reads| reads.writes.clone()),
+            writes,
             instruction: call.instruction,
             area: reads.and_then(|reads| reads.stack),
         })
@@ -1134,9 +1200,12 @@ impl<'a> Walker<'a> {
             }
         }
         self.points.handed = handed;
+        let writing = self.points.opaque.iter().any(|access| access.writes);
+        let opaque = self.points.whole || !self.points.escaped.is_empty() || writing;
+        let own = arguments.own_writes(&self.values, &self.accesses, opaque);
         (self.points.rewritten, self.points.unstated_rewriting) =
-            arguments.rewritten(self.func, &self.values, &self.accesses);
-        self.points.incoming = arguments.incoming(&self.values, &self.accesses);
+            arguments.rewritten(self.func, (&self.values, &self.accesses), own.as_deref());
+        self.points.incoming = arguments.incoming(&self.values, &self.accesses, own.as_deref());
         self.points.written_bases = (arguments.calls.iter())
             .filter_map(|call| Some((call.instruction?, call.base(&self.values))))
             .collect();
