@@ -6896,6 +6896,38 @@ fn an_aarch64_place_a_tail_callee_writes_stays_a_load() {
     assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
 }
 
+/// `mov dword [rsp + 8], 5; call f; mov eax, [rsp + 8]`, where `f: lea rdi, [rsp + 0x10]; jmp g`
+/// hands the caller's slot to `g`, which writes through its pointer parameter.
+const READ_BACK_PAST_A_TAIL_HANDED_THE_SLOT: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xe8, 0x0f, 0x00, 0x00, 0x00, // 100c call 0x1020
+    0x8b, 0x44, 0x24, 0x08, // 1011 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 1015 add rsp, 0x18
+    0xc3, // 1019 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 101a
+    0x48, 0x8d, 0x7c, 0x24, 0x10, // 1020 f: lea rdi, [rsp + 0x10]
+    0xe9, 0x06, 0x00, 0x00, 0x00, // 1025 jmp 0x1030
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 102a
+    0xc7, 0x07, 0x00, 0x00, 0x00, 0x00, // 1030 g: mov dword [rdi], 0
+    0xc3, // 1036 ret
+];
+
+/// A caller's slot a tail callee may write through a handed register stays a load (D381,
+/// default-deny); the slot stays a load with the hand-off disabled too (ROADMAP D381, open).
+#[test]
+fn a_slot_a_tail_is_handed_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let text = rendered_entered(
+        &machine,
+        READ_BACK_PAST_A_TAIL_HANDED_THE_SLOT,
+        &[0x1030],
+        "tail_handed",
+    );
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+}
+
 /// `f: mov qword [rsp + 8], 0x2a; jmp g`, where `g` returns its first stack parameter: the tail
 /// hands `g` the pointer it found, so the argument sits at `g`'s own entry offset.
 const TAIL_PASSING_A_STACK_ARGUMENT: &[u8] = &[

@@ -1341,13 +1341,11 @@ impl<'a> Walker<'a> {
     }
 
     /// A tail transfer hands its callee every register: an address one holds where the transfer
-    /// runs escapes (D381). `O(addressed values x tails)` dominance tests.
+    /// runs escapes (D381). `O((values + blocks) log blocks)` through one dominator index.
     fn hand_to_tails(&mut self, arguments: &StackArguments) {
-        let tails = (arguments.calls.iter())
-            .filter(|call| call.tail)
-            .map(|call| call.op)
-            .collect::<Vec<_>>();
-        if tails.is_empty() {
+        let tails = (arguments.calls.iter()).filter(|call| call.tail);
+        let reach = self.defs.reach_of(self.func, tails.map(|call| call.op));
+        if reach.is_empty() {
             return;
         }
         let handed = (self.values.iter())
@@ -1358,9 +1356,7 @@ impl<'a> Walker<'a> {
                         && !self.sinks.bases.contains(&Some(storage))
                 })
             })
-            .filter(|(var, _)| {
-                (tails.iter()).any(|tail| self.defs.defined_before(self.func, *var, *tail))
-            })
+            .filter(|(var, _)| self.defs.defined_before_some(*var, &reach))
             .map(|(_, value)| value.clone())
             .collect::<Vec<_>>();
         for value in &handed {
