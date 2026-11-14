@@ -1974,6 +1974,48 @@ fn a_three_member_forwarding_cycle_a_cited_slot_reads_returns_its_int() {
     }
 }
 
+/// [`TAKES_HANDLER`] padded to `wrapper` at 0x1020: `jmp handler`, the format's entry point, so its
+/// own ways in are unknown and its tail branch forwards `handler`'s result to them.
+fn branched_into_by_an_entry(import: &str) -> Literal {
+    let mut text = TAKES_HANDLER.to_vec();
+    text.resize(0x20, 0xcc);
+    text.extend([0xe9, 0xeb, 0xff, 0xff, 0xff]); // 1020 jmp 0x1010
+    let text: &'static [u8] = Box::leak(text.into_boxed_slice());
+    at_exit(text, import).entering(BASE + 0x20, r2abi::statement::EntryKind::Main)
+}
+
+/// D408's exemption is a tail branch's, never its jumper's: `handler`, taken into `atexit`'s void
+/// slot, is also branched into by an entry point that may read its result, so it is never void.
+#[test]
+fn a_handler_an_entry_point_branches_into_is_never_declared_void() {
+    let text = handler_rendered(branched_into_by_an_entry("atexit"), true);
+    assert!(!text.contains("void handler("), "{text}");
+    assert!(!text.contains("no call reads the result"), "{text}");
+}
+
+/// `f` (0x1010, `ret`, handing back RAX) is called once by `main`, which drops it, and branched
+/// into by an entry point (0x1020): its tail caller's ways in are unknown, so `f` is never void.
+#[test]
+fn a_callee_an_entry_point_branches_into_is_never_void() {
+    let mut code = vec![0xcc; 0x30];
+    code[..8].copy_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00, 0x31, 0xc0, 0xc3]); // call f; xor; ret
+    code[0x10] = 0xc3; // f: ret
+    code[0x20..0x25].copy_from_slice(&[0xe9, 0xeb, 0xff, 0xff, 0xff]); // c: jmp 0x1010
+    let functions = [
+        ("main", BASE, 8),
+        ("f", BASE + 0x10, 1),
+        ("c", BASE + 0x20, 5),
+    ];
+    let literal = Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
+        .entering(BASE + 0x20, r2abi::statement::EntryKind::Main)
+        .running_on(common::GLIBC);
+    let mut open = OpenProgram::of(literal);
+    open.analyse_program().expect("it surveys");
+    let text = open.rendered(BASE + 0x10).expect("it renders");
+    let text = text.response.output.into_text();
+    assert!(!text.starts_with("void f("), "{text}");
+}
+
 /// `init`'s slot states no return: the same cycle taken there decides no read (default-deny).
 #[test]
 fn a_three_member_forwarding_cycle_a_slot_stating_no_return_takes_stays_unproven() {

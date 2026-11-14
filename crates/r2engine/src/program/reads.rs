@@ -207,7 +207,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
             let tails = survey.tail_callers_of(fact.to);
             let tail = fact.role == Role::Jump
                 && !claimant.owners.is_empty()
-                && claimant.owners.iter().all(|owner| tails.contains(owner));
+                && (claimant.owners.iter()).all(|owner| tails.binary_search(owner).is_ok());
             // A PIE's slot is a loader write: the reference is the slot's own word.
             let slot =
                 claimant.owners.is_empty() && slots.binary_search(&(fact.from, fact.to)).is_ok();
