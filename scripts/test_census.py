@@ -6,7 +6,9 @@ Pure Python; no binary runs.
 
 from __future__ import annotations
 
+import argparse
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -194,6 +196,77 @@ class WriteOrders(unittest.TestCase):
         elsewhere = census.fingerprint(record(REFUSED, refused={**reason, "reason": reason["reason"] + " at 0x53748"},
                                               proof={"total": 1252, "residual": 214}))
         self.assertEqual(census.verdict_moves(was, elsewhere), (["refusal"], None))
+
+
+
+# Run 43460444577 (Ge's tip 05da11feb against its base): each case's base and head allocation counts.
+GE_TIP = {
+    "0pack pdd @ 0x0058e3d0": (10_993_000, 11_219_817),
+    "0pack pdd @ 0x0062ecf0": (12_322_511, 12_321_097),
+    "pumasim pdd @ 0x0023fdf0": (27_296_158, 27_120_506),
+    "pumasim pdd @ 0x004baf30": (20_561_863, 21_088_630),
+    "pumasim afl": (99_622_591, 108_961_709),
+    "0pack afl": (84_175_920, 88_592_097),
+    "pumasim session: pdd of 50 functions": (149_880_316, 151_306_743),
+}
+
+
+class CountedBudget(unittest.TestCase):
+    """D401: an allocation rise past 1.02 x the base fails unless a cause line names it."""
+
+    def failing(self, entries):
+        return sorted(case for case, (base, head) in GE_TIP.items()
+                      if census.counted_rise("allocations", case, base, head, 1.02, entries))
+
+    def test_ge_tip_fails_the_budget_on_four_cases(self) -> None:
+        # 1.3 passed all seven; 1.02 fails afl twice, 0x4baf30 at 1.0256 and 0x58e3d0 at 1.0206.
+        self.assertEqual(self.failing({}), ["0pack afl", "0pack pdd @ 0x0058e3d0",
+                                            "pumasim afl", "pumasim pdd @ 0x004baf30"])
+
+    def test_the_message_prints_the_ratio_to_four_places(self) -> None:
+        base, head = GE_TIP["0pack pdd @ 0x0058e3d0"]
+        rise = census.counted_rise("allocations", "0pack pdd @ 0x0058e3d0", base, head, 1.02, {})
+        self.assertIn("1.0206x", rise)
+        self.assertIn(f"| {base} | {head} | Dnnn |", rise)
+
+    def test_a_cause_line_for_the_base_count_lets_the_rise_stand(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as ledger:
+            ledger.write("# header\nallocations | pumasim afl | 99622591 | 108961709 | D367 | dispatch rounds\n")
+        entries = census.causes(ledger.name)
+        self.assertNotIn("pumasim afl", self.failing(entries))
+        self.assertEqual(len(self.failing(entries)), 3)
+
+    def test_a_cause_line_excuses_no_other_base_and_no_higher_head(self) -> None:
+        entries = {("allocations", "pumasim afl", 99_622_590): (108_961_709, "D367", "x")}
+        self.assertIn("pumasim afl", self.failing(entries))
+        entries = {("allocations", "pumasim afl", 99_622_591): (108_961_708, "D367", "x")}
+        self.assertIn("pumasim afl", self.failing(entries))
+
+    def test_a_cause_line_without_a_row_is_refused(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False) as ledger:
+            ledger.write("allocations | pumasim afl | 1 | 2 | because | slower\n")
+        with self.assertRaises(SystemExit):
+            census.causes(ledger.name)
+
+    def test_the_committed_ledger_parses(self) -> None:
+        census.causes()
+
+
+class TimedCases(unittest.TestCase):
+    """D402: the chain's analysed cases are timed, and a missing binary fails the run."""
+
+    def test_the_analysed_cases_are_timed_and_counted(self) -> None:
+        for case in (("pumasim", "aa; pdd @ 0x3b6b20"), ("bash", "aa; pdd @ 0x2e630")):
+            self.assertIn(case, census.TIMED)
+            self.assertIn(case, census.COUNTED)
+
+    def test_a_missing_binary_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as empty:
+            args = argparse.Namespace(bins=empty, r2s=["/nonexistent", "/nonexistent"], runs=1,
+                                      count_r2s=None, budget=1.3, rss_budget=1.1, alloc_budget=1.02,
+                                      heap_budget=1.05, causes=str(census.CAUSES))
+            with self.assertRaises(SystemExit):
+                census.time_cases(args)
 
 
 if __name__ == "__main__":
