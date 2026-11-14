@@ -288,6 +288,7 @@ jobs:
           python3 scripts/test_check_shards.py
           python3 scripts/test_stack_tip.py
           python3 scripts/test_census.py
+          python3 scripts/test_scaling.py
           python3 scripts/test_audit_abi_rows.py
           python3 scripts/audit_abi_rows.py --cc gcc
           python3 scripts/test_compile_check.py
@@ -481,6 +482,44 @@ jobs:
           python3 scripts/census.py count --r2s "$RUNNER_TEMP/base/r2s" --r2s "$RUNNER_TEMP/head/r2s" \
             --qemu "$RUNNER_TEMP/qemu/bin/qemu-x86_64" --bins "$RUNNER_TEMP/testbins/elf" \
             --budget 1.01 | tee -a "$GITHUB_STEP_SUMMARY"
+      # The engine's work counts per timed case, held exactly against scripts/stats_baseline.txt (D403).
+      - name: Engine work counts
+        if: always()
+        run: |
+          set -o pipefail
+          python3 scripts/census.py stats --r2s "$RUNNER_TEMP/head/r2s" --bins "$RUNNER_TEMP/testbins/elf" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+  # ── Scaling: each dimension of one function at sizes 0, N and 2N ────
+  #
+  # A pass quadratic in calls, returns, parameters or escaped locals reads 4 where a linear one
+  # reads 2, once the size-0 run's fixed cost is taken off (ROADMAP D404).
+  scaling:
+    name: Scaling Bench
+    runs-on: ubuntu-24.04
+    needs: [plan, build]
+    if: needs.plan.outputs.full == 'true'
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: r2s
+          path: target/ci
+      - run: chmod +x target/ci/r2s
+      - name: Install valgrind
+        run: |
+          apt="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=20"
+          for attempt in 1 2 3; do
+            timeout -k 10 60 $apt update -qq &&
+              timeout -k 10 120 $apt install --no-install-recommends -y valgrind &&
+              break
+            [ "$attempt" = 3 ] && exit 1
+          done
+      - name: Scaling
+        run: |
+          set -o pipefail
+          python3 scripts/scaling.py --r2s target/ci/r2s | tee -a "$GITHUB_STEP_SUMMARY"
 
   # ── Source-gold: graded against the source, not against another tool ──
   #
