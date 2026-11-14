@@ -678,6 +678,8 @@ struct BuildKey {
     conventions: SiteConventions,
     /// What each walked callee may read of the result registers, which bounds a call's reads (D372).
     lane_reads: CalleeLaneReads,
+    /// The imports called, whose count register bounds what a call reads of its register (D431).
+    imports: CalleeImports,
     /// The argument positions through which each callee reaches only upward: all the frame walk
     /// reads of its reach, which its decision reads again where it moves (D365).
     upward: BTreeMap<u64, BTreeSet<usize>>,
@@ -732,7 +734,7 @@ impl BuildKey {
             &self.return_addresses,
             (&self.security_checks, &self.narrow_results),
             (&self.reentering, &self.unstated_imports, &self.premises),
-            (&self.conventions, &self.lane_reads),
+            (&self.conventions, &self.lane_reads, &self.imports),
         )
     }
 
@@ -803,6 +805,7 @@ impl BuildKey {
             unstated_imports: evidence.unstated_imports.clone(),
             conventions: callees.sites.by_target().clone(),
             lane_reads: evidence.lane_reads.clone(),
+            imports: evidence.imports.clone(),
             upward: (evidence.reach.iter())
                 .map(|(target, reach)| {
                     let upward = reach.iter().filter(|(_, reach)| reach.is_upward());
@@ -2814,6 +2817,7 @@ impl TrustedSsaArtifact {
             reentering,
             exits,
             unstated_imports,
+            imports: callee_imports,
             conventions: site_conventions,
         } = evidence;
         let callee_statements = crate::machine_context::CalleeStatement::of(callee_interfaces);
@@ -2967,6 +2971,7 @@ impl TrustedSsaArtifact {
                     .set_callee_argument_reach(callee_argument_reach.clone());
                 provisional_machine_context.set_callee_writes(callee_writes.clone());
                 provisional_machine_context.set_callee_lane_reads(callee_lane_reads.clone());
+                provisional_machine_context.set_callee_imports(callee_imports.clone());
                 provisional_machine_context.set_site_models(Arc::clone(&sites));
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
@@ -3139,6 +3144,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
         machine_context.set_callee_writes(callee_writes.clone());
         machine_context.set_callee_lane_reads(callee_lane_reads.clone());
+        machine_context.set_callee_imports(callee_imports.clone());
         machine_context.set_site_models(sites);
         machine_context.set_callee_library(library.clone());
         machine_context.set_reentering_callees(reentering.clone());
@@ -4166,6 +4172,9 @@ pub type CalleePreservedCarriers = BTreeMap<u64, BTreeSet<CanonicalStorageId>>;
 /// Each walked callee's result registers with the low bytes its body may read of each, by entry.
 pub type CalleeLaneReads = BTreeMap<u64, crate::site_boundary::LaneReads>;
 
+/// The imports a body calls directly, by entry, each with its witness (D431).
+pub type CalleeImports = BTreeMap<u64, crate::call_reads::ImportCall>;
+
 /// What the engine knows of the functions a body calls, by entry address.
 #[derive(Debug, Clone, Default)]
 pub struct CalleeEvidence {
@@ -4187,6 +4196,8 @@ pub struct CalleeEvidence {
     pub exits: AssumedExits,
     /// The imports called whose declaration states no interface, and why.
     pub unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
+    /// The imports called, each a global function the convention's calling sequence binds (D431).
+    pub imports: CalleeImports,
     /// The convention a call to each callee runs under where the program states it: a bound
     /// import's default, a declaration's own (RULING 1.6, 2.6); every other call runs under `calls`.
     pub conventions: SiteConventions,

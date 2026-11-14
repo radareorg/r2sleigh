@@ -1319,6 +1319,9 @@ fn declare_imports(
         let Some(name) = native.program.import_at(*address) else {
             continue;
         };
+        if let Some(import) = crate::declared::import_call(target) {
+            callees.imports.insert(*address, import);
+        }
         let Some(declared) = Declared::import(target, &name) else {
             callees
                 .unstated
@@ -1880,6 +1883,8 @@ struct Callees {
     lane_reads: r2ssa::CalleeLaneReads,
     /// The imports whose declaration states no interface: they have no body to read one off.
     unstated: BTreeMap<u64, r2ssa::UnstatedImport>,
+    /// The imports called, each a global function its convention's calling sequence binds (D431).
+    imports: r2ssa::CalleeImports,
     /// The convention each call runs under where the program states it (`site_convention`).
     conventions: r2ssa::SiteConventions,
 }
@@ -1902,6 +1907,7 @@ impl Callees {
             reentering,
             exits,
             unstated_imports: self.unstated.clone(),
+            imports: self.imports.clone(),
             conventions: self.conventions.clone(),
         }
     }
@@ -3861,7 +3867,7 @@ fn forms(
             offset_width: area.offset_width,
             stack_field: area.stack_field,
         }),
-        count_register: row.count_register.and_then(|name| at.resolve(name.0)),
+        count_register: (row.count_register).and_then(|count| at.resolve(count.register.0)),
         entry_stack: row.entry_stack.map(|stack| r2source::SourceEntryStack {
             alignment: stack.alignment,
             residue: stack.residue,

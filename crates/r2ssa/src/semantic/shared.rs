@@ -1014,6 +1014,10 @@ pub(crate) fn register_read_bytes(
     if let Some(bytes) = reads.lane_read(carrier) {
         return Some(bytes);
     }
+    // An import's call reads only the count register's bytes of the register holding it (D431).
+    if let Some(bytes) = reads.count_read(carrier) {
+        return Some(bytes);
+    }
     let stated = |storage: &CanonicalStorageId| register_storages_overlap(*storage, carrier);
     let interface = interface?;
     let mut lanes = (interface.arguments().iter())

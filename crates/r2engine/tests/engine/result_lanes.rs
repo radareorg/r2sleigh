@@ -619,6 +619,69 @@ fn a_tail_to_an_unstated_callee_reads_its_argument_registers_whole() {
     assert_eq!(demanded_of_narrow(&[0x48, 0x89, 0xc7]), Some(0xff));
 }
 
+/// `narrow` of [`UNREAD_ABOVE`]; `calls`: `pxor xmm0, xmm0; call narrow; <call>; mov eax, 1; ret`.
+fn call_after_narrow(call: &[u8]) -> &'static [u8] {
+    let mut code = [0xcc_u8; 0xa0];
+    code[..9].copy_from_slice(&UNREAD_ABOVE[..9]);
+    code[0x10..0x19].copy_from_slice(&UNREAD_ABOVE[0x10..0x19]);
+    let after = 0x19 + call.len();
+    code[0x19..after].copy_from_slice(call);
+    code[after..after + 6].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    code[0x98..].fill(0);
+    Box::leak(Box::new(code))
+}
+
+/// `call stub` at 0x1019.
+const CALL_STUB: &[u8] = &[0xe8, 0x72, 0x00, 0x00, 0x00];
+
+/// The bytes demand reads of the RAX `call narrow` leaves before `call`, and the rendered C.
+fn read_at_call(call: &[u8], import: &str) -> (Option<u64>, String) {
+    let functions = &[("narrow", BASE, 0x09), ("calls", BASE + 0x10, 0x20)];
+    let code = call_after_narrow(call);
+    let literal = || Literal::of_code(code, functions).importing(import);
+    let mut open = OpenProgram::of(literal());
+    let prepared = open.prepared(BASE + 0x10).expect("it prepares");
+    let artifact = prepared.artifact().shared_artifact();
+    let graph = artifact.graph();
+    let rax = (graph.insts.iter())
+        .find_map(|inst| match graph.op(inst.id) {
+            Some(r2ssa::SSAOp::CallDefine { dst }) => graph
+                .value(*dst)
+                .and_then(|value| value.canonical_storage)
+                .filter(|storage| storage.offset == 0 && storage.size == 8)
+                .map(|_| *dst),
+            _ => None,
+        })
+        .expect("the RAX the call defines");
+    let demanded = (artifact.facts().demanded.as_ref()).map(|demand| demand.bytes(rax));
+    let rendered = OpenProgram::of(literal()).rendered(BASE + 0x10);
+    (
+        demanded,
+        rendered.expect("it renders").response.output.into_text(),
+    )
+}
+
+/// An import's call reads AL alone of RAX (psABI 1.0 3.2.3's footnote, D431): of `narrow`'s
+/// 32-bit result left in RAX, demand reads one byte at an uncited row, an unstated import and a
+/// variadic one, so no residual stands for the upper bytes.
+#[test]
+fn an_import_call_reads_the_count_register_alone_of_its_register() {
+    for import in ["dcgettext", "r2s_unstated_import", "printf"] {
+        let (demanded, text) = read_at_call(CALL_STUB, import);
+        assert_eq!(demanded, Some(0x1), "{import}: {text}");
+        assert!(!text.contains("<< 32"), "{import}: {text}");
+    }
+}
+
+/// Default-deny: `call rdi` may reach a local function, which the psABI does not bind (3.2), so
+/// the call reads all of RAX (D431).
+#[test]
+fn an_indirect_call_reads_its_count_register_whole() {
+    let (demanded, text) = read_at_call(&[0xff, 0xd7], "r2s_unstated_import");
+    assert_eq!(demanded, Some(0xff), "{text}");
+}
+
 /// `test edi, edi; je tail; movabs rax, imm64; ret`: a direct return proves a 64-bit result.
 const WIDE_BESIDE: &[u8] = &[
     0x85, 0xff, 0x74, 0x0b, 0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0xc3,

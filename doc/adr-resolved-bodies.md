@@ -324,7 +324,7 @@ unread, so a call to `vfold` was counted from the registers written
 `Exact(2)`, while its root, reading `vfold`'s summary, is a floor of 0:
 certification graded `main` calling it with 2, "defined with 0". System V
 hands a call to a variadic or unprototyped function its vector count in
-`al` (psABI 3.5.7; r2abi's row, on `SourceConventionSlots`), so a register
+`al` (psABI 3.2.3; r2abi's row, on `SourceConventionSlots`), so a register
 count is refused (`CountRegisterSet`) where the body sets that register for
 the call alone: a constant at most 8 only the call reads, found from the
 call's own `CallUse`, O(reads). The call keeps no argument past its callee's

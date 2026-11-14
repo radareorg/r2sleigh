@@ -440,6 +440,8 @@ pub struct SourceMachineContext {
     callee_writes: BTreeMap<u64, crate::call_reads::StackWrites>,
     /// The low bytes each walked callee may read of each result register, by entry (D372).
     callee_lane_reads: crate::function::CalleeLaneReads,
+    /// The imports this body calls directly, each with its witness, by entry (D431).
+    callee_imports: crate::function::CalleeImports,
     /// The convention each call runs under (D390); any other call runs under `calls`.
     sites: std::sync::Arc<crate::function::SiteModels>,
     /// The library models of the imports this body calls, by entry.
@@ -828,6 +830,7 @@ impl SourceMachineContext {
             callee_argument_reach: BTreeMap::new(),
             callee_writes: BTreeMap::new(),
             callee_lane_reads: BTreeMap::new(),
+            callee_imports: BTreeMap::new(),
             sites: std::sync::Arc::default(),
             callee_library: BTreeMap::new(),
             reentering_callees: BTreeSet::new(),
@@ -1170,6 +1173,10 @@ impl SourceMachineContext {
         self.callee_lane_reads = reads;
     }
 
+    pub(crate) fn set_callee_imports(&mut self, imports: crate::function::CalleeImports) {
+        self.callee_imports = imports;
+    }
+
     pub(crate) fn set_site_models(&mut self, sites: std::sync::Arc<crate::function::SiteModels>) {
         self.sites = sites;
     }
@@ -1342,9 +1349,10 @@ impl SourceMachineContext {
             .filter(|interface| interface.is_complete());
         // The site's own model, by the one lookup rename and the frame walk ask (D390).
         let model = self.site_model(instruction, target.map(|target| target.offset));
+        let import = target.and_then(|target| self.callee_imports.get(&target.offset).copied());
         if let Some(interface) = interface.filter(|interface| !interface.is_variadic()) {
             let reads = crate::call_reads::CallReads::exact(interface, model);
-            return Some(reads.writing(writes));
+            return Some(reads.writing(writes).importing(import));
         }
         // A printf's stack is its fixed parameters and the operands its own format counts (D409).
         let counted = (interface.zip(model))
@@ -1352,7 +1360,7 @@ impl SourceMachineContext {
             .and_then(|((interface, model), tail)| counted_stack(interface, model, tail));
         if let (Some(stack), Some(model)) = (counted, model) {
             let reads = crate::call_reads::CallReads::every_location(model).on_stack(stack);
-            return Some(reads.writing(writes));
+            return Some(reads.writing(writes).importing(import));
         }
         // A walked callee that mints no contract still states its reads where its arity is exact.
         let stated = target
@@ -1369,7 +1377,7 @@ impl SourceMachineContext {
                 .map(crate::call_reads::CallReads::every_location)
                 .map(|reads| reads.reading_lanes(lanes)),
         };
-        reads.map(|reads| reads.writing(writes))
+        reads.map(|reads| reads.writing(writes).importing(import))
     }
 
     pub fn call_site_interface(

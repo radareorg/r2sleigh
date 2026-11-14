@@ -2752,7 +2752,7 @@ pub(crate) fn reaching_source_return_register_in_block(
 }
 
 /// Whether the body sets the convention's vector count for the call at `(block_addr, op_index)` and
-/// for nothing else: a constant at most 8 only that call reads (psABI 3.5.7, ADR "Variadic tail").
+/// for nothing else: a constant at most 8 only that call reads (psABI 3.2.3, ADR "Variadic tail").
 fn count_register_set(at: CallPosition<'_>, machine_context: &SourceMachineContext) -> bool {
     let CallPosition {
         prep,
