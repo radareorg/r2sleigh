@@ -589,7 +589,8 @@ fn a_staged_table_switch_reads_its_selector() {
 }
 
 /// `shape_variadic`'s last `snprintf` passes eight arguments, two of them in the outgoing stack
-/// area: the staged call takes them in order, as integer bits, where it was a gap.
+/// area: the staged call takes them in order, as integer bits, where it was a gap. Since
+/// `rd3-frame3` the xor is named before the call.
 #[test]
 fn a_staged_call_passes_its_stack_arguments() {
     let pinned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned");
@@ -597,9 +598,14 @@ fn a_staged_call_passes_its_stack_arguments() {
     assert!(
         staged
             .out
-            .contains(
-                "tmp_40133c_8_1, tmp_401335_8_1, (uint64_t)((uint64_t)tmp_401324_8_1 ^ (uint64_t)tmp_40132b_8_1), tmp_401320_8_1, rax_42);"
-            ),
+            .contains("rax_45 = (uint64_t)((uint64_t)tmp_401324_8_1 ^ (uint64_t)tmp_40132b_8_1);"),
+        "{}",
+        staged.out
+    );
+    assert!(
+        staged
+            .out
+            .contains("tmp_40133c_8_1, tmp_401335_8_1, rax_45, tmp_401320_8_1, rax_42);"),
         "{}",
         staged.out
     );

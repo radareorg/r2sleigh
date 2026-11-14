@@ -72,34 +72,36 @@ CMDS=aa; pdd @ 0x100000420
 EXPECT=<<EOF
 r2sleigh_word_u64 _table_dispatch(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)
 {
-    uint64_t x8_4;
-    uint32_t stack_m76_1;
-    uint64_t stack_m72_1;
-    uint64_t stack_m72_3;
-    _Alignas(16) uint8_t frame[64];
+    uint32_t tmp_10000045c_8_1;
+    uint32_t tmp_100000498_8_1;
+    _Alignas(16) uint8_t frame[80];
 
-    /* r2dec proof: 3 constructs are marked below; 60 source obligations: 30 rendered, 11 elided, 0 refused, 19 residual; 12 statements rendered; 1 never assigned, read as residuals (X0_2); the parameters are a floor: at least 2 (a register past them reaches an indirect call); a call reads the result (assuming closed-world) */
+    /* r2dec proof: 3 constructs are marked below; 80 source obligations: 29 rendered, 27 elided, 0 refused, 24 residual; 14 statements rendered; 1 never assigned, read as residuals (X0_2); the parameters are a floor: at least 2 (a register past them reaches an indirect call); a call reads the result (assuming closed-world) */
     {
-        r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)arg0);
-        r2sleigh_store_u64((void*)(uint64_t)(frame + 32U), (uint64_t)arg1);
-        r2sleigh_store_u128((void*)(uint64_t)(frame + 0U), (__uint128_t)r2sleigh_load_u128((void*)(uint64_t)0x100004000U));
-        r2sleigh_store_u64((void*)((uint64_t)(frame + 0U) + (uint64_t)16U), (uint64_t)r2sleigh_load_u64((void*)(uint64_t)0x100004010U));
-        x8_4 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
-        stack_m76_1 = 0;
-        stack_m72_1 = x8_4;
-        while ((uint8_t)((uint32_t)3U > (uint32_t)stack_m76_1)) {
-            {
-                r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x10000046c:36 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
-                r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x10000046c:69 covering 1 op (render::values) */
-                stack_m72_3 = r2sleigh_residual_u64(3);
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 56U), (uint64_t)arg0);
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 48U), (uint64_t)arg1);
+        r2sleigh_store_u128((void*)(uint64_t)(frame + 16U), (__uint128_t)r2sleigh_load_u128((void*)(uint64_t)0x100004000U));
+        r2sleigh_store_u64((void*)((uint64_t)(frame + 16U) + (uint64_t)16U), (uint64_t)r2sleigh_load_u64((void*)(uint64_t)0x100004010U));
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 8U), (uint64_t)r2sleigh_load_u64((void*)(uint64_t)(frame + 56U)));
+        r2sleigh_store_u32((void*)(uint64_t)(frame + 4U), (uint32_t)0U);
+        for (; ; ) {
+            tmp_10000045c_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 4U));
+            if ((uint8_t)((uint32_t)3U <= (uint32_t)tmp_10000045c_8_1)) {
+                break;
+            } else {
                 {
-                    stack_m76_1 = (uint32_t)((uint32_t)stack_m76_1 + (uint32_t)1U);
-                    stack_m72_1 = stack_m72_3;
+                    r2sleigh_residual_void(1); /* r2dec gap: CallNotRendered at 0x10000046c:36 covering 1 op (render::values): call to an indirect target: no arity is stated, only the registers written before it */
+                    r2sleigh_residual_void(2); /* r2dec gap: ValueNotComputed at 0x10000046c:69 covering 1 op (render::values) */
+                    r2sleigh_store_u64((void*)(uint64_t)(frame + 8U), (uint64_t)r2sleigh_residual_u64(3));
+                    {
+                        tmp_100000498_8_1 = r2sleigh_load_u32((void*)(uint64_t)(frame + 4U));
+                        r2sleigh_store_u32((void*)(uint64_t)(frame + 4U), (uint32_t)((uint32_t)tmp_100000498_8_1 + (uint32_t)1U));
+                    }
                 }
             }
         }
         {
-            return (uint64_t)stack_m72_1;
+            return (uint64_t)r2sleigh_load_u64((void*)(uint64_t)(frame + 8U));
         }
     }
 }
@@ -119,7 +121,7 @@ r2sleigh_word_u64 _main(void)
 
     uint64_t x0_2;
 
-    /* r2dec proof: no individual construct is marked; 14 source obligations: 9 rendered, 5 elided, 0 refused; 2 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 20 source obligations: 9 rendered, 11 elided, 0 refused; 2 statements rendered; a call reads the result (assuming closed-world) */
     {
         x0_2 = _table_dispatch(3, 5);
         return (uint64_t)x0_2;

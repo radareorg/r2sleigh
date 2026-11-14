@@ -177,7 +177,7 @@ CMDS=aa; pdd @ 0x010105cc
 EXPECT=<<EOF
 void __libc_csu_init(int32_t argc, char** argv, char** envp)
 {
-    /* r2dec proof: no individual construct is marked; 17 source obligations: 2 rendered, 15 elided, 0 refused; 1 statements rendered */
+    /* r2dec proof: no individual construct is marked; 22 source obligations: 2 rendered, 20 elided, 0 refused; 1 statements rendered */
     {
         {
             return;

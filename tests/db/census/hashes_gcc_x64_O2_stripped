@@ -110,7 +110,7 @@ r2sleigh_word_u32 fcn_401050(void)
     uint64_t rax_35;
     uint64_t rax_38;
 
-    /* r2dec proof: no individual construct is marked; 320 source obligations: 233 rendered, 87 elided, 0 refused; 28 statements rendered; 13 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 320 source obligations: 233 rendered, 87 elided, 0 refused; 28 statements rendered; 13 callee prototypes supplied by the source; a call reads the result (assuming closed-world, ub-free) */
     {
         fcn_401580();
         rax_2 = (uint64_t)fcn_401330(0x402060, 61);
@@ -221,7 +221,7 @@ r2sleigh_result_u64 entry_fini0(void)
     uint8_t tmp_4012f4_0_1;
     uint64_t rax_1;
 
-    /* r2dec proof: 1 construct is marked below; 26 source obligations: 12 rendered, 12 elided, 0 refused, 2 residual; 6 statements rendered; the parameters are a floor: at least 0 (a register past them reaches the call to 0x401280); the result is unproven (Written): 1 unproven-return carried, 1 unproven-return residual */
+    /* r2dec proof: 1 construct is marked below; 27 source obligations: 12 rendered, 13 elided, 0 refused, 2 residual; 6 statements rendered; the parameters are a floor: at least 0 (a register past them reaches the call to 0x401280); the result is unproven (Written): 1 unproven-return carried, 1 unproven-return residual */
     {
         tmp_4012f4_0_1 = r2sleigh_load_u8((void*)(uint64_t)0x404020U);
         if ((uint8_t)((uint8_t)tmp_4012f4_0_1 != (uint8_t)0U)) {
