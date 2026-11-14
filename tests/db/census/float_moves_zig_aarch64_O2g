@@ -110,7 +110,7 @@ int32_t main(int32_t argc, char** argv)
     struct r2sleigh_bits_256 z0_5;
     uint64_t tmp_lane_1010514_0_0_1;
 
-    /* r2dec proof: 1 construct is marked below; 15 source obligations: 10 rendered, 3 elided, 0 refused, 2 residual; 3 statements rendered; 1 callee prototype supplied by the source */
+    /* r2dec proof: 1 construct is marked below; 20 source obligations: 10 rendered, 8 elided, 0 refused, 2 residual; 3 statements rendered; 1 callee prototype supplied by the source */
     {
         z0_5 = r2sleigh_bits_zero_extend_64_256((uint64_t)r2sleigh_float_to_bits_64(swap_call((double)(int32_t)argc, r2sleigh_float_from_bits_64((uint64_t)0x4000000000000000U))));
         tmp_lane_1010514_0_0_1 = r2sleigh_bits_extract_256_64(z0_5, 0U);
