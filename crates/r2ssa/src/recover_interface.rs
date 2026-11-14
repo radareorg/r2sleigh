@@ -2268,14 +2268,12 @@ fn recover_interface_inner(
     }
     // A call's read of a register its certified boundary does not pass is no read (`liveness`).
     let ignored_reads = crate::function::unpassed_call_reads(graph, machine_context);
-    // The call of unproven arity a `CallUse` at `inst` reads for: the first after it in its block.
+    // The call of unproven arity a `CallUse` at `inst` reads for, by the one link; a call with no
+    // boundary (a `/GS` check) is no other call's.
     let handed_to = |inst: crate::InstId| {
-        let used = graph.inst(inst)?;
-        let call = (facts.boundaries.calls.values())
-            .filter_map(|boundary| Some((boundary, graph.inst(boundary.at)?)))
-            .filter(|(_, at)| at.block == used.block && at.ordinal > used.ordinal)
-            .min_by_key(|(_, at)| at.ordinal)?
-            .0;
+        let at = graph.call_reading(inst)?;
+        let call = facts.call_sites.by_inst.get(at)?;
+        let call = facts.boundaries.calls.get(call)?;
         (call.may_read_unlisted()).then(|| unproven_call(&facts, machine_context, call.call_site))
     };
     // Each register's entry values and the lanes minted for them, found in one pass. O(V log V).
@@ -3993,26 +3991,15 @@ pub fn mint_recovered_call_site_interface(
         );
         return None;
     }
-    let spent = callee.return_mechanism().map_or(0, |mechanism| {
-        i64::from(mechanism.stack_pointer_delta_bytes())
-    });
-    let arguments = callee.parameters().iter().map(|parameter| {
-        let location = match parameter.location() {
-            SourceParameterLocation::Register(storage) => {
-                SourceParameterLocation::Register(storage)
-            }
-            SourceParameterLocation::Stack {
-                offset,
-                size_bytes,
-                callee_offset,
-            } => SourceParameterLocation::Stack {
-                offset: offset.saturating_sub(spent),
-                size_bytes,
-                callee_offset: callee_offset.saturating_sub(spent),
-            },
-        };
-        SourceCallArgumentSpec::with_location(parameter.index(), location)
-    });
+    let arguments = (callee.parameters().iter())
+        .map(|parameter| {
+            let location = callee.at_call_site(parameter.location())?;
+            Some(SourceCallArgumentSpec::with_location(
+                parameter.index(),
+                location,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
     // One result per callee at every call (D62): a call that does not read the high half of a pair
     // reads the low half; an unproven result with one carrier is that register.
     let result = match callee.return_kind() {

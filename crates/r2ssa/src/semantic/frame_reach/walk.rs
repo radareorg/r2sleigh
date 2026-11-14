@@ -48,6 +48,38 @@ pub(crate) struct OpaqueAccess {
     pub(crate) writes: bool,
 }
 
+impl OpaqueAccess {
+    /// One operation's two accesses as one: every point either names, writing where either may.
+    fn join(&self, other: &Self) -> Self {
+        let origin = match (&self.origin, &other.origin) {
+            (Origin::Points(mine), Origin::Points(theirs)) => {
+                let points = mine.iter().chain(theirs).copied().collect::<BTreeSet<_>>();
+                Origin::Points(points.into_iter().collect())
+            }
+            _ => Origin::Unplaced,
+        };
+        Self {
+            op: self.op,
+            origin,
+            writes: self.writes || other.writes,
+        }
+    }
+}
+
+/// Two rounds' opaque accesses, each by operation order, joined per operation. O(n + m).
+fn merged_opaque(mine: Vec<OpaqueAccess>, theirs: Vec<OpaqueAccess>) -> Vec<OpaqueAccess> {
+    let mut out: Vec<OpaqueAccess> = Vec::with_capacity(mine.len().max(theirs.len()));
+    let mut all = mine.into_iter().chain(theirs).collect::<Vec<_>>();
+    all.sort_by_key(|access| access.op);
+    for access in all {
+        match out.last_mut() {
+            Some(last) if last.op == access.op => *last = last.join(&access),
+            _ => out.push(access),
+        }
+    }
+    out
+}
+
 /// A call's written area as spans from its pointer; `None` where nothing bounds it.
 type Area<'a> = Option<&'a [(i64, i64)]>;
 
@@ -56,6 +88,9 @@ type Area<'a> = Option<&'a [(i64, i64)]>;
 pub struct FramePoints {
     /// An address no offset places leaves the function.
     pub(crate) whole: bool,
+    /// `whole`, an unplaced opaque access or a derived point: no place is fixed. It only turns on
+    /// as the walk adds them (D397).
+    pub(crate) unplaced: bool,
     /// The addresses that leave the function.
     pub(crate) escaped: BTreeSet<FramePoint>,
     /// Accesses no exact load or store states, in operation order.
@@ -64,9 +99,9 @@ pub struct FramePoints {
     pub(crate) handed: BTreeSet<i64>,
     /// Places a call's argument area covers that a load reads after a call: they stay (D369).
     pub(crate) rewritten: BTreeSet<i64>,
-    /// The entry offset each call's argument area is measured from, in operation order; `None`
-    /// where no offset places the stack pointer (D351: the one reading of it).
-    pub(crate) call_bases: Vec<(OpId, Option<i64>)>,
+    /// The entry offset each call's or tail transfer's area is measured from, by instruction then
+    /// operation; `None` where no offset places the stack pointer (D351, D398: the one table).
+    pub(crate) call_bases: Vec<CallBase>,
     /// Each (callee, argument position) whose upward reach the walk asked, in any round (D365).
     pub(crate) asked_reach: BTreeSet<(u64, usize)>,
     /// The first instruction that moves the stack pointer by an amount no constant states (D355).
@@ -75,13 +110,54 @@ pub struct FramePoints {
     pub(crate) incoming_stores: Vec<(i64, i64)>,
     /// The calls of the body to itself, by instruction.
     pub(crate) own_calls: BTreeSet<u64>,
-    /// The places holding an address, with their widest access, and each call's base by its
-    /// instruction: what a kept build compares areas over (D377).
-    pub(crate) held_places: BTreeMap<i64, u32>,
+    /// The places holding an address, with their widest access: what a kept build compares read
+    /// areas over (D377).
+    pub(crate) held_places: Places,
     /// The places whose promotion only `rewritten` decides, with their width: what a written area
     /// changes in a build (D377).
-    pub(crate) rewrite_decides: BTreeMap<i64, u32>,
-    pub(crate) written_bases: BTreeMap<u64, Option<i64>>,
+    pub(crate) rewrite_decides: Places,
+    /// The places slot promotion took out of memory, by entry offset (D389).
+    pub(crate) promoted: BTreeSet<i64>,
+}
+
+/// One call's or tail transfer's area base.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CallBase {
+    pub(crate) instruction: Option<u64>,
+    pub(crate) op: OpId,
+    pub(crate) base: Option<i64>,
+    /// A transfer leaving the body: nothing after it in the body loads what it writes (D381).
+    pub(crate) tail: bool,
+}
+
+/// Entry offsets with a width, and the widest: a span meets one in `O(log places)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Places {
+    widths: BTreeMap<i64, u32>,
+    widest: u32,
+}
+
+impl Places {
+    pub(crate) fn new(widths: BTreeMap<i64, u32>) -> Self {
+        let widest = widths.values().copied().max().unwrap_or(1);
+        Self { widths, widest }
+    }
+
+    /// Whether no place shares a byte with `[low, high)`.
+    fn untouched(&self, (low, high): (i64, i64)) -> bool {
+        let near = (self.widths).range(low.saturating_sub(i64::from(self.widest))..high);
+        !near
+            .into_iter()
+            .any(|(place, width)| place + i64::from(*width) > low)
+    }
+
+    fn join(&mut self, other: Self) {
+        for (place, width) in other.widths {
+            let widest = self.widths.entry(place).or_insert(width);
+            *widest = (*widest).max(width);
+        }
+        self.widest = self.widest.max(other.widest);
+    }
 }
 
 /// A frame no offset places past one instruction: `sub rsp, rax` after `__chkstk`, an `alloca`
@@ -106,17 +182,28 @@ impl FramePoints {
     pub(crate) fn whole_frame() -> Self {
         Self {
             whole: true,
+            unplaced: true,
             ..Self::default()
         }
+    }
+
+    fn set_whole(&mut self) {
+        self.whole = true;
+        self.unplaced = true;
+    }
+
+    /// An address leaving at `point`.
+    fn leave(&mut self, point: FramePoint) {
+        self.unplaced |= point.extent == Extent::Derived;
+        self.escaped.insert(point);
     }
 
     /// Both rounds' points: what either states leaves or is accessed.
     fn absorb(&mut self, other: Self) {
         self.whole |= other.whole;
+        self.unplaced |= other.unplaced;
         self.escaped.extend(other.escaped);
-        self.opaque.extend(other.opaque);
-        self.opaque.sort_by_key(|access| access.op);
-        self.opaque.dedup();
+        self.opaque = merged_opaque(std::mem::take(&mut self.opaque), other.opaque);
         self.handed.extend(other.handed);
         self.rewritten.extend(other.rewritten);
         self.asked_reach.extend(other.asked_reach);
@@ -128,16 +215,11 @@ impl FramePoints {
                 .copied(),
         );
         self.own_calls.extend(other.own_calls);
-        for (place, width) in other.held_places {
-            let widest = self.held_places.entry(place).or_insert(width);
-            *widest = (*widest).max(width);
-        }
-        for (instruction, base) in other.written_bases {
-            let known = self.written_bases.entry(instruction).or_insert(base);
-            *known = (*known)
-                .zip(base)
-                .filter(|(mine, theirs)| mine == theirs)
-                .map(|(mine, _)| mine);
+        self.held_places.join(other.held_places);
+        // Both rounds walk the same calls: a base the two disagree on is none.
+        for (mine, theirs) in self.call_bases.iter_mut().zip(other.call_bases) {
+            debug_assert_eq!(mine.op, theirs.op);
+            mine.base = mine.base.filter(|base| theirs.base == Some(*base));
         }
     }
 
@@ -154,9 +236,16 @@ impl FramePoints {
             return false;
         }
         // A call no offset places reads and writes the whole frame whatever its areas say.
-        let base = match self.written_bases.get(&instruction) {
-            Some(Some(base)) => *base,
-            Some(None) => return true,
+        let at = (self.call_bases).partition_point(|call| call.instruction < Some(instruction));
+        let base = match self
+            .call_bases
+            .get(at)
+            .filter(|call| call.instruction == Some(instruction))
+        {
+            Some(CallBase {
+                base: Some(base), ..
+            }) => *base,
+            Some(_) => return true,
             None => return reads[0] == reads[1] && writes[0] == writes[1],
         };
         let at = |area: Area<'_>| match area {
@@ -166,45 +255,47 @@ impl FramePoints {
             ),
             None => merged([(base, 0)].into_iter()),
         };
-        let untouched = |places: &BTreeMap<i64, u32>, (low, high): (i64, i64)| {
-            let widest = i64::from(places.values().copied().max().unwrap_or(1));
-            let near = places.range(low.saturating_sub(widest)..high);
-            !near
-                .into_iter()
-                .any(|(place, width)| place + i64::from(*width) > low)
-        };
         let read = differing(&at(reads[0]), &at(reads[1]));
         let written = differing(&at(writes[0]), &at(writes[1]));
         read.into_iter()
-            .all(|span| untouched(&self.held_places, span))
-            && (written.into_iter())
-                .all(|span| span.1 <= 0 && untouched(&self.rewrite_decides, span))
+            .all(|span| self.held_places.untouched(span))
+            && (written.into_iter()).all(|span| span.1 <= 0 && self.rewrite_decides.untouched(span))
     }
 
     /// What a call to this body may write of its caller's stack, from the call's pointer, as `context`
-    /// states its calls; a self call in two rounds (doc/adr-callee-builds.md, D377). `O(calls x spans)`.
+    /// states its calls and tail transfers; a self call in two rounds (doc/adr-callee-builds.md,
+    /// D377, D381). `O(calls x spans)`.
     pub fn call_writes(&self, context: &SourceMachineContext) -> Option<Vec<(i64, i64)>> {
         let writing = self.opaque.iter().any(|access| access.writes);
         if self.whole || !self.escaped.is_empty() || writing {
             return None;
         }
         let address = i64::from(context.memory_model().default_address_bits() / 8);
+        // An unstated mechanism spends nothing or one address (D386).
         let (least, most) = context
             .return_mechanism()
             .map_or((0, address), |mechanism| {
-                let spent = i64::from(mechanism.stack_pointer_delta_bytes());
+                let spent = r2source::SourceReturnMechanism::spent(Some(mechanism));
                 (spent, spent)
             });
         let mut fixed = self.incoming_stores.clone();
         let mut own_bases = Vec::new();
-        for (instruction, base) in &self.written_bases {
+        for call in &self.call_bases {
             // A call above what its transfer spends could move a cycle's spans up each round.
-            let base = (*base).filter(|base| *base <= least)?;
-            if self.own_calls.contains(instruction) {
+            let base = call.base.filter(|base| *base <= least)?;
+            let instruction = call.instruction?;
+            if self.own_calls.contains(&instruction) {
                 own_bases.push(base);
                 continue;
             }
-            let writes = context.call_reads(Some(*instruction))?.writes?;
+            // A tail transfer writes what its source-correlated callee states; any other, all.
+            let stated = (!call.tail)
+                || (context.raw_call_site_at(instruction))
+                    .is_some_and(|identity| context.is_tail_call_site(identity));
+            let writes = stated
+                .then(|| context.call_reads(Some(instruction)))
+                .flatten()?
+                .writes?;
             fixed.extend(writes.iter().map(|(low, high)| (base + low, base + high)));
         }
         // Two rounds: a call to itself whose writes move the spans again bounds nothing (D377).
@@ -224,16 +315,19 @@ impl FramePoints {
         (own_bases.is_empty() || second == first).then_some(first)
     }
 
+    /// Whether slot promotion took the place at entry offset `place` out of memory. O(log).
+    pub fn promoted(&self, place: i64) -> bool {
+        self.promoted.contains(&place)
+    }
+
     /// The frame's typed refusal, where the stack pointer moves by an unstated amount (D355).
     pub const fn dynamic_frame(&self) -> Option<DynamicFrame> {
         self.dynamic
     }
 
-    /// Whether an address no offset places escapes or is accessed.
-    pub(crate) fn unplaced(&self) -> bool {
-        self.whole
-            || (self.opaque.iter()).any(|access| matches!(access.origin, Origin::Unplaced))
-            || self.reaching().any(|point| point.extent == Extent::Derived)
+    /// Whether an address no offset places escapes or is accessed. O(1).
+    pub(crate) const fn unplaced(&self) -> bool {
+        self.unplaced
     }
 
     /// The points that escape or are accessed opaquely.
@@ -280,10 +374,9 @@ impl FramePoints {
     /// The places a call's write area covers that a load reads after it (D369), with each call's
     /// base by instruction: what asks a call nothing states to state itself (D376).
     pub fn rewriting_calls(&self) -> impl Iterator<Item = (u64, i64)> + '_ {
-        let bases = self
-            .written_bases
-            .iter()
-            .filter_map(|(at, base)| Some((*at, (*base)?)));
+        let bases = (self.call_bases.iter())
+            .filter(|call| !call.tail)
+            .filter_map(|call| Some((call.instruction?, call.base?)));
         bases.filter(|(_, base)| *base < 0 && self.rewritten.range(*base..0).next().is_some())
     }
 }
@@ -423,33 +516,40 @@ pub(crate) fn walk(
     let entry_sp = (0..func.values().len())
         .map(VarId::from_index)
         .find(|id| func.var(*id).version == 0 && func.storage_of(*id) == Some(stack_pointer));
-    // No entry stack pointer value: no frame address exists, so nothing writes the stack.
+    // No entry stack pointer value: no frame address exists, and every transfer is at entry (D381).
     let Some(entry_sp) = entry_sp else {
-        return refused(FramePoints::default());
+        let arguments = StackArguments::of(func, machine, stack_pointer, None);
+        let values = IdMap::new(func.values().len());
+        return refused(FramePoints {
+            own_calls: arguments.own_calls(),
+            call_bases: arguments.by_call(&values),
+            ..FramePoints::default()
+        });
     };
     if defs.exhausted().is_some() {
         return refused(FramePoints::whole_frame());
     }
     let sinks = Sinks::of(func, machine, stack_pointer, entry_sp, calls_refund_stack);
+    let uses = Uses::of(func);
     let mut carried: Option<BTreeSet<i64>> = None;
     let mut asked = BTreeSet::new();
     // An entry edge runs the prologue again: an offset names a place per pass, so any escape or
     // opaque access reaches the whole frame.
     let reentered = func.cfg().has_entry_edge();
     loop {
-        let mut walked = Walker::new(func, defs, entry_sp, &sinks, carried.as_ref()).run();
+        let mut walked = Walker::new((func, defs, &uses), entry_sp, &sinks, carried.as_ref()).run();
         let promoted = promotable(&walked);
         let unplaced = walked.points.unplaced();
         // An unplaced round promotes nothing: its places keep their stores, so each stored
         // address also leaves, as the round where no place carries states.
         if unplaced && carried.as_ref().is_none_or(|carried| !carried.is_empty()) {
             let kept = BTreeSet::new();
-            let stored = Walker::new(func, defs, entry_sp, &sinks, Some(&kept)).run();
+            let stored = Walker::new((func, defs, &uses), entry_sp, &sinks, Some(&kept)).run();
             walked.points.absorb(stored.points);
         }
         asked.extend(walked.points.asked_reach.iter().copied());
         if reentered && !(walked.points.escaped.is_empty() && walked.points.opaque.is_empty()) {
-            walked.points.whole = true;
+            walked.points.set_whole();
         }
         let settled =
             unplaced || (walked.carriers.iter()).all(|place| promoted.contains_key(place));
@@ -483,6 +583,8 @@ struct Sinks<'a> {
     /// whether the callee reaches only upward through it.
     upward_at: Box<dyn Fn(u64, usize, crate::CanonicalStorageId) -> Option<ReachAsk> + 'a>,
     stack_arguments: StackArguments,
+    /// The stack and frame pointers: the frame's own bases, not addresses handed on.
+    bases: [Option<crate::CanonicalStorageId>; 2],
     machine: &'a SourceMachineContext,
 }
 
@@ -517,20 +619,24 @@ impl<'a> Sinks<'a> {
                 SSAOp::CallUse { .. } => None,
                 op => Some(op.call().filter(|call| call.direct)),
             });
-            let target = (call.flatten().and_then(|call| call.instruction))
-                .and_then(|instruction| machine.raw_call_site_at(instruction))
-                .and_then(crate::semantic::direct_target_from_raw_identity);
-            let target = target?;
-            let position = machine.site_position(target, storage)?;
+            let instruction = call.flatten().and_then(|call| call.instruction);
+            let target = (instruction
+                .and_then(|instruction| machine.raw_call_site_at(instruction)))
+            .and_then(crate::semantic::direct_target_from_raw_identity)?;
+            let position = (machine
+                .site_integer_arguments(instruction, Some(target))
+                .iter())
+            .position(|slot| slot.space == storage.space && slot.offset == storage.offset)?;
             let upward = (machine.callee_reach_at(target, position))
                 .is_some_and(crate::interproc::ArgumentReach::is_upward);
             Some(((target, position), upward))
         };
         Self {
             calls_refund_stack,
+            bases,
             read_by_calls: Box::new(read_by_calls),
             upward_at: Box::new(upward_at),
-            stack_arguments: StackArguments::of(func, machine, stack_pointer, entry_sp),
+            stack_arguments: StackArguments::of(func, machine, stack_pointer, Some(entry_sp)),
             machine,
         }
     }
@@ -542,12 +648,13 @@ struct StackArguments {
     calls: Vec<CallArguments>,
 }
 
-/// One call's argument area, from the stack pointer it is measured at.
+/// One call's or tail transfer's argument area, from the stack pointer it is measured at.
 struct CallArguments {
     op: OpId,
     /// The block the call is in and its index there.
     at: (u64, usize),
-    pointer: VarId,
+    /// The stack pointer reaching it; none where the body never reads one, the entry pointer.
+    pointer: Option<VarId>,
     /// What the transfer spends where no restore records the pointer entering it.
     shift: i64,
     /// `CallReads::stack` of the call; none reads every place from the pointer to entry.
@@ -556,6 +663,9 @@ struct CallArguments {
     writes: Option<Vec<(i64, i64)>>,
     /// A direct call to the body itself that nothing else states.
     own: bool,
+    /// A transfer that leaves the body: its callee's writes above the entry pointer are the
+    /// body's, and nothing after it in the body sees them (D381).
+    tail: bool,
     instruction: Option<u64>,
 }
 
@@ -565,14 +675,12 @@ impl StackArguments {
         func: &SSAFunction,
         machine: &SourceMachineContext,
         stack_pointer: crate::CanonicalStorageId,
-        entry_sp: VarId,
+        entry_sp: Option<VarId>,
     ) -> Self {
         let site = Site {
             func,
             machine,
-            spent: machine.return_mechanism().map_or(0, |mechanism| {
-                i64::from(mechanism.stack_pointer_delta_bytes())
-            }),
+            spent: r2source::SourceReturnMechanism::spent(machine.return_mechanism()),
             stack_pointer,
         };
         let mut calls = Vec::new();
@@ -583,7 +691,7 @@ impl StackArguments {
                 continue;
             };
             if let Some((_, phi)) = block.sited_phis().find(|(_, phi)| site.is_pointer(phi.dst)) {
-                pointer = phi.dst;
+                pointer = Some(phi.dst);
             }
             pointer = site.calls((address, block), pointer, &mut calls);
             let children = func.domtree().children(address);
@@ -603,12 +711,25 @@ impl StackArguments {
         }
     }
 
-    /// Each call's area base, by operation.
-    fn by_call(&self, values: &IdMap<VarId, Value>) -> Vec<(OpId, Option<i64>)> {
+    /// The calls of the body to itself, by instruction.
+    fn own_calls(&self) -> BTreeSet<u64> {
+        (self.calls.iter())
+            .filter(|call| call.own)
+            .filter_map(|call| call.instruction)
+            .collect()
+    }
+
+    /// Each call's area base, by instruction then operation.
+    fn by_call(&self, values: &IdMap<VarId, Value>) -> Vec<CallBase> {
         let mut bases = (self.calls.iter())
-            .map(|call| (call.op, call.base(values)))
+            .map(|call| CallBase {
+                instruction: call.instruction,
+                op: call.op,
+                base: call.base(values),
+                tail: call.tail,
+            })
             .collect::<Vec<_>>();
-        bases.sort_by_key(|(op, _)| *op);
+        bases.sort_by_key(|call| (call.instruction, call.op));
         bases
     }
 
@@ -622,7 +743,7 @@ impl StackArguments {
     ) -> BTreeSet<i64> {
         // Each call's area as entry-relative spans, by block and index; an unplaced call covers all.
         let mut in_block = BTreeMap::<u64, Vec<CallSpans>>::new();
-        for call in &self.calls {
+        for call in self.calls.iter().filter(|call| !call.tail) {
             let spans = match (call.base(values), Self::writes_of(call, own)) {
                 (None, _) => vec![(i64::MIN, i64::MAX)],
                 (Some(base), Some(area)) => merged(
@@ -668,8 +789,8 @@ impl StackArguments {
                     base.wrapping_add(*low) < place.saturating_add(i64::from(width))
                         && place < base.wrapping_add(*high)
                 }),
-                // Unbounded, it is still this frame's: it ends at the entry pointer.
-                None => place.saturating_add(i64::from(width)) > base && place < 0,
+                // Unbounded, a call's still ends at the entry pointer; a tail transfer's does not.
+                None => place.saturating_add(i64::from(width)) > base && (call.tail || place < 0),
             };
             read.extend(
                 (stored.iter())
@@ -684,7 +805,10 @@ impl StackArguments {
 impl CallArguments {
     /// The entry offset the call's area is measured from, where an offset places its pointer.
     fn base(&self, values: &IdMap<VarId, Value>) -> Option<i64> {
-        let base = values.get(self.pointer)?.exact()?;
+        let base = match self.pointer {
+            Some(pointer) => values.get(pointer)?.exact()?,
+            None => 0,
+        };
         Some(base.wrapping_add(self.shift))
     }
 }
@@ -702,23 +826,75 @@ impl Site<'_> {
         self.func.storage_of(var) == Some(self.stack_pointer)
     }
 
-    /// Each call of a block, entered at the stack `pointer`; the pointer leaving it.
+    /// Each call and tail transfer of a block, entered at the stack `pointer`; the pointer leaving it.
     fn calls(
         &self,
         (address, block): (u64, &crate::block::SSABlock<VarId>),
-        mut pointer: VarId,
+        mut pointer: Option<VarId>,
         out: &mut Vec<CallArguments>,
-    ) -> VarId {
+    ) -> Option<VarId> {
         let ops = block.ops();
         for (index, (id, op)) in block.sited().enumerate() {
-            out.extend(self.call((id, (address, index)), &ops[index..], pointer));
+            let at = (id, (address, index));
+            let call = self.call(at, &ops[index..], pointer);
+            out.extend(call.or_else(|| self.tail(at, op, pointer)));
             pointer = op
                 .dst()
                 .copied()
                 .filter(|dst| self.is_pointer(*dst))
-                .unwrap_or(pointer);
+                .or(pointer);
         }
         pointer
+    }
+
+    /// A transfer leaving the body at the stack `pointer`, as a call its callee returns from
+    /// would be: a source-correlated tail with its callee's statement; any other, a branch to code
+    /// the body does not hold or a register jump nothing follows, reads and writes all (D381).
+    fn tail(
+        &self,
+        (op, at): (OpId, (u64, usize)),
+        ssa: &SSAOp<VarId>,
+        pointer: Option<VarId>,
+    ) -> Option<CallArguments> {
+        let transfer = ssa.transfer().filter(|transfer| !transfer.call)?;
+        let identified = (transfer.instruction)
+            .and_then(|instruction| self.machine.raw_call_site_at(instruction))
+            .filter(|identity| self.machine.is_tail_call_site(*identity));
+        let leaves = identified.is_some()
+            || match transfer.direct {
+                true => self
+                    .func
+                    .storage_of(*transfer.target)
+                    .is_some_and(|target| {
+                        target.space == crate::CanonicalStorageSpace::Ram
+                            && self.func.get_block(target.offset).is_none()
+                    }),
+                false => {
+                    self.func.successors(at.0).is_empty()
+                        || (self.func.cfg().get_block(at.0)).is_some_and(|block| {
+                            matches!(
+                                block.terminator,
+                                crate::cfg::BlockTerminator::ConditionalExit { .. }
+                            )
+                        })
+                }
+            };
+        if !leaves {
+            return None;
+        }
+        let reads = identified.and_then(|_| self.machine.call_reads(transfer.instruction));
+        let (area, writes) = reads.map_or((None, None), |reads| (reads.stack, reads.writes));
+        Some(CallArguments {
+            op,
+            at,
+            pointer,
+            shift: self.spent,
+            area,
+            writes,
+            own: false,
+            tail: true,
+            instruction: transfer.instruction,
+        })
     }
 
     /// The call `ops` starts with, in the boundary's coordinates: the pointer a restore records
@@ -727,7 +903,7 @@ impl Site<'_> {
         &self,
         (op, at): (OpId, (u64, usize)),
         ops: &[SSAOp<VarId>],
-        pointer: VarId,
+        pointer: Option<VarId>,
     ) -> Option<CallArguments> {
         let call = ops.first()?.call()?;
         let entering = (ops[1..].iter())
@@ -736,7 +912,7 @@ impl Site<'_> {
                 SSAOp::CallRestore { dst, src } if self.is_pointer(*dst) => Some(*src),
                 _ => None,
             });
-        let (pointer, shift) = entering.map_or((pointer, self.spent), |src| (src, 0));
+        let (pointer, shift) = entering.map_or((pointer, self.spent), |src| (Some(src), 0));
         let reads = self.machine.call_reads(call.instruction);
         let target = (call
             .instruction
@@ -748,6 +924,7 @@ impl Site<'_> {
         let writes = reads.as_ref().and_then(|reads| reads.writes.clone());
         Some(CallArguments {
             own: entry && writes.is_none(),
+            tail: false,
             op,
             at,
             pointer,
@@ -767,9 +944,12 @@ struct Walker<'a> {
     sinks: &'a Sinks<'a>,
     /// The places an address stored into flows to the loads of; every place when `None`.
     carried: Option<&'a BTreeSet<i64>>,
-    uses: IdMap<VarId, Vec<(OpId, u64, usize)>>,
-    phi_uses: IdMap<VarId, Vec<VarId>>,
+    uses: &'a Uses,
     values: IdMap<VarId, Value>,
+    /// Each opaque access by its operation, its origins joined (D397).
+    opaque: IdMap<OpId, OpaqueAccess>,
+    /// Merges a source reached that have no value yet: the partial merges to check (D398).
+    merge_candidates: Vec<VarId>,
     pending: Vec<VarId>,
     accesses: Accesses,
     points: FramePoints,
@@ -783,32 +963,44 @@ struct Walker<'a> {
     stored: BTreeMap<i64, Value>,
 }
 
-impl<'a> Walker<'a> {
-    fn new(
-        func: &'a SSAFunction,
-        defs: &'a Definitions,
-        entry_sp: VarId,
-        sinks: &'a Sinks<'a>,
-        carried: Option<&'a BTreeSet<i64>>,
-    ) -> Self {
-        let mut uses = IdMap::<VarId, Vec<(OpId, u64, usize)>>::new(func.values().len());
-        let mut phi_uses = IdMap::<VarId, Vec<VarId>>::new(func.values().len());
+/// Each value's readers: the operations and the merges. Built once per walk, read every round.
+struct Uses {
+    ops: IdMap<VarId, Vec<(OpId, u64, usize)>>,
+    phis: IdMap<VarId, Vec<VarId>>,
+}
+
+impl Uses {
+    /// O(ops + phi sources).
+    fn of(func: &SSAFunction) -> Self {
+        let mut ops = IdMap::<VarId, Vec<(OpId, u64, usize)>>::new(func.values().len());
+        let mut phis = IdMap::<VarId, Vec<VarId>>::new(func.values().len());
         for addr in func.block_addrs() {
             let Some(block) = func.get_block(*addr) else {
                 continue;
             };
             for (_, phi) in block.sited_phis() {
                 for (_, source) in &phi.sources {
-                    phi_uses.get_or_insert_with(*source, Vec::new).push(phi.dst);
+                    phis.get_or_insert_with(*source, Vec::new).push(phi.dst);
                 }
             }
             for (index, (id, op)) in block.sited().enumerate() {
                 for source in op.sources() {
-                    uses.get_or_insert_with(*source, Vec::new)
+                    ops.get_or_insert_with(*source, Vec::new)
                         .push((id, *addr, index));
                 }
             }
         }
+        Self { ops, phis }
+    }
+}
+
+impl<'a> Walker<'a> {
+    fn new(
+        (func, defs, uses): (&'a SSAFunction, &'a Definitions, &'a Uses),
+        entry_sp: VarId,
+        sinks: &'a Sinks<'a>,
+        carried: Option<&'a BTreeSet<i64>>,
+    ) -> Self {
         let mut values = IdMap::<VarId, Value>::new(func.values().len());
         values.insert(entry_sp, Value::one(Point::Exact(0)));
         Self {
@@ -818,8 +1010,9 @@ impl<'a> Walker<'a> {
             sinks,
             carried,
             uses,
-            phi_uses,
             values,
+            opaque: IdMap::new(func.id_limit()),
+            merge_candidates: Vec::new(),
             pending: vec![entry_sp],
             accesses: Accesses::new(),
             points: FramePoints::default(),
@@ -865,45 +1058,56 @@ impl<'a> Walker<'a> {
         match value {
             Value::Points(points) => {
                 // Handed on, an address may be indexed either way.
-                self.points
-                    .escaped
-                    .extend(points.iter().map(|point| match point {
+                for point in points {
+                    self.points.leave(match point {
                         Point::Derived(_) => point.frame_point(),
                         _ => FramePoint {
                             at: point.frame_point().at,
                             extent: Extent::Either,
                         },
-                    }));
+                    });
+                }
             }
-            Value::Top => self.points.whole = true,
+            Value::Top => self.points.set_whole(),
         }
     }
 
     fn escape_up(&mut self, value: &Value) {
         match value {
             Value::Points(points) => {
-                self.points
-                    .escaped
-                    .extend(points.iter().map(|point| match point {
+                for point in points {
+                    self.points.leave(match point {
                         Point::Exact(at) => FramePoint {
                             at: *at,
                             extent: Extent::Upward,
                         },
                         indexed => indexed.frame_point(),
-                    }));
+                    });
+                }
             }
-            Value::Top => self.points.whole = true,
+            Value::Top => self.points.set_whole(),
         }
     }
 
+    /// An access at `op` no exact load or store states, joined with what `op` was found to do.
     fn opaque(&mut self, op: OpId, value: &Value, writes: bool) {
         let origin = match value {
             Value::Points(points) => {
-                Origin::Points(points.iter().map(|point| point.frame_point()).collect())
+                let points = points.iter().map(|point| point.frame_point());
+                Origin::Points(points.collect::<BTreeSet<_>>().into_iter().collect())
             }
             Value::Top => Origin::Unplaced,
         };
-        self.points.opaque.push(OpaqueAccess { op, origin, writes });
+        self.points.unplaced |= match &origin {
+            Origin::Unplaced => true,
+            Origin::Points(points) => points.iter().any(|point| point.extent == Extent::Derived),
+        };
+        let access = OpaqueAccess { op, origin, writes };
+        let joined = match self.opaque.get(op) {
+            Some(known) => known.join(&access),
+            None => access,
+        };
+        self.opaque.insert(op, joined);
     }
 
     /// Everything `var`'s value reaches: the merges it feeds and each operation reading it.
@@ -917,7 +1121,7 @@ impl<'a> Walker<'a> {
         {
             self.escape(&value);
         }
-        for dst in self.phi_uses.get(var).cloned().unwrap_or_default() {
+        for dst in self.uses.phis.get(var).cloned().unwrap_or_default() {
             let (root, offset) = self.defs.affine(self.func, dst);
             let merged = if root == self.entry_sp {
                 Some(Value::one(Point::Exact(offset)))
@@ -928,18 +1132,19 @@ impl<'a> Walker<'a> {
             } else {
                 self.merged_sources(dst)
             };
-            if let Some(merged) = merged {
-                self.set(dst, merged);
+            match merged {
+                Some(merged) => self.set(dst, merged),
+                None => self.merge_candidates.push(dst),
             }
         }
-        for (id, block, index) in self.uses.get(var).cloned().unwrap_or_default() {
+        for (id, block, index) in self.uses.ops.get(var).cloned().unwrap_or_default() {
             let Some(op) = (self.func.get_block(block)).and_then(|block| block.ops().get(index))
             else {
                 continue;
             };
-            let whole_before = self.points.unplaced();
+            let whole_before = self.points.unplaced;
             self.read(var, &value, op, (id, block, index));
-            if self.points.unplaced() && !whole_before {
+            if self.points.unplaced && !whole_before {
                 r2il::refusal_evidence!(
                     "frame-reach",
                     "{block:#x}:{index} {op:?} takes a frame address no offset places"
@@ -1049,7 +1254,7 @@ impl<'a> Walker<'a> {
                 }
             }
             // Default deny: a target, a return or an unmodelled use reaches every place.
-            _ => self.points.whole = true,
+            _ => self.points.set_whole(),
         }
     }
 
@@ -1127,22 +1332,58 @@ impl<'a> Walker<'a> {
         Value::Points(moved.collect())
     }
 
-    /// The merges with no value yet some of whose sources are frame addresses, in id order.
-    fn partial_merges(&self) -> Vec<VarId> {
-        let mut partial = (self.phi_uses.iter())
-            .flat_map(|(_, dsts)| dsts.iter().copied())
-            .filter(|dst| self.values.get(*dst).is_none())
-            .filter(|dst| {
-                (self.defs.phi_sources(*dst).iter())
-                    .any(|source| self.values.get(*source).is_some())
-            })
-            .collect::<Vec<_>>();
+    /// The merges with no value yet some of whose sources are frame addresses, in id order: the
+    /// candidates a visit left, each source visit adding one, so O(candidates log) per call.
+    fn partial_merges(&mut self) -> Vec<VarId> {
+        let mut partial = std::mem::take(&mut self.merge_candidates);
+        partial.retain(|dst| self.values.get(*dst).is_none());
         partial.sort_unstable();
         partial.dedup();
         partial
     }
 
+    /// A tail transfer hands its callee every register: an address one holds where the transfer
+    /// runs escapes (D381). `O(addressed values x tails)` dominance tests.
+    fn hand_to_tails(&mut self, arguments: &StackArguments) {
+        let tails = (arguments.calls.iter())
+            .filter(|call| call.tail)
+            .map(|call| call.op)
+            .collect::<Vec<_>>();
+        if tails.is_empty() {
+            return;
+        }
+        let handed = (self.values.iter())
+            .filter(|(var, _)| *var != self.entry_sp)
+            .filter(|(var, _)| {
+                self.func.storage_of(*var).is_some_and(|storage| {
+                    storage.space == crate::CanonicalStorageSpace::Register
+                        && !self.sinks.bases.contains(&Some(storage))
+                })
+            })
+            .filter(|(var, _)| {
+                (tails.iter()).any(|tail| self.defs.defined_before(self.func, *var, *tail))
+            })
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>();
+        for value in &handed {
+            self.escape(value);
+        }
+    }
+
     fn finish(mut self) -> Walked {
+        let opaque = std::mem::replace(&mut self.opaque, IdMap::new(0));
+        self.points.opaque = opaque.into_iter().map(|(_, access)| access).collect();
+        // The flag the walk kept is what its points state (D397).
+        debug_assert_eq!(
+            self.points.unplaced,
+            self.points.whole
+                || (self.points.opaque.iter())
+                    .any(|access| matches!(access.origin, Origin::Unplaced))
+                || self
+                    .points
+                    .reaching()
+                    .any(|point| point.extent == Extent::Derived)
+        );
         for (val, addr) in std::mem::take(&mut self.deferred) {
             if self.values.get(addr).is_none()
                 && let Some(address) = self.values.get(val).cloned()
@@ -1160,8 +1401,9 @@ impl<'a> Walker<'a> {
             })
             .collect();
         let arguments = &self.sinks.stack_arguments;
+        self.hand_to_tails(arguments);
         let handed = arguments.read(&self.values, &widths);
-        self.points.held_places.clone_from(&widths);
+        self.points.held_places = Places::new(widths.clone());
         for place in &handed {
             if let Some(address) = self.stored.get(place).cloned() {
                 self.escape(&address);
@@ -1176,20 +1418,14 @@ impl<'a> Walker<'a> {
             .filter(|(_, high)| *high > 0)
             .map(|(low, high)| (low.max(0), high));
         self.points.incoming_stores = merged(above);
-        self.points.own_calls = (arguments.calls.iter())
-            .filter(|call| call.own)
-            .filter_map(|call| call.instruction)
-            .collect();
-        self.points.written_bases = (arguments.calls.iter())
-            .filter_map(|call| Some((call.instruction?, call.base(&self.values))))
-            .collect();
+        self.points.own_calls = arguments.own_calls();
+        self.points.call_bases = arguments.by_call(&self.values);
         // A call to itself writes what the body does, as far as the rest states (D377).
         let own = (!self.points.own_calls.is_empty())
             .then(|| self.points.call_writes(self.sinks.machine))
             .flatten();
         self.points.rewritten =
             arguments.rewritten(self.func, (&self.values, &self.accesses), own.as_deref());
-        self.points.call_bases = arguments.by_call(&self.values);
         Walked {
             points: self.points,
             accesses: self.accesses,
@@ -1391,8 +1627,13 @@ mod tests {
             vec![(-32, -16), (-8, 8)]
         );
         let points = FramePoints {
-            rewrite_decides: BTreeMap::from([(-24, 8)]),
-            written_bases: BTreeMap::from([(0x10, Some(-32))]),
+            rewrite_decides: Places::new(BTreeMap::from([(-24, 8)])),
+            call_bases: vec![CallBase {
+                instruction: Some(0x10),
+                op: OpId::from_index(0),
+                base: Some(-32),
+                tail: false,
+            }],
             ..FramePoints::default()
         };
         // From the base at -32: unbounded covers the loaded [-24, -16), `(0, 4)` does not.
@@ -1405,7 +1646,12 @@ mod tests {
     #[test]
     fn a_derived_or_unplaced_point_reaches_every_place() {
         let none = BTreeSet::new();
-        assert!(escaped(&[(-40, Extent::Derived)]).reaches(-200, &none));
+        let mut derived = FramePoints::default();
+        derived.leave(FramePoint {
+            at: -40,
+            extent: Extent::Derived,
+        });
+        assert!(derived.reaches(-200, &none));
         assert!(FramePoints::whole_frame().names(-16, -8));
         let opaque = FramePoints {
             opaque: vec![OpaqueAccess {
@@ -1413,6 +1659,7 @@ mod tests {
                 origin: Origin::Unplaced,
                 writes: true,
             }],
+            unplaced: true,
             ..FramePoints::default()
         };
         assert!(opaque.unplaced() && opaque.reaches(-8, &none));

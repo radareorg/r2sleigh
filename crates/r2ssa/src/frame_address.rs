@@ -21,6 +21,8 @@ pub(crate) struct Definitions {
     phis: IdMap<VarId, Vec<VarId>>,
     /// Where each operation sits: its block and its index there.
     positions: IdMap<OpId, (u64, usize)>,
+    /// The block each merge heads.
+    phi_blocks: IdMap<VarId, u64>,
     /// A bound on any definition chain: every step moves to an operand defined earlier.
     values: usize,
     /// Where each merge points, where its sources agree (`Merge::Place`).
@@ -56,11 +58,13 @@ impl Definitions {
         let mut defs = IdMap::new(values);
         let mut phis = IdMap::new(values);
         let mut positions = IdMap::new(func.id_limit());
+        let mut phi_blocks = IdMap::new(values);
         for addr in func.block_addrs() {
             let Some(block) = func.get_block(*addr) else {
                 continue;
             };
             for (_, phi) in block.sited_phis() {
+                phi_blocks.insert(phi.dst, *addr);
                 phis.insert(
                     phi.dst,
                     phi.sources.iter().map(|(_, source)| *source).collect(),
@@ -77,6 +81,7 @@ impl Definitions {
             defs,
             phis,
             positions,
+            phi_blocks,
             values,
             merges: IdMap::new(values),
             chains: IdMap::new(values),
@@ -244,6 +249,19 @@ impl Definitions {
         match (self.position(a), self.position(b)) {
             (Some((block_a, at)), Some((block_b, bt))) if block_a == block_b => at < bt,
             (Some((block_a, _)), Some((block_b, _))) => func.dominates(block_a, block_b),
+            _ => false,
+        }
+    }
+
+    /// Whether `var`'s definition, an operation or a merge, runs before `op` on every path to it.
+    pub(crate) fn defined_before(&self, func: &SSAFunction, var: VarId, op: OpId) -> bool {
+        match (
+            self.defs.get(var),
+            self.phi_blocks.get(var),
+            self.position(op),
+        ) {
+            (Some((def, _)), _, _) => self.precedes(func, *def, op),
+            (None, Some(head), Some((block, _))) => func.dominates(*head, block),
             _ => false,
         }
     }

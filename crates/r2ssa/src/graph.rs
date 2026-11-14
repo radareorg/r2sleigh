@@ -815,6 +815,16 @@ impl SsaGraph {
         self.insts.get(id.0 as usize)
     }
 
+    /// The call a `CallUse` at `read` is read by: the first call after it in its block, which
+    /// rename emits it for, a compiler-inserted one alike (D392: the one link). O(run).
+    pub fn call_reading(&self, read: InstId) -> Option<InstId> {
+        let inst = self.inst(read)?;
+        let block = self.block(inst.block)?;
+        (block.insts.get(inst.ordinal + 1..)?.iter())
+            .copied()
+            .find(|inst| self.op(*inst).is_some_and(|op| op.call().is_some()))
+    }
+
     /// The values an instruction reads, in operand order; a phi's in its predecessors' order.
     pub fn inputs(&self, id: InstId) -> &[ValueId] {
         self.inputs.get(id)
@@ -931,34 +941,20 @@ impl SsaGraph {
         &block.insts[end - start..end]
     }
 
-    /// The `CallUse` reads construction minted just before `call`: the carriers it may read.
+    /// The `CallUse` reads `call` is read by, the inverse of `call_reading` (D392): each one after
+    /// the call before it in its block. O(reads), from its ordinal (D389).
     pub fn call_boundary_reads(&self, call: InstId) -> Vec<InstId> {
-        let Some(block) = self.inst(call).and_then(|inst| self.block(inst.block)) else {
+        let Some((inst, block)) =
+            (self.inst(call)).and_then(|inst| Some((inst, self.block(inst.block)?)))
+        else {
             return Vec::new();
         };
-        let before = block
-            .insts
-            .iter()
-            .position(|inst| *inst == call)
-            .unwrap_or(0);
+        let before = inst.ordinal.min(block.insts.len());
         (block.insts[..before].iter().rev())
-            .take_while(|inst| {
-                self.inst(**inst).is_some_and(|inst| {
-                    matches!(inst.payload, InstPayload::Op(SSAOp::CallUse { .. }))
-                })
-            })
+            .take_while(|inst| self.op(**inst).is_none_or(|op| op.call().is_none()))
+            .filter(|inst| matches!(self.op(**inst), Some(SSAOp::CallUse { .. })))
             .copied()
             .collect()
-    }
-
-    /// The call a carrier read (`CallUse`) stands before: the inverse of [`Self::call_boundary_reads`].
-    /// O(reads in its run).
-    pub fn call_of_boundary_read(&self, read: InstId) -> Option<InstId> {
-        let read = self.inst(read)?;
-        let after = self.block(read.block)?.insts.get(read.ordinal + 1..)?;
-        let is_read = |inst: &InstId| matches!(self.op(*inst), Some(SSAOp::CallUse { .. }));
-        let next = *after.iter().find(|inst| !is_read(inst))?;
-        self.op(next).is_some_and(SSAOp::is_call).then_some(next)
     }
 
     pub fn use_sites(&self, id: ValueId) -> &[UseSite] {

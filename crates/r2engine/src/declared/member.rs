@@ -4,7 +4,7 @@
 use r2source::{
     SourceCallArgumentSpec, SourceCallResult, SourceCallSiteInterface, SourceCarrierKind,
     SourceCarrierProjection, SourceFunctionInterface, SourceFunctionReturn, SourceLogicalValue,
-    SourceParameterLocation, SourceResultWidth, SourceTypeGraph, SourceTypeKind,
+    SourceResultWidth, SourceTypeGraph, SourceTypeKind,
 };
 use r2ssa::place::ParamClass;
 
@@ -78,24 +78,15 @@ impl Placement<'_> {
         revision: &[u8],
         complete: bool,
     ) -> Option<SourceCallSiteInterface> {
-        let spent = callee.return_mechanism().map_or(0, |mechanism| {
-            i64::from(mechanism.stack_pointer_delta_bytes())
-        });
-        let arguments = callee.parameters().iter().map(|parameter| {
-            let location = match parameter.location() {
-                SourceParameterLocation::Stack {
-                    offset,
-                    size_bytes,
-                    callee_offset,
-                } => SourceParameterLocation::Stack {
-                    offset: offset - spent,
-                    size_bytes,
-                    callee_offset: callee_offset - spent,
-                },
-                register => register,
-            };
-            SourceCallArgumentSpec::with_location(parameter.index(), location)
-        });
+        let arguments = (callee.parameters().iter())
+            .map(|parameter| {
+                let location = callee.at_call_site(parameter.location())?;
+                Some(SourceCallArgumentSpec::with_location(
+                    parameter.index(),
+                    location,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
         let result = match callee.return_kind() {
             SourceFunctionReturn::Register { storage } => SourceCallResult::Register {
                 storage,

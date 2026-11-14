@@ -545,8 +545,10 @@ pub(crate) fn variadic_callsite_arguments(
         if let Some(stack_index) = stack_index_of(position) {
             let placement = stack_placement
                 .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
-            let offset = placement
-                .offset_of(stack_index)
+            let spent =
+                r2source::SourceReturnMechanism::spent(recovery.machine_context.return_mechanism());
+            let argument = (placement.offset_of(stack_index))
+                .and_then(|offset| StackArgument::of(offset, placement.stride_bytes(), spent))
                 .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
             let (value, entry_offset) = reaching_stack_argument_before_call(
                 CallPosition {
@@ -556,11 +558,7 @@ pub(crate) fn variadic_callsite_arguments(
                     block_addr: recovery.block_addr,
                     op_index: recovery.op_index,
                 },
-                StackArgument {
-                    offset,
-                    callee_offset: offset,
-                    size_bytes: placement.stride_bytes(),
-                },
+                argument,
                 stack_pointer.as_deref_mut(),
             )
             .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
@@ -715,6 +713,25 @@ pub(crate) struct StackArgument {
     pub(crate) size_bytes: u32,
 }
 
+impl StackArgument {
+    /// A convention's slot `offset` above the pointer before a transfer spending `spent`, in
+    /// r2source's one coordinate rule (D386); none on overflow.
+    fn of(offset: i64, size_bytes: u32, spent: i64) -> Option<Self> {
+        match r2source::SourceParameterLocation::before_transfer(offset, size_bytes, spent)? {
+            r2source::SourceParameterLocation::Stack {
+                offset,
+                size_bytes,
+                callee_offset,
+            } => Some(Self {
+                offset,
+                callee_offset,
+                size_bytes,
+            }),
+            r2source::SourceParameterLocation::Register(_) => None,
+        }
+    }
+}
+
 pub(crate) fn reaching_stack_argument_before_call(
     at: CallPosition<'_>,
     argument: StackArgument,
@@ -749,14 +766,10 @@ pub(crate) fn reaching_stack_argument_before_call(
     };
     let entry_offset = entering.offset.checked_add(offset)?;
     let slot_name = crate::naming::frame_slot_name(entry_offset);
-    // Promotion named the slot's variable after its entry coordinate; the
-    // graph has such a value exactly when the slot left memory. The name
-    // carries no frame, so only the entry frame may be asked for one.
+    // Promotion records the places it took out of memory by entry offset (D389); the name carries
+    // no frame, so only the entry frame may be asked for one.
     let promoted = entering.base == StackAddressBase::StackPointer
-        && graph
-            .values
-            .iter()
-            .any(|value| value.var.name() == slot_name);
+        && (function.frame_points()).is_some_and(|points| points.promoted(entry_offset));
     let mut visited = BTreeSet::new();
     reaching_stack_slot_value(
         function,
@@ -1196,13 +1209,11 @@ pub(crate) fn convention_call_boundary(
             );
             return Err(CallBoundaryRefusal::ArgumentAreaUnseen);
         }
-        // The callee names the same slot from the pointer it is entered with,
-        // below the caller's by what the transfer spends on the return address.
-        let spent = machine_context.return_mechanism().map_or(0, |mechanism| {
-            i64::from(mechanism.stack_pointer_delta_bytes())
-        });
+        let spent = r2source::SourceReturnMechanism::spent(machine_context.return_mechanism());
         for position in 0.. {
-            let Some(offset) = placement.offset_of(position) else {
+            let Some(argument) = (placement.offset_of(position))
+                .and_then(|offset| StackArgument::of(offset, placement.stride_bytes(), spent))
+            else {
                 break;
             };
             let Some((value, entry_offset)) = reaching_stack_argument_before_call(
@@ -1213,11 +1224,7 @@ pub(crate) fn convention_call_boundary(
                     block_addr,
                     op_index,
                 },
-                StackArgument {
-                    offset,
-                    callee_offset: offset.saturating_add(spent),
-                    size_bytes: placement.stride_bytes(),
-                },
+                argument,
                 stack_pointer.as_deref_mut(),
             ) else {
                 break;
@@ -1312,17 +1319,12 @@ fn stated_call_arguments(
     let Some(placement) = convention.stack_arguments() else {
         return (arguments, false);
     };
-    let spent = machine_context.return_mechanism().map_or(0, |mechanism| {
-        i64::from(mechanism.stack_pointer_delta_bytes())
-    });
+    let spent = r2source::SourceReturnMechanism::spent(machine_context.return_mechanism());
     for position in 0..stacked {
-        let Some(offset) = placement.offset_of(position) else {
+        let Some(argument) = (placement.offset_of(position))
+            .and_then(|offset| StackArgument::of(offset, placement.stride_bytes(), spent))
+        else {
             return (arguments, false);
-        };
-        let argument = StackArgument {
-            offset,
-            callee_offset: offset.saturating_add(spent),
-            size_bytes: placement.stride_bytes(),
         };
         let Some((value, entry_offset)) =
             reaching_stack_argument_before_call(at, argument, stack_pointer.as_deref_mut())
