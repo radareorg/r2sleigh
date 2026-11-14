@@ -826,10 +826,8 @@ impl Spell<'_> {
                 word,
             } => (pointer, member, result, word),
         };
-        // The word is the variable that holds it, else the load read once where it is used.
-        let ty = self.arena.term(word).ty;
-        let base = (self.bound)(result, &ty).or_else(|| self.term(word))?;
-        let base = cast(pointer, base);
+        // Only the variable holding the word spells it: the load again could read a later store.
+        let base = cast(pointer, (self.bound)(result, &self.arena.term(word).ty)?);
         Some(CExpr::addr_of(CExpr::PtrMember {
             base: Box::new(base),
             member,
