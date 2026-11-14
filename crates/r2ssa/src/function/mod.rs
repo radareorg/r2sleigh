@@ -329,6 +329,7 @@ impl ArtifactLiveness {
         &self.live_out
     }
 
+    #[doc(alias = "default_deny_ignored_reads")]
     pub const fn ignored_reads(&self) -> &std::collections::BTreeSet<crate::graph::UseSite> {
         &self.ignored_reads
     }
@@ -1629,6 +1630,7 @@ impl SsaArtifact {
     }
 
     /// Reads the text never performs, which hold nothing live.
+    #[doc(alias = "default_deny_ignored_reads")]
     pub const fn ignored_reads(&self) -> &std::collections::BTreeSet<crate::graph::UseSite> {
         self.liveness.ignored_reads()
     }

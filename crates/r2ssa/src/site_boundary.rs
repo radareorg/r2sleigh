@@ -211,6 +211,7 @@ pub struct CallEffect {
     pub overwrites: Overwrites,
     /// The bytes its callee leaves as found on every path to a return: a read after the call reads
     /// what was there before it.
+    #[doc(alias = "default_deny_kept")]
     pub kept: LaneBytes,
     /// The bytes the callee certainly reads: a cited fixed float parameter's, a read at the call
     /// (D228). An integer argument a callee may leave alone is no read.

@@ -983,6 +983,7 @@ fn read_width(
 }
 
 /// The low bytes of a `CallUse`'s carrier its call takes (`register_read_bytes`); `None`: whole.
+#[doc(alias = "default_deny_call_read_bytes")]
 pub(crate) fn call_read_bytes(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,

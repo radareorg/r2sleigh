@@ -33,6 +33,7 @@ pub use r2source::confidence::{Basis, Confidence, Fact, Grade, Premise};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Return {
     Comes,
+    #[doc(alias = "default_deny_never")]
     Never(Never),
 }
 

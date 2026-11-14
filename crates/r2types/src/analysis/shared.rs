@@ -180,6 +180,7 @@ pub(crate) fn interproc_out_param_source(
     }
 }
 
+#[doc(alias = "default_deny_pointer")]
 pub(crate) fn summary_suggests_pointer_param(
     summary: &FunctionSemanticSummary,
     idx: usize,
