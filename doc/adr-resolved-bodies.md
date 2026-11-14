@@ -120,9 +120,11 @@ r2engine sets it where all of these hold:
 
 1. Every caller the survey found was walked and lifted, and the reference
    index claims exactly as many calls to the function as were read.
-2. No reference other than a call names the entry: no jump from another
-   function (a tail call), no computed address (`lea`, `adrp`+`add`, a
-   loader write). A jump to a function's own entry is a loop.
+2. No reference other than a call names the entry: no computed address
+   (`lea`, `adrp`+`add`, a loader write), and no jump from another function
+   except a tail branch the survey states (`tail_callers_of`), which
+   `DirectSites` joins as a call: its lanes return to the jumper's callers
+   (D227, D408). A jump to a function's own entry is a loop.
 3. The container states no other entry there: no entry point, initialiser
    or finaliser, and no export (ELF's dynamic table, any non-local Mach-O
    symbol).
