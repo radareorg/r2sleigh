@@ -271,6 +271,7 @@ impl CallReads {
             stack: None,
             writes: None,
             bound: Some(ReadBound::cited(citation)),
+            lanes: None,
         }
     }
 
