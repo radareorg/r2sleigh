@@ -1029,11 +1029,8 @@ fn call_after<'a>(
     read: crate::graph::InstId,
     machine_context: &'a SourceMachineContext,
 ) -> Option<(u64, Option<&'a crate::SourceCallSiteInterface>)> {
-    let inst = graph.inst(read)?;
-    let block = graph.block(inst.block)?;
-    let instruction = (block.insts.get(inst.ordinal..)?.iter())
-        .find_map(|inst| graph.op(*inst)?.transfer().filter(|flow| flow.call))?
-        .instruction?;
+    let call = graph.call_reading(read)?;
+    let instruction = graph.op(call)?.call()?.instruction?;
     let identity = machine_context.raw_call_site_at(instruction);
     Some((
         instruction,

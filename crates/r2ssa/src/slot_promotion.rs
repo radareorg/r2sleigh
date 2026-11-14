@@ -72,6 +72,7 @@ pub(crate) fn promote(
         promotable.len(),
         promotable.keys().collect::<Vec<_>>()
     );
+    points.promoted = promotable.keys().copied().collect();
     (rename(func, &accesses, &promotable), points)
 }
 

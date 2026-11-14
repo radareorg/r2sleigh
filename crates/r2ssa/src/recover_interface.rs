@@ -2268,14 +2268,12 @@ fn recover_interface_inner(
     }
     // A call's read of a register its certified boundary does not pass is no read (`liveness`).
     let ignored_reads = crate::function::unpassed_call_reads(graph, machine_context);
-    // The call of unproven arity a `CallUse` at `inst` reads for: the first after it in its block.
+    // The call of unproven arity a `CallUse` at `inst` reads for, by the one link; a call with no
+    // boundary (a `/GS` check) is no other call's.
     let handed_to = |inst: crate::InstId| {
-        let used = graph.inst(inst)?;
-        let call = (facts.boundaries.calls.values())
-            .filter_map(|boundary| Some((boundary, graph.inst(boundary.at)?)))
-            .filter(|(_, at)| at.block == used.block && at.ordinal > used.ordinal)
-            .min_by_key(|(_, at)| at.ordinal)?
-            .0;
+        let at = graph.call_reading(inst)?;
+        let call = facts.call_sites.by_inst.get(at)?;
+        let call = facts.boundaries.calls.get(call)?;
         (call.may_read_unlisted()).then(|| unproven_call(&facts, machine_context, call.call_site))
     };
     // Each register's entry values and the lanes minted for them, found in one pass. O(V log V).

@@ -774,7 +774,7 @@ impl ValueReaders {
             )
             .then_some(inst);
         }
-        match graph.call_of_boundary_read(inst) {
+        match graph.call_reading(inst) {
             Some(call) => (!inventory.bounded.contains(call)).then_some(call),
             None => Some(inst),
         }

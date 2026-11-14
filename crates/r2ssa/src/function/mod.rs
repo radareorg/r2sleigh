@@ -3484,36 +3484,31 @@ pub(crate) fn unpassed_call_reads(
     machine_context: Option<&SourceMachineContext>,
 ) -> std::collections::BTreeSet<crate::graph::UseSite> {
     let model = machine_context.and_then(SourceMachineContext::calls);
-    // The reads minted just before a call are its own; any other run is read by no call.
+    // Each read is its call's, by the one link (`SsaGraph::call_reading`); one no call follows is
+    // read by none.
     let mut unpassed = std::collections::BTreeSet::new();
-    for block in &graph.blocks {
-        let mut run = Vec::new();
-        for &inst in &block.insts {
-            let op = graph.op(inst);
-            if let Some(SSAOp::CallUse { storage, .. }) = op {
-                run.push((inst, *storage));
-                continue;
-            }
-            // A run no call ends is read by none.
-            let Some(call) = op.and_then(SSAOp::call) else {
-                let unread = run
-                    .drain(..)
-                    .map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 });
-                unpassed.extend(unread);
-                continue;
-            };
-            let reads = (machine_context.zip(call.instruction))
-                .and_then(|(context, instruction)| context.call_reads(Some(instruction)));
-            let unread = run.drain(..).filter(|(_, storage)| {
+    for inst in &graph.insts {
+        let Some(SSAOp::CallUse { storage, .. }) = graph.op(inst.id) else {
+            continue;
+        };
+        let call = graph
+            .call_reading(inst.id)
+            .and_then(|call| graph.op(call)?.call());
+        let unread = match call {
+            Some(call) => {
+                let reads = (machine_context.zip(call.instruction))
+                    .and_then(|(context, instruction)| context.call_reads(Some(instruction)));
                 (reads.as_ref().zip(model))
                     .is_some_and(|(reads, model)| reads.reads_none_of(model, *storage))
+            }
+            None => true,
+        };
+        if unread {
+            unpassed.insert(crate::graph::UseSite {
+                inst: inst.id,
+                input_idx: 0,
             });
-            unpassed.extend(unread.map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 }));
         }
-        unpassed.extend(
-            run.into_iter()
-                .map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 }),
-        );
     }
     unpassed
 }

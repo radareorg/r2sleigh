@@ -115,6 +115,8 @@ pub struct FramePoints {
     /// The places whose promotion only `rewritten` decides, with their width: what a written area
     /// changes in a build (D377).
     pub(crate) rewrite_decides: Places,
+    /// The places slot promotion took out of memory, by entry offset (D389).
+    pub(crate) promoted: BTreeSet<i64>,
     /// The calls nothing states whose area covers a place loaded after a call, by instruction:
     /// the callees a caller build asks to state (D376).
     pub(crate) unstated_rewriting: BTreeSet<u64>,
@@ -258,6 +260,11 @@ impl FramePoints {
         let writing = self.opaque.iter().any(|access| access.writes);
         let opaque = self.whole || !self.escaped.is_empty() || writing;
         self.incoming.as_deref().filter(|_| !opaque)
+    }
+
+    /// Whether slot promotion took the place at entry offset `place` out of memory. O(log).
+    pub fn promoted(&self, place: i64) -> bool {
+        self.promoted.contains(&place)
     }
 
     /// The frame's typed refusal, where the stack pointer moves by an unstated amount (D355).

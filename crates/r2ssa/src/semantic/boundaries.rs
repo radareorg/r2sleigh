@@ -766,14 +766,10 @@ pub(crate) fn reaching_stack_argument_before_call(
     };
     let entry_offset = entering.offset.checked_add(offset)?;
     let slot_name = crate::naming::frame_slot_name(entry_offset);
-    // Promotion named the slot's variable after its entry coordinate; the
-    // graph has such a value exactly when the slot left memory. The name
-    // carries no frame, so only the entry frame may be asked for one.
+    // Promotion records the places it took out of memory by entry offset (D389); the name carries
+    // no frame, so only the entry frame may be asked for one.
     let promoted = entering.base == StackAddressBase::StackPointer
-        && graph
-            .values
-            .iter()
-            .any(|value| value.var.name() == slot_name);
+        && (function.frame_points()).is_some_and(|points| points.promoted(entry_offset));
     let mut visited = BTreeSet::new();
     reaching_stack_slot_value(
         function,

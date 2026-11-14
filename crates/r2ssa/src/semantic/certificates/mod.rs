@@ -1155,9 +1155,8 @@ pub(crate) fn collect_prepared_function_certificates(
                             source_inst: Some(stack_arg.memory_access.inst),
                         });
                     }
-                    None if graph.values.iter().any(|value| {
-                        value.var.name() == crate::naming::frame_slot_name(declared.entry_offset)
-                    }) =>
+                    None if (function.frame_points())
+                        .is_some_and(|points| points.promoted(declared.entry_offset)) =>
                     {
                         argument_certificates.push(CallArgumentCertificate {
                             index: declared.index,
