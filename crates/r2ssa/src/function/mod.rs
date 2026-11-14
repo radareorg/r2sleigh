@@ -617,18 +617,10 @@ impl Prior {
     /// Whether the callees `key` reads state to this build what it was built against: every part
     /// equal, the argument areas only where promotion read them.
     fn builds(&self, key: &BuildKey) -> bool {
-        // An area that begins below its call's pointer is outside what promotion's record covers.
-        let below = |key: &BuildKey| {
-            let mut ranges = key.argument_areas.iter().flat_map(|(_, area)| area);
-            ranges.any(|(low, _)| *low < 0)
-        };
-        let unread = !self.function.argument_areas_read() && !below(&self.key) && !below(key);
-        let areas = unread || self.key.argument_areas == key.argument_areas;
-        let written = (self.function.frame_points()).map_or_else(
-            || self.key.written_areas == key.written_areas,
-            |points| same_where_loaded(points, &self.key.written_areas, &key.written_areas),
+        let areas = (self.function.frame_points()).map_or_else(
+            || self.key.areas == key.areas,
+            |points| same_where_read(points, &self.key.areas, &key.areas),
         );
-        let areas = areas && written;
         let reach = same_where_asked(self.function.asked_reach(), &self.key.upward, &key.upward);
         areas && reach && self.key.without_areas() == key.without_areas()
     }
@@ -646,18 +638,30 @@ fn rewriting_callees(function: &SSAFunction, context: &SourceMachineContext) -> 
     targets.map(|target| target.offset).collect()
 }
 
-/// Whether two keys' written areas cover the same loaded places and incoming bytes at every call,
-/// both listed by instruction from one lift (D377). `O(calls x spans x log loaded)`.
-fn same_where_loaded(
+/// Whether two keys' areas cover the same places the build read at every call, both listed by
+/// instruction from one lift (D377). `O(calls x spans x log places)`.
+fn same_where_read(
     points: &crate::semantic::FramePoints,
-    built: &[(u64, crate::call_reads::StackArea)],
-    now: &[(u64, crate::call_reads::StackArea)],
+    built: &[CallAreas],
+    now: &[CallAreas],
 ) -> bool {
     built.len() == now.len()
-        && (built.iter().zip(now)).all(|((at, one), (other_at, other))| {
-            at == other_at && points.writes_alike(*at, one.as_deref(), other.as_deref())
+        && (built.iter().zip(now)).all(|(one, other)| {
+            one.0 == other.0
+                && points.areas_alike(
+                    one.0,
+                    [one.1.as_deref(), other.1.as_deref()],
+                    [one.2.as_deref(), other.2.as_deref()],
+                )
         })
 }
+
+/// One call's read and written areas, by its instruction.
+type CallAreas = (
+    u64,
+    crate::call_reads::StackArea,
+    crate::call_reads::StackArea,
+);
 
 /// Whether two keys' upward positions agree at every (callee, position) promotion asked: a
 /// callee's other positions decide nothing in the build (D365). `O(asked x log)`.
@@ -700,10 +704,8 @@ struct BuildKey {
     return_addresses: BTreeMap<u64, CanonicalStorageId>,
     security_checks: BTreeSet<u64>,
     narrow_results: crate::lanes::CallResults,
-    /// The argument area each call's complete interface states, by its instruction.
-    argument_areas: Vec<(u64, Vec<(i64, i64)>)>,
-    /// The stack each call may write, by its instruction; none where nothing bounds it (D377).
-    written_areas: Vec<(u64, crate::call_reads::StackArea)>,
+    /// The stack each call may read and write, by its instruction; none where nothing bounds it.
+    areas: Vec<CallAreas>,
     reentering: BTreeSet<u64>,
     unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
     conventions: SiteConventions,
@@ -781,9 +783,7 @@ impl BuildKey {
             "result width".to_owned()
         } else if self.without_areas() != other.without_areas() {
             "premise or import".to_owned()
-        } else if self.argument_areas != other.argument_areas
-            || self.written_areas != other.written_areas
-        {
+        } else if self.areas != other.areas {
             "argument area".to_owned()
         } else {
             "argument reach".to_owned()
@@ -814,12 +814,10 @@ impl BuildKey {
             let kept = carriers.iter().copied().filter(defined).collect::<Vec<_>>();
             (!kept.is_empty()).then_some((*target, kept))
         });
-        let areas = context.raw_call_sites().keys().filter_map(|instruction| {
-            Some((*instruction, context.call_reads(Some(*instruction))?.stack?))
-        });
-        let written = context.raw_call_sites().keys().map(|instruction| {
+        let areas = context.raw_call_sites().keys().map(|instruction| {
             let reads = context.call_reads(Some(*instruction));
-            (*instruction, reads.and_then(|reads| reads.writes))
+            let (stack, writes) = reads.map_or((None, None), |reads| (reads.stack, reads.writes));
+            (*instruction, stack, writes)
         });
         Self {
             clobbered: clobbered.into(),
@@ -828,8 +826,7 @@ impl BuildKey {
             return_addresses: callees.return_addresses.clone(),
             security_checks: callees.security_checks.clone(),
             narrow_results: crate::lanes::CallResults::of(context),
-            argument_areas: areas.collect(),
-            written_areas: written.collect(),
+            areas: areas.collect(),
             reentering: evidence.reentering.clone(),
             unstated_imports: evidence.unstated_imports.clone(),
             conventions: callees.conventions.clone(),
@@ -4322,11 +4319,6 @@ impl SSAFunction {
     /// `(block, index)`, read while the function has its origins.
     pub const fn promoted_slots(&self) -> &BTreeSet<(u64, usize)> {
         &self.promoted_slots
-    }
-
-    /// Whether what promotion decided read some call's argument area.
-    pub(crate) fn argument_areas_read(&self) -> bool {
-        (self.frame_points.as_deref()).is_some_and(crate::semantic::FramePoints::by_area)
     }
 
     /// The (callee, argument position) pairs whose upward reach promotion's walk asked (D365).

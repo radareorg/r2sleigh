@@ -62,8 +62,6 @@ pub struct FramePoints {
     pub(crate) opaque: Vec<OpaqueAccess>,
     /// Places holding an address a call reads as a stack argument: the store stays.
     pub(crate) handed: BTreeSet<i64>,
-    /// Some place holding an address lies where a call's argument area could reach (D226).
-    pub(crate) by_area: bool,
     /// Places a call's argument area covers that a load reads after a call: they stay (D369).
     pub(crate) rewritten: BTreeSet<i64>,
     /// The entry offset each call's argument area is measured from, in operation order; `None`
@@ -76,9 +74,12 @@ pub struct FramePoints {
     /// Entry-relative spans at or above the entry pointer its stores and calls may write; `None`
     /// where an unplaced call base leaves them unbounded (D377).
     pub(crate) incoming: Option<Vec<(i64, i64)>>,
-    /// The places a load reads, with the widest load, and each call's base by its instruction:
-    /// what a kept build compares written areas over (D377).
-    pub(crate) loaded: BTreeMap<i64, u32>,
+    /// The places holding an address, with their widest access, and each call's base by its
+    /// instruction: what a kept build compares areas over (D377).
+    pub(crate) held_places: BTreeMap<i64, u32>,
+    /// The places whose promotion only `rewritten` decides, with their width: what a written area
+    /// changes in a build (D377).
+    pub(crate) rewrite_decides: BTreeMap<i64, u32>,
     pub(crate) written_bases: BTreeMap<u64, Option<i64>>,
     /// The calls nothing states whose area covers a place loaded after a call, by instruction:
     /// the callees a caller build asks to state (D376).
@@ -121,13 +122,12 @@ impl FramePoints {
         self.handed.extend(other.handed);
         self.rewritten.extend(other.rewritten);
         self.unstated_rewriting.extend(other.unstated_rewriting);
-        self.by_area |= other.by_area;
         self.asked_reach.extend(other.asked_reach);
         self.dynamic = self.dynamic.into_iter().chain(other.dynamic).min();
         self.incoming = (self.incoming.take().zip(other.incoming))
             .map(|(mine, theirs)| mine.into_iter().chain(theirs).collect());
-        for (place, width) in other.loaded {
-            let widest = self.loaded.entry(place).or_insert(width);
+        for (place, width) in other.held_places {
+            let widest = self.held_places.entry(place).or_insert(width);
             *widest = (*widest).max(width);
         }
         for (instruction, base) in other.written_bases {
@@ -139,29 +139,41 @@ impl FramePoints {
         }
     }
 
-    /// Whether two written areas of the call at `instruction` cover the same loaded places and the
-    /// same bytes at or above the entry pointer, so the build reads them alike. O(spans x log loaded).
-    pub(crate) fn writes_alike(&self, instruction: u64, one: Area<'_>, other: Area<'_>) -> bool {
-        let Some(Some(base)) = self.written_bases.get(&instruction).copied() else {
-            return one == other;
+    /// Whether two reads and two written areas of the call at `instruction` cover the same places
+    /// holding an address, loaded places and incoming bytes, so the build reads them alike (D377).
+    /// `O(spans x log places)`.
+    pub(crate) fn areas_alike(
+        &self,
+        instruction: u64,
+        reads: [Area<'_>; 2],
+        writes: [Area<'_>; 2],
+    ) -> bool {
+        // A call no offset places reads and writes the whole frame whatever its areas say.
+        let base = match self.written_bases.get(&instruction) {
+            Some(Some(base)) => *base,
+            Some(None) => return true,
+            None => return reads[0] == reads[1] && writes[0] == writes[1],
         };
-        let at = |area: Option<&[(i64, i64)]>| match area {
+        let at = |area: Area<'_>| match area {
             Some(area) => merged(
-                area.iter()
+                (area.iter())
                     .map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high))),
             ),
             None => merged([(base, 0)].into_iter()),
         };
-        let widest = i64::from(self.loaded.values().copied().max().unwrap_or(1));
-        differing(&at(one), &at(other))
-            .into_iter()
-            .all(|(low, high)| {
-                let near = self.loaded.range(low.saturating_sub(widest)..high);
-                high <= 0
-                    && !near
-                        .into_iter()
-                        .any(|(place, width)| place + i64::from(*width) > low)
-            })
+        let untouched = |places: &BTreeMap<i64, u32>, (low, high): (i64, i64)| {
+            let widest = i64::from(places.values().copied().max().unwrap_or(1));
+            let near = places.range(low.saturating_sub(widest)..high);
+            !near
+                .into_iter()
+                .any(|(place, width)| place + i64::from(*width) > low)
+        };
+        let read = differing(&at(reads[0]), &at(reads[1]));
+        let written = differing(&at(writes[0]), &at(writes[1]));
+        read.into_iter()
+            .all(|span| untouched(&self.held_places, span))
+            && (written.into_iter())
+                .all(|span| span.1 <= 0 && untouched(&self.rewrite_decides, span))
     }
 
     /// The incoming stack bytes the body may write, from its entry pointer: `None` where a frame
@@ -219,10 +231,6 @@ impl FramePoints {
     /// Places a call may write that a load reads after it (D369).
     pub(crate) const fn rewritten(&self) -> &BTreeSet<i64> {
         &self.rewritten
-    }
-
-    pub(crate) const fn by_area(&self) -> bool {
-        self.by_area
     }
 
     pub(crate) const fn asked_reach(&self) -> &BTreeSet<(u64, usize)> {
@@ -539,11 +547,6 @@ impl StackArguments {
         Self { calls }
     }
 
-    /// Each call's area base, where every call is at a placed pointer.
-    fn bases(&self, values: &IdMap<VarId, Value>) -> Option<Vec<i64>> {
-        (self.calls.iter()).map(|call| call.base(values)).collect()
-    }
-
     /// Each call's area base, by operation.
     fn by_call(&self, values: &IdMap<VarId, Value>) -> Vec<(OpId, Option<i64>)> {
         let mut bases = (self.calls.iter())
@@ -551,15 +554,6 @@ impl StackArguments {
             .collect::<Vec<_>>();
         bases.sort_by_key(|(op, _)| *op);
         bases
-    }
-
-    /// Whether `read` could differ under other argument areas: every call is at a placed pointer
-    /// and some place of `stored` ends above one, where an area begins. O(calls x stored).
-    fn reads_by_area(&self, values: &IdMap<VarId, Value>, stored: &BTreeMap<i64, u32>) -> bool {
-        let lowest = self.bases(values).and_then(|bases| bases.into_iter().min());
-        lowest.is_some_and(|base| {
-            (stored.iter()).any(|(place, width)| place.saturating_add(i64::from(*width)) > base)
-        })
     }
 
     /// Places a call's written area covers that a load reads after it (D369), and the unstated calls
@@ -666,21 +660,6 @@ impl StackArguments {
         spans.sort_unstable();
         spans.dedup();
         Some(spans)
-    }
-
-    /// Whether some place of `places` ends above the lowest placed call base: an unplaced call
-    /// leaves the placed ones' areas deciding (D369). O(calls + places).
-    fn reaches_placed_area(
-        &self,
-        values: &IdMap<VarId, Value>,
-        places: &BTreeMap<i64, u32>,
-    ) -> bool {
-        let lowest = (self.calls.iter())
-            .filter_map(|call| call.base(values))
-            .min();
-        lowest.is_some_and(|base| {
-            (places.iter()).any(|(place, width)| place.saturating_add(i64::from(*width)) > base)
-        })
     }
 
     /// The places of `stored` some call may read, given each place's widest access.
@@ -1179,32 +1158,20 @@ impl<'a> Walker<'a> {
             })
             .collect();
         let arguments = &self.sinks.stack_arguments;
-        self.points.by_area = arguments.reads_by_area(&self.values, &widths);
         let handed = arguments.read(&self.values, &widths);
+        self.points.held_places.clone_from(&widths);
         for place in &handed {
             if let Some(address) = self.stored.get(place).cloned() {
                 self.escape(&address);
             }
         }
         self.points.handed = handed;
-        // What a call may rewrite turns on the areas wherever a loaded place ends above a base.
-        let loaded = (self.accesses.iter())
-            .filter(|(_, list)| list.iter().any(|access| !access.store))
-            .map(|(place, list)| {
-                (
-                    *place,
-                    list.iter().map(|access| access.width).max().unwrap_or(1),
-                )
-            })
-            .collect();
-        self.points.by_area |= arguments.reaches_placed_area(&self.values, &loaded);
         (self.points.rewritten, self.points.unstated_rewriting) =
             arguments.rewritten(self.func, &self.values, &self.accesses);
         self.points.incoming = arguments.incoming(&self.values, &self.accesses);
         self.points.written_bases = (arguments.calls.iter())
             .filter_map(|call| Some((call.instruction?, call.base(&self.values))))
             .collect();
-        self.points.loaded = loaded;
         self.points.call_bases = arguments.by_call(&self.values);
         Walked {
             points: self.points,
@@ -1351,15 +1318,15 @@ mod tests {
             vec![(-32, -16), (-8, 8)]
         );
         let points = FramePoints {
-            loaded: BTreeMap::from([(-24, 8)]),
+            rewrite_decides: BTreeMap::from([(-24, 8)]),
             written_bases: BTreeMap::from([(0x10, Some(-32))]),
             ..FramePoints::default()
         };
         // From the base at -32: unbounded covers the loaded [-24, -16), `(0, 4)` does not.
-        assert!(!points.writes_alike(0x10, None, Some(&[(0, 4)])));
-        assert!(points.writes_alike(0x10, Some(&[(0, 4)]), Some(&[])));
+        assert!(!points.areas_alike(0x10, [None; 2], [None, Some(&[(0, 4)])]));
+        assert!(points.areas_alike(0x10, [None; 2], [Some(&[(0, 4)]), Some(&[])]));
         // `(0, 40)` reaches past the entry pointer, which the body's own statement reads.
-        assert!(!points.writes_alike(0x10, Some(&[]), Some(&[(0, 40)])));
+        assert!(!points.areas_alike(0x10, [None; 2], [Some(&[]), Some(&[(0, 40)])]));
     }
 
     #[test]

@@ -38,17 +38,22 @@ pub(crate) fn promote(
     if let Some(exhausted) = defs.exhausted() {
         func.note_exhausted(exhausted);
     }
+    let mut decided = BTreeMap::new();
     let (walked, promotable) = walk(func, &defs, machine, calls_refund_stack, |walked| {
+        decided.clear();
         // An entry block something branches back to runs its prologue again: no place is fixed.
         if walked.points.unplaced() || func.cfg().has_entry_edge() {
             return BTreeMap::new();
         }
         let saves = saves(func, &defs, &walked.accesses, machine);
-        eligible(func, &defs, walked, &saves, machine)
+        eligible(func, &defs, walked, (&saves, &mut decided), machine)
     });
     let Walked {
-        points, accesses, ..
+        mut points,
+        accesses,
+        ..
     } = walked;
+    points.rewrite_decides = decided;
     if points.unplaced() {
         r2il::refusal_evidence!(
             "promote-stack-slot",
@@ -103,7 +108,7 @@ fn eligible(
     func: &SSAFunction,
     defs: &Definitions,
     walked: &Walked,
-    saves: &BTreeSet<i64>,
+    (saves, decided): (&BTreeSet<i64>, &mut BTreeMap<i64, u32>),
     machine: &SourceMachineContext,
 ) -> BTreeMap<i64, u32> {
     let (accesses, points) = (&walked.accesses, &walked.points);
@@ -150,6 +155,10 @@ fn eligible(
         let handed = points.handed().contains(offset);
         // A call may rewrite its own argument area, so a load after it reads memory (D369).
         let rewritten = points.rewritten().contains(offset);
+        let otherwise = overlaps || is_save || is_declared || handed || reachable(*offset);
+        if !otherwise {
+            decided.insert(*offset, width);
+        }
         if overlaps || is_save || is_declared || handed || rewritten || reachable(*offset) {
             r2il::refusal_evidence!(
                 "promote-stack-slot",
