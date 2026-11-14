@@ -667,11 +667,11 @@ fn unfixed_tail_registers(
     let direct = call.raw_identity.and_then(direct_target_from_raw_identity);
     let model = context.site_model(instruction, direct)?;
     let stated = context.call_reads(instruction)?;
-    let every = crate::call_reads::CallReads::every_location(model);
+    let every = context.every_location_at(instruction)?;
     let unnamed = model.call_reads()?.iter().copied();
     Some(
         unnamed
-            .filter(|storage| !stated.reads_none_within(&every, *storage))
+            .filter(|storage| !stated.reads_none_within(every, *storage))
             .collect(),
     )
 }

@@ -674,6 +674,19 @@ fn an_import_call_reads_the_count_register_alone_of_its_register() {
     }
 }
 
+/// A context builds each raw call site's reads once (D436): a `work-meter` build counts the
+/// `CallReads` built against the rows every machine context states, a row per site and one more.
+#[cfg(feature = "work-meter")]
+#[test]
+fn a_context_builds_each_call_sites_reads_once() {
+    let _ = read_at_call(CALL_STUB, "dcgettext");
+    let (built, rows) = r2ssa::call_reads_built().expect("a work-meter build");
+    assert!(
+        built <= rows,
+        "{built} CallReads built for {rows} call-site rows"
+    );
+}
+
 /// Default-deny: `call rdi` may reach a local function, which the psABI does not bind (3.2), so
 /// the call reads all of RAX (D431).
 #[test]

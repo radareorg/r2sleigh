@@ -398,6 +398,42 @@ pub enum MachineRegisterGeometryState {
     Malformed,
 }
 
+/// `CallReads` built and raw call sites stated by contexts made, in a `work-meter` build (D436).
+pub fn call_reads_built() -> Option<(u64, u64)> {
+    #[cfg(feature = "work-meter")]
+    return Some(meter::counts());
+    #[cfg(not(feature = "work-meter"))]
+    None
+}
+
+mod meter {
+    #[cfg(feature = "work-meter")]
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[cfg(feature = "work-meter")]
+    static BUILT: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "work-meter")]
+    static SITES: AtomicU64 = AtomicU64::new(0);
+
+    #[cfg(feature = "work-meter")]
+    pub(super) fn counts() -> (u64, u64) {
+        (BUILT.load(Ordering::Relaxed), SITES.load(Ordering::Relaxed))
+    }
+
+    #[inline]
+    pub(super) fn built() {
+        #[cfg(feature = "work-meter")]
+        BUILT.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A context's rows: each raw call site and the unsited one.
+    #[inline]
+    pub(super) fn made(_sites: usize) {
+        #[cfg(feature = "work-meter")]
+        SITES.fetch_add(_sites as u64 + 1, Ordering::Relaxed);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceMachineContext {
     schema_version: u32,
@@ -474,6 +510,25 @@ pub struct SourceMachineContext {
     format_tails: BTreeMap<u64, r2abi::format::PrintfConsumedArguments>,
     /// The image's data objects whose type is a laid-out struct, with that graph (D348).
     data_structs: Option<std::sync::Arc<DataStructs>>,
+    /// What each raw call site reads, stated once the facts it reads are bound (D436).
+    call_reads: CallReadsColumn,
+}
+
+/// One call's reads, and the index of its model's every-location row.
+type CallReadsRow = (Option<crate::call_reads::CallReads>, Option<usize>);
+
+/// Each raw call site's `CallReads` and the index of its model's every-location row (D436).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct CallReadsColumn {
+    /// By instruction, ascending.
+    sites: Box<[(u64, CallReadsRow)]>,
+    /// What a call at no raw site reads, under the calls' model.
+    unsited: CallReadsRow,
+    /// Every location of each distinct model a site runs under.
+    every: Box<[crate::call_reads::CallReads]>,
+    /// The calls' model's row in `every`.
+    calls: Option<usize>,
+    bound: bool,
 }
 
 /// Data objects the image graph types as a struct of known size, by address.
@@ -580,7 +635,7 @@ impl SourceMachineContext {
         call_site_interfaces: Vec<SourceCallSiteInterface>,
         tail_call_identities: Vec<SourceCallSiteIdentity>,
     ) -> Self {
-        Self::from_blocks_with_interfaces_tail_calls_and_terminals(
+        let mut context = Self::from_blocks_with_interfaces_tail_calls_and_terminals(
             blocks,
             arch,
             function_interface,
@@ -589,9 +644,12 @@ impl SourceMachineContext {
             call_site_interfaces,
             tail_call_identities,
             &BTreeSet::new(),
-        )
+        );
+        context.bind_call_reads();
+        context
     }
 
+    /// Unbound: the caller sets the callee facts, then [`Self::bind_call_reads`] (D436).
     /// `terminal_blocks` are the blocks the source's own block graph declares
     /// to have no successor. A transfer at the end of one of them leaves the
     /// function whatever it transfers through, which is what makes an
@@ -809,6 +867,7 @@ impl SourceMachineContext {
                 call_site_interfaces_by_identity.remove(&identity);
             }
         }
+        meter::made(raw_call_sites.len());
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
             arch: arch.cloned(),
@@ -844,6 +903,7 @@ impl SourceMachineContext {
             read_only: BTreeMap::new(),
             format_tails: BTreeMap::new(),
             data_structs: None,
+            call_reads: CallReadsColumn::default(),
         }
     }
 
@@ -991,6 +1051,7 @@ impl SourceMachineContext {
     }
 
     pub(crate) fn set_callee_statements(&mut self, statements: &BTreeMap<u64, CalleeStatement>) {
+        self.feeding_call_reads();
         self.callee_statements.clone_from(statements);
     }
 
@@ -1166,18 +1227,22 @@ impl SourceMachineContext {
         &mut self,
         writes: BTreeMap<u64, crate::call_reads::StackWrites>,
     ) {
+        self.feeding_call_reads();
         self.callee_writes = writes;
     }
 
     pub(crate) fn set_callee_lane_reads(&mut self, reads: crate::function::CalleeLaneReads) {
+        self.feeding_call_reads();
         self.callee_lane_reads = reads;
     }
 
     pub(crate) fn set_callee_imports(&mut self, imports: crate::function::CalleeImports) {
+        self.feeding_call_reads();
         self.callee_imports = imports;
     }
 
     pub(crate) fn set_site_models(&mut self, sites: std::sync::Arc<crate::function::SiteModels>) {
+        self.feeding_call_reads();
         self.sites = sites;
     }
 
@@ -1333,9 +1398,87 @@ impl SourceMachineContext {
         &self.call_site_interfaces
     }
 
+    /// A fact `call_reads` reads changes only before the column is bound (D436).
+    fn feeding_call_reads(&self) {
+        debug_assert!(
+            !self.call_reads.bound,
+            "a call-read fact set after the bind"
+        );
+    }
+
+    /// State each raw call site's reads once, after the last fact they read (D436). O(C x R) for C
+    /// sites of R locations, plus every location once per distinct model.
+    pub(crate) fn bind_call_reads(&mut self) {
+        let (mut models, mut every) = (Vec::<*const r2source::ConventionModel>::new(), Vec::new());
+        let mut row = |model: Option<&r2source::ConventionModel>| {
+            let model = model?;
+            let seen = models.iter().position(|seen| std::ptr::eq(*seen, model));
+            Some(seen.unwrap_or_else(|| {
+                models.push(model);
+                every.push(crate::call_reads::CallReads::every_location(model));
+                models.len() - 1
+            }))
+        };
+        let sites = (self.raw_call_sites.iter()).map(|(instruction, identity)| {
+            let direct = crate::semantic::direct_target_from_raw_identity(*identity);
+            let model = row(self.site_model(Some(*instruction), direct));
+            let reads = self.stated_call_reads(Some(*instruction));
+            (*instruction, (reads, model))
+        });
+        let sites = sites.collect();
+        let unsited = (
+            self.stated_call_reads(None),
+            row(self.site_model(None, None)),
+        );
+        let calls = row(self.calls());
+        self.call_reads = CallReadsColumn {
+            sites,
+            unsited,
+            every: every.into(),
+            calls,
+            bound: true,
+        };
+    }
+
+    /// The column's row of the call at `instruction`; the unsited row for no raw site. O(log C).
+    fn call_reads_row(
+        &self,
+        instruction: Option<u64>,
+    ) -> (Option<&crate::call_reads::CallReads>, Option<usize>) {
+        debug_assert!(
+            self.call_reads.bound,
+            "a call's reads asked before the bind"
+        );
+        let column = &self.call_reads;
+        let at =
+            instruction.and_then(|at| column.sites.binary_search_by_key(&at, |row| row.0).ok());
+        let (reads, every) = at.map_or(&column.unsited, |at| &column.sites[at].1);
+        (reads.as_ref(), *every)
+    }
+
+    /// What the call at `instruction` may read, as the bind stated it (D436). O(log C).
+    pub fn call_reads(&self, instruction: Option<u64>) -> Option<&crate::call_reads::CallReads> {
+        self.call_reads_row(instruction).0
+    }
+
+    /// Every location a call at `instruction` may read under its own model (D390). O(log C).
+    pub fn every_location_at(
+        &self,
+        instruction: Option<u64>,
+    ) -> Option<&crate::call_reads::CallReads> {
+        let at = self.call_reads_row(instruction).1?;
+        self.call_reads.every.get(at)
+    }
+
+    /// Every location a call may read under the calls' model. O(1).
+    pub fn every_location(&self) -> Option<&crate::call_reads::CallReads> {
+        self.call_reads.every.get(self.call_reads.calls?)
+    }
+
     /// What the call at `instruction` may read (`CallReads`): the locations of its complete, fixed
     /// interface, else every location; none where the machine names no convention.
-    pub fn call_reads(&self, instruction: Option<u64>) -> Option<crate::call_reads::CallReads> {
+    fn stated_call_reads(&self, instruction: Option<u64>) -> Option<crate::call_reads::CallReads> {
+        meter::built();
         let identity = instruction.and_then(|instruction| self.raw_call_site_at(instruction));
         let target = identity
             .map(SourceCallSiteIdentity::target)
@@ -1496,6 +1639,7 @@ impl SourceMachineContext {
     /// Fold the format each call to a cited printf `...` passes in its own block, one forward pass
     /// per block, and keep what a read-only format consumes (D409). O(operations + calls log calls).
     pub(crate) fn bind_format_tails(&mut self, blocks: &[R2ILBlock], immutable: &[u64]) {
+        self.feeding_call_reads();
         let mut tails = BTreeMap::new();
         for block in blocks {
             let mut origins = BlockOrigins::default();

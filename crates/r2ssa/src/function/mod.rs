@@ -790,7 +790,9 @@ impl BuildKey {
         });
         let areas = context.raw_call_sites().keys().map(|instruction| {
             let reads = context.call_reads(Some(*instruction));
-            let (stack, writes) = reads.map_or((None, None), |reads| (reads.stack, reads.writes));
+            let (stack, writes) = reads.map_or((None, None), |reads| {
+                (reads.stack.clone(), reads.writes.clone())
+            });
             (*instruction, stack, writes)
         });
         Self {
@@ -2943,7 +2945,7 @@ impl TrustedSsaArtifact {
                 // Recovery reads the decompile-normalized build the artifact
                 // seals, so a call it numbers is the call the artifact numbers.
                 let mut provisional_machine_context =
-                    SourceMachineContext::from_blocks_with_interfaces_and_tail_calls(
+                    SourceMachineContext::from_blocks_with_interfaces_tail_calls_and_terminals(
                         blocks.as_slice(),
                         Some(&arch),
                         None,
@@ -2951,6 +2953,7 @@ impl TrustedSsaArtifact {
                         source.conventions().cloned(),
                         correlated_call_sites.interfaces.clone(),
                         correlated_call_sites.tail_calls.clone(),
+                        &BTreeSet::new(),
                     );
                 // The recovery proves variadic counts from the same literals
                 // the final pass reads; without them every format was unproven.
@@ -2975,6 +2978,7 @@ impl TrustedSsaArtifact {
                 provisional_machine_context.set_site_models(Arc::clone(&sites));
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
+                provisional_machine_context.bind_call_reads();
                 // A build against callees that state the same to it is this build.
                 let key = BuildKey::of(
                     (&provisional_machine_context, &arch),
@@ -3197,6 +3201,7 @@ impl TrustedSsaArtifact {
         machine_context.bind_read_only(source.image().read_only());
         machine_context.bind_format_tails(blocks.as_slice(), source.image().immutable_literals());
         machine_context.bind_data_structs(source.image());
+        machine_context.bind_call_reads();
         let function = match built {
             Some(built) => built,
             None => {
@@ -3556,7 +3561,10 @@ pub(crate) fn unpassed_call_reads(
 }
 
 /// What the call at `instruction` reads and every location its site's model may read.
-type SiteLists = Option<(crate::call_reads::CallReads, crate::call_reads::CallReads)>;
+type SiteLists<'a> = Option<(
+    &'a crate::call_reads::CallReads,
+    &'a crate::call_reads::CallReads,
+)>;
 
 /// [`unpassed_call_reads`] of one block's `insts`, from its end.
 fn unpassed_in(
@@ -3593,13 +3601,9 @@ fn unpassed_in(
 fn site_lists(
     machine_context: Option<&SourceMachineContext>,
     instruction: Option<u64>,
-) -> SiteLists {
+) -> SiteLists<'_> {
     let context = machine_context?;
-    let direct = (instruction)
-        .and_then(|instruction| context.raw_call_site_at(instruction))
-        .and_then(crate::semantic::direct_target_from_raw_identity);
-    let model = context.site_model(instruction, direct)?;
-    let every = crate::call_reads::CallReads::every_location(model);
+    let every = context.every_location_at(instruction)?;
     Some((context.call_reads(instruction)?, every))
 }
 

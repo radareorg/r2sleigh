@@ -568,7 +568,7 @@ fn call_reaches(
             .zip(instruction)
             .and_then(|(context, instruction)| {
                 let reads = context.call_reads(instruction)?;
-                Some([reads.stack?, reads.writes?].concat())
+                Some([reads.stack()?, reads.writes()?].concat())
             });
         if let Some(area) = area {
             let area = (area.iter())

@@ -1486,3 +1486,13 @@ A counted printf states its registers as D409 states its stack.
 - Citation, D409's (`types-posix.sdb.txt`, stdio.h): ISO C17 7.21.6.1p2, "If the format is exhausted while arguments remain, the excess arguments are evaluated (as always) but are otherwise ignored"; too few arguments is undefined behaviour. Premise and refusals are D409's.
 - The count register stays read, so D431's import witness bounds RAX at AL's byte on this path too.
 - Test (`call_boundary`): `a_counted_printf_reads_only_its_placed_registers`, `error(0, 0, "%s", x)` past an untouched entry R8, red on the parent ("the parameters are a floor: at least 4").
+
+## D436 as built (2026-11-15, rd6-reads)
+
+`CallReads` is a dense column of `SourceMachineContext` over its raw call sites.
+
+- Quantity: `CallReads` values built per context. Before, `call_reads` built one per question: once per `CallUse` in each demand pass (`call_read_bytes`), again per argument area, frame walk and tail, and `reads_none_of` built `every_location` once more per question. Bound now: C + 1 per context (C raw call sites and one row for a call at no site), each O(R) for R locations, plus `every_location` once per distinct site model.
+- Algorithm: `bind_call_reads` runs once after the last fact the rows read (callee writes, statements, lane reads, imports, site models, format tails). The two preparation sequences build with the unbound constructor and bind at their end; every other constructor binds at once. A setter of those facts after the bind is a debug assertion; a read before it answers `None`, the default-deny row.
+- Lookup: `call_reads`, `every_location_at` (the site's model, D390) and `every_location` (the calls' model) are a binary search over the sorted rows, O(log C), and hand out references; no question clones a row.
+- Equivalence: a row is `stated_call_reads(instruction)`, the old `call_reads` body unchanged, a pure function of fields that no longer change after the bind. `reads_none_of(model, carrier)` was `reads_none_within(&every_location(model), carrier)`; its readers now pass the held row.
+- Meter: in a `work-meter` build `r2ssa::call_reads_built()` counts rows built against rows the contexts made; `result_lanes::a_context_builds_each_call_sites_reads_once` asserts built ≤ made, red on the parent.
