@@ -1385,6 +1385,17 @@ impl<'a> Walker<'a> {
     fn finish(mut self) -> Walked {
         let opaque = std::mem::replace(&mut self.opaque, IdMap::new(0));
         self.points.opaque = opaque.into_iter().map(|(_, access)| access).collect();
+        // The flag the walk kept is what its points state (D397).
+        debug_assert_eq!(
+            self.points.unplaced,
+            self.points.whole
+                || (self.points.opaque.iter())
+                    .any(|access| matches!(access.origin, Origin::Unplaced))
+                || self
+                    .points
+                    .reaching()
+                    .any(|point| point.extent == Extent::Derived)
+        );
         for (val, addr) in std::mem::take(&mut self.deferred) {
             if self.values.get(addr).is_none()
                 && let Some(address) = self.values.get(val).cloned()

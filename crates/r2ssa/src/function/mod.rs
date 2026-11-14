@@ -3483,7 +3483,6 @@ pub(crate) fn unpassed_call_reads(
     graph: &SsaGraph,
     machine_context: Option<&SourceMachineContext>,
 ) -> std::collections::BTreeSet<crate::graph::UseSite> {
-    let model = machine_context.and_then(SourceMachineContext::calls);
     // Each read is its call's, by the one link (`SsaGraph::call_reading`); one no call follows is
     // read by none.
     let mut unpassed = std::collections::BTreeSet::new();
@@ -3495,12 +3494,15 @@ pub(crate) fn unpassed_call_reads(
             .call_reading(inst.id)
             .and_then(|call| graph.op(call)?.call());
         let unread = match call {
-            Some(call) => {
-                let reads = (machine_context.zip(call.instruction))
-                    .and_then(|(context, instruction)| context.call_reads(Some(instruction)));
-                (reads.as_ref().zip(model))
+            Some(call) => machine_context.is_some_and(|context| {
+                // The site's model, the one `call_reads` built the reads from (D390).
+                let direct = (call.instruction)
+                    .and_then(|instruction| context.raw_call_site_at(instruction))
+                    .and_then(crate::semantic::direct_target_from_raw_identity);
+                let model = context.site_model(call.instruction, direct);
+                (context.call_reads(call.instruction).zip(model))
                     .is_some_and(|(reads, model)| reads.reads_none_of(model, *storage))
-            }
+            }),
             None => true,
         };
         if unread {
