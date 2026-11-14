@@ -2260,7 +2260,7 @@ fn recover_interface_inner(
         observed = observed_reads(None);
     }
     // A call's read of a register its certified boundary does not pass is no read (`liveness`).
-    let ignored_reads = crate::function::unpassed_call_reads(graph, &facts.boundaries);
+    let ignored_reads = crate::function::unpassed_call_reads(graph, machine_context);
     // The call of unproven arity a `CallUse` at `inst` reads for: the first after it in its block.
     let handed_to = |inst: crate::InstId| {
         let used = graph.inst(inst)?;
@@ -4246,6 +4246,7 @@ mod tests {
                 unstated_carrier: None,
                 fixed_argument_count: Some(arguments.len()),
                 ignored: Box::default(),
+                reads_stated: true,
                 variadic_argument_count_evidence: None,
                 variadic_argument_count_refusal: None,
                 arguments,

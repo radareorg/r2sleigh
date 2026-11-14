@@ -982,8 +982,7 @@ fn read_width(
     }
 }
 
-/// The low bytes of a `CallUse`'s carrier its call takes: none for an argument register a stated
-/// `CallReads` leaves out, else the callee's widest held lane (D266 rule 2); `None`: whole.
+/// The low bytes of a `CallUse`'s carrier its call takes (`register_read_bytes`); `None`: whole.
 pub(crate) fn call_read_bytes(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
@@ -997,23 +996,28 @@ pub(crate) fn call_read_bytes(
     };
     let (instruction, interface) = call_after(graph, read, machine_context)?;
     let reads = machine_context.call_reads(Some(instruction))?;
-    let stated = |storage: &CanonicalStorageId| register_storages_overlap(*storage, *carrier);
-    // Only the convention's argument registers: a hidden-result pointer (x8) is no argument.
-    let argument = (machine_context.calls()).is_some_and(|model| {
-        crate::call_reads::CallReads::every_location(model)
-            .registers
-            .iter()
-            .any(stated)
-    });
-    if argument && reads.stated && !reads.registers.iter().any(stated) {
+    register_read_bytes(&reads, machine_context, interface, *carrier)
+}
+
+/// The low bytes of `carrier` a call reads, the one derivation (D283): none where its stated
+/// `CallReads` leaves the register out, else the callee's widest held lane (D266 rule 2), else
+/// `None`, the whole register.
+pub(crate) fn register_read_bytes(
+    reads: &crate::call_reads::CallReads,
+    machine_context: &SourceMachineContext,
+    interface: Option<&crate::SourceCallSiteInterface>,
+    carrier: CanonicalStorageId,
+) -> Option<u32> {
+    if (machine_context.calls()).is_some_and(|model| reads.reads_none_of(model, carrier)) {
         return Some(0);
     }
+    let stated = |storage: &CanonicalStorageId| register_storages_overlap(*storage, carrier);
     let interface = interface?;
     let mut lanes = (interface.arguments().iter())
         .filter(|argument| argument.register_storage().as_ref().is_some_and(stated))
         .map(|argument| {
             let storage = argument.register_storage()?;
-            (storage == *carrier).then(|| callee_held_lane(interface, argument.index(), storage))?
+            (storage == carrier).then(|| callee_held_lane(interface, argument.index(), storage))?
         })
         .map(|lane| lane.map(|lane| lane.size));
     let first = lanes.next()??;

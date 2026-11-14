@@ -1303,12 +1303,24 @@ impl SourceMachineContext {
     /// What the call at `instruction` may read (`CallReads`): the locations of its complete, fixed
     /// interface, else every location; none where the machine names no convention.
     pub fn call_reads(&self, instruction: Option<u64>) -> Option<crate::call_reads::CallReads> {
-        let interface = instruction
-            .and_then(|instruction| self.raw_call_site_at(instruction))
-            .and_then(|identity| self.call_site_interface(identity))
+        let identity = instruction.and_then(|instruction| self.raw_call_site_at(instruction));
+        let interface = (identity.and_then(|identity| self.call_site_interface(identity)))
             .filter(|interface| interface.is_complete() && !interface.is_variadic());
-        match interface {
-            Some(interface) => Some(crate::call_reads::CallReads::exact(interface, self.calls())),
+        if let Some(interface) = interface {
+            return Some(crate::call_reads::CallReads::exact(interface, self.calls()));
+        }
+        // A walked callee that mints no contract still states its reads where its arity is exact.
+        let target = identity
+            .map(SourceCallSiteIdentity::target)
+            .filter(|target| target.space == CanonicalStorageSpace::Ram);
+        let stated = target
+            .and_then(|target| self.callee_statement(target.offset))
+            .and_then(|statement| statement.reads.as_deref());
+        match stated {
+            Some(read) => Some(crate::call_reads::CallReads::of_locations(
+                read.iter().copied(),
+                self.calls(),
+            )),
             None => (self.calls()).map(crate::call_reads::CallReads::every_location),
         }
     }
@@ -3153,7 +3165,7 @@ mod tests {
 }
 
 /// What a callee's body states when it mints no call contract (doc/adr-resolved-bodies.md).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CalleeStatement {
     /// The arguments its body proves it takes, a floor where a slot past them may be read.
     pub(crate) arity: crate::SourceArity,
@@ -3163,6 +3175,8 @@ pub(crate) struct CalleeStatement {
     pub(crate) seed: Option<r2source::SourceResultSeed>,
     /// The typed lanes its body writes a result byte in, where its result is unproven.
     pub(crate) carriers: Option<r2source::SourceResultCarriers>,
+    /// What a call reads where the arity is exact and fixed: its parameters' locations (D283).
+    pub(crate) reads: Option<Vec<crate::SourceParameterLocation>>,
 }
 
 impl CalleeStatement {
@@ -3176,21 +3190,25 @@ impl CalleeStatement {
                 || !interface.arity().is_exact()
         });
         let statements = unproven.map(|(address, interface)| {
+            // A statement counts no call's variadic tail, so its parameters are only a floor.
+            let arity = match interface.is_variadic() {
+                true => crate::SourceArity::AtLeast(interface.parameters().len()),
+                false
+                    if !interface
+                        .arity_floor()
+                        .is_some_and(|floor| floor.reads_past()) =>
+                {
+                    crate::SourceArity::Exact(interface.parameters().len())
+                }
+                false => interface.arity(),
+            };
             (
                 *address,
                 Self {
-                    // A statement counts no call's variadic tail, so its parameters are only a floor.
-                    arity: match interface.is_variadic() {
-                        true => crate::SourceArity::AtLeast(interface.parameters().len()),
-                        false
-                            if !interface
-                                .arity_floor()
-                                .is_some_and(|floor| floor.reads_past()) =>
-                        {
-                            crate::SourceArity::Exact(interface.parameters().len())
-                        }
-                        false => interface.arity(),
-                    },
+                    reads: (matches!(arity, crate::SourceArity::Exact(_))
+                        && !interface.is_variadic())
+                    .then(|| crate::call_reads::CallReads::callee_locations(interface)),
+                    arity,
                     result: match interface.return_kind() {
                         crate::SourceFunctionReturn::Void => Some(crate::SourceCallResult::Void),
                         crate::SourceFunctionReturn::Register { storage } => {
