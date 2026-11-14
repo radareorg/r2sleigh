@@ -35,7 +35,7 @@ pub use control_domains::*;
 pub(crate) use declared_slots::*;
 pub use facts::*;
 pub(crate) use frame_reach::{Access, Walked, walk};
-pub use frame_reach::{CallFrameReach, FramePoints, FrameReach};
+pub use frame_reach::{CallFrameReach, DynamicFrame, FramePoints, FrameReach};
 pub(crate) use loops::*;
 pub(crate) use objects::*;
 pub(crate) use predicates::*;
@@ -313,7 +313,7 @@ impl PreparedFunctionFacts {
         // performs, and two reads of the same bytes the same memory versions
         // reach hold one content; both are known here, before anything reads
         // a span, so liveness is computed once, with them.
-        let ignored_reads = crate::function::unpassed_call_reads(graph, &boundaries);
+        let ignored_reads = crate::function::unpassed_call_reads(graph, machine_context);
         let mut content = crate::liveness::ValueContent::of(graph, machine_context);
         content.declare_same_content(&crate::function::same_content_reads(
             &memory_accesses,

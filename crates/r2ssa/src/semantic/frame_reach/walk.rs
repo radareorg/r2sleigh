@@ -59,11 +59,32 @@ pub struct FramePoints {
     pub(crate) handed: BTreeSet<i64>,
     /// Some place holding an address lies where a call's argument area could reach (D226).
     pub(crate) by_area: bool,
+    /// Places a call's argument area covers that a load reads after a call: they stay (D369).
+    pub(crate) rewritten: BTreeSet<i64>,
     /// The entry offset each call's argument area is measured from, in operation order; `None`
     /// where no offset places the stack pointer (D351: the one reading of it).
     pub(crate) call_bases: Vec<(OpId, Option<i64>)>,
     /// Each (callee, argument position) whose upward reach the walk asked, in any round (D365).
     pub(crate) asked_reach: BTreeSet<(u64, usize)>,
+    /// The first instruction that moves the stack pointer by an amount no constant states (D355).
+    pub(crate) dynamic: Option<DynamicFrame>,
+}
+
+/// A frame no offset places past one instruction: `sub rsp, rax` after `__chkstk`, an `alloca`
+/// (D355). The frame model's typed refusal; the route prints it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DynamicFrame {
+    pub instruction: u64,
+}
+
+impl std::fmt::Display for DynamicFrame {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "dynamic frame: the stack pointer at {:#x} moves by an amount no constant states",
+            self.instruction
+        )
+    }
 }
 
 impl FramePoints {
@@ -83,8 +104,15 @@ impl FramePoints {
         self.opaque.sort_by_key(|access| access.op);
         self.opaque.dedup();
         self.handed.extend(other.handed);
+        self.rewritten.extend(other.rewritten);
         self.by_area |= other.by_area;
         self.asked_reach.extend(other.asked_reach);
+        self.dynamic = self.dynamic.into_iter().chain(other.dynamic).min();
+    }
+
+    /// The frame's typed refusal, where the stack pointer moves by an unstated amount (D355).
+    pub const fn dynamic_frame(&self) -> Option<DynamicFrame> {
+        self.dynamic
     }
 
     /// Whether an address no offset places escapes or is accessed.
@@ -124,6 +152,11 @@ impl FramePoints {
 
     pub(crate) const fn handed(&self) -> &BTreeSet<i64> {
         &self.handed
+    }
+
+    /// Places a call may write that a load reads after it (D369).
+    pub(crate) const fn rewritten(&self) -> &BTreeSet<i64> {
+        &self.rewritten
     }
 
     pub(crate) const fn by_area(&self) -> bool {
@@ -390,6 +423,8 @@ struct StackArguments {
 /// One call's argument area, from the stack pointer it is measured at.
 struct CallArguments {
     op: OpId,
+    /// The block the call is in and its index there.
+    at: (u64, usize),
     pointer: VarId,
     /// What the transfer spends where no restore records the pointer entering it.
     shift: i64,
@@ -423,7 +458,7 @@ impl StackArguments {
             if let Some((_, phi)) = block.sited_phis().find(|(_, phi)| site.is_pointer(phi.dst)) {
                 pointer = phi.dst;
             }
-            pointer = site.calls(block, pointer, &mut calls);
+            pointer = site.calls((address, block), pointer, &mut calls);
             let children = func.domtree().children(address);
             steps.extend(children.iter().rev().map(|child| (*child, pointer)));
         }
@@ -450,6 +485,92 @@ impl StackArguments {
         let lowest = self.bases(values).and_then(|bases| bases.into_iter().min());
         lowest.is_some_and(|base| {
             (stored.iter()).any(|(place, width)| place.saturating_add(i64::from(*width)) > base)
+        })
+    }
+
+    /// The places a call's area covers that a load reads after it, since a callee may write its
+    /// area (D369). One closure per distinct area: `O(calls log + areas x (B + E + accesses))`.
+    fn rewritten(
+        &self,
+        func: &SSAFunction,
+        values: &IdMap<VarId, Value>,
+        accesses: &Accesses,
+    ) -> BTreeSet<i64> {
+        // Each call's area as entry-relative spans; a call no offset places covers the frame.
+        let mut groups = BTreeMap::<Vec<(i64, i64)>, Vec<(u64, usize)>>::new();
+        for call in &self.calls {
+            let spans = match (call.base(values), &call.area) {
+                (None, _) => vec![(i64::MIN, i64::MAX)],
+                (Some(base), Some(area)) => (area.iter())
+                    .map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high)))
+                    .filter(|(low, high)| low < high)
+                    .collect(),
+                // Unbounded, it is still this frame's: it ends at the entry pointer.
+                (Some(base), None) => vec![(base, 0)].into_iter().filter(|(l, h)| l < h).collect(),
+            };
+            if !spans.is_empty() {
+                groups.entry(spans).or_default().push(call.at);
+            }
+        }
+        let loaded = |place: &i64| {
+            (accesses.get(place).into_iter().flatten()).filter(|access| !access.store)
+        };
+        let mut rewritten = BTreeSet::new();
+        for (spans, calls) in &groups {
+            let covers = |place: i64, width: u32| {
+                let end = place.saturating_add(i64::from(width));
+                spans.iter().any(|(low, high)| *low < end && place < *high)
+            };
+            let covered = (accesses.iter())
+                .filter(|(place, list)| {
+                    let widest = list.iter().map(|access| access.width).max();
+                    !rewritten.contains(*place)
+                        && covers(**place, widest.unwrap_or(1))
+                        && loaded(place).next().is_some()
+                })
+                .map(|(place, _)| *place)
+                .collect::<Vec<_>>();
+            if covered.is_empty() {
+                continue;
+            }
+            // The group's first call in each block, and every block the calls' successors reach.
+            let mut first = BTreeMap::<u64, usize>::new();
+            for (block, index) in calls {
+                let known = first.entry(*block).or_insert(*index);
+                *known = (*known).min(*index);
+            }
+            let mut reached = BTreeSet::new();
+            let mut pending = (first.keys())
+                .flat_map(|block| func.successors(*block))
+                .collect::<Vec<_>>();
+            while let Some(block) = pending.pop() {
+                if reached.insert(block) {
+                    pending.extend(func.successors(block));
+                }
+            }
+            let after = |access: &Access| {
+                reached.contains(&access.block)
+                    || first
+                        .get(&access.block)
+                        .is_some_and(|call| *call < access.index)
+            };
+            rewritten.extend(covered.into_iter().filter(|place| loaded(place).any(after)));
+        }
+        rewritten
+    }
+
+    /// Whether some place of `places` ends above the lowest placed call base: an unplaced call
+    /// leaves the placed ones' areas deciding (D369). O(calls + places).
+    fn reaches_placed_area(
+        &self,
+        values: &IdMap<VarId, Value>,
+        places: &BTreeMap<i64, u32>,
+    ) -> bool {
+        let lowest = (self.calls.iter())
+            .filter_map(|call| call.base(values))
+            .min();
+        lowest.is_some_and(|base| {
+            (places.iter()).any(|(place, width)| place.saturating_add(i64::from(*width)) > base)
         })
     }
 
@@ -503,13 +624,13 @@ impl Site<'_> {
     /// Each call of a block, entered at the stack `pointer`; the pointer leaving it.
     fn calls(
         &self,
-        block: &crate::block::SSABlock<VarId>,
+        (address, block): (u64, &crate::block::SSABlock<VarId>),
         mut pointer: VarId,
         out: &mut Vec<CallArguments>,
     ) -> VarId {
         let ops = block.ops();
         for (index, (id, op)) in block.sited().enumerate() {
-            out.extend(self.call(id, &ops[index..], pointer));
+            out.extend(self.call((id, (address, index)), &ops[index..], pointer));
             pointer = op
                 .dst()
                 .copied()
@@ -521,7 +642,12 @@ impl Site<'_> {
 
     /// The call `ops` starts with, in the boundary's coordinates: the pointer a restore records
     /// entering the transfer, else the one reaching it past what the transfer spends.
-    fn call(&self, op: OpId, ops: &[SSAOp<VarId>], pointer: VarId) -> Option<CallArguments> {
+    fn call(
+        &self,
+        (op, at): (OpId, (u64, usize)),
+        ops: &[SSAOp<VarId>],
+        pointer: VarId,
+    ) -> Option<CallArguments> {
         let call = ops.first()?.call()?;
         let entering = (ops[1..].iter())
             .take_while(|op| matches!(op, SSAOp::CallDefine { .. } | SSAOp::CallRestore { .. }))
@@ -532,6 +658,7 @@ impl Site<'_> {
         let (pointer, shift) = entering.map_or((pointer, self.spent), |src| (src, 0));
         Some(CallArguments {
             op,
+            at,
             pointer,
             shift,
             area: (self.machine.call_reads(call.instruction)).and_then(|reads| reads.stack),
@@ -782,6 +909,15 @@ impl<'a> Walker<'a> {
             SSAOp::IntAdd { dst, a, b } | SSAOp::IntSub { dst, a, b } => {
                 let subtract = matches!(op, SSAOp::IntSub { .. });
                 let next = self.displaced(var, value, (*a, *b), subtract);
+                // The stack pointer moved by what no constant states: the frame is dynamic.
+                let pointer = self.func.storage_of(*dst) == self.func.storage_of(self.entry_sp);
+                if pointer && value.exact().is_some() && next.exact().is_none() {
+                    let instruction = self
+                        .func
+                        .instruction_of(id)
+                        .map(|at| DynamicFrame { instruction: at });
+                    self.points.dynamic = self.points.dynamic.into_iter().chain(instruction).min();
+                }
                 self.set(*dst, next);
             }
             SSAOp::CallUse { storage, .. } => {
@@ -939,6 +1075,18 @@ impl<'a> Walker<'a> {
             }
         }
         self.points.handed = handed;
+        // What a call may rewrite turns on the areas wherever a loaded place ends above a base.
+        let loaded = (self.accesses.iter())
+            .filter(|(_, list)| list.iter().any(|access| !access.store))
+            .map(|(place, list)| {
+                (
+                    *place,
+                    list.iter().map(|access| access.width).max().unwrap_or(1),
+                )
+            })
+            .collect();
+        self.points.by_area |= arguments.reaches_placed_area(&self.values, &loaded);
+        self.points.rewritten = arguments.rewritten(self.func, &self.values, &self.accesses);
         self.points.call_bases = arguments.by_call(&self.values);
         Walked {
             points: self.points,

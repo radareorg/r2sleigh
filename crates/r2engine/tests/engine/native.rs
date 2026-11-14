@@ -6449,6 +6449,109 @@ fn an_unchecked_canary_whose_slot_address_escapes_stays() {
     assert!(response.premises.is_empty(), "{:?}", response.premises);
 }
 
+/// `buf` at entry - 0x28 goes to `clear`, which writes 16 bytes through it, over the canary at
+/// - 0x20; the function returns `buf`, so it escapes, and the local at - 0x18 is stored 5.
+const CANARY_INSIDE_A_WRITE: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 1000 sub rsp, 0x28
+    0x64, 0x48, 0x8b, 0x04, 0x25, 0x28, 0x00, 0x00, 0x00, // 1004 mov rax, fs:[0x28]
+    0x48, 0x89, 0x44, 0x24, 0x08, // 100d mov [rsp + 8], rax
+    0xc7, 0x44, 0x24, 0x10, 0x05, 0x00, 0x00, 0x00, // 1012 mov dword [rsp + 0x10], 5
+    0x48, 0x89, 0xe7, // 101a mov rdi, rsp
+    0xe8, 0x2e, 0x00, 0x00, 0x00, // 101d call 0x1050
+    0x48, 0x8b, 0x54, 0x24, 0x08, // 1022 mov rdx, [rsp + 8]
+    0x64, 0x48, 0x2b, 0x14, 0x25, 0x28, 0x00, 0x00, 0x00, // 1027 sub rdx, fs:[0x28]
+    0x75, 0x08, // 1030 jne 0x103a
+    0x48, 0x89, 0xe0, // 1032 mov rax, rsp
+    0x48, 0x83, 0xc4, 0x28, // 1035 add rsp, 0x28
+    0xc3, // 1039 ret
+    0xe8, 0x21, 0x00, 0x00, 0x00, // 103a call 0x1060
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, // 103f padding
+    0x48, 0xc7, 0x07, 0x00, 0x00, 0x00, 0x00, // 1050 clear: mov qword [rdi], 0
+    0x48, 0xc7, 0x47, 0x08, 0x00, 0x00, 0x00, 0x00, // 1057 mov qword [rdi + 8], 0
+    0xc3, // 105f ret
+    0xeb, 0xfe, // 1060 jmp 0x1060
+];
+
+/// The canary lies inside `clear`'s write, so it ends no escape run: `buf`'s run is one object up
+/// to the local. The declared-slot rule ended it at the canary, and the call had no C (D290).
+#[test]
+fn a_canary_inside_a_callee_write_ends_no_escape_run() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Halting {
+        fixture: Fixture {
+            bytes: CANARY_INSIDE_A_WRITE.to_vec(),
+            name: "canary_inside_a_write",
+        },
+        halts: 0x1060,
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("compiler-inserted"), "{text}");
+    assert!(text.contains("fcn_1050((r2sleigh_word_u64*)"), "{text}");
+    assert!(text.contains("(uint32_t)5U);"), "{text}");
+    assert!(!text.contains("CallNotRendered"), "{text}");
+}
+
+/// `r11`'s entry value at entry - 0x20, between `buf` (- 0x28), which `clear` writes through, and
+/// a local (- 0x18) read after the call. No convention keeps `r11`, so the slot is no compiler's.
+const SCRATCH_ENTRY_SAVED: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 1000 sub rsp, 0x28
+    0x4c, 0x89, 0x5c, 0x24, 0x08, // 1004 mov [rsp + 8], r11
+    0xc7, 0x44, 0x24, 0x10, 0x05, 0x00, 0x00, 0x00, // 1009 mov dword [rsp + 0x10], 5
+    0x48, 0x89, 0xe7, // 1011 mov rdi, rsp
+    0xe8, 0x27, 0x00, 0x00, 0x00, // 1014 call 0x1040
+    0x8b, 0x44, 0x24, 0x10, // 1019 mov eax, [rsp + 0x10]
+    0x48, 0x83, 0xc4, 0x28, // 101d add rsp, 0x28
+    0xc3, // 1021 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, // 1022
+    0x48, 0xc7, 0x07, 0x00, 0x00, 0x00, 0x00, // 1040 clear: mov qword [rdi], 0
+    0xc3, // 1047 ret
+];
+
+/// A scratch register's entry value bounds no escape run: the run reaches the local as one object
+/// and the store stays. Before, the slot was the compiler's and its store elided as assumed.
+#[test]
+fn a_scratch_registers_entry_value_ends_no_escape_run() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: SCRATCH_ENTRY_SAVED.to_vec(),
+        name: "scratch_entry_saved",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("R11_0"), "{text}");
+    assert!(!text.contains("frame extent unproven"), "{text}");
+    assert!(text.contains("(uint32_t)5U);"), "{text}");
+}
+
+/// `mov dword [rsp + 8], 5; call rdi; mov eax, [rsp + 8]`: an indirect call states no arity.
+const READ_BACK_PAST_AN_INDIRECT_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xff, 0xd7, // 100c call rdi
+    0x8b, 0x44, 0x24, 0x08, // 100e mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 1012 add rsp, 0x18
+    0xc3, // 1016 ret
+];
+
+/// A call nothing states may take its arguments on the stack up to the entry pointer and write
+/// them, so the local read after it is memory (D369, default-deny).
+#[test]
+fn a_place_an_unstated_call_may_rewrite_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: READ_BACK_PAST_AN_INDIRECT_CALL.to_vec(),
+        name: "read_back_past_an_indirect_call",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+}
+
 /// A body that returns and stores the guard without checking it is no prologue the bytes prove.
 #[test]
 fn an_unchecked_canary_in_a_function_that_returns_stays() {

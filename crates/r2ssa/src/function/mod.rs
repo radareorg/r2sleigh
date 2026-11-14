@@ -3414,8 +3414,8 @@ pub(crate) fn same_content_reads(
     pairs
 }
 
-/// The reads a call's text does not perform: each `CallUse` whose register a proven argument list
-/// leaves out; an unproven list passes every read, no boundary none (D283). `O(insts x arguments)`.
+/// The reads a call's text does not perform: each `CallUse` whose register its call's stated
+/// `CallReads` leaves out (D283); an unstated call reads every register. `O(insts + calls x regs)`.
 #[cfg_attr(
     dylint_lib = "r2sleigh_lints",
     allow(
@@ -3425,41 +3425,10 @@ pub(crate) fn same_content_reads(
 )]
 pub(crate) fn unpassed_call_reads(
     graph: &SsaGraph,
-    boundaries: &crate::semantic::SourceBoundaryFacts,
+    machine_context: Option<&SourceMachineContext>,
 ) -> std::collections::BTreeSet<crate::graph::UseSite> {
-    // `None`: no statement bounds the callee's reads, so it may read every register (default-deny).
-    let mut passed =
-        crate::dense::IdMap::<crate::InstId, Option<Vec<CanonicalStorageId>>>::default();
-    for boundary in boundaries.calls.values() {
-        if boundary.may_read_unlisted() {
-            passed.insert(boundary.at, None);
-            continue;
-        }
-        let registers = (boundary.arguments.iter())
-            .filter(|argument| !boundary.ignores(argument))
-            .filter(|argument| {
-                matches!(
-                    argument.value,
-                    crate::semantic::SourceCallArgumentValue::Value(_)
-                )
-            })
-            .filter_map(|argument| match argument.slot {
-                crate::semantic::CallBoundarySlot::Register { storage, .. } => Some(storage),
-                _ => None,
-            })
-            .collect::<Vec<_>>();
-        passed.insert(boundary.at, Some(registers));
-    }
-    // A call with no boundary passes nothing; `None` passes every register.
-    let passes = |registers: Option<&Option<Vec<CanonicalStorageId>>>, storage| {
-        registers.is_some_and(|registers| {
-            (registers.as_deref()).is_none_or(|registers| {
-                (registers.iter())
-                    .any(|register| crate::semantic::register_storages_overlap(*register, storage))
-            })
-        })
-    };
-    // The reads minted just before a call are its own; any other run passes nothing.
+    let model = machine_context.and_then(SourceMachineContext::calls);
+    // The reads minted just before a call are its own; any other run is read by no call.
     let mut unpassed = std::collections::BTreeSet::new();
     for block in &graph.blocks {
         let mut run = Vec::new();
@@ -3469,12 +3438,20 @@ pub(crate) fn unpassed_call_reads(
                 run.push((inst, *storage));
                 continue;
             }
-            let registers = op
-                .filter(|op| op.call().is_some())
-                .and_then(|_| passed.get(inst));
-            let unread = run
-                .drain(..)
-                .filter(|(_, storage)| !passes(registers, *storage));
+            // A run no call ends is read by none.
+            let Some(call) = op.and_then(SSAOp::call) else {
+                let unread = run
+                    .drain(..)
+                    .map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 });
+                unpassed.extend(unread);
+                continue;
+            };
+            let reads = (machine_context.zip(call.instruction))
+                .and_then(|(context, instruction)| context.call_reads(Some(instruction)));
+            let unread = run.drain(..).filter(|(_, storage)| {
+                (reads.as_ref().zip(model))
+                    .is_some_and(|(reads, model)| reads.reads_none_of(model, *storage))
+            });
             unpassed.extend(unread.map(|(inst, _)| crate::graph::UseSite { inst, input_idx: 0 }));
         }
         unpassed.extend(

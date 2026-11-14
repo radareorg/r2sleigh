@@ -965,8 +965,8 @@ fn printing_spilled(format: &[u8], handed: bool) -> String {
     rendered.response.output.into_text()
 }
 
-/// Gb: the reload equals the spill, since no call may write a slot whose address stays in the
-/// function, so the format folds and `f`'s q0 to q3 die at `printf`.
+/// Gb: `f` (`ret`) reads no argument, so the reload is the spill and q0 to q3 die at `printf`.
+/// Fails (D376): `f`'s statement never reaches its caller's build, so the call is unstated (D369).
 #[test]
 fn a_spilled_format_reloaded_in_another_block_reads_no_vector_register() {
     let text = printing_spilled(b"%d\n\0", false);
