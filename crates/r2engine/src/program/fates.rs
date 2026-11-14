@@ -1537,7 +1537,7 @@ impl<S: Source + 'static> Reading<'_, S> {
     /// literal the printf reader parses whole and finds no floating conversion in.
     fn unfloated_at(&self, address: u64, format: &Formatted) -> Option<CallEffect> {
         let text = crate::native::immutable_text_at(self.view, address)?;
-        let consumed = r2ssa::printf::printf_consumed_arguments(&text).ok()?;
+        let consumed = r2abi::format::printf_consumed_arguments(&text).ok()?;
         (!consumed.any_floating).then_some(format.unfloated)
     }
 

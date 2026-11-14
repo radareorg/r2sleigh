@@ -94,8 +94,14 @@ pub(crate) fn variadic_callsite_argument_count(
             );
             VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral
         })?;
-    let consumed = crate::printf::printf_consumed_arguments(format)
+    let consumed = r2abi::format::printf_consumed_arguments(format)
         .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
+    // The block's fold that bounds the call's stack read the same format (D409).
+    debug_assert!(
+        (machine_context.format_tail(interface.identity().instruction()))
+            .is_none_or(|early| *early == consumed),
+        "the call's block and its values fold its format to different texts"
+    );
     // A floating operand travels in the floating sequence, which this recovery walks only where
     // it shares positions with the integer one (Microsoft x64) or the tail is on the stack.
     if consumed.any_floating && !floating_tail_placed(machine_context) {
@@ -419,7 +425,7 @@ pub(crate) fn merged_format_literal_argument_count(
             );
             return Err(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral);
         };
-        let consumed = crate::printf::printf_consumed_arguments(format)
+        let consumed = r2abi::format::printf_consumed_arguments(format)
             .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
         if consumed.any_floating && !floating_tail_placed(machine_context) {
             r2il::refusal_evidence!(

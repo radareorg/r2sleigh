@@ -465,6 +465,9 @@ pub struct SourceMachineContext {
     source_string_literals: BTreeMap<u64, String>,
     /// Bytes the program never writes, by the address a body loads from: what a load there reads.
     read_only: BTreeMap<u64, Box<[u8]>>,
+    /// What the read-only format each printf call's own block passes consumes, by the call's
+    /// instruction (D409).
+    format_tails: BTreeMap<u64, r2abi::format::PrintfConsumedArguments>,
     /// The image's data objects whose type is a laid-out struct, with that graph (D348).
     data_structs: Option<std::sync::Arc<DataStructs>>,
 }
@@ -830,6 +833,7 @@ impl SourceMachineContext {
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
             read_only: BTreeMap::new(),
+            format_tails: BTreeMap::new(),
             data_structs: None,
         }
     }
@@ -1325,11 +1329,20 @@ impl SourceMachineContext {
             None => Some(&crate::call_reads::StackWrites::Arguments),
         };
         let interface = (identity.and_then(|identity| self.call_site_interface(identity)))
-            .filter(|interface| interface.is_complete() && !interface.is_variadic());
+            .filter(|interface| interface.is_complete());
         // The site's own model, by the one lookup rename and the frame walk ask (D390).
         let model = self.site_model(instruction, target.map(|target| target.offset));
-        if let Some(interface) = interface {
+        if let Some(interface) = interface.filter(|interface| !interface.is_variadic()) {
             let reads = crate::call_reads::CallReads::exact(interface, model);
+            return Some(reads.writing(writes));
+        }
+        // A printf's stack is its fixed parameters and the operands its own format counts (D409).
+        let counted = (interface.zip(model))
+            .zip(instruction.and_then(|at| self.format_tails.get(&at)))
+            .and_then(|((interface, model), tail)| counted_stack(interface, model, tail));
+        if let (Some(stack), Some(model)) = (counted, model) {
+            let mut reads = crate::call_reads::CallReads::every_location(model);
+            (reads.stack, reads.writes) = (Some(stack.clone()), Some(stack));
             return Some(reads.writing(writes));
         }
         // A walked callee that mints no contract still states its reads where its arity is exact.
@@ -1440,6 +1453,57 @@ impl SourceMachineContext {
         }
         for address in ambiguous {
             self.source_string_literals.remove(&address);
+        }
+    }
+
+    /// Fold the format each call to a cited printf `...` passes in its own block, one forward pass
+    /// per block, and keep what a read-only format consumes (D409). O(operations + calls log calls).
+    pub(crate) fn bind_format_tails(&mut self, blocks: &[R2ILBlock], immutable: &[u64]) {
+        let mut tails = BTreeMap::new();
+        for block in blocks {
+            let mut origins = BlockOrigins::default();
+            for (at, op) in block.ops.iter().enumerate() {
+                let tail = (op.is_call())
+                    .then(|| block.instruction_of(at))
+                    .flatten()
+                    .and_then(|instruction| Some((instruction, self.format_register(instruction)?)))
+                    .and_then(|(instruction, register)| {
+                        let varnode = r2il::Varnode::register(register.offset, register.size);
+                        let at = origins.of(&varnode)?.constant()?;
+                        immutable.binary_search(&at).ok()?;
+                        let text = self.source_string_literal(at)?;
+                        let consumed = r2abi::format::printf_consumed_arguments(text).ok()?;
+                        Some((instruction, consumed))
+                    });
+                tails.extend(tail);
+                origins.step(op);
+            }
+        }
+        self.format_tails = tails;
+    }
+
+    /// What the read-only format the call at `instruction` passes consumes, where its block folds it.
+    pub(crate) fn format_tail(
+        &self,
+        instruction: u64,
+    ) -> Option<&r2abi::format::PrintfConsumedArguments> {
+        self.format_tails.get(&instruction)
+    }
+
+    /// The register a call at `instruction` passes a cited printf `...`'s format in: the
+    /// declaration's format of a variadic site (a body-proven one is no citation). O(log sites).
+    fn format_register(&self, instruction: u64) -> Option<CanonicalStorageId> {
+        let interface = self.call_site_interface(self.raw_call_site_at(instruction)?)?;
+        let index = match interface.format_parameter_rule()? {
+            r2source::SourceFormatParameterRule::Radare2FormatString { parameter_index } => {
+                parameter_index
+            }
+            r2source::SourceFormatParameterRule::BodyProvenFormatString { .. } => return None,
+        };
+        let argument = interface.arguments().get(usize::try_from(index).ok()?)?;
+        match (interface.is_variadic(), argument.location()) {
+            (true, SourceParameterLocation::Register(storage)) => Some(storage),
+            _ => None,
         }
     }
 
@@ -1608,6 +1672,62 @@ pub fn loaded_target_slot(block: &R2ILBlock, op_index: usize) -> Option<Canonica
     BlockOrigins::upto(block, op_index)
         .of(target)?
         .loaded_slot()
+}
+
+/// The stack a variadic call reads from its stack pointer: the fixed parameters and one promoted
+/// pointer-wide slot per `tail` operand (C17 6.5.2.2p7); refusals in adr-call-boundary "D409 as built".
+fn counted_stack(
+    interface: &SourceCallSiteInterface,
+    model: &r2source::ConventionModel,
+    tail: &r2abi::format::PrintfConsumedArguments,
+) -> Option<Vec<(i64, i64)>> {
+    use r2source::convention::SlotClass;
+    let callee = interface.exact_callee_interface()?;
+    let integers = model.arguments(SlotClass::Integer);
+    let wide = integers.first().is_some_and(|first| first.size == 8);
+    let unclassed = tail.long_double || tail.gapped || tail.count > 64;
+    if !wide || model.forms.variadic_on_stack || unclassed {
+        return None;
+    }
+    let floats = model.arguments(SlotClass::Float);
+    let fixed = (callee.parameters().iter()).map(|parameter| match parameter.location() {
+        SourceParameterLocation::Register(storage)
+            if floats
+                .iter()
+                .any(|float| crate::semantic::register_storages_overlap(*float, storage)) =>
+        {
+            Some(crate::place::ParamClass::Float(
+                u8::try_from(storage.size).ok()?,
+            ))
+        }
+        SourceParameterLocation::Register(storage) => Some(crate::place::ParamClass::Integer(
+            u8::try_from(storage.size).ok()?,
+        )),
+        SourceParameterLocation::Stack { size_bytes, .. } => Some(
+            crate::place::ParamClass::Integer(u8::try_from(size_bytes).ok()?),
+        ),
+    });
+    let operands = (0..tail.count).map(|at| match (tail.floating >> at) & 1 {
+        1 => Some(crate::place::ParamClass::Float(8)),
+        _ => Some(crate::place::ParamClass::Integer(8)),
+    });
+    let classes = fixed.chain(operands).collect::<Option<Vec<_>>>()?;
+    let placement = crate::place::place(model, &classes);
+    let declared = callee
+        .parameters()
+        .iter()
+        .map(|parameter| parameter.location());
+    let placed_as_declared = placement
+        .locations
+        .iter()
+        .copied()
+        .take(callee.parameters().len());
+    if !placement.is_whole() || !placed_as_declared.eq(declared) {
+        return None;
+    }
+    let at_call = (placement.locations.into_iter()).map(|location| callee.at_call_site(location));
+    let at_call = at_call.collect::<Option<Vec<_>>>()?;
+    crate::call_reads::CallReads::of_locations(at_call.into_iter(), Some(model)).stack
 }
 
 #[cfg(test)]

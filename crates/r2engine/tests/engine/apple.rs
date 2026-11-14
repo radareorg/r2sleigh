@@ -120,3 +120,36 @@ fn a_mach_o_variadic_tail_is_read_from_the_stack_and_an_elf_s_from_registers() {
         "{usual}"
     );
 }
+
+/// Apple's convention passes the whole variadic tail on the stack, which the counted placement
+/// refuses (D409): `printf` may write its argument area, so `[sp]` read back stays memory.
+#[test]
+fn a_mach_o_printf_s_stacked_tail_bounds_no_stack_by_its_format() {
+    let code = arm64_with_stub(&[
+        (BASE + 0x50, 0xa9be_7bfd), // stp x29, x30, [sp, #-32]!
+        (BASE + 0x54, 0x5280_00e8), // mov w8, #7
+        (BASE + 0x58, 0xf900_03e8), // str x8, [sp]
+        (BASE + 0x5c, 0x9000_0000), // adrp x0, 0x1000
+        (BASE + 0x60, 0x9102_8000), // add x0, x0, #0xa0
+        (BASE + 0x64, 0x9400_000b), // bl stub
+        (BASE + 0x68, 0xf940_03e0), // ldr x0, [sp]
+        (BASE + 0x6c, 0xa8c2_7bfd), // ldp x29, x30, [sp], #32
+        (BASE + 0x70, 0xd65f_03c0), // ret
+    ]);
+    let program = Literal::of_code(code, &[("varargs", BASE + 0x50, 0x24)])
+        .in_aarch64()
+        .with_data()
+        .importing("printf");
+    let program = (program.mach_o()).with_dylib("printf", "/usr/lib/libSystem.B.dylib");
+    let mut program = OpenProgram::of(program);
+    program.source_mut().write(TEXT, b"%d\n\0");
+    let text = (program.rendered(BASE + 0x50))
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(
+        text.contains("r2sleigh_load_u64((void*)(uint64_t)(frame + 0U))"),
+        "{text}"
+    );
+}

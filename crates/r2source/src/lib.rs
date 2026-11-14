@@ -358,6 +358,9 @@ pub struct OwnedFunctionImage {
     /// Display data: it tells a renderer what to print where a constant points
     /// at text, and carries no claim about behaviour.
     string_literals: Box<[(u64, String)]>,
+    /// The addresses of `string_literals` whose text and terminator no write reaches for the
+    /// whole run, ascending: semantic evidence, since a call reads such a format as the file holds it.
+    immutable_literals: Box<[u64]>,
     /// Bytes the container states read-only and the loader leaves alone, at each address the
     /// function loads from: semantic evidence, since a load there reads them (ROADMAP P5).
     read_only: Box<[(u64, Vec<u8>)]>,
@@ -492,6 +495,10 @@ impl OwnedFunctionImage {
 
     pub fn string_literals(&self) -> &[(u64, String)] {
         &self.string_literals
+    }
+
+    pub fn immutable_literals(&self) -> &[u64] {
+        &self.immutable_literals
     }
 
     pub fn read_only(&self) -> &[(u64, Vec<u8>)] {
@@ -1215,6 +1222,7 @@ mod tests {
             },
             OwnedFunctionImage {
                 string_literals: Box::new([]),
+                immutable_literals: Box::new([]),
                 read_only: Box::new([]),
                 data_symbols: Box::new([]),
                 data_types: None,
