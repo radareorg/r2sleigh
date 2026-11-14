@@ -229,7 +229,8 @@ impl Halt {
 /// Every row one C library's program reads, and the graph their types are nodes of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryRows {
-    library: CLibrary,
+    /// The C library, and its handle tags read once for every spelling of every table (D391).
+    reading: crate::spelling::Reading,
     graph: TypeGraph,
     prototypes: Vec<Prototype>,
     rows: BTreeMap<LibraryId, BTreeMap<Box<str>, LibraryRow>>,
@@ -302,7 +303,7 @@ impl CLibrary {
 impl Default for LibraryRows {
     fn default() -> Self {
         Self {
-            library: CLibrary::Unknown,
+            reading: crate::spelling::Reading::of(CLibrary::Unknown),
             graph: TypeGraph::default(),
             prototypes: Vec::new(),
             rows: BTreeMap::new(),
@@ -338,11 +339,11 @@ impl LibraryRows {
             table(CxxRuntime, true, CXX_CITED),
         ];
         let mut rows = Self {
-            library,
+            reading: crate::spelling::Reading::of(library),
             ..Self::default()
         };
         for embedded in shared.iter().chain(own) {
-            rows.read(embedded, library);
+            rows.read_text(embedded, embedded.text);
         }
         rows
     }
@@ -355,7 +356,7 @@ impl LibraryRows {
             cited: false,
             text: "",
         };
-        rows.read_text(&embedded, text, CLibrary::Unknown);
+        rows.read_text(&embedded, text);
         rows
     }
 
@@ -384,7 +385,6 @@ impl LibraryRows {
                 (takes.then_some(this), format!("{MANGLING}; {header}"))
             }
         };
-        let library = self.library;
         let object = this.map(|this| (this, Some("this")));
         let explicit = mangled
             .parameters
@@ -393,7 +393,7 @@ impl LibraryRows {
         let parameters = object.into_iter().chain(explicit);
         let parameters = parameters
             .map(|(spelling, called)| {
-                let ty = crate::spelling::read(&spelling, &mut self.graph, library);
+                let ty = crate::spelling::read(&spelling, &mut self.graph, &self.reading);
                 Parameter::new(ty, spelling, called)
             })
             .collect();
@@ -426,26 +426,17 @@ impl LibraryRows {
         })
     }
 
-    fn read(&mut self, embedded: &Embedded, library: CLibrary) {
-        self.read_text(embedded, embedded.text, library);
-    }
-
-    fn read_text(&mut self, embedded: &Embedded, text: &str, library: CLibrary) {
+    fn read_text(&mut self, embedded: &Embedded, text: &str) {
         for (name, declared) in Table::read(text).functions {
-            let row = self.typed(&name, declared, embedded, library);
+            let row = self.typed(&name, declared, embedded);
             (self.rows.entry(embedded.library).or_default()).insert(name.into(), row);
         }
     }
 
     /// One row's spellings, read into this table's graph.
-    fn typed(
-        &mut self,
-        name: &str,
-        declared: Declared,
-        embedded: &Embedded,
-        library: CLibrary,
-    ) -> LibraryRow {
-        let mut read = |spelling: &str| crate::spelling::read(spelling, &mut self.graph, library);
+    fn typed(&mut self, name: &str, declared: Declared, embedded: &Embedded) -> LibraryRow {
+        let reading = &self.reading;
+        let mut read = |spelling: &str| crate::spelling::read(spelling, &mut self.graph, reading);
         let returns = declared.returns.unwrap_or_else(|| "void".to_owned());
         let return_type = read(&returns);
         let mut parameters = Vec::new();
