@@ -5,25 +5,30 @@
 //! question, none of them joining at a merge and none of them following a phi
 //! -- this is the one answer they were all approximating.
 //!
-//! The shape is a worklist: seed from the literals, transfer at each
-//! instruction, and re-queue the readers of anything that moved. What is different is the domain, and that a merge
-//! joins rather than giving up.
-//!
-//! Widening at `W`, the DFS back-edge targets, ends the ascent on any CFG (doc/ssa.md, "Termination").
+//! The solve runs on `fixpoint::wto_sparse`, with branch environments in the ascent (doc/ssa.md,
+//! "Termination" and "Branch assumptions").
 //!
 //! Top wider than sixty-four bits is unknown, never read as a value below `2^64`.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::BTreeMap;
 
-use crate::graph::{GraphInst, SsaGraph};
+use crate::dense::{Csr, DenseId};
+use crate::fixpoint::{Step, Wto};
+use crate::graph::{BlockId, GraphInst, SsaGraph};
 use crate::op::SSAOp;
 use crate::strided::StridedInterval;
-use crate::{InstId, InstPayload, ValueId};
+use crate::{InstPayload, ValueId};
 
 /// What every value in one function can be.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ValueRanges {
     by_value: Vec<StridedInterval>,
+    /// Each value's copy class, which a guard environment is keyed by.
+    class: Vec<ValueId>,
+    /// Each block's guard environment, by [`BlockId`]; `u32::MAX` where no branch proves anything.
+    env_of: Vec<u32>,
+    /// What each environment holds once solved; `None` for one the entry never reached.
+    envs: Vec<Option<Held>>,
 }
 
 impl ValueRanges {
@@ -59,6 +64,24 @@ impl ValueRanges {
     /// is the element size the aggregate recovery is otherwise guessing.
     pub fn stride(&self, value: ValueId) -> Option<u64> {
         self.get(value).filter(|range| !range.is_top())?.stride()
+    }
+
+    /// What this value can be where it is read in `block`: its range, under what the branches
+    /// dominating `block` prove of its copy class. `O(log k)` in the classes they prove things of.
+    pub fn range_at(&self, value: ValueId, block: BlockId) -> Option<StridedInterval> {
+        let range = self.get(value)?;
+        let held = (self.env_of.get(block.0 as usize))
+            .and_then(|env| self.envs.get(*env as usize)?.as_ref());
+        Some(meet_held(range, held, class_of(&self.class, value)))
+    }
+
+    /// The largest value this can take where it is read in `block`, where that is bounded.
+    pub fn upper_bound_at(&self, value: ValueId, block: BlockId) -> Option<u64> {
+        let range = self.range_at(value, block)?;
+        match range.is_top() || range.is_bottom() {
+            true => None,
+            false => range.bounds().map(|(_, high)| high),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -180,49 +203,252 @@ fn literal_or_top(graph: &SsaGraph, value: ValueId) -> StridedInterval {
     }
 }
 
-/// What is the same bits as what: the copy classes, and the loads that reread an unwritten slot.
-#[derive(Clone, Copy)]
-struct SameBits<'a> {
-    class: &'a [ValueId],
-    reloads: &'a crate::dense::IdMap<ValueId, ValueId>,
+/// A head phi's widening moves: off bottom, each bound once, the stride through at most 64 divisors.
+const WIDENING_MOVES: usize = 67;
+
+/// A head phi's refinement moves: each bound widening sent to the extreme, once.
+const REFINING_MOVES: usize = 2;
+
+/// One cell of the solve: an instruction's output (`InstId` below the instruction count), or a
+/// guard environment past it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct Cell(u32);
+
+impl DenseId for Cell {
+    fn index(self) -> usize {
+        self.0 as usize
+    }
+    fn from_index(index: usize) -> Self {
+        Self(u32::try_from(index).expect("fewer than 2^32 cells"))
+    }
 }
 
-/// The solution, and how many transfers the ascent spent reaching it.
+/// No environment: no branch on the way proves anything.
+const NO_ENV: u32 = u32::MAX;
+
+/// What one environment holds: a narrowed range per copy class, sorted by class; a class absent is
+/// not narrowed. A sparse row of the environments' dense index (doc/ssa.md, "Branch assumptions").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct Held(Vec<(ValueId, StridedInterval)>);
+
+impl Held {
+    fn get(&self, class: ValueId) -> Option<&StridedInterval> {
+        let at = self
+            .0
+            .binary_search_by_key(&class, |(class, _)| *class)
+            .ok()?;
+        Some(&self.0[at].1)
+    }
+
+    fn insert(&mut self, class: ValueId, range: StridedInterval) {
+        match self.0.binary_search_by_key(&class, |(class, _)| *class) {
+            Ok(at) => self.0[at].1 = range,
+            Err(at) => self.0.insert(at, (class, range)),
+        }
+    }
+
+    /// What both hold of a class each holds; a class one leaves unnarrowed is unnarrowed.
+    fn join(&self, other: &Self) -> Self {
+        let both = self.0.iter().filter_map(|(class, range)| {
+            let theirs = other.get(*class)?;
+            (theirs.width_bits() == range.width_bits()).then(|| (*class, range.join(theirs)))
+        });
+        Self(both.collect())
+    }
+
+    /// What either holds, met where both do.
+    fn meet(&self, other: &Self) -> Self {
+        let mut met = self.clone();
+        for (class, theirs) in &other.0 {
+            let range = match met.get(*class) {
+                Some(ours) if ours.width_bits() == theirs.width_bits() => ours.meet(theirs),
+                Some(ours) => *ours,
+                None => *theirs,
+            };
+            met.insert(*class, range);
+        }
+        met
+    }
+}
+
+/// A range under what an environment holds of its class.
+fn meet_held(range: StridedInterval, held: Option<&Held>, class: ValueId) -> StridedInterval {
+    match held.and_then(|held| held.get(class)) {
+        Some(narrowed) if narrowed.width_bits() == range.width_bits() => range.meet(narrowed),
+        _ => range,
+    }
+}
+
+/// One guard environment: what holds at a block's start, or along one edge into a merge.
+#[derive(Debug, Clone)]
+struct Env {
+    parent: u32,
+    /// The block its cell is evaluated at the start of.
+    block: BlockId,
+    tests: Vec<(crate::semantic::CompareProvenance, bool)>,
+}
+
+/// The guard environments and where they hold.
+struct Guards {
+    envs: Vec<Env>,
+    /// Each block's environment, by [`BlockId`].
+    env_of: Vec<u32>,
+    /// Each tested edge into a block with phis, `(to, from)` ascending, with its environment.
+    edges: Vec<((BlockId, BlockId), u32)>,
+}
+
+impl Guards {
+    /// Down the dominator tree, a new environment only where a dominating edge tests something:
+    /// `O(B + A log A)` for `A` assumptions.
+    fn of(
+        graph: &SsaGraph,
+        function: crate::semantic::BuildFacts<'_>,
+        predicates: &crate::semantic::PredicateFacts,
+    ) -> Self {
+        let mut guards = Self {
+            envs: Vec::new(),
+            env_of: vec![NO_ENV; graph.blocks.len()],
+            edges: Vec::new(),
+        };
+        if predicates.block_assumptions.is_empty() {
+            return guards;
+        }
+        let block = |addr: u64| graph.block_by_addr.get(&addr).copied();
+        let tests_from = |addr: u64, from: u64| {
+            (predicates
+                .block_assumptions
+                .get(&addr)
+                .into_iter()
+                .flatten())
+            .filter(|assumption| assumption.predecessor == from)
+            .filter_map(|assumption| {
+                Some((tested(predicates, assumption)?.clone(), assumption.truth))
+            })
+            .collect::<Vec<_>>()
+        };
+        let domtree = function.domtree();
+        let mut ready = vec![domtree.entry];
+        while let Some(addr) = ready.pop() {
+            ready.extend(domtree.children(addr).iter().copied());
+            let Some(at) = block(addr) else {
+                continue;
+            };
+            let inherited = (domtree.idom(addr).and_then(block))
+                .map_or(NO_ENV, |idom| guards.env_of[idom.0 as usize]);
+            let dominating = (graph.blocks[at.0 as usize].predecessors.iter())
+                .filter_map(|from| Some(graph.blocks.get(from.0 as usize)?.addr))
+                .find(|from| edge_dominates((function.cfg(), function.domtree()), *from, addr));
+            let tests = dominating
+                .map(|from| tests_from(addr, from))
+                .unwrap_or_default();
+            guards.env_of[at.0 as usize] = match tests.is_empty() {
+                true => inherited,
+                false => guards.push(inherited, at, tests),
+            };
+        }
+        for target in graph.blocks.iter() {
+            let has_phis = (target.insts.iter())
+                .filter_map(|inst| graph.inst(*inst))
+                .any(|inst| matches!(inst.payload, InstPayload::Phi { .. }));
+            if !has_phis || !predicates.block_assumptions.contains_key(&target.addr) {
+                continue;
+            }
+            let mut sources = target.predecessors.clone();
+            sources.sort_unstable();
+            sources.dedup();
+            for from in sources {
+                let Some(from_addr) = graph.blocks.get(from.0 as usize).map(|b| b.addr) else {
+                    continue;
+                };
+                let tests = tests_from(target.addr, from_addr);
+                if tests.is_empty() {
+                    continue;
+                }
+                let dominates =
+                    edge_dominates((function.cfg(), function.domtree()), from_addr, target.addr);
+                let env = match dominates {
+                    true => guards.env_of[target.id.0 as usize],
+                    false => {
+                        let parent = guards.env_of[from.0 as usize];
+                        guards.push(parent, target.id, tests)
+                    }
+                };
+                guards.edges.push(((target.id, from), env));
+            }
+        }
+        guards.edges.sort_unstable();
+        guards
+    }
+
+    fn push(
+        &mut self,
+        parent: u32,
+        block: BlockId,
+        tests: Vec<(crate::semantic::CompareProvenance, bool)>,
+    ) -> u32 {
+        self.envs.push(Env {
+            parent,
+            block,
+            tests,
+        });
+        (self.envs.len() - 1) as u32
+    }
+
+    /// What holds along `from -> to`: the edge's own environment, or `from`'s.
+    fn along(&self, from: BlockId, to: BlockId) -> u32 {
+        match self
+            .edges
+            .binary_search_by_key(&(to, from), |(edge, _)| *edge)
+        {
+            Ok(at) => self.edges[at].1,
+            Err(_) => self.env_of.get(from.0 as usize).copied().unwrap_or(NO_ENV),
+        }
+    }
+}
+
+/// The values a guard environment's own tests read, and the copy classes they narrow.
+fn guard_reads(graph: &SsaGraph, solved: Solved<'_>, env: &Env) -> (Vec<ValueId>, Vec<ValueId>) {
+    let (mut reads, mut narrows) = (Vec::new(), Vec::new());
+    for (compare, _) in &env.tests {
+        for side in [compare.lhs, compare.rhs] {
+            reads.push(side);
+            if wide(graph, side) {
+                continue;
+            }
+            narrows.push(solved.class_of(side));
+            if let Some(whole) = lane_source(graph, side) {
+                reads.push(whole);
+                narrows.push(solved.class_of(whole));
+            }
+            narrows.extend(
+                solved
+                    .zero_extensions(side)
+                    .into_iter()
+                    .map(|w| solved.class_of(w)),
+            );
+        }
+    }
+    (reads, narrows)
+}
+
+/// The solution, and what the solve spent.
 fn solve_counted(
     graph: &SsaGraph,
     function: crate::semantic::BuildFacts<'_>,
     prep: Option<&crate::DecompilePrepFacts>,
     predicates: &crate::semantic::PredicateFacts,
-) -> (ValueRanges, usize) {
-    let (mut by_value, transfers) = ascend(graph, &widening_set(function));
-    // What a branch proves about a value it compares holds of every value
-    // with the same bits: the narrowing is keyed by copy class, so a copy or
-    // a lane read of the compared value read further on is narrowed too.
+) -> (ValueRanges, crate::fixpoint::Meter) {
+    // Environments are keyed by copy class: what a branch proves of a value it proves of its copies.
     let mut class = crate::view::class_values(graph, prep.map(|facts| &facts.views));
     let reloads = crate::reload::reloads(graph, prep);
     crate::reload::unite_classes(&mut class, &reloads);
-    let same = SameBits {
-        class: &class,
-        reloads: &reloads,
-    };
-    narrow_where_defined(graph, function, predicates, same, &mut by_value);
-    (ValueRanges { by_value }, transfers)
-}
+    let extended = zero_extended(graph, &class);
+    let guards = Guards::of(graph, function, predicates);
+    let inst_count = graph.insts.len();
+    let pi = |env: u32| Cell((inst_count + env as usize) as u32);
+    let cell_count = inst_count + guards.envs.len();
 
-/// `W`: every block a depth-first walk from the entry reaches by a back edge, in `O(V + E)`.
-fn widening_set(function: crate::semantic::BuildFacts<'_>) -> BTreeSet<u64> {
-    function.cfg().collect_back_edges().into_keys().collect()
-}
-
-/// The ascending half: raise every value until nothing moves.
-fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> (Vec<StridedInterval>, usize) {
-    // A literal is what it says. A value some instruction defines starts at
-    // bottom, since the transfer raises it to what the instruction can
-    // produce. A value nothing in the function defines -- an argument, a
-    // live-in register -- is never raised by anything, so bottom would be a
-    // claim that it has no values at all; it starts at top, which is the
-    // truth about it.
-    let mut by_value = graph
+    let mut state = graph
         .values
         .iter()
         .map(|value| {
@@ -234,69 +460,216 @@ fn ascend(graph: &SsaGraph, widen_at: &BTreeSet<u64>) -> (Vec<StridedInterval>, 
             }
         })
         .collect::<Vec<_>>();
+    let mut held: Vec<Option<Held>> = vec![None; guards.envs.len()];
+    let solved_classes = Solved {
+        class: &class,
+        state: &state,
+        extended: &extended,
+    };
 
-    let widen_insts = graph
-        .insts
-        .iter()
-        .filter(|inst| matches!(inst.payload, InstPayload::Phi { .. }))
-        .filter(|inst| block_addr(graph, inst).is_some_and(|addr| widen_at.contains(&addr)))
-        .map(|inst| inst.id)
-        .collect::<crate::dense::IdSet<_>>();
+    // Each environment's cell first in its block, then the block's instructions.
+    let mut cells = Csr::<BlockId, Cell>::with_capacity(graph.blocks.len(), cell_count);
+    let mut by_block = vec![Vec::new(); graph.blocks.len()];
+    for (env, Env { block, .. }) in guards.envs.iter().enumerate() {
+        by_block[block.0 as usize].push(pi(env as u32));
+    }
+    for (block, row) in graph.blocks.iter().zip(&mut by_block) {
+        let defining = block
+            .insts
+            .iter()
+            .filter(|inst| graph.inst(**inst).is_some_and(|inst| inst.output.is_some()));
+        row.extend(defining.map(|inst| Cell(inst.0)));
+        cells.push_row(std::mem::take(row));
+    }
 
-    let mut queued = graph
-        .insts
-        .iter()
-        .map(|inst| inst.id)
-        .collect::<crate::dense::IdSet<_>>();
-    let mut ready = queued.iter().collect::<VecDeque<_>>();
-    let mut transfers = 0usize;
-    while let Some(inst_id) = ready.pop_front() {
-        queued.remove(inst_id);
-        let Some(inst) = graph.inst(inst_id) else {
-            continue;
-        };
+    // Operands, a select's comparison, a reload's first load, an environment's tests and parent:
+    // every source dominates its reader (doc/adr-fixpoint.md, "Weak topological order").
+    let mut pairs = Vec::new();
+    let defined = |value: ValueId| graph.def_inst(value).map(|inst| Cell(inst.0));
+    let mut narrows_of = Vec::with_capacity(guards.envs.len());
+    for (at, env) in guards.envs.iter().enumerate() {
+        let (reads, mut narrows) = guard_reads(graph, solved_classes, env);
+        pairs.extend(
+            reads
+                .into_iter()
+                .filter_map(defined)
+                .map(|from| (from, pi(at as u32))),
+        );
+        if env.parent != NO_ENV {
+            pairs.push((pi(env.parent), pi(at as u32)));
+            narrows.extend(
+                narrows_of
+                    .get(env.parent as usize)
+                    .into_iter()
+                    .flat_map(|n: &Vec<ValueId>| n.iter().copied()),
+            );
+        }
+        narrows.sort_unstable();
+        narrows.dedup();
+        narrows_of.push(narrows);
+    }
+    let narrowed = |env: u32, value: ValueId| {
+        (narrows_of.get(env as usize)).is_some_and(|narrows: &Vec<ValueId>| {
+            narrows.binary_search(&class_of(&class, value)).is_ok()
+        })
+    };
+    for inst in graph.insts.iter() {
         let Some(output) = inst.output else {
             continue;
         };
-        let Some(slot) = by_value.get(output.0 as usize).copied() else {
-            continue;
+        let reader = Cell(inst.id.0);
+        let inputs = graph.inputs(inst.id);
+        let tested = match &inst.payload {
+            InstPayload::Op(SSAOp::Select(_)) => inputs
+                .first()
+                .and_then(|condition| comparison_of(graph, *condition)),
+            _ => None,
         };
-        transfers += 1;
-        let computed = transfer(graph, inst, &|value: ValueId| {
-            by_value
-                .get(value.0 as usize)
-                .copied()
-                .unwrap_or_else(|| StridedInterval::top(64))
-        });
-        let next = match widen_insts.contains(inst_id) {
-            true => slot.widen(&slot.join(&computed)),
-            false => slot.join(&computed),
-        };
-        if next == slot {
-            continue;
+        let compared = tested.iter().flat_map(|compare| [compare.lhs, compare.rhs]);
+        let first = reloads.get(output).copied();
+        for value in inputs.iter().copied().chain(compared).chain(first) {
+            pairs.extend(defined(value).map(|from| (from, reader)));
         }
-        by_value[output.0 as usize] = next;
-        for reader in readers(graph, output) {
-            if queued.insert(reader) {
-                ready.push_back(reader);
+        match &inst.payload {
+            InstPayload::Phi { predecessors } => {
+                for (value, from) in inputs.iter().zip(predecessors) {
+                    let env = guards.along(*from, inst.block);
+                    if env != NO_ENV && narrowed(env, *value) {
+                        pairs.push((pi(env), reader));
+                    }
+                }
+            }
+            InstPayload::Op(_) => {
+                let env = guards.env_of[inst.block.0 as usize];
+                let compared = tested.iter().flat_map(|compare| [compare.lhs, compare.rhs]);
+                let read = inputs.iter().copied().chain(compared).chain(first);
+                if env != NO_ENV && read.into_iter().any(|value| narrowed(env, value)) {
+                    pairs.push((pi(env), reader));
+                }
             }
         }
     }
+    let readers = Csr::<Cell, Cell>::from_pairs(cell_count, pairs);
+    let successors = Csr::<BlockId, BlockId>::from_pairs(
+        graph.blocks.len(),
+        graph
+            .blocks
+            .iter()
+            .flat_map(|block| block.successors.iter().map(move |to| (block.id, *to))),
+    );
+    let wto = Wto::of(&successors, graph.entry, |block| {
+        graph.blocks[block.0 as usize].addr
+    });
 
-    (by_value, transfers)
-}
-
-/// Every instruction whose transfer reads this value: its users, and a select narrowed by a comparison it feeds.
-fn readers(graph: &SsaGraph, value: ValueId) -> impl Iterator<Item = InstId> + '_ {
-    graph.use_sites(value).iter().flat_map(move |site| {
-        let tested = graph
-            .inst(site.inst)
-            .filter(|inst| matches!(&inst.payload, InstPayload::Op(op) if comparison_kind(op).is_some()))
-            .and_then(|inst| inst.output)
-            .map(|condition| graph.use_sites(condition))
-            .unwrap_or_default();
-        std::iter::once(site.inst).chain(tested.iter().map(|site| site.inst))
-    })
+    let solve = crate::fixpoint::wto_sparse(
+        "value ranges",
+        (WIDENING_MOVES, REFINING_MOVES),
+        &wto,
+        &cells,
+        &readers,
+        |cell, step| {
+            let solved = Solved {
+                class: &class,
+                state: &state,
+                extended: &extended,
+            };
+            if cell.index() >= inst_count {
+                let at = cell.index() - inst_count;
+                let env = &guards.envs[at];
+                let parent = match env.parent {
+                    NO_ENV => Some(Held::default()),
+                    parent => held[parent as usize].clone(),
+                };
+                let Some(mut now) = parent else {
+                    return false;
+                };
+                for (compare, truth) in &env.tests {
+                    assume(&mut now, graph, solved, compare, *truth);
+                }
+                let next = match (&held[at], step) {
+                    (None, _) => now,
+                    (Some(was), Step::Ascend { .. }) => was.join(&now),
+                    (Some(was), Step::Descend { .. }) => was.meet(&now),
+                };
+                let moved = held[at].as_ref() != Some(&next);
+                held[at] = Some(next);
+                return moved;
+            }
+            let Some(inst) = graph.inst(crate::InstId(cell.0)) else {
+                return false;
+            };
+            let Some(output) = inst.output else {
+                return false;
+            };
+            let Some(slot) = state.get(output.0 as usize).copied() else {
+                return false;
+            };
+            let read_under = |env: u32, value: ValueId| {
+                let range = (state.get(value.0 as usize).copied())
+                    .unwrap_or_else(|| StridedInterval::top(64));
+                let held = (env != NO_ENV)
+                    .then(|| held[env as usize].as_ref())
+                    .flatten();
+                meet_held(range, held, class_of(&class, value))
+            };
+            let env = guards.env_of[inst.block.0 as usize];
+            let read = |value: ValueId| read_under(env, value);
+            let phi = matches!(inst.payload, InstPayload::Phi { .. });
+            let mut computed = match &inst.payload {
+                // A merge is the join of what reaches it, each input under what its own edge proves.
+                InstPayload::Phi { predecessors } => {
+                    let width = slot.width_bits();
+                    (graph.inputs(inst.id).iter().zip(predecessors))
+                        .map(|(value, from)| {
+                            read_at(read_under(guards.along(*from, inst.block), *value), width)
+                        })
+                        .reduce(|left, right| left.join(&right))
+                        .unwrap_or_else(|| StridedInterval::bottom(width))
+                }
+                InstPayload::Op(_) => transfer(graph, inst, &read),
+            };
+            // A reload of an unwritten slot is the earlier load's bits.
+            if let Some(first) = reloads.get(output) {
+                let reread = read(*first);
+                if reread.width_bits() == computed.width_bits() {
+                    computed = computed.meet(&reread);
+                }
+            }
+            let next = match step {
+                Step::Ascend { head: true } if phi => slot.widen(&slot.join(&computed)),
+                Step::Ascend { .. } => slot.join(&computed),
+                Step::Descend { head: true } if phi => slot.refine(&slot.meet(&computed)),
+                Step::Descend { .. } => slot.meet(&computed),
+            };
+            if next == slot {
+                return false;
+            }
+            state[output.0 as usize] = next;
+            true
+        },
+    );
+    let meter = match solve {
+        Ok(meter) => meter,
+        // A solve that broke its bound states nothing: every value is unknown.
+        Err(_) => {
+            let top =
+                (graph.values.iter()).map(|value| StridedInterval::top(width_of(value.var.size)));
+            let ranges = ValueRanges {
+                by_value: top.collect(),
+                class,
+                env_of: Vec::new(),
+                envs: Vec::new(),
+            };
+            return (ranges, crate::fixpoint::Meter::default());
+        }
+    };
+    let ranges = ValueRanges {
+        by_value: state,
+        class,
+        env_of: guards.env_of,
+        envs: held,
+    };
+    (ranges, meter)
 }
 
 /// Whether a value is wider than the domain describes.
@@ -502,63 +875,6 @@ const fn mask_of(width_bits: u32) -> u64 {
     }
 }
 
-/// What each block's branches prove about the values they compare.
-///
-/// Walked down the dominator tree so a block starts from everything its
-/// dominators proved and adds its own, which is the same set a walk up the
-/// chain from each instruction would gather, gathered once.
-///
-/// An assumption holds at `B` only where its edge dominates `B` (doc/ssa.md, "Branch assumptions").
-#[cfg_attr(
-    dylint_lib = "r2sleigh_lints",
-    allow(
-        entity_keyed_map,
-        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
-    )
-)]
-fn assumptions_by_block(
-    function: crate::semantic::BuildFacts<'_>,
-    graph: &SsaGraph,
-    predicates: &crate::semantic::PredicateFacts,
-    solved: Solved<'_>,
-) -> BTreeMap<u64, BTreeMap<ValueId, StridedInterval>> {
-    if predicates.block_assumptions.is_empty() {
-        return BTreeMap::new();
-    }
-    let domtree = function.domtree();
-    let mut by_block = BTreeMap::<u64, BTreeMap<ValueId, StridedInterval>>::new();
-    let mut ready = vec![domtree.entry];
-    while let Some(addr) = ready.pop() {
-        let mut held = domtree
-            .idom(addr)
-            .and_then(|idom| by_block.get(&idom))
-            .cloned()
-            .unwrap_or_default();
-        for assumption in predicates
-            .block_assumptions
-            .get(&addr)
-            .into_iter()
-            .flatten()
-        {
-            if !edge_dominates(
-                (function.cfg(), function.domtree()),
-                assumption.predecessor,
-                addr,
-            ) {
-                continue;
-            }
-            if let Some(compare) = tested(predicates, assumption) {
-                assume(&mut held, graph, solved, compare, assumption.truth);
-            }
-        }
-        if !held.is_empty() {
-            by_block.insert(addr, held);
-        }
-        ready.extend(domtree.children(addr).iter().copied());
-    }
-    by_block
-}
-
 /// The comparison an edge's branch tests, where its two ways out differ.
 fn tested<'a>(
     predicates: &'a crate::semantic::PredicateFacts,
@@ -572,108 +888,6 @@ fn tested<'a>(
                 .or(fact.evaluated_comparison.as_ref())
         })
         .flatten()
-}
-
-/// What holds on the edge from the block at `from`: what that block assumes, and what the edge's
-/// own branch tests among `tests`; `None` where neither states anything.
-#[cfg_attr(
-    dylint_lib = "r2sleigh_lints",
-    allow(
-        entity_keyed_map,
-        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
-    )
-)]
-fn edge_held<'a>(
-    graph: &SsaGraph,
-    predicates: &crate::semantic::PredicateFacts,
-    assumed: &'a BTreeMap<u64, BTreeMap<ValueId, StridedInterval>>,
-    solved: Solved<'_>,
-    (from, tests): (u64, &[crate::semantic::BlockAssumption]),
-) -> Option<std::borrow::Cow<'a, BTreeMap<ValueId, StridedInterval>>> {
-    use std::borrow::Cow;
-    let mut held = assumed.get(&from).map(Cow::Borrowed);
-    let own = tests.iter().filter(|test| test.predecessor == from);
-    for (test, compare) in own.filter_map(|test| Some((test, tested(predicates, test)?))) {
-        let held = held.get_or_insert_with(Cow::default).to_mut();
-        assume(held, graph, solved, compare, test.truth);
-    }
-    held
-}
-
-/// Each merge re-read once, every input under what its own edge proves; the merges that narrow, with
-/// their ranges (doc/ssa.md, "Branch assumptions"). `O(phi inputs)` and one environment per tested edge.
-#[cfg_attr(
-    dylint_lib = "r2sleigh_lints",
-    allow(
-        entity_keyed_map,
-        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
-    )
-)]
-fn narrowed_merges(
-    graph: &SsaGraph,
-    predicates: &crate::semantic::PredicateFacts,
-    assumed: &BTreeMap<u64, BTreeMap<ValueId, StridedInterval>>,
-    solved: Solved<'_>,
-) -> Vec<(ValueId, StridedInterval)> {
-    let mut narrowed = Vec::new();
-    if predicates.block_assumptions.is_empty() {
-        return narrowed;
-    }
-    let address = |block: crate::graph::BlockId| graph.blocks.get(block.0 as usize).map(|b| b.addr);
-    for block in &graph.blocks {
-        let phis = (block.insts.iter())
-            .filter_map(|inst| graph.inst(*inst))
-            .filter(|inst| matches!(inst.payload, InstPayload::Phi { .. }))
-            .collect::<Vec<_>>();
-        let tests = predicates.block_assumptions.get(&block.addr);
-        if phis.is_empty() {
-            continue;
-        }
-        let mut edges = (block.predecessors.iter())
-            .filter_map(|source| {
-                let edge = (address(*source)?, tests.map_or(&[][..], Vec::as_slice));
-                Some((
-                    *source,
-                    edge_held(graph, predicates, assumed, solved, edge)?,
-                ))
-            })
-            .collect::<Vec<_>>();
-        if edges.is_empty() {
-            continue;
-        }
-        edges.sort_unstable_by_key(|(source, _)| *source);
-        edges.dedup_by_key(|(source, _)| *source);
-        for phi in phis {
-            let (Some(output), InstPayload::Phi { predecessors }) = (phi.output, &phi.payload)
-            else {
-                continue;
-            };
-            let Some(was) = solved.state.get(output.0 as usize).copied() else {
-                continue;
-            };
-            let inputs = graph.inputs(phi.id);
-            if inputs.is_empty() || inputs.len() != predecessors.len() {
-                continue;
-            }
-            let arriving = (inputs.iter().zip(predecessors)).map(|(input, source)| {
-                let range = (solved.state.get(input.0 as usize).copied())
-                    .unwrap_or_else(|| StridedInterval::top(was.width_bits()));
-                let held = (edges
-                    .binary_search_by_key(source, |(source, _)| *source)
-                    .ok())
-                .and_then(|at| edges[at].1.get(&solved.class_of(*input)));
-                held.map_or(range, |held| range.meet(held))
-            });
-            let Some(joined) = arriving.reduce(|joined, range| joined.join(&range)) else {
-                continue;
-            };
-            let now = was.meet(&joined);
-            if now != was {
-                narrowed.push((output, now));
-            }
-        }
-    }
-    narrowed
 }
 
 /// Whether every arrival at `block` first takes `predecessor -> block`, so what that edge tests holds there (doc/ssa.md, "Branch assumptions").
@@ -762,15 +976,8 @@ fn class_of(class: &[ValueId], value: ValueId) -> ValueId {
 /// Narrow what a block holds by one comparison, taken the way `truth` says.
 ///
 /// `held` is keyed by copy class.
-#[cfg_attr(
-    dylint_lib = "r2sleigh_lints",
-    allow(
-        entity_keyed_map,
-        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
-    )
-)]
 fn assume(
-    held: &mut BTreeMap<ValueId, StridedInterval>,
+    held: &mut Held,
     graph: &SsaGraph,
     solved: Solved<'_>,
     compare: &crate::semantic::CompareProvenance,
@@ -786,19 +993,17 @@ fn assume(
             // `cmp $0xe, %ax` tests the low lane of a value that fits the lane: the value is the lane.
             if let Some(whole) = fitting_source(graph, solved, side) {
                 let width = (graph.value(whole)).map_or(64, |value| width_of(value.var.size));
-                let was = (held.get(&solved.class_of(whole)).copied())
+                let was = (held.get(solved.class_of(whole)).copied())
                     .or_else(|| solved.state.get(whole.0 as usize).copied())
                     .unwrap_or_else(|| StridedInterval::top(width));
                 held.insert(solved.class_of(whole), was.meet(&read_at(now, width)));
             }
+            // An extension may be written after the guard: a reader meets its own range with this.
             for widened in solved.zero_extensions(side) {
                 let width = graph
                     .value(widened)
                     .map_or(64, |value| width_of(value.var.size));
-                let was = held
-                    .get(&solved.class_of(widened))
-                    .copied()
-                    .or_else(|| solved.state.get(widened.0 as usize).copied())
+                let was = (held.get(solved.class_of(widened)).copied())
                     .unwrap_or_else(|| StridedInterval::top(width));
                 held.insert(solved.class_of(widened), was.meet(&read_at(now, width)));
             }
@@ -806,17 +1011,27 @@ fn assume(
     }
 }
 
-/// The value `lane` is the low bytes of, where the ascent bounds that value inside the lane's width.
+/// The value `lane` is the low bytes of, where the ascent bounds that value inside the lane's
+/// width; a value with no values yet fits, so the environment only grows as the source does.
 fn fitting_source(graph: &SsaGraph, solved: Solved<'_>, lane: ValueId) -> Option<ValueId> {
+    let src = lane_source(graph, lane)?;
+    let width = width_of(graph.value(lane)?.var.size);
+    let range = solved.state.get(src.0 as usize)?;
+    let fits = range.is_bottom()
+        || range
+            .bounds()
+            .is_some_and(|(_, high)| high <= mask_of(width));
+    fits.then_some(src)
+}
+
+/// The value a lane narrower than sixty-four bits is the low bytes of, where the domain describes it.
+fn lane_source(graph: &SsaGraph, lane: ValueId) -> Option<ValueId> {
     let inst = graph.inst(graph.def_inst(lane)?)?;
     let InstPayload::Op(SSAOp::Subpiece { src, offset: 0, .. }) = &inst.payload else {
         return None;
     };
     let width = width_of(graph.value(lane)?.var.size);
-    let (_, high) = (solved.state.get(src.0 as usize))
-        .filter(|range| !range.is_bottom())?
-        .bounds()?;
-    (!wide(graph, *src) && width < 64 && high <= mask_of(width)).then_some(*src)
+    (!wide(graph, *src) && width < 64).then_some(*src)
 }
 
 /// One arm of a select, under what its condition proves on that arm.
@@ -851,22 +1066,15 @@ fn selected_arm(
 ///
 /// `None` where the side has no range yet or where the comparison leaves it
 /// exactly as it was, so the caller inserts only what it has learned.
-#[cfg_attr(
-    dylint_lib = "r2sleigh_lints",
-    allow(
-        entity_keyed_map,
-        reason = "per-block interval environments; P5 rebuilds the value domain as an index over value ids (ROADMAP P5)"
-    )
-)]
 fn narrowed_side(
-    held: &std::collections::BTreeMap<ValueId, StridedInterval>,
+    held: &Held,
     solved: Solved<'_>,
     compare: &crate::semantic::CompareProvenance,
     truth: bool,
     side: ValueId,
 ) -> Option<StridedInterval> {
     let known = |value: ValueId| {
-        held.get(&solved.class_of(value))
+        held.get(solved.class_of(value))
             .copied()
             .or_else(|| solved.state.get(value.0 as usize).copied())
     };
@@ -902,9 +1110,13 @@ fn narrow(
             !mirrored,
         ),
     };
-    let Some(bound) = known(other).filter(|other| !other.is_bottom()) else {
+    let Some(bound) = known(other) else {
         return range;
     };
+    // A side with no values yet admits nothing, so what it bounds only grows as it does.
+    if bound.is_bottom() {
+        return StridedInterval::bottom(range.width_bits());
+    }
     let Some((low, high)) = bound.bounds() else {
         return range;
     };
@@ -963,128 +1175,6 @@ fn comparison_kind<V>(op: &SSAOp<V>) -> Option<crate::semantic::CompareKind> {
     })
 }
 
-/// Where an instruction stands.
-fn block_addr(graph: &SsaGraph, inst: &GraphInst) -> Option<u64> {
-    graph
-        .blocks
-        .get(inst.block.0 as usize)
-        .map(|block| block.addr)
-}
-
-/// The descending half: each instruction re-read under what dominates it.
-///
-/// Widening is what makes the ascending half finish, and what it costs is the
-/// bound: a counter raised one iteration at a time jumps to the extreme of
-/// its width instead, so a loop that plainly runs eight times leaves its
-/// counter describing every value there is. The condition that stops the loop
-/// is the missing fact, and it is a fact about a block rather than about the
-/// whole function -- which is why it is applied here, to the instructions the
-/// block dominates, rather than folded into the ascent.
-///
-/// A value is narrowed where it is *defined*. Every execution that defines it
-/// passes through that block, so what the block assumes holds of it
-/// everywhere, and one range per value stays the whole answer -- no caller
-/// has to say where it is asking from. A use further on under a weaker
-/// assumption still reads a range the value really has.
-///
-/// The carry forward stops at phis. Every cycle in an SSA graph passes
-/// through one, so stopping there leaves a DAG, and a walk over a DAG
-/// finishes without anything having to count its steps. Nothing true is lost:
-/// a merge takes its value from several paths, and what held on one of them
-/// is not a fact about the merge.
-fn narrow_where_defined(
-    graph: &SsaGraph,
-    function: crate::semantic::BuildFacts<'_>,
-    predicates: &crate::semantic::PredicateFacts,
-    same: SameBits<'_>,
-    state: &mut [StridedInterval],
-) {
-    let SameBits { class, reloads } = same;
-    if predicates.block_assumptions.is_empty() {
-        return;
-    }
-    let extended = zero_extended(graph, class);
-    let solved = Solved {
-        class,
-        state: &*state,
-        extended: &extended,
-    };
-    let assumed = assumptions_by_block(function, graph, predicates, solved);
-    let merged = narrowed_merges(graph, predicates, &assumed, solved);
-    if assumed.is_empty() && merged.is_empty() {
-        return;
-    }
-    // Only the instructions something is assumed about start on the list.
-    // One under no assumption recomputes to exactly what the ascent already
-    // gave it, and if an input of it narrows elsewhere the carry forward
-    // brings it back.
-    let mut queued = graph
-        .blocks
-        .iter()
-        .filter(|block| assumed.contains_key(&block.addr))
-        .flat_map(|block| block.insts.iter().copied())
-        .filter(|inst| {
-            graph
-                .inst(*inst)
-                .is_some_and(|inst| !matches!(inst.payload, InstPayload::Phi { .. }))
-        })
-        .collect::<crate::dense::IdSet<_>>();
-    // A merge is read once here and never queued again, so the carry forward still walks a DAG.
-    for (merge, now) in merged {
-        state[merge.0 as usize] = now;
-        let carried = readers(graph, merge).filter(|reader| {
-            (graph.inst(*reader))
-                .is_some_and(|inst| !matches!(inst.payload, InstPayload::Phi { .. }))
-        });
-        carried.for_each(|reader| _ = queued.insert(reader));
-    }
-    let mut ready = queued.iter().collect::<VecDeque<_>>();
-    while let Some(inst_id) = ready.pop_front() {
-        queued.remove(inst_id);
-        let Some(inst) = graph.inst(inst_id) else {
-            continue;
-        };
-        let Some(output) = inst.output else {
-            continue;
-        };
-        let Some(was) = state.get(output.0 as usize).copied() else {
-            continue;
-        };
-        let held = block_addr(graph, inst).and_then(|addr| assumed.get(&addr));
-        let read = |value: ValueId| {
-            let range = state
-                .get(value.0 as usize)
-                .copied()
-                .unwrap_or_else(|| StridedInterval::top(64));
-            match held.and_then(|held| held.get(&class_of(class, value))) {
-                Some(narrowed) => range.meet(narrowed),
-                None => range,
-            }
-        };
-        // A reload of an unwritten slot is the earlier load's bits, under what the block assumes of them.
-        let reread = reloads.get(output).map(|first| read(*first));
-        let mut now = was.meet(&transfer(graph, inst, &read));
-        if let Some(reread) = reread {
-            now = now.meet(&reread);
-        }
-        if now == was {
-            continue;
-        }
-        state[output.0 as usize] = now;
-        for reader in readers(graph, output) {
-            let Some(user) = graph.inst(reader) else {
-                continue;
-            };
-            if matches!(user.payload, InstPayload::Phi { .. }) {
-                continue;
-            }
-            if queued.insert(reader) {
-                ready.push_back(reader);
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1105,17 +1195,20 @@ mod tests {
         (ranges, graph)
     }
 
-    fn solve_counting(blocks: &[SSABlock], cfg: CFG) -> (ValueRanges, SsaGraph, usize) {
+    fn solve_counting(
+        blocks: &[SSABlock],
+        cfg: CFG,
+    ) -> (ValueRanges, SsaGraph, crate::fixpoint::Meter) {
         let function = SSAFunction::from_exact_test_blocks(blocks, cfg);
         let graph = SsaGraph::from_function(&function);
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let (ranges, transfers) = solve_counted(
+        let (ranges, meter) = solve_counted(
             &graph,
             crate::semantic::BuildFacts::bare(&function),
             None,
             &predicates,
         );
-        (ranges, graph, transfers)
+        (ranges, graph, meter)
     }
 
     /// A graph from each block's terminator.
@@ -1488,14 +1581,19 @@ mod tests {
                 (b, BlockTerminator::Branch { target: a }),
             ],
         );
-        let (ranges, graph, transfers) = solve_counting(&blocks, cfg);
-        let size = graph.insts.len()
-            + graph
-                .values
-                .iter()
-                .map(|value| graph.use_sites(value.id).len())
-                .sum::<usize>();
-        assert!(transfers <= 64 * size, "{transfers} transfers over {size}");
+        let (ranges, graph, meter) = solve_counting(&blocks, cfg);
+        // One component of two head cells: at most `2 + 2 * 67 * 2` runs per phase.
+        assert!(meter.head_moves <= WIDENING_MOVES, "{meter:?}");
+        let cells = graph.insts.len() as u64;
+        let runs = 2 + 2 * WIDENING_MOVES as u64 * 2;
+        assert!(
+            meter.evaluations <= 2 * cells * runs,
+            "{meter:?} over {cells} cells"
+        );
+        assert!(
+            meter.evaluations <= 4 * cells,
+            "{meter:?}: two passes per phase settle it"
+        );
         for counter in [&at_a, &at_b] {
             let range = range_of(&ranges, &graph, counter);
             assert!(range.contains(0) && range.contains(7), "{range:?}");
@@ -2001,5 +2099,281 @@ mod tests {
         };
         assert_eq!(fixed(0x1000, &r3), Some(0xffff_ffff));
         assert_eq!(fixed(0x1004, &eax), Some(0));
+    }
+
+    /// Two counter loops meeting at a self-loop `H`; `flipped` swaps the entry branch (renumbering
+    /// every InstId), `cut` drops `H`'s exit (an ancestor-closed block set of the whole).
+    fn two_loops_meeting(flipped: bool, cut: bool) -> Vec<(String, StridedInterval)> {
+        let (entry, l1, x1, l2, x2, head, exit) =
+            (0x1000, 0x1010, 0x1020, 0x1030, 0x1040, 0x1050, 0x1060);
+        let (u, u2, t, m) = (
+            var("u", 1, 4),
+            var("u", 2, 4),
+            var("t", 1, 4),
+            var("m", 1, 4),
+        );
+        let (v, v2, c1, c2) = (
+            var("v", 1, 4),
+            var("v", 2, 4),
+            var("c1", 1, 4),
+            var("c2", 1, 4),
+        );
+        let (w, w2, w3) = (var("w", 1, 4), var("w", 2, 4), var("w", 3, 4));
+        let (p, p2, after) = (var("p", 1, 4), var("p", 2, 4), var("after", 1, 4));
+        let counter = |addr: u64, phi: &SSAVar, stepped: &SSAVar, step: u64| {
+            let mut block = SSABlock::new(addr, 16);
+            block.push_phi(PhiNode {
+                dst: phi.clone(),
+                sources: vec![(entry, constant(0, 4)), (addr, stepped.clone())],
+                canonical_storage: None,
+            });
+            block.push(crate::op::SSAOp::IntAdd {
+                dst: stepped.clone(),
+                a: phi.clone(),
+                b: constant(step, 4),
+            });
+            block
+        };
+        // `c1 = 10 - (u & 1) * 8` settles at `8[2,10]` one round before `c2 = 10 - (v & 5)`, two
+        // copies longer, settles at `[5,10]`: the head reads `[2,10]` whichever it reads first.
+        let mut x1_block = SSABlock::new(x1, 16);
+        x1_block.push(crate::op::SSAOp::IntAnd {
+            dst: t.clone(),
+            a: u.clone(),
+            b: constant(1, 4),
+        });
+        x1_block.push(crate::op::SSAOp::IntMult {
+            dst: m.clone(),
+            a: t,
+            b: constant(8, 4),
+        });
+        x1_block.push(crate::op::SSAOp::IntSub {
+            dst: c1.clone(),
+            a: constant(10, 4),
+            b: m,
+        });
+        let mut x2_block = SSABlock::new(x2, 16);
+        x2_block.push(crate::op::SSAOp::IntAnd {
+            dst: w.clone(),
+            a: v.clone(),
+            b: constant(5, 4),
+        });
+        x2_block.push(crate::op::SSAOp::Copy {
+            dst: w2.clone(),
+            src: w,
+        });
+        x2_block.push(crate::op::SSAOp::Copy {
+            dst: w3.clone(),
+            src: w2,
+        });
+        x2_block.push(crate::op::SSAOp::IntSub {
+            dst: c2.clone(),
+            a: constant(10, 4),
+            b: w3,
+        });
+        let mut head_block = SSABlock::new(head, 16);
+        head_block.push_phi(PhiNode {
+            dst: p.clone(),
+            sources: vec![(x1, c1), (x2, c2), (head, p2.clone())],
+            canonical_storage: None,
+        });
+        head_block.push(crate::op::SSAOp::Copy {
+            dst: p2,
+            src: p.clone(),
+        });
+        let mut exit_block = SSABlock::new(exit, 16);
+        exit_block.push(crate::op::SSAOp::IntAdd {
+            dst: after,
+            a: p,
+            b: constant(1, 4),
+        });
+        let (first, second) = match flipped {
+            true => (l2, l1),
+            false => (l1, l2),
+        };
+        let looping = |addr: u64, out: u64| {
+            let terminator = BlockTerminator::ConditionalBranch {
+                true_target: addr,
+                false_target: out,
+            };
+            (addr, terminator)
+        };
+        let mut shape = vec![
+            (
+                entry,
+                BlockTerminator::ConditionalBranch {
+                    true_target: first,
+                    false_target: second,
+                },
+            ),
+            looping(l1, x1),
+            (x1, BlockTerminator::Branch { target: head }),
+            looping(l2, x2),
+            (x2, BlockTerminator::Branch { target: head }),
+        ];
+        let mut blocks = vec![
+            SSABlock::new(entry, 16),
+            counter(l1, &u, &u2, 16),
+            x1_block,
+            counter(l2, &v, &v2, 1),
+            x2_block,
+            head_block,
+        ];
+        match cut {
+            true => shape.push((head, BlockTerminator::Branch { target: head })),
+            false => {
+                shape.push(looping(head, exit));
+                shape.push((exit, BlockTerminator::Return));
+                blocks.push(exit_block);
+            }
+        }
+        let (ranges, graph) = solve_over(&blocks, cfg_of(entry, &shape));
+        ["u", "t", "m", "c1", "v", "w", "c2", "p"]
+            .iter()
+            .flat_map(|name| [1, 2, 3].map(|version| var(name, version, 4)))
+            .filter_map(|name| {
+                let id = graph.value_id_for_var(&name)?;
+                Some((name.to_string(), ranges.get(id)?))
+            })
+            .collect()
+    }
+
+    /// The ranges are a function of the program: a renumbering of its InstIds, or a cut to an
+    /// ancestor-closed block set, leaves every value's range as it was (doc/adr-fixpoint.md).
+    #[test]
+    fn a_renumbered_function_solves_to_the_same_ranges() {
+        let whole = two_loops_meeting(false, false);
+        assert_eq!(whole.len(), 13, "{whole:?}");
+        assert_eq!(two_loops_meeting(true, false), whole, "renumbered");
+        assert_eq!(two_loops_meeting(false, true), whole, "cut");
+        let (p, at) = (var("p", 1, 4), |ranges: &[(String, StridedInterval)]| {
+            ranges.to_vec()
+        });
+        let p = whole.iter().find(|(name, _)| *name == p.to_string());
+        assert_eq!(
+            p.map(|(_, range)| range.bounds()),
+            Some(Some((2, 10))),
+            "{:?}",
+            at(&whole)
+        );
+        assert_eq!(
+            irreducible(true),
+            irreducible(false),
+            "an irreducible loop's head"
+        );
+    }
+
+    /// `entry -> A | B`, `A <-> B` with `qa = pa + 1`, `qb = pb & 7`; `flipped` swaps the entry
+    /// branch, which a search taking the true edge first follows into the other block.
+    fn irreducible(flipped: bool) -> Vec<Option<StridedInterval>> {
+        let (entry, a, b) = (0x1000, 0x1010, 0x1020);
+        let (pa, qa, pb, qb) = (
+            var("pa", 1, 4),
+            var("qa", 1, 4),
+            var("pb", 1, 4),
+            var("qb", 1, 4),
+        );
+        let mut a_block = SSABlock::new(a, 16);
+        a_block.push_phi(PhiNode {
+            dst: pa.clone(),
+            sources: vec![(entry, constant(0, 4)), (b, qb.clone())],
+            canonical_storage: None,
+        });
+        a_block.push(crate::op::SSAOp::IntAdd {
+            dst: qa.clone(),
+            a: pa.clone(),
+            b: constant(1, 4),
+        });
+        let mut b_block = SSABlock::new(b, 16);
+        b_block.push_phi(PhiNode {
+            dst: pb.clone(),
+            sources: vec![(entry, constant(0, 4)), (a, qa.clone())],
+            canonical_storage: None,
+        });
+        b_block.push(crate::op::SSAOp::IntAnd {
+            dst: qb.clone(),
+            a: pb.clone(),
+            b: constant(7, 4),
+        });
+        let (first, second) = match flipped {
+            true => (b, a),
+            false => (a, b),
+        };
+        let cfg = cfg_of(
+            entry,
+            &[
+                (
+                    entry,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: first,
+                        false_target: second,
+                    },
+                ),
+                (a, BlockTerminator::Branch { target: b }),
+                (b, BlockTerminator::Branch { target: a }),
+            ],
+        );
+        let (ranges, graph) = solve_over(&[SSABlock::new(entry, 16), a_block, b_block], cfg);
+        [pa, qa, pb, qb]
+            .iter()
+            .map(|name| ranges.get(graph.value_id_for_var(name)?))
+            .collect()
+    }
+
+    /// `entry: i = arg & 7`, `H: n = phi(4, 8); if i < n goto B`, `B: x = i`: the bound `n` rises
+    /// after the guard first reads it, and the guard reads it again (8 admits `i = 7`).
+    #[test]
+    fn a_guard_reads_its_bound_again_when_the_bound_rises_in_the_loop() {
+        let (entry, head, body, exit) = (0x1000, 0x1010, 0x1020, 0x1030);
+        let (i, n, n2) = (var("i", 1, 4), var("n", 1, 4), var("n", 2, 4));
+        let (x, below) = (var("x", 1, 4), var("below", 1, 1));
+        let mut entry_block = SSABlock::new(entry, 16);
+        entry_block.push(crate::op::SSAOp::IntAnd {
+            dst: i.clone(),
+            a: var("arg", 0, 4),
+            b: constant(7, 4),
+        });
+        let mut head_block = SSABlock::new(head, 16);
+        head_block.push_phi(PhiNode {
+            dst: n.clone(),
+            sources: vec![(entry, constant(4, 4)), (body, n2.clone())],
+            canonical_storage: None,
+        });
+        head_block.push(crate::op::SSAOp::IntLess {
+            dst: below.clone(),
+            a: i.clone(),
+            b: n,
+        });
+        head_block.push(crate::op::SSAOp::CBranch {
+            target: constant(body, 8),
+            cond: below,
+        });
+        let mut body_block = SSABlock::new(body, 16);
+        body_block.push(crate::op::SSAOp::Copy {
+            dst: x.clone(),
+            src: i,
+        });
+        body_block.push(crate::op::SSAOp::Copy {
+            dst: n2,
+            src: constant(8, 4),
+        });
+        let cfg = cfg_of(
+            entry,
+            &[
+                (entry, BlockTerminator::Branch { target: head }),
+                (
+                    head,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: body,
+                        false_target: exit,
+                    },
+                ),
+                (body, BlockTerminator::Branch { target: head }),
+                (exit, BlockTerminator::Return),
+            ],
+        );
+        let blocks = [entry_block, head_block, body_block, SSABlock::new(exit, 16)];
+        let (ranges, graph) = solve_over(&blocks, cfg);
+        assert_eq!(range_of(&ranges, &graph, &x).bounds(), Some((0, 7)));
     }
 }
