@@ -589,25 +589,15 @@ fn a_staged_table_switch_reads_its_selector() {
 }
 
 /// `shape_variadic`'s last `snprintf` passes two of its eight arguments in the outgoing stack area:
-/// the staged call takes them in order, as integer bits (the xor named before it since rd3-frame3).
+/// the staged call takes them in order, as integer bits (the xor in its operand since D433 bounds
+/// the counted call's reads).
 #[test]
 fn a_staged_call_passes_its_stack_arguments() {
     let pinned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned");
     let staged = on(pinned.join("shapes_gcc_x64_O0"), "pdd @ sym.shape_variadic");
-    assert!(
-        staged
-            .out
-            .contains("rax_45 = (uint64_t)((uint64_t)tmp_401324_8_1 ^ (uint64_t)tmp_40132b_8_1);"),
-        "{}",
-        staged.out
-    );
-    assert!(
-        staged
-            .out
-            .contains("tmp_40133c_8_1, tmp_401335_8_1, rax_45, tmp_401320_8_1, rax_42);"),
-        "{}",
-        staged.out
-    );
+    let xor = "(uint64_t)((uint64_t)tmp_401324_8_1 ^ (uint64_t)tmp_40132b_8_1)";
+    let operands = format!("tmp_40133c_8_1, tmp_401335_8_1, {xor}, tmp_401320_8_1, rax_42);");
+    assert!(staged.out.contains(&operands), "{}", staged.out);
     assert!(!staged.out.contains("CallNotRendered"), "{}", staged.out);
 }
 
