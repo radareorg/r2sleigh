@@ -662,3 +662,27 @@ fn pddj_states_a_member_calls_declared_arity() {
         "{stripped:?}"
     );
 }
+
+/// `cur->next->next` with the second offset in a register: `mov ecx, 8; mov rax, [rax + rcx]`.
+const NEXT_NEXT_BY_REGISTER: &[u8] = &[
+    0x48, 0x8b, 0x47, 0x08, // 1000 mov rax, [rdi + 8]
+    0xb9, 0x08, 0x00, 0x00, 0x00, // 1004 mov ecx, 8
+    0x48, 0x8b, 0x04, 0x08, // 1009 mov rax, [rax + rcx]
+    0xc3, // 100d ret
+];
+
+/// D394: the second `next` is a member of the struct the first `next` points at, rooted at the
+/// load the projection states, whatever shape the cell's address term has.
+#[test]
+fn a_member_through_a_loaded_pointer_reads_its_root_from_the_projection() {
+    let types = types();
+    let declared = declaring(
+        "f",
+        Some((types.node_pointer, "struct node *")),
+        types.node_pointer,
+    );
+    let mut open = program(NEXT_NEXT_BY_REGISTER, declared);
+    let text = (open.rendered(BASE).expect("it renders").response.output).into_text();
+    assert_eq!(text.matches("->next").count(), 2, "{text}");
+    assert!(text.contains("(struct node*)"), "{text}");
+}
