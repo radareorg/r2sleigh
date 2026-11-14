@@ -65,3 +65,20 @@ Release, Mac, instructions retired in G, median of 3 under one `heavy.sh` lock. 
 - Release, master against the head, cold `pdd` of every function of the 23 census fixtures (369 functions), of 30 aarch64 builds (1,214 functions), of 200 functions each of bash, ls, pumasim and 0pack, and `aa; pdd` of 30 each of bash and ls and 8 each of pumasim and 0pack: 0 outputs differ. The aarch64 builds restate no function and leave 3 to an owner cycle.
 - A debug build, cold and traced, over pumasim `0x23fdf0`, 0pack `0x62ecf0`, 79 functions of bash, 69 of ls and 6 large pumasim functions: 160 builds kept and compared with a rebuild, 21 rebuilt, 0 differences, 0 defects, 0 cycles. The census fixtures restate no function cold: none has a callee whose owner proves its result.
 - `crates/r2engine/tests/engine/builds.rs`: a kept build (`frees` calls `free`, so it keeps no register a call defines), a rebuilt one (a leaf that keeps every register but its result), and the root rendered the same after its callee was rendered first.
+
+## What a call writes (D376, D377; `rd3-exit`)
+
+A call's stack writes are their own fact, `CallReads::writes`, beside its reads (`CallReads::stack`). Before, D369 bounded what a callee writes by what it reads, so a callee writing above its parameters (`mov dword [rsp+0x10], 0; ret`) rewrote its caller's slot behind a promoted value.
+
+| Callee | What the call may write |
+|---|---|
+| A declaration (an import's cited row, a typed indirect call) | its argument area; a variadic one, the arguments its site passes (`va_arg` only reads) |
+| A walked body with a statement | `PreparedCalleeSummary::incoming_writes`: the frame walk's stores at or above the entry pointer and its calls' write areas, moved past what the transfer spends (one address or none where no return mechanism is stated) |
+| The body itself (a recursive call) | the least fixpoint, from none, of those incoming writes; rounds only grow and shift down |
+| Anything else, or a body whose frame address escapes, whose opaque access may write, or with an unplaced call | any byte up to the caller's entry pointer |
+
+`BuildKey` holds each call's read and written areas. A kept build compares them only over what they decide: a read area over the places holding an address (`handed`), a written area over the places only `rewritten` keeps (slot promotion records them) and the bytes above the entry pointer; a call at an unplaced base reads and writes the whole frame either way. `by_area` is deleted: every x86-64 return load met it, so a restated function was compared on every area.
+
+D376's asks: the walk names each unstated call whose writes kept a loaded place (`FramePoints::unstated_rewriting`). The convention seal and every tier-2 resolution (`Stated::asks`) state those callees from their alone read and build again. An alone read (`CalleeReads`) asks none, so a statement never reads a statement: depth one, no cycle. Cold callee builds (`built_resolved`) do not ask yet.
+
+Measured (Mac, instructions retired, median of 3, base `a2ad45017`): cold pumasim `pdd @ 0x23fdf0` 19.84 to 20.25 G (+2.1%; the rd3 merge alone 21.28 G, `0x2312c0` rebuilt); 20 restated functions rebuild where the base rebuilt 10, each because an owner's statement frees a place an unstated call kept.
