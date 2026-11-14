@@ -59,6 +59,7 @@ impl MemoryPrefix {
             &declared_slots,
             &values,
         )?;
+        control.frame_built();
         phase!("objects", objects.objects.len());
         let (memory_accesses, member_run_stores) = collect_structured_memory_access_facts(
             graph,

@@ -2390,6 +2390,7 @@ impl<'a> Native<'a> {
             ptr_bits,
             &mut imports,
         );
+        self.program.control().note_table_seal();
         let read = crate::isolation::isolated(|| {
             let seal = self.convention_seal(region, &imports, restatement, held)?;
             Ok(seal.dispatch_table_reads())

@@ -269,5 +269,24 @@ class TimedCases(unittest.TestCase):
                 census.time_cases(args)
 
 
+class StatsRatchet(unittest.TestCase):
+    """D403: the engine's work counts are held exactly, a rise and a fall alike."""
+
+    def test_a_rebuild_more_or_fewer_moves(self) -> None:
+        held = {("pumasim pdd @ 0x0023fdf0", "rebuilt"): 0, ("pumasim pdd @ 0x0023fdf0", "frames_built"): 40}
+        rose = {**held, ("pumasim pdd @ 0x0023fdf0", "rebuilt"): 21}
+        fell = {**held, ("pumasim pdd @ 0x0023fdf0", "frames_built"): 39}
+        self.assertEqual(census.stats_moves(held, rose), ["pumasim pdd @ 0x0023fdf0: rebuilt 0 -> 21"])
+        self.assertEqual(census.stats_moves(held, fell), ["pumasim pdd @ 0x0023fdf0: frames_built 40 -> 39"])
+        self.assertEqual(census.stats_moves(held, dict(held)), [])
+
+    def test_a_stat_one_side_lacks_moves(self) -> None:
+        self.assertEqual(census.stats_moves({}, {("c", "table_seals"): 3}), ["c: table_seals absent -> 3"])
+
+    def test_the_baseline_reads_back_what_the_printer_writes(self) -> None:
+        text = "r2s: stats: sealed.computed 12\nr2s: stats: frames_built 7\n"
+        self.assertEqual(census.STAT.findall(text), [("sealed.computed", "12"), ("frames_built", "7")])
+
+
 if __name__ == "__main__":
     unittest.main()

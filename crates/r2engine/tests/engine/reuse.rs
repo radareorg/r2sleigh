@@ -30,6 +30,23 @@ fn afi_afv_and_pdd_read_one_type_analysis() {
 }
 
 #[test]
+fn the_frames_one_request_builds_stay_counted_once_the_next_request_starts() {
+    // A request's control is its own (`begin_request`), so the program adds an ended request's
+    // frame builds to its stats; a second, served request builds none (ROADMAP D403).
+    let mut program = opened();
+    program.rendered(ONE).expect("it renders");
+    let first = program.analysis_stats();
+    assert!(
+        first.frames_built > 0,
+        "a rendering built no frame: {first:?}"
+    );
+    program.rendered(ONE).expect("it renders again");
+    let second = program.analysis_stats();
+    assert_eq!(second.frames_built, first.frames_built, "{second:?}");
+    assert_eq!(second.table_seals, first.table_seals, "{second:?}");
+}
+
+#[test]
 fn a_patch_makes_the_held_analysis_stale() {
     let mut program = opened();
     program.prepared(ONE).expect("it prepares");

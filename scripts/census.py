@@ -20,6 +20,9 @@
                                                    every guest instruction of an `r2s` process per
                                                    counted case under a `--enable-plugins`
                                                    qemu-user; fails as `time` does for allocations
+  census.py stats --r2s R2S [--baseline FILE] [--bless] --bins DIR
+                                                   the engine's work counts (`R2S_STATS=1`) per timed
+                                                   case; fails on any move from the baseline
   census.py exponent --r2s R2S [--min-instructions N] [--sample N] [--max-exponent X]
                     [--out FILE] BINARY...         how `pdd` instructions retired, CPU time and
                                                    peak RSS grow with a function's instructions
@@ -398,6 +401,63 @@ def count_cases(args):
         sys.exit(1)
 
 
+STATS = ROOT / "scripts/stats_baseline.txt"
+STAT = re.compile(r"^r2s: stats: (\S+) (\d+)$", re.MULTILINE)
+
+
+def stats_of(binary, command, executable):
+    """The engine's work counts one `R2S_STATS=1 r2s -q -c COMMAND BINARY` prints, by name."""
+    done = subprocess.run([executable, "-q", "-c", command, str(binary)], capture_output=True, text=True,
+                          errors="replace", env={**os.environ, "R2S_STATS": "1"})
+    found = dict((name, int(count)) for name, count in STAT.findall(done.stderr))
+    if done.returncode != 0 or not found:
+        sys.exit(f"{binary.name}: `{command}` exited {done.returncode} and printed {len(found)} stats")
+    return found
+
+
+def stats_lines(path=STATS):
+    """The baseline's `case | stat | count` lines, by (case, stat)."""
+    held = {}
+    for line in Path(path).read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            case, stat, count = line.rsplit(" | ", 2)
+            held[(case, stat)] = int(count)
+    return held
+
+
+def stats_moves(held, measured):
+    """Every (case, stat) whose count differs from the baseline's, either way: a rise is a cost the
+    change must name, a fall a baseline to lower with it (zero tolerance, D403)."""
+    return [f"{case}: {stat} {held.get((case, stat), 'absent')} -> {measured.get((case, stat), 'absent')}"
+            for case, stat in sorted(set(held) | set(measured))
+            if held.get((case, stat)) != measured.get((case, stat))]
+
+
+def stats_cases(args):
+    """Each timed case's engine work counts against scripts/stats_baseline.txt, held exactly."""
+    measured = {}
+    for name, command, *label in TIMED:
+        case = f"{name} {label[0] if label else command}"
+        binary = Path(args.bins) / name
+        if not binary.exists():
+            sys.exit(f"{case}: no {binary}; every case runs")
+        for stat, count in stats_of(binary, command, args.r2s).items():
+            measured[(case, stat)] = count
+        print(f"{case}: " + ", ".join(f"{stat} {count}" for (c, stat), count in measured.items() if c == case),
+              flush=True)
+    if args.bless:
+        header = ("# R2S_STATS=1 counts per census.py TIMED case, held exactly by `census.py stats` (ROADMAP D403).\n"
+                  "# A move either way fails; rewrite with `census.py stats --bless` and name the cause.\n")
+        Path(args.baseline).write_text(header + "".join(
+            f"{case} | {stat} | {count}\n" for (case, stat), count in sorted(measured.items())))
+        return
+    moves = stats_moves(stats_lines(args.baseline), measured)
+    for line in moves:
+        print(line, file=sys.stderr)
+    if moves:
+        sys.exit(1)
+
+
 def retired(binary, command, executable):
     """User-space instructions retired, CPU milliseconds and peak RSS in MB of one run that
     exited cleanly; `perf` is Linux's."""
@@ -693,6 +753,12 @@ def main():
     p.add_argument("--budget", type=float, default=1.01)
     p.add_argument("--causes", default=str(CAUSES))
     p.set_defaults(func=count_cases)
+    p = sub.add_parser("stats")
+    p.add_argument("--r2s", required=True)
+    p.add_argument("--bins", required=True)
+    p.add_argument("--baseline", default=str(STATS))
+    p.add_argument("--bless", action="store_true")
+    p.set_defaults(func=stats_cases)
     p = sub.add_parser("exponent")
     p.add_argument("--r2s", required=True)
     p.add_argument("--min-instructions", type=int, default=300)
