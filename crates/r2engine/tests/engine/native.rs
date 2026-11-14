@@ -1834,8 +1834,8 @@ impl Program for Metered {
     }
 }
 
-/// The SSA work a decompile of `bytes` spends, and how many switches it renders.
-fn decompile_work(bytes: Vec<u8>) -> (u64, usize) {
+/// The meters of a decompile of `bytes`, and how many switches it renders.
+fn decompile_metered(bytes: Vec<u8>) -> (r2engine::EngineExecutionControl, usize) {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Metered {
@@ -1847,7 +1847,27 @@ fn decompile_work(bytes: Vec<u8>) -> (u64, usize) {
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     let switches = response.output.text().matches("switch (").count();
-    (program.control.work_spent(), switches)
+    (program.control, switches)
+}
+
+/// The SSA work a decompile of `bytes` spends, and how many switches it renders.
+fn decompile_work(bytes: Vec<u8>) -> (u64, usize) {
+    let (control, switches) = decompile_metered(bytes);
+    (control.work_spent(), switches)
+}
+
+/// A later round copies only its region's blocks out of its walk, never the body (D367): the outer
+/// case 1's `filler` diamonds reach no new dispatch, so they add no copied block.
+#[test]
+fn a_later_round_copies_only_its_regions_blocks() {
+    let copied = |filler| {
+        let (control, switches) = decompile_metered(arm_switch(true, filler));
+        assert_eq!(switches, 2);
+        control.round_blocks()
+    };
+    let (short, long) = (copied(0), copied(40));
+    // The outer dispatch's block, the case 0 guard and the inner dispatch's block.
+    assert_eq!((short, long), (3, 3), "copied {short} and {long} blocks");
 }
 
 #[test]

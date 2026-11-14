@@ -347,6 +347,17 @@ impl Instruction {
     fn end(&self) -> u64 {
         self.lifted.addr + self.lifted.size as u64
     }
+
+    /// A copy of the lift, no decode window: what a block of a cut holds.
+    fn copied(&self) -> Self {
+        Self {
+            lifted: self.lifted.clone(),
+            bytes: self.bytes.clone(),
+            terminator: self.terminator.clone(),
+            decode: None,
+            halts: self.halts,
+        }
+    }
 }
 
 /// Whether control leaves an instruction ending this way for somewhere other than the next one, which ends a basic block.
@@ -521,9 +532,15 @@ impl Lifting {
         self.0.follow(arms, disasm, program);
     }
 
-    /// The body walked so far. O(instructions), no decode.
-    pub fn body(&self) -> Body {
-        self.0.body()
+    /// The blocks walked so far by place, no lift copied. O(instructions).
+    pub fn shape(&self) -> Shape {
+        self.0.shape()
+    }
+
+    /// The blocks of `shape`, this walk's as it stands, that `keep` holds, entered at `entry`:
+    /// only their lifts are copied. O(instructions + kept operations).
+    pub fn cut(&self, shape: &Shape, entry: u64, keep: &[bool]) -> Body {
+        self.0.cut(shape, entry, keep)
     }
 
     /// The body walked, the walk ended.
@@ -1332,65 +1349,132 @@ impl Walk {
 
     /// Gather the decoded instructions into blocks, each ending where control leaves, a leader begins, a hole opens or a fallthrough is closed.
     fn into_body(mut self) -> (Body, Vec<Decoded>) {
+        let closed = self.closed();
         let lifted = self.lifted.take().unwrap_or_default();
-        self.assemble(lifted.into_iter())
+        let spans = self.spans(lifted.iter().map(|(addr, lift)| (*addr, lift)), &closed);
+        let ending = self.ending();
+        let (mut lifted, mut decodes) = (lifted.into_values(), Vec::new());
+        let mut blocks = Vec::with_capacity(spans.len());
+        for span in &spans {
+            let mut parts = lifted.by_ref().take(span.len).collect::<Vec<_>>();
+            for instruction in &mut parts {
+                if let Some(decode) = instruction.decode.take() {
+                    let (window, continuation) = *decode;
+                    let lift = instruction.lifted.clone();
+                    decodes.push(Decoded {
+                        lift,
+                        window,
+                        continuation,
+                    });
+                }
+            }
+            blocks.push(finish(&mut parts, &ending, span.closed));
+        }
+        (self.body_of(self.entry, blocks, &spans, &closed), decodes)
     }
 
-    /// The body walked so far, each lift cloned; the walk goes on. O(instructions), no decode.
-    fn body(&self) -> Body {
-        let lifted = self.lifted.iter().flatten();
-        self.assemble(lifted.map(|(addr, instruction)| (*addr, instruction.clone())))
-            .0
+    /// The blocks walked so far by place, no lift copied. O(instructions).
+    fn shape(&self) -> Shape {
+        let closed = self.closed();
+        let lifts = (self.lifted.iter().flatten()).collect::<Vec<_>>();
+        let spans = self.spans(lifts.iter().map(|(addr, lift)| (**addr, *lift)), &closed);
+        let ending = self.ending();
+        let blocks = spans.iter().map(|span| {
+            let parts = lifts[span.first..span.first + span.len]
+                .iter()
+                .map(|(_, lift)| *lift);
+            let parts = parts.collect::<Vec<_>>();
+            let successors = successors_after(&parts, &ending, span.closed);
+            (
+                span.start,
+                successors.into_iter().map(|(_, to)| to).collect(),
+            )
+        });
+        Shape {
+            blocks: blocks.collect(),
+            spans,
+        }
     }
 
-    fn assemble(&self, lifted: impl Iterator<Item = (u64, Instruction)>) -> (Body, Vec<Decoded>) {
-        let closed = (self.gated.values().flatten())
+    /// The blocks of `shape` that `keep` holds, entered at `entry`: only their lifts are copied, and
+    /// the body's calls, stops and exits are the whole walk's. O(instructions + kept operations).
+    fn cut(&self, shape: &Shape, entry: u64, keep: &[bool]) -> Body {
+        let closed = self.closed();
+        let lifts = (self.lifted.iter().flatten()).collect::<Vec<_>>();
+        let ending = self.ending();
+        let kept = (shape.spans.iter().zip(keep)).filter(|(_, kept)| **kept);
+        let blocks = kept.map(|(span, _)| {
+            let parts = lifts[span.first..span.first + span.len].iter();
+            let mut parts = parts.map(|(_, lift)| lift.copied()).collect::<Vec<_>>();
+            finish(&mut parts, &ending, span.closed)
+        });
+        self.body_of(entry, blocks.collect(), &shape.spans, &closed)
+    }
+
+    /// The calls that end their block closed: gated on a callee not known to return, or halting.
+    fn closed(&self) -> BTreeSet<u64> {
+        (self.gated.values().flatten())
             .map(|(call, _)| *call)
             .chain(self.halting.iter().copied())
-            .collect::<BTreeSet<_>>();
-        let link = self.link.as_ref();
-        let mut blocks: Vec<BodyBlock> = Vec::new();
-        let mut parts: Vec<Instruction> = Vec::new();
-        let mut decodes = Vec::new();
+            .collect()
+    }
 
-        let ending = Ending {
-            link,
+    fn ending(&self) -> Ending<'_> {
+        Ending {
+            link: self.link.as_ref(),
             dispatched: &self.dispatched,
             tail_calls: &self.tail_calls,
             slot_calls: &self.slot_calls,
-        };
-        for (addr, mut instruction) in lifted {
-            if let Some(decode) = instruction.decode.take() {
-                let (window, continuation) = *decode;
-                let lift = instruction.lifted.clone();
-                decodes.push(Decoded {
-                    lift,
-                    window,
-                    continuation,
-                });
-            }
-            let broken = parts
-                .last()
-                .is_some_and(|last| last.end() != addr || self.leaders.contains(&addr));
-            if broken {
-                blocks.push(finish(&mut parts, &ending, false));
-            }
-            let ends = closed.contains(&addr);
-            let ends_block = ends || ends_block(&instruction.terminator);
-            parts.push(instruction);
-            if ends_block {
-                blocks.push(finish(&mut parts, &ending, ends));
-            }
         }
-        if !parts.is_empty() {
-            blocks.push(finish(&mut parts, &ending, false));
-        }
+    }
 
-        // Each call still closed ends its block, with what says it never comes back (D384): one
-        // pass over the closed calls, each placed by binary search, `O(c log b)`.
+    /// Where each block of `lifted` (in address order) starts and how many instructions it holds:
+    /// a block ends where control leaves, a leader begins, a hole opens or a call is `closed`. O(instructions).
+    fn spans<'a>(
+        &self,
+        lifted: impl Iterator<Item = (u64, &'a Instruction)>,
+        closed: &BTreeSet<u64>,
+    ) -> Vec<Span> {
+        let (mut spans, mut open) = (Vec::new(), None::<(Span, u64)>);
+        for (index, (addr, instruction)) in lifted.enumerate() {
+            let broken = open.is_some_and(|(_, end)| end != addr || self.leaders.contains(&addr));
+            if broken {
+                spans.extend(open.take().map(|(span, _)| span));
+            }
+            let (mut span, _) = open.unwrap_or((
+                Span {
+                    first: index,
+                    len: 0,
+                    start: addr,
+                    closed: false,
+                },
+                addr,
+            ));
+            span.len += 1;
+            let ends = closed.contains(&addr);
+            open = Some((span, instruction.end()));
+            if ends || ends_block(&instruction.terminator) {
+                span.closed = ends;
+                spans.push(span);
+                open = None;
+            }
+        }
+        spans.extend(open.map(|(span, _)| span));
+        spans
+    }
+
+    /// The body of `blocks`, each call still closed ending its block with what says it never comes
+    /// back (D384), placed among `spans` by binary search: `O(c log b)`.
+    fn body_of(
+        &self,
+        entry: u64,
+        blocks: Vec<BodyBlock>,
+        spans: &[Span],
+        closed: &BTreeSet<u64>,
+    ) -> Body {
         let block_of = |call: u64| {
-            let after = blocks.partition_point(|block| block.lifted.addr <= call);
-            Some(blocks.get(after.checked_sub(1)?)?.lifted.addr)
+            let after = spans.partition_point(|span| span.start <= call);
+            Some(spans.get(after.checked_sub(1)?)?.start)
         };
         let mut exits = r2ssa::AssumedExits::default();
         for (call, (never, callee)) in &self.nevers {
@@ -1404,16 +1488,33 @@ impl Walk {
         }
         exits.sites.sort_unstable_by_key(|site| site.block);
         exits.sites.dedup_by_key(|site| site.block);
-        let body = Body {
-            entry: self.entry,
+        Body {
+            entry,
             blocks,
             calls: self.calls.iter().copied().collect(),
             tail_calls: self.tail_calls.iter().copied().collect(),
             unresolved: self.unresolved.clone(),
             exits,
-        };
-        (body, decodes)
+        }
     }
+}
+
+/// One block among a walk's lifts in address order: `len` instructions from the `first`th, the
+/// first at `start`, and whether a closed call ends it.
+#[derive(Debug, Clone, Copy)]
+struct Span {
+    first: usize,
+    len: usize,
+    start: u64,
+    closed: bool,
+}
+
+/// A walk's blocks by place, no lift copied (D367): what a round indexes its regions over.
+#[derive(Debug)]
+pub struct Shape {
+    spans: Vec<Span>,
+    /// Each block's start and the addresses control goes to from it, in address order.
+    pub blocks: Vec<(u64, Vec<u64>)>,
 }
 
 /// A "never" a statement makes with no premise: a cited row, a kernel's row, a halting argument.
@@ -1510,31 +1611,43 @@ fn transfer_of(
 }
 
 /// One block from the instructions collected for it, with its last instruction's successors, or none where that call is `closed`.
-fn finish(parts: &mut Vec<Instruction>, ending: &Ending<'_>, closed: bool) -> BodyBlock {
+/// Where control goes after the block of `parts`, `closed` where a call ends it closed.
+fn successors_after<P: std::borrow::Borrow<Instruction>>(
+    parts: &[P],
+    ending: &Ending<'_>,
+    closed: bool,
+) -> Vec<(AdvisorySuccessorKind, u64)> {
     let (link, dispatched) = (ending.link, ending.dispatched);
-    let start = parts[0].lifted.addr;
     let last = parts
         .last()
-        .expect("a block holds at least one instruction");
+        .expect("a block holds at least one instruction")
+        .borrow();
     let end = last.end();
     // A transfer the block returns from continues after it, whatever the
     // opcode was: the link register holding the address after the block is
     // what says so, and the walk followed it for the same reason.
     let returns = matches!(last.terminator, BlockTerminator::IndirectBranch)
         && link.is_some_and(|link| {
-            parts
-                .iter()
-                .any(|part| r2il::returns_to(&part.lifted.ops, end, link))
+            (parts.iter()).any(|part| r2il::returns_to(&part.borrow().lifted.ops, end, link))
         });
     let arms = dispatched
         .get(&last.lifted.addr)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let successors = match (closed, returns) {
+    match (closed, returns) {
         (true, _) => Vec::new(),
         (false, true) => vec![(AdvisorySuccessorKind::Fallthrough, end)],
         (false, false) => successors_of(&last.terminator, end, arms),
-    };
+    }
+}
+
+fn finish(parts: &mut Vec<Instruction>, ending: &Ending<'_>, closed: bool) -> BodyBlock {
+    let start = parts[0].lifted.addr;
+    let end = parts
+        .last()
+        .expect("a block holds at least one instruction")
+        .end();
+    let successors = successors_after(parts, ending, closed);
     let size = u32::try_from(end - start).unwrap_or(u32::MAX);
     let mut bytes = Vec::with_capacity(size as usize);
     for part in parts.iter() {
