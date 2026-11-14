@@ -28,8 +28,8 @@ MUTANTS = [
     ("an-export-is-no-way-in", [(READS, ".filter(|symbol| exported(container.format, symbol))", ".filter(|_| false)")],
      [WAYS]),
     ("an-entry-is-no-way-in", [(READS, "None => escaped.push(entry.vaddr),", "None => {}")], [WAYS]),
-    ("a-non-call-reference-is-no-way-in", [(READS, "if fact.role != Role::Call && !looping && !slot {",
-                                            "if fact.role != Role::Call && !looping && !slot && false {")], [WAYS]),
+    ("a-non-call-reference-is-no-way-in", [(READS, "if fact.role != Role::Call && !looping && !tail && !slot {",
+                                            "if fact.role != Role::Call && !looping && !tail && !slot && false {")], [WAYS]),
     # Below 4 GiB a 4-byte window holds every 8-byte word's entry, so the 8-byte width is read above it.
     ("an-8-byte-word-is-no-way-in", [(READS, "64 => &[8, 4],", "64 => &[4],")], [COUNT]),
     ("a-4-byte-word-is-no-way-in", [(READS, "64 => &[8, 4],", "64 => &[8],")], [WAYS]),
