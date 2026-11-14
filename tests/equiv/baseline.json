@@ -1002,12 +1002,7 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O0::main": {
-   "cause": "[P7, W14] The first trap is main's call to shape_variadic_local: that function hands its parameters only into vfold's variadic tail (vfold's va_start save area is its tail, W14), whose count no format literal proves, so its arity is a floor of 0 and this call, writing past it, is a counted Floor gap where it passed never-assigned residuals before. Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count, so vfold(1u, a) passes one (a summary, SM).",
-   "compared": "output",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/save_area.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/corpus/shapes.c::clang-O0::mixed_fold": {
    "cause": "[gate-limitation] Gate limitation: an aggregate passed by value. `struct mixed` is 16 bytes laid out as byte@0, half@2, word@4, quad@8. Both eightbytes are INTEGER class, so it is passed in RDI:RSI. tests/equiv/spec.py:175-176 marks every by-value aggregate unsupported. The engine already renders the function register-equivalently as `uint64_t fcn_4016a0(uint64_t RDI_0, uint64_t RSI_0)`, with the field shifts applied to RDI and `^ RSI_0`. The GATE should lift this limitation. CORRECTION: spec.py does not compute a SysV class for aggregates today (grep finds no eightbyte or classification code). The gate firs...",
