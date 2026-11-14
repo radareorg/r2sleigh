@@ -1573,17 +1573,9 @@ mod tests {
                 .map(|_| (next(count as u64) as u32, next(count as u64) as u32))
                 .collect::<Vec<_>>();
             let (successors, condensation) = condensed(count, &edges);
-            let mut reach = vec![vec![false; count]; count];
-            for (from, row) in reach.iter_mut().enumerate() {
-                let mut stack = vec![from];
-                while let Some(at) = stack.pop() {
-                    for to in successors.get(Node::from_index(at)) {
-                        if !std::mem::replace(&mut row[to.index()], true) {
-                            stack.push(to.index());
-                        }
-                    }
-                }
-            }
+            let reach = (0..count)
+                .map(|from| reached_from(&successors, from))
+                .collect::<Vec<_>>();
             let of = |at: usize| condensation.component(Node::from_index(at));
             let pairs = (0..count).flat_map(|a| (0..count).map(move |b| (a, b)));
             for (a, b) in pairs {
@@ -1603,12 +1595,25 @@ mod tests {
             let mut order = (0..count as u32).map(finish).collect::<Vec<_>>();
             order.sort_unstable();
             assert!(order.iter().copied().eq(0..count as u32), "{edges:?}");
-            for (from, to) in &edges {
-                if of(*to as usize) != of(*from as usize) {
-                    assert!(finish(*to) < finish(*from), "{edges:?}");
-                }
+            let crossing = edges
+                .iter()
+                .filter(|(from, to)| of(*to as usize) != of(*from as usize));
+            for (from, to) in crossing {
+                assert!(finish(*to) < finish(*from), "{edges:?}");
             }
         }
+    }
+
+    /// The nodes a path of one edge or more reaches from `from`.
+    fn reached_from(successors: &super::Csr<Node, Node>, from: usize) -> Vec<bool> {
+        let mut row = vec![false; successors.len()];
+        let mut stack = vec![from];
+        while let Some(at) = stack.pop() {
+            let next = successors.get(Node::from_index(at)).iter();
+            let fresh = next.filter(|to| !std::mem::replace(&mut row[to.index()], true));
+            stack.extend(fresh.map(|to| to.index()).collect::<Vec<_>>());
+        }
+        row
     }
 
     /// A chain deeper than any thread's stack closes callee first with one visit per node and

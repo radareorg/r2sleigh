@@ -965,14 +965,10 @@ mod tests {
         assert!(tables.iter().map(LibraryRows::len).sum::<usize>() > 70);
         for cxx in &tables {
             for row in cxx.rows() {
-                for parameter in &cxx.prototype(row).parameters {
-                    let ty = cxx.graph().get(parameter.ty);
-                    assert!(
-                        !matches!(ty, Some(crate::Type::Refused(_))),
-                        "{}",
-                        row.linked_name
-                    );
-                }
+                let parameters = cxx.prototype(row).parameters.iter();
+                let mut types = parameters.map(|parameter| cxx.graph().get(parameter.ty));
+                let refused = types.any(|ty| matches!(ty, Some(crate::Type::Refused(_))));
+                assert!(!refused, "{}", row.linked_name);
             }
         }
     }

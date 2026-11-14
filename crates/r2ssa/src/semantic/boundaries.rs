@@ -2047,6 +2047,30 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+/// Split off a new class for each covered class a write leaves bytes of.
+fn split(size: &mut Vec<u32>, moved: &mut [(u32, u32, u32)]) {
+    for entry in moved.iter_mut() {
+        if entry.2 < size[entry.0 as usize] {
+            entry.1 = u32::try_from(size.len()).unwrap_or(u32::MAX);
+            size[entry.0 as usize] -= entry.2;
+            size.push(entry.2);
+        }
+    }
+}
+
+/// The set bits of a word, lowest first.
+struct BitsSet(u64);
+
+impl Iterator for BitsSet {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        let bit = (self.0 != 0).then(|| self.0.trailing_zeros())?;
+        self.0 &= self.0 - 1;
+        Some(bit)
+    }
+}
+
 /// A set of register classes, one bit each.
 type Classes = Vec<u64>;
 
@@ -2104,17 +2128,22 @@ impl<'g> RegisterWalk<'g> {
         walk.walked = vec![vec![0; words]; graph.blocks.len()];
         for (at, block) in graph.blocks.iter().enumerate() {
             for id in block.insts.iter().rev() {
-                for class in walk.written_by(*id) {
-                    let (word, bit) = (class as usize / 64, 1u64 << (class % 64));
-                    if walk.written[at][word] & bit == 0 {
-                        walk.written[at][word] |= bit;
-                        walk.last[at].push((class, *id));
-                    }
-                }
+                walk.written_by(*id)
+                    .into_iter()
+                    .for_each(|class| walk.first_write(at, class, *id));
             }
             walk.last[at].sort_unstable();
         }
         walk
+    }
+
+    /// `id` writes `class` in block `at`: its last writer, where no later one was seen.
+    fn first_write(&mut self, at: usize, class: u32, id: InstId) {
+        let (word, bit) = (class as usize / 64, 1u64 << (class % 64));
+        if self.written[at][word] & bit == 0 {
+            self.written[at][word] |= bit;
+            self.last[at].push((class, id));
+        }
     }
 
     /// Cut the bytes into classes, one write at a time, each costing its width; classes are then
@@ -2128,27 +2157,13 @@ impl<'g> RegisterWalk<'g> {
             let Some(range) = self.indices(inst.id) else {
                 continue;
             };
-            let mut moved: Vec<(u32, u32, u32)> = Vec::new();
-            for index in range.clone() {
-                let class = self.class_of[index];
-                match moved.iter_mut().find(|(from, _, _)| *from == class) {
-                    Some(entry) => entry.2 += 1,
-                    None => moved.push((class, u32::MAX, 1)),
-                }
-            }
-            for entry in &mut moved {
-                if entry.2 < size[entry.0 as usize] {
-                    entry.1 = u32::try_from(size.len()).unwrap_or(u32::MAX);
-                    size[entry.0 as usize] -= entry.2;
-                    size.push(entry.2);
-                }
-            }
+            let mut moved = self.covered(range.clone());
+            split(&mut size, &mut moved);
             for index in range {
                 let class = self.class_of[index];
                 let to = moved.iter().find(|(from, _, _)| *from == class);
-                if let Some(&(_, to, _)) = to.filter(|(_, to, _)| *to != u32::MAX) {
-                    self.class_of[index] = to;
-                }
+                self.class_of[index] =
+                    (to.filter(|(_, to, _)| *to != u32::MAX)).map_or(class, |(_, to, _)| *to);
             }
         }
         let mut number = vec![u32::MAX; size.len()];
@@ -2159,6 +2174,18 @@ impl<'g> RegisterWalk<'g> {
             }
             *class = number[*class as usize];
         }
+    }
+
+    /// Each class a write covers, with no new class yet and how many of its bytes it covers.
+    fn covered(&self, range: std::ops::Range<usize>) -> Vec<(u32, u32, u32)> {
+        let mut moved: Vec<(u32, u32, u32)> = Vec::new();
+        for class in range.map(|index| self.class_of[index]) {
+            match moved.iter_mut().find(|(from, _, _)| *from == class) {
+                Some(entry) => entry.2 += 1,
+                None => moved.push((class, u32::MAX, 1)),
+            }
+        }
+        moved
     }
 
     /// The indices into `bytes` an instruction writes, by binary search.
@@ -2191,18 +2218,19 @@ impl<'g> RegisterWalk<'g> {
             pending[class / 64] |= 1 << (class % 64);
         }
         // The exit's own block is scanned back from the return.
-        if let Some(held) = self.graph.block(exit.block) {
-            let end = (held.insts.iter().position(|inst| *inst == at)).unwrap_or(held.insts.len());
-            for id in held.insts[..end].iter().rev() {
-                let mut wrote = false;
-                for class in self.written_by(*id) {
-                    let (word, bit) = (class as usize / 64, 1u64 << (class % 64));
-                    wrote |= pending[word] & bit != 0;
-                    pending[word] &= !bit;
-                }
-                if wrote && !self.killed(*id) {
-                    live.extend(self.graph.inst(*id).and_then(|inst| inst.output));
-                }
+        let held = self.graph.block(exit.block);
+        let insts = held.map_or(&[][..], |held| &held.insts[..]);
+        let end = (insts.iter().position(|inst| *inst == at)).unwrap_or(insts.len());
+        for id in insts[..end].iter().rev() {
+            let classes = self.written_by(*id);
+            let wrote = (classes.iter()).fold(false, |wrote, class| {
+                let (word, bit) = (*class as usize / 64, 1u64 << (class % 64));
+                let pending_bit = pending[word] & bit != 0;
+                pending[word] &= !bit;
+                wrote | pending_bit
+            });
+            if wrote && !self.killed(*id) {
+                live.extend(self.graph.inst(*id).and_then(|inst| inst.output));
             }
         }
         let mut work = Vec::new();
@@ -2217,23 +2245,7 @@ impl<'g> RegisterWalk<'g> {
                     .sum::<usize>();
                 visits.set(visits.get() + classes);
             });
-            let mut pass = fresh.clone();
-            for (word, bits) in fresh.iter().enumerate() {
-                let mut hit = bits & self.written[at][word];
-                pass[word] &= !self.written[at][word];
-                while hit != 0 {
-                    let class = (word * 64) as u32 + hit.trailing_zeros();
-                    hit &= hit - 1;
-                    let last = &self.last[at];
-                    let Ok(found) = last.binary_search_by_key(&class, |(class, _)| *class) else {
-                        continue;
-                    };
-                    let id = last[found].1;
-                    if !self.killed(id) {
-                        live.extend(self.graph.inst(id).and_then(|inst| inst.output));
-                    }
-                }
-            }
+            let pass = self.through(at, &fresh, &mut live);
             self.spread(block, &pass, &mut work);
         }
         for at in self.touched.drain(..) {
@@ -2242,6 +2254,24 @@ impl<'g> RegisterWalk<'g> {
         live.sort_unstable();
         live.dedup();
         live
+    }
+
+    /// The classes of `fresh` block `at` does not write, its last writer of each other one live.
+    fn through(&self, at: usize, fresh: &Classes, live: &mut Vec<ValueId>) -> Classes {
+        let mut pass = fresh.clone();
+        for (word, bits) in fresh.iter().enumerate() {
+            let hit = bits & self.written[at][word];
+            pass[word] &= !self.written[at][word];
+            let classes = BitsSet(hit).map(|bit| (word * 64) as u32 + bit);
+            let last = &self.last[at];
+            let found = classes
+                .filter_map(|class| last.binary_search_by_key(&class, |(class, _)| *class).ok());
+            let writers = found
+                .map(|found| last[found].1)
+                .filter(|id| !self.killed(*id));
+            live.extend(writers.filter_map(|id| self.graph.inst(id).and_then(|inst| inst.output)));
+        }
+        pass
     }
 
     /// Whether `inst` is a call's clobber: a `CallDefine` no boundary states as a result.

@@ -1471,24 +1471,30 @@ impl SourceMachineContext {
 
     /// Fold the format each call to a cited printf `...` passes in its own block, one forward pass
     /// per block, and keep what a read-only format consumes (D409). O(operations + calls log calls).
+    /// The arguments the read-only format a call at `instruction` passes consumes, where its
+    /// format register holds a literal no write reaches.
+    fn folded_format_tail(
+        &self,
+        instruction: u64,
+        origins: &BlockOrigins,
+        immutable: &[u64],
+    ) -> Option<r2abi::format::PrintfConsumedArguments> {
+        let register = self.format_register(instruction)?;
+        let varnode = r2il::Varnode::register(register.offset, register.size);
+        let at = origins.of(&varnode)?.constant()?;
+        immutable.binary_search(&at).ok()?;
+        let text = self.source_string_literal(at)?;
+        r2abi::format::printf_consumed_arguments(text).ok()
+    }
+
     pub(crate) fn bind_format_tails(&mut self, blocks: &[R2ILBlock], immutable: &[u64]) {
         let mut tails = BTreeMap::new();
         for block in blocks {
             let mut origins = BlockOrigins::default();
             for (at, op) in block.ops.iter().enumerate() {
-                let tail = (op.is_call())
-                    .then(|| block.instruction_of(at))
-                    .flatten()
-                    .and_then(|instruction| Some((instruction, self.format_register(instruction)?)))
-                    .and_then(|(instruction, register)| {
-                        let varnode = r2il::Varnode::register(register.offset, register.size);
-                        let at = origins.of(&varnode)?.constant()?;
-                        immutable.binary_search(&at).ok()?;
-                        let text = self.source_string_literal(at)?;
-                        let consumed = r2abi::format::printf_consumed_arguments(text).ok()?;
-                        Some((instruction, consumed))
-                    });
-                tails.extend(tail);
+                let instruction = (op.is_call()).then(|| block.instruction_of(at)).flatten();
+                let consumed = |at| Some((at, self.folded_format_tail(at, &origins, immutable)?));
+                tails.extend(instruction.and_then(consumed));
                 origins.step(op);
             }
         }

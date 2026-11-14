@@ -552,6 +552,17 @@ fn demanded(
 /// Blocks that leave by a tail transfer, and the bytes of each value their callees read.
 type TailReads = (BTreeSet<u64>, Vec<(ValueId, crate::bytes::ByteMask)>);
 
+use crate::liveout::FunctionLiveOut;
+
+/// The low `bytes` of `storage` where `value` holds it from its first byte; else every byte.
+fn lane_of(graph: &SsaGraph, value: ValueId, storage: CanonicalStorageId, bytes: u32) -> ByteMask {
+    let held = graph.value(value).and_then(|held| held.canonical_storage);
+    match held.is_some_and(|held| held.offset == storage.offset) {
+        true => ByteMask::whole(bytes),
+        false => ByteMask::All,
+    }
+}
+
 /// Tail exits and what their callees read: fixed arguments, else each register a call reads unnamed;
 /// a narrower lane, else ours (adr-call-boundary.md "S2 as built", D373). O(tails x regs x blocks).
 #[cfg_attr(
@@ -584,25 +595,9 @@ fn tail_reads(
             refused("is in no block");
             continue;
         };
-        let reaching = |storage| {
-            crate::liveout::FunctionLiveOut::reaching(
-                body.function,
-                body.graph,
-                storage,
-                block.addr,
-            )
-        };
-        // The low `bytes` of `storage` where the value holds it from its first byte.
-        let lane = |value: ValueId, storage: CanonicalStorageId, bytes: u32| {
-            let held = body
-                .graph
-                .value(value)
-                .and_then(|held| held.canonical_storage);
-            match held.is_some_and(|held| held.offset == storage.offset) {
-                true => ByteMask::whole(bytes),
-                false => ByteMask::All,
-            }
-        };
+        let (function, graph) = (body.function, body.graph);
+        let reaching = |storage| FunctionLiveOut::reaching(function, graph, storage, block.addr);
+        let lane = |value, storage, bytes| lane_of(body.graph, value, storage, bytes);
         let boundary = boundaries.calls.get(&call.id);
         let narrow = match boundary.and_then(|boundary| boundary.result_kind) {
             Some(SourceCallResult::Register { storage, width }) if !width.fills(storage) => {
@@ -629,11 +624,11 @@ fn tail_reads(
             },
         };
         tails.insert(block.addr);
-        for argument in fixed.iter().flat_map(|boundary| &boundary.arguments) {
-            if let SourceCallArgumentValue::Value(value) = argument.value {
-                reads.push((value, ByteMask::All));
-            }
-        }
+        let arguments = fixed.iter().flat_map(|boundary| &boundary.arguments);
+        reads.extend(arguments.filter_map(|argument| match argument.value {
+            SourceCallArgumentValue::Value(value) => Some((value, ByteMask::All)),
+            _ => None,
+        }));
         for storage in unfixed.into_iter().flatten() {
             let read = reaching(storage);
             reads.extend(

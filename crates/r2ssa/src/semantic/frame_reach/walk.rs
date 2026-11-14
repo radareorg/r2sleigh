@@ -542,6 +542,29 @@ struct WalkSite {
 }
 
 impl WalkSite {
+    /// The site of `func`'s walk; each edge placed by binary search, `O(E log B)`, and an edge out
+    /// of the lifted blocks dropped.
+    fn of(func: &SSAFunction, machine: &SourceMachineContext, arguments: StackArguments) -> Self {
+        let mut blocks = func.block_addrs().to_vec();
+        blocks.sort_unstable();
+        let edges = (blocks.iter().enumerate()).flat_map(|(at, block)| {
+            let from = Node::from_index(at);
+            let next = func.successors(*block).into_iter();
+            next.filter_map(|next| node_of(&blocks, next).map(|to| (from, to)))
+                .collect::<Vec<_>>()
+        });
+        let successors = Csr::from_pairs(blocks.len(), edges.collect::<Vec<_>>());
+        Self {
+            entry: func.entry,
+            reentered: func.cfg().has_entry_edge(),
+            spent: spent(machine),
+            blocks,
+            successors,
+            calls: arguments.calls,
+            transfers: arguments.transfers,
+        }
+    }
+
     /// The node of the block at `addr`, by binary search: `O(log B)`.
     fn node(&self, addr: u64) -> Option<Node> {
         node_of(&self.blocks, addr)
@@ -771,6 +794,35 @@ fn eligible(points: &FramePoints, places: &PlaceFacts, site: &WalkSite) -> BTree
     promotable
 }
 
+/// The one round of a body with no entry stack pointer value: every transfer is at entry (D381).
+fn walk_at_entry<C: SsaWorkControl + ?Sized>(
+    func: &SSAFunction,
+    site: WalkSite,
+    evidence: &Evidence<'_>,
+    control: &C,
+) -> (FrameWalk, FramePoints, BTreeMap<i64, u32>) {
+    let mut steps = 0;
+    let values = IdMap::new(func.values().len());
+    let table = RoundTable::empty(&site, &values);
+    let (points, promoted) = decide(&table, &site, evidence, &mut steps);
+    let unplaced = points.unplaced();
+    let points = settle(points, &promoted, None, &site, (evidence, &mut steps));
+    control.frame_decided(steps);
+    let walk = FrameWalk {
+        named: points.named(),
+        decided: Decided::Rounds(Box::new(HeldRounds {
+            site,
+            rounds: vec![HeldRound {
+                table,
+                promoted: promoted.clone(),
+                unplaced,
+            }],
+            no_carrier: None,
+        })),
+    };
+    (walk, points, promoted)
+}
+
 /// Walk `func`'s frame addresses, round by round: propagate, then decide against the callees'
 /// statements. The promoted set only shrinks, so at most one round per place.
 pub(crate) fn walk<C: SsaWorkControl + ?Sized>(
@@ -799,46 +851,10 @@ pub(crate) fn walk<C: SsaWorkControl + ?Sized>(
     let evidence = Evidence::of(machine);
     let (mut walk_steps, mut steps) = (0, 0);
     let arguments = StackArguments::of(func, machine, stack_pointer, entry_sp);
-    let mut blocks = func.block_addrs().to_vec();
-    blocks.sort_unstable();
-    // O(E log B): each edge placed by binary search; an edge out of the lifted blocks is dropped.
-    let mut edges = Vec::new();
-    for (at, block) in blocks.iter().enumerate() {
-        for next in func.successors(*block) {
-            edges.extend(node_of(&blocks, next).map(|to| (Node::from_index(at), to)));
-        }
-    }
-    let successors = Csr::from_pairs(blocks.len(), edges);
-    let site = WalkSite {
-        entry: func.entry,
-        reentered: func.cfg().has_entry_edge(),
-        spent: spent(machine),
-        blocks,
-        successors,
-        calls: arguments.calls,
-        transfers: arguments.transfers,
-    };
+    let site = WalkSite::of(func, machine, arguments);
     // No entry stack pointer value: no frame address exists, and every transfer is at entry (D381).
     let Some(entry_sp) = entry_sp else {
-        let values = IdMap::new(func.values().len());
-        let table = RoundTable::empty(&site, &values);
-        let (points, promoted) = decide(&table, &site, &evidence, &mut steps);
-        let unplaced = points.unplaced();
-        let points = settle(points, &promoted, None, &site, (&evidence, &mut steps));
-        control.frame_decided(steps);
-        let walk = FrameWalk {
-            named: points.named(),
-            decided: Decided::Rounds(Box::new(HeldRounds {
-                site,
-                rounds: vec![HeldRound {
-                    table,
-                    promoted: promoted.clone(),
-                    unplaced,
-                }],
-                no_carrier: None,
-            })),
-        };
-        return (walk, points, promoted);
+        return walk_at_entry(func, site, &evidence, control);
     };
     let sinks = Sinks::of(func, machine, stack_pointer, calls_refund_stack);
     let uses = Uses::of(func);
@@ -875,15 +891,13 @@ pub(crate) fn walk<C: SsaWorkControl + ?Sized>(
         );
         control.frame_walked(walk_steps);
         control.frame_decided(steps);
+        let origins = (points.opaque.iter()).map(|access| &access.origin);
+        let (escaped, opaque) = (&points.escaped, origins.collect::<BTreeSet<_>>());
+        let unplaced = points.unplaced();
         r2il::refusal_evidence!(
             "frame-reach",
-            "{:#x}: escaped {:?}, opaque {:?}, unplaced {}",
+            "{:#x}: escaped {escaped:?}, opaque {opaque:?}, unplaced {unplaced}",
             func.entry,
-            points.escaped,
-            (points.opaque.iter())
-                .map(|access| &access.origin)
-                .collect::<BTreeSet<_>>(),
-            points.unplaced()
         );
         let promotable = match points.unplaced() {
             true => BTreeMap::new(),
@@ -1825,15 +1839,15 @@ fn reaching_writes(
         REACHING_STEPS.with(|steps| steps.set(steps.get() + reaching.len() + members.len()));
         for &member in members {
             let leaving = union(&reaching, &made(member));
-            for &next in successors.get(member) {
-                let to = condensation.component(next);
-                if to != component {
-                    #[cfg(test)]
-                    REACHING_STEPS.with(|steps| steps.set(steps.get() + leaving.len() + 1));
-                    incoming[to] = union(&incoming[to], &leaving);
-                }
+            let out = (successors.get(member).iter())
+                .map(|next| condensation.component(*next))
+                .filter(|to| *to != component);
+            for to in out {
+                #[cfg(test)]
+                REACHING_STEPS.with(|steps| steps.set(steps.get() + leaving.len() + 1));
+                incoming[to] = union(&incoming[to], &leaving);
             }
-            entering[member] = reaching.clone();
+            entering[member].clone_from(&reaching);
         }
     }
     entering
@@ -1950,25 +1964,28 @@ mod tests {
         in_block: &IdVec<Node, Vec<CallSpans>>,
     ) -> Vec<Vec<(i64, i64)>> {
         let n = in_block.len();
+        let seen = (0..n)
+            .map(|start| beyond(successors, start))
+            .collect::<Vec<_>>();
         (0..n)
             .map(|target| {
-                let mut spans = Vec::new();
-                for start in 0..n {
-                    let mut seen = vec![false; n];
-                    let mut stack = successors.get(Node::from_index(start)).to_vec();
-                    while let Some(node) = stack.pop() {
-                        if !std::mem::replace(&mut seen[node.index()], true) {
-                            stack.extend(successors.get(node));
-                        }
-                    }
-                    if seen[target] {
-                        let made = in_block[Node::from_index(start)].iter();
-                        spans.extend(made.flat_map(|(_, spans)| spans.iter().copied()));
-                    }
-                }
-                merged(spans.into_iter())
+                let starts = (0..n).filter(|start| seen[*start][target]);
+                let made = starts.flat_map(|start| in_block[Node::from_index(start)].iter());
+                merged(made.flat_map(|(_, spans)| spans.iter().copied()))
             })
             .collect()
+    }
+
+    /// The blocks a path of one edge or more reaches from `start`.
+    fn beyond(successors: &Csr<Node, Node>, start: usize) -> Vec<bool> {
+        let mut seen = vec![false; successors.len()];
+        let mut stack = successors.get(Node::from_index(start)).to_vec();
+        while let Some(node) = stack.pop() {
+            if !std::mem::replace(&mut seen[node.index()], true) {
+                stack.extend(successors.get(node));
+            }
+        }
+        seen
     }
 
     /// The condensation order gives the path union on graphs with cycles, self edges, nesting

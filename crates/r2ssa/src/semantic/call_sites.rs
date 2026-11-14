@@ -39,22 +39,10 @@ pub(crate) fn collect_call_sites(
             let target = *flow.target;
             let raw_identity =
                 (flow.instruction).and_then(|instruction| function.raw_call_site_at(instruction));
+            let tail = |identity| tails_through(function, graph, identity, (target, flow.direct));
             let transfer = if flow.call {
                 CallSiteTransfer::Call
-            } else if raw_identity.is_some_and(|identity| {
-                function.is_tail_call_site(identity)
-                    && if flow.direct {
-                        graph
-                            .value(target)
-                            .is_some_and(|value| value.canonical_storage == Some(identity.target()))
-                    } else {
-                        // A slot in memory or the register the jump goes through.
-                        identity.target().space == crate::CanonicalStorageSpace::Ram
-                            || graph.value(target).is_some_and(|value| {
-                                value.canonical_storage == Some(identity.target())
-                            })
-                    }
-            }) {
+            } else if raw_identity.is_some_and(tail) {
                 CallSiteTransfer::TailCall
             } else {
                 continue;
@@ -92,6 +80,22 @@ pub(crate) fn collect_call_sites(
     }
 
     CallSiteFacts { by_id, by_inst }
+}
+
+/// Whether a jump through `target` is the tail call the source names at `identity`.
+fn tails_through(
+    function: BuildFacts<'_>,
+    graph: &SsaGraph,
+    identity: SourceCallSiteIdentity,
+    (target, direct): (crate::graph::ValueId, bool),
+) -> bool {
+    let named = graph
+        .value(target)
+        .is_some_and(|value| value.canonical_storage == Some(identity.target()));
+    // A direct jump names its target; else a slot in memory or the register it goes through.
+    let through =
+        named || (!direct && identity.target().space == crate::CanonicalStorageSpace::Ram);
+    function.is_tail_call_site(identity) && through
 }
 
 pub(crate) fn direct_target_from_raw_identity(identity: SourceCallSiteIdentity) -> Option<u64> {

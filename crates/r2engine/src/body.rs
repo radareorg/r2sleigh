@@ -1224,11 +1224,7 @@ impl Walk {
                     self.halting.insert(addr);
                     self.proven.extend(from.map(|from| (from, addr, None)));
                     // Through a slot whose import never returns, the "never" is the callee's.
-                    let closer = if from.is_some() {
-                        Closer::Site
-                    } else {
-                        Closer::Callee
-                    };
+                    let closer = from.map_or(Closer::Callee, |_| Closer::Site);
                     self.nevers.insert(addr, (never, closer));
                 } else if let Some(never) = exit {
                     self.halting.insert(addr);
@@ -1377,17 +1373,15 @@ impl Walk {
         let mut blocks = Vec::with_capacity(spans.len());
         for span in &spans {
             let mut parts = lifted.by_ref().take(span.len).collect::<Vec<_>>();
-            for instruction in &mut parts {
-                if let Some(decode) = instruction.decode.take() {
-                    let (window, continuation) = *decode;
-                    let lift = instruction.lifted.clone();
-                    decodes.push(Decoded {
-                        lift,
-                        window,
-                        continuation,
-                    });
-                }
-            }
+            decodes.extend(parts.iter_mut().filter_map(|instruction| {
+                let (window, continuation) = *instruction.decode.take()?;
+                let lift = instruction.lifted.clone();
+                Some(Decoded {
+                    lift,
+                    window,
+                    continuation,
+                })
+            }));
             blocks.push(finish(&mut parts, &ending, span.closed));
         }
         (self.body_of(self.entry, blocks, &spans, &closed), decodes)

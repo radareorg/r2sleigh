@@ -754,6 +754,30 @@ pub(crate) fn dispatch_tables(
     tables
 }
 
+/// Each region's tables, read against what earlier rounds and regions read; a region the
+/// convention cannot seal leaves its dispatches unresolved, and a stopped refusal ends the rounds.
+fn read_regions(
+    native: &Native<'_>,
+    regions: impl Iterator<Item = Walked>,
+    held: &[NativePointerTable],
+) -> Result<Vec<NativePointerTable>, Tables> {
+    let mut fresh = Vec::new();
+    for region in regions {
+        let held = held.iter().chain(&fresh).cloned().collect::<Vec<_>>();
+        let read = native.read_tables(&region, &held, Restatement::default());
+        match &read.refusal {
+            Some(refusal) if refusal.stopped() => return Err(read),
+            Some(refusal) => r2il::refusal_evidence!(
+                "dispatch-table",
+                "{:#x}: a round's region: {refusal:?}",
+                region.body.entry
+            ),
+            None => fresh.extend(read.read),
+        }
+    }
+    Ok(fresh)
+}
+
 /// Every round of the body's tables past `first` (D285): one lifting walk continued through each
 /// round's tables, so a round lifts only what its arms newly reach (D367).
 pub(crate) fn later_tables(
@@ -809,24 +833,10 @@ pub(crate) fn later_tables(
                 body,
             })
         });
-        let mut fresh = Vec::new();
-        for region in regions {
-            let held = (tables.read.iter())
-                .chain(&fresh)
-                .cloned()
-                .collect::<Vec<_>>();
-            let read = native.read_tables(&region, &held, Restatement::default());
-            match &read.refusal {
-                Some(refusal) if refusal.stopped() => return read,
-                // A region the convention cannot seal leaves its dispatches unresolved.
-                Some(refusal) => r2il::refusal_evidence!(
-                    "dispatch-table",
-                    "{:#x}: a round's region: {refusal:?}",
-                    region.body.entry
-                ),
-                None => fresh.extend(read.read),
-            }
-        }
+        let fresh = match read_regions(&native, regions, &tables.read) {
+            Ok(fresh) => fresh,
+            Err(stopped) => return stopped,
+        };
         last = fresh.iter().map(|table| table.instruction).collect();
         tables.read.extend(fresh);
     }
