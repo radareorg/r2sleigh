@@ -954,8 +954,8 @@ pub struct Reached<K> {
 }
 
 impl<K: Copy + Ord + std::hash::Hash> Reached<K> {
-    /// `successors` is asked once per node, in the depth-first preorder Tarjan's search from
-    /// `root` takes. O(V + E) asks and hash probes, then O(V log V) to number by key.
+    /// `successors` is asked once per node (a key enters `seen` once, so the walk ends), in the
+    /// preorder Tarjan's search from `root` takes. O(V + E) probes, O(V log V) to number by key.
     pub fn from(root: K, mut successors: impl FnMut(K) -> Vec<K>) -> Self {
         let mut seen = rustc_hash::FxHashSet::default();
         seen.insert(root);
@@ -1271,6 +1271,15 @@ mod tests {
                 assert_eq!(condensation.is_cyclic(component), cyclic, "{edges:?}");
             }
             assert_eq!(condensation.visits(), (count + edges.len()) as u64);
+            let finish = |at: u32| condensation.finish(Node(at));
+            let mut order = (0..count as u32).map(finish).collect::<Vec<_>>();
+            order.sort_unstable();
+            assert!(order.iter().copied().eq(0..count as u32), "{edges:?}");
+            for (from, to) in &edges {
+                if of(*to as usize) != of(*from as usize) {
+                    assert!(finish(*to) < finish(*from), "{edges:?}");
+                }
+            }
         }
     }
 
