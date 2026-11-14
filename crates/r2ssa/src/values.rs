@@ -2320,6 +2320,45 @@ mod tests {
             .collect()
     }
 
+    /// `if (x <u 4) body; exit`: a live-in no instruction narrows is bounded where each way holds.
+    #[test]
+    fn a_guard_bounds_a_live_in_where_it_dominates() {
+        let (entry, body, exit) = (0x1000, 0x1010, 0x1020);
+        let (x, below) = (var("x", 0, 4), var("below", 1, 1));
+        let mut head = SSABlock::new(entry, 16);
+        head.push(crate::op::SSAOp::IntLess {
+            dst: below.clone(),
+            a: x.clone(),
+            b: constant(4, 4),
+        });
+        head.push(crate::op::SSAOp::CBranch {
+            target: constant(body, 8),
+            cond: below,
+        });
+        let cfg = cfg_of(
+            entry,
+            &[
+                (
+                    entry,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: body,
+                        false_target: exit,
+                    },
+                ),
+                (body, BlockTerminator::Return),
+                (exit, BlockTerminator::Return),
+            ],
+        );
+        let blocks = [head, SSABlock::new(body, 16), SSABlock::new(exit, 16)];
+        let (ranges, graph) = solve_over(&blocks, cfg);
+        let value = graph.value_id_for_var(&x).expect("x");
+        let at = |addr: u64| ranges.range_at(value, graph.block_by_addr[&addr]);
+        assert_eq!(at(body).and_then(|range| range.bounds()), Some((0, 3)));
+        let past = at(exit).and_then(|range| range.bounds());
+        assert_eq!(past, Some((4, u64::from(u32::MAX))));
+        assert_eq!(ranges.upper_bound(value), None);
+    }
+
     /// `entry: i = arg & 7`, `H: n = phi(4, 8); if i < n goto B`, `B: x = i`: the bound `n` rises
     /// after the guard first reads it, and the guard reads it again (8 admits `i = 7`).
     #[test]

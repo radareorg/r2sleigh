@@ -80,7 +80,7 @@ const MASKED_INDEX: &[u8] = &[
     0xc3, // 1007 ret
 ];
 
-/// `if (i <= 3) return t->a[i]; return 0;`: only the guard bounds `i`, and no range reads it (D370).
+/// `if (i <= 3) return t->a[i]; return 0;`: only the guard bounds `i`, read where the address is computed (D370).
 const GUARDED_INDEX: &[u8] = &[
     0x89, 0xf6, // 1000 mov esi, esi
     0x31, 0xc0, // 1002 xor eax, eax
@@ -527,13 +527,13 @@ fn table_index(code: &'static [u8]) -> OpenProgram<Literal> {
     program(code, declarations)
 }
 
-/// D360: an index a range keeps below the member array's count projects as that array's element;
-/// one no range bounds (a guard alone, D370), or past the last element, projects nothing.
+/// D360: an index a range keeps below the member array's count projects as that array's element,
+/// as does one a dominating guard bounds (D370); an unbounded one, or past the last element, does not.
 #[test]
 fn a_bounded_index_into_an_array_member_projects_its_element() {
     let roots = |code| projected(&mut table_index(code));
     assert_eq!(roots(MASKED_INDEX), [("a[]".to_string(), "parameter")]);
-    assert_eq!(roots(GUARDED_INDEX), []);
+    assert_eq!(roots(GUARDED_INDEX), [("a[]".to_string(), "parameter")]);
     assert_eq!(roots(UNBOUNDED_INDEX), []);
     assert_eq!(roots(PAST_THE_END), []);
 }
