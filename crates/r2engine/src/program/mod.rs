@@ -583,6 +583,7 @@ impl<S: Source + 'static> OpenProgram<S> {
 
     /// Start a request under the control a caller set, or a fresh one.
     fn start_request(&mut self) {
+        self.db.note_request(&self.db.inputs().control);
         self.db.inputs_mut().control = self.next.take().unwrap_or_default();
     }
 
@@ -620,6 +621,8 @@ impl<S: Source + 'static> OpenProgram<S> {
             owner_takes: self.db.query_stats::<slots::OwnerTakes>(),
             defects: self.db.stats().defects,
             rebuilt: self.db.stats().rebuilt,
+            frames_built: self.db.stats().frames_built + self.control().frames_built(),
+            table_seals: self.db.stats().table_seals + self.control().table_seals(),
         }
     }
 

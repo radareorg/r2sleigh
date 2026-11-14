@@ -322,6 +322,7 @@ pub struct SummaryAtomicEffect {
 /// What a function does through one argument. `read`, `write`, `escape` and `free` are proven: the
 /// body or a described callee does it. `assumed` is the upper bound alone: the argument reaches a
 /// call or operation nothing describes, which may do any of them to it or to nothing (D382).
+#[doc(alias = "default_deny_pointer")]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryArgEffect {
     pub read: bool,

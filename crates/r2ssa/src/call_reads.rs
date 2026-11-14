@@ -26,6 +26,7 @@ pub enum StackWrites {
     /// A declaration's: only its argument area, which the convention gives the callee.
     Arguments,
     /// A walked body's: these ranges from the call's stack pointer.
+    #[doc(alias = "default_deny_incoming_writes")]
     Within(Box<[(i64, i64)]>),
 }
 

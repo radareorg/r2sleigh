@@ -14,6 +14,7 @@ use std::time::Instant;
 #[derive(Debug, Default)]
 pub struct SsaWorkMeter {
     polls: AtomicU64,
+    frames: AtomicU64,
 }
 
 impl SsaWorkMeter {
@@ -25,6 +26,11 @@ impl SsaWorkMeter {
     /// Work counted so far.
     pub fn spent(&self) -> u64 {
         self.polls.load(Ordering::Relaxed)
+    }
+
+    /// Frame object models built so far, one `FrameReach` each (ROADMAP D403).
+    pub fn frames_built(&self) -> u64 {
+        self.frames.load(Ordering::Relaxed)
     }
 }
 
@@ -116,6 +122,9 @@ impl From<SsaExecutionStopReason> for SsaPrepareError {
 /// thread, timer callback, or allocation at each poll.
 pub trait SsaWorkControl {
     fn poll(&self) -> Result<(), SsaExecutionStopReason>;
+
+    /// One frame object model and its `FrameReach` built; a metered control counts it (D403).
+    fn frame_built(&self) {}
 }
 
 /// Cloneable cancellation/deadline control for SSA preparation.
@@ -172,6 +181,12 @@ impl SsaWorkControl for SsaExecutionControl {
             meter.spend();
         }
         self.stop_reason().map_or(Ok(()), Err)
+    }
+
+    fn frame_built(&self) {
+        if let Some(meter) = &self.meter {
+            meter.frames.fetch_add(1, Ordering::Relaxed);
+        }
     }
 }
 

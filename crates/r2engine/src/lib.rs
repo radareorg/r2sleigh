@@ -441,6 +441,8 @@ pub struct EngineExecutionControl {
     /// Work this request has done, counted rather than timed, so the size of
     /// the thing the deadline stands in for can be measured.
     meter: Arc<r2ssa::SsaWorkMeter>,
+    /// Convention seals this request made to read a body's dispatch tables, every round (D403).
+    table_seals: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl EngineExecutionControl {
@@ -450,12 +452,27 @@ impl EngineExecutionControl {
             cancellation,
             deadline,
             meter: Arc::new(r2ssa::SsaWorkMeter::default()),
+            table_seals: Arc::default(),
         }
     }
 
     /// Work counted for this request so far.
     pub fn work_spent(&self) -> u64 {
         self.meter.spent()
+    }
+
+    /// Frame object models this request built.
+    pub fn frames_built(&self) -> u64 {
+        self.meter.frames_built()
+    }
+
+    /// Convention seals this request made to read dispatch tables.
+    pub fn table_seals(&self) -> u64 {
+        self.table_seals.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_table_seal(&self) {
+        (self.table_seals).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn with_cancellation_and_deadline(

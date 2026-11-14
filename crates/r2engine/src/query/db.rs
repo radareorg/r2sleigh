@@ -144,6 +144,10 @@ pub struct DbStats {
     pub defects: u64,
     /// Builds made anew against their owners' statements, where a kept build was refused (D365).
     pub rebuilt: u64,
+    /// Frame object models built by requests that have ended (D403).
+    pub frames_built: u64,
+    /// Dispatch-table convention seals made by requests that have ended (D403).
+    pub table_seals: u64,
 }
 
 /// A held answer found good, with what it depends on.
@@ -322,6 +326,13 @@ impl<I: Inputs + 'static> Db<I> {
     /// Count a build its owners' statements moved, so it was built anew (D365).
     pub fn note_rebuilt(&self) {
         self.stats.borrow_mut().rebuilt += 1;
+    }
+
+    /// Add an ended request's frame builds and table seals (D403).
+    pub fn note_request(&self, control: &crate::EngineExecutionControl) {
+        let mut stats = self.stats.borrow_mut();
+        stats.frames_built += control.frames_built();
+        stats.table_seals += control.table_seals();
     }
 
     /// The answer to `Q` at `key`, reused where nothing it read has moved.

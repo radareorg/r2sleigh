@@ -1,0 +1,281 @@
+# R2S_STATS=1 counts per census.py TIMED case, held exactly by `census.py stats` (ROADMAP D403).
+# A move either way fails; rewrite with `census.py stats --bless` and name the cause.
+0pack afl | analysed.computed | 0
+0pack afl | analysed.recomputed | 0
+0pack afl | analysed.reused | 0
+0pack afl | call_boundaries.computed | 0
+0pack afl | call_boundaries.recomputed | 0
+0pack afl | call_boundaries.reused | 0
+0pack afl | callee_reads.computed | 0
+0pack afl | callee_reads.recomputed | 0
+0pack afl | callee_reads.reused | 0
+0pack afl | defects | 0
+0pack afl | direct_sites.computed | 0
+0pack afl | direct_sites.recomputed | 0
+0pack afl | direct_sites.reused | 0
+0pack afl | frames_built | 0
+0pack afl | rebuilt | 0
+0pack afl | references.computed | 0
+0pack afl | references.recomputed | 0
+0pack afl | references.reused | 0
+0pack afl | rendered.computed | 0
+0pack afl | rendered.recomputed | 0
+0pack afl | rendered.reused | 0
+0pack afl | resolved.computed | 0
+0pack afl | resolved.recomputed | 0
+0pack afl | resolved.reused | 0
+0pack afl | sealed.computed | 0
+0pack afl | sealed.recomputed | 0
+0pack afl | sealed.reused | 0
+0pack afl | table_seals | 547
+0pack afl | walked.computed | 0
+0pack afl | walked.recomputed | 0
+0pack afl | walked.reused | 0
+0pack pdd @ 0x0058e3d0 | analysed.computed | 1
+0pack pdd @ 0x0058e3d0 | analysed.recomputed | 0
+0pack pdd @ 0x0058e3d0 | analysed.reused | 1
+0pack pdd @ 0x0058e3d0 | call_boundaries.computed | 7
+0pack pdd @ 0x0058e3d0 | call_boundaries.recomputed | 0
+0pack pdd @ 0x0058e3d0 | call_boundaries.reused | 0
+0pack pdd @ 0x0058e3d0 | callee_reads.computed | 0
+0pack pdd @ 0x0058e3d0 | callee_reads.recomputed | 0
+0pack pdd @ 0x0058e3d0 | callee_reads.reused | 0
+0pack pdd @ 0x0058e3d0 | defects | 0
+0pack pdd @ 0x0058e3d0 | direct_sites.computed | 0
+0pack pdd @ 0x0058e3d0 | direct_sites.recomputed | 0
+0pack pdd @ 0x0058e3d0 | direct_sites.reused | 0
+0pack pdd @ 0x0058e3d0 | frames_built | 4
+0pack pdd @ 0x0058e3d0 | rebuilt | 0
+0pack pdd @ 0x0058e3d0 | references.computed | 0
+0pack pdd @ 0x0058e3d0 | references.recomputed | 0
+0pack pdd @ 0x0058e3d0 | references.reused | 0
+0pack pdd @ 0x0058e3d0 | rendered.computed | 1
+0pack pdd @ 0x0058e3d0 | rendered.recomputed | 0
+0pack pdd @ 0x0058e3d0 | rendered.reused | 0
+0pack pdd @ 0x0058e3d0 | resolved.computed | 3
+0pack pdd @ 0x0058e3d0 | resolved.recomputed | 0
+0pack pdd @ 0x0058e3d0 | resolved.reused | 0
+0pack pdd @ 0x0058e3d0 | sealed.computed | 1
+0pack pdd @ 0x0058e3d0 | sealed.recomputed | 0
+0pack pdd @ 0x0058e3d0 | sealed.reused | 0
+0pack pdd @ 0x0058e3d0 | table_seals | 0
+0pack pdd @ 0x0058e3d0 | walked.computed | 4
+0pack pdd @ 0x0058e3d0 | walked.recomputed | 0
+0pack pdd @ 0x0058e3d0 | walked.reused | 6
+0pack pdd @ 0x0062ecf0 | analysed.computed | 1
+0pack pdd @ 0x0062ecf0 | analysed.recomputed | 0
+0pack pdd @ 0x0062ecf0 | analysed.reused | 1
+0pack pdd @ 0x0062ecf0 | call_boundaries.computed | 20
+0pack pdd @ 0x0062ecf0 | call_boundaries.recomputed | 0
+0pack pdd @ 0x0062ecf0 | call_boundaries.reused | 29
+0pack pdd @ 0x0062ecf0 | callee_reads.computed | 0
+0pack pdd @ 0x0062ecf0 | callee_reads.recomputed | 0
+0pack pdd @ 0x0062ecf0 | callee_reads.reused | 0
+0pack pdd @ 0x0062ecf0 | defects | 0
+0pack pdd @ 0x0062ecf0 | direct_sites.computed | 0
+0pack pdd @ 0x0062ecf0 | direct_sites.recomputed | 0
+0pack pdd @ 0x0062ecf0 | direct_sites.reused | 0
+0pack pdd @ 0x0062ecf0 | frames_built | 24
+0pack pdd @ 0x0062ecf0 | rebuilt | 3
+0pack pdd @ 0x0062ecf0 | references.computed | 0
+0pack pdd @ 0x0062ecf0 | references.recomputed | 0
+0pack pdd @ 0x0062ecf0 | references.reused | 0
+0pack pdd @ 0x0062ecf0 | rendered.computed | 1
+0pack pdd @ 0x0062ecf0 | rendered.recomputed | 0
+0pack pdd @ 0x0062ecf0 | rendered.reused | 0
+0pack pdd @ 0x0062ecf0 | resolved.computed | 17
+0pack pdd @ 0x0062ecf0 | resolved.recomputed | 0
+0pack pdd @ 0x0062ecf0 | resolved.reused | 0
+0pack pdd @ 0x0062ecf0 | sealed.computed | 1
+0pack pdd @ 0x0062ecf0 | sealed.recomputed | 0
+0pack pdd @ 0x0062ecf0 | sealed.reused | 0
+0pack pdd @ 0x0062ecf0 | table_seals | 0
+0pack pdd @ 0x0062ecf0 | walked.computed | 44
+0pack pdd @ 0x0062ecf0 | walked.recomputed | 0
+0pack pdd @ 0x0062ecf0 | walked.reused | 34
+bash aa; pdd @ 0x2e630 | analysed.computed | 1
+bash aa; pdd @ 0x2e630 | analysed.recomputed | 0
+bash aa; pdd @ 0x2e630 | analysed.reused | 1
+bash aa; pdd @ 0x2e630 | call_boundaries.computed | 4
+bash aa; pdd @ 0x2e630 | call_boundaries.recomputed | 0
+bash aa; pdd @ 0x2e630 | call_boundaries.reused | 0
+bash aa; pdd @ 0x2e630 | callee_reads.computed | 4
+bash aa; pdd @ 0x2e630 | callee_reads.recomputed | 0
+bash aa; pdd @ 0x2e630 | callee_reads.reused | 6
+bash aa; pdd @ 0x2e630 | defects | 0
+bash aa; pdd @ 0x2e630 | direct_sites.computed | 139
+bash aa; pdd @ 0x2e630 | direct_sites.recomputed | 0
+bash aa; pdd @ 0x2e630 | direct_sites.reused | 139
+bash aa; pdd @ 0x2e630 | frames_built | 7
+bash aa; pdd @ 0x2e630 | rebuilt | 0
+bash aa; pdd @ 0x2e630 | references.computed | 0
+bash aa; pdd @ 0x2e630 | references.recomputed | 0
+bash aa; pdd @ 0x2e630 | references.reused | 0
+bash aa; pdd @ 0x2e630 | rendered.computed | 1
+bash aa; pdd @ 0x2e630 | rendered.recomputed | 0
+bash aa; pdd @ 0x2e630 | rendered.reused | 0
+bash aa; pdd @ 0x2e630 | resolved.computed | 3
+bash aa; pdd @ 0x2e630 | resolved.recomputed | 0
+bash aa; pdd @ 0x2e630 | resolved.reused | 0
+bash aa; pdd @ 0x2e630 | sealed.computed | 1
+bash aa; pdd @ 0x2e630 | sealed.recomputed | 0
+bash aa; pdd @ 0x2e630 | sealed.reused | 0
+bash aa; pdd @ 0x2e630 | table_seals | 183
+bash aa; pdd @ 0x2e630 | walked.computed | 1200
+bash aa; pdd @ 0x2e630 | walked.recomputed | 0
+bash aa; pdd @ 0x2e630 | walked.reused | 1
+pumasim aa; pdd @ 0x3b6b20 | analysed.computed | 1
+pumasim aa; pdd @ 0x3b6b20 | analysed.recomputed | 0
+pumasim aa; pdd @ 0x3b6b20 | analysed.reused | 1
+pumasim aa; pdd @ 0x3b6b20 | call_boundaries.computed | 37
+pumasim aa; pdd @ 0x3b6b20 | call_boundaries.recomputed | 0
+pumasim aa; pdd @ 0x3b6b20 | call_boundaries.reused | 310
+pumasim aa; pdd @ 0x3b6b20 | callee_reads.computed | 13
+pumasim aa; pdd @ 0x3b6b20 | callee_reads.recomputed | 0
+pumasim aa; pdd @ 0x3b6b20 | callee_reads.reused | 21
+pumasim aa; pdd @ 0x3b6b20 | defects | 0
+pumasim aa; pdd @ 0x3b6b20 | direct_sites.computed | 158
+pumasim aa; pdd @ 0x3b6b20 | direct_sites.recomputed | 0
+pumasim aa; pdd @ 0x3b6b20 | direct_sites.reused | 158
+pumasim aa; pdd @ 0x3b6b20 | frames_built | 23
+pumasim aa; pdd @ 0x3b6b20 | rebuilt | 0
+pumasim aa; pdd @ 0x3b6b20 | references.computed | 0
+pumasim aa; pdd @ 0x3b6b20 | references.recomputed | 0
+pumasim aa; pdd @ 0x3b6b20 | references.reused | 0
+pumasim aa; pdd @ 0x3b6b20 | rendered.computed | 1
+pumasim aa; pdd @ 0x3b6b20 | rendered.recomputed | 0
+pumasim aa; pdd @ 0x3b6b20 | rendered.reused | 0
+pumasim aa; pdd @ 0x3b6b20 | resolved.computed | 12
+pumasim aa; pdd @ 0x3b6b20 | resolved.recomputed | 0
+pumasim aa; pdd @ 0x3b6b20 | resolved.reused | 0
+pumasim aa; pdd @ 0x3b6b20 | sealed.computed | 1
+pumasim aa; pdd @ 0x3b6b20 | sealed.recomputed | 0
+pumasim aa; pdd @ 0x3b6b20 | sealed.reused | 0
+pumasim aa; pdd @ 0x3b6b20 | table_seals | 1387
+pumasim aa; pdd @ 0x3b6b20 | walked.computed | 372
+pumasim aa; pdd @ 0x3b6b20 | walked.recomputed | 0
+pumasim aa; pdd @ 0x3b6b20 | walked.reused | 0
+pumasim afl | analysed.computed | 0
+pumasim afl | analysed.recomputed | 0
+pumasim afl | analysed.reused | 0
+pumasim afl | call_boundaries.computed | 0
+pumasim afl | call_boundaries.recomputed | 0
+pumasim afl | call_boundaries.reused | 0
+pumasim afl | callee_reads.computed | 0
+pumasim afl | callee_reads.recomputed | 0
+pumasim afl | callee_reads.reused | 0
+pumasim afl | defects | 0
+pumasim afl | direct_sites.computed | 0
+pumasim afl | direct_sites.recomputed | 0
+pumasim afl | direct_sites.reused | 0
+pumasim afl | frames_built | 0
+pumasim afl | rebuilt | 0
+pumasim afl | references.computed | 0
+pumasim afl | references.recomputed | 0
+pumasim afl | references.reused | 0
+pumasim afl | rendered.computed | 0
+pumasim afl | rendered.recomputed | 0
+pumasim afl | rendered.reused | 0
+pumasim afl | resolved.computed | 0
+pumasim afl | resolved.recomputed | 0
+pumasim afl | resolved.reused | 0
+pumasim afl | sealed.computed | 0
+pumasim afl | sealed.recomputed | 0
+pumasim afl | sealed.reused | 0
+pumasim afl | table_seals | 1387
+pumasim afl | walked.computed | 0
+pumasim afl | walked.recomputed | 0
+pumasim afl | walked.reused | 0
+pumasim pdd @ 0x0023fdf0 | analysed.computed | 1
+pumasim pdd @ 0x0023fdf0 | analysed.recomputed | 0
+pumasim pdd @ 0x0023fdf0 | analysed.reused | 1
+pumasim pdd @ 0x0023fdf0 | call_boundaries.computed | 17
+pumasim pdd @ 0x0023fdf0 | call_boundaries.recomputed | 0
+pumasim pdd @ 0x0023fdf0 | call_boundaries.reused | 52
+pumasim pdd @ 0x0023fdf0 | callee_reads.computed | 0
+pumasim pdd @ 0x0023fdf0 | callee_reads.recomputed | 0
+pumasim pdd @ 0x0023fdf0 | callee_reads.reused | 0
+pumasim pdd @ 0x0023fdf0 | defects | 0
+pumasim pdd @ 0x0023fdf0 | direct_sites.computed | 0
+pumasim pdd @ 0x0023fdf0 | direct_sites.recomputed | 0
+pumasim pdd @ 0x0023fdf0 | direct_sites.reused | 0
+pumasim pdd @ 0x0023fdf0 | frames_built | 108
+pumasim pdd @ 0x0023fdf0 | rebuilt | 20
+pumasim pdd @ 0x0023fdf0 | references.computed | 0
+pumasim pdd @ 0x0023fdf0 | references.recomputed | 0
+pumasim pdd @ 0x0023fdf0 | references.reused | 0
+pumasim pdd @ 0x0023fdf0 | rendered.computed | 1
+pumasim pdd @ 0x0023fdf0 | rendered.recomputed | 0
+pumasim pdd @ 0x0023fdf0 | rendered.reused | 0
+pumasim pdd @ 0x0023fdf0 | resolved.computed | 60
+pumasim pdd @ 0x0023fdf0 | resolved.recomputed | 0
+pumasim pdd @ 0x0023fdf0 | resolved.reused | 11
+pumasim pdd @ 0x0023fdf0 | sealed.computed | 1
+pumasim pdd @ 0x0023fdf0 | sealed.recomputed | 0
+pumasim pdd @ 0x0023fdf0 | sealed.reused | 0
+pumasim pdd @ 0x0023fdf0 | table_seals | 9
+pumasim pdd @ 0x0023fdf0 | walked.computed | 216
+pumasim pdd @ 0x0023fdf0 | walked.recomputed | 0
+pumasim pdd @ 0x0023fdf0 | walked.reused | 105
+pumasim pdd @ 0x004baf30 | analysed.computed | 1
+pumasim pdd @ 0x004baf30 | analysed.recomputed | 0
+pumasim pdd @ 0x004baf30 | analysed.reused | 1
+pumasim pdd @ 0x004baf30 | call_boundaries.computed | 20
+pumasim pdd @ 0x004baf30 | call_boundaries.recomputed | 0
+pumasim pdd @ 0x004baf30 | call_boundaries.reused | 100
+pumasim pdd @ 0x004baf30 | callee_reads.computed | 0
+pumasim pdd @ 0x004baf30 | callee_reads.recomputed | 0
+pumasim pdd @ 0x004baf30 | callee_reads.reused | 0
+pumasim pdd @ 0x004baf30 | defects | 0
+pumasim pdd @ 0x004baf30 | direct_sites.computed | 0
+pumasim pdd @ 0x004baf30 | direct_sites.recomputed | 0
+pumasim pdd @ 0x004baf30 | direct_sites.reused | 0
+pumasim pdd @ 0x004baf30 | frames_built | 123
+pumasim pdd @ 0x004baf30 | rebuilt | 21
+pumasim pdd @ 0x004baf30 | references.computed | 0
+pumasim pdd @ 0x004baf30 | references.recomputed | 0
+pumasim pdd @ 0x004baf30 | references.reused | 0
+pumasim pdd @ 0x004baf30 | rendered.computed | 1
+pumasim pdd @ 0x004baf30 | rendered.recomputed | 0
+pumasim pdd @ 0x004baf30 | rendered.reused | 0
+pumasim pdd @ 0x004baf30 | resolved.computed | 89
+pumasim pdd @ 0x004baf30 | resolved.recomputed | 0
+pumasim pdd @ 0x004baf30 | resolved.reused | 13
+pumasim pdd @ 0x004baf30 | sealed.computed | 1
+pumasim pdd @ 0x004baf30 | sealed.recomputed | 0
+pumasim pdd @ 0x004baf30 | sealed.reused | 0
+pumasim pdd @ 0x004baf30 | table_seals | 3
+pumasim pdd @ 0x004baf30 | walked.computed | 214
+pumasim pdd @ 0x004baf30 | walked.recomputed | 0
+pumasim pdd @ 0x004baf30 | walked.reused | 172
+pumasim session: pdd of 50 functions | analysed.computed | 50
+pumasim session: pdd of 50 functions | analysed.recomputed | 0
+pumasim session: pdd of 50 functions | analysed.reused | 50
+pumasim session: pdd of 50 functions | call_boundaries.computed | 108
+pumasim session: pdd of 50 functions | call_boundaries.recomputed | 0
+pumasim session: pdd of 50 functions | call_boundaries.reused | 769
+pumasim session: pdd of 50 functions | callee_reads.computed | 0
+pumasim session: pdd of 50 functions | callee_reads.recomputed | 0
+pumasim session: pdd of 50 functions | callee_reads.reused | 0
+pumasim session: pdd of 50 functions | defects | 0
+pumasim session: pdd of 50 functions | direct_sites.computed | 0
+pumasim session: pdd of 50 functions | direct_sites.recomputed | 0
+pumasim session: pdd of 50 functions | direct_sites.reused | 0
+pumasim session: pdd of 50 functions | frames_built | 702
+pumasim session: pdd of 50 functions | rebuilt | 91
+pumasim session: pdd of 50 functions | references.computed | 0
+pumasim session: pdd of 50 functions | references.recomputed | 0
+pumasim session: pdd of 50 functions | references.reused | 0
+pumasim session: pdd of 50 functions | rendered.computed | 50
+pumasim session: pdd of 50 functions | rendered.recomputed | 0
+pumasim session: pdd of 50 functions | rendered.reused | 0
+pumasim session: pdd of 50 functions | resolved.computed | 518
+pumasim session: pdd of 50 functions | resolved.recomputed | 0
+pumasim session: pdd of 50 functions | resolved.reused | 289
+pumasim session: pdd of 50 functions | sealed.computed | 50
+pumasim session: pdd of 50 functions | sealed.recomputed | 0
+pumasim session: pdd of 50 functions | sealed.reused | 0
+pumasim session: pdd of 50 functions | table_seals | 34
+pumasim session: pdd of 50 functions | walked.computed | 1065
+pumasim session: pdd of 50 functions | walked.recomputed | 0
+pumasim session: pdd of 50 functions | walked.reused | 980

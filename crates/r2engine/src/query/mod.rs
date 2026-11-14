@@ -45,6 +45,10 @@ pub struct AnalysisStats {
     pub defects: u64,
     /// Builds made anew against their owners' statements (D365).
     pub rebuilt: u64,
+    /// Frame object models built, one `FrameReach` each (D403).
+    pub frames_built: u64,
+    /// Convention seals made to read dispatch tables, every round (D403).
+    pub table_seals: u64,
 }
 pub use proved::Proved;
 pub use r2ssa::InductionStep;

@@ -481,6 +481,7 @@ impl SourceUnprovenResult {
 /// `Void` is therefore materially different from no return information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum SourceFunctionReturn {
+    #[doc(alias = "default_deny_void")]
     Void,
     Register {
         storage: CanonicalStorageId,

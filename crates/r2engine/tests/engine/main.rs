@@ -13,6 +13,7 @@ mod call_tables;
 mod control;
 mod conventions;
 mod declared_types;
+mod default_deny;
 mod degraded;
 mod discovery;
 mod gs;

@@ -9,11 +9,20 @@
   census.py sites DIR                              each staged function whose proof line counts a
                                                    residual its text holds no site for; fails on any
   census.py time --r2s BASE --r2s HEAD [--runs N] [--budget R] [--rss-budget R]
-                 [--count-r2s BASE --count-r2s HEAD] [--alloc-budget R] [--heap-budget R] --bins DIR
-                                                   median release time and peak RSS per case, and
+                 [--count-r2s BASE --count-r2s HEAD] [--alloc-budget R] [--heap-budget R]
+                 [--causes FILE] --bins DIR       median release time and peak RSS per case, and
                                                    the allocation count and heap peak from
                                                    alloc-count builds; fails when HEAD exceeds a
-                                                   budget x BASE
+                                                   budget x BASE, an allocation rise only without
+                                                   a cause line for its base count, or a case's
+                                                   binary is missing
+  census.py count --r2s BASE --r2s HEAD --qemu QEMU [--runs N] [--budget R] [--causes FILE] --bins DIR
+                                                   every guest instruction of an `r2s` process per
+                                                   counted case under a `--enable-plugins`
+                                                   qemu-user; fails as `time` does for allocations
+  census.py stats --r2s R2S [--baseline FILE] [--bless] --bins DIR
+                                                   the engine's work counts (`R2S_STATS=1`) per timed
+                                                   case; fails on any move from the baseline
   census.py exponent --r2s R2S [--min-instructions N] [--sample N] [--max-exponent X]
                     [--out FILE] BINARY...         how `pdd` instructions retired, CPU time and
                                                    peak RSS grow with a function's instructions
@@ -67,7 +76,16 @@ SESSION = (
 TIMED = [("0pack", "pdd @ 0x0058e3d0"), ("0pack", "pdd @ 0x0062ecf0"),
          ("pumasim", "pdd @ 0x0023fdf0"), ("pumasim", "pdd @ 0x004baf30"),
          ("pumasim", "afl"), ("0pack", "afl"),
-         ("pumasim", "; ".join(f"pdd @ {address:#x}" for address in SESSION), "session: pdd of 50 functions")]
+         ("pumasim", "; ".join(f"pdd @ {address:#x}" for address in SESSION), "session: pdd of 50 functions"),
+         # The chain's analysed cases (D402): `aa` walks every body, so a per-body cost shows here first.
+         ("pumasim", "aa; pdd @ 0x3b6b20"), ("bash", "aa; pdd @ 0x2e630")]
+# The four cases the stack's timing table grades, counted whole-process under qemu (D343).
+COUNTED = [("pumasim", "pdd @ 0x0023fdf0"), ("0pack", "pdd @ 0x0062ecf0"),
+           ("bash", "aa; pdd @ 0x2e630"), ("pumasim", "aa; pdd @ 0x3b6b20")]
+# A counted rise past its budget stands only on a line naming its row and cause for that exact
+# base count, so the line excuses no later rise (D401).
+CAUSES = ROOT / "scripts/cost_causes.txt"
+CAUSE = re.compile(r"^(allocations|instructions) \| (.+?) \| (\d+) \| (\d+) \| (D\d+) \| (\S.*)$")
 ALLOCATIONS = re.compile(r"^r2s: allocations: (\d+)$", re.MULTILINE)
 HEAP_PEAK = re.compile(r"^r2s: heap peak: (\d+)$", re.MULTILINE)
 INFO = re.compile(r"^addr: (0x[0-9a-f]+)\n(?:.*\n)*?num-instrs: (\d+)$", re.MULTILINE)
@@ -230,6 +248,33 @@ def sites(args):
         sys.exit(1)
 
 
+def causes(path=CAUSES):
+    """Each cause line by (metric, case, base count): the head count it allows, its row and cause."""
+    entries = {}
+    for number, line in enumerate(Path(path).read_text().splitlines(), 1):
+        if not line.strip() or line.startswith("#"):
+            continue
+        found = CAUSE.match(line)
+        if not found:
+            sys.exit(f"{path}:{number}: not `metric | case | base | head ceiling | Dnnn | cause`")
+        metric, case, base, ceiling, row, cause = found.groups()
+        entries[(metric, case, int(base))] = (int(ceiling), row, cause)
+    return entries
+
+
+def counted_rise(metric, case, base, head, budget, entries):
+    """Why HEAD's count fails against BASE's, or None: above budget x BASE with no cause line for
+    this base count whose ceiling holds HEAD."""
+    ratio = head / base
+    if ratio <= budget:
+        return None
+    ceiling, *_ = entries.get((metric, case, base), (0,))
+    if head <= ceiling:
+        return None
+    return (f"{case}: {metric} {base:,} -> {head:,} ({ratio:.4f}x, budget {budget}); a rise stands only "
+            f"on a line in {CAUSES.relative_to(ROOT)}: `{metric} | {case} | {base} | {head} | Dnnn | <cause>`")
+
+
 def measured(binary, command, executable):
     """Wall seconds, this child's own peak RSS in MB, its output, and the allocations and heap peak
     in MB it reported."""
@@ -254,14 +299,14 @@ def measured(binary, command, executable):
 
 
 def time_cases(args):
-    failed = []
+    failed, entries = [], causes(args.causes)
     print("| case | base s | head s | ratio | base MB | head MB | ratio | base heap MB | head heap MB "
           "| ratio | allocations | output |\n|---|---|---|---|---|---|---|---|---|---|---|---|")
     for name, command, *label in TIMED:
         case = f"{name} {label[0] if label else command}"
         binary = Path(args.bins) / name
         if not binary.exists():
-            print(f"| {case} | missing | | | | | | | | | | |")
+            failed.append(f"{case}: no {binary}; every timed case runs (D402)")
             continue
         seconds, peaks, digests, counts, heaps = {}, {}, {}, {}, {}
         for side, executable in zip(("base", "head"), args.r2s):
@@ -279,9 +324,9 @@ def time_cases(args):
         allocations = ""
         if counts.get("base") and counts.get("head"):
             allocated = counts["head"] / counts["base"]
-            allocations = f"{counts['base']:,} -> {counts['head']:,} ({allocated:.2f})"
-            if allocated > args.alloc_budget:
-                failed.append(f"{case}: {allocated:.2f}x the base's allocations")
+            allocations = f"{counts['base']:,} -> {counts['head']:,} ({allocated:.4f})"
+            if rise := counted_rise("allocations", case, counts["base"], counts["head"], args.alloc_budget, entries):
+                failed.append(rise)
         elif counts.get("head"):
             allocations = f"{counts['head']:,}"
         heap = ["", "", ""]
@@ -306,6 +351,110 @@ def time_cases(args):
     for line in failed:
         print(line, file=sys.stderr)
     if failed:
+        sys.exit(1)
+
+
+def qemu_plugin(qemu, workdir):
+    """scripts/qemu_insns.c built against the header a `--enable-plugins` qemu installs beside its bin."""
+    header = Path(qemu).resolve().parent.parent / "include" / "qemu-plugin.h"
+    if not header.exists():
+        sys.exit(f"{qemu} has no {header}: build qemu with --enable-plugins (D343)")
+    plugin = Path(workdir) / "qemu_insns.so"
+    subprocess.run(["cc", "-O2", "-Wall", "-Werror", "-shared", "-fPIC", f"-I{header.parent}",
+                    str(ROOT / "scripts/qemu_insns.c"), "-o", str(plugin)], check=True)
+    return plugin
+
+
+def guest_instructions(qemu, plugin, binary, command, executable, workdir):
+    """Every instruction one `r2s -q -c COMMAND BINARY` process retires under qemu-user."""
+    out = Path(workdir) / "count"
+    out.unlink(missing_ok=True)
+    done = subprocess.run([qemu, "-plugin", f"{plugin},out={out}", executable, "-q", "-c", command,
+                           str(binary)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if done.returncode != 0 or not out.exists():
+        sys.exit(f"{binary.name}: `{command}` under qemu exited {done.returncode}; no count")
+    return int(out.read_text())
+
+
+def count_cases(args):
+    """Whole-process guest instructions of base and head per counted case; a rise past the budget
+    fails unless a cause line names its base count (D343, D401)."""
+    failed, entries = [], causes(args.causes)
+    print("| case | base | head | ratio |\n|---|---|---|---|")
+    with tempfile.TemporaryDirectory() as workdir:
+        plugin = qemu_plugin(args.qemu, workdir)
+        for name, command in COUNTED:
+            case = f"{name} {command}"
+            binary = Path(args.bins) / name
+            if not binary.exists():
+                failed.append(f"{case}: no {binary}; every counted case runs")
+                continue
+            base, head = (statistics.median_low(
+                guest_instructions(args.qemu, plugin, binary, command, executable, workdir)
+                for _ in range(args.runs)) for executable in args.r2s)
+            print(f"| {case} | {base:,} | {head:,} | {head / base:.4f} |", flush=True)
+            if rise := counted_rise("instructions", case, base, head, args.budget, entries):
+                failed.append(rise)
+    for line in failed:
+        print(line, file=sys.stderr)
+    if failed:
+        sys.exit(1)
+
+
+STATS = ROOT / "scripts/stats_baseline.txt"
+STAT = re.compile(r"^r2s: stats: (\S+) (\d+)$", re.MULTILINE)
+
+
+def stats_of(binary, command, executable):
+    """The engine's work counts one `R2S_STATS=1 r2s -q -c COMMAND BINARY` prints, by name."""
+    done = subprocess.run([executable, "-q", "-c", command, str(binary)], capture_output=True, text=True,
+                          errors="replace", env={**os.environ, "R2S_STATS": "1"})
+    found = dict((name, int(count)) for name, count in STAT.findall(done.stderr))
+    if done.returncode != 0 or not found:
+        sys.exit(f"{binary.name}: `{command}` exited {done.returncode} and printed {len(found)} stats")
+    return found
+
+
+def stats_lines(path=STATS):
+    """The baseline's `case | stat | count` lines, by (case, stat)."""
+    held = {}
+    for line in Path(path).read_text().splitlines():
+        if line.strip() and not line.startswith("#"):
+            case, stat, count = line.rsplit(" | ", 2)
+            held[(case, stat)] = int(count)
+    return held
+
+
+def stats_moves(held, measured):
+    """Every (case, stat) whose count differs from the baseline's, either way: a rise is a cost the
+    change must name, a fall a baseline to lower with it (zero tolerance, D403)."""
+    return [f"{case}: {stat} {held.get((case, stat), 'absent')} -> {measured.get((case, stat), 'absent')}"
+            for case, stat in sorted(set(held) | set(measured))
+            if held.get((case, stat)) != measured.get((case, stat))]
+
+
+def stats_cases(args):
+    """Each timed case's engine work counts against scripts/stats_baseline.txt, held exactly."""
+    measured = {}
+    for name, command, *label in TIMED:
+        case = f"{name} {label[0] if label else command}"
+        binary = Path(args.bins) / name
+        if not binary.exists():
+            sys.exit(f"{case}: no {binary}; every case runs")
+        for stat, count in stats_of(binary, command, args.r2s).items():
+            measured[(case, stat)] = count
+        print(f"{case}: " + ", ".join(f"{stat} {count}" for (c, stat), count in measured.items() if c == case),
+              flush=True)
+    if args.bless:
+        header = ("# R2S_STATS=1 counts per census.py TIMED case, held exactly by `census.py stats` (ROADMAP D403).\n"
+                  "# A move either way fails; rewrite with `census.py stats --bless` and name the cause.\n")
+        Path(args.baseline).write_text(header + "".join(
+            f"{case} | {stat} | {count}\n" for (case, stat), count in sorted(measured.items())))
+        return
+    moves = stats_moves(stats_lines(args.baseline), measured)
+    for line in moves:
+        print(line, file=sys.stderr)
+    if moves:
         sys.exit(1)
 
 
@@ -592,9 +741,24 @@ def main():
     p.add_argument("--budget", type=float, default=1.25)
     p.add_argument("--rss-budget", type=float, default=1.3)
     p.add_argument("--count-r2s", action="append")
-    p.add_argument("--alloc-budget", type=float, default=1.3)
+    p.add_argument("--alloc-budget", type=float, default=1.02)
     p.add_argument("--heap-budget", type=float, default=1.05)
+    p.add_argument("--causes", default=str(CAUSES))
     p.set_defaults(func=time_cases)
+    p = sub.add_parser("count")
+    p.add_argument("--r2s", action="append", required=True)
+    p.add_argument("--qemu", required=True)
+    p.add_argument("--bins", required=True)
+    p.add_argument("--runs", type=int, default=1)
+    p.add_argument("--budget", type=float, default=1.01)
+    p.add_argument("--causes", default=str(CAUSES))
+    p.set_defaults(func=count_cases)
+    p = sub.add_parser("stats")
+    p.add_argument("--r2s", required=True)
+    p.add_argument("--bins", required=True)
+    p.add_argument("--baseline", default=str(STATS))
+    p.add_argument("--bless", action="store_true")
+    p.set_defaults(func=stats_cases)
     p = sub.add_parser("exponent")
     p.add_argument("--r2s", required=True)
     p.add_argument("--min-instructions", type=int, default=300)
@@ -616,8 +780,8 @@ def main():
     p.add_argument("profiles", nargs="+")
     p.set_defaults(func=heap)
     args = parser.parse_args()
-    if args.command == "time" and len(args.r2s) != 2:
-        parser.error("time takes --r2s twice: base, then head")
+    if args.command in ("time", "count") and len(args.r2s) != 2:
+        parser.error(f"{args.command} takes --r2s twice: base, then head")
     if args.command == "time" and args.count_r2s and len(args.count_r2s) != 2:
         parser.error("time takes --count-r2s twice: base, then head")
     args.func(args)
