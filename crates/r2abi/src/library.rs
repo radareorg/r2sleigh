@@ -738,6 +738,50 @@ impl Table {
 mod tests {
     use super::*;
 
+    /// D383: every `effects` key reads, on a cited row with no tail; a typo or an uncited row would
+    /// drop a model silently.
+    #[test]
+    fn every_effects_key_reads_on_a_cited_row_with_no_tail() {
+        let tables = [
+            (PORTABLE, false),
+            (PORTABLE_CITED, true),
+            (CXX, false),
+            (CXX_CITED, true),
+            (GLIBC, false),
+            (GLIBC_CITED, true),
+            (BIONIC, false),
+            (BIONIC_CITED, true),
+            (MUSL_CITED, true),
+            (LIBSYSTEM, false),
+            (OBJC, false),
+            (KERNEL32, true),
+            (UCRT, true),
+        ];
+        let mut stated = 0;
+        for (text, cited) in tables {
+            for (name, declared) in Table::read(text).functions {
+                let Some(effects) = declared.effects else {
+                    continue;
+                };
+                stated += 1;
+                assert!(cited, "{name}: an uncited row states effects");
+                assert!(
+                    crate::Effects::read(&effects).is_some(),
+                    "{name}: {effects}"
+                );
+                let ellipsis = declared
+                    .parameters
+                    .values()
+                    .any(|(spelling, _)| spelling.is_empty());
+                assert!(
+                    declared.tail.is_none() && !ellipsis,
+                    "{name}: a row with a tail"
+                );
+            }
+        }
+        assert_eq!(stated, 12);
+    }
+
     #[test]
     fn a_tail_reads_as_its_citation_spells_it() {
         assert_eq!(parse_tail("none"), Some(Tail::None));

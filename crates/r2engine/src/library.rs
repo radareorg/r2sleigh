@@ -31,7 +31,12 @@ fn summary(
     let effects = row.effects.as_ref().filter(|_| row.tail == Tail::None)?;
     let prototype = rows.prototype(row);
     let mut arg_effects = BTreeMap::<usize, SummaryArgEffect>::new();
-    let mut memory_effects = Vec::new();
+    // The clauses bound the parameters only: a library's own state (a stream, the heap) is memory
+    // no clause names, so it stays the unknown location.
+    let mut memory_effects = vec![
+        unknown_effect(SummaryMemoryEffectKind::Read),
+        unknown_effect(SummaryMemoryEffectKind::Write),
+    ];
     let mut transfer_effects = Vec::new();
     let mut allocation_effects = Vec::new();
     let mut lifetime_effects = Vec::new();
@@ -102,9 +107,9 @@ fn summary(
         sync_effects: Vec::new(),
         atomic_effects: Vec::new(),
         return_relation,
-        reads_global_memory: false,
-        writes_global_memory: false,
-        touches_unknown_memory: false,
+        reads_global_memory: true,
+        writes_global_memory: true,
+        touches_unknown_memory: true,
     })
 }
 
@@ -122,6 +127,13 @@ fn unknown() -> SummaryMemoryLocation {
     SummaryMemoryLocation {
         region: SummaryMemoryRegion::Unknown,
         range: None,
+    }
+}
+
+fn unknown_effect(kind: SummaryMemoryEffectKind) -> SummaryMemoryEffect {
+    SummaryMemoryEffect {
+        kind,
+        location: unknown(),
     }
 }
 
@@ -165,7 +177,13 @@ mod tests {
         let malloc = seed("malloc").expect("malloc's row states effects");
         assert!(malloc.arg_effects.is_empty(), "{:?}", malloc.arg_effects);
         assert_eq!(malloc.return_relation, SummaryReturnRelation::HeapAlloc);
-        assert!(malloc.memory_effects.is_empty());
+        let at_args = (malloc.memory_effects.iter())
+            .filter(|effect| matches!(effect.location.region, SummaryMemoryRegion::Arg { .. }));
+        assert_eq!(at_args.count(), 0);
+        assert!(
+            malloc.touches_unknown_memory,
+            "the heap's own state is no parameter"
+        );
     }
 
     /// A row with a tail (`snprintf`, `__snprintf_chk`, `printf`) may write through a tail argument,
