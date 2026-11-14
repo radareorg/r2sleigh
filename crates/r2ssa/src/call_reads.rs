@@ -133,7 +133,7 @@ pub struct CallReads {
     pub(crate) bound: Option<ReadBound>,
     /// Each result register with the low bytes a walked callee's body may read of it before writing
     /// it, from its register effect (D372); none where no row states them.
-    pub(crate) lanes: Option<Box<[(CanonicalStorageId, u32)]>>,
+    pub(crate) lanes: Option<crate::site_boundary::LaneReads>,
 }
 
 impl CallReads {
@@ -157,21 +157,20 @@ impl CallReads {
     /// These reads bounded on the result registers by a walked callee's register effect (D372):
     /// only those no argument register overlaps, whose width the callee's lanes own. O(lanes × r).
     #[must_use]
-    pub fn reading_lanes(mut self, lanes: Option<&[(CanonicalStorageId, u32)]>) -> Self {
+    pub(crate) fn reading_lanes(mut self, lanes: Option<&crate::site_boundary::LaneReads>) -> Self {
         let argument = |slot: &CanonicalStorageId| {
             (self.registers.iter())
                 .any(|register| crate::semantic::register_storages_overlap(*register, *slot))
         };
-        let lanes = lanes.map(|lanes| lanes.iter().filter(|(slot, _)| !argument(slot)));
-        self.lanes = lanes.map(|lanes| lanes.copied().collect());
+        self.lanes = lanes.map(|lanes| lanes.without(argument));
         self
     }
 
     /// The low bytes of `carrier` the callee may read, where its register effect states a result
     /// register starting at it; `O(LANES)`.
     pub fn lane_read(&self, carrier: CanonicalStorageId) -> Option<u32> {
-        let lanes = self.lanes.as_deref()?;
-        let (_, bytes) = lanes.iter().find(|(slot, _)| {
+        let lanes = self.lanes.as_ref()?;
+        let (_, bytes) = lanes.pairs().iter().find(|(slot, _)| {
             slot.space == carrier.space
                 && slot.offset == carrier.offset
                 && carrier.size <= slot.size
@@ -398,7 +397,8 @@ mod tests {
             register(56, 8),
         );
         let every = CallReads::unbounded(vec![rdi, rdx], Some(al), None);
-        let reads = every.reading_lanes(Some(&[(rax, 0), (rdx, 0)]));
+        let walked = crate::site_boundary::LaneReads::walked(&[(rax, 0), (rdx, 0)]);
+        let reads = every.reading_lanes(Some(&walked));
         assert_eq!(reads.lane_read(rax), Some(0));
         assert_eq!(reads.lane_read(rdx), None);
     }

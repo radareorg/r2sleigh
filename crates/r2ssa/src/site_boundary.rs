@@ -407,13 +407,13 @@ impl RegisterEffect {
 
     /// Each result register with the low bytes the body may read of it before writing them: one
     /// past the highest byte `takes` holds, 0 where it takes none (D372). `O(LANES)`.
-    pub fn register_reads(&self) -> Vec<(CanonicalStorageId, u32)> {
+    pub fn register_reads(&self) -> LaneReads {
         let slots = self.lanes.slots();
         let read = (slots.iter().zip(self.takes.0)).filter_map(|(slot, taken)| {
             let slot = (*slot)?;
             Some((slot, (128 - taken.leading_zeros()).min(slot.size)))
         });
-        read.collect()
+        LaneReads(read.collect())
     }
 
     /// What the body keeps once every pending callee keeps it, as `kept` answers each (none keeps
@@ -629,6 +629,43 @@ pub struct CallerFlow<'a, B> {
     /// What each operation of each block may do, where the block's first operation is `first[block]`.
     modes: Vec<Mode>,
     first: Vec<u32>,
+}
+
+/// The low bytes a walked body may read of each result register before writing it (D372, D411):
+/// minted only by [`RegisterEffect::register_reads`], whose `takes` holds every read, forward
+/// and loss.
+///
+/// ```compile_fail,E0423
+/// let forged = r2ssa::site_boundary::LaneReads(Box::new([]));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LaneReads(Box<[(CanonicalStorageId, u32)]>);
+
+impl r2source::Negative for LaneReads {
+    const FACTS: &'static [r2source::NegativeFact] = &[r2source::NegativeFact::CallReadBytes];
+}
+
+impl LaneReads {
+    /// The registers with the bytes read of each, in the body's lane order.
+    pub fn pairs(&self) -> &[(CanonicalStorageId, u32)] {
+        &self.0
+    }
+
+    /// These reads less the registers `drop` names: a narrower bound is never minted.
+    pub(crate) fn without(&self, drop: impl Fn(&CanonicalStorageId) -> bool) -> Self {
+        Self(
+            self.0
+                .iter()
+                .filter(|(slot, _)| !drop(slot))
+                .copied()
+                .collect(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn walked(pairs: &[(CanonicalStorageId, u32)]) -> Self {
+        Self(pairs.into())
+    }
 }
 
 /// How an operation takes part in the pass.

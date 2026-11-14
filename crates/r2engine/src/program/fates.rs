@@ -1354,7 +1354,7 @@ pub(super) struct LiftSummary {
     /// What a call to it leaves as found: the greatest fixpoint over its pending callees.
     pub(super) kept: r2ssa::site_boundary::Kept,
     /// Each result register with the low bytes the body may read of it before writing it (D372).
-    pub(super) reads: Box<[(CanonicalStorageId, u32)]>,
+    pub(super) reads: r2ssa::site_boundary::LaneReads,
 }
 
 /// One body's lift-grade summary, solved with every member of its component of the pending-callee
@@ -1461,7 +1461,7 @@ fn greatest_kept(
     let summaries = (rows.iter().zip(kept)).map(|(row, kept)| {
         Some(LiftSummary {
             kept: kept?,
-            reads: row.as_ref()?.register_reads().into(),
+            reads: row.as_ref()?.register_reads(),
         })
     });
     members.iter().copied().zip(summaries).collect()

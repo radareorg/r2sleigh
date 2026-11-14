@@ -766,7 +766,7 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
         crate::native::Program::kept_at(&self.view(), entry)
     }
 
-    fn reads_at(&self, entry: u64) -> Option<Box<[(r2ssa::CanonicalStorageId, u32)]>> {
+    fn reads_at(&self, entry: u64) -> Option<r2ssa::site_boundary::LaneReads> {
         crate::native::Program::reads_at(&self.view(), entry)
     }
 }

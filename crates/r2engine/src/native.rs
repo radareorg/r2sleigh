@@ -103,7 +103,7 @@ pub trait Program: crate::body::Program {
 
     /// Each result register with the low bytes the body at `entry` may read of it before writing
     /// it, from its held register effect (D372); `None` where no row states them.
-    fn reads_at(&self, _entry: u64) -> Option<Box<[(CanonicalStorageId, u32)]>> {
+    fn reads_at(&self, _entry: u64) -> Option<r2ssa::site_boundary::LaneReads> {
         None
     }
 

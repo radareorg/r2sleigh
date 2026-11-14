@@ -4164,7 +4164,7 @@ pub struct DefRef<'a, V = SSAVar> {
 pub type CalleePreservedCarriers = BTreeMap<u64, BTreeSet<CanonicalStorageId>>;
 
 /// Each walked callee's result registers with the low bytes its body may read of each, by entry.
-pub type CalleeLaneReads = BTreeMap<u64, Box<[(CanonicalStorageId, u32)]>>;
+pub type CalleeLaneReads = BTreeMap<u64, crate::site_boundary::LaneReads>;
 
 /// What the engine knows of the functions a body calls, by entry address.
 #[derive(Debug, Clone, Default)]

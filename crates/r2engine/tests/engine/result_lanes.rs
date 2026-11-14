@@ -482,6 +482,16 @@ fn a_walked_callee_that_reads_the_result_register_reads_the_bits_above_a_narrow_
     assert!(text.contains("| r2sleigh_residual_u64(1) << 32"), "{text}");
 }
 
+/// `g` hands RAX on unwritten in a tail through a register (D373's forward): its register effect
+/// takes every byte, so the call reads RAX whole and the bits above `narrow`'s result stay a
+/// residual (D372 meets D373, default-deny).
+#[test]
+fn a_walked_callee_that_tails_the_result_register_on_reads_the_bits_above_a_narrow_result() {
+    // jmp rdi
+    let text = read_by_a_walked_callee(&[0xff, 0xe7]);
+    assert!(text.contains("<< 32"), "{text}");
+}
+
 /// `caller`'s register effect is deposited by its own site fates where `f` is decided first, and
 /// asked directly where `top` is: each order renders every function alike (ADR, "S31b as built").
 #[test]

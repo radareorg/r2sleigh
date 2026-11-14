@@ -12,6 +12,7 @@ use r2source::{Negative, NegativeFact};
 const CARRIERS: &[&[NegativeFact]] = &[
     <r2ssa::call_reads::ReadBound as Negative>::FACTS,
     <r2ssa::call_reads::StackWrites as Negative>::FACTS,
+    <r2ssa::site_boundary::LaneReads as Negative>::FACTS,
     <r2ssa::site_boundary::CallEffect as Negative>::FACTS,
     <r2ssa::SummaryArgEffect as Negative>::FACTS,
     <r2source::Never as Negative>::FACTS,

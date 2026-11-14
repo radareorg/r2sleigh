@@ -1367,7 +1367,7 @@ impl SourceMachineContext {
             )),
             None => model
                 .map(crate::call_reads::CallReads::every_location)
-                .map(|reads| reads.reading_lanes(lanes.map(|lanes| &lanes[..]))),
+                .map(|reads| reads.reading_lanes(lanes)),
         };
         reads.map(|reads| reads.writing(writes))
     }

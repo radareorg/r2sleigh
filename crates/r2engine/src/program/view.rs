@@ -487,7 +487,7 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
             .map(|summary| summary.kept.kept_registers().collect())
     }
 
-    fn reads_at(&self, entry: u64) -> Option<Box<[(r2ssa::CanonicalStorageId, u32)]>> {
+    fn reads_at(&self, entry: u64) -> Option<r2ssa::site_boundary::LaneReads> {
         let key = (entry, self.thumb_at(entry));
         let summary = self.db.get::<super::fates::Summary>(&key).ok()?;
         (*summary).as_ref().map(|summary| summary.reads.clone())
