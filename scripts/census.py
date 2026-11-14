@@ -10,16 +10,19 @@
                                                    residual its text holds no site for; fails on any
   census.py time --r2s BASE --r2s HEAD [--runs N] [--budget R] [--rss-budget R]
                  [--count-r2s BASE --count-r2s HEAD] [--alloc-budget R] [--heap-budget R]
-                 [--causes FILE] --bins DIR       median release time and peak RSS per case, and
+                 [--causes FILE] [--base-commit SHA] --bins DIR
+                                                   median release time and peak RSS per case, and
                                                    the allocation count and heap peak from
                                                    alloc-count builds; fails when HEAD exceeds a
                                                    budget x BASE, an allocation rise only without
-                                                   a cause line for its base count, or a case's
+                                                   a cause line for the base commit, or a case's
                                                    binary is missing
-  census.py count --r2s BASE --r2s HEAD --qemu QEMU [--runs N] [--budget R] [--causes FILE] --bins DIR
-                                                   every guest instruction of an `r2s` process per
+  census.py count --r2s BASE --r2s HEAD --qemu QEMU [--runs N] [--budget R] [--causes FILE]
+                  [--base-commit SHA] --bins DIR   every guest instruction of an `r2s` process per
                                                    counted case under a `--enable-plugins`
-                                                   qemu-user; fails as `time` does for allocations
+                                                   qemu-user, in a fixed environment, the base
+                                                   counted twice; fails as `time` does for
+                                                   allocations
   census.py stats --r2s R2S [--baseline FILE] [--bless] --bins DIR
                                                    the engine's work counts (`R2S_STATS=1`) per timed
                                                    case; fails on any move from the baseline
@@ -82,10 +85,19 @@ TIMED = [("0pack", "pdd @ 0x0058e3d0"), ("0pack", "pdd @ 0x0062ecf0"),
 # The four cases the stack's timing table grades, counted whole-process under qemu (D343).
 COUNTED = [("pumasim", "pdd @ 0x0023fdf0"), ("0pack", "pdd @ 0x0062ecf0"),
            ("bash", "aa; pdd @ 0x2e630"), ("pumasim", "aa; pdd @ 0x3b6b20")]
-# A counted rise past its budget stands only on a line naming its row and cause for that exact
-# base count, so the line excuses no later rise (D401).
+# A counted rise past its budget stands only on a line naming its row and cause for that base
+# commit, with the head/base ratio as printed for a ceiling, so it excuses no later rise (D401, D439).
 CAUSES = ROOT / "scripts/cost_causes.txt"
-CAUSE = re.compile(r"^(allocations|instructions) \| (.+?) \| (\d+) \| (\d+) \| (D\d+) \| (\S.*)$")
+CAUSE = re.compile(r"^(allocations|instructions) \| (.+?) \| ([0-9a-f]{40}) \| (\d+\.\d{4}) \| (D\d+) \| (\S.*)$")
+COMMIT = re.compile(r"^[0-9a-f]{40}$")
+# What a counted process sees: no host variable, and mimalloc's host-dependent options stated, so the
+# count reads no runner's settings (D439; libmimalloc-sys 0.1.49, v2 src/options.c).
+COUNT_ENV = {
+    "PATH": "/usr/bin:/bin", "LC_ALL": "C",
+    "MIMALLOC_ARENA_EAGER_COMMIT": "1", "MIMALLOC_EAGER_COMMIT": "1",
+    "MIMALLOC_ALLOW_LARGE_OS_PAGES": "0", "MIMALLOC_RESERVE_HUGE_OS_PAGES": "0",
+    "MIMALLOC_ALLOW_THP": "0", "MIMALLOC_PURGE_DELAY": "-1", "MIMALLOC_USE_NUMA_NODES": "1",
+}
 ALLOCATIONS = re.compile(r"^r2s: allocations: (\d+)$", re.MULTILINE)
 HEAP_PEAK = re.compile(r"^r2s: heap peak: (\d+)$", re.MULTILINE)
 INFO = re.compile(r"^addr: (0x[0-9a-f]+)\n(?:.*\n)*?num-instrs: (\d+)$", re.MULTILINE)
@@ -249,30 +261,36 @@ def sites(args):
 
 
 def causes(path=CAUSES):
-    """Each cause line by (metric, case, base count): the head count it allows, its row and cause."""
+    """Each cause line by (metric, case, base commit): the printed ratio it allows, its row and cause."""
     entries = {}
     for number, line in enumerate(Path(path).read_text().splitlines(), 1):
         if not line.strip() or line.startswith("#"):
             continue
         found = CAUSE.match(line)
         if not found:
-            sys.exit(f"{path}:{number}: not `metric | case | base | head ceiling | Dnnn | cause`")
-        metric, case, base, ceiling, row, cause = found.groups()
-        entries[(metric, case, int(base))] = (int(ceiling), row, cause)
+            sys.exit(f"{path}:{number}: not `metric | case | base commit | head/base ceiling | Dnnn | cause`")
+        metric, case, commit, ceiling, row, cause = found.groups()
+        entries[(metric, case, commit)] = (ceiling, row, cause)
     return entries
 
 
-def counted_rise(metric, case, base, head, budget, entries):
+def printed_ratio(base, head):
+    """HEAD/BASE to the four places every table prints and every cause line states."""
+    return f"{head / base:.4f}"
+
+
+def counted_rise(metric, case, base, head, budget, entries, commit):
     """Why HEAD's count fails against BASE's, or None: above budget x BASE with no cause line for
-    this base count whose ceiling holds HEAD."""
-    ratio = head / base
-    if ratio <= budget:
+    the base commit whose ceiling holds the printed ratio."""
+    if head / base <= budget:
         return None
-    ceiling, *_ = entries.get((metric, case, base), (0,))
-    if head <= ceiling:
+    printed = printed_ratio(base, head)
+    ceiling, *_ = entries.get((metric, case, commit), ("0.0000",))
+    if float(printed) <= float(ceiling):
         return None
-    return (f"{case}: {metric} {base:,} -> {head:,} ({ratio:.4f}x, budget {budget}); a rise stands only "
-            f"on a line in {CAUSES.relative_to(ROOT)}: `{metric} | {case} | {base} | {head} | Dnnn | <cause>`")
+    return (f"{case}: {metric} {base:,} -> {head:,} ({printed}x, budget {budget}); a rise stands only "
+            f"on a line in {CAUSES.relative_to(ROOT)}: "
+            f"`{metric} | {case} | {commit or '<base commit>'} | {printed} | Dnnn | <cause>`")
 
 
 def measured(binary, command, executable):
@@ -300,6 +318,7 @@ def measured(binary, command, executable):
 
 def time_cases(args):
     failed, entries = [], causes(args.causes)
+    commit = base_commit(args)
     print("| case | base s | head s | ratio | base MB | head MB | ratio | base heap MB | head heap MB "
           "| ratio | allocations | output |\n|---|---|---|---|---|---|---|---|---|---|---|---|")
     for name, command, *label in TIMED:
@@ -323,9 +342,10 @@ def time_cases(args):
         rss = peaks["head"] / peaks["base"]
         allocations = ""
         if counts.get("base") and counts.get("head"):
-            allocated = counts["head"] / counts["base"]
-            allocations = f"{counts['base']:,} -> {counts['head']:,} ({allocated:.4f})"
-            if rise := counted_rise("allocations", case, counts["base"], counts["head"], args.alloc_budget, entries):
+            allocated = printed_ratio(counts["base"], counts["head"])
+            allocations = f"{counts['base']:,} -> {counts['head']:,} ({allocated})"
+            if rise := counted_rise("allocations", case, counts["base"], counts["head"], args.alloc_budget,
+                                    entries, commit):
                 failed.append(rise)
         elif counts.get("head"):
             allocations = f"{counts['head']:,}"
@@ -366,21 +386,33 @@ def qemu_plugin(qemu, workdir):
 
 
 def guest_instructions(qemu, plugin, binary, command, executable, workdir):
-    """Every instruction one `r2s -q -c COMMAND BINARY` process retires under qemu-user."""
+    """Every instruction one `r2s -q -c COMMAND BINARY` process retires under qemu-user, in COUNT_ENV."""
     out = Path(workdir) / "count"
     out.unlink(missing_ok=True)
     done = subprocess.run([qemu, "-plugin", f"{plugin},out={out}", executable, "-q", "-c", command,
-                           str(binary)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                           str(binary)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                          env=dict(COUNT_ENV))
     if done.returncode != 0 or not out.exists():
         sys.exit(f"{binary.name}: `{command}` under qemu exited {done.returncode}; no count")
     return int(out.read_text())
 
 
+def base_commit(args):
+    """The base commit a cause line must name, or None, when no line binds (D439)."""
+    if args.base_commit and not COMMIT.match(args.base_commit):
+        sys.exit(f"--base-commit {args.base_commit}: not a full 40-digit commit")
+    return args.base_commit
+
+
 def count_cases(args):
-    """Whole-process guest instructions of base and head per counted case; a rise past the budget
-    fails unless a cause line names its base count (D343, D401)."""
+    """Whole-process guest instructions of base, head and base again per counted case; a rise past
+    the budget fails unless a cause line names the base commit (D343, D401, D439)."""
     failed, entries = [], causes(args.causes)
-    print("| case | base | head | ratio |\n|---|---|---|---|")
+    commit = base_commit(args)
+    print("| r2s | sha256 |\n|---|---|")
+    for side, executable in zip(("base", "head"), args.r2s):
+        print(f"| {side} | {hashlib.sha256(Path(executable).read_bytes()).hexdigest()} |")
+    print("\n| case | base | head | ratio | base again | base difference |\n|---|---|---|---|---|---|")
     with tempfile.TemporaryDirectory() as workdir:
         plugin = qemu_plugin(args.qemu, workdir)
         for name, command in COUNTED:
@@ -389,11 +421,12 @@ def count_cases(args):
             if not binary.exists():
                 failed.append(f"{case}: no {binary}; every counted case runs")
                 continue
-            base, head = (statistics.median_low(
+            base, head, again = (statistics.median_low(
                 guest_instructions(args.qemu, plugin, binary, command, executable, workdir)
-                for _ in range(args.runs)) for executable in args.r2s)
-            print(f"| {case} | {base:,} | {head:,} | {head / base:.4f} |", flush=True)
-            if rise := counted_rise("instructions", case, base, head, args.budget, entries):
+                for _ in range(args.runs)) for executable in (*args.r2s, args.r2s[0]))
+            print(f"| {case} | {base:,} | {head:,} | {printed_ratio(base, head)} | {again:,} | {again - base:+,} |",
+                  flush=True)
+            if rise := counted_rise("instructions", case, base, head, args.budget, entries, commit):
                 failed.append(rise)
     for line in failed:
         print(line, file=sys.stderr)
@@ -744,6 +777,7 @@ def main():
     p.add_argument("--alloc-budget", type=float, default=1.02)
     p.add_argument("--heap-budget", type=float, default=1.05)
     p.add_argument("--causes", default=str(CAUSES))
+    p.add_argument("--base-commit")
     p.set_defaults(func=time_cases)
     p = sub.add_parser("count")
     p.add_argument("--r2s", action="append", required=True)
@@ -752,6 +786,7 @@ def main():
     p.add_argument("--runs", type=int, default=1)
     p.add_argument("--budget", type=float, default=1.01)
     p.add_argument("--causes", default=str(CAUSES))
+    p.add_argument("--base-commit")
     p.set_defaults(func=count_cases)
     p = sub.add_parser("stats")
     p.add_argument("--r2s", required=True)
