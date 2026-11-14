@@ -443,8 +443,8 @@ pub struct EngineExecutionControl {
     meter: Arc<r2ssa::SsaWorkMeter>,
     /// Convention seals this request made to read a body's dispatch tables, every round (D403).
     table_seals: Arc<std::sync::atomic::AtomicU64>,
-    /// Blocks a later dispatch round copied out of its walk to seal a region (D367).
-    round_blocks: Arc<std::sync::atomic::AtomicU64>,
+    /// Lifts a later dispatch round copied out of its walk to seal a region (D367).
+    round_lifts: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl EngineExecutionControl {
@@ -455,7 +455,7 @@ impl EngineExecutionControl {
             deadline,
             meter: Arc::new(r2ssa::SsaWorkMeter::default()),
             table_seals: Arc::default(),
-            round_blocks: Arc::default(),
+            round_lifts: Arc::default(),
         }
     }
 
@@ -478,14 +478,14 @@ impl EngineExecutionControl {
         (self.table_seals).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
-    /// Blocks later dispatch rounds copied to seal their regions.
-    pub fn round_blocks(&self) -> u64 {
-        self.round_blocks.load(std::sync::atomic::Ordering::Relaxed)
+    /// Instruction lifts later dispatch rounds copied out of their walks to seal regions.
+    pub fn round_lifts(&self) -> u64 {
+        self.round_lifts.load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    pub(crate) fn note_round_blocks(&self, blocks: usize) {
-        let blocks = u64::try_from(blocks).unwrap_or(u64::MAX);
-        (self.round_blocks).fetch_add(blocks, std::sync::atomic::Ordering::Relaxed);
+    pub(crate) fn note_round_lifts(&self, lifts: usize) {
+        let lifts = u64::try_from(lifts).unwrap_or(u64::MAX);
+        (self.round_lifts).fetch_add(lifts, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn with_cancellation_and_deadline(

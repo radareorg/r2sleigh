@@ -463,7 +463,7 @@ pub struct SourceMachineContext {
     /// callsite interfaces. Unlike display strings, these are semantic
     /// evidence, because a variadic format literal is count evidence.
     source_string_literals: BTreeMap<u64, String>,
-    /// Bytes the program never writes, by the address a body loads from or a literal it names.
+    /// Bytes the program never writes, by the address a body loads from: what a load there reads.
     read_only: BTreeMap<u64, Box<[u8]>>,
     /// What the read-only format each printf call's own block passes consumes, by the call's
     /// instruction (D409).
@@ -1458,7 +1458,7 @@ impl SourceMachineContext {
 
     /// Fold the format each call to a cited printf `...` passes in its own block, one forward pass
     /// per block, and keep what a read-only format consumes (D409). O(operations + calls log calls).
-    pub(crate) fn bind_format_tails(&mut self, blocks: &[R2ILBlock]) {
+    pub(crate) fn bind_format_tails(&mut self, blocks: &[R2ILBlock], immutable: &[u64]) {
         let mut tails = BTreeMap::new();
         for block in blocks {
             let mut origins = BlockOrigins::default();
@@ -1469,7 +1469,9 @@ impl SourceMachineContext {
                     .and_then(|instruction| Some((instruction, self.format_register(instruction)?)))
                     .and_then(|(instruction, register)| {
                         let varnode = r2il::Varnode::register(register.offset, register.size);
-                        let text = self.immutable_literal(origins.of(&varnode)?.constant()?)?;
+                        let at = origins.of(&varnode)?.constant()?;
+                        immutable.binary_search(&at).ok()?;
+                        let text = self.source_string_literal(at)?;
                         let consumed = r2abi::format::printf_consumed_arguments(text).ok()?;
                         Some((instruction, consumed))
                     });
@@ -1503,16 +1505,6 @@ impl SourceMachineContext {
             (true, SourceParameterLocation::Register(storage)) => Some(storage),
             _ => None,
         }
-    }
-
-    /// The literal at `address` where the capture holds its bytes and terminator read-only: text no
-    /// write reaches for the whole run. O(log windows + length).
-    fn immutable_literal(&self, address: u64) -> Option<&str> {
-        let text = self.source_string_literal(address)?;
-        let (start, bytes) = self.read_only.range(..=address).next_back()?;
-        let from = usize::try_from(address - start).ok()?;
-        let held = bytes.get(from..from.checked_add(text.len() + 1)?)?;
-        (held.strip_suffix(&[0]) == Some(text.as_bytes())).then_some(text)
     }
 
     pub fn source_string_literal(&self, address: u64) -> Option<&str> {
@@ -1682,11 +1674,8 @@ pub fn loaded_target_slot(block: &R2ILBlock, op_index: usize) -> Option<Canonica
         .loaded_slot()
 }
 
-/// The stack a variadic call reads, from the call's stack pointer: its fixed parameters and `tail`'s
-/// operands placed after them, each in a pointer-wide slot (C17 6.5.2.2p7 promotes every one).
-/// None where a 32-bit target, an Apple arm64 stacked tail, a `long double`, more than 64
-/// operands, a fixed parameter placed otherwise than declared or a stack offset before the call
-/// leaves the place unproven. O(parameters + operands).
+/// The stack a variadic call reads from its stack pointer: the fixed parameters and one promoted
+/// pointer-wide slot per `tail` operand (C17 6.5.2.2p7); refusals in adr-call-boundary "D409 as built".
 fn counted_stack(
     interface: &SourceCallSiteInterface,
     model: &r2source::ConventionModel,
@@ -1696,7 +1685,8 @@ fn counted_stack(
     let callee = interface.exact_callee_interface()?;
     let integers = model.arguments(SlotClass::Integer);
     let wide = integers.first().is_some_and(|first| first.size == 8);
-    if !wide || model.forms.variadic_on_stack || tail.long_double || tail.count > 64 {
+    let unclassed = tail.long_double || tail.gapped || tail.count > 64;
+    if !wide || model.forms.variadic_on_stack || unclassed {
         return None;
     }
     let floats = model.arguments(SlotClass::Float);

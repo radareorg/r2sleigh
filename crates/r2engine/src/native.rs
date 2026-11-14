@@ -796,17 +796,15 @@ pub(crate) fn later_tables(
         );
         let regions = last.iter().filter_map(|dispatch| {
             let (at, keep) = index.region_after(*dispatch, &new)?;
-            native
-                .program
-                .control()
-                .note_round_blocks(keep.iter().filter(|kept| **kept).count());
+            let (body, copied) = walk.cut(&shape, at, &keep);
+            native.program.control().note_round_lifts(copied);
             Some(Walked {
                 name: name.clone(),
-                body: walk.cut(&shape, at, &keep),
+                body,
             })
         });
         let mut fresh = Vec::new();
-        for region in regions.collect::<Vec<_>>() {
+        for region in regions {
             let held = (tables.read.iter())
                 .chain(&fresh)
                 .cloned()
@@ -2096,9 +2094,8 @@ impl Adjacency {
         keep
     }
 
-    /// The region after the dispatch at `dispatch` (D285): the blocks it reaches that reach one of
-    /// `stops`, less any block entered from outside, entered at the dispatch's block; its entry
-    /// and blocks. O(blocks + edges).
+    /// The region after `dispatch` (D285): its entry and the blocks it reaches that reach one of
+    /// `stops`, less any entered from outside. O(blocks + edges).
     fn region_after(&self, dispatch: u64, stops: &BTreeSet<u64>) -> Option<(u64, Vec<bool>)> {
         let at = self.held(dispatch)?;
         let stops = stops.iter().filter_map(|stop| self.held(*stop));
@@ -2992,14 +2989,15 @@ impl<'a> Native<'a> {
         string_literals.extend(extra_literals);
         string_literals.sort_by_key(|(address, _)| *address);
         string_literals.dedup_by_key(|(address, _)| *address);
-        let read_only = self.read_only(&walked.body, &string_literals);
+        let immutable_literals = self.immutable_literals(&walked.body, &string_literals);
         let function = NativeFunction {
             address: walked.body.entry,
             name: walked.name.clone(),
             blocks,
             calls,
             string_literals,
-            read_only,
+            immutable_literals,
+            read_only: self.read_only(&walked.body),
             data_symbols,
             data_types,
             code_pointer_tables: (tables.iter().chain(call_tables))
@@ -3126,43 +3124,38 @@ impl Native<'_> {
             .collect()
     }
 
-    /// The bytes at each literal address the body loads from, and each of `literals`' texts, where
-    /// the program never writes them and the loader does not (`TableBytes::ReadOnly`) (P5, D409).
-    fn read_only(
-        &self,
-        body: &crate::body::Body,
-        literals: &[(u64, String)],
-    ) -> Vec<(u64, Vec<u8>)> {
+    /// The bytes at each literal address the body loads from, where the program never writes
+    /// them and the loader does not (`TableBytes::ReadOnly`): what every such load reads (P5).
+    fn read_only(&self, body: &crate::body::Body) -> Vec<(u64, Vec<u8>)> {
         let (loads, stores) = literal_accesses(body);
-        // A literal no write reaches is read-only bytes too, with its terminator: a format (D409).
-        let texts = literals.iter().filter_map(|(address, _)| {
-            let mut bytes = immutable_text_at(self.program, *address)?.into_bytes();
-            bytes.push(0);
-            Some((*address, bytes))
+        loads
+            .into_iter()
+            .filter_map(|(address, size)| {
+                let bytes = self.program.read(address, size)?;
+                let range = address..address.checked_add(bytes.len() as u64)?;
+                // A body that stores there says the container's statement is not this run's.
+                let stored = stores
+                    .iter()
+                    .any(|written| written.start < range.end && range.start < written.end);
+                (bytes.len() == size
+                    && !stored
+                    && TableBytes::of(self.program, range) == TableBytes::ReadOnly)
+                    .then_some((address, bytes))
+            })
+            .collect()
+    }
+
+    /// Each of `literals` whose text and terminator are mapped read-only, untouched by the loader
+    /// and by the body's own stores: a format a call reads as the file holds it (D409). Ascending.
+    fn immutable_literals(&self, body: &crate::body::Body, literals: &[(u64, String)]) -> Vec<u64> {
+        let (_, stores) = literal_accesses(body);
+        let immutable = literals.iter().filter(|(address, text)| {
+            let end = address.saturating_add(text.len() as u64 + 1);
+            let stored =
+                (stores.iter()).any(|written| written.start < end && *address < written.end);
+            !stored && immutable_text_at(self.program, *address).as_ref() == Some(text)
         });
-        let loaded = loads.into_iter().filter_map(|(address, size)| {
-            let bytes = self.program.read(address, size)?;
-            let range = address..address.checked_add(bytes.len() as u64)?;
-            // A body that stores there says the container's statement is not this run's.
-            let stored = stores
-                .iter()
-                .any(|written| written.start < range.end && range.start < written.end);
-            (bytes.len() == size
-                && !stored
-                && TableBytes::of(self.program, range) == TableBytes::ReadOnly)
-                .then_some((address, bytes))
-        });
-        // Two windows at one address are one run's bytes: the longer is kept, as it sorts last.
-        let mut windows = loaded.chain(texts).collect::<Vec<_>>();
-        windows.sort_by_key(|(address, bytes)| (*address, bytes.len()));
-        windows.dedup_by(|later, earlier| {
-            let same = later.0 == earlier.0;
-            if same {
-                std::mem::swap(later, earlier);
-            }
-            same
-        });
-        windows
+        immutable.map(|(address, _)| *address).collect()
     }
 
     /// The named program data this body points at, each with the type the

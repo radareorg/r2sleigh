@@ -87,6 +87,9 @@ pub struct NativeFunction {
     pub calls: Vec<NativeCall>,
     /// Text the body points at, with the address it lives at.
     pub string_literals: Vec<(u64, String)>,
+    /// The addresses of `string_literals` whose text and terminator no write reaches for the
+    /// whole run, ascending (D409).
+    pub immutable_literals: Vec<u64>,
     /// Bytes the program never writes at each address the body loads from, as the file holds them.
     pub read_only: Vec<(u64, Vec<u8>)>,
     /// Program data the body points at, named.
@@ -236,6 +239,7 @@ pub fn capture(
             blocks: blocks.into_boxed_slice(),
             external_exits: external_exits.into_boxed_slice(),
             string_literals: function.string_literals.into_boxed_slice(),
+            immutable_literals: function.immutable_literals.into_boxed_slice(),
             read_only: function.read_only.into_boxed_slice(),
             data_symbols: function.data_symbols.into_boxed_slice(),
             data_types: function.data_types,
@@ -369,6 +373,7 @@ mod tests {
             ],
             calls: Vec::new(),
             string_literals: Vec::new(),
+            immutable_literals: Vec::new(),
             read_only: Vec::new(),
             data_symbols: Vec::new(),
             data_types: None,

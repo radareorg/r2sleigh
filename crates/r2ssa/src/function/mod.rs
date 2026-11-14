@@ -2963,7 +2963,8 @@ impl TrustedSsaArtifact {
                 provisional_machine_context
                     .bind_source_string_literals(source.image().string_literals());
                 provisional_machine_context.bind_read_only(source.image().read_only());
-                provisional_machine_context.bind_format_tails(blocks.as_slice());
+                provisional_machine_context
+                    .bind_format_tails(blocks.as_slice(), source.image().immutable_literals());
                 provisional_machine_context.set_callee_statements(&callee_statements);
                 provisional_machine_context
                     .set_slot_targets(correlated_call_sites.slot_targets.clone());
@@ -3181,7 +3182,7 @@ impl TrustedSsaArtifact {
         );
         machine_context.bind_source_string_literals(source.image().string_literals());
         machine_context.bind_read_only(source.image().read_only());
-        machine_context.bind_format_tails(blocks.as_slice());
+        machine_context.bind_format_tails(blocks.as_slice(), source.image().immutable_literals());
         machine_context.bind_data_structs(source.image());
         let function = match built {
             Some(built) => built,

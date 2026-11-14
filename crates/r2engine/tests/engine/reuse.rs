@@ -241,6 +241,7 @@ fn rendered_returning_object(declared: bool) -> String {
         }],
         calls: Vec::new(),
         string_literals: Vec::new(),
+        immutable_literals: Vec::new(),
         read_only: Vec::new(),
         data_symbols: vec![r2source::SourceDataObject::new(
             0x2000,

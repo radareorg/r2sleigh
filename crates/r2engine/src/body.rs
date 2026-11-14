@@ -537,9 +537,9 @@ impl Lifting {
         self.0.shape()
     }
 
-    /// The blocks of `shape`, this walk's as it stands, that `keep` holds, entered at `entry`:
-    /// only their lifts are copied. O(instructions + kept operations).
-    pub fn cut(&self, shape: &Shape, entry: u64, keep: &[bool]) -> Body {
+    /// The blocks of `shape`, this walk's as it stands, that `keep` holds, entered at `entry`, and
+    /// how many lifts were copied: only theirs. O(instructions + kept operations).
+    pub fn cut(&self, shape: &Shape, entry: u64, keep: &[bool]) -> (Body, usize) {
         self.0.cut(shape, entry, keep)
     }
 
@@ -1398,17 +1398,18 @@ impl Walk {
 
     /// The blocks of `shape` that `keep` holds, entered at `entry`: only their lifts are copied, and
     /// the body's calls, stops and exits are the whole walk's. O(instructions + kept operations).
-    fn cut(&self, shape: &Shape, entry: u64, keep: &[bool]) -> Body {
+    fn cut(&self, shape: &Shape, entry: u64, keep: &[bool]) -> (Body, usize) {
         let closed = self.closed();
         let lifts = (self.lifted.iter().flatten()).collect::<Vec<_>>();
         let ending = self.ending();
-        let kept = (shape.spans.iter().zip(keep)).filter(|(_, kept)| **kept);
-        let blocks = kept.map(|(span, _)| {
+        let (mut blocks, mut copied) = (Vec::new(), 0);
+        for (span, _) in (shape.spans.iter().zip(keep)).filter(|(_, kept)| **kept) {
             let parts = lifts[span.first..span.first + span.len].iter();
             let mut parts = parts.map(|(_, lift)| lift.copied()).collect::<Vec<_>>();
-            finish(&mut parts, &ending, span.closed)
-        });
-        self.body_of(entry, blocks.collect(), &shape.spans, &closed)
+            copied += parts.len();
+            blocks.push(finish(&mut parts, &ending, span.closed));
+        }
+        (self.body_of(entry, blocks, &shape.spans, &closed), copied)
     }
 
     /// The calls that end their block closed: gated on a callee not known to return, or halting.
