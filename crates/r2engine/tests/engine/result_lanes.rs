@@ -372,3 +372,74 @@ fn a_tail_to_a_void_callee_names_its_exit() {
         "{text}"
     );
 }
+
+/// [`tail_to_free`] tailing into `printf`: a variadic tail reads every register a call reads
+/// unnamed and `printf`'s `int`, so `narrow`'s upper bytes stay unread and no residual (D373).
+#[test]
+fn a_tail_to_a_variadic_callee_names_its_exit() {
+    let functions = &[("narrow", BASE, 0x09), ("stores", BASE + 0x10, 0x1a)];
+    let literal = Literal::of_code(tail_to_free(), functions).importing("printf");
+    let rendered = OpenProgram::of(literal).rendered(BASE + 0x10);
+    let text = rendered.expect("it renders").response.output.into_text();
+    assert!(text.contains("call to printf: variadic"), "{text}");
+    assert!(!text.contains("<< 32"), "{text}");
+    assert!(
+        text.contains("rax_1 = (uint64_t)narrow((uint32_t)arg0);"),
+        "{text}"
+    );
+}
+
+/// `narrow` of [`UNREAD_ABOVE`]; `tails`: `pxor xmm0, xmm0; call narrow; <between>; jmp stub`,
+/// the stub an import no row states.
+fn tail_to_unstated(between: &[u8]) -> &'static [u8] {
+    let mut code = [0xcc_u8; 0xa0];
+    code[..9].copy_from_slice(&UNREAD_ABOVE[..9]);
+    code[0x10..0x19].copy_from_slice(&UNREAD_ABOVE[0x10..0x19]);
+    let jump = 0x19 + between.len();
+    code[0x19..jump].copy_from_slice(between);
+    let rel = i32::try_from(0x90 - (jump + 5)).expect("a near jump");
+    code[jump] = 0xe9;
+    code[jump + 1..jump + 5].copy_from_slice(&rel.to_le_bytes());
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    code[0x98..].fill(0);
+    Box::leak(Box::new(code))
+}
+
+/// The bytes demand reads of the RAX `call narrow` leaves, in `tails` of [`tail_to_unstated`].
+fn demanded_of_narrow(between: &[u8]) -> Option<u64> {
+    let functions = &[("narrow", BASE, 0x09), ("tails", BASE + 0x10, 0x20)];
+    let literal = Literal::of_code(tail_to_unstated(between), functions).importing("unstated");
+    let mut open = OpenProgram::of(literal);
+    let prepared = open.prepared(BASE + 0x10).expect("it prepares");
+    let artifact = prepared.artifact().shared_artifact();
+    let graph = artifact.graph();
+    let rax = (graph.insts.iter())
+        .find_map(|inst| match graph.op(inst.id) {
+            Some(r2ssa::SSAOp::CallDefine { dst }) => graph
+                .value(*dst)
+                .and_then(|value| value.canonical_storage)
+                .filter(|storage| storage.offset == 0 && storage.size == 8)
+                .map(|_| *dst),
+            _ => None,
+        })
+        .expect("the RAX the call defines");
+    artifact
+        .facts()
+        .demanded
+        .as_ref()
+        .map(|demand| demand.bytes(rax))
+}
+
+/// A tail to an unstated callee reads the count register: of the RAX `narrow` leaves, nothing
+/// but AL's byte reaches the exit, so demand reads that byte alone (D373).
+#[test]
+fn a_tail_to_an_unstated_callee_reads_its_count_register() {
+    assert_eq!(demanded_of_narrow(&[]), Some(0x1));
+}
+
+/// Default-deny: an unstated tail reads every argument register whole, so `mov rdi, rax` hands
+/// `narrow`'s undefined upper bytes on and demand reads all eight (D373).
+#[test]
+fn a_tail_to_an_unstated_callee_reads_its_argument_registers_whole() {
+    assert_eq!(demanded_of_narrow(&[0x48, 0x89, 0xc7]), Some(0xff));
+}
