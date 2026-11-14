@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 
 use crate::dense::{Csr, DenseId};
-use crate::fixpoint::{Step, Wto};
+use crate::fixpoint::{Evaluated, Step, Wto};
 use crate::graph::{BlockId, GraphInst, SsaGraph};
 use crate::op::SSAOp;
 use crate::strided::StridedInterval;
@@ -625,7 +625,7 @@ impl Solve<'_> {
         pairs
     }
 
-    fn eval(&mut self, cell: Cell, step: Step) -> bool {
+    fn eval(&mut self, cell: Cell, step: Step) -> Evaluated {
         match cell.index().checked_sub(self.graph.insts.len()) {
             Some(at) => self.eval_env(at, step),
             None => self.eval_inst(cell, step),
@@ -633,26 +633,28 @@ impl Solve<'_> {
     }
 
     /// A guard environment: its parent's facts with its own tests assumed.
-    fn eval_env(&mut self, at: usize, step: Step) -> bool {
+    fn eval_env(&mut self, at: usize, step: Step) -> Evaluated {
         let env = &self.guards.envs[at];
         let parent = match env.parent {
             NO_ENV => Some(Held::default()),
             parent => self.held[parent as usize].clone(),
         };
         let Some(mut now) = parent else {
-            return false;
+            return Evaluated::default();
         };
         for (compare, truth) in &env.tests {
             assume(&mut now, self.graph, self.solved(), compare, *truth);
         }
         let next = match (&self.held[at], step) {
-            (None, _) => now,
-            (Some(was), Step::Ascend { .. }) => was.join(&now),
-            (Some(was), Step::Descend { .. }) => was.meet(&now),
+            (None, _) => None,
+            (Some(was), Step::Ascend { .. }) => Some(was.join(&now)),
+            (Some(was), Step::Descend { .. }) => Some(was.meet(&now)),
         };
+        let above = next.as_ref().is_some_and(|next| *next != now);
+        let next = next.unwrap_or(now);
         let moved = self.held[at].as_ref() != Some(&next);
         self.held[at] = Some(next);
-        moved
+        Evaluated { moved, above }
     }
 
     /// `value` read under environment `env`.
@@ -665,16 +667,16 @@ impl Solve<'_> {
         meet_held(range, held, class_of(self.class, value))
     }
 
-    fn eval_inst(&mut self, cell: Cell, step: Step) -> bool {
+    fn eval_inst(&mut self, cell: Cell, step: Step) -> Evaluated {
         let graph = self.graph;
         let Some(inst) = graph.inst(crate::InstId(cell.0)) else {
-            return false;
+            return Evaluated::default();
         };
         let Some(output) = inst.output else {
-            return false;
+            return Evaluated::default();
         };
         let Some(slot) = self.state.get(output.0 as usize).copied() else {
-            return false;
+            return Evaluated::default();
         };
         let env = self.guards.env_of[inst.block.0 as usize];
         let read = |value: ValueId| self.read_under(env, value);
@@ -706,11 +708,9 @@ impl Solve<'_> {
             Step::Descend { head: true } if phi => slot.refine(&slot.meet(&computed)),
             Step::Descend { .. } => slot.meet(&computed),
         };
-        if next == slot {
-            return false;
-        }
+        let (moved, above) = (next != slot, next != computed);
         self.state[output.0 as usize] = next;
-        true
+        Evaluated { moved, above }
     }
 }
 
@@ -1711,6 +1711,75 @@ mod tests {
         let scaled = range_of(&ranges, &graph, &offset);
         assert_eq!(scaled.bounds(), Some((0, 28)), "{scaled:?}");
         assert_eq!(scaled.stride(), Some(4), "{scaled:?}");
+    }
+
+    /// `i = phi(0, i + 1)` stepped under `i < 8`, after `prefix` straight-line cells: the counter's
+    /// `[0, 8]` is the descent's alone, and the prefix's cells are not evaluated again in it.
+    fn guarded_counter(prefix: usize) -> (StridedInterval, u64, crate::fixpoint::Meter) {
+        let (entry, header, body, exit) = (0x1000, 0x1010, 0x1020, 0x1030);
+        let (counter, stepped, guard) = (var("i", 1, 4), var("i", 2, 4), var("guard", 1, 1));
+        let mut head = SSABlock::new(entry, 16);
+        for at in 0..prefix as u32 {
+            let from = match at {
+                0 => var("arg", 0, 4),
+                _ => var("s", at, 4),
+            };
+            head.push(crate::op::SSAOp::IntAdd {
+                dst: var("s", at + 1, 4),
+                a: from,
+                b: constant(1, 4),
+            });
+        }
+        let mut header_block = SSABlock::new(header, 16);
+        header_block.push_phi(PhiNode {
+            dst: counter.clone(),
+            sources: vec![(entry, constant(0, 4)), (body, stepped.clone())],
+            canonical_storage: None,
+        });
+        header_block.push(crate::op::SSAOp::IntLess {
+            dst: guard.clone(),
+            a: counter.clone(),
+            b: constant(8, 4),
+        });
+        header_block.push(crate::op::SSAOp::CBranch {
+            target: constant(body, 8),
+            cond: guard,
+        });
+        let mut body_block = SSABlock::new(body, 16);
+        body_block.push(crate::op::SSAOp::IntAdd {
+            dst: stepped,
+            a: counter.clone(),
+            b: constant(1, 4),
+        });
+        let cfg = cfg_of(
+            entry,
+            &[
+                (entry, BlockTerminator::Branch { target: header }),
+                (
+                    header,
+                    BlockTerminator::ConditionalBranch {
+                        true_target: body,
+                        false_target: exit,
+                    },
+                ),
+                (body, BlockTerminator::Branch { target: header }),
+                (exit, BlockTerminator::Return),
+            ],
+        );
+        let blocks = [head, header_block, body_block, SSABlock::new(exit, 16)];
+        let (ranges, graph, meter) = solve_counting(&blocks, cfg);
+        let cells = graph.insts.len() as u64;
+        (range_of(&ranges, &graph, &counter), cells, meter)
+    }
+
+    /// D435: the descent starts at the cells the ascent left above what their inputs compute.
+    #[test]
+    fn the_descent_evaluates_only_what_a_widened_head_reaches() {
+        let (counter, cells, meter) = guarded_counter(32);
+        assert_eq!(counter.bounds(), Some((0, 8)), "{counter:?}: the descent's");
+        assert!(meter.descended < cells, "{meter:?} over {cells} cells");
+        let (_, _, short) = guarded_counter(0);
+        assert_eq!(meter.descended, short.descended, "{meter:?} {short:?}");
     }
 
     /// `cmp eax, 7; ja default; mov eax, eax; ... [rax*8]` with EAX loaded:

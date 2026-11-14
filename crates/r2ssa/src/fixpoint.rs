@@ -397,11 +397,21 @@ pub enum Step {
     Descend { head: bool },
 }
 
+/// What one evaluation did: whether the cell moved, and in the ascent whether it now holds more
+/// than its inputs compute, which seeds the descent (doc/adr-fixpoint.md, "Semi-naive descent").
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Evaluated {
+    pub moved: bool,
+    pub above: bool,
+}
+
 /// What one [`wto_sparse`] run spent.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Meter {
     /// Cells evaluated.
     pub evaluations: u64,
+    /// Cells evaluated in the descent: `O(|reach(W')| · repeats)` for the cells `W'` the ascent left above what their inputs compute.
+    pub descended: u64,
     /// The most times one head-block cell moved in one phase.
     pub head_moves: usize,
     /// Bitmap words the waiting search read: `O(cells / 64 + evaluations)` per phase.
@@ -416,13 +426,13 @@ pub struct Placed<'a, B, C> {
     pub readers: &'a Csr<C, C>,
 }
 
-/// Solve `placed`'s cells, ascending then descending; `height` bounds a head-block cell's moves per
-/// phase (doc/adr-fixpoint.md, "Weak topological order").
+/// Solve `placed`'s cells, ascending then descending from the cells the ascent left above their
+/// inputs; `height` bounds a head-block cell's moves per phase (doc/adr-fixpoint.md, "Weak topological order").
 pub fn wto_sparse<B: DenseId, C: DenseId>(
     pass: &'static str,
     height: (usize, usize),
     placed: Placed<'_, B, C>,
-    mut eval: impl FnMut(C, Step) -> bool,
+    mut eval: impl FnMut(C, Step) -> Evaluated,
 ) -> Result<Meter, Exhausted> {
     let mut solve = Ranked::of(placed);
     for (descend, height) in [(false, height.0), (true, height.1)] {
@@ -443,6 +453,8 @@ struct Ranked<'a, B, C> {
     ranked: Vec<C>,
     moves: Vec<usize>,
     waiting: Waiting,
+    /// The cells whose last ascent evaluation left them above what their inputs compute: `W'`.
+    above: Waiting,
     meter: Meter,
 }
 
@@ -464,7 +476,8 @@ impl<'a, B: DenseId, C: DenseId> Ranked<'a, B, C> {
             rank,
             first,
             moves: vec![0; ranked.len()],
-            waiting: Waiting::all(0),
+            waiting: Waiting::none(ranked.len()),
+            above: Waiting::none(ranked.len()),
             ranked,
             meter: Meter::default(),
         }
@@ -479,10 +492,14 @@ impl<'a, B: DenseId, C: DenseId> Ranked<'a, B, C> {
         &mut self,
         descend: bool,
         height: usize,
-        eval: &mut impl FnMut(C, Step) -> bool,
+        eval: &mut impl FnMut(C, Step) -> Evaluated,
     ) -> Result<(), String> {
         let wto = self.placed.wto;
-        self.waiting = Waiting::all(self.ranked.len());
+        // A cell outside reach(W') would recompute its slot: meet(x, x) = refine(x, x) = x (Kani).
+        self.waiting = match descend {
+            false => Waiting::all(self.ranked.len()),
+            true => std::mem::replace(&mut self.above, Waiting::none(0)),
+        };
         self.moves.iter_mut().for_each(|count| *count = 0);
         // The open components: each head's position and how often it has run.
         let mut open = Vec::<(usize, usize)>::new();
@@ -515,7 +532,7 @@ impl<'a, B: DenseId, C: DenseId> Ranked<'a, B, C> {
         open: &mut Vec<(usize, usize)>,
         mut at: usize,
         (descend, height): (bool, usize),
-        eval: &mut impl FnMut(C, Step) -> bool,
+        eval: &mut impl FnMut(C, Step) -> Evaluated,
     ) -> Result<usize, String> {
         let wto = self.placed.wto;
         while let Some(&(head, runs)) = open.last()
@@ -548,7 +565,7 @@ impl<'a, B: DenseId, C: DenseId> Ranked<'a, B, C> {
 
     /// Evaluate the waiting cells of position `at`'s block. The search resumes past each taken
     /// cell; a reader requeued below it moves it back.
-    fn evaluate(&mut self, at: usize, step: Step, eval: &mut impl FnMut(C, Step) -> bool) {
+    fn evaluate(&mut self, at: usize, step: Step, eval: &mut impl FnMut(C, Step) -> Evaluated) {
         let head = matches!(
             step,
             Step::Ascend { head: true } | Step::Descend { head: true }
@@ -559,7 +576,12 @@ impl<'a, B: DenseId, C: DenseId> Ranked<'a, B, C> {
             self.waiting.clear(index);
             from = index + 1;
             self.meter.evaluations += 1;
-            if !eval(self.ranked[index], step) {
+            self.meter.descended += u64::from(matches!(step, Step::Descend { .. }));
+            let evaluated = eval(self.ranked[index], step);
+            if let Step::Ascend { .. } = step {
+                self.above.put(index, evaluated.above);
+            }
+            if !evaluated.moved {
                 continue;
             }
             if head {
@@ -581,6 +603,12 @@ struct Waiting {
 }
 
 impl Waiting {
+    fn none(count: usize) -> Self {
+        Self {
+            words: vec![0; count.div_ceil(64)],
+        }
+    }
+
     fn all(count: usize) -> Self {
         let mut words = vec![u64::MAX; count.div_ceil(64)];
         if let Some(last) = words.last_mut()
@@ -597,6 +625,13 @@ impl Waiting {
 
     fn clear(&mut self, at: usize) {
         self.words[at / 64] &= !(1 << (at % 64));
+    }
+
+    fn put(&mut self, at: usize, waits: bool) {
+        match waits {
+            true => self.set(at),
+            false => self.clear(at),
+        }
     }
 
     /// The first waiting rank in `lo..hi`, each word read counted in `probes`.
@@ -735,8 +770,12 @@ mod tests {
                 cells: &cells,
                 readers: &readers,
             };
-            let meter = wto_sparse("straight", (1, 1), placed, |cell, _| moved.insert(cell))
-                .expect("a straight block settles");
+            let step = |cell, _| Evaluated {
+                moved: moved.insert(cell),
+                above: false,
+            };
+            let meter =
+                wto_sparse("straight", (1, 1), placed, step).expect("a straight block settles");
             assert!(
                 meter.probes <= 2 * meter.evaluations + 4 * u64::from(n) / 64,
                 "{meter:?}"

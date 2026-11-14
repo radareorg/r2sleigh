@@ -699,6 +699,10 @@ mod tests {
             assert_eq!(described(&widened) & both, both, "{left:?} widen {right:?}");
             // Two progressions meet in a progression, so the meet is exact.
             let met = left.meet(right);
+            if left == right {
+                assert_eq!(met, *left, "{left:?} meet itself");
+                assert_eq!(left.refine(left), *left, "{left:?} refine itself");
+            }
             assert_eq!(
                 described(&met),
                 left_set & right_set,
@@ -765,6 +769,8 @@ mod tests {
                 (left.widen(&right), Some(b)),
                 (left.meet(&right), right.contains(a).then_some(a)),
             ];
+            prop_assert_eq!(left.meet(&left), left);
+            prop_assert_eq!(left.refine(&left), left);
             for (result, value) in checks {
                 if let Some(value) = value {
                     prop_assert!(result.contains(value), "{:?} {:?} -> {:?} misses {}", left, right, result, value);
@@ -871,6 +877,31 @@ mod kani_proofs {
             element,
             u64::from(low) + u64::from(stride) * u64::from(pick),
         )
+    }
+
+    /// Any element of any width, bottom included: `strided` canonicalises whatever it is given.
+    fn any_canonical() -> StridedInterval {
+        let width: u32 = kani::any();
+        kani::assume((1..=StridedInterval::MAX_WIDTH_BITS).contains(&width));
+        match kani::any() {
+            true => StridedInterval::bottom(width),
+            false => StridedInterval::strided(width, kani::any(), kani::any(), kani::any()),
+        }
+    }
+
+    /// The descent skips a cell whose slot equals what its inputs compute (doc/adr-fixpoint.md, "Semi-naive descent").
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn a_meet_with_itself_is_itself() {
+        let element = any_canonical();
+        assert!(element.meet(&element) == element);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(4)]
+    fn a_refine_by_itself_is_itself() {
+        let element = any_canonical();
+        assert!(element.refine(&element) == element);
     }
 
     #[kani::proof]
