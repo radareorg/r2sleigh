@@ -19,13 +19,9 @@ pub struct FormatTail {
 /// Stack ranges from a call's pointer; `None` where nothing bounds them.
 pub type StackArea = Option<Vec<(i64, i64)>>;
 
-/// What a call to one callee may write of its caller's stack beside its reads (D377); a callee
-/// with no entry may write any of it up to the caller's entry pointer. Spans are minted only by
-/// the frame walk that classified every transfer of the body (D411).
-///
-/// ```compile_fail,E0423
-/// let forged = r2ssa::call_reads::StackWrites(());
-/// ```
+/// What a call may write of its caller's stack (D377, D411): spans only the frame walk that
+/// classified every transfer of the callee mints; no entry writes up to the caller's entry pointer.
+#[doc = "```compile_fail,E0423\nlet forged = r2ssa::call_reads::StackWrites(());\n```"]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StackWrites(Writes);
 
@@ -79,10 +75,7 @@ impl StackWrites {
 
 /// Why a call's listed registers are all it may read (D411): a cited declaration, or a callee whose
 /// arity r2ssa holds exact. The every-location default has none.
-///
-/// ```compile_fail,E0423
-/// let forged = r2ssa::call_reads::ReadBound(());
-/// ```
+#[doc = "```compile_fail,E0423\nlet forged = r2ssa::call_reads::ReadBound(());\n```"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadBound(Bounded);
 
@@ -178,9 +171,8 @@ impl CallReads {
         Some((*bytes).min(carrier.size))
     }
 
-    /// A complete, fixed interface: its arguments, the slots its callee's body proves unread left
-    /// out (`is_hole`); every location where the callee states its reads unbounded (an uncited
-    /// row, D411). O(arguments).
+    /// A complete, fixed interface's arguments less its proven holes, O(arguments); every location
+    /// where the callee states its reads unbounded (an uncited row, D411).
     pub fn exact(interface: &SourceCallSiteInterface, model: Option<&ConventionModel>) -> Self {
         let unbounded = (interface.exact_callee_interface())
             .is_some_and(|callee| callee.unbounded_reads().is_some());

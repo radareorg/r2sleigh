@@ -514,9 +514,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ComponentForwarding {
 }
 
 /// The callers `ComponentForwarding(root)` joins, their site fates asked in `CallRanks` order
-/// (component, finish, address) before `DirectSites` joins them, so a deep read finds a lower-ranked
-/// caller's register effect deposited (doc/adr-result-side.md, "Relift order"). A body's callers are
-/// pushed only once `DirectSites` forwards it a lane, asked when every caller of its callee is popped.
+/// before `DirectSites` joins them (doc/adr-result-side.md, "Relift order").
 struct CallersFirst<'a> {
     ranks: &'a Ranks,
     survey: &'a super::requests::Survey,
@@ -1415,9 +1413,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Summary {
     }
 }
 
-/// One component's members, ascending, each kept set descended from `unwritten` to the greatest
-/// fixpoint: a member is closed again only when a pending callee inside shrinks, and a set shrinks
-/// at most `r` times, so `O(k + E × r)` closings. Sound since a returning call has finite depth.
+/// One component's kept sets, descended from `unwritten` to the greatest fixpoint: `O(k + E × r)`
+/// closings, each set shrinking at most `r` times (doc/adr-resolved-bodies.md, "The lift grade").
 fn greatest_kept(
     members: &[(u64, bool)],
     row: &impl Fn((u64, bool)) -> Option<RegisterEffect>,

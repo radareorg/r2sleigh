@@ -2164,10 +2164,8 @@ rustc_lint::declare_lint!(
 );
 
 rustc_lint::declare_lint!(
-    /// `r2ssa::semantic::BuildFacts` is what a static phase reads of a build. A read of the
-    /// function or its context outside the allowed shape and source call-site accessors, or a
-    /// method handing either out, lets a callee's statement reach a phase a kept build does not
-    /// run again (doc/adr-callee-builds.md, D289).
+    /// A read of a build's function or context past `BuildFacts`' shape and call-site accessors lets
+    /// a callee's statement reach a static phase a kept build does not run again (D289).
     pub BUILD_FACTS_READS_A_CALLEE_FACT,
     Deny,
     "a static phase reads a build's shape and its source's call sites, nothing a callee states"

@@ -2050,11 +2050,8 @@ thread_local! {
 /// A set of register classes, one bit each.
 type Classes = Vec<u64>;
 
-/// The register bytes a function writes, the machine-state carriers left out, cut into classes:
-/// two bytes share a class where no instruction writes one without the other, so they have the
-/// same writers and the same reaching definitions everywhere. Per block, the last writer of each
-/// class it writes, and one walked set per block, built once for every unproven machine return
-/// (D254, rescans R4).
+/// A function's written register bytes cut into classes no instruction splits, each block's last
+/// writer per class (D254; doc/adr-one-ir.md, "Register classes").
 struct RegisterWalk<'g> {
     graph: &'g SsaGraph,
     call_results: &'g crate::dense::IdSet<ValueId>,
@@ -2120,9 +2117,8 @@ impl<'g> RegisterWalk<'g> {
         walk
     }
 
-    /// Cut the bytes into classes, one write at a time: the bytes a write covers of a class it
-    /// covers in part leave for a new class. Each write costs its width; classes are then numbered
-    /// by their first byte.
+    /// Cut the bytes into classes, one write at a time, each costing its width; classes are then
+    /// numbered by their first byte.
     fn refine(&mut self) {
         if self.bytes.is_empty() {
             return;
@@ -2183,10 +2179,8 @@ impl<'g> RegisterWalk<'g> {
         classes
     }
 
-    /// Every register definition that may reach `at`, a call's clobber left out; only the blocks
-    /// a walk marked are cleared after it. A (block, class) pair is walked once, and a visit costs
-    /// its set's words and the classes the block writes of it: `O(E x R' x R'/64 + |live| log R')`
-    /// per return for `R'` classes.
+    /// Every register definition that may reach `at`, a call's clobber left out:
+    /// `O(E x R' x R'/64 + |live| log R')` for `R'` classes (doc/adr-one-ir.md, "Register classes").
     fn reaching(&mut self, at: InstId) -> Vec<ValueId> {
         let Some(exit) = self.graph.inst(at) else {
             return Vec::new();

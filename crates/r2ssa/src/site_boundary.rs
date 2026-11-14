@@ -631,13 +631,9 @@ pub struct CallerFlow<'a, B> {
     first: Vec<u32>,
 }
 
-/// The low bytes a walked body may read of each result register before writing it (D372, D411):
-/// minted only by [`RegisterEffect::register_reads`], whose `takes` holds every read, forward
-/// and loss.
-///
-/// ```compile_fail,E0423
-/// let forged = r2ssa::site_boundary::LaneReads(Box::new([]));
-/// ```
+/// The low bytes a walked body may read of each result register before writing it (D372, D411),
+/// minted only by [`RegisterEffect::register_reads`], whose `takes` holds every read and forward.
+#[doc = "```compile_fail,E0423\nlet forged = r2ssa::site_boundary::LaneReads(Box::new([]));\n```"]
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct LaneReads(Box<[(CanonicalStorageId, u32)]>);
 

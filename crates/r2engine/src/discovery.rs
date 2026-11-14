@@ -411,9 +411,8 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
         (*waits == 0).then_some(caller)
     }
 
-    /// Bodies whose every end halts or waits on a callee declared or composed never, each with the
-    /// "never" its ends compose; a trap or a wait cycle stays a bound. A least fixpoint over the
-    /// wait edges, each body composed once its last wait is met, callee first: `O(V + E)`.
+    /// Bodies whose every end halts or waits on a callee declared or composed never; a trap or a
+    /// wait cycle stays a bound. A least fixpoint over the wait edges, callee first: `O(V + E)`.
     fn composed(&self) -> BTreeMap<u64, Never> {
         let candidate = |address: u64| {
             !self.returning.contains(&address)

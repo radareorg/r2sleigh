@@ -1,7 +1,5 @@
 //! The frame's one escape walk, default deny, before slot promotion (doc/adr-frame-model.md,
-//! "Escape spans"). Each round propagates, reading no callee, then decides against the callees'
-//! statements (doc/adr-callee-builds.md, "D365 as built"). A value's set and a place's held set
-//! only grow: `O(rounds x 65 x (V + E))`.
+//! "Escape spans"; doc/adr-callee-builds.md, "D365 as built"): `O(rounds x 65 x (V + E))`.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -596,9 +594,8 @@ impl FrameWalk {
         }
     }
 
-    /// The points every round decides against `evidence`, where each round promotes and places as
-    /// it did and the canary's projection is equal: the build stands, with these points. `None`
-    /// where a decision moved. `O(rounds x |D|)`, no propagation.
+    /// The points every round decides against `evidence` where each round promotes and places as it
+    /// did and the canary's projection is equal; `None` where a decision moved. `O(rounds x |D|)`.
     pub(crate) fn restate<C: SsaWorkControl + ?Sized>(
         &self,
         evidence: &Evidence<'_>,
@@ -775,8 +772,7 @@ fn eligible(points: &FramePoints, places: &PlaceFacts, site: &WalkSite) -> BTree
 }
 
 /// Walk `func`'s frame addresses, round by round: propagate, then decide against the callees'
-/// statements. `places` states promotion's facts of a round's accesses. The promoted set only
-/// shrinks, so at most one round per place. Returns the walk, its points and what it promotes.
+/// statements. The promoted set only shrinks, so at most one round per place.
 pub(crate) fn walk<C: SsaWorkControl + ?Sized>(
     func: &SSAFunction,
     (defs, machine): (&Definitions, &SourceMachineContext),
@@ -1801,11 +1797,8 @@ thread_local! {
     pub(crate) static REACHING_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The merged write spans reaching each block's entry: the union of `gen(c)` over every block `c`
-/// with a path `c ->+ b`, since the transfer `out = in | gen` kills nothing (doc/adr-one-ir.md,
-/// "Condensation"). One Tarjan search, then components predecessors first: an acyclic one takes
-/// its in-edges' outs, a cyclic one adds its members' gen. One linear union per edge:
-/// `O(B + E x K)` for `K` spans, floor `Omega(B + E + sum |in(b)|)`. Every block is seeded.
+/// The merged write spans reaching each block's entry, one condensation and one union per edge:
+/// `O(B + E x K)` for `K` spans (doc/adr-one-ir.md, "Reaching frame writes").
 fn reaching_writes(
     successors: &Csr<Node, Node>,
     in_block: &IdVec<Node, Vec<CallSpans>>,

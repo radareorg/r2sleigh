@@ -13,23 +13,8 @@ use rustc_span::Span;
 use rustc_span::def_id::LocalDefId;
 
 rustc_lint::declare_lint!(
-    /// ### What it does
-    ///
-    /// Flags a whole pass over a function-scale set inside a loop body or an iterator closure: an
-    /// iteration, `clone` or `len()`-sized allocation of a dense table, a graph table, or a
-    /// collection of a function's entities or registry rows, or a call to a function of the same
-    /// crate that makes one over a function-owned table. A receiver that depends on the loop's own
-    /// binding passes (`for b in blocks { for i in &b.insts }` is `O(I)`).
-    ///
-    /// ### Why is this bad?
-    ///
-    /// One pass per item over a set the size of the function is `O(|X| x |Y|)`. Five of the
-    /// engine's quadratics had this shape (1cd65fdcc, c67924d1a, adee2bc73, 6e3250060, 8e9b6edc1).
-    ///
-    /// ### Known problems
-    ///
-    /// Blind to cross-crate callees, rebuilds per call and fixpoint height. A bounded scan states
-    /// its bound in `allow(scan_in_loop, reason = ...)`; the scaling bench (D404, D417) proves it.
+    /// A whole pass over a function-scale set inside a per-item loop or closure is `O(|X| x |Y|)`
+    /// (doc/rewrite_quality_gates.md, "Round 5 lints"); a bounded scan states its bound in `allow`.
     pub SCAN_IN_LOOP,
     Warn,
     "a whole pass over a function-scale set inside a per-item loop"
@@ -106,9 +91,8 @@ const KEY_METHODS: &[&str] = &[
     "remove",
 ];
 
-/// The scans standing when D416 landed, by item, scan and count, unaudited: each goes when its
-/// item is rewritten or its bound is stated in `allow(scan_in_loop, reason = ...)` beside it. A
-/// new scan, or one more of a listed one, fires; a count that falls fails until it is lowered.
+/// The scans standing when D416 landed, unaudited: a new one or one more fires, and a count that
+/// falls fails until it is lowered (doc/rewrite_quality_gates.md, "Round 5 lints").
 const STANDING_SCANS: &[(&str, &str, usize)] = &[
     (
         "r2dec::render::values::Values::<'a>::copies",

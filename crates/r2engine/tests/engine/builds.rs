@@ -128,9 +128,8 @@ const RECURSES: &[u8] = &[
     0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1018 padding
 ];
 
-/// `rec` writes neither rsi nor rax, and its returning path calls only itself: the greatest
-/// fixpoint keeps both (D413; a returning call has finite depth), so the caller stores through its
-/// own rsi the rax it was entered with. The parent kept nothing across a cycle: rsi was a residual.
+/// `rec` writes neither rsi nor rax and its returning path calls only itself: the greatest fixpoint
+/// keeps both (D413), where the parent kept nothing across a cycle and rsi was a residual.
 #[test]
 fn a_callee_that_calls_itself_on_a_returning_path_keeps_what_it_never_writes() {
     let functions = [("rec", BASE, 0x0a), ("root", BASE + 0x10, 0x08)];
@@ -179,9 +178,8 @@ fn a_reach_promotion_never_asked_keeps_the_build() {
     assert_eq!(stats.defects, 0, "{stats:?}");
 }
 
-/// `forwards`' build is kept against `frees`' statement, whose areas moved and decide nothing, so
-/// its second recovery borrows the static phases its first collected: one prefix per build and
-/// per seal, 9 on the parent (D289). The debug oracle's rebuild is unmetered.
+/// `forwards`' build is kept against `frees`' statement, so its second recovery borrows the static
+/// phases its first collected: one prefix per build and per seal, 9 on the parent (D289).
 #[test]
 fn a_kept_build_collects_its_static_phases_once() {
     let mut open = OpenProgram::of(Literal::plt_wrapped("free", &FORWARDS));
@@ -212,10 +210,8 @@ const HANDS_A_SLOT_UPWARD: &[u8] = &[
     0xc3, // 1037 ret
 ];
 
-/// `middle` hands its slot's address to `clear`, which turns out to reach only upward, and also
-/// stores it to memory: the slot escapes either way whatever `clear` states, so the frame walk's
-/// decision stands and the build is kept with no propagation (D365 rule 2); the parent built it
-/// twice, the asked reach flipped. A debug build compares it with a rebuild.
+/// `middle`'s slot address reaches `clear` and memory, so it escapes whatever `clear` states: the
+/// build is kept with no propagation (D365 rule 2), where the parent built it twice.
 #[test]
 fn a_reach_that_moves_no_decision_keeps_the_build() {
     let functions = [

@@ -1292,9 +1292,8 @@ fn every_unproven_machine_return_of_a_function_shares_one_register_walk() {
     assert_eq!(walks, 1);
 }
 
-/// `2^depth` unproven machine returns at the leaves of a tree of branches, each leaf writing the
-/// result and a register across its top byte, the root one more: the class visits of every walk,
-/// which grow as `T log T`.
+/// The class visits over `2^depth` unproven returns at a branch tree's leaves, each writing the
+/// result and a register across its top byte: they grow as `T log T`.
 fn register_class_visits(depth: u32) -> usize {
     let mut arch = composed_return_arch_spec("whole", "slice", "pc");
     arch.add_register(RegisterDef::new("partial", 3, 2));

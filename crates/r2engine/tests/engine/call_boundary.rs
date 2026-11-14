@@ -1811,9 +1811,8 @@ fn a_caller_that_calls_another_caller_is_read_after_it() {
     assert_eq!(walked, 4, "walks during the request");
 }
 
-/// `a` (0x1000) and `b` (0x1010) return `r`'s (0x1040) result; `c1` (0x1020) calls `a`, `d`
-/// (0x1050, `ret`) and `c2`, so its read of `a`'s result lifts `c2` (0x1030) and then `d`; `c2`
-/// calls `b`. `c2` is no caller of `a`, so no order over `a`'s callers names it.
+/// `a` (0x1000), `b` (0x1010) return `r`'s (0x1040); `c1` (0x1020) calls `a`, `d` (0x1050) and `c2`
+/// (0x1030), which calls `b`: `c2` is no caller of `a`, so no order over `a`'s callers names it.
 const A_CALLER_OF_ANOTHER_CALLEE: &[u8] = &[
     0xe8, 0x3b, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
     0xe8, 0x2b, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
@@ -1960,9 +1959,8 @@ fn slotted_cycle_rendered(start: &[u8]) -> Vec<String> {
     texts.into()
 }
 
-/// D408: `main`'s cited `int` slot takes `a`, the first of a three-member forwarding cycle, so
-/// every member returns a word the slot reads; none decides `ForwardCycle` (red on the parent:
-/// `c`'s tail branch into `a` was a way in no take states, so the slot's read never joined).
+/// D408: `main`'s cited `int` slot takes `a` of a three-member forwarding cycle, so no member decides
+/// `ForwardCycle`; red on the parent, where `c`'s tail branch into `a` was no way in.
 #[test]
 fn a_three_member_forwarding_cycle_a_cited_slot_reads_returns_its_int() {
     for text in slotted_cycle_rendered(STARTS_HANDLER) {

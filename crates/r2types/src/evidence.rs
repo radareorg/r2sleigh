@@ -101,9 +101,8 @@ impl Identity {
     }
 }
 
-/// The entry value each value is on every path (itself, a copy, a merge of only it), once per
-/// function: a worklist where each value only descends `Top`, `Entry`, `Bottom`, and a lowered
-/// value requeues its readers from the graph's own def-use. O(insts + inputs).
+/// The entry value each value is on every path, once per function: a worklist where each value
+/// only descends `Top`, `Entry`, `Bottom` and requeues its readers. O(insts + inputs).
 fn entry_identities(
     graph: &r2ssa::SsaGraph,
     entries: &r2ssa::dense::IdSet<r2ssa::ValueId>,

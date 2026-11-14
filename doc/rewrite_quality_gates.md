@@ -60,3 +60,33 @@ Reading failures
   a typed contract.
 - **Kani**: fix the invariant or tighten the proof; never delete a harness.
 - **Mutants**: a survivor means the tests do not pin the behaviour.
+
+## Round 5 lints (D289, D411, D416)
+
+- `SCAN_IN_LOOP` (warn, `function_scale.rs`): a whole pass over a
+  function-scale set inside a loop body or an iterator closure. That is an
+  iteration, `clone` or `len()`-sized allocation of a dense table, a graph
+  table or a collection of a function's entities or registry rows, or a call
+  to a same-crate function that makes one over a function-owned table. A
+  receiver that depends on the loop's own binding passes
+  (`for b in blocks { for i in &b.insts }` is `O(I)`). One pass per item over
+  a function-sized set is `O(|X| x |Y|)`; five of the engine's quadratics had
+  this shape (1cd65fdcc, c67924d1a, adee2bc73, 6e3250060, 8e9b6edc1). The lint
+  is blind to cross-crate callees, rebuilds per call and fixpoint height. A
+  bounded scan states its bound in `allow(scan_in_loop, reason = ...)`, and the
+  scaling bench (D404, D417) proves it. `STANDING_SCANS` lists the scans
+  standing when D416 landed, by item, scan and count, unaudited. Each goes when
+  its item is rewritten or its bound is stated beside it. A new scan, or one
+  more of a listed one, fires; a count that falls fails until it is lowered.
+- `UNPROVEN_NEGATIVE` (deny): a `bool` field of a public struct whose name
+  ends in `stated`, `assumed`, `cited`, `proven` or `kept`. Such a field
+  states that something does not happen (a call reads no more, a register is
+  kept), and any code that builds the struct sets it with no evidence. Five
+  built fixes had that cause (f6943caa5, D382, D393, D395, D379). The fact is a
+  type whose owner mints it from its evidence: `ReadBound`, `Cancelled`,
+  `StackWrites`, `Citation`.
+- `BUILD_FACTS_READS_A_CALLEE_FACT` (deny): `r2ssa::semantic::BuildFacts` is
+  what a static phase reads of a build. A read of the function or its context
+  outside the allowed shape and source call-site accessors, or a method handing
+  either out, lets a callee's statement reach a phase a kept build does not run
+  again (doc/adr-callee-builds.md, D289).

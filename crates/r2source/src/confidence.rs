@@ -179,12 +179,9 @@ impl Premise {
     }
 }
 
-/// A source that states a fact, minted only from its owner's statement (D410): a cited library
-/// row, the binary's debug information, a kernel's document or a runtime model.
-///
-/// ```compile_fail,E0423
-/// let forged = r2source::Citation(());
-/// ```
+/// A source that states a fact (D410): a cited row, debug information, a kernel's document or a
+/// runtime model, minted only from that owner's statement.
+#[doc = "```compile_fail,E0423\nlet forged = r2source::Citation(());\n```"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Citation(Cited);
 
@@ -247,13 +244,7 @@ impl NeverProof {
 
 /// A call that never comes back: what states it, and what it takes for granted. A proving one is
 /// minted only from a [`Citation`] or from proving ends (D410).
-///
-/// ```compile_fail,E0451
-/// let never = r2source::Never {
-///     proof: r2source::NeverProof::Declared,
-///     premises: Default::default(),
-/// };
-/// ```
+#[doc = "```compile_fail,E0451\nlet never = r2source::Never { proof: r2source::NeverProof::Declared, premises: Default::default() };\n```"]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Never {
     proof: NeverProof,

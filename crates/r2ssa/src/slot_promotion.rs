@@ -27,9 +27,8 @@ pub fn promoted_slot_offset(storage: &crate::CanonicalStorageId) -> Option<i64> 
     promoted.then_some(storage.offset as i64)
 }
 
-/// Promote every eligible frame place of `func`, the loads and stores rewritten; the frame's
-/// points, from the one escape walk (D290), are what every later reader of escape asks. The walk
-/// is held where a restatement may decide it again (D365).
+/// Promote every eligible frame place of `func`; the points of the one escape walk (D290) answer
+/// every later reader of escape, and the walk is held for a restatement to decide again (D365).
 pub(crate) fn promote<C: crate::SsaWorkControl + ?Sized>(
     func: &mut SSAFunction,
     machine: &SourceMachineContext,

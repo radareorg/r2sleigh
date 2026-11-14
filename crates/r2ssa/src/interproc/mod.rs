@@ -319,9 +319,8 @@ pub struct SummaryAtomicEffect {
     pub ordering: SummaryAtomicOrdering,
 }
 
-/// What a function does through one argument: `read`, `write`, `escape`, `free` proven by the body or
-/// a described callee. An entry with none is an argument handed to an undescribed call: it exists,
-/// and nothing is known of its use (D382, D411).
+/// What a function does through one argument, proven by the body or a described callee. An entry
+/// with none is an argument handed to an undescribed call: nothing is known of its use (D382).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryArgEffect {
     pub read: bool,

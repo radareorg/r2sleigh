@@ -253,9 +253,8 @@ fn an_unknown_callee_comes_back() {
     hold([failures.as_slice(), &[walk]].concat());
 }
 
-/// `push rbx; mov rbx, rdi; call; mov rax, rbx; pop rbx; ret`: the parameter handed to an unknown
-/// callee is returned, and the callee's may-effects are no evidence that it is a pointer. The
-/// function states `arg0`, so a cell cannot pass on a signature with no parameter.
+/// `push rbx; mov rbx, rdi; call; mov rax, rbx; pop rbx; ret`: the stated `arg0` handed to an
+/// unknown callee is returned, and the callee's may-effects are no evidence that it is a pointer.
 #[test]
 fn an_unknown_callee_types_no_argument_a_pointer() {
     let failures = Unknown::ALL.map(|row| {
@@ -374,9 +373,8 @@ fn a_cited_row_bounds_its_reads_and_an_uncited_one_does_not() {
     assert!(!import_bound(UNCITED, &[0x48, 0x89, 0xf7]));
 }
 
-/// `main: sub rsp, 0x18; mov qword [rsp+8], 5; mov edi, 1; mov esi, 7; call f; mov rax, [rsp+8];
-/// add rsp, 0x18; ret`, `f: mov eax, edi; ret`: the walked callee writes none of main's stack and
-/// reads only RDI, so the slot keeps the 5 and the call's reads are bounded (D411's witnesses).
+/// `main` stores 5 to a slot, calls `f: mov eax, edi; ret` and reloads it: the walked callee writes
+/// none of main's stack and reads only RDI, so the slot keeps the 5 (D411's witnesses).
 #[test]
 fn a_walked_callee_bounds_its_reads_and_its_stack_writes() {
     const CODE: &[u8] = &[

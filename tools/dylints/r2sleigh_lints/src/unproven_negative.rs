@@ -9,17 +9,8 @@ use rustc_lint::{LateContext, LateLintPass};
 use rustc_span::Span;
 
 rustc_lint::declare_lint!(
-    /// ### What it does
-    ///
-    /// Denies a `bool` field of a public struct whose name ends in `stated`, `assumed`, `cited`,
-    /// `proven` or `kept`.
-    ///
-    /// ### Why is this bad?
-    ///
-    /// Such a field states that something does not happen (a call reads no more, a register is
-    /// kept), and any code that builds the struct sets it with no evidence. Five built fixes had
-    /// that cause (f6943caa5, D382, D393, D395, D379). The fact is a type whose owner mints it from
-    /// its evidence: `ReadBound`, `Cancelled`, `StackWrites`, `Citation`.
+    /// A public `bool` field ending in `stated`, `assumed`, `cited`, `proven` or `kept` states a
+    /// negative fact no evidence mints (doc/rewrite_quality_gates.md, "Round 5 lints").
     pub UNPROVEN_NEGATIVE,
     Deny,
     "a negative fact is a witness its owner mints, not a public bool"

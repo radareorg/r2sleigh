@@ -426,9 +426,8 @@ fn a_cycles_kept_registers_are_one_answer_whichever_member_is_asked_first() {
     assert!(f.starts_with("double f("), "{f}");
 }
 
-/// `narrow` (0x1000) leaves RAX above EAX unwritten on one path; `g` (0x1010, `body`) makes an
-/// indirect call, so its parameters are a floor and its call reads every location; `caller`
-/// (0x1020) calls `narrow`, then `g` on one path, and stores EAX on the other.
+/// `narrow` (0x1000) leaves RAX above EAX unwritten on one path; `caller` (0x1020) calls it, then
+/// `g` (0x1010, `body`, an indirect call so a parameter floor) on one path and stores EAX on the other.
 fn read_by_a_walked_callee(body: &[u8]) -> String {
     let mut code = vec![0xcc_u8; 0x40];
     let narrow: &[u8] = &[
@@ -462,9 +461,8 @@ fn read_by_a_walked_callee(body: &[u8]) -> String {
     rendered.response.output.into_text()
 }
 
-/// `g` writes RAX before it reads it, so its register effect takes no byte of the integer result
-/// register and the call reads none of it: no byte above `narrow`'s 32-bit result is a residual
-/// (D372, the recovered half). The parent read RAX whole at a callee whose parameters are a floor.
+/// `g` writes RAX before reading it, so the call reads none of it and no byte above `narrow`'s
+/// 32-bit result is a residual (D372's recovered half); the parent read RAX whole.
 #[test]
 fn a_walked_callee_that_writes_the_result_register_first_reads_no_bits_above_a_narrow_result() {
     // mov rax, rdi; call rax; ret
@@ -482,9 +480,8 @@ fn a_walked_callee_that_reads_the_result_register_reads_the_bits_above_a_narrow_
     assert!(text.contains("| r2sleigh_residual_u64(1) << 32"), "{text}");
 }
 
-/// `g` hands RAX on unwritten in a tail through a register (D373's forward): its register effect
-/// takes every byte, so the call reads RAX whole and the bits above `narrow`'s result stay a
-/// residual (D372 meets D373, default-deny).
+/// `g` hands RAX on unwritten in a register tail (D373's forward), so the call reads RAX whole and
+/// the bits above `narrow`'s result stay a residual (default-deny).
 #[test]
 fn a_walked_callee_that_tails_the_result_register_on_reads_the_bits_above_a_narrow_result() {
     // jmp rdi

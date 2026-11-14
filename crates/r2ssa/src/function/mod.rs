@@ -613,10 +613,8 @@ struct Prior {
 }
 
 impl Prior {
-    /// This build against the callees `key` reads: kept where they state what it was built against,
-    /// or where only reach and areas move and its frame walk decides every round, the promoted set
-    /// and the canary's projection as before, its points decided again (D365). Else the key it
-    /// was built against, and the build is made again.
+    /// This build kept where the callees `key` reads state what it was built against, or where its
+    /// frame walk decides every round as before (D365, rule 2); else the key, to build again.
     fn kept<C: SsaWorkControl + ?Sized>(
         mut self,
         key: &BuildKey,

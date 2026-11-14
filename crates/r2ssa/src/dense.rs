@@ -1,13 +1,8 @@
 //! Dense containers over a sealed function's ids (doc/adr-one-ir.md, F2.0).
 //!
-//! A sealed function's operations, instructions, values and blocks are
-//! numbered densely from zero. A fact about them is therefore a vector
-//! indexed by id, not a tree or a hash keyed by one: a lookup is one index,
-//! iteration is in id order and so deterministic, and two passes that need
-//! the same relation can share it.
+//! Ids are dense from zero, so a fact is a vector indexed by id: one index per lookup, id order.
 //!
-//! - [`IdVec`]: a value for every id.
-//! - [`IdMap`]: a value for some ids.
+//! - [`IdVec`]: a value for every id; [`IdMap`]: for some ids.
 //! - [`SparseMap`]: a value for a few ids, sized by its entries: a dataflow state copied per block.
 //! - [`IdSet`]: a set of ids, as a bitset.
 //! - [`Csr`]: for each id, a slice of related items (def-use, predecessors),
@@ -1020,9 +1015,8 @@ impl<K: Copy + Ord + std::hash::Hash> Reached<K> {
     }
 }
 
-/// A function-scale table (a graph's instructions, values or blocks, a block's instructions, a
-/// registry): each whole iteration counts its element visits in a `work-meter` build (D417).
-/// Indexing and `len` pass through `Deref`; only `iter`, `values`, `keys` and `for` are counted.
+/// A function-scale table whose whole iterations (`iter`, `values`, `keys`, `for`) count their
+/// element visits in a `work-meter` build (D417); indexing and `len` pass through `Deref`.
 #[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(transparent)]
 pub struct Metered<C>(C);

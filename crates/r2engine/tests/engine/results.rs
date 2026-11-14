@@ -275,9 +275,8 @@ fn a_cold_request_proves_a_cycle_through_a_floor_its_result() {
     }
 }
 
-/// The base path returns whatever the caller left in `rax`, which defines nothing (D200 case 1):
-/// nothing seeds the fixpoint, and both results stay a visible residual. Neither member writes
-/// `rax`, so the pair keeps it across each call (D413) and the cause is the entry value handed back.
+/// The base path returns the caller's `rax` (D200 case 1), so both results stay a residual whose
+/// cause is the entry value handed back: neither member writes `rax`, so the pair keeps it (D413).
 #[test]
 fn a_pair_with_no_path_of_its_own_stays_unproven() {
     for at in [UNTOUCHED[0].1, UNTOUCHED[1].1] {
@@ -496,11 +495,8 @@ fn a_tail_jump_to_signal_returns_the_previous_handler() {
     assert!(rendered.contains("return "), "{rendered}");
 }
 
-/// One condensation answers the whole pair (D412): `even ⇄ odd`, the owners of `caller`'s result,
-/// is two nodes and two edges, and so is the pair's pending-callee graph its `Summary` solves
-/// (D413); every member's component is deposited, so asking each member after adds no visit. Under
-/// `aa` the forwarder graph from the pair adds three nodes, three edges, and `CallRanks`' one
-/// condensation of the survey's three bodies and three calls as many (D354).
+/// One condensation answers the whole pair (D412, D413): each member's component is deposited, so
+/// asking each after adds no visit; `aa` adds the forwarder graph's and `CallRanks`' (D354).
 #[test]
 fn one_condensation_answers_every_member_of_a_cycle() {
     let mut open = OpenProgram::of(Literal::of_code(MUTUAL_U64, &U64));

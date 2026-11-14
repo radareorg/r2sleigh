@@ -120,10 +120,7 @@ pub struct Reads {
 
 /// The registers a live operation cancels against itself (`xor eax, eax`, `sbb edx, edx`), each
 /// once: the flags beside it read their bits, not their value; any other input stays a read.
-///
-/// ```compile_fail,E0423
-/// let forged = r2il::eval::independence::Cancelled(Vec::new());
-/// ```
+#[doc = "```compile_fail,E0423\nlet forged = r2il::eval::independence::Cancelled(Vec::new());\n```"]
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Cancelled(Vec<Varnode>);
 

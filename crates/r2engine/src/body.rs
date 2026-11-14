@@ -1314,9 +1314,8 @@ impl Walk {
         origins.of(target)?.constant()
     }
 
-    /// Whether a tail jump through an import slot never returns, with what proves it: `None` for
-    /// `from` where the import never does, `Some(from)` where a handle the call at `from` yielded
-    /// makes it not.
+    /// Whether a tail jump through an import slot never returns: `None` where the import never
+    /// does, `Some(from)` where a handle the call at `from` yielded makes it not.
     fn halts_through(
         &self,
         instruction: &Instruction,
