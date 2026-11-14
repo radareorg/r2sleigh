@@ -1074,10 +1074,11 @@ fn rewritten(
             // Unbounded, it is still this frame's: it ends at the entry pointer.
             (Some(base), None) => merged([(*base, 0)].into_iter()),
         };
-        // A call outside the lifted blocks reaches no block and no load.
-        if let Some(node) = site.node(call.at.0) {
-            in_block[node].push((call.at.1, spans));
-        }
+        // Default deny: a call outside the numbered blocks may rewrite every loaded place.
+        let Some(node) = site.node(call.at.0) else {
+            return accesses.keys().copied().collect();
+        };
+        in_block[node].push((call.at.1, spans));
     }
     let entering = reaching_writes(&site.successors, &in_block);
     // Each load against what reaches it: the block's entry and the calls before it there.
@@ -1090,10 +1091,17 @@ fn rewritten(
     let mut rewritten = BTreeSet::new();
     for list in loads.chunk_by(|one, other| one.0 == other.0) {
         let block = list[0].0;
-        let (calls, live) = (site.node(block))
-            .map(|node| (in_block[node].clone(), entering[node].clone()))
-            .unwrap_or_default();
-        rewritten_in_block(list, calls, live, &mut rewritten);
+        // Default deny: a load outside the numbered blocks may read a rewritten place.
+        let Some(node) = site.node(block) else {
+            rewritten.extend(list.iter().map(|load| load.2));
+            continue;
+        };
+        rewritten_in_block(
+            list,
+            in_block[node].clone(),
+            entering[node].clone(),
+            &mut rewritten,
+        );
     }
     rewritten
 }
