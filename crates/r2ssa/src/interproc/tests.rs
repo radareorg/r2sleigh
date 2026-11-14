@@ -636,13 +636,12 @@ fn prepared_summary_set_models_missing_direct_callee_as_unknown() {
     assert!(summary.has_unknown_calls);
     assert!(summary.touches_unknown_memory);
     assert_eq!(summary.return_relation, SummaryReturnRelation::Unknown);
+    // Handed to a callee nothing describes: assumed, never proven, read or written (D382).
     assert_eq!(
         summary.arg_effects.get(&0),
         Some(&SummaryArgEffect {
-            read: true,
-            write: true,
-            escape: true,
-            free: false,
+            assumed: true,
+            ..SummaryArgEffect::default()
         })
     );
     for kind in [
@@ -654,16 +653,11 @@ fn prepared_summary_set_models_missing_direct_callee_as_unknown() {
             location: unknown_location(),
         }));
     }
-    for kind in [
-        SummaryMemoryEffectKind::Read,
-        SummaryMemoryEffectKind::Write,
-        SummaryMemoryEffectKind::Escape,
-    ] {
-        assert!(summary.memory_effects.contains(&SummaryMemoryEffect {
-            kind,
-            location: arg_location(0, None, None),
-        }));
-    }
+    // The unknown location is the upper bound; no effect is placed at the argument.
+    assert!(
+        (summary.memory_effects.iter())
+            .all(|effect| effect.location != arg_location(0, None, None))
+    );
 }
 
 #[test]
@@ -1031,6 +1025,7 @@ fn malloc_summary(id: InterprocFunctionId) -> FunctionSemanticSummary {
             write: false,
             escape: false,
             free: false,
+            assumed: false,
         },
     );
     summary.allocation_effects.push(SummaryAllocationEffect {
@@ -1927,10 +1922,8 @@ fn callother_maps_explicit_argument_and_unknown_escape() {
     assert_eq!(
         local.arg_effects.get(&0),
         Some(&SummaryArgEffect {
-            read: true,
-            write: true,
-            escape: true,
-            free: false,
+            assumed: true,
+            ..SummaryArgEffect::default()
         })
     );
     assert!(local.memory_effects.contains(&SummaryMemoryEffect {

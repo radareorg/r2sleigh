@@ -130,8 +130,9 @@ fn main_name_keeps_its_stated_signature() {
     );
 }
 
+/// A summary is no type basis: its `HeapAlloc` return leaves the body's own return type (D382).
 #[test]
-fn interproc_heap_alloc_summary_upgrades_pointer_sized_scalar_return() {
+fn a_heap_alloc_summary_does_not_retype_a_scalar_return() {
     let root = r2ssa::InterprocFunctionId(0x401000);
     let summary_set = InterprocSummarySet {
         schema_version: r2ssa::interproc::INTERPROC_SUMMARY_SCHEMA_VERSION,
@@ -177,20 +178,13 @@ fn interproc_heap_alloc_summary_upgrades_pointer_sized_scalar_return() {
 
     assert_eq!(
         spelled_ret(&spelled_signature(&analysis).ret_type),
-        "allocation_ptr"
-    );
-    assert_eq!(
-        analysis
-            .type_facts
-            .merged_signature
-            .as_ref()
-            .and_then(|sig| sig.ret_type.clone()),
-        Some(CTypeLike::typedef("allocation_ptr"))
+        "int64_t"
     );
 }
 
+/// A returned-argument summary retypes no return; the callee's facts still carry its effects.
 #[test]
-fn interproc_returned_arg_summary_propagates_param_type_and_callee_facts() {
+fn a_returned_arg_summary_does_not_retype_the_return() {
     let root = r2ssa::InterprocFunctionId(0x401100);
     let helper = r2ssa::InterprocFunctionId(0x401200);
     let summary_set = InterprocSummarySet {
@@ -239,6 +233,7 @@ fn interproc_returned_arg_summary_propagates_param_type_and_callee_facts() {
                             write: false,
                             escape: false,
                             free: false,
+                            assumed: false,
                         },
                     )]),
                     memory_effects: Vec::new(),
@@ -274,7 +269,7 @@ fn interproc_returned_arg_summary_propagates_param_type_and_callee_facts() {
 
     assert_eq!(
         spelled_ret(&spelled_signature(&analysis).ret_type),
-        "int8_t*"
+        "int64_t"
     );
     let callee = analysis
         .type_facts
@@ -616,7 +611,7 @@ fn inferred_signature_certificate_records_local_source() {
 }
 
 #[test]
-fn interproc_heap_alloc_summary_upgrades_generic_return_type() {
+fn a_heap_alloc_summary_does_not_type_an_unknown_return() {
     let mut summary_set = r2ssa::InterprocSummarySet::default();
     let root = r2ssa::InterprocFunctionId(0x401000);
     summary_set.root = Some(root);
@@ -669,19 +664,14 @@ fn interproc_heap_alloc_summary_upgrades_generic_return_type() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(
-        analysis
-            .type_facts
-            .merged_signature
-            .as_ref()
-            .and_then(|sig| sig.ret_type.as_ref()),
-        Some(&CTypeLike::typedef("allocation_ptr"))
-    );
+    let returns =
+        (analysis.type_facts.merged_signature.as_ref()).and_then(|sig| sig.ret_type.as_ref());
+    assert_ne!(returns, Some(&CTypeLike::typedef("allocation_ptr")));
     assert_eq!(analysis.type_facts.interproc_diagnostics.scope_size, 1);
 }
 
 #[test]
-fn interproc_void_return_summary_replaces_weak_scalar_return_type() {
+fn a_void_return_summary_does_not_replace_the_inferred_return() {
     let mut summary_set = r2ssa::InterprocSummarySet::default();
     let root = r2ssa::InterprocFunctionId(0x401500);
     summary_set.root = Some(root);
@@ -726,14 +716,9 @@ fn interproc_void_return_summary_replaces_weak_scalar_return_type() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(spelled_ret(&spelled_signature(&analysis).ret_type), "void");
     assert_eq!(
-        analysis
-            .type_facts
-            .merged_signature
-            .as_ref()
-            .and_then(|sig| sig.ret_type.as_ref()),
-        Some(&CTypeLike::Void)
+        spelled_ret(&spelled_signature(&analysis).ret_type),
+        "int64_t"
     );
 }
 
@@ -759,11 +744,7 @@ fn interproc_summary_name_does_not_project_role_out_param_type() {
     let projection = SemanticTypeProjection::from_inputs(
         &InterprocSummaryView::new(Some(summary_set)).expect("current interproc report schema"),
     );
-
-    assert!(!projection.param_type_hints.contains_key(&2));
-    assert!(projection.pointer_param_indices.contains(&2));
     assert!(!projection.out_param_indices.contains(&2));
-    assert!(projection.refusal_warnings().is_empty());
 
     summary.arg_effects.insert(
         2,
@@ -783,8 +764,32 @@ fn interproc_summary_name_does_not_project_role_out_param_type() {
     );
 
     assert!(projection.out_param_indices.contains(&2));
-    assert!(!projection.param_type_hints.contains_key(&2));
-    assert!(projection.refusal_warnings().is_empty());
+}
+
+/// An argument only handed to a call nothing describes is assumed, not proven, read and written:
+/// it is no pointer and no out parameter (D382).
+#[test]
+fn an_assumed_effect_is_no_pointer_or_out_param_evidence() {
+    let root = r2ssa::InterprocFunctionId(0x401000);
+    let mut summary = r2ssa::FunctionSemanticSummary::unknown(root, None);
+    summary.arg_count_hint = Some(1);
+    summary.arg_effects.insert(
+        0,
+        r2ssa::SummaryArgEffect {
+            assumed: true,
+            ..r2ssa::SummaryArgEffect::default()
+        },
+    );
+    let summary_set = r2ssa::InterprocSummarySet {
+        schema_version: r2ssa::interproc::INTERPROC_SUMMARY_SCHEMA_VERSION,
+        root: Some(root),
+        summaries: BTreeMap::from([(root, summary)]),
+        diagnostics: Default::default(),
+    };
+    let projection = SemanticTypeProjection::from_inputs(
+        &InterprocSummaryView::new(Some(summary_set)).expect("current interproc report schema"),
+    );
+    assert!(!projection.out_param_indices.contains(&0));
 }
 
 #[test]
@@ -810,8 +815,6 @@ fn interproc_escape_only_does_not_certify_out_param() {
         &InterprocSummaryView::new(Some(summary_set.clone()))
             .expect("current interproc report schema"),
     );
-
-    assert!(projection.pointer_param_indices.contains(&0));
     assert!(!projection.out_param_indices.contains(&0));
     assert!(!projection.out_param_evidence.contains_key(&0));
 
@@ -1261,6 +1264,7 @@ fn interproc_returned_arg_summary_exports_callee_facts() {
                         write: true,
                         escape: true,
                         free: false,
+                        assumed: false,
                     },
                 ),
                 (
@@ -1270,6 +1274,7 @@ fn interproc_returned_arg_summary_exports_callee_facts() {
                         write: false,
                         escape: false,
                         free: false,
+                        assumed: false,
                     },
                 ),
             ]),
@@ -1475,8 +1480,10 @@ fn interproc_summary_name_does_not_fabricate_callee_out_param_writes() {
     );
 }
 
+/// A summary's memory effect through a parameter retypes no parameter: the body's evidence types
+/// a dereferenced one, and the summary is a second owner of that fact (D382).
 #[test]
-fn interproc_memory_effect_summary_upgrades_generic_pointer_like_params() {
+fn a_memory_effect_summary_does_not_retype_a_parameter() {
     let root = r2ssa::InterprocFunctionId(0x401300);
     let summary_set = InterprocSummarySet {
         schema_version: r2ssa::interproc::INTERPROC_SUMMARY_SCHEMA_VERSION,
@@ -1499,6 +1506,7 @@ fn interproc_memory_effect_summary_upgrades_generic_pointer_like_params() {
                         write: true,
                         escape: false,
                         free: false,
+                        assumed: false,
                     },
                 )]),
                 memory_effects: vec![r2ssa::SummaryMemoryEffect {
@@ -1543,14 +1551,8 @@ fn interproc_memory_effect_summary_upgrades_generic_pointer_like_params() {
         diagnostics: TypeAnalysisDiagnostics::default(),
     });
 
-    assert_eq!(spelled(&spelled_signature(&analysis).params[0].ty), "void*");
     assert_eq!(
-        analysis
-            .type_facts
-            .merged_signature
-            .as_ref()
-            .and_then(|sig| sig.params.first())
-            .and_then(|param| param.ty.as_ref()),
-        Some(&CTypeLike::Pointer(Box::new(CTypeLike::Void)))
+        spelled(&spelled_signature(&analysis).params[0].ty),
+        "int64_t"
     );
 }

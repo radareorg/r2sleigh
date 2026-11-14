@@ -20,10 +20,8 @@ mod signedness;
 pub(crate) mod solver;
 
 pub(crate) use facts::{
-    SignatureCertificate, is_generic_signature_type, signature_hint_can_replace_existing,
-    signature_param_count_is_authoritative, signature_param_name_is_weak,
-    signature_projection_is_exact, signature_return_hint_can_replace_existing,
-    summary_hint_can_replace_weak_existing,
+    SignatureCertificate, is_generic_signature_type, signature_param_count_is_authoritative,
+    signature_param_name_is_weak, signature_projection_is_exact,
 };
 
 pub use callee::{

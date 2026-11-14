@@ -42,6 +42,7 @@ fn model(id: InterprocFunctionId, name: &str) -> Option<FunctionSemanticSummary>
                 write,
                 escape,
                 free,
+                assumed: false,
             },
         );
     };

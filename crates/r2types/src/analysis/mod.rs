@@ -682,30 +682,13 @@ fn build_type_analysis_inner(
         );
     }
 
-    let mut merged_signature = merge_local_signature_into_merged_signature(
+    let merged_signature = merge_local_signature_into_merged_signature(
         input.parsed_context.merged_signature.clone(),
         inferred_signature_spec,
     );
-    let before_interproc_signature = merged_signature.clone();
-    apply_interproc_summary_to_signature(
-        &mut merged_signature,
-        &mut input.inferred_signature,
-        &summary_view,
-        Some(&semantic_projection),
-        input.ptr_bits,
-    );
-    if merged_signature != before_interproc_signature {
-        push_signature_certificate_source(
-            &mut signature_certificate_sources,
-            SignatureCertificateSource::InterprocSummary,
-        );
-    }
 
     let mut diagnostics = input.diagnostics;
     diagnostics.solver_warnings = input.parsed_context.diagnostics.clone();
-    diagnostics
-        .warnings
-        .extend(semantic_projection.refusal_warnings());
     if summary_view
         .diagnostics()
         .is_some_and(|diagnostics| !diagnostics.converged)
