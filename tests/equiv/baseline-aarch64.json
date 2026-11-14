@@ -965,7 +965,12 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::indirect_store": {
-   "status": "equal"
+   "cause": "[P4, D221, D369, D378] main stores the printf format at [sp, #8] and reloads it before each call; the shape_* calls between store and reload escape frame addresses, so they state no bound on what they write of main's frame (D377, default-deny) and D369 keeps the slot in memory: printf's format is unknown, it may read q0 to q3, and this void callee's vector lanes reach a read through its forwarding caller. The old equal rested on promoting the slot past calls that may rewrite it. Closing fact: an escaped frame point bounded by the callee's own ArgumentReach (D378).",
+   "compared": "memory",
+   "owner": "P4",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/semantic/frame_reach/walk.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::main": {
    "cause": "[P7, W14] The first trap is main's call to shape_variadic_local: that function hands its parameters only into vfold's variadic tail (vfold's va_start save area is its tail, W14), whose count no format literal proves, so its arity is a floor of 0 and this call, writing past it, is a counted Floor gap where it passed never-assigned residuals before. Closing fact: a count-driven variadic tail, vfold's va_arg loop bounded by its named count, so vfold(1u, a) passes one (a summary, SM).",
@@ -990,7 +995,12 @@
    "status": "unsupported"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::mixed_touch": {
-   "status": "equal"
+   "cause": "[P4, D221, D369, D378] main stores the printf format at [sp, #8] and reloads it before each call; the shape_* calls between store and reload escape frame addresses, so they state no bound on what they write of main's frame (D377, default-deny) and D369 keeps the slot in memory: printf's format is unknown, it may read q0 to q3, and this void callee's vector lanes reach a read through its forwarding caller. The old equal rested on promoting the slot past calls that may rewrite it. Closing fact: an escaped frame point bounded by the callee's own ArgumentReach (D378).",
+   "compared": "memory",
+   "owner": "P4",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/semantic/frame_reach/walk.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::op_add": {
    "status": "equal"
@@ -1046,7 +1056,12 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::shape_stash": {
-   "status": "equal"
+   "cause": "[P4, D221, D369, D378] main stores the printf format at [sp, #8] and reloads it before each call; the shape_* calls between store and reload escape frame addresses, so they state no bound on what they write of main's frame (D377, default-deny) and D369 keeps the slot in memory: printf's format is unknown, it may read q0 to q3, and this void callee's vector lanes reach a read through its forwarding caller. The old equal rested on promoting the slot past calls that may rewrite it. Closing fact: an escaped frame point bounded by the callee's own ArgumentReach (D378).",
+   "compared": "memory",
+   "owner": "P4",
+   "reason": "r2sleigh_residual_u64 unproven-return",
+   "site": "crates/r2ssa/src/semantic/frame_reach/walk.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O0::shape_step": {
    "status": "equal"
@@ -1253,11 +1268,11 @@
    "status": "equal"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_function_pointer": {
-   "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
+   "cause": "[P7, D369] The function's own indirect call (blr x8) states no arity or writes, so D369 keeps its frame record in memory: the x30 save is stored from the entry value and read back, the first residual is that held entry value (held-from-entry) where it was the call's CallNotRendered gap. Closing fact: the common prototype and writes of the call's target set (P7's indirect-call arity).",
    "compared": "output",
    "owner": "P7",
-   "reason": "r2sleigh_residual_void gap:CallNotRendered",
-   "site": "crates/r2ssa/src/semantic/boundaries.rs",
+   "reason": "r2sleigh_residual_u64 held-from-entry",
+   "site": "crates/r2ssa/src/semantic/frame_reach/walk.rs",
    "status": "residual-trap"
   },
   "tests/corpus/shapes.c::aarch64-clang-O2::shape_multiword_return": {
@@ -1668,7 +1683,12 @@
    "status": "unsupported"
   },
   "tests/corpus/values.c::aarch64-clang-O0::main": {
-   "status": "equal"
+   "cause": "[P7, D369, D377, D409] A variadic call's tail is uncounted at its site, so nothing bounds what the declaration writes of the caller's stack (default-deny): D369 keeps a frame place the call's area could cover in memory past the call. Here main's printf format spilled at [sp, #8] stays a load past the earlier printf calls, so the next call's format is no literal and its argument count is unproven (CallNotRendered). Closing fact: a counted printf tail bounding the call's stack area.",
+   "compared": "output",
+   "owner": "P7",
+   "reason": "r2sleigh_residual_void gap:CallNotRendered",
+   "site": "crates/r2ssa/src/machine_context.rs",
+   "status": "residual-trap"
   },
   "tests/corpus/values.c::aarch64-clang-O0::value_abs_minmax": {
    "status": "equal"
@@ -2125,12 +2145,7 @@
    "status": "residual-trap"
   },
   "tests/gold/code_pointer_table.c::aarch64-clang-O0::main": {
-   "cause": "[P7] main passes table_dispatch its two arguments and returns what it returns. clang -O0's table_dispatch copies its table through q0 (`ldr q0; str q0`), so it leaves both x0 and q0 written (#85), and no call reads either (#86): main hands x0 on by returning it, which reads nothing until main's own result is stated. Its result is unproven, and main's return is a residual. Owner: r2abi, __libc_start_main's main stated as int (*)(int, char**, char**), spelled `func` today; with main's result stated, its return reads x0.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/code_pointer_table.c::aarch64-clang-O0::table_dispatch": {
    "cause": "[P7, #264] The function's own indirect call (through its table of function pointers, or a pointer it was passed) states no arity, so the call is a counted residual instead of taking the registers written before it as its arguments. Closing fact: the common prototype of the call's target set (P7's indirect-call arity, SM).",
@@ -2376,12 +2391,7 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-clang-O0::main": {
-   "cause": "main writes q0 for a local (`movi v0.2d, #0; str q0, [sp, #0x30]`) and its callees pass that lane, so at its return a written float lane stands beside the written x0. Both result registers are written and nothing in the program calls main to read one, so the result is Unproven (Ambiguous, ROADMAP D227; doc/adr-call-boundary.md, \"S16 as built\") and the return is a counted residual. The old `equal` returned x0 through `r2sleigh_carrier_u64`, which rested on reading the float lane as no value. The trap is at the return, in the outermost activation, with memory compared: demand roots nothing at an unproven return (D340), so no call's upper half is a residual.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-clang-O0::mem_scan2": {
    "status": "equal"
@@ -2405,12 +2415,7 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-clang-O1::main": {
-   "cause": "main writes q0 for a local (`movi v0.2d, #0; stp q0, q0, [sp]`) and its callees pass that lane, so at its return a written float lane stands beside the written x0. Both result registers are written and nothing in the program calls main to read one, so the result is Unproven (Ambiguous, ROADMAP D227; doc/adr-call-boundary.md, \"S16 as built\") and the return is a counted residual. The old `equal` returned x0 through `r2sleigh_carrier_u64`, which rested on reading the float lane as no value. The trap is at the return, in the outermost activation, with memory compared: demand roots nothing at an unproven return (D340), so no call's upper half is a residual.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-clang-O1::mem_scan2": {
    "status": "equal"
@@ -2468,12 +2473,7 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-gcc-O0::main": {
-   "cause": "main writes q0 for a local (`ldp q0, q1, [x1]; stp q0, q1, [x0]`) and its callees pass that lane, so at its return a written float lane stands beside the written x0. Both result registers are written and nothing in the program calls main to read one, so the result is Unproven (Ambiguous, ROADMAP D227; doc/adr-call-boundary.md, \"S16 as built\") and the return is a counted residual. The old `equal` returned x0 through `r2sleigh_carrier_u64`, which rested on reading the float lane as no value. The trap is at the return, in the outermost activation, with memory compared: demand roots nothing at an unproven return (D340), so no call's upper half is a residual.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-gcc-O0::mem_scan2": {
    "status": "equal"
@@ -2497,12 +2497,7 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-gcc-O1::main": {
-   "cause": "main writes q0 for a local (`ldp q0, q1, [x0]; stp q0, q1, [x1]`) and its callees pass that lane, so at its return a written float lane stands beside the written x0. Both result registers are written and nothing in the program calls main to read one, so the result is Unproven (Ambiguous, ROADMAP D227; doc/adr-call-boundary.md, \"S16 as built\") and the return is a counted residual. The old `equal` returned x0 through `r2sleigh_carrier_u64`, which rested on reading the float lane as no value. The trap is at the return, in the outermost activation, with memory compared: demand roots nothing at an unproven return (D340), so no call's upper half is a residual.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-gcc-O1::mem_scan2": {
    "status": "equal"
@@ -2526,12 +2521,7 @@
    "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-gcc-O2::main": {
-   "cause": "main writes q0 for a local (`ldr q0, [x2, #0x40]; stur q0, [sp, #0x68]`) and its callees pass that lane, so at its return a written float lane stands beside the written x0. Both result registers are written and nothing in the program calls main to read one, so the result is Unproven (Ambiguous, ROADMAP D227; doc/adr-call-boundary.md, \"S16 as built\") and the return is a counted residual. The old `equal` returned x0 through `r2sleigh_carrier_u64`, which rested on reading the float lane as no value. The trap is at the return, in the outermost activation, with memory compared: demand roots nothing at an unproven return (D340), so no call's upper half is a residual.",
-   "compared": "memory",
-   "owner": "P7",
-   "reason": "r2sleigh_residual_u64 unproven-return",
-   "site": "crates/r2ssa/src/recover_interface.rs",
-   "status": "residual-trap"
+   "status": "equal"
   },
   "tests/gold/manual_limits.c::aarch64-gcc-O2::mem_scan2": {
    "status": "equal"

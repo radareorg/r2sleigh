@@ -1059,22 +1059,12 @@ fn require_trusted_root_for_helper_scope(
     Ok(())
 }
 
-/// The frame walk's writes at or above the entry pointer, moved past what the transfer spends; an
-/// unstated return mechanism spends nothing or one address, so both. `None` with no walk. O(spans).
+/// What a call to this body may write of its caller's stack (`FramePoints::call_writes`).
 fn incoming_writes(prepared: &SsaArtifact) -> Option<Box<[(i64, i64)]>> {
-    let context = prepared.machine_context();
-    let spans = prepared.function().frame_points()?.incoming_writes()?;
-    let (least, most) = match context.return_mechanism() {
-        Some(mechanism) => (
-            mechanism.stack_pointer_delta_bytes(),
-            mechanism.stack_pointer_delta_bytes(),
-        ),
-        None => (0, context.memory_model().default_address_bits() / 8),
-    };
-    let spans = spans
-        .iter()
-        .map(|(low, high)| ((low - i64::from(most)).max(0), high - i64::from(least)));
-    Some(spans.filter(|(low, high)| low < high).collect())
+    let points = prepared.function().frame_points()?;
+    points
+        .call_writes(prepared.machine_context())
+        .map(Vec::into_boxed_slice)
 }
 
 /// Solve interprocedural evidence owned by one exact prepared SSA root.

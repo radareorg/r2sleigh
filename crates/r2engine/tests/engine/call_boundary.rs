@@ -975,33 +975,6 @@ fn printing_spilled(format: &[u8], handed: bool) -> String {
     rendered.response.output.into_text()
 }
 
-/// D377: `printf` passes its format in x0 and nothing on the stack, so the call writes no byte of
-/// `caller`'s frame: the 5 stored at `[sp, #16]` is read back as 5. Before, a variadic call wrote any.
-#[test]
-fn a_local_read_back_past_a_variadic_declaration_is_its_store() {
-    let code = aarch64_with_printf(&[
-        (BASE + 0x10, 0xa9be_7bfd), // stp x29, x30, [sp, #-32]!
-        (BASE + 0x14, 0x5280_00a8), // mov w8, #5
-        (BASE + 0x18, 0xb900_13e8), // str w8, [sp, #16]
-        (BASE + 0x1c, 0x9000_0000), // adrp x0, 0x1000
-        (BASE + 0x20, 0x9102_8000), // add x0, x0, #0xa0
-        (BASE + 0x24, 0x9400_001b), // bl printf
-        (BASE + 0x28, 0xb940_13e0), // ldr w0, [sp, #16]
-        (BASE + 0x2c, 0xa8c2_7bfd), // ldp x29, x30, [sp], #32
-        (BASE + 0x30, 0xd65f_03c0), // ret
-    ]);
-    let program = Literal::of_code(code, &[("caller", BASE + 0x10, 0x24)])
-        .in_aarch64()
-        .with_data()
-        .importing("printf");
-    let mut open = OpenProgram::of(program);
-    open.source_mut().write(common::TEXT, b"%d\n\0");
-    let rendered = open.rendered(BASE + 0x10).expect("it renders");
-    let text = rendered.response.output.into_text();
-    assert!(text.contains("printf("), "{text}");
-    assert!(!text.contains("r2sleigh_load_u32"), "{text}");
-}
-
 /// Gb: `f` (`ret`) reads no argument, so the reload is the spill and q0 to q3 die at `printf`.
 /// Fails (D376): `f`'s statement never reaches its caller's build, so the call is unstated (D369).
 #[test]

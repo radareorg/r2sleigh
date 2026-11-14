@@ -626,13 +626,17 @@ impl Prior {
     }
 }
 
-/// The direct targets of the calls `function`'s frame walk found unstated and rewriting (D376).
+/// The direct targets of the calls nothing states whose writes kept a loaded place (D376).
+/// `O(calls x log sites)`.
 fn rewriting_callees(function: &SSAFunction, context: &SourceMachineContext) -> BTreeSet<u64> {
     let points = function.frame_points();
-    let asked = points
+    let calls = points
         .into_iter()
-        .flat_map(|points| points.unstated_rewriting());
-    let sites = asked.filter_map(|instruction| context.raw_call_site_at(*instruction));
+        .flat_map(crate::semantic::FramePoints::rewriting_calls);
+    let unstated = calls.filter(|(at, _)| {
+        (context.call_reads(Some(*at))).is_none_or(|reads| reads.writes.is_none())
+    });
+    let sites = unstated.filter_map(|(at, _)| context.raw_call_site_at(at));
     let targets = sites.map(r2source::SourceCallSiteIdentity::target);
     let targets = targets.filter(|target| target.space == r2source::CanonicalStorageSpace::Ram);
     targets.map(|target| target.offset).collect()

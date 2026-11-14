@@ -71,9 +71,10 @@ pub struct FramePoints {
     pub(crate) asked_reach: BTreeSet<(u64, usize)>,
     /// The first instruction that moves the stack pointer by an amount no constant states (D355).
     pub(crate) dynamic: Option<DynamicFrame>,
-    /// Entry-relative spans at or above the entry pointer its stores and calls may write; `None`
-    /// where an unplaced call base leaves them unbounded (D377).
-    pub(crate) incoming: Option<Vec<(i64, i64)>>,
+    /// The entry-relative spans at or above the entry pointer its exact stores write (D377).
+    pub(crate) incoming_stores: Vec<(i64, i64)>,
+    /// The calls of the body to itself, by instruction.
+    pub(crate) own_calls: BTreeSet<u64>,
     /// The places holding an address, with their widest access, and each call's base by its
     /// instruction: what a kept build compares areas over (D377).
     pub(crate) held_places: BTreeMap<i64, u32>,
@@ -81,9 +82,6 @@ pub struct FramePoints {
     /// changes in a build (D377).
     pub(crate) rewrite_decides: BTreeMap<i64, u32>,
     pub(crate) written_bases: BTreeMap<u64, Option<i64>>,
-    /// The calls nothing states whose area covers a place loaded after a call, by instruction:
-    /// the callees a caller build asks to state (D376).
-    pub(crate) unstated_rewriting: BTreeSet<u64>,
 }
 
 /// A frame no offset places past one instruction: `sub rsp, rax` after `__chkstk`, an `alloca`
@@ -121,11 +119,15 @@ impl FramePoints {
         self.opaque.dedup();
         self.handed.extend(other.handed);
         self.rewritten.extend(other.rewritten);
-        self.unstated_rewriting.extend(other.unstated_rewriting);
         self.asked_reach.extend(other.asked_reach);
         self.dynamic = self.dynamic.into_iter().chain(other.dynamic).min();
-        self.incoming = (self.incoming.take().zip(other.incoming))
-            .map(|(mine, theirs)| mine.into_iter().chain(theirs).collect());
+        self.incoming_stores = merged(
+            self.incoming_stores
+                .iter()
+                .chain(&other.incoming_stores)
+                .copied(),
+        );
+        self.own_calls.extend(other.own_calls);
         for (place, width) in other.held_places {
             let widest = self.held_places.entry(place).or_insert(width);
             *widest = (*widest).max(width);
@@ -147,6 +149,10 @@ impl FramePoints {
         reads: [Area<'_>; 2],
         writes: [Area<'_>; 2],
     ) -> bool {
+        // A call to itself writes what the rest of the body writes, so every area counts.
+        if !self.own_calls.is_empty() && writes[0] != writes[1] {
+            return false;
+        }
         // A call no offset places reads and writes the whole frame whatever its areas say.
         let base = match self.written_bases.get(&instruction) {
             Some(Some(base)) => *base,
@@ -175,12 +181,47 @@ impl FramePoints {
                 .all(|span| span.1 <= 0 && untouched(&self.rewrite_decides, span))
     }
 
-    /// The incoming stack bytes the body may write, from its entry pointer: `None` where a frame
-    /// address escapes or an access through one no offset places may write (D377).
-    pub fn incoming_writes(&self) -> Option<&[(i64, i64)]> {
+    /// What a call to this body may write of its caller's stack, from the call's pointer, as `context`
+    /// states its calls; a self call in two rounds (doc/adr-callee-builds.md, D377). `O(calls x spans)`.
+    pub fn call_writes(&self, context: &SourceMachineContext) -> Option<Vec<(i64, i64)>> {
         let writing = self.opaque.iter().any(|access| access.writes);
-        let opaque = self.whole || !self.escaped.is_empty() || writing;
-        self.incoming.as_deref().filter(|_| !opaque)
+        if self.whole || !self.escaped.is_empty() || writing {
+            return None;
+        }
+        let address = i64::from(context.memory_model().default_address_bits() / 8);
+        let (least, most) = context
+            .return_mechanism()
+            .map_or((0, address), |mechanism| {
+                let spent = i64::from(mechanism.stack_pointer_delta_bytes());
+                (spent, spent)
+            });
+        let mut fixed = self.incoming_stores.clone();
+        let mut own_bases = Vec::new();
+        for (instruction, base) in &self.written_bases {
+            // A call above what its transfer spends could move a cycle's spans up each round.
+            let base = (*base).filter(|base| *base <= least)?;
+            if self.own_calls.contains(instruction) {
+                own_bases.push(base);
+                continue;
+            }
+            let writes = context.call_reads(Some(*instruction))?.writes?;
+            fixed.extend(writes.iter().map(|(low, high)| (base + low, base + high)));
+        }
+        // Two rounds: a call to itself whose writes move the spans again bounds nothing (D377).
+        let round = |own: &[(i64, i64)]| {
+            let shifted = own_bases
+                .iter()
+                .flat_map(|base| own.iter().map(move |(low, high)| (base + low, base + high)));
+            let incoming = fixed
+                .iter()
+                .copied()
+                .chain(shifted)
+                .filter(|(_, high)| *high > 0);
+            merged(incoming.map(|(low, high)| ((low.max(0) - most).max(0), high - least)))
+        };
+        let first = round(&[]);
+        let second = round(&first);
+        (own_bases.is_empty() || second == first).then_some(first)
     }
 
     /// The frame's typed refusal, where the stack pointer moves by an unstated amount (D355).
@@ -236,9 +277,14 @@ impl FramePoints {
         &self.asked_reach
     }
 
-    /// The calls nothing states whose writes kept a loaded place in memory, by instruction (D376).
-    pub const fn unstated_rewriting(&self) -> &BTreeSet<u64> {
-        &self.unstated_rewriting
+    /// The places a call's write area covers that a load reads after it (D369), with each call's
+    /// base by instruction: what asks a call nothing states to state itself (D376).
+    pub fn rewriting_calls(&self) -> impl Iterator<Item = (u64, i64)> + '_ {
+        let bases = self
+            .written_bases
+            .iter()
+            .filter_map(|(at, base)| Some((*at, (*base)?)));
+        bases.filter(|(_, base)| *base < 0 && self.rewritten.range(*base..0).next().is_some())
     }
 }
 
@@ -379,11 +425,7 @@ pub(crate) fn walk(
         .find(|id| func.var(*id).version == 0 && func.storage_of(*id) == Some(stack_pointer));
     // No entry stack pointer value: no frame address exists, so nothing writes the stack.
     let Some(entry_sp) = entry_sp else {
-        let incoming = Some(Vec::new());
-        return refused(FramePoints {
-            incoming,
-            ..FramePoints::default()
-        });
+        return refused(FramePoints::default());
     };
     if defs.exhausted().is_some() {
         return refused(FramePoints::whole_frame());
@@ -441,6 +483,7 @@ struct Sinks<'a> {
     /// whether the callee reaches only upward through it.
     upward_at: Box<dyn Fn(u64, usize, crate::CanonicalStorageId) -> Option<ReachAsk> + 'a>,
     stack_arguments: StackArguments,
+    machine: &'a SourceMachineContext,
 }
 
 impl<'a> Sinks<'a> {
@@ -488,6 +531,7 @@ impl<'a> Sinks<'a> {
             read_by_calls: Box::new(read_by_calls),
             upward_at: Box::new(upward_at),
             stack_arguments: StackArguments::of(func, machine, stack_pointer, entry_sp),
+            machine,
         }
     }
 }
@@ -496,8 +540,6 @@ impl<'a> Sinks<'a> {
 /// (doc/adr-call-boundary.md, "D217 as built").
 struct StackArguments {
     calls: Vec<CallArguments>,
-    /// The least and most a transfer spends: one address, or nothing, where no return states it.
-    spent: (i64, i64),
 }
 
 /// One call's argument area, from the stack pointer it is measured at.
@@ -547,14 +589,7 @@ impl StackArguments {
             let children = func.domtree().children(address);
             steps.extend(children.iter().rev().map(|child| (*child, pointer)));
         }
-        let address = i64::from(machine.memory_model().default_address_bits() / 8);
-        let spent = machine
-            .return_mechanism()
-            .map_or((0, address), |mechanism| {
-                let spent = i64::from(mechanism.stack_pointer_delta_bytes());
-                (spent, spent)
-            });
-        Self { calls, spent }
+        Self { calls }
     }
 
     /// What a call writes: the body's own writes for a call to itself (`own`), else its statement.
@@ -568,40 +603,6 @@ impl StackArguments {
         }
     }
 
-    /// What a call of the body to itself writes: the least fixpoint from none of its incoming writes
-    /// (D377). Rounds only grow and shift down, so it ends; `None` where `opaque` or unbounded.
-    fn own_writes(
-        &self,
-        values: &IdMap<VarId, Value>,
-        accesses: &Accesses,
-        opaque: bool,
-    ) -> Option<Vec<(i64, i64)>> {
-        if opaque || !self.calls.iter().any(|call| call.own) {
-            return None;
-        }
-        let (least, most) = self.spent;
-        // A call above what its transfer spends would move the spans up each round: unbounded.
-        let own_calls = self.calls.iter().filter(|call| call.own);
-        if own_calls
-            .map(|call| call.base(values))
-            .any(|base| base.is_none_or(|base| base > least))
-        {
-            return None;
-        }
-        let mut own = Vec::new();
-        loop {
-            let incoming = self.incoming(values, accesses, Some(&own))?;
-            let next = incoming
-                .iter()
-                .map(|(low, high)| ((low - most).max(0), high - least));
-            let next = merged(next);
-            if next == own {
-                return Some(own);
-            }
-            own = next;
-        }
-    }
-
     /// Each call's area base, by operation.
     fn by_call(&self, values: &IdMap<VarId, Value>) -> Vec<(OpId, Option<i64>)> {
         let mut bases = (self.calls.iter())
@@ -611,14 +612,14 @@ impl StackArguments {
         bases
     }
 
-    /// Places a call's written area covers that a load reads after it (D369), and the unstated calls
-    /// covering one (D376). A union dataflow; sets only grow: `O((B + E) x K log K + A log A)`.
+    /// Places a call's written area covers that a load reads after it (D369). A union dataflow; sets
+    /// only grow: `O((B + E) x K log K + A log A)`.
     fn rewritten(
         &self,
         func: &SSAFunction,
         (values, accesses): (&IdMap<VarId, Value>, &Accesses),
         own: Option<&[(i64, i64)]>,
-    ) -> (BTreeSet<i64>, BTreeSet<u64>) {
+    ) -> BTreeSet<i64> {
         // Each call's area as entry-relative spans, by block and index; an unplaced call covers all.
         let mut in_block = BTreeMap::<u64, Vec<CallSpans>>::new();
         for call in &self.calls {
@@ -651,40 +652,7 @@ impl StackArguments {
             let live = entering.get(&block).cloned().unwrap_or_default();
             rewritten_in_block(list, calls, live, &mut rewritten);
         }
-        let asked = (self.calls.iter())
-            .filter(|call| Self::writes_of(call, own).is_none())
-            .filter_map(|call| Some((call.instruction?, call.base(values)?)))
-            .filter(|(_, base)| rewritten.range(*base..0).next().is_some())
-            .map(|(instruction, _)| instruction)
-            .collect();
-        (rewritten, asked)
-    }
-
-    /// The spans at or above the entry pointer a store or a call's area covers; `None` where a call
-    /// is at an unplaced pointer. An unbounded area ends at the entry pointer. O(accesses + calls).
-    fn incoming(
-        &self,
-        values: &IdMap<VarId, Value>,
-        accesses: &Accesses,
-        own: Option<&[(i64, i64)]>,
-    ) -> Option<Vec<(i64, i64)>> {
-        let stores = (accesses.iter()).flat_map(|(place, list)| {
-            let stored = list.iter().filter(|access| access.store);
-            stored.map(|access| (*place, place.saturating_add(i64::from(access.width))))
-        });
-        let mut spans = stores.collect::<Vec<_>>();
-        for call in &self.calls {
-            let base = call.base(values)?;
-            let area = Self::writes_of(call, own).into_iter().flatten();
-            spans.extend(
-                area.map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high))),
-            );
-        }
-        spans.retain(|(_, high)| *high > 0);
-        spans.iter_mut().for_each(|span| span.0 = span.0.max(0));
-        spans.sort_unstable();
-        spans.dedup();
-        Some(spans)
+        rewritten
     }
 
     /// The places of `stored` some call may read, given each place's widest access.
@@ -1200,15 +1168,27 @@ impl<'a> Walker<'a> {
             }
         }
         self.points.handed = handed;
-        let writing = self.points.opaque.iter().any(|access| access.writes);
-        let opaque = self.points.whole || !self.points.escaped.is_empty() || writing;
-        let own = arguments.own_writes(&self.values, &self.accesses, opaque);
-        (self.points.rewritten, self.points.unstated_rewriting) =
-            arguments.rewritten(self.func, (&self.values, &self.accesses), own.as_deref());
-        self.points.incoming = arguments.incoming(&self.values, &self.accesses, own.as_deref());
+        let stores = (self.accesses.iter()).flat_map(|(place, list)| {
+            let stored = list.iter().filter(|access| access.store);
+            stored.map(|access| (*place, place.saturating_add(i64::from(access.width))))
+        });
+        let above = stores
+            .filter(|(_, high)| *high > 0)
+            .map(|(low, high)| (low.max(0), high));
+        self.points.incoming_stores = merged(above);
+        self.points.own_calls = (arguments.calls.iter())
+            .filter(|call| call.own)
+            .filter_map(|call| call.instruction)
+            .collect();
         self.points.written_bases = (arguments.calls.iter())
             .filter_map(|call| Some((call.instruction?, call.base(&self.values))))
             .collect();
+        // A call to itself writes what the body does, as far as the rest states (D377).
+        let own = (!self.points.own_calls.is_empty())
+            .then(|| self.points.call_writes(self.sinks.machine))
+            .flatten();
+        self.points.rewritten =
+            arguments.rewritten(self.func, (&self.values, &self.accesses), own.as_deref());
         self.points.call_bases = arguments.by_call(&self.values);
         Walked {
             points: self.points,
@@ -1274,8 +1254,8 @@ fn non_negative(func: &SSAFunction, defs: &Definitions, var: VarId) -> bool {
 /// A call's index in its block and the entry-relative spans it may write.
 type CallSpans = (usize, Vec<(i64, i64)>);
 
-/// The merged write spans reaching each block's entry: what leaves its predecessors. A worklist
-/// whose sets only grow, each to at most the spans' edges. `O((B + E) x K log K)`.
+/// The merged write spans reaching each block's entry. A worklist whose sets only grow, each at most
+/// K times (K the calls' spans): `O(K x (B + E) x K log K)` worst, one round where they nest.
 fn reaching_writes(
     func: &SSAFunction,
     in_block: &BTreeMap<u64, Vec<CallSpans>>,
