@@ -588,9 +588,8 @@ fn a_staged_table_switch_reads_its_selector() {
     );
 }
 
-/// `shape_variadic`'s last `snprintf` passes eight arguments, two of them in the outgoing stack
-/// area: the staged call takes them in order, as integer bits, where it was a gap. Since
-/// `rd3-frame3` the xor is named before the call.
+/// `shape_variadic`'s last `snprintf` passes two of its eight arguments in the outgoing stack area:
+/// the staged call takes them in order, as integer bits (the xor named before it since rd3-frame3).
 #[test]
 fn a_staged_call_passes_its_stack_arguments() {
     let pinned = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/coverage/pinned");

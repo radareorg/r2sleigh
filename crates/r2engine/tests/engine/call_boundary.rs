@@ -1616,9 +1616,8 @@ fn a_caller_that_calls_another_caller_is_read_after_it() {
     assert_eq!(walked, 4, "walks during the request");
 }
 
-/// glibc AArch64's `_start` hands `__wrap_main` (`nop; b main`) to `__libc_start_main`:
-/// `adrp x0; add x0, x0, #0x20; bl the stub`, `wrap` at 0x1020, `main` at 0x1040 returning
-/// `helper`'s `w0`, and the stub `ldr x16, slot; br x16` at 0x1080.
+/// glibc AArch64's `_start` hands `__wrap_main` (`nop; b main`, 0x1020) to `__libc_start_main`'s
+/// stub (0x1080); `main` (0x1040) returns `helper`'s `w0`.
 fn wrapped_main() -> Literal {
     let mut code = vec![0u8; 0x98];
     let words: [(usize, u32); 13] = [

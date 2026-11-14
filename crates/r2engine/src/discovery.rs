@@ -427,9 +427,8 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             .collect()
     }
 
-    /// The bodies no return reaches whose every end is proven: a halting transfer, or a wait on a
-    /// callee declared or composed never. A least fixpoint over the wait edges, `O(V + E)`; a body
-    /// with no end, a trap, or a cycle of waits stays a bound.
+    /// Bodies whose every end halts or waits on a callee declared or composed never; a trap or a
+    /// wait cycle stays a bound. A least fixpoint over the wait edges, `O(V + E)`.
     fn composed(&self) -> BTreeSet<u64> {
         let candidate = |address: u64| {
             !self.returning.contains(&address)

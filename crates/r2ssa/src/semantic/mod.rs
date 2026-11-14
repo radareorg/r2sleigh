@@ -512,9 +512,8 @@ fn demanded(
 /// Blocks that leave by a tail transfer, and the bytes of each value their callees read.
 type TailReads = (BTreeSet<u64>, Vec<(ValueId, crate::bytes::ByteMask)>);
 
-/// Tail-transfer exits and what their callees read: each argument, and the result lane's `logical`
-/// bytes for a narrower result, else what reaches `ours` in the bytes a caller reads; `None` where a tail states
-/// no fixed arguments or no result (doc/adr-call-boundary.md, "S2 as built"; D211).
+/// Tail-transfer exits and the bytes their callees read (arguments, a narrower result's lane); `None`
+/// where a tail states no fixed arguments or no result (doc/adr-call-boundary.md, "S2 as built"; D211).
 #[cfg_attr(
     dylint_lib = "r2sleigh_lints",
     allow(
