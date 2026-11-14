@@ -6733,6 +6733,40 @@ fn a_place_a_callees_callee_writes_stays_a_load() {
     assert!(!text.contains("return 5"), "{text}");
 }
 
+/// `f` writes `[rsp + 0x100000]` and calls itself while `edi` is not zero; the root stores 5 at
+/// `[rsp + 8]`, calls `f` and reloads it.
+const READ_BACK_PAST_A_SELF_CALL_WHOSE_WRITES_MOVE: &[u8] = &[
+    0xc7, 0x84, 0x24, 0x00, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00,
+    0x00, // 1000 f: mov dword [rsp + 0x100000], 0
+    0x85, 0xff, // 100b test edi, edi
+    0x74, 0x05, // 100d je 0x1014
+    0xe8, 0xec, 0xff, 0xff, 0xff, // 100f call 0x1000
+    0xc3, // 1014 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 1015
+    0x48, 0x83, 0xec, 0x18, // 1020 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1024 mov dword [rsp + 8], 5
+    0xe8, 0xcf, 0xff, 0xff, 0xff, // 102c call 0x1000
+    0x8b, 0x44, 0x24, 0x08, // 1031 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 1035 add rsp, 0x18
+    0xc3, // 1039 ret
+];
+
+/// Each round of `f`'s own writes moves them 8 bytes: the fixpoint would run 131,072 rounds, so
+/// two rounds that disagree bound nothing and the root's slot stays a load (D377, default-deny).
+#[test]
+fn a_self_call_whose_writes_move_each_round_bounds_nothing() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: READ_BACK_PAST_A_SELF_CALL_WHOSE_WRITES_MOVE.to_vec(),
+        name: "read_back_past_a_self_call_whose_writes_move",
+    };
+    let started = std::time::Instant::now();
+    let response = decompile(&machine.target(), &program, BASE + 0x20).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(started.elapsed().as_secs() < 30, "{:?}", started.elapsed());
+}
+
 /// A body that returns and stores the guard without checking it is no prologue the bytes prove.
 #[test]
 fn an_unchecked_canary_in_a_function_that_returns_stays() {

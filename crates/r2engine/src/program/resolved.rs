@@ -521,6 +521,8 @@ struct Assumed {
     interface: SourceFunctionInterface,
     /// What the member writes of its caller's stack: none at first, `None` the top (D377).
     writes: Option<Vec<(i64, i64)>>,
+    /// Whether the writes rose once already: a second move is the top.
+    writes_rose: bool,
 }
 
 impl Assumed {
@@ -537,6 +539,7 @@ impl Assumed {
             result,
             kept,
             writes: Some(Vec::new()),
+            writes_rose: false,
             interface: interface
                 .clone()
                 .assumed(cause.cloned(), result.flatten().or(kept)),
@@ -592,9 +595,14 @@ impl Assumed {
         let result = held
             .result
             .map(|seed| join(seed, interface.stated_result()));
-        // The writes only grow: a union, and none once either bounds nothing.
-        let writes = (held.writes.clone().zip(Self::writes_of(read)))
-            .map(|(held, read)| union(&held, &read));
+        // The writes rise once from none to what a read states; any later move bounds nothing.
+        let read_writes = Self::writes_of(read);
+        let writes = match held.writes.as_deref() {
+            _ if held.writes == read_writes => held.writes.clone(),
+            Some([]) if !held.writes_rose => read_writes,
+            _ => None,
+        };
+        let writes_rose = held.writes_rose || writes != held.writes;
         if (count, floor, result, &writes) == (held.count, held.floor, held.result, &held.writes) {
             return false;
         }
@@ -612,17 +620,10 @@ impl Assumed {
             kept: held.kept,
             interface,
             writes,
+            writes_rose,
         };
         true
     }
-}
-
-/// Two span lists joined, sorted and deduplicated. O(n log n).
-fn union(one: &[(i64, i64)], other: &[(i64, i64)]) -> Vec<(i64, i64)> {
-    let mut spans = one.iter().chain(other).copied().collect::<Vec<_>>();
-    spans.sort_unstable();
-    spans.dedup();
-    spans
 }
 
 /// The result both states: the wider of two integers in one carrier, and none where either is
@@ -655,8 +656,8 @@ fn least_fixpoint<S: Source + 'static>(
     let mut pending = (0..members.len())
         .filter(|at| cycle.open[*at])
         .collect::<BTreeSet<_>>();
-    // Terminates: an assumption only rises (count, floor, none; result width, none), and each rise
-    // queues its callers once: O(k + (s + 6)·E) preparations.
+    // Terminates: an assumption only rises (count, floor, none; result width, none; writes twice),
+    // and each rise queues its callers once: O(k + (s + 8)·E) preparations.
     while let Some(at) = pending.pop_first() {
         let Some(rose) = cycle.resolve(db, view, at) else {
             return stopped_read();

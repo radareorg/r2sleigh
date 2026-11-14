@@ -182,7 +182,7 @@ impl FramePoints {
     }
 
     /// What a call to this body may write of its caller's stack, from the call's pointer, as `context`
-    /// states its calls; a self call by least fixpoint (doc/adr-callee-builds.md, D377).
+    /// states its calls; a self call in two rounds (doc/adr-callee-builds.md, D377). `O(calls x spans)`.
     pub fn call_writes(&self, context: &SourceMachineContext) -> Option<Vec<(i64, i64)>> {
         let writing = self.opaque.iter().any(|access| access.writes);
         if self.whole || !self.escaped.is_empty() || writing {
@@ -207,24 +207,21 @@ impl FramePoints {
             let writes = context.call_reads(Some(*instruction))?.writes?;
             fixed.extend(writes.iter().map(|(low, high)| (base + low, base + high)));
         }
-        let mut own = Vec::new();
-        loop {
-            let shifted = own_bases.iter().flat_map(|base| {
-                own.iter()
-                    .map(move |(low, high): &(i64, i64)| (base + low, base + high))
-            });
+        // Two rounds: a call to itself whose writes move the spans again bounds nothing (D377).
+        let round = |own: &[(i64, i64)]| {
+            let shifted = own_bases
+                .iter()
+                .flat_map(|base| own.iter().map(move |(low, high)| (base + low, base + high)));
             let incoming = fixed
                 .iter()
                 .copied()
                 .chain(shifted)
                 .filter(|(_, high)| *high > 0);
-            let next =
-                merged(incoming.map(|(low, high)| ((low.max(0) - most).max(0), high - least)));
-            if next == own {
-                return Some(own);
-            }
-            own = next;
-        }
+            merged(incoming.map(|(low, high)| ((low.max(0) - most).max(0), high - least)))
+        };
+        let first = round(&[]);
+        let second = round(&first);
+        (own_bases.is_empty() || second == first).then_some(first)
     }
 
     /// The frame's typed refusal, where the stack pointer moves by an unstated amount (D355).
@@ -1257,8 +1254,8 @@ fn non_negative(func: &SSAFunction, defs: &Definitions, var: VarId) -> bool {
 /// A call's index in its block and the entry-relative spans it may write.
 type CallSpans = (usize, Vec<(i64, i64)>);
 
-/// The merged write spans reaching each block's entry: what leaves its predecessors. A worklist
-/// whose sets only grow, each to at most the spans' edges. `O((B + E) x K log K)`.
+/// The merged write spans reaching each block's entry. A worklist whose sets only grow, each at most
+/// K times (K the calls' spans): `O(K x (B + E) x K log K)` worst, one round where they nest.
 fn reaching_writes(
     func: &SSAFunction,
     in_block: &BTreeMap<u64, Vec<CallSpans>>,
