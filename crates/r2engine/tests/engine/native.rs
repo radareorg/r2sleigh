@@ -9515,8 +9515,13 @@ fn an_import_reads_past_its_fixed_parameters_unless_its_citation_fixes_them() {
                 .min_by_key(String::len);
             named.unwrap_or_else(|| format!("{storage:?}"))
         };
-        let registers = reads.registers.into_iter().map(name).collect::<Vec<_>>();
-        (registers, reads.count_register.map(name))
+        let registers = reads
+            .registers()
+            .iter()
+            .copied()
+            .map(name)
+            .collect::<Vec<_>>();
+        (registers, reads.count_register().map(name))
     };
     let sysv = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
     let (fixed, count) = names(&sysv, &sysv.target(), "__assert_fail");

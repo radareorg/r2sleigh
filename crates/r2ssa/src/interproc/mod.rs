@@ -320,15 +320,18 @@ pub struct SummaryAtomicEffect {
 }
 
 /// What a function does through one argument: `read`, `write`, `escape`, `free` proven by the body or
-/// a described callee; `assumed` only bounds an undescribed call or operation it reaches (D382).
-#[doc(alias = "default_deny_pointer")]
+/// a described callee. An entry with none is an argument handed to an undescribed call: it exists,
+/// and nothing is known of its use (D382, D411).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryArgEffect {
     pub read: bool,
     pub write: bool,
     pub escape: bool,
     pub free: bool,
-    pub assumed: bool,
+}
+
+impl r2source::Negative for SummaryArgEffect {
+    const FACTS: &'static [r2source::NegativeFact] = &[r2source::NegativeFact::Pointer];
 }
 
 impl SummaryArgEffect {
@@ -338,7 +341,6 @@ impl SummaryArgEffect {
         self.write |= other.write;
         self.escape |= other.escape;
         self.free |= other.free;
-        self.assumed |= other.assumed;
         *self != before
     }
 
@@ -795,11 +797,11 @@ fn mark_unknown_call_effects(
     args: Option<&[SummaryOperand]>,
 ) {
     *has_unknown_calls = true;
-    // An argument handed on is assumed, never proven, read or written: the callee may treat it
-    // as a number. The unknown location below states what it may touch.
+    // An argument handed on exists, but no effect is proven: the callee may treat it as a number.
+    // The unknown location below states what it may touch.
     for actual in args.into_iter().flatten() {
         if let SummaryOperand::Arg(idx) = actual {
-            arg_effects.entry(*idx).or_default().assumed = true;
+            arg_effects.entry(*idx).or_default();
         }
     }
     for kind in [
@@ -1051,11 +1053,9 @@ fn require_trusted_root_for_helper_scope(
 }
 
 /// What a call to this body may write of its caller's stack (`FramePoints::call_writes`).
-fn incoming_writes(prepared: &SsaArtifact) -> Option<Box<[(i64, i64)]>> {
+fn incoming_writes(prepared: &SsaArtifact) -> Option<crate::call_reads::StackWrites> {
     let points = prepared.function().frame_points()?;
-    points
-        .call_writes(prepared.machine_context())
-        .map(Vec::into_boxed_slice)
+    points.call_writes(prepared.machine_context())
 }
 
 /// Solve interprocedural evidence owned by one exact prepared SSA root.
@@ -1083,7 +1083,7 @@ pub struct PreparedCalleeSummary {
     /// The library model of each import this body calls directly.
     library: BTreeMap<u64, FunctionSemanticSummary>,
     /// The caller's stack a call to this body may write, from the call's pointer (D377).
-    incoming_writes: Option<Box<[(i64, i64)]>>,
+    incoming_writes: Option<crate::call_reads::StackWrites>,
 }
 
 impl PreparedCalleeSummary {
@@ -1128,8 +1128,8 @@ impl PreparedCalleeSummary {
 
     /// The caller's stack bytes a call to this body may write, as ranges from the stack pointer
     /// before the transfer; `None` where nothing bounds them (D377).
-    pub fn incoming_writes(&self) -> Option<&[(i64, i64)]> {
-        self.incoming_writes.as_deref()
+    pub const fn incoming_writes(&self) -> Option<&crate::call_reads::StackWrites> {
+        self.incoming_writes.as_ref()
     }
 
     pub const fn id(&self) -> InterprocFunctionId {

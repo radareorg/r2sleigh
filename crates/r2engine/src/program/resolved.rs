@@ -16,6 +16,7 @@ use super::analysis::{CalleeReads, Shared, built_read, callee_built, callee_read
 use super::{ProgramInputs, Source, View};
 use crate::native::{Built, CalleeRead, Stated, Unreadable};
 use crate::query::db::{Db, Hold, Query, Retention};
+use r2ssa::call_reads::StackWrites;
 use r2ssa::dense::Reached;
 
 /// A function by its entry and whether it is Thumb.
@@ -528,7 +529,7 @@ struct Assumed {
     kept: Option<SourceResultSeed>,
     interface: SourceFunctionInterface,
     /// What the member writes of its caller's stack: none at first, `None` the top (D377).
-    writes: Option<Vec<(i64, i64)>>,
+    writes: Option<StackWrites>,
     /// Whether the writes rose once already: a second move is the top.
     writes_rose: bool,
 }
@@ -546,7 +547,7 @@ impl Assumed {
             floor: cause.is_some(),
             result,
             kept,
-            writes: Some(Vec::new()),
+            writes: Some(StackWrites::cycle_seed()),
             writes_rose: false,
             interface: interface
                 .clone()
@@ -563,16 +564,18 @@ impl Assumed {
 
     fn state(assumed: &Option<Self>) -> Option<State> {
         let held = assumed.as_ref()?;
-        Some((held.count, held.floor, held.result, held.writes.clone()))
+        Some((
+            held.count,
+            held.floor,
+            held.result,
+            spans(held.writes.as_ref()),
+        ))
     }
 
     /// What a read states its body writes of its caller's stack.
-    fn writes_of(read: &CalleeRead) -> Option<Vec<(i64, i64)>> {
+    fn writes_of(read: &CalleeRead) -> Option<StackWrites> {
         let facts = read.facts.as_ref().ok()?;
-        facts
-            .summary()
-            .incoming_writes()
-            .map(<[(i64, i64)]>::to_vec)
+        facts.summary().incoming_writes().cloned()
     }
 
     /// What a read of a member states, as far as the member's assumption tracks it.
@@ -584,7 +587,7 @@ impl Assumed {
             arity.floor(),
             !arity.is_exact(),
             result,
-            Self::writes_of(read),
+            spans(Self::writes_of(read).as_ref()),
         ))
     }
 
@@ -605,13 +608,15 @@ impl Assumed {
             .map(|seed| join(seed, interface.stated_result()));
         // The writes rise once from none to what a read states; any later move bounds nothing.
         let read_writes = Self::writes_of(read);
-        let writes = match held.writes.as_deref() {
-            _ if held.writes == read_writes => held.writes.clone(),
+        let held_spans = spans(held.writes.as_ref());
+        let writes = match held_spans.as_deref() {
+            _ if held_spans == spans(read_writes.as_ref()) => held.writes.clone(),
             Some([]) if !held.writes_rose => read_writes,
             _ => None,
         };
-        let writes_rose = held.writes_rose || writes != held.writes;
-        if (count, floor, result, &writes) == (held.count, held.floor, held.result, &held.writes) {
+        let moved = spans(writes.as_ref()) != held_spans;
+        let writes_rose = held.writes_rose || moved;
+        if (count, floor, result, moved) == (held.count, held.floor, held.result, false) {
             return false;
         }
         let cause = (interface.arity_floor()).or_else(|| held.interface.arity_floor());
@@ -632,6 +637,13 @@ impl Assumed {
         };
         true
     }
+}
+
+/// The spans a statement of a caller's stack writes holds; `None` for the top.
+fn spans(writes: Option<&StackWrites>) -> Option<Vec<(i64, i64)>> {
+    writes
+        .and_then(StackWrites::spans)
+        .map(<[(i64, i64)]>::to_vec)
 }
 
 /// The result both states: the wider of two integers in one carrier, and none where either is

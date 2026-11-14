@@ -4257,7 +4257,7 @@ mod tests {
                 unstated_carrier: None,
                 fixed_argument_count: Some(arguments.len()),
                 ignored: Box::default(),
-                reads_stated: true,
+                reads_bound: Some(crate::call_reads::ReadBound::arity()),
                 variadic_argument_count_evidence: None,
                 variadic_argument_count_refusal: None,
                 arguments,

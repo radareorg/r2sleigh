@@ -328,8 +328,6 @@ impl ArtifactLiveness {
     pub const fn live_out(&self) -> &crate::liveout::FunctionLiveOut {
         &self.live_out
     }
-
-    #[doc(alias = "default_deny_ignored_reads")]
     pub const fn ignored_reads(&self) -> &std::collections::BTreeSet<crate::graph::UseSite> {
         &self.ignored_reads
     }
@@ -1622,7 +1620,6 @@ impl SsaArtifact {
     }
 
     /// Reads the text never performs, which hold nothing live.
-    #[doc(alias = "default_deny_ignored_reads")]
     pub const fn ignored_reads(&self) -> &std::collections::BTreeSet<crate::graph::UseSite> {
         self.liveness.ignored_reads()
     }
@@ -3564,7 +3561,8 @@ fn unpassed_in(
         let Some(SSAOp::CallUse { storage, .. }) = op else {
             continue;
         };
-        let unread = next.as_mut().is_none_or(|(instruction, lists)| {
+        // A read with no call after it in its block is no call's: it stays a read (D411).
+        let unread = next.as_mut().is_some_and(|(instruction, lists)| {
             let lists = lists.get_or_insert_with(|| site_lists(machine_context, *instruction));
             (lists.as_ref()).is_some_and(|(reads, every)| reads.reads_none_within(every, *storage))
         });
