@@ -85,3 +85,15 @@ The writes are read at ask time from the frame walk's stores and call bases and 
 D376's asks: the walk names each unstated call whose writes kept a loaded place (`FramePoints::rewriting_calls`, tail transfers excluded). The convention seal and every tier-2 resolution (`Stated::asks`) state those callees from their alone read and build again. An alone read (`CalleeReads`) asks none, so a statement never reads a statement: depth one, no cycle. Cold callee builds (`built_resolved`) do not ask yet.
 
 Measured (Mac, instructions retired, median of 3, base `a2ad45017`): cold pumasim `pdd @ 0x23fdf0` 19.84 to 20.25 G (+2.1%; the rd3 merge alone 21.28 G, `0x2312c0` rebuilt); 20 restated functions rebuild where the base rebuilt 10, each because an owner's statement frees a place an unstated call kept.
+
+## D289 as built (`rd5-recovery`)
+
+Recovery's collection has 7 phases that read no callee statement: addresses, call sites, predicates, values, the `ValueContent` base, and (with no interface, as in recovery) declared slots and live-out. They read the build through `semantic::BuildFacts`, which exposes the shape (`cfg`, `domtree`, `block_addrs`, `root`, `entry`, predecessors, successors, dominance) and 6 context reads (`stack_pointer_carrier`, `register_projection`, `raw_call_site_at`, `is_tail_call_site`, `slot_target`, `callee_linkage`). It exposes no `call_passes` (the 6th Δ channel: `set_callee_passes` rewrites it on a kept build), no `function_interface`, no `frame_points`, no call-site interface, call reads, statement, reach, writes or member site. The Dylint `build_facts_reads_a_callee_fact` (deny) rejects any other read in `build_facts.rs` and any `BuildFacts` method returning the function or the context.
+
+- `construct` collects `StaticPrefix` (addresses, call sites, predicates, values as `Arc`, the content base) once per build and holds it in `Reuse` beside `Provisional`; it drops at the seal. A kept restatement borrows it, so its second recovery runs only the dynamic phases. Each collection copies the content base before `declare_same_content`: `O(V)`.
+- Live-out without a stated result is `FunctionLiveOut::unstated` (`O(blocks)`, every returning block unresolved), which `compute` with no storages now returns; declared slots are empty there.
+- The sealed collection keeps computing every phase: its interface makes declared slots and live-out dynamic.
+- Equivalence: the 4 static phases and the base read only `BuildFacts`, the held `Provisional` and its graph, all equal on a kept build. The debug `difference` in `restated` stays the oracle.
+- Cost: Θ(C_dyn + T) per second recovery, where it was Θ(C + T); s = 0.225 to 0.255 of the round-2 collection on pumasim cold (round5-measure item 4), about 0.15 to 0.17 G. Peak RSS rises at most 3.9 MB.
+- Meter: `AnalysisStats::static_prefixes` counts each collection (a metered `SsaWorkControl::static_prefix_built`). `builds::a_kept_build_collects_its_static_phases_once` reads 9; the parent's flow reads 10.
+- Step B (re-solving the region a changed site reaches) is D420.

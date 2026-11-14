@@ -599,6 +599,8 @@ struct Constructed {
 struct Reuse {
     key: BuildKey,
     provisional: Provisional,
+    /// What recovery's static phases read of the build, where it recovered (D289).
+    prefix: Option<crate::semantic::StaticPrefix>,
 }
 
 /// A build offered to a construction: taken where the callees state the same to it.
@@ -606,6 +608,7 @@ struct Prior {
     key: BuildKey,
     function: Prepared,
     provisional: Provisional,
+    prefix: Option<crate::semantic::StaticPrefix>,
 }
 
 impl Prior {
@@ -965,11 +968,18 @@ impl TrustedConstruction {
         let Constructed {
             function, reuse, ..
         } = constructed;
-        let prior = reuse.map(|Reuse { key, provisional }| Prior {
-            key,
-            function,
-            provisional,
-        });
+        let prior = reuse.map(
+            |Reuse {
+                 key,
+                 provisional,
+                 prefix,
+             }| Prior {
+                key,
+                function,
+                provisional,
+                prefix,
+            },
+        );
         let constructed = TrustedSsaArtifact::construct(
             &lifted, arch, control, evidence, premises, recovery, prior,
         )?;
@@ -1561,7 +1571,9 @@ impl SsaArtifact {
         &self,
     ) -> (crate::liveness::ValueLiveness, crate::span::StorageSpans) {
         let graph = self.graph();
-        let mut content = crate::liveness::ValueContent::of(graph, Some(&self.machine_context));
+        let mut content = crate::liveness::ValueContent::of(graph, |storage| {
+            self.machine_context.register_projection(storage)
+        });
         content.declare_same_content(&same_content_reads(
             &self.facts.structured.memory_accesses,
             &self.facts.memory,
@@ -2925,6 +2937,7 @@ impl TrustedSsaArtifact {
         let mut built = None;
         // The build recovery read, its prep facts and what it read of the callees.
         let mut reuse = None;
+        let mut prefix = None;
         let mut kept = false;
         // Whether the recovered result is void on the premise that no caller outside the image reads it.
         let mut closed_premises: &'static [r2source::Premise] = &[];
@@ -2997,6 +3010,7 @@ impl TrustedSsaArtifact {
                         kept = true;
                         let mut function = prior.function;
                         function.set_callee_passes(callees.preserved());
+                        prefix = prior.prefix;
                         (Ok(function), Some(prior.provisional))
                     }
                     None => (
@@ -3049,9 +3063,20 @@ impl TrustedSsaArtifact {
                 let Some(model) = source.convention() else {
                     break 'recovered None;
                 };
+                // A kept build's static facts are its own: recovery borrows them again (D289).
+                let held = match prefix.take() {
+                    Some(held) => held,
+                    None => crate::semantic::StaticPrefix::collect(
+                        preliminary.function(),
+                        Some(&provisional_machine_context),
+                        (Some(&preliminary_prep.facts), &preliminary_prep.graph),
+                        control,
+                    )?,
+                };
+                let prefix = &*prefix.insert(held);
                 let recovered = crate::recover_interface::recover_interface_with_context(
                     preliminary,
-                    preliminary_prep,
+                    (preliminary_prep, prefix),
                     model,
                     &provisional_machine_context,
                     crate::recover_interface::Stated::of(&source),
@@ -3209,7 +3234,11 @@ impl TrustedSsaArtifact {
             function,
             closed_premises,
             exits: exits.clone(),
-            reuse: reuse.map(|(key, provisional)| Reuse { key, provisional }),
+            reuse: reuse.map(|(key, provisional)| Reuse {
+                key,
+                provisional,
+                prefix,
+            }),
             kept,
             machine_context,
             finish: Finish {

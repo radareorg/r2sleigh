@@ -1742,17 +1742,24 @@ impl Stated {
 /// `prep` is the prep facts of `func`, which is prepared and never sealed.
 pub(crate) fn recover_interface_with_context(
     func: &SSAFunction,
-    prep: &crate::function::Provisional,
+    (prep, prefix): (
+        &crate::function::Provisional,
+        &crate::semantic::StaticPrefix,
+    ),
     slots: &ConventionModel,
     machine_context: &crate::SourceMachineContext,
     stated: Stated,
 ) -> Result<Option<RecoveredInterface>, crate::fixpoint::Exhausted> {
-    recover_interface_inner(func, Some(prep), slots, Some(machine_context), stated)
+    let held = Some((prep, prefix));
+    recover_interface_inner(func, held, slots, Some(machine_context), stated)
 }
 
 fn recover_interface_inner(
     func: &SSAFunction,
-    provisional: Option<&crate::function::Provisional>,
+    provisional: Option<(
+        &crate::function::Provisional,
+        &crate::semantic::StaticPrefix,
+    )>,
     slots: &ConventionModel,
     machine_context: Option<&crate::SourceMachineContext>,
     Stated {
@@ -1778,19 +1785,19 @@ fn recover_interface_inner(
     // scan cannot distinguish program inputs from preserved machine state.
     // The graph the prep facts were read off, or one built here when none came with them.
     let built;
-    let (graph, prep) = match provisional {
-        Some(provisional) => (&provisional.graph, Some(&provisional.facts)),
+    let (graph, prep, prefix) = match provisional {
+        Some((provisional, prefix)) => (&provisional.graph, Some(&provisional.facts), Some(prefix)),
         None => {
             built = SsaGraph::from_function(func);
-            (&built, None)
+            (&built, None, None)
         }
     };
     let facts = if let Some(machine_context) = machine_context {
         crate::semantic::PreparedFunctionFacts::collect_for_recovery(
             func,
-            prep,
-            graph,
+            (prep, graph),
             machine_context,
+            prefix,
         )?
     } else {
         crate::semantic::PreparedFunctionFacts::collect(func, graph)?
@@ -4086,9 +4093,17 @@ mod tests {
         function: &SSAFunction,
         context: &crate::SourceMachineContext,
     ) -> Option<RecoveredInterface> {
+        let provisional = function.prep_facts_for_test();
+        let prefix = crate::semantic::StaticPrefix::collect(
+            function,
+            Some(context),
+            (Some(&provisional.facts), &provisional.graph),
+            &crate::control::UncheckedSsaWorkControl,
+        )
+        .expect("an unchecked control never stops");
         recover_interface_with_context(
             function,
-            &function.prep_facts_for_test(),
+            (&provisional, &prefix),
             &candidates(),
             context,
             Stated::default(),

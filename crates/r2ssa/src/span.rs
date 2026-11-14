@@ -445,7 +445,7 @@ mod tests {
         let liveness = ValueLiveness::compute(
             &graph,
             &crate::liveout::FunctionLiveOut::default(),
-            crate::liveness::ValueContent::of(&graph, None),
+            crate::liveness::ValueContent::unmapped(&graph),
         );
         let spans = StorageSpans::compute(&graph, &liveness);
 
@@ -482,7 +482,7 @@ mod tests {
         let liveness = ValueLiveness::compute(
             &graph,
             &crate::liveout::FunctionLiveOut::default(),
-            crate::liveness::ValueContent::of(&graph, None),
+            crate::liveness::ValueContent::unmapped(&graph),
         );
         let spans = StorageSpans::compute(&graph, &liveness);
 
@@ -524,7 +524,7 @@ mod tests {
         let liveness = ValueLiveness::compute(
             &graph,
             &crate::liveout::FunctionLiveOut::default(),
-            crate::liveness::ValueContent::of(&graph, None),
+            crate::liveness::ValueContent::unmapped(&graph),
         );
         let spans = StorageSpans::compute(&graph, &liveness);
 
@@ -595,7 +595,7 @@ mod tests {
         let liveness = ValueLiveness::compute(
             &graph,
             &crate::liveout::FunctionLiveOut::default(),
-            crate::liveness::ValueContent::of(&graph, None),
+            crate::liveness::ValueContent::unmapped(&graph),
         );
         let spans = StorageSpans::compute(&graph, &liveness);
 
@@ -634,7 +634,7 @@ mod tests {
         let liveness = ValueLiveness::compute(
             &graph,
             &crate::liveout::FunctionLiveOut::default(),
-            crate::liveness::ValueContent::of(&graph, None),
+            crate::liveness::ValueContent::unmapped(&graph),
         );
         let spans = StorageSpans::compute(&graph, &liveness);
 

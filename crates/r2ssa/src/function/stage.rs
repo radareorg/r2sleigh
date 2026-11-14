@@ -366,6 +366,7 @@ impl Sealed {
                     machine_context: Some(&machine_context),
                     site: "prepare",
                     certified: crate::semantic::Certified::Whole,
+                    prefix: None,
                 },
                 control,
             )?;

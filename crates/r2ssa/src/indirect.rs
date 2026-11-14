@@ -563,8 +563,9 @@ pub(crate) fn prepared_dispatch_table_reads(
     prep: &crate::DecompilePrepFacts,
 ) -> Vec<DispatchTableRead> {
     let prep = Some(prep);
-    let predicates = crate::semantic::collect_predicate_facts(function, prep, graph);
-    let values = crate::values::solve_value_ranges(graph, function, prep, &predicates);
+    let build = crate::semantic::BuildFacts::bare(function);
+    let predicates = crate::semantic::collect_predicate_facts(build, prep, graph);
+    let values = crate::values::solve_value_ranges(graph, build, prep, &predicates);
     dispatch_table_reads_in_graph(graph, &values, &|_| None)
 }
 
@@ -597,7 +598,12 @@ mod tests {
         // The dispatch is resolved from what the address can be, so the test
         // solves for that exactly as the analysis phase does.
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let values = crate::values::solve_value_ranges(&graph, &function, None, &predicates);
+        let values = crate::values::solve_value_ranges(
+            &graph,
+            crate::semantic::BuildFacts::bare(&function),
+            None,
+            &predicates,
+        );
         dispatch_table_reads_in_graph(&graph, &values, &|_| None)
     }
 

@@ -146,6 +146,8 @@ pub struct DbStats {
     pub rebuilt: u64,
     /// Frame object models built by requests that have ended (D403).
     pub frames_built: u64,
+    /// Static prefixes collected, one per build recovery read (D289).
+    pub static_prefixes: u64,
     /// Dispatch-table convention seals made by requests that have ended (D403).
     pub table_seals: u64,
 }
@@ -332,6 +334,7 @@ impl<I: Inputs + 'static> Db<I> {
     pub fn note_request(&self, control: &crate::EngineExecutionControl) {
         let mut stats = self.stats.borrow_mut();
         stats.frames_built += control.frames_built();
+        stats.static_prefixes += control.static_prefixes();
         stats.table_seals += control.table_seals();
     }
 

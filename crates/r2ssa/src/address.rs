@@ -27,10 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::graph::InstPayload;
 use crate::view::ValueViews;
-use crate::{
-    CanonicalStorageId, SSAFunction, SSAOp, SSAVar, SourceMachineContext, SsaGraph,
-    StackAddressRoot, ValueId,
-};
+use crate::{CanonicalStorageId, SSAOp, SSAVar, SsaGraph, StackAddressRoot, ValueId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AffineAddressTerm {
@@ -267,7 +264,7 @@ impl AffineScalar {
 }
 
 struct AddressCollector<'a> {
-    function: &'a SSAFunction,
+    function: crate::semantic::BuildFacts<'a>,
     /// The function's prep facts, where it was prepared.
     prep: Option<&'a crate::DecompilePrepFacts>,
     graph: &'a SsaGraph,
@@ -318,10 +315,9 @@ type Spills = BTreeMap<SpillSlotKey, Held>;
 
 impl<'a> AddressCollector<'a> {
     fn new(
-        function: &'a SSAFunction,
+        function: crate::semantic::BuildFacts<'a>,
         prep: Option<&'a crate::DecompilePrepFacts>,
         graph: &'a SsaGraph,
-        machine_context: Option<&SourceMachineContext>,
     ) -> Self {
         let mut expressions = crate::dense::IdMap::default();
         if let Some(prep) = prep {
@@ -374,7 +370,7 @@ impl<'a> AddressCollector<'a> {
             scalar_visiting: crate::dense::IdSet::default(),
             stack_out: BTreeMap::new(),
             load_count,
-            stack_pointer: machine_context.and_then(SourceMachineContext::stack_pointer_carrier),
+            stack_pointer: function.stack_pointer_carrier(),
         }
     }
 
@@ -433,7 +429,7 @@ impl<'a> AddressCollector<'a> {
                 r2il::refusal_evidence!(
                     "address-provenance",
                     "{:#x}: did not settle within {budget} block visits",
-                    self.function.entry
+                    self.function.entry()
                 );
                 return AddressProvenanceFacts::default();
             }
@@ -901,12 +897,11 @@ fn signed_constant(var: &SSAVar) -> Option<i64> {
 }
 
 pub(crate) fn collect_address_provenance(
-    function: &SSAFunction,
+    build: crate::semantic::BuildFacts<'_>,
     prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
-    machine_context: Option<&SourceMachineContext>,
 ) -> AddressProvenanceFacts {
-    AddressCollector::new(function, prep, graph, machine_context).collect()
+    AddressCollector::new(build, prep, graph).collect()
 }
 
 #[cfg(test)]

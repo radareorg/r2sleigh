@@ -176,3 +176,15 @@ fn a_reach_promotion_never_asked_keeps_the_build() {
     assert_eq!(stats.rebuilt, 0, "{stats:?}");
     assert_eq!(stats.defects, 0, "{stats:?}");
 }
+
+/// `forwards`' build is kept against `frees`' statement, so its second recovery borrows the
+/// static phases its first collected: one prefix per build and per seal, 10 on the parent (D289).
+#[test]
+fn a_kept_build_collects_its_static_phases_once() {
+    let mut open = OpenProgram::of(Literal::plt_wrapped("free", &FORWARDS));
+    let _ = rendered(&mut open, ROOT);
+    let stats = open.analysis_stats();
+    assert_eq!(stats.rebuilt, 0, "{stats:?}");
+    assert_eq!(stats.static_prefixes, 9, "{stats:?}");
+    assert_eq!(stats.defects, 0, "{stats:?}");
+}

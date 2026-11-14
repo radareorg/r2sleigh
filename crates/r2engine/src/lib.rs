@@ -466,6 +466,11 @@ impl EngineExecutionControl {
         self.meter.frames_built()
     }
 
+    /// Static prefixes this request collected, one per build recovery read (D289).
+    pub fn static_prefixes(&self) -> u64 {
+        self.meter.static_prefixes()
+    }
+
     /// Convention seals this request made to read dispatch tables.
     pub fn table_seals(&self) -> u64 {
         self.table_seals.load(std::sync::atomic::Ordering::Relaxed)

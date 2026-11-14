@@ -82,7 +82,7 @@ impl ValueRanges {
 /// Solve for every value.
 pub fn solve_value_ranges(
     graph: &SsaGraph,
-    function: &crate::SSAFunction,
+    function: crate::semantic::BuildFacts<'_>,
     prep: Option<&crate::DecompilePrepFacts>,
     predicates: &crate::semantic::PredicateFacts,
 ) -> ValueRanges {
@@ -190,7 +190,7 @@ struct SameBits<'a> {
 /// The solution, and how many transfers the ascent spent reaching it.
 fn solve_counted(
     graph: &SsaGraph,
-    function: &crate::SSAFunction,
+    function: crate::semantic::BuildFacts<'_>,
     prep: Option<&crate::DecompilePrepFacts>,
     predicates: &crate::semantic::PredicateFacts,
 ) -> (ValueRanges, usize) {
@@ -210,7 +210,7 @@ fn solve_counted(
 }
 
 /// `W`: every block a depth-first walk from the entry reaches by a back edge, in `O(V + E)`.
-fn widening_set(function: &crate::SSAFunction) -> BTreeSet<u64> {
+fn widening_set(function: crate::semantic::BuildFacts<'_>) -> BTreeSet<u64> {
     function.cfg().collect_back_edges().into_keys().collect()
 }
 
@@ -517,7 +517,7 @@ const fn mask_of(width_bits: u32) -> u64 {
     )
 )]
 fn assumptions_by_block(
-    function: &crate::SSAFunction,
+    function: crate::semantic::BuildFacts<'_>,
     graph: &SsaGraph,
     predicates: &crate::semantic::PredicateFacts,
     solved: Solved<'_>,
@@ -540,7 +540,11 @@ fn assumptions_by_block(
             .into_iter()
             .flatten()
         {
-            if !edge_dominates(function, assumption.predecessor, addr) {
+            if !edge_dominates(
+                (function.cfg(), function.domtree()),
+                assumption.predecessor,
+                addr,
+            ) {
                 continue;
             }
             if let Some(compare) = tested(predicates, assumption) {
@@ -673,15 +677,18 @@ fn narrowed_merges(
 }
 
 /// Whether every arrival at `block` first takes `predecessor -> block`, so what that edge tests holds there (doc/ssa.md, "Branch assumptions").
-pub(crate) fn edge_dominates(function: &crate::SSAFunction, predecessor: u64, block: u64) -> bool {
-    let domtree = function.domtree();
+pub(crate) fn edge_dominates(
+    (cfg, domtree): (&crate::cfg::CFG, &crate::domtree::DomTree),
+    predecessor: u64,
+    block: u64,
+) -> bool {
     let reachable = |other: u64| other == domtree.entry || domtree.idom(other).is_some();
     block != domtree.entry
-        && function
+        && cfg
             .predecessors(block)
             .into_iter()
             .filter(|other| *other != predecessor && reachable(*other))
-            .all(|other| function.dominates(block, other))
+            .all(|other| domtree.dominates(block, other))
 }
 
 /// The ranges solved so far, and the copy class (the view's) each value is
@@ -987,7 +994,7 @@ fn block_addr(graph: &SsaGraph, inst: &GraphInst) -> Option<u64> {
 /// is not a fact about the merge.
 fn narrow_where_defined(
     graph: &SsaGraph,
-    function: &crate::SSAFunction,
+    function: crate::semantic::BuildFacts<'_>,
     predicates: &crate::semantic::PredicateFacts,
     same: SameBits<'_>,
     state: &mut [StridedInterval],
@@ -1102,7 +1109,12 @@ mod tests {
         let function = SSAFunction::from_exact_test_blocks(blocks, cfg);
         let graph = SsaGraph::from_function(&function);
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let (ranges, transfers) = solve_counted(&graph, &function, None, &predicates);
+        let (ranges, transfers) = solve_counted(
+            &graph,
+            crate::semantic::BuildFacts::bare(&function),
+            None,
+            &predicates,
+        );
         (ranges, graph, transfers)
     }
 
@@ -1635,7 +1647,12 @@ mod tests {
         let prep = function.prep_facts_for_test();
         let graph = SsaGraph::from_function(&function);
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let ranges = solve_value_ranges(&graph, &function, Some(&prep), &predicates);
+        let ranges = solve_value_ranges(
+            &graph,
+            crate::semantic::BuildFacts::bare(&function),
+            Some(&prep),
+            &predicates,
+        );
         assert_eq!(range_of(&ranges, &graph, &index).bounds(), Some((0, 7)));
         assert_eq!(range_of(&ranges, &graph, &offset).bounds(), Some((0, 56)));
     }
@@ -1698,7 +1715,12 @@ mod tests {
         let prep = function.prep_facts_for_test();
         let graph = SsaGraph::from_function(&function);
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let ranges = solve_value_ranges(&graph, &function, Some(&prep), &predicates);
+        let ranges = solve_value_ranges(
+            &graph,
+            crate::semantic::BuildFacts::bare(&function),
+            Some(&prep),
+            &predicates,
+        );
         assert_eq!(
             range_of(&ranges, &graph, &offset).bounds(),
             Some((0, 0x450))
@@ -1768,7 +1790,12 @@ mod tests {
         let prep = function.prep_facts_for_test();
         let graph = SsaGraph::from_function(&function);
         let predicates = crate::semantic::collect_predicate_facts_for_test(&function, &graph);
-        let ranges = solve_value_ranges(&graph, &function, Some(&prep), &predicates);
+        let ranges = solve_value_ranges(
+            &graph,
+            crate::semantic::BuildFacts::bare(&function),
+            Some(&prep),
+            &predicates,
+        );
         assert_eq!(range_of(&ranges, &graph, &offset).bounds(), Some((0, 56)));
     }
 

@@ -15,6 +15,7 @@ use std::time::Instant;
 pub struct SsaWorkMeter {
     polls: AtomicU64,
     frames: AtomicU64,
+    prefixes: AtomicU64,
 }
 
 impl SsaWorkMeter {
@@ -31,6 +32,11 @@ impl SsaWorkMeter {
     /// Frame object models built so far, one `FrameReach` each (ROADMAP D403).
     pub fn frames_built(&self) -> u64 {
         self.frames.load(Ordering::Relaxed)
+    }
+
+    /// Static prefixes collected so far, one per build recovery read (D289).
+    pub fn static_prefixes(&self) -> u64 {
+        self.prefixes.load(Ordering::Relaxed)
     }
 }
 
@@ -125,6 +131,9 @@ pub trait SsaWorkControl {
 
     /// One frame object model and its `FrameReach` built; a metered control counts it (D403).
     fn frame_built(&self) {}
+
+    /// One build's static prefix collected; a metered control counts it (D289).
+    fn static_prefix_built(&self) {}
 }
 
 /// Cloneable cancellation/deadline control for SSA preparation.
@@ -186,6 +195,12 @@ impl SsaWorkControl for SsaExecutionControl {
     fn frame_built(&self) {
         if let Some(meter) = &self.meter {
             meter.frames.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn static_prefix_built(&self) {
+        if let Some(meter) = &self.meter {
+            meter.prefixes.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
