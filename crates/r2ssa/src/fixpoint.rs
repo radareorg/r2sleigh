@@ -397,6 +397,8 @@ pub struct Meter {
     pub evaluations: u64,
     /// The most times one head-block cell moved in one phase.
     pub head_moves: usize,
+    /// Bitmap words the waiting search read: `O(cells / 64 + evaluations)` per phase.
+    pub probes: u64,
 }
 
 /// Solve cells placed in blocks over a weak topological order, ascending then descending; `height`
@@ -426,10 +428,13 @@ pub fn wto_sparse<B: DenseId, C: DenseId>(
     for (phase, height) in [(false, height.0), (true, height.1)] {
         let mut waiting = Waiting::all(ranked.len());
         moves.iter_mut().for_each(|count| *count = 0);
-        let mut evaluate = |at: usize, head: bool, waiting: &mut Waiting| {
+        let mut evaluate = |at: usize, head: bool, waiting: &mut Waiting, meter: &mut Meter| {
             let (lo, hi) = (first[at] as usize, first[at + 1] as usize);
-            while let Some(index) = waiting.next(lo, hi) {
+            // The search resumes past each taken cell; a reader requeued below it moves it back.
+            let mut from = lo;
+            while let Some(index) = waiting.next(from, hi, &mut meter.probes) {
                 waiting.clear(index);
+                from = index + 1;
                 meter.evaluations += 1;
                 let step = match phase {
                     false => Step::Ascend { head },
@@ -445,6 +450,9 @@ pub fn wto_sparse<B: DenseId, C: DenseId>(
                 for reader in readers.get(ranked[index]) {
                     if let Some(at) = Some(rank[*reader]).filter(|at| *at != UNPLACED) {
                         waiting.set(at as usize);
+                        if (lo..from).contains(&(at as usize)) {
+                            from = at as usize;
+                        }
                     }
                 }
             }
@@ -457,7 +465,7 @@ pub fn wto_sparse<B: DenseId, C: DenseId>(
                 && at == wto.end(wto.order()[head]) as usize
             {
                 let (lo, hi) = (first[head] as usize, first[head + 1] as usize);
-                if waiting.next(lo, hi).is_none() {
+                if waiting.next(lo, hi, &mut meter.probes).is_none() {
                     open.pop();
                     continue;
                 }
@@ -469,7 +477,7 @@ pub fn wto_sparse<B: DenseId, C: DenseId>(
                 if let Some(last) = open.last_mut() {
                     last.1 += 1;
                 }
-                evaluate(head, true, &mut waiting);
+                evaluate(head, true, &mut waiting, &mut meter);
                 at = head + 1;
             }
             let Some(block) = wto.order().get(at) else {
@@ -479,10 +487,10 @@ pub fn wto_sparse<B: DenseId, C: DenseId>(
             if head {
                 open.push((at, 1));
             }
-            evaluate(at, head, &mut waiting);
+            evaluate(at, head, &mut waiting, &mut meter);
             at += 1;
         }
-        if waiting.next(0, ranked.len()).is_some() {
+        if waiting.next(0, ranked.len(), &mut meter.probes).is_some() {
             r2il::refusal_evidence!("fixpoint", "{pass}: a cell was read before its writer");
             return Err(Exhausted { pass, height });
         }
@@ -514,11 +522,12 @@ impl Waiting {
         self.words[at / 64] &= !(1 << (at % 64));
     }
 
-    /// The first waiting rank in `lo..hi`.
-    fn next(&self, lo: usize, hi: usize) -> Option<usize> {
+    /// The first waiting rank in `lo..hi`, each word read counted in `probes`.
+    fn next(&self, lo: usize, hi: usize, probes: &mut u64) -> Option<usize> {
         let mut word = lo / 64;
         let mut bits = self.words.get(word)? & (u64::MAX << (lo % 64));
         loop {
+            *probes += 1;
             if bits != 0 {
                 let at = word * 64 + bits.trailing_zeros() as usize;
                 return (at < hi).then_some(at);
@@ -631,6 +640,28 @@ mod tests {
             "{}",
             wto.visits()
         );
+    }
+
+    /// One block of `n` cells, each read by the next and moving once: the waiting search reads
+    /// `O(n / 64 + evaluations)` words, where restarting at the block's first word read `n² / 128`.
+    #[test]
+    fn a_straight_block_searches_its_waiting_cells_once() {
+        use crate::{ValueId, dense::Node};
+        for n in [4096u32, 8192] {
+            let wto = order_of(1, &[], &[0]);
+            let cells = Csr::from_pairs(1, (0..n).map(|cell| (Node(0), ValueId(cell))));
+            let readers =
+                Csr::from_pairs(n as usize, (1..n).map(|at| (ValueId(at - 1), ValueId(at))));
+            let mut moved = IdSet::new(n as usize);
+            let meter = wto_sparse("straight", (1, 1), &wto, &cells, &readers, |cell, _| {
+                moved.insert(cell)
+            })
+            .expect("a straight block settles");
+            assert!(
+                meter.probes <= 2 * meter.evaluations + 4 * u64::from(n) / 64,
+                "{meter:?}"
+            );
+        }
     }
 
     /// A self-loop is its own component.

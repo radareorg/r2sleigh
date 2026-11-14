@@ -1167,7 +1167,16 @@ fn visits<I: Iterator>(iter: I) -> Visits<I> {
         iter,
         at: std::panic::Location::caller(),
         count: 0,
+        metered: meter::PAUSED.with(|paused| paused.get() == 0),
     }
+}
+
+/// Runs `work` with this thread's iterations uncounted: a debug oracle's rebuild is no work of the
+/// request, so a `work-meter` build counts the same with and without debug assertions.
+pub fn unmetered<R>(work: impl FnOnce() -> R) -> R {
+    #[cfg(feature = "work-meter")]
+    let _paused = meter::Paused::new();
+    work()
 }
 
 /// The element visits counted at each call site, most first, in a `work-meter` build.
@@ -1186,6 +1195,25 @@ mod meter {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     pub(super) static VISITS: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        pub(super) static PAUSED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Holds this thread's meter paused until dropped, a panic included.
+    pub(super) struct Paused;
+
+    impl Paused {
+        pub(super) fn new() -> Self {
+            PAUSED.with(|paused| paused.set(paused.get() + 1));
+            Self
+        }
+    }
+
+    impl Drop for Paused {
+        fn drop(&mut self) {
+            PAUSED.with(|paused| paused.set(paused.get() - 1));
+        }
+    }
     static SITES: Mutex<Option<FxHashMap<&'static Location<'static>, u64>>> = Mutex::new(None);
 
     pub(super) fn by_site() -> Vec<(String, u64)> {
@@ -1205,6 +1233,8 @@ mod meter {
         pub(super) iter: I,
         pub(super) at: &'static Location<'static>,
         pub(super) count: u64,
+        /// False for an iteration begun under [`super::unmetered`].
+        pub(super) metered: bool,
     }
 
     /// A copy counts only what it hands out itself.
@@ -1214,6 +1244,7 @@ mod meter {
                 iter: self.iter.clone(),
                 at: self.at,
                 count: 0,
+                metered: self.metered,
             }
         }
     }
@@ -1237,8 +1268,10 @@ mod meter {
 
         fn next(&mut self) -> Option<I::Item> {
             let item = self.iter.next()?;
-            self.count += 1;
-            VISITS.fetch_add(1, Ordering::Relaxed);
+            if self.metered {
+                self.count += 1;
+                VISITS.fetch_add(1, Ordering::Relaxed);
+            }
             Some(item)
         }
 
@@ -1250,8 +1283,10 @@ mod meter {
     impl<I: DoubleEndedIterator> DoubleEndedIterator for Counted<I> {
         fn next_back(&mut self) -> Option<I::Item> {
             let item = self.iter.next_back()?;
-            self.count += 1;
-            VISITS.fetch_add(1, Ordering::Relaxed);
+            if self.metered {
+                self.count += 1;
+                VISITS.fetch_add(1, Ordering::Relaxed);
+            }
             Some(item)
         }
     }
@@ -1288,6 +1323,20 @@ mod tests {
                 .any(|(at, _)| at.starts_with(&here))
         );
         assert!(super::element_visits().is_some_and(|visits| visits >= 136));
+    }
+
+    /// An iteration begun under `unmetered` counts nothing at its site, so a debug oracle's
+    /// rebuild adds no visit to what the scaling bench grades.
+    #[cfg(feature = "work-meter")]
+    #[test]
+    fn an_unmetered_pass_counts_no_visit() {
+        let table = super::Metered::from(vec![1u32, 2, 3, 4]);
+        let mut hidden = super::unmetered(|| table.iter());
+        assert_eq!(hidden.by_ref().count(), 4);
+        assert_eq!(hidden.count, 0);
+        let mut counted = table.iter();
+        assert_eq!(counted.by_ref().count(), 4);
+        assert_eq!(counted.count, 4);
     }
 
     /// An index finds each row it was given, through growth and with colliding hashes.

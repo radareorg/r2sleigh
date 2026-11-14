@@ -961,9 +961,11 @@ impl TrustedConstruction {
         #[cfg(debug_assertions)]
         if kept {
             let unmetered = &crate::control::UncheckedSsaWorkControl;
-            let full = TrustedSsaArtifact::construct(
-                &lifted, arch, unmetered, evidence, premises, recovery, None,
-            )?;
+            let full = crate::dense::unmetered(|| {
+                TrustedSsaArtifact::construct(
+                    &lifted, arch, unmetered, evidence, premises, recovery, None,
+                )
+            })?;
             if let Some(part) = constructed.difference(&full) {
                 panic!(
                     "{:#x}: a restated construction differs from a rebuild in its {part}",
