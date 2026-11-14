@@ -4096,7 +4096,7 @@ pub struct CalleeEvidence {
     pub library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The callees a runtime model says re-enter their caller at its entry (Go's stack growth).
     pub reentering: BTreeSet<u64>,
-    /// The calls the walk ended the body at because a model says the callee never returns.
+    /// The calls the walk ended the body at, each with what says it never comes back.
     pub exits: AssumedExits,
     /// The imports called whose declaration states no interface, and why.
     pub unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
@@ -4108,15 +4108,53 @@ pub struct CalleeEvidence {
 /// The convention each stated callee runs under, by entry address.
 pub type SiteConventions = BTreeMap<u64, Arc<r2source::ConventionModel>>;
 
-/// Calls whose fall-through a body's walk ended because a model, not the program, says the callee
-/// never returns, and what that takes for granted.
+/// The calls whose fall-through a body's walk closed, one per block, ascending by block: the one
+/// statement of which calls never come back (D384). A closed call no site names proves nothing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AssumedExits {
-    pub calls: usize,
-    pub premises: BTreeSet<r2source::Premise>,
-    /// Blocks, ascending, ending at a call whose callee only a walk found reaching no return: a
-    /// bound, so neither an exit nor a `noreturn` (D255).
-    pub unproven: Vec<u64>,
+    pub sites: Vec<ExitSite>,
+}
+
+/// One closed call: the block it ends, what says it never comes back, and whether that is the
+/// callee's own "never" or only this site's (a halting argument, D211).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitSite {
+    pub block: u64,
+    pub never: r2source::Never,
+    pub callee: bool,
+}
+
+impl AssumedExits {
+    /// The closed call ending `block`, if one does. `O(log n)`.
+    pub fn site(&self, block: u64) -> Option<&ExitSite> {
+        let at = self
+            .sites
+            .binary_search_by_key(&block, |site| site.block)
+            .ok()?;
+        self.sites.get(at)
+    }
+
+    /// What every "never" here takes for granted.
+    pub fn premises(&self) -> BTreeSet<r2source::Premise> {
+        (self.sites.iter())
+            .flat_map(|site| site.never.premises.iter().copied())
+            .collect()
+    }
+
+    /// How many calls end the body on a proof that takes a premise: a model's word.
+    pub fn assumed(&self) -> usize {
+        (self.sites.iter())
+            .filter(|site| site.never.proves() && !site.never.premises.is_empty())
+            .count()
+    }
+
+    /// How many calls end the body on a bound: a "never" no statement proves (D255, D395).
+    pub fn unproven(&self) -> usize {
+        self.sites
+            .iter()
+            .filter(|site| !site.never.proves())
+            .count()
+    }
 }
 
 /// What the callees this function calls said about their own boundaries.
@@ -4414,7 +4452,7 @@ impl SSAFunction {
     }
 
     pub(crate) fn record_assumed_exits(&mut self, exits: &AssumedExits) {
-        self.premises.extend(exits.premises.iter().copied());
+        self.premises.extend(exits.premises());
         self.assumed_exits = exits.clone();
     }
 

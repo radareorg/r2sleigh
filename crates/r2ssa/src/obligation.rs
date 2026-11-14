@@ -2784,7 +2784,6 @@ mod tests {
         complete: bool,
         arguments: impl IntoIterator<Item = SourceCallArgumentSpec>,
         variadic: bool,
-        noreturn: bool,
         result: SourceCallResult,
     ) -> SourceCallSiteInterface {
         SourceCallSiteInterface::new(
@@ -2794,7 +2793,6 @@ mod tests {
             r2source::ConventionId::SysVAmd64,
             arguments,
             variadic,
-            noreturn,
             result,
         )
         .expect("valid callsite interface")
@@ -3006,7 +3004,6 @@ mod tests {
             true,
             [],
             false,
-            false,
             SourceCallResult::Void,
         );
         let returns = SourceFunctionReturn::Register {
@@ -3073,7 +3070,7 @@ mod tests {
         assert!(!missing_call.complete);
         assert_eq!(missing_call.convention, None);
         assert_eq!(missing_call.variadic, None);
-        assert_eq!(missing_call.noreturn, None);
+        assert_eq!(missing_call.never, None);
         assert_eq!(missing_call.result_kind, None);
         assert!(missing_call.arguments.is_empty());
         assert!(missing_call.results.is_empty());
@@ -3089,7 +3086,6 @@ mod tests {
                 true,
                 [],
                 false,
-                true,
                 SourceCallResult::Void,
             )],
         )
@@ -3106,7 +3102,8 @@ mod tests {
             Some(r2source::ConventionId::SysVAmd64)
         );
         assert_eq!(explicit_call.variadic, Some(false));
-        assert_eq!(explicit_call.noreturn, Some(true));
+        // No walk closed the call, so nothing says it never comes back (D384).
+        assert_eq!(explicit_call.never, None);
         assert_eq!(explicit_call.result_kind, Some(SourceCallResult::Void));
         assert!(explicit_call.arguments.is_empty());
         assert!(explicit_call.results.is_empty());
@@ -3120,7 +3117,6 @@ mod tests {
                 identity,
                 false,
                 [],
-                false,
                 false,
                 SourceCallResult::Void,
             )],
@@ -3157,7 +3153,6 @@ mod tests {
             true,
             [SourceCallArgumentSpec::new(0, argument_storage)],
             false,
-            false,
             SourceCallResult::register(result_storage),
         );
         let artifact = crate::testing::prepared_under(
@@ -3177,7 +3172,7 @@ mod tests {
 
         assert!(boundary.complete);
         assert_eq!(boundary.variadic, Some(false));
-        assert_eq!(boundary.noreturn, Some(false));
+        assert_eq!(boundary.never, None);
         assert_eq!(
             boundary.result_kind,
             Some(SourceCallResult::register(result_storage))
@@ -3311,7 +3306,6 @@ mod tests {
             true,
             [],
             false,
-            false,
             SourceCallResult::Void,
         );
         let duplicate = SsaArtifact::raw_with_interfaces(
@@ -3340,7 +3334,6 @@ mod tests {
             true,
             [],
             false,
-            false,
             SourceCallResult::Void,
         );
         let wrong_target_artifact = SsaArtifact::raw_with_interfaces(
@@ -3365,7 +3358,6 @@ mod tests {
             identity,
             true,
             [SourceCallArgumentSpec::new(0, register_storage(0x100, 8))],
-            false,
             false,
             SourceCallResult::Void,
         );
@@ -3400,7 +3392,6 @@ mod tests {
             indirect_identity,
             true,
             [],
-            false,
             false,
             SourceCallResult::Void,
         );
@@ -3444,7 +3435,6 @@ mod tests {
             direct_call_identity(&mut direct_block, 0, &direct_target),
             true,
             [],
-            false,
             false,
             SourceCallResult::Void,
         );
@@ -3769,7 +3759,7 @@ mod tests {
                 at: call_inst,
                 convention: Some(r2source::ConventionId::SysVAmd64),
                 variadic: Some(false),
-                noreturn: Some(false),
+                never: None,
                 result_kind: Some(crate::SourceCallResult::Void),
                 unstated_lanes: Box::default(),
                 unstated_carrier: None,
@@ -3861,7 +3851,7 @@ mod tests {
                 at: call_inst,
                 convention: Some(r2source::ConventionId::SysVAmd64),
                 variadic: Some(false),
-                noreturn: Some(false),
+                never: None,
                 result_kind: Some(crate::SourceCallResult::Void),
                 unstated_lanes: Box::default(),
                 unstated_carrier: None,

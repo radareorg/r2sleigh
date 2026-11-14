@@ -129,8 +129,8 @@ impl super::condition::Marks for Occurrences {
 
 /// What the rewrites may rely on that the tree does not say.
 pub(crate) struct Evidence<'a> {
-    /// The callees declared never to return, which `never_returns` reads.
-    never_return: &'a BTreeSet<String>,
+    /// The written calls a proof says never come back, by call instruction (D384).
+    never_return: &'a r2ssa::dense::IdSet<r2ssa::InstId>,
     /// Whether the return ending a block hands back a merge whose inputs are pairwise distinct
     /// values (the compiler merged returns of different values into this one).
     pub(crate) distinct_return: &'a dyn Fn(u64) -> bool,
@@ -138,7 +138,7 @@ pub(crate) struct Evidence<'a> {
 
 impl<'a> Evidence<'a> {
     pub(crate) fn new(
-        never_return: &'a BTreeSet<String>,
+        never_return: &'a r2ssa::dense::IdSet<r2ssa::InstId>,
         distinct_return: &'a dyn Fn(u64) -> bool,
     ) -> Self {
         Self {
@@ -147,17 +147,18 @@ impl<'a> Evidence<'a> {
         }
     }
 
-    /// Whether `callee` is named and declared never to return; what a call passes cannot reach this.
-    pub(crate) fn never_returns(&self, callee: Option<&str>) -> bool {
-        callee.is_some_and(|callee| self.never_return.contains(callee))
+    /// Whether the call at `site` is one a proof says never comes back; a callee's name, or what
+    /// a call passes, cannot reach this.
+    pub(crate) fn never_returns(&self, site: Option<r2ssa::InstId>) -> bool {
+        site.is_some_and(|site| self.never_return.contains(site))
     }
 }
 
-/// The named callee of a call statement, the one input of [`Evidence::never_returns`].
-pub(crate) fn callee_of(stmt: &CStmt) -> Option<&str> {
+/// The instruction of a call statement to a named callee, the one input of [`Evidence::never_returns`].
+pub(crate) fn site_of(stmt: &CStmt) -> Option<r2ssa::InstId> {
     match stmt {
-        CStmt::Expr(CExpr::Call { func, .. }) => match &**func {
-            CExpr::External { name, .. } => Some(name),
+        CStmt::Expr(CExpr::Call { func, site, .. }) => match &**func {
+            CExpr::External { .. } => *site,
             _ => None,
         },
         _ => None,
@@ -711,61 +712,42 @@ mod tests {
         RenderObservationId::from_dense_index(index)
     }
 
-    /// `name` and every name one insert, delete or substitution of a character of `alphabet` away from it.
-    fn single_edits(name: &str, alphabet: &[char]) -> Vec<String> {
-        let chars = name.chars().collect::<Vec<_>>();
-        let spelled = |left: &[char], middle: Option<&char>, right: &[char]| {
-            left.iter().chain(middle).chain(right).collect::<String>()
+    /// A call at `site` to `name`.
+    fn call_at(name: &str, site: Option<r2ssa::InstId>) -> CStmt {
+        let callee = CExpr::External {
+            name: name.to_owned(),
+            kind: crate::symbol::ExternalKind::Function,
         };
-        let mut names = vec![name.to_owned()];
-        // At each position: insert before it, substitute it, delete it (past the end these repeat other names).
-        for at in 0..=chars.len() {
-            let (left, rest) = chars.split_at(at);
-            let after = rest.get(1..).unwrap_or_default();
-            names.extend(alphabet.iter().map(|c| spelled(left, Some(c), rest)));
-            names.extend(alphabet.iter().map(|c| spelled(left, Some(c), after)));
-            names.push(spelled(left, None, after));
-        }
-        names
+        CStmt::Expr(CExpr::Call {
+            func: Box::new(callee),
+            args: Vec::new(),
+            site,
+        })
     }
 
+    /// A call ends control by its site's proof alone: `exit` at a site no proof names comes back,
+    /// and any callee at a proven site ends (D384). Names prove nothing (AGENTS 6).
     #[test]
-    fn a_callee_never_returns_by_its_declared_name_and_by_no_name_one_edit_from_it() {
-        // The names the C libraries declare; one may be an edit of another (`exit`, `_exit`), so the set decides.
-        let names = [
-            "exit",
-            "_exit",
-            "_Exit",
-            "abort",
-            "err",
-            "errx",
-            "__longjmp_chk",
-            "__stack_chk_fail",
-        ];
-        let alphabet = (('a'..='z').chain('A'..='Z').chain('0'..='9'))
-            .chain("_.@:$- /".chars())
-            .collect::<Vec<_>>();
-        let sets: [&[&str]; 3] = [&names, &["exit"], &[]];
-        for declared in sets {
-            let set = declared
-                .iter()
-                .map(|name| (*name).to_owned())
-                .collect::<BTreeSet<_>>();
-            let evidence = Evidence::new(&set, &|_| false);
-            let ends = |stmt: &CStmt| evidence.never_returns(callee_of(stmt));
-            for near in names.iter().flat_map(|name| single_edits(name, &alphabet)) {
-                assert_eq!(
-                    ends(&call(&near)),
-                    set.contains(&near),
-                    "{near:?} against {declared:?}"
-                );
-            }
-            // The declaration decides whatever the call passes, and a statement that is no call never ends.
-            for call in exit_calls() {
-                assert_eq!(ends(&call), set.contains("exit"), "{call:?}");
-            }
-            assert!(!ends(&CStmt::Expr(CExpr::IntLit(1))));
+    fn a_call_ends_control_by_its_site_never_by_its_callee_s_name() {
+        let (proven, other) = (r2ssa::InstId(7), r2ssa::InstId(8));
+        let mut sites = r2ssa::dense::IdSet::new(0);
+        sites.insert(proven);
+        let evidence = Evidence::new(&sites, &|_| false);
+        let ends = |stmt: &CStmt| evidence.never_returns(site_of(stmt));
+        for name in ["exit", "abort", "f", "error"] {
+            assert!(ends(&call_at(name, Some(proven))), "{name}");
+            assert!(!ends(&call_at(name, Some(other))), "{name}");
+            assert!(!ends(&call_at(name, None)), "{name}");
         }
+        // The proof decides whatever the call passes, and a statement that is no call never ends.
+        let none = r2ssa::dense::IdSet::new(0);
+        let unproven = Evidence::new(&none, &|_| false);
+        for call in exit_calls() {
+            assert!(ends(&call) == sites.contains(crate::structure::support::EXIT_SITE));
+            assert!(!unproven.never_returns(site_of(&call)), "{call:?}");
+        }
+        assert!(!ends(&call("exit")));
+        assert!(!ends(&CStmt::Expr(CExpr::IntLit(1))));
     }
 
     /// Markers 0 and 1, for blocks 0x10 and 0x20 and their instructions 0x11 and 0x21.

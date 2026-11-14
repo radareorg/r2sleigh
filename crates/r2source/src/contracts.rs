@@ -2832,7 +2832,6 @@ pub struct SourceCallSiteInterface {
     /// Set when this call's target hands back one of its own arguments as a
     /// format string, so a caller can count from the msgid it passed.
     format_forwarding: Option<SourceFormatForwardingRule>,
-    noreturn: bool,
     result: SourceCallResult,
     /// Exact callee-owned interface recovered from a body in the same capture.
     ///
@@ -2852,7 +2851,6 @@ pub enum SourceCallSiteInterfaceError {
     InvalidRegisterStorage,
     OverlappingRegisterStorages,
     InvalidFormatParameterIndex,
-    NoreturnWithResult,
     IncompatibleCalleeInterface,
 }
 
@@ -2865,7 +2863,6 @@ impl std::fmt::Display for SourceCallSiteInterfaceError {
             Self::InvalidRegisterStorage => "a register it names is not a register storage",
             Self::OverlappingRegisterStorages => "two of its registers overlap",
             Self::InvalidFormatParameterIndex => "its format argument is not one of its arguments",
-            Self::NoreturnWithResult => "a call that never returns states a result",
             Self::IncompatibleCalleeInterface => "the callee's own interface disagrees with it",
         };
         write!(f, "invalid source callsite interface: {why}")
@@ -2883,7 +2880,6 @@ impl SourceCallSiteInterface {
         convention: ConventionId,
         arguments: impl IntoIterator<Item = SourceCallArgumentSpec>,
         variadic: bool,
-        noreturn: bool,
         result: SourceCallResult,
     ) -> Result<Self, SourceCallSiteInterfaceError> {
         let revision_identity = revision_identity.into();
@@ -2917,9 +2913,6 @@ impl SourceCallSiteInterface {
         }) {
             return Err(SourceCallSiteInterfaceError::OverlappingRegisterStorages);
         }
-        if noreturn && !matches!(result, SourceCallResult::Void) {
-            return Err(SourceCallSiteInterfaceError::NoreturnWithResult);
-        }
         Ok(Self {
             schema_version: SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
             revision_identity: revision_identity.into_boxed_slice(),
@@ -2930,7 +2923,6 @@ impl SourceCallSiteInterface {
             variadic,
             format_parameter_rule: None,
             format_forwarding: None,
-            noreturn,
             result,
             exact_callee_interface: None,
         })
@@ -3002,7 +2994,6 @@ impl SourceCallSiteInterface {
             }
         };
         let carriers_match = self.complete
-            && !self.noreturn
             && self.convention == callee.convention()
             && self.result == expected_result
             && self.arguments.len() == callee.parameters().len()
@@ -3119,10 +3110,6 @@ impl SourceCallSiteInterface {
         self.format_parameter_rule
     }
 
-    pub const fn is_noreturn(&self) -> bool {
-        self.noreturn
-    }
-
     pub const fn result(&self) -> SourceCallResult {
         self.result
     }
@@ -3185,7 +3172,6 @@ mod tests {
             convention,
             [],
             false,
-            false,
             SourceCallResult::Void,
         )
         .expect("test callsite")
@@ -3230,7 +3216,6 @@ mod tests {
             crate::ConventionId::SysVAmd64,
             arguments,
             true,
-            false,
             SourceCallResult::Void,
         )
         .expect("variadic interface")
@@ -3251,7 +3236,6 @@ mod tests {
             true,
             crate::ConventionId::SysVAmd64,
             arguments,
-            false,
             false,
             SourceCallResult::Void,
         )
@@ -3323,7 +3307,6 @@ mod tests {
                 crate::ConventionId::SysVAmd64,
                 arguments,
                 true,
-                false,
                 SourceCallResult::Void,
             )
             .expect("variadic interface")

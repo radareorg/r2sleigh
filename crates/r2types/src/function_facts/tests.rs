@@ -590,7 +590,7 @@ fn exact_tail_return_requires_a_complete_matching_source_boundary() {
         at,
         convention: Some(r2ssa::ConventionId::SysVAmd64),
         variadic: Some(false),
-        noreturn: Some(false),
+        never: None,
         result_kind: Some(r2ssa::SourceCallResult::register(storage)),
         unstated_lanes: Box::default(),
         unstated_carrier: None,
@@ -1258,7 +1258,6 @@ fn prepared_call_results_bind_certified_exprs_to_stable_call_ids() {
         r2source::ConventionId::SysVAmd64,
         [],
         false,
-        false,
         r2ssa::SourceCallResult::register(result_storage),
     )
     .expect("exact call-result interface");
@@ -1356,7 +1355,6 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
         true,
         r2source::ConventionId::SysVAmd64,
         [r2ssa::SourceCallArgumentSpec::new(0, parameter_storage)],
-        false,
         false,
         r2ssa::SourceCallResult::Void,
     )

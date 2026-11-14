@@ -32,9 +32,9 @@ pub struct FunctionInfo {
     pub returns: Option<Fact<Option<CTypeLike>>>,
     /// Where the result is unproven: the convention's carrier and why (doc/adr-scratch-result.md).
     pub unproven: Option<UnprovenResult>,
-    /// Whether control never comes back from it, and what that takes for granted: nothing where
-    /// the whole program proves it, a premise where a runtime model says it. `None` where it may.
-    pub noreturn: Option<std::collections::BTreeSet<r2source::Premise>>,
+    /// Why control never comes back from it, and what that takes for granted: a proof, or a bound
+    /// such as a walk that reached no return (D380). `None` where nothing says it never does.
+    pub noreturn: Option<r2source::Never>,
     /// Why there is no analysis, where there is none: the blocks are then the walk's, and
     /// the calls, convention, parameters, locals and return are unknown, not empty (ROADMAP D29).
     pub refused: Option<crate::native::NativeRefusal>,
@@ -103,7 +103,7 @@ impl FunctionInfo {
         entry: u64,
         artifact: &r2ssa::SsaArtifact,
         sealed: &SourceOwnedFunctionFacts,
-        noreturn: Option<std::collections::BTreeSet<r2source::Premise>>,
+        noreturn: Option<r2source::Never>,
     ) -> Self {
         let facts = sealed.report();
         let certificates = artifact.certificates();
@@ -145,7 +145,7 @@ impl FunctionInfo {
     pub(crate) fn refused(
         entry: u64,
         walked: &[super::GraphBlock],
-        noreturn: Option<std::collections::BTreeSet<r2source::Premise>>,
+        noreturn: Option<r2source::Never>,
         refusal: crate::native::NativeRefusal,
     ) -> Self {
         let blocks = (walked.iter())

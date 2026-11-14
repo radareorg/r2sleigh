@@ -2040,7 +2040,7 @@ impl<'a> Values<'a> {
         let (inst, _) = self.terminator(addr)?;
         let plan = self.calls.get(inst)?;
         let tail = plan.tail.as_ref()?;
-        if plan.noreturn || self.calls_itself(plan) {
+        if plan.ends || self.calls_itself(plan) {
             return None;
         }
         let returns = self
@@ -2255,12 +2255,25 @@ impl<'a> Values<'a> {
         Some(assign(*name, value))
     }
 
-    /// The callees a written call declares never to return.
-    pub(super) fn never_returning(&self) -> std::collections::BTreeSet<String> {
-        (self.externs.borrow().values())
-            .filter(|declaration| declaration.noreturn)
-            .map(|declaration| declaration.name.clone())
-            .collect()
+    /// The written calls a proof says never come back, by call instruction (D384).
+    pub(super) fn never_returning(&self) -> r2ssa::dense::IdSet<InstId> {
+        let mut ends = r2ssa::dense::IdSet::new(self.graph.insts.len());
+        for (inst, plan) in self.calls.iter() {
+            if self.ends_here(inst, plan) {
+                ends.insert(inst);
+            }
+        }
+        ends
+    }
+
+    /// Whether the call at `inst` is written and a proof says it never comes back. Only a named
+    /// callee's line says so to C: a call through a pointer, or to the function's own entry,
+    /// still ends its block at the trap.
+    fn ends_here(&self, inst: InstId, plan: &calls::CallPlan) -> bool {
+        plan.ends
+            && matches!(plan.callee, calls::Callee::Named { .. })
+            && !self.calls_itself(plan)
+            && self.rendered.borrow().get(inst.0 as usize) == Some(&true)
     }
 
     /// Whether the block at `addr` ends in a written call its callee is declared never to return from.
@@ -2270,14 +2283,8 @@ impl<'a> Values<'a> {
             return false;
         };
         let last_call = calls::last_call(self.graph, block);
-        // Only a named callee's declaration says so to C: a call through a pointer, or the
-        // function's own entry, declares nothing, so the trap still ends its block.
         last_call.is_some_and(|inst| {
-            self.calls.get(inst).is_some_and(|plan| {
-                plan.noreturn
-                    && matches!(plan.callee, calls::Callee::Named { .. })
-                    && !self.calls_itself(plan)
-            }) && self.rendered.borrow().get(inst.0 as usize) == Some(&true)
+            (self.calls.get(inst)).is_some_and(|plan| self.ends_here(inst, plan))
         })
     }
 

@@ -63,7 +63,6 @@ fn tail_jump_is_a_terminal_callsite_without_call_clobbers() {
         r2source::ConventionId::Aapcs64,
         [],
         false,
-        false,
         SourceCallResult::Void,
     )
     .expect("tail callsite interface");
@@ -1077,7 +1076,6 @@ fn variadic_format_call_artifact_formed(
             SourceCallArgumentSpec::new(1, slot(1)),
         ],
         variadic,
-        false,
         SourceCallResult::Void,
     )
     .expect("exact callsite interface");
@@ -1206,7 +1204,6 @@ fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
             SourceCallArgumentSpec::new(1, slot(1)),
         ],
         true,
-        false,
         SourceCallResult::Void,
     )
     .expect("exact callsite interface")
@@ -1372,7 +1369,6 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
                 SourceCallArgumentSpec::new(1, slot(1)),
             ],
             true,
-            false,
             SourceCallResult::Void,
         )
         .and_then(|interface| interface.with_radare2_format_parameter(1))

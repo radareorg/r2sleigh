@@ -769,7 +769,8 @@ pub struct SourceCallBoundaryFact {
     pub at: InstId,
     pub convention: Option<r2source::ConventionId>,
     pub variadic: Option<bool>,
-    pub noreturn: Option<bool>,
+    /// The walk's closed call this is, with what says it never comes back (D384).
+    pub never: Option<crate::ExitSite>,
     pub result_kind: Option<SourceCallResult>,
     /// Result lanes the call may change that no contract states (S36), or that a minted contract leaves
     /// `Unproven` (D212): what the call leaves there is a result no one states, never no value.

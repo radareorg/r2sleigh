@@ -116,22 +116,32 @@ fn a_go_runtime_panic_ends_its_caller_under_the_runtime_s_contract() {
         "{go}"
     );
     let mut program = OpenProgram::of(throws().in_go(Some((1, 21)), Some(&[])).running_on(GLIBC));
-    let assumed = Some(std::collections::BTreeSet::from([
-        r2engine::discovery::Premise::GoRuntime,
-    ]));
-    for entry in [BASE, BASE + 0x40] {
+    // `runtime.throw` is the model's word; `main.f` composes it (D380).
+    let assumed = |proof| {
+        Some(r2engine::discovery::Never {
+            proof,
+            premises: std::collections::BTreeSet::from([r2engine::discovery::Premise::GoRuntime]),
+        })
+    };
+    for (entry, proof) in [
+        (BASE, r2engine::discovery::NeverProof::Composed),
+        (BASE + 0x40, r2engine::discovery::NeverProof::Declared),
+    ] {
         let info = program.function_info(entry).expect("described");
-        assert_eq!(info.noreturn, assumed, "{entry:#x}");
+        assert_eq!(info.noreturn, assumed(proof), "{entry:#x}");
     }
     let c = rendered(throws()).expect("C renders");
     assert!(!c.contains("never return"), "{c}");
-    // As C, `main.f` loops back to its entry and has no return: proven, on no premise.
+    // As C, `main.f` loops back to its entry and no walk reaches a return: a bound, never a proof (D380).
     let mut c = OpenProgram::of(throws().running_on(GLIBC));
     let noreturn =
         |c: &mut OpenProgram<Literal>, entry| c.function_info(entry).expect("described").noreturn;
     assert_eq!(
         noreturn(&mut c, BASE),
-        Some(std::collections::BTreeSet::new())
+        Some(r2engine::discovery::Never {
+            proof: r2engine::discovery::NeverProof::NoReturnReached,
+            premises: std::collections::BTreeSet::new(),
+        })
     );
     assert_eq!(noreturn(&mut c, BASE + 0x40), None);
 }

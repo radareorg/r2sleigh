@@ -650,8 +650,8 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         crate::body::Program::exit(&self.view(), callee, foreign)
     }
 
-    fn returns_through(&self, slot: u64) -> bool {
-        self.view().returns_through(slot)
+    fn exit_through(&self, slot: u64) -> Option<crate::discovery::Never> {
+        self.view().exit_through(slot)
     }
 
     fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {

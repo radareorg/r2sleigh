@@ -51,7 +51,7 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         format!("end-bbs: {}", info.exits()),
     ]);
     // Only a proof is printed, with what it takes for granted: unproven, a function may still never return.
-    out.extend(noreturn(&info));
+    out.extend(noreturn(info.noreturn.as_ref()));
     out.extend([
         format!("recursive: {}", info.is_recursive()),
         format!("out-degree: {}", info.direct_calls()),
@@ -78,20 +78,20 @@ fn walked(info: &r2engine::program::info::FunctionInfo) -> Vec<String> {
         format!("is-lineal: {}", info.is_lineal()),
         format!("end-bbs: {}", info.exits()),
     ];
-    out.extend(noreturn(info));
+    out.extend(noreturn(info.noreturn.as_ref()));
     out
 }
 
-/// `noreturn: true`, with what it takes for granted, where it is proved.
-fn noreturn(info: &r2engine::program::info::FunctionInfo) -> Option<String> {
-    info.noreturn.as_ref().map(|premises| {
-        let assuming = premises.iter().map(|premise| premise.spelled());
-        match premises.is_empty() {
-            true => "noreturn: true".to_owned(),
-            false => format!(
-                "noreturn: true (assuming {})",
-                assuming.collect::<Vec<_>>().join(", ")
-            ),
+/// `noreturn: true` where a statement or a composition proves it, with what it takes for granted;
+/// a bound is spelled as one, never as `true` (D380).
+fn noreturn(never: Option<&r2engine::discovery::Never>) -> Option<String> {
+    never.map(|never| {
+        let assuming = (never.premises.iter()).map(|premise| premise.spelled());
+        let assuming = assuming.collect::<Vec<_>>().join(", ");
+        match (never.proves(), assuming.is_empty()) {
+            (true, true) => "noreturn: true".to_owned(),
+            (true, false) => format!("noreturn: true (assuming {assuming})"),
+            (false, _) => format!("noreturn: unproven ({})", never.proof.spelled()),
         }
     })
 }
@@ -202,4 +202,35 @@ pub fn blocks(session: &mut Session, argument: &str) -> Result<String, String> {
         out.push('\n');
     }
     Ok(out.trim_end().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use r2engine::discovery::{Never, NeverProof, Premise};
+
+    fn spelled(proof: NeverProof, premises: &[Premise]) -> Option<String> {
+        let premises = premises.iter().copied().collect();
+        super::noreturn(Some(&Never { proof, premises }))
+    }
+
+    /// `afi` says `noreturn: true` only for a proof; a bound is spelled as one (D380).
+    #[test]
+    fn a_bound_is_never_spelled_noreturn_true() {
+        assert_eq!(
+            spelled(NeverProof::Declared, &[]).as_deref(),
+            Some("noreturn: true")
+        );
+        assert_eq!(
+            spelled(NeverProof::Composed, &[Premise::GoRuntime]).as_deref(),
+            Some("noreturn: true (assuming go-runtime)")
+        );
+        assert_eq!(
+            spelled(NeverProof::NoReturnReached, &[]).as_deref(),
+            Some("noreturn: unproven (no return reached)")
+        );
+        assert_eq!(
+            spelled(NeverProof::Uncited, &[]).as_deref(),
+            Some("noreturn: unproven (uncited row)")
+        );
+    }
 }

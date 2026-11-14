@@ -388,9 +388,9 @@ impl ObligationLedger {
     /// The same ledger, stating the calls the body ends at on a model's word.
     pub fn with_exits(self, exits: &r2ssa::AssumedExits) -> Self {
         Self {
-            exits: exits.calls,
-            exit_premises: exits.premises.clone(),
-            unproven_exits: exits.unproven.len(),
+            exits: exits.assumed(),
+            exit_premises: exits.premises(),
+            unproven_exits: exits.unproven(),
             ..self
         }
     }

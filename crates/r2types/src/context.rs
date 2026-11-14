@@ -27,7 +27,6 @@ pub struct ParsedExternalContext {
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub assumptions: r2ssa::AssumptionSet,
     pub diagnostics: Vec<String>,
-    pub noreturn: bool,
 }
 
 /// The address ranges a program's loaded sections hold.

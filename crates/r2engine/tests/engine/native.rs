@@ -6821,8 +6821,11 @@ impl r2engine::body::Program for HaltingSlot {
         self.fixture.is_entry(vaddr)
     }
 
-    fn returns_through(&self, slot: u64) -> bool {
-        slot != self.slot
+    fn exit_through(&self, slot: u64) -> Option<r2engine::discovery::Never> {
+        (slot == self.slot).then(|| r2engine::discovery::Never {
+            proof: r2engine::discovery::NeverProof::Declared,
+            premises: std::collections::BTreeSet::new(),
+        })
     }
 }
 

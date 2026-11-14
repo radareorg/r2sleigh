@@ -16,7 +16,7 @@ pub mod confidence;
 pub mod convention;
 pub mod display_names;
 pub mod native;
-pub use confidence::{Basis, Confidence, Fact, Grade, Premise};
+pub use confidence::{Basis, Confidence, Fact, Grade, Never, NeverProof, Premise};
 pub use convention::{CallRegisterEffect, ConventionId, ConventionModel, Conventions};
 pub use display_names::{
     DisplayNames, positional_parameter_name, unnamed_function, unnamed_identifier,
@@ -186,23 +186,14 @@ impl FunctionPresentation {
 /// Types travel on the interface's `SourceTypeGraph` (ADR call-boundary, Types on the wire).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSignaturePresentation {
-    noreturn: bool,
     parameters: Box<[SourceSignatureParameter]>,
 }
 
 impl SourceSignaturePresentation {
-    pub fn new(
-        noreturn: bool,
-        parameters: impl IntoIterator<Item = SourceSignatureParameter>,
-    ) -> Self {
+    pub fn new(parameters: impl IntoIterator<Item = SourceSignatureParameter>) -> Self {
         Self {
-            noreturn,
             parameters: parameters.into_iter().collect(),
         }
-    }
-
-    pub const fn noreturn(&self) -> bool {
-        self.noreturn
     }
 
     pub fn parameters(&self) -> &[SourceSignatureParameter] {

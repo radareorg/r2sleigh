@@ -1167,10 +1167,16 @@ pub(crate) fn declared_return(
             .filter(|name| r2abi::runtime::exits(name))
             .map(|_| Return::declared(std::collections::BTreeSet::from([premise])));
     };
-    let row = target.imports.row(&name);
-    Some(match row.is_some_and(|row| row.noreturn) {
-        true => Return::declared(std::collections::BTreeSet::new()),
-        false => Return::Comes,
+    // Only a cited row proves a "never"; radare2's uncited one is a bound (D395).
+    Some(match target.imports.row(&name) {
+        Some(row) if row.noreturn && row.cited() => {
+            Return::declared(std::collections::BTreeSet::new())
+        }
+        Some(row) if row.noreturn => Return::Never(crate::discovery::Never {
+            proof: crate::discovery::NeverProof::Uncited,
+            premises: std::collections::BTreeSet::new(),
+        }),
+        _ => Return::Comes,
     })
 }
 
