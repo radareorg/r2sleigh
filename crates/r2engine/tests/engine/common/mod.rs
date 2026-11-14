@@ -610,6 +610,17 @@ impl Literal {
         self
     }
 
+    /// The same bytes as 32-bit x86.
+    pub fn in_i386(mut self) -> Self {
+        self.container.arch = Arch {
+            name: "x86".to_owned(),
+            bits: 32,
+            endian: Endian::Little,
+            instructions: None,
+        };
+        self
+    }
+
     /// The same bytes as little-endian 32-bit ARM.
     pub fn in_arm(mut self) -> Self {
         self.container.arch = Arch {

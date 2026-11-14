@@ -3644,14 +3644,18 @@ fn forms(
             _ => None,
         }),
         stack_bound: guard(row.stack_bound.as_ref()),
-        // The row says the C library checks a load-config cookie; the container says where.
-        security_cookie: matches!(guard_row, Some(r2abi::GuardRow::LoadConfigCookie))
-            .then_some(guards.cookie)
-            .flatten()
-            .map(|address| r2source::SourceSecurityCookie {
-                address,
-                width: bits / 8,
-            }),
+        // The row says the C library checks a load-config cookie in a register; the container says where.
+        security_cookie: match guard_row {
+            Some(r2abi::GuardRow::LoadConfigCookie(check)) => {
+                guards.cookie.zip(at.resolve(check.argument.0))
+            }
+            _ => None,
+        }
+        .map(|(address, argument)| r2source::SourceSecurityCookie {
+            address,
+            width: bits / 8,
+            argument,
+        }),
         // The row names the library's global; only the container's binding places it.
         linked_guard: matches!(guard_row, Some(r2abi::GuardRow::LinkedGlobal(_)))
             .then_some(guards.linked)
