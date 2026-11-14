@@ -27,6 +27,14 @@ impl SourceMachineContext {
     fn call_reads(&self, _instruction: u64) -> Option<u64> {
         None
     }
+
+    fn function_interface(&self) -> Option<u64> {
+        None
+    }
+
+    fn stack_pointer_carrier(&self) -> Option<u64> {
+        None
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -54,6 +62,14 @@ impl<'a> BuildFacts<'a> {
 
     fn call_reads(&self, instruction: u64) -> Option<u64> {
         self.context.call_reads(instruction)
+    }
+
+    fn interface(&self) -> Option<u64> {
+        Some(self.context).and_then(SourceMachineContext::function_interface)
+    }
+
+    fn stack_pointer(&self) -> Option<u64> {
+        Some(self.context).and_then(SourceMachineContext::stack_pointer_carrier)
     }
 
     fn function(&self) -> &'a SSAFunction {

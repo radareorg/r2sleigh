@@ -95,7 +95,7 @@ Recovery's collection has 7 phases that read no callee statement: addresses, cal
 - The sealed collection keeps computing every phase: its interface makes declared slots and live-out dynamic.
 - Equivalence: the 4 static phases and the base read only `BuildFacts`, the held `Provisional` and its graph, all equal on a kept build. The debug `difference` in `restated` stays the oracle.
 - Cost: Θ(C_dyn + T) per second recovery, where it was Θ(C + T); s = 0.225 to 0.255 of the round-2 collection on pumasim cold (round5-measure item 4), about 0.15 to 0.17 G. Peak RSS rises at most 3.9 MB.
-- Meter: `AnalysisStats::static_prefixes` counts each collection (a metered `SsaWorkControl::static_prefix_built`). `builds::a_kept_build_collects_its_static_phases_once` reads 9; the parent's flow reads 10.
+- Meter: `AnalysisStats::static_prefixes` counts each collection (a metered `SsaWorkControl::static_prefix_built`); `restated`'s debug oracle runs unmetered. `builds::a_kept_build_collects_its_static_phases_once` reads 8; the parent's flow reads 9.
 - Step B (re-solving the region a changed site reaches) is D420.
 
 ## D365 as built (`rd5-recovery`): rebuild only where a decided output changes
@@ -111,4 +111,6 @@ Keep rule (`Prior::kept`):
 
 - Equivalence: propagation is deterministic and reads no evidence, so equal raw SSA and an equal carried set give an equal table; the decision is pure, so equal promoted sets give equal next rounds; C reads `FramePoints` only through `names` (`stack_protector.rs`). The debug `difference` in `restated` stays the oracle, and now runs unmetered.
 - Cost: Θ(rounds x |D|) per restatement, |D| = O(sinks x 64 + calls x places + (B + E) K log K + places x points log saves), with no propagation. The bound Ω(changed coordinates read) is not met: a reach flip still decides every round.
-- Meters: `AnalysisStats::frame_walk_steps` (value visits) and `frame_decision_steps` (sink points and candidates). `builds::a_reach_that_moves_no_decision_keeps_the_build`: `middle` hands its slot to `clear`, which turns upward, and also stores it; 0 rebuilt and 34 walk steps where the parent rebuilt (47 steps).
+- Meters: `AnalysisStats::frame_walk_steps` (value visits) and `frame_decision_steps` (sink points and candidates). `builds::a_reach_that_moves_no_decision_keeps_the_build`: `middle` hands its slot to `clear`, which turns upward, and also stores it; 0 rebuilt and 34 walk steps where the parent rebuilt (47 steps; checked by rebuilding wherever `upward` moves).
+- Measured (`R2S_STATS=1`, release, Mac): cold pumasim `pdd @ 0x23fdf0` rebuilds 10 to 6, `pdd @ 0x4baf30` 10 to 7, the 50-function session 48 to 25, 0pack `pdd @ 0x62ecf0` 2 to 1; `aa; pdd` cases 0 both. Outputs byte-identical on the four timing commands; debug cold pumasim and 0pack run the oracle on every kept build with no difference. Timing in `timing-table` terms: cold pumasim -1.47%, 0pack -0.46%, bash and pumasim `aa; pdd` within 0.1%.
+- Open: no engine test has a restatement whose decision moves (`restate` returning `None`): `call_boundary::a_build_a_callee_s_statement_moves_is_counted_rebuilt` builds again with no held build, and an x86 owner-frees-a-place fixture did not restate (its callee's writes reach the first build). The case is covered by the debug oracle only.

@@ -224,7 +224,7 @@ impl FramePoints {
     /// in two rounds (doc/adr-callee-builds.md, D377, D381). `O(calls x spans)`.
     pub fn call_writes(&self, context: &SourceMachineContext) -> Option<Vec<(i64, i64)>> {
         // A tail transfer writes what its source-correlated callee states; any other, all.
-        let stated = |call: &CallBase, instruction: u64| {
+        let stated = |_: usize, call: &CallBase, instruction: u64| {
             let stated = (!call.tail)
                 || (context.raw_call_site_at(instruction))
                     .is_some_and(|identity| context.is_tail_call_site(identity));
@@ -240,7 +240,7 @@ impl FramePoints {
     fn writes_bound(
         &self,
         (least, most): (i64, i64),
-        stated: impl Fn(&CallBase, u64) -> Option<Vec<(i64, i64)>>,
+        stated: impl Fn(usize, &CallBase, u64) -> Option<Vec<(i64, i64)>>,
     ) -> Option<Vec<(i64, i64)>> {
         let writing = self.opaque.iter().any(|access| access.writes);
         if self.whole || !self.escaped.is_empty() || writing {
@@ -248,7 +248,7 @@ impl FramePoints {
         }
         let mut fixed = self.incoming_stores.clone();
         let mut own_bases = Vec::new();
-        for call in &self.call_bases {
+        for (index, call) in self.call_bases.iter().enumerate() {
             // A call above what its transfer spends could move a cycle's spans up each round.
             let base = call.base.filter(|base| *base <= least)?;
             let instruction = call.instruction?;
@@ -256,7 +256,7 @@ impl FramePoints {
                 own_bases.push(base);
                 continue;
             }
-            let writes = stated(call, instruction)?;
+            let writes = stated(index, call, instruction)?;
             fixed.extend(writes.iter().map(|(low, high)| (base + low, base + high)));
         }
         // Two rounds: a call to itself whose writes move the spans again bounds nothing (D377).
@@ -678,11 +678,12 @@ fn decide_points(
         .filter_map(|(call, _)| call.instruction)
         .collect();
     // A call to itself writes what the body does, as far as the rest states (D377).
-    let by_instruction = calls()
-        .filter_map(|(call, (_, writes))| Some(((call.instruction?, call.op), writes)))
-        .collect::<BTreeMap<_, _>>();
-    let stated = |call: &CallBase, instruction: u64| {
-        (by_instruction.get(&(instruction, call.op))).and_then(|writes| (*writes).clone())
+    // `call_bases` lists the calls by instruction then operation, as `by_call` sorts them.
+    let mut order = (0..site.calls.len()).collect::<Vec<_>>();
+    order.sort_by_key(|index| (site.calls[*index].instruction, site.calls[*index].op));
+    let stated = |index: usize, call: &CallBase, _: u64| {
+        debug_assert_eq!(site.calls[order[index]].op, call.op);
+        areas[order[index]].1.clone()
     };
     let own_writes = (!points.own_calls.is_empty())
         .then(|| points.writes_bound(site.spent, stated))

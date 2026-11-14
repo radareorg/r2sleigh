@@ -5993,15 +5993,46 @@ fn build_facts_disallowed_read<'tcx>(
     cx: &LateContext<'tcx>,
     expr: &'tcx Expr<'tcx>,
 ) -> Option<String> {
-    let (read, receiver) = match expr.kind {
-        ExprKind::MethodCall(segment, receiver, ..) => (segment.ident.name, receiver),
-        ExprKind::Field(base, field) => (field.name, base),
+    if !is_build_facts_span(cx, expr.span) {
+        return None;
+    }
+    let read = match expr.kind {
+        ExprKind::MethodCall(segment, receiver, ..)
+            if is_build_facts_source(cx, cx.typeck_results().expr_ty(receiver)) =>
+        {
+            segment.ident.name
+        }
+        ExprKind::Field(base, field)
+            if is_build_facts_source(cx, cx.typeck_results().expr_ty(base)) =>
+        {
+            field.name
+        }
+        // A method named by path, `.and_then(SourceMachineContext::read)`.
+        ExprKind::Path(ref qpath) => match cx.qpath_res(qpath, expr.hir_id) {
+            rustc_hir::def::Res::Def(rustc_hir::def::DefKind::AssocFn, def_id) => {
+                let owner = cx.tcx.parent(def_id);
+                // A trait's method has no self type to read; only an inherent impl's names one.
+                if !matches!(
+                    cx.tcx.def_kind(owner),
+                    rustc_hir::def::DefKind::Impl { of_trait: false }
+                ) {
+                    return None;
+                }
+                let ty = cx
+                    .tcx
+                    .type_of(owner)
+                    .instantiate_identity()
+                    .skip_normalization();
+                if !is_build_facts_source(cx, ty) {
+                    return None;
+                }
+                cx.tcx.item_name(def_id)
+            }
+            _ => return None,
+        },
         _ => return None,
     };
-    (is_build_facts_span(cx, expr.span)
-        && is_build_facts_source(cx, cx.typeck_results().expr_ty(receiver))
-        && !BUILD_FACTS_READS.contains(&read.as_str()))
-    .then(|| read.to_string())
+    (!BUILD_FACTS_READS.contains(&read.as_str())).then(|| read.to_string())
 }
 
 /// The methods of `BuildFacts` whose result holds the function or its context.
