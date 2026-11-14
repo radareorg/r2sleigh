@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use crate::convert::CTypeLike;
-use crate::facts::{CalleeFact, CalleeLinkage, FunctionParamSpec, FunctionSignatureSpec};
+use crate::facts::{CalleeFact, CalleeLinkage, FunctionSignatureSpec};
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ExternalRegisterParamSpec {
@@ -72,10 +72,6 @@ impl ProgramExtents {
     }
 }
 
-pub use r2ssa::StackAddressBase as ExternalStackBase;
-
-pub type StackSlotKey = r2ssa::StackAddressRoot;
-
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalCalleeLinkageJson {
@@ -93,92 +89,6 @@ impl From<ExternalCalleeLinkageJson> for CalleeLinkage {
             ExternalCalleeLinkageJson::Imported => Self::Imported,
         }
     }
-}
-
-fn normalize_function_basename(name: &str) -> String {
-    let mut lower = name.trim().to_ascii_lowercase();
-    for prefix in ["sym.imp.", "sym.", "dbg.", "fcn.", "imp."] {
-        if let Some(rest) = lower.strip_prefix(prefix) {
-            lower = rest.to_string();
-            break;
-        }
-    }
-    if let Some(rest) = lower.strip_prefix('_')
-        && rest == "main"
-    {
-        return "main".to_string();
-    }
-    lower
-}
-
-fn is_c_main_function(name: &str) -> bool {
-    normalize_function_basename(name) == "main"
-}
-
-pub fn canonical_main_signature_spec() -> FunctionSignatureSpec {
-    let char_ptr = CTypeLike::Pointer(Box::new(CTypeLike::Int {
-        bits: 8,
-        signedness: crate::Signedness::Signed,
-    }));
-    let char_pp = CTypeLike::Pointer(Box::new(char_ptr));
-    FunctionSignatureSpec {
-        ret_type: Some(CTypeLike::typedef("int")),
-        params: vec![
-            FunctionParamSpec {
-                name: "argc".to_string(),
-                ty: Some(CTypeLike::typedef("int")),
-            },
-            FunctionParamSpec {
-                name: "argv".to_string(),
-                ty: Some(char_pp.clone()),
-            },
-            FunctionParamSpec {
-                name: "envp".to_string(),
-                ty: Some(char_pp),
-            },
-        ],
-    }
-}
-
-fn normalize_signature_param_name(name: &str) -> String {
-    name.trim()
-        .trim_start_matches('_')
-        .to_ascii_lowercase()
-        .replace('-', "_")
-}
-
-fn signature_spec_has_main_abi_evidence(signature: &FunctionSignatureSpec) -> bool {
-    let mut names = signature
-        .params
-        .iter()
-        .map(|param| normalize_signature_param_name(&param.name))
-        .collect::<Vec<_>>();
-    names.retain(|name| !name.is_empty());
-    let has_argc = names.iter().any(|name| name == "argc");
-    let has_argv = names.iter().any(|name| name == "argv");
-    let has_envp = names.iter().any(|name| name == "envp" || name == "env");
-    has_argc && (has_argv || has_envp)
-}
-
-pub fn apply_main_signature_override(
-    function_name: &str,
-    merged_signature: &mut Option<FunctionSignatureSpec>,
-) -> bool {
-    if !is_c_main_function(function_name) {
-        return false;
-    }
-    let Some(signature) = merged_signature.as_ref() else {
-        return false;
-    };
-    if !signature_spec_has_main_abi_evidence(signature) {
-        return false;
-    }
-    let canonical = canonical_main_signature_spec();
-    if merged_signature.as_ref() == Some(&canonical) {
-        return false;
-    }
-    *merged_signature = Some(canonical);
-    true
 }
 
 /// The C identifier a source name renders as, or `None` when nothing of the
@@ -225,48 +135,4 @@ pub fn is_generic_arg_name(name: &str) -> bool {
         .strip_prefix("arg")
         .map(|suffix| !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()))
         .unwrap_or(false)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn apply_main_signature_override_refuses_name_only_main() {
-        let mut merged = None;
-        assert!(!apply_main_signature_override("dbg.main", &mut merged));
-        assert!(merged.is_none());
-    }
-
-    #[test]
-    fn apply_main_signature_override_canonicalizes_main_shaped_signature() {
-        let mut merged = Some(FunctionSignatureSpec {
-            ret_type: Some(CTypeLike::typedef("int")),
-            params: vec![
-                FunctionParamSpec {
-                    name: "argc".to_string(),
-                    ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Int {
-                        bits: 8,
-                        signedness: crate::Signedness::Signed,
-                    }))),
-                },
-                FunctionParamSpec {
-                    name: "argv".to_string(),
-                    ty: Some(CTypeLike::Pointer(Box::new(CTypeLike::Pointer(Box::new(
-                        CTypeLike::Int {
-                            bits: 8,
-                            signedness: crate::Signedness::Signed,
-                        },
-                    ))))),
-                },
-            ],
-        });
-        assert!(apply_main_signature_override("dbg.main", &mut merged));
-        let merged = merged.expect("main signature");
-        assert_eq!(merged.params.len(), 3);
-        assert_eq!(merged.params[0].name, "argc");
-        assert_eq!(merged.params[0].ty, Some(CTypeLike::typedef("int")));
-        assert_eq!(merged.params[1].name, "argv");
-        assert_eq!(merged.params[2].name, "envp");
-    }
 }

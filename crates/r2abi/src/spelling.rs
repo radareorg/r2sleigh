@@ -8,15 +8,17 @@
 //! function-pointer spelling -- is a refused node, and only the declaration
 //! that needs it loses anything.
 
+use std::collections::BTreeMap;
+
 use crate::CLibrary;
 use crate::types::{
     Keyword, Qualifiers, Scalar, ScalarKind, Signature, Type, TypeGraph, TypeId, Width,
 };
 
 /// Read one spelling into the graph.
-pub(crate) fn read(spelling: &str, graph: &mut TypeGraph, library: CLibrary) -> TypeId {
+pub(crate) fn read(spelling: &str, graph: &mut TypeGraph, reading: &Reading) -> TypeId {
     if let Some((returns, parameters)) = code_pointer(spelling) {
-        return read_code_pointer(spelling, (returns, parameters), graph, library);
+        return read_code_pointer(spelling, (returns, parameters), graph, reading);
     }
     let Some(tokens) = tokens(spelling) else {
         return graph.refused(format!("`{spelling}` is not a C type spelling"));
@@ -25,7 +27,7 @@ pub(crate) fn read(spelling: &str, graph: &mut TypeGraph, library: CLibrary) -> 
     // is one pointer, qualified by the words that follow it.
     let mut levels = tokens.split(|token| *token == "*");
     let base = levels.next().unwrap_or_default();
-    let mut ty = match base_type(base, graph, library) {
+    let mut ty = match base_type(base, graph, reading) {
         Ok(ty) => ty,
         Err(reason) => return graph.refused(format!("`{spelling}`: {reason}")),
     };
@@ -60,16 +62,16 @@ fn read_code_pointer(
     spelling: &str,
     (returns, parameters): (&str, &str),
     graph: &mut TypeGraph,
-    library: CLibrary,
+    reading: &Reading,
 ) -> TypeId {
     if returns.contains('(') || parameters.contains('(') || parameters.contains("...") {
         return graph.refused(format!("`{spelling}`: a nested or variadic code pointer"));
     }
-    let returns = read(returns, graph, library);
+    let returns = read(returns, graph, reading);
     let parameters = match parameters {
         "void" => Vec::new(),
         listed => (listed.split(','))
-            .map(|parameter| read(parameter.trim(), graph, library))
+            .map(|parameter| read(parameter.trim(), graph, reading))
             .collect(),
     };
     let code = graph.add(Type::Code(Signature {
@@ -120,7 +122,7 @@ fn qualifiers_of(words: &[&str]) -> Option<Qualifiers> {
 }
 
 /// The type the words before any star name, qualified as they say.
-fn base_type(words: &[&str], graph: &mut TypeGraph, library: CLibrary) -> Result<TypeId, String> {
+fn base_type(words: &[&str], graph: &mut TypeGraph, reading: &Reading) -> Result<TypeId, String> {
     let qualifiers = words
         .iter()
         .filter_map(|word| qualifier(word))
@@ -130,7 +132,7 @@ fn base_type(words: &[&str], graph: &mut TypeGraph, library: CLibrary) -> Result
         .copied()
         .filter(|word| qualifier(word).is_none())
         .collect::<Vec<_>>();
-    let ty = unqualified(&words, graph, library)?;
+    let ty = unqualified(&words, graph, reading)?;
     Ok(match qualifiers.is_empty() {
         true => ty,
         false => graph.add(Type::Qualified {
@@ -140,7 +142,8 @@ fn base_type(words: &[&str], graph: &mut TypeGraph, library: CLibrary) -> Result
     })
 }
 
-fn unqualified(words: &[&str], graph: &mut TypeGraph, library: CLibrary) -> Result<TypeId, String> {
+fn unqualified(words: &[&str], graph: &mut TypeGraph, reading: &Reading) -> Result<TypeId, String> {
+    let library = reading.library;
     if let [name] = words
         && let Some((kind, width)) = named_scalar(name, library)
     {
@@ -167,14 +170,14 @@ fn unqualified(words: &[&str], graph: &mut TypeGraph, library: CLibrary) -> Resu
         && library == CLibrary::Ucrt
         && let Some(spelling) = windows_type(name)
     {
-        let target = read(spelling, graph, library);
+        let target = read(spelling, graph, reading);
         return Ok(graph.add(Type::Typedef {
             name: (*name).to_owned(),
             target,
         }));
     }
     if let [name] = words
-        && let Some(tag) = handle_tag(name, library)
+        && let Some(tag) = reading.handles.get(name).copied()
     {
         let target = graph.add(Type::Opaque {
             keyword: Keyword::Struct,
@@ -384,16 +387,48 @@ fn windows_type(name: &str) -> Option<&'static str> {
     })
 }
 
-/// The tag a C library's header gives a handle typedef, and none where no header read states
-/// one (data/README.md, "Handles").
-fn handle_tag(name: &str, library: CLibrary) -> Option<&'static str> {
-    match (library, name) {
-        (CLibrary::Glibc, "FILE") => Some("_IO_FILE"),
-        (CLibrary::Glibc, "DIR") => Some("__dirstream"),
-        (CLibrary::LibSystem | CLibrary::Bionic, "FILE") => Some("__sFILE"),
-        (CLibrary::Bionic, "DIR") => Some("DIR"),
-        _ => None,
+const HANDLES: &str = include_str!("../data/handles.txt");
+
+/// What one C library's spellings read against: the library, and the struct tag each of its handle
+/// typedefs names, read from `data/handles.txt` once per table (D391).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Reading {
+    pub(crate) library: CLibrary,
+    handles: BTreeMap<&'static str, &'static str>,
+}
+
+impl Reading {
+    /// `library`'s handle rows, one pass over the file: O(rows log rows).
+    pub(crate) fn of(library: CLibrary) -> Self {
+        let handles = (handle_rows())
+            .filter(|(of, ..)| *of == library)
+            .map(|(_, name, tag)| (name, tag))
+            .collect();
+        Self { library, handles }
     }
+}
+
+/// Each `data/handles.txt` row as (library, typedef, tag); a line naming no `.h` header is no row.
+fn handle_rows() -> impl Iterator<Item = (CLibrary, &'static str, &'static str)> {
+    HANDLES.lines().filter_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let [library, name, tag, header] = line.split('|').map(str::trim).collect::<Vec<_>>()[..]
+        else {
+            return None;
+        };
+        let library = match library {
+            "glibc" => CLibrary::Glibc,
+            "bionic" => CLibrary::Bionic,
+            "musl" => CLibrary::Musl,
+            "libsystem" => CLibrary::LibSystem,
+            "ucrt" => CLibrary::Ucrt,
+            _ => return None,
+        };
+        header.ends_with(".h").then_some((library, name, tag))
+    })
 }
 
 #[cfg(test)]
@@ -403,7 +438,7 @@ mod tests {
 
     fn spelled(spelling: &str) -> Option<String> {
         let mut graph = TypeGraph::new();
-        let id = read(spelling, &mut graph, CLibrary::Glibc);
+        let id = read(spelling, &mut graph, &Reading::of(CLibrary::Glibc));
         graph.spelled(id).map(|spelled| spelled.declared)
     }
 
@@ -422,7 +457,7 @@ mod tests {
     #[test]
     fn a_tag_the_table_never_lays_out_is_opaque() {
         let mut graph = TypeGraph::new();
-        let file = read("FILE *", &mut graph, CLibrary::Musl);
+        let file = read("FILE *", &mut graph, &Reading::of(CLibrary::Musl));
         let Some(Type::Pointer { target }) = graph.get(file) else {
             panic!("{:?}", graph.get(file));
         };
@@ -437,7 +472,7 @@ mod tests {
     #[test]
     fn a_handle_a_library_states_is_its_typedef_over_the_tag() {
         let mut graph = TypeGraph::new();
-        let file = read("FILE *", &mut graph, CLibrary::Glibc);
+        let file = read("FILE *", &mut graph, &Reading::of(CLibrary::Glibc));
         let Some(Type::Pointer { target }) = graph.get(file) else {
             panic!("{:?}", graph.get(file));
         };
@@ -456,15 +491,29 @@ mod tests {
         );
     }
 
+    /// Every handle row parses and cites its header (D391); no handle tag is stated in code.
+    #[test]
+    fn every_handle_row_parses_and_names_its_header() {
+        let rows = HANDLES
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+            .count();
+        assert_eq!(handle_rows().count(), rows);
+        assert_eq!(Reading::of(CLibrary::LibSystem).handles.get("DIR"), None);
+        assert_eq!(Reading::of(CLibrary::Musl).handles.get("FILE"), None);
+        let bionic = Reading::of(CLibrary::Bionic);
+        assert_eq!(bionic.handles.get("FILE"), Some(&"__sFILE"));
+    }
+
     #[test]
     fn a_platform_name_for_an_integer_has_the_width_the_target_gives_it() {
         let mut graph = TypeGraph::new();
-        let size = read("size_t", &mut graph, CLibrary::Unknown);
+        let size = read("size_t", &mut graph, &Reading::of(CLibrary::Unknown));
         assert_eq!(graph.size_bits(size, &CDataModel::unix(64)), Some(64));
         assert_eq!(graph.size_bits(size, &CDataModel::unix(32)), Some(32));
-        let long = read("unsigned long", &mut graph, CLibrary::Unknown);
+        let long = read("unsigned long", &mut graph, &Reading::of(CLibrary::Unknown));
         assert_eq!(graph.size_bits(long, &CDataModel::unix(32)), Some(32));
-        let mode = read("mode_t", &mut graph, CLibrary::LibSystem);
+        let mode = read("mode_t", &mut graph, &Reading::of(CLibrary::LibSystem));
         assert_eq!(graph.size_bits(mode, &CDataModel::unix(64)), Some(16));
     }
 
@@ -476,7 +525,7 @@ mod tests {
             "struct std::type_info *",
             "long char",
         ] {
-            let id = read(spelling, &mut graph, CLibrary::Glibc);
+            let id = read(spelling, &mut graph, &Reading::of(CLibrary::Glibc));
             assert!(
                 matches!(graph.get(id), Some(Type::Refused(_))),
                 "{spelling}: {:?}",
@@ -485,7 +534,7 @@ mod tests {
         }
         // A name the table never defines is a tag, not a refusal: a pointer
         // to it is still a pointer.
-        let generic = read("arithmetic", &mut graph, CLibrary::Glibc);
+        let generic = read("arithmetic", &mut graph, &Reading::of(CLibrary::Glibc));
         assert!(matches!(graph.get(generic), Some(Type::Opaque { .. })));
     }
 }

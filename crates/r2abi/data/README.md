@@ -213,11 +213,21 @@ declares it, and a name it does not list gets no row.
 
 ## Handles
 
-`FILE` and `DIR` are typedefs of tags the C library's header names. `spelling.rs` states the tag
-per library: glibc's `struct _IO_FILE` (`bits/types/FILE.h`) and `struct __dirstream`
-(`dirent.h`), libSystem's `struct __sFILE` (`_stdio.h`), bionic's `struct __sFILE` (`stdio.h`)
-and `struct DIR` (`dirent.h`). libSystem's `DIR` is a typedef of an anonymous struct, so it states
-none and the name stays an opaque typedef.
+`FILE` and `DIR` are typedefs of tags the C library's header names. `handles.txt` states each
+tag per library with the header it is read from: glibc's `struct _IO_FILE` (`bits/types/FILE.h`)
+and `struct __dirstream` (`dirent.h`), libSystem's `struct __sFILE` (`_stdio.h`), bionic's
+`struct __sFILE` (`stdio.h`) and `struct DIR` (`dirent.h`). libSystem's `DIR` is a typedef of an
+anonymous struct, so it has no row and the name stays an opaque typedef.
+
+## Effects
+
+A cited row may state `func.<name>.effects=`, what the function does through its parameters,
+read from the standard the row cites: `reads(i, n)` and `writes(i, n)` reach from parameter `i`
+as many bytes as parameter `n` holds (`str`: up to the first zero byte), `frees(i)`,
+`allocates()` or `allocates(zeroed)` for a new heap block, `returns(i)`. The clauses are an upper
+bound: a parameter no clause names is used as a value only (malloc's size). An uncited table states
+no effects, and a row with a tail states none, since a tail argument may be written (`%n`).
+r2engine's `library.rs` reads them only through the row `Imports::bind` returns (ROADMAP D383).
 
 ## Binding
 

@@ -16,7 +16,6 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::constraint::SolverNode;
-use crate::context::{ExternalStackBase, StackSlotKey};
 use crate::convert::{CTypeLike, to_c_type_like};
 use crate::facts::FunctionType;
 use crate::model::{Signedness, Type, TypeArena, TypeId};
@@ -47,7 +46,6 @@ impl SolverNode for EvidenceNode {
 #[derive(Debug, Clone, Default)]
 pub struct EvidenceTypes {
     value_types: r2ssa::dense::IdMap<r2ssa::ValueId, CTypeLike>,
-    slot_types: BTreeMap<StackSlotKey, CTypeLike>,
     /// Each parameter entry value a declared callee slot types: the pointer, or why none (D262).
     declared: r2ssa::dense::IdMap<r2ssa::ValueId, DeclaredBound>,
 }
@@ -184,7 +182,7 @@ pub enum DeclaredBound {
 
 impl EvidenceTypes {
     pub fn is_empty(&self) -> bool {
-        self.value_types.is_empty() && self.slot_types.is_empty()
+        self.value_types.is_empty()
     }
 
     pub fn value_type(&self, value: r2ssa::ValueId) -> Option<&CTypeLike> {
@@ -194,10 +192,6 @@ impl EvidenceTypes {
     /// What declared callee slots state of parameter entry value `value`, where one is handed it.
     pub fn declared_bound(&self, value: r2ssa::ValueId) -> Option<&DeclaredBound> {
         self.declared.get(value)
-    }
-
-    pub fn stack_slot_types(&self) -> impl Iterator<Item = (&StackSlotKey, &CTypeLike)> {
-        self.slot_types.iter()
     }
 }
 
@@ -832,41 +826,13 @@ impl<'a> EvidenceBuilder<'a> {
             declared: self.declared_bounds(),
             ..EvidenceTypes::default()
         };
-        let mut object_types: FxHashMap<r2ssa::ObjectId, CTypeLike> = FxHashMap::default();
         for (node, ty) in self.solver.typed() {
-            let Some(resolved) = self.spell(&class_spellings, node, ty) else {
+            let EvidenceNode::Value(value) = node else {
                 continue;
             };
-            match node {
-                EvidenceNode::Value(value) => {
-                    types.value_types.insert(value, resolved);
-                }
-                EvidenceNode::Object(object) => {
-                    object_types.insert(object, resolved);
-                }
+            if let Some(resolved) = self.spell(&class_spellings, node, ty) {
+                types.value_types.insert(value, resolved);
             }
-        }
-
-        for (object, ty) in object_types {
-            let Some(fact) = self.source.objects().object(object) else {
-                continue;
-            };
-            let (base, offset) = match fact.kind {
-                r2ssa::ObjectKind::StackSlot { base, offset, .. }
-                | r2ssa::ObjectKind::FrameObject { base, offset, .. } => (base, offset),
-                _ => continue,
-            };
-            types.slot_types.insert(
-                StackSlotKey {
-                    base: match base {
-                        r2ssa::StackAddressBase::FramePointer => ExternalStackBase::FramePointer,
-                        r2ssa::StackAddressBase::StackPointer => ExternalStackBase::StackPointer,
-                        r2ssa::StackAddressBase::Realigned => ExternalStackBase::Realigned,
-                    },
-                    offset,
-                },
-                ty,
-            );
         }
 
         types

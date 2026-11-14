@@ -18,17 +18,20 @@ pub(super) struct Tags {
     kinds: BTreeMap<String, Option<bool>>,
     /// The tags a pointer asked for whose kinds disagree, so it was spelled at its class.
     refused: RefCell<BTreeSet<String>>,
+    /// The pointer width a callee graph's layouts are read at.
+    ptr_bits: u32,
 }
 
 impl Tags {
     pub(super) fn of(input: &RenderInput<'_>) -> Self {
         let callees = input.callee_type_graphs().collect::<Vec<_>>();
-        Self::of_parts(input.type_graph(), input.inferred_aggregates(), &callees)
+        let (graph, inferred) = (input.type_graph(), input.inferred_aggregates());
+        Self::of_parts(graph, inferred, &callees, input.ptr_bits())
     }
 
     #[cfg(test)]
     fn of_graph(graph: Option<&r2ssa::SourceTypeGraph>) -> Self {
-        Self::of_parts(graph, &BTreeMap::new(), &[])
+        Self::of_parts(graph, &BTreeMap::new(), &[], 64)
     }
 
     /// The greatest set of laid-out aggregates whose members name only tags in the set or, behind a
@@ -37,13 +40,10 @@ impl Tags {
         graph: Option<&r2ssa::SourceTypeGraph>,
         inferred: &BTreeMap<String, r2types::AggregateDefinition>,
         callees: &[&r2ssa::SourceTypeGraph],
+        ptr_bits: u32,
     ) -> Self {
         let declared = (graph.iter())
-            .flat_map(|graph| graph.aggregates().iter().map(move |layout| (graph, layout)))
-            .filter_map(|(graph, layout)| {
-                let definition = r2types::aggregate_members(graph, layout.name())?;
-                Some((layout.name().to_owned(), definition))
-            });
+            .flat_map(|graph| r2types::AggregateDefinitions::of(graph, ptr_bits).into_iter());
         // A declared tag of the same name wins: it comes last.
         let stated = (inferred.iter())
             .map(|(name, definition)| (name.clone(), definition.clone()))
@@ -82,6 +82,7 @@ impl Tags {
                     declarable,
                     kinds,
                     refused: RefCell::default(),
+                    ptr_bits,
                 };
             }
             candidates = (defined.iter())
@@ -153,10 +154,10 @@ impl Tags {
     /// Whether `graph`, a callee's own, lays tag `name` out as the unit defines it.
     fn agrees(&self, name: &str, is_union: bool, graph: Option<&r2ssa::SourceTypeGraph>) -> bool {
         self.defines(name, is_union)
-            && graph
-                .and_then(|graph| r2types::aggregate_members(graph, name))
-                .as_ref()
-                == self.stated.get(name)
+            && graph.is_some_and(|graph| {
+                r2types::AggregateDefinitions::one(graph, name, self.ptr_bits).as_ref()
+                    == self.stated.get(name)
+            })
     }
 
     /// The definitions `c` needs: every tag it spells and every tag those hold, each once; a tag
@@ -474,6 +475,53 @@ mod tests {
         assert_eq!(order, [("lock_s".to_owned(), 0), ("pool".to_owned(), 2)]);
     }
 
+    /// i386 `struct node { int val; struct node *next; }`: `next` is 4 bytes at offset 4.
+    fn node_32() -> r2ssa::SourceTypeGraph {
+        let parts = r2ssa::SourceTypeGraphParts {
+            types: vec![
+                r2ssa::SourceType::new(
+                    0,
+                    r2ssa::SourceTypeKind::Struct { aggregate_id: 0 },
+                    64,
+                    32,
+                ),
+                r2ssa::SourceType::new(
+                    1,
+                    r2ssa::SourceTypeKind::Pointer {
+                        target_type_id: 0,
+                        const_target: false,
+                    },
+                    32,
+                    32,
+                ),
+                r2ssa::SourceType::new(2, r2ssa::SourceTypeKind::SignedInteger, 32, 32),
+            ],
+            aggregates: vec![r2ssa::SourceAggregateLayout::new(
+                0,
+                0,
+                64,
+                32,
+                "node",
+                [
+                    r2ssa::SourceAggregateMember::new(0, 2, 0, 32, "val"),
+                    r2ssa::SourceAggregateMember::new(1, 1, 32, 32, "next"),
+                ],
+            )],
+            ..r2ssa::SourceTypeGraphParts::default()
+        };
+        r2ssa::SourceTypeGraph::from_parts(parts).expect("a 32-bit node graph")
+    }
+
+    /// D387: a 32-bit struct holding a pointer is laid out at the program's pointer width, so the
+    /// unit defines it; read at 64 bits its 4-byte pointer member refuses the layout.
+    #[test]
+    fn a_struct_holding_a_pointer_is_laid_out_at_the_programs_width() {
+        let graph = node_32();
+        let at = |bits| Tags::of_parts(Some(&graph), &std::collections::BTreeMap::new(), &[], bits);
+        assert!(at(32).defines("node", false));
+        assert!(!at(64).defines("node", false));
+    }
+
     /// A graph stating only an opaque tag `item` of `keyword`, behind a pointer.
     fn opaque_item(keyword: r2ssa::SourceTagKeyword) -> r2ssa::SourceTypeGraph {
         let parts = r2ssa::SourceTypeGraphParts {
@@ -501,10 +549,15 @@ mod tests {
     fn a_tag_two_graphs_state_as_different_kinds_is_not_named() {
         let own = opaque_item(r2ssa::SourceTagKeyword::Struct);
         let callee = opaque_item(r2ssa::SourceTagKeyword::Union);
-        let alone = Tags::of_parts(Some(&own), &std::collections::BTreeMap::new(), &[]);
+        let alone = Tags::of_parts(Some(&own), &std::collections::BTreeMap::new(), &[], 64);
         assert!(alone.names("item", false));
         assert!(alone.conflicting().is_empty());
-        let tags = Tags::of_parts(Some(&own), &std::collections::BTreeMap::new(), &[&callee]);
+        let tags = Tags::of_parts(
+            Some(&own),
+            &std::collections::BTreeMap::new(),
+            &[&callee],
+            64,
+        );
         assert!(!tags.names("item", false));
         assert!(!tags.declares("item", true, Some(&callee)));
         assert!(!tags.admits("item", true, Some(&callee)));
@@ -534,7 +587,7 @@ mod tests {
         };
         let inferred =
             std::collections::BTreeMap::from([("fcn_48776a_arg0".to_owned(), definition)]);
-        let tags = Tags::of_parts(None, &inferred, &[]);
+        let tags = Tags::of_parts(None, &inferred, &[], 64);
         assert!(tags.defines("fcn_48776a_arg0", false));
         let members = &tags.defined["fcn_48776a_arg0"].1;
         assert_eq!(members[1].0, CType::Pointer(Box::new(CType::Void)));

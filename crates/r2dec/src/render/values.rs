@@ -936,27 +936,33 @@ impl<'a> Values<'a> {
         let graph = interface.type_graph()?;
         let projections = (self.artifact.aggregate_accesses())
             .projections_for_revision(interface.revision_identity())?;
-        let cells = (projections.values())
-            .filter(|projection| {
-                matches!(projection.root, r2ssa::AggregateRoot::Member(_))
-                    && projection.graph == r2ssa::GraphOf::Interface
-                    && projection.element_index.is_none()
-                    && !projection.member_indexed()
-            })
-            .filter_map(|projection| {
-                let layout = (graph.aggregates().get(projection.aggregate_id as usize))
-                    .filter(|layout| layout.id() == projection.aggregate_id)?;
-                let tag = tags.defines(layout.name(), false).then(|| layout.name())?;
-                let cell = self.roots.access(projection.access)?.canonical;
-                Some((
-                    cell,
-                    MemberCell::Through {
-                        pointer: CType::Pointer(Box::new(CType::Struct(tag.to_owned()))),
-                        member: projection.member_name.to_string(),
-                        offset: projection.byte_offset,
-                    },
-                ))
-            });
+        let cells = (projections.values()).filter_map(|projection| {
+            let r2ssa::AggregateRoot::Member(root) = projection.root else {
+                return None;
+            };
+            let whole = projection.graph == r2ssa::GraphOf::Interface
+                && projection.element_index.is_none()
+                && !projection.member_indexed();
+            let r2ssa::AggregateAccessBinding::Read { result } =
+                whole.then(|| projections.get(&root))??.binding
+            else {
+                return None;
+            };
+            let word = self.roots.access(root)?.canonical;
+            let layout = (graph.aggregates().get(projection.aggregate_id as usize))
+                .filter(|layout| layout.id() == projection.aggregate_id)?;
+            let tag = tags.defines(layout.name(), false).then(|| layout.name())?;
+            let cell = self.roots.access(projection.access)?.canonical;
+            Some((
+                cell,
+                MemberCell::Through {
+                    pointer: CType::Pointer(Box::new(CType::Struct(tag.to_owned()))),
+                    member: projection.member_name.to_string(),
+                    result,
+                    word,
+                },
+            ))
+        });
         Some(cells.collect())
     }
 
@@ -2316,11 +2322,7 @@ impl<'a> Values<'a> {
             Some(access) => {
                 let cell = arena.term(access.canonical);
                 let bytes = cell.ty.width_bits() / 8;
-                let at = match cell.kind {
-                    TermKind::Load { address, .. } => Some(address),
-                    _ => None,
-                };
-                let member = self.spelling(|spell| spell.member_address(access.canonical, at));
+                let member = self.spelling(|spell| spell.member_address(access.canonical));
                 let address = match cell.kind {
                     _ if member.is_some() => member?,
                     TermKind::Load { object, address } => {

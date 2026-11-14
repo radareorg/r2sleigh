@@ -123,7 +123,6 @@ impl SignatureCertificate {
                         | SignatureCertificateSource::CalleeSignature
                         | SignatureCertificateSource::SlotTypeOverride
                         | SignatureCertificateSource::SemanticProjection
-                        | SignatureCertificateSource::InterprocSummary
                         | SignatureCertificateSource::SourceInterface
                 )
             })
@@ -181,7 +180,6 @@ pub enum SignatureCertificateSource {
     SummaryRole,
     SummaryKind,
     SemanticProjection,
-    InterprocSummary,
     /// The return type alone is projected from the immutable source function
     /// interface and matched to exact native return-value certificates. This
     /// does not certify parameter types or certify a full signature by
@@ -204,7 +202,6 @@ impl SignatureCertificateSource {
             Self::SummaryRole => "summary_role",
             Self::SummaryKind => "summary_kind",
             Self::SemanticProjection => "semantic_projection",
-            Self::InterprocSummary => "interproc_summary",
             Self::SourceReturnType => "source_return_type",
             Self::SourceInterface => "source_interface",
         }
@@ -223,7 +220,6 @@ impl SignatureCertificateSource {
                 | Self::SourceInterface
                 | Self::SlotTypeOverride
                 | Self::SemanticProjection
-                | Self::InterprocSummary
         )
     }
 }
@@ -246,14 +242,6 @@ pub struct ParameterStructure {
     pub tag: String,
     /// The member each accessed offset is, by its index in the definition's members.
     pub fields: BTreeMap<i64, usize>,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CalleeArgEffect {
-    pub read: bool,
-    pub write: bool,
-    pub escape: bool,
-    pub free: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -401,15 +389,12 @@ pub struct CalleeFact {
     pub direct_callees: Vec<u64>,
     pub callsite_count: usize,
     pub has_unknown_calls: bool,
-    pub arg_effects: BTreeMap<usize, CalleeArgEffect>,
     pub memory_effects: Vec<CalleeMemoryEffect>,
     pub transfer_effects: Vec<CalleeTransferEffect>,
     pub allocation_effects: Vec<CalleeAllocationEffect>,
     pub lifetime_effects: Vec<CalleeLifetimeEffect>,
     pub sync_effects: Vec<CalleeSyncEffect>,
     pub atomic_effects: Vec<CalleeAtomicEffect>,
-    pub param_type_hints: BTreeMap<usize, CTypeLike>,
-    pub return_type_hint: Option<CTypeLike>,
     pub return_relation: CalleeReturnRelation,
     pub reads_global_memory: bool,
     pub writes_global_memory: bool,
@@ -432,15 +417,12 @@ impl CalleeFact {
             direct_callees: Vec::new(),
             callsite_count: 0,
             has_unknown_calls: false,
-            arg_effects: BTreeMap::new(),
             memory_effects: Vec::new(),
             transfer_effects: Vec::new(),
             allocation_effects: Vec::new(),
             lifetime_effects: Vec::new(),
             sync_effects: Vec::new(),
             atomic_effects: Vec::new(),
-            param_type_hints: BTreeMap::new(),
-            return_type_hint: None,
             return_relation: CalleeReturnRelation::Unknown,
             reads_global_memory: false,
             writes_global_memory: false,
@@ -742,72 +724,6 @@ pub fn signature_hint_can_replace_existing(
                         | CTypeLike::Enum(_)
                 ))
         }
-        (
-            CTypeLike::Typedef {
-                name: existing_name,
-                ..
-            },
-            CTypeLike::Typedef {
-                name: hint_name,
-                ty: hint_target,
-            },
-        ) => {
-            is_weak_storage_scalar_typedef(existing_name, ptr_bits)
-                && crate::analysis::typedef_resolves(hint_name, hint_target)
-        }
-        (
-            CTypeLike::Typedef {
-                name: existing_name,
-                ..
-            },
-            CTypeLike::Pointer(_),
-        ) => is_weak_pointer_sized_storage_typedef(existing_name, ptr_bits),
-        _ => false,
-    }
-}
-
-pub fn signature_return_hint_can_replace_existing(
-    existing: &CTypeLike,
-    hint: Option<&CTypeLike>,
-    ptr_bits: u32,
-) -> bool {
-    if signature_hint_can_replace_existing(existing, hint, ptr_bits) {
-        return true;
-    }
-    matches!(hint, Some(CTypeLike::Void)) && is_weak_storage_scalar_type(existing, ptr_bits)
-}
-
-pub fn summary_hint_can_replace_weak_existing(
-    existing: &CTypeLike,
-    hint: &CTypeLike,
-    ptr_bits: u32,
-) -> bool {
-    let existing = crate::word_free(existing);
-    if is_generic_signature_type(Some(existing)) {
-        return true;
-    }
-    match (existing, hint) {
-        (CTypeLike::Pointer(inner), CTypeLike::Pointer(new_inner)) => {
-            matches!(**inner, CTypeLike::Void | CTypeLike::Unknown)
-                && !matches!(**new_inner, CTypeLike::Void | CTypeLike::Unknown)
-        }
-        (
-            CTypeLike::Int {
-                bits,
-                signedness: Signedness::Signed | Signedness::Unsigned | Signedness::Unknown,
-            },
-            CTypeLike::Int {
-                bits: hint_bits,
-                signedness: Signedness::Unsigned,
-            },
-        ) => *bits == ptr_bits && *hint_bits == ptr_bits,
-        (
-            CTypeLike::Int {
-                bits,
-                signedness: Signedness::Signed | Signedness::Unsigned | Signedness::Unknown,
-            },
-            CTypeLike::Pointer(_),
-        ) => *bits == ptr_bits,
         (
             CTypeLike::Typedef {
                 name: existing_name,

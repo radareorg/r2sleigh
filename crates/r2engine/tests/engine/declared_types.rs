@@ -373,3 +373,48 @@ fn a_value_also_handed_to_an_unstated_callee_keeps_its_register_width() {
         "{text}"
     );
 }
+
+/// `int main(char *argc, char **argv) { return 0; }`, as its declaration states it.
+const MAIN_RETURNING_ZERO: &[u8] = &[
+    0x31, 0xc0, // 1000 xor eax, eax
+    0xc3, // 1002 ret
+];
+
+/// D396: a function named `main` keeps the signature its declaration states: the name retypes no
+/// parameter and adds no `envp` (AGENTS 6).
+#[test]
+fn main_keeps_its_declared_signature() {
+    use r2abi::{Parameter, Prototype, Scalar, ScalarKind, Type, TypeGraph, Width};
+    let mut graph = TypeGraph::new();
+    let int = graph.add(Type::Scalar(Scalar {
+        kind: ScalarKind::Signed,
+        width: Width::Bits(32),
+        name: Some("int".to_owned()),
+    }));
+    let char = graph.add(Type::Scalar(Scalar {
+        kind: ScalarKind::Signed,
+        width: Width::Bits(8),
+        name: Some("char".to_owned()),
+    }));
+    let char_pointer = graph.add(Type::Pointer { target: char });
+    let char_pointers = graph.add(Type::Pointer {
+        target: char_pointer,
+    });
+    let prototype = Prototype {
+        name: "main".to_owned(),
+        parameters: vec![
+            Parameter::new(char_pointer, "char *", Some("argc")),
+            Parameter::new(char_pointers, "char **", Some("argv")),
+        ],
+        returns: "int".into(),
+        return_type: int,
+        ..Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(graph);
+    declarations.declare_function(common::BASE, prototype);
+    let functions = [("main", common::BASE, MAIN_RETURNING_ZERO.len() as u64)];
+    let literal = Literal::of_code(MAIN_RETURNING_ZERO, &functions).with_declarations(declarations);
+    let text = rendered(literal, common::BASE);
+    assert!(text.contains("(char* argc, char** argv)"), "{text}");
+    assert!(!text.contains("envp"), "{text}");
+}
