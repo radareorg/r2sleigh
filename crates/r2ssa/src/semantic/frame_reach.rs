@@ -6,7 +6,7 @@ use super::*;
 mod walk;
 
 use walk::Origin;
-pub(crate) use walk::{Access, Walked, walk};
+pub(crate) use walk::{Access, Places, Walked, walk};
 pub use walk::{DynamicFrame, FramePoint, FramePoints};
 
 /// What one call reaches of the frame besides what has escaped.
@@ -324,7 +324,7 @@ pub(crate) fn compiler_slot_addresses(
 /// Nothing proves where the object an escaped address points into ends: `rows[4]` is four
 /// objects to the partition and one to the callee that indexes it. So an escaped address reaches
 /// every object of this frame around it, out to a slot the compiler owns, which no C object spans.
-/// `O(objects)` per escaped object.
+/// One pass over the frame's starts below the entry pointer: `O(objects + escaped log escaped)`.
 fn close_upward(
     escaped: &mut BTreeSet<ObjectId>,
     frame: &FrameIndex,
@@ -335,21 +335,42 @@ fn close_upward(
         .filter_map(|object| frame.start_of(*object))
         .filter(|start| *start < 0)
         .collect::<BTreeSet<_>>();
-    let mut reached = BTreeSet::new();
-    let stops =
-        |objects: &BTreeSet<ObjectId>| objects.iter().any(|object| barriers.contains(object));
-    for start in starts {
-        // An interior address indexes down as well as up: `&rows[1]` reaches `rows[0]`.
-        let up = frame.starts.range(start..0);
-        let down = frame.starts.range(..start).rev();
-        for run in [up.collect::<Vec<_>>(), down.collect::<Vec<_>>()] {
-            for (_, objects) in run {
-                if stops(objects) {
-                    break;
-                }
-                reached.extend(objects.iter().copied());
-            }
+    let below = frame.starts.range(..0).collect::<Vec<_>>();
+    let barrier = (below.iter())
+        .map(|(_, objects)| objects.iter().any(|object| barriers.contains(object)))
+        .collect::<Vec<_>>();
+    // The first barrier at or above each start, from one backward pass.
+    let mut next_barrier = vec![below.len(); below.len() + 1];
+    for at in (0..below.len()).rev() {
+        next_barrier[at] = if barrier[at] {
+            at
+        } else {
+            next_barrier[at + 1]
+        };
+    }
+    // Each start reaches down to the barrier below it and up to the one at or above it (the one
+    // below where it is a barrier itself): an interior address indexes both ways.
+    let mut runs = Vec::with_capacity(starts.len());
+    let mut last_barrier = None;
+    let mut next = starts.iter().peekable();
+    for (at, (start, _)) in below.iter().enumerate() {
+        if next.next_if(|wanted| *wanted == *start).is_some() {
+            let low = last_barrier.map_or(0, |barrier: usize| barrier + 1);
+            let high = next_barrier[at];
+            runs.push((low, high));
         }
+        if barrier[at] {
+            last_barrier = Some(at);
+        }
+    }
+    // Runs only grow rightwards in `low`; joined, each object is added once.
+    let mut reached = BTreeSet::new();
+    let mut covered = 0;
+    for (low, high) in runs {
+        for (_, objects) in &below[low.max(covered)..high.max(covered)] {
+            reached.extend(objects.iter().copied());
+        }
+        covered = covered.max(high);
     }
     escaped.extend(reached);
 }
@@ -534,8 +555,8 @@ fn call_reaches(
             by_call.insert(inst.id, CallFrameReach::Whole);
         }
     }
-    for (op, base) in bases {
-        let Some((call, base)) = graph.inst_for_op(*op).zip(*base) else {
+    for call_base in bases {
+        let Some((call, base)) = graph.inst_for_op(call_base.op).zip(call_base.base) else {
             continue;
         };
         let instruction = graph

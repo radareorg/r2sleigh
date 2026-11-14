@@ -53,7 +53,7 @@ pub(crate) fn promote(
         accesses,
         ..
     } = walked;
-    points.rewrite_decides = decided;
+    points.rewrite_decides = crate::semantic::Places::new(decided);
     if points.unplaced() {
         r2il::refusal_evidence!(
             "promote-stack-slot",
@@ -155,16 +155,16 @@ fn eligible(
         let handed = points.handed().contains(offset);
         // A call may rewrite its own argument area, so a load after it reads memory (D369).
         let rewritten = points.rewritten().contains(offset);
-        let otherwise = overlaps || is_save || is_declared || handed || reachable(*offset);
+        let reached = reachable(*offset);
+        let otherwise = overlaps || is_save || is_declared || handed || reached;
         if !otherwise {
             decided.insert(*offset, width);
         }
-        if overlaps || is_save || is_declared || handed || rewritten || reachable(*offset) {
+        if otherwise || rewritten {
             r2il::refusal_evidence!(
                 "promote-stack-slot",
-                "{:#x}: slot at {offset} stays in memory: overlap {overlaps}, save {is_save}, declared {is_declared}, handed {handed}, rewritten {rewritten}, reached {}",
+                "{:#x}: slot at {offset} stays in memory: overlap {overlaps}, save {is_save}, declared {is_declared}, handed {handed}, rewritten {rewritten}, reached {reached}",
                 func.entry,
-                reachable(*offset)
             );
             continue;
         }
