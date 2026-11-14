@@ -364,10 +364,6 @@ func.lldiv.arg.0=long long,numer
 func.lldiv.arg.1=long long,denom
 func.lldiv.ret=lldiv_t
 
-at_quick_exit=func
-func.at_quick_exit.args=0
-func.at_quick_exit.ret=int
-
 bzero=func
 func.bzero.args=2
 func.bzero.arg.0=void *,s
@@ -453,12 +449,6 @@ gets=func
 func.gets.args=1
 func.gets.arg.0=char *,s
 func.gets.ret=char *
-
-signal=func
-func.signal.args=2
-func.signal.arg.0=int,sig
-func.signal.arg.1=void *,func
-func.signal.ret=void *
 
 inet_aton=func
 func.inet_aton.args=2

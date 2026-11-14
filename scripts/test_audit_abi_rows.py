@@ -42,7 +42,8 @@ class Rows(unittest.TestCase):
         rows = audit.tables(audit.DATA)
         _, errors = audit.audit(rows, audit.citations_of(audit.CITATIONS.read_text()))
         self.assertEqual(errors, [])
-        self.assertEqual(rows["types.sdb.txt"]["signal"], "void *")
+        self.assertEqual(rows["types-posix.sdb.txt"]["signal"], "void (*)(int)")
+        self.assertNotIn("signal", rows["types.sdb.txt"])
 
 
 class Headers(unittest.TestCase):

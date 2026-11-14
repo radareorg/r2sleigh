@@ -17,7 +17,7 @@ pub mod convention;
 pub mod display_names;
 pub mod native;
 pub use confidence::{Basis, Confidence, Fact, Grade, Premise};
-pub use convention::{ConventionId, ConventionModel};
+pub use convention::{CallRegisterEffect, ConventionId, ConventionModel, Conventions};
 pub use display_names::{
     DisplayNames, positional_parameter_name, unnamed_function, unnamed_identifier,
 };
@@ -97,6 +97,18 @@ pub enum SourceClosedResult {
     ForwardCycle,
     /// A call reads these lanes as the call leaves them: a value at `Solved` under the closed world.
     Read(SourceReadLanes),
+    /// Every way in is a call that leaves every lane dead or a cited `void` callback slot the
+    /// address reaches, so no way in reads a result (S30, premises closed world and UB-free source).
+    DeclaredVoid(SourceSlotOrigin),
+}
+
+/// The cited slot a function's address reaches: the import's address and the parameter's index.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+pub struct SourceSlotOrigin {
+    pub import: u64,
+    pub parameter: u8,
 }
 
 /// The result lanes a reading call takes.
@@ -145,26 +157,19 @@ impl FunctionPresentation {
 /// Types travel on the interface's `SourceTypeGraph` (ADR call-boundary, Types on the wire).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSignaturePresentation {
-    calling_convention: Option<Box<str>>,
     noreturn: bool,
     parameters: Box<[SourceSignatureParameter]>,
 }
 
 impl SourceSignaturePresentation {
     pub fn new(
-        calling_convention: Option<impl Into<Box<str>>>,
         noreturn: bool,
         parameters: impl IntoIterator<Item = SourceSignatureParameter>,
     ) -> Self {
         Self {
-            calling_convention: calling_convention.map(Into::into),
             noreturn,
             parameters: parameters.into_iter().collect(),
         }
-    }
-
-    pub fn calling_convention(&self) -> Option<&str> {
-        self.calling_convention.as_deref()
     }
 
     pub const fn noreturn(&self) -> bool {
@@ -711,31 +716,10 @@ pub struct AdvisoryCallSite {
     target_name: Option<String>,
     /// Whether the target is the binary's own or imported.
     linkage: AdvisoryCalleeLinkage,
-    /// The prototype radare2 recovered for this site. Present only when radare2
-    /// reported the site as complete; absent means it described the call but
-    /// not what it takes or returns.
-    prototype: Option<AdvisoryCallPrototype>,
-}
-
-/// Prototype radare2 recovered for one call site, keyed by address.
-///
-/// This deliberately carries no call-site identity. An identity names a block
-/// address, an operation index and a target storage, which exist only once the
-/// function has been lifted, so the correlation happens there rather than here.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AdvisoryCallPrototype {
-    pub convention: ConventionId,
-    pub arguments: Box<[SourceCallArgumentSpec]>,
-    pub variadic: bool,
-    pub noreturn: bool,
-    pub result: SourceCallResult,
 }
 
 impl AdvisoryCallSite {
-    /// A call site described by the capture, with no recovered prototype.
-    ///
-    /// A prototype is attached by the capture that recovered one; a site built
-    /// here states only where the call is, where it goes and how it leaves.
+    /// A call site described by the capture: where the call is, where it goes and how it leaves.
     pub const fn described(
         instruction_address: u64,
         target_address: u64,
@@ -749,14 +733,7 @@ impl AdvisoryCallSite {
             transfer,
             target_name,
             linkage,
-            prototype: None,
         }
-    }
-
-    /// Borrow the prototype radare2 recovered for this site, if it recovered
-    /// one.
-    pub const fn prototype(&self) -> Option<&AdvisoryCallPrototype> {
-        self.prototype.as_ref()
     }
 
     pub const fn instruction_address(&self) -> u64 {
@@ -862,11 +839,8 @@ struct SnapshotState {
     source_revision_identity: Box<[u8]>,
     function_interface: Option<SourceFunctionInterface>,
     machine_roles: SourceMachineRoles,
-    convention_slots: SourceConventionSlots,
-    /// What the convention says a call does to the registers, where it says.
-    call_effect: Option<SourceCallEffect>,
-    /// The model `convention_slots` is a view of, where the capture holds one.
-    convention: Option<Arc<ConventionModel>>,
+    /// The function's convention and its calls', where the capture holds them.
+    conventions: Option<convention::Conventions>,
     /// Contracts an earlier seal minted for calls through a typed member (S32), one per site.
     member_calls: Box<[SourceCallSiteInterface]>,
     captured_fields: CapturedSourceFields,
@@ -922,8 +896,7 @@ impl OwnedFunctionSnapshot {
         source_revision_identity: Box<[u8]>,
         function_interface: Option<SourceFunctionInterface>,
         machine_roles: SourceMachineRoles,
-        convention_slots: SourceConventionSlots,
-        call_effect: Option<SourceCallEffect>,
+        conventions: Option<convention::Conventions>,
         captured_fields: CapturedSourceFields,
         diagnostics: DiagnosticIdentity,
     ) -> Result<Self, SnapshotValidationError> {
@@ -1044,9 +1017,7 @@ impl OwnedFunctionSnapshot {
             source_revision_identity,
             function_interface,
             machine_roles,
-            convention_slots,
-            call_effect,
-            convention: None,
+            conventions,
             member_calls: Box::default(),
             captured_fields,
             diagnostics,
@@ -1115,33 +1086,14 @@ impl OwnedFunctionSnapshot {
         &self.0.machine_roles
     }
 
-    /// Where this function's calling convention would place arguments and the
-    /// result. Present regardless of whether a prototype was recovered.
-    pub fn convention_slots(&self) -> &SourceConventionSlots {
-        &self.0.convention_slots
+    /// The function's convention and its calls', where the capture holds them.
+    pub fn conventions(&self) -> Option<&convention::Conventions> {
+        self.0.conventions.as_ref()
     }
 
-    /// What the convention says a call does to the registers, where it says.
-    pub fn call_effect(&self) -> Option<&SourceCallEffect> {
-        self.0.call_effect.as_ref()
-    }
-
-    /// The convention model the slots are a view of, where the capture holds one.
+    /// The function's own convention model, where the capture holds one.
     pub fn convention(&self) -> Option<&ConventionModel> {
-        self.0.convention.as_deref()
-    }
-
-    /// The model, shared with whatever keeps it beside the capture.
-    pub fn shared_convention(&self) -> Option<Arc<ConventionModel>> {
-        self.0.convention.clone()
-    }
-
-    /// The same capture with the model its slots view; a model of another convention is ignored.
-    pub(crate) fn with_convention(mut self, model: Arc<ConventionModel>) -> Self {
-        if model.id == self.0.convention_slots.convention() {
-            Arc::make_mut(&mut self.0).convention = Some(model);
-        }
-        self
+        self.0.conventions.as_ref().map(|it| &*it.own)
     }
 
     /// The same capture stating a contract for each call through a typed member. Each is about
@@ -1264,8 +1216,6 @@ mod tests {
             Box::from([7]),
             None,
             SourceMachineRoles::default(),
-            SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                .expect("empty convention slots"),
             None,
             CapturedSourceFields {
                 bounded_function_image: true,
@@ -1295,7 +1245,11 @@ mod tests {
         SourceFunctionInterface::new_exact(
             [7],
             crate::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, register(0))],
+            [SourceAbiParameterSpec::new(
+                0,
+                register(0),
+                SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Register {
                 storage: register(8),
             },
@@ -1365,8 +1319,7 @@ mod tests {
                 valid.source_revision_identity().into(),
                 valid.function_interface().cloned(),
                 *valid.machine_roles(),
-                valid.convention_slots().clone(),
-                valid.call_effect().cloned(),
+                valid.conventions().cloned(),
                 valid.captured_fields(),
                 valid.diagnostic_identity(),
             ),
@@ -1400,8 +1353,6 @@ mod tests {
             Box::from([7]),
             Some(interface.clone()),
             exact_machine_roles(),
-            SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                .expect("empty convention slots"),
             None,
             captured_fields,
             valid.diagnostic_identity(),
@@ -1453,8 +1404,6 @@ mod tests {
                 Box::from([7]),
                 Some(wrong_machine_width),
                 exact_machine_roles(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 narrow_fields,
                 valid.diagnostic_identity()
@@ -1474,8 +1423,6 @@ mod tests {
                 Box::from([7]),
                 Some(interface.clone()),
                 exact_machine_roles(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 missing_frame_pointer,
                 valid.diagnostic_identity()
@@ -1495,8 +1442,6 @@ mod tests {
                 Box::from([7]),
                 Some(interface.clone()),
                 exact_machine_roles(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 missing_stack_allocation_contract,
                 valid.diagnostic_identity()
@@ -1507,7 +1452,11 @@ mod tests {
         let interface_without_frame_pointer = SourceFunctionInterface::new_exact(
             [7],
             crate::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, register(0))],
+            [SourceAbiParameterSpec::new(
+                0,
+                register(0),
+                SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Register {
                 storage: register(8),
             },
@@ -1536,8 +1485,6 @@ mod tests {
                 Box::from([7]),
                 Some(interface_without_frame_pointer.clone()),
                 exact_machine_roles(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 captured_fields,
                 valid.diagnostic_identity()
@@ -1555,8 +1502,6 @@ mod tests {
             Box::from([7]),
             Some(interface_without_frame_pointer),
             exact_machine_roles(),
-            SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                .expect("empty convention slots"),
             None,
             fields_without_frame_pointer,
             valid.diagnostic_identity(),
@@ -1581,8 +1526,6 @@ mod tests {
                 Box::from([7]),
                 Some(interface),
                 exact_machine_roles(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 missing_return_mechanism,
                 valid.diagnostic_identity()
@@ -1602,8 +1545,6 @@ mod tests {
                 Box::from([7]),
                 None,
                 SourceMachineRoles::default(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 mechanism_without_interface,
                 valid.diagnostic_identity()
@@ -1623,8 +1564,6 @@ mod tests {
                 Box::from([7]),
                 None,
                 SourceMachineRoles::default(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 frame_pointer_without_interface,
                 valid.diagnostic_identity()
@@ -1635,7 +1574,11 @@ mod tests {
         let wrong_revision = SourceFunctionInterface::new_exact(
             [8],
             crate::ConventionId::SysVAmd64,
-            [SourceAbiParameterSpec::new(0, register(0))],
+            [SourceAbiParameterSpec::new(
+                0,
+                register(0),
+                SourceSlot::integer(0),
+            )],
             SourceFunctionReturn::Register {
                 storage: register(8),
             },
@@ -1655,8 +1598,6 @@ mod tests {
                 Box::from([7]),
                 Some(wrong_revision),
                 exact_machine_roles(),
-                SourceConventionSlots::new(crate::ConventionId::SysVAmd64, [], None)
-                    .expect("empty convention slots"),
                 None,
                 captured_fields,
                 valid.diagnostic_identity()

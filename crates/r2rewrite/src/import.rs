@@ -40,11 +40,13 @@ pub struct ImportedValue {
     pub term: TermId,
 }
 
-/// A producer whose term a read absorbed: the root it was imported as, and its instruction.
+/// A producer whose term a read absorbed: the root it was imported as, and its instruction; or
+/// one whose value a read spelled as the frame object it addresses (`addressed`, D254).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Substitution {
     pub root: MachineExprId,
     pub producer: CanonicalInstructionId,
+    pub addressed: Option<ObjectId>,
 }
 
 /// One import step: its own rewrites, after those of the producers it absorbed directly, in
@@ -287,7 +289,10 @@ impl Import {
                 continue;
             };
             stack.push((step, next + 1));
-            stack.extend(self.step(substitution.root).map(|child| (child, 0)));
+            // An addressed read rewrote nothing of its producer: it holds no step to flatten.
+            let absorbed = substitution.addressed.is_none();
+            let child = absorbed.then(|| self.step(substitution.root)).flatten();
+            stack.extend(child.map(|child| (child, 0)));
         }
         out
     }
@@ -298,14 +303,36 @@ impl Import {
         let mut producers = BTreeSet::new();
         let mut stack = vec![step];
         while let Some(step) = stack.pop() {
-            let fresh = step
-                .substitutions
-                .iter()
+            let fresh = (step.substitutions.iter())
+                .filter(|substitution| substitution.addressed.is_none())
                 .filter(|substitution| producers.insert(substitution.producer));
             let children = fresh.filter_map(|substitution| self.step(substitution.root));
             stack.extend(children);
         }
         producers
+    }
+
+    /// The producers whose values a value's term spells as the frame object each addresses, through
+    /// every producer it absorbed: the same walk as `substituted`.
+    pub fn addressed(&self, value: ValueId) -> BTreeSet<(CanonicalInstructionId, ObjectId)> {
+        let Some(step) = (self.value(value)).and_then(|imported| self.step(imported.base_root))
+        else {
+            return BTreeSet::new();
+        };
+        let (mut walked, mut addressed) = (BTreeSet::new(), BTreeSet::new());
+        let mut stack = vec![step];
+        while let Some(step) = stack.pop() {
+            let substitutions = step.substitutions.iter();
+            addressed.extend(
+                substitutions
+                    .clone()
+                    .filter_map(|at| Some((at.producer, at.addressed?))),
+            );
+            let absorbed = substitutions.filter(|at| at.addressed.is_none());
+            let fresh = absorbed.filter(|at| walked.insert(at.producer));
+            stack.extend(fresh.filter_map(|at| self.step(at.root)));
+        }
+        addressed
     }
 
     /// Whether every read `term` makes is of a literal or of an entry value
@@ -837,10 +864,12 @@ impl Importer<'_> {
                         from: imported.term,
                         to: term,
                     });
+                    let mut substitutions = imported.substitutions;
+                    substitutions.extend(self.addressed_leaves(imported.term, object));
                     RootImport {
                         term,
                         own,
-                        substitutions: imported.substitutions,
+                        substitutions,
                         opaque: false,
                     }
                 }
@@ -875,10 +904,12 @@ impl Importer<'_> {
                             from: imported.term,
                             to: term,
                         });
+                        let mut substitutions = imported.substitutions;
+                        substitutions.extend(self.addressed_leaves(imported.term, object));
                         RootImport {
                             term,
                             own,
-                            substitutions: imported.substitutions,
+                            substitutions,
                             opaque: false,
                         }
                     }
@@ -950,7 +981,8 @@ impl Importer<'_> {
                         let term = self.arena.intern(ty, TermKind::ObjectAddress(object));
                         self.place_object(object);
                         self.declare_leaf_facts(term, binding.value());
-                        return Some((term, Vec::new()));
+                        let addressed = self.addressed(id, binding.value(), object);
+                        return Some((term, addressed.into_iter().collect()));
                     }
                     let leaf = leaf(self.arena);
                     self.reads_so_far += 1;
@@ -1573,6 +1605,45 @@ impl Importer<'_> {
             })
     }
 
+    /// Each read in `term` of a value addressing `object`, which the term spelling `object`'s
+    /// address in its place now spells so.
+    fn addressed_leaves(&self, term: TermId, object: ObjectId) -> Vec<Substitution> {
+        let objects = self.artifact.objects();
+        let reads = (self.arena.leaves(term).into_iter()).filter_map(|leaf| {
+            match self.projection.expr(leaf)?.kind() {
+                MachineExprKind::Source { binding, .. } => Some((leaf, binding.value())),
+                _ => None,
+            }
+        });
+        reads
+            .filter(|(_, value)| {
+                objects.object_for_value(*value, r2il::SpaceId::Ram) == Some(object)
+            })
+            .filter_map(|(leaf, value)| self.addressed(leaf, value, object))
+            .collect()
+    }
+
+    /// The read of `value` at `at` spelled as `object`'s address: its producer, where it has one.
+    fn addressed(
+        &self,
+        at: MachineExprId,
+        value: ValueId,
+        object: ObjectId,
+    ) -> Option<Substitution> {
+        let graph = self.artifact.graph();
+        let inst = graph.def_inst(value)?;
+        let producer = (self
+            .artifact
+            .obligations()
+            .instruction_for_inst(graph, inst)?)
+        .id;
+        Some(Substitution {
+            root: at,
+            producer,
+            addressed: Some(object),
+        })
+    }
+
     fn object_address_of(&self, value: ValueId) -> Option<ObjectId> {
         exact_stack_object_address(self.artifact, value)
     }
@@ -1746,6 +1817,14 @@ impl Importer<'_> {
         if !(self.policy)(&query) {
             return None;
         }
-        Some((imported.term, vec![Substitution { root, producer }]))
+        let addressed = None;
+        Some((
+            imported.term,
+            vec![Substitution {
+                root,
+                producer,
+                addressed,
+            }],
+        ))
     }
 }

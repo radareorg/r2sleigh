@@ -101,7 +101,8 @@ pub use address::{
 };
 pub use aggregate_access::{
     AGGREGATE_ACCESS_PROJECTION_SCHEMA_VERSION, AggregateAccessBinding, AggregateAccessProjection,
-    AggregateAccessProjectionFacts, AggregateElementIndexProjection,
+    AggregateAccessProjectionFacts, AggregateElementIndexProjection, AggregateRoot, GraphOf,
+    PathStep,
 };
 pub use arena::{OpArena, OpId, OpOrigin, OpSlot, Pass};
 pub use assumption::{
@@ -120,9 +121,10 @@ pub use function::{
     AssumedExits, CFGRiskSummary, CalleeEvidence, CalleePreservedCarriers, DecompileInputs,
     DecompilePrepFacts, DefRef, DefSite, GenuineNativeInstructionSpan, Lifted, NamedBlockMut,
     PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot, RegisterIdentityCensus,
-    RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction, Sealed, SourceRef, SourceSite,
-    SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind, StackAddressBase,
-    StackAddressRoot, TrustedConstruction, TrustedSeal, TrustedSsaArtifact, def_use_graph,
+    RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction, Sealed, SiteConventions,
+    SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind,
+    StackAddressBase, StackAddressRoot, TrustedConstruction, TrustedSeal, TrustedSsaArtifact,
+    def_use_graph,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
@@ -156,17 +158,17 @@ pub use machine::{
     MachineZeroDivisorBehavior, float_width_is_supported, machine_address_provenance,
 };
 pub use machine_context::{
-    MACHINE_CONTEXT_SCHEMA_VERSION, MachineAbiModel, MachineMemoryEndianness, MachineMemoryModel,
-    MachineMemorySpace, MachineRegisterGeometryState, SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
-    SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION, SOURCE_TYPE_GRAPH_SCHEMA_VERSION,
-    SourceAbiParameterSpec, SourceAggregateLayout, SourceAggregateMember, SourceArity,
-    SourceArityFloor, SourceBoundaryReads, SourceCallArgumentSpec, SourceCallEffect,
-    SourceCallResult, SourceCallSiteIdentity, SourceCallSiteInterface,
-    SourceCallSiteInterfaceError, SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature,
-    SourceConventionSlots, SourceFloorCause, SourceFormatParameterRule, SourceFunctionInterface,
-    SourceFunctionInterfaceError, SourceFunctionReturn, SourceLogicalValue, SourceMachineContext,
-    SourceMachineRoles, SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation,
-    SourceResultCause, SourceResultSeed, SourceResultWidth, SourceStackAllocationContract,
+    DataStructs, MACHINE_CONTEXT_SCHEMA_VERSION, MachineAbiModel, MachineMemoryEndianness,
+    MachineMemoryModel, MachineMemorySpace, MachineRegisterGeometryState,
+    SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION, SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION,
+    SOURCE_TYPE_GRAPH_SCHEMA_VERSION, SourceAbiParameterSpec, SourceAggregateLayout,
+    SourceAggregateMember, SourceArity, SourceArityFloor, SourceCallArgumentSpec, SourceCallResult,
+    SourceCallSiteIdentity, SourceCallSiteInterface, SourceCallSiteInterfaceError,
+    SourceCarrierKind, SourceCarrierProjection, SourceCodeSignature, SourceFloorCause,
+    SourceFormatParameterRule, SourceFunctionInterface, SourceFunctionInterfaceError,
+    SourceFunctionReturn, SourceLogicalValue, SourceMachineContext, SourceMachineRoles,
+    SourceMachineRolesError, SourceOpaqueTag, SourceParameterLocation, SourceResultCause,
+    SourceResultSeed, SourceResultWidth, SourceSlot, SourceStackAllocationContract,
     SourceStackGrowth, SourceStackSlotRole, SourceStackSlotSpec, SourceTagKeyword, SourceType,
     SourceTypeAlias, SourceTypeClosure, SourceTypeGraph, SourceTypeGraphError,
     SourceTypeGraphParts, SourceTypeKind, SourceUnprovenCall, SourceUnprovenResult,
@@ -186,7 +188,9 @@ pub use r2sleigh_lift::{
     GENUINE_LIFT_PROVENANCE_SCHEMA_VERSION, GenuineLiftedFunction, GenuineLiftedFunctionAuthority,
     TrustedLiftedFunction,
 };
-pub use r2source::{ConventionId, OwnedFunctionSnapshot};
+pub use r2source::{
+    CallRegisterEffect, ConventionId, ConventionModel, Conventions, OwnedFunctionSnapshot,
+};
 pub use semantic::{
     BlockAssumption, ByDirection, CallArgumentCertificate, CallArgumentLocation,
     CallBoundaryRefusal, CallBoundarySlot, CallBoundaryValueFact, CallFrameReach, CallMemoryEffect,

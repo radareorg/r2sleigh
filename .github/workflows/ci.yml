@@ -298,6 +298,9 @@ jobs:
           python3 scripts/test_upstream_drift.py
           python3 scripts/test_mutants_d75.py
           python3 scripts/test_scratch_void.py
+          python3 scripts/test_roadmap_gaps.py
+          python3 scripts/test_s35_clauses.py
+          python3 scripts/test_arm64_canary.py
           python3 scripts/test_void_soundness.py
           python3 scripts/mutants_d213.py --check
           python3 scripts/mutants_s31a.py --check
@@ -923,6 +926,48 @@ jobs:
             ${{ runner.temp }}/equiv/baseline.proposed.json
           if-no-files-found: warn
 
+  # D203 on AArch64 (ROADMAP D246): source-gold's scratch-void shapes, cross-built with gcc 13, graded under
+  # --target aarch64; build names carry the target qualifier, so known.txt keys never collide with the x86 ones.
+  source-gold-aarch64:
+    name: Source-Gold Scratch Void aarch64
+    runs-on: ubuntu-24.04
+    needs: [plan, build, aarch64-toolchain]
+    if: needs.plan.outputs.full == 'true'
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/download-artifact@v8
+        with:
+          name: r2s
+          path: target/ci
+      - run: chmod +x target/ci/r2s
+      - uses: actions/download-artifact@v8
+        with:
+          name: aarch64-toolchain
+          path: debs
+      - name: Install the AArch64 cross toolchain
+        run: |
+          sudo dpkg -i debs/*.deb
+          aarch64-linux-gnu-gcc --version | head -n 1
+      - name: Grade what each return leaves in the result register
+        run: |
+          set -eu
+          out=target/source-gold-aarch64
+          mkdir -p "$out"
+          aarch64-linux-gnu-gcc -g -O2 -fstack-protector-strong -o "$out/scratch_debug" tests/gold/source_gold/scratch.c
+          aarch64-linux-gnu-gcc -g -O2 -o "$out/returns_debug" tests/gold/source_gold/returns.c
+          aarch64-linux-gnu-gcc -g -O2 -o "$out/clones_debug" tests/gold/source_gold/clones.c
+          for shape in scratch returns clones; do
+            aarch64-linux-gnu-strip -o "$out/${shape}_stripped" "$out/${shape}_debug"
+          done
+          python3 scripts/scratch_void.py --r2s target/ci/r2s --target aarch64 \
+            --build aarch64-scratch "$out/scratch_debug" "$out/scratch_stripped" \
+            --build aarch64-returns "$out/returns_debug" "$out/returns_stripped" \
+            --build aarch64-clones "$out/clones_debug" "$out/clones_stripped" \
+            --known tests/gold/scratch_void/known.txt \
+            --baseline tests/gold/scratch_void/ci_baseline_aarch64.json \
+            --json "$out/scratch_void.json"
+
   # ── Whole-binary render coverage ────────────────────────────────────
   #
   # The other gates score nine hand-picked functions and check that what they
@@ -965,7 +1010,7 @@ jobs:
     name: Release Build
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: [quality, capture-gate, diff-r2, source-gold, equivalence-harness, equivalence, equivalence-aarch64, coverage]
+    needs: [quality, capture-gate, diff-r2, source-gold, source-gold-aarch64, equivalence-harness, equivalence, equivalence-aarch64, coverage]
     if: github.ref == 'refs/heads/master'
     steps:
       - uses: actions/checkout@v7

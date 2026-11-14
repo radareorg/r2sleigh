@@ -16,8 +16,7 @@ impl SsaArtifact {
 /// Each caller slot only read, with what it holds. One pass over the accesses and the formals.
 fn caller_stack_slots(artifact: &SsaArtifact) -> BTreeMap<ObjectId, CallerStackSlotCertificate> {
     let machine = artifact.machine_context();
-    let area_placed = (machine.convention_slots())
-        .is_some_and(|slots| slots.stack_arguments().is_some())
+    let area_placed = (machine.convention()).is_some_and(|model| model.stack_arguments().is_some())
         && (machine.return_mechanism().is_some() || !machine.call_moves_stack_pointer());
     let formals = (artifact.facts().boundaries.parameters.values())
         .filter_map(|formal| match formal.home {

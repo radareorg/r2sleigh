@@ -111,7 +111,7 @@ NAME=0x00401070
 FILE=tests/coverage/pinned/branchy_gcc_x64_O0
 CMDS=aa; pdd @ 0x00401070
 EXPECT=<<EOF
-r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, r2sleigh_word_u64 arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, void* arg2)
 {
     uint64_t tmp_401079_0_2;
 
@@ -1060,7 +1060,7 @@ CMDS=aa; pdd @ 0x00401764
 EXPECT=<<EOF
 struct fcn_401472_arg0;
 
-r2sleigh_result_u32 fcn_401764(void)
+r2sleigh_word_u32 fcn_401764(void)
 {
     r2sleigh_word_u32 addr_chain(void);
     r2sleigh_word_u32 affine_probe(r2sleigh_word_u32);
@@ -1138,7 +1138,7 @@ r2sleigh_result_u32 fcn_401764(void)
     uint64_t rax_62;
     _Alignas(16) uint8_t frame[568];
 
-    /* r2dec proof: no individual construct is marked; 544 source obligations: 359 rendered, 170 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 12 assumed (frame extent unproven); 79 statements rendered; 6 callee prototypes supplied by the source; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 544 source obligations: 359 rendered, 170 elided, 0 refused, 3 compiler-inserted (assuming ub-free), 12 assumed (frame extent unproven); 79 statements rendered; 6 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
     /* symbol `main`; C allows that name no other prototype */
     {
         r2sleigh_store_u64((void*)(uint64_t)(frame + 48U), (uint64_t)0U);
@@ -1223,7 +1223,7 @@ r2sleigh_result_u32 fcn_401764(void)
         rax_62 = (uint64_t)addr_chain();
         printf("%d %d %d\n", (uint64_t)(uint32_t)((uint64_t)rax_62 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_61 >> 0U), (uint64_t)(uint32_t)((uint64_t)rax_59 >> 0U));
         {
-            return r2sleigh_carrier_u32(0);
+            return 0;
         }
     }
 }

@@ -39,8 +39,16 @@ fn prepared_parameter_indexed_accesses_keep_semantic_index_identity() {
         b"prepared-indexed-access-fixture".to_vec(),
         r2source::ConventionId::SysVAmd64,
         [
-            r2ssa::SourceAbiParameterSpec::new(0, register_storage(0x10)),
-            r2ssa::SourceAbiParameterSpec::new(1, register_storage(0x18)),
+            r2ssa::SourceAbiParameterSpec::new(
+                0,
+                register_storage(0x10),
+                r2source::SourceSlot::integer(0),
+            ),
+            r2ssa::SourceAbiParameterSpec::new(
+                1,
+                register_storage(0x18),
+                r2source::SourceSlot::integer(1),
+            ),
         ],
         r2ssa::SourceFunctionReturn::Void,
         [],

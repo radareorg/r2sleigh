@@ -713,7 +713,7 @@ static inline struct r2sleigh_bits_256 r2sleigh_bits_zero_extend_64_256(uint64_t
     return carrier;
 }
 
-r2sleigh_result_u64 _main(r2sleigh_word_u32 arg0, r2sleigh_word_u64* arg1)
+r2sleigh_word_u64 _main(r2sleigh_word_u32 arg0, r2sleigh_word_u64* arg1)
 {
     r2sleigh_word_u64 _fnv_fold(uint8_t*, uint64_t);
     r2sleigh_word_u64 _mem_scan2(uint8_t*, uint64_t, uint8_t, uint8_t);
@@ -753,9 +753,10 @@ r2sleigh_result_u64 _main(r2sleigh_word_u32 arg0, r2sleigh_word_u64* arg1)
     uint64_t x0_18;
     uint64_t x8_44;
     uint32_t tmp_100000fb4_8_1;
+    uint32_t tmp_100000fc0_8_1;
     _Alignas(16) uint8_t frame[192];
 
-    /* r2dec proof: 1 construct is marked below; 222 source obligations: 169 rendered, 35 elided, 0 refused, 16 assumed (frame extent unproven), 2 residual; 56 statements rendered; 1 data object type refused; 1 callee prototype supplied by the source; the result is unproven (Written): 0 unproven-return carried, 1 unproven-return residual */
+    /* r2dec proof: no individual construct is marked; 225 source obligations: 174 rendered, 35 elided, 0 refused, 16 assumed (frame extent unproven); 56 statements rendered; 1 data object type refused; 1 callee prototype supplied by the source; a call reads the result (assuming closed-world) */
     {
         r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)124U), (uint32_t)0U);
         r2sleigh_store_u32((void*)((uint64_t)(frame + 48U) + (uint64_t)120U), (uint32_t)arg0);
@@ -826,8 +827,8 @@ r2sleigh_result_u64 _main(r2sleigh_word_u32 arg0, r2sleigh_word_u64* arg1)
                     x8_44 = r2sleigh_load_u64((void*)(uint64_t)(frame + 0U));
                     tmp_100000fb4_8_1 = r2sleigh_load_u32((void*)x8_44);
                     r2sleigh_store_u32((void*)x8_44, (uint32_t)((uint32_t)((uint64_t)x0_18 >> 0U) + (uint32_t)tmp_100000fb4_8_1));
-                    (void)r2sleigh_load_u32((void*)x8_44);
-                    return r2sleigh_residual_u64(1);
+                    tmp_100000fc0_8_1 = r2sleigh_load_u32((void*)x8_44);
+                    return (uint64_t)(uint8_t)((uint32_t)tmp_100000fc0_8_1 == (uint32_t)0U);
                 }
             }
         }

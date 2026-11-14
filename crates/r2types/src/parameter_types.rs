@@ -209,11 +209,10 @@ impl ParameterTypes {
         }
     }
 
-    /// The table over an interface's parameters, at the slot each states; a spec no producer
-    /// numbered (a test's) stands at its formal position. O(parameters).
+    /// The table over an interface's parameters, at the slot each states. O(parameters).
     pub fn of_interface(interface: &r2source::SourceFunctionInterface) -> Self {
-        let formals = (interface.parameters().iter().enumerate())
-            .map(|(formal, spec)| SlotId(spec.slot().map_or(formal as u32, |slot| slot.id)))
+        let formals = (interface.parameters().iter())
+            .map(|spec| SlotId(spec.slot().id))
             .collect();
         Self::over(formals)
     }

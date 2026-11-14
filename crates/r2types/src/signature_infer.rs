@@ -908,7 +908,11 @@ mod tests {
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"aarch64-stack-fixture".to_vec(),
             r2source::ConventionId::Aapcs64,
-            [r2ssa::SourceAbiParameterSpec::new(0, parameter)],
+            [r2ssa::SourceAbiParameterSpec::new(
+                0,
+                parameter,
+                r2source::SourceSlot::integer(0),
+            )],
             r2ssa::SourceFunctionReturn::Void,
             [stack_slot],
         )

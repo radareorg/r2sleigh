@@ -34,7 +34,8 @@ pub use certificates::*;
 pub use control_domains::*;
 pub(crate) use declared_slots::*;
 pub use facts::*;
-pub use frame_reach::{CallFrameReach, FrameReach};
+pub(crate) use frame_reach::{Access, Walked, walk};
+pub use frame_reach::{CallFrameReach, FramePoints, FrameReach};
 pub(crate) use loops::*;
 pub(crate) use objects::*;
 pub(crate) use predicates::*;
@@ -312,11 +313,7 @@ impl PreparedFunctionFacts {
         // performs, and two reads of the same bytes the same memory versions
         // reach hold one content; both are known here, before anything reads
         // a span, so liveness is computed once, with them.
-        let ignored_reads = crate::function::uncertified_call_reads(
-            graph,
-            prep.map(|facts| &facts.views),
-            &boundaries,
-        );
+        let ignored_reads = crate::function::unpassed_call_reads(graph, &boundaries);
         let mut content = crate::liveness::ValueContent::of(graph, machine_context);
         content.declare_same_content(&crate::function::same_content_reads(
             &memory_accesses,
@@ -490,7 +487,13 @@ fn demanded(
     let live_out = &without;
     let (tails, reads) = tail_reads(body, calls).unwrap_or_default();
     crate::demand::exits_are_named_beside(body.function, live_out, &tails).then(|| {
-        crate::demand::DemandedBytes::of_returning(body.graph, live_out, (result, &reads), ignored)
+        let reads = (result, reads.as_slice());
+        crate::demand::DemandedBytes::of_returning(
+            body.graph,
+            live_out,
+            reads,
+            (ignored, body.machine_context),
+        )
     })
 }
 
@@ -641,8 +644,10 @@ pub(crate) fn ensure_source_formal_parameter_values(
     // what a call may read implicitly is fixed by the calling convention, and
     // a function whose captured prototype declares fewer parameters than it
     // passes through is exactly the case that needs this.
-    if let Some(slots) = machine_context.convention_slots() {
-        let argument_storages = slots.argument_slots().to_vec();
+    if let Some(slots) = machine_context.convention() {
+        let argument_storages = slots
+            .arguments(r2source::convention::SlotClass::Integer)
+            .to_vec();
         for storage in argument_storages {
             materialize(graph, &mut existing, storage);
         }

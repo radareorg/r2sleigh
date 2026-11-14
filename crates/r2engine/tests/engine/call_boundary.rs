@@ -936,6 +936,50 @@ fn printing_from(held: u32, format: &[u8], writable: bool) -> String {
     rendered.response.output.into_text()
 }
 
+/// clang -O0's shape (D221, Gb): `caller` spills the format to `[sp, #16]`, calls `f`, and reloads
+/// it in the next block for `printf(format, 7)`. Where `handed` the slot's address is `f`'s x1.
+fn printing_spilled(format: &[u8], handed: bool) -> String {
+    let code = aarch64_with_printf(&[
+        (F, 0xd65f_03c0),                                              // ret
+        (BASE + 0x10, 0xa9be_7bfd),                                    // stp x29, x30, [sp, #-32]!
+        (BASE + 0x14, 0x9000_0008),                                    // adrp x8, 0x1000
+        (BASE + 0x18, 0x9102_8108),                                    // add x8, x8, #0xa0
+        (BASE + 0x1c, 0xf900_0be8),                                    // str x8, [sp, #16]
+        (BASE + 0x20, if handed { 0x9100_43e1 } else { 0xd503_201f }), // add x1, sp, #16 | nop
+        (BASE + 0x24, 0x97ff_fff9),                                    // bl f
+        (BASE + 0x28, 0x1400_0001),                                    // b 0x102c
+        (BASE + 0x2c, 0xf940_0be0),                                    // ldr x0, [sp, #16]
+        (BASE + 0x30, 0x5280_00e1),                                    // mov w1, #7
+        (BASE + 0x34, 0x9400_0017),                                    // bl printf
+        (BASE + 0x38, 0xa8c2_7bfd),                                    // ldp x29, x30, [sp], #32
+        (BASE + 0x3c, 0xd65f_03c0),                                    // ret
+    ]);
+    let program = Literal::of_code(code, &[("f", F, 0x04), ("caller", BASE + 0x10, 0x30)])
+        .in_aarch64()
+        .with_data()
+        .importing("printf");
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(common::TEXT, format);
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(F).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// Gb: the reload equals the spill, since no call may write a slot whose address stays in the
+/// function, so the format folds and `f`'s q0 to q3 die at `printf`.
+#[test]
+fn a_spilled_format_reloaded_in_another_block_reads_no_vector_register() {
+    let text = printing_spilled(b"%d\n\0", false);
+    assert!(text.starts_with("void f("), "{text}");
+}
+
+/// A call handed the slot's address may write it: the reload is unknown and q0 stays taken.
+#[test]
+fn a_spilled_format_whose_slot_a_call_receives_keeps_q0_taken() {
+    let text = printing_spilled(b"%d\n\0", true);
+    assert!(!text.starts_with("void f("), "{text}");
+}
+
 /// D218: a format with no floating conversion reads no vector register, so `f`'s q0 to q3 die at
 /// `printf`: void under `aa`, the format held in x19, which the call to `f` preserves.
 #[test]
@@ -1046,9 +1090,116 @@ fn a_termination_function_the_loader_alone_calls_is_void() {
         .expect("it renders");
     let cold = cold.response.output.into_text();
     assert!(cold.contains("return r2sleigh_residual_"), "{cold}");
-    // An initialiser has no row: glibc passes it `argc, argv, envp`, and the gABI states no type.
+    // A library no container evidence names states no initialiser row (D240).
     let init = analysed(entered(EntryKind::InitHook));
     assert!(init.contains("return r2sleigh_residual_"), "{init}");
+}
+
+/// glibc calls each constructor as a statement (`elf/dl-init.c`, `csu/libc-start.c`), so a body
+/// that reads none of `argc, argv, envp` is `void f(void)` under `aa`, keyed by the library (D240).
+#[test]
+fn a_glibc_constructor_reading_no_argument_is_void() {
+    use r2abi::statement::EntryKind;
+    for kind in [EntryKind::InitHook, EntryKind::Init, EntryKind::Preinit] {
+        let text = analysed(entered(kind).running_on(common::GLIBC));
+        assert!(text.starts_with("void f(void)"), "{kind:?}: {text}");
+        assert!(
+            text.contains("; no call reads the result (assuming closed-world)"),
+            "{kind:?}: {text}"
+        );
+    }
+}
+
+/// musl's `do_init_fini` calls a constructor with no argument and drops its value (D240).
+#[test]
+fn a_musl_constructor_is_void() {
+    use r2abi::statement::EntryKind;
+    use r2engine::program::{Libc, PlatformEvidence};
+    let musl = [PlatformEvidence::Interpreter(Libc::Musl)];
+    let text = analysed(entered(EntryKind::Init).running_on(&musl));
+    assert!(text.starts_with("void f(void)"), "{text}");
+    // musl runs no preinit array: no row, so the entry stays a way in.
+    let preinit = analysed(entered(EntryKind::Preinit).running_on(&musl));
+    assert!(preinit.contains("return r2sleigh_residual_"), "{preinit}");
+}
+
+/// Bionic's linker and a library the container does not name have no cited row: the entry is a
+/// way in whose read nothing states, so the result stays unproven (D240).
+#[test]
+fn an_unknown_library_constructor_escapes() {
+    use r2abi::statement::EntryKind;
+    use r2engine::program::{Libc, PlatformEvidence};
+    let bionic = [PlatformEvidence::Interpreter(Libc::Bionic)];
+    for program in [
+        entered(EntryKind::Init),
+        entered(EntryKind::Init).running_on(&bionic),
+    ] {
+        let text = analysed(program);
+        assert!(text.contains("return r2sleigh_residual_"), "{text}");
+    }
+}
+
+/// The row states what glibc reads, never what it passes: a constructor storing RDI keeps it as
+/// its one parameter, and its result is still void (D240).
+#[test]
+fn a_constructor_reading_rdi_keeps_one_parameter() {
+    use r2abi::statement::EntryKind;
+    let mut program = Literal::of_code(FINI, &[("f", BASE, 0x09)])
+        .writable_data_after(BASE + 0x20)
+        .text_ending(BASE + 0x20)
+        .entering_from(BASE, EntryKind::Init, BASE + 0x20)
+        .running_on(common::GLIBC);
+    // 1000 mov [rip + 0x21], rdi (0x1028); 1007 nop; 1008 ret
+    program.write(
+        BASE,
+        &[0x48, 0x89, 0x3d, 0x21, 0x00, 0x00, 0x00, 0x90, 0xc3],
+    );
+    let text = analysed(program);
+    assert!(text.starts_with("void f(r2sleigh_word_u64 arg0)"), "{text}");
+}
+
+/// A PIE's fini array slot is a `RELA` record's place: the loader's word there and the record's
+/// addend word both name the entry, and both are the slot's, so the loader's call is the one way in (D239).
+#[test]
+fn a_pie_fini_entry_named_by_a_relative_addend_is_unread() {
+    use r2abi::statement::{Applies, EntryKind, Relocation, StatedAt};
+    let relative = |place: u64| Relocation {
+        vaddr: place,
+        ntype: 8,
+        width: 8,
+        addend: Some(BASE as i64),
+        addend_at: Some(StatedAt {
+            offset: 0x28,
+            vaddr: Some(BASE + 0x28),
+        }),
+        applies: Applies::Relative,
+        ..Relocation::default()
+    };
+    let slot = BASE + 0x20;
+    let addended = |record: Relocation| {
+        let mut program = (entered(EntryKind::Fini).relocated(record)).loader_written(
+            r2engine::program::LoaderWrite {
+                place: slot,
+                width: 8,
+                kind: r2engine::program::WriteKind::Relative(BASE),
+                encoding: r2abi::statement::Encoding::Word,
+            },
+        );
+        program.write(BASE + 0x28, &BASE.to_le_bytes());
+        program
+    };
+    let text = analysed(addended(relative(slot)));
+    assert!(text.starts_with("void f(void)"), "{text}");
+    // The addend word of a record writing elsewhere, or not stating `f`, names `f` once more.
+    let elsewhere = relative(BASE + 0x30);
+    let other = Relocation {
+        addend: Some(BASE as i64 + 1),
+        ..relative(slot)
+    };
+    for record in [elsewhere, other] {
+        let text = analysed(addended(record));
+        assert!(text.contains("return r2sleigh_residual_"), "{text}");
+    }
 }
 
 /// The row speaks for the loader's call alone: another word naming `f` is a way in it does not
@@ -1083,6 +1234,42 @@ fn a_termination_function_another_way_reaches_keeps_its_result() {
         text.contains("; a call reads the result (assuming closed-world)"),
         "{text}"
     );
+}
+
+/// dyld hands `main`'s `int` to `exit` (r2abi `loader_call`, D227): a Mach-O `LC_MAIN` body
+/// writing EAX and XMM0 returns its integer lane under `aa`; cold, both stay a residual.
+#[test]
+fn dyld_reads_the_integer_lane_of_the_main_a_mach_o_names() {
+    use r2abi::statement::EntryKind;
+    let program = |format_mach_o: bool| {
+        let mut program = Literal::of_code(FINI, &[("f", BASE, 0x09)])
+            .data_mapped_after(BASE + 0x20)
+            .text_ending(BASE + 0x20)
+            .entering(BASE, EntryKind::CMain);
+        // 1000 xorps xmm0, xmm0; 1003 mov eax, 7; 1008 ret
+        program.write(
+            BASE,
+            &[0x0f, 0x57, 0xc0, 0xb8, 0x07, 0x00, 0x00, 0x00, 0xc3],
+        );
+        match format_mach_o {
+            true => program.mach_o(),
+            false => program,
+        }
+    };
+    let cold = OpenProgram::of(program(true))
+        .rendered(BASE)
+        .expect("it renders");
+    let cold = cold.response.output.into_text();
+    assert!(cold.contains("unproven"), "{cold}");
+    let text = analysed(program(true));
+    assert!(text.starts_with("r2sleigh_word_u32 f(void)"), "{text}");
+    assert!(
+        text.contains("; a call reads the result (assuming closed-world)"),
+        "{text}"
+    );
+    // No ELF row states a `CMain`: nothing reads either lane.
+    let elf = analysed(program(false));
+    assert!(elf.contains("unproven"), "{elf}");
 }
 
 /// `f` is `fld1; ret`: its result is x87 st0, a lane no typed lane covers; `caller` stores st0 and
@@ -1182,4 +1369,236 @@ fn a_forwarded_unstated_float_result_is_never_void() {
     assert!(!text.starts_with("void f("), "{text}");
     let text = analysed(program());
     assert!(!text.starts_with("void f("), "{text}");
+}
+
+/// `text` at 0x1000, padded with `int3` to `atexit`'s stub at 0x1090, which jumps through 0x1098;
+/// `handler` at 0x1010 calls `helper` at 0x1018 (`mov eax, 1; ret`), so its RAX is written.
+fn at_exit(text: &[u8], import: &str) -> Literal {
+    let mut code = vec![0xcc; 0xa0];
+    code[..text.len()].copy_from_slice(text);
+    code[0x10..0x1e].copy_from_slice(&[
+        0xe8, 0x03, 0x00, 0x00, 0x00, // 1010 call 0x1018
+        0xc3, // 1015 ret
+        0xcc, 0xcc, // 1016 padding
+        0xb8, 0x01, 0x00, 0x00, 0x00, // 1018 mov eax, 1
+        0xc3, // 101d ret
+    ]);
+    code[0x90..0x96].copy_from_slice(&[0xff, 0x25, 0x02, 0x00, 0x00, 0x00]); // jmp [rip + 2]
+    code[0x98..0xa0].fill(0);
+    let mut functions = vec![("main", BASE, 0x10), ("handler", HANDLER, 0x06)];
+    functions.push(("helper", BASE + 0x18, 0x06));
+    if text.len() > 0x20 {
+        functions.push(("wrapper", BASE + 0x20, text.len() as u64 - 0x20));
+    }
+    let code: &'static [u8] = Box::leak(code.into_boxed_slice());
+    Literal::of_code(code, &functions)
+        .importing(import)
+        .running_on(common::GLIBC)
+}
+
+/// `lea rdi, [rip + 9]: handler; call the stub; xor eax, eax; ret`.
+const TAKES_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, 0xe8, 0x84, 0x00, 0x00, 0x00, 0x31, 0xc0, 0xc3,
+];
+
+/// `lea rdi, [rip + 9]: handler; call rdi` at 0x1007, then `ret`: the take reaches an indirect call.
+const CALLS_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, 0xff, 0xd7, 0x31, 0xc0, 0xc3,
+];
+
+/// `main: lea rdi, [handler]; call wrapper; xor edi, edi; ret`, and `wrapper` at 0x1020 as
+/// libc_nonshared's `atexit` (find `0x278e0`): `xor edx, edx; xor esi, esi; jmp __cxa_atexit`.
+const WRAPS_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, // 1000 lea rdi, [rip + 9]: handler
+    0xe8, 0x14, 0x00, 0x00, 0x00, // 1007 call 0x1020
+    0x31, 0xff, 0xc3, // 100c xor edi, edi; ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 100f the handler's room
+    0x31, 0xd2, 0x31, 0xf6, // 1020 xor edx, edx; xor esi, esi
+    0xe9, 0x67, 0x00, 0x00, 0x00, // 1024 jmp the stub
+];
+
+/// [`TAKES_HANDLER`] that also calls the handler and stores its EAX: `call 0x1010; mov [rsi], eax`.
+const READS_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, // 1000 lea rdi, [rip + 9]: handler
+    0xe8, 0x84, 0x00, 0x00, 0x00, // 1007 call the stub
+    0xeb, 0x12, // 100c jmp 0x1020
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, // 100e the handler's room
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1020 call 0x1010
+    0x89, 0x06, 0xc3, // 1025 mov [rsi], eax; ret
+];
+
+const HANDLER: u64 = BASE + 0x10;
+
+fn handler_rendered(literal: Literal, survey: bool) -> String {
+    handler_answer(literal, survey).0
+}
+
+/// The handler's text and the premises its answer takes.
+fn handler_answer(
+    literal: Literal,
+    survey: bool,
+) -> (String, std::collections::BTreeSet<r2source::Premise>) {
+    let mut open = OpenProgram::of(literal);
+    if survey {
+        open.analyse_program().expect("it surveys");
+    }
+    let rendered = open.rendered(HANDLER).expect("it renders");
+    let premises = rendered.response.premises.clone();
+    (rendered.response.output.into_text(), premises)
+}
+
+/// A handler whose address only reaches `atexit`'s cited `void (*)(void)` slot returns nothing
+/// under the closed world, though its RAX is written; cold, it stays unproven (S30, D205).
+#[test]
+fn a_handler_only_atexit_takes_is_void_under_the_closed_world() {
+    let closed = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), true);
+    assert!(closed.contains("void handler(void)"), "{closed}");
+    let cold = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), false);
+    assert!(!cold.contains("void handler("), "{cold}");
+}
+
+/// A slot no cited row types `void` (`qsort`'s comparator returns `int`), or a take a call
+/// through the register reads, proves nothing: the handler keeps its written result.
+#[test]
+fn a_take_into_no_void_slot_keeps_the_result() {
+    let qsort = handler_rendered(at_exit(TAKES_HANDLER, "qsort"), true);
+    assert!(!qsort.contains("void handler("), "{qsort}");
+    let called = handler_rendered(at_exit(CALLS_HANDLER, "atexit"), true);
+    assert!(!called.contains("void handler("), "{called}");
+    // A direct call that reads the result decides it, whatever the slot says.
+    let read = handler_rendered(at_exit(READS_HANDLER, "atexit"), true);
+    assert!(!read.contains("void handler("), "{read}");
+}
+
+/// A wrapper that tail-jumps to `__cxa_atexit` with RDI untouched hands its parameter into the
+/// cited `void (*)(void *)` slot, so a handler only it takes is void (S30, find's `close_stdout`).
+#[test]
+fn a_handler_a_wrapper_hands_to_cxa_atexit_is_void_under_the_closed_world() {
+    let closed = handler_rendered(at_exit(WRAPS_HANDLER, "__cxa_atexit"), true);
+    assert!(closed.contains("void handler(void)"), "{closed}");
+}
+
+/// `main: lea rdi, [handler]; call 0x1020`; `0x1020: jmp 0x1028` and `0x1028: jmp 0x1020`: two
+/// wrappers forwarding to each other hand the address nowhere, so no slot is proven.
+const CYCLES_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, // 1000 lea rdi, [rip + 9]: handler
+    0xe8, 0x14, 0x00, 0x00, 0x00, // 1007 call 0x1020
+    0x31, 0xff, 0xc3, // 100c xor edi, edi; ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 100f the handler's room
+    0xeb, 0x06, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1020 jmp 0x1028
+    0xeb, 0xf6, // 1028 jmp 0x1020
+];
+
+#[test]
+fn wrappers_forwarding_to_each_other_prove_no_slot() {
+    let mut literal = at_exit(CYCLES_HANDLER, "atexit");
+    literal = literal.stating("other", BASE + 0x28);
+    let mut open = OpenProgram::of(literal);
+    open.analyse_program().expect("it surveys");
+    let text = open
+        .rendered(HANDLER)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(!text.contains("void handler("), "{text}");
+    assert_eq!(open.analysis_stats().defects, 0);
+}
+
+/// `main`'s extern for `atexit` spells the cited slot's code pointer.
+#[test]
+fn the_atexit_extern_spells_its_slot() {
+    let mut open = OpenProgram::of(at_exit(TAKES_HANDLER, "atexit"));
+    open.analyse_program().expect("it surveys");
+    let text = open
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(text.contains("int32_t atexit(void(*)(void));"), "{text}");
+}
+
+/// `_start`'s shape: `lea rdi, [rip + 9]: handler; call __libc_start_main; hlt`.
+const STARTS_HANDLER: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x09, 0x00, 0x00, 0x00, 0xe8, 0x84, 0x00, 0x00, 0x00, 0xf4,
+];
+
+/// [`STARTS_HANDLER`] handing the address in RCX, `__libc_start_main`'s `init`: `lea rcx, [rip + 9]`.
+const STARTS_HANDLER_AS_INIT: &[u8] = &[
+    0x48, 0x8d, 0x0d, 0x09, 0x00, 0x00, 0x00, 0xe8, 0x84, 0x00, 0x00, 0x00, 0xf4,
+];
+
+/// A function only `__libc_start_main`'s cited `int (*)(int, char **, char **)` slot takes returns
+/// that `int` under the closed world, though its RAX is a call's: LSB passes it to `exit` (D227).
+#[test]
+fn a_main_only_libc_start_main_takes_returns_its_int_under_the_closed_world() {
+    let (closed, premises) = handler_answer(at_exit(STARTS_HANDLER, "__libc_start_main"), true);
+    assert!(
+        premises.contains(&r2source::Premise::ClosedWorld),
+        "{premises:?}"
+    );
+    assert!(
+        closed.contains("r2sleigh_word_u32 handler(void)"),
+        "{closed}"
+    );
+    assert!(
+        closed.contains("reads the result (assuming closed-world)"),
+        "{closed}"
+    );
+    let cold = handler_rendered(at_exit(STARTS_HANDLER, "__libc_start_main"), false);
+    assert!(cold.contains("the result is unproven"), "{cold}");
+}
+
+/// A non-PIE `_start` forms the address as an immediate, `mov edi, 0x1010`: the word inside that
+/// instruction is the take itself, so it is no stored word and `main` is no escape (D227).
+#[test]
+fn a_main_an_immediate_hands_to_libc_start_main_returns_its_int() {
+    const STARTS_BY_IMMEDIATE: &[u8] = &[
+        0xbf, 0x10, 0x10, 0x00, 0x00, // 1000 mov edi, 0x1010
+        0xe8, 0x86, 0x00, 0x00, 0x00, // 1005 call the stub
+        0xf4, // 100a hlt
+    ];
+    let closed = handler_rendered(at_exit(STARTS_BY_IMMEDIATE, "__libc_start_main"), true);
+    assert!(
+        closed.contains("r2sleigh_word_u32 handler(void)"),
+        "{closed}"
+    );
+}
+
+/// `init`'s slot is `func`, which states no return, so a function taken into it keeps its residual.
+#[test]
+fn a_take_into_a_slot_that_states_no_return_reads_nothing() {
+    let init = handler_rendered(at_exit(STARTS_HANDLER_AS_INIT, "__libc_start_main"), true);
+    assert!(init.contains("the result is unproven"), "{init}");
+}
+
+/// `p1` at 0x1000 calls `p2` and `x`; `p2` at 0x1010 calls `x`; `x` at 0x1020 is `mov eax, 1; ret`.
+const CALLERS_CALLING_EACH_OTHER: &[u8] = &[
+    0xe8, 0x0b, 0x00, 0x00, 0x00, 0xe8, 0x16, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xe8, 0x0b, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3,
+];
+
+/// `x`'s calls are read from `p2`'s site fates before `p1`'s, which reads `p2`'s register effect:
+/// that effect is then the deposited one, and no body is lifted twice (D354).
+#[test]
+fn a_caller_that_calls_another_caller_is_read_after_it() {
+    let functions = [
+        ("p1", BASE, 0x0b),
+        ("p2", BASE + 0x10, 6),
+        ("x", BASE + 0x20, 6),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(CALLERS_CALLING_EACH_OTHER, &functions));
+    open.analyse_program().expect("it surveys");
+    let before = open.analysis_stats().walked.computed;
+    open.rendered(BASE + 0x20).expect("it renders");
+    let stats = open.analysis_stats();
+    assert_eq!(stats.defects, 0);
+    let walked = stats.walked.computed - before;
+    // `x` for its own render and for its register effect, `p2` and `p1` once each.
+    assert_eq!(walked, 4, "walks during the request");
 }

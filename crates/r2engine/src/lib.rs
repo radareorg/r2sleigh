@@ -24,7 +24,6 @@ pub mod program;
 pub mod query;
 pub mod stated;
 
-use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -32,8 +31,6 @@ use std::time::{Duration, Instant};
 use r2il::R2ILBlock;
 use r2ssa::SsaArtifact;
 use r2types::FunctionFacts;
-#[cfg(test)]
-use r2types::FunctionTypeFacts;
 use serde::{Deserialize, Serialize};
 
 mod json;
@@ -74,8 +71,8 @@ pub struct EngineSourceSnapshot {
     function_interface: Option<r2ssa::SourceFunctionInterface>,
     machine_roles: r2ssa::SourceMachineRoles,
     call_site_interfaces: Box<[r2ssa::SourceCallSiteInterface]>,
-    /// What the source's convention says a call does, where it says.
-    call_effect: Option<r2ssa::SourceCallEffect>,
+    /// The function's convention and its calls', where the source states them.
+    conventions: Option<r2ssa::Conventions>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -148,19 +145,19 @@ impl EngineSourceSnapshot {
             function_interface,
             machine_roles,
             call_site_interfaces: call_site_interfaces.into_boxed_slice(),
-            call_effect: None,
+            conventions: None,
         })
     }
 
-    /// State what the source's convention says a call does.
+    /// State the function's convention and its calls'.
     #[must_use]
-    pub fn with_call_effect(mut self, call_effect: r2ssa::SourceCallEffect) -> Self {
-        self.call_effect = Some(call_effect);
+    pub fn with_conventions(mut self, conventions: r2ssa::Conventions) -> Self {
+        self.conventions = Some(conventions);
         self
     }
 
-    pub const fn call_effect(&self) -> Option<&r2ssa::SourceCallEffect> {
-        self.call_effect.as_ref()
+    pub const fn conventions(&self) -> Option<&r2ssa::Conventions> {
+        self.conventions.as_ref()
     }
 
     pub const fn revision_identity(&self) -> &[u8] {
@@ -582,9 +579,6 @@ fn ssa_prepare_execution_refusal(
         r2ssa::SsaPrepareError::MalformedInput => {
             "malformed SSA source input during ssa phase".to_string()
         }
-        r2ssa::SsaPrepareError::NoCallEffect => {
-            "the convention states nothing a call leaves standing".to_string()
-        }
         r2ssa::SsaPrepareError::Exhausted(exhausted) => exhausted.to_string(),
         r2ssa::SsaPrepareError::Integrity(rule) => format!("SSA integrity: {rule}"),
     };
@@ -622,7 +616,6 @@ pub struct EngineAnalyzeRequest {
     /// the source-owned signature that callers may consume.
     pub ptr_bits: u32,
     pub semantic_metadata_enabled: bool,
-    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub semantic_mode: EngineSemanticMode,
     pub include_interproc_summary_set: bool,
@@ -638,7 +631,6 @@ pub struct EngineAnalyzeRequestParts {
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     pub ptr_bits: u32,
     pub semantic_metadata_enabled: bool,
-    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub include_interproc_summary_set: bool,
 }
@@ -756,7 +748,6 @@ pub struct EngineAnalyzeRequestInput {
     pub source_snapshot: Option<Arc<EngineSourceSnapshot>>,
     pub ptr_bits: Option<u32>,
     pub semantic_metadata_enabled: bool,
-    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub include_interproc_summary_set: bool,
 }
@@ -765,159 +756,15 @@ pub struct EngineAnalyzeRequestInput {
 pub struct EngineAnalyzeFunctionRequestInput {
     pub function: EngineFunctionInput,
     pub ptr_bits: Option<u32>,
-    pub reg_type_hints: FxHashMap<String, r2types::TypeHint>,
     pub parsed_context: r2types::ParsedExternalContext,
     pub include_interproc_summary_set: bool,
-}
-
-/// The struct layouts radare2 captured alongside the function, as the external
-/// type database the field-naming path reads.
-///
-/// The snapshot already carries an aggregate layout for every struct its
-/// signature mentions, but nothing turned those layouts into the database, so
-/// it stayed empty in every real decompile. Field certificates are only kept
-/// when the database confirms a field, so every struct access fell back to
-/// pointer arithmetic however completely radare2 knew the type: `list_sum`
-/// rendered `cur[1]` for `cur->next`.
-fn trusted_external_type_db(trusted: &r2ssa::TrustedSsaArtifact) -> r2types::ExternalTypeDb {
-    let mut db = r2types::ExternalTypeDb::default();
-    let Some(graph) = trusted
-        .source()
-        .function_interface()
-        .and_then(r2ssa::SourceFunctionInterface::type_graph)
-    else {
-        return db;
-    };
-    for aggregate in graph.aggregates() {
-        let name = aggregate.name();
-        if name.is_empty() {
-            continue;
-        }
-        let fields = external_struct_fields(graph, aggregate);
-        if fields.is_empty() {
-            continue;
-        }
-        db.structs.insert(
-            r2types::normalize_external_type_name(name).to_ascii_lowercase(),
-            r2types::ExternalStruct {
-                name: name.to_string(),
-                fields,
-            },
-        );
-    }
-    db
-}
-
-/// The scalar members of an aggregate, keyed by byte offset, with a nested
-/// aggregate flattened into the dotted path that reaches its members.
-///
-/// Code reads the scalars, never the aggregate that contains them, so naming a
-/// four-byte read after the eight-byte `Point` sharing its offset would claim a
-/// member the access is not. Flattening gives that read the name it deserves:
-/// `r->top_left.x` rather than an unnamed subscript.
-///
-/// The type graph refuses an aggregate that holds itself by value, so the
-/// nesting is well founded and read to its end: no aggregate recurs on one
-/// path, a path is at most as long as the graph has aggregates, and each
-/// member of each nested instance is visited once. The members of one struct
-/// occupy disjoint bytes, so no two scalars claim one offset and the order the
-/// explicit stack visits them in does not change the map.
-fn external_struct_fields(
-    graph: &r2ssa::SourceTypeGraph,
-    aggregate: &r2ssa::SourceAggregateLayout,
-) -> std::collections::BTreeMap<u64, r2types::ExternalField> {
-    let mut fields = std::collections::BTreeMap::new();
-    let mut pending = vec![(aggregate, 0u64, String::new())];
-    while let Some((aggregate, base_offset, prefix)) = pending.pop() {
-        for member in aggregate.members() {
-            // A member the capture could not name, or one that does not start on a
-            // byte, cannot be spelled as a field access.
-            if member.name().is_empty() || member.offset_bits() % 8 != 0 {
-                continue;
-            }
-            let Some(offset) = base_offset.checked_add(member.offset_bits() / 8) else {
-                continue;
-            };
-            let path = if prefix.is_empty() {
-                member.name().to_string()
-            } else {
-                format!("{prefix}.{}", member.name())
-            };
-            let member_type = usize::try_from(member.type_id())
-                .ok()
-                .and_then(|id| graph.types().get(id));
-            match member_type.map(r2ssa::SourceType::kind) {
-                // A union's members share one offset, so no single name is the
-                // name of a read at it; the field stays unnamed rather than
-                // guessed.
-                Some(r2ssa::SourceTypeKind::Union { .. }) => {}
-                Some(r2ssa::SourceTypeKind::Struct { aggregate_id }) => {
-                    if let Some(nested) = usize::try_from(aggregate_id)
-                        .ok()
-                        .and_then(|id| graph.aggregates().get(id))
-                    {
-                        pending.push((nested, offset, path));
-                    }
-                }
-                _ => {
-                    fields.insert(
-                        offset,
-                        r2types::ExternalField {
-                            name: path,
-                            offset,
-                            ty: source_member_type(graph, member),
-                        },
-                    );
-                }
-            }
-        }
-    }
-    fields
-}
-
-/// A captured aggregate member's type: an array of its element where its width repeats one.
-fn source_member_type(
-    graph: &r2ssa::SourceTypeGraph,
-    member: &r2ssa::SourceAggregateMember,
-) -> Option<r2types::CTypeLike> {
-    let ty = r2types::source_type_like(graph, member.type_id())?;
-    let bits = graph
-        .types()
-        .get(usize::try_from(member.type_id()).ok()?)?
-        .size_bits();
-    match source_member_element_count(member, bits)? {
-        1 => Some(ty),
-        count => Some(r2types::CTypeLike::Array(
-            Box::new(ty),
-            Some(usize::try_from(count).ok()?),
-        )),
-    }
-}
-
-/// How many elements a captured member holds, from its own width against the
-/// width of one element. `None` when the two do not divide evenly, because a
-/// member that is not a whole number of elements is not an array of them.
-fn source_member_element_count(
-    member: &r2ssa::SourceAggregateMember,
-    element_bits: u64,
-) -> Option<u64> {
-    if element_bits == 0 {
-        return None;
-    }
-    let total_bits = member.size_bits();
-    if total_bits == 0 || total_bits == element_bits {
-        return Some(1);
-    }
-    total_bits
-        .is_multiple_of(element_bits)
-        .then(|| total_bits / element_bits)
 }
 
 /// The prototype the program declares: names from the presentation, types
 /// from the declared interface's graph (ADR call-boundary, Types on the wire).
 fn trusted_source_signature(
     trusted: &r2ssa::TrustedSsaArtifact,
-) -> Option<(r2types::FunctionSignatureSpec, Option<String>, bool)> {
+) -> Option<(r2types::FunctionSignatureSpec, bool)> {
     let signature = trusted.source().presentation().signature()?;
     let interface =
         (trusted.source().function_interface()).filter(|interface| interface.types_are_declared());
@@ -941,11 +788,7 @@ fn trusted_source_signature(
         _ => typed(interface.and_then(r2ssa::SourceFunctionInterface::return_logical_value)),
     };
     let spec = r2types::FunctionSignatureSpec { ret_type, params };
-    let callconv = signature
-        .calling_convention()
-        .filter(|convention| !convention.is_empty())
-        .map(str::to_string);
-    Some((spec, callconv, signature.noreturn()))
+    Some((spec, signature.noreturn()))
 }
 
 /// Everything one callee contributes to a caller's request.
@@ -964,9 +807,6 @@ pub struct CalleeFacts {
     interface: r2ssa::SourceFunctionInterface,
     summary: r2ssa::PreparedCalleeSummary,
     signature: Option<r2types::SourceOwnedCalleeSignature>,
-    /// Convention-clobbered registers this callee's body proves it leaves
-    /// untouched at every exit; a caller reads them after the call as its own.
-    preserved_carriers: BTreeSet<r2ssa::CanonicalStorageId>,
 }
 
 impl CalleeFacts {
@@ -979,7 +819,6 @@ impl CalleeFacts {
         let shared = callee.shared_artifact();
         let address = shared.function().entry;
         let interface = shared.machine_context().function_interface()?.clone();
-        let preserved_carriers = shared.facts().boundaries.preserved_call_carriers.clone();
         let summary =
             r2ssa::PreparedCalleeSummary::derive(r2ssa::InterprocFunctionId(address), &shared)
                 .ok()?;
@@ -996,7 +835,6 @@ impl CalleeFacts {
             interface,
             summary,
             signature,
-            preserved_carriers,
         })
     }
 
@@ -1017,34 +855,20 @@ impl CalleeFacts {
     pub fn argument_touch_reach(&self) -> std::collections::BTreeMap<usize, r2ssa::ArgumentReach> {
         self.summary.argument_touch_reach()
     }
-
-    /// Registers this callee's body proves it leaves untouched at every exit.
-    pub const fn preserved_carriers(&self) -> &BTreeSet<r2ssa::CanonicalStorageId> {
-        &self.preserved_carriers
-    }
 }
 
 fn trusted_parsed_context(trusted: &r2ssa::TrustedSsaArtifact) -> r2types::ParsedExternalContext {
     let signature = trusted_source_signature(trusted);
-    let external_type_db = trusted_external_type_db(trusted);
     // What this function's own capture states: an object's type is the program's, so no other request can add to it.
     let image = trusted.source().image();
     let program_data_objects = r2types::ProgramDataObjectTypeFacts::from_source(
-        (image.data_symbols().iter()).map(|object| {
-            let ty = (image.data_types().zip(object.type_id()))
-                .and_then(|(graph, id)| r2types::source_type_like(graph, id));
-            (object.address(), ty)
-        }),
-        &external_type_db,
+        image.data_types(),
+        (image.data_symbols().iter()).map(|object| (object.address(), object.type_id())),
     );
     r2types::ParsedExternalContext {
-        callconv: signature
-            .as_ref()
-            .and_then(|(_, callconv, _)| callconv.clone()),
-        noreturn: signature.as_ref().is_some_and(|(_, _, noreturn)| *noreturn),
-        current_signature: signature.as_ref().map(|(spec, _, _)| spec.clone()),
-        merged_signature: signature.map(|(spec, _, _)| spec),
-        external_type_db,
+        noreturn: signature.as_ref().is_some_and(|(_, noreturn)| *noreturn),
+        current_signature: signature.as_ref().map(|(spec, _)| spec.clone()),
+        merged_signature: signature.map(|(spec, _)| spec),
         program_data_objects,
         assumptions: trusted.artifact().facts().assumptions.clone(),
         ..r2types::ParsedExternalContext::default()
@@ -1098,7 +922,6 @@ impl EngineAnalyzeRequest {
             declared_signatures: Vec::new(),
             ptr_bits: parts.ptr_bits,
             semantic_metadata_enabled: parts.semantic_metadata_enabled,
-            reg_type_hints: parts.reg_type_hints,
             parsed_context: parts.parsed_context,
             semantic_mode,
             include_interproc_summary_set: parts.include_interproc_summary_set,
@@ -1134,7 +957,6 @@ impl EngineAnalyzeRequest {
         self.ptr_bits = engine_ptr_bits(self.arch.as_ref());
         self.source_snapshot = None;
         self.semantic_metadata_enabled = true;
-        self.reg_type_hints.clear();
         // Where the program's sections lie is the caller's to state; the artifact knows one function.
         let program_extents = std::mem::take(&mut self.parsed_context.program_extents);
         self.parsed_context = trusted_parsed_context(&trusted);
@@ -1213,7 +1035,6 @@ fn engine_analyze_request_input_from_function(
         source_snapshot: input.function.source_snapshot,
         ptr_bits: input.ptr_bits,
         semantic_metadata_enabled: input.function.semantic_metadata_enabled,
-        reg_type_hints: input.reg_type_hints,
         parsed_context: input.parsed_context,
         include_interproc_summary_set: input.include_interproc_summary_set,
     }
@@ -1233,7 +1054,6 @@ fn engine_analyze_request_parts_from_input(
         source_snapshot: input.source_snapshot,
         ptr_bits,
         semantic_metadata_enabled: input.semantic_metadata_enabled,
-        reg_type_hints: input.reg_type_hints,
         parsed_context: input.parsed_context,
         include_interproc_summary_set: input.include_interproc_summary_set,
     }
@@ -1386,7 +1206,6 @@ impl EngineFunctionDecompileRequest {
                 EngineAnalyzeFunctionRequestInput {
                     function: input.function,
                     ptr_bits: input.ptr_bits,
-                    reg_type_hints: FxHashMap::default(),
                     parsed_context: input.parsed_context,
                     include_interproc_summary_set: true,
                 },
@@ -1418,7 +1237,6 @@ impl EngineFunctionAnalysisArtifactRequest {
                 EngineAnalyzeFunctionRequestInput {
                     function: input.function,
                     ptr_bits: input.ptr_bits,
-                    reg_type_hints: FxHashMap::default(),
                     parsed_context: input.parsed_context,
                     include_interproc_summary_set: true,
                 },
@@ -2440,7 +2258,7 @@ fn build_engine_analysis_from_parts_with_control<C: r2ssa::SsaWorkControl + ?Siz
             source_snapshot.function_interface().cloned(),
             *source_snapshot.machine_roles(),
             source_snapshot.call_site_interfaces().to_vec(),
-            source_snapshot.call_effect().cloned(),
+            source_snapshot.conventions().cloned(),
             control,
         )?
         .with_name(function_name),

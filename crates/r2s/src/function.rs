@@ -29,7 +29,7 @@ pub fn info(session: &mut Session, argument: &str) -> Result<String, String> {
         format!("size: {}", info.max_addr() - info.min_addr()),
         format!("realsz: {}", info.real_size()),
     ]);
-    out.extend(info.convention.as_ref().map(|cc| format!("callconv: {cc}")));
+    out.extend((info.convention).map(|id| format!("callconv: {}", id.radare2_name())));
     out.extend([
         format!("cyclomatic-complexity: {}", info.complexity()),
         format!("num-bbs: {}", info.blocks.len()),

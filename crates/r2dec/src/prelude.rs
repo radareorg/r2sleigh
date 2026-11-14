@@ -664,10 +664,10 @@ const UNREAD_TYPEDEF: &str = "r2sleigh_unread_";
 /// A hole's type at a call: r2types' typedef over the argument's class (`r2types::unread_slot`).
 pub(crate) fn unread_slot(class: &CType) -> Option<CType> {
     match class {
-        CType::Int { bits, .. } => r2types::unread_slot(None, *bits),
-        CType::Float(bits) => {
-            r2types::unread_slot(Some(r2source::convention::SlotClass::Float), *bits)
+        CType::Int { bits, .. } => {
+            r2types::unread_slot(r2source::convention::SlotClass::Integer, *bits)
         }
+        CType::Float(bits) => r2types::unread_slot(r2source::convention::SlotClass::Float, *bits),
         _ => None,
     }
 }

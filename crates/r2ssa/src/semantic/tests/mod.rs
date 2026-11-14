@@ -84,6 +84,7 @@ fn dual_space_exact_parameter_artifact(arch: &crate::Arch) -> SsaArtifact {
                 offset: 0,
                 size: 8,
             },
+            r2source::SourceSlot::integer(0),
         )],
         SourceFunctionReturn::Void,
         [],
@@ -790,6 +791,27 @@ fn assert_predicate_assumption_preserves_source_semantics(
     assert_eq!(conditioned.obligations(), base.obligations());
 }
 
+/// Prepared under a convention whose calls keep every register: a store of an entry register is
+/// a save. With no model no register is kept (RULING 2.1).
+fn keeping_every_register(
+    blocks: &[R2ILBlock],
+    arch: &crate::Arch,
+    function_interface: Option<SourceFunctionInterface>,
+    machine_roles: SourceMachineRoles,
+) -> Option<SsaArtifact> {
+    let kept = arch.outermost_registers().iter().copied();
+    SsaArtifact::for_decompile_with(
+        blocks,
+        crate::DecompileInputs {
+            arch: Some(arch),
+            function_interface,
+            machine_roles,
+            conventions: crate::testing::conventions([], kept),
+            ..Default::default()
+        },
+    )
+}
+
 fn return_boundary_arch() -> crate::Arch {
     crate::Arch::new(return_boundary_arch_spec())
 }
@@ -819,7 +841,11 @@ fn return_boundary_interface() -> SourceFunctionInterface {
     SourceFunctionInterface::new(
         b"return-boundary-revision-1".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [SourceAbiParameterSpec::new(0, register_storage(8, 8))],
+        [SourceAbiParameterSpec::new(
+            0,
+            register_storage(8, 8),
+            r2source::SourceSlot::integer(0),
+        )],
         SourceFunctionReturn::Register {
             storage: register_storage(0, 8),
         },
@@ -2700,7 +2726,7 @@ fn a_convention_result_read_only_by_the_return_is_the_call_result() {
         target: Varnode::register(12, 4),
     });
     // cdecl: the three scratch registers are clobbered, the return target is not.
-    let effect = crate::testing::call_effect(
+    let effect = crate::testing::conventions(
         [0, 4, 8].map(|offset| register_storage(offset, 4)),
         [register_storage(12, 4)],
     );

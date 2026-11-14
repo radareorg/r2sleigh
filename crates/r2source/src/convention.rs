@@ -2,6 +2,7 @@
 //! once per convention by r2engine (doc/adr-call-boundary.md, "The joined model").
 
 use std::ops::{Deref, Range};
+use std::sync::Arc;
 
 pub use r2abi::{ConventionId, Extension, SlotClass};
 
@@ -10,10 +11,29 @@ use crate::contracts::{
     valid_register_storage,
 };
 use crate::{
-    CanonicalStorageId, SourceBoundaryReads, SourceCallEffect, SourceCallRegisterEffect,
-    SourceConventionSlots, SourceEntryStack, SourceLinkedGuard, SourceMachineRolesError,
-    SourceRegisterSaveArea, SourceSecurityCookie, SourceStackArgumentPlacement, SourceStackGuard,
+    CanonicalStorageId, SourceEntryStack, SourceLinkedGuard, SourceRegisterSaveArea,
+    SourceSecurityCookie, SourceStackArgumentPlacement, SourceStackGuard,
 };
+
+/// What a call does to one register under a convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CallRegisterEffect {
+    /// The call may leave anything there.
+    Clobbered,
+    /// The callee may change it and restores it before it returns.
+    Preserved,
+    /// The platform reserves it to the system: no call writes it.
+    SystemReserved,
+}
+
+/// A function's own convention and the one its calls run under (S34; RULING 1.6, 2.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Conventions {
+    /// Where the function's own arguments and result lie.
+    pub own: Arc<ConventionModel>,
+    /// What a call it makes reads, keeps and clobbers, where no site states its callee's.
+    pub calls: Arc<ConventionModel>,
+}
 
 /// Every location of one class, in the convention's order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,6 +307,7 @@ struct Derived {
     arguments: [Box<[CanonicalStorageId]>; 2],
     /// Each argument register and first typed result with its class, sorted.
     roles: Box<[(CanonicalStorageId, SlotClass)]>,
+    results: TypedResults,
     /// What a call does, or why the convention states nothing consistent about it.
     effect: Result<Effect, ModelRefusal>,
 }
@@ -302,8 +323,8 @@ struct Effect {
 }
 
 impl Derived {
-    /// The checks `convention_slots` ran, then the index; O(L log L) in the model's locations
-    /// and lanes. The effect's own checks refuse only the effect, as `call_effect` did.
+    /// The position checks, then the index; O(L log L) in the model's locations and lanes.
+    /// The effect's own checks refuse only the effect.
     fn of(parts: &ConventionParts) -> Result<Self, ModelRefusal> {
         let register = |storage: &CanonicalStorageId| valid_register_storage(*storage);
         let TypedResults {
@@ -335,6 +356,11 @@ impl Derived {
         Ok(Self {
             arguments: [integers, floats],
             roles: roles.into_boxed_slice(),
+            results: TypedResults {
+                integer,
+                float,
+                second,
+            },
             effect: Effect::of(parts),
         })
     }
@@ -342,7 +368,7 @@ impl Derived {
 
 impl Effect {
     /// Clobbered is every location a call reads or writes, `killedbycall` and the link, less
-    /// what is preserved or reserved; the checks are `call_effect`'s.
+    /// what is preserved or reserved.
     fn of(parts: &ConventionParts) -> Result<Self, ModelRefusal> {
         let inputs = (parts.register_locations())
             .filter_map(Location::register)
@@ -398,8 +424,9 @@ impl ConventionParts {
             .flat_map(|section| section.locations.iter())
     }
 
-    /// The argument registers of one class, in the convention's order.
-    pub fn argument_registers(&self, of: SlotClass) -> impl Iterator<Item = CanonicalStorageId> {
+    /// The argument registers of one class, in the convention's order; `ConventionModel::arguments`
+    /// reads them from the index.
+    fn argument_registers(&self, of: SlotClass) -> impl Iterator<Item = CanonicalStorageId> {
         self.register_locations()
             .filter_map(move |location| match *location {
                 Location::Register { storage, class, .. } if class == of => Some(storage),
@@ -479,6 +506,16 @@ impl ConventionModel {
         Ok(Self { parts, index })
     }
 
+    /// The typed result lanes, read from the index; O(1).
+    pub const fn results(&self) -> TypedResults {
+        self.index.results
+    }
+
+    /// The integer result register, where the convention names one.
+    pub const fn result(&self) -> Option<CanonicalStorageId> {
+        self.index.results.integer
+    }
+
     /// The argument registers of one class, in the convention's order; none for the stack's.
     pub fn arguments(&self, class: SlotClass) -> &[CanonicalStorageId] {
         match class {
@@ -519,29 +556,29 @@ impl ConventionModel {
 
     /// What a call does to a storage: reserved where every byte is, preserved where every byte
     /// is, else clobbered, as is every storage under a refused effect. O(L).
-    pub fn effect_on(&self, storage: CanonicalStorageId) -> SourceCallRegisterEffect {
+    pub fn effect_on(&self, storage: CanonicalStorageId) -> CallRegisterEffect {
         let Ok(effect) = &self.index.effect else {
-            return SourceCallRegisterEffect::Clobbered;
+            return CallRegisterEffect::Clobbered;
         };
         if covers_every_byte(&effect.reserved, storage) {
-            SourceCallRegisterEffect::SystemReserved
+            CallRegisterEffect::SystemReserved
         } else if covers_every_byte(&effect.preserved, storage) {
-            SourceCallRegisterEffect::Preserved
+            CallRegisterEffect::Preserved
         } else {
-            SourceCallRegisterEffect::Clobbered
+            CallRegisterEffect::Clobbered
         }
     }
 
     pub fn clobbers(&self, storage: CanonicalStorageId) -> bool {
-        self.effect_on(storage) == SourceCallRegisterEffect::Clobbered
+        self.effect_on(storage) == CallRegisterEffect::Clobbered
     }
 
     pub fn preserves(&self, storage: CanonicalStorageId) -> bool {
-        self.effect_on(storage) == SourceCallRegisterEffect::Preserved
+        self.effect_on(storage) == CallRegisterEffect::Preserved
     }
 
     pub fn reserves(&self, storage: CanonicalStorageId) -> bool {
-        self.effect_on(storage) == SourceCallRegisterEffect::SystemReserved
+        self.effect_on(storage) == CallRegisterEffect::SystemReserved
     }
 
     /// Every location a call reads or writes, `killedbycall` and the link, less what is kept;
@@ -601,32 +638,6 @@ impl ConventionModel {
             .map(|effect| &*effect.result_reads)
     }
 
-    /// The candidate slots: a view of this model, as the snapshot carries it.
-    pub fn convention_slots(&self) -> Result<SourceConventionSlots, SourceMachineRolesError> {
-        let TypedResults {
-            integer: result,
-            float: float_result,
-            second,
-        } = self.typed_results();
-        Ok(
-            SourceConventionSlots::new(
-                self.id,
-                self.argument_registers(SlotClass::Integer),
-                result,
-            )
-            .and_then(|slots| {
-                slots.with_float_slots(self.argument_registers(SlotClass::Float), float_result)
-            })
-            .and_then(|slots| slots.with_second_result_slot(second))?
-            .with_shared_positions(self.shares_positions())
-            .with_stack_arguments(self.stack_arguments())
-            .with_variadic_tail_on_stack(self.forms.variadic_on_stack)
-            .with_register_save_area(self.forms.save_area)
-            .with_variadic_count_register(self.forms.count_register)
-            .with_entry_stack(self.forms.entry_stack),
-        )
-    }
-
     /// A call under this convention or `other` reads and writes what either does and keeps what
     /// both keep; each register keeps its first position (ADR "S34 step 4 as built"). O(lanes).
     pub fn either(&self, other: &Self) -> Result<Self, ModelRefusal> {
@@ -675,48 +686,6 @@ impl ConventionModel {
             ..self.parts.clone()
         })
     }
-
-    /// What a call does to the registers, a view of this model: clobbered is every location a call
-    /// reads or writes, `killedbycall` and the return address, less what is preserved or reserved.
-    pub fn call_effect(&self) -> Result<SourceCallEffect, SourceMachineRolesError> {
-        let inputs = self
-            .register_locations()
-            .filter_map(|location| match *location {
-                Location::Register { storage, .. } => Some(storage),
-                Location::Stack { .. } => None,
-            })
-            .chain(self.hidden_return)
-            .collect::<Vec<_>>();
-        let outputs = (self.results.iter())
-            .filter(|lane| lane.stated_by == LaneSource::Specification)
-            .map(|lane| lane.storage)
-            .collect::<Vec<_>>();
-        let mut preserved = self
-            .preserved
-            .iter()
-            .map(LaneSet::narrowed)
-            .collect::<Vec<_>>();
-        preserved.sort_unstable();
-        preserved.dedup();
-        let reserved = self.reserved.iter().map(LaneSet::narrowed);
-        let reserved = reserved.collect::<Vec<_>>();
-        let kept = preserved
-            .iter()
-            .chain(&reserved)
-            .copied()
-            .collect::<Vec<_>>();
-        let mut clobbered = (inputs.iter().chain(&outputs).copied())
-            .chain(self.killed.iter().map(LaneSet::narrowed))
-            .chain(self.link)
-            .collect::<Vec<_>>();
-        clobbered.retain(|storage| !kept.iter().any(|kept| overlap(*kept, *storage)));
-        let call_reads = inputs.into_iter().chain(self.forms.count_register);
-        SourceBoundaryReads::new(call_reads, outputs)
-            .and_then(|reads| SourceCallEffect::new(clobbered, preserved, reads))
-            .and_then(|effect| effect.with_system_reserved(reserved))
-            .and_then(|effect| effect.with_stack_guard(self.forms.guard))
-            .and_then(|effect| effect.with_stack_bound(self.forms.stack_bound))
-    }
 }
 
 /// Whether two storages share a byte.
@@ -724,6 +693,155 @@ fn overlap(left: CanonicalStorageId, right: CanonicalStorageId) -> bool {
     left.space == right.space
         && left.offset < right.offset + u64::from(right.size)
         && right.offset < left.offset + u64::from(left.size)
+}
+
+/// A model built from registers alone, through `ConventionModel::new`, for tests downstream.
+#[cfg(any(test, feature = "testing"))]
+pub mod testing {
+    use super::*;
+
+    /// A convention with nothing stated; each method adds one kind of location or lane.
+    #[derive(Debug, Clone)]
+    pub struct Model(ConventionParts);
+
+    pub fn model(id: ConventionId) -> Model {
+        Model(ConventionParts {
+            id,
+            sections: Box::default(),
+            hidden_return: None,
+            results: Box::default(),
+            results_complete: None,
+            owned: Box::default(),
+            preserved: Box::default(),
+            killed: Box::default(),
+            likely_trash: Box::default(),
+            reserved: Box::default(),
+            link: None,
+            forms: BoundaryForms {
+                frame_pointer: None,
+                red_zone: 0,
+                save_area: None,
+                count_register: None,
+                entry_stack: None,
+                variadic_on_stack: false,
+                guard: None,
+                stack_bound: None,
+                security_cookie: None,
+                linked_guard: None,
+            },
+            refused: None,
+        })
+    }
+
+    fn lanes(storages: impl IntoIterator<Item = CanonicalStorageId>) -> Box<[LaneSet]> {
+        storages.into_iter().map(LaneSet::whole).collect()
+    }
+
+    impl Model {
+        /// The argument registers of `class`, in order, as one section.
+        pub fn arguments(
+            mut self,
+            class: SlotClass,
+            storages: impl IntoIterator<Item = CanonicalStorageId>,
+        ) -> Self {
+            let locations =
+                storages
+                    .into_iter()
+                    .enumerate()
+                    .map(|(position, storage)| Location::Register {
+                        storage,
+                        bytes: u8::try_from(storage.size).unwrap_or(u8::MAX),
+                        class,
+                        position: u16::try_from(position).unwrap_or(u16::MAX),
+                        extension: Extension::Unspecified,
+                    });
+            let section = Section {
+                class: match class {
+                    SlotClass::Float => SectionClass::Float,
+                    _ => SectionClass::Integer,
+                },
+                locations: locations.collect(),
+            };
+            let mut sections = self.0.sections.into_vec();
+            sections.push(section);
+            self.0.sections = sections.into_boxed_slice();
+            self
+        }
+
+        /// One more specification result lane of `class`.
+        pub fn result(mut self, class: SlotClass, storage: CanonicalStorageId) -> Self {
+            let mut results = self.0.results.into_vec();
+            results.push(ResultLane {
+                storage,
+                class,
+                extension: Extension::Unspecified,
+                stated_by: LaneSource::Specification,
+                entry: LaneEntry::Scratch,
+                follows: None,
+            });
+            self.0.results = results.into_boxed_slice();
+            self
+        }
+
+        pub fn preserved(mut self, storages: impl IntoIterator<Item = CanonicalStorageId>) -> Self {
+            self.0.preserved = lanes(storages);
+            self
+        }
+
+        pub fn killed(mut self, storages: impl IntoIterator<Item = CanonicalStorageId>) -> Self {
+            self.0.killed = lanes(storages);
+            self
+        }
+
+        pub fn reserved(mut self, storages: impl IntoIterator<Item = CanonicalStorageId>) -> Self {
+            self.0.reserved = lanes(storages);
+            self
+        }
+
+        /// The stack argument section: the first slot and the step to the next.
+        pub fn stack(mut self, first: i64, step: u32) -> Self {
+            let mut sections = self.0.sections.into_vec();
+            sections.push(Section {
+                class: SectionClass::Stack { first, step },
+                locations: Box::default(),
+            });
+            self.0.sections = sections.into_boxed_slice();
+            self
+        }
+
+        /// Integer and float arguments share one position sequence (Microsoft x64).
+        pub fn shared(mut self) -> Self {
+            let registers = (self.0.sections.iter_mut())
+                .filter(|section| !matches!(section.class, SectionClass::Stack { .. }));
+            for section in registers {
+                section.class = SectionClass::Shared;
+            }
+            self
+        }
+
+        pub fn forms(mut self, edit: impl FnOnce(&mut BoundaryForms)) -> Self {
+            edit(&mut self.0.forms);
+            self
+        }
+
+        pub fn parts(mut self, edit: impl FnOnce(&mut ConventionParts)) -> Self {
+            edit(&mut self.0);
+            self
+        }
+
+        pub fn build(self) -> Arc<ConventionModel> {
+            Arc::new(ConventionModel::new(self.0).expect("a test model"))
+        }
+
+        /// The function's own model, which its calls run under too.
+        pub fn conventions(self) -> Conventions {
+            let model = self.build();
+            Conventions {
+                own: Arc::clone(&model),
+                calls: model,
+            }
+        }
+    }
 }
 
 #[cfg(test)]

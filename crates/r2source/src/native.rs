@@ -18,9 +18,9 @@ use crate::{
     AdvisoryCallSite, AdvisoryCallTransfer, AdvisoryCalleeLinkage, AdvisorySuccessor,
     AdvisorySuccessorKind, CapturedSourceFields, DiagnosticIdentity, FunctionIdentity,
     FunctionPresentation, MachineProfile, OwnedFunctionBlock, OwnedFunctionImage,
-    OwnedFunctionSnapshot, SnapshotValidationError, SourceCallEffect, SourceCodePointerTable,
-    SourceConventionSlots, SourceDataObject, SourceEndianness, SourceFunctionInterface,
-    SourceMachineRoles, SourceSignaturePresentation, SourceStackSlotName,
+    OwnedFunctionSnapshot, SnapshotValidationError, SourceCodePointerTable, SourceDataObject,
+    SourceEndianness, SourceFunctionInterface, SourceMachineRoles, SourceSignaturePresentation,
+    SourceStackSlotName,
 };
 
 /// The machine every function in one capture session runs on.
@@ -31,11 +31,8 @@ pub struct NativeMachine {
     pub bits: u32,
     pub endianness: SourceEndianness,
     pub roles: SourceMachineRoles,
-    pub slots: SourceConventionSlots,
-    /// What the convention says a call does to the registers, where it says.
-    pub call_effect: Option<SourceCallEffect>,
-    /// The convention the slots are a view of; `place` reads its sections.
-    pub convention: Option<std::sync::Arc<crate::ConventionModel>>,
+    /// The default convention and what its calls run under; `place` reads its sections.
+    pub conventions: crate::Conventions,
 }
 
 /// One basic block, as bytes and where control goes from it.
@@ -254,8 +251,7 @@ pub fn capture(
         identity,
         interface.clone(),
         machine.roles,
-        machine.slots.clone(),
-        machine.call_effect.clone(),
+        Some(machine.conventions.clone()),
         CapturedSourceFields {
             // The walk bounds the function: every block it kept, it decoded.
             bounded_function_image: true,
@@ -275,10 +271,6 @@ pub fn capture(
         },
         DiagnosticIdentity(0),
     )
-    .map(|snapshot| match &machine.convention {
-        Some(model) => snapshot.with_convention(std::sync::Arc::clone(model)),
-        None => snapshot,
-    })
     .and_then(|snapshot| {
         let member_calls = (function.member_calls.into_iter())
             .filter(|call| call.revision_identity() == revision.as_ref())
@@ -341,21 +333,17 @@ mod tests {
     fn machine() -> NativeMachine {
         let roles = SourceMachineRoles::new(Some(storage(0x288, 8)), Some(storage(0x20, 8)))
             .expect("machine roles");
-        let slots = SourceConventionSlots::new(
-            crate::ConventionId::SysVAmd64,
-            [storage(0x38, 8)],
-            Some(storage(0x0, 8)),
-        )
-        .expect("convention slots");
+        let conventions = crate::convention::testing::model(crate::ConventionId::SysVAmd64)
+            .arguments(crate::convention::SlotClass::Integer, [storage(0x38, 8)])
+            .result(crate::convention::SlotClass::Integer, storage(0x0, 8))
+            .conventions();
         NativeMachine {
             arch_id: "x86".to_owned(),
             cpu_id: "x86-64".to_owned(),
             bits: 64,
             endianness: SourceEndianness::Little,
             roles,
-            slots,
-            call_effect: None,
-            convention: None,
+            conventions,
         }
     }
 
@@ -406,8 +394,8 @@ mod tests {
         // instructions instead.
         assert!(snapshot.function_interface().is_none());
         assert_eq!(
-            snapshot.convention_slots().convention(),
-            crate::ConventionId::SysVAmd64
+            snapshot.convention().map(|model| model.id),
+            Some(crate::ConventionId::SysVAmd64)
         );
     }
 

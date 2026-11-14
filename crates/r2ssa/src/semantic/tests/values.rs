@@ -1190,3 +1190,104 @@ fn return_boundary_refusal_is_deterministic_name_and_address_independent() {
         assert!(refused.exit_stack_pointer.is_none());
     }
 }
+
+/// D254: a proven machine return with unproven values reads each register reaching it, no more: a
+/// register written over before it is dead, where the unproven-exit taint made it unknown.
+#[test]
+fn an_unproven_machine_return_reads_only_the_registers_reaching_it() {
+    let mut arch = composed_return_arch_spec("whole", "slice", "pc");
+    arch.add_register(RegisterDef::new("partial", 3, 2));
+    arch.add_register(RegisterDef::new("sp", 32, 8));
+    arch.add_register(RegisterDef::new("other", 40, 8));
+    let mut block = R2ILBlock::new(0x5180, 4);
+    for (dst, value, size) in [(40, 1, 8), (40, 2, 8), (0, 0, 4), (3, 1, 2)] {
+        block.push(R2ILOp::Copy {
+            dst: Varnode::register(dst, size),
+            src: Varnode::constant(value, size),
+        });
+    }
+    block.push(R2ILOp::Return {
+        target: Varnode::register(16, 8),
+    });
+    let interface = (composed_return_interface())
+        .with_return_address_storage(register_storage(16, 8))
+        .and_then(|interface| interface.with_stack_pointer_storage(register_storage(32, 8)))
+        .expect("typed machine roles");
+    let artifact =
+        SsaArtifact::raw_with_interface(&[block], Some(&crate::Arch::from(arch)), interface)
+            .expect("unproven machine return");
+    let boundary = (artifact.facts().boundaries.returns.values().next()).expect("return");
+    assert!(
+        !boundary.complete && boundary.machine_state_complete,
+        "{boundary:?}"
+    );
+    let graph = artifact.graph();
+    let other = (graph.insts.iter())
+        .filter(|inst| graph.written_storage(inst) == Some(register_storage(40, 8)))
+        .map(|inst| inst.id)
+        .collect::<Vec<_>>();
+    let [overwritten, reaching] = other[..] else {
+        panic!("two writes of `other`: {other:?}");
+    };
+    let live = |inst: InstId| graph.inst(inst).and_then(|inst| inst.output);
+    assert!(
+        boundary
+            .live_registers
+            .contains(&live(reaching).expect("value"))
+    );
+    assert!(
+        !boundary
+            .live_registers
+            .contains(&live(overwritten).expect("value"))
+    );
+    let state = |inst| artifact.obligations().state_of(inst);
+    assert_eq!(
+        state(overwritten),
+        Some(crate::obligation::SemanticInstructionState::ProvenDead)
+    );
+    assert_eq!(
+        state(reaching),
+        Some(crate::obligation::SemanticInstructionState::LiveObligation)
+    );
+}
+
+/// D254: one function's unproven machine returns share one register walk, built once.
+#[test]
+fn every_unproven_machine_return_of_a_function_shares_one_register_walk() {
+    let mut arch = composed_return_arch_spec("whole", "slice", "pc");
+    arch.add_register(RegisterDef::new("partial", 3, 2));
+    arch.add_register(RegisterDef::new("sp", 32, 8));
+    arch.add_register(RegisterDef::new("cond", 48, 1));
+    let mut entry = R2ILBlock::new(0x5300, 4);
+    entry.push(R2ILOp::CBranch {
+        target: Varnode::ram(0x5320, 8),
+        cond: Varnode::register(48, 1),
+    });
+    let exit = |addr| {
+        let mut block = R2ILBlock::new(addr, 4);
+        for (dst, size) in [(0, 4), (3, 2)] {
+            block.push(R2ILOp::Copy {
+                dst: Varnode::register(dst, size),
+                src: Varnode::constant(1, size),
+            });
+        }
+        block.push(R2ILOp::Return {
+            target: Varnode::register(16, 8),
+        });
+        block
+    };
+    let interface = (composed_return_interface())
+        .with_return_address_storage(register_storage(16, 8))
+        .and_then(|interface| interface.with_stack_pointer_storage(register_storage(32, 8)))
+        .expect("typed machine roles");
+    super::super::boundaries::REGISTER_WALKS.with(|walks| walks.set(0));
+    let blocks = [entry, exit(0x5304), exit(0x5320)];
+    let artifact =
+        SsaArtifact::raw_with_interface(&blocks, Some(&crate::Arch::from(arch)), interface)
+            .expect("two unproven machine returns");
+    let returns = artifact.facts().boundaries.returns.values();
+    let unproven = returns.filter(|boundary| !boundary.complete && boundary.machine_state_complete);
+    assert_eq!(unproven.count(), 2);
+    let walks = super::super::boundaries::REGISTER_WALKS.with(std::cell::Cell::get);
+    assert_eq!(walks, 1);
+}

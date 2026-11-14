@@ -69,6 +69,8 @@ pub(super) struct Values<'a> {
     rendered: RefCell<Vec<bool>>,
     /// By instruction index: frame teardown a spelled C `return` performs.
     restored: RefCell<Vec<bool>>,
+    /// By instruction index: a value the kept text spells as `&object` where it is read (D254).
+    addressed: RefCell<Vec<bool>>,
     /// The instructions whose rendered text evaluates a residual: their obligations are residual.
     residual: RefCell<Vec<bool>>,
     /// By instruction index: a gap stands for its atomic effect beside the value the text assigns.
@@ -108,6 +110,8 @@ pub(super) struct Values<'a> {
 struct Attempt {
     reads: Vec<super::proof::UnassignedRead>,
     marks: Vec<InstId>,
+    /// Producers whose values the text spells as the frame object each addresses.
+    addressed: Vec<InstId>,
 }
 
 struct Own {
@@ -630,6 +634,20 @@ fn discharged_insts<'g>(
     })
 }
 
+/// The instruction a canonical id names: an operation, or the merge of its storage in its block.
+fn canonical_inst(graph: &SsaGraph, id: &r2ssa::CanonicalInstructionId) -> Option<InstId> {
+    match id.site {
+        r2ssa::CanonicalInstructionSite::Op(op) => graph.inst_for_op(op),
+        r2ssa::CanonicalInstructionSite::Phi(storage) => {
+            let block = graph.block_id_for_addr(id.block_addr)?;
+            (graph.phi_insts(block).iter().copied()).find(|phi| {
+                (graph.inst(*phi)).and_then(|inst| graph.written_storage(inst)) == Some(storage)
+            })
+        }
+        r2ssa::CanonicalInstructionSite::NativeSpan { .. } => None,
+    }
+}
+
 /// Who reads each value, as the obligation inventory says ([`r2ssa::ValueReaders`]).
 struct Readers<'a> {
     graph: &'a SsaGraph,
@@ -817,6 +835,7 @@ impl<'a> Values<'a> {
             locals: RefCell::new(Vec::new()),
             rendered: RefCell::new(vec![false; graph.insts.len()]),
             restored: RefCell::new(vec![false; graph.insts.len()]),
+            addressed: RefCell::new(vec![false; graph.insts.len()]),
             residual: RefCell::new(vec![false; graph.insts.len()]),
             effect: RefCell::new(vec![false; graph.insts.len()]),
             unassigned: RefCell::new(Vec::new()),
@@ -857,7 +876,7 @@ impl<'a> Values<'a> {
     fn members_of(
         &self,
         input: &RenderInput<'_>,
-        pointing: Vec<(usize, String, CExpr)>,
+        pointing: Vec<(usize, String, CExpr, bool)>,
     ) -> Vec<Option<CExpr>> {
         let mut members = Vec::new();
         // A member is read and written by a byte copy, which only a little-endian target matches.
@@ -865,7 +884,15 @@ impl<'a> Values<'a> {
             return members;
         }
         let fields = &self.artifact.certificates().parameter_fields;
-        for (slot, tag, base) in pointing {
+        let through = self.accesses_by_parameter(&pointing);
+        for (slot, tag, base, stated) in pointing {
+            if let Some(cells) = stated
+                .then(|| self.projected_members(slot, &base, through.get(slot)?))
+                .flatten()
+            {
+                self.place(&mut members, cells);
+                continue;
+            }
             let Some(structure) = input.parameter_structures().get(&slot) else {
                 continue;
             };
@@ -891,19 +918,96 @@ impl<'a> Values<'a> {
                 };
                 Some((cell, CExpr::addr_of(member)))
             });
-            let Some(cells) = cells.collect::<Option<Vec<_>>>() else {
-                continue;
-            };
-            if members.is_empty() {
-                members = vec![None; self.roots.arena().len()];
-            }
-            for (cell, address) in cells {
-                if let Some(at) = members.get_mut(cell.index()) {
-                    *at = Some(address);
-                }
+            if let Some(cells) = cells.collect::<Option<Vec<_>>>() {
+                self.place(&mut members, cells);
             }
         }
         members
+    }
+
+    /// Each cell's member address in `members`, a table over the arena allocated at the first.
+    fn place(&self, members: &mut Vec<Option<CExpr>>, cells: Vec<(TermId, CExpr)>) {
+        if members.is_empty() {
+            *members = vec![None; self.roots.arena().len()];
+        }
+        for (cell, address) in cells {
+            if let Some(at) = members.get_mut(cell.index()) {
+                *at = Some(address);
+            }
+        }
+    }
+
+    /// The accesses through each stated pointing parameter, indexed by slot, in one pass over the
+    /// body's accesses: O(accesses + slots).
+    fn accesses_by_parameter(
+        &self,
+        pointing: &[(usize, String, CExpr, bool)],
+    ) -> Vec<Vec<r2ssa::StructuredAccessId>> {
+        let stated = (pointing.iter()).filter(|(_, _, _, stated)| *stated);
+        let Some(slots) = stated.map(|(slot, ..)| slot + 1).max() else {
+            return Vec::new();
+        };
+        let mut through = vec![Vec::new(); slots];
+        let facts = self.artifact.facts();
+        for access in facts.structured.memory_accesses.values() {
+            if let Some(expression) = facts.addresses.parameter_expression(access.address)
+                && let Some(accesses) = through.get_mut(expression.parameter)
+            {
+                accesses.push(access.id);
+            }
+        }
+        through
+    }
+
+    /// Each cell an access through parameter `slot` (`through`), declared a pointer to the struct
+    /// its root projects into, addresses as `&base->member` (D359); `None` where one is unprojected.
+    fn projected_members(
+        &self,
+        slot: usize,
+        base: &CExpr,
+        through: &[r2ssa::StructuredAccessId],
+    ) -> Option<Vec<(TermId, CExpr)>> {
+        let interface = self.artifact.machine_context().function_interface()?;
+        let projections = (self.artifact.aggregate_accesses())
+            .projections_for_revision(interface.revision_identity())?;
+        let cells = (through.iter())
+            .map(|id| {
+                // A parameter root's struct is the declared pointee's node (`parameter_target`).
+                let projection = projections.get(id)?;
+                let named = projection.root == r2ssa::AggregateRoot::Parameter(slot as u32)
+                    && projection.graph == r2ssa::GraphOf::Interface
+                    && projection.element_index.is_none();
+                let cell = self.roots.access(*id)?.canonical;
+                let member = CExpr::PtrMember {
+                    base: Box::new(base.clone()),
+                    member: projection.member_name.to_string(),
+                };
+                named.then(|| (cell, CExpr::addr_of(member)))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        (!cells.is_empty()).then_some(cells)
+    }
+
+    /// A declared type is spelled as stated, a tag the graph states incomplete; an analysed one
+    /// naming only tags the unit defines, an unstated sign as its word (D265).
+    fn parameter_type(
+        &self,
+        input: &RenderInput<'_>,
+        tags: &super::tags::Tags,
+        (index, ty): (u32, &MachineType),
+        stated: Option<&CType>,
+    ) -> Option<CType> {
+        match stated {
+            Some(declared) => calls::spellable(declared, &|tag, union| tags.names(tag, union))
+                .or_else(|| calls::untagged_pointer(declared)),
+            None => (input.parameter_declaration(index as usize, ty.width_bits())).and_then(
+                |analysed| {
+                    calls::spellable(&analysed, &|tag, union| tags.defines(tag, union))
+                        .or_else(|| calls::analysed_pointer(&analysed))
+                },
+            ),
+        }
+        .filter(|declared| calls::held_as(declared, ty, self.ptr_bits))
     }
 
     /// Parameters in their ABI order, then a local per bound value. A parameter the source declares
@@ -917,26 +1021,18 @@ impl<'a> Values<'a> {
         let mut pointing = Vec::new();
         for (index, home, ty) in parameters.into_iter().flatten() {
             let class = terms::c_type(&ty).expect("a classed parameter has a C type");
-            // A declared type is spelled as stated, a tag the graph states incomplete; an analysed
-            // one naming only tags the unit defines, an unstated sign as its word (D265).
-            let declared = match input.declared_parameter(index as usize, ty.width_bits()) {
-                Some(declared) => calls::spellable(&declared, &|tag, union| tags.names(tag, union))
-                    .or_else(|| calls::untagged_pointer(&declared)),
-                None => (input.parameter_declaration(index as usize, ty.width_bits())).and_then(
-                    |analysed| {
-                        calls::spellable(&analysed, &|tag, union| tags.defines(tag, union))
-                            .or_else(|| calls::analysed_pointer(&analysed))
-                    },
-                ),
-            }
-            .filter(|declared| calls::held_as(declared, &ty, self.ptr_bits));
-            // The word is the class the body reads through: no read is cast.
-            let differs = (declared.as_ref())
-                .is_some_and(|declared| *declared != class && !r2types::is_unstated_word(declared));
+            let stated = input.declared_parameter(index as usize, ty.width_bits());
+            let declared = self.parameter_type(input, tags, (index, &ty), stated.as_ref());
             // A hole states no type: r2types spells its class's typedef, which claims none (D165).
             let hole = (input.parameter_declaration(index as usize, ty.width_bits()))
                 .filter(crate::prelude::is_unread_slot);
-            let differs = differs && hole.is_none();
+            // The word is the class the body reads through: no read is cast.
+            let differs = hole.is_none()
+                && (declared.as_ref()).is_some_and(|declared| {
+                    *declared != class && !r2types::is_unstated_word(declared)
+                });
+            // The source's own declaration, so its struct is the node r2ssa projects into (D359).
+            let stated = stated.is_some() && hole.is_none() && declared.is_some();
             let c = hole.or(declared).unwrap_or_else(|| unstated_class(&class));
             let named = crate::ast::c_identifier(&input.parameter_name(index as usize));
             // The body reads the unstated word as its integer; only the header spells the word.
@@ -962,7 +1058,7 @@ impl<'a> Values<'a> {
                 && let CType::Struct(tag) = pointee.as_ref()
                 && tags.defines(tag, false)
             {
-                pointing.push((index as usize, tag.clone(), CExpr::Var(name)));
+                pointing.push((index as usize, tag.clone(), CExpr::Var(name), stated));
             }
             self.params.push(CParam { ty: c, name });
         }
@@ -1130,6 +1226,9 @@ impl<'a> Values<'a> {
         for inst in discharged_insts(self.graph, discharges.iter()) {
             self.mark(inst);
         }
+        let addressed = self.roots.addressed(value);
+        let addressed = (addressed.iter()).filter_map(|id| canonical_inst(self.graph, id));
+        self.pending.borrow_mut().addressed.extend(addressed);
     }
 
     /// `value` as `reader` reads it: its term where it is absorbed, else its name.
@@ -1222,10 +1321,12 @@ impl<'a> Values<'a> {
             .get(value.0 as usize)?
             .canonical_storage);
         let context = self.artifact.machine_context();
-        let slots = context.convention_slots();
+        let slots = context.convention();
         let position = storage.zip(slots).and_then(|(storage, slots)| {
-            (slots.argument_slots().iter())
-                .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
+            (slots
+                .arguments(r2source::convention::SlotClass::Integer)
+                .iter())
+            .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
         });
         // A variadic body's tail: an argument slot past its parameters, or the vector count.
         // The integer section's own parameters: a float one takes no integer slot.
@@ -1233,8 +1334,10 @@ impl<'a> Values<'a> {
             (interface.parameters().iter())
                 .filter_map(r2source::SourceAbiParameterSpec::register_storage)
                 .filter(|storage| {
-                    (slots.into_iter().flat_map(|slots| slots.argument_slots()))
-                        .any(|slot| slot.space == storage.space && slot.offset == storage.offset)
+                    (slots.into_iter().flat_map(|slots| {
+                        slots.arguments(r2source::convention::SlotClass::Integer)
+                    }))
+                    .any(|slot| slot.space == storage.space && slot.offset == storage.offset)
                 })
                 .count()
         };
@@ -1242,7 +1345,7 @@ impl<'a> Values<'a> {
             interface.is_variadic()
                 && (position.is_some_and(|slot| slot >= integers(interface))
                     || storage
-                        .zip(slots.and_then(r2ssa::SourceConventionSlots::variadic_count_register))
+                        .zip(slots.and_then(|model| model.forms.count_register))
                         .is_some_and(|(storage, count)| {
                             storage.space == count.space
                                 && storage.offset < count.offset + u64::from(count.size)
@@ -1339,10 +1442,18 @@ impl<'a> Values<'a> {
 
     /// Keep what the text just written reads and absorbs.
     fn keep(&self) {
-        let Attempt { reads, marks } = std::mem::take(&mut *self.pending.borrow_mut());
+        let Attempt {
+            reads,
+            marks,
+            addressed,
+        } = std::mem::take(&mut *self.pending.borrow_mut());
         self.unassigned.borrow_mut().extend(reads);
         for inst in marks {
             self.commit(inst);
+        }
+        let mut held = self.addressed.borrow_mut();
+        for inst in addressed {
+            held[inst.0 as usize] = true;
         }
     }
 
@@ -2624,10 +2735,11 @@ impl<'a> Values<'a> {
     pub(super) fn close(&self, ledger: &mut crate::ledger::ObligationLedger) {
         use crate::ledger::{ElisionReason, Outcome};
         let (rendered, restored) = (self.rendered.borrow(), self.restored.borrow());
-        let effect = self.effect.borrow();
+        let (effect, addressed) = (self.effect.borrow(), self.addressed.borrow());
         let covered = self.covered_by_residuals();
         let certificates = self.artifact.certificates();
         let frame_setup = &certificates.stack_geometry.frame_setup;
+        let object_addresses = &certificates.stack_geometry.object_addresses;
         for obligation in self.inventory.obligations().values() {
             let index = obligation.source.graph_inst().map(|inst| inst.0 as usize);
             let certified = obligation.source.graph_inst().and_then(|inst| {
@@ -2655,6 +2767,17 @@ impl<'a> Values<'a> {
                 }
                 _ if index.is_some_and(|i| restored[i]) => {
                     Outcome::Elided(ElisionReason::StackFrame)
+                }
+                // One frame object's address on every path, spelled `&object` where the text reads it.
+                (
+                    SemanticObligationKind::LiveValueProducer
+                    | SemanticObligationKind::LoopCarriedState
+                    | SemanticObligationKind::LiveStateTransition,
+                    _,
+                ) if (obligation.source.graph_inst())
+                    .is_some_and(|i| object_addresses.contains(i) && addressed[i.0 as usize]) =>
+                {
+                    Outcome::Elided(ElisionReason::FrameAddress)
                 }
                 // Stack-pointer arithmetic r2ssa states only locates the frame the array names.
                 (
@@ -2745,16 +2868,13 @@ pub(super) fn class_of(ty: &r2types::CTypeLike, width_bits: u32) -> Option<Machi
 }
 
 /// The type a value `width_bits` wide spells in `storage`, of the class the convention gives it
-/// (`SourceConventionSlots::class_of`); `None` outside every slot.
+/// (`ConventionModel::class_of`); `None` outside every slot.
 pub(super) fn located_class(
     artifact: &SsaArtifact,
     storage: r2source::CanonicalStorageId,
     width_bits: u32,
 ) -> Option<MachineType> {
-    let class = artifact
-        .machine_context()
-        .convention_slots()?
-        .class_of(storage)?;
+    let class = artifact.machine_context().convention()?.class_of(storage)?;
     match class {
         r2source::convention::SlotClass::Integer if matches!(width_bits, 8 | 16 | 32 | 64) => {
             Some(MachineType::Integer {

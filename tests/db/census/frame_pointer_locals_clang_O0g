@@ -65,7 +65,7 @@ NAME=0x00001040
 FILE=tests/fixtures/frame_pointer_locals_clang_O0g
 CMDS=aa; pdd @ 0x00001040
 EXPECT=<<EOF
-r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, r2sleigh_word_u64 arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, void* arg2)
 {
     uint64_t tmp_1049_0_2;
 
@@ -92,7 +92,7 @@ r2sleigh_result_u64 deregister_tm_clones(void)
 {
     uint64_t rax_3;
 
-    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered; the parameters are a floor: at least 0 (a transfer is unresolved); the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 8 source obligations: 5 rendered, 3 elided, 0 refused; 2 statements rendered; the parameters are a floor: at least 0 (a transfer is unresolved); no call reads the result (assuming closed-world); the result is unproven (Unread): 1 unproven-return carried */
     {
         rax_3 = 0x4010;
         {
@@ -156,7 +156,7 @@ r2sleigh_result_u64 __do_global_dtors_aux(void)
             }
             {
                 r2sleigh_residual_void(2); /* r2dec gap: CallNotRendered at 0x1107:17 covering 1 op (render::values): call to deregister_tm_clones: argument slot 0 may hand on what this function was passed */
-                r2sleigh_residual_void(3); /* r2dec gap: ValueNotComputed at 0x1107:22 covering 1 op (render::values) */
+                r2sleigh_residual_void(3); /* r2dec gap: ValueNotComputed at 0x1107:24 covering 1 op (render::values) */
                 r2sleigh_store_u8((void*)&__TMC_END__, (uint8_t)1U);
                 return (uint64_t)r2sleigh_residual_u64(4);
             }

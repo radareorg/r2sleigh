@@ -2881,6 +2881,16 @@ impl Disassembler {
             // for rendering is that control stops here, and that is preserved
             // exactly.
             Some(ModelledUserOperation::Trap) => Some(vec![R2ILOp::Breakpoint]),
+            // Intel SDM, INT n/INTO/INT3/INT1: `int1` raises #DB (vector 1) and `int3` #BP (vector
+            // 3), which Sleigh ends with `return [0]`; any other vector keeps its call.
+            Some(ModelledUserOperation::Interrupt) => match inputs.as_slice() {
+                [vector]
+                    if vector.space == r2il::SpaceId::Const && matches!(vector.offset, 1 | 3) =>
+                {
+                    Some(vec![R2ILOp::Breakpoint])
+                }
+                _ => None,
+            },
             // ARM `bx` switches instruction set by the target's low bit. The
             // p-code has already written the mode bit and masked the target
             // by the time this fires, so the operation itself spells nothing

@@ -45,12 +45,11 @@ fn callee_stack_allocation_reaches_unchanged_sp_through_loop_fixpoint() {
                 ))
             })
             .expect("exact downward stack allocation roles");
-    let artifact = SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+    let artifact = keeping_every_register(
         &[entry, header, exit],
-        Some(&return_boundary_arch()),
+        &return_boundary_arch(),
         Some(preserved_stack_interface()),
         roles,
-        Vec::new(),
     )
     .expect("loop stack allocation artifact");
     let [store] = artifact
@@ -130,12 +129,11 @@ fn a_pre_index_store_is_allocated_by_its_own_instruction() {
                 ))
             })
             .expect("exact downward stack allocation roles");
-    let artifact = SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+    let artifact = keeping_every_register(
         &[push, pop, ret],
-        Some(&return_boundary_arch()),
+        &return_boundary_arch(),
         Some(preserved_stack_interface()),
         roles,
-        Vec::new(),
     )
     .expect("pre-index artifact");
     let [store] = artifact
@@ -221,12 +219,11 @@ fn frame_pointer_round_trip_certificate_owns_exact_graph_cells() {
                 ))
             })
             .expect("exact downward stack allocation roles");
-    let artifact = SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+    let artifact = keeping_every_register(
         &[entry, header, exit],
-        Some(&return_boundary_arch()),
+        &return_boundary_arch(),
         Some(interface),
         roles,
-        Vec::new(),
     )
     .expect("frame round-trip artifact");
     let [store] = artifact
@@ -377,12 +374,11 @@ fn frame_round_trip_certifies_through_a_merge_no_observation_depends_on() {
                 ))
             })
             .expect("exact downward stack allocation roles");
-    let artifact = SsaArtifact::for_decompile_with_interfaces_and_machine_roles(
+    let artifact = keeping_every_register(
         &[entry, header, exit],
-        Some(&return_boundary_arch()),
+        &return_boundary_arch(),
         Some(preserved_stack_interface()),
         roles,
-        Vec::new(),
     )
     .expect("callee-saved round-trip artifact");
     let [store] = artifact
@@ -685,7 +681,7 @@ fn framed_artifact_growing(
             arch: Some(&return_boundary_arch()),
             function_interface: Some(preserved_stack_interface()),
             machine_roles: roles,
-            call_effect: crate::testing::call_effect([], preserved),
+            conventions: crate::testing::conventions([], preserved),
             ..Default::default()
         },
     )
@@ -768,6 +764,54 @@ fn a_slot_whose_address_escapes_is_not_a_dead_store() {
             space: SpaceId::Ram,
             addr: Varnode::constant(0x9000, 8),
             val: sp.clone(),
+        });
+    });
+    assert_eq!(store_ownership(&artifact), (true, false));
+}
+
+/// A round reading an unplaced address keeps every store, so the byte buffer at `sp` stays live
+/// though a save parts it from the escape at `sp + 24` (adr-frame-model.md, "Carried places").
+#[test]
+fn an_address_stored_in_an_unplaced_round_leaves_with_its_slot() {
+    let artifact = framed_artifact(|block, sp| {
+        let buffer = indexed_address(block, sp, (0, true), 0x100);
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: buffer,
+            val: Varnode::register(40, 1),
+        });
+        let save = Varnode::unique(0x200, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: save.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(16, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: save,
+            val: Varnode::register(16, 8),
+        });
+        let slot = Varnode::unique(0x208, 8);
+        block.push(R2ILOp::IntAdd {
+            dst: slot.clone(),
+            a: sp.clone(),
+            b: Varnode::constant(24, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: slot.clone(),
+            val: sp.clone(),
+        });
+        let derived = Varnode::unique(0x210, 8);
+        block.push(R2ILOp::IntAnd {
+            dst: derived.clone(),
+            a: slot,
+            b: Varnode::constant(!7, 8),
+        });
+        block.push(R2ILOp::Store {
+            space: SpaceId::Ram,
+            addr: Varnode::constant(0x9000, 8),
+            val: derived,
         });
     });
     assert_eq!(store_ownership(&artifact), (true, false));

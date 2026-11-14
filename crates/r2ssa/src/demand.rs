@@ -118,7 +118,12 @@ pub(crate) fn exits_are_named_beside(
     live_out: &FunctionLiveOut,
     tails: &BTreeSet<u64>,
 ) -> bool {
-    if live_out.unresolved_blocks().next().is_some() {
+    if let Some(block) = live_out.unresolved_blocks().next() {
+        r2il::refusal_evidence!(
+            "exits-unnamed",
+            "{:#x}: return {block:#x} is unresolved",
+            function.entry
+        );
         return false;
     }
     let cfg = function.cfg();
@@ -129,14 +134,26 @@ pub(crate) fn exits_are_named_beside(
         if tails.contains(&block.addr) {
             return true;
         }
-        match &block.terminator {
+        let named = match &block.terminator {
             BlockTerminator::Return => true,
             BlockTerminator::ConditionalExit { .. } => false,
+            // A call ending on a "never" no statement makes may come back (D255).
             BlockTerminator::Call { .. } | BlockTerminator::IndirectCall { .. } => {
-                successors.is_empty() || !leaves
+                let unproven = &function.assumed_exits().unproven;
+                (successors.is_empty() && unproven.binary_search(&block.addr).is_err()) || !leaves
             }
             _ => !leaves,
+        };
+        if !named {
+            r2il::refusal_evidence!(
+                "exits-unnamed",
+                "{:#x}: block {:#x} leaves by {:?} to {successors:x?}",
+                function.entry,
+                block.addr,
+                block.terminator
+            );
         }
+        named
     })
 }
 
@@ -149,17 +166,21 @@ pub struct DemandedBytes {
 }
 
 impl DemandedBytes {
-    pub(crate) fn of(graph: &SsaGraph, live_out: &FunctionLiveOut) -> Self {
-        Self::of_returning(graph, live_out, (None, &[]), &BTreeSet::new())
+    pub(crate) fn of(
+        graph: &SsaGraph,
+        live_out: &FunctionLiveOut,
+        context: Option<&crate::SourceMachineContext>,
+    ) -> Self {
+        Self::of_returning(graph, live_out, (None, &[]), (&BTreeSet::new(), context))
     }
 
-    /// The same, where a return reads only the `result` bytes its interface states (`None`: whole),
-    /// a tail exit reads the bytes `tails` names, and no `ignored` read counts.
+    /// The same, where a return reads its interface's `result` bytes, a tail exit the `tails` bytes,
+    /// no `ignored` read counts, and a call an argument at its callee's held lane (D366).
     pub(crate) fn of_returning(
         graph: &SsaGraph,
         live_out: &FunctionLiveOut,
         (result, tails): (Option<CanonicalStorageId>, &[(ValueId, ByteMask)]),
-        ignored: &BTreeSet<UseSite>,
+        (ignored, context): (&BTreeSet<UseSite>, Option<&crate::SourceMachineContext>),
     ) -> Self {
         let returned = live_out.iter().map(|value| {
             let storage = graph.value(value).and_then(|value| value.canonical_storage);
@@ -182,9 +203,16 @@ impl DemandedBytes {
                         input_idx: *input_idx,
                     })
                 };
+                let held = match inst.payload {
+                    InstPayload::Op(SSAOp::CallUse { .. }) => context.and_then(|context| {
+                        crate::semantic::call_read_bytes(graph, context, inst.id)
+                    }),
+                    _ => None,
+                };
+                let mask = held.map_or(ByteMask::All, ByteMask::whole);
                 (graph.inputs(inst.id).iter().enumerate())
                     .filter(read)
-                    .map(|(_, input)| (*input, ByteMask::All))
+                    .map(move |(_, input)| (*input, mask))
             });
         let roots = returned.chain(tails.iter().copied()).chain(effects);
         Self {
@@ -329,7 +357,7 @@ mod tests {
         if !exits_are_named(&function, &live_out) {
             return false;
         }
-        let demand = DemandedBytes::of(&graph, &live_out);
+        let demand = DemandedBytes::of(&graph, &live_out, None);
         !function
             .release_undemanded_insert_bases(&graph, &demand)
             .is_empty()
@@ -340,6 +368,39 @@ mod tests {
         assert!(released(R2ILOp::Return {
             target: reg(0x288, 8),
         }));
+    }
+
+    /// A call that ends the body names its exit only where no walk alone derived its "never" (D255).
+    #[test]
+    fn a_call_ending_on_an_unproven_never_names_no_exit() {
+        let block = R2ILBlock {
+            addr: 0x1000,
+            size: 5,
+            ops: vec![R2ILOp::Call {
+                target: Varnode::new(SpaceId::Ram, 0x2000, 8),
+            }],
+            ..R2ILBlock::default()
+        };
+        let mut declared = crate::cfg::DeclaredSuccessors::entered_at(0x1000);
+        declared.insert(0x1000, []);
+        let cfg = crate::cfg::CFG::from_blocks_with_declared_successors(&[block], Some(&declared));
+        let control = crate::control::UncheckedSsaWorkControl;
+        let built = SSAFunction::from_blocks_raw_with_policy_and_control(
+            cfg.expect("cfg"),
+            Some(&x86_64_arch()),
+            None,
+            &[],
+            &control,
+        );
+        let mut function = built.expect("ssa");
+        let graph = SsaGraph::from_function(&function);
+        let live_out = FunctionLiveOut::compute(&function, &graph, &[]);
+        assert!(exits_are_named(&function, &live_out));
+        function.record_assumed_exits(&crate::AssumedExits {
+            unproven: vec![0x1000],
+            ..crate::AssumedExits::default()
+        });
+        assert!(!exits_are_named(&function, &live_out));
     }
 
     /// The target of a jump out of the body may take RDX as an argument, and

@@ -91,7 +91,7 @@ stripping underscores at lookup:
 | `realpath_chk`    | `__realpath_chk`    | linux       |
 | `longjmp_chk`     | `__longjmp_chk`     | linux       |
 | `fdelt_chk`       | `__fdelt_chk`       | linux       |
-| `libc_start_main` | `__libc_start_main` | linux |
+| `libc_start_main` | `__libc_start_main` | glibc (cited, LSB) |
 | `cxa_throw`       | `__cxa_throw`       | cxx |
 | `cxa_finalize`    | `__cxa_finalize`    | cxx |
 | `assert_fail`     | `__assert_fail`     | glibc (cited) |
@@ -234,7 +234,7 @@ portable rows as every other PE import does.
 - `fopen`, `fdopen`, `freopen`, `popen`, `tmpfile` and glibc's `fopen64` return `FILE *`, where
   radare2 spells their result `file*`, a name no header has.
 
-- `types-linux.sdb.txt` declares `__libc_start_main`, the name glibc exports.
+- `types-glibc.sdb.txt` declares `__libc_start_main`, the name glibc exports, from LSB 5.0 Core.
 - `types-darwin.sdb.txt` declares `__bzero`, which radare2 does not.
   libsystem_platform exports `___bzero` at the address of
   `__platform_bzero`, the function libsystem_c re-exports as `_bzero`

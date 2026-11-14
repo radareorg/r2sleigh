@@ -62,6 +62,7 @@ addr: 0x01001fe8
 name: sym.shape_step
 size: 50
 realsz: 50
+callconv: rvg
 cyclomatic-complexity: 1
 num-bbs: 1
 num-instrs: 18

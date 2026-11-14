@@ -139,6 +139,11 @@ pub struct CallBoundaryConfig {
     /// the value the caller held going in is the value it holds coming out,
     /// which is exactly what a compiler that has seen the callee relies on.
     pub preserved_by_target: BTreeMap<u64, BTreeSet<CanonicalStorageId>>,
+    /// The convention a call to each stated callee runs under (RULING 1.6): what it keeps, the
+    /// call does not define.
+    pub convention_by_target: crate::SiteConventions,
+    /// The import slot each `CallSlot` site calls through, by instruction: its convention is the slot's (D364).
+    pub slot_by_instruction: BTreeMap<u64, u64>,
     /// The carrier a direct callee's own interface names as its result, by
     /// callee entry address. A convention's unaffected list describes a callee
     /// nothing is known about, and this callee's boundary has said it hands
@@ -182,17 +187,29 @@ impl CallBoundaryConfig {
         self.written_within(root) != [(root.offset, root.offset + u64::from(root.size))]
     }
 
-    /// What this call's own callee says about the convention, asked once for
-    /// both consumers: only a direct call names a callee whose boundary may
-    /// have been read.
-    pub fn callee_boundary(&self, op: &r2il::R2ILOp) -> CalleeBoundary<'_> {
+    /// What the call at `instruction` says of its callee, asked once for both consumers: a direct
+    /// call names a callee whose boundary may have been read; a slot call states only its model.
+    pub fn callee_boundary(
+        &self,
+        op: &r2il::R2ILOp,
+        instruction: Option<u64>,
+    ) -> CalleeBoundary<'_> {
         let target = match op {
             r2il::R2ILOp::Call { target } if target.is_ram() => target.offset,
-            _ => return CalleeBoundary::default(),
+            _ => {
+                let slot = instruction.and_then(|at| self.slot_by_instruction.get(&at));
+                return CalleeBoundary {
+                    convention: slot
+                        .and_then(|slot| self.convention_by_target.get(slot))
+                        .map(|model| &**model),
+                    ..CalleeBoundary::default()
+                };
+            }
         };
         CalleeBoundary {
             target: Some(target),
             preserved: self.preserved_by_target.get(&target),
+            convention: self.convention_by_target.get(&target).map(|model| &**model),
             result: self.result_by_target.get(&target),
         }
     }
@@ -205,8 +222,18 @@ pub struct CalleeBoundary<'a> {
     pub target: Option<u64>,
     /// Carriers its body proves it leaves exactly as it found them.
     pub preserved: Option<&'a BTreeSet<CanonicalStorageId>>,
+    /// The convention the program states the call runs under, where it states one.
+    pub convention: Option<&'a r2source::ConventionModel>,
     /// The carrier its interface names as its result.
     pub result: Option<&'a CallBoundaryDef>,
+}
+
+impl CalleeBoundary<'_> {
+    /// Whether the convention the program states for this call keeps `storage`.
+    pub fn keeps(&self, storage: CanonicalStorageId) -> bool {
+        self.convention
+            .is_some_and(|model| !model.clobbers(storage))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -823,7 +850,7 @@ fn rename_block<C: SsaWorkControl + ?Sized>(
                         ctx,
                         &mut defined_vars,
                         boundary,
-                        boundary.callee_boundary(op),
+                        boundary.callee_boundary(op, op_addr),
                         reg_names,
                     );
                     for (dst, storage) in boundary_defs.retained {
@@ -1056,6 +1083,7 @@ fn append_call_boundary_defs(
         if callee
             .preserved
             .is_some_and(|preserved| crate::semantic::covers(preserved, storage))
+            || callee.keeps(storage) && !results.contains(identity)
         {
             continue;
         }
@@ -1203,7 +1231,10 @@ fn append_call_boundary_reads(
         ) {
             retained.push((src.clone(), identity.storage));
         }
-        block_ops.push(SSAOp::CallUse { src });
+        block_ops.push(SSAOp::CallUse {
+            src,
+            storage: identity.storage,
+        });
     }
     retained
 }

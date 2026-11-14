@@ -194,6 +194,41 @@ fn terminating_from(code: &'static [u8], functions: &[(&str, u64, u64)]) -> Open
     OpenProgram::of(program)
 }
 
+/// [`TERMINATES`] where `raise` calls `TerminateProcess` and would return after it (D229).
+const TERMINATES_BY_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x28, // 1000 sub rsp, 0x28
+    0xff, 0x15, 0x8e, 0x00, 0x00, 0x00, // 1004 call [rip + 0x8e]: GetCurrentProcess
+    0x48, 0x89, 0xc1, // 100a mov rcx, rax
+    0xba, 0x09, 0x04, 0x00, 0xc0, // 100d mov edx, 0xc0000409
+    0xff, 0x15, 0x90, 0x00, 0x00, 0x00, // 1012 call [rip + 0x90]: TerminateProcess
+    0x48, 0x83, 0xc4, 0x28, // 1018 add rsp, 0x28
+    0xc3, 0xcc, 0xcc, 0xcc, // 101c ret; padding
+    0x48, 0x83, 0xec, 0x28, // 1020 sub rsp, 0x28
+    0xe8, 0xd7, 0xff, 0xff, 0xff, // 1024 call 0x1000
+    0xb8, 0x05, 0x00, 0x00, 0x00, // 1029 mov eax, 5
+    0x48, 0x83, 0xc4, 0x28, // 102e add rsp, 0x28
+    0xc3, // 1032 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xcc, // 1033 padding
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1090 GetCurrentProcess's stub room
+    0, 0, 0, 0, 0, 0, 0, 0, // 1098 its slot
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 10a0 TerminateProcess's stub room
+    0, 0, 0, 0, 0, 0, 0, 0, // 10a8 its slot
+];
+
+#[test]
+fn calling_terminate_on_the_current_process_does_not_return() {
+    let mut open = terminating(TERMINATES_BY_CALL);
+    let text = rendered(&mut open, BASE + 0x20);
+    assert!(text.contains("__attribute__((noreturn))"), "{text}");
+    assert!(!text.contains("(5)"), "{text}");
+}
+
 #[test]
 fn terminating_the_current_process_does_not_return() {
     let mut open = terminating(TERMINATES);
@@ -257,4 +292,37 @@ fn a_cookie_compare_that_also_tests_another_argument_is_no_check() {
     let mut open = program(SECOND_TEST, "check", Some(TEXT));
     let text = rendered(&mut open, CALLER);
     assert!(text.contains("check("), "{text}");
+}
+
+/// [`GUARDED`] with `mov al, [rdx]; movzx eax, al` in place of `mov eax, 7`: the low byte replaces
+/// the save's in RAX, and only that byte is read (testapp `0x140006138`'s `movsx rax, al`, D230).
+const LANE_OVER_THE_SAVE: &[u8] = &{
+    let mut code = [0u8; 0xa8];
+    let mut at = 0;
+    while at < code.len() {
+        code[at] = GUARDED[at];
+        at += 1;
+    }
+    let lane = [0x8a, 0x02, 0x0f, 0xb6, 0xc0];
+    let mut at = 0;
+    while at < lane.len() {
+        code[0x33 + at] = lane[at];
+        at += 1;
+    }
+    code
+};
+
+/// The save's other seven bytes stay in RAX unread until the extension writes it whole, so the
+/// check is elided; the `<< 32`-free byte is the result.
+#[test]
+fn a_save_whose_unread_upper_bytes_stay_in_a_register_is_elided() {
+    let mut open = program(LANE_OVER_THE_SAVE, "check", Some(TEXT));
+    let text = rendered(&mut open, CALLER);
+    assert!(!text.contains("check("), "{text}");
+    assert!(!text.contains("0x10a0"), "{text}");
+    assert!(text.contains("compiler-inserted"), "{text}");
+    assert!(
+        text.contains("return r2sleigh_carrier_u32((uint32_t)(uint8_t)tmp_1033_0_1);"),
+        "{text}"
+    );
 }

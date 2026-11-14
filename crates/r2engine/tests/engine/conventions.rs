@@ -42,8 +42,11 @@ fn model(
         id.row(),
     );
     let built = built.unwrap_or_else(|why| panic!("{id:?}: {why}"));
-    assert!(built.call_effect().is_ok(), "{id:?}: the call effect holds");
-    assert!(built.convention_slots().is_ok(), "{id:?}: the slots hold");
+    assert_eq!(
+        built.effect_refused(),
+        None,
+        "{id:?}: the call effect holds"
+    );
     // Every register the row names resolves: the frame pointer, `al`, each override lane.
     let row = id.row();
     assert_eq!(
@@ -275,9 +278,8 @@ fn a_call_under_either_convention_keeps_only_what_both_preserve() {
         ConventionId::Win64,
         Kernel::Linux,
     );
-    let own = win64.call_effect().expect("Microsoft x64's effect");
+    let own = &win64;
     let either = win64.either(&model_of_sysv()).expect("the join");
-    let either = either.call_effect().expect("the joined effect");
     for name in ["rsi", "rdi", "xmm6"] {
         assert!(
             own.preserves(register(name)),
@@ -288,7 +290,7 @@ fn a_call_under_either_convention_keeps_only_what_both_preserve() {
     for name in ["rbx", "rbp", "r12"] {
         assert!(either.preserves(register(name)), "{name}");
     }
-    let reads = either.reads().call();
+    let reads = either.call_reads().expect("the join's reads");
     for name in ["rcx", "rdx", "rdi", "rsi", "al"] {
         assert!(reads.contains(&register(name)), "{name}");
     }
@@ -359,8 +361,8 @@ fn built_on(sleigh: &str, bits: u32) -> Vec<(String, ConventionModel)> {
     built
 }
 
-/// Every join `AnyCall` can form of two models under one kernel agrees with its views.
-fn joins_agree(built: &[(String, ConventionModel)], storages: &[r2source::CanonicalStorageId]) {
+/// Every join `AnyCall` can form of two models under one kernel builds.
+fn joins_build(built: &[(String, ConventionModel)]) {
     let kernel = |name: &str| name.rsplit('/').next().map(str::to_owned);
     let pairs = built
         .iter()
@@ -368,35 +370,28 @@ fn joins_agree(built: &[(String, ConventionModel)], storages: &[r2source::Canoni
     let pairs = pairs.filter(|((one, _), (other, _))| one != other && kernel(one) == kernel(other));
     for ((one, model), (other, with)) in pairs {
         let join = model.either(with);
-        let join = join.unwrap_or_else(|why| panic!("{one} with {other}: {why:?}"));
-        agrees(&format!("{one} with {other}"), &join, storages);
+        join.unwrap_or_else(|why| panic!("{one} with {other}: {why:?}"));
     }
 }
 
-/// The model's answers are its two views' (S34 step 4; deleted with the views in step 8): on
-/// every model the native path builds and every join `AnyCall` forms of two of them.
+/// Every model the native path builds on the nine selected cspecs, and every join `AnyCall` forms
+/// of two of them, builds with its effect; a refused effect would keep nothing.
 #[test]
-fn the_model_answers_every_register_question_its_views_answer() {
+fn every_native_model_and_join_builds_with_its_effect() {
     let mut specifications = std::collections::BTreeSet::new();
     let mut refused = Vec::new();
     for (sleigh, bits) in [("x86-64", 64), ("x86", 32), ("aarch64", 64)] {
-        let machine = r2sleigh_lift::embedded_machine(sleigh).expect("an embedded machine");
-        let storages = (machine.arch.registers.iter())
-            .filter(|register| register.size != 0)
-            .map(|register| r2source::CanonicalStorageId {
-                space: r2source::CanonicalStorageSpace::Register,
-                offset: register.offset,
-                size: register.size,
-            })
-            .collect::<Vec<_>>();
         let built = built_on(sleigh, bits);
         for (name, model) in &built {
-            agrees(name, model, &storages);
             let compiler = name.split('/').nth(1).unwrap_or_default();
             specifications.insert(format!("{sleigh}/{compiler}"));
-            refused.extend(model.effect_refused().map(|why| format!("{name}: {why:?}")));
+            if let Some(why) = model.effect_refused() {
+                refused.push(format!("{name}: {why:?}"));
+                assert!(model.clobbered().is_none() && model.call_reads().is_none());
+                assert!(model.preserved_registers().is_empty() && model.stack_bound().is_none());
+            }
         }
-        joins_agree(&built, &storages);
+        joins_build(&built);
     }
     let selected = [
         "x86-64/gcc",
@@ -415,82 +410,8 @@ fn the_model_answers_every_register_question_its_views_answer() {
             "{specification}: {specifications:?}"
         );
     }
-    // D274: Go's arm64 specification names x18 unaffected, which Darwin reserves.
-    let expected = ["GoAmd64", "GoArm64", "GoAmd64Abi0", "GoArm64Abi0"];
-    let expected = expected
-        .iter()
-        .chain(&["GoAmd64Unstated", "GoArm64Unstated"]);
-    let expected = expected.map(|id| format!("aarch64/golang/{id}/Darwin: Contradictory"));
-    assert_eq!(refused, expected.collect::<Vec<_>>());
-}
-
-/// The model and its views give one answer to each question, for every register of the file
-/// and its low half.
-fn agrees(name: &str, model: &ConventionModel, storages: &[r2source::CanonicalStorageId]) {
-    let slots = model.convention_slots().expect("the slots");
-    let integers = slots.argument_slots();
-    assert_eq!(model.arguments(SlotClass::Integer), integers, "{name}");
-    let floats = slots.float_argument_slots();
-    assert_eq!(model.arguments(SlotClass::Float), floats, "{name}");
-    for (at, storage) in integers.iter().enumerate() {
-        let positioned = model.argument(SlotClass::Integer, at);
-        assert_eq!(positioned, Some(*storage), "{name}");
-    }
-    let halves = storages.iter().map(|storage| r2source::CanonicalStorageId {
-        size: (storage.size / 2).max(1),
-        ..*storage
-    });
-    let storages = storages.iter().copied().chain(halves).collect::<Vec<_>>();
-    for storage in &storages {
-        let class = model.class_of(*storage);
-        assert_eq!(class, slots.class_of(*storage), "{name}: {storage:?}");
-    }
-    match model.call_effect() {
-        Ok(effect) => effects_agree(name, model, &effect, &storages),
-        Err(_) => refused_effect_clobbers(name, model, &storages),
-    }
-}
-
-fn effects_agree(
-    name: &str,
-    model: &ConventionModel,
-    effect: &r2source::SourceCallEffect,
-    storages: &[r2source::CanonicalStorageId],
-) {
-    assert_eq!(model.effect_refused(), None, "{name}");
-    assert_eq!(model.clobbered(), Some(effect.clobbered()), "{name}");
-    assert_eq!(model.preserved_registers(), effect.preserved(), "{name}");
-    assert_eq!(model.system_reserved(), effect.system_reserved(), "{name}");
-    assert_eq!(model.call_reads(), Some(effect.reads().call()), "{name}");
-    assert_eq!(model.result_reads(), Some(effect.reads().ret()), "{name}");
-    assert_eq!(model.stack_guard().as_ref(), effect.stack_guard(), "{name}");
-    assert_eq!(model.stack_bound().as_ref(), effect.stack_bound(), "{name}");
-    for storage in storages {
-        let same = model.effect_on(*storage) == effect.effect_on(*storage);
-        assert!(same, "{name}: {storage:?}");
-    }
-}
-
-/// Where the view refused the effect, the model states none and every storage is clobbered.
-fn refused_effect_clobbers(
-    name: &str,
-    model: &ConventionModel,
-    storages: &[r2source::CanonicalStorageId],
-) {
-    assert!(model.effect_refused().is_some(), "{name}");
-    assert!(
-        model.clobbered().is_none() && model.call_reads().is_none(),
-        "{name}"
-    );
-    assert!(model.preserved_registers().is_empty(), "{name}");
-    assert!(
-        model.stack_guard().is_none() && model.stack_bound().is_none(),
-        "{name}"
-    );
-    assert!(
-        storages.iter().all(|storage| model.clobbers(*storage)),
-        "{name}"
-    );
+    // Go's arm64 specification names x18 unaffected, which Darwin reserves: x18 is reserved (D274).
+    assert_eq!(refused, Vec::<String>::new());
 }
 
 /// One node per class `ParamClass::of` answers at a 64-bit pointer, and that class.

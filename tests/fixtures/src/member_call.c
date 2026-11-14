@@ -35,7 +35,7 @@ NOINL long ops_wide(struct ops *o, long a) {
 /* Floating-point argument and result. */
 NOINL double ops_scale(struct ops *o, double x) { return o->scale(x, o->count) + 1.0; }
 
-/* Refused: a variadic member, an unprototyped one, a record result, a slot behind a loaded pointer. */
+/* Refused: a variadic member, an unprototyped one, a record result. Placed: a loaded member (D348). */
 NOINL int ops_log(struct ops *o, const char *s) { return o->log("%s", s) + 1; }
 NOINL int ops_old(struct ops *o) { o->old(o->opaque); return o->count; }
 NOINL long ops_make(struct ops *o, int n) { return o->make(n).hi + 1; }

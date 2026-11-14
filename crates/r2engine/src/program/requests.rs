@@ -168,6 +168,9 @@ pub struct Rendering {
     /// Why nothing was analysed to render, where nothing was: the response is then that record's
     /// comment alone (ROADMAP D29).
     pub refused: Option<NativeRefusal>,
+    /// Each member call's instruction and the parameter count its contract's exact callee
+    /// declares, sorted by instruction (D272).
+    pub member_arities: Vec<(r2ssa::InstId, usize)>,
 }
 
 impl Rendering {
@@ -190,6 +193,7 @@ impl Rendering {
             unread: Vec::new(),
             language,
             refused: Some(refusal),
+            member_arities: Vec::new(),
         }
     }
 
@@ -380,7 +384,8 @@ impl<S: Source + 'static> OpenProgram<S> {
     /// analysis refused, what the walk shows and the record (ROADMAP D29).
     pub fn function_info(&mut self, entry: u64) -> Result<super::info::FunctionInfo, String> {
         self.start_request();
-        let noreturn = (!self.comes_back(entry)).then(|| self.view().exit_premises(entry));
+        let view = self.view();
+        let noreturn = (view.exit(entry, view.thumb_at(entry))).map(|never| never.premises);
         let prepared = match self.analysed(entry) {
             Ok(prepared) => prepared,
             // A stop is the request's, and an address nothing maps names no function.
@@ -765,7 +770,7 @@ impl<S: Source + 'static> OpenProgram<S> {
                 program: self,
                 endian: self.endian(),
             },
-            call_effect: self.view().default_call_effect(),
+            calls: self.view().default_calls(),
             proved,
             body: None,
             holdings: true,
@@ -859,11 +864,19 @@ fn listed_walk<S: Source + 'static>(
 ) -> Result<crate::native::ListedWalk, NativeRefusal> {
     let target = super::analysis::target(view, entry, thumb)?;
     let key = (entry, thumb);
-    let held = view.db.held::<super::analysis::DispatchTables>(&key);
-    let held = held.ok().flatten().map(|tables| (*tables.0).clone());
-    let tables = || (*super::analysis::dispatch_tables(view.db, key).0).clone();
+    let held = (view
+        .db
+        .held::<super::analysis::LaterTables>(&key)
+        .ok()
+        .flatten())
+    .or_else(|| (view.db.held::<super::analysis::DispatchTables>(&key).ok()).flatten());
+    let held = held.map(|tables| (*tables.0).clone());
+    let rounds = crate::native::TableRounds {
+        first: &|| (*super::analysis::dispatch_tables(view.db, key).0).clone(),
+        later: &|_| (*super::analysis::later_tables(view.db, key).0).clone(),
+    };
     let walked = crate::isolation::isolated(|| {
-        crate::native::listed_walk(&target, view, entry, held, &tables)
+        crate::native::listed_walk(&target, view, entry, held, &rounds)
     });
     walked.unwrap_or_else(|panicked| Err(panicked.into()))
 }
@@ -883,7 +896,7 @@ fn claimed_by<S: Source + 'static>(
             program: view,
             endian: super::view::endian(view.source()),
         },
-        call_effect: target.call.call_effect().ok(),
+        calls: Some(std::sync::Arc::clone(&target.call)),
         proved: None,
         body: Some(&body),
         holdings: false,
@@ -938,7 +951,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
         }
         let walker = super::returns::Walking::new(view.clone(), true)?;
         let found = crate::discovery::functions(&view, seeds, &walker);
-        db.deposit::<super::returns::ComesBack>(found.returns);
+        let keyed = (found.returns.into_iter())
+            .map(|((address, thumb), answer)| (view.returns_key(address, thumb), answer));
+        db.deposit::<super::returns::ComesBack>(keyed);
         for (vaddr, confidence) in found.placeless {
             placeless.entry(vaddr).or_insert(confidence);
         }

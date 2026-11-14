@@ -179,14 +179,34 @@ pub enum Arrival {
 }
 
 impl Parameter {
-    /// Whether the declaration says this parameter is a function.
-    ///
-    /// The type data spells it `func`, which is what `__libc_start_main` says
-    /// of `main` and `atexit` says of the handler it is given. A constant in
-    /// such a slot is a function address on the declaration's authority, which
-    /// is the only ground on which this engine will believe one.
-    pub fn is_function(&self) -> bool {
-        self.spelling.as_type().trim() == "func"
+    /// The return type of the code this parameter points to; `None` for a data pointer or a
+    /// refused return (`func`, S30). A constant in such a slot is a function address.
+    pub fn code_returns(&self, graph: &crate::TypeGraph) -> Option<crate::TypeId> {
+        let crate::types::Type::Pointer { target } = graph.resolved(self.ty)? else {
+            return None;
+        };
+        match graph.resolved(*target)? {
+            crate::types::Type::Code(signature) => Some(signature.returns),
+            _ => None,
+        }
+    }
+
+    /// What a caller through this code pointer reads of the code's result, by its declared return:
+    /// nothing for `void`, the low bytes for a fixed-width integer; `None` for anything else.
+    pub fn code_result(&self, graph: &crate::TypeGraph) -> Option<crate::ResultRead> {
+        use crate::types::{Scalar, ScalarKind, Type, Width};
+        let returns = self.code_returns(graph)?;
+        match graph.resolved(returns)? {
+            Type::Void => Some(crate::ResultRead::Nothing),
+            Type::Scalar(Scalar {
+                kind: ScalarKind::Signed | ScalarKind::Unsigned,
+                width: Width::Bits(bits @ (8 | 16 | 32 | 64)),
+                ..
+            }) => Some(crate::ResultRead::Integer {
+                bytes: u8::try_from(bits / 8).ok()?,
+            }),
+            _ => None,
+        }
     }
 
     pub fn new(ty: TypeId, spelling: impl Into<Spelled>, name: Option<impl Into<String>>) -> Self {

@@ -45,7 +45,7 @@ pub(super) fn over_run(
         return;
     }
     let memory = &answered.memory;
-    let call_effect = answered.call_effect.as_ref();
+    let call_effect = answered.calls.as_deref();
     let body = (work >= Work::Function).then_some(answered.body).flatten();
     let fresh = fresh_over(lines, body);
     let mut named = named_over(run.lifts, &fresh, call_effect);
@@ -243,7 +243,7 @@ fn fresh_over(lines: &[Line], body: Option<&WalkedBody<'_>>) -> Vec<bool> {
 fn named_over(
     lifts: &[Option<r2il::R2ILBlock>],
     fresh: &[bool],
-    call_effect: Option<&r2ssa::SourceCallEffect>,
+    call_effect: Option<&r2ssa::ConventionModel>,
 ) -> Vec<Option<Named>> {
     let mut carried = BlockOrigins::default();
     lifts
@@ -266,7 +266,7 @@ fn named_over(
 fn named_by(
     lift: &r2il::R2ILBlock,
     carried: &mut BlockOrigins,
-    call_effect: Option<&r2ssa::SourceCallEffect>,
+    call_effect: Option<&r2ssa::ConventionModel>,
 ) -> Named {
     let before = carried.clone();
     let mut own = BlockOrigins::default();
@@ -336,7 +336,7 @@ fn relative_over(
         return vec![false; lines.len()];
     };
     let shifted = super::decode::lift_run(answered, &lines[..=last], &run.windows[..=last], PAGE);
-    let there = named_over(&shifted, fresh, answered.call_effect.as_ref());
+    let there = named_over(&shifted, fresh, answered.calls.as_deref());
     lines
         .iter()
         .enumerate()
@@ -419,7 +419,7 @@ struct After<'a, 'r, 'b> {
     /// The instructions past the run, read as far as a question needs them.
     beyond: &'a mut Lookahead<'r, 'b>,
     /// What a call does; without it a call leaves every holder standing.
-    call_effect: Option<&'a r2ssa::SourceCallEffect>,
+    call_effect: Option<&'a r2ssa::ConventionModel>,
     /// Which parameters of a callee take an address, where the number's use decides whether it is one.
     parameters: Option<&'a dyn super::records::Parameters>,
 }
@@ -497,15 +497,14 @@ fn pointer_use(
 fn follow_copies(
     op: &R2ILOp,
     holders: &mut Vec<Varnode>,
-    call_effect: Option<&r2ssa::SourceCallEffect>,
+    call_effect: Option<&r2ssa::ConventionModel>,
 ) -> bool {
     if op.is_call() {
-        // A register the call may change no longer holds the number.
+        // A register the call may change no longer holds the number; under no model, every one.
         holders.retain(|held| {
-            call_effect.is_none_or(|effect| {
-                held.space != SpaceId::Register
-                    || !effect.clobbers(CanonicalStorageId::from_varnode(held))
-            })
+            held.space != SpaceId::Register
+                || call_effect
+                    .is_some_and(|effect| !effect.clobbers(CanonicalStorageId::from_varnode(held)))
         });
         return true;
     }
@@ -631,6 +630,25 @@ fn spells_address(value: i128, address: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A register holding a number past a call keeps it only where the calls' model keeps the
+    /// register; with no model, it holds nothing past the call (S34).
+    #[test]
+    fn a_call_under_no_model_drops_every_register_holder() {
+        let rbx = r2il::Varnode::register(0x18, 8);
+        let call = R2ILOp::Call {
+            target: r2il::Varnode::constant(0x2000, 8),
+        };
+        let mut holders = vec![rbx.clone()];
+        assert!(follow_copies(&call, &mut holders, None));
+        assert!(holders.is_empty());
+        let keeps = r2source::convention::testing::model(r2abi::ConventionId::SysVAmd64)
+            .preserved([CanonicalStorageId::from_varnode(&rbx)])
+            .build();
+        let mut holders = vec![rbx.clone()];
+        assert!(follow_copies(&call, &mut holders, Some(&keeps)));
+        assert_eq!(holders, [rbx]);
+    }
 
     #[test]
     fn a_displacement_beside_a_register_is_never_a_wrapped_address() {

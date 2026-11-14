@@ -78,7 +78,11 @@ pub fn artifact_with_parameters(ops: Vec<R2ILOp>, parameters: &[u64]) -> SsaArti
         b"r2rewrite-fixture".to_vec(),
         r2ssa::ConventionId::SysVAmd64,
         parameters.iter().enumerate().map(|(index, offset)| {
-            r2ssa::SourceAbiParameterSpec::new(index as u32, storage(*offset))
+            r2ssa::SourceAbiParameterSpec::new(
+                index as u32,
+                storage(*offset),
+                r2ssa::SourceSlot::integer(index as u32),
+            )
         }),
         r2ssa::SourceFunctionReturn::Register {
             storage: storage(RAX),

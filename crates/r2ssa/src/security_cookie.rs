@@ -113,7 +113,7 @@ fn cookie_and_argument(
     machine: &SourceMachineContext,
 ) -> Option<(r2source::SourceSecurityCookie, r2source::CanonicalStorageId)> {
     let model = machine.convention()?;
-    let argument = model.argument_registers(SlotClass::Integer).next()?;
+    let argument = model.argument(SlotClass::Integer, 0)?;
     Some((model.forms.security_cookie?, argument))
 }
 
@@ -293,8 +293,8 @@ fn check_calls(
     for block in (func.block_addrs().iter()).filter_map(|addr| func.get_block(*addr)) {
         let mut handed = None;
         for (id, op) in block.sited() {
-            if let SSAOp::CallUse { src } = op
-                && func.storage_of(*src) == Some(argument)
+            if let SSAOp::CallUse { src, storage } = op
+                && *storage == argument
             {
                 handed = Some(*src);
                 continue;
@@ -471,20 +471,22 @@ impl Context<'_> {
         }
         let mut sinks = IdSet::new(func.id_limit());
         sinks.extend(ops.iter().copied());
-        // What the inserted values reach: only each other, or flags nothing reads.
-        let mut dead = Vec::new();
-        for op in &ops {
-            let defined = self.readers.op(*op).ok_or("an operation is not indexed")?;
-            let Some(dst) = defined.dst().copied() else {
-                continue;
-            };
-            if !self.unread_but_by(dst, &sinks, &mut dead) {
-                return Err("a value the check computes has another reader");
-            }
-        }
+        // What the inserted values reach: only each other, flags nothing reads, or lanes no one reads.
+        let roots = ops
+            .iter()
+            .map(|op| self.readers.op(*op).map(|op| op.dst().copied()));
+        let roots = roots
+            .collect::<Option<Vec<_>>>()
+            .ok_or("an operation is not indexed")?;
+        let (dead, carried) = (self.computed_bytes(roots.into_iter().flatten(), &sinks))
+            .ok_or("a value the check computes has another reader")?;
         ops.extend(dead);
         // A return reads its result carrier implicitly: a save left there is the function's result.
-        if ops.iter().any(|op| self.reaches_return(*op)) {
+        if ops
+            .iter()
+            .chain(&carried)
+            .any(|op| self.reaches_return(*op))
+        {
             return Err("a value the check's save computes reaches a return in a result carrier");
         }
         Ok(ops)
@@ -567,37 +569,131 @@ impl Context<'_> {
             .any(|(at, size, id)| *id != reload && *at < end && offset < at + size)
     }
 
-    /// Whether `var` is read only by `sinks`, or by operations whose own results nothing else
-    /// reads (an xor's flags); those are added to `dead`. Bounded by the readers walked.
-    fn unread_but_by(&self, var: VarId, sinks: &IdSet<OpId>, dead: &mut Vec<OpId>) -> bool {
+    /// The operations `roots`' bytes reach whose results nothing else reads, and those still holding
+    /// some; `None` where a byte reaches another reader (D230). Walked per byte gained, `BUDGET` ops.
+    fn computed_bytes(
+        &self,
+        roots: impl IntoIterator<Item = VarId>,
+        sinks: &IdSet<OpId>,
+    ) -> Option<(Vec<OpId>, Vec<OpId>)> {
         const BUDGET: usize = 64;
-        let mut work = vec![var];
-        let mut walked = 0;
-        while let Some(var) = work.pop() {
+        let func = self.func;
+        let mut held = IdMap::<VarId, u64>::new(func.values().len());
+        let mut work = Vec::new();
+        for root in roots {
+            let all = all_bytes(func.var(root).size);
+            held.insert(root, all);
+            work.push((root, all));
+        }
+        let mut walked = Vec::new();
+        while let Some((var, bytes)) = work.pop() {
             if self.readers.merged.contains(var) {
-                return false;
+                return None;
             }
-            let unseen = (self.readers.of_var(var).iter().copied())
-                .filter(|reader| !sinks.contains(*reader) && !dead.contains(reader))
-                .collect::<Vec<_>>();
-            walked += unseen.len();
-            let read = |reader: &OpId| self.readers.op(*reader).map_or(Read::Kept, reads);
-            if walked > BUDGET
-                || unseen
-                    .iter()
-                    .any(|reader| matches!(read(reader), Read::Kept))
-            {
-                return false;
-            }
-            let into = unseen.into_iter().filter_map(|reader| match read(&reader) {
-                Read::Into(dst) => Some((reader, dst)),
-                _ => None,
-            });
-            for (reader, dst) in into.collect::<Vec<_>>() {
-                dead.push(reader);
-                work.extend(dst);
+            let readers =
+                (self.readers.of_var(var).iter()).filter(|reader| !sinks.contains(**reader));
+            for reader in readers {
+                let into = self.byte_step(*reader, var, bytes, &mut walked)?;
+                (walked.len() <= BUDGET).then_some(())?;
+                let gained = into.filter(|(dst, kept)| {
+                    let had = held.get(*dst).copied().unwrap_or(0);
+                    held.insert(*dst, had | kept);
+                    had | kept != had
+                });
+                work.extend(gained);
             }
         }
-        true
+        // Dead: every reader of the result is a sink or dead; the rest still carry a byte. Each
+        // round drops one operation or more, so at most `BUDGET` rounds.
+        let live = |op: OpId, dead: &[OpId]| {
+            let dst = self.readers.op(op).and_then(|op| op.dst().copied());
+            dst.is_some_and(|dst| {
+                self.readers.merged.contains(dst)
+                    || (self.readers.of_var(dst).iter())
+                        .any(|reader| !sinks.contains(*reader) && !dead.contains(reader))
+            })
+        };
+        let mut dead = walked.clone();
+        loop {
+            let next = (dead.iter().copied())
+                .filter(|op| !live(*op, &dead))
+                .collect::<Vec<_>>();
+            if next.len() == dead.len() {
+                break;
+            }
+            dead = next;
+        }
+        let carried = (walked.into_iter())
+            .filter(|op| !dead.contains(op))
+            .collect();
+        Some((dead, carried))
+    }
+}
+
+impl Context<'_> {
+    /// One reader of `bytes` of `var`, recorded in `walked`: `None` where it keeps them, else the
+    /// result and the bytes it holds, where it has a result holding any.
+    fn byte_step(
+        &self,
+        reader: OpId,
+        var: VarId,
+        bytes: u64,
+        walked: &mut Vec<OpId>,
+    ) -> Option<Option<(VarId, u64)>> {
+        let op = self.readers.op(reader)?;
+        let (dst, kept) = match lane_read(self.func, op, var, bytes) {
+            LaneRead::Kept => return None,
+            LaneRead::None => return Some(None),
+            LaneRead::Into(dst, kept) => (dst, kept),
+        };
+        if !walked.contains(&reader) {
+            walked.push(reader);
+        }
+        Some(dst.map(|dst| (dst, kept)))
+    }
+}
+
+/// Every byte of a value `size` bytes wide, as a mask; a value past 64 bytes is 64 of them.
+fn all_bytes(size: u32) -> u64 {
+    1u64.checked_shl(size).map_or(u64::MAX, |past| past - 1)
+}
+
+/// What an operation does with `bytes` of `var` it reads.
+enum LaneRead {
+    /// An effect, a branch or a return keeps them.
+    Kept,
+    /// It reads none of them, or cancels them (`xor eax, eax`).
+    None,
+    /// Its result, where it has one, holds these bytes of them.
+    Into(Option<VarId>, u64),
+}
+
+/// The bytes of `op`'s result `bytes` of `var` reach: an extract shifts them, an insert over a
+/// constant position drops the ones it writes, any other register operation mixes them in whole.
+fn lane_read(func: &SSAFunction, op: &SSAOp<VarId>, var: VarId, bytes: u64) -> LaneRead {
+    match (op, reads(op)) {
+        (_, Read::Kept) => LaneRead::Kept,
+        (_, Read::Cancels) => LaneRead::None,
+        (_, Read::Into(None)) => LaneRead::Into(None, bytes),
+        (SSAOp::Copy { dst, .. }, _) => LaneRead::Into(Some(*dst), bytes),
+        (SSAOp::Subpiece { dst, offset, .. }, _) => {
+            let shifted = bytes.checked_shr(*offset).unwrap_or(0);
+            match shifted & all_bytes(func.var(*dst).size) {
+                0 => LaneRead::None,
+                kept => LaneRead::Into(Some(*dst), kept),
+            }
+        }
+        (SSAOp::Insert(insert), _) if insert.src == var && insert.value != var => {
+            let written = (func.var(insert.position).constant_bits())
+                .filter(|bits| bits % 8 == 0)
+                .and_then(|bits| u32::try_from(bits / 8).ok())
+                .and_then(|at| all_bytes(func.var(insert.value).size).checked_shl(at));
+            match written.map(|written| bytes & !written) {
+                Some(0) => LaneRead::None,
+                Some(kept) => LaneRead::Into(Some(insert.dst), kept),
+                None => LaneRead::Into(Some(insert.dst), all_bytes(func.var(insert.dst).size)),
+            }
+        }
+        (_, Read::Into(Some(dst))) => LaneRead::Into(Some(dst), all_bytes(func.var(dst).size)),
     }
 }

@@ -340,6 +340,31 @@ fn a_body_named_as_a_library_function_hands_nothing() {
     assert_eq!(handed.count(), 0, "{found:?}");
 }
 
+/// A Thumb switch whose case 0 alone calls 0x1014.
+const SWITCH_CALLS: [u8; 0x1c] = [
+    0x01, 0x28, // 1000 cmp r0, #1
+    0x06, 0xd8, // 1002 bhi 0x1012
+    0xdf, 0xe8, 0x00, 0xf0, // 1004 tbb [pc, r0]
+    0x01, 0x04, // 1008 cases: 0x100a, 0x1010
+    0x00, 0xf0, 0x03, 0xf8, // 100a bl 0x1014
+    0x70, 0x47, // 100e bx lr
+    0x01, 0x20, // 1010 movs r0, #1
+    0x70, 0x47, // 1012 bx lr
+    0x07, 0x20, // 1014 movs r0, #7
+    0x70, 0x47, // 1016 bx lr
+    0x00, 0x00, 0x00, 0x00, // 1018 padding
+];
+
+/// A callee only a dispatch arm reaches is asked whether it comes back in the set its call enters
+/// it in, while the survey reads the tables: reading the survey's modes there was a cycle.
+#[test]
+fn a_call_in_a_dispatch_arm_is_discovered_on_a_machine_with_two_sets() {
+    let found = thumb_entry(&SWITCH_CALLS, false).functions();
+    let found = found.expect("discovery runs");
+    let found = found.iter().map(|one| (one.address, one.thumb));
+    assert_eq!(found.collect::<Vec<_>>(), [(ARM, true), (ARM + 0x14, true)]);
+}
+
 /// Thumb: `cmp r0, #0; it eq; moveq r0, #1; bx lr`.
 const IT_BLOCK: [u8; 8] = [0x00, 0x28, 0x08, 0xbf, 0x01, 0x20, 0x70, 0x47];
 

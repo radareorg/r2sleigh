@@ -460,6 +460,22 @@ func.__stack_chk_fail.noreturn=true
 func.__stack_chk_fail.ret=void
 func.__stack_chk_fail.cite=LSB-Core-generic 5.0, libc: void __stack_chk_fail(void)
 
+# LSB 5.0 Core, generic: __libc_start_main is in the binary standard only, so no header declares
+# it. "If the main() function returns, its return value shall be passed to the exit() function":
+# the slot reads main's int. glibc passes init three arguments, so init and fini stay `func`.
+__libc_start_main=func
+func.__libc_start_main.args=7
+func.__libc_start_main.arg.0=int (*)(int, char **, char **),main
+func.__libc_start_main.arg.1=int,argc
+func.__libc_start_main.arg.2=char **,ubp_av
+func.__libc_start_main.arg.3=func,init
+func.__libc_start_main.arg.4=func,fini
+func.__libc_start_main.arg.5=func,rtld_fini
+func.__libc_start_main.arg.6=void *,stack_end
+func.__libc_start_main.noreturn=true
+func.__libc_start_main.ret=int
+func.__libc_start_main.cite=LSB-Core-generic 5.0, libc: int __libc_start_main(int (*main)(int, char **, char **), int argc, char **ubp_av, void (*init)(void), void (*fini)(void), void (*rtld_fini)(void), void *stack_end)
+
 # The rows below were radare2's glibc rows, or had no row, and are now read from glibc 2.39's
 # header under the mode their source names; `scripts/audit_abi_rows.py --cc gcc` compiles each
 # against it. An ISO C or POSIX function sits here, not in the portable table, where bionic's or
@@ -758,3 +774,11 @@ func.prctl.arg.1=,...
 func.prctl.ret=int
 func.prctl.include=sys/prctl.h
 func.prctl.tail=variadic
+
+# stdlib.h: glibc, on_exit(3). The handler takes exit's status and the registered argument.
+on_exit=func
+func.on_exit.args=2
+func.on_exit.arg.0=void (*)(int, void *),function
+func.on_exit.arg.1=void *,arg
+func.on_exit.ret=int
+func.on_exit.include=stdlib.h

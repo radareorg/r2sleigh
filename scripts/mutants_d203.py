@@ -5,8 +5,9 @@ why.
 
   mutants_d203.py [--check] [--only NAME]... GATE_ARGS...
 
-GATE_ARGS go to scripts/scratch_void.py (`--build`, `--manifest`, `--known`, `--baseline`, `--binutils-prefix`); the
-shapes in tests/gold/source_gold/scratch.c kill each mutant. The unmutated tree must pass the gate first. Run from the
+GATE_ARGS go to scripts/scratch_void.py (`--target`, `--build`, `--manifest`, `--known`, `--baseline`,
+`--binutils-prefix`); the shapes in tests/gold/source_gold/scratch.c kill each mutant. Under `--target aarch64` a mutant may
+live where its row names why (ROADMAP D246). The unmutated tree must pass the gate first. Run from the
 repository root with the files below unmodified; exit 1 where a mutant lives that should die, or dies that should live.
 """
 
@@ -22,18 +23,24 @@ RECOVER = "crates/r2ssa/src/recover_interface.rs"
 PORTABLE = "crates/r2abi/data/types-posix.sdb.txt"
 LANES = "crates/r2ssa/src/lanes.rs"
 
-# (name, edits, whether it must die, why it may live)
+ALL = ("x86-64", "aarch64")
+# Measured on the gcc 13.3 arm64 corpus (2026-11-13): why each mutant that lives there does (D246).
+SOME_PATH_A64 = "it reaches arm64 `some_path` (the value path becomes a residual), and EntryInput keeps X0 Unproven"
+ENTRY_A64 = "every entry byte C can reach X0 with is an input's, so EntryInput keeps it Unproven (S19: no case 1)"
+
+# (name, edits, whether it must die, why it may live, {target: why it lives there})
 MUTANTS = [
     # A void call's leftover on one path decides every path: `some_path` returns a value on the other.
     ("some-path-join", [(RECOVER, "ReturnedByCall::Void => {\n                every_path_writes = false;\n                continue;\n            }",
-                         "ReturnedByCall::Void => return RecoveredFunctionResult::Void,")], True, ""),
+                         "ReturnedByCall::Void => return RecoveredFunctionResult::Void,")], True, "",
+     {"aarch64": SOME_PATH_A64}),
     # `puts` stated void: `tail_puts` forwards its result.
-    ("void-row", [(PORTABLE, "func.puts.ret=int\n", "func.puts.ret=void\n")], True, ""),
+    ("void-row", [(PORTABLE, "func.puts.ret=int\n", "func.puts.ret=void\n")], True, "", {}),
     # Any entry byte defines nothing: `identity` returns its argument, an input's entry byte.
-    ("entry-byte", [(LANES, "Fill::Entry(from) => own(at, from),", "Fill::Entry(_) => true,")], True, ""),
+    ("entry-byte", [(LANES, "Fill::Entry(from) => own(at, from),", "Fill::Entry(_) => true,")], True, "", {"aarch64": ENTRY_A64}),
     # The canary's residue is a write like any other: `canary_void` returns it (D200 case 3).
     ("inserted-write-unread", [(LANES, "_ if inserted.contains(id) || function.is_checked_difference(*dst) => {",
-                                "_ if false => {")], True, ""),
+                                "_ if false => {")], True, "", {}),
 ]
 
 
@@ -64,6 +71,16 @@ def verdict(stage: str, done: subprocess.CompletedProcess) -> tuple[str, bool | 
     return (f"killed: {'; '.join(caught[:3])}", True) if caught else ("survived the gate", False)
 
 
+def target_of(gate_args: list[str]) -> str:
+    """The `--target` the gate is given, x86-64 when absent."""
+    for i, arg in enumerate(gate_args):
+        if arg == "--target" and i + 1 < len(gate_args):
+            return gate_args[i + 1]
+        if arg.startswith("--target="):
+            return arg.split("=", 1)[1]
+    return "x86-64"
+
+
 def run(name, edits, must_die, why, check, gate_args):
     files = {path for path, _, _ in edits}
     originals = {path: open(path).read() for path in files}
@@ -92,6 +109,9 @@ def main(argv: list[str]) -> int:
     check = "--check" in argv
     only = [argv[i + 1] for i, a in enumerate(argv) if a == "--only"]
     gate_args = [a for i, a in enumerate(argv) if a != "--check" and a != "--only" and (i == 0 or argv[i - 1] != "--only")]
+    target = target_of(gate_args)
+    if target not in ALL:
+        sys.exit(f"no mutant is graded on {target}")
     paths = sorted({path for _, edits, *_ in MUTANTS for path, _, _ in edits})
     if not check:
         if subprocess.run(["git", "diff", "--quiet", "--", *paths]).returncode:
@@ -102,9 +122,10 @@ def main(argv: list[str]) -> int:
             sys.exit("the unmutated tree fails the gate: no mutant can be graded against it")
         print("ok    unmutated: the gate passes", flush=True)
     bad = 0
-    for name, edits, must_die, why in MUTANTS:
+    for name, edits, must_die, why, lives_on in MUTANTS:
         if only and name not in only:
             continue
+        must_die, why = (False, lives_on[target]) if target in lives_on else (must_die, why)
         line, ok = run(name, edits, must_die, why, check, gate_args)
         print(("ok   " if ok else "WRONG"), line, flush=True)
         bad += not ok

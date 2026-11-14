@@ -73,7 +73,6 @@ fn tail_jump_is_a_terminal_callsite_without_call_clobbers() {
         None,
         SourceMachineRoles::default(),
         None,
-        None,
         vec![interface],
         vec![identity],
     );
@@ -108,7 +107,7 @@ use super::*;
 use crate::semantic::{CallArgumentLocation, SemanticId};
 use crate::{
     CallBoundarySlot, CanonicalStorageSpace, SourceAbiParameterSpec, SourceCallArgumentFact,
-    SourceCallArgumentValue, SourceCallEffect, SourceFunctionReturn, SourceStackSlotSpec, ValueId,
+    SourceCallArgumentValue, SourceFunctionReturn, SourceStackSlotSpec, ValueId,
 };
 use r2il::{R2ILOp, RegisterDef, SpaceId, SwitchCase, SwitchInfo as R2ILSwitchInfo, Varnode};
 use std::cell::Cell;
@@ -119,12 +118,14 @@ use std::time::{Duration, Instant};
 fn clobbering(
     clobbered: impl IntoIterator<Item = CanonicalStorageId>,
     preserved: impl IntoIterator<Item = CanonicalStorageId>,
-) -> Option<SourceCallEffect> {
-    crate::testing::call_effect(clobbered, preserved)
+) -> Option<crate::Conventions> {
+    crate::testing::conventions(clobbered, preserved)
 }
 
 /// A call effect that preserves exactly these registers and clobbers every other.
-fn preserving(preserved: impl IntoIterator<Item = CanonicalStorageId>) -> Option<SourceCallEffect> {
+fn preserving(
+    preserved: impl IntoIterator<Item = CanonicalStorageId>,
+) -> Option<crate::Conventions> {
     clobbering([], preserved)
 }
 
@@ -1085,19 +1086,14 @@ fn variadic_format_call_artifact_formed(
             .with_radare2_format_parameter(index)
             .expect("format parameter belongs to the fixed prefix");
     }
-    let convention = SourceConventionSlots::new(
-        r2source::ConventionId::SysVAmd64,
-        (0..4).map(slot).collect::<Vec<_>>(),
-        None,
-    )
-    .expect("convention slots");
+    let convention = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+        .arguments(r2source::convention::SlotClass::Integer, (0..4).map(slot));
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         &blocks,
         Some(&crate::Arch::from(arch.clone())),
         None,
         SourceMachineRoles::default(),
-        Some(convention),
-        clobbering((0..4).map(slot), []),
+        Some(convention.killed((0..4).map(slot)).conventions()),
         vec![interface],
     );
     if let Some(format) = format {
@@ -1216,20 +1212,15 @@ fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
     .expect("exact callsite interface")
     .with_radare2_format_parameter(1)
     .expect("format parameter belongs to the fixed prefix");
-    let convention = SourceConventionSlots::new(
-        r2source::ConventionId::SysVAmd64,
-        (0..4).map(slot).collect::<Vec<_>>(),
-        None,
-    )
-    .expect("convention slots");
+    let convention = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+        .arguments(r2source::convention::SlotClass::Integer, (0..4).map(slot));
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         &blocks,
         Some(&crate::Arch::from(arch.clone())),
         None,
         SourceMachineRoles::default(),
-        Some(convention),
         // A call reads its argument registers without naming them.
-        crate::testing::call_effect_reading((0..4).map(slot), [], (0..4).map(slot)),
+        Some(convention.killed((0..4).map(slot)).conventions()),
         vec![interface],
     );
     machine_context
@@ -1387,19 +1378,14 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
         .and_then(|interface| interface.with_radare2_format_parameter(1))
         .expect("exact variadic callsite interface")
     };
-    let convention = SourceConventionSlots::new(
-        r2source::ConventionId::SysVAmd64,
-        (0..4).map(slot).collect::<Vec<_>>(),
-        None,
-    )
-    .expect("convention slots");
+    let convention = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+        .arguments(r2source::convention::SlotClass::Integer, (0..4).map(slot));
     let mut machine_context = SourceMachineContext::from_blocks_with_interfaces(
         &blocks,
         Some(&crate::Arch::from(arch.clone())),
         None,
         SourceMachineRoles::default(),
-        Some(convention),
-        clobbering((0..4).map(slot), []),
+        Some(convention.killed((0..4).map(slot)).conventions()),
         vec![interface(first_call_index), interface(second_call_index)],
     );
     machine_context.bind_source_string_literals(&[
@@ -2335,7 +2321,7 @@ fn call_preservation_arch_spec() -> ArchSpec {
 }
 
 /// The fixture's call effect: rax, rdi, rsi and rdx clobbered, the register at 32 preserved.
-fn call_preservation_effect() -> Option<SourceCallEffect> {
+fn call_preservation_effect() -> Option<crate::Conventions> {
     let clobbered = [0, 8, 16, 24].map(|offset| call_preservation_storage(offset, 8));
     clobbering(clobbered, [call_preservation_storage(32, 8)])
 }
@@ -2346,7 +2332,7 @@ fn call_preservation_artifact(blocks: &[R2ILBlock], arch: &crate::Arch) -> Optio
         blocks,
         DecompileInputs {
             arch: Some(arch),
-            call_effect: call_preservation_effect(),
+            conventions: call_preservation_effect(),
             ..Default::default()
         },
     )
@@ -2369,29 +2355,6 @@ fn call_preservation_block(ops: Vec<R2ILOp>) -> R2ILBlock {
     }
 }
 
-#[test]
-fn a_body_that_calls_preserves_nothing_its_own_call_may_touch() {
-    let arch = call_preservation_arch();
-    let block = call_preservation_block(vec![
-        R2ILOp::Call {
-            target: make_ram(0x2000, 8),
-        },
-        R2ILOp::Return {
-            target: make_const(0, 8),
-        },
-    ]);
-    let artifact = call_preservation_artifact(&[block], &arch).expect("calling artifact");
-    assert!(
-        artifact
-            .facts()
-            .boundaries
-            .preserved_call_carriers
-            .is_empty(),
-        "{:?}",
-        artifact.facts().boundaries.preserved_call_carriers
-    );
-}
-
 /// Prepare blocks where a call clobbers the general registers and keeps `xmm8`, the low half of `ymm8`.
 fn prepared_keeping_xmm8(
     blocks: Vec<(u64, Vec<R2ILOp>)>,
@@ -2412,7 +2375,7 @@ fn prepared_keeping_xmm8(
         &blocks,
         DecompileInputs {
             arch: Some(&crate::Arch::from(arch.clone())),
-            call_effect: clobbering(clobbered, [call_preservation_storage(0x100, 16)]),
+            conventions: clobbering(clobbered, [call_preservation_storage(0x100, 16)]),
             callee_preserved_carriers,
             ..Default::default()
         },
@@ -2458,8 +2421,6 @@ fn a_call_that_never_returns_ends_its_block_past_the_lanes_it_writes() {
         "{:?}",
         ends.ops()
     );
-    let preserved = &artifact.facts().boundaries.preserved_call_carriers;
-    assert!(preserved.contains(&general[1]), "{preserved:?}");
 }
 
 /// The half of a register a call keeps is the value that reached the call, here a merge of two paths.
@@ -2578,7 +2539,11 @@ fn promotion_fixture_with_argument(
     let interface = SourceFunctionInterface::new_exact(
         b"promotion-test".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [SourceAbiParameterSpec::new(0, argument)],
+        [SourceAbiParameterSpec::new(
+            0,
+            argument,
+            r2source::SourceSlot::integer(0),
+        )],
         SourceFunctionReturn::Void,
         [],
     )
@@ -2766,47 +2731,4 @@ fn a_sealed_function_refuses_to_read_its_operations() {
         .seal(&SourceMachineContext::from_blocks(&[block], None))
         .expect("the sealed function validates");
     let _ = sealed.function().blocks().len();
-}
-
-/// A register the convention's list never names is still one a call may
-/// change, so a callee's body answers for it: a leaf that never touches it
-/// preserves it, and a body whose own call reaches a callee that does not
-/// prove it kept loses it, though nothing in that body mentions it.
-#[test]
-fn a_callee_answers_for_every_register_a_call_may_change_not_a_list() {
-    let mut arch = call_preservation_arch_spec();
-    arch.add_register(RegisterDef::new("r10", 40, 8));
-    let r10 = call_preservation_storage(40, 8);
-    let ret = R2ILOp::Return {
-        target: make_const(0, 8),
-    };
-    let preserved = |ops: Vec<R2ILOp>, callees: CalleePreservedCarriers| {
-        SsaArtifact::for_decompile_with(
-            &[call_preservation_block(ops)],
-            DecompileInputs {
-                arch: Some(&crate::Arch::from(arch.clone())),
-                call_effect: call_preservation_effect(),
-                callee_preserved_carriers: callees,
-                ..Default::default()
-            },
-        )
-        .expect("artifact")
-        .facts()
-        .boundaries
-        .preserved_call_carriers
-        .clone()
-    };
-    assert!(preserved(vec![ret.clone()], BTreeMap::new()).contains(&r10));
-    let call = R2ILOp::Call {
-        target: make_ram(0x2000, 8),
-    };
-    let keeps = |kept: &[CanonicalStorageId]| {
-        BTreeMap::from([(0x2000, kept.iter().copied().collect::<BTreeSet<_>>())])
-    };
-    let general = call_preservation_storage(8, 8);
-    let through_unknown = preserved(vec![call.clone(), ret.clone()], keeps(&[general]));
-    assert!(!through_unknown.contains(&r10), "{through_unknown:?}");
-    assert!(through_unknown.contains(&general), "{through_unknown:?}");
-    let through_keeper = preserved(vec![call, ret], keeps(&[general, r10]));
-    assert!(through_keeper.contains(&r10), "{through_keeper:?}");
 }

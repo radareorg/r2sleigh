@@ -278,12 +278,12 @@ impl<'a> Placement<'a> {
         }
         let storage = match types.class(returns) {
             ParamClass::Float(bytes) => {
-                (self.machine.slots.float_result_slot()).map(|slot| CanonicalStorageId {
+                (self.machine.conventions.own.results().float).map(|slot| CanonicalStorageId {
                     size: u32::from(bytes).min(slot.size),
                     ..slot
                 })
             }
-            ParamClass::Integer(_) => self.machine.slots.result_slot(),
+            ParamClass::Integer(_) => self.machine.conventions.own.result(),
             ParamClass::Unplaced(class) => {
                 r2il::refusal_evidence!(
                     "declared-interface",
@@ -348,7 +348,11 @@ impl<'a> Placement<'a> {
                 true,
             ) => {
                 let at = placement.locations.get(usize::from(index));
-                let floats = self.machine.slots.float_argument_slots();
+                let floats = self
+                    .machine
+                    .conventions
+                    .own
+                    .arguments(r2source::convention::SlotClass::Float);
                 (at.and_then(|location| location.register())).map(|format| {
                     r2ssa::call_reads::FormatTail {
                         format,
@@ -490,7 +494,7 @@ impl Placement<'_> {
         frame: &frame::DeclaredFrame,
     ) -> Option<r2source::SourceFunctionInterface> {
         let name = &declared.prototype.name;
-        let convention = self.machine.slots.convention();
+        let convention = self.machine.conventions.own.id;
         let interface = self.typed(name, convention, placement, typed)?;
         // Typed first: a declared format parameter is believed on what the
         // declaration's types are.
@@ -559,7 +563,7 @@ impl Placement<'_> {
                 class: *class,
                 basis,
             };
-            r2source::SourceAbiParameterSpec::with_location(index as u32, *location).at_slot(slot)
+            r2source::SourceAbiParameterSpec::with_location(index as u32, *location, slot)
         });
         let revision = format!("declared:{name}").into_bytes();
         let interface = r2source::SourceFunctionInterface::new_exact_with_logical_types(
@@ -748,5 +752,5 @@ fn presentation(prototype: &Prototype, placed: usize) -> r2source::SourceSignatu
         .map(|parameter| r2source::SourceSignatureParameter::new(parameter.name.clone()));
     let ellipsis =
         (prototype.variadic).then(|| r2source::SourceSignatureParameter::new(Some("...")));
-    r2source::SourceSignaturePresentation::new(None::<String>, false, parameters.chain(ellipsis))
+    r2source::SourceSignaturePresentation::new(false, parameters.chain(ellipsis))
 }

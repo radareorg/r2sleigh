@@ -1,7 +1,6 @@
 use super::*;
 use rustc_hash::FxHashMap;
 use std::cell::Cell;
-use std::collections::BTreeMap;
 
 fn register_assumption(id: &str, name: &str, value: u64) -> r2ssa::AnalysisAssumption {
     r2ssa::AnalysisAssumption {
@@ -85,6 +84,7 @@ fn exact_rdi_test_source_snapshot(revision: &str) -> Arc<EngineSourceSnapshot> {
                 offset: 0x10,
                 size: 8,
             },
+            r2source::SourceSlot::integer(0),
         )],
         r2ssa::SourceFunctionReturn::Void,
         std::iter::empty::<r2ssa::SourceStackSlotSpec>(),
@@ -257,7 +257,7 @@ fn authoritative_source_interface_reaches_prepared_ssa_through_request() {
             )],
         )
         .expect("source snapshot")
-        .with_call_effect(x86_64_result_call_effect()),
+        .with_conventions(x86_64_result_conventions()),
     );
     let mut blocks = direct_call_return_blocks(0x401000, 0x5000);
     blocks[0].ops[1] = r2il::R2ILOp::Return {
@@ -275,7 +275,6 @@ fn authoritative_source_interface_reaches_prepared_ssa_through_request() {
                 semantic_metadata_enabled: false,
             },
             ptr_bits: Some(64),
-            reg_type_hints: FxHashMap::default(),
             parsed_context: r2types::ParsedExternalContext::default(),
             include_interproc_summary_set: false,
         });
@@ -334,7 +333,6 @@ fn absent_source_snapshot_refuses_before_ssa_construction() {
                 semantic_metadata_enabled: false,
             },
             ptr_bits: Some(64),
-            reg_type_hints: FxHashMap::default(),
             parsed_context: r2types::ParsedExternalContext::default(),
             include_interproc_summary_set: false,
         });
@@ -373,7 +371,6 @@ fn request_assumptions_produce_one_shared_semantic_artifact() {
             declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
-            reg_type_hints: FxHashMap::default(),
             parsed_context,
             semantic_mode: EngineSemanticMode::Optional,
             include_interproc_summary_set: true,
@@ -388,18 +385,16 @@ fn request_assumptions_produce_one_shared_semantic_artifact() {
 }
 
 /// What a call does on the result arch: rax clobbered, rsp and rip preserved.
-fn x86_64_result_call_effect() -> r2ssa::SourceCallEffect {
+fn x86_64_result_conventions() -> r2ssa::Conventions {
     let storage = |offset| r2ssa::CanonicalStorageId {
         space: r2ssa::CanonicalStorageSpace::Register,
         offset,
         size: 8,
     };
-    r2ssa::SourceCallEffect::new(
-        [storage(0)],
-        [storage(0x28), storage(0x30)],
-        r2ssa::SourceBoundaryReads::new([], []).expect("no reads"),
-    )
-    .expect("a call effect")
+    r2source::convention::testing::model(r2ssa::ConventionId::SysVAmd64)
+        .killed([storage(0)])
+        .preserved([storage(0x28), storage(0x30)])
+        .conventions()
 }
 
 fn x86_64_result_arch() -> r2ssa::Arch {
@@ -469,7 +464,6 @@ fn analyze_request_builders_own_semantic_mode_selection() {
         source_snapshot: Some(test_source_snapshot("sym.builder/rev1")),
         ptr_bits: 64,
         semantic_metadata_enabled: false,
-        reg_type_hints: FxHashMap::default(),
         parsed_context: r2types::ParsedExternalContext::default(),
         include_interproc_summary_set: true,
     };
@@ -502,7 +496,6 @@ fn analyze_request_input_builder_owns_parts_and_pointer_width() {
         source_snapshot: Some(test_source_snapshot("sym.input_builder/rev1")),
         ptr_bits: None,
         semantic_metadata_enabled: true,
-        reg_type_hints: FxHashMap::default(),
         parsed_context: r2types::ParsedExternalContext::default(),
         include_interproc_summary_set: true,
     };
@@ -536,7 +529,6 @@ fn analyze_request_input_builder_owns_parts_and_pointer_width() {
                 semantic_metadata_enabled: false,
             },
             ptr_bits: Some(32),
-            reg_type_hints: FxHashMap::default(),
             parsed_context: r2types::ParsedExternalContext::default(),
             include_interproc_summary_set: false,
         });
@@ -564,7 +556,11 @@ fn interproc_summary_build_uses_only_trusted_callee_bodies() {
     let interface = r2ssa::SourceFunctionInterface::new_exact(
         b"interproc-owner/rev1".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [r2ssa::SourceAbiParameterSpec::new(0, storage(8))],
+        [r2ssa::SourceAbiParameterSpec::new(
+            0,
+            storage(8),
+            r2source::SourceSlot::integer(0),
+        )],
         r2ssa::SourceFunctionReturn::Register {
             storage: storage(0),
         },
@@ -727,7 +723,6 @@ fn analyze_reports_planning_time() {
         declared_signatures: Vec::new(),
         ptr_bits: 64,
         semantic_metadata_enabled: false,
-        reg_type_hints: FxHashMap::default(),
         parsed_context: r2types::ParsedExternalContext::default(),
         semantic_mode: EngineSemanticMode::Full,
         include_interproc_summary_set: true,
@@ -808,7 +803,6 @@ fn controlled_ssa_test_request(
             semantic_metadata_enabled: false,
         },
         ptr_bits: Some(64),
-        reg_type_hints: FxHashMap::default(),
         parsed_context: r2types::ParsedExternalContext::default(),
         include_interproc_summary_set: false,
     })
@@ -1497,7 +1491,6 @@ fn analyze_checked_refuses_pre_cancelled_request_with_full_phase_report() {
                 semantic_metadata_enabled: false,
             },
             ptr_bits: Some(64),
-            reg_type_hints: FxHashMap::default(),
             parsed_context: r2types::ParsedExternalContext::default(),
             include_interproc_summary_set: false,
         })
@@ -1638,58 +1631,6 @@ fn function_identity_keeps_ordered_aliases_for_summary_and_type_routes() {
 }
 
 #[test]
-fn external_layout_names_rewrite_placeholder_field_certificates() {
-    let signature = r2types::FunctionSignatureSpec {
-        ret_type: None,
-        params: vec![r2types::FunctionParamSpec {
-            name: "arg0".to_string(),
-            ty: Some(r2types::CTypeLike::Pointer(Box::new(
-                r2types::CTypeLike::Struct("DemoStruct".to_string()),
-            ))),
-        }],
-    };
-    let type_facts = FunctionTypeFacts {
-        merged_signature: Some(signature),
-        external_type_db: r2types::ExternalTypeDb {
-            structs: BTreeMap::from([(
-                "demostruct".to_string(),
-                r2types::ExternalStruct {
-                    name: "DemoStruct".to_string(),
-                    fields: BTreeMap::from([(
-                        48,
-                        r2types::ExternalField {
-                            name: "thirteenth".to_string(),
-                            offset: 48,
-                            ty: Some(r2types::CTypeLike::i32()),
-                        },
-                    )]),
-                },
-            )]),
-            ..r2types::ExternalTypeDb::default()
-        },
-        field_access_certificates: vec![r2types::FieldAccessCertificate {
-            slot: 0,
-            field_offset: 48,
-            field_name: "f_30".to_string(),
-            field_type: None,
-        }],
-        ..FunctionTypeFacts::default()
-    };
-    let mut facts = FunctionFacts::new(type_facts);
-
-    facts.normalize_field_certificates_from_external_layout();
-
-    assert_eq!(
-        facts.type_facts().field_access_certificates[0].field_name,
-        "thirteenth"
-    );
-    assert_eq!(
-        facts.type_facts().field_access_certificates[0].field_type,
-        Some(r2types::CTypeLike::i32())
-    );
-}
-
-#[test]
 fn function_analysis_artifact_request_builder_owns_analysis_policy() {
     let request = EngineFunctionAnalysisArtifactRequest::full_semantics_for_function(
         EngineFunctionAnalysisArtifactRequestInput {
@@ -1711,10 +1652,6 @@ fn function_analysis_artifact_request_builder_owns_analysis_policy() {
     assert_eq!(request.analysis.ptr_bits, 64);
     assert_eq!(request.analysis.semantic_mode, EngineSemanticMode::Full);
     assert!(request.analysis.include_interproc_summary_set);
-    assert!(
-        request.analysis.reg_type_hints.is_empty(),
-        "request builder owns default register-hint policy"
-    );
 }
 
 #[test]
@@ -1736,7 +1673,6 @@ fn decompile_function_uses_engine_summary_preprobe_without_plugin_policy() {
             declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
-            reg_type_hints: FxHashMap::default(),
             parsed_context,
             semantic_mode: EngineSemanticMode::Full,
             include_interproc_summary_set: true,
@@ -2055,7 +1991,6 @@ fn decompile_function_refuses_incomplete_optional_input_quality() {
             declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
-            reg_type_hints: FxHashMap::default(),
             parsed_context,
             semantic_mode: EngineSemanticMode::Full,
             include_interproc_summary_set: true,
@@ -2106,7 +2041,6 @@ fn decompile_function_uses_canonical_display_identity_without_raw_payloads() {
             declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
-            reg_type_hints: FxHashMap::default(),
             parsed_context,
             semantic_mode: EngineSemanticMode::Full,
             include_interproc_summary_set: true,
@@ -2149,7 +2083,6 @@ fn decompile_function_does_not_invent_raw_payload_callee_names() {
             declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
-            reg_type_hints: FxHashMap::default(),
             parsed_context,
             semantic_mode: EngineSemanticMode::Full,
             include_interproc_summary_set: true,
@@ -2183,7 +2116,6 @@ fn decompile_function_does_not_invent_raw_payload_strings() {
             declared_signatures: Vec::new(),
             ptr_bits: 64,
             semantic_metadata_enabled: false,
-            reg_type_hints: FxHashMap::default(),
             parsed_context,
             semantic_mode: EngineSemanticMode::Full,
             include_interproc_summary_set: true,
@@ -2377,54 +2309,4 @@ fn a_panic_caught_at_rendering_refuses_from_its_own_phase_and_claims_none_before
     }
     let text = response.output.text();
     assert!(text.contains("a defect in the renderer"), "{text}");
-}
-
-/// Each scalar of an aggregate is named by the dotted path that reaches it,
-/// however deeply the source nests the structs on the way.
-#[test]
-fn every_scalar_of_a_nested_aggregate_is_named_at_any_depth() {
-    // `struct level0 { struct level1 { ... struct levelN { int32_t leaf; } } }`,
-    // each level one member wide.
-    const LEVELS: u32 = 9;
-    let mut types = vec![r2ssa::SourceType::new(
-        0,
-        r2ssa::SourceTypeKind::SignedInteger,
-        32,
-        32,
-    )];
-    let mut aggregates = Vec::new();
-    for level in 0..LEVELS {
-        types.push(r2ssa::SourceType::new(
-            level + 1,
-            r2ssa::SourceTypeKind::Struct {
-                aggregate_id: level,
-            },
-            32,
-            32,
-        ));
-        let (member, name) = if level + 1 == LEVELS {
-            (0, "leaf")
-        } else {
-            (level + 2, "inner")
-        };
-        aggregates.push(r2ssa::SourceAggregateLayout::new(
-            level,
-            level + 1,
-            32,
-            32,
-            format!("level{level}"),
-            [r2ssa::SourceAggregateMember::new(0, member, 0, 32, name)],
-        ));
-    }
-    let graph = r2ssa::SourceTypeGraph::new(types, aggregates).expect("nested graph");
-
-    let fields = external_struct_fields(&graph, &graph.aggregates()[0]);
-
-    let expected = format!("{}leaf", "inner.".repeat(LEVELS as usize - 1));
-    assert_eq!(
-        fields.get(&0).map(|field| field.name.as_str()),
-        Some(expected.as_str()),
-        "the scalar {} structs down lost its name",
-        LEVELS
-    );
 }

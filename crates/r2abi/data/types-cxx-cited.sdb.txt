@@ -1,0 +1,14 @@
+# Rows that cite the header they are read from, in the Itanium C++ ABI's runtime, which glibc,
+# bionic and libSystem export alike. None of it is radare2's. Every row carries `.include=` and
+# sits under a comment naming its source, which `tests/cited_rows.rs` requires.
+
+# cxxabi.h: the Itanium C++ ABI (itanium-cxx-abi.github.io/cxx-abi/abi.html) 3.3.5.3:
+# `extern "C" int __cxa_atexit(void (*f)(void *), void *p, void *d);` registers a destructor
+# `f`, called as `f(p)` at exit (S30).
+__cxa_atexit=func
+func.__cxa_atexit.args=3
+func.__cxa_atexit.arg.0=void (*)(void *),func
+func.__cxa_atexit.arg.1=void *,arg
+func.__cxa_atexit.arg.2=void *,dso_handle
+func.__cxa_atexit.ret=int
+func.__cxa_atexit.include=cxxabi.h

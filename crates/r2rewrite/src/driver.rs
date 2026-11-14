@@ -152,6 +152,19 @@ impl CanonicalRoots {
             })
     }
 
+    /// The producers a value's canonical term spells as the frame object each addresses, where
+    /// the term still names that object (D254).
+    pub fn addressed(&self, value: ValueId) -> DischargedInstructions {
+        let Some(canonical) = self.value(value) else {
+            return DischargedInstructions::default();
+        };
+        let named = (self.import.addressed(value).into_iter())
+            .filter(|(_, object)| (self.arena).names_object_address(canonical.canonical, *object))
+            .map(|(producer, _)| producer)
+            .collect::<BTreeSet<_>>();
+        DischargedInstructions(named.into_iter().collect())
+    }
+
     /// The instructions rendering an access's canonical cell renders, walked on demand.
     pub fn access_discharges(
         &self,

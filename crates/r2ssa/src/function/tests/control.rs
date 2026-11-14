@@ -1543,7 +1543,6 @@ fn an_exhausted_pass_refuses_the_function() {
         None,
         SourceMachineRoles::default(),
         None,
-        None,
         Vec::new(),
         Vec::new(),
     );

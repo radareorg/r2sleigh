@@ -20,6 +20,7 @@ fact_mutants = []
 sleigh-config = ["dep:sleigh-config", "r2sleigh-lift/x86"]
 
 [dev-dependencies]
+r2source = { path = "../r2source", features = ["testing"] }
 proptest = "1.12"
 r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false, features = ["x86", "arm"] }
 serde_json.workspace = true

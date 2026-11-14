@@ -1191,7 +1191,11 @@ mod tests {
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"evidence-without-callee-signatures".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [r2ssa::SourceAbiParameterSpec::new(0, register(0))],
+            [r2ssa::SourceAbiParameterSpec::new(
+                0,
+                register(0),
+                r2source::SourceSlot::integer(0),
+            )],
             r2ssa::SourceFunctionReturn::Void,
             [],
         )
@@ -1256,13 +1260,14 @@ mod tests {
             offset,
             size: 8,
         };
+        let spec = |index, offset| {
+            let slot = r2source::SourceSlot::integer(index);
+            r2ssa::SourceAbiParameterSpec::new(index, register(offset), slot)
+        };
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"indexed-parameter-evidence".to_vec(),
             r2source::ConventionId::SysVAmd64,
-            [
-                r2ssa::SourceAbiParameterSpec::new(0, register(0)),
-                r2ssa::SourceAbiParameterSpec::new(1, register(8)),
-            ],
+            [spec(0, 0), spec(1, 8)],
             r2ssa::SourceFunctionReturn::Void,
             [],
         )
@@ -1342,8 +1347,16 @@ mod tests {
             b"unobserved-merge-evidence".to_vec(),
             r2source::ConventionId::SysVAmd64,
             [
-                r2ssa::SourceAbiParameterSpec::new(0, register(0)),
-                r2ssa::SourceAbiParameterSpec::new(1, register(8)),
+                r2ssa::SourceAbiParameterSpec::new(
+                    0,
+                    register(0),
+                    r2source::SourceSlot::integer(0),
+                ),
+                r2ssa::SourceAbiParameterSpec::new(
+                    1,
+                    register(8),
+                    r2source::SourceSlot::integer(1),
+                ),
             ],
             r2ssa::SourceFunctionReturn::Void,
             [],
@@ -1449,8 +1462,16 @@ mod tests {
             b"signed-parameter-evidence".to_vec(),
             r2source::ConventionId::SysVAmd64,
             [
-                r2ssa::SourceAbiParameterSpec::new(0, register(0)),
-                r2ssa::SourceAbiParameterSpec::new(1, register(8)),
+                r2ssa::SourceAbiParameterSpec::new(
+                    0,
+                    register(0),
+                    r2source::SourceSlot::integer(0),
+                ),
+                r2ssa::SourceAbiParameterSpec::new(
+                    1,
+                    register(8),
+                    r2source::SourceSlot::integer(1),
+                ),
             ],
             r2ssa::SourceFunctionReturn::Void,
             [],
@@ -1544,7 +1565,7 @@ mod tests {
     }
 
     #[test]
-    fn unsigned_use_after_a_stack_spill_types_the_parameter_and_home() {
+    fn unsigned_use_after_a_stack_spill_types_the_parameter() {
         let mut arch = r2il::ArchSpec::new("aarch64");
         arch.add_register(r2il::RegisterDef::new("x1", 8, 8));
         arch.add_register(r2il::RegisterDef::new("sp", 16, 8));
@@ -1557,7 +1578,11 @@ mod tests {
         let interface = r2ssa::SourceFunctionInterface::new_exact(
             b"unsigned-spilled-parameter".to_vec(),
             r2source::ConventionId::Aapcs64,
-            [r2ssa::SourceAbiParameterSpec::new(0, register(8))],
+            [r2ssa::SourceAbiParameterSpec::new(
+                0,
+                register(8),
+                r2source::SourceSlot::integer(0),
+            )],
             r2ssa::SourceFunctionReturn::Void,
             [r2ssa::SourceStackSlotSpec::new_local(
                 r2ssa::StackAddressBase::StackPointer,
@@ -1613,15 +1638,9 @@ mod tests {
             signedness: Signedness::Unsigned,
         };
 
+        // Under no model x1 is kept by no call, so its spill is no save and promotes (S34): the
+        // use-proven type lands on the parameter the reload reads.
         assert_eq!(solved.value_type(parameter), Some(&unsigned));
-        assert_eq!(
-            solved
-                .stack_slot_types()
-                .find(|(slot, _)| slot.offset == -8)
-                .map(|(_, ty)| ty),
-            Some(&unsigned),
-            "one scalar memory cell must carry the use-proven type both ways"
-        );
 
         let signed = CTypeLike::typedef("int64_t");
         let signature = crate::FunctionSignatureSpec {

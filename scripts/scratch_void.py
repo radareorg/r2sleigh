@@ -17,7 +17,8 @@ Names are read by this gate only; the engine reads none.
 Against a baseline it also fails on a source-void function the baseline renders `void` that is no longer `void`,
 unless the known list names it as moving (ADR, Decided 2), and on an unanswered function the baseline does not list:
 a crash, a deadline or a malformed `pddj` could hide either failure. `--floor-open` and `--floor-closed` are D203's totals;
-absent, the baseline's recorded `floors` apply. Exit 2 is a build the gate cannot grade.
+absent, the baseline's recorded `floors` apply. Exit 2 is a build the gate cannot grade: one whose debug or stripped file
+is not of `--target`'s ELF machine, or a baseline recorded for another target (ROADMAP D245).
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ import argparse
 import dataclasses
 import json
 import re
+import subprocess
 import sys
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
@@ -33,10 +35,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests" / "equiv"))
+import build as equiv_build  # noqa: E402
 import c_types  # noqa: E402
 import r2s_batch  # noqa: E402
 from dwarf import Dwarf, function_symbols, loaded_code  # noqa: E402
-from target import X86_64  # noqa: E402
+from target import TARGETS, Target, by_name  # noqa: E402
 
 CLASSES = ("void-open", "void-closed", "refused", "unanswered")
 VOIDS = ("void-open", "void-closed")
@@ -88,12 +91,28 @@ class Graded:
         return sorted(name for name, (cls, t) in self.rows.items() if cls in VOIDS and t == truth)
 
 
-def truth(debug: Path, prefix: str) -> dict[int, Source]:
+def target_of(name: str, prefix: str | None) -> Target:
+    """The `Target` the gate grades; `prefix` overrides its binutils (`g` on macOS)."""
+    target = by_name(name)
+    return target if prefix is None else dataclasses.replace(target, binutils_prefix=prefix)
+
+
+def check_machine(build: Build, target: Target) -> None:
+    """Default-deny: both files of a build are of the target's ELF machine, or the build is ungradable."""
+    for path in (build.debug, build.stripped):
+        try:
+            machine = equiv_build.elf_machine(path, target)
+        except OSError as error:
+            raise Ungradable(f"{path}: cannot read its ELF machine: {error}") from error
+        if machine != target.elf_machine:
+            raise Ungradable(f"{path}: machine {machine or 'unreadable'!r}, not {target.name}'s {target.elf_machine!r}")
+
+
+def truth(debug: Path, target: Target) -> dict[int, Source]:
     """Every gcc C function of the debug build that may return, by entry, named by its symbol.
 
     A `DW_AT_noreturn` function and an entry two DIEs disagree on are left out: neither has one answer.
     """
-    target = dataclasses.replace(X86_64, binutils_prefix=prefix)
     try:
         dwarf = Dwarf.read(debug, target)
         symbols = function_symbols(debug, target)
@@ -127,8 +146,9 @@ def classify(answer: r2s_batch.Answer) -> str:
     return f"unproven:{found.group(1) if found else 'unstated'}"
 
 
-def grade(build: Build, r2s: str, prefix: str, timeout: float) -> Graded:
-    sources = truth(build.debug, prefix)
+def grade(build: Build, r2s: str, target: Target, timeout: float) -> Graded:
+    check_machine(build, target)
+    sources = truth(build.debug, target)
     if not sources:
         raise Ungradable(f"{build.debug}: no gcc C function with an entry")
     try:
@@ -199,6 +219,13 @@ def summary(results: list[Graded]) -> dict:
     }
 
 
+def recorded_at() -> str:
+    """The commit a baseline is recorded at (S19 gate 6): a stale baseline names where it went stale."""
+    done = subprocess.run(["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short=9", "HEAD"],
+                          capture_output=True, text=True, check=False)
+    return done.stdout.strip() or "unknown"
+
+
 def builds_from(args) -> list[Build]:
     found = [Build(name, Path(debug), Path(stripped)) for name, debug, stripped in args.build or []]
     for line in args.manifest.read_text().splitlines() if args.manifest else []:
@@ -215,7 +242,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--build", nargs=3, action="append", metavar=("NAME", "DEBUG", "STRIPPED"))
     parser.add_argument("--manifest", type=Path, help="lines of `name debug stripped`, paths relative to it")
     parser.add_argument("--r2s", default="target/release/r2s")
-    parser.add_argument("--binutils-prefix", default="", help="`g` for GNU binutils on macOS")
+    parser.add_argument("--target", choices=sorted(TARGETS), default="x86-64",
+                        help="the machine every build must be (tests/equiv/target.py)")
+    parser.add_argument("--binutils-prefix", help="overrides the target's binutils: `g` for GNU binutils on macOS")
     parser.add_argument("--known", type=Path, help="clones and moving voids, by build and symbol")
     parser.add_argument("--baseline", type=Path)
     parser.add_argument("--accept-baseline", action="store_true")
@@ -230,17 +259,22 @@ def main(argv: list[str] | None = None) -> int:
         if not builds:
             raise Ungradable("no build given")
         known = read_known(args.known)
+        baseline = json.loads(args.baseline.read_text()) if args.baseline and args.baseline.exists() else {}
+        # A baseline without the key predates D245 and was recorded on x86-64.
+        if baseline and baseline.get("target", "x86-64") != args.target:
+            raise Ungradable(f"{args.baseline} records target {baseline.get('target', 'x86-64')}, not {args.target}")
+        target = target_of(args.target, args.binutils_prefix)
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-            results = list(pool.map(lambda b: grade(b, args.r2s, args.binutils_prefix, args.timeout), builds))
+            results = list(pool.map(lambda b: grade(b, args.r2s, target, args.timeout), builds))
     except Ungradable as error:
         print(f"refusing to grade: {error}", file=sys.stderr)
         return 2
     report = summary(results)
+    report["target"] = args.target
     for cls, truths in report["totals"].items():
         print(f"{cls:24} source void {truths.get('void', 0):5}  source value {truths.get('value', 0):5}")
     if args.json:
         args.json.write_text(json.dumps(report, indent=1) + "\n")
-    baseline = json.loads(args.baseline.read_text()) if args.baseline and args.baseline.exists() else {}
     # The floors default to the ones the baseline records (D203), so a lost void moves them only by name.
     recorded = {} if args.accept_baseline else baseline.get("floors", {})
     floors = (args.floor_open if args.floor_open is not None else recorded.get("open"),
@@ -261,6 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         open_voids = totals.get("void-open", {}).get("void", 0)
         report["floors"] = {"open": open_voids,
                             "closed": open_voids + totals.get("void-closed", {}).get("void", 0)}
+        report["recorded_at"] = recorded_at()
         args.baseline.write_text(json.dumps(report, indent=1) + "\n")
         print(f"baseline recorded: {args.baseline}", file=sys.stderr)
         return 0

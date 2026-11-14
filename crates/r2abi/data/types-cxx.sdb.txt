@@ -216,13 +216,6 @@ func._ZdaPvjSt11align_val_t.ret=void
 # and `__cxa_deleted_virtual`; 2.9.7 `__dynamic_cast`; 3.4 `__cxa_demangle`.
 # Each `noreturn` is cxxabi.h's, libsupc++'s and libc++abi's alike.
 
-__cxa_atexit=func
-func.__cxa_atexit.args=3
-func.__cxa_atexit.arg.0=func,func
-func.__cxa_atexit.arg.1=void *,arg
-func.__cxa_atexit.arg.2=void *,dso_handle
-func.__cxa_atexit.ret=int
-
 __cxa_finalize=func
 func.__cxa_finalize.args=1
 func.__cxa_finalize.arg.0=void *,dso_handle

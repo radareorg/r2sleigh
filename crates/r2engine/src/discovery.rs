@@ -29,17 +29,45 @@ use crate::native::Program;
 /// engine's answers carry it, so the shell reads it from here.
 pub use r2source::confidence::{Basis, Confidence, Fact, Grade, Premise};
 
-/// Whether control comes back from a call to a function, and what a "never" takes for granted.
+/// Whether control comes back from a call to a function, and why a "never" is believed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Return {
     Comes,
-    /// Never comes back: proven where no premise is named, else assuming each one.
-    Never(BTreeSet<Premise>),
+    Never(Never),
+}
+
+/// A call that never comes back: what states it, and what it takes for granted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Never {
+    pub proof: NeverProof,
+    pub premises: BTreeSet<Premise>,
+}
+
+/// What a "never" rests on (doc/adr-call-boundary.md, "S30 as built"; RULING 1.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NeverProof {
+    /// A cited row, a runtime model or the binary's debug information states it.
+    Declared,
+    /// No walk of the body reached a return: a lower bound on what it does, never proof.
+    NoReturnReached,
 }
 
 impl Return {
+    /// A "never" a statement makes, assuming `premises`.
+    pub const fn declared(premises: BTreeSet<Premise>) -> Self {
+        Self::Never(Never {
+            proof: NeverProof::Declared,
+            premises,
+        })
+    }
+
     pub const fn comes(&self) -> bool {
         matches!(self, Self::Comes)
+    }
+
+    /// Whether this proves a call never comes back: declared, assuming nothing.
+    pub fn proves_never(&self) -> bool {
+        matches!(self, Self::Never(never) if never.proof == NeverProof::Declared && never.premises.is_empty())
     }
 
     /// What a "never" takes for granted; nothing for a call that comes back.
@@ -47,7 +75,7 @@ impl Return {
         static NONE: BTreeSet<Premise> = BTreeSet::new();
         match self {
             Self::Comes => &NONE,
-            Self::Never(premises) => premises,
+            Self::Never(never) => &never.premises,
         }
     }
 }
@@ -83,31 +111,39 @@ pub trait Walker {
     type Walk;
     type Refusal;
 
-    /// Walk the body at `address`, in Thumb where `thumb`, past every call `returns` says comes back.
+    /// Walk the body at `address`, in Thumb where `thumb`, past every call `returns` says comes back
+    /// (a callee's address, and whether it is entered in Thumb).
     fn walk(
         &self,
         address: u64,
         thumb: bool,
-        returns: &dyn Fn(u64) -> bool,
+        returns: &dyn Fn(u64, bool) -> bool,
     ) -> Result<(Self::Walk, Transfers), Self::Refusal>;
 
     /// Continue a walk past every call to `callee`, which is now known to come back.
-    fn open(&self, walk: &mut Self::Walk, callee: u64, returns: &dyn Fn(u64) -> bool) -> Transfers;
+    fn open(
+        &self,
+        walk: &mut Self::Walk,
+        callee: u64,
+        returns: &dyn Fn(u64, bool) -> bool,
+    ) -> Transfers;
 
-    /// The answers the walks so far have settled, told before any dispatch is read, so that reading one finds its callees decided.
-    fn answered(&self, _returns: BTreeMap<u64, Return>) {}
+    /// The answers the walks so far have settled, by address and instruction set, told before any
+    /// dispatch is read, so that reading one finds its callees decided.
+    fn answered(&self, _returns: BTreeMap<(u64, bool), Return>) {}
 
-    /// Walk a finished body on through the arms of its dispatch tables, read once; what the arms reach, or `None` where there is nothing to follow.
+    /// Walk a finished body on through the arms of its dispatch tables; what the arms reach, or
+    /// `None` where there is nothing new to follow, which a walker says after finitely many reads.
     fn dispatch(
         &self,
         _walk: &mut Self::Walk,
-        _returns: &dyn Fn(u64) -> bool,
+        _returns: &dyn Fn(u64, bool) -> bool,
     ) -> Option<Transfers> {
         None
     }
 
     /// Where a finished body hands a function to a parameter declared to take one, and whether each is Thumb.
-    fn handed(&self, walk: &Self::Walk, returns: &dyn Fn(u64) -> bool) -> Vec<(u64, bool)>;
+    fn handed(&self, walk: &Self::Walk, returns: &dyn Fn(u64, bool) -> bool) -> Vec<(u64, bool)>;
 
     /// Whether control comes back from the routine at this address as a declaration or a runtime
     /// model says; `None` for anything else.
@@ -180,7 +216,8 @@ pub struct Discovery<T, E> {
     pub functions: Vec<Discovered>,
     /// Addresses offered as functions that hold no code the file backs, which begin none (audit W29).
     pub placeless: BTreeMap<u64, Confidence>,
-    pub returns: BTreeMap<u64, Return>,
+    /// Whether each comes back, by address and the instruction set it is walked in.
+    pub returns: BTreeMap<(u64, bool), Return>,
     pub walks: BTreeMap<u64, Result<T, E>>,
 }
 
@@ -190,7 +227,7 @@ pub fn functions<W: Walker>(
     seeds: impl IntoIterator<Item = (u64, Confidence, bool)>,
     walker: &W,
 ) -> Discovery<W::Walk, W::Refusal> {
-    let unknown = |_| None;
+    let unknown = |_, _| None;
     let places = |address| program.places_function(address);
     let mut fixpoint = Fixpoint::new(walker, &unknown, &places, None);
     for (address, confidence, thumb) in seeds {
@@ -200,13 +237,13 @@ pub fn functions<W: Walker>(
     // Each body is read through its dispatch tables once its callees are decided; the arms may reach more functions.
     loop {
         let decided = fixpoint.believed.keys().chain(fixpoint.placeless.keys());
-        walker.answered(fixpoint.answers(decided.copied()));
+        walker.answered(fixpoint.keyed(fixpoint.answers(decided.copied())));
         if !fixpoint.dispatch_on() {
             break;
         }
         fixpoint.run();
     }
-    let returns = fixpoint.answers(fixpoint.believed.keys().copied());
+    let returns = fixpoint.keyed(fixpoint.answers(fixpoint.believed.keys().copied()));
     Discovery {
         functions: fixpoint
             .believed
@@ -224,18 +261,21 @@ pub fn functions<W: Walker>(
     }
 }
 
-/// Whether control can come back from `seed` and from each function walked to decide it, walking a callee only while an undecided caller waits on it.
+/// Whether control comes back from `seed` (Thumb where `thumb`) and each function walked to decide
+/// it, by address and set; a callee is walked only while an undecided caller waits on it.
 pub fn returns<W: Walker>(
     seed: u64,
-    known: &dyn Fn(u64) -> Option<Return>,
+    thumb: bool,
+    known: &dyn Fn(u64, bool) -> Option<Return>,
     walker: &W,
-) -> BTreeMap<u64, Return> {
+) -> BTreeMap<(u64, bool), Return> {
     // Asking whether one function returns lists no functions, so every address is placed.
     let anywhere = |_| true;
     let mut fixpoint = Fixpoint::new(walker, known, &anywhere, Some(seed));
+    fixpoint.offer(seed, Confidence::of(Basis::Called), thumb);
     fixpoint.pending.push(seed);
     fixpoint.run();
-    fixpoint.answers(fixpoint.walks.keys().copied())
+    fixpoint.keyed(fixpoint.answers(fixpoint.walks.keys().copied()))
 }
 
 /// What a caller waits on a callee for.
@@ -250,8 +290,8 @@ enum Wait {
 /// The joint least fixpoint of the believed functions and those that can return, one whatever the order because walks are bounded by fixed stated entries.
 struct Fixpoint<'w, W: Walker> {
     walker: &'w W,
-    /// What an earlier run settled, which this one neither walks nor revises.
-    known: &'w dyn Fn(u64) -> Option<Return>,
+    /// What an earlier run settled, by address and instruction set, which this one neither walks nor revises.
+    known: &'w dyn Fn(u64, bool) -> Option<Return>,
     /// Whether a function can begin at an address.
     places: &'w dyn Fn(u64) -> bool,
     /// The one function whose return is asked, where discovery is not walking every believed body.
@@ -267,8 +307,6 @@ struct Fixpoint<'w, W: Walker> {
     joined: Vec<u64>,
     /// Who waits on each callee, and for what.
     waiting: BTreeMap<u64, BTreeSet<(u64, Wait)>>,
-    /// Bodies already walked on through their dispatch tables.
-    tabled: BTreeSet<u64>,
     /// Bodies already read for the functions they hand on.
     read: BTreeSet<u64>,
 }
@@ -276,7 +314,7 @@ struct Fixpoint<'w, W: Walker> {
 impl<'w, W: Walker> Fixpoint<'w, W> {
     fn new(
         walker: &'w W,
-        known: &'w dyn Fn(u64) -> Option<Return>,
+        known: &'w dyn Fn(u64, bool) -> Option<Return>,
         places: &'w dyn Fn(u64) -> bool,
         seed: Option<u64>,
     ) -> Self {
@@ -292,7 +330,6 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             returning: BTreeSet::new(),
             joined: Vec::new(),
             waiting: BTreeMap::new(),
-            tabled: BTreeSet::new(),
             read: BTreeSet::new(),
         }
     }
@@ -319,7 +356,19 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
 
     /// A status no walk here decides: an earlier run's, or a declaration's.
     fn settled(&self, address: u64) -> Option<Return> {
-        settled(self.walker, self.known, address)
+        settled(self.walker, self.known, address, self.thumb(address))
+    }
+
+    /// The instruction set a body is walked in: the one it is believed in, else the primary.
+    fn thumb(&self, address: u64) -> bool {
+        self.believed.get(&address).is_some_and(|(_, thumb)| *thumb)
+    }
+
+    /// Answers keyed by the instruction set each body is walked in.
+    fn keyed(&self, answers: BTreeMap<u64, Return>) -> BTreeMap<(u64, bool), Return> {
+        (answers.into_iter())
+            .map(|(address, answer)| ((address, self.thumb(address)), answer))
+            .collect()
     }
 
     /// Each address's answer once the fixpoint has run. One that never comes back takes for
@@ -329,10 +378,10 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
         let mut premises = BTreeMap::<u64, BTreeSet<Premise>>::new();
         let mut work = Vec::new();
         for callee in self.waiting.keys() {
-            if let Some(Return::Never(assumed)) = self.settled(*callee)
-                && !assumed.is_empty()
+            if let Some(Return::Never(never)) = self.settled(*callee)
+                && !never.premises.is_empty()
             {
-                premises.insert(*callee, assumed);
+                premises.insert(*callee, never.premises);
                 work.push(*callee);
             }
         }
@@ -355,7 +404,10 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
                 let answer = self.settled(address).unwrap_or_else(|| {
                     match self.returning.contains(&address) {
                         true => Return::Comes,
-                        false => Return::Never(premises.remove(&address).unwrap_or_default()),
+                        false => Return::Never(Never {
+                            proof: NeverProof::NoReturnReached,
+                            premises: premises.remove(&address).unwrap_or_default(),
+                        }),
                     }
                 });
                 (address, answer)
@@ -364,7 +416,13 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
     }
 
     fn comes_back(&self, address: u64) -> bool {
-        comes_back(self.walker, self.known, &self.returning, address)
+        comes_back(
+            self.walker,
+            self.known,
+            &self.returning,
+            address,
+            self.thumb(address),
+        )
     }
 
     /// Believe an address for a reason, keeping the stronger one; the first reason decides the instruction set.
@@ -398,9 +456,9 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
         if self.walks.contains_key(&address) || !self.demanded(address) {
             return;
         }
-        let thumb = self.believed.get(&address).is_some_and(|(_, thumb)| *thumb);
+        let thumb = self.thumb(address);
         let (walker, known, returning) = (self.walker, self.known, &self.returning);
-        let returns = |callee| comes_back(walker, known, returning, callee);
+        let returns = |callee, thumb| comes_back(walker, known, returning, callee, thumb);
         match walker.walk(address, thumb, &returns) {
             Ok((walk, transfers)) => {
                 self.walks.insert(address, Ok(walk));
@@ -470,14 +528,14 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             return;
         };
         let (walker, known, returning) = (self.walker, self.known, &self.returning);
-        let returns = |callee| comes_back(walker, known, returning, callee);
+        let returns = |callee, thumb| comes_back(walker, known, returning, callee, thumb);
         let transfers = walker.open(walk, callee, &returns);
         let thumb = self.believed.get(&caller).is_some_and(|(_, thumb)| *thumb);
         self.absorb(caller, thumb, transfers);
     }
 
     /// Read the tables of each body, final once every callee is walked, and walk on through their arms; whether any body moved.
-    /// Each walk is read once, so this ends when every walk has been.
+    /// A walker reads each walk finitely often, so this ends.
     fn dispatch_on(&mut self) -> bool {
         if self.seed.is_some() {
             return false;
@@ -488,11 +546,8 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             let Some(Ok(walk)) = self.walks.get_mut(&address) else {
                 continue;
             };
-            if !self.tabled.insert(address) {
-                continue;
-            }
             let (walker, known, returning) = (self.walker, self.known, &self.returning);
-            let returns = |callee| comes_back(walker, known, returning, callee);
+            let returns = |callee, thumb| comes_back(walker, known, returning, callee, thumb);
             if let Some(transfers) = walker.dispatch(walk, &returns) {
                 let thumb = self.believed.get(&address).is_some_and(|(_, thumb)| *thumb);
                 self.absorb(address, thumb, transfers);
@@ -508,7 +563,7 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             return false;
         }
         let (walker, known, returning) = (self.walker, self.known, &self.returning);
-        let returns = |callee| comes_back(walker, known, returning, callee);
+        let returns = |callee, thumb| comes_back(walker, known, returning, callee, thumb);
         let unread = self
             .walks
             .iter()
@@ -528,19 +583,21 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
 
 fn settled<W: Walker>(
     walker: &W,
-    known: &dyn Fn(u64) -> Option<Return>,
+    known: &dyn Fn(u64, bool) -> Option<Return>,
     address: u64,
+    thumb: bool,
 ) -> Option<Return> {
-    known(address).or_else(|| walker.declared(address))
+    known(address, thumb).or_else(|| walker.declared(address))
 }
 
 fn comes_back<W: Walker>(
     walker: &W,
-    known: &dyn Fn(u64) -> Option<Return>,
+    known: &dyn Fn(u64, bool) -> Option<Return>,
     returning: &BTreeSet<u64>,
     address: u64,
+    thumb: bool,
 ) -> bool {
-    settled(walker, known, address)
+    settled(walker, known, address, thumb)
         .map_or_else(|| returning.contains(&address), |answer| answer.comes())
 }
 
@@ -631,6 +688,7 @@ mod tests {
     struct At {
         address: u64,
         next: usize,
+        tabled: bool,
     }
 
     impl Bodies {
@@ -643,7 +701,7 @@ mod tests {
             )
         }
 
-        fn go(&self, at: &mut At, returns: &dyn Fn(u64) -> bool) -> Transfers {
+        fn go(&self, at: &mut At, returns: &dyn Fn(u64, bool) -> bool) -> Transfers {
             let mut transfers = Transfers::default();
             let steps = &self.0[&at.address][at.next..];
             let stopped = steps
@@ -655,11 +713,11 @@ mod tests {
     }
 
     /// Record one step, and answer whether the walk goes on past it.
-    fn taken(step: Step, transfers: &mut Transfers, returns: &dyn Fn(u64) -> bool) -> bool {
+    fn taken(step: Step, transfers: &mut Transfers, returns: &dyn Fn(u64, bool) -> bool) -> bool {
         match step {
             Step::Call(callee) => {
                 transfers.calls.push(callee);
-                let back = returns(callee);
+                let back = returns(callee, false);
                 if !back {
                     transfers.gated.push(callee);
                 }
@@ -685,20 +743,36 @@ mod tests {
             &self,
             address: u64,
             _thumb: bool,
-            returns: &dyn Fn(u64) -> bool,
+            returns: &dyn Fn(u64, bool) -> bool,
         ) -> Result<(At, Transfers), ()> {
             self.0.get(&address).ok_or(())?;
-            let mut at = At { address, next: 0 };
+            let mut at = At {
+                address,
+                next: 0,
+                tabled: false,
+            };
             let transfers = self.go(&mut at, returns);
             Ok((at, transfers))
         }
 
-        fn open(&self, walk: &mut At, _callee: u64, returns: &dyn Fn(u64) -> bool) -> Transfers {
+        fn open(
+            &self,
+            walk: &mut At,
+            _callee: u64,
+            returns: &dyn Fn(u64, bool) -> bool,
+        ) -> Transfers {
             walk.next += 1;
             self.go(walk, returns)
         }
 
-        fn dispatch(&self, walk: &mut At, _returns: &dyn Fn(u64) -> bool) -> Option<Transfers> {
+        fn dispatch(
+            &self,
+            walk: &mut At,
+            _returns: &dyn Fn(u64, bool) -> bool,
+        ) -> Option<Transfers> {
+            if std::mem::replace(&mut walk.tabled, true) {
+                return None;
+            }
             let arms = self.0[&walk.address].iter().filter_map(|step| match step {
                 Step::Table(target) => Some(*target),
                 _ => None,
@@ -710,7 +784,7 @@ mod tests {
             })
         }
 
-        fn handed(&self, walk: &At, _returns: &dyn Fn(u64) -> bool) -> Vec<(u64, bool)> {
+        fn handed(&self, walk: &At, _returns: &dyn Fn(u64, bool) -> bool) -> Vec<(u64, bool)> {
             let handed = self.0[&walk.address].iter().filter_map(|step| match step {
                 Step::Hand(target) => Some((*target, false)),
                 _ => None,
@@ -719,7 +793,7 @@ mod tests {
         }
 
         fn declared(&self, address: u64) -> Option<Return> {
-            (address == EXIT).then(|| Return::Never(BTreeSet::from([Premise::GoRuntime])))
+            (address == EXIT).then(|| Return::declared(BTreeSet::from([Premise::GoRuntime])))
         }
     }
 
@@ -727,7 +801,10 @@ mod tests {
     const EXIT: u64 = 0x9000;
 
     fn never() -> Return {
-        Return::Never(BTreeSet::new())
+        Return::Never(Never {
+            proof: NeverProof::NoReturnReached,
+            premises: BTreeSet::new(),
+        })
     }
 
     fn found(bodies: &[(u64, &[Step])], seeds: &[u64]) -> Discovery<At, ()> {
@@ -815,7 +892,7 @@ mod tests {
         assert_eq!(seen(&found).len(), 2);
         assert_eq!(
             found.returns,
-            BTreeMap::from([(0x1000, never()), (0x2000, never())])
+            BTreeMap::from([((0x1000, false), never()), ((0x2000, false), never())])
         );
     }
 
@@ -825,7 +902,10 @@ mod tests {
         assert_eq!(seen(&found).len(), 2);
         assert_eq!(
             found.returns,
-            BTreeMap::from([(0x1000, Return::Comes), (0x2000, Return::Comes)])
+            BTreeMap::from([
+                ((0x1000, false), Return::Comes),
+                ((0x2000, false), Return::Comes)
+            ])
         );
     }
 
@@ -841,11 +921,14 @@ mod tests {
         assert_eq!(forward.returns, backward.returns);
         assert!(forward.returns.values().all(|returns| *returns == never()));
         // The same walks, asked of one function against what an earlier run settled.
-        let settled = |address| (address == 0x3000).then_some(Return::Comes);
-        let from = returns(0x1000, &settled, &Bodies::of(&bodies));
+        let settled = |address, _| (address == 0x3000).then_some(Return::Comes);
+        let from = returns(0x1000, false, &settled, &Bodies::of(&bodies));
         assert_eq!(
             from,
-            BTreeMap::from([(0x1000, Return::Comes), (0x2000, Return::Comes)])
+            BTreeMap::from([
+                ((0x1000, false), Return::Comes),
+                ((0x2000, false), Return::Comes)
+            ])
         );
     }
 
@@ -859,12 +942,18 @@ mod tests {
             (0x3000, &[Step::Tail(0x3000)]),
         ];
         let found = found(&bodies, &[0x1000, 0x3000]);
-        let assumed = Return::Never(BTreeSet::from([Premise::GoRuntime]));
-        assert_eq!(found.returns[&0x2000], assumed);
-        assert_eq!(found.returns[&0x1000], assumed);
-        assert_eq!(found.returns[&EXIT], assumed);
-        assert_eq!(found.returns[&0x3000], never());
-        let asked = returns(0x1000, &|_| None, &Bodies::of(&bodies));
-        assert_eq!(asked[&0x1000], assumed);
+        let assumed = Return::Never(Never {
+            proof: NeverProof::NoReturnReached,
+            premises: BTreeSet::from([Premise::GoRuntime]),
+        });
+        assert_eq!(found.returns[&(0x2000, false)], assumed);
+        assert_eq!(found.returns[&(0x1000, false)], assumed);
+        assert_eq!(
+            found.returns[&(EXIT, false)],
+            Return::declared(BTreeSet::from([Premise::GoRuntime]))
+        );
+        assert_eq!(found.returns[&(0x3000, false)], never());
+        let asked = returns(0x1000, false, &|_, _| None, &Bodies::of(&bodies));
+        assert_eq!(asked[&(0x1000, false)], assumed);
     }
 }

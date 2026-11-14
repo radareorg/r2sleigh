@@ -102,6 +102,15 @@ impl Declarations {
         self.objects.get(&address)
     }
 
+    /// The object whose bytes hold `address`, and its start: one with no size holds only its
+    /// start. O(log objects).
+    pub fn object_containing(&self, address: u64) -> Option<(u64, &DataObject)> {
+        let (start, object) = self.objects.range(..=address).next_back()?;
+        let within =
+            address == *start || object.size_bytes.is_some_and(|size| address - start < size);
+        within.then_some((*start, object))
+    }
+
     pub fn objects(&self) -> impl Iterator<Item = (u64, &DataObject)> {
         self.objects
             .iter()

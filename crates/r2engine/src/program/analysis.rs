@@ -130,9 +130,12 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
             Ok(target) => target,
             Err(refusal) => return Walking(Err(refusal)),
         };
-        let tables = || (*dispatch_tables(db, (entry, thumb)).0).clone();
+        let rounds = crate::native::TableRounds {
+            first: &|| (*dispatch_tables(db, (entry, thumb)).0).clone(),
+            later: &|_| (*later_tables(db, (entry, thumb)).0).clone(),
+        };
         let walked = crate::isolation::isolated(|| {
-            crate::native::walk_reading(&target, &view, entry, &tables)
+            crate::native::walk_reading(&target, &view, entry, &rounds)
         });
         Walking(
             walked
@@ -149,7 +152,8 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Walked {
     }
 }
 
-/// The dispatch tables one function's body reads, by its entry and whether it is Thumb: read once for the survey, the walk and the listings.
+/// The first round of the dispatch tables one function's body reads, by its entry and whether it
+/// is Thumb: read once for the survey, the walk and the listings.
 pub(super) struct DispatchTables;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for DispatchTables {
@@ -160,7 +164,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for DispatchTables {
 
     fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
         // The survey asks while it runs, so no mode is read: the key states the set.
-        let view = View::new(db, false);
+        let view = View::new(db, false).walking(thumb);
         let read = target(&view, entry, thumb).map(|target| {
             crate::isolation::isolated(|| crate::native::dispatch_tables(&target, &view, entry))
         });
@@ -179,12 +183,112 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for DispatchTables {
     }
 }
 
+/// Every round of one function's dispatch tables, by its entry and whether it is Thumb: asked only
+/// where a walk through the first round's arms stops at a dispatch that round did not see (D367).
+pub(super) struct LaterTables;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for LaterTables {
+    type Key = (u64, bool);
+    type Value = Shared<crate::native::Tables>;
+    const NAME: &'static str = "later-tables";
+    const RETENTION: Retention = Retention::Held;
+
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
+        let first = dispatch_tables(db, (entry, thumb));
+        // Asked by the survey too, so read through `DispatchTables`' view.
+        let view = View::new(db, false).walking(thumb);
+        let read = target(&view, entry, thumb).map(|target| {
+            crate::isolation::isolated(|| {
+                crate::native::later_tables(&target, &view, entry, &first.0)
+            })
+        });
+        Shared(Arc::new(match read {
+            Ok(Ok(tables)) => tables,
+            Ok(Err(panicked)) => crate::native::Tables::refused(panicked.into()),
+            Err(refusal) => crate::native::Tables::refused(refusal),
+        }))
+    }
+
+    fn hold(value: &Self::Value) -> Hold {
+        match value.0.refusal().is_some_and(NativeRefusal::stopped) {
+            true => Hold::Stopped,
+            false => Hold::Held,
+        }
+    }
+}
+
+/// One function sealed against the convention and its imports alone, by its entry and whether it
+/// is Thumb (Gb): the format fold reads what a spilled format folds to through a promoted slot.
+pub(super) struct ConventionSeal;
+
+/// A convention seal, or why there is none; compared by identity, as an analysis is.
+#[derive(Clone)]
+pub(super) struct ConventionSealing(pub(super) Result<Arc<r2ssa::TrustedSeal>, NativeRefusal>);
+
+impl PartialEq for ConventionSealing {
+    fn eq(&self, other: &Self) -> bool {
+        matches!((&self.0, &other.0), (Ok(one), Ok(other)) if Arc::ptr_eq(one, other))
+    }
+}
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for ConventionSeal {
+    type Key = (u64, bool);
+    type Value = ConventionSealing;
+    const NAME: &'static str = "convention-seal";
+    /// A per-function answer that holds a sealed body: the newest only (RULING 1.8).
+    const RETENTION: Retention = Retention::Newest;
+
+    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> ConventionSealing {
+        let view = View::new(db, true);
+        let target = match target(&view, entry, thumb) {
+            Ok(target) => target,
+            Err(refusal) => return ConventionSealing(Err(refusal)),
+        };
+        let walk = db
+            .get::<Walked>(&(entry, thumb))
+            .expect("a walk asks for no seal");
+        let walk = match walk.resolved() {
+            Ok(walk) => walk,
+            Err(refusal) => return ConventionSealing(Err(refusal)),
+        };
+        let sealed =
+            crate::isolation::isolated(|| crate::native::convention_seal_of(&target, &view, walk));
+        ConventionSealing(
+            sealed
+                .unwrap_or_else(|panicked| Err(panicked.into()))
+                .map(Arc::new),
+        )
+    }
+
+    fn hold(value: &ConventionSealing) -> Hold {
+        match value.0.as_ref().is_err_and(NativeRefusal::stopped) {
+            true => Hold::Stopped,
+            false => Hold::Held,
+        }
+    }
+}
+
 /// The tables read for a body; a cycle reads as none, which is a walk following no table.
 pub(super) fn dispatch_tables<S: Source + 'static>(
     db: &Db<ProgramInputs<S>>,
     key: (u64, bool),
 ) -> Shared<crate::native::Tables> {
     db.get::<DispatchTables>(&key).map_or_else(
+        |cycle| {
+            Shared(Arc::new(crate::native::Tables::refused(
+                NativeRefusal::Prepare(format!("{cycle:?}")),
+            )))
+        },
+        |tables| (*tables).clone(),
+    )
+}
+
+/// Every round of a body's tables; a cycle reads as none, as `dispatch_tables`'.
+pub(super) fn later_tables<S: Source + 'static>(
+    db: &Db<ProgramInputs<S>>,
+    key: (u64, bool),
+) -> Shared<crate::native::Tables> {
+    db.get::<LaterTables>(&key).map_or_else(
         |cycle| {
             Shared(Arc::new(crate::native::Tables::refused(
                 NativeRefusal::Prepare(format!("{cycle:?}")),
@@ -438,6 +542,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
             unread,
             language,
             refused: None,
+            member_arities: member_arities(prepared.artifact().artifact()),
         };
         let stopped = control.stopped();
         Render(Rc::new(Drawn { rendering, stopped }))
@@ -449,4 +554,20 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Rendered {
             false => Hold::Held,
         }
     }
+}
+
+/// Each proven member call's instruction and its contract's declared parameter count (D272).
+/// A floor states no exact callee, so it names no arity. O(member calls x log).
+fn member_arities(artifact: &r2ssa::SsaArtifact) -> Vec<(r2ssa::InstId, usize)> {
+    let mut arities = (artifact.member_calls().proven())
+        .filter_map(|(site, _)| {
+            let at = artifact.facts().call_sites.by_id.get(&site)?.at;
+            let callee = artifact
+                .call_site_interface(site)?
+                .exact_callee_interface()?;
+            Some((at, callee.parameters().len()))
+        })
+        .collect::<Vec<_>>();
+    arities.sort_unstable();
+    arities
 }

@@ -252,20 +252,12 @@ pub enum SSAOp<V = SSAVar> {
     /// drifts by one return-address slot at every call it makes.
     CallRestore { dst: V, src: V },
 
-    /// A carrier a call boundary may read, as the convention names it.
-    ///
-    /// The third of the same family as `CallDefine` and `CallRestore`, and the
-    /// one that was missing. A call instruction's own p-code names only the
-    /// callee, so nothing downstream could see that a call consumes its
-    /// arguments: liveness could not keep their producers, and the obligation
-    /// inventory had to keep every definition reaching an incomplete boundary
-    /// out of `ProvenDead` by declaring it an unknown effect instead.
-    ///
-    /// This says the true thing in the graph. The carriers are the
-    /// convention's argument registers, so the set is bounded by the
-    /// architecture rather than by the function's size, and a carrier the
-    /// callee does not actually take is a read of a value that is live anyway.
-    CallUse { src: V },
+    /// A convention argument register `storage` a call may read, so liveness keeps its producer;
+    /// `storage` stays when forwarding renames `src` (D283).
+    CallUse {
+        src: V,
+        storage: r2source::CanonicalStorageId,
+    },
 
     /// Return from subroutine
     Return { target: V },
@@ -1079,7 +1071,10 @@ impl<V> SSAOp<V> {
                 dst: f(dst),
                 src: f(src),
             },
-            CallUse { src } => CallUse { src: f(src) },
+            CallUse { src, storage } => CallUse {
+                src: f(src),
+                storage: *storage,
+            },
             Return { target } => Return { target: f(target) },
             FloatAdd { dst, a, b } => FloatAdd {
                 dst: f(dst),
@@ -1567,7 +1562,7 @@ impl<V> SSAOp<V> {
                 }
             }
 
-            CallRestore { src, .. } | CallUse { src } => f(src),
+            CallRestore { src, .. } | CallUse { src, .. } => f(src),
 
             Fence { .. }
             | ClearExclusive
@@ -1884,7 +1879,7 @@ impl<V: std::fmt::Display> std::fmt::Display for SSAOp<V> {
             SSAOp::CallInd { target, .. } => write!(f, "CALLIND {}", target),
             SSAOp::CallDefine { dst } => write!(f, "{} = CALLDEF", dst),
             SSAOp::CallRestore { dst, src } => write!(f, "{} = CALLRESTORE {}", dst, src),
-            SSAOp::CallUse { src } => write!(f, "CALLUSE {}", src),
+            SSAOp::CallUse { src, .. } => write!(f, "CALLUSE {}", src),
             SSAOp::Return { target } => write!(f, "RETURN {}", target),
             SSAOp::FloatAdd { dst, a, b } => write!(f, "{} = {} f+ {}", dst, a, b),
             SSAOp::FloatSub { dst, a, b } => write!(f, "{} = {} f- {}", dst, a, b),
@@ -2281,7 +2276,14 @@ mod tests {
         );
         for op in [
             SSAOp::CallDefine { dst: v("d") },
-            SSAOp::CallUse { src: v("s") },
+            SSAOp::CallUse {
+                src: v("s"),
+                storage: r2source::CanonicalStorageId {
+                    space: r2source::CanonicalStorageSpace::Register,
+                    offset: 0,
+                    size: 8,
+                },
+            },
             SSAOp::CallRestore {
                 dst: v("d"),
                 src: v("s"),
@@ -2316,7 +2318,14 @@ mod tests {
         }
         for op in [
             SSAOp::Nop,
-            SSAOp::CallUse { src: v("s") },
+            SSAOp::CallUse {
+                src: v("s"),
+                storage: r2source::CanonicalStorageId {
+                    space: r2source::CanonicalStorageSpace::Register,
+                    offset: 0,
+                    size: 8,
+                },
+            },
             SSAOp::CallDefine { dst: v("d") },
         ] {
             assert!(!op.is_control_flow(), "{op:?}");

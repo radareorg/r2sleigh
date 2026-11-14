@@ -290,6 +290,9 @@ pub struct ObjectModel {
     pub indexed_displacements: crate::dense::IdMap<ValueId, i64>,
     /// How many bytes a callee is proven to write into each object from its base.
     pub callee_write_reach: BTreeMap<ObjectId, u32>,
+    /// Canary stores inside a declared slot or a write span: no compiler slot, for the escape
+    /// runs and the seal alike (doc/adr-frame-model.md, "Escape spans").
+    pub interior_canaries: crate::dense::IdSet<ValueId>,
     /// Which frame objects outside code can touch: those whose address
     /// escapes, and each call's argument area (`frame_reach`).
     pub frame_reach: FrameReach,
@@ -841,6 +844,9 @@ pub struct SourceReturnBoundaryFact {
     pub machine_state_complete: bool,
     /// The interface proves no result, so what a caller reads in the result carrier here is unproven.
     pub result_unproven: bool,
+    /// Where the interface is unproven and the machine state complete: every register definition
+    /// that may reach this return, a call's clobber left out (D254). Empty otherwise.
+    pub live_registers: Vec<ValueId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -953,11 +959,6 @@ pub struct SourceBoundaryFacts {
     pub parameters: BTreeMap<u32, SourceFormalParameterFact>,
     pub calls: BTreeMap<CallSiteId, SourceCallBoundaryFact>,
     pub returns: crate::dense::IdMap<InstId, SourceReturnBoundaryFact>,
-    /// Convention-clobbered registers this body leaves exactly as it found
-    /// them at every exit. A caller that reads one of these after calling
-    /// here is reading its own value, not a clobber; see
-    /// [`preserved_call_carriers`].
-    pub preserved_call_carriers: BTreeSet<CanonicalStorageId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -1636,27 +1637,6 @@ pub struct PreparedAssumptionBinding {
     pub binding: PreparedAssumptionBindingKind,
 }
 
-/// What the object model's build reads that no escape span changes, read once per collection.
-pub(crate) struct BuildInputs {
-    callee_spans: CalleeSpans,
-    boundaries: FrameBoundaries,
-}
-
-impl BuildInputs {
-    pub(crate) fn of(
-        facts: &DecompilePrepFacts,
-        function: &SSAFunction,
-        graph: &SsaGraph,
-        machine_context: Option<&SourceMachineContext>,
-        values: &crate::values::ValueRanges,
-    ) -> Self {
-        Self {
-            callee_spans: callee_write_spans(facts, function, graph, machine_context, values),
-            boundaries: FrameBoundaries::of(facts, graph, machine_context),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(crate) struct ObjectModelBuilder<'a> {
     pub(crate) facts: Option<&'a DecompilePrepFacts>,
@@ -1681,6 +1661,7 @@ pub(crate) struct ObjectModelBuilder<'a> {
     pub(crate) evidenced_absorbing: BTreeSet<StackAddressRoot>,
     /// How far a callee writes from each root it is handed.
     pub(crate) callee_write_spans: BTreeMap<StackAddressRoot, i64>,
+    pub(crate) interior_canaries: crate::dense::IdSet<ValueId>,
     /// The positions no frame object extends across.
     pub(crate) frame_boundaries: FrameBoundaries,
     /// What every value can be, for an index's lower bound.
@@ -1747,6 +1728,7 @@ impl<'a> ObjectModelBuilder<'a> {
             covering: super::covering::CoveringSpans::default(),
             evidenced_absorbing: BTreeSet::new(),
             callee_write_spans: BTreeMap::new(),
+            interior_canaries: crate::dense::IdSet::default(),
             frame_boundaries: FrameBoundaries::default(),
             values: empty_value_ranges(),
             resolving: crate::dense::IdSet::default(),
@@ -1770,37 +1752,55 @@ impl<'a> ObjectModelBuilder<'a> {
         self.indexed_displacements.get(value).copied().unwrap_or(0)
     }
 
-    /// Spans an escaped address reaches, each one object: seeded as write spans are.
-    pub(crate) fn escape_spans(&mut self, spans: &[(i64, i64)]) {
-        for (start, end) in spans {
-            let root = StackAddressRoot {
-                base: StackAddressBase::StackPointer,
-                offset: *start,
-            };
-            self.callee_write_spans
-                .entry(root)
-                .and_modify(|known| *known = (*known).max(*end))
-                .or_insert(*end);
-        }
-    }
-
     pub(crate) fn build(
         mut self,
+        function: &SSAFunction,
         graph: &SsaGraph,
         values: &'a crate::values::ValueRanges,
-        inputs: Option<&BuildInputs>,
     ) -> ObjectModel {
         self.values = values;
-        if let (Some(facts), Some(inputs)) = (self.facts, inputs) {
-            let BuildInputs {
-                callee_spans,
-                boundaries,
-            } = inputs;
+        if let Some(facts) = self.facts {
+            let callee_spans =
+                callee_write_spans(facts, function, graph, self.machine_context, values);
+            let boundaries = FrameBoundaries::of(facts, graph, self.machine_context);
             for (start, end) in callee_spans.spans.iter().copied() {
                 self.callee_write_spans
                     .entry(start)
                     .and_modify(|known| *known = (*known).max(end))
                     .or_insert(end);
+            }
+            // A MAY write stops at the next compiler slot: the spans and the reach read one end (D368).
+            for (start, end) in &mut self.callee_write_spans {
+                *end = clipped(&boundaries, *start, *end);
+            }
+            // A run an escaped address reaches is one object, seeded as a write span; a canary
+            // inside it ends nothing, and an unbounded write reaches the next boundary (D290).
+            let mut reach = self.callee_write_spans.clone();
+            for root in &callee_spans.unbounded {
+                let end = boundaries.ceiling(*root).unwrap_or(i64::MAX);
+                let known = reach.entry(*root).or_insert(end);
+                *known = (*known).max(end);
+            }
+            self.interior_canaries = super::frame_reach::interior_canaries(
+                (function, graph, facts),
+                self.declared_slots,
+                &reach,
+                self.machine_context,
+            );
+            let escapes = super::frame_reach::escape_spans(
+                (function, graph, facts),
+                self.declared_slots,
+                &self.interior_canaries,
+                self.machine_context,
+            );
+            for (start, end) in escapes {
+                let root = StackAddressRoot {
+                    base: StackAddressBase::StackPointer,
+                    offset: start,
+                };
+                let end = clipped(&boundaries, root, end);
+                let known = self.callee_write_spans.entry(root).or_insert(end);
+                *known = (*known).max(end);
             }
             let evidenced = evidenced_stack_roots(
                 facts,
@@ -1810,13 +1810,14 @@ impl<'a> ObjectModelBuilder<'a> {
                 values,
                 &self.callee_write_spans,
                 &callee_spans.unbounded,
-                boundaries,
+                &boundaries,
             );
-            self.frame_boundaries = boundaries.clone();
+            self.frame_boundaries = boundaries;
             self.covering = super::covering::CoveringSpans::of(&evidenced.spans, &evidenced.roots);
             self.evidenced_roots = evidenced.roots;
             self.evidenced_spans = evidenced.spans;
             self.evidenced_absorbing = evidenced.absorbing;
+
             let mut stack_roots: Vec<StackAddressRoot> =
                 facts.stack_address_roots.values().copied().collect();
             stack_roots.sort_unstable();
@@ -1903,7 +1904,14 @@ impl<'a> ObjectModelBuilder<'a> {
                     .into_iter()
                     .flatten()
                     .max()?;
-                let reach = u32::try_from(end.checked_sub(key.root.offset)?).ok()?;
+                let reach = end.checked_sub(key.root.offset).filter(|reach| *reach >= 0)?;
+                let Ok(reach) = u32::try_from(reach) else {
+                    r2il::refusal_evidence!(
+                        "frame-callee-reach",
+                        "{key:?} reaches {end} past every boundary: the object keeps its accesses' extent"
+                    );
+                    return None;
+                };
                 Some((*object, reach))
             })
             .collect();
@@ -1918,6 +1926,7 @@ impl<'a> ObjectModelBuilder<'a> {
             .collect();
         ObjectModel {
             callee_write_reach,
+            interior_canaries: self.interior_canaries,
             frame_reach: FrameReach::default(),
             frame_ceilings,
             objects: self.objects,
@@ -2458,7 +2467,7 @@ impl DeclaredStackSlots {
     ///
     /// A member of a declared aggregate is that aggregate at an offset, not an
     /// object of its own, so the address resolves to the slot that contains it.
-    fn containing(&self, root: StackAddressRoot) -> Option<(StackAddressRoot, i64)> {
+    pub(crate) fn containing(&self, root: StackAddressRoot) -> Option<(StackAddressRoot, i64)> {
         self.by_key.iter().find_map(|((base, offset), slot)| {
             if *base != root.base || slot.size_bytes() == 0 {
                 return None;

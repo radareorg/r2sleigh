@@ -122,12 +122,62 @@ class Judge(unittest.TestCase):
                          ["FLOOR: open world void 1 under 2", "FLOOR: closed world void 3 under 4"])
 
 
+X86_MACHINE = "Advanced Micro Devices X86-64"
+
+
 class Main(unittest.TestCase):
     def run_main(self, results, *argv):
         with mock.patch.object(scratch_void, "grade", side_effect=lambda build, *_: results[build.name]), \
                 contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()) as err:
             code = scratch_void.main(["--build", "b", "d", "s", *argv])
         return code, out.getvalue(), err.getvalue()
+
+    def run_machine(self, machine, *argv):
+        """`main` with the real `grade`, the files' ELF machine stubbed and the DWARF never read."""
+        with mock.patch.object(scratch_void.equiv_build, "elf_machine", return_value=machine), \
+                mock.patch.object(scratch_void, "truth", side_effect=AssertionError("graded")), \
+                contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            code = scratch_void.main(["--build", "b", "d", "s", *argv])
+        return code, err.getvalue()
+
+    def test_a_build_of_another_machine_is_exit_2(self):
+        code, err = self.run_machine("AArch64")
+        self.assertEqual(code, 2)
+        self.assertIn("not x86-64's 'Advanced Micro Devices X86-64'", err)
+        code, err = self.run_machine(X86_MACHINE, "--target", "aarch64")
+        self.assertEqual(code, 2)
+        self.assertIn("not aarch64's 'AArch64'", err)
+
+    def test_an_unreadable_machine_is_exit_2(self):
+        code, err = self.run_machine("")
+        self.assertEqual(code, 2)
+        self.assertIn("machine 'unreadable'", err)
+
+    def test_a_baseline_of_another_target_is_exit_2(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "baseline.json"
+            path.write_text(json.dumps({"target": "x86-64", "builds": {}}))
+            code, _, err = self.run_main({"b": graded("b")}, "--target", "aarch64", "--baseline", str(path))
+            self.assertEqual(code, 2)
+            self.assertIn("records target x86-64, not aarch64", err)
+            path.write_text(json.dumps({"builds": {}}))
+            self.assertEqual(self.run_main({"b": graded("b")}, "--target", "aarch64", "--baseline", str(path),
+                                           "--accept-baseline")[0], 2)
+            self.assertEqual(self.run_main({"b": graded("b")}, "--baseline", str(path))[0], 0)
+
+    def test_a_recorded_baseline_names_its_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "baseline.json"
+            self.assertEqual(self.run_main({"b": graded("b")}, "--target", "aarch64", "--baseline", str(path),
+                                           "--accept-baseline")[0], 0)
+            self.assertEqual(json.loads(path.read_text())["target"], "aarch64")
+            self.assertRegex(json.loads(path.read_text())["recorded_at"], r"^[0-9a-f]{9}$|^unknown$")
+            self.assertEqual(self.run_main({"b": graded("b")}, "--target", "aarch64", "--baseline", str(path))[0], 0)
+
+    def test_the_binutils_prefix_overrides_the_targets_own(self):
+        self.assertEqual(scratch_void.target_of("aarch64", None).tool("readelf"), "aarch64-linux-gnu-readelf")
+        self.assertEqual(scratch_void.target_of("aarch64", "g").tool("readelf"), "greadelf")
+        self.assertEqual(scratch_void.target_of("x86-64", None).elf_machine, X86_MACHINE)
 
     def test_counts_per_class_are_printed_and_a_clean_run_exits_0(self):
         code, out, _ = self.run_main({"b": graded("b", f=("void-open", "void"), g=("unproven:unstated", "value"))})
@@ -165,6 +215,7 @@ class Main(unittest.TestCase):
 
     def test_an_r2s_that_cannot_run_is_exit_2(self):
         with mock.patch.object(scratch_void, "truth", return_value={0x1000: scratch_void.Source("f", True)}), \
+                mock.patch.object(scratch_void.equiv_build, "elf_machine", return_value=X86_MACHINE), \
                 contextlib.redirect_stderr(io.StringIO()) as err:
             code = scratch_void.main(["--build", "b", "d", "s", "--r2s", "/nonexistent/r2s"])
         self.assertEqual(code, 2)
@@ -205,10 +256,19 @@ class Mutants(unittest.TestCase):
     def test_every_mutant_edit_applies_once_to_the_tree(self):
         import mutants_d203
         root = pathlib.Path(__file__).resolve().parent.parent
-        for name, edits, must_die, why in mutants_d203.MUTANTS:
+        for name, edits, must_die, why, lives_on in mutants_d203.MUTANTS:
             for path, old, _ in edits:
                 self.assertEqual((root / path).read_text().count(old), 1, f"{name}: {path}")
             self.assertTrue(must_die or why, f"{name} may live only with a reason")
+            self.assertTrue(set(lives_on) <= set(mutants_d203.ALL) - {"x86-64"} and all(lives_on.values()), name)
+
+    def test_arm64_kills_two_mutants_and_names_why_two_live(self):
+        import mutants_d203
+        self.assertEqual(mutants_d203.target_of(["--known", "k", "--target", "aarch64"]), "aarch64")
+        self.assertEqual(mutants_d203.target_of(["--target=aarch64"]), "aarch64")
+        self.assertEqual(mutants_d203.target_of([]), "x86-64")
+        self.assertEqual([m[0] for m in mutants_d203.MUTANTS if "aarch64" not in m[4]],
+                         ["void-row", "inserted-write-unread"])
 
 
 if __name__ == "__main__":

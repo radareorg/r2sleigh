@@ -49,7 +49,6 @@ qsort | a function pointer parameter, which the row reader does not spell
 div | a record or an array typedef by value, which the row reader does not spell
 ldiv | a record or an array typedef by value, which the row reader does not spell
 lldiv | a record or an array typedef by value, which the row reader does not spell
-at_quick_exit | a function pointer parameter, which the row reader does not spell
 bzero | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 memmem | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 fts_open_INODE64 | no glibc 2.39 header declares it
@@ -64,7 +63,6 @@ localtime | its header names a record radare2 spelled otherwise, and a prototype
 strftime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 wcsftime | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
 gets | ISO C11 removed it, and no mode of glibc 2.39's <stdio.h> declares it
-signal | a function pointer parameter, which the row reader does not spell
 inet_aton | glibc declares it only under _GNU_SOURCE, and every library reads the portable table
 inet_ntoa | a record or an array typedef by value, which the row reader does not spell
 connect | its header names a record radare2 spelled otherwise, and a prototype naming one renders every parameter `uint64_t` (D151)
@@ -109,8 +107,6 @@ utimes | its header names a record radare2 spelled otherwise, and a prototype na
 
 # types-linux.sdb.txt, glibc's own.
 xalloc_die | no glibc 2.39 header declares it
-__libc_start_main | glibc's start-up entry, which no installed header declares
-atexit | a function pointer parameter, which the row reader does not spell
 ctype_b_loc | no glibc 2.39 header declares it
 ctype_toupper_loc | no glibc 2.39 header declares it
 ctype_tolower_loc | no glibc 2.39 header declares it

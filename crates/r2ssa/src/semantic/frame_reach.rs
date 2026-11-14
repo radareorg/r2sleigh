@@ -1,32 +1,14 @@
-//! Which of the frame's objects code outside this function can touch.
-//!
-//! Under the UB-free premise a callee reaches the frame only two ways: through
-//! an address this function hands out, and through the argument area of the
-//! call, which the callee finds above its own stack pointer. Everything else in
-//! the frame is private, and a call neither reads nor writes it. Memory reached
-//! through an unknown pointer is the same: only an escaped object can be at the
-//! other end of it.
-//!
-//! - **Escape** is a forward taint from every frame address over the SSA
-//!   graph: arithmetic, copies, extensions and merges carry it; a load does
-//!   not, since what was stored is whatever was stored, and storing a frame
-//!   address is itself an escape. A tainted value that reaches a call argument,
-//!   the value of a store, or the inputs of an intrinsic escapes the object it
-//!   points into. A tainted value that names no object escapes the whole
-//!   frame -- there is no object to blame, so none may be called private.
-//!   An access through an address the model places in no object escapes the
-//!   object at its offset; a frame address used as code or in an unmodelled
-//!   operation escapes the whole frame; a return does not escape (the frame
-//!   ends with the call). Private objects are the frame objects not escaped.
-//! - **The argument area** of a call is the slots its complete, non-variadic
-//!   interface places on the stack, at the stack pointer the call is made with,
-//!   and below the first of them the space the convention reserves for the
-//!   callee. Without such an interface, or without the stack pointer at the
-//!   call, the call reaches every frame object.
-//!
-//! Cost: O(V + E) for the taint, O(calls x objects) for the argument areas.
+//! Which frame objects outside code can touch: the walk's points mapped to objects at the seal
+//! (doc/adr-frame-model.md, "Escape spans"). O(points x log objects), O(calls x objects).
 
 use super::*;
+
+mod walk;
+
+use r2source::convention::SlotClass;
+use walk::Origin;
+pub(crate) use walk::{Access, Walked, walk};
+pub use walk::{FramePoint, FramePoints};
 
 /// What one call reaches of the frame besides what has escaped.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -37,20 +19,29 @@ pub enum CallFrameReach {
     Whole,
 }
 
-/// The frame objects outside code can touch.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// The frame objects outside code can touch; the default is the whole frame (default deny).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FrameReach {
     escaped: BTreeSet<ObjectId>,
     /// The objects whose own address escapes, before the closure around them.
     direct: BTreeSet<ObjectId>,
-    /// A frame address escaped that names no object, so every frame object is
-    /// reachable.
+    /// A frame address escaped that names no object, so every frame object is reachable.
     whole: bool,
     /// The entry offsets at or above the entry stack pointer that escaped addresses point at.
     incoming: BTreeSet<i64>,
-    /// An escaped address may point at or above the entry stack pointer at no offset known.
-    incoming_unplaced: bool,
     by_call: crate::dense::IdMap<InstId, CallFrameReach>,
+}
+
+impl Default for FrameReach {
+    fn default() -> Self {
+        Self {
+            escaped: BTreeSet::new(),
+            direct: BTreeSet::new(),
+            whole: true,
+            incoming: BTreeSet::new(),
+            by_call: crate::dense::IdMap::default(),
+        }
+    }
 }
 
 impl FrameReach {
@@ -74,7 +65,7 @@ impl FrameReach {
     /// The entry offsets at or above the entry stack pointer (the homes and the argument area)
     /// that escaped addresses point at; none where one may point there at no offset known.
     pub const fn escaped_incoming(&self) -> Option<&BTreeSet<i64>> {
-        match self.incoming_unplaced {
+        match self.whole {
             true => None,
             false => Some(&self.incoming),
         }
@@ -92,41 +83,53 @@ impl FrameReach {
         self.by_call.get(call).unwrap_or(WHOLE)
     }
 
+    /// The build's points as objects: no walk, and so no points, is the whole frame.
     pub(crate) fn of(
         function: &SSAFunction,
-        prep: Option<&crate::DecompilePrepFacts>,
         graph: &SsaGraph,
         model: &ObjectModel,
-        (machine_context, areas): (Option<&SourceMachineContext>, &CallAreas),
+        machine_context: Option<&SourceMachineContext>,
     ) -> Self {
-        let Some(facts) = prep else {
-            // Nothing places a frame address, so nothing is proven private.
+        let frame = FrameIndex::of(model);
+        let by_call = call_reaches(function, graph, &frame, machine_context);
+        let Some(points) = function.frame_points() else {
             return Self {
-                whole: true,
-                incoming_unplaced: true,
+                by_call,
                 ..Self::default()
             };
         };
-        let frame = FrameIndex::of(model);
-        let (mut escaped, whole, incoming) = escaped_objects(facts, graph, model, &frame);
-        let (incoming, incoming_unplaced) = incoming;
-        let direct = escaped.clone();
+        let (leaving, mut whole) = leaving(points, graph, model);
+        let mut direct = BTreeSet::new();
+        for point in &leaving {
+            match frame.containing(point.at) {
+                Some(object) => drop(direct.insert(object)),
+                None => {
+                    r2il::refusal_evidence!(
+                        "frame-reach",
+                        "{:#x}: an address escapes at {} where no frame object is",
+                        function.entry,
+                        point.at
+                    );
+                    whole = true;
+                }
+            }
+        }
+        let incoming = (leaving.iter().map(|point| point.at))
+            .filter(|at| *at >= 0)
+            .collect();
+        let mut escaped = direct.clone();
         let barriers = compiler_slots(function, graph, model, machine_context);
         close_upward(&mut escaped, &frame, &barriers);
-        let by_call = (areas.0.iter())
-            .map(|(call, area)| {
-                let reach = area.as_ref().map_or(CallFrameReach::Whole, |area| {
-                    CallFrameReach::Objects(objects_in(&frame, area))
-                });
-                (call, reach)
-            })
-            .collect::<crate::dense::IdMap<_, _>>();
         r2il::refusal_evidence!(
             "frame-reach",
-            "{:#x}: {} of {} frame objects escape (whole frame: {whole}), {} calls bounded",
+            "{:#x}: {} of {} frame objects escape (whole frame: {whole}), escaped starts {:?}, {} calls bounded",
             function.entry,
             escaped.len(),
             frame.len(),
+            escaped
+                .iter()
+                .filter_map(|object| frame.start_of(*object))
+                .collect::<BTreeSet<_>>(),
             by_call
                 .values()
                 .filter(|reach| matches!(reach, CallFrameReach::Objects(_)))
@@ -137,161 +140,190 @@ impl FrameReach {
             direct,
             whole,
             incoming,
-            incoming_unplaced,
             by_call,
         }
     }
 }
 
-impl FrameReach {
-    /// Each run of escaped frame objects from the lowest whose own address escapes up to a slot the
-    /// compiler owns or the frame's top, as one span: an escaped address may reach any of
-    /// it, so it is one object, and C's pointer arithmetic across it is defined
-    /// (doc/adr-frame-model.md, extent rule; decided 2026-10-07). Only runs of two or more objects.
-    pub(crate) fn escape_spans(
-        &self,
-        function: &SSAFunction,
-        graph: &SsaGraph,
-        model: &ObjectModel,
-        machine_context: Option<&SourceMachineContext>,
-    ) -> Vec<(i64, i64)> {
-        // Without the convention's saves nothing bounds a run below the return address.
-        if self.whole
-            || machine_context
-                .and_then(SourceMachineContext::call_effect)
-                .is_none()
-        {
-            return Vec::new();
-        }
-        let frame = FrameIndex::of(model);
-        // An entry value of a register no argument arrives in, stored whole, is the compiler's: a
-        // save, the return address, the frame pointer. An argument's may be a local's initial value.
-        let arguments = machine_context
-            .and_then(SourceMachineContext::convention_slots)
-            .map(|slots| {
-                slots
-                    .argument_slots()
-                    .iter()
-                    .chain(slots.float_argument_slots())
-                    .copied()
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let argument = |storage: CanonicalStorageId| {
-            arguments.iter().any(|slot| {
-                slot.space == storage.space
-                    && slot.offset <= storage.offset
-                    && storage.offset < slot.offset + u64::from(slot.size)
-            })
+/// The points that leave, and whether one leaves unplaced; an opaque access outside every frame
+/// object hands on what it points at (S27). O(opaque accesses x log objects).
+fn leaving(
+    points: &FramePoints,
+    graph: &SsaGraph,
+    model: &ObjectModel,
+) -> (BTreeSet<FramePoint>, bool) {
+    let mut leaving = points.escaped.clone();
+    let mut whole = points.whole;
+    let unknown = model.escaped_unknown_object(SpaceId::Ram);
+    let placed = |value: ValueId, space: SpaceId| {
+        let key = MemoryObjectKey { value, space };
+        (model.value_objects.get(&key)).is_some_and(|object| Some(*object) != unknown)
+    };
+    for access in &points.opaque {
+        // Preparation mints no memory operation, so an access with no operation was deleted.
+        let Some(op) = graph.inst_for_op(access.op).and_then(|inst| graph.op(inst)) else {
+            continue;
         };
-        let mut barriers = compiler_slots(function, graph, model, machine_context);
-        barriers.extend(graph.insts.iter().filter_map(|inst| match &inst.payload {
-            crate::graph::InstPayload::Op(SSAOp::Store { space, .. }) => {
-                let (address, mut value) = (
-                    *graph.inputs(inst.id).first()?,
-                    *graph.inputs(inst.id).get(1)?,
+        let addresses = access_addresses(op);
+        if !addresses.is_empty()
+            && addresses
+                .iter()
+                .all(|(value, space)| placed(*value, *space))
+        {
+            continue;
+        }
+        match &access.origin {
+            Origin::Points(points) => leaving.extend(points.iter().copied()),
+            Origin::Unplaced => {
+                r2il::refusal_evidence!(
+                    "frame-reach",
+                    "{op:?} accesses a frame address no offset or object places"
                 );
-                // Through copies and low lanes, as a save of `x29` reads it.
-                for _ in 0..graph.values.len() {
-                    let definition = graph.def_inst(value).and_then(|inst| graph.inst(inst));
-                    match definition.map(|inst| (&inst.payload, graph.inputs(inst.id).first())) {
-                        Some((
-                            crate::graph::InstPayload::Op(
-                                SSAOp::Copy { .. } | SSAOp::Subpiece { offset: 0, .. },
-                            ),
-                            Some(source),
-                        )) => value = *source,
-                        _ => break,
-                    }
-                }
-                let entry = graph
-                    .value(value)
-                    .filter(|value| value.var.version == 0)
-                    .and_then(|value| value.canonical_storage)
-                    .or_else(|| graph.formal_projection_storage(value))
-                    .is_some_and(|storage| {
-                        storage.space == CanonicalStorageSpace::Register && !argument(storage)
-                    });
-                let key = MemoryObjectKey {
-                    value: address,
-                    space: *space,
-                };
-                entry
-                    .then(|| model.value_objects.get(&key).copied())
-                    .flatten()
-            }
-            _ => None,
-        }));
-        // How far each object's widest access reaches past its start, for a run nothing above ends.
-        let mut widths = BTreeMap::<ObjectId, i64>::new();
-        for inst in &graph.insts {
-            let crate::graph::InstPayload::Op(op) = &inst.payload else {
-                continue;
-            };
-            let (address, accessed, space) = match op {
-                SSAOp::Load { dst, addr, space } => (*addr, *dst, *space),
-                SSAOp::Store { addr, val, space } => (*addr, *val, *space),
-                _ => continue,
-            };
-            let key = MemoryObjectKey {
-                value: address,
-                space,
-            };
-            if let (Some(object), Some(value)) =
-                (model.value_objects.get(&key), graph.value(accessed))
-            {
-                let width = widths.entry(*object).or_default();
-                *width = (*width).max(i64::from(value.var.size));
+                whole = true;
             }
         }
-        let mut spans = Vec::new();
-        // A run opens at an object whose own address escapes: below it lies the argument area
-        // the calls pass on, which is no C object (an interior address reaching down past its
-        // object's base stays the labelled assumption).
-        let mut run: Option<(i64, usize)> = None;
-        for (start, objects) in frame.starts.range(..0) {
-            let barrier = objects.iter().any(|object| barriers.contains(object));
-            // Bytes any escaped object starts at are reachable, whatever else starts there.
-            let escaped = objects.iter().any(|object| self.escaped.contains(object));
-            let opens = objects.iter().any(|object| self.direct.contains(object));
-            if run.is_none() && !opens {
-                continue;
-            }
-            if barrier || !escaped {
-                if let Some((first, _)) = run.take() {
-                    spans.push((first, *start));
-                }
-                continue;
-            }
-            run = Some(run.map_or((*start, 1), |(first, count)| (first, count + 1)));
-        }
-        // A run nothing above ends stops where its last object's widest access does.
-        if let Some((first, _)) = run {
-            let last = frame.starts.range(first..0).next_back();
-            let end = last
-                .map(|(start, objects)| {
-                    let width = objects.iter().filter_map(|object| widths.get(object)).max();
-                    start.saturating_add(width.copied().unwrap_or(1))
-                })
-                .unwrap_or(0)
-                .min(0);
-            spans.push((first, end));
-        }
-        r2il::refusal_evidence!(
-            "frame-reach",
-            "{:#x}: escaped runs merged as {spans:?}; barriers at {:?}; escaped starts {:?}",
-            function.entry,
-            barriers
-                .iter()
-                .filter_map(|object| frame.start_of(*object))
-                .collect::<BTreeSet<_>>(),
-            self.escaped
-                .iter()
-                .filter_map(|object| frame.start_of(*object))
-                .collect::<BTreeSet<_>>()
-        );
-        spans
     }
+    (leaving, whole)
+}
+
+/// The addresses a memory access reads, with their spaces.
+fn access_addresses(op: &SSAOp<ValueId>) -> Vec<(ValueId, SpaceId)> {
+    match op {
+        SSAOp::Load { addr, space, .. }
+        | SSAOp::Store { addr, space, .. }
+        | SSAOp::LoadLinked { addr, space, .. }
+        | SSAOp::StoreConditional { addr, space, .. }
+        | SSAOp::LoadGuarded { addr, space, .. }
+        | SSAOp::StoreGuarded { addr, space, .. } => vec![(*addr, *space)],
+        SSAOp::Atomic(access) => vec![(access.addr, access.space)],
+        SSAOp::BlockTransfer(transfer) => vec![
+            (transfer.destination, transfer.space),
+            (transfer.source, transfer.space),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+/// Each frame run an escaped address may reach, lowest escaping place to a compiler slot or the
+/// top (doc/adr-frame-model.md, "Escape spans"). O(points + accesses x log places).
+pub(crate) fn escape_spans(
+    (function, graph, facts): (&SSAFunction, &SsaGraph, &crate::DecompilePrepFacts),
+    declared: &DeclaredStackSlots,
+    interior: &crate::dense::IdSet<ValueId>,
+    machine_context: Option<&SourceMachineContext>,
+) -> Vec<(i64, i64)> {
+    let Some(points) = function.frame_points() else {
+        return Vec::new();
+    };
+    // Without the convention's saves nothing bounds a run below the return address.
+    if points.whole
+        || machine_context
+            .and_then(SourceMachineContext::calls)
+            .is_none()
+    {
+        return Vec::new();
+    }
+    let offset = |value: ValueId| {
+        (facts.stack_address_root_of(value))
+            .filter(|root| root.base == StackAddressBase::StackPointer)
+            .map(|root| root.offset)
+    };
+    // Where places start and how wide each is accessed: the accesses and the declarations.
+    let mut widths = BTreeMap::<i64, i64>::new();
+    for op in graph.insts.iter().filter_map(|inst| match &inst.payload {
+        crate::graph::InstPayload::Op(op) => Some(op),
+        crate::graph::InstPayload::Phi { .. } => None,
+    }) {
+        let (address, accessed) = match op {
+            SSAOp::Load { dst, addr, .. } => (*addr, *dst),
+            SSAOp::Store { addr, val, .. } => (*addr, *val),
+            _ => continue,
+        };
+        if let (Some(at), Some(value)) = (offset(address), graph.value(accessed)) {
+            let width = widths.entry(at).or_default();
+            *width = (*width).max(i64::from(value.var.size));
+        }
+    }
+    for ((base, at), slot) in &declared.by_key {
+        if *base == StackAddressBase::StackPointer {
+            let width = widths.entry(*at).or_default();
+            *width = (*width).max(i64::from(slot.size_bytes()));
+        }
+    }
+    let barriers = (compiler_slot_stores(function, graph, machine_context, true).into_iter())
+        .filter_map(|(address, canary)| {
+            let at = offset(address)?;
+            (!canary || !interior.contains(address)).then_some(at)
+        })
+        .collect::<BTreeSet<_>>();
+    // An opaque access no stack root places is in the unknown object: what it points at leaves
+    // (S27), read here from the prep roots since no object exists yet.
+    let unplaced_accesses = (points.opaque.iter())
+        .filter(|access| {
+            let op = graph.inst_for_op(access.op).and_then(|inst| graph.op(inst));
+            op.is_some_and(|op| {
+                (access_addresses(op).iter())
+                    .any(|(value, _)| entry_offset(facts, *value).is_none())
+            })
+        })
+        .flat_map(|access| match &access.origin {
+            Origin::Points(points) => points.as_slice(),
+            Origin::Unplaced => &[],
+        });
+    let opens = (points.escaped.iter())
+        .chain(unplaced_accesses)
+        .filter(|point| point.at < 0)
+        .map(|point| {
+            // An interior address opens the run at the place it lies inside.
+            let inside = (widths.range(..=point.at).next_back())
+                .filter(|(start, width)| point.at < start.saturating_add(**width));
+            inside.map_or(point.at, |(start, _)| *start)
+        })
+        .collect::<BTreeSet<_>>();
+    let mut spans = Vec::<(i64, i64)>::new();
+    for first in opens {
+        let covered = spans.last().is_some_and(|(_, end)| first < *end);
+        if covered || barriers.contains(&first) {
+            continue;
+        }
+        let end = match barriers.range(first + 1..0).next() {
+            Some(barrier) => *barrier,
+            // A run nothing above ends stops where its last place's widest access does.
+            None => (widths.range(first..0).next_back())
+                .map_or(0, |(start, width)| start.saturating_add((*width).max(1)))
+                .min(0),
+        };
+        spans.push((first, end));
+    }
+    r2il::refusal_evidence!(
+        "frame-reach",
+        "{:#x}: escaped runs merged as {spans:?}; barriers at {barriers:?}",
+        function.entry
+    );
+    spans
+}
+
+/// The canary stores inside a declared slot or a write span, by address: the one rule for "a canary
+/// inside an object", read before any escape run is seeded (D290). `O(stores x spans)`.
+pub(crate) fn interior_canaries(
+    (function, graph, facts): (&SSAFunction, &SsaGraph, &crate::DecompilePrepFacts),
+    declared: &DeclaredStackSlots,
+    spans: &BTreeMap<StackAddressRoot, i64>,
+    machine_context: Option<&SourceMachineContext>,
+) -> crate::dense::IdSet<ValueId> {
+    let inside = |root: StackAddressRoot| {
+        declared.containing(root).is_some()
+            || (spans.range(..root))
+                .any(|(start, end)| start.base == root.base && root.offset < *end)
+    };
+    let mut interior = crate::dense::IdSet::new(graph.values.len());
+    for (address, canary) in compiler_slot_stores(function, graph, machine_context, false) {
+        let root = facts.stack_address_root_of(address).copied();
+        if canary && root.is_some_and(inside) {
+            interior.insert(address);
+        }
+    }
+    interior
 }
 
 /// Nothing proves where the object an escaped address points into ends: `rows[4]` is four
@@ -328,14 +360,34 @@ fn close_upward(
 }
 
 /// The frame slots the compiler owns: a save of a register the convention preserves (its entry
-/// value stored) and a decided stack protector's canary.
+/// value stored) and a decided stack protector's canary not inside a wider object.
 fn compiler_slots(
     function: &SSAFunction,
     graph: &SsaGraph,
     model: &ObjectModel,
     machine_context: Option<&SourceMachineContext>,
 ) -> BTreeSet<ObjectId> {
-    let effect = machine_context.and_then(SourceMachineContext::call_effect);
+    (compiler_slot_stores(function, graph, machine_context, false).into_iter())
+        .filter(|(address, canary)| !canary || !model.interior_canaries.contains(*address))
+        .filter_map(|(address, _)| {
+            let key = MemoryObjectKey {
+                value: address,
+                space: SpaceId::Ram,
+            };
+            model.value_objects.get(&key).copied()
+        })
+        .collect()
+}
+
+/// Stores that fill a compiler slot (a preserved save, the canary, with `entries` any
+/// non-argument entry value), each marked whether it is the canary's.
+fn compiler_slot_stores(
+    function: &SSAFunction,
+    graph: &SsaGraph,
+    machine_context: Option<&SourceMachineContext>,
+    entries: bool,
+) -> Vec<(ValueId, bool)> {
+    let effect = machine_context.and_then(SourceMachineContext::calls);
     let canary = function
         .compiler_inserted()
         .iter()
@@ -352,7 +404,7 @@ fn compiler_slots(
     // The low lane of an entry register the convention preserves: AArch64's `d8` of `z8`.
     let preserved_low_lane = |root: CanonicalStorageId, size: u32| {
         effect.is_some_and(|effect| {
-            effect.preserved().iter().any(|lane| {
+            effect.preserved_registers().iter().any(|lane| {
                 lane.size == size
                     && machine_context.is_some_and(|context| context.is_low_lane_of(*lane, root))
             })
@@ -383,25 +435,60 @@ fn compiler_slots(
                         })
                 })
     };
-    graph
-        .insts
-        .iter()
+    // An entry value of a register no argument arrives in, stored whole, is the compiler's: a
+    // save, the return address, the frame pointer. An argument's may be a local's initial value.
+    let arguments = machine_context
+        .and_then(SourceMachineContext::convention)
+        .map(|slots| {
+            (slots.arguments(SlotClass::Integer).iter())
+                .chain(slots.arguments(SlotClass::Float))
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let argument = |storage: CanonicalStorageId| {
+        arguments.iter().any(|slot| {
+            slot.space == storage.space
+                && slot.offset <= storage.offset
+                && storage.offset < slot.offset + u64::from(slot.size)
+        })
+    };
+    let non_argument_entry = |mut value: ValueId| {
+        // Through copies and low lanes, as a save of `x29` reads it.
+        for _ in 0..graph.values.len() {
+            let definition = graph.def_inst(value).and_then(|inst| graph.inst(inst));
+            match definition.map(|inst| (&inst.payload, graph.inputs(inst.id).first())) {
+                Some((
+                    crate::graph::InstPayload::Op(
+                        SSAOp::Copy { .. } | SSAOp::Subpiece { offset: 0, .. },
+                    ),
+                    Some(source),
+                )) => value = *source,
+                _ => break,
+            }
+        }
+        graph
+            .value(value)
+            .filter(|value| value.var.version == 0)
+            .and_then(|value| value.canonical_storage)
+            .or_else(|| graph.formal_projection_storage(value))
+            .is_some_and(|storage| {
+                storage.space == CanonicalStorageSpace::Register && !argument(storage)
+            })
+    };
+    (graph.insts.iter())
         .filter_map(|inst| match &inst.payload {
-            crate::graph::InstPayload::Op(SSAOp::Store { space, .. }) => {
+            crate::graph::InstPayload::Op(SSAOp::Store { .. }) => {
                 let (address, value) = (
                     *graph.inputs(inst.id).first()?,
                     *graph.inputs(inst.id).get(1)?,
                 );
-                // A canary store inside a wider object is that object's interior, not a slot.
-                let own_slot = canary.contains(inst.id) && model.interior_offset(address).is_none();
-                (saved(value) || own_slot).then_some(MemoryObjectKey {
-                    value: address,
-                    space: *space,
-                })
+                let own = canary.contains(inst.id);
+                let filled = saved(value) || own || (entries && non_argument_entry(value));
+                filled.then_some((address, own && !saved(value)))
             }
             _ => None,
         })
-        .filter_map(|key| model.value_objects.get(&key).copied())
         .collect()
 }
 
@@ -460,275 +547,42 @@ fn entry_offset(facts: &DecompilePrepFacts, value: ValueId) -> Option<i64> {
         .map(|root| root.offset)
 }
 
-/// The frame objects whose addresses escape, whether one escaped that names none, and where the
-/// escaped addresses at or above the entry stack pointer point (and whether one is unplaced).
-fn escaped_objects(
-    facts: &DecompilePrepFacts,
-    graph: &SsaGraph,
-    model: &ObjectModel,
-    frame: &FrameIndex,
-) -> (BTreeSet<ObjectId>, bool, (BTreeSet<i64>, bool)) {
-    let mut incoming = Incoming::default();
-    let (mut origins, mut tainted, mut pending) =
-        frame_addresses(facts, graph, frame, &mut incoming);
-    let mut escaped = BTreeSet::new();
-    let mut whole = false;
-    let unknown = model.escaped_unknown_object(SpaceId::Ram);
-    let placed = |value: ValueId| {
-        let key = MemoryObjectKey {
-            value,
-            space: SpaceId::Ram,
-        };
-        // The unknown object names no frame object: an access there escapes what flows into it.
-        (model.value_objects.get(&key)).is_some_and(|object| Some(*object) != unknown)
-    };
-    while let Some(value) = pending.pop() {
-        let from = origins.get(value).cloned().unwrap_or_default();
-        let high = incoming.above.contains(value);
-        for site in graph.use_sites(value) {
-            let Some(inst) = graph.inst(site.inst) else {
-                whole = true;
-                incoming.leaves(facts, value);
-                continue;
-            };
-            let carried = carries(inst, site.input_idx, placed(value));
-            if matches!(carried, Carry::Escapes | Carry::Everything) {
-                incoming.leaves(facts, value);
-            }
-            match carried {
-                Carry::Escapes => match escaping_object(facts, graph, frame, value) {
-                    Some(object) => {
-                        escaped.insert(object);
-                    }
-                    // A merge of a frame address with something else: the objects it may name.
-                    None if !from.is_empty() => escaped.extend(from.iter().copied()),
-                    None => {
-                        r2il::refusal_evidence!(
-                            "frame-reach",
-                            "{value:?} escapes through {:?} at no frame object",
-                            inst.payload
-                        );
-                        whole = true;
-                    }
-                },
-                Carry::Propagates => {
-                    if let Some(out) = inst.output {
-                        let known = origins.get_or_insert_with(out, BTreeSet::new);
-                        let before = known.len();
-                        known.extend(from.iter().copied());
-                        let rose = incoming.rises(facts, out, high);
-                        if tainted.insert(out) || known.len() != before || rose {
-                            pending.push(out);
-                        }
-                    }
-                }
-                Carry::Stops => {}
-                Carry::Everything => {
-                    r2il::refusal_evidence!(
-                        "frame-reach",
-                        "{value:?} is taken as code or by an unmodelled operation: {:?}",
-                        inst.payload
-                    );
-                    whole = true;
-                }
-            }
-        }
-    }
-    if whole {
-        r2il::refusal_evidence!(
-            "frame-reach",
-            "a frame address escapes that names no frame object, so the whole frame is reachable"
-        );
-    }
-    (escaped, whole, (incoming.offsets, incoming.unplaced))
-}
-
-/// What each tainted value may point into, the tainted values and the queue of them.
-type Taint = (
-    crate::dense::IdMap<ValueId, BTreeSet<ObjectId>>,
-    crate::dense::IdSet<ValueId>,
-    Vec<ValueId>,
-);
-
-/// Every frame address seeded: the object it points into is its own; each set only grows, bounded
-/// by the objects, so a value is re-queued at most once per object.
-fn frame_addresses(
-    facts: &DecompilePrepFacts,
-    graph: &SsaGraph,
-    frame: &FrameIndex,
-    incoming: &mut Incoming,
-) -> Taint {
-    let frame_address = |value: ValueId| {
-        facts.stack_address_root_of(value).is_some()
-            || facts.indexed_stack_address_root_of(value).is_some()
-    };
-    let mut origins = crate::dense::IdMap::<ValueId, BTreeSet<ObjectId>>::default();
-    let mut tainted = crate::dense::IdSet::default();
-    let mut pending = Vec::new();
-    for value in graph.values.iter().map(|value| value.id) {
-        if frame_address(value) && tainted.insert(value) {
-            incoming.rises(facts, value, true);
-            let own = escaping_object(facts, graph, frame, value);
-            origins.insert(value, own.into_iter().collect());
-            pending.push(value);
-        }
-    }
-    (origins, tainted, pending)
-}
-
-/// The tainted values not proven below the entry stack pointer, and where those that leave point.
-#[derive(Default)]
-struct Incoming {
-    /// Only grows, so a value is queued for it once.
-    above: crate::dense::IdSet<ValueId>,
-    offsets: BTreeSet<i64>,
-    unplaced: bool,
-}
-
-impl Incoming {
-    /// Whether `value` joins the set: by its own offset where the frame places it, else where an
-    /// input is in it (`inherits`).
-    fn rises(&mut self, facts: &DecompilePrepFacts, value: ValueId, inherits: bool) -> bool {
-        let high = entry_offset(facts, value).map_or(inherits, |offset| offset >= 0);
-        high && self.above.insert(value)
-    }
-
-    /// `value` leaves the body: where it points is recorded, where it is in the set.
-    fn leaves(&mut self, facts: &DecompilePrepFacts, value: ValueId) {
-        if !self.above.contains(value) {
-            return;
-        }
-        match entry_offset(facts, value) {
-            Some(offset) => drop(self.offsets.insert(offset)),
-            None => self.unplaced = true,
-        }
-    }
-}
-
-enum Carry {
-    /// The value leaves the function's sight with the address it carries.
-    Escapes,
-    /// Control or code goes where the address says, so no object of the frame is private.
-    Everything,
-    /// The output is computed from the address and may be one.
-    Propagates,
-    /// The address is used as one, or reduced to something that is not one.
-    Stops,
-}
-
-/// The frame object an escaping frame address points into, where the prep
-/// facts place it in one.
-fn escaping_object(
-    facts: &DecompilePrepFacts,
-    graph: &SsaGraph,
-    frame: &FrameIndex,
-    value: ValueId,
-) -> Option<ObjectId> {
-    let offset = entry_offset(facts, graph.value(value)?.id)?;
-    frame.containing(offset)
-}
-
-/// What one use of a frame address does with it; `placed` is whether the model puts the address in an object.
-///
-/// A return is no escape: under the UB-free premise the frame ends with the call (doc/adr-frame-model.md).
-fn carries(inst: &crate::graph::GraphInst, input: usize, placed: bool) -> Carry {
-    let op = match &inst.payload {
-        crate::graph::InstPayload::Phi { .. } => return Carry::Propagates,
-        crate::graph::InstPayload::Op(op) => op,
-    };
-    let access = || if placed { Carry::Stops } else { Carry::Escapes };
-    match op {
-        SSAOp::CallUse { .. } | SSAOp::CallOther { .. } => Carry::Escapes,
-        _ if op.is_call() || op.jump().is_some() || matches!(op, SSAOp::Switch { .. }) => {
-            Carry::Everything
-        }
-        // A conditional branch reads its condition; an address there is a truth value.
-        SSAOp::CBranch { .. } | SSAOp::Return { .. } => Carry::Stops,
-        // Input 0 is the address; anything else stored is the value.
-        SSAOp::Store { .. }
-        | SSAOp::StoreConditional { .. }
-        | SSAOp::StoreGuarded { .. }
-        | SSAOp::Atomic(_) => {
-            if input == 0 {
-                access()
-            } else {
-                Carry::Escapes
-            }
-        }
-        SSAOp::Load { .. } | SSAOp::LoadLinked { .. } | SSAOp::LoadGuarded { .. } => access(),
-        SSAOp::BlockTransfer(_) => access(),
-        SSAOp::IntEqual { .. }
-        | SSAOp::IntNotEqual { .. }
-        | SSAOp::IntLess { .. }
-        | SSAOp::IntSLess { .. }
-        | SSAOp::IntLessEqual { .. }
-        | SSAOp::IntSLessEqual { .. }
-        | SSAOp::IntCarry { .. }
-        | SSAOp::IntSCarry { .. }
-        | SSAOp::IntSBorrow { .. }
-        | SSAOp::PopCount { .. }
-        | SSAOp::Lzcount { .. } => Carry::Stops,
-        _ if inst.output.is_some() => Carry::Propagates,
-        // An operation with no output that is none of the above does something unmodelled with the address.
-        _ => Carry::Everything,
-    }
-}
-
-/// Each call's argument area at the entry offset of its stack pointer, or `None` where nothing
-/// bounds it: what no object model changes, walked once per collection.
-#[derive(Default)]
-pub(crate) struct CallAreas(crate::dense::IdMap<InstId, Option<Vec<(i64, i64)>>>);
-
-impl CallAreas {
-    pub(crate) fn of(
-        function: &SSAFunction,
-        graph: &SsaGraph,
-        prep: Option<&DecompilePrepFacts>,
-        machine_context: Option<&SourceMachineContext>,
-    ) -> Self {
-        match (prep, machine_context) {
-            (Some(facts), Some(context)) => Self(call_areas(function, graph, facts, context)),
-            _ => Self::default(),
-        }
-    }
-}
-
-fn call_areas(
+/// What each call reaches of the frame: its `CallReads::stack` from the base the walk placed, as
+/// objects; the whole frame where either is missing. `O(insts + calls x log objects)`.
+fn call_reaches(
     function: &SSAFunction,
     graph: &SsaGraph,
-    facts: &DecompilePrepFacts,
-    machine_context: &SourceMachineContext,
-) -> crate::dense::IdMap<InstId, Option<Vec<(i64, i64)>>> {
-    let mut out = crate::dense::IdMap::default();
-    let Some(stack_pointer) = machine_context.stack_pointer_carrier() else {
-        return out;
-    };
-    let mut states = ReachingStorage::new(function, graph, stack_pointer);
-    for block in &graph.blocks {
-        for &call in graph.op_insts(block.id) {
-            let Some(op) = graph.op(call) else {
-                continue;
-            };
-            let Some(transfer) = op.call() else {
-                continue;
-            };
-            let instruction = transfer.instruction;
-            let sp = match states.before(call) {
-                Some(ReachingStorageState::Value(value)) => graph
-                    .value(value)
-                    .and_then(|value| entry_offset(facts, value.id)),
-                _ => None,
-            };
-            let area = (machine_context.call_reads(instruction)).and_then(|reads| reads.stack);
-            let area = sp.zip(area).map(|(sp, area)| {
-                (area.iter())
-                    .map(|(low, high)| (sp.saturating_add(*low), sp.saturating_add(*high)))
-                    .collect::<Vec<_>>()
-            });
-            out.insert(call, area);
+    frame: &FrameIndex,
+    machine_context: Option<&SourceMachineContext>,
+) -> crate::dense::IdMap<InstId, CallFrameReach> {
+    let bases = function
+        .frame_points()
+        .map_or(&[][..], |points| &points.call_bases[..]);
+    let mut by_call = crate::dense::IdMap::default();
+    for inst in &graph.insts {
+        if graph.op(inst.id).is_some_and(|op| op.call().is_some()) {
+            by_call.insert(inst.id, CallFrameReach::Whole);
         }
     }
-    out
+    for (op, base) in bases {
+        let Some((call, base)) = graph.inst_for_op(*op).zip(*base) else {
+            continue;
+        };
+        let instruction = graph
+            .op(call)
+            .and_then(|op| op.call())
+            .map(|call| call.instruction);
+        let area = machine_context
+            .zip(instruction)
+            .and_then(|(context, instruction)| context.call_reads(instruction)?.stack);
+        if let Some(area) = area {
+            let area = (area.iter())
+                .map(|(low, high)| (base.saturating_add(*low), base.saturating_add(*high)))
+                .collect::<Vec<_>>();
+            by_call.insert(call, CallFrameReach::Objects(objects_in(frame, &area)));
+        }
+    }
+    by_call
 }
 
 /// The frame objects any byte of these entry-relative ranges lies in; an

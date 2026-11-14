@@ -24,18 +24,6 @@ fn op_at(prepared: &r2ssa::SsaArtifact, block_addr: u64, index: usize) -> r2ssa:
 }
 
 #[test]
-fn constant_looking_spelling_is_not_constant_evidence() {
-    assert_eq!(
-        const_var_i64(&r2ssa::SSAVar::new("const:ffffffffffffffb8", 0, 8)),
-        None
-    );
-    assert_eq!(
-        const_var_i64(&r2ssa::SSAVar::constant(0xffff_ffff_ffff_ffb8, 8)),
-        Some(-72)
-    );
-}
-
-#[test]
 fn parameter_coalescing_values_are_exact_entry_membership() {
     let entry_values = BTreeSet::from([r2ssa::ValueId(7), r2ssa::ValueId(2), r2ssa::ValueId(11)]);
     let entity = CertifiedEntity::Parameter {
@@ -252,7 +240,11 @@ fn exact_source_param_slots_ignore_misleading_register_names() {
     let interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
         b"exact-param-alias".to_vec(),
         r2source::ConventionId::SysVAmd64,
-        [r2ssa::SourceAbiParameterSpec::new(0, storage)],
+        [r2ssa::SourceAbiParameterSpec::new(
+            0,
+            storage,
+            r2source::SourceSlot::integer(0),
+        )],
         r2ssa::SourceFunctionReturn::Void,
         [],
         [Some(logical)],
@@ -286,17 +278,13 @@ fn exact_source_param_slots_ignore_misleading_register_names() {
     )
     .expect("prepared source");
 
-    let resolver = exact_source_param_slot_resolver(&source).expect("exact resolver");
+    exact_source_param_slot_resolver(&source).expect("exact resolver");
     let parameter = source
         .facts()
         .boundaries
         .parameters
         .get(&0)
         .expect("exact boundary parameter");
-    assert_eq!(
-        resolver.slot_for_value(parameter.value().expect("a register formal")),
-        Some(0)
-    );
     let parameter_var = &source
         .graph()
         .value(parameter.value().expect("a register formal"))
@@ -897,12 +885,7 @@ fn a_recovered_pointer_replaces_a_storage_width_scalar() {
         signedness: crate::Signedness::Signed,
     };
     let recovered = CTypeLike::Pointer(Box::new(CTypeLike::Void));
-    assert!(recovered_type_outranks(
-        &existing,
-        &recovered,
-        64,
-        &crate::ExternalTypeDb::default()
-    ));
+    assert!(recovered_type_outranks(&existing, &recovered, 64));
 }
 
 /// A name carries what it stands for, so a width can be measured through
@@ -965,7 +948,7 @@ fn a_recovered_type_never_demotes_a_structured_one() {
         CTypeLike::typedef("int64_t"),
     ] {
         assert!(
-            !recovered_type_outranks(&existing, &recovered, 64, &crate::ExternalTypeDb::default()),
+            !recovered_type_outranks(&existing, &recovered, 64),
             "{recovered:?} must not replace a struct pointer"
         );
     }
@@ -978,12 +961,7 @@ fn a_recovered_type_that_renders_the_same_is_not_a_replacement() {
         bits: 32,
         signedness: crate::Signedness::Signed,
     };
-    assert!(!recovered_type_outranks(
-        &existing,
-        &recovered,
-        64,
-        &crate::ExternalTypeDb::default()
-    ));
+    assert!(!recovered_type_outranks(&existing, &recovered, 64));
 }
 
 #[test]
@@ -996,12 +974,7 @@ fn a_storage_width_scalar_is_not_evidence_for_replacing_another_one() {
         bits: 32,
         signedness: crate::Signedness::Unsigned,
     };
-    assert!(!recovered_type_outranks(
-        &existing,
-        &recovered,
-        64,
-        &crate::ExternalTypeDb::default()
-    ));
+    assert!(!recovered_type_outranks(&existing, &recovered, 64));
 }
 
 #[test]
@@ -1332,7 +1305,11 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
     let function_interface = r2ssa::SourceFunctionInterface::new_exact(
         revision.clone(),
         r2source::ConventionId::SysVAmd64,
-        [r2ssa::SourceAbiParameterSpec::new(0, parameter_storage)],
+        [r2ssa::SourceAbiParameterSpec::new(
+            0,
+            parameter_storage,
+            r2source::SourceSlot::integer(0),
+        )],
         r2ssa::SourceFunctionReturn::Void,
         [],
     )
@@ -1346,7 +1323,11 @@ fn an_implicit_call_read_keeps_its_entry_value_as_a_certified_parameter() {
     let callee_interface = r2ssa::SourceFunctionInterface::new_exact_with_logical_types(
         revision.clone(),
         r2source::ConventionId::SysVAmd64,
-        [r2ssa::SourceAbiParameterSpec::new(0, parameter_storage)],
+        [r2ssa::SourceAbiParameterSpec::new(
+            0,
+            parameter_storage,
+            r2source::SourceSlot::integer(0),
+        )],
         r2ssa::SourceFunctionReturn::Void,
         [],
         [Some(logical_parameter)],
@@ -1498,21 +1479,6 @@ fn prepared_decompile_evidence_replaces_detached_source_dependent_rows() {
         residual_reason: Some("upstream refusal".to_string()),
     };
     let string_value = r2ssa::ValueId(0xcafe);
-    let member_op = (r2ssa::InstId(7), false);
-    let member_access = MemberAccessRenderFact {
-        access: r2ssa::StructuredAccessId {
-            inst: r2ssa::InstId(7),
-            ordinal: 0,
-        },
-        object: r2ssa::ObjectId(9),
-        is_write: false,
-        field_offset: 8,
-        field_name: "len".to_string(),
-        field_type: None,
-        access_width: 32,
-        base: None,
-        source: MemberAccessSource::ExternalLayout,
-    };
     let existing_render = FunctionRenderFacts {
         string_literals_by_value: r2ssa::dense::IdMap::from_iter([(
             string_value,
@@ -1523,7 +1489,6 @@ fn prepared_decompile_evidence_replaces_detached_source_dependent_rows() {
                 source: StringLiteralRenderSource::TypedFunctionFacts,
             },
         )]),
-        member_accesses_by_inst: by_direction([(member_op, vec![member_access])]),
         ..FunctionRenderFacts::default()
     };
     let mut facts = FunctionFacts::default()
@@ -1557,13 +1522,6 @@ fn prepared_decompile_evidence_replaces_detached_source_dependent_rows() {
             .and_then(|render| render.string_literal_for_value(string_value))
             .is_none(),
         "an unvalidated detached string annotation must be removed during source rebuild"
-    );
-    assert!(
-        facts
-            .render()
-            .and_then(|render| render.member_accesses_by_inst.get(member_op.0))
-            .is_none(),
-        "an unvalidated detached member projection must be removed during source rebuild"
     );
     assert!(
         facts
@@ -1618,292 +1576,6 @@ fn the_enriched_report_holds_the_projection_of_its_final_types() {
     assert!(SourceOwnedFunctionFacts::seal(source, report).is_some());
 }
 
-#[test]
-fn field_certificates_populate_direct_member_render_facts() {
-    let mut block = R2ILBlock::new(0x401000, 4);
-    block.push(R2ILOp::IntAdd {
-        dst: Varnode::unique(0x100, 8),
-        a: Varnode::register(0x10, 8),
-        b: Varnode::constant(8, 8),
-    });
-    block.push(R2ILOp::Load {
-        dst: Varnode::register(0x00, 8),
-        space: SpaceId::Ram,
-        addr: Varnode::unique(0x100, 8),
-    });
-    let prepared = x86_stack_home_prepared(&[block]);
-    let type_facts = FunctionTypeFacts {
-        field_access_certificates: vec![crate::facts::FieldAccessCertificate {
-            slot: 0,
-            field_offset: 8,
-            field_name: "hash".to_string(),
-            field_type: Some(CTypeLike::Int {
-                bits: 64,
-                signedness: crate::Signedness::Unsigned,
-            }),
-        }],
-        ..FunctionTypeFacts::default()
-    };
-    let mut facts = FunctionFacts::new(type_facts);
-
-    facts.attach_prepared_decompile_evidence(&prepared);
-    facts.populate_member_access_render_facts_from_field_certificates(
-        &prepared,
-        &x86_stack_home_param_slots(&prepared),
-    );
-
-    let render = facts.render().expect("prepared render facts");
-    let member = render
-        .member_access_for_inst(inst_at(&prepared, 0x401000, 1), false, "hash", 8, Some(8))
-        .expect("typed member render fact");
-    let expected = CTypeLike::Int {
-        bits: 64,
-        signedness: crate::model::Signedness::Unsigned,
-    };
-    assert_eq!(member.field_type.as_ref(), Some(&expected));
-    assert_eq!(render.memory_value_type(member.access), Some(&expected));
-}
-
-/// A pointer a loop carries -- `p = phi(arg0, p->next)` -- is parameter 0
-/// only on the loop's first iteration. Naming its accesses from parameter 0's
-/// field certificates rested on reading the merge as parameter 0 by skipping
-/// the input nothing could place, which is the identity claim the value view
-/// refuses: a merge is based where every input is. What types the carrier is
-/// its declared pointee, which a certificate keyed by parameter does not
-/// state, so the accesses through it get no parameter member name and the
-/// carrier no type borrowed from one.
-#[test]
-fn field_certificates_do_not_follow_a_loop_carried_pointer_as_the_parameter() {
-    let mut entry = R2ILBlock::new(0x400ff0, 0x10);
-    entry.push(R2ILOp::Branch {
-        target: Varnode::constant(0x401000, 8),
-    });
-    let mut header = R2ILBlock::new(0x401000, 0x10);
-    header.push(R2ILOp::IntAdd {
-        dst: Varnode::unique(0x100, 8),
-        a: Varnode::register(0x10, 8),
-        b: Varnode::constant(8, 8),
-    });
-    header.push(R2ILOp::Load {
-        dst: Varnode::register(0x00, 8),
-        space: SpaceId::Ram,
-        addr: Varnode::unique(0x100, 8),
-    });
-    header.push(R2ILOp::CBranch {
-        target: Varnode::constant(0x401020, 8),
-        cond: Varnode::register(0x80, 1),
-    });
-    let mut latch = R2ILBlock::new(0x401010, 0x10);
-    latch.push(R2ILOp::IntAdd {
-        dst: Varnode::unique(0x200, 8),
-        a: Varnode::register(0x10, 8),
-        b: Varnode::constant(0x10, 8),
-    });
-    latch.push(R2ILOp::Load {
-        dst: Varnode::register(0x10, 8),
-        space: SpaceId::Ram,
-        addr: Varnode::unique(0x200, 8),
-    });
-    latch.push(R2ILOp::Branch {
-        target: Varnode::constant(0x401000, 8),
-    });
-    let mut exit = R2ILBlock::new(0x401020, 4);
-    exit.push(R2ILOp::Return {
-        target: Varnode::register(0x08, 8),
-    });
-    let prepared = x86_stack_home_prepared(&[entry, header, latch, exit]);
-    let type_facts = FunctionTypeFacts {
-        field_access_certificates: vec![
-            crate::facts::FieldAccessCertificate {
-                slot: 0,
-                field_offset: 8,
-                field_name: "value".to_string(),
-                field_type: Some(CTypeLike::Int {
-                    bits: 64,
-                    signedness: crate::Signedness::Unsigned,
-                }),
-            },
-            crate::facts::FieldAccessCertificate {
-                slot: 0,
-                field_offset: 0x10,
-                field_name: "next".to_string(),
-                field_type: Some(CTypeLike::Pointer(Box::new(CTypeLike::Struct(
-                    "Node".to_owned(),
-                )))),
-            },
-        ],
-        ..FunctionTypeFacts::default()
-    };
-    let mut facts = FunctionFacts::new(type_facts);
-
-    facts.attach_prepared_decompile_evidence(&prepared);
-    let upstream_carrier = prepared
-        .structured()
-        .loops
-        .values()
-        .flat_map(|loop_fact| loop_fact.carriers.iter())
-        .next()
-        .expect("prepared loop carrier");
-    let projected_carrier = facts
-        .render()
-        .and_then(|render| render.certified_entities.get(&upstream_carrier.id))
-        .expect("projected loop carrier");
-    assert!(matches!(
-        projected_carrier,
-        CertifiedEntity::LoopCarrier {
-            entries,
-            updates,
-            dominating_initializers,
-            members,
-            ..
-        } if entries == &upstream_carrier.entries
-            && updates == &upstream_carrier.updates
-            && dominating_initializers == &upstream_carrier.dominating_initializers
-            && members == &upstream_carrier.members
-    ));
-    facts.populate_member_access_render_facts_from_field_certificates(
-        &prepared,
-        &x86_stack_home_param_slots(&prepared),
-    );
-    facts.populate_certified_loop_carrier_types();
-
-    let render = facts.render().expect("prepared render facts");
-    assert!(
-        render
-            .member_access_for_inst(inst_at(&prepared, 0x401000, 1), false, "value", 8, Some(8))
-            .is_none()
-    );
-    assert!(
-        render
-            .member_access_for_inst(
-                inst_at(&prepared, 0x401010, 1),
-                false,
-                "next",
-                0x10,
-                Some(8)
-            )
-            .is_none()
-    );
-    let borrowed = CTypeLike::Pointer(Box::new(CTypeLike::Struct("Node".to_string())));
-    assert!(!render.loop_carriers().any(|carrier| {
-        matches!(
-            carrier,
-            CertifiedEntity::LoopCarrier { ty: Some(ty), .. } if *ty == borrowed
-        )
-    }));
-}
-
-#[test]
-fn field_certificates_do_not_populate_member_render_facts_for_wrong_width() {
-    let mut block = R2ILBlock::new(0x401000, 4);
-    block.push(R2ILOp::IntAdd {
-        dst: Varnode::unique(0x100, 8),
-        a: Varnode::register(0x10, 8),
-        b: Varnode::constant(8, 8),
-    });
-    block.push(R2ILOp::Load {
-        dst: Varnode::register(0x00, 8),
-        space: SpaceId::Ram,
-        addr: Varnode::unique(0x100, 8),
-    });
-    let prepared = x86_stack_home_prepared(&[block]);
-    let type_facts = FunctionTypeFacts {
-        field_access_certificates: vec![crate::facts::FieldAccessCertificate {
-            slot: 0,
-            field_offset: 8,
-            field_name: "small".to_string(),
-            field_type: Some(CTypeLike::Int {
-                bits: 32,
-                signedness: crate::Signedness::Unsigned,
-            }),
-        }],
-        ..FunctionTypeFacts::default()
-    };
-    let mut facts = FunctionFacts::new(type_facts);
-
-    facts.attach_prepared_decompile_evidence(&prepared);
-    facts.populate_member_access_render_facts_from_field_certificates(
-        &prepared,
-        &x86_stack_home_param_slots(&prepared),
-    );
-
-    assert!(
-        facts.render().is_none_or(|render| render
-            .member_access_for_inst(inst_at(&prepared, 0x401000, 1), false, "small", 8, Some(8))
-            .is_none()),
-        "wrong-width field certificate must not authorize member rendering"
-    );
-}
-
-#[test]
-fn field_certificates_do_not_populate_member_render_facts_for_wrong_param_slot() {
-    let mut block = R2ILBlock::new(0x401000, 4);
-    block.push(R2ILOp::IntAdd {
-        dst: Varnode::unique(0x100, 8),
-        a: Varnode::register(0x18, 8),
-        b: Varnode::constant(8, 8),
-    });
-    block.push(R2ILOp::Load {
-        dst: Varnode::register(0x00, 8),
-        space: SpaceId::Ram,
-        addr: Varnode::unique(0x100, 8),
-    });
-    let prepared = x86_stack_home_prepared(&[block]);
-    let type_facts = FunctionTypeFacts {
-        field_access_certificates: vec![crate::facts::FieldAccessCertificate {
-            slot: 0,
-            field_offset: 8,
-            field_name: "hash".to_string(),
-            field_type: Some(CTypeLike::Int {
-                bits: 64,
-                signedness: crate::Signedness::Unsigned,
-            }),
-        }],
-        ..FunctionTypeFacts::default()
-    };
-    let mut facts = FunctionFacts::new(type_facts);
-
-    facts.attach_prepared_decompile_evidence(&prepared);
-    facts.populate_member_access_render_facts_from_field_certificates(
-        &prepared,
-        &x86_stack_home_param_slots(&prepared),
-    );
-
-    assert!(
-        facts.render().is_none_or(|render| render
-            .member_access_for_inst(inst_at(&prepared, 0x401000, 1), false, "hash", 8, Some(8))
-            .is_none()),
-        "a field certificate for one parameter slot must not authorize the same offset on another parameter"
-    );
-
-    let matching_type_facts = FunctionTypeFacts {
-        field_access_certificates: vec![crate::facts::FieldAccessCertificate {
-            slot: 1,
-            field_offset: 8,
-            field_name: "hash".to_string(),
-            field_type: Some(CTypeLike::Int {
-                bits: 64,
-                signedness: crate::Signedness::Unsigned,
-            }),
-        }],
-        ..FunctionTypeFacts::default()
-    };
-    let mut matching_facts = FunctionFacts::new(matching_type_facts);
-
-    matching_facts.attach_prepared_decompile_evidence(&prepared);
-    matching_facts.populate_member_access_render_facts_from_field_certificates(
-        &prepared,
-        &x86_stack_home_param_slots(&prepared),
-    );
-
-    assert!(
-        matching_facts.render().is_some_and(|render| render
-            .member_access_for_inst(inst_at(&prepared, 0x401000, 1), false, "hash", 8, Some(8))
-            .is_some()),
-        "the same memory proof should authorize the certificate for the matching parameter slot"
-    );
-}
-
 fn x86_stack_home_arch() -> r2ssa::Arch {
     r2ssa::Arch::new(x86_stack_home_arch_spec())
 }
@@ -1935,19 +1607,16 @@ fn x86_stack_home_under(
         })
     };
     // The calls under test pass their arguments on the stack: no register is read.
-    let reads = r2ssa::SourceBoundaryReads::new([], []).expect("no reads");
-    let call_effect = r2ssa::SourceCallEffect::new(
-        storages([0x00, 0x10, 0x18]),
-        storages([0x20, 0x28, 0x30]),
-        reads,
-    )
-    .expect("a call effect");
+    let conventions = r2source::convention::testing::model(r2ssa::ConventionId::SysVAmd64)
+        .killed(storages([0x00, 0x10, 0x18]))
+        .preserved(storages([0x20, 0x28, 0x30]))
+        .conventions();
     r2ssa::SsaArtifact::for_decompile_with(
         blocks,
         r2ssa::DecompileInputs {
             arch: Some(&x86_stack_home_arch()),
             function_interface,
-            call_effect: Some(call_effect),
+            conventions: Some(conventions),
             call_site_interfaces,
             ..Default::default()
         },
@@ -1967,8 +1636,12 @@ fn x86_stack_home_prepared(blocks: &[R2ILBlock]) -> r2ssa::SsaArtifact {
         b"x86-stack-home-fixture".to_vec(),
         r2source::ConventionId::SysVAmd64,
         [
-            r2ssa::SourceAbiParameterSpec::new(0, parameter),
-            r2ssa::SourceAbiParameterSpec::new(1, second_parameter),
+            r2ssa::SourceAbiParameterSpec::new(0, parameter, r2source::SourceSlot::integer(0)),
+            r2ssa::SourceAbiParameterSpec::new(
+                1,
+                second_parameter,
+                r2source::SourceSlot::integer(1),
+            ),
         ],
         r2ssa::SourceFunctionReturn::Register {
             storage: register_storage(0x00),
@@ -2264,343 +1937,6 @@ fn prepared_render_facts_keep_single_consumer_load_inline() {
     );
 }
 
-fn member_load_prepared_for_register(arch: &ArchSpec, register_offset: u64) -> r2ssa::SsaArtifact {
-    let mut block = R2ILBlock::new(0x401000, 4);
-    block.push(R2ILOp::IntAdd {
-        dst: Varnode::unique(0x100, 8),
-        a: Varnode::register(register_offset, 8),
-        b: Varnode::constant(8, 8),
-    });
-    block.push(R2ILOp::Load {
-        dst: Varnode::register(0x00, 8),
-        space: SpaceId::Ram,
-        addr: Varnode::unique(0x100, 8),
-    });
-    r2ssa::SsaArtifact::for_decompile(&[block], Some(&r2ssa::Arch::from(arch.clone())))
-        .expect("prepared")
-}
-
-fn field_certificate_type_facts(slot: usize, offset: u64) -> FunctionTypeFacts {
-    FunctionTypeFacts {
-        field_access_certificates: vec![crate::facts::FieldAccessCertificate {
-            slot,
-            field_offset: offset,
-            field_name: "hash".to_string(),
-            field_type: Some(CTypeLike::Int {
-                bits: 64,
-                signedness: crate::Signedness::Unsigned,
-            }),
-        }],
-        ..FunctionTypeFacts::default()
-    }
-}
-
-#[test]
-fn field_certificates_fail_closed_without_param_slot_resolver() {
-    let prepared = member_load_prepared_for_register(&x86_stack_home_arch(), 0x10);
-    let mut facts = FunctionFacts::new(field_certificate_type_facts(0, 8));
-
-    facts.attach_prepared_decompile_evidence(&prepared);
-    facts.populate_member_access_render_facts_from_field_certificates(
-        &prepared,
-        &ParamSlotResolver::default(),
-    );
-
-    assert!(
-        facts.render().is_none_or(|render| render
-            .member_access_for_inst(inst_at(&prepared, 0x401000, 1), false, "hash", 8, Some(8))
-            .is_none()),
-        "missing ABI slot evidence must not guess rdi as parameter slot 0"
-    );
-}
-
-fn stack_home_field_load_prepared(with_store: bool) -> r2ssa::SsaArtifact {
-    let mut block = R2ILBlock::new(0x401000, 4);
-    block.push(R2ILOp::IntAdd {
-        dst: Varnode::unique(0x100, 8),
-        a: Varnode::register(0x20, 8),
-        b: Varnode::constant(0xffff_ffff_ffff_fff8, 8),
-    });
-    if with_store {
-        block.push(R2ILOp::Copy {
-            dst: Varnode::unique(0x104, 8),
-            src: Varnode::register(0x10, 8),
-        });
-        block.push(R2ILOp::Store {
-            space: SpaceId::Ram,
-            addr: Varnode::unique(0x100, 8),
-            val: Varnode::unique(0x104, 8),
-        });
-    }
-    block.push(R2ILOp::IntAdd {
-        dst: Varnode::unique(0x108, 8),
-        a: Varnode::register(0x20, 8),
-        b: Varnode::constant(0xffff_ffff_ffff_fff8, 8),
-    });
-    block.push(R2ILOp::Load {
-        dst: Varnode::unique(0x110, 8),
-        space: SpaceId::Ram,
-        addr: Varnode::unique(0x108, 8),
-    });
-    block.push(R2ILOp::IntAdd {
-        dst: Varnode::unique(0x118, 8),
-        a: Varnode::unique(0x110, 8),
-        b: Varnode::constant(4, 8),
-    });
-    block.push(R2ILOp::Load {
-        dst: Varnode::register(0x00, 4),
-        space: SpaceId::Ram,
-        addr: Varnode::unique(0x118, 8),
-    });
-    x86_stack_home_prepared(&[block])
-}
-
-#[test]
-fn field_certificates_populate_stack_home_member_render_facts() {
-    let prepared = stack_home_field_load_prepared(true);
-    let type_facts = FunctionTypeFacts {
-        field_access_certificates: vec![crate::facts::FieldAccessCertificate {
-            slot: 0,
-            field_offset: 4,
-            field_name: "hash".to_string(),
-            field_type: Some(CTypeLike::Int {
-                bits: 32,
-                signedness: crate::Signedness::Unsigned,
-            }),
-        }],
-        ..FunctionTypeFacts::default()
-    };
-    let mut facts = FunctionFacts::new(type_facts);
-
-    facts.attach_prepared_decompile_evidence(&prepared);
-    facts.populate_member_access_render_facts_from_field_certificates(
-        &prepared,
-        &x86_stack_home_param_slots(&prepared),
-    );
-
-    assert!(
-        facts.render().is_some_and(|render| render
-            .member_access_for_inst(inst_at(&prepared, 0x401000, 6), false, "hash", 4, Some(4))
-            .is_some()),
-        "field certificate plus prepared stack-reload proof must authorize O0 stack-home member rendering"
-    );
-}
-
-#[test]
-fn field_certificates_do_not_populate_stack_home_member_without_reload_proof() {
-    let prepared = stack_home_field_load_prepared(false);
-    let type_facts = FunctionTypeFacts {
-        field_access_certificates: vec![crate::facts::FieldAccessCertificate {
-            slot: 0,
-            field_offset: 4,
-            field_name: "hash".to_string(),
-            field_type: Some(CTypeLike::Int {
-                bits: 32,
-                signedness: crate::Signedness::Unsigned,
-            }),
-        }],
-        ..FunctionTypeFacts::default()
-    };
-    let mut facts = FunctionFacts::new(type_facts);
-
-    facts.attach_prepared_decompile_evidence(&prepared);
-    facts.populate_member_access_render_facts_from_field_certificates(
-        &prepared,
-        &x86_stack_home_param_slots(&prepared),
-    );
-
-    assert!(
-        facts.render().is_none_or(|render| render
-            .member_access_for_inst(inst_at(&prepared, 0x401000, 4), false, "hash", 4, Some(4))
-            .is_none()),
-        "field certificate must not authorize a member render through an unproven stack load"
-    );
-}
-
-#[test]
-fn scalar_array_candidates_populate_indexed_member_render_facts() {
-    let mut block = R2ILBlock::new(0x401000, 4);
-    block.push(R2ILOp::IntZExt {
-        dst: Varnode::unique(0x100, 8),
-        src: Varnode::register(0x18, 4),
-    });
-    block.push(R2ILOp::IntMult {
-        dst: Varnode::unique(0x108, 8),
-        a: Varnode::unique(0x100, 8),
-        b: Varnode::constant(16, 8),
-    });
-    block.push(R2ILOp::IntAdd {
-        dst: Varnode::unique(0x110, 8),
-        a: Varnode::register(0x10, 8),
-        b: Varnode::unique(0x108, 8),
-    });
-    block.push(R2ILOp::IntAdd {
-        dst: Varnode::unique(0x118, 8),
-        a: Varnode::unique(0x110, 8),
-        b: Varnode::constant(4, 8),
-    });
-    block.push(R2ILOp::Load {
-        dst: Varnode::register(0x00, 4),
-        space: SpaceId::Ram,
-        addr: Varnode::unique(0x118, 8),
-    });
-    let prepared = x86_stack_home_prepared(&[block]);
-    let load_index = prepared
-        .named_block(0x401000)
-        .expect("block")
-        .ops()
-        .iter()
-        .position(|op| matches!(op, r2ssa::SSAOp::Load { .. }))
-        .expect("array load");
-    let index_value = prepared
-        .memory_certificate_for_inst(inst_at(&prepared, 0x401000, load_index), false)
-        .expect("array load certificate")
-        .address;
-    let index_value = prepared
-        .addresses()
-        .parameter_expression(index_value)
-        .and_then(|address| address.terms.first())
-        .map(|term| term.value)
-        .expect("semantic array index");
-    let type_facts = FunctionTypeFacts {
-        array_index_certificates: vec![crate::facts::ArrayIndexCertificate {
-            slot: 0,
-            base: Some(crate::facts::ArrayIndexBase::Param { index: 0 }),
-            field_offset: 4,
-            element_stride: 16,
-        }],
-        field_access_certificates: vec![crate::facts::FieldAccessCertificate {
-            slot: 0,
-            field_offset: 4,
-            field_name: "score".to_string(),
-            field_type: Some(CTypeLike::i32()),
-        }],
-        scalar_array_render_candidates: vec![crate::facts::ScalarArrayRenderCandidate {
-            slot: 0,
-            op: op_at(&prepared, 0x401000, load_index),
-            is_write: false,
-            field_offset: 4,
-            element_stride: 16,
-            access_width: 4,
-            index_value: Some(index_value),
-        }],
-        ..FunctionTypeFacts::default()
-    };
-    let mut facts = FunctionFacts::new(type_facts);
-
-    facts.attach_prepared_decompile_evidence(&prepared);
-    facts.populate_certified_parameter_exprs(&prepared, &x86_stack_home_param_slots(&prepared));
-    facts.populate_member_access_render_facts_from_field_certificates(
-        &prepared,
-        &x86_stack_home_param_slots(&prepared),
-    );
-    facts.populate_array_access_render_facts_from_scalar_candidates(
-        &prepared,
-        &x86_stack_home_param_slots(&prepared),
-    );
-
-    let render = facts.render().expect("render facts");
-    assert!(
-        render
-            .member_access_for_inst(
-                inst_at(&prepared, 0x401000, load_index),
-                false,
-                "score",
-                4,
-                Some(4)
-            )
-            .is_some(),
-        "scalar array candidate plus field certificate must authorize indexed member rendering"
-    );
-    assert!(
-        render
-            .array_access_for_inst(
-                inst_at(&prepared, 0x401000, load_index),
-                false,
-                4,
-                16,
-                Some(4)
-            )
-            .is_some(),
-        "scalar array candidate must still authorize array rendering"
-    );
-    let array = render
-        .array_access_for_inst(
-            inst_at(&prepared, 0x401000, load_index),
-            false,
-            4,
-            16,
-            Some(4),
-        )
-        .expect("stable array render fact");
-    assert_eq!(array.base, Some(r2ssa::SemanticId::Parameter(0)));
-    assert_eq!(
-        array.index,
-        Some(r2ssa::SemanticId::expression(index_value))
-    );
-}
-
-#[test]
-fn scalar_array_member_candidate_requires_semantic_index_identity() {
-    let mut block = R2ILBlock::new(0x401000, 4);
-    block.push(R2ILOp::Load {
-        dst: Varnode::register(0x00, 4),
-        space: SpaceId::Ram,
-        addr: Varnode::register(0x18, 8),
-    });
-    let prepared = x86_stack_home_prepared(&[block]);
-    let type_facts_for_slot = |slot| FunctionTypeFacts {
-        array_index_certificates: vec![crate::facts::ArrayIndexCertificate {
-            slot,
-            base: Some(crate::facts::ArrayIndexBase::Param { index: slot }),
-            field_offset: 4,
-            element_stride: 16,
-        }],
-        field_access_certificates: vec![crate::facts::FieldAccessCertificate {
-            slot,
-            field_offset: 4,
-            field_name: "score".to_string(),
-            field_type: Some(CTypeLike::i32()),
-        }],
-        scalar_array_render_candidates: vec![crate::facts::ScalarArrayRenderCandidate {
-            slot,
-            op: op_at(&prepared, 0x401000, 0),
-            is_write: false,
-            field_offset: 4,
-            element_stride: 16,
-            access_width: 4,
-            index_value: None,
-        }],
-        ..FunctionTypeFacts::default()
-    };
-
-    let mut wrong_slot_facts = FunctionFacts::new(type_facts_for_slot(0));
-    wrong_slot_facts.attach_prepared_decompile_evidence(&prepared);
-    wrong_slot_facts.populate_member_access_render_facts_from_field_certificates(
-        &prepared,
-        &x86_stack_home_param_slots(&prepared),
-    );
-    assert!(
-        wrong_slot_facts.render().is_none_or(|render| render
-            .member_access_for_inst(inst_at(&prepared, 0x401000, 0), false, "score", 4, Some(4))
-            .is_none()),
-        "scalar-array member candidate from rsi must not render with a slot 0 certificate"
-    );
-
-    let mut matching_slot_facts = FunctionFacts::new(type_facts_for_slot(1));
-    matching_slot_facts.attach_prepared_decompile_evidence(&prepared);
-    matching_slot_facts.populate_member_access_render_facts_from_field_certificates(
-        &prepared,
-        &x86_stack_home_param_slots(&prepared),
-    );
-    assert!(
-        matching_slot_facts.render().is_none_or(|render| render
-            .member_access_for_inst(inst_at(&prepared, 0x401000, 0), false, "score", 4, Some(4))
-            .is_none()),
-        "coordinate-only array candidates must not authorize member rendering"
-    );
-}
-
 #[test]
 fn function_facts_owns_canonical_control_facts() {
     let branch = BranchPredicateFact {
@@ -2762,20 +2098,6 @@ fn function_facts_owns_canonical_render_facts() {
                 source: StringLiteralRenderSource::TypedFunctionFacts,
             },
         )]),
-        member_accesses_by_inst: by_direction([(
-            (r2ssa::InstId(7), true),
-            vec![MemberAccessRenderFact {
-                access,
-                object,
-                is_write: true,
-                field_offset: 0,
-                field_name: "value".to_string(),
-                field_type: None,
-                access_width: 8,
-                base: None,
-                source: MemberAccessSource::ExternalLayout,
-            }],
-        )]),
         array_accesses_by_inst: by_direction([(
             (r2ssa::InstId(7), true),
             vec![ArrayAccessRenderFact {
@@ -2806,12 +2128,6 @@ fn function_facts_owns_canonical_render_facts() {
             .map(|literal| (literal.address, literal.text.as_str())),
         Some((0x402000, "value")),
         "string literal render proof must travel through FunctionFacts"
-    );
-    assert!(
-        facts.render().is_some_and(|render| render
-            .member_access_for_inst(r2ssa::InstId(7), true, "value", 0, Some(8))
-            .is_some()),
-        "member access render proof must travel through FunctionFacts"
     );
     assert!(
         facts.render().is_some_and(|render| render

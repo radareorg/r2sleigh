@@ -424,6 +424,57 @@ fn a_call_to_a_function_that_executes_ud2_ends_its_caller() {
     assert_eq!(extent(&mut program, caller), (caller + 5, true));
 }
 
+/// `trap: int3`, then `caller: call trap; mov eax, 1; ret`.
+const BREAKS: &[u8] = &[0xcc, 0xe8, 0xfa, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3];
+
+/// `int3` raises #BP, which Sleigh ends with `return [0]`: a trap, so a call to a function that
+/// executes it ends its caller (D352).
+#[test]
+fn a_call_to_a_function_that_executes_int3_ends_its_caller() {
+    let (trap, caller) = (BASE, BASE + 1);
+    let functions = [("trap", trap, 1), ("caller", caller, 11)];
+    let mut program = OpenProgram::of(Literal::of_code(BREAKS, &functions));
+    assert_eq!(extent(&mut program, trap), (caller, true));
+    assert_eq!(extent(&mut program, caller), (caller + 5, true));
+}
+
+/// `fatal: ret`, then `caller: call fatal; mov eax, 1; ret`.
+const DECLARED_FATAL: &[u8] = &[0xc3, 0xe8, 0xfa, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3];
+
+/// Debug information that declares `fatal` `DW_AT_noreturn` (diffutils `try_help`) ends a call to it
+/// with no premise (D255); with none, the body's `ret` comes back.
+#[test]
+fn a_call_to_a_function_its_debug_information_declares_noreturn_ends_its_caller() {
+    let (fatal, caller) = (BASE, BASE + 1);
+    let functions = [("fatal", fatal, 1), ("caller", caller, 11)];
+    let prototype = r2abi::Prototype {
+        name: "fatal".to_owned(),
+        noreturn: true,
+        ..r2abi::Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(r2abi::TypeGraph::new());
+    declarations.declare_function(fatal, prototype);
+    let literal = Literal::of_code(DECLARED_FATAL, &functions);
+    let mut declared = OpenProgram::of(literal.with_declarations(declarations));
+    assert_eq!(extent(&mut declared, caller), (caller + 5, true));
+    let mut bare = OpenProgram::of(Literal::of_code(DECLARED_FATAL, &functions));
+    assert_eq!(extent(&mut bare, caller), (caller + 11, false));
+}
+
+/// `sys: int 0x80; ret`, then `caller: call sys; mov eax, 1; ret`.
+const INTERRUPTS: &[u8] = &[
+    0xcd, 0x80, 0xc3, 0xe8, 0xf8, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,
+];
+
+/// Any other vector stays the call through it Sleigh writes, which comes back (D352).
+#[test]
+fn a_call_to_a_function_that_interrupts_through_another_vector_comes_back() {
+    let (sys, caller) = (BASE, BASE + 3);
+    let functions = [("sys", sys, 3), ("caller", caller, 11)];
+    let mut program = OpenProgram::of(Literal::of_code(INTERRUPTS, &functions));
+    assert_eq!(extent(&mut program, caller), (caller + 11, false));
+}
+
 /// `spin: b spin`, then `caller: cmp r0, #0; blne spin; bx lr`.
 const PREDICATED: &[u8] = &[
     0xfe, 0xff, 0xff, 0xea, 0x00, 0x00, 0x50, 0xe3, 0xfc, 0xff, 0xff, 0x1b, 0x1e, 0xff, 0x2f, 0xe1,
@@ -450,4 +501,119 @@ fn a_function_that_runs_on_into_another_returns_what_that_one_returns() {
     let mut warm = OpenProgram::of(literal());
     believed(&mut warm);
     assert_eq!(extent(&mut warm, f), (g, false));
+}
+
+/// `trap: ud2`, then `caller: test edi, edi; je 1f; call trap; 1: mov eax, 1; ret`.
+const GUARDED_TRAP: &[u8] = &[
+    0x0f, 0x0b, 0x85, 0xff, 0x74, 0x05, 0xe8, 0xf5, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,
+];
+
+fn rendered_caller(literal: Literal) -> String {
+    let mut open = OpenProgram::of(literal);
+    let rendered = open.rendered(BASE + 2).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// A callee only the walk finds reaching no return ends its call's block, but the exit is unnamed:
+/// the "never" is a bound (RULING 1.4, D255). A declared one names it.
+#[test]
+fn a_call_to_a_never_no_statement_makes_leaves_its_exit_unnamed() {
+    let functions = [("trap", BASE, 2), ("caller", BASE + 2, 15)];
+    let derived = rendered_caller(Literal::of_code(GUARDED_TRAP, &functions));
+    let prototype = r2abi::Prototype {
+        name: "trap".to_owned(),
+        noreturn: true,
+        ..r2abi::Prototype::default()
+    };
+    let mut declarations = r2abi::Declarations::new(r2abi::TypeGraph::new());
+    declarations.declare_function(BASE, prototype);
+    let literal = Literal::of_code(GUARDED_TRAP, &functions).with_declarations(declarations);
+    let declared = rendered_caller(literal);
+    assert!(
+        derived.contains("1 call ends where no return was reached (unproven)"),
+        "{derived}"
+    );
+    assert!(
+        declared.contains("__attribute__((noreturn)) void trap"),
+        "{declared}"
+    );
+    assert!(!declared.contains("unproven)"), "{declared}");
+}
+
+/// `fail: mov ecx, 7; int 0x29; ret`, then `caller: call fail; mov eax, 1; ret`.
+const FASTFAILS: &[u8] = &[
+    0xb9, 7, 0, 0, 0, 0xcd, 0x29, 0xc3, 0xe8, 0xf3, 0xff, 0xff, 0xff, 0xb8, 1, 0, 0, 0, 0xc3,
+];
+
+/// Windows states `int 0x29` (`__fastfail`) never returns, so a PE's call to `fail` ends its
+/// caller; under Linux the same vector is a call that comes back (D229).
+#[test]
+fn a_call_to_a_function_that_fastfails_ends_its_caller_in_a_pe() {
+    let (fail, caller) = (BASE, BASE + 8);
+    let functions = [("fail", fail, 8), ("caller", caller, 11)];
+    let mut pe = OpenProgram::of(Literal::of_code(FASTFAILS, &functions).pe());
+    assert_eq!(extent(&mut pe, fail), (fail + 7, true));
+    assert_eq!(extent(&mut pe, caller), (caller + 5, true));
+    let mut elf = OpenProgram::of(Literal::of_code(FASTFAILS, &functions));
+    assert_eq!(extent(&mut elf, caller), (caller + 11, false));
+}
+
+/// A table switch (`jmp [rdi*8 + 0x1040]`) whose arms return `g()` and whose default arm at 0x1020
+/// calls `ends`: the import `exit` at the stub, or the body `trap` (`ud2`) at 0x1036.
+fn switch_ending_at(ends: u64) -> &'static [u8] {
+    let mut code = vec![0xcc; 0xa0];
+    code[..0x0e].copy_from_slice(&[
+        0x83, 0xff, 0x03, 0x77, 0x1b, 0x89, 0xff, 0xff, 0x24, 0xfd, 0x40, 0x10, 0x00, 0x00,
+    ]);
+    for arm in [0x0e, 0x14, 0x1a, 0x28] {
+        let call = (0x30 - (arm + 5)) as u8;
+        code[arm..arm + 6].copy_from_slice(&[0xe8, call, 0, 0, 0, 0xc3]);
+    }
+    let call = (ends - (BASE + 0x27)) as u32;
+    code[0x20..0x22].copy_from_slice(&[0x31, 0xff]);
+    code[0x22] = 0xe8;
+    code[0x23..0x27].copy_from_slice(&call.to_le_bytes());
+    code[0x30..0x38].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0x0f, 0x0b]);
+    for (at, target) in [0x100e_u64, 0x1014, 0x101a, 0x1028].iter().enumerate() {
+        code[0x40 + 8 * at..0x48 + 8 * at].copy_from_slice(&target.to_le_bytes());
+    }
+    code[0x90..0x96].copy_from_slice(&[0xff, 0x25, 0x02, 0x00, 0x00, 0x00]); // jmp [rip + 2]
+    code[0x98..0xa0].fill(0);
+    Box::leak(code.into_boxed_slice())
+}
+
+fn switch_rendered(ends: u64) -> String {
+    let functions = [
+        ("pick", BASE, 0x30),
+        ("g", BASE + 0x30, 6),
+        ("trap", BASE + 0x36, 2),
+    ];
+    let literal = Literal::of_code(switch_ending_at(ends), &functions)
+        .importing("exit")
+        .running_on(GLIBC);
+    let mut open = OpenProgram::of(literal);
+    let rendered = open.rendered(BASE).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// A switch arm ending at a call to `exit`, whose cited row states noreturn, names its exit: the
+/// other arms' 32-bit `g()` is the whole result, with no undefined upper bytes (S23 D255, D211).
+#[test]
+fn a_switch_arm_that_calls_a_cited_noreturn_names_its_exit() {
+    let text = switch_rendered(common::STUB);
+    assert!(text.contains("r2sleigh_result_u32 pick("), "{text}");
+    assert!(!text.contains("<< 32"), "{text}");
+    assert!(!text.contains("unproven)"), "{text}");
+}
+
+/// The same arm ending at a body only the walk finds reaching no return names no exit: the "never"
+/// is a bound, and the proof line counts the call as unproven (S23 D255; RULING 1.4).
+#[test]
+fn a_block_ended_at_an_unstated_call_names_no_exit() {
+    let text = switch_rendered(BASE + 0x36);
+    assert!(
+        text.contains("1 call ends where no return was reached (unproven)"),
+        "{text}"
+    );
+    assert!(text.contains("r2sleigh_result_u32 pick("), "{text}");
 }

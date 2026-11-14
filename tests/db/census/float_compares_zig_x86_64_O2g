@@ -22,7 +22,7 @@ NAME=0x01001520
 FILE=tests/fixtures/float_compares_zig_x86_64_O2g
 CMDS=aa; pdd @ 0x01001520
 EXPECT=<<EOF
-r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, r2sleigh_word_u64 arg2)
+r2sleigh_result_u64 _start(r2sleigh_unread_u64 arg0, r2sleigh_unread_u64 arg1, void* arg2)
 {
     uint64_t tmp_1001525_0_2;
 

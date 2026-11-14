@@ -55,6 +55,12 @@ engine. Commands, the visual mode and the agent surface all ask it.
   cut is transient; a callee prepared under a stop is a stop. Body-to-body
   forwarding needs callee interfaces a callee prepared alone does not
   have yet, so no cycle is reached today; the Db tests cover each hold.
+- `ComesBack` is keyed by entry and instruction set (2026-11-13). A walk
+  states each callee's set from its transfer, and the fixpoint walks each
+  callee in the set its call enters it in, so it reads no `Modes`. Ge's
+  rounds ask it from inside `LaterTables` for a callee only an arm
+  reaches; reading `Modes` there cycled into the survey on a machine with
+  Thumb (test `a_call_in_a_dispatch_arm_is_discovered_on_a_machine_with_two_sets`).
 
 ## Formed addresses
 

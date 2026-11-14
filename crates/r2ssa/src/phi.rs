@@ -354,20 +354,18 @@ pub fn add_call_boundary_def_sites(
         let Some(block) = cfg.get_block(addr) else {
             continue;
         };
-        for op in &block.ops {
+        for (at, op) in block.ops.iter().enumerate() {
             if !op.is_call() {
                 continue;
             }
-            let callee = call_boundaries.callee_boundary(op);
-            let result = callee
-                .target
-                .and_then(|target| results.get(&target))
-                .into_iter()
-                .flatten();
-            for identity in resolved.iter().chain(result) {
+            let callee = call_boundaries.callee_boundary(op, block.op_instruction_addr(at));
+            let result = callee.target.and_then(|target| results.get(&target));
+            for identity in resolved.iter().chain(result.into_iter().flatten()) {
+                let returned = result.is_some_and(|result| result.contains(identity));
                 if callee
                     .preserved
                     .is_some_and(|preserved| preserved.contains(&identity.storage))
+                    || callee.keeps(identity.storage) && !returned
                 {
                     continue;
                 }
