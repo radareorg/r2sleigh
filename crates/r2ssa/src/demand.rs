@@ -142,7 +142,8 @@ pub(crate) fn exits_are_named_beside(
             // A closed call ends the body only where a statement proves its "never" (D255, D384).
             BlockTerminator::Call { .. } | BlockTerminator::IndirectCall { .. } => {
                 let site = function.assumed_exits().site(block.addr);
-                (successors.is_empty() && site.is_some_and(|site| site.never.proves())) || !leaves
+                (successors.is_empty() && site.is_some_and(|site| site.never.proves().is_some()))
+                    || !leaves
             }
             _ => !leaves,
         };
@@ -399,23 +400,19 @@ mod tests {
         let graph = SsaGraph::from_function(&function);
         let live_out = FunctionLiveOut::compute(&function, &graph, &[]);
         assert!(!exits_are_named(&function, &live_out));
-        let closed = |proof| crate::AssumedExits {
+        let closed = |never: &r2source::Never| crate::AssumedExits {
             sites: vec![crate::ExitSite {
                 block: 0x1000,
-                never: r2source::Never {
-                    proof,
-                    premises: BTreeSet::new(),
-                },
+                never: never.clone(),
                 callee: true,
             }],
         };
-        function.record_assumed_exits(&closed(r2source::NeverProof::Declared));
+        let cited =
+            r2source::Citation::runtime("runtime.gopanic").expect("the model names gopanic");
+        function.record_assumed_exits(&closed(&r2source::Never::cited(cited)));
         assert!(exits_are_named(&function, &live_out));
-        for bound in [
-            r2source::NeverProof::NoReturnReached,
-            r2source::NeverProof::Uncited,
-        ] {
-            function.record_assumed_exits(&closed(bound));
+        for bound in [r2source::Never::unreached(), r2source::Never::uncited()] {
+            function.record_assumed_exits(&closed(&bound));
             assert!(!exits_are_named(&function, &live_out));
         }
     }

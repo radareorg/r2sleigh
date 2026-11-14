@@ -22,6 +22,7 @@ libmimalloc-sys = { version = "=0.1.49", default-features = false, features = ["
 dhat = { version = "0.3", optional = true }
 
 [dev-dependencies]
+r2abi = { path = "../r2abi" }
 libtest-mimic.workspace = true
 similar.workspace = true
 ratatui.workspace = true

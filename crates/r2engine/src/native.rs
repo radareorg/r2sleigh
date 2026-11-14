@@ -1160,12 +1160,12 @@ pub(crate) fn declared_return(
     program: &dyn Program,
     address: u64,
 ) -> Option<crate::discovery::Return> {
-    use crate::discovery::Return;
+    use crate::discovery::{Citation, Never, Return};
     let declarations = target.declarations;
     // `DW_AT_noreturn` is a declaration with no premise (D255); folded bodies declared apart state none.
     let stated = (declarations.function_at(address)).is_some_and(|prototype| prototype.noreturn);
-    if stated && !declarations.is_contested(address) {
-        return Some(Return::declared(std::collections::BTreeSet::new()));
+    if let Some(citation) = Citation::debug_info(declarations, address).filter(|_| stated) {
+        return Some(Return::Never(Never::cited(citation)));
     }
     let Some(name) = program.import_at(address) else {
         // A Go function the runtime model says never returns, under the runtime's contract.
@@ -1174,17 +1174,14 @@ pub(crate) fn declared_return(
         return (go && accepted_premises().contains(&premise))
             .then(|| program.name_at(address))
             .flatten()
-            .filter(|name| r2abi::runtime::exits(name))
-            .map(|_| Return::declared(std::collections::BTreeSet::from([premise])));
+            .and_then(|name| Citation::runtime(&name))
+            .map(|citation| Return::Never(Never::cited(citation)));
     };
     // Only a cited row proves a "never"; radare2's uncited one is a bound (D395).
     Some(match target.imports.row(&name) {
-        Some(row) if row.noreturn && row.cited() => {
-            Return::declared(std::collections::BTreeSet::new())
-        }
-        Some(row) if row.noreturn => Return::Never(crate::discovery::Never {
-            proof: crate::discovery::NeverProof::Uncited,
-            premises: std::collections::BTreeSet::new(),
+        Some(row) if row.noreturn => Return::Never(match Citation::of(row) {
+            Some(citation) => Never::cited(citation),
+            None => Never::uncited(),
         }),
         _ => Return::Comes,
     })

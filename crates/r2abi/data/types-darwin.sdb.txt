@@ -5,18 +5,6 @@ func.tputs.arg.1=int,affcnt
 func.tputs.arg.2=void *,putc
 func.tputs.ret=int
 
-_exit=func
-func._exit.args=1
-func._exit.arg.0=int,status
-func._exit.noreturn=true
-func._exit.ret=void
-
-_Exit=func
-func._Exit.args=1
-func._Exit.arg.0=int,status
-func._Exit.noreturn=true
-func._Exit.ret=void
-
 xalloc_die=func
 func.xalloc_die.args=0
 func.xalloc_die.noreturn=true
@@ -138,19 +126,6 @@ struct.NSString.len=int,0,0
 struct.NSString.len.meta=4
 struct.NSString.str=char *,0,0
 struct.NSString.str.meta=4
-
-# assert.h: `assert` calls `__assert_rtn(__func__, __FILE__, __LINE__, #e)`, declared in
-# _assert.h as `void __assert_rtn(const char *, const char *, int, const char *) __dead2`.
-# (SDK usr/include; radare2's `assert_rtn` named the arguments in glibc's order.)
-
-__assert_rtn=func
-func.__assert_rtn.args=4
-func.__assert_rtn.arg.0=const char *,function
-func.__assert_rtn.arg.1=const char *,file
-func.__assert_rtn.arg.2=int,line
-func.__assert_rtn.arg.3=const char *,assertion
-func.__assert_rtn.noreturn=true
-func.__assert_rtn.ret=void
 
 # _ctype.h (SDK usr/include): `int __maskrune(__darwin_ct_rune_t, unsigned long)` and
 # `__darwin_ct_rune_t __tolower(__darwin_ct_rune_t)`, where __darwin_ct_rune_t is `int`

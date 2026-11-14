@@ -11,10 +11,11 @@ is a merge that keeps them rather than a copy that drops them.
   library r2abi scopes (glibc, bionic, Darwin's libSystem) declares that
   interface alike.
 - `types-cxx.sdb.txt`: the C++ runtime, portable as well: operator new and
-  delete, the Itanium C++ ABI's `__cxa_*`, `__dynamic_cast` and
-  `_Unwind_Resume`, `std::terminate` and libstdc++'s `std::__throw_*`. None
-  of it is radare2's, so a refresh leaves it alone; each block cites its
-  source.
+  delete, the Itanium C++ ABI's `__cxa_*` and `__dynamic_cast`. None of it is
+  radare2's, so a refresh leaves it alone; each block cites its source.
+- `types-cxx-cited.sdb.txt`: the C++ runtime's rows that carry their header, on the same terms
+  as `types-posix.sdb.txt`: `__cxa_atexit`, the noreturn `__cxa_*`, `_Unwind_Resume`,
+  `std::terminate` and libstdc++'s `std::__throw_*`, read from GCC 13's headers (D406).
 - `types-posix.sdb.txt`: ISO C17, POSIX and 4.4BSD rows that carry the header they are read
   from, portable like `types.sdb.txt`, each with its tail stated (see "Cited rows").
 - `types-linux.sdb.txt`: what the GNU C library declares for itself.
@@ -33,6 +34,9 @@ is a merge that keeps them rather than a copy that drops them.
 - `cxx-objects.txt`: for a mangled member whose name does not say whether it
   takes `this`, the header that does (see "Mangled names").
 - `types-darwin.sdb.txt`: what Darwin's libSystem declares for itself.
+- `types-darwin-cited.sdb.txt`: libSystem's rows that carry their macOS SDK header (`_exit`,
+  `_Exit`, `__assert_rtn`, `errc`), read with `types-darwin.sdb.txt` on the same terms as
+  `types-posix.sdb.txt` (D406).
 - `types-objc.sdb.txt`: what objc4's `libobjc.A.dylib` exports; read only for an import whose
   two-level namespace ordinal names that dylib.
 - `uncited-rows.txt`: why each row of `types.sdb.txt` and `types-linux.sdb.txt` is still
@@ -154,7 +158,8 @@ Where radare2 scopes differently:
 
 Every row of `types-posix.sdb.txt` and `types-glibc.sdb.txt` names the header it is read from on
 a `func.<name>.include=` line and sits under a comment naming its source (`r2abi::library::SOURCES`:
-ISO C17, POSIX.1-2017, POSIX.1-2024, 4.4BSD, glibc, LSB 5.0, GCC, bionic, musl or Microsoft). The bionic,
+ISO C17, POSIX.1-2017, POSIX.1-2024, 4.4BSD, glibc, LSB 5.0, GCC, bionic, musl, Microsoft, the
+Itanium C++ ABI or the macOS SDK). The bionic,
 KERNEL32 and UCRT tables are cited the same way; a Microsoft row adds `func.<name>.cite=`, the
 reference page and its minimum supported client. A binary-only LSB 5.0 interface
 (`__stack_chk_fail`) has no header: it cites its LSB section on `func.<name>.cite=` instead, under

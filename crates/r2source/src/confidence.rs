@@ -179,6 +179,47 @@ impl Premise {
     }
 }
 
+/// A source that states a fact, minted only from its owner's statement (D410): a cited library
+/// row, the binary's debug information, a kernel's document or a runtime model.
+///
+/// ```compile_fail,E0423
+/// let forged = r2source::Citation(());
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Citation(Cited);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+enum Cited {
+    Row,
+    DebugInfo,
+    Kernel,
+    Runtime,
+}
+
+impl Citation {
+    /// A row that cites its source; radare2's uncited rows mint none (D395).
+    pub fn of(row: &r2abi::LibraryRow) -> Option<Self> {
+        row.cited().then_some(Self(Cited::Row))
+    }
+
+    /// The debug information's declaration of the function at `entry`, where no other contests it.
+    pub fn debug_info(declarations: &r2abi::Declarations, entry: u64) -> Option<Self> {
+        let stated = declarations.function_at(entry).is_some();
+        (stated && !declarations.is_contested(entry)).then_some(Self(Cited::DebugInfo))
+    }
+
+    /// The document stating that interrupt `vector` never comes back under `kernel` (D229).
+    pub fn interrupt(kernel: r2abi::Kernel, arch: &str, vector: u64) -> Option<Self> {
+        r2abi::syscalls::interrupt_never_returns(kernel, arch, vector).map(|_| Self(Cited::Kernel))
+    }
+
+    /// The Go runtime model naming `name` among the routines its compiler ends a block at; what it
+    /// states holds under [`Premise::GoRuntime`].
+    pub fn runtime(name: &str) -> Option<Self> {
+        r2abi::runtime::exits(name).then_some(Self(Cited::Runtime))
+    }
+}
+
 /// What a "never comes back" rests on (doc/adr-call-boundary.md, "S30 as built"; RULING 1.4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum NeverProof {
@@ -193,11 +234,6 @@ pub enum NeverProof {
 }
 
 impl NeverProof {
-    /// Whether this proves the call never comes back; a bound proves nothing.
-    pub const fn proves(self) -> bool {
-        matches!(self, Self::Declared | Self::Composed)
-    }
-
     /// The proof as answers spell it.
     pub const fn spelled(self) -> &'static str {
         match self {
@@ -209,17 +245,88 @@ impl NeverProof {
     }
 }
 
-/// A call that never comes back: what states it, and what it takes for granted.
+/// A call that never comes back: what states it, and what it takes for granted. A proving one is
+/// minted only from a [`Citation`] or from proving ends (D410).
+///
+/// ```compile_fail,E0451
+/// let never = r2source::Never {
+///     proof: r2source::NeverProof::Declared,
+///     premises: Default::default(),
+/// };
+/// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Never {
-    pub proof: NeverProof,
-    pub premises: BTreeSet<Premise>,
+    proof: NeverProof,
+    premises: BTreeSet<Premise>,
 }
 
 impl Never {
-    /// Whether this proves the call never comes back, whatever it assumes.
-    pub const fn proves(&self) -> bool {
-        self.proof.proves()
+    /// What `citation` states, assuming what its source does: the runtime model its contract.
+    pub fn cited(citation: Citation) -> Self {
+        let premises = match citation.0 {
+            Cited::Runtime => BTreeSet::from([Premise::GoRuntime]),
+            Cited::Row | Cited::DebugInfo | Cited::Kernel => BTreeSet::new(),
+        };
+        Self {
+            proof: NeverProof::Declared,
+            premises,
+        }
+    }
+
+    /// A body every one of whose `ends` proves it never comes back (D229), assuming what each
+    /// does; `None` where there is no end or one is a bound.
+    pub fn composed<'a>(ends: impl IntoIterator<Item = &'a Self>) -> Option<Self> {
+        let mut premises = BTreeSet::new();
+        let mut any = false;
+        for end in ends {
+            premises.extend(end.proves()?.iter().copied());
+            any = true;
+        }
+        any.then_some(Self {
+            proof: NeverProof::Composed,
+            premises,
+        })
+    }
+
+    /// radare2's uncited row: a bound, never proof (D395).
+    pub const fn uncited() -> Self {
+        Self::bound(NeverProof::Uncited)
+    }
+
+    /// No walk of the body reached a return: a bound, never proof.
+    pub const fn unreached() -> Self {
+        Self::bound(NeverProof::NoReturnReached)
+    }
+
+    const fn bound(proof: NeverProof) -> Self {
+        Self {
+            proof,
+            premises: BTreeSet::new(),
+        }
+    }
+
+    /// The same claim, also taking `premises` for granted: only ever weaker.
+    #[must_use]
+    pub fn assuming(mut self, premises: impl IntoIterator<Item = Premise>) -> Self {
+        self.premises.extend(premises);
+        self
+    }
+
+    /// What the proof takes for granted where it proves the call never comes back; `None` for a
+    /// bound. The one predicate: a consumer that cannot carry a premise demands none.
+    pub const fn proves(&self) -> Option<&BTreeSet<Premise>> {
+        match self.proof {
+            NeverProof::Declared | NeverProof::Composed => Some(&self.premises),
+            NeverProof::Uncited | NeverProof::NoReturnReached => None,
+        }
+    }
+
+    pub const fn proof(&self) -> NeverProof {
+        self.proof
+    }
+
+    pub const fn premises(&self) -> &BTreeSet<Premise> {
+        &self.premises
     }
 }
 
@@ -430,6 +537,28 @@ mod tests {
                 .assuming(Premise::ClosedWorld)
                 .to_string(),
             "handed+closed-world+ub-free"
+        );
+    }
+}
+
+#[cfg(test)]
+mod never_tests {
+    use super::{Citation, Never, NeverProof, Premise};
+
+    /// A composition proves only from proving ends, at least one, assuming what each does (D410).
+    #[test]
+    fn a_composition_needs_an_end_and_proves_only_from_proofs() {
+        let go = Never::cited(Citation::runtime("runtime.gopanic").expect("the model names it"));
+        assert_eq!(go.premises(), &[Premise::GoRuntime].into());
+        assert_eq!(Never::composed([]), None);
+        assert_eq!(Never::composed([&go, &Never::uncited()]), None);
+        assert_eq!(Never::composed([&Never::unreached()]), None);
+        let composed = Never::composed([&go, &go]).expect("every end proves");
+        assert_eq!(composed.proof(), NeverProof::Composed);
+        assert_eq!(composed.proves(), Some(&[Premise::GoRuntime].into()));
+        assert_eq!(
+            Never::unreached().assuming([Premise::ClosedWorld]).proves(),
+            None
         );
     }
 }

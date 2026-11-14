@@ -7109,10 +7109,11 @@ impl r2engine::body::Program for HaltingSlot {
     }
 
     fn exit_through(&self, slot: u64) -> Option<r2engine::discovery::Never> {
-        (slot == self.slot).then(|| r2engine::discovery::Never {
-            proof: r2engine::discovery::NeverProof::Declared,
-            premises: std::collections::BTreeSet::new(),
-        })
+        // `exit`'s cited row states it never returns.
+        let rows = r2abi::LibraryRows::embedded(r2abi::CLibrary::Glibc);
+        let exit = rows.find(r2abi::CLibrary::Glibc.scope(), "exit")?;
+        let citation = r2engine::discovery::Citation::of(exit)?;
+        (slot == self.slot).then(|| r2engine::discovery::Never::cited(citation))
     }
 }
 

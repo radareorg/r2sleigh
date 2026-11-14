@@ -95,11 +95,11 @@ impl crate::body::Program for Knowing<'_> {
         self.program.exit_through(slot)
     }
 
-    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
+    fn halts_on_through(&self, slot: u64) -> Option<crate::body::Halting> {
         self.program.halts_on_through(slot)
     }
 
-    fn halts_on(&self, callee: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
+    fn halts_on(&self, callee: u64) -> Option<crate::body::Halting> {
         self.program.halts_on(callee)
     }
 
@@ -107,8 +107,8 @@ impl crate::body::Program for Knowing<'_> {
         self.program.holds_values()
     }
 
-    fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
-        self.program.interrupt_returns(arch, vector)
+    fn interrupt_halts(&self, arch: &str, vector: u64) -> Option<r2source::Citation> {
+        self.program.interrupt_halts(arch, vector)
     }
 
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
@@ -318,7 +318,7 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
         crate::native::declared_return(&self.primary, &self.program, address)
     }
 
-    fn ends(&self, walk: &BodyWalk) -> (usize, usize) {
+    fn ends<'a>(&self, walk: &'a BodyWalk) -> (Vec<&'a crate::discovery::Never>, usize) {
         walk.trace.ends()
     }
 }

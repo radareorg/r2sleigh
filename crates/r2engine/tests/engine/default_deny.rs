@@ -19,22 +19,37 @@ const COLUMNS: &[&str] = &[
 
 /// A cell another row owns and that fails today, held exactly: it fails until its row lands, then
 /// this entry goes in the same change.
-const OPEN: &[(&str, &str, &str)] = &[];
+const OPEN: &[(&str, &str, &str)] = &[
+    // `CallReads::exact` bounds the reads by a complete site interface, which no citation backs.
+    ("uncited_row", "ignored_reads", "D411 ReadBound"),
+    ("uncited_row", "call_read_bytes", "D411 ReadBound"),
+];
 
-/// The unknown inputs: a call through a register nothing sets, and a call to an import no row states.
+/// The unknown inputs: a call through a register nothing sets, a call to an import no row states,
+/// and one to an import only radare2's uncited row states (`xmalloc`, one parameter, D410).
 #[derive(Clone, Copy, Debug)]
 enum Unknown {
     IndirectCall,
     UnboundImport,
+    UncitedRow,
 }
 
 impl Unknown {
-    const ALL: [Self; 2] = [Self::IndirectCall, Self::UnboundImport];
+    const ALL: [Self; 3] = [Self::IndirectCall, Self::UnboundImport, Self::UncitedRow];
 
     const fn name(self) -> &'static str {
         match self {
             Self::IndirectCall => "indirect_call",
             Self::UnboundImport => "unbound_import",
+            Self::UncitedRow => "uncited_row",
+        }
+    }
+
+    /// The import the call goes to, where it goes to one.
+    const fn import(self) -> &'static str {
+        match self {
+            Self::IndirectCall | Self::UnboundImport => "r2s_default_deny_unstated",
+            Self::UncitedRow => "xmalloc",
         }
     }
 
@@ -46,14 +61,13 @@ impl Unknown {
                 let functions = [("f", BASE, code.len() as u64)];
                 (Literal::of_code(Box::leak(code.into()), &functions), BASE)
             }
-            Self::UnboundImport => {
+            Self::UnboundImport | Self::UncitedRow => {
                 let plt = common::plt_then::<0x20>(&[]);
                 let after_call = PLT_CALLER + (before.len() + 5) as u64;
                 let rel = (common::PLT_STUB as i64 - after_call as i64) as i32;
                 let call = [&[0xe8][..], &rel.to_le_bytes()].concat(); // call stub
                 let code = [&plt[..], before, &call, after].concat();
-                let literal =
-                    Literal::plt_wrapped("r2s_default_deny_unstated", Box::leak(code.into()));
+                let literal = Literal::plt_wrapped(self.import(), Box::leak(code.into()));
                 (literal, PLT_CALLER)
             }
         }
@@ -226,7 +240,23 @@ fn an_unknown_callee_types_no_argument_a_pointer() {
         cell(row.name(), "pointer", || {
             let before = [0x53, 0x48, 0x89, 0xfb]; // push rbx; mov rbx, rdi
             let text = rendered(row.around(&before, &[0x48, 0x89, 0xd8, 0x5b, 0xc3]));
-            match text.contains("void *") || text.contains("void*") {
+            // A declaration's return type (`void* xmalloc(uint64_t);`) is no argument: only the
+            // text past its first `(` is read.
+            let argued = |line: &str| {
+                let trimmed = line.trim();
+                let head = trimmed.split('(').next().unwrap_or_default();
+                let typed = head.contains(' ') || head.contains('*');
+                let declaration = trimmed.ends_with(");") && typed && !trimmed.contains('=');
+                match declaration && !head.starts_with("return") {
+                    true => trimmed
+                        .split_once('(')
+                        .map_or("", |(_, rest)| rest)
+                        .to_owned(),
+                    false => line.to_owned(),
+                }
+            };
+            let mut lines = text.lines().map(argued);
+            match lines.any(|line| line.contains("void *") || line.contains("void*")) {
                 true => Err(text),
                 false => Ok(()),
             }

@@ -1300,11 +1300,13 @@ fn effect_on_flow<S: Source + 'static>(
     (entry, body, flow): (u64, &Body, &CallerFlow<'_, BodyBlock>),
 ) -> Option<RegisterEffect> {
     let effects = reading.effects(body);
-    // Only a declared `Never` with no premise proves a call never returns; a derived one is a bound.
+    // Only a declared `Never` proves a call never returns here; an effect carries no premise.
     let never = |block: usize, op: usize| {
         use crate::discovery::Walker;
         let declared = |callee| walker.declared(callee);
-        (effects.callee_at(block, op).and_then(declared)).is_some_and(|said| said.proves_never())
+        let said = effects.callee_at(block, op).and_then(declared);
+        let proves = said.as_ref().and_then(|said| said.never()?.proves());
+        proves.is_some_and(std::collections::BTreeSet::is_empty)
     };
     // A convention whose call effect is refused keeps nothing: every register is clobbered.
     let model = target
