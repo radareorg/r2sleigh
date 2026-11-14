@@ -649,11 +649,8 @@ impl SourceMachineContext {
         context
     }
 
-    /// Unbound: the caller sets the callee facts, then [`Self::bind_call_reads`] (D436).
-    /// `terminal_blocks` are the blocks the source's own block graph declares
-    /// to have no successor. A transfer at the end of one of them leaves the
-    /// function whatever it transfers through, which is what makes an
-    /// indirect jump there a tail call rather than an unresolved dispatch.
+    /// Unbound until [`Self::bind_call_reads`] (D436). A transfer ending a `terminal_blocks` block
+    /// (no successor, as the source states) is a tail call, whatever it transfers through.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_blocks_with_interfaces_tail_calls_and_terminals(
         blocks: &[R2ILBlock],
@@ -1845,9 +1842,8 @@ pub fn loaded_target_slot(block: &R2ILBlock, op_index: usize) -> Option<Canonica
         .loaded_slot()
 }
 
-/// What a counted printf reads: its fixed parameters and one promoted pointer-wide slot per
-/// `tail` operand (C17 6.5.2.2p7), placed, and the count register (D433); refusals in
-/// adr-call-boundary "D409 as built".
+/// What a counted printf reads: its fixed parameters, a promoted slot per `tail` operand (C17
+/// 6.5.2.2p7) and the count register (D433); refusals in adr-call-boundary "D409 as built".
 fn counted_reads(
     interface: &SourceCallSiteInterface,
     model: &r2source::ConventionModel,

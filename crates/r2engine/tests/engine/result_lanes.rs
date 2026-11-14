@@ -662,9 +662,8 @@ fn read_at_call(call: &[u8], import: &str) -> (Option<u64>, String) {
     )
 }
 
-/// An import's call reads AL alone of RAX (psABI 1.0 3.2.3's footnote, D431): of `narrow`'s
-/// 32-bit result left in RAX, demand reads one byte at an uncited row, an unstated import and a
-/// variadic one, so no residual stands for the upper bytes.
+/// An import's call reads AL alone of RAX (D431): demand reads one byte of `narrow`'s result at an
+/// uncited row, an unstated import and a variadic one, so no residual stands for the upper bytes.
 #[test]
 fn an_import_call_reads_the_count_register_alone_of_its_register() {
     for import in ["dcgettext", "r2s_unstated_import", "printf"] {

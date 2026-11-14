@@ -115,9 +115,8 @@ impl ReadBound {
     }
 }
 
-/// A direct call to an import, a global function the container states (D431): the convention's
-/// standard calling sequence binds it, so of the register holding the count register it reads that
-/// register's bytes only. Minted by r2engine `declared` from a row's cited [`r2abi::CountRegister`].
+/// A direct call to an import, which reads only the count register's bytes of the register holding
+/// it (D431; [`r2abi::CountRegister`] cites why). Minted by r2engine `declared`.
 #[doc = "```compile_fail,E0423\nlet forged = r2ssa::call_reads::ImportCall(());\n```"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ImportCall(());
@@ -376,9 +375,8 @@ impl CallReads {
         self.bound
     }
 
-    /// Whether the call reads none of `carrier`: an argument or count register of `every`, a model's
-    /// [`Self::every_location`], this bounded list leaves out (D283). Any other register may be
-    /// read: x8, a static chain.
+    /// Whether the call reads none of `carrier`: a register of `every` (a model's every location)
+    /// this bounded list leaves out (D283). Any other register may be read: x8, a static chain.
     pub fn reads_none_within(&self, every: &Self, carrier: CanonicalStorageId) -> bool {
         let overlaps = |storage: &CanonicalStorageId| {
             crate::semantic::register_storages_overlap(*storage, carrier)
