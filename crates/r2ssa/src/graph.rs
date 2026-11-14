@@ -161,6 +161,40 @@ mod tests {
         );
     }
 
+    /// `use_sites` is the inverse of `inputs`, phis and copies included: every input is a use site of
+    /// its value, and every use site names an input (D411 rescans R5 reads it as the def-use).
+    #[test]
+    fn use_sites_invert_inputs() {
+        let graph = SsaGraph::from_function(&two_phi_merge());
+        assert!(
+            (graph.insts.iter()).any(|inst| matches!(inst.payload, InstPayload::Phi { .. })),
+            "the fixture merges"
+        );
+        let mut inputs = 0;
+        for inst in graph.insts.iter() {
+            for (input_idx, value) in graph.inputs(inst.id).iter().enumerate() {
+                inputs += 1;
+                let site = UseSite {
+                    inst: inst.id,
+                    input_idx,
+                };
+                assert!(
+                    graph.use_sites(*value).contains(&site),
+                    "{site:?} of {value:?}"
+                );
+            }
+        }
+        let sites = (graph.values.iter()).flat_map(|value| {
+            (graph.use_sites(value.id).iter()).map(move |site| (value.id, *site))
+        });
+        let mut counted = 0;
+        for (value, site) in sites {
+            counted += 1;
+            assert_eq!(graph.inputs(site.inst).get(site.input_idx), Some(&value));
+        }
+        assert_eq!(counted, inputs);
+    }
+
     #[test]
     fn use_sites_have_stable_instruction_then_input_order() {
         let mut sites = [
