@@ -58,7 +58,11 @@ after `u` enters the head of a component holding `u`.
 
 `fixpoint::wto_sparse` solves cells placed in blocks over that order. A cell
 waits at the start of each phase and when a cell it reads moves; a block's
-waiting cells run in its order, found a word at a time in a bitset. A component
+waiting cells run in its order, found a word at a time in a bitset. The search
+resumes past each cell it takes and moves back only to a reader requeued inside
+the block, so it reads `O(cells / 64 + evaluations)` words per phase
+(`Meter::probes`; restarting at the block's first word read `n² / 128` for a
+straight block of `n` cells, PR #400's review). A component
 runs its head block, then its body in order, and repeats while a head-block
 cell waits; the ascent joins and widens, the descent meets and refines. A
 component repeats at most `2 + 2 · h · |head cells|` times per stabilisation
