@@ -7,6 +7,7 @@
 //! source snapshot request.
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(cache_outside_query_database))]
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(scan_in_loop))]
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]
@@ -443,6 +444,8 @@ pub struct EngineExecutionControl {
     meter: Arc<r2ssa::SsaWorkMeter>,
     /// Convention seals this request made to read a body's dispatch tables, every round (D403).
     table_seals: Arc<std::sync::atomic::AtomicU64>,
+    /// Lifts a later dispatch round copied out of its walk to seal a region (D367).
+    round_lifts: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl EngineExecutionControl {
@@ -453,6 +456,7 @@ impl EngineExecutionControl {
             deadline,
             meter: Arc::new(r2ssa::SsaWorkMeter::default()),
             table_seals: Arc::default(),
+            round_lifts: Arc::default(),
         }
     }
 
@@ -466,6 +470,21 @@ impl EngineExecutionControl {
         self.meter.frames_built()
     }
 
+    /// Static prefixes this request collected, one per build recovery read (D289).
+    pub fn static_prefixes(&self) -> u64 {
+        self.meter.static_prefixes()
+    }
+
+    /// Value visits this request's frame walks propagated (D365).
+    pub fn frame_walk_steps(&self) -> u64 {
+        self.meter.frame_walk_steps()
+    }
+
+    /// Sink points and candidate places this request's frame walk decisions read (D365).
+    pub fn frame_decision_steps(&self) -> u64 {
+        self.meter.frame_decision_steps()
+    }
+
     /// Convention seals this request made to read dispatch tables.
     pub fn table_seals(&self) -> u64 {
         self.table_seals.load(std::sync::atomic::Ordering::Relaxed)
@@ -473,6 +492,16 @@ impl EngineExecutionControl {
 
     pub(crate) fn note_table_seal(&self) {
         (self.table_seals).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Instruction lifts later dispatch rounds copied out of their walks to seal regions.
+    pub fn round_lifts(&self) -> u64 {
+        self.round_lifts.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_round_lifts(&self, lifts: usize) {
+        let lifts = u64::try_from(lifts).unwrap_or(u64::MAX);
+        (self.round_lifts).fetch_add(lifts, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn with_cancellation_and_deadline(

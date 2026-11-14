@@ -183,7 +183,7 @@ fn an_import_called_under_ms_abi_is_placed_under_the_program_s_convention() {
     let open = program(StatedConvention::LlvmWin64);
     let target = r2engine::native::Program::target_at(&open, BASE).expect("a machine");
     let reads = r2engine::native::import_reads(&target, "puts").expect("puts binds");
-    let names = (reads.registers.iter().take(1))
+    let names = (reads.registers().iter().take(1))
         .filter_map(|storage| {
             (target.arch.registers.iter())
                 .find(|it| it.offset == storage.offset && it.size == storage.size)

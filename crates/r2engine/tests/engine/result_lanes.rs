@@ -319,6 +319,176 @@ fn a_read_past_a_callee_that_keeps_the_lane_is_the_earlier_calls_read() {
     assert_eq!(open.analysis_stats().defects, 0);
 }
 
+/// `rec` (0x1000) runs `step`, then calls itself until `edi` is 0, and never writes XMM0; `f`
+/// writes XMM0; `caller` calls `f`, then `rec`, then stores XMM0. `f`'s rendering under `aa`.
+fn kept_across_recursion(step: [u8; 2]) -> String {
+    let code: &[u8] = &[
+        0x85, 0xff, // 1000 test edi, edi
+        0x74, 0x07, // 1002 je 0x100b
+        step[0], step[1], // 1004 step
+        0xe8, 0xf5, 0xff, 0xff, 0xff, // 1006 call 0x1000
+        0xc3, // 100b ret
+        0xcc, 0xcc, 0xcc, 0xcc, //
+        0x66, 0x0f, 0xef, 0xc0, // 1010 pxor xmm0, xmm0
+        0xf2, 0x0f, 0x58, 0xc1, // 1014 addsd xmm0, xmm1
+        0xc3, // 1018 ret
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, //
+        0xe8, 0xeb, 0xff, 0xff, 0xff, // 1020 call 0x1010
+        0xe8, 0xd6, 0xff, 0xff, 0xff, // 1025 call 0x1000
+        0xf2, 0x0f, 0x11, 0x07, // 102a movsd qword ptr [rdi], xmm0
+        0xc3, // 102e ret
+        0xcc,
+    ];
+    let functions = [
+        ("rec", BASE, 0x0c),
+        ("f", BASE + 0x10, 0x09),
+        ("caller", BASE + 0x20, 0x0f),
+    ];
+    let code = Box::leak(code.to_vec().into_boxed_slice());
+    let mut open = OpenProgram::of(Literal::of_code(code, &functions));
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    assert_eq!(open.analysis_stats().defects, 0);
+    rendered.response.output.into_text()
+}
+
+/// A recursive callee keeps what no operation of it writes (D413, the greatest fixpoint): `rec`
+/// keeps XMM0 across its own call, so the store reads `f`'s double. A cycle kept nothing before.
+#[test]
+fn a_read_past_a_recursive_callee_that_keeps_the_lane_is_the_earlier_calls_read() {
+    // dec edi
+    let text = kept_across_recursion([0xff, 0xcf]);
+    assert!(text.starts_with("double f("), "{text}");
+}
+
+/// A call naming no callee on `rec`'s path to its return keeps nothing, so neither does the cycle:
+/// the store may read what that call left, and `f`'s result is not decided (default-deny).
+#[test]
+fn a_recursive_callee_with_a_call_naming_no_callee_keeps_nothing() {
+    // call rcx
+    let text = kept_across_recursion([0xff, 0xd1]);
+    assert!(!text.starts_with("double f("), "{text}");
+}
+
+/// `a` (0x1000) and `b` (0x1010) call each other; `a` writes edi, `b` ecx, neither XMM0. `f`
+/// (0x1020) writes XMM0; `caller` (0x1030) calls `f`, then `a`, then stores XMM0.
+const KEPT_ACROSS_A_PAIR: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x07, // 1002 je 0x100b
+    0xff, 0xcf, // 1004 dec edi
+    0xe8, 0x05, 0x00, 0x00, 0x00, // 1006 call 0x1010
+    0xc3, // 100b ret
+    0xcc, 0xcc, 0xcc, 0xcc, //
+    0x85, 0xff, // 1010 test edi, edi
+    0x74, 0x07, // 1012 je 0x101b
+    0x31, 0xc9, // 1014 xor ecx, ecx
+    0xe8, 0xe5, 0xff, 0xff, 0xff, // 1016 call 0x1000
+    0xc3, // 101b ret
+    0xcc, 0xcc, 0xcc, 0xcc, //
+    0x66, 0x0f, 0xef, 0xc0, // 1020 pxor xmm0, xmm0
+    0xf2, 0x0f, 0x58, 0xc1, // 1024 addsd xmm0, xmm1
+    0xc3, // 1028 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, //
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1030 call 0x1020
+    0xe8, 0xc6, 0xff, 0xff, 0xff, // 1035 call 0x1000
+    0xf2, 0x0f, 0x11, 0x07, // 103a movsd qword ptr [rdi], xmm0
+    0xc3, // 103e ret
+    0xcc,
+];
+
+/// The pair's kept sets differ (`a` writes edi, `b` ecx), and each member's `Summary` is the one
+/// greatest fixpoint whichever is asked first: every order renders every function alike (D413).
+#[test]
+fn a_cycles_kept_registers_are_one_answer_whichever_member_is_asked_first() {
+    let functions = [
+        ("a", BASE, 0x0c),
+        ("b", BASE + 0x10, 0x0c),
+        ("f", BASE + 0x20, 0x09),
+        ("caller", BASE + 0x30, 0x0f),
+    ];
+    let rendered = |order: [u64; 4]| {
+        let mut open = OpenProgram::of(Literal::of_code(KEPT_ACROSS_A_PAIR, &functions));
+        open.analyse_program().expect("it surveys");
+        let mut texts = order.map(|at| {
+            let rendered = open.rendered(at).expect("it renders");
+            (at, rendered.response.output.into_text())
+        });
+        assert_eq!(open.analysis_stats().defects, 0);
+        texts.sort();
+        texts
+    };
+    let first = rendered([BASE, BASE + 0x10, BASE + 0x20, BASE + 0x30]);
+    let second = rendered([BASE + 0x10, BASE + 0x30, BASE, BASE + 0x20]);
+    let third = rendered([BASE + 0x30, BASE + 0x20, BASE + 0x10, BASE]);
+    assert_eq!(first, second);
+    assert_eq!(first, third);
+    let f = &first[2].1;
+    assert!(f.starts_with("double f("), "{f}");
+}
+
+/// `narrow` (0x1000) leaves RAX above EAX unwritten on one path; `caller` (0x1020) calls it, then
+/// `g` (0x1010, `body`, an indirect call so a parameter floor) on one path and stores EAX on the other.
+fn read_by_a_walked_callee(body: &[u8]) -> String {
+    let mut code = vec![0xcc_u8; 0x40];
+    let narrow: &[u8] = &[
+        0x85, 0xff, // 1000 test edi, edi
+        0x74, 0x04, // 1002 je 0x1008
+        0x8d, 0x04, 0x7f, // 1004 lea eax, [rdi + rdi*2]
+        0xc3, // 1007 ret
+        0xc3, // 1008 ret
+    ];
+    let caller: &[u8] = &[
+        0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+        0x85, 0xff, // 1025 test edi, edi
+        0x74, 0x07, // 1027 je 0x1030
+        0xe8, 0xe2, 0xff, 0xff, 0xff, // 1029 call 0x1010
+        0xeb, 0x02, // 102e jmp 0x1032
+        0x89, 0x06, // 1030 mov dword ptr [rsi], eax
+        0xb8, 0x01, 0x00, 0x00, 0x00, // 1032 mov eax, 0x1
+        0xc3, // 1037 ret
+    ];
+    code[..narrow.len()].copy_from_slice(narrow);
+    code[0x10..0x10 + body.len()].copy_from_slice(body);
+    code[0x20..0x20 + caller.len()].copy_from_slice(caller);
+    let functions = [
+        ("narrow", BASE, 0x09),
+        ("g", BASE + 0x10, body.len() as u64),
+        ("caller", BASE + 0x20, 0x18),
+    ];
+    let code = Box::leak(code.into_boxed_slice());
+    let mut open = OpenProgram::of(Literal::of_code(code, &functions));
+    let rendered = open.rendered(BASE + 0x20).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// `g` writes RAX before reading it, so the call reads none of it and no byte above `narrow`'s
+/// 32-bit result is a residual (D372's recovered half); the parent read RAX whole.
+#[test]
+fn a_walked_callee_that_writes_the_result_register_first_reads_no_bits_above_a_narrow_result() {
+    // mov rax, rdi; call rax; ret
+    let text = read_by_a_walked_callee(&[0x48, 0x89, 0xf8, 0xff, 0xd0, 0xc3]);
+    assert!(!text.contains("<< 32"), "{text}");
+    assert!(text.contains("narrow((uint32_t)arg0);"), "{text}");
+}
+
+/// `g` copies RAX before it writes it, so its register effect takes every byte: the call reads
+/// RAX whole and the bytes above `narrow`'s result stay a residual (default-deny).
+#[test]
+fn a_walked_callee_that_reads_the_result_register_reads_the_bits_above_a_narrow_result() {
+    // mov rdx, rax; mov rax, rdi; call rax; ret
+    let text = read_by_a_walked_callee(&[0x48, 0x89, 0xc2, 0x48, 0x89, 0xf8, 0xff, 0xd0, 0xc3]);
+    assert!(text.contains("| r2sleigh_residual_u64(1) << 32"), "{text}");
+}
+
+/// `g` hands RAX on unwritten in a register tail (D373's forward), so the call reads RAX whole and
+/// the bits above `narrow`'s result stay a residual (default-deny).
+#[test]
+fn a_walked_callee_that_tails_the_result_register_on_reads_the_bits_above_a_narrow_result() {
+    // jmp rdi
+    let text = read_by_a_walked_callee(&[0xff, 0xe7]);
+    assert!(text.contains("<< 32"), "{text}");
+}
+
 /// `caller`'s register effect is deposited by its own site fates where `f` is decided first, and
 /// asked directly where `top` is: each order renders every function alike (ADR, "S31b as built").
 #[test]
@@ -371,4 +541,93 @@ fn a_tail_to_a_void_callee_names_its_exit() {
         text.contains("rax_1 = (uint64_t)narrow((uint32_t)arg0);"),
         "{text}"
     );
+}
+
+/// [`tail_to_free`] tailing into `printf`: a variadic tail reads every register a call reads
+/// unnamed and `printf`'s `int`, so `narrow`'s upper bytes stay unread and no residual (D373).
+#[test]
+fn a_tail_to_a_variadic_callee_names_its_exit() {
+    let functions = &[("narrow", BASE, 0x09), ("stores", BASE + 0x10, 0x1a)];
+    let literal = Literal::of_code(tail_to_free(), functions).importing("printf");
+    let rendered = OpenProgram::of(literal).rendered(BASE + 0x10);
+    let text = rendered.expect("it renders").response.output.into_text();
+    assert!(text.contains("call to printf: variadic"), "{text}");
+    assert!(!text.contains("<< 32"), "{text}");
+    assert!(
+        text.contains("rax_1 = (uint64_t)narrow((uint32_t)arg0);"),
+        "{text}"
+    );
+}
+
+/// `narrow` of [`UNREAD_ABOVE`]; `tails`: `pxor xmm0, xmm0; call narrow; <between>; jmp stub`,
+/// the stub an import no row states.
+fn tail_to_unstated(between: &[u8]) -> &'static [u8] {
+    let mut code = [0xcc_u8; 0xa0];
+    code[..9].copy_from_slice(&UNREAD_ABOVE[..9]);
+    code[0x10..0x19].copy_from_slice(&UNREAD_ABOVE[0x10..0x19]);
+    let jump = 0x19 + between.len();
+    code[0x19..jump].copy_from_slice(between);
+    let rel = i32::try_from(0x90 - (jump + 5)).expect("a near jump");
+    code[jump] = 0xe9;
+    code[jump + 1..jump + 5].copy_from_slice(&rel.to_le_bytes());
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    code[0x98..].fill(0);
+    Box::leak(Box::new(code))
+}
+
+/// The bytes demand reads of the RAX `call narrow` leaves, in `tails` of [`tail_to_unstated`].
+fn demanded_of_narrow(between: &[u8]) -> Option<u64> {
+    demanded_tailing_into(between, "unstated")
+}
+
+/// [`demanded_of_narrow`], the stub `import`.
+fn demanded_tailing_into(between: &[u8], import: &str) -> Option<u64> {
+    let functions = &[("narrow", BASE, 0x09), ("tails", BASE + 0x10, 0x30)];
+    let literal = Literal::of_code(tail_to_unstated(between), functions).importing(import);
+    let mut open = OpenProgram::of(literal);
+    let prepared = open.prepared(BASE + 0x10).expect("it prepares");
+    let artifact = prepared.artifact().shared_artifact();
+    let graph = artifact.graph();
+    let rax = (graph.insts.iter())
+        .find_map(|inst| match graph.op(inst.id) {
+            Some(r2ssa::SSAOp::CallDefine { dst }) => graph
+                .value(*dst)
+                .and_then(|value| value.canonical_storage)
+                .filter(|storage| storage.offset == 0 && storage.size == 8)
+                .map(|_| *dst),
+            _ => None,
+        })
+        .expect("the RAX the call defines");
+    artifact
+        .facts()
+        .demanded
+        .as_ref()
+        .map(|demand| demand.bytes(rax))
+}
+
+/// A tail to an unstated callee reads the count register: of the RAX `narrow` leaves, nothing
+/// but AL's byte reaches the exit, so demand reads that byte alone (D373).
+#[test]
+fn a_tail_to_an_unstated_callee_reads_its_count_register() {
+    assert_eq!(demanded_of_narrow(&[]), Some(0x1));
+}
+
+/// Default-deny: an unstated tail reads every argument register whole, so `mov rdi, rax` hands
+/// `narrow`'s undefined upper bytes on and demand reads all eight (D373).
+#[test]
+fn a_tail_to_an_unstated_callee_reads_its_argument_registers_whole() {
+    assert_eq!(demanded_of_narrow(&[0x48, 0x89, 0xc7]), Some(0xff));
+}
+
+/// `test edi, edi; je tail; movabs rax, imm64; ret`: a direct return proves a 64-bit result.
+const WIDE_BESIDE: &[u8] = &[
+    0x85, 0xff, 0x74, 0x0b, 0x48, 0xb8, 0x88, 0x77, 0x66, 0x55, 0x44, 0x33, 0x22, 0x11, 0xc3,
+];
+
+/// A tail whose callee states no narrower result passes ours: beside a 64-bit return, all eight
+/// bytes of the RAX `narrow` leaves reach the caller (D373).
+#[test]
+fn a_tail_stating_no_narrower_result_passes_a_wide_result_whole() {
+    assert_eq!(demanded_tailing_into(WIDE_BESIDE, "unstated"), Some(0xff));
+    assert_eq!(demanded_tailing_into(WIDE_BESIDE, "free"), Some(0xff));
 }

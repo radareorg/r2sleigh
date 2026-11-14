@@ -53,7 +53,7 @@
 //! the whole termination argument, and no pass is counted. Every lookup after
 //! the solve is `O(1)`.
 
-use crate::dense::{DenseId, IdMap, IdVec};
+use crate::dense::{Condensation, Csr, DenseId, IdMap, IdVec, Node};
 use crate::function::SSAFunction;
 use crate::graph::{SsaGraph, ValueId};
 use crate::op::{SSAOp, var_facts};
@@ -720,27 +720,21 @@ impl<I: DenseId + std::hash::Hash> Solver<I> {
             queued: vec![false; count],
             pending: Vec::new(),
         };
-        let successors = (0..count).map(|node| self.inputs(node)).collect::<Vec<_>>();
-        let components = strongly_connected_components(&successors);
-        let mut component_of = vec![usize::MAX; count];
-        for (id, member) in components
-            .iter()
-            .enumerate()
-            .flat_map(|(id, component)| component.iter().map(move |member| (id, *member)))
-        {
-            component_of[member] = id;
+        let mut successors = Csr::<Node, Node>::with_capacity(count, count);
+        for node in 0..count {
+            successors.push_row(self.inputs(node).into_iter().map(Node::from_index));
         }
+        let components = Condensation::of(&successors, []);
         // Readers inside the same component, to re-evaluate when a view moves.
         let mut readers = vec![Vec::new(); count];
-        for (node, input) in successors
-            .iter()
-            .enumerate()
-            .flat_map(|(node, inputs)| inputs.iter().map(move |input| (node, *input)))
-            .filter(|(node, input)| component_of[*input] == component_of[*node])
+        for (node, input) in (0..count)
+            .map(Node::from_index)
+            .flat_map(|node| successors.get(node).iter().map(move |input| (node, *input)))
+            .filter(|(node, input)| components.component(*input) == components.component(*node))
         {
-            readers[input].push(node);
+            readers[input.index()].push(node.index());
         }
-        for component in &components {
+        for (_, component) in components.components() {
             self.settle(component, &readers, &mut work);
         }
 
@@ -762,10 +756,11 @@ impl<I: DenseId + std::hash::Hash> Solver<I> {
 
     /// Evaluate one component to its fixed point. Every component it reads
     /// is settled already, so only its own members move.
-    fn settle(&self, component: &[usize], readers: &[Vec<usize>], work: &mut Work<I>) {
-        work.pending.extend(component.iter().rev().copied());
+    fn settle(&self, component: &[Node], readers: &[Vec<usize>], work: &mut Work<I>) {
+        work.pending
+            .extend(component.iter().rev().map(|member| member.index()));
         for member in component {
-            work.queued[*member] = true;
+            work.queued[member.index()] = true;
         }
         loop {
             self.drain(readers, work);
@@ -773,7 +768,7 @@ impl<I: DenseId + std::hash::Hash> Solver<I> {
             // each is its own root, and what reads it follows.
             let Some(unreached) = component
                 .iter()
-                .copied()
+                .map(|member| member.index())
                 .find(|member| work.state[*member].is_none() && self.is_phi(*member))
             else {
                 break;
@@ -927,90 +922,6 @@ fn graph_definition(
             Definition::Phi(graph.inputs(inst.id).to_vec()),
         )),
         crate::graph::InstPayload::Op(op) => definition_of(op, |id| facts[*id]),
-    }
-}
-
-const UNVISITED: usize = usize::MAX;
-
-/// The strongly connected components of a graph given as each node's
-/// successors, each after every component it reaches (Tarjan, iteratively),
-/// with its members in index order so a loop's header phi comes first.
-pub(crate) fn strongly_connected_components(successors: &[Vec<usize>]) -> Vec<Vec<usize>> {
-    let count = successors.len();
-    let mut tarjan = Tarjan {
-        order: vec![UNVISITED; count],
-        low: vec![0; count],
-        on_stack: vec![false; count],
-        stack: Vec::new(),
-        components: Vec::new(),
-        next: 0,
-    };
-    for start in 0..count {
-        if tarjan.order[start] == UNVISITED {
-            tarjan.run(start, successors);
-        }
-    }
-    tarjan.components
-}
-
-struct Tarjan {
-    order: Vec<usize>,
-    low: Vec<usize>,
-    on_stack: Vec<bool>,
-    stack: Vec<usize>,
-    components: Vec<Vec<usize>>,
-    next: usize,
-}
-
-impl Tarjan {
-    fn enter(&mut self, node: usize) {
-        self.order[node] = self.next;
-        self.low[node] = self.next;
-        self.next += 1;
-        self.stack.push(node);
-        self.on_stack[node] = true;
-    }
-
-    /// One depth-first walk from `start`, with an explicit stack of
-    /// (node, index of the next successor to look at).
-    fn run(&mut self, start: usize, successors: &[Vec<usize>]) {
-        let mut frames = vec![(start, 0usize)];
-        self.enter(start);
-        while let Some(&mut (node, ref mut edge)) = frames.last_mut() {
-            let Some(&successor) = successors[node].get(*edge) else {
-                frames.pop();
-                self.leave(node, frames.last().map(|(parent, _)| *parent));
-                continue;
-            };
-            *edge += 1;
-            if self.order[successor] == UNVISITED {
-                self.enter(successor);
-                frames.push((successor, 0));
-            } else if self.on_stack[successor] {
-                self.low[node] = self.low[node].min(self.order[successor]);
-            }
-        }
-    }
-
-    /// Finish `node`: hand its low link to its parent, and close a component
-    /// where it is the root of one.
-    fn leave(&mut self, node: usize, parent: Option<usize>) {
-        if let Some(parent) = parent {
-            self.low[parent] = self.low[parent].min(self.low[node]);
-        }
-        if self.low[node] != self.order[node] {
-            return;
-        }
-        let mut component = Vec::new();
-        while let Some(member) = self.stack.pop() {
-            self.on_stack[member] = false;
-            component.push(member);
-            if member == node {
-                break;
-            }
-        }
-        component.sort_unstable();
-        self.components.push(component);
     }
 }
 

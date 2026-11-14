@@ -333,14 +333,14 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         }
     }
 
-    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
-        let cited = |row: &r2abi::LibraryRow| row.halts_on.filter(|_| row.cited());
-        let ((index, halt), model) = self.import_through(slot, cited)?;
+    fn halts_on_through(&self, slot: u64) -> Option<crate::body::Halting> {
+        let cited = |row: &r2abi::LibraryRow| Some((row.halts_on?, r2source::Citation::of(row)?));
+        let (((index, halt), citation), model) = self.import_through(slot, cited)?;
         let register = model.argument(r2abi::SlotClass::Integer, index.into());
-        register.map(|register| (register, halt))
+        register.map(|register| (register, halt, citation))
     }
 
-    fn halts_on(&self, callee: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
+    fn halts_on(&self, callee: u64) -> Option<crate::body::Halting> {
         let halting = self.db.get::<super::HaltingStubs>(&()).ok()?;
         halting.get(&callee).copied()
     }
@@ -354,9 +354,8 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
         self.source().container().format == r2abi::statement::Format::Pe
     }
 
-    fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
-        let kernel = super::kernel(self.source().container());
-        r2abi::syscalls::interrupt_never_returns(kernel, arch, vector).is_none()
+    fn interrupt_halts(&self, arch: &str, vector: u64) -> Option<r2source::Citation> {
+        r2source::Citation::interrupt(super::kernel(self.source().container()), arch, vector)
     }
 
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
@@ -482,8 +481,16 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
 
     fn kept_at(&self, entry: u64) -> Option<std::collections::BTreeSet<r2ssa::CanonicalStorageId>> {
         let key = (entry, self.thumb_at(entry));
-        let kept = self.db.get::<super::fates::KeptAcross>(&key).ok()?;
-        (*kept).as_ref().map(|kept| kept.kept_registers().collect())
+        let summary = self.db.get::<super::fates::Summary>(&key).ok()?;
+        (*summary)
+            .as_ref()
+            .map(|summary| summary.kept.kept_registers().collect())
+    }
+
+    fn reads_at(&self, entry: u64) -> Option<r2ssa::site_boundary::LaneReads> {
+        let key = (entry, self.thumb_at(entry));
+        let summary = self.db.get::<super::fates::Summary>(&key).ok()?;
+        (*summary).as_ref().map(|summary| summary.reads.clone())
     }
 
     fn site_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {

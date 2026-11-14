@@ -66,6 +66,24 @@ fn report_stats(stats: r2engine::query::AnalysisStats) {
     eprintln!("r2s: stats: rebuilt {}", stats.rebuilt);
     eprintln!("r2s: stats: frames_built {}", stats.frames_built);
     eprintln!("r2s: stats: table_seals {}", stats.table_seals);
+    eprintln!(
+        "r2s: stats: site_fates_in_direct_sites {}",
+        stats.site_fates_in_direct_sites
+    );
+    eprintln!(
+        "r2s: stats: site_fates_never_joined {}",
+        stats.site_fates_never_joined
+    );
+    eprintln!(
+        "r2s: stats: site_fates_relifted {}",
+        stats.site_fates_relifted
+    );
+    if let Some(scans) = r2engine::query::scans() {
+        eprintln!("r2s: stats: scans {scans}");
+        for (site, count) in r2engine::query::scan_sites() {
+            eprintln!("r2s: scans at {site} {count}");
+        }
+    }
 }
 
 fn main() {

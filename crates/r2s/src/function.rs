@@ -86,12 +86,14 @@ fn walked(info: &r2engine::program::info::FunctionInfo) -> Vec<String> {
 /// a bound is spelled as one, never as `true` (D380).
 fn noreturn(never: Option<&r2engine::discovery::Never>) -> Option<String> {
     never.map(|never| {
-        let assuming = (never.premises.iter()).map(|premise| premise.spelled());
-        let assuming = assuming.collect::<Vec<_>>().join(", ");
-        match (never.proves(), assuming.is_empty()) {
-            (true, true) => "noreturn: true".to_owned(),
-            (true, false) => format!("noreturn: true (assuming {assuming})"),
-            (false, _) => format!("noreturn: unproven ({})", never.proof.spelled()),
+        let spelled = |premises: &std::collections::BTreeSet<r2engine::discovery::Premise>| {
+            let assuming = premises.iter().map(|premise| premise.spelled());
+            assuming.collect::<Vec<_>>().join(", ")
+        };
+        match never.proves().map(spelled) {
+            Some(assuming) if assuming.is_empty() => "noreturn: true".to_owned(),
+            Some(assuming) => format!("noreturn: true (assuming {assuming})"),
+            None => format!("noreturn: unproven ({})", never.proof().spelled()),
         }
     })
 }
@@ -206,30 +208,27 @@ pub fn blocks(session: &mut Session, argument: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use r2engine::discovery::{Never, NeverProof, Premise};
+    use r2engine::discovery::{Citation, Never};
 
-    fn spelled(proof: NeverProof, premises: &[Premise]) -> Option<String> {
-        let premises = premises.iter().copied().collect();
-        super::noreturn(Some(&Never { proof, premises }))
+    fn spelled(never: &Never) -> Option<String> {
+        super::noreturn(Some(never))
     }
 
-    /// `afi` says `noreturn: true` only for a proof; a bound is spelled as one (D380).
+    /// `afi` says `noreturn: true` only for a proof; a bound is spelled as one (D380). A cited
+    /// row's `noreturn: true` is read through `afi` in `tests/signatures.rs`.
     #[test]
     fn a_bound_is_never_spelled_noreturn_true() {
+        let go = Never::cited(Citation::runtime("runtime.gopanic").expect("the model names it"));
         assert_eq!(
-            spelled(NeverProof::Declared, &[]).as_deref(),
-            Some("noreturn: true")
-        );
-        assert_eq!(
-            spelled(NeverProof::Composed, &[Premise::GoRuntime]).as_deref(),
+            spelled(&Never::composed([&go]).expect("a proving end")).as_deref(),
             Some("noreturn: true (assuming go-runtime)")
         );
         assert_eq!(
-            spelled(NeverProof::NoReturnReached, &[]).as_deref(),
+            spelled(&Never::unreached()).as_deref(),
             Some("noreturn: unproven (no return reached)")
         );
         assert_eq!(
-            spelled(NeverProof::Uncited, &[]).as_deref(),
+            spelled(&Never::uncited()).as_deref(),
             Some("noreturn: unproven (uncited row)")
         );
     }

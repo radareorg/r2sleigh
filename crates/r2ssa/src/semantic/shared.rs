@@ -983,7 +983,6 @@ fn read_width(
 }
 
 /// The low bytes of a `CallUse`'s carrier its call takes (`register_read_bytes`); `None`: whole.
-#[doc(alias = "default_deny_call_read_bytes")]
 pub(crate) fn call_read_bytes(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
@@ -1010,6 +1009,10 @@ pub(crate) fn register_read_bytes(
 ) -> Option<u32> {
     if (machine_context.calls()).is_some_and(|model| reads.reads_none_of(model, carrier)) {
         return Some(0);
+    }
+    // A walked callee's register effect bounds what it reads of a result register (D372).
+    if let Some(bytes) = reads.lane_read(carrier) {
+        return Some(bytes);
     }
     let stated = |storage: &CanonicalStorageId| register_storages_overlap(*storage, carrier);
     let interface = interface?;

@@ -124,3 +124,59 @@ Exit: one encoding of each operation live after the seal, the census
 byte-identical at each step, about 10 to 14 MB of 0pack's peak (5 to 8%).
 Bound: each step re-keys in `O(n)`. Stop rule: past 40 files or any semantic
 change beyond the three named above, stop and report.
+
+## Condensation (D412, 2026-11-14)
+
+One Tarjan search owns every strongly connected component in the workspace:
+`r2ssa::dense::Condensation` over a `Csr<I, I>`. It returns each node's
+component, numbered in close order (an edge `u → v` has
+`component(v) <= component(u)`), each node's depth-first finish index, each
+component's members ascending, and whether a component is cyclic (several
+members or a self edge). The start order and the row order of the successors
+fix every index, so two runs on one graph agree.
+
+`dense::Reached` numbers a graph the engine states on demand (owner edges,
+forwarders): it asks each node's successors once, in the preorder the search
+from the root takes, so the query asks run in the order the deleted
+`resolved::Search` asked them; nodes are numbered by ascending key, so members
+come out in address order.
+
+Cost: `O(V + E)` visits, metered (`Condensation::visits`, and
+`AnalysisStats::condensed` for the program graphs). `Reached` adds `O(V + E)`
+hash probes and `O(V log V)` to number. The engine search it replaced kept
+`BTreeMap`s, `O((V + E) log V)`.
+
+Deleted: `view::strongly_connected_components` (value views and unstructured
+cycle blocks read the condensation), `resolved::Search` (resolved components
+and component forwarding), and interproc's Kosaraju (`compute_summary_sccs`).
+Readers to come: relift order (component and finish rank), callee summaries,
+the WTO (D415) and the rescans' no-kill union (R3).
+
+## Register classes (rescans R4, 2026-11-14)
+
+`boundaries::RegisterWalk` answers every unproven machine return's reaching
+register definitions (D254). The register bytes a function writes, the
+machine-state carriers left out, are cut into classes: two bytes share a class
+where no instruction writes one without the other, so they have the same
+writers and the same reaching definitions everywhere. `refine` cuts one write
+at a time: the bytes a write covers of a class it covers in part leave for a
+new class. Each write costs its width; classes are then numbered by their
+first byte.
+
+Each block keeps the last writer of each class it writes and one walked set,
+built once for every return. A (block, class) pair is walked once per return,
+and a visit costs its set's words and the classes the block writes of it:
+`O(E x R' x R'/64 + |live| log R')` per return for `R'` classes. Only the
+blocks a walk marked are cleared after it. The test `register_class_visits`
+grows `2^depth` leaves, each writing the result and a register across its top
+byte, and the class visits grow as `T log T`.
+
+## Reaching frame writes (D365, 2026-11-14)
+
+`frame_reach::walk`'s `reaching_writes` gives the merged write spans reaching
+each block's entry: the union of `gen(c)` over every block `c` with a path
+`c ->+ b`, since the transfer `out = in | gen` kills nothing. One condensation,
+then components predecessors first: an acyclic one takes its in-edges' outs, a
+cyclic one adds its members' gen. One linear union per edge gives
+`O(B + E x K)` for `K` spans, against the floor `Omega(B + E + sum |in(b)|)`.
+Every block is seeded.

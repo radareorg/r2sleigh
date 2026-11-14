@@ -19,6 +19,7 @@
 // their dense ids (doc/adr-one-ir.md, ROADMAP D11). The exceptions say why
 // at the item that keeps one.
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(scan_in_loop))]
 
 pub(crate) mod abi;
 pub(crate) mod address;
@@ -68,7 +69,6 @@ pub(crate) mod optimize;
 pub mod origin;
 pub(crate) mod phi;
 pub mod place;
-pub mod printf;
 pub(crate) mod reaching_rules;
 pub(crate) mod read_only;
 pub mod recover_interface;
@@ -118,9 +118,9 @@ pub use control::{
 pub use defuse::{DefUseInfo, def_use};
 pub use demand::DemandedBytes;
 pub use function::{
-    AssumedExits, CFGRiskSummary, CalleeEvidence, CalleePreservedCarriers, DecompileInputs,
-    DecompilePrepFacts, DefRef, DefSite, ExitSite, GenuineNativeInstructionSpan, Lifted,
-    NamedBlockMut, PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot,
+    AssumedExits, CFGRiskSummary, CalleeEvidence, CalleeLaneReads, CalleePreservedCarriers,
+    DecompileInputs, DecompilePrepFacts, DefRef, DefSite, ExitSite, GenuineNativeInstructionSpan,
+    Lifted, NamedBlockMut, PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot,
     RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction, Sealed,
     SiteConventions, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,
     SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot, TrustedConstruction,

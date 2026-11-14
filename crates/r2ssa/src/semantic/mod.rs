@@ -5,6 +5,7 @@
 
 mod assumptions;
 mod boundaries;
+mod build_facts;
 mod call_sites;
 mod certificates;
 mod control_domains;
@@ -29,12 +30,13 @@ pub use supervisor::SupervisorCall;
 
 pub(crate) use assumptions::*;
 pub(crate) use boundaries::*;
+pub use build_facts::BuildFacts;
 pub(crate) use call_sites::*;
 pub use certificates::*;
 pub use control_domains::*;
 pub(crate) use declared_slots::*;
 pub use facts::*;
-pub(crate) use frame_reach::{Access, Places, Walked, walk};
+pub(crate) use frame_reach::{Access, Accesses, Evidence, FrameWalk, PlaceBits, PlaceFacts, walk};
 pub use frame_reach::{CallFrameReach, DynamicFrame, FramePoints, FrameReach};
 pub(crate) use loops::*;
 pub(crate) use objects::*;
@@ -47,6 +49,7 @@ pub(crate) use structured::*;
 pub(crate) use trips::*;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::Arc;
 
 use r2il::SpaceId;
 use serde::{Deserialize, Serialize};
@@ -70,14 +73,15 @@ use crate::var::{CanonicalStorageId, CanonicalStorageSpace, SSAVar};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedFunctionFacts {
-    pub addresses: AddressProvenanceFacts,
+    /// The static phases' facts, shared with a kept build's held prefix (D289).
+    pub addresses: std::sync::Arc<AddressProvenanceFacts>,
     /// What every value can be. One answer, where each question used to walk
     /// the graph for a bound of its own.
-    pub values: crate::values::ValueRanges,
+    pub values: std::sync::Arc<crate::values::ValueRanges>,
     pub objects: ObjectModel,
     pub memory: MemorySSAFacts,
-    pub predicates: PredicateFacts,
-    pub call_sites: CallSiteFacts,
+    pub predicates: std::sync::Arc<PredicateFacts>,
+    pub call_sites: std::sync::Arc<CallSiteFacts>,
     pub boundaries: SourceBoundaryFacts,
     pub structured: StructuredDataflowFacts,
     pub control_domains: ControlDomainFacts,
@@ -110,6 +114,8 @@ pub(crate) struct CollectionOver<'a> {
     /// Which caller asked, so a trace says which of the three collections it is.
     pub(crate) site: &'static str,
     pub(crate) certified: Certified,
+    /// The build's static facts where a construction holds them (D289); collected here otherwise.
+    pub(crate) prefix: Option<&'a StaticPrefix>,
 }
 
 /// Which certificates a collection derives.
@@ -192,6 +198,7 @@ impl PreparedFunctionFacts {
             machine_context: None,
             site: "collect",
             certified: Certified::Whole,
+            prefix: None,
         })
     }
 
@@ -211,15 +218,16 @@ impl PreparedFunctionFacts {
             machine_context: Some(machine_context),
             site,
             certified: Certified::Whole,
+            prefix: None,
         })
     }
 
     /// The facts interface recovery reads of a function built but not sealed.
     pub(crate) fn collect_for_recovery(
         function: &SSAFunction,
-        prep: Option<&crate::function::DecompilePrepFacts>,
-        graph: &SsaGraph,
+        (prep, graph): (Option<&crate::function::DecompilePrepFacts>, &SsaGraph),
         machine_context: &SourceMachineContext,
+        prefix: Option<&StaticPrefix>,
     ) -> Result<Self, crate::fixpoint::Exhausted> {
         Self::collect_unchecked(CollectionOver {
             function,
@@ -229,6 +237,7 @@ impl PreparedFunctionFacts {
             machine_context: Some(machine_context),
             site: "recover",
             certified: Certified::ReturnControls,
+            prefix,
         })
     }
 
@@ -264,14 +273,40 @@ impl PreparedFunctionFacts {
             machine_context,
             site,
             certified,
+            prefix,
         } = over;
         let mut phases = PhaseRecorder::open(site, function);
+        let collected;
+        let prefix = match prefix {
+            Some(prefix) => prefix,
+            None => {
+                collected =
+                    StaticPrefix::collect(function, machine_context, (prep, graph), control)?;
+                &collected
+            }
+        };
+        let (declared_slots, live_out) = match certified {
+            // Recovery's context states no interface: no slot is declared and no result read.
+            Certified::ReturnControls => {
+                debug_assert!(
+                    (machine_context.and_then(SourceMachineContext::function_interface)).is_none()
+                );
+                let build = BuildFacts::of(function, machine_context);
+                let live_out = crate::liveout::FunctionLiveOut::unstated(build, graph);
+                (DeclaredStackSlots::default(), live_out)
+            }
+            Certified::Whole => {
+                let return_storages = (machine_context
+                    .and_then(SourceMachineContext::function_interface))
+                .into_iter()
+                .flat_map(|interface| interface.return_kind().storages())
+                .collect::<Vec<_>>();
+                let live_out =
+                    crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
+                (collect_declared_stack_slots(machine_context), live_out)
+            }
+        };
         let MemoryPrefix {
-            addresses,
-            call_sites,
-            declared_slots,
-            predicates,
-            values,
             objects,
             memory,
             memory_accesses,
@@ -283,20 +318,25 @@ impl PreparedFunctionFacts {
                 graph,
                 machine_context,
             },
+            (prefix, &declared_slots),
             &mut phases,
             control,
         )?;
+        let StaticPrefix {
+            addresses,
+            call_sites,
+            predicates,
+            values,
+            ..
+        } = prefix;
+        let (addresses, call_sites) = (Arc::clone(addresses), Arc::clone(call_sites));
+        let (predicates, values) = (Arc::clone(predicates), Arc::clone(values));
         macro_rules! phase {
             ($name:literal, $size:expr) => {{
                 phases.mark($name, $size);
                 control.poll()?;
             }};
         }
-        let return_storages = (machine_context.and_then(SourceMachineContext::function_interface))
-            .into_iter()
-            .flat_map(|interface| interface.return_kind().storages())
-            .collect::<Vec<_>>();
-        let live_out = crate::liveout::FunctionLiveOut::compute(function, graph, &return_storages);
         let boundaries = collect_source_boundary_facts(
             Body {
                 function,
@@ -315,7 +355,7 @@ impl PreparedFunctionFacts {
         // reach hold one content; both are known here, before anything reads
         // a span, so liveness is computed once, with them.
         let ignored_reads = crate::function::unpassed_call_reads(graph, machine_context);
-        let mut content = crate::liveness::ValueContent::of(graph, machine_context);
+        let mut content = prefix.content();
         content.declare_same_content(&crate::function::same_content_reads(
             &memory_accesses,
             &memory,
@@ -497,7 +537,7 @@ fn demanded(
             interface.return_kind().storages().map(read).collect()
         }),
     };
-    let (tails, reads) = tail_reads(body, calls, ours.as_deref()).unwrap_or_default();
+    let (tails, reads) = tail_reads(body, calls, ours.as_deref());
     crate::demand::exits_are_named_beside(body.function, live_out, &tails).then(|| {
         let reads = (result, reads.as_slice());
         crate::demand::DemandedBytes::of_returning(
@@ -512,8 +552,19 @@ fn demanded(
 /// Blocks that leave by a tail transfer, and the bytes of each value their callees read.
 type TailReads = (BTreeSet<u64>, Vec<(ValueId, crate::bytes::ByteMask)>);
 
-/// Tail-transfer exits and the bytes their callees read (arguments, a narrower result's lane); `None`
-/// where a tail states no fixed arguments or no result (doc/adr-call-boundary.md, "S2 as built"; D211).
+use crate::liveout::FunctionLiveOut;
+
+/// The low `bytes` of `storage` where `value` holds it from its first byte; else every byte.
+fn lane_of(graph: &SsaGraph, value: ValueId, storage: CanonicalStorageId, bytes: u32) -> ByteMask {
+    let held = graph.value(value).and_then(|held| held.canonical_storage);
+    match held.is_some_and(|held| held.offset == storage.offset) {
+        true => ByteMask::whole(bytes),
+        false => ByteMask::All,
+    }
+}
+
+/// Tail exits and what their callees read: fixed arguments, else each register a call reads unnamed;
+/// a narrower lane, else ours (adr-call-boundary.md "S2 as built", D373). O(tails x regs x blocks).
 #[cfg_attr(
     dylint_lib = "r2sleigh_lints",
     allow(
@@ -525,7 +576,7 @@ fn tail_reads(
     body: Body<'_>,
     (call_sites, boundaries): (&CallSiteFacts, &SourceBoundaryFacts),
     ours: Option<&[(CanonicalStorageId, u32)]>,
-) -> Option<TailReads> {
+) -> TailReads {
     let mut tails = BTreeSet::new();
     let mut reads = Vec::new();
     let tail_calls =
@@ -539,72 +590,90 @@ fn tail_reads(
                 call.id
             );
         };
-        let Some(boundary) = boundaries.calls.get(&call.id) else {
-            refused("has no boundary");
-            return None;
+        let Some(block) = (body.graph.inst(call.at)).and_then(|inst| body.graph.block(inst.block))
+        else {
+            refused("is in no block");
+            continue;
         };
-        let named =
-            boundary.complete && boundary.arguments_complete && boundary.variadic == Some(false);
-        let narrow = match boundary.result_kind {
+        let (function, graph) = (body.function, body.graph);
+        let reaching = |storage| FunctionLiveOut::reaching(function, graph, storage, block.addr);
+        let lane = |value, storage, bytes| lane_of(body.graph, value, storage, bytes);
+        let boundary = boundaries.calls.get(&call.id);
+        let narrow = match boundary.and_then(|boundary| boundary.result_kind) {
             Some(SourceCallResult::Register { storage, width }) if !width.fills(storage) => {
                 Some((storage, width))
             }
-            Some(SourceCallResult::Register { .. } | SourceCallResult::Void) => None,
-            other => {
-                refused(&format!("states result {other:?}"));
-                return None;
-            }
+            _ => None,
         };
-        if !named {
-            refused(&format!(
-                "complete {} arguments {} variadic {:?}",
-                boundary.complete, boundary.arguments_complete, boundary.variadic
-            ));
-            return None;
-        }
-        let block = body
-            .graph
-            .inst(call.at)
-            .and_then(|inst| body.graph.block(inst.block))?;
-        tails.insert(block.addr);
-        for argument in &boundary.arguments {
-            if let SourceCallArgumentValue::Value(value) = argument.value {
-                reads.push((value, ByteMask::All));
-            }
-        }
-        let reaching = |storage| {
-            crate::liveout::FunctionLiveOut::reaching(
-                body.function,
-                body.graph,
-                storage,
-                block.addr,
-            )
-        };
-        let Some((storage, width)) = narrow else {
-            // A whole or `void` result need not write a byte: what reaches our result passes whole.
-            let Some(ours) = ours else {
-                refused("states no narrower result, and no interface names ours");
-                return None;
-            };
-            for (storage, bytes) in ours {
-                let mask = ByteMask::whole(*bytes);
-                reads.extend(reaching(*storage).iter().map(|value| (value, mask)));
-            }
+        // A result no narrower lane states may leave ours as it found it: what reaches it passes.
+        if narrow.is_none() && ours.is_none() {
+            refused("states no narrower result, and no interface names ours");
             continue;
+        }
+        let fixed = boundary.filter(|boundary| {
+            boundary.complete && boundary.arguments_complete && boundary.variadic == Some(false)
+        });
+        let unfixed = match fixed {
+            Some(_) => None,
+            None => match unfixed_tail_registers(body.machine_context, call) {
+                Some(registers) => Some(registers),
+                None => {
+                    refused("is unfixed under no convention whose calls read registers");
+                    continue;
+                }
+            },
         };
-        for value in reaching(storage).iter() {
-            let held = body
-                .graph
-                .value(value)
-                .and_then(|held| held.canonical_storage);
-            let mask = match held.is_some_and(|held| held.offset == storage.offset) {
-                true => ByteMask::whole(u32::from(width.logical)),
-                false => ByteMask::All,
-            };
-            reads.push((value, mask));
+        tails.insert(block.addr);
+        let arguments = fixed.iter().flat_map(|boundary| &boundary.arguments);
+        reads.extend(arguments.filter_map(|argument| match argument.value {
+            SourceCallArgumentValue::Value(value) => Some((value, ByteMask::All)),
+            _ => None,
+        }));
+        for storage in unfixed.into_iter().flatten() {
+            let read = reaching(storage);
+            reads.extend(
+                read.iter()
+                    .map(|value| (value, lane(value, storage, storage.size))),
+            );
+        }
+        match narrow {
+            Some((storage, width)) => {
+                let bytes = u32::from(width.logical);
+                let read = reaching(storage);
+                reads.extend(
+                    read.iter()
+                        .map(|value| (value, lane(value, storage, bytes))),
+                );
+            }
+            None => {
+                for (storage, bytes) in ours.into_iter().flatten() {
+                    let mask = ByteMask::whole(*bytes);
+                    reads.extend(reaching(*storage).iter().map(|value| (value, mask)));
+                }
+            }
         }
     }
-    Some((tails, reads))
+    (tails, reads)
+}
+
+/// The registers an unfixed tail reads: what its site's model says a call reads unnamed, less what a
+/// stated `CallReads` leaves out (D283); none under no model or a refused effect (D373).
+fn unfixed_tail_registers(
+    context: Option<&SourceMachineContext>,
+    call: &CallSiteFact,
+) -> Option<Vec<CanonicalStorageId>> {
+    let context = context?;
+    let instruction = call.raw_identity.map(SourceCallSiteIdentity::instruction);
+    let direct = call.raw_identity.and_then(direct_target_from_raw_identity);
+    let model = context.site_model(instruction, direct)?;
+    let stated = context.call_reads(instruction)?;
+    let every = crate::call_reads::CallReads::every_location(model);
+    let unnamed = model.call_reads()?.iter().copied();
+    Some(
+        unnamed
+            .filter(|storage| !stated.reads_none_within(&every, *storage))
+            .collect(),
+    )
 }
 
 /// Whether no return of `interface` reads a register: a `void` one hands back nothing, and one whose
@@ -737,7 +806,7 @@ pub(crate) fn collect_predicate_facts_for_test(
     function: &SSAFunction,
     graph: &SsaGraph,
 ) -> PredicateFacts {
-    collect_predicate_facts(function, None, graph)
+    collect_predicate_facts(BuildFacts::bare(function), None, graph)
 }
 
 /// The blocks whose conditional branch sends both arms to one block: a direct transfer.

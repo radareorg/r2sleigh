@@ -11,6 +11,7 @@ mod fates;
 pub mod info;
 pub mod naming;
 mod pointers;
+mod ranks;
 mod reads;
 mod requests;
 mod resolved;
@@ -621,7 +622,15 @@ impl<S: Source + 'static> OpenProgram<S> {
             defects: self.db.stats().defects,
             rebuilt: self.db.stats().rebuilt,
             frames_built: self.db.stats().frames_built + self.control().frames_built(),
+            static_prefixes: self.db.stats().static_prefixes + self.control().static_prefixes(),
+            frame_walk_steps: self.db.stats().frame_walk_steps + self.control().frame_walk_steps(),
+            frame_decision_steps: self.db.stats().frame_decision_steps
+                + self.control().frame_decision_steps(),
             table_seals: self.db.stats().table_seals + self.control().table_seals(),
+            condensed: self.db.stats().condensed,
+            site_fates_in_direct_sites: self.db.stats().site_fates_in_direct_sites,
+            site_fates_never_joined: self.db.stats().site_fates_never_joined,
+            site_fates_relifted: self.db.stats().site_fates_relifted,
         }
     }
 
@@ -682,11 +691,11 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         self.view().exit_through(slot)
     }
 
-    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
+    fn halts_on_through(&self, slot: u64) -> Option<crate::body::Halting> {
         self.view().halts_on_through(slot)
     }
 
-    fn halts_on(&self, callee: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
+    fn halts_on(&self, callee: u64) -> Option<crate::body::Halting> {
         crate::body::Program::halts_on(&self.view(), callee)
     }
 
@@ -702,8 +711,8 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         self.view().binds_handles()
     }
 
-    fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
-        self.view().interrupt_returns(arch, vector)
+    fn interrupt_halts(&self, arch: &str, vector: u64) -> Option<r2source::Citation> {
+        self.view().interrupt_halts(arch, vector)
     }
 
     fn return_address_register(&self) -> Option<r2il::Varnode> {
@@ -755,6 +764,10 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
 
     fn kept_at(&self, entry: u64) -> Option<std::collections::BTreeSet<r2ssa::CanonicalStorageId>> {
         crate::native::Program::kept_at(&self.view(), entry)
+    }
+
+    fn reads_at(&self, entry: u64) -> Option<r2ssa::site_boundary::LaneReads> {
+        crate::native::Program::reads_at(&self.view(), entry)
     }
 }
 
@@ -969,13 +982,13 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Imports {
     }
 }
 
-/// Each import stub whose row halts on a value in an argument register, by stub address: the
-/// register and the value (D211). One pass over the stubs, `O(stubs log rows)`.
+/// Each import stub whose cited row halts on a value in an argument register, by stub address: the
+/// register, the value and the row's citation (D211). One pass over the stubs, `O(stubs log rows)`.
 pub(super) struct HaltingStubs;
 
 impl<S: Source + 'static> Query<ProgramInputs<S>> for HaltingStubs {
     type Key = ();
-    type Value = BTreeMap<u64, (r2source::CanonicalStorageId, r2abi::Halt)>;
+    type Value = BTreeMap<u64, crate::body::Halting>;
     const NAME: &'static str = "halting-stubs";
     const RETENTION: Retention = Retention::Held;
 
@@ -988,12 +1001,13 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for HaltingStubs {
         let imports = db.get::<Imports>(&()).expect("the imports ask for nothing");
         let halting = imports.stubs.iter().filter_map(|(at, stub)| {
             // Only a cited row halts a call (D395).
-            let row = target.imports.row(&stub.symbol).filter(|row| row.cited())?;
+            let row = target.imports.row(&stub.symbol)?;
+            let citation = r2source::Citation::of(row)?;
             let (index, halt) = row.halts_on?;
             let register = target
                 .convention
                 .argument(r2abi::SlotClass::Integer, index.into());
-            Some((*at, (register?, halt)))
+            Some((*at, (register?, halt, citation)))
         });
         halting.collect()
     }

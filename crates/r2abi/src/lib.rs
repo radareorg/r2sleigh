@@ -7,6 +7,7 @@ pub mod convention;
 pub mod data_model;
 pub mod declarations;
 pub mod effects;
+pub mod format;
 pub mod frames;
 pub mod library;
 pub mod loader;

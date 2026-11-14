@@ -16,6 +16,8 @@ use rustc_lint::{LateContext, LateLintPass, LintContext};
 
 dylint_linting::dylint_library!();
 
+mod function_scale;
+mod unproven_negative;
 
 rustc_lint::declare_lint!(
     /// ### What it does
@@ -2161,6 +2163,14 @@ rustc_lint::declare_lint!(
     "a type reaches r2types through `SourceTypeGraph`, never by reparsing its spelling"
 );
 
+rustc_lint::declare_lint!(
+    /// A read of a build's function or context past `BuildFacts`' shape and call-site accessors lets
+    /// a callee's statement reach a static phase a kept build does not run again (D289).
+    pub BUILD_FACTS_READS_A_CALLEE_FACT,
+    Deny,
+    "a static phase reads a build's shape and its source's call sites, nothing a callee states"
+);
+
 rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     DISPLAY_NAMES_OUTSIDE_RENDERING,
     STRING_PREFIX_SEMANTIC_CLASSIFICATION,
@@ -2242,7 +2252,8 @@ rustc_lint::declare_lint_pass!(R2sleighLintPass => [
     R2IL_OP_PROPERTY_OUTSIDE_R2IL,
     SSA_CALL_CLASS_OUTSIDE_OP,
     EXHAUSTED_READ_THROUGH_SEALED_STAGE,
-    TYPE_SPELLING_REPARSED
+    TYPE_SPELLING_REPARSED,
+    BUILD_FACTS_READS_A_CALLEE_FACT
 ]);
 
 #[unsafe(no_mangle)]
@@ -2332,8 +2343,17 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         SSA_CALL_CLASS_OUTSIDE_OP,
         EXHAUSTED_READ_THROUGH_SEALED_STAGE,
         TYPE_SPELLING_REPARSED,
+        function_scale::SCAN_IN_LOOP,
+        unproven_negative::UNPROVEN_NEGATIVE,
+        BUILD_FACTS_READS_A_CALLEE_FACT,
     ]);
     lint_store.register_late_lint_pass(Box::new(|_| Box::new(R2sleighLintPass)));
+    lint_store.register_late_lint_pass(Box::new(|_| {
+        Box::<function_scale::FunctionScale>::default()
+    }));
+    lint_store.register_late_lint_pass(Box::new(|_| {
+        Box::<unproven_negative::UnprovenNegative>::default()
+    }));
 }
 
 impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
@@ -2397,6 +2417,15 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
     }
 
     fn check_item(&mut self, cx: &LateContext<'tcx>, item: &'tcx Item<'tcx>) {
+        for span in build_facts_handing_out_its_source(cx, item) {
+            span_lint(
+                cx,
+                BUILD_FACTS_READS_A_CALLEE_FACT,
+                span,
+                "this hands out the function or its context, whose callee statements a kept build does not read again; expose the one fact a static phase needs",
+            );
+        }
+
         if facts_impl_self_name(item).is_some() && !item_is_test_only(cx, item) {
             for span in rendering_decision_method_names(cx, item) {
                 span_lint(
@@ -3259,6 +3288,17 @@ impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
                 TYPE_SPELLING_REPARSED,
                 expr.span,
                 "this reads a type back from its spelling; take it from the `SourceTypeGraph` through `source_type_like`",
+            );
+        }
+
+        if let Some(method) = build_facts_disallowed_read(cx, expr) {
+            span_lint(
+                cx,
+                BUILD_FACTS_READS_A_CALLEE_FACT,
+                expr.span,
+                format!(
+                    "`BuildFacts` reads `{method}`, which no build's shape or source call site states; a callee's statement would reach a static phase (D289)"
+                ),
             );
         }
 
@@ -4962,10 +5002,7 @@ fn r2dec_direct_type_facts_mutator_impl_item(cx: &LateContext<'_>, item: &ImplIt
     let name = item.ident.name.as_str();
     if !matches!(
         name,
-        "type_facts_mut"
-            | "with_type_facts"
-            | "set_type_facts"
-            | "set_known_function_signatures"
+        "type_facts_mut" | "with_type_facts" | "set_type_facts" | "set_known_function_signatures"
     ) {
         return false;
     }
@@ -5184,7 +5221,7 @@ fn r2types_role_name_signature_hint_expr(expr: &Expr<'_>) -> bool {
     )
 }
 
-fn item_is_test_only(cx: &LateContext<'_>, item: &Item<'_>) -> bool {
+pub(crate) fn item_is_test_only(cx: &LateContext<'_>, item: &Item<'_>) -> bool {
     cx.sess()
         .source_map()
         .span_to_snippet(item.span)
@@ -5926,6 +5963,119 @@ fn asks_r2il<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Expr<'tcx>) -> bool {
         _ => std::ops::ControlFlow::Continue(()),
     })
     .is_some()
+}
+
+/// What `BuildFacts` may read of the function and its context: the shape, and the call sites the
+/// source names (D289). Every other read is denied.
+const BUILD_FACTS_READS: [&str; 14] = [
+    "entry",
+    "root",
+    "block_addrs",
+    "cfg",
+    "domtree",
+    "predecessors",
+    "successors",
+    "dominates",
+    "stack_pointer_carrier",
+    "register_projection",
+    "raw_call_site_at",
+    "is_tail_call_site",
+    "slot_target",
+    "callee_linkage",
+];
+
+/// The types `BuildFacts` wraps: a static phase reaches them only through its allowed reads.
+const BUILD_FACTS_SOURCES: [&str; 2] = ["SSAFunction", "SourceMachineContext"];
+
+fn is_build_facts_span(cx: &LateContext<'_>, span: rustc_span::Span) -> bool {
+    let filename = format!("{:?}", cx.sess().source_map().span_to_filename(span));
+    filename.contains("crates/r2ssa/src/") && filename.contains("build_facts.rs")
+}
+
+fn is_build_facts_source(cx: &LateContext<'_>, ty: rustc_middle::ty::Ty<'_>) -> bool {
+    matches!(ty.peel_refs().kind(), rustc_middle::ty::Adt(adt, _)
+        if BUILD_FACTS_SOURCES.contains(&cx.tcx.item_name(adt.did()).as_str()))
+}
+
+/// A method `BuildFacts`' module calls on the function or its context that no allowed read names.
+fn build_facts_disallowed_read<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr: &'tcx Expr<'tcx>,
+) -> Option<String> {
+    if !is_build_facts_span(cx, expr.span) {
+        return None;
+    }
+    let read = match expr.kind {
+        ExprKind::MethodCall(segment, receiver, ..)
+            if is_build_facts_source(cx, cx.typeck_results().expr_ty(receiver)) =>
+        {
+            segment.ident.name
+        }
+        ExprKind::Field(base, field)
+            if is_build_facts_source(cx, cx.typeck_results().expr_ty(base)) =>
+        {
+            field.name
+        }
+        // A method named by path, `.and_then(SourceMachineContext::read)`.
+        ExprKind::Path(ref qpath) => match cx.qpath_res(qpath, expr.hir_id) {
+            rustc_hir::def::Res::Def(rustc_hir::def::DefKind::AssocFn, def_id) => {
+                let owner = cx.tcx.parent(def_id);
+                // A trait's method has no self type to read; only an inherent impl's names one.
+                if !matches!(
+                    cx.tcx.def_kind(owner),
+                    rustc_hir::def::DefKind::Impl { of_trait: false }
+                ) {
+                    return None;
+                }
+                let ty = cx
+                    .tcx
+                    .type_of(owner)
+                    .instantiate_identity()
+                    .skip_normalization();
+                if !is_build_facts_source(cx, ty) {
+                    return None;
+                }
+                cx.tcx.item_name(def_id)
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    (!BUILD_FACTS_READS.contains(&read.as_str())).then(|| read.to_string())
+}
+
+/// The methods of `BuildFacts` whose result holds the function or its context.
+fn build_facts_handing_out_its_source(
+    cx: &LateContext<'_>,
+    item: &Item<'_>,
+) -> Vec<rustc_span::Span> {
+    let rustc_hir::ItemKind::Impl(impl_item) = item.kind else {
+        return Vec::new();
+    };
+    let rustc_hir::TyKind::Path(rustc_hir::QPath::Resolved(_, path)) = impl_item.self_ty.kind
+    else {
+        return Vec::new();
+    };
+    if path
+        .segments
+        .last()
+        .map(|segment| segment.ident.name.as_str())
+        != Some("BuildFacts")
+    {
+        return Vec::new();
+    }
+    let holds = |ty: rustc_middle::ty::Ty<'_>| {
+        ty.walk().any(|part| {
+            part.as_type()
+                .is_some_and(|part| is_build_facts_source(cx, part))
+        })
+    };
+    (impl_item.items.iter())
+        .map(|entry| entry.owner_id.to_def_id())
+        .filter(|def_id| matches!(cx.tcx.def_kind(*def_id), rustc_hir::def::DefKind::AssocFn))
+        .filter(|def_id| holds(cx.tcx.fn_sig(*def_id).skip_binder().output().skip_binder()))
+        .map(|def_id| cx.tcx.def_span(def_id))
+        .collect()
 }
 
 /// The stages a pass cannot exhaust: `Prepared::seal` and `Sealed::into_artifact` refuse it (D42).

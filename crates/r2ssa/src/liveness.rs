@@ -26,7 +26,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::graph::{BlockId, InstId, InstPayload, SsaGraph, UseSite, ValueId};
 use crate::liveout::FunctionLiveOut;
-use crate::machine_context::SourceMachineContext;
 use crate::var::{CanonicalStorageId, CanonicalStorageSpace};
 use crate::view::{ValueViews, ViewExtension};
 
@@ -125,14 +124,14 @@ struct LaneAnchor {
 
 /// Where the lifter maps `storage`: its carrier and the bit its low bit sits
 /// at. A storage the lifter states no mapping for is anchored to itself alone.
-fn lane_anchor(
+fn lane_anchor<'a>(
     storage: CanonicalStorageId,
-    lanes: Option<&SourceMachineContext>,
+    lanes: &impl Fn(CanonicalStorageId) -> Option<&'a r2il::RegisterProjection>,
 ) -> Option<LaneAnchor> {
     if storage.is_unknown() {
         return None;
     }
-    if let Some(projection) = lanes.and_then(|context| context.register_projection(storage))
+    if let Some(projection) = lanes(storage)
         && let r2il::RegisterProjectionDisposition::Bound { carrier, slice } =
             projection.disposition
     {
@@ -156,7 +155,10 @@ impl ValueContent {
     /// entry values the lifter maps onto one carrier bit joined.
     ///
     /// `O(V + E)` for the view and `O(V log V)` to group the lanes.
-    pub fn of(graph: &SsaGraph, lanes: Option<&SourceMachineContext>) -> Self {
+    pub fn of<'a>(
+        graph: &SsaGraph,
+        lanes: impl Fn(CanonicalStorageId) -> Option<&'a r2il::RegisterProjection>,
+    ) -> Self {
         let views = ValueViews::of_graph(graph);
         let width = |var: &crate::var::SSAVar| var.size.saturating_mul(8);
         let mut content = Self {
@@ -189,7 +191,7 @@ impl ValueContent {
             graph
                 .value(value)
                 .and_then(|value| value.canonical_storage)
-                .and_then(|storage| lane_anchor(storage, lanes))
+                .and_then(|storage| lane_anchor(storage, &lanes))
         };
         // The merges one block makes over one carrier bit are that lane's one
         // state there, at several widths; the values a function is entered
@@ -231,6 +233,11 @@ impl ValueContent {
         }
         content.flatten();
         content
+    }
+
+    /// The content of every value where no geometry maps a lane onto a carrier.
+    pub fn unmapped(graph: &SsaGraph) -> Self {
+        Self::of(graph, |_| None)
     }
 
     /// State that each pair's two values hold one content at their full width,
@@ -1119,7 +1126,7 @@ mod tests {
         let liveness = ValueLiveness::compute(
             &graph,
             &FunctionLiveOut::default(),
-            ValueContent::of(&graph, None),
+            ValueContent::unmapped(&graph),
         );
         let merged = value_named(&graph, "RAX", 2);
         let updated = defined_at(&graph, 0x1008, 1);
@@ -1192,7 +1199,7 @@ mod tests {
         let liveness = ValueLiveness::compute(
             &graph,
             &FunctionLiveOut::default(),
-            ValueContent::of(&graph, None),
+            ValueContent::unmapped(&graph),
         );
         let merged = value_named(&graph, "RAX", 2);
         let next = defined_at(&graph, 0x1008, 0);
@@ -1233,7 +1240,7 @@ mod tests {
             size: 8,
         };
         let live_out = FunctionLiveOut::compute(&func, &graph, &[rax]);
-        let liveness = ValueLiveness::compute(&graph, &live_out, ValueContent::of(&graph, None));
+        let liveness = ValueLiveness::compute(&graph, &live_out, ValueContent::unmapped(&graph));
         let returned = defined_at(&graph, 0x1000, 0);
         let scratch = defined_at(&graph, 0x1000, 1);
         let block = block_at(&graph, 0x1000);
@@ -1253,7 +1260,7 @@ mod tests {
         let liveness = ValueLiveness::compute(
             &graph,
             &FunctionLiveOut::default(),
-            ValueContent::of(&graph, None),
+            ValueContent::unmapped(&graph),
         );
         let merged = value_named(&graph, "RAX", 2);
         let updated = defined_at(&graph, 0x1008, 1);
@@ -1298,7 +1305,7 @@ mod tests {
         });
         let func = SSAFunction::from_blocks_with_arch(&[block], Some(&arch())).expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let content = ValueContent::of(&graph, None);
+        let content = ValueContent::unmapped(&graph);
         let t = value_named(&graph, "RCX", 0);
         let signed = defined_at(&graph, 0x1000, 0);
         let high = defined_at(&graph, 0x1000, 1);
@@ -1365,7 +1372,7 @@ mod tests {
             SSAFunction::from_blocks_with_arch(&[block], Some(&crate::Arch::from(arch.clone())))
                 .expect("ssa");
         let graph = SsaGraph::from_function(&func);
-        let content = ValueContent::of(&graph, None);
+        let content = ValueContent::unmapped(&graph);
         let whole = value_named(&graph, "r0", 0);
         let copied = |offset| {
             graph
@@ -1447,7 +1454,7 @@ mod tests {
         ];
         let context =
             crate::SourceMachineContext::from_blocks(&[], Some(&crate::Arch::from(arch.clone())));
-        let content = ValueContent::of(&graph, Some(&context));
+        let content = ValueContent::of(&graph, |storage| context.register_projection(storage));
         let [whole, high, low] = ["r0", "hw0", "w0"].map(|name| value_named(&graph, name, 0));
         assert!(content.same_content(whole, low), "w0 is r0's low word");
         assert!(
@@ -1456,7 +1463,7 @@ mod tests {
         );
         assert!(!content.same_content(high, low));
         // Where the lifter states no mapping, nothing is joined by offset.
-        let unmapped = ValueContent::of(&graph, None);
+        let unmapped = ValueContent::unmapped(&graph);
         assert!(!unmapped.same_content(whole, high));
         assert!(!unmapped.same_content(whole, low));
     }
@@ -1467,7 +1474,7 @@ mod tests {
         let liveness = ValueLiveness::compute(
             &graph,
             &FunctionLiveOut::default(),
-            ValueContent::of(&graph, None),
+            ValueContent::unmapped(&graph),
         );
         let values = graph
             .values

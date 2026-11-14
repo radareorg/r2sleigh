@@ -16,6 +16,8 @@ use super::analysis::{CalleeReads, Shared, built_read, callee_built, callee_read
 use super::{ProgramInputs, Source, View};
 use crate::native::{Built, CalleeRead, Stated, Unreadable};
 use crate::query::db::{Db, Hold, Query, Retention};
+use r2ssa::call_reads::StackWrites;
+use r2ssa::dense::Reached;
 
 /// A function by its entry and whether it is Thumb.
 type Node = (u64, bool);
@@ -46,22 +48,29 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Component {
     const NAME: &'static str = "component";
     const RETENTION: Retention = Retention::Held;
 
-    /// Tarjan's algorithm from `root` over owner edges, O(V + E) over what it reaches; every component it closes is deposited.
+    /// r2ssa's one condensation of what `root` reaches over owner edges, O(V + E); every
+    /// component it closes is deposited.
     fn compute(db: &Db<ProgramInputs<S>>, &(root, demand): &(Node, Demand)) -> Members {
         let view = View::new(db, true);
-        let mut search = Search::default();
-        search.run(root, |node| owners(db, &view, node, demand));
-        let own = search.of[&root];
-        let closed = search.closed.into_iter().map(|members| Members { members });
-        let mut closed = closed.collect::<Vec<_>>();
-        let answers = closed.iter().enumerate();
-        let answers = answers.filter(|(at, _)| *at != own);
-        let answers = answers.flat_map(|(_, members)| {
+        let reached = Reached::from(root, |node| owners(db, &view, node, demand));
+        let condensation = reached.condensation();
+        db.note_condensed(condensation.visits());
+        let own = condensation.component(reached.root());
+        let mut answers = Vec::new();
+        let mut held = None;
+        for (component, members) in condensation.components() {
+            let members = Members {
+                members: members.iter().map(|node| reached.key(*node)).collect(),
+            };
+            if component == own {
+                held = Some(members);
+                continue;
+            }
             let each = members.members.iter();
-            each.map(|node| ((*node, demand), members.clone()))
-        });
-        db.deposit::<Component>(answers.collect::<Vec<_>>());
-        closed.swap_remove(own)
+            answers.extend(each.map(|node| ((*node, demand), members.clone())));
+        }
+        db.deposit::<Component>(answers);
+        held.expect("the root is in a component")
     }
 }
 
@@ -520,7 +529,7 @@ struct Assumed {
     kept: Option<SourceResultSeed>,
     interface: SourceFunctionInterface,
     /// What the member writes of its caller's stack: none at first, `None` the top (D377).
-    writes: Option<Vec<(i64, i64)>>,
+    writes: Option<StackWrites>,
     /// Whether the writes rose once already: a second move is the top.
     writes_rose: bool,
 }
@@ -538,7 +547,7 @@ impl Assumed {
             floor: cause.is_some(),
             result,
             kept,
-            writes: Some(Vec::new()),
+            writes: Some(StackWrites::cycle_seed()),
             writes_rose: false,
             interface: interface
                 .clone()
@@ -555,16 +564,18 @@ impl Assumed {
 
     fn state(assumed: &Option<Self>) -> Option<State> {
         let held = assumed.as_ref()?;
-        Some((held.count, held.floor, held.result, held.writes.clone()))
+        Some((
+            held.count,
+            held.floor,
+            held.result,
+            spans(held.writes.as_ref()),
+        ))
     }
 
     /// What a read states its body writes of its caller's stack.
-    fn writes_of(read: &CalleeRead) -> Option<Vec<(i64, i64)>> {
+    fn writes_of(read: &CalleeRead) -> Option<StackWrites> {
         let facts = read.facts.as_ref().ok()?;
-        facts
-            .summary()
-            .incoming_writes()
-            .map(<[(i64, i64)]>::to_vec)
+        facts.summary().incoming_writes().cloned()
     }
 
     /// What a read of a member states, as far as the member's assumption tracks it.
@@ -576,7 +587,7 @@ impl Assumed {
             arity.floor(),
             !arity.is_exact(),
             result,
-            Self::writes_of(read),
+            spans(Self::writes_of(read).as_ref()),
         ))
     }
 
@@ -597,13 +608,15 @@ impl Assumed {
             .map(|seed| join(seed, interface.stated_result()));
         // The writes rise once from none to what a read states; any later move bounds nothing.
         let read_writes = Self::writes_of(read);
-        let writes = match held.writes.as_deref() {
-            _ if held.writes == read_writes => held.writes.clone(),
+        let held_spans = spans(held.writes.as_ref());
+        let writes = match held_spans.as_deref() {
+            _ if held_spans == spans(read_writes.as_ref()) => held.writes.clone(),
             Some([]) if !held.writes_rose => read_writes,
             _ => None,
         };
-        let writes_rose = held.writes_rose || writes != held.writes;
-        if (count, floor, result, &writes) == (held.count, held.floor, held.result, &held.writes) {
+        let moved = spans(writes.as_ref()) != held_spans;
+        let writes_rose = held.writes_rose || moved;
+        if (count, floor, result, moved) == (held.count, held.floor, held.result, false) {
             return false;
         }
         let cause = (interface.arity_floor()).or_else(|| held.interface.arity_floor());
@@ -624,6 +637,13 @@ impl Assumed {
         };
         true
     }
+}
+
+/// The spans a statement of a caller's stack writes holds; `None` for the top.
+fn spans(writes: Option<&StackWrites>) -> Option<Vec<(i64, i64)>> {
+    writes
+        .and_then(StackWrites::spans)
+        .map(<[(i64, i64)]>::to_vec)
 }
 
 /// The result both states: the wider of two integers in one carrier, and none where either is
@@ -851,121 +871,19 @@ fn resolved<S: Source + 'static>(
     (!stopped(&read.0)).then(|| (*read).clone())
 }
 
-/// One frame of the search: a function, its callees, and the next callee to visit.
-struct Frame<N> {
-    node: N,
-    callees: Vec<N>,
-    next: usize,
-}
-
-/// Tarjan's search over any graph, by an ordered node: components close callees first.
-pub(super) struct Search<N = Node> {
-    index: BTreeMap<N, usize>,
-    low: BTreeMap<N, usize>,
-    stack: Vec<N>,
-    on_stack: BTreeSet<N>,
-    /// Which closed component each function is in.
-    of: BTreeMap<N, usize>,
-    /// Each component in the order it closed, its members ascending.
-    pub(super) closed: Vec<std::rc::Rc<[N]>>,
-}
-
-impl<N> Default for Search<N> {
-    fn default() -> Self {
-        Self {
-            index: BTreeMap::new(),
-            low: BTreeMap::new(),
-            stack: Vec::new(),
-            on_stack: BTreeSet::new(),
-            of: BTreeMap::new(),
-            closed: Vec::new(),
-        }
-    }
-}
-
-impl<N: Copy + Ord> Search<N> {
-    /// The search terminates: each function is pushed once, and each frame advances over finitely many callees.
-    pub(super) fn run(&mut self, root: N, callees: impl Fn(N) -> Vec<N>) {
-        let mut frames = vec![self.open(root, &callees)];
-        while let Some(frame) = frames.last_mut() {
-            let node = frame.node;
-            let Some(&callee) = frame.callees.get(frame.next) else {
-                frames.pop();
-                self.finish(node, frames.last().map(|caller| caller.node));
-                continue;
-            };
-            frame.next += 1;
-            match self.index.get(&callee) {
-                None => frames.push(self.open(callee, &callees)),
-                Some(&index) if self.on_stack.contains(&callee) => self.lower(node, index),
-                Some(_) => {}
-            }
-        }
-    }
-
-    /// `node` has visited every callee: its caller's low link takes its own, and it may close a component.
-    fn finish(&mut self, node: N, caller: Option<N>) {
-        if let Some(caller) = caller {
-            self.lower(caller, self.low[&node]);
-        }
-        self.close(node);
-    }
-
-    /// Lower `node`'s low link to `to` where that is lower.
-    fn lower(&mut self, node: N, to: usize) {
-        let low = self.low[&node].min(to);
-        self.low.insert(node, low);
-    }
-
-    fn open(&mut self, node: N, callees: &impl Fn(N) -> Vec<N>) -> Frame<N> {
-        let index = self.index.len();
-        self.index.insert(node, index);
-        self.low.insert(node, index);
-        self.stack.push(node);
-        self.on_stack.insert(node);
-        let callees = callees(node);
-        Frame {
-            node,
-            callees,
-            next: 0,
-        }
-    }
-
-    /// Where `node` is the first of its component on the stack, pop the component.
-    fn close(&mut self, node: N) {
-        if self.low[&node] != self.index[&node] {
-            return;
-        }
-        let at = self
-            .stack
-            .iter()
-            .rposition(|held| *held == node)
-            .expect("on the stack");
-        let mut members = self.stack.split_off(at);
-        members.sort_unstable();
-        let id = self.closed.len();
-        for member in &members {
-            self.on_stack.remove(member);
-            self.of.insert(*member, id);
-        }
-        self.closed.push(members.into());
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn components(edges: &[(u64, u64)], root: u64) -> Vec<Vec<u64>> {
-        let mut search = Search::<Node>::default();
         let callees = |(at, _): Node| {
             let out = edges.iter().filter(|(from, _)| *from == at);
             out.map(|(_, to)| (*to, false)).collect()
         };
-        search.run((root, false), callees);
-        let closed = search.closed.iter();
-        closed
-            .map(|closed| closed.iter().map(|(at, _)| *at).collect())
+        let reached = Reached::from((root, false), callees);
+        let condensation = reached.condensation();
+        (condensation.components())
+            .map(|(_, members)| members.iter().map(|at| reached.key(*at).0).collect())
             .collect()
     }
 

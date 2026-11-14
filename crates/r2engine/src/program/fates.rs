@@ -8,13 +8,14 @@ use r2il::R2ILOp;
 use r2source::{
     CanonicalStorageId, ConventionModel, SourceClosedResult, SourceReadLanes, SourceResultCause,
 };
-use r2ssa::dense::{Csr, DenseId, IdMap};
+use r2ssa::dense::{Csr, DenseId, IdMap, IdSet, Node, Reached};
 use r2ssa::site_boundary::{
     ByteMask, CallEffect, CallEffects, CallerFlow, Counted, LANES, LaneBytes, LaneFate, LaneId,
     Overwrites, RegisterEffect, ResultLanes, SiteBoundary, argument_registers,
 };
 
 use super::analysis::Walked;
+use super::ranks::Ranks;
 use super::requests::SurveyQuery;
 use super::{ProgramInputs, Source, View};
 use crate::body::{Body, BodyBlock, UnresolvedReason};
@@ -326,12 +327,6 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
     // A call two bodies hold (one walk enters the other's tail) is one call, read once.
     let mut seen = BTreeSet::new();
     let mut returned = BTreeSet::new();
-    // A caller's site fates deposit its register effect, so a caller calling it reads it held (D354).
-    for caller in callee_first(&survey, survey.callers_of(callee)) {
-        if let Some(Ok(thumb)) = survey.walked_in(caller) {
-            let _ = db.get::<SiteFates>(&(caller, thumb));
-        }
-    }
     let view = View::new(db, true);
     // A caller under another convention states its sites' fates in its lanes: none is read (D385).
     let convention = |entry: u64| view.convention_at(entry).ok().map(|ruled| ruled.id);
@@ -345,6 +340,10 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
         if !alike(caller) {
             unread = true;
             continue;
+        }
+        // The callers-first read asked each caller already where `N` stays inside `N⁺` (D354).
+        if !db.holds::<SiteFates>(&(caller, thumb)) {
+            db.note_site_fates_in_direct_sites();
         }
         let Some(sites) = (db.get::<SiteFates>(&(caller, thumb)).ok()).and_then(|f| (*f).clone())
         else {
@@ -414,44 +413,6 @@ fn slot_reads<S: Source + 'static>(
     true
 }
 
-/// `callers` (ascending) ordered so each comes after every other one it calls, a cycle broken where
-/// the search enters it: a post-order over the calls among them, `O(E log k)` for `E` calls into them.
-fn callee_first(survey: &super::requests::Survey, callers: &[u64]) -> Vec<u64> {
-    let mut calls = vec![Vec::new(); callers.len()];
-    for (to, called) in callers.iter().enumerate() {
-        for caller in survey.callers_of(*called) {
-            if let Ok(from) = callers.binary_search(caller)
-                && from != to
-            {
-                calls[from].push(to);
-            }
-        }
-    }
-    let mut seen = vec![false; callers.len()];
-    let mut order = Vec::with_capacity(callers.len());
-    // Each caller enters the stack once, and each of its calls is stepped past once.
-    for root in 0..callers.len() {
-        if std::mem::replace(&mut seen[root], true) {
-            continue;
-        }
-        let mut stack = vec![(root, 0usize)];
-        while let Some((at, next)) = stack.last_mut() {
-            match calls[*at].get(*next).copied() {
-                Some(to) => {
-                    *next += 1;
-                    let fresh = !std::mem::replace(&mut seen[to], true);
-                    stack.extend(fresh.then_some((to, 0)));
-                }
-                None => {
-                    order.push(callers[*at]);
-                    stack.pop();
-                }
-            }
-        }
-    }
-    order
-}
-
 /// The loader's calls to `callee` a cited row states, each read joined into `lanes` (D237, D240):
 /// `O(entries)`.
 fn loader_reads(container: &super::Container, callee: u64, lanes: &mut [JoinedLane; LANES]) -> u32 {
@@ -513,19 +474,28 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ComponentForwarding {
     const NAME: &'static str = "forwarded";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: Tarjan's search over the callers a lane is returned to, `O(V + E)` over what it
-    /// reaches, then each component's fixpoint, `O(V + E × height)`; every member is deposited.
+    /// Work: r2ssa's one condensation of the callers a lane is returned to, `O(V + E)` over what
+    /// it reaches, then each component's fixpoint, `O(V + E × height)`; every member is deposited.
     fn compute(db: &Db<ProgramInputs<S>>, &root: &u64) -> Self::Value {
         let solved = |node: u64| {
             (db.held::<ComponentForwarding>(&node).ok().flatten()).filter(|_| node != root)
         };
-        let mut search = super::resolved::Search::default();
-        search.run(root, |node| match solved(node) {
+        let asked = CallersFirst::read(db, root);
+        let reached = Reached::from(root, |node| match solved(node) {
             Some(_) => Vec::new(),
             None => callers_returned_to(db, node),
         });
+        let condensation = reached.condensation();
+        db.note_condensed(condensation.visits());
+        if let Some(asked) = asked {
+            let joined = (condensation.components())
+                .flat_map(|(_, members)| members.iter().map(|node| reached.key(*node)));
+            db.note_site_fates_never_joined(asked.never_joined(joined));
+        }
         let mut answers = BTreeMap::new();
-        for members in &search.closed {
+        for (_, members) in condensation.components() {
+            let members = members.iter().map(|node| reached.key(*node));
+            let members = members.collect::<Vec<_>>();
             if members.iter().all(|member| solved(*member).is_some()) {
                 continue;
             }
@@ -533,13 +503,182 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ComponentForwarding {
                 Some(answer) => Some(Option::clone(answer)),
                 None => solved(caller).map(|held| (*held).clone()),
             };
-            for (member, answer) in solve(db, members, outside) {
+            for (member, answer) in solve(db, &members, outside) {
                 answers.insert(member, answer);
             }
         }
         let own = answers.remove(&root).flatten();
         db.deposit::<ComponentForwarding>(answers);
         own
+    }
+}
+
+/// The callers `ComponentForwarding(root)` joins, their site fates asked in `CallRanks` order
+/// before `DirectSites` joins them (doc/adr-result-side.md, "Relift order").
+struct CallersFirst<'a> {
+    ranks: &'a Ranks,
+    survey: &'a super::requests::Survey,
+    root: u64,
+    /// `N`: the bodies a lane is returned to, or the root.
+    admitted: IdSet<Node>,
+    pushed: IdSet<Node>,
+    popped: IdSet<Node>,
+    /// Each admitted body's callers not yet popped.
+    pending: IdMap<Node, u32>,
+    /// Each pushed body's admitted callees still counting it.
+    waiting: IdMap<Node, Vec<u64>>,
+    /// Admitted bodies whose callers are all popped, for `DirectSites` to join.
+    ready: Vec<u64>,
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, u32, u64)>>,
+}
+
+impl CallersFirst<'_> {
+    /// The bodies asked, or none where the survey has no ranks. Work: `O(|A| log |A| + Σ deg)`: each
+    /// body is pushed, popped and admitted once, and each admission asks one held `DirectSites`.
+    fn read<S: Source + 'static>(db: &Db<ProgramInputs<S>>, root: u64) -> Option<Asked> {
+        let ranks = (*db.get::<super::ranks::CallRanks>(&()).ok()?).clone()?;
+        let survey = db.get::<SurveyQuery>(&()).ok()?;
+        let survey = Arc::clone(&survey.as_ref().as_ref().ok()?.0);
+        let mut read = CallersFirst {
+            ranks: &ranks,
+            survey: &survey,
+            root,
+            admitted: IdSet::new(ranks.len()),
+            pushed: IdSet::new(ranks.len()),
+            popped: IdSet::new(ranks.len()),
+            pending: IdMap::new(ranks.len()),
+            waiting: IdMap::new(ranks.len()),
+            ready: Vec::new(),
+            heap: std::collections::BinaryHeap::new(),
+        };
+        read.admit(db, root);
+        read.resolve(db);
+        // Each body enters the heap once (`pushed`), so the loop ends after `|A|` pops.
+        while let Some(std::cmp::Reverse((_, _, body))) = read.heap.pop() {
+            read.pop(db, body);
+            read.resolve(db);
+        }
+        let asked = read.popped.iter().collect();
+        Some(Asked {
+            asked,
+            ranks: Arc::clone(&ranks),
+            survey: Arc::clone(&survey),
+        })
+    }
+
+    /// `body`'s site fates asked (a lift where a deep read lifted it first), then each admitted
+    /// callee whose last caller it was resolved.
+    fn pop<S: Source + 'static>(&mut self, db: &Db<ProgramInputs<S>>, body: u64) {
+        let Some(node) = self.ranks.node(body) else {
+            return;
+        };
+        self.popped.insert(node);
+        if let Some(Ok(thumb)) = self.survey.walked_in(body) {
+            if db.holds::<RegisterEffects>(&(body, thumb)) && !db.holds::<SiteFates>(&(body, thumb))
+            {
+                db.note_site_fates_relifted();
+            }
+            let _ = db.get::<SiteFates>(&(body, thumb));
+        }
+        for callee in self.waiting.remove(node).unwrap_or_default() {
+            let Some(at) = self.ranks.node(callee) else {
+                continue;
+            };
+            let left = self.pending.get_or_insert_with(at, || 0);
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                self.ready.push(callee);
+            }
+        }
+    }
+
+    /// Each ready body's `DirectSites` joins its callers' held fates, and each caller it returns a
+    /// lane to is admitted; ends since a body is admitted, so made ready, once.
+    fn resolve<S: Source + 'static>(&mut self, db: &Db<ProgramInputs<S>>) {
+        while let Some(callee) = self.ready.pop() {
+            let direct = db.get::<DirectSites>(&callee).ok();
+            let Some(direct) = direct.as_deref().and_then(Option::as_ref) else {
+                continue;
+            };
+            let callers = direct.returned.iter().map(|returned| returned.caller);
+            for caller in callers.collect::<BTreeSet<_>>() {
+                self.admit(db, caller);
+            }
+        }
+    }
+
+    /// `entry` admitted and its callers `DirectSites` reads pushed; one whose forwarding is held
+    /// stops, as the condensation does.
+    fn admit<S: Source + 'static>(&mut self, db: &Db<ProgramInputs<S>>, entry: u64) {
+        let Some(node) = self.ranks.node(entry) else {
+            return;
+        };
+        if !self.admitted.insert(node) {
+            return;
+        }
+        if entry != self.root
+            && db
+                .held::<ComponentForwarding>(&entry)
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            return;
+        }
+        let view = View::new(db, true);
+        let convention = |entry: u64| view.convention_at(entry).ok().map(|ruled| ruled.id);
+        // `DirectSites` reads only a walked caller under the callee's convention (D385).
+        let own = convention(entry);
+        let read = |caller: &u64| {
+            matches!(self.survey.walked_in(*caller), Some(Ok(_)))
+                && own.is_some()
+                && convention(*caller) == own
+        };
+        let mut left = 0u32;
+        for &caller in self
+            .survey
+            .callers_of(entry)
+            .iter()
+            .filter(|caller| read(caller))
+        {
+            let Some(at) = self.ranks.node(caller) else {
+                continue;
+            };
+            if self.popped.contains(at) {
+                continue;
+            }
+            left += 1;
+            self.waiting.get_or_insert_with(at, Vec::new).push(entry);
+            if self.pushed.insert(at) {
+                self.heap.push(std::cmp::Reverse(self.ranks.order(at)));
+            }
+        }
+        self.pending.insert(node, left);
+        if left == 0 {
+            self.ready.push(entry);
+        }
+    }
+}
+
+/// The bodies one callers-first read asked.
+struct Asked {
+    ranks: Arc<Ranks>,
+    survey: Arc<super::requests::Survey>,
+    asked: Vec<Node>,
+}
+
+impl Asked {
+    /// How many asked bodies call none of `joined`: `|A⁺ \ A|`, the speculation's waste. `O(Σ deg)`.
+    fn never_joined(&self, joined: impl Iterator<Item = u64>) -> u64 {
+        let mut callers = IdSet::new(self.ranks.len());
+        for member in joined {
+            let nodes = self.survey.callers_of(member).iter();
+            for node in nodes.filter_map(|caller| self.ranks.node(*caller)) {
+                callers.insert(node);
+            }
+        }
+        let never = self.asked.iter().filter(|node| !callers.contains(**node));
+        never.count() as u64
     }
 }
 
@@ -1156,7 +1295,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
     const RETENTION: Retention = Retention::Held;
 
     /// Work: the body's own register effect, deposited, then one backward pass over the body,
-    /// `O((B + E) × lanes)` within its budget, and one held effect and `KeptAcross` per callee.
+    /// `O((B + E) × lanes)` within its budget, and one held effect and `Summary` per callee.
     fn compute(db: &Db<ProgramInputs<S>>, &(caller, thumb): &(u64, bool)) -> Self::Value {
         read_body(db, (caller, thumb), |read| {
             // Deposited before any deep read, so the row depends on what a computed row reads (ADR).
@@ -1207,27 +1346,122 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for RegisterEffects {
     }
 }
 
-/// What a call to a body keeps: its register effect closed over each pending callee's own answer
-/// (D363). A cycle, a callee with no row or another machine keeps nothing. `O(p × r / 64)` per row.
-pub(super) struct KeptAcross;
+/// What a caller reads of a body at the lift grade (doc/adr-resolved-bodies.md, "Summaries"; D413).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LiftSummary {
+    /// What a call to it leaves as found: the greatest fixpoint over its pending callees.
+    pub(super) kept: r2ssa::site_boundary::Kept,
+    /// Each result register with the low bytes the body may read of it before writing it (D372).
+    pub(super) reads: r2ssa::site_boundary::LaneReads,
+}
 
-impl<S: Source + 'static> Query<ProgramInputs<S>> for KeptAcross {
+/// One body's lift-grade summary, solved with every member of its component of the pending-callee
+/// graph and each member deposited. A callee with no row or another machine keeps nothing.
+pub(super) struct Summary;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for Summary {
     type Key = (u64, bool);
-    type Value = Option<r2ssa::site_boundary::Kept>;
-    const NAME: &'static str = "kept-across";
+    type Value = Option<LiftSummary>;
+    const NAME: &'static str = "summary";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: one row, then each pending callee's answer until nothing is left; worst case the
-    /// bodies a return path reaches, each lifted once.
-    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
-        let effect = db.get::<RegisterEffects>(&(entry, thumb)).ok()?;
-        let effect = (*effect).as_ref()?;
+    /// Work: r2ssa's one condensation of the pending callees reached while a register may still be
+    /// kept, `O(V + E)` and one row each; then each component descends from `unwritten`, `O(E × r)`.
+    fn compute(db: &Db<ProgramInputs<S>>, &root: &(u64, bool)) -> Self::Value {
         let view = View::new(db, true);
-        Some(effect.closed(|callee| {
-            let key = (callee, view.thumb_at(callee));
-            (*db.get::<KeptAcross>(&key).ok()?).clone()
-        }))
+        let row = |key: (u64, bool)| {
+            (db.get::<RegisterEffects>(&key).ok()).and_then(|row| (*row).clone())
+        };
+        let key_of = |callee: u64| (callee, view.thumb_at(callee));
+        let held =
+            |key: (u64, bool)| (db.held::<Summary>(&key).ok().flatten()).filter(|_| key != root);
+        // A body's callees past the one that empties the bound keep nothing it could keep.
+        let pending = |key: (u64, bool)| -> Vec<(u64, bool)> {
+            let Some(effect) = row(key) else {
+                return Vec::new();
+            };
+            let mut asked = Vec::new();
+            effect.closed(|callee| {
+                asked.push(key_of(callee));
+                row(key_of(callee)).map(|callee| callee.unwritten_kept())
+            });
+            asked
+        };
+        let reached = Reached::from(root, |node| match held(node) {
+            Some(_) => Vec::new(),
+            None => pending(node),
+        });
+        let condensation = reached.condensation();
+        db.note_condensed(condensation.visits());
+        let mut answers = BTreeMap::new();
+        for (_, members) in condensation.components() {
+            let members = members.iter().map(|node| reached.key(*node));
+            let members = members.collect::<Vec<_>>();
+            if members.iter().all(|member| held(*member).is_some()) {
+                continue;
+            }
+            let outside = |callee: (u64, bool)| match answers.get(&callee) {
+                Some(answer) => Option::clone(answer),
+                None => held(callee).and_then(|held| (*held).clone()),
+            };
+            let solved = greatest_kept(&members, &row, &key_of, outside);
+            answers.extend(solved);
+        }
+        let own = answers.remove(&root).flatten();
+        db.deposit::<Summary>(answers);
+        own
     }
+}
+
+/// One component's kept sets, descended from `unwritten` to the greatest fixpoint: `O(k + E × r)`
+/// closings, each set shrinking at most `r` times (doc/adr-resolved-bodies.md, "The lift grade").
+fn greatest_kept(
+    members: &[(u64, bool)],
+    row: &impl Fn((u64, bool)) -> Option<RegisterEffect>,
+    key_of: &impl Fn(u64) -> (u64, bool),
+    outside: impl Fn((u64, bool)) -> Option<LiftSummary>,
+) -> Vec<((u64, bool), Option<LiftSummary>)> {
+    let rows = members
+        .iter()
+        .map(|member| row(*member))
+        .collect::<Vec<_>>();
+    let inside = |callee: u64| members.binary_search(&key_of(callee)).ok();
+    let mut kept = (rows.iter())
+        .map(|row| row.as_ref().map(RegisterEffect::unwritten_kept))
+        .collect::<Vec<_>>();
+    let mut readers = vec![Vec::new(); members.len()];
+    for (at, row) in rows.iter().enumerate() {
+        let pending = row.iter().flat_map(|row| row.pending.iter());
+        for callee in pending.filter_map(|callee| inside(*callee)) {
+            readers[callee].push(at);
+        }
+    }
+    let mut queued = vec![true; members.len()];
+    let mut queue = (0..members.len()).rev().collect::<Vec<_>>();
+    while let Some(at) = queue.pop() {
+        queued[at] = false;
+        let Some(row) = &rows[at] else { continue };
+        let next = row.closed(|callee| match inside(callee) {
+            Some(member) => kept[member].clone(),
+            None => outside(key_of(callee)).map(|summary| summary.kept),
+        });
+        if kept[at].as_ref() == Some(&next) {
+            continue;
+        }
+        kept[at] = Some(next);
+        for &reader in &readers[at] {
+            if !std::mem::replace(&mut queued[reader], true) {
+                queue.push(reader);
+            }
+        }
+    }
+    let summaries = (rows.iter().zip(kept)).map(|(row, kept)| {
+        Some(LiftSummary {
+            kept: kept?,
+            reads: row.as_ref()?.register_reads(),
+        })
+    });
+    members.iter().copied().zip(summaries).collect()
 }
 
 /// One walked body as the site fates and the register effect read it: the one prefix both share.
@@ -1300,11 +1534,13 @@ fn effect_on_flow<S: Source + 'static>(
     (entry, body, flow): (u64, &Body, &CallerFlow<'_, BodyBlock>),
 ) -> Option<RegisterEffect> {
     let effects = reading.effects(body);
-    // Only a declared `Never` with no premise proves a call never returns; a derived one is a bound.
+    // Only a declared `Never` proves a call never returns here; an effect carries no premise.
     let never = |block: usize, op: usize| {
         use crate::discovery::Walker;
         let declared = |callee| walker.declared(callee);
-        (effects.callee_at(block, op).and_then(declared)).is_some_and(|said| said.proves_never())
+        let said = effects.callee_at(block, op).and_then(declared);
+        let proves = said.as_ref().and_then(|said| said.never()?.proves());
+        proves.is_some_and(std::collections::BTreeSet::is_empty)
     };
     // A convention whose call effect is refused keeps nothing: every register is clobbered.
     let model = target
@@ -1413,7 +1649,9 @@ pub(super) fn import_reads<S: Source + 'static>(
     let key = (CalleeKey::Import(ImportId(callee)), World::Open);
     let boundary = db.get::<CallBoundary>(&key).ok()?;
     match boundary.as_ref() {
-        Some(CallBoundary::Import { reads }) => reads.as_ref().map(|reads| reads.registers.clone()),
+        Some(CallBoundary::Import { reads }) => {
+            reads.as_ref().map(|reads| reads.registers().to_vec())
+        }
         _ => None,
     }
 }
@@ -1532,7 +1770,7 @@ impl<S: Source + 'static> Reading<'_, S> {
     /// literal the printf reader parses whole and finds no floating conversion in.
     fn unfloated_at(&self, address: u64, format: &Formatted) -> Option<CallEffect> {
         let text = crate::native::immutable_text_at(self.view, address)?;
-        let consumed = r2ssa::printf::printf_consumed_arguments(&text).ok()?;
+        let consumed = r2abi::format::printf_consumed_arguments(&text).ok()?;
         (!consumed.any_floating).then_some(format.unfloated)
     }
 
@@ -1566,12 +1804,9 @@ impl<S: Source + 'static> Reading<'_, S> {
                 _ => None,
             };
             let formatted = (reads.as_ref())
-                .and_then(|reads| Some((reads, reads.format.as_ref()?)))
+                .and_then(|reads| Some((reads, reads.format()?)))
                 .map(|(reads, format)| {
-                    let mut unfloated = reads.clone();
-                    unfloated
-                        .registers
-                        .retain(|read| !format.floats.contains(read));
+                    let unfloated = reads.without_format_floats();
                     let (takes, counted, reads) = self.import_takes(Some(unfloated));
                     Formatted {
                         register: format.format,
@@ -1607,8 +1842,8 @@ impl<S: Source + 'static> Reading<'_, S> {
                 takes: row.takes,
                 counted: None,
                 overwrites: Overwrites::Bytes(row.overwrites),
-                kept: (self.db.get::<KeptAcross>(&key).ok())
-                    .and_then(|kept| (*kept).as_ref().map(|kept| kept.kept_lanes(self.lanes)))
+                kept: (self.db.get::<Summary>(&key).ok())
+                    .and_then(|summary| (*summary).as_ref().map(|s| s.kept.kept_lanes(self.lanes)))
                     .unwrap_or_default(),
                 reads: LaneBytes::default(),
             },
@@ -1638,16 +1873,16 @@ impl<S: Source + 'static> Reading<'_, S> {
                 && a.offset < b.offset + u64::from(b.size)
                 && b.offset < a.offset + u64::from(a.size)
         };
-        let Some(register) = reads.count_register else {
-            let fixed = reads.stated && reads.format.is_none();
-            let certain = (reads.registers.iter())
+        let Some(register) = reads.count_register() else {
+            let fixed = reads.bound().is_some() && reads.format().is_none();
+            let certain = (reads.registers().iter())
                 .filter(|read| fixed && floats.iter().any(|float| overlaps(read, float)))
                 .copied()
                 .collect::<Vec<_>>();
-            let takes = LaneBytes::covered_by(self.lanes, &reads.registers);
+            let takes = LaneBytes::covered_by(self.lanes, reads.registers());
             return (takes, None, LaneBytes::covered_by(self.lanes, &certain));
         };
-        let mut integers = (reads.registers.iter())
+        let mut integers = (reads.registers().iter())
             .filter(|read| !floats.iter().any(|float| overlaps(read, float)))
             .copied()
             .collect::<Vec<_>>();

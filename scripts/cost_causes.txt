@@ -1,3 +1,9 @@
 # A counted rise past its budget (census.py `time` allocations, `count` instructions) stands only
 # on one line here for that exact base count: metric | case | base count | head ceiling | Dnnn | cause.
 # The base count binds the line to one parent, so it excuses no later rise (ROADMAP D401).
+instructions | 0pack pdd @ 0x0062ecf0 | 17307492621 | 18345799614 | D406 | rd5 over rd4, bisected in release on Mac (13.26 to 14.03 G): rd5-proof +0.41 G (D406's cited throw rows prove 21 calls noreturn that only an uncited row stated; obligations equal), rd5-deny +0.14 G (D411/D426: an uncited row bounds no reads; 6320 to 6374 obligations, 976 to 1018 residual), rd5-dispatch +0.08 G (D409's format fold, D367 Stage A), D415's WTO solve +0.12 G after its search resumes past each cell (it read n^2/128 words before, +1.44 G)
+instructions | pumasim pdd @ 0x0023fdf0 | 35758995278 | 37272035166 | D415 | rd5 over rd4, bisected in release on Mac (19.83 to 20.45 G): D415/D370/D373/D408 +0.39 G (value ranges on the WTO driver with per-block guard environments), rd5-deny +0.18 G (D411), rd5-dispatch +0.16 G (D409), rd5-summaries +0.11 G (D413's lift grade), rd5-recovery -0.24 G (D289, D365)
+allocations | 0pack pdd @ 0x0058e3d0 | 11120764 | 11828387 | D406 | rd5 over rd4, not bisected by allocation: the merges the instruction line names move 0pack's output (D406's cited throw rows, D411's unbounded uncited reads)
+allocations | 0pack pdd @ 0x0062ecf0 | 12208424 | 12833183 | D406 | rd5 over rd4, not bisected by allocation: as 0x0058e3d0; the instruction line has the bisection
+allocations | pumasim pdd @ 0x0023fdf0 | 27702251 | 28466381 | D415 | rd5 over rd4, not bisected by allocation: the merges the instruction line names (D415/D370's held guard environments, D411)
+allocations | pumasim session: pdd of 50 functions | 151885701 | 155083992 | D415 | rd5 over rd4: as pumasim 0x0023fdf0, over 50 functions (1.0211)

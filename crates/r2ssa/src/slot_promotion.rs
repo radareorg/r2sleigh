@@ -14,7 +14,7 @@ use crate::frame_address::Definitions;
 use crate::function::{EditPlan, PhiNode, SSAFunction, ShapeEdit};
 use crate::machine_context::SourceMachineContext;
 use crate::op::SSAOp;
-use crate::semantic::{Access, FramePoints, Walked, walk};
+use crate::semantic::{Access, Accesses, FramePoints, FrameWalk, PlaceBits, PlaceFacts, walk};
 use crate::value_table::{Minting, VarId};
 use crate::var::SSAVar;
 
@@ -27,44 +27,32 @@ pub fn promoted_slot_offset(storage: &crate::CanonicalStorageId) -> Option<i64> 
     promoted.then_some(storage.offset as i64)
 }
 
-/// Promote every eligible frame place of `func`, the loads and stores rewritten; the frame's
-/// points, from the one escape walk (D290), are what every later reader of escape asks.
-pub(crate) fn promote(
+/// Promote every eligible frame place of `func`; the points of the one escape walk (D290) answer
+/// every later reader of escape, and the walk is held for a restatement to decide again (D365).
+pub(crate) fn promote<C: crate::SsaWorkControl + ?Sized>(
     func: &mut SSAFunction,
     machine: &SourceMachineContext,
     calls_refund_stack: bool,
-) -> (IdSet<OpId>, FramePoints) {
+    control: &C,
+) -> (IdSet<OpId>, FramePoints, FrameWalk) {
     let defs = Definitions::of(func);
     if let Some(exhausted) = defs.exhausted() {
         func.note_exhausted(exhausted);
     }
-    let mut decided = BTreeMap::new();
-    let (walked, promotable) = walk(func, &defs, machine, calls_refund_stack, |walked| {
-        decided.clear();
-        // An entry block something branches back to runs its prologue again: no place is fixed.
-        if walked.points.unplaced() || func.cfg().has_entry_edge() {
-            return BTreeMap::new();
-        }
-        let saves = saves(func, &defs, &walked.accesses, machine);
-        eligible(func, &defs, walked, (&saves, &mut decided), machine)
-    });
-    let Walked {
-        mut points,
-        accesses,
-        ..
-    } = walked;
-    points.rewrite_decides = crate::semantic::Places::new(decided);
+    let places = |accesses: &Accesses| place_facts(func, &defs, accesses, machine);
+    let (walk, points, promotable) =
+        walk(func, (&defs, machine), calls_refund_stack, places, control);
     if points.unplaced() {
         r2il::refusal_evidence!(
             "promote-stack-slot",
             "{:#x}: a frame address no offset places reaches an access or leaves, so nothing is promoted",
             func.entry
         );
-        return (IdSet::default(), points);
+        return (IdSet::default(), points, walk);
     }
-    if promotable.is_empty() {
-        return (IdSet::default(), points);
-    }
+    let Some(accesses) = walk.accesses().filter(|_| !promotable.is_empty()) else {
+        return (IdSet::default(), points, walk);
+    };
     r2il::refusal_evidence!(
         "promote-stack-slot",
         "{:#x}: {} slots promoted out of memory: {:?}",
@@ -72,8 +60,8 @@ pub(crate) fn promote(
         promotable.len(),
         promotable.keys().collect::<Vec<_>>()
     );
-    points.promoted = promotable.keys().copied().collect();
-    (rename(func, &accesses, &promotable), points)
+    let ops = rename(func, accesses, &promotable);
+    (ops, points, walk)
 }
 
 /// The places a register lane the convention preserves is saved into at its entry value
@@ -104,16 +92,15 @@ fn saves(
         .collect()
 }
 
-/// Each place a variable may stand for, with its one width.
-fn eligible(
+/// What keeps each accessed place in memory whatever a callee states: the caller owns it, its
+/// accesses differ in width, another overlaps it, it is a save read back, or a declaration names it.
+fn place_facts(
     func: &SSAFunction,
     defs: &Definitions,
-    walked: &Walked,
-    (saves, decided): (&BTreeSet<i64>, &mut BTreeMap<i64, u32>),
+    accesses: &Accesses,
     machine: &SourceMachineContext,
-) -> BTreeMap<i64, u32> {
-    let (accesses, points) = (&walked.accesses, &walked.points);
-    let reachable = |place: i64| points.reaches(place, saves);
+) -> PlaceFacts {
+    let saves = saves(func, defs, accesses, machine);
     let declared = machine
         .function_interface()
         .map(|interface| interface.stack_slots().to_vec())
@@ -125,8 +112,8 @@ fn eligible(
                 && offset < slot.offset() + i64::from(slot.size_bytes())
         })
     };
-    let mut promotable = BTreeMap::new();
     let overlapped = overlapped_places(accesses);
+    let mut candidates = BTreeMap::new();
     for (offset, list) in accesses {
         // The caller's storage stays in memory: the return address, stack arguments.
         if !machine.stack_owner(*offset).callee_owned() {
@@ -139,7 +126,6 @@ fn eligible(
         let Some(width) = widths.iter().next().copied().filter(|_| widths.len() == 1) else {
             continue;
         };
-        let overlaps = overlapped.contains(offset);
         let stores = list.iter().filter(|access| access.store).count();
         let read_only_home = stores == 1
             && list.iter().filter(|access| access.store).any(|access| {
@@ -150,28 +136,16 @@ fn eligible(
                     })
                     .unwrap_or(false)
             });
-        let is_declared = declared_covers(*offset, width) && !read_only_home;
-        // A save read back stays in memory: the frame round-trip certificate answers for it.
-        let is_save = saves.contains(offset) && list.iter().any(|access| !access.store);
-        let handed = points.handed().contains(offset);
-        // A call may rewrite its own argument area, so a load after it reads memory (D369).
-        let rewritten = points.rewritten().contains(offset);
-        let reached = reachable(*offset);
-        let otherwise = overlaps || is_save || is_declared || handed || reached;
-        if !otherwise {
-            decided.insert(*offset, width);
-        }
-        if otherwise || rewritten {
-            r2il::refusal_evidence!(
-                "promote-stack-slot",
-                "{:#x}: slot at {offset} stays in memory: overlap {overlaps}, save {is_save}, declared {is_declared}, handed {handed}, rewritten {rewritten}, reached {reached}",
-                func.entry,
-            );
-            continue;
-        }
-        promotable.insert(*offset, width);
+        let bits = PlaceBits {
+            width,
+            overlaps: overlapped.contains(offset),
+            // A save read back stays in memory: the frame round-trip certificate answers for it.
+            save: saves.contains(offset) && list.iter().any(|access| !access.store),
+            declared: declared_covers(*offset, width) && !read_only_home,
+        };
+        candidates.insert(*offset, bits);
     }
-    promotable
+    PlaceFacts { saves, candidates }
 }
 
 /// One rewrite of a slot's access, found by the walk: a load reads `version`, a store defines it.

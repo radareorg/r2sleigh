@@ -120,9 +120,11 @@ r2engine sets it where all of these hold:
 
 1. Every caller the survey found was walked and lifted, and the reference
    index claims exactly as many calls to the function as were read.
-2. No reference other than a call names the entry: no jump from another
-   function (a tail call), no computed address (`lea`, `adrp`+`add`, a
-   loader write). A jump to a function's own entry is a loop.
+2. No reference other than a call names the entry: no computed address
+   (`lea`, `adrp`+`add`, a loader write), and no jump from another function
+   except a tail branch the survey states (`tail_callers_of`), which
+   `DirectSites` joins as a call: its lanes return to the jumper's callers
+   (D227, D408). A jump to a function's own entry is a loop.
 3. The container states no other entry there: no entry point, initialiser
    or finaliser, and no export (ELF's dynamic table, any non-local Mach-O
    symbol).
@@ -598,6 +600,25 @@ component proves. Components: Tarjan, O(V + E) over the owner edges.
   sets are shown equal over the AArch64 census and a gzdoom sample. Next,
   measured first.
 
+### The lift grade as built (D413, 2026-11-14)
+
+r2engine `Summary`, keyed `(entry, thumb)` and `Held`, is the lift grade of `Summary(f)`. It holds what a caller reads of a body from its lift alone. Its two facts come from the body's `RegisterEffects` row:
+
+- `kept` is the registers a call to the body leaves as found. It is the greatest fixpoint of `kept(f) = unwritten(f) ∩ ⋂ kept(p)` over the pending callees `p`. A callee with no row, a stub or another machine keeps nothing. Soundness: a returning call has finite depth, so by induction on that depth each path keeps what no operation on it writes. The fixpoint is unique, so the order members are asked changes nothing.
+- `reads` lists each result register with the low bytes the body may read before writing it. It is the row's `takes` (D318, inner calls read shallowly). D372's recovered half reads it.
+
+Algorithm:
+
+- D412's condensation runs over the pending callees `Summary(f)` reaches. A body's callees stop at the one that empties `unwritten`, since past it nothing more can be kept. Each component is solved callee first.
+- Each member starts at `unwritten`. It is closed again only when a pending callee inside its component shrinks. A set shrinks at most `r` times for `r` registers, so a component costs `O(k + E × r)` closings. Every member is deposited, and none is entry-dependent.
+- `KeptAcross` is deleted. Its readers, the deep `CallEffect.kept` in `fates.rs` and `Program::kept_at`, read `Summary.kept`.
+
+The cost is what `KeptAcross` lifted. Measured walks: pumasim `aa; pdd @ 0x3b6b20` stays 375, output identical; cold `pdd @ 0x23fdf0` goes 216 to 217, and one residual obligation leaves its proof line.
+
+`reads` reaches a build only through the root's `read_callees`, which reads every direct callee in one round. A statement round (`state_asked`, the owners' `state`) adds none. A bound added in round two would move `BuildKey`'s `lane_reads` and rebuild a kept build. In r2ssa, a call that falls to `CallReads::every_location` at a walked direct callee takes that callee's bound (`CallReads::lanes`) on each result register no argument register overlaps (RAX beside the count register; an argument's width stays its interface's). `register_read_bytes` then reads only those low bytes. Gate 4 holds: `a_cycles_kept_registers_are_one_answer_whichever_member_is_asked_first` renders a pair with unequal kept sets in three orders, byte-identical. With no row, an indirect call or an import, the register is read whole.
+
+Deviation from the callee-summaries design: the summary is r2engine's `LiftSummary`, not an extension of `PreparedCalleeSummary`. That type is built from a sealed SSA artifact (build grade), so carrying the lift grade on it would build every callee. `reads` is the shallow row's `takes`, not a least fixpoint over callee reads. A deeper `reads` needs r2ssa to state, at each call, the lane bytes still held from entry.
+
 ### Calls through a table (ROADMAP P5)
 
 A call is not a branch: its targets are callees, not successors, so a fetched call table never reaches
@@ -691,3 +712,9 @@ Tarjan, O(V + E) over the owner edges the demand names, each component deposited
 - Proof by sweep: `aa; aflj` byte-identical between the parent and this head on 295 radare2 ELF test binaries (libc-2.32.so, pumasim and bash among them) and the 24 DecBench O2 executables, and the four timed `pdd`. The test decompiles one nested switch with and without a 40-diamond arm on no path to a dispatch, against the same switch with no later round: the arm costs the same SSA work in both (13415 units), where the parent's whole-body check sealed it twice (26670).
 - Cost, Mac release, instructions retired, median of 3, master 6fd93a0d2, a control asking no later round, the parent, this head: pumasim `aa; pdd @ 0x3b6b20` 70.82, 71.24, 74.36, 72.98 G (+3.05% on master), peak 190.8, 196.3, 205.6, 196.3 MB. The rounds cost 1.74 G: the check about 0.96 G, the region seals about 0.44 G, the rounds' lift about 0.3 G. `0x3051e0` alone is about 0.68 G: its cut is 283 of 323 blocks, and its round-1 tables `0x306704` and `0x307419` stop reading as tables once its later arms enter their region, so the check drops its rounds. Checking only the later tables would keep them (its two later tables read the same in the check's trace; not built), and predicting the drop from an entered region would move the four gnulib bodies and `0x385ef0`, which the earlier probe found entered and holding (not rerun on this head). The seal itself is the next lever (D374).
 - A walk continued through `walk_reading`'s rounds (one `Lifting` for `Walked`) saves 0.08 G and is not taken: the listed walk still walks from the start, and on a body with an arm inside a block (D375) the two orders are not shown to agree.
+
+### Stage A as built (2026-11-14, rd5-dispatch; designs/math/dispatch-rounds ruling)
+
+- A round reads its walk's blocks by place once: `Lifting::shape` gives each block's start and successors with no lift copied, and `native::Adjacency` indexes successors and predecessors once for every region of the round. Each region is `Lifting::cut` of its own blocks, cut and sealed one at a time, so a round copies `Σ |region|` lifts where `Lifting::body` copied the whole body. Cost per round `O(I + B + E + Σ region ops)`, where it was `O(I + D·(B + E) + Σ region ops)` plus a copy of every lift. The meter `EngineExecutionControl::round_lifts` counts the lifts `cut` copies. `a_later_round_copies_only_its_regions_lifts` holds it at 6 with 0 or 40 filler diamonds off the path. In a loop (`a_later_round_in_a_loop_copies_its_region_once`) the diamonds lie in the region and add 3 lifts each, once: the bound is an upper bound, `Σ_k |region_k|`, `Θ(K·B)` where every round's region is the loop.
+- `rounds_hold` is unchanged: it seals the cut to every table's dispatch and compares every table. The clean-table skip is not built: its premise, that a seal of an ancestor-closed cut reads the same tables as the whole seal, is a sweep result, not a tested r2ssa property.
+- `later_tables` still decodes the round-1 walk again (D419): continuing `DispatchTables`' walk needs its `Lifting` held in a query value.

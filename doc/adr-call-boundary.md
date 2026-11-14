@@ -1437,3 +1437,33 @@ One "never comes back" fact, with its proof, from `ComesBack` to the C (D379, D3
 - r2dec. `CallPlan.ends` (the site's proof) ends control; `CallPlan.noreturn` (the callee's proof) is the declaration's attribute. Structuring reads a set of proven call instructions, never a callee's name.
 - `afi` prints `noreturn: true` only for a proof and spells a bound as `noreturn: unproven (…)`.
 
+## rd5-proof as built (2026-11-14)
+
+A proving "never" carries its witness (D410, designs/foundation proof-typed).
+
+- r2source. `Citation` has a private field and four mints, each from its owner's statement: `of(&LibraryRow)` (a cited row), `debug_info(&Declarations, entry)` (an uncontested DWARF declaration), `interrupt(kernel, arch, vector)` (r2abi's interrupt document) and `runtime(name)` (the Go model). `Never`'s fields are private. `cited(Citation)` (the Go model's carrying `GoRuntime`) and `composed(ends)` prove; `uncited()` and `unreached()` are bounds; `assuming` only adds premises. A struct literal outside r2source fails to compile (doctest `E0451`).
+- One predicate: `Never::proves() -> Option<&premises>`. `Return::declared` and `Return::proves_never` are deleted; S31b's register effect, which carries no premise, demands an empty set.
+- `composed(ends)` is `None` for no end or a bound end. Discovery builds each composed body callee first inside its fixpoint, from its callees' `Never`s and the walk's proving halts (`Walker::ends` returns them), `O(V + E)`. A halting tail branch now records its `Never` (`Closer::Branch`), which names no exit site.
+- The walk's halting argument and interrupt carry the row's or the document's `Citation` (`body::Halting`, `Program::interrupt_halts`); the three hand `.cited()` checks are gone. `Placement::reads` states a bound only for a cited row.
+
+## rd5-deny as built (2026-11-14, D411)
+
+Every negative fact on the call boundary is a type its owner mints (designs/foundation proof-typed).
+
+- r2ssa `ReadBound`: why a call's listed registers are all it reads. Minted by `cited(Citation)` (r2engine's cited row) or r2ssa's exact arity (a complete fixed site interface, a callee statement of exact arity). `CallReads` fields are private; `cited`, `unbounded` and `every_location` build it, `reads_none_of` needs `bound()`. `SourceCallBoundaryFact::reads_bound` carries the same witness.
+- An uncited row's reads are unbounded: r2engine `declared` states `SourceUnboundedReads::UncitedRow` on its interface. The call keeps the declared contract; `CallReads::exact` and the callee statement read every location. An arity floor was rejected: it dropped the site contract, so an uncited variadic call lost its count gap.
+- `StackWrites` is opaque. `within(spans, Transfers)` takes the frame walk's witness that each operation of each reached block went through `SSAOp::transfer`, a match with no wildcard arm. r2engine hands the minted value on. A cycle member's first assumption is `cycle_seed()` (no write); a risen one is its read's minted value.
+- r2il `Reads` and `Cancelled` have private fields; `reads_of` alone mints them.
+- `SummaryArgEffect.assumed` is gone: an argument handed to an undescribed call keeps an empty entry, which counts toward arity and proves no effect.
+- The matrix's columns are `r2source::NegativeFact`, each carried by a `Negative` type; Dylint `UNPROVEN_NEGATIVE` denies a new public negative bool.
+
+## D409 as built (2026-11-14, rd5-dispatch)
+
+A cited printf `...` call bounds its stack by the operands its own format counts.
+
+- r2abi `format` owns the format model (C17 7.21.6.1, POSIX `%n$`, glibc `%m`), moved from r2ssa `printf.rs`. It also names a `long double` operand (`L`, glibc `ll` and `q` on a floating conversion) and a positional gap (`gapped`).
+- r2source `OwnedFunctionImage::immutable_literals` states which captured literals no write reaches. r2engine lists each one whose text and terminator are mapped read-only, untouched by the loader (`immutable_text_at`) and by the body's own stores.
+- r2ssa `SourceMachineContext::bind_format_tails` folds, per block in one forward pass (`BlockOrigins`), the format register of each variadic site whose format rule is the declaration's. A cited `Tail::Format { Printf }` row is the only source of that rule. The site keeps what its read-only literal consumes. `call_reads` places the fixed parameters and one pointer-wide slot per operand (C17 6.5.2.2p7) with `place::place`, and bounds `stack` and `writes` to that area. `registers` and `stated` stay the every-location default.
+- Refused, so the stack stays unbounded: a body-proven format, a format not in a register, a fold through a merge or another block, writable text, an unparsed conversion, `long double`, a positional gap, more than 64 operands, a 32-bit target, Apple arm64's stacked tail, and fixed parameters `place` does not put where the declaration does.
+- Open (D421): r2engine `fates::formatted_sites` folds the same site's format again, with the convention's call effect and a seal fallback.
+- Tests (`call_boundary`): `a_printf_whose_format_counts_its_tail_leaves_the_callers_slot_alone` (aarch64 clang -O0 spill, values.c `main`) and `a_printf_whose_format_counts_its_tail_leaves_a_pushed_slot_alone` (x86-64 `push rax`, hashes `main`) fail on the parent. Writable text, `%Lf` and a ten-operand tail over the slot keep the reload, as does Apple's stacked tail (`apple::a_mach_o_printf_s_stacked_tail_bounds_no_stack_by_its_format`, which another rule also keeps). The late count in `boundaries.rs` debug-asserts that it agrees with the block's fold.

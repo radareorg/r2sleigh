@@ -128,17 +128,18 @@ const RECURSES: &[u8] = &[
     0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1018 padding
 ];
 
-/// `rec` writes no rsi, but its returning path calls itself: a cycle keeps nothing, so the
-/// caller's rsi past the call stays a residual (D363, default-deny).
+/// `rec` writes neither rsi nor rax and its returning path calls only itself: the greatest fixpoint
+/// keeps both (D413), where the parent kept nothing across a cycle and rsi was a residual.
 #[test]
-fn a_callee_that_calls_itself_on_a_returning_path_keeps_nothing() {
+fn a_callee_that_calls_itself_on_a_returning_path_keeps_what_it_never_writes() {
     let functions = [("rec", BASE, 0x0a), ("root", BASE + 0x10, 0x08)];
     let mut open = OpenProgram::of(Literal::of_code(RECURSES, &functions));
     let text = rendered(&mut open, BASE + 0x10);
     assert!(
-        text.contains("never assigned, read as residuals (RSI"),
+        text.contains("r2sleigh_store_u32((void*)(uint64_t)arg1,"),
         "{text}"
     );
+    assert!(text.contains("read as residuals (RAX_0)"), "{text}");
     assert_eq!(open.analysis_stats().defects, 0);
 }
 
@@ -174,5 +175,57 @@ fn a_reach_promotion_never_asked_keeps_the_build() {
     let stats = open.analysis_stats();
     // Comparing every reach the key holds built `middle` twice.
     assert_eq!(stats.rebuilt, 0, "{stats:?}");
+    assert_eq!(stats.defects, 0, "{stats:?}");
+}
+
+/// `forwards`' build is kept against `frees`' statement, so its second recovery borrows the static
+/// phases its first collected: one prefix per build and per seal, 9 on the parent (D289).
+#[test]
+fn a_kept_build_collects_its_static_phases_once() {
+    let mut open = OpenProgram::of(Literal::plt_wrapped("free", &FORWARDS));
+    let _ = rendered(&mut open, ROOT);
+    let stats = open.analysis_stats();
+    assert_eq!(stats.rebuilt, 0, "{stats:?}");
+    assert_eq!(stats.static_prefixes, 8, "{stats:?}");
+    assert_eq!(stats.defects, 0, "{stats:?}");
+}
+
+/// `clear` as above; `middle`: `sub rsp, 0x18; lea rdi, [rsp + 8]; mov [0x3000], rdi; call clear;
+/// add rsp, 0x18; ret`; the root: `call middle; mov [rsi], eax; ret`.
+const HANDS_A_SLOT_UPWARD: &[u8] = &[
+    0xc7, 0x07, 0x00, 0x00, 0x00, 0x00, // 1000 mov dword [rdi], 0
+    0x31, 0xff, // 1006 xor edi, edi
+    0xff, 0xd6, // 1008 call rsi
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 100a mov eax, 7
+    0xc3, // 100f ret
+    0x48, 0x83, 0xec, 0x18, // 1010 sub rsp, 0x18
+    0x48, 0x8d, 0x7c, 0x24, 0x08, // 1014 lea rdi, [rsp + 8]
+    0x48, 0x89, 0x3c, 0x25, 0x00, 0x30, 0x00, 0x00, // 1019 mov [0x3000], rdi
+    0xe8, 0xda, 0xff, 0xff, 0xff, // 1021 call 0x1000
+    0x48, 0x83, 0xc4, 0x18, // 1026 add rsp, 0x18
+    0xc3, // 102a ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 102b padding
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1030 call 0x1010
+    0x89, 0x06, // 1035 mov [rsi], eax
+    0xc3, // 1037 ret
+];
+
+/// `middle`'s slot address reaches `clear` and memory, so it escapes whatever `clear` states: the
+/// build is kept with no propagation (D365 rule 2), where the parent built it twice.
+#[test]
+fn a_reach_that_moves_no_decision_keeps_the_build() {
+    let functions = [
+        ("clear", BASE, 0x10),
+        ("middle", BASE + 0x10, 0x1b),
+        ("root", BASE + 0x30, 0x08),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(HANDS_A_SLOT_UPWARD, &functions));
+    let text = rendered(&mut open, BASE + 0x30);
+    assert!(text.contains("= middle(arg0, arg1);"), "{text}");
+    let stats = open.analysis_stats();
+    assert_eq!(stats.rebuilt, 0, "{stats:?}");
+    // Built again, `middle` walks 13 more values (47); the restatement decides its 1 sink point.
+    assert_eq!(stats.frame_walk_steps, 34, "{stats:?}");
+    assert_eq!(stats.frame_decision_steps, 3, "{stats:?}");
     assert_eq!(stats.defects, 0, "{stats:?}");
 }

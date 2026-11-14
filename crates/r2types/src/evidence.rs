@@ -101,8 +101,8 @@ impl Identity {
     }
 }
 
-/// The entry value each value is on every path (itself, a copy, a merge of only it), once per
-/// function: a worklist where each value only descends `Top`, `Entry`, `Bottom`. O(insts + inputs).
+/// The entry value each value is on every path, once per function: a worklist where each value
+/// only descends `Top`, `Entry`, `Bottom` and requeues its readers. O(insts + inputs).
 fn entry_identities(
     graph: &r2ssa::SsaGraph,
     entries: &r2ssa::dense::IdSet<r2ssa::ValueId>,
@@ -122,15 +122,10 @@ fn entry_identities(
             _ => Identity::Bottom,
         }
     });
-    // The copies and merges reading each value, so a lowered value requeues only them.
-    let mut readers = IdVec::from_fn(graph.values.len(), |_: r2ssa::ValueId| Vec::new());
-    let mut pending = Vec::new();
-    for inst in graph.insts.iter().filter(|inst| transparent(inst)) {
-        for input in graph.inputs(inst.id) {
-            readers[*input].push(inst.id);
-        }
-        pending.push(inst.id);
-    }
+    let mut pending = (graph.insts.iter())
+        .filter(|inst| transparent(inst))
+        .map(|inst| inst.id)
+        .collect::<Vec<_>>();
     while let Some(at) = pending.pop() {
         let Some(inst) = graph.inst(at) else {
             continue;
@@ -150,7 +145,8 @@ fn entry_identities(
         let met = state[output].meet(read);
         if met != state[output] {
             state[output] = met;
-            pending.extend(readers[output].iter().copied());
+            let readers = graph.use_sites(output).iter().map(|site| site.inst);
+            pending.extend(readers.filter(|reader| graph.inst(*reader).is_some_and(transparent)));
         }
     }
     IdVec::from_fn(graph.values.len(), |value| match state[value] {
@@ -1045,6 +1041,65 @@ mod tests {
         );
         assert_eq!(pointee_type_for_width(3), None);
         assert_eq!(pointee_type_for_width(0), None);
+    }
+
+    /// `r1 = SRC; loop { r1 = r1 }; return`, where nothing reads `r1`: the loop's phi and copy are
+    /// dead, and each is the entry `r0` on every path only where `SRC` is `r0` (rescans R5).
+    fn dead_loop_identities(src: r2il::Varnode) -> Vec<Option<bool>> {
+        use r2il::{ArchSpec, R2ILBlock, R2ILOp, RegisterDef, SpaceId, Varnode};
+        let reg = |offset, size| Varnode::new(SpaceId::Register, offset, size);
+        let mut arch = ArchSpec::new("dead-loop");
+        for (name, offset, size) in [("r0", 0, 8), ("r1", 8, 8), ("c", 32, 1), ("pc", 0x80, 8)] {
+            arch.add_register(RegisterDef::new(name, offset, size));
+        }
+        let mut entry = R2ILBlock::new(0x1000, 4);
+        entry.push(R2ILOp::Copy {
+            dst: reg(8, 8),
+            src,
+        });
+        entry.push(R2ILOp::Branch {
+            target: Varnode::ram(0x1004, 8),
+        });
+        let mut body = R2ILBlock::new(0x1004, 4);
+        body.push(R2ILOp::Copy {
+            dst: reg(8, 8),
+            src: reg(8, 8),
+        });
+        body.push(R2ILOp::CBranch {
+            target: Varnode::ram(0x1004, 8),
+            cond: reg(32, 1),
+        });
+        let mut exit = R2ILBlock::new(0x1008, 4);
+        exit.push(R2ILOp::Return {
+            target: reg(0x80, 8),
+        });
+        let artifact =
+            r2ssa::SsaArtifact::raw(&[entry, body, exit], Some(&r2ssa::Arch::from(arch)))
+                .expect("the loop prepares");
+        let graph = artifact.graph();
+        let named =
+            |value: &r2ssa::GraphValue, name: &str| value.var.name().eq_ignore_ascii_case(name);
+        let mut entries = r2ssa::dense::IdSet::new(graph.values.len());
+        let r0 = (graph.values.iter())
+            .find(|value| named(value, "r0") && graph.def_inst(value.id).is_none())
+            .map(|value| value.id);
+        if let Some(r0) = r0 {
+            entries.insert(r0);
+        }
+        let identities = entry_identities(graph, &entries);
+        (graph.values.iter())
+            .filter(|value| named(value, "r1") && graph.def_inst(value.id).is_some())
+            .map(|value| Some(r0.is_some() && identities[value.id] == r0))
+            .collect()
+    }
+
+    #[test]
+    fn a_dead_phi_on_a_cycle_is_the_entry_value_only_where_every_path_carries_it() {
+        let copied = dead_loop_identities(r2il::Varnode::new(r2il::SpaceId::Register, 0, 8));
+        assert!(copied.len() >= 2, "the phi and the copy: {copied:?}");
+        assert!(copied.iter().all(|is| *is == Some(true)), "{copied:?}");
+        let constant = dead_loop_identities(r2il::Varnode::constant(5, 8));
+        assert!(constant.iter().all(|is| *is == Some(false)), "{constant:?}");
     }
 
     fn empty_artifact() -> r2ssa::SsaArtifact {

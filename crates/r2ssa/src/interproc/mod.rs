@@ -319,16 +319,18 @@ pub struct SummaryAtomicEffect {
     pub ordering: SummaryAtomicOrdering,
 }
 
-/// What a function does through one argument: `read`, `write`, `escape`, `free` proven by the body or
-/// a described callee; `assumed` only bounds an undescribed call or operation it reaches (D382).
-#[doc(alias = "default_deny_pointer")]
+/// What a function does through one argument, proven by the body or a described callee. An entry
+/// with none is an argument handed to an undescribed call: nothing is known of its use (D382).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SummaryArgEffect {
     pub read: bool,
     pub write: bool,
     pub escape: bool,
     pub free: bool,
-    pub assumed: bool,
+}
+
+impl r2source::Negative for SummaryArgEffect {
+    const FACTS: &'static [r2source::NegativeFact] = &[r2source::NegativeFact::Pointer];
 }
 
 impl SummaryArgEffect {
@@ -338,7 +340,6 @@ impl SummaryArgEffect {
         self.write |= other.write;
         self.escape |= other.escape;
         self.free |= other.free;
-        self.assumed |= other.assumed;
         *self != before
     }
 
@@ -795,11 +796,11 @@ fn mark_unknown_call_effects(
     args: Option<&[SummaryOperand]>,
 ) {
     *has_unknown_calls = true;
-    // An argument handed on is assumed, never proven, read or written: the callee may treat it
-    // as a number. The unknown location below states what it may touch.
+    // An argument handed on exists, but no effect is proven: the callee may treat it as a number.
+    // The unknown location below states what it may touch.
     for actual in args.into_iter().flatten() {
         if let SummaryOperand::Arg(idx) = actual {
-            arg_effects.entry(*idx).or_default().assumed = true;
+            arg_effects.entry(*idx).or_default();
         }
     }
     for kind in [
@@ -1051,11 +1052,9 @@ fn require_trusted_root_for_helper_scope(
 }
 
 /// What a call to this body may write of its caller's stack (`FramePoints::call_writes`).
-fn incoming_writes(prepared: &SsaArtifact) -> Option<Box<[(i64, i64)]>> {
+fn incoming_writes(prepared: &SsaArtifact) -> Option<crate::call_reads::StackWrites> {
     let points = prepared.function().frame_points()?;
-    points
-        .call_writes(prepared.machine_context())
-        .map(Vec::into_boxed_slice)
+    points.call_writes(prepared.machine_context())
 }
 
 /// Solve interprocedural evidence owned by one exact prepared SSA root.
@@ -1083,7 +1082,7 @@ pub struct PreparedCalleeSummary {
     /// The library model of each import this body calls directly.
     library: BTreeMap<u64, FunctionSemanticSummary>,
     /// The caller's stack a call to this body may write, from the call's pointer (D377).
-    incoming_writes: Option<Box<[(i64, i64)]>>,
+    incoming_writes: Option<crate::call_reads::StackWrites>,
 }
 
 impl PreparedCalleeSummary {
@@ -1128,8 +1127,8 @@ impl PreparedCalleeSummary {
 
     /// The caller's stack bytes a call to this body may write, as ranges from the stack pointer
     /// before the transfer; `None` where nothing bounds them (D377).
-    pub fn incoming_writes(&self) -> Option<&[(i64, i64)]> {
-        self.incoming_writes.as_deref()
+    pub const fn incoming_writes(&self) -> Option<&crate::call_reads::StackWrites> {
+        self.incoming_writes.as_ref()
     }
 
     pub const fn id(&self) -> InterprocFunctionId {
@@ -1515,104 +1514,22 @@ pub fn solve_prepared_interproc_summary_set(
     Ok(set)
 }
 
+/// The summary graph's components, each after every callee component (r2ssa `dense`'s one
+/// condensation): O(V + E) plus O(E log V) to number callees.
 fn compute_summary_sccs(
     locals: &BTreeMap<InterprocFunctionId, (Option<String>, LocalSummaryFacts)>,
 ) -> Vec<Vec<InterprocFunctionId>> {
-    let node_ids: Vec<InterprocFunctionId> = locals.keys().copied().collect();
-    let node_set: BTreeSet<InterprocFunctionId> = node_ids.iter().copied().collect();
-    let mut succs = BTreeMap::<InterprocFunctionId, Vec<InterprocFunctionId>>::new();
-    let mut rev = BTreeMap::<InterprocFunctionId, Vec<InterprocFunctionId>>::new();
-
-    for node in &node_ids {
-        succs.entry(*node).or_default();
-        rev.entry(*node).or_default();
-    }
-    for (node, (_, local)) in locals {
-        let mut out = local
-            .direct_callees
-            .iter()
-            .map(|target| InterprocFunctionId(*target))
-            .filter(|target| node_set.contains(target))
-            .collect::<Vec<_>>();
-        out.sort_unstable();
-        out.dedup();
-        succs.insert(*node, out.clone());
-        for succ in out {
-            rev.entry(succ).or_default().push(*node);
-        }
-    }
-    for preds in rev.values_mut() {
-        preds.sort_unstable();
-        preds.dedup();
-    }
-
-    let mut visited = BTreeSet::new();
-    let mut order = Vec::new();
-    for node in &node_ids {
-        dfs_summary_postorder(*node, &succs, &mut visited, &mut order);
-    }
-
-    visited.clear();
-    let mut sccs = Vec::new();
-    while let Some(node) = order.pop() {
-        if visited.contains(&node) {
-            continue;
-        }
-        let mut component = Vec::new();
-        dfs_summary_component(node, &rev, &mut visited, &mut component);
-        component.sort_unstable();
-        sccs.push(component);
-    }
-
-    // Edges point caller -> callee, but summary propagation wants callee SCCs
-    // solved before dependent caller SCCs when the graph is acyclic.
-    sccs.reverse();
-
-    sccs
-}
-
-fn dfs_summary_postorder(
-    node: InterprocFunctionId,
-    succs: &BTreeMap<InterprocFunctionId, Vec<InterprocFunctionId>>,
-    visited: &mut BTreeSet<InterprocFunctionId>,
-    order: &mut Vec<InterprocFunctionId>,
-) {
-    let mut stack = vec![(node, false)];
-    while let Some((node, expanded)) = stack.pop() {
-        if expanded {
-            order.push(node);
-            continue;
-        }
-        if !visited.insert(node) {
-            continue;
-        }
-        stack.push((node, true));
-        if let Some(children) = succs.get(&node) {
-            for &succ in children.iter().rev() {
-                stack.push((succ, false));
-            }
-        }
-    }
-}
-
-fn dfs_summary_component(
-    node: InterprocFunctionId,
-    rev: &BTreeMap<InterprocFunctionId, Vec<InterprocFunctionId>>,
-    visited: &mut BTreeSet<InterprocFunctionId>,
-    component: &mut Vec<InterprocFunctionId>,
-) {
-    let mut stack = vec![node];
-    while let Some(node) = stack.pop() {
-        if !visited.insert(node) {
-            continue;
-        }
-        component.push(node);
-        if let Some(preds) = rev.get(&node) {
-            for &pred in preds.iter().rev() {
-                stack.push(pred);
-            }
-        }
-    }
+    use crate::dense::{Condensation, Csr, DenseId, Node};
+    let ids = locals.keys().copied().collect::<Vec<_>>();
+    let node = |id: &u64| ids.binary_search(&InterprocFunctionId(*id)).ok();
+    let edges = locals.values().enumerate().flat_map(|(from, (_, local))| {
+        let callees = local.direct_callees.iter().filter_map(node);
+        callees.map(move |to| (Node::from_index(from), Node::from_index(to)))
+    });
+    let condensation = Condensation::of(&Csr::from_pairs(ids.len(), edges), []);
+    (condensation.components())
+        .map(|(_, members)| members.iter().map(|member| ids[member.index()]).collect())
+        .collect()
 }
 
 fn initial_summary(

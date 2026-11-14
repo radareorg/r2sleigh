@@ -7,6 +7,7 @@ description = "SSA (Static Single Assignment) form for r2il"
 
 [dependencies]
 rustc-hash.workspace = true
+r2abi = { path = "../r2abi" }
 r2il = { path = "../r2il" }
 r2sleigh-lift = { path = "../r2sleigh-lift", default-features = false }
 r2source = { path = "../r2source" }
@@ -18,6 +19,8 @@ default = []
 # Test only: state the boundary facts unsoundly, so a reader's guard is shown to hold alone (ROADMAP D68).
 fact_mutants = []
 sleigh-config = ["dep:sleigh-config", "r2sleigh-lift/x86"]
+# Count each element a function-scale table hands out (`dense::element_visits`, ROADMAP D417).
+work-meter = []
 
 [dev-dependencies]
 r2source = { path = "../r2source", features = ["testing"] }

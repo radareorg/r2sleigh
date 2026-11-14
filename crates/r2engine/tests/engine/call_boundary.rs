@@ -985,6 +985,115 @@ fn printing_spilled(format: &[u8], handed: bool) -> String {
     rendered.response.output.into_text()
 }
 
+/// clang -O0's shape (values.c `main`, D409): `caller` spills the format at `BASE + 0xb0` to
+/// `[sp, #16]`, calls `printf(format, 7)` with it, then reloads it for `printf(format, 8)`.
+fn printing_twice(format: &[u8], writable: bool) -> String {
+    const FORMAT: u64 = BASE + 0xb0;
+    let mut code = vec![0u8; 0x100];
+    let words: [(u64, u32); 14] = [
+        (BASE + 0x10, 0xa9be_7bfd), // stp x29, x30, [sp, #-32]!
+        (BASE + 0x14, 0x9000_0008), // adrp x8, 0x1000
+        (BASE + 0x18, 0x9102_c108), // add x8, x8, #0xb0
+        (BASE + 0x1c, 0xf900_0be8), // str x8, [sp, #16]
+        (BASE + 0x20, 0xaa08_03e0), // mov x0, x8
+        (BASE + 0x24, 0x5280_00e1), // mov w1, #7
+        (BASE + 0x28, 0x9400_001a), // bl printf
+        (BASE + 0x2c, 0xf940_0be0), // ldr x0, [sp, #16]
+        (BASE + 0x30, 0x5280_0101), // mov w1, #8
+        (BASE + 0x34, 0x9400_0017), // bl printf
+        (BASE + 0x38, 0xa8c2_7bfd), // ldp x29, x30, [sp], #32
+        (BASE + 0x3c, 0xd65f_03c0), // ret
+        (BASE + 0x90, 0x5800_0050), // printf: ldr x16, #8
+        (BASE + 0x94, 0xd61f_0200), // br x16
+    ];
+    for (at, word) in words {
+        let at = (at - BASE) as usize;
+        code[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("caller", BASE + 0x10, 0x30)])
+        .in_aarch64()
+        .with_data_after(FORMAT)
+        .importing("printf");
+    let program = match writable {
+        true => program.writable_data_after(FORMAT),
+        false => program,
+    };
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(FORMAT, format);
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// hashes clang -O1 `main`'s shape (D409): `push rax` aligns the stack, `printf("%d\n", 7)` runs,
+/// and the pushed slot is read back as the next `printf`'s operand.
+fn printing_after_a_push() -> String {
+    let mut code = vec![0x90u8; 0xb0];
+    code[..0x28].copy_from_slice(&[
+        0x50, // 1000 push rax
+        0x48, 0x8d, 0x3d, 0x98, 0x00, 0x00, 0x00, // 1001 lea rdi, [rip + 0x98]: 0x10a0
+        0xbe, 0x07, 0x00, 0x00, 0x00, // 1008 mov esi, 7
+        0x31, 0xc0, // 100d xor eax, eax
+        0xe8, 0x7c, 0x00, 0x00, 0x00, // 100f call 0x1090
+        0x48, 0x8b, 0x34, 0x24, // 1014 mov rsi, [rsp]
+        0x48, 0x8d, 0x3d, 0x81, 0x00, 0x00, 0x00, // 1018 lea rdi, [rip + 0x81]: 0x10a0
+        0x31, 0xc0, // 101f xor eax, eax
+        0xe8, 0x6a, 0x00, 0x00, 0x00, // 1021 call 0x1090
+        0x59, // 1026 pop rcx
+        0xc3, // 1027 ret
+    ]);
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("caller", BASE, 0x28)])
+        .with_data()
+        .importing("printf");
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(common::TEXT, b"%d\n\0");
+    let rendered = open.rendered(BASE).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// D409 on x86-64: the format counts one operand, in RSI, so `printf` reads and writes none of
+/// the caller's stack and the pushed slot still holds the entry RAX.
+#[test]
+fn a_printf_whose_format_counts_its_tail_leaves_a_pushed_slot_alone() {
+    let text = printing_after_a_push();
+    assert!(
+        text.contains("held from entry, read as residuals (RAX_0)"),
+        "{text}"
+    );
+    assert!(!text.contains("r2sleigh_load_u64("), "{text}");
+}
+
+/// D409: the first call's own format counts one operand, all in registers, so the call reads and
+/// writes no caller stack: the spill stays the format and the second call counts its tail too.
+#[test]
+fn a_printf_whose_format_counts_its_tail_leaves_the_callers_slot_alone() {
+    let text = printing_twice(b"%d\n\0", false);
+    assert!(text.contains(r#"printf("%d\n", (uint64_t)8U);"#), "{text}");
+}
+
+/// A format the program may write counts nothing for the whole run: the reload stays memory.
+#[test]
+fn a_printf_whose_format_the_program_may_write_bounds_no_stack() {
+    let text = printing_twice(b"%d\n\0", true);
+    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+}
+
+/// A `long double` operand takes no 8-byte slot this rule places: the reload stays memory.
+#[test]
+fn a_printf_whose_format_reads_a_long_double_bounds_no_stack() {
+    let text = printing_twice(b"%Lf\n\0", false);
+    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+}
+
+/// Ten operands put three on the stack, the third at the slot: the reload stays memory.
+#[test]
+fn a_printf_whose_counted_tail_covers_the_slot_keeps_it_a_load() {
+    let text = printing_twice(b"%d%d%d%d%d%d%d%d%d%d\0", false);
+    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+}
+
 /// Gb: `f` (`ret`) reads no argument, so the reload is the spill and q0 to q3 die at `printf`.
 /// Fails (D376): `f`'s statement never reaches its caller's build, so the call is unstated (D369).
 #[test]
@@ -1702,6 +1811,42 @@ fn a_caller_that_calls_another_caller_is_read_after_it() {
     assert_eq!(walked, 4, "walks during the request");
 }
 
+/// `a` (0x1000), `b` (0x1010) return `r`'s (0x1040); `c1` (0x1020) calls `a`, `d` (0x1050) and `c2`
+/// (0x1030), which calls `b`: `c2` is no caller of `a`, so no order over `a`'s callers names it.
+const A_CALLER_OF_ANOTHER_CALLEE: &[u8] = &[
+    0xe8, 0x3b, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xe8, 0x2b, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xe8, 0xdb, 0xff, 0xff, 0xff, 0xe8, 0x26, 0x00, 0x00, 0x00, 0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3,
+    0xe8, 0xdb, 0xff, 0xff, 0xff, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xc3,
+];
+
+#[test]
+fn a_caller_of_another_callee_is_read_before_the_caller_calling_it() {
+    let functions = [
+        ("a", BASE, 6),
+        ("b", BASE + 0x10, 6),
+        ("c1", BASE + 0x20, 16),
+        ("c2", BASE + 0x30, 6),
+        ("r", BASE + 0x40, 6),
+        ("d", BASE + 0x50, 1),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(A_CALLER_OF_ANOTHER_CALLEE, &functions));
+    open.analyse_program().expect("it surveys");
+    let before = open.analysis_stats();
+    open.rendered(BASE + 0x40).expect("it renders");
+    let stats = open.analysis_stats();
+    assert_eq!(stats.defects, 0);
+    // `r` for its render and its effect, then `a`, `b`, `c2`, `c1` and `d` once each.
+    let walked = stats.walked.computed - before.walked.computed;
+    assert_eq!(walked, 7, "walks during the request");
+    assert_eq!(stats.site_fates_relifted, 0, "{stats:?}");
+    // Every caller `DirectSites` joins was asked first, and every one asked is joined.
+    assert_eq!(stats.site_fates_in_direct_sites, 0, "{stats:?}");
+    assert_eq!(stats.site_fates_never_joined, 0, "{stats:?}");
+}
+
 /// glibc AArch64's `_start` hands `__wrap_main` (`nop; b main`, 0x1020) to `__libc_start_main`'s
 /// stub (0x1080); `main` (0x1040) returns `helper`'s `w0`.
 fn wrapped_main() -> Literal {
@@ -1773,4 +1918,106 @@ fn a_main_musls_libc_start_main_takes_returns_its_int() {
         premises.contains(&r2source::Premise::UbFreeSource),
         "{premises:?}"
     );
+}
+
+/// `_start` hands `a` to a slot (`lea rdi`/`lea rcx`, `call __libc_start_main`); `a`, `b` and `c`
+/// each return a constant or branch to the next (`test; je 1f; jmp next; 1: mov eax, k; ret`).
+fn slotted_cycle(start: &[u8]) -> Literal {
+    let mut code = vec![0xcc; 0xa0];
+    code[..start.len()].copy_from_slice(start);
+    let member = |test: [u8; 2], next: u32, k: u8| {
+        let mut body = vec![test[0], test[1], 0x74, 0x05, 0xe9];
+        body.extend(next.to_le_bytes());
+        body.extend([0xb8, k, 0x00, 0x00, 0x00, 0xc3]);
+        body
+    };
+    code[0x10..0x1f].copy_from_slice(&member([0x85, 0xff], 0x17, 1)); // a: jmp 0x1030
+    code[0x30..0x3f].copy_from_slice(&member([0x85, 0xf6], 0x17, 2)); // b: jmp 0x1050
+    code[0x50..0x5f].copy_from_slice(&member([0x85, 0xd2], 0xffff_ffb7, 3)); // c: jmp 0x1010
+    code[0x90..0x96].copy_from_slice(&[0xff, 0x25, 0x02, 0x00, 0x00, 0x00]); // jmp [rip + 2]
+    code[0x98..0xa0].fill(0);
+    let functions = [
+        ("_start", BASE, 0x0d),
+        ("a", BASE + 0x10, 0x0f),
+        ("b", BASE + 0x30, 0x0f),
+        ("c", BASE + 0x50, 0x0f),
+    ];
+    Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
+        .importing("__libc_start_main")
+        .running_on(common::GLIBC)
+}
+
+/// Each member's text under `aa`.
+fn slotted_cycle_rendered(start: &[u8]) -> Vec<String> {
+    let mut open = OpenProgram::of(slotted_cycle(start));
+    open.analyse_program().expect("it surveys");
+    let texts = [BASE + 0x10, BASE + 0x30, BASE + 0x50].map(|at| {
+        let rendered = open.rendered(at).expect("it renders");
+        rendered.response.output.into_text()
+    });
+    assert_eq!(open.analysis_stats().defects, 0);
+    texts.into()
+}
+
+/// D408: `main`'s cited `int` slot takes `a` of a three-member forwarding cycle, so no member decides
+/// `ForwardCycle`; red on the parent, where `c`'s tail branch into `a` was no way in.
+#[test]
+fn a_three_member_forwarding_cycle_a_cited_slot_reads_returns_its_int() {
+    for text in slotted_cycle_rendered(STARTS_HANDLER) {
+        assert!(text.starts_with("r2sleigh_word_u"), "{text}");
+        assert!(
+            text.contains("a call reads the result (assuming closed-world, ub-free)"),
+            "{text}"
+        );
+    }
+}
+
+/// [`TAKES_HANDLER`] padded to `wrapper` at 0x1020: `jmp handler`, the format's entry point, so its
+/// own ways in are unknown and its tail branch forwards `handler`'s result to them.
+fn branched_into_by_an_entry(import: &str) -> Literal {
+    let mut text = TAKES_HANDLER.to_vec();
+    text.resize(0x20, 0xcc);
+    text.extend([0xe9, 0xeb, 0xff, 0xff, 0xff]); // 1020 jmp 0x1010
+    let text: &'static [u8] = Box::leak(text.into_boxed_slice());
+    at_exit(text, import).entering(BASE + 0x20, r2abi::statement::EntryKind::Main)
+}
+
+/// D408's exemption is a tail branch's, never its jumper's: `handler`, taken into `atexit`'s void
+/// slot, is also branched into by an entry point that may read its result, so it is never void.
+#[test]
+fn a_handler_an_entry_point_branches_into_is_never_declared_void() {
+    let text = handler_rendered(branched_into_by_an_entry("atexit"), true);
+    assert!(!text.contains("void handler("), "{text}");
+    assert!(!text.contains("no call reads the result"), "{text}");
+}
+
+/// `f` (0x1010, `ret`, handing back RAX) is called once by `main`, which drops it, and branched
+/// into by an entry point (0x1020): its tail caller's ways in are unknown, so `f` is never void.
+#[test]
+fn a_callee_an_entry_point_branches_into_is_never_void() {
+    let mut code = vec![0xcc; 0x30];
+    code[..8].copy_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00, 0x31, 0xc0, 0xc3]); // call f; xor; ret
+    code[0x10] = 0xc3; // f: ret
+    code[0x20..0x25].copy_from_slice(&[0xe9, 0xeb, 0xff, 0xff, 0xff]); // c: jmp 0x1010
+    let functions = [
+        ("main", BASE, 8),
+        ("f", BASE + 0x10, 1),
+        ("c", BASE + 0x20, 5),
+    ];
+    let literal = Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
+        .entering(BASE + 0x20, r2abi::statement::EntryKind::Main)
+        .running_on(common::GLIBC);
+    let mut open = OpenProgram::of(literal);
+    open.analyse_program().expect("it surveys");
+    let text = open.rendered(BASE + 0x10).expect("it renders");
+    let text = text.response.output.into_text();
+    assert!(!text.starts_with("void f("), "{text}");
+}
+
+/// `init`'s slot states no return: the same cycle taken there decides no read (default-deny).
+#[test]
+fn a_three_member_forwarding_cycle_a_slot_stating_no_return_takes_stays_unproven() {
+    for text in slotted_cycle_rendered(STARTS_HANDLER_AS_INIT) {
+        assert!(!text.contains("reads the result"), "{text}");
+    }
 }

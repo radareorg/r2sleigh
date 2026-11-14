@@ -27,32 +27,28 @@ use crate::native::Program;
 ///
 /// `r2source`'s, the one type every derived fact states its trust in; the
 /// engine's answers carry it, so the shell reads it from here.
-pub use r2source::confidence::{Basis, Confidence, Fact, Grade, Never, NeverProof, Premise};
+pub use r2source::confidence::{
+    Basis, Citation, Confidence, Fact, Grade, Never, NeverProof, Premise,
+};
 
 /// Whether control comes back from a call to a function, and why a "never" is believed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Return {
     Comes,
-    #[doc(alias = "default_deny_never")]
     Never(Never),
 }
 
 impl Return {
-    /// A "never" a statement makes, assuming `premises`.
-    pub const fn declared(premises: BTreeSet<Premise>) -> Self {
-        Self::Never(Never {
-            proof: NeverProof::Declared,
-            premises,
-        })
-    }
-
     pub const fn comes(&self) -> bool {
         matches!(self, Self::Comes)
     }
 
-    /// Whether this proves a call never comes back: declared, assuming nothing.
-    pub fn proves_never(&self) -> bool {
-        matches!(self, Self::Never(never) if never.proof == NeverProof::Declared && never.premises.is_empty())
+    /// The "never", where a call does not come back.
+    pub const fn never(&self) -> Option<&Never> {
+        match self {
+            Self::Comes => None,
+            Self::Never(never) => Some(never),
+        }
     }
 
     /// What a "never" takes for granted; nothing for a call that comes back.
@@ -60,7 +56,7 @@ impl Return {
         static NONE: BTreeSet<Premise> = BTreeSet::new();
         match self {
             Self::Comes => &NONE,
-            Self::Never(never) => &never.premises,
+            Self::Never(never) => never.premises(),
         }
     }
 }
@@ -134,10 +130,10 @@ pub trait Walker {
     /// model says; `None` for anything else.
     fn declared(&self, address: u64) -> Option<Return>;
 
-    /// How many ends of a walked body a statement proves halt, and how many none does; a walker
-    /// that cannot say reports one unproven end.
-    fn ends(&self, _walk: &Self::Walk) -> (usize, usize) {
-        (0, 1)
+    /// The "never" of each end of a walked body a statement proves halts, and how many ends none
+    /// does; a walker that cannot say reports one unproven end.
+    fn ends<'a>(&self, _walk: &'a Self::Walk) -> (Vec<&'a Never>, usize) {
+        (Vec::new(), 1)
     }
 }
 
@@ -370,9 +366,9 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
         let mut work = Vec::new();
         for callee in self.waiting.keys() {
             if let Some(Return::Never(never)) = self.settled(*callee)
-                && !never.premises.is_empty()
+                && !never.premises().is_empty()
             {
-                premises.insert(*callee, never.premises);
+                premises.insert(*callee, never.premises().clone());
                 work.push(*callee);
             }
         }
@@ -390,19 +386,17 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
                 }
             }
         }
-        let composed = self.composed();
+        let mut composed = self.composed();
         addresses
             .map(|address| {
                 let answer = self.settled(address).unwrap_or_else(|| {
                     match self.returning.contains(&address) {
                         true => Return::Comes,
-                        false => Return::Never(Never {
-                            proof: match composed.contains(&address) {
-                                true => NeverProof::Composed,
-                                false => NeverProof::NoReturnReached,
-                            },
-                            premises: premises.remove(&address).unwrap_or_default(),
-                        }),
+                        false => Return::Never(
+                            (composed.remove(&address))
+                                .unwrap_or_else(Never::unreached)
+                                .assuming(premises.remove(&address).unwrap_or_default()),
+                        ),
                     }
                 });
                 (address, answer)
@@ -418,26 +412,31 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
     }
 
     /// Bodies whose every end halts or waits on a callee declared or composed never; a trap or a
-    /// wait cycle stays a bound. A least fixpoint over the wait edges, `O(V + E)`.
-    fn composed(&self) -> BTreeSet<u64> {
+    /// wait cycle stays a bound. A least fixpoint over the wait edges, callee first: `O(V + E)`.
+    fn composed(&self) -> BTreeMap<u64, Never> {
         let candidate = |address: u64| {
             !self.returning.contains(&address)
                 && self.settled(address).is_none()
                 && matches!(self.walks.get(&address), Some(Ok(walk)) if self.walker.ends(walk).1 == 0)
         };
-        // Each candidate's waits on callees not yet proven never.
+        // Each candidate's waits on callees not yet proven never, and the callees it waits on.
         let mut open = BTreeMap::<u64, usize>::new();
+        let mut callees = BTreeMap::<u64, BTreeSet<u64>>::new();
         let mut proven = Vec::new();
         for (callee, waiters) in &self.waiting {
             let settled = self.settled(*callee);
             // A bound composes nothing: only a declared or composed "never" does (D395).
-            let declared = matches!(settled, Some(Return::Never(never)) if never.proves());
+            let declared = settled
+                .as_ref()
+                .and_then(Return::never)
+                .is_some_and(|never| never.proves().is_some());
             for (caller, _) in waiters.iter().filter(|(caller, _)| candidate(*caller)) {
                 *open.entry(*caller).or_default() += usize::from(!declared);
+                callees.entry(*caller).or_default().insert(*callee);
             }
         }
         for (address, walk) in &self.walks {
-            let halts = matches!(walk, Ok(walk) if self.walker.ends(walk).0 > 0);
+            let halts = matches!(walk, Ok(walk) if !self.walker.ends(walk).0.is_empty());
             if candidate(*address) && (halts || open.contains_key(address)) {
                 open.entry(*address).or_default();
             }
@@ -447,12 +446,30 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
                 .filter(|(_, waits)| **waits == 0)
                 .map(|(at, _)| *at),
         );
-        let mut composed = BTreeSet::new();
-        while let Some(callee) = proven.pop() {
-            if !composed.insert(callee) {
+        let mut composed = BTreeMap::new();
+        while let Some(body) = proven.pop() {
+            if composed.contains_key(&body) {
                 continue;
             }
-            let callers = self.waiting.get(&callee).into_iter().flatten();
+            let Some(Ok(walk)) = self.walks.get(&body) else {
+                continue;
+            };
+            let settled = (callees.get(&body).into_iter().flatten())
+                .map(|callee| self.settled(*callee))
+                .collect::<Vec<_>>();
+            let waited = (callees.get(&body).into_iter().flatten()).zip(&settled);
+            let ends = waited.map(|(callee, settled)| match settled {
+                Some(Return::Never(never)) => Some(never),
+                _ => composed.get(callee),
+            });
+            let ends = ends.collect::<Option<Vec<_>>>();
+            let halts = self.walker.ends(walk).0;
+            let Some(never) = ends.and_then(|ends| Never::composed(halts.into_iter().chain(ends)))
+            else {
+                continue;
+            };
+            composed.insert(body, never);
+            let callers = self.waiting.get(&body).into_iter().flatten();
             for (caller, _) in callers {
                 proven.extend(Self::settle_wait(&mut open, *caller));
             }
@@ -838,18 +855,21 @@ mod tests {
         }
 
         fn declared(&self, address: u64) -> Option<Return> {
-            (address == EXIT).then(|| Return::declared(BTreeSet::from([Premise::GoRuntime])))
+            (address == EXIT).then(model_exit)
         }
     }
 
     /// A routine with no body here that a model says never returns, under the runtime's contract.
     const EXIT: u64 = 0x9000;
 
+    /// The Go runtime model's `gopanic`, under its premise.
+    fn model_exit() -> Return {
+        let citation = Citation::runtime("runtime.gopanic").expect("the model names gopanic");
+        Return::Never(Never::cited(citation))
+    }
+
     fn never() -> Return {
-        Return::Never(Never {
-            proof: NeverProof::NoReturnReached,
-            premises: BTreeSet::new(),
-        })
+        Return::Never(Never::unreached())
     }
 
     fn found(bodies: &[(u64, &[Step])], seeds: &[u64]) -> Discovery<At, ()> {
@@ -987,16 +1007,10 @@ mod tests {
             (0x3000, &[Step::Tail(0x3000)]),
         ];
         let found = found(&bodies, &[0x1000, 0x3000]);
-        let assumed = Return::Never(Never {
-            proof: NeverProof::NoReturnReached,
-            premises: BTreeSet::from([Premise::GoRuntime]),
-        });
+        let assumed = Return::Never(Never::unreached().assuming([Premise::GoRuntime]));
         assert_eq!(found.returns[&(0x2000, false)], assumed);
         assert_eq!(found.returns[&(0x1000, false)], assumed);
-        assert_eq!(
-            found.returns[&(EXIT, false)],
-            Return::declared(BTreeSet::from([Premise::GoRuntime]))
-        );
+        assert_eq!(found.returns[&(EXIT, false)], model_exit());
         assert_eq!(found.returns[&(0x3000, false)], never());
         let asked = returns(0x1000, false, &|_, _| None, &Bodies::of(&bodies));
         assert_eq!(asked[&(0x1000, false)], assumed);

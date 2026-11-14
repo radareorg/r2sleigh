@@ -1751,6 +1751,11 @@ fn a_later_round_entering_an_earlier_rounds_guarded_arm_drops_the_rounds() {
 /// [`NESTED_SWITCH`]'s shape whose outer case 1 runs `filler` diamonds on `edx`, on no path to a
 /// dispatch; where `nested` is false the outer case 0 returns, so no later round runs.
 fn arm_switch(nested: bool, filler: usize) -> Vec<u8> {
+    arm_switch_ending(nested, filler, false)
+}
+
+/// [`arm_switch`] whose outer case 1 jumps back to the entry where `looped`: a switch in a loop.
+fn arm_switch_ending(nested: bool, filler: usize, looped: bool) -> Vec<u8> {
     let rel32 = |code: &mut Vec<u8>, at: usize, value: u64| {
         let value = u32::try_from(value).expect("fits").to_le_bytes();
         code[at..at + 4].copy_from_slice(&value);
@@ -1775,7 +1780,15 @@ fn arm_switch(nested: bool, filler: usize) -> Vec<u8> {
     for _ in 0..filler {
         code.extend([0x85, 0xd2, 0x74, 0x02, 0xff, 0xc0]); // test edx, edx; jz +2; inc eax
     }
-    code.push(0xc3);
+    match looped {
+        // jmp 0 (rel32 back to the entry)
+        true => code.extend(
+            [0xe9]
+                .into_iter()
+                .chain((-(code.len() as i32 + 5)).to_le_bytes()),
+        ),
+        false => code.push(0xc3),
+    }
     let default = code.len();
     code.extend([0xb8, 0xff, 0xff, 0xff, 0xff, 0xc3]);
     code.resize(code.len().next_multiple_of(8), 0);
@@ -1834,8 +1847,8 @@ impl Program for Metered {
     }
 }
 
-/// The SSA work a decompile of `bytes` spends, and how many switches it renders.
-fn decompile_work(bytes: Vec<u8>) -> (u64, usize) {
+/// The meters of a decompile of `bytes`, and how many switches it renders.
+fn decompile_metered(bytes: Vec<u8>) -> (r2engine::EngineExecutionControl, usize) {
     let machine = Machine::new("x86-64", "x86-64", 64);
     let target = machine.target();
     let program = Metered {
@@ -1847,7 +1860,40 @@ fn decompile_work(bytes: Vec<u8>) -> (u64, usize) {
     };
     let response = decompile(&target, &program, BASE).expect("decompile");
     let switches = response.output.text().matches("switch (").count();
-    (program.control.work_spent(), switches)
+    (program.control, switches)
+}
+
+/// The SSA work a decompile of `bytes` spends, and how many switches it renders.
+fn decompile_work(bytes: Vec<u8>) -> (u64, usize) {
+    let (control, switches) = decompile_metered(bytes);
+    (control.work_spent(), switches)
+}
+
+/// A later round copies only its region's lifts out of its walk, never the body (D367): the outer
+/// case 1's `filler` diamonds reach no new dispatch, so they add no copied lift.
+#[test]
+fn a_later_round_copies_only_its_regions_lifts() {
+    let copied = |filler| {
+        let (control, switches) = decompile_metered(arm_switch(true, filler));
+        assert_eq!(switches, 2);
+        control.round_lifts()
+    };
+    let (short, long) = (copied(0), copied(40));
+    // Two instructions each: the outer dispatch's block, the case 0 guard, the inner dispatch's.
+    assert_eq!((short, long), (6, 6), "copied {short} and {long} lifts");
+}
+
+/// In a loop (the outer case 1 jumps back to the entry) the diamonds lie on a path to the inner
+/// dispatch, so the round's region holds them: copied once, `|region|`, never once per round.
+#[test]
+fn a_later_round_in_a_loop_copies_its_region_once() {
+    let copied = |filler| {
+        let (control, _) = decompile_metered(arm_switch_ending(true, filler, true));
+        control.round_lifts()
+    };
+    let (short, long) = (copied(0), copied(40));
+    // Three lifts per diamond: `test`, `jz`, `inc`.
+    assert_eq!(long - short, 3 * 40, "copied {short} and {long} lifts");
 }
 
 #[test]
@@ -7109,10 +7155,11 @@ impl r2engine::body::Program for HaltingSlot {
     }
 
     fn exit_through(&self, slot: u64) -> Option<r2engine::discovery::Never> {
-        (slot == self.slot).then(|| r2engine::discovery::Never {
-            proof: r2engine::discovery::NeverProof::Declared,
-            premises: std::collections::BTreeSet::new(),
-        })
+        // `exit`'s cited row states it never returns.
+        let rows = r2abi::LibraryRows::embedded(r2abi::CLibrary::Glibc);
+        let exit = rows.find(r2abi::CLibrary::Glibc.scope(), "exit")?;
+        let citation = r2engine::discovery::Citation::of(exit)?;
+        (slot == self.slot).then(|| r2engine::discovery::Never::cited(citation))
     }
 }
 
@@ -9468,8 +9515,13 @@ fn an_import_reads_past_its_fixed_parameters_unless_its_citation_fixes_them() {
                 .min_by_key(String::len);
             named.unwrap_or_else(|| format!("{storage:?}"))
         };
-        let registers = reads.registers.into_iter().map(name).collect::<Vec<_>>();
-        (registers, reads.count_register.map(name))
+        let registers = reads
+            .registers()
+            .iter()
+            .copied()
+            .map(name)
+            .collect::<Vec<_>>();
+        (registers, reads.count_register().map(name))
     };
     let sysv = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
     let (fixed, count) = names(&sysv, &sysv.target(), "__assert_fail");

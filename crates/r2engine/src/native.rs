@@ -101,6 +101,12 @@ pub trait Program: crate::body::Program {
         None
     }
 
+    /// Each result register with the low bytes the body at `entry` may read of it before writing
+    /// it, from its held register effect (D372); `None` where no row states them.
+    fn reads_at(&self, _entry: u64) -> Option<r2ssa::site_boundary::LaneReads> {
+        None
+    }
+
     /// The model a call to `callee` runs under where the program states it: a bound import's
     /// program default, a declared body's own; `None` runs it under `AnyCall` (RULING 1.6, 2.6).
     fn site_convention_at(&self, _callee: u64) -> Option<Arc<ConventionModel>> {
@@ -748,6 +754,30 @@ pub(crate) fn dispatch_tables(
     tables
 }
 
+/// Each region's tables, read against what earlier rounds and regions read; a region the
+/// convention cannot seal leaves its dispatches unresolved, and a stopped refusal ends the rounds.
+fn read_regions(
+    native: &Native<'_>,
+    regions: impl Iterator<Item = Walked>,
+    held: &[NativePointerTable],
+) -> Result<Vec<NativePointerTable>, Tables> {
+    let mut fresh = Vec::new();
+    for region in regions {
+        let held = held.iter().chain(&fresh).cloned().collect::<Vec<_>>();
+        let read = native.read_tables(&region, &held, Restatement::default());
+        match &read.refusal {
+            Some(refusal) if refusal.stopped() => return Err(read),
+            Some(refusal) => r2il::refusal_evidence!(
+                "dispatch-table",
+                "{:#x}: a round's region: {refusal:?}",
+                region.body.entry
+            ),
+            None => fresh.extend(read.read),
+        }
+    }
+    Ok(fresh)
+}
+
 /// Every round of the body's tables past `first` (D285): one lifting walk continued through each
 /// round's tables, so a round lifts only what its arms newly reach (D367).
 pub(crate) fn later_tables(
@@ -767,6 +797,7 @@ pub(crate) fn later_tables(
         return first.clone();
     };
     let restatement = native.restatement(entry);
+    let name = native.name_of(entry);
     let mut tables = Tables {
         whole: true,
         ..first.clone()
@@ -785,25 +816,27 @@ pub(crate) fn later_tables(
             break;
         }
         stopped.extend(&new);
-        let through = native.walked(walk.body());
-        let mut fresh = Vec::new();
-        for region in (last.iter()).filter_map(|dispatch| through.region_after(*dispatch, &new)) {
-            let held = (tables.read.iter())
-                .chain(&fresh)
-                .cloned()
-                .collect::<Vec<_>>();
-            let read = native.read_tables(&region, &held, Restatement::default());
-            match &read.refusal {
-                Some(refusal) if refusal.stopped() => return read,
-                // A region the convention cannot seal leaves its dispatches unresolved.
-                Some(refusal) => r2il::refusal_evidence!(
-                    "dispatch-table",
-                    "{:#x}: a round's region: {refusal:?}",
-                    region.body.entry
-                ),
-                None => fresh.extend(read.read),
-            }
-        }
+        // One index of the round's blocks; each region copies only its own blocks' lifts.
+        let shape = walk.shape();
+        let index = Adjacency::of(
+            shape
+                .blocks
+                .iter()
+                .map(|(start, to)| (*start, to.iter().copied())),
+        );
+        let regions = last.iter().filter_map(|dispatch| {
+            let (at, keep) = index.region_after(*dispatch, &new)?;
+            let (body, copied) = walk.cut(&shape, at, &keep);
+            native.program.control().note_round_lifts(copied);
+            Some(Walked {
+                name: name.clone(),
+                body,
+            })
+        });
+        let fresh = match read_regions(&native, regions, &tables.read) {
+            Ok(fresh) => fresh,
+            Err(stopped) => return stopped,
+        };
         last = fresh.iter().map(|table| table.instruction).collect();
         tables.read.extend(fresh);
     }
@@ -1160,12 +1193,12 @@ pub(crate) fn declared_return(
     program: &dyn Program,
     address: u64,
 ) -> Option<crate::discovery::Return> {
-    use crate::discovery::Return;
+    use crate::discovery::{Citation, Never, Return};
     let declarations = target.declarations;
     // `DW_AT_noreturn` is a declaration with no premise (D255); folded bodies declared apart state none.
     let stated = (declarations.function_at(address)).is_some_and(|prototype| prototype.noreturn);
-    if stated && !declarations.is_contested(address) {
-        return Some(Return::declared(std::collections::BTreeSet::new()));
+    if let Some(citation) = Citation::debug_info(declarations, address).filter(|_| stated) {
+        return Some(Return::Never(Never::cited(citation)));
     }
     let Some(name) = program.import_at(address) else {
         // A Go function the runtime model says never returns, under the runtime's contract.
@@ -1174,17 +1207,14 @@ pub(crate) fn declared_return(
         return (go && accepted_premises().contains(&premise))
             .then(|| program.name_at(address))
             .flatten()
-            .filter(|name| r2abi::runtime::exits(name))
-            .map(|_| Return::declared(std::collections::BTreeSet::from([premise])));
+            .and_then(|name| Citation::runtime(&name))
+            .map(|citation| Return::Never(Never::cited(citation)));
     };
     // Only a cited row proves a "never"; radare2's uncited one is a bound (D395).
     Some(match target.imports.row(&name) {
-        Some(row) if row.noreturn && row.cited() => {
-            Return::declared(std::collections::BTreeSet::new())
-        }
-        Some(row) if row.noreturn => Return::Never(crate::discovery::Never {
-            proof: crate::discovery::NeverProof::Uncited,
-            premises: std::collections::BTreeSet::new(),
+        Some(row) if row.noreturn => Return::Never(match Citation::of(row) {
+            Some(citation) => Never::cited(citation),
+            None => Never::uncited(),
         }),
         _ => Return::Comes,
     })
@@ -1319,7 +1349,7 @@ fn declare_imports(
         }
         callees.interfaces.insert(*address, interface);
         // A declaration states its arguments, the area the convention gives the callee.
-        (callees.writes).insert(*address, r2ssa::call_reads::StackWrites::Arguments);
+        (callees.writes).insert(*address, r2ssa::call_reads::StackWrites::arguments());
     }
     signatures
 }
@@ -1375,7 +1405,7 @@ type Resolution = Arc<TrustedSsaArtifact>;
 pub(crate) type AssumedMember = (
     u64,
     r2source::SourceFunctionInterface,
-    Option<Vec<(i64, i64)>>,
+    Option<r2ssa::call_reads::StackWrites>,
 );
 
 /// What a body is resolved against beside its imports: its owners resolved, and the arities a
@@ -1409,8 +1439,7 @@ fn resolved_alone(
     // An assumed member states its interface and what it writes: nothing it preserves or reaches.
     for (member, interface, writes) in stated.assumed {
         if let Some(writes) = writes {
-            let within = r2ssa::call_reads::StackWrites::Within(writes.clone().into());
-            imports.writes.insert(*member, within);
+            imports.writes.insert(*member, writes.clone());
         }
         imports.interfaces.insert(*member, interface.clone());
     }
@@ -1699,6 +1728,10 @@ fn read_callees(
         match &read.facts {
             Ok(derived) => {
                 callees.record(*address, derived, native.program);
+                // The root reads every callee in one round, so the bound moves no kept build (D372).
+                if let Some(reads) = native.program.reads_at(*address) {
+                    callees.lane_reads.insert(*address, reads);
+                }
                 facts.push(derived.clone());
             }
             Err(reason) => unread.push(Unread {
@@ -1843,6 +1876,8 @@ struct Callees {
     reach: BTreeMap<u64, BTreeMap<usize, ArgumentReach>>,
     /// What each stated callee may write of its caller's stack; one absent may write any (D377).
     writes: BTreeMap<u64, r2ssa::call_reads::StackWrites>,
+    /// What each walked callee may read of the result registers; one absent reads any (D372).
+    lane_reads: r2ssa::CalleeLaneReads,
     /// The imports whose declaration states no interface: they have no body to read one off.
     unstated: BTreeMap<u64, r2ssa::UnstatedImport>,
     /// The convention each call runs under where the program states it (`site_convention`).
@@ -1862,6 +1897,7 @@ impl Callees {
             preserved: self.preserved.clone(),
             reach: self.reach.clone(),
             writes: self.writes.clone(),
+            lane_reads: self.lane_reads.clone(),
             library,
             reentering,
             exits,
@@ -1889,10 +1925,7 @@ impl Callees {
         // describes.
         self.reach.insert(address, facts.argument_touch_reach());
         match facts.summary().incoming_writes() {
-            Some(spans) => {
-                let within = r2ssa::call_reads::StackWrites::Within(spans.into());
-                self.writes.insert(address, within);
-            }
+            Some(writes) => _ = self.writes.insert(address, writes.clone()),
             None => _ = self.writes.remove(&address),
         }
     }
@@ -1979,31 +2012,17 @@ impl Walked {
     /// The blocks on a path from the entry to one of the instructions `at`; the whole body where
     /// none is held. O(blocks + edges).
     fn reaching(&self, at: impl Iterator<Item = u64>) -> Self {
-        let stops = at.filter_map(|stop| self.held(stop));
-        let (keep, _) = self.reaching_blocks(stops.collect(), None);
+        let blocks = self.body.blocks.iter().map(|block| {
+            let successors = block.successors.iter().map(|(_, to)| *to);
+            (block.lifted.addr, successors)
+        });
+        let index = Adjacency::of(blocks);
+        let stops = at.filter_map(|stop| index.held(stop));
+        let keep = index.reaching(stops.collect(), None);
         match keep.contains(&true) {
             true => self.cut(self.body.entry, &keep),
             false => self.clone(),
         }
-    }
-
-    /// The region after the dispatch at `dispatch` (D285): the blocks it reaches that reach one of
-    /// `stops`, less any block entered from outside, entered at the dispatch's block. O(blocks + edges).
-    fn region_after(&self, dispatch: u64, stops: &BTreeSet<u64>) -> Option<Self> {
-        let at = self.held(dispatch)?;
-        let stops = stops.iter().filter_map(|stop| self.held(*stop));
-        let (keep, preceding) = self.reaching_blocks(stops.clone().collect(), Some(at));
-        let keep = closed_under_entry(keep, &preceding, at);
-        let mut kept = stops.filter(|block| keep[*block]);
-        kept.next()
-            .map(|_| self.cut(self.body.blocks[at].lifted.addr, &keep))
-    }
-
-    /// The block holding `address`.
-    fn held(&self, address: u64) -> Option<usize> {
-        let blocks = &self.body.blocks;
-        let after = blocks.partition_point(|block| block.lifted.addr <= address);
-        after.checked_sub(1)
     }
 
     fn indirect_stops(&self) -> impl Iterator<Item = u64> + '_ {
@@ -2011,49 +2030,6 @@ impl Walked {
         let indirect =
             indirect.filter(|stop| stop.reason == crate::body::UnresolvedReason::IndirectBranch);
         indirect.map(|stop| stop.addr)
-    }
-
-    /// Each block that reaches one of the `stops` blocks and, given `from`, is reachable from it; and
-    /// each block's predecessors.
-    fn reaching_blocks(
-        &self,
-        stops: Vec<usize>,
-        from: Option<usize>,
-    ) -> (Vec<bool>, Vec<Vec<usize>>) {
-        let blocks = &self.body.blocks;
-        let block_at = |address: u64| {
-            blocks
-                .binary_search_by_key(&address, |block| block.lifted.addr)
-                .ok()
-        };
-        let succeeding = (blocks.iter())
-            .map(|block| (block.successors.iter()).filter_map(|(_, target)| block_at(*target)))
-            .map(Iterator::collect)
-            .collect::<Vec<Vec<usize>>>();
-        let mut preceding = vec![Vec::new(); blocks.len()];
-        for (from, targets) in succeeding.iter().enumerate() {
-            for to in targets {
-                preceding[*to].push(from);
-            }
-        }
-        let visit = |starts: Vec<usize>, next: &[Vec<usize>]| {
-            let mut seen = vec![false; blocks.len()];
-            let mut pending = starts;
-            while let Some(at) = pending.pop() {
-                if !std::mem::replace(&mut seen[at], true) {
-                    pending.extend(next[at].iter().copied());
-                }
-            }
-            seen
-        };
-        let mut keep = visit(stops, &preceding);
-        if let Some(from) = from {
-            let reached = visit(vec![from], &succeeding);
-            keep.iter_mut()
-                .zip(reached)
-                .for_each(|(keep, reached)| *keep &= reached);
-        }
-        (keep, preceding)
     }
 
     /// The same walk holding only the `keep` blocks, entered at `entry`.
@@ -2076,27 +2052,91 @@ impl Walked {
     }
 }
 
-/// `keep` less every block but `entry` entered from outside it, and what those reach, since the
-/// seal never sees such a path's values. A removal-only worklist: O(blocks + edges).
-fn closed_under_entry(mut keep: Vec<bool>, preceding: &[Vec<usize>], entry: usize) -> Vec<bool> {
-    let mut succeeding = vec![Vec::new(); keep.len()];
-    for (to, from) in preceding.iter().enumerate() {
-        for from in from {
-            succeeding[*from].push(to);
+/// A walk's blocks by start, in address order, with each one's successors and predecessors:
+/// indexed once per walk or round, so each reach over it is O(blocks + edges) (D367).
+struct Adjacency {
+    starts: Vec<u64>,
+    succeeding: Vec<Vec<usize>>,
+    preceding: Vec<Vec<usize>>,
+}
+
+impl Adjacency {
+    /// Each block's start, ascending, and the addresses control goes to from it; an address that
+    /// starts no block is no edge. O((blocks + edges) log blocks).
+    fn of<T: Iterator<Item = u64>>(blocks: impl Iterator<Item = (u64, T)>) -> Self {
+        let (starts, targets): (Vec<u64>, Vec<T>) = blocks.unzip();
+        let block_at = |address: u64| starts.binary_search(&address).ok();
+        let succeeding = (targets.into_iter())
+            .map(|to| to.filter_map(block_at).collect())
+            .collect::<Vec<Vec<usize>>>();
+        let mut preceding = vec![Vec::new(); starts.len()];
+        for (from, targets) in succeeding.iter().enumerate() {
+            for to in targets {
+                preceding[*to].push(from);
+            }
+        }
+        Self {
+            starts,
+            succeeding,
+            preceding,
         }
     }
-    let entered = |keep: &[bool], at: usize| preceding[at].iter().any(|from| !keep[*from]);
-    let mut pending = (0..keep.len())
-        .filter(|at| keep[*at] && *at != entry && entered(&keep, *at))
-        .collect::<Vec<_>>();
-    while let Some(at) = pending.pop() {
-        if !std::mem::replace(&mut keep[at], false) {
-            continue;
-        }
-        let next = succeeding[at].iter().copied();
-        pending.extend(next.filter(|to| keep[*to] && *to != entry));
+
+    /// The block holding `address`.
+    fn held(&self, address: u64) -> Option<usize> {
+        let after = self.starts.partition_point(|start| *start <= address);
+        after.checked_sub(1)
     }
-    keep
+
+    /// Each block that reaches one of the `stops` blocks and, given `from`, is reachable from it.
+    fn reaching(&self, stops: Vec<usize>, from: Option<usize>) -> Vec<bool> {
+        let visit = |starts: Vec<usize>, next: &[Vec<usize>]| {
+            let mut seen = vec![false; self.starts.len()];
+            let mut pending = starts;
+            while let Some(at) = pending.pop() {
+                if !std::mem::replace(&mut seen[at], true) {
+                    pending.extend(next[at].iter().copied());
+                }
+            }
+            seen
+        };
+        let mut keep = visit(stops, &self.preceding);
+        if let Some(from) = from {
+            let reached = visit(vec![from], &self.succeeding);
+            keep.iter_mut()
+                .zip(reached)
+                .for_each(|(keep, reached)| *keep &= reached);
+        }
+        keep
+    }
+
+    /// The region after `dispatch` (D285): its entry and the blocks it reaches that reach one of
+    /// `stops`, less any entered from outside. O(blocks + edges).
+    fn region_after(&self, dispatch: u64, stops: &BTreeSet<u64>) -> Option<(u64, Vec<bool>)> {
+        let at = self.held(dispatch)?;
+        let stops = stops.iter().filter_map(|stop| self.held(*stop));
+        let keep = self.reaching(stops.clone().collect(), Some(at));
+        let keep = self.closed_under_entry(keep, at);
+        let mut kept = stops.filter(|block| keep[*block]);
+        kept.next().map(|_| (self.starts[at], keep))
+    }
+
+    /// `keep` less every block but `entry` entered from outside it, and what those reach, since the
+    /// seal never sees such a path's values. A removal-only worklist: O(blocks + edges).
+    fn closed_under_entry(&self, mut keep: Vec<bool>, entry: usize) -> Vec<bool> {
+        let entered = |keep: &[bool], at: usize| self.preceding[at].iter().any(|from| !keep[*from]);
+        let mut pending = (0..keep.len())
+            .filter(|at| keep[*at] && *at != entry && entered(&keep, *at))
+            .collect::<Vec<_>>();
+        while let Some(at) = pending.pop() {
+            if !std::mem::replace(&mut keep[at], false) {
+                continue;
+            }
+            let next = self.succeeding[at].iter().copied();
+            pending.extend(next.filter(|to| keep[*to] && *to != entry));
+        }
+        keep
+    }
 }
 
 /// The parameter of import `name` placed at `storage` whose cited row types it a pointer to code,
@@ -2500,12 +2540,14 @@ impl<'a> Native<'a> {
     /// One walked body, with what the program calls it.
     fn walked(&self, body: crate::body::Body) -> Walked {
         Walked {
-            name: self
-                .program
-                .name_at(body.entry)
-                .unwrap_or_else(|| r2source::unnamed_function(body.entry)),
+            name: self.name_of(body.entry),
             body,
         }
+    }
+
+    /// What the program calls the function at `entry`.
+    fn name_of(&self, entry: u64) -> String {
+        (self.program.name_at(entry)).unwrap_or_else(|| r2source::unnamed_function(entry))
     }
 
     /// The tables the dispatches in a prepared body read, fetched.
@@ -2959,18 +3001,18 @@ impl<'a> Native<'a> {
             restate(&interface, slots, identity.to_vec())
         });
         let (data_symbols, data_types) = self.data_symbols(&walked.body);
+        let mut string_literals = self.literals(&walked.body);
+        string_literals.extend(extra_literals);
+        string_literals.sort_by_key(|(address, _)| *address);
+        string_literals.dedup_by_key(|(address, _)| *address);
+        let immutable_literals = self.immutable_literals(&walked.body, &string_literals);
         let function = NativeFunction {
             address: walked.body.entry,
             name: walked.name.clone(),
             blocks,
             calls,
-            string_literals: {
-                let mut literals = self.literals(&walked.body);
-                literals.extend(extra_literals);
-                literals.sort_by_key(|(address, _)| *address);
-                literals.dedup_by_key(|(address, _)| *address);
-                literals
-            },
+            string_literals,
+            immutable_literals,
             read_only: self.read_only(&walked.body),
             data_symbols,
             data_types,
@@ -3117,6 +3159,19 @@ impl Native<'_> {
                     .then_some((address, bytes))
             })
             .collect()
+    }
+
+    /// Each of `literals` whose text and terminator are mapped read-only, untouched by the loader
+    /// and by the body's own stores: a format a call reads as the file holds it (D409). Ascending.
+    fn immutable_literals(&self, body: &crate::body::Body, literals: &[(u64, String)]) -> Vec<u64> {
+        let (_, stores) = literal_accesses(body);
+        let immutable = literals.iter().filter(|(address, text)| {
+            let end = address.saturating_add(text.len() as u64 + 1);
+            let stored =
+                (stores.iter()).any(|written| written.start < end && *address < written.end);
+            !stored && immutable_text_at(self.program, *address).as_ref() == Some(text)
+        });
+        immutable.map(|(address, _)| *address).collect()
     }
 
     /// The named program data this body points at, each with the type the

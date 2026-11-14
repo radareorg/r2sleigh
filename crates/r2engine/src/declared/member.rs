@@ -61,7 +61,7 @@ impl Placement<'_> {
         };
         let name = format!("member@{at:#x}");
         let convention = self.target.convention.id;
-        let callee = self.typed(&name, convention, &placement, typed)?;
+        let callee = self.typed((&name, false), convention, &placement, typed)?;
         let callee = callee.with_types(r2source::Confidence::of(basis));
         let callee = self.carriers(&name, callee, None)?;
         let stacked = placement.locations.iter().any(|at| at.register().is_none());

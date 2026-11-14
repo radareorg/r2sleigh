@@ -256,6 +256,7 @@ const BIONIC: &str = include_str!("../data/types-android.sdb.txt");
 const BIONIC_CITED: &str = include_str!("../data/types-bionic.sdb.txt");
 const MUSL_CITED: &str = include_str!("../data/types-musl.sdb.txt");
 const LIBSYSTEM: &str = include_str!("../data/types-darwin.sdb.txt");
+const LIBSYSTEM_CITED: &str = include_str!("../data/types-darwin-cited.sdb.txt");
 const OBJC: &str = include_str!("../data/types-objc.sdb.txt");
 const KERNEL32: &str = include_str!("../data/types-kernel32.sdb.txt");
 const UCRT: &str = include_str!("../data/types-ucrt.sdb.txt");
@@ -278,7 +279,7 @@ const fn table(library: LibraryId, cited: bool, text: &'static str) -> Embedded 
 }
 
 /// The sources a cited row's comment may name.
-pub const SOURCES: [&str; 11] = [
+pub const SOURCES: [&str; 12] = [
     "ISO C17",
     "POSIX.1-2017",
     "POSIX.1-2024",
@@ -290,6 +291,7 @@ pub const SOURCES: [&str; 11] = [
     "musl",
     "Microsoft",
     "Itanium C++ ABI",
+    "macOS SDK",
 ];
 
 /// What a row read from a mangled name cites.
@@ -332,6 +334,7 @@ impl LibraryRows {
             ],
             CLibrary::LibSystem => &[
                 table(LibSystem, false, LIBSYSTEM),
+                table(LibSystem, true, LIBSYSTEM_CITED),
                 table(LibraryId::Objc, false, OBJC),
             ],
             CLibrary::Ucrt => &[
@@ -958,16 +961,14 @@ mod tests {
         assert!(!row("__cxa_begin_catch").noreturn);
         let format = rows.prototype(row("_ZSt24__throw_out_of_range_fmtPKcz"));
         assert_eq!((format.parameters.len(), format.variadic), (1, true));
-        let cxx = LibraryRows::parse(LibraryId::CxxRuntime, CXX);
-        assert!(cxx.len() > 70, "{}", cxx.len());
-        for row in cxx.rows() {
-            for parameter in &cxx.prototype(row).parameters {
-                let ty = cxx.graph().get(parameter.ty);
-                assert!(
-                    !matches!(ty, Some(crate::Type::Refused(_))),
-                    "{}",
-                    row.linked_name
-                );
+        let tables = [CXX, CXX_CITED].map(|text| LibraryRows::parse(LibraryId::CxxRuntime, text));
+        assert!(tables.iter().map(LibraryRows::len).sum::<usize>() > 70);
+        for cxx in &tables {
+            for row in cxx.rows() {
+                let parameters = cxx.prototype(row).parameters.iter();
+                let mut types = parameters.map(|parameter| cxx.graph().get(parameter.ty));
+                let refused = types.any(|ty| matches!(ty, Some(crate::Type::Refused(_))));
+                assert!(!refused, "{}", row.linked_name);
             }
         }
     }

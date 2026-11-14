@@ -146,6 +146,24 @@ impl SSAFunction {
         declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
         control: &C,
     ) -> Result<Prepared, SsaPrepareError> {
+        let built = Self::built_for_decompile(
+            blocks,
+            (arch, questions),
+            (machine_context, callees),
+            declared_successors,
+            control,
+        );
+        built.map(|(prepared, _)| prepared)
+    }
+
+    /// The decompile build and its frame walk, which a restatement decides again (D365).
+    pub(crate) fn built_for_decompile<C: SsaWorkControl + ?Sized>(
+        blocks: &[R2ILBlock],
+        (arch, questions): (Option<&crate::Arch>, InterfaceQuestions<'_>),
+        (machine_context, callees): (&SourceMachineContext, &CalleeBoundaries),
+        declared_successors: Option<&crate::cfg::DeclaredSuccessors>,
+        control: &C,
+    ) -> Result<(Prepared, crate::semantic::FrameWalk), SsaPrepareError> {
         let call_preserved_carriers = machine_context.call_preserved_carriers();
         let stack_pointer_carrier = machine_context.stack_pointer_carrier();
         // The lifted text as it arrived, for a reader tracing a defect that
@@ -207,12 +225,13 @@ impl SSAFunction {
         func.stack_pointer_carrier = stack_pointer_carrier;
         // Before preparation, so the arithmetic above the constant folds with it.
         func.forward_proven_call_return_addresses(callees);
-        let promoted = crate::slot_promotion::promote(
+        let (ops, points, walk) = crate::slot_promotion::promote(
             &mut func,
             machine_context,
             stack_pointer_restored_by_callee.is_some(),
+            control,
         );
-        func.record_promoted_slots(promoted);
+        func.record_promoted_slots((ops, points));
         // Before preparation, so what reads a folded load folds with it.
         crate::read_only::fold_loads(&mut func, machine_context);
         // Before preparation, so the comparison a decided check leaves unread folds away.
@@ -232,7 +251,7 @@ impl SSAFunction {
         )?;
         phase("prepared", prepared.num_blocks());
         control.poll()?;
-        Ok(prepared)
+        Ok((prepared, walk))
     }
 
     /// Build SSA prepared for pattern/type inference.

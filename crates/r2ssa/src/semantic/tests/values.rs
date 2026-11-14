@@ -1291,3 +1291,70 @@ fn every_unproven_machine_return_of_a_function_shares_one_register_walk() {
     let walks = super::super::boundaries::REGISTER_WALKS.with(std::cell::Cell::get);
     assert_eq!(walks, 1);
 }
+
+/// The class visits over `2^depth` unproven returns at a branch tree's leaves, each writing the
+/// result and a register across its top byte: they grow as `T log T`.
+fn register_class_visits(depth: u32) -> usize {
+    let mut arch = composed_return_arch_spec("whole", "slice", "pc");
+    arch.add_register(RegisterDef::new("partial", 3, 2));
+    arch.add_register(RegisterDef::new("sp", 32, 8));
+    arch.add_register(RegisterDef::new("cond", 48, 1));
+    arch.add_register(RegisterDef::new("other", 8, 8));
+    // Preorder: a node's left child falls through at the next address, its right is branched to.
+    fn lay(depth: u32, addr: &mut u64, blocks: &mut Vec<R2ILBlock>) {
+        let mut block = R2ILBlock::new(*addr, 4);
+        *addr += 4;
+        if depth == 0 {
+            for (dst, size) in [(0, 4), (3, 2)] {
+                block.push(R2ILOp::Copy {
+                    dst: Varnode::register(dst, size),
+                    src: Varnode::constant(1, size),
+                });
+            }
+            block.push(R2ILOp::Return {
+                target: Varnode::register(16, 8),
+            });
+            blocks.push(block);
+            return;
+        }
+        let at = blocks.len();
+        blocks.push(block);
+        lay(depth - 1, addr, blocks);
+        let right = *addr;
+        blocks[at].push(R2ILOp::CBranch {
+            target: Varnode::ram(right, 8),
+            cond: Varnode::register(48, 1),
+        });
+        lay(depth - 1, addr, blocks);
+    }
+    let mut blocks = Vec::new();
+    lay(depth, &mut 0x10000, &mut blocks);
+    blocks[0].ops.insert(
+        0,
+        R2ILOp::Copy {
+            dst: Varnode::register(8, 8),
+            src: Varnode::constant(2, 8),
+        },
+    );
+    let interface = (composed_return_interface())
+        .with_return_address_storage(register_storage(16, 8))
+        .and_then(|interface| interface.with_stack_pointer_storage(register_storage(32, 8)))
+        .expect("typed machine roles");
+    super::super::boundaries::REGISTER_CLASS_VISITS.with(|visits| visits.set(0));
+    let artifact =
+        SsaArtifact::raw_with_interface(&blocks, Some(&crate::Arch::from(arch)), interface)
+            .expect("a tree of unproven machine returns");
+    let returns = artifact.facts().boundaries.returns.values();
+    let unproven = returns.filter(|boundary| !boundary.complete && boundary.machine_state_complete);
+    assert_eq!(unproven.count(), 1 << depth);
+    super::super::boundaries::REGISTER_CLASS_VISITS.with(std::cell::Cell::get)
+}
+
+/// Rescans R4: a walk visits a class of a block once, so `T` returns `log T` deep cost
+/// `T log T` class visits, not `T x R` byte rescans.
+#[test]
+fn register_walks_visit_each_class_of_a_block_once_per_return() {
+    let (one, two) = (register_class_visits(8), register_class_visits(9));
+    assert!(one > 0, "the walks visit classes");
+    assert!(two < 3 * one, "{one} then {two}");
+}

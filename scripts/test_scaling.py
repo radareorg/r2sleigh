@@ -37,6 +37,25 @@ class Verdict(unittest.TestCase):
         self.assertIsNone(scaling.verdict("d", 2.0, 2.3, {}))
 
 
+class Sites(unittest.TestCase):
+    def test_a_site_that_quadruples_is_named_and_a_linear_one_is_not(self) -> None:
+        fixed = {"a.rs:1": 10, "b.rs:2": 10}
+        one = {"a.rs:1": 10 + 512 * 512, "b.rs:2": 10 + 4 * 512, "c.rs:3": 3}
+        two = {"a.rs:1": 10 + 1024 * 1024, "b.rs:2": 10 + 4 * 1024, "c.rs:3": 30}
+        grown = scaling.superlinear(512, fixed, one, two)
+        self.assertEqual([site for site, _ in grown], ["a.rs:1"])
+
+    def test_an_open_dimension_fails_on_a_site_its_row_does_not_own(self) -> None:
+        grown = [("own.rs:7", "own.rs:7 4x"), ("new.rs:9", "new.rs:9 4x")]
+        failed = scaling.unowned("d", grown, {"d": "D1"}, {"D1": ("own.rs",)})
+        self.assertEqual(len(failed), 1)
+        self.assertIn("new.rs:9", failed[0])
+        self.assertEqual(len(scaling.unowned("e", grown[:1], {}, {})), 1)
+
+    def test_every_open_meter_dimension_is_a_dimension(self) -> None:
+        self.assertLessEqual(set(scaling.SCAN_OPEN), set(scaling.DIMENSIONS))
+
+
 class Generators(unittest.TestCase):
     def test_each_dimension_grows_its_source_with_n(self) -> None:
         for name, generate in scaling.DIMENSIONS.items():

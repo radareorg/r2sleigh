@@ -91,6 +91,9 @@ impl FunctionLiveOut {
         graph: &SsaGraph,
         return_storages: &[CanonicalStorageId],
     ) -> Self {
+        if return_storages.is_empty() {
+            return Self::unstated(crate::semantic::BuildFacts::bare(func), graph);
+        }
         let mut live = Self::default();
         for block in &graph.blocks {
             if !returns(func, graph, block, return_storages) {
@@ -122,6 +125,17 @@ impl FunctionLiveOut {
             }
         }
         live
+    }
+
+    /// Where no interface states a result: every returning block, none resolved, and no callee
+    /// read, so a restatement keeps it (D289). `O(blocks)`.
+    pub(crate) fn unstated(build: crate::semantic::BuildFacts<'_>, graph: &SsaGraph) -> Self {
+        let returning =
+            (graph.blocks.iter()).filter(|block| returns_plainly(build.cfg(), graph, block));
+        Self {
+            unresolved: returning.map(|block| block.addr).collect(),
+            ..Self::default()
+        }
     }
 
     /// Find what reaches a returning block in the return registers, walking back
@@ -358,10 +372,21 @@ fn returns(
     return_storages: &[CanonicalStorageId],
 ) -> bool {
     let last = graph.op_insts(block.id).last();
+    returns_plainly(func.cfg(), graph, block)
+        || (last.and_then(|inst| graph.op(*inst)))
+            .is_some_and(|last| passing_tail(func, graph, last, return_storages))
+}
+
+/// Whether `block` returns by its terminator or a `Return` operation, whatever any callee states.
+fn returns_plainly(
+    cfg: &crate::cfg::CFG,
+    graph: &SsaGraph,
+    block: &crate::graph::GraphBlock,
+) -> bool {
+    let last = graph.op_insts(block.id).last();
     let last = last.and_then(|inst| graph.op(*inst));
-    (func.cfg().get_block(block.addr)).is_some_and(|cfg| cfg.is_return())
+    (cfg.get_block(block.addr)).is_some_and(|cfg| cfg.is_return())
         || matches!(last, Some(crate::op::SSAOp::Return { .. }))
-        || last.is_some_and(|last| passing_tail(func, graph, last, return_storages))
 }
 
 /// Whether anything at all reads a value: an operation in the body, or the caller.

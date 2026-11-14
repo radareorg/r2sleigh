@@ -87,7 +87,6 @@ swift_bridgeObjectRetain | no glibc 2.39 header declares it
 swift_getObjCClassFromMetadata | no glibc 2.39 header declares it
 swift_initStackObject | no glibc 2.39 header declares it
 swift_beginAccess | no glibc 2.39 header declares it
-errc | no glibc 2.39 header declares it
 warnc | no glibc 2.39 header declares it
 sysctlbyname | no glibc 2.39 header declares it
 sysctl | no glibc 2.39 header declares it
@@ -157,49 +156,18 @@ __cxa_finalize | no row names the header that declares it on `.include=`
 __cxa_guard_acquire | no row names the header that declares it on `.include=`
 __cxa_guard_release | no row names the header that declares it on `.include=`
 __cxa_guard_abort | no row names the header that declares it on `.include=`
-__cxa_pure_virtual | no row names the header that declares it on `.include=`
-__cxa_deleted_virtual | no row names the header that declares it on `.include=`
-__cxa_bad_cast | no row names the header that declares it on `.include=`
-__cxa_bad_typeid | no row names the header that declares it on `.include=`
-__cxa_throw_bad_array_new_length | no row names the header that declares it on `.include=`
 __dynamic_cast | no row names the header that declares it on `.include=`
 __cxa_demangle | no row names the header that declares it on `.include=`
 __cxa_allocate_exception | no row names the header that declares it on `.include=`
 __cxa_free_exception | no row names the header that declares it on `.include=`
-__cxa_throw | no row names the header that declares it on `.include=`
 __cxa_get_exception_ptr | no row names the header that declares it on `.include=`
 __cxa_begin_catch | no row names the header that declares it on `.include=`
 __cxa_end_catch | no row names the header that declares it on `.include=`
-__cxa_rethrow | no row names the header that declares it on `.include=`
-__cxa_call_unexpected | no row names the header that declares it on `.include=`
-_Unwind_Resume | no row names the header that declares it on `.include=`
-_ZSt9terminatev | no row names the header that declares it on `.include=`
-_ZSt21__throw_bad_exceptionv | no row names the header that declares it on `.include=`
-_ZSt17__throw_bad_allocv | no row names the header that declares it on `.include=`
-_ZSt28__throw_bad_array_new_lengthv | no row names the header that declares it on `.include=`
-_ZSt16__throw_bad_castv | no row names the header that declares it on `.include=`
-_ZSt18__throw_bad_typeidv | no row names the header that declares it on `.include=`
-_ZSt19__throw_logic_errorPKc | no row names the header that declares it on `.include=`
-_ZSt20__throw_domain_errorPKc | no row names the header that declares it on `.include=`
-_ZSt24__throw_invalid_argumentPKc | no row names the header that declares it on `.include=`
-_ZSt20__throw_length_errorPKc | no row names the header that declares it on `.include=`
-_ZSt20__throw_out_of_rangePKc | no row names the header that declares it on `.include=`
-_ZSt24__throw_out_of_range_fmtPKcz | no row names the header that declares it on `.include=`
-_ZSt21__throw_runtime_errorPKc | no row names the header that declares it on `.include=`
-_ZSt19__throw_range_errorPKc | no row names the header that declares it on `.include=`
-_ZSt22__throw_overflow_errorPKc | no row names the header that declares it on `.include=`
-_ZSt23__throw_underflow_errorPKc | no row names the header that declares it on `.include=`
-_ZSt19__throw_ios_failurePKc | no row names the header that declares it on `.include=`
-_ZSt19__throw_ios_failurePKci | no row names the header that declares it on `.include=`
-_ZSt20__throw_system_errori | no row names the header that declares it on `.include=`
-_ZSt20__throw_future_errori | no row names the header that declares it on `.include=`
-_ZSt25__throw_bad_function_callv | no row names the header that declares it on `.include=`
+__cxa_call_unexpected | no installed header declares it: GCC 13's and libc++abi's cxxabi.h name it nowhere
 
 # types-darwin.sdb.txt, libSystem's own.
 tputs | no libSystem header is read for it yet
-_exit | no libSystem header is read for it yet
-_Exit | no libSystem header is read for it yet
-xalloc_die | no libSystem header is read for it yet
+xalloc_die | gnulib's, which no macOS SDK header declares
 access | no libSystem header is read for it yet
 prctl | no libSystem header is read for it yet
 sigaction | no libSystem header is read for it yet
@@ -212,10 +180,9 @@ waitpid | no libSystem header is read for it yet
 wait | no libSystem header is read for it yet
 waitid | no libSystem header is read for it yet
 __bzero | no libSystem header is read for it yet
-__stack_chk_fail | no libSystem header is read for it yet
+__stack_chk_fail | no macOS SDK header declares it
 acl_free | no libSystem header is read for it yet
 recvfrom | no libSystem header is read for it yet
-__assert_rtn | no libSystem header is read for it yet
 __maskrune | no libSystem header is read for it yet
 __tolower | no libSystem header is read for it yet
 __error | no libSystem header is read for it yet

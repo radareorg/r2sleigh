@@ -200,6 +200,10 @@ pub enum Overwrites {
     All,
 }
 
+impl r2source::Negative for CallEffect {
+    const FACTS: &'static [r2source::NegativeFact] = &[r2source::NegativeFact::Kept];
+}
+
 /// What one call does to the result registers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallEffect {
@@ -211,7 +215,6 @@ pub struct CallEffect {
     pub overwrites: Overwrites,
     /// The bytes its callee leaves as found on every path to a return: a read after the call reads
     /// what was there before it.
-    #[doc(alias = "default_deny_kept")]
     pub kept: LaneBytes,
     /// The bytes the callee certainly reads: a cited fixed float parameter's, a read at the call
     /// (D228). An integer argument a callee may leave alone is no read.
@@ -392,6 +395,25 @@ impl RegisterEffect {
         (self.machine.outermost_registers().iter().enumerate())
             .filter(|(at, _)| self.unwritten.contains(*at))
             .map(|(_, storage)| *storage)
+    }
+
+    /// The greatest the body can keep: `unwritten`, before any pending callee is asked (D413).
+    pub fn unwritten_kept(&self) -> Kept {
+        Kept {
+            set: self.unwritten.clone(),
+            machine: self.machine.clone(),
+        }
+    }
+
+    /// Each result register with the low bytes the body may read of it before writing them: one
+    /// past the highest byte `takes` holds, 0 where it takes none (D372). `O(LANES)`.
+    pub fn register_reads(&self) -> LaneReads {
+        let slots = self.lanes.slots();
+        let read = (slots.iter().zip(self.takes.0)).filter_map(|(slot, taken)| {
+            let slot = (*slot)?;
+            Some((slot, (128 - taken.leading_zeros()).min(slot.size)))
+        });
+        LaneReads(read.collect())
     }
 
     /// What the body keeps once every pending callee keeps it, as `kept` answers each (none keeps
@@ -609,6 +631,39 @@ pub struct CallerFlow<'a, B> {
     first: Vec<u32>,
 }
 
+/// The low bytes a walked body may read of each result register before writing it (D372, D411),
+/// minted only by [`RegisterEffect::register_reads`], whose `takes` holds every read and forward.
+#[doc = "```compile_fail,E0423\nlet forged = r2ssa::site_boundary::LaneReads(Box::new([]));\n```"]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct LaneReads(Box<[(CanonicalStorageId, u32)]>);
+
+impl r2source::Negative for LaneReads {
+    const FACTS: &'static [r2source::NegativeFact] = &[r2source::NegativeFact::CallReadBytes];
+}
+
+impl LaneReads {
+    /// The registers with the bytes read of each, in the body's lane order.
+    pub fn pairs(&self) -> &[(CanonicalStorageId, u32)] {
+        &self.0
+    }
+
+    /// These reads less the registers `drop` names: a narrower bound is never minted.
+    pub(crate) fn without(&self, drop: impl Fn(&CanonicalStorageId) -> bool) -> Self {
+        Self(
+            self.0
+                .iter()
+                .filter(|(slot, _)| !drop(slot))
+                .copied()
+                .collect(),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn walked(pairs: &[(CanonicalStorageId, u32)]) -> Self {
+        Self(pairs.into())
+    }
+}
+
 /// How an operation takes part in the pass.
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 struct Mode {
@@ -657,7 +712,7 @@ fn modes_of(block: &R2ILBlock, irregular: bool, endian: Endianness) -> Vec<Mode>
     while run < block.ops.len() {
         let Some(instruction) = block.instruction_of(run) else {
             modes[run].weak = true;
-            modes[run].ignored = reads_of(&block.ops[run..=run], false, endian).ignored[0];
+            modes[run].ignored = reads_of(&block.ops[run..=run], false, endian).ignored()[0];
             run += 1;
             continue;
         };
@@ -670,19 +725,19 @@ fn modes_of(block: &R2ILBlock, irregular: bool, endian: Endianness) -> Vec<Mode>
         let weak = ops.iter().any(R2ILOp::is_local_branch);
         let reads = reads_of(ops, true, endian);
         // Past two cancelled registers no read is dropped: each input of the instruction stays one.
-        let cancelled = match reads.cancelled.as_slice() {
+        let cancelled = match reads.cancelled().registers() {
             cancelled @ ([_] | [_, _]) => cancelled
                 .iter()
                 .map(CanonicalStorageId::from_varnode)
                 .collect(),
             _ => Vec::new(),
         };
-        let each = (modes[run..end].iter_mut()).zip(reads.ignored).zip(ops);
+        let each = (modes[run..end].iter_mut()).zip(reads.ignored()).zip(ops);
         for ((mode, ignored), op) in each {
             mode.weak |= weak;
             mode.inert |= inert;
             mode.cancelled = cancelled_inputs(op, &cancelled);
-            mode.ignored = ignored;
+            mode.ignored = *ignored;
         }
         run = end;
     }

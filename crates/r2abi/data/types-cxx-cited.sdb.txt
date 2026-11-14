@@ -12,3 +12,211 @@ func.__cxa_atexit.arg.1=void *,arg
 func.__cxa_atexit.arg.2=void *,dso_handle
 func.__cxa_atexit.ret=int
 func.__cxa_atexit.include=cxxabi.h
+
+# cxxabi.h, as GCC 13's libstdc++ declares each `__attribute__((__noreturn__))`: the Itanium C++
+# ABI 3.2.6 pure and deleted virtual calls, the 2.9.5 failed cast and typeid, and the
+# array-new length check; libc++abi's cxxabi.h declares each `_LIBCXXABI_NORETURN` alike (D406).
+__cxa_pure_virtual=func
+func.__cxa_pure_virtual.args=0
+func.__cxa_pure_virtual.noreturn=true
+func.__cxa_pure_virtual.ret=void
+func.__cxa_pure_virtual.include=cxxabi.h
+
+__cxa_deleted_virtual=func
+func.__cxa_deleted_virtual.args=0
+func.__cxa_deleted_virtual.noreturn=true
+func.__cxa_deleted_virtual.ret=void
+func.__cxa_deleted_virtual.include=cxxabi.h
+
+__cxa_bad_cast=func
+func.__cxa_bad_cast.args=0
+func.__cxa_bad_cast.noreturn=true
+func.__cxa_bad_cast.ret=void
+func.__cxa_bad_cast.include=cxxabi.h
+
+__cxa_bad_typeid=func
+func.__cxa_bad_typeid.args=0
+func.__cxa_bad_typeid.noreturn=true
+func.__cxa_bad_typeid.ret=void
+func.__cxa_bad_typeid.include=cxxabi.h
+
+__cxa_throw_bad_array_new_length=func
+func.__cxa_throw_bad_array_new_length.args=0
+func.__cxa_throw_bad_array_new_length.noreturn=true
+func.__cxa_throw_bad_array_new_length.ret=void
+func.__cxa_throw_bad_array_new_length.include=cxxabi.h
+
+# cxxabi.h, GCC 13's libstdc++: the Itanium C++ ABI exception handling (abi-eh.html) 2.4.3
+# `__cxa_throw` and 2.5.4 `__cxa_rethrow`, each declared `__attribute__((__noreturn__))`.
+__cxa_throw=func
+func.__cxa_throw.args=3
+func.__cxa_throw.arg.0=void *,thrown_exception
+func.__cxa_throw.arg.1=type_info *,tinfo
+func.__cxa_throw.arg.2=void (*)(void *),dest
+func.__cxa_throw.noreturn=true
+func.__cxa_throw.ret=void
+func.__cxa_throw.include=cxxabi.h
+
+__cxa_rethrow=func
+func.__cxa_rethrow.args=0
+func.__cxa_rethrow.noreturn=true
+func.__cxa_rethrow.ret=void
+func.__cxa_rethrow.include=cxxabi.h
+
+# exception, GCC 13's libstdc++: `void terminate() noexcept __attribute__ ((__noreturn__))`,
+# [except.terminate]'s `[[noreturn]] void terminate() noexcept`.
+_ZSt9terminatev=func
+func._ZSt9terminatev.args=0
+func._ZSt9terminatev.noreturn=true
+func._ZSt9terminatev.ret=void
+func._ZSt9terminatev.include=exception
+
+# bits/functexcept.h, GCC 13's libstdc++: the helpers its headers call to throw, each declared
+# `__attribute__((__noreturn__))`; `__throw_out_of_range_fmt` also states
+# `__format__(__gnu_printf__, 1, 2)`.
+_ZSt21__throw_bad_exceptionv=func
+func._ZSt21__throw_bad_exceptionv.args=0
+func._ZSt21__throw_bad_exceptionv.noreturn=true
+func._ZSt21__throw_bad_exceptionv.ret=void
+func._ZSt21__throw_bad_exceptionv.include=bits/functexcept.h
+
+_ZSt17__throw_bad_allocv=func
+func._ZSt17__throw_bad_allocv.args=0
+func._ZSt17__throw_bad_allocv.noreturn=true
+func._ZSt17__throw_bad_allocv.ret=void
+func._ZSt17__throw_bad_allocv.include=bits/functexcept.h
+
+_ZSt28__throw_bad_array_new_lengthv=func
+func._ZSt28__throw_bad_array_new_lengthv.args=0
+func._ZSt28__throw_bad_array_new_lengthv.noreturn=true
+func._ZSt28__throw_bad_array_new_lengthv.ret=void
+func._ZSt28__throw_bad_array_new_lengthv.include=bits/functexcept.h
+
+_ZSt16__throw_bad_castv=func
+func._ZSt16__throw_bad_castv.args=0
+func._ZSt16__throw_bad_castv.noreturn=true
+func._ZSt16__throw_bad_castv.ret=void
+func._ZSt16__throw_bad_castv.include=bits/functexcept.h
+
+_ZSt18__throw_bad_typeidv=func
+func._ZSt18__throw_bad_typeidv.args=0
+func._ZSt18__throw_bad_typeidv.noreturn=true
+func._ZSt18__throw_bad_typeidv.ret=void
+func._ZSt18__throw_bad_typeidv.include=bits/functexcept.h
+
+_ZSt19__throw_logic_errorPKc=func
+func._ZSt19__throw_logic_errorPKc.args=1
+func._ZSt19__throw_logic_errorPKc.arg.0=const char *,what
+func._ZSt19__throw_logic_errorPKc.noreturn=true
+func._ZSt19__throw_logic_errorPKc.ret=void
+func._ZSt19__throw_logic_errorPKc.include=bits/functexcept.h
+
+_ZSt20__throw_domain_errorPKc=func
+func._ZSt20__throw_domain_errorPKc.args=1
+func._ZSt20__throw_domain_errorPKc.arg.0=const char *,what
+func._ZSt20__throw_domain_errorPKc.noreturn=true
+func._ZSt20__throw_domain_errorPKc.ret=void
+func._ZSt20__throw_domain_errorPKc.include=bits/functexcept.h
+
+_ZSt24__throw_invalid_argumentPKc=func
+func._ZSt24__throw_invalid_argumentPKc.args=1
+func._ZSt24__throw_invalid_argumentPKc.arg.0=const char *,what
+func._ZSt24__throw_invalid_argumentPKc.noreturn=true
+func._ZSt24__throw_invalid_argumentPKc.ret=void
+func._ZSt24__throw_invalid_argumentPKc.include=bits/functexcept.h
+
+_ZSt20__throw_length_errorPKc=func
+func._ZSt20__throw_length_errorPKc.args=1
+func._ZSt20__throw_length_errorPKc.arg.0=const char *,what
+func._ZSt20__throw_length_errorPKc.noreturn=true
+func._ZSt20__throw_length_errorPKc.ret=void
+func._ZSt20__throw_length_errorPKc.include=bits/functexcept.h
+
+_ZSt20__throw_out_of_rangePKc=func
+func._ZSt20__throw_out_of_rangePKc.args=1
+func._ZSt20__throw_out_of_rangePKc.arg.0=const char *,what
+func._ZSt20__throw_out_of_rangePKc.noreturn=true
+func._ZSt20__throw_out_of_rangePKc.ret=void
+func._ZSt20__throw_out_of_rangePKc.include=bits/functexcept.h
+
+_ZSt24__throw_out_of_range_fmtPKcz=func
+func._ZSt24__throw_out_of_range_fmtPKcz.args=2
+func._ZSt24__throw_out_of_range_fmtPKcz.arg.0=const char *,format
+func._ZSt24__throw_out_of_range_fmtPKcz.arg.1=,...
+func._ZSt24__throw_out_of_range_fmtPKcz.noreturn=true
+func._ZSt24__throw_out_of_range_fmtPKcz.ret=void
+func._ZSt24__throw_out_of_range_fmtPKcz.include=bits/functexcept.h
+func._ZSt24__throw_out_of_range_fmtPKcz.tail=format(printf,0)
+
+_ZSt21__throw_runtime_errorPKc=func
+func._ZSt21__throw_runtime_errorPKc.args=1
+func._ZSt21__throw_runtime_errorPKc.arg.0=const char *,what
+func._ZSt21__throw_runtime_errorPKc.noreturn=true
+func._ZSt21__throw_runtime_errorPKc.ret=void
+func._ZSt21__throw_runtime_errorPKc.include=bits/functexcept.h
+
+_ZSt19__throw_range_errorPKc=func
+func._ZSt19__throw_range_errorPKc.args=1
+func._ZSt19__throw_range_errorPKc.arg.0=const char *,what
+func._ZSt19__throw_range_errorPKc.noreturn=true
+func._ZSt19__throw_range_errorPKc.ret=void
+func._ZSt19__throw_range_errorPKc.include=bits/functexcept.h
+
+_ZSt22__throw_overflow_errorPKc=func
+func._ZSt22__throw_overflow_errorPKc.args=1
+func._ZSt22__throw_overflow_errorPKc.arg.0=const char *,what
+func._ZSt22__throw_overflow_errorPKc.noreturn=true
+func._ZSt22__throw_overflow_errorPKc.ret=void
+func._ZSt22__throw_overflow_errorPKc.include=bits/functexcept.h
+
+_ZSt23__throw_underflow_errorPKc=func
+func._ZSt23__throw_underflow_errorPKc.args=1
+func._ZSt23__throw_underflow_errorPKc.arg.0=const char *,what
+func._ZSt23__throw_underflow_errorPKc.noreturn=true
+func._ZSt23__throw_underflow_errorPKc.ret=void
+func._ZSt23__throw_underflow_errorPKc.include=bits/functexcept.h
+
+_ZSt19__throw_ios_failurePKc=func
+func._ZSt19__throw_ios_failurePKc.args=1
+func._ZSt19__throw_ios_failurePKc.arg.0=const char *,what
+func._ZSt19__throw_ios_failurePKc.noreturn=true
+func._ZSt19__throw_ios_failurePKc.ret=void
+func._ZSt19__throw_ios_failurePKc.include=bits/functexcept.h
+
+_ZSt19__throw_ios_failurePKci=func
+func._ZSt19__throw_ios_failurePKci.args=2
+func._ZSt19__throw_ios_failurePKci.arg.0=const char *,what
+func._ZSt19__throw_ios_failurePKci.arg.1=int,error
+func._ZSt19__throw_ios_failurePKci.noreturn=true
+func._ZSt19__throw_ios_failurePKci.ret=void
+func._ZSt19__throw_ios_failurePKci.include=bits/functexcept.h
+
+_ZSt20__throw_system_errori=func
+func._ZSt20__throw_system_errori.args=1
+func._ZSt20__throw_system_errori.arg.0=int,error
+func._ZSt20__throw_system_errori.noreturn=true
+func._ZSt20__throw_system_errori.ret=void
+func._ZSt20__throw_system_errori.include=bits/functexcept.h
+
+_ZSt20__throw_future_errori=func
+func._ZSt20__throw_future_errori.args=1
+func._ZSt20__throw_future_errori.arg.0=int,error
+func._ZSt20__throw_future_errori.noreturn=true
+func._ZSt20__throw_future_errori.ret=void
+func._ZSt20__throw_future_errori.include=bits/functexcept.h
+
+_ZSt25__throw_bad_function_callv=func
+func._ZSt25__throw_bad_function_callv.args=0
+func._ZSt25__throw_bad_function_callv.noreturn=true
+func._ZSt25__throw_bad_function_callv.ret=void
+func._ZSt25__throw_bad_function_callv.include=bits/functexcept.h
+
+# unwind.h, GCC 13's: `_Unwind_Resume (struct _Unwind_Exception *)`, an Itanium C++ ABI routine.
+# GCC 13 tree.cc (build_common_builtin_nodes) declares `__builtin_unwind_resume`, linked as
+# `_Unwind_Resume`, ECF_NORETURN: the landing pad's call resumes unwinding and never comes back.
+_Unwind_Resume=func
+func._Unwind_Resume.args=1
+func._Unwind_Resume.arg.0=struct _Unwind_Exception *,exception_object
+func._Unwind_Resume.noreturn=true
+func._Unwind_Resume.ret=void
+func._Unwind_Resume.include=unwind.h

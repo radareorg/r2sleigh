@@ -782,8 +782,8 @@ pub struct SourceCallBoundaryFact {
     /// The argument positions the callee's interface states it ignores (holes, D165): each is
     /// passed as a typed residual, so the value reaching it is no read and holds nothing live.
     pub ignored: Box<[u32]>,
-    /// Its `CallReads` is stated: the callee's statement bounds what it reads (D283).
-    pub reads_stated: bool,
+    /// What bounds its `CallReads` to the listed registers (D283, D411); none where any may be read.
+    pub reads_bound: Option<crate::call_reads::ReadBound>,
     /// How many leading entries of `arguments` the callee's prototype names.
     ///
     /// The rest are the tail a variadic call passes and no prototype can
@@ -819,7 +819,7 @@ impl SourceCallBoundaryFact {
     /// Whether the call may read an argument location its listed arguments do not name: no
     /// statement of its callee bounds what it reads (`CallReads`), or a stated one is unreached.
     pub const fn may_read_unlisted(&self) -> bool {
-        !self.reads_stated || !self.arguments_proven
+        self.reads_bound.is_none() || !self.arguments_proven
     }
 
     /// Whether `argument` is a slot the callee ignores (`ignored`).
@@ -1533,7 +1533,8 @@ pub struct StructuredDataflowFacts {
     pub inductions: crate::dense::IdMap<ValueId, InductionFact>,
     /// Cyclic CFG blocks not represented by a structured loop fact.
     pub unstructured_cycle_blocks: BTreeSet<u64>,
-    pub memory_accesses: BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
+    pub memory_accesses:
+        crate::dense::Metered<BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>>,
     /// Wide constant stores written out one declared member at a time.
     pub member_run_stores: crate::dense::IdMap<InstId, MemberRunStoreCertificate>,
     pub recursive_calls: BTreeMap<CallSiteId, StructuredRecursiveCallFact>,

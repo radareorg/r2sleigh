@@ -47,11 +47,28 @@ pub struct AnalysisStats {
     pub rebuilt: u64,
     /// Frame object models built, one `FrameReach` each (D403).
     pub frames_built: u64,
+    /// Static prefixes collected, one per build recovery read (D289).
+    pub static_prefixes: u64,
+    /// Value visits the frame walks propagated (D365).
+    pub frame_walk_steps: u64,
+    /// Sink points and candidate places the frame walks' decisions read (D365).
+    pub frame_decision_steps: u64,
     /// Convention seals made to read dispatch tables, every round (D403).
     pub table_seals: u64,
+    /// Nodes entered plus edges followed by the program's condensations, `V + E` each (D412).
+    pub condensed: u64,
+    /// Site fates `DirectSites` computed itself; 0 where the callers-first read held `N ⊆ N⁺` (D354).
+    pub site_fates_in_direct_sites: u64,
+    /// Site fates the callers-first read asked that no `DirectSites` joined, `|A⁺ \ A|` (D354).
+    pub site_fates_never_joined: u64,
+    /// Site fates the callers-first read asked of a body a deep read had lifted first (D354).
+    pub site_fates_relifted: u64,
 }
 pub use proved::Proved;
 pub use r2ssa::InductionStep;
+/// The process's element visits, in all and by call site, in a `work-meter` build (D417): a count
+/// of the process, not of one program, so it stays out of [`AnalysisStats`].
+pub use r2ssa::dense::{element_visits as scans, element_visits_by_site as scan_sites};
 pub use records::{
     Annotation, AnnotationKind, Answered, ArgumentSlot, CallArgument, Callee, Decoders,
     Instruction, Line, Listing, Memory, Operand, Parameters, Register, Registers, Semantics, Stop,
