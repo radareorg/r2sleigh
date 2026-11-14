@@ -18,7 +18,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::SSAFunction;
-use crate::dense::{Csr, DenseId, IdMap};
+use crate::dense::{Csr, DenseId, IdMap, IdSet, IdVec};
 
 /// A state that joins: `join` moves `self` up to cover `other` and says
 /// whether it moved.
@@ -224,6 +224,314 @@ pub fn sparse<I: DenseId, L: Clone + PartialEq>(
     Ok(cells)
 }
 
+/// Not placed by the order: a node the entry does not reach.
+const UNPLACED: u32 = u32::MAX;
+
+/// Bourdoncle's weak topological order of what an entry reaches: each strongly connected component
+/// a nested run led by its head (doc/adr-fixpoint.md, "Weak topological order").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Wto<I> {
+    order: Vec<I>,
+    position: IdVec<I, u32>,
+    /// One past the last position of the component a head leads; else the node's next position.
+    end: IdVec<I, u32>,
+    head: IdSet<I>,
+    visits: u64,
+}
+
+/// One step of building the order.
+enum Build<I> {
+    /// Order a node set, its search entering at `starts` first.
+    Decompose {
+        nodes: Vec<I>,
+        starts: Vec<I>,
+    },
+    Place(I),
+    /// Close the component a placed node leads.
+    Close(I),
+}
+
+impl<I: DenseId> Wto<I> {
+    /// The order of what `entry` reaches, numbered and searched by ascending `key` alone; one
+    /// condensation per nesting level, `O(d · (V + E))` for depth `d`.
+    pub fn of(successors: &Csr<I, I>, entry: I, key: impl Fn(I) -> u64) -> Self {
+        use crate::dense::Node;
+        let count = successors.len();
+        let mut wto = Self {
+            order: Vec::new(),
+            position: IdVec::filled(count, UNPLACED),
+            end: IdVec::filled(count, UNPLACED),
+            head: IdSet::new(count),
+            visits: 0,
+        };
+        let by_key = |nodes: &mut Vec<I>| nodes.sort_unstable_by_key(|node| (key(*node), *node));
+        let mut reached = IdSet::new(count);
+        reached.insert(entry);
+        let mut pending = vec![entry];
+        while let Some(node) = pending.pop() {
+            for successor in successors.get(node) {
+                wto.visits += 1;
+                if reached.insert(*successor) {
+                    pending.push(*successor);
+                }
+            }
+        }
+        let mut nodes = reached.iter().collect::<Vec<_>>();
+        by_key(&mut nodes);
+        // A decomposition places at least one node or removes a head from what it hands on,
+        // so the tasks end.
+        let mut tasks = vec![Build::Decompose {
+            nodes,
+            starts: vec![entry],
+        }];
+        let mut local = IdVec::filled(count, UNPLACED);
+        while let Some(task) = tasks.pop() {
+            let (nodes, starts) = match task {
+                Build::Place(node) => {
+                    wto.position[node] = wto.order.len() as u32;
+                    wto.order.push(node);
+                    continue;
+                }
+                Build::Close(node) => {
+                    wto.end[node] = wto.order.len() as u32;
+                    continue;
+                }
+                Build::Decompose { nodes, starts } => (nodes, starts),
+            };
+            for (at, node) in nodes.iter().enumerate() {
+                local[*node] = at as u32;
+            }
+            let member = |node: I| {
+                let at = local[node];
+                (nodes.get(at as usize) == Some(&node)).then_some(Node(at))
+            };
+            let mut rows = Csr::<Node, Node>::with_capacity(nodes.len(), nodes.len());
+            for node in &nodes {
+                let mut row = (successors.get(*node).iter())
+                    .filter_map(|successor| member(*successor))
+                    .collect::<Vec<_>>();
+                wto.visits += row.len() as u64 + 1;
+                row.sort_unstable();
+                row.dedup();
+                rows.push_row(row);
+            }
+            let condensation =
+                crate::dense::Condensation::of(&rows, starts.iter().filter_map(|s| member(*s)));
+            wto.visits += condensation.visits();
+            let mut steps = Vec::new();
+            // Components close sinks first; the order wants sources first.
+            for (component, members) in condensation
+                .components()
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
+                let members = members
+                    .iter()
+                    .map(|at| nodes[at.index()])
+                    .collect::<Vec<_>>();
+                if !condensation.is_cyclic(component) {
+                    steps.extend([Build::Place(members[0]), Build::Close(members[0])]);
+                    continue;
+                }
+                // The member the search entered first finishes last: the component's head.
+                let head = *(members.iter())
+                    .max_by_key(|member| condensation.finish(Node(local[**member])))
+                    .expect("a component has a member");
+                wto.head.insert(head);
+                let mut starts = successors.get(head).to_vec();
+                by_key(&mut starts);
+                let rest = members.into_iter().filter(|other| *other != head).collect();
+                steps.extend([
+                    Build::Place(head),
+                    Build::Decompose {
+                        nodes: rest,
+                        starts,
+                    },
+                    Build::Close(head),
+                ]);
+            }
+            tasks.extend(steps.into_iter().rev());
+        }
+        wto
+    }
+
+    /// The reached nodes, in order.
+    pub fn order(&self) -> &[I] {
+        &self.order
+    }
+
+    /// Where `node` stands in the order; `None` for a node the entry does not reach.
+    pub fn position(&self, node: I) -> Option<u32> {
+        Some(self.position[node]).filter(|at| *at != UNPLACED)
+    }
+
+    /// Whether `node` leads a component: a cycle passes through it.
+    pub fn is_head(&self, node: I) -> bool {
+        self.head.contains(node)
+    }
+
+    /// One past the last position of the component `node` leads, or its own next position.
+    pub fn end(&self, node: I) -> u32 {
+        self.end[node]
+    }
+
+    /// Nodes and edges the searches touched: the `O(d · (V + E))` bound, metered.
+    pub fn visits(&self) -> u64 {
+        self.visits
+    }
+}
+
+/// How [`wto_sparse`] asks for one cell: in the ascent (join, widen at a head) or the descent
+/// (meet, refine at a head), and whether the cell lies in a component's head block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    Ascend { head: bool },
+    Descend { head: bool },
+}
+
+/// What one [`wto_sparse`] run spent.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Meter {
+    /// Cells evaluated.
+    pub evaluations: u64,
+    /// The most times one head-block cell moved in one phase.
+    pub head_moves: usize,
+}
+
+/// Solve cells placed in blocks over a weak topological order, ascending then descending; `height`
+/// bounds a head-block cell's moves per phase (doc/adr-fixpoint.md, "Weak topological order").
+pub fn wto_sparse<B: DenseId, C: DenseId>(
+    pass: &'static str,
+    height: (usize, usize),
+    wto: &Wto<B>,
+    cells: &Csr<B, C>,
+    readers: &Csr<C, C>,
+    mut eval: impl FnMut(C, Step) -> bool,
+) -> Result<Meter, Exhausted> {
+    // Each cell's rank: blocks in order, a block's cells in its order.
+    let mut rank = IdVec::filled(readers.len(), UNPLACED);
+    let mut first = Vec::with_capacity(wto.order().len() + 1);
+    let mut ranked = Vec::new();
+    for block in wto.order() {
+        first.push(ranked.len() as u32);
+        for cell in cells.get(*block) {
+            rank[*cell] = ranked.len() as u32;
+            ranked.push(*cell);
+        }
+    }
+    first.push(ranked.len() as u32);
+    let mut meter = Meter::default();
+    let mut moves = vec![0usize; ranked.len()];
+    for (phase, height) in [(false, height.0), (true, height.1)] {
+        let mut waiting = Waiting::all(ranked.len());
+        moves.iter_mut().for_each(|count| *count = 0);
+        let mut evaluate = |at: usize, head: bool, waiting: &mut Waiting| {
+            let (lo, hi) = (first[at] as usize, first[at + 1] as usize);
+            while let Some(index) = waiting.next(lo, hi) {
+                waiting.clear(index);
+                meter.evaluations += 1;
+                let step = match phase {
+                    false => Step::Ascend { head },
+                    true => Step::Descend { head },
+                };
+                if !eval(ranked[index], step) {
+                    continue;
+                }
+                if head {
+                    moves[index] += 1;
+                    meter.head_moves = meter.head_moves.max(moves[index]);
+                }
+                for reader in readers.get(ranked[index]) {
+                    if let Some(at) = Some(rank[*reader]).filter(|at| *at != UNPLACED) {
+                        waiting.set(at as usize);
+                    }
+                }
+            }
+        };
+        // The open components: each head's position and how often it has run.
+        let mut open = Vec::<(usize, usize)>::new();
+        let mut at = 0usize;
+        loop {
+            while let Some(&(head, runs)) = open.last()
+                && at == wto.end(wto.order()[head]) as usize
+            {
+                let (lo, hi) = (first[head] as usize, first[head + 1] as usize);
+                if waiting.next(lo, hi).is_none() {
+                    open.pop();
+                    continue;
+                }
+                let limit = 2 + 2 * height * (hi - lo);
+                if runs >= limit {
+                    r2il::refusal_evidence!("fixpoint", "{pass}: a component ran past {limit}");
+                    return Err(Exhausted { pass, height });
+                }
+                if let Some(last) = open.last_mut() {
+                    last.1 += 1;
+                }
+                evaluate(head, true, &mut waiting);
+                at = head + 1;
+            }
+            let Some(block) = wto.order().get(at) else {
+                break;
+            };
+            let head = wto.is_head(*block);
+            if head {
+                open.push((at, 1));
+            }
+            evaluate(at, head, &mut waiting);
+            at += 1;
+        }
+        if waiting.next(0, ranked.len()).is_some() {
+            r2il::refusal_evidence!("fixpoint", "{pass}: a cell was read before its writer");
+            return Err(Exhausted { pass, height });
+        }
+    }
+    Ok(meter)
+}
+
+/// The cells waiting to be evaluated, by rank: a bitset searched a word at a time.
+struct Waiting {
+    words: Vec<u64>,
+}
+
+impl Waiting {
+    fn all(count: usize) -> Self {
+        let mut words = vec![u64::MAX; count.div_ceil(64)];
+        if let Some(last) = words.last_mut()
+            && !count.is_multiple_of(64)
+        {
+            *last = (1u64 << (count % 64)) - 1;
+        }
+        Self { words }
+    }
+
+    fn set(&mut self, at: usize) {
+        self.words[at / 64] |= 1 << (at % 64);
+    }
+
+    fn clear(&mut self, at: usize) {
+        self.words[at / 64] &= !(1 << (at % 64));
+    }
+
+    /// The first waiting rank in `lo..hi`.
+    fn next(&self, lo: usize, hi: usize) -> Option<usize> {
+        let mut word = lo / 64;
+        let mut bits = self.words.get(word)? & (u64::MAX << (lo % 64));
+        loop {
+            if bits != 0 {
+                let at = word * 64 + bits.trailing_zeros() as usize;
+                return (at < hi).then_some(at);
+            }
+            word += 1;
+            if word * 64 >= hi {
+                return None;
+            }
+            bits = *self.words.get(word)?;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -254,6 +562,84 @@ mod tests {
         assert_eq!(solved.get(ValueId(0)), Some(&2));
     }
     use r2il::{R2ILBlock, R2ILOp, Varnode};
+
+    /// The order of `edges` over `count` nodes from node 0, each node keyed by `keys`.
+    fn order_of(count: usize, edges: &[(u32, u32)], keys: &[u64]) -> Wto<crate::dense::Node> {
+        use crate::dense::Node;
+        let pairs = edges.iter().map(|(from, to)| (Node(*from), Node(*to)));
+        let successors = Csr::from_pairs(count, pairs);
+        Wto::of(&successors, Node(0), |node| keys[node.index()])
+    }
+
+    /// The keys in order, a head marked `(` with its component closed by `)`.
+    fn spelled(wto: &Wto<crate::dense::Node>, keys: &[u64]) -> String {
+        let mut text = String::new();
+        let mut open = Vec::new();
+        for (at, node) in wto.order().iter().enumerate() {
+            while open.last() == Some(&(at as u32)) {
+                open.pop();
+                text.push(')');
+            }
+            if wto.is_head(*node) {
+                text.push('(');
+                open.push(wto.end(*node));
+            }
+            text.push_str(&format!("{:x} ", keys[node.index()]));
+        }
+        text + &")".repeat(open.len())
+    }
+
+    /// `entry -> A | B`, `A <-> B`: the head is the lower-keyed of the two, whatever the numbering.
+    #[test]
+    fn an_irreducible_loops_head_is_its_least_key_whatever_the_numbering() {
+        let keys = [0x1000, 0x1010, 0x1020];
+        let given = order_of(3, &[(0, 1), (0, 2), (1, 2), (2, 1)], &keys);
+        let swapped = order_of(3, &[(0, 2), (0, 1), (2, 1), (1, 2)], &keys);
+        let renumbered = order_of(
+            3,
+            &[(0, 2), (0, 1), (1, 2), (2, 1)],
+            &[0x1000, 0x1020, 0x1010],
+        );
+        assert_eq!(spelled(&given, &keys), "1000 (1010 1020 )");
+        assert_eq!(spelled(&swapped, &keys), "1000 (1010 1020 )");
+        assert_eq!(
+            spelled(&renumbered, &[0x1000, 0x1020, 0x1010]),
+            "1000 (1010 1020 )"
+        );
+    }
+
+    /// Two nested loops, a block after them and one nothing reaches.
+    #[test]
+    fn nested_loops_nest_and_an_unreached_block_is_unplaced() {
+        // 0 -> 1 (outer head) -> 2 (inner head) -> 3 -> 2 | 4 -> 1 | 5; 6 unreached.
+        let keys = [0, 1, 2, 3, 4, 5, 6];
+        let edges = [
+            (0, 1),
+            (1, 2),
+            (2, 3),
+            (3, 2),
+            (3, 4),
+            (4, 1),
+            (4, 5),
+            (6, 5),
+        ];
+        let wto = order_of(7, &edges, &keys);
+        assert_eq!(spelled(&wto, &keys), "0 (1 (2 3 )4 )5 ");
+        assert_eq!(wto.position(crate::dense::Node(6)), None);
+        assert!(
+            wto.visits() <= 3 * (7 + edges.len() as u64) * 3,
+            "{}",
+            wto.visits()
+        );
+    }
+
+    /// A self-loop is its own component.
+    #[test]
+    fn a_self_loop_heads_a_component_of_one() {
+        let keys = [0, 1, 2];
+        let wto = order_of(3, &[(0, 1), (1, 1), (1, 2)], &keys);
+        assert_eq!(spelled(&wto, &keys), "0 (1 )2 ");
+    }
 
     /// The set of block addresses a path has passed, joined by union.
     #[derive(Debug, Clone, PartialEq, Eq)]

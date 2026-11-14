@@ -436,7 +436,7 @@ pub(crate) fn collect_aggregate_access_projections(
         let Some(binding) = exact_access_binding(graph, access, access.space) else {
             continue;
         };
-        let target = parameter_target(addresses, interface, type_graph, (access, values))
+        let target = parameter_target(addresses, interface, type_graph, (graph, access, values))
             .or_else(|| frame_target(sources, type_graph, access))
             .or_else(|| data_target(views, image, access));
         let Some(target) = target else {
@@ -505,7 +505,11 @@ fn parameter_target<'g>(
     addresses: &AddressProvenanceFacts,
     interface: &crate::SourceFunctionInterface,
     type_graph: &'g crate::SourceTypeGraph,
-    (access, values): (&StructuredMemoryAccessFact, &crate::values::ValueRanges),
+    (graph, access, values): (
+        &SsaGraph,
+        &StructuredMemoryAccessFact,
+        &crate::values::ValueRanges,
+    ),
 ) -> Option<Target<'g>> {
     let expression = addresses.parameter_expression(access.address)?;
     let parameter_index = u32::try_from(expression.parameter).ok()?;
@@ -532,7 +536,7 @@ fn parameter_target<'g>(
             Some(VariableIndex {
                 value: term.value,
                 stride_bytes: u64::try_from(term.coefficient).ok()?,
-                upper: values.upper_bound(term.value),
+                upper: bound_where_computed(graph, values, access.address, term.value),
             }),
         ),
         _ => return None,
@@ -546,6 +550,19 @@ fn parameter_target<'g>(
         element_index,
         variable,
     })
+}
+
+/// `index`'s bound in the block that computes `address`: a guard dominating that block holds of every
+/// address it computes, so of every one the access reads (D370). `O(log k)`.
+fn bound_where_computed(
+    graph: &SsaGraph,
+    values: &crate::values::ValueRanges,
+    address: ValueId,
+    index: ValueId,
+) -> Option<u64> {
+    let block = (graph.def_inst(address).and_then(|inst| graph.inst(inst)))
+        .map_or(graph.entry, |inst| inst.block);
+    values.upper_bound_at(index, block)
 }
 
 /// A frame slot declared a struct or an array of them: a constant offset, or for an indexed access
@@ -572,7 +589,12 @@ fn frame_target<'g>(
             let variable = VariableIndex {
                 value: term.value,
                 stride_bytes: u64::try_from(term.coefficient).ok().filter(|s| *s > 0)?,
-                upper: sources.values.upper_bound(term.value),
+                upper: bound_where_computed(
+                    sources.graph,
+                    sources.values,
+                    access.address,
+                    term.value,
+                ),
             };
             (u64::try_from(offset).ok()?, Some(variable))
         }

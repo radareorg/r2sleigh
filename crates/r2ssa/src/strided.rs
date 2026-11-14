@@ -231,6 +231,26 @@ impl StridedInterval {
         Self::strided(self.width_bits, stride, low, high)
     }
 
+    /// Narrowing after `widen`: take `next`'s bound only where this one is the width's extreme on
+    /// its stride, as `widen` leaves it. `next` lies within `self`, so each bound moves once.
+    pub fn refine(&self, next: &Self) -> Self {
+        debug_assert_eq!(self.width_bits, next.width_bits);
+        let (Some(old), Some(new)) = (self.body, next.body) else {
+            return *next;
+        };
+        let mask = Self::mask_for(self.width_bits);
+        let stride = old.stride.max(1);
+        let low = match old.low < stride {
+            true => new.low,
+            false => old.low,
+        };
+        let high = match mask - old.high < stride {
+            true => new.high,
+            false => old.high,
+        };
+        self.meet(&Self::interval(self.width_bits, low, high))
+    }
+
     /// Addition at this width, wrapping where the machine would.
     ///
     /// A range that wraps past the width's end is not describable by one
