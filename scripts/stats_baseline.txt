@@ -76,7 +76,7 @@
 0pack pdd @ 0x0062ecf0 | direct_sites.recomputed | 0
 0pack pdd @ 0x0062ecf0 | direct_sites.reused | 0
 0pack pdd @ 0x0062ecf0 | frames_built | 28
-0pack pdd @ 0x0062ecf0 | rebuilt | 2
+0pack pdd @ 0x0062ecf0 | rebuilt | 1
 0pack pdd @ 0x0062ecf0 | references.computed | 0
 0pack pdd @ 0x0062ecf0 | references.recomputed | 0
 0pack pdd @ 0x0062ecf0 | references.reused | 0
@@ -200,7 +200,7 @@ pumasim pdd @ 0x0023fdf0 | direct_sites.computed | 0
 pumasim pdd @ 0x0023fdf0 | direct_sites.recomputed | 0
 pumasim pdd @ 0x0023fdf0 | direct_sites.reused | 0
 pumasim pdd @ 0x0023fdf0 | frames_built | 145
-pumasim pdd @ 0x0023fdf0 | rebuilt | 10
+pumasim pdd @ 0x0023fdf0 | rebuilt | 6
 pumasim pdd @ 0x0023fdf0 | references.computed | 0
 pumasim pdd @ 0x0023fdf0 | references.recomputed | 0
 pumasim pdd @ 0x0023fdf0 | references.reused | 0
@@ -231,7 +231,7 @@ pumasim pdd @ 0x004baf30 | direct_sites.computed | 0
 pumasim pdd @ 0x004baf30 | direct_sites.recomputed | 0
 pumasim pdd @ 0x004baf30 | direct_sites.reused | 0
 pumasim pdd @ 0x004baf30 | frames_built | 149
-pumasim pdd @ 0x004baf30 | rebuilt | 10
+pumasim pdd @ 0x004baf30 | rebuilt | 7
 pumasim pdd @ 0x004baf30 | references.computed | 0
 pumasim pdd @ 0x004baf30 | references.recomputed | 0
 pumasim pdd @ 0x004baf30 | references.reused | 0
@@ -262,7 +262,7 @@ pumasim session: pdd of 50 functions | direct_sites.computed | 0
 pumasim session: pdd of 50 functions | direct_sites.recomputed | 0
 pumasim session: pdd of 50 functions | direct_sites.reused | 0
 pumasim session: pdd of 50 functions | frames_built | 842
-pumasim session: pdd of 50 functions | rebuilt | 48
+pumasim session: pdd of 50 functions | rebuilt | 25
 pumasim session: pdd of 50 functions | references.computed | 0
 pumasim session: pdd of 50 functions | references.recomputed | 0
 pumasim session: pdd of 50 functions | references.reused | 0

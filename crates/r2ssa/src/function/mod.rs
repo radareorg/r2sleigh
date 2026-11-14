@@ -599,6 +599,10 @@ struct Constructed {
 struct Reuse {
     key: BuildKey,
     provisional: Provisional,
+    /// What recovery's static phases read of the build, where it recovered (D289).
+    prefix: Option<crate::semantic::StaticPrefix>,
+    /// The build's frame walk, decided again against a restatement's reach and areas (D365).
+    walk: crate::semantic::FrameWalk,
 }
 
 /// A build offered to a construction: taken where the callees state the same to it.
@@ -606,18 +610,33 @@ struct Prior {
     key: BuildKey,
     function: Prepared,
     provisional: Provisional,
+    prefix: Option<crate::semantic::StaticPrefix>,
+    walk: crate::semantic::FrameWalk,
 }
 
 impl Prior {
-    /// Whether the callees `key` reads state to this build what it was built against: every part
-    /// equal, the argument areas only where promotion read them.
-    fn builds(&self, key: &BuildKey) -> bool {
-        let areas = (self.function.frame_points()).map_or_else(
-            || self.key.areas == key.areas,
-            |points| same_where_read(points, &self.key.areas, &key.areas),
-        );
-        let reach = same_where_asked(self.function.asked_reach(), &self.key.upward, &key.upward);
-        areas && reach && self.key.without_areas() == key.without_areas()
+    /// This build against the callees `key` reads: kept where they state what it was built against,
+    /// or where only reach and areas move and its frame walk decides every round, the promoted set
+    /// and the canary's projection as before, its points decided again (D365). Else the key it
+    /// was built against, and the build is made again.
+    fn kept<C: SsaWorkControl + ?Sized>(
+        mut self,
+        key: &BuildKey,
+        context: &SourceMachineContext,
+        control: &C,
+    ) -> Result<Self, Box<BuildKey>> {
+        if self.key.without_areas() != key.without_areas() {
+            return Err(Box::new(self.key));
+        }
+        if (&self.key.upward, &self.key.areas) == (&key.upward, &key.areas) {
+            return Ok(self);
+        }
+        let evidence = crate::semantic::Evidence::of(context);
+        let Some(points) = self.walk.restate(&evidence, control) else {
+            return Err(Box::new(self.key));
+        };
+        self.function.restate_frame_points(points);
+        Ok(self)
     }
 }
 
@@ -637,59 +656,12 @@ fn rewriting_callees(function: &SSAFunction, context: &SourceMachineContext) -> 
     targets.map(|target| target.offset).collect()
 }
 
-/// Whether two keys' areas cover the same places the build read at every call, both listed by
-/// instruction from one lift (D377). `O(calls x spans x log places)`.
-fn same_where_read(
-    points: &crate::semantic::FramePoints,
-    built: &[CallAreas],
-    now: &[CallAreas],
-) -> bool {
-    built.len() == now.len()
-        && (built.iter().zip(now)).all(|(one, other)| {
-            one.0 == other.0
-                && points.areas_alike(
-                    one.0,
-                    [one.1.as_deref(), other.1.as_deref()],
-                    [one.2.as_deref(), other.2.as_deref()],
-                )
-        })
-}
-
 /// One call's read and written areas, by its instruction.
 type CallAreas = (
     u64,
     crate::call_reads::StackArea,
     crate::call_reads::StackArea,
 );
-
-/// Whether two keys' upward positions agree at every (callee, position) promotion asked: a
-/// callee's other positions decide nothing in the build (D365). `O(asked x log)`.
-fn same_where_asked(
-    asked: &BTreeSet<(u64, usize)>,
-    built: &BTreeMap<u64, BTreeSet<usize>>,
-    now: &BTreeMap<u64, BTreeSet<usize>>,
-) -> bool {
-    let upward = |key: &BTreeMap<u64, BTreeSet<usize>>, (target, position): &(u64, usize)| {
-        (key.get(target)).is_some_and(|positions| positions.contains(position))
-    };
-    (asked.iter()).all(|pair| upward(built, pair) == upward(now, pair))
-}
-
-#[cfg(test)]
-mod asked_reach_tests {
-    use super::*;
-
-    #[test]
-    fn a_reach_moves_the_build_only_where_promotion_asked() {
-        let asked = BTreeSet::from([(0x2000, 0)]);
-        let built = BTreeMap::from([(0x2000, BTreeSet::from([0]))]);
-        let elsewhere = BTreeMap::from([(0x2000, BTreeSet::from([0, 1])), (0x3000, [0].into())]);
-        assert!(same_where_asked(&asked, &built, &elsewhere));
-        let flipped = BTreeMap::from([(0x2000, BTreeSet::from([1]))]);
-        assert!(!same_where_asked(&asked, &built, &flipped));
-        assert!(!same_where_asked(&asked, &BTreeMap::new(), &built));
-    }
-}
 
 /// Everything the build before recovery reads of the callees' statements: equal keys over one lift
 /// build equal functions (doc/adr-callee-builds.md).
@@ -709,7 +681,7 @@ struct BuildKey {
     unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
     conventions: SiteConventions,
     /// The argument positions through which each callee reaches only upward: all the frame walk
-    /// reads of its reach, compared only where it asked (D365).
+    /// reads of its reach, which its decision reads again where it moves (D365).
     upward: BTreeMap<u64, BTreeSet<usize>>,
     premises: BTreeSet<r2source::Premise>,
 }
@@ -754,7 +726,8 @@ impl<'a> DefinedWhole<'a> {
 }
 
 impl BuildKey {
-    /// Every part but the argument areas.
+    /// Every part but the reach and the argument areas: what the build reads before its frame
+    /// walk decides.
     fn without_areas(&self) -> impl PartialEq + '_ {
         (
             (&self.clobbered, &self.kept, &self.results),
@@ -965,19 +938,30 @@ impl TrustedConstruction {
         let Constructed {
             function, reuse, ..
         } = constructed;
-        let prior = reuse.map(|Reuse { key, provisional }| Prior {
-            key,
-            function,
-            provisional,
-        });
+        let prior = reuse.map(
+            |Reuse {
+                 key,
+                 provisional,
+                 prefix,
+                 walk,
+             }| Prior {
+                key,
+                function,
+                provisional,
+                prefix,
+                walk,
+            },
+        );
         let constructed = TrustedSsaArtifact::construct(
             &lifted, arch, control, evidence, premises, recovery, prior,
         )?;
         let kept = constructed.kept;
+        // The oracle is no work of the request: unmetered, so a meter counts the same in debug.
         #[cfg(debug_assertions)]
         if kept {
+            let unmetered = &crate::control::UncheckedSsaWorkControl;
             let full = TrustedSsaArtifact::construct(
-                &lifted, arch, control, evidence, premises, recovery, None,
+                &lifted, arch, unmetered, evidence, premises, recovery, None,
             )?;
             if let Some(part) = constructed.difference(&full) {
                 panic!(
@@ -1561,7 +1545,9 @@ impl SsaArtifact {
         &self,
     ) -> (crate::liveness::ValueLiveness, crate::span::StorageSpans) {
         let graph = self.graph();
-        let mut content = crate::liveness::ValueContent::of(graph, Some(&self.machine_context));
+        let mut content = crate::liveness::ValueContent::of(graph, |storage| {
+            self.machine_context.register_projection(storage)
+        });
         content.declare_same_content(&same_content_reads(
             &self.facts.structured.memory_accesses,
             &self.facts.memory,
@@ -2925,6 +2911,7 @@ impl TrustedSsaArtifact {
         let mut built = None;
         // The build recovery read, its prep facts and what it read of the callees.
         let mut reuse = None;
+        let mut prefix = None;
         let mut kept = false;
         // Whether the recovered result is void on the premise that no caller outside the image reads it.
         let mut closed_premises: &'static [r2source::Premise] = &[];
@@ -2986,35 +2973,39 @@ impl TrustedSsaArtifact {
                     evidence,
                     premises,
                 );
-                if let Some(prior) = prior.as_ref().filter(|prior| !prior.builds(&key)) {
+                let prior =
+                    prior.map(|prior| prior.kept(&key, &provisional_machine_context, control));
+                if let Some(Err(built)) = &prior {
                     r2il::refusal_evidence!(
                         "build-key",
                         "{:#x}: the callees state another {}",
                         source.image().entry_address(),
-                        prior.key.difference(&key)
+                        built.difference(&key)
                     );
                 }
-                let (preliminary, held) = match prior.filter(|prior| prior.builds(&key)) {
+                let (preliminary, held) = match prior.and_then(Result::ok) {
                     Some(prior) => {
                         kept = true;
                         let mut function = prior.function;
                         function.set_callee_passes(callees.preserved());
-                        (Ok(function), Some(prior.provisional))
+                        prefix = prior.prefix;
+                        (Ok((function, prior.walk)), Some(prior.provisional))
                     }
                     None => (
-                        SSAFunction::from_blocks_for_decompile_with_interface_and_control(
+                        SSAFunction::built_for_decompile(
                             &blocks,
-                            Some(&arch),
-                            InterfaceQuestions::before_recovery(source.convention()),
-                            &provisional_machine_context,
-                            &callees,
+                            (
+                                Some(&arch),
+                                InterfaceQuestions::before_recovery(source.convention()),
+                            ),
+                            (&provisional_machine_context, &callees),
                             Some(&declared_successors),
                             control,
                         ),
                         None,
                     ),
                 };
-                let Ok(preliminary) = preliminary else {
+                let Ok((preliminary, walk)) = preliminary else {
                     r2il::refusal_evidence!(
                         "interface-recovery",
                         "the decompile-normalized preliminary SSA needed to read the ABI off \
@@ -3041,7 +3032,7 @@ impl TrustedSsaArtifact {
                         Err(_) => break 'recovered None,
                     },
                 };
-                let preliminary_prep = &reuse.insert((key, preliminary_prep)).1;
+                let preliminary_prep = &reuse.insert((key, preliminary_prep, walk)).1;
                 // The preliminary build may be the one sealed: its provisional facts and
                 // recovery's own are passes over it, and an exhausted one refuses it.
                 if let Some(exhausted) = preliminary_prep.facts.exhausted {
@@ -3051,9 +3042,20 @@ impl TrustedSsaArtifact {
                 let Some(model) = source.convention() else {
                     break 'recovered None;
                 };
+                // A kept build's static facts are its own: recovery borrows them again (D289).
+                let held = match prefix.take() {
+                    Some(held) => held,
+                    None => crate::semantic::StaticPrefix::collect(
+                        preliminary.function(),
+                        Some(&provisional_machine_context),
+                        (Some(&preliminary_prep.facts), &preliminary_prep.graph),
+                        control,
+                    )?,
+                };
+                let prefix = &*prefix.insert(held);
                 let recovered = crate::recover_interface::recover_interface_with_context(
                     preliminary,
-                    preliminary_prep,
+                    (preliminary_prep, prefix),
                     model,
                     &provisional_machine_context,
                     crate::recover_interface::Stated::of(&source),
@@ -3212,7 +3214,12 @@ impl TrustedSsaArtifact {
             function,
             closed_premises,
             exits: exits.clone(),
-            reuse: reuse.map(|(key, provisional)| Reuse { key, provisional }),
+            reuse: reuse.map(|(key, provisional, walk)| Reuse {
+                key,
+                provisional,
+                prefix,
+                walk,
+            }),
             kept,
             machine_context,
             finish: Finish {
@@ -4486,10 +4493,9 @@ impl SSAFunction {
         &self.promoted_slots
     }
 
-    /// The (callee, argument position) pairs whose upward reach promotion's walk asked (D365).
-    pub(crate) fn asked_reach(&self) -> &BTreeSet<(u64, usize)> {
-        static NONE: BTreeSet<(u64, usize)> = BTreeSet::new();
-        (self.frame_points.as_deref()).map_or(&NONE, crate::semantic::FramePoints::asked_reach)
+    /// The frame walk's points decided again where a restatement keeps the build (D365).
+    pub(crate) fn restate_frame_points(&mut self, points: crate::semantic::FramePoints) {
+        self.frame_points = Some(Arc::new(points));
     }
 
     /// What the frame's addresses do, by entry offset; none where no walk ran (the whole frame).

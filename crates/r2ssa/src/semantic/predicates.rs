@@ -4,7 +4,7 @@ use super::*;
 use crate::dense::IdMap;
 
 pub(crate) fn collect_predicate_facts(
-    function: &SSAFunction,
+    function: BuildFacts<'_>,
     prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
 ) -> PredicateFacts {

@@ -470,6 +470,21 @@ impl EngineExecutionControl {
         self.meter.frames_built()
     }
 
+    /// Static prefixes this request collected, one per build recovery read (D289).
+    pub fn static_prefixes(&self) -> u64 {
+        self.meter.static_prefixes()
+    }
+
+    /// Value visits this request's frame walks propagated (D365).
+    pub fn frame_walk_steps(&self) -> u64 {
+        self.meter.frame_walk_steps()
+    }
+
+    /// Sink points and candidate places this request's frame walk decisions read (D365).
+    pub fn frame_decision_steps(&self) -> u64 {
+        self.meter.frame_decision_steps()
+    }
+
     /// Convention seals this request made to read dispatch tables.
     pub fn table_seals(&self) -> u64 {
         self.table_seals.load(std::sync::atomic::Ordering::Relaxed)

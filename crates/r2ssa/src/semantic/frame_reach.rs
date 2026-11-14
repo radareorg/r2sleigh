@@ -6,7 +6,7 @@ use super::*;
 mod walk;
 
 use walk::Origin;
-pub(crate) use walk::{Access, Places, Walked, walk};
+pub(crate) use walk::{Access, Accesses, Evidence, FrameWalk, PlaceBits, PlaceFacts, walk};
 pub use walk::{DynamicFrame, FramePoint, FramePoints};
 
 /// What one call reaches of the frame besides what has escaped.

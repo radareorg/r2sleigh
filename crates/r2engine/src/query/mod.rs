@@ -47,6 +47,12 @@ pub struct AnalysisStats {
     pub rebuilt: u64,
     /// Frame object models built, one `FrameReach` each (D403).
     pub frames_built: u64,
+    /// Static prefixes collected, one per build recovery read (D289).
+    pub static_prefixes: u64,
+    /// Value visits the frame walks propagated (D365).
+    pub frame_walk_steps: u64,
+    /// Sink points and candidate places the frame walks' decisions read (D365).
+    pub frame_decision_steps: u64,
     /// Convention seals made to read dispatch tables, every round (D403).
     pub table_seals: u64,
     /// Nodes entered plus edges followed by the program's condensations, `V + E` each (D412).

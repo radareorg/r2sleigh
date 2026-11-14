@@ -3,10 +3,9 @@
 use super::*;
 
 pub(crate) fn collect_call_sites(
-    function: &SSAFunction,
+    function: BuildFacts<'_>,
     graph: &SsaGraph,
     prep_facts: Option<&DecompilePrepFacts>,
-    machine_context: Option<&SourceMachineContext>,
 ) -> CallSiteFacts {
     let mut by_id = BTreeMap::new();
     let mut by_inst = crate::dense::IdMap::default();
@@ -38,26 +37,23 @@ pub(crate) fn collect_call_sites(
                 continue;
             };
             let target = *flow.target;
-            let raw_identity = machine_context
-                .zip(flow.instruction)
-                .and_then(|(context, instruction)| context.raw_call_site_at(instruction));
+            let raw_identity =
+                (flow.instruction).and_then(|instruction| function.raw_call_site_at(instruction));
             let transfer = if flow.call {
                 CallSiteTransfer::Call
-            } else if machine_context.is_some_and(|context| {
-                raw_identity.is_some_and(|identity| {
-                    context.is_tail_call_site(identity)
-                        && if flow.direct {
-                            graph.value(target).is_some_and(|value| {
+            } else if raw_identity.is_some_and(|identity| {
+                function.is_tail_call_site(identity)
+                    && if flow.direct {
+                        graph
+                            .value(target)
+                            .is_some_and(|value| value.canonical_storage == Some(identity.target()))
+                    } else {
+                        // A slot in memory or the register the jump goes through.
+                        identity.target().space == crate::CanonicalStorageSpace::Ram
+                            || graph.value(target).is_some_and(|value| {
                                 value.canonical_storage == Some(identity.target())
                             })
-                        } else {
-                            // A slot in memory or the register the jump goes through.
-                            identity.target().space == crate::CanonicalStorageSpace::Ram
-                                || graph.value(target).is_some_and(|value| {
-                                    value.canonical_storage == Some(identity.target())
-                                })
-                        }
-                })
+                    }
             }) {
                 CallSiteTransfer::TailCall
             } else {
@@ -67,10 +63,7 @@ pub(crate) fn collect_call_sites(
             next_id = next_id.saturating_add(1);
             let direct_target = resolve_graph_literal_value(graph, prep_facts, target_id)
                 .or_else(|| raw_identity.and_then(direct_target_from_raw_identity))
-                .or_else(|| {
-                    let (identity, context) = raw_identity.zip(machine_context)?;
-                    context.slot_target(identity)
-                });
+                .or_else(|| function.slot_target(raw_identity?));
             by_inst.insert(inst_id, id);
             by_id.insert(
                 id,
@@ -89,10 +82,10 @@ pub(crate) fn collect_call_sites(
                     },
                     transfer,
                     memory_effect: CallMemoryEffect::Unknown,
-                    callee_linkage: raw_identity.zip(machine_context).map_or(
-                        r2source::AdvisoryCalleeLinkage::Unknown,
-                        |(identity, context)| context.callee_linkage(identity),
-                    ),
+                    callee_linkage: raw_identity
+                        .map_or(r2source::AdvisoryCalleeLinkage::Unknown, |identity| {
+                            function.callee_linkage(identity)
+                        }),
                 },
             );
         }
