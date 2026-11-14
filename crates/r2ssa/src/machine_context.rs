@@ -1322,16 +1322,12 @@ impl SourceMachineContext {
             Some(target) => self.callee_writes.get(&target.offset),
             None => Some(&crate::call_reads::StackWrites::Arguments),
         };
-        let declared = (identity.and_then(|identity| self.call_site_interface(identity)))
-            .filter(|interface| interface.is_complete());
-        if let Some(interface) = declared.filter(|interface| !interface.is_variadic()) {
+        let interface = (identity.and_then(|identity| self.call_site_interface(identity)))
+            .filter(|interface| interface.is_complete() && !interface.is_variadic());
+        if let Some(interface) = interface {
             let reads = crate::call_reads::CallReads::exact(interface, self.calls());
             return Some(reads.writing(writes));
         }
-        // A variadic declaration writes the area of the arguments its site passes; va_arg reads.
-        let passed = (declared
-            .filter(|_| writes == Some(&crate::call_reads::StackWrites::Arguments)))
-        .map(|interface| crate::call_reads::CallReads::exact(interface, self.calls()).writes);
         // A walked callee that mints no contract still states its reads where its arity is exact.
         let stated = target
             .and_then(|target| self.callee_statement(target.offset))
@@ -1343,13 +1339,7 @@ impl SourceMachineContext {
             )),
             None => (self.calls()).map(crate::call_reads::CallReads::every_location),
         };
-        reads.map(|reads| match passed {
-            Some(passed) => crate::call_reads::CallReads {
-                writes: passed,
-                ..reads
-            },
-            None => reads.writing(writes),
-        })
+        reads.map(|reads| reads.writing(writes))
     }
 
     pub fn call_site_interface(

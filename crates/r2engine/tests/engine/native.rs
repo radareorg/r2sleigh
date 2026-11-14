@@ -6700,6 +6700,39 @@ fn a_place_a_stated_callee_writes_above_its_arguments_stays_a_load() {
     assert!(!text.contains("return 5"), "{text}");
 }
 
+/// The root of [`READ_BACK_PAST_A_CALLEE_WRITING_ITS_CALLERS_FRAME`] calls `middle` (`call clear;
+/// mov eax, 7; ret`), and `clear` writes `[rsp + 0x18]` on its entry pointer: the root's slot.
+const READ_BACK_PAST_A_CALLEE_WHOSE_CALLEE_WRITES_ITS_FRAME: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xe8, 0x0f, 0x00, 0x00, 0x00, // 100c call 0x1020
+    0x8b, 0x44, 0x24, 0x08, // 1011 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 1015 add rsp, 0x18
+    0xc3, // 1019 ret
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, // 101a
+    0xe8, 0x0b, 0x00, 0x00, 0x00, // 1020 middle: call 0x1030
+    0xb8, 0x07, 0x00, 0x00, 0x00, // 1025 mov eax, 7
+    0xc3, // 102a ret
+    0x90, 0x90, 0x90, 0x90, 0x90, // 102b
+    0xc7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x00, // 1030 clear: mov dword [rsp + 0x18], 0
+    0xc3, // 1038 ret
+];
+
+/// `middle` writes nothing above its entry pointer itself, but its call to `clear` may: its
+/// statement bounds no write, so the root reads its slot back as memory (D377, default-deny).
+#[test]
+fn a_place_a_callees_callee_writes_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: READ_BACK_PAST_A_CALLEE_WHOSE_CALLEE_WRITES_ITS_FRAME.to_vec(),
+        name: "read_back_past_a_callee_whose_callee_writes_its_frame",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+    assert!(!text.contains("return 5"), "{text}");
+}
+
 /// A body that returns and stores the guard without checking it is no prologue the bytes prove.
 #[test]
 fn an_unchecked_canary_in_a_function_that_returns_stays() {

@@ -72,12 +72,12 @@ A call's stack writes are their own fact, `CallReads::writes`, beside its reads 
 
 | Callee | What the call may write |
 |---|---|
-| A declaration (an import's cited row, a typed indirect call) | its argument area; a variadic one, the arguments its site passes (`va_arg` only reads) |
-| A walked body with a statement | `PreparedCalleeSummary::incoming_writes`: the frame walk's stores at or above the entry pointer and its calls' write areas, moved past what the transfer spends (one address or none where no return mechanism is stated) |
-| The body itself (a recursive call) | the least fixpoint, from none, of those incoming writes; rounds only grow and shift down |
-| Anything else, or a body whose frame address escapes, whose opaque access may write, or with an unplaced call | any byte up to the caller's entry pointer |
+| A complete, fixed declaration (an import's cited row, a typed indirect call) | its argument area; a variadic one, any byte, since its site's tail is not counted |
+| A walked body with a statement | `FramePoints::call_writes`, read with the sealed context: the frame walk's stores at or above the entry pointer and its calls' write areas, moved past what the transfer spends (one address or none where no return mechanism is stated) |
+| The body itself (a recursive call), or a member of a cycle's fixpoint | the least fixpoint, from none, of those writes (`Assumed::writes` for a cycle); rounds only grow and shift down, and a call above its spend bounds nothing |
+| Anything else, or a body whose frame address escapes, whose opaque access may write, or with an unplaced or unstated call | any byte up to the caller's entry pointer |
 
-`BuildKey` holds each call's read and written areas. A kept build compares them only over what they decide: a read area over the places holding an address (`handed`), a written area over the places only `rewritten` keeps (slot promotion records them) and the bytes above the entry pointer; a call at an unplaced base reads and writes the whole frame either way. `by_area` is deleted: every x86-64 return load met it, so a restated function was compared on every area.
+The writes are read at ask time from the frame walk's stores and call bases and the sealed context, so a kept build holds no stale bound. `BuildKey` holds each call's read and written areas. A kept build compares them only over what they decide: a read area over the places holding an address (`handed`), a written area over the places only `rewritten` keeps (slot promotion records them) and the bytes above the entry pointer; a call at an unplaced base reads and writes the whole frame either way; a body with a call to itself compares every written area. `by_area` is deleted: every x86-64 return load met it, so a restated function was compared on every area.
 
 D376's asks: the walk names each unstated call whose writes kept a loaded place (`FramePoints::unstated_rewriting`). The convention seal and every tier-2 resolution (`Stated::asks`) state those callees from their alone read and build again. An alone read (`CalleeReads`) asks none, so a statement never reads a statement: depth one, no cycle. Cold callee builds (`built_resolved`) do not ask yet.
 

@@ -502,7 +502,12 @@ fn member_owned(read: &CalleeRead, members: &[Node], demand: Demand) -> bool {
 
 /// What a read states that a cycle's fixpoint moves: its parameters' count and whether that is a
 /// floor, and, where the member's result is open, the result it states.
-type State = (usize, bool, Option<Option<SourceResultSeed>>);
+type State = (
+    usize,
+    bool,
+    Option<Option<SourceResultSeed>>,
+    Option<Vec<(i64, i64)>>,
+);
 
 /// The arity and result a cycle's fixpoint assumes of a member, and the interface its callers are
 /// handed.
@@ -514,6 +519,8 @@ struct Assumed {
     /// The result an untracked member states in its own right, which no member can move.
     kept: Option<SourceResultSeed>,
     interface: SourceFunctionInterface,
+    /// What the member writes of its caller's stack: none at first, `None` the top (D377).
+    writes: Option<Vec<(i64, i64)>>,
 }
 
 impl Assumed {
@@ -529,15 +536,32 @@ impl Assumed {
             floor: cause.is_some(),
             result,
             kept,
+            writes: Some(Vec::new()),
             interface: interface
                 .clone()
                 .assumed(cause.cloned(), result.flatten().or(kept)),
         })
     }
 
+    /// A member stated as resolved: what its read states, its writes included.
+    fn resolved(read: &CalleeRead) -> Option<Self> {
+        let held = Self::of(read, false, false)?;
+        let writes = Self::writes_of(read);
+        Some(Self { writes, ..held })
+    }
+
     fn state(assumed: &Option<Self>) -> Option<State> {
         let held = assumed.as_ref()?;
-        Some((held.count, held.floor, held.result))
+        Some((held.count, held.floor, held.result, held.writes.clone()))
+    }
+
+    /// What a read states its body writes of its caller's stack.
+    fn writes_of(read: &CalleeRead) -> Option<Vec<(i64, i64)>> {
+        let facts = read.facts.as_ref().ok()?;
+        facts
+            .summary()
+            .incoming_writes()
+            .map(<[(i64, i64)]>::to_vec)
     }
 
     /// What a read of a member states, as far as the member's assumption tracks it.
@@ -545,7 +569,12 @@ impl Assumed {
         let interface = read.interface.as_ref()?;
         let arity = interface.arity();
         let result = tracked.then(|| interface.stated_result());
-        Some((arity.floor(), !arity.is_exact(), result))
+        Some((
+            arity.floor(),
+            !arity.is_exact(),
+            result,
+            Self::writes_of(read),
+        ))
     }
 
     /// Raise an assumption to what a read of its member states; whether it moved.
@@ -563,7 +592,10 @@ impl Assumed {
         let result = held
             .result
             .map(|seed| join(seed, interface.stated_result()));
-        if (count, floor, result) == (held.count, held.floor, held.result) {
+        // The writes only grow: a union, and none once either bounds nothing.
+        let writes = (held.writes.clone().zip(Self::writes_of(read)))
+            .map(|(held, read)| union(&held, &read));
+        if (count, floor, result, &writes) == (held.count, held.floor, held.result, &held.writes) {
             return false;
         }
         let cause = (interface.arity_floor()).or_else(|| held.interface.arity_floor());
@@ -579,9 +611,18 @@ impl Assumed {
             result,
             kept: held.kept,
             interface,
+            writes,
         };
         true
     }
+}
+
+/// Two span lists joined, sorted and deduplicated. O(n log n).
+fn union(one: &[(i64, i64)], other: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    let mut spans = one.iter().chain(other).copied().collect::<Vec<_>>();
+    spans.sort_unstable();
+    spans.dedup();
+    spans
 }
 
 /// The result both states: the wider of two integers in one carrier, and none where either is
@@ -727,7 +768,11 @@ impl<'m> Cycle<'m> {
         }
         let stated = self.callees[at].iter().filter_map(|callee| {
             let held = self.assumed[*callee].as_ref()?;
-            Some((self.members[*callee].0, held.interface.clone()))
+            Some((
+                self.members[*callee].0,
+                held.interface.clone(),
+                held.writes.clone(),
+            ))
         });
         let stated = stated.collect::<Vec<_>>();
         // A member is read in the world of the seal that consumes it, as one read alone is.
@@ -776,7 +821,7 @@ impl<'m> Cycle<'m> {
             self.callers[callee].push(at);
             if !self.stated[callee] {
                 let read = resolved(db, members[callee], self.demand)?;
-                self.assumed[callee] = Assumed::of(&read.0, false, false);
+                self.assumed[callee] = Assumed::resolved(&read.0);
                 self.stated[callee] = true;
             }
         }

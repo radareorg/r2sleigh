@@ -1355,12 +1355,19 @@ fn prepare_callee(
 /// A resolved body, and the callees whose statement could prove what it leaves open.
 type Resolution = Arc<TrustedSsaArtifact>;
 
+/// A cycle member as its fixpoint assumes it: its interface, and the stack it writes (D377).
+pub(crate) type AssumedMember = (
+    u64,
+    r2source::SourceFunctionInterface,
+    Option<Vec<(i64, i64)>>,
+);
+
 /// What a body is resolved against beside its imports: its owners resolved, and the arities a
 /// cycle's least fixpoint assumes of its members (doc/adr-resolved-bodies.md, "Arity").
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Stated<'a> {
     pub(crate) owners: &'a [(u64, Arc<CalleeRead>)],
-    pub(crate) assumed: &'a [(u64, r2source::SourceFunctionInterface)],
+    pub(crate) assumed: &'a [AssumedMember],
     /// Under `aa` a callee's result is its closed-world `CallBoundary`'s, as the root's is.
     pub(crate) world: crate::program::World,
     /// Whether the build asks each callee its walk finds unstated and rewriting to state itself
@@ -1382,8 +1389,12 @@ fn resolved_alone(
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
     // Each resolved owner of its result or arity, read as any callee's statement.
     imports.state(stated.owners, native.program);
-    // An assumed member states its interface alone: nothing it preserves or reaches.
-    for (member, interface) in stated.assumed {
+    // An assumed member states its interface and what it writes: nothing it preserves or reaches.
+    for (member, interface, writes) in stated.assumed {
+        if let Some(writes) = writes {
+            let within = r2ssa::call_reads::StackWrites::Within(writes.clone().into());
+            imports.writes.insert(*member, within);
+        }
         imports.interfaces.insert(*member, interface.clone());
     }
     let mut resolved = native.resolve(address, walked, &imports, stated.world);
