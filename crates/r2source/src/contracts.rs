@@ -148,6 +148,19 @@ impl SourceParameterLocation {
         }
     }
 
+    /// A call-site slot `offset` bytes above the stack pointer before a transfer spending `spent`,
+    /// with the coordinate the callee finds it at; none on overflow (D386).
+    pub const fn before_transfer(offset: i64, size_bytes: u32, spent: i64) -> Option<Self> {
+        match offset.checked_add(spent) {
+            Some(callee_offset) => Some(Self::Stack {
+                offset,
+                size_bytes,
+                callee_offset,
+            }),
+            None => None,
+        }
+    }
+
     fn is_valid(self) -> bool {
         match self {
             Self::Register(storage) => valid_register_storage(storage),
@@ -691,6 +704,14 @@ impl SourceStackAllocationContract {
 }
 
 impl SourceReturnMechanism {
+    /// What a transfer spends of the stack pointer under `mechanism`: its return-address slot, or
+    /// nothing where the address travels in a register or no mechanism is stated (D386).
+    pub fn spent(mechanism: Option<Self>) -> i64 {
+        mechanism.map_or(0, |mechanism| {
+            i64::from(mechanism.stack_pointer_delta_bytes())
+        })
+    }
+
     pub const fn stack_offset(self) -> i64 {
         match self {
             Self::Stacked { stack_offset, .. } => stack_offset,
@@ -1778,12 +1799,31 @@ impl SourceFunctionInterface {
                     ..
                 },
             ) => {
-                let spent = self.return_mechanism.map_or(0, |mechanism| {
-                    i64::from(mechanism.stack_pointer_delta_bytes())
-                });
+                let spent = SourceReturnMechanism::spent(self.return_mechanism);
                 call_size == entry_size && call_offset.checked_add(spent) == Some(entry_offset)
             }
             _ => false,
+        }
+    }
+
+    /// `location`, one of this function's parameters named from its entry pointer, as a call site
+    /// names it: from the stack pointer before the transfer, the callee's coordinate kept. The
+    /// one translation of the return-address spend; none on overflow (D386).
+    pub fn at_call_site(
+        &self,
+        location: SourceParameterLocation,
+    ) -> Option<SourceParameterLocation> {
+        match location {
+            SourceParameterLocation::Stack {
+                offset,
+                size_bytes,
+                callee_offset,
+            } => Some(SourceParameterLocation::Stack {
+                offset: offset.checked_sub(SourceReturnMechanism::spent(self.return_mechanism))?,
+                size_bytes,
+                callee_offset,
+            }),
+            register => Some(register),
         }
     }
 
@@ -3454,6 +3494,46 @@ mod tests {
                 )],
             ),
             Err(SourceFunctionInterfaceError::InvalidStackSlot)
+        );
+    }
+
+    /// A call site names an entry slot below by what the transfer spends and keeps the callee's
+    /// coordinate; an offset past the address space is no location (D386).
+    #[test]
+    fn a_parameter_at_a_call_site_is_below_its_entry_offset_by_the_spend() {
+        let stack_pointer = register_storage(72, 8);
+        let slots = [SourceStackSlotSpec::new_local(
+            StackAddressBase::StackPointer,
+            stack_pointer,
+            -8,
+            8,
+        )];
+        let stacked = exact_return_interface(b"spend", ConventionId::SysVAmd64, slots)
+            .with_exact_stacked_return(0, 8, 8, 8)
+            .expect("exact stacked return");
+        let entry = |offset| SourceParameterLocation::Stack {
+            offset,
+            size_bytes: 8,
+            callee_offset: offset,
+        };
+        let at = stacked.at_call_site(entry(8)).expect("in range");
+        assert_eq!(
+            at,
+            SourceParameterLocation::before_transfer(0, 8, 8).expect("in range")
+        );
+        assert_eq!(
+            at,
+            SourceParameterLocation::Stack {
+                offset: 0,
+                size_bytes: 8,
+                callee_offset: 8
+            }
+        );
+        assert!(stacked.argument_location_matches_parameter(at, entry(8)));
+        assert_eq!(stacked.at_call_site(entry(i64::MIN)), None);
+        assert_eq!(
+            SourceParameterLocation::before_transfer(i64::MAX, 8, 8),
+            None
         );
     }
 

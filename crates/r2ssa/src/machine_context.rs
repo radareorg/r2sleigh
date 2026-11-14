@@ -3234,7 +3234,8 @@ impl CalleeStatement {
                 Self {
                     reads: (matches!(arity, crate::SourceArity::Exact(_))
                         && !interface.is_variadic())
-                    .then(|| crate::call_reads::CallReads::callee_locations(interface)),
+                    .then(|| crate::call_reads::CallReads::callee_locations(interface))
+                    .flatten(),
                     arity,
                     result: match interface.return_kind() {
                         crate::SourceFunctionReturn::Void => Some(crate::SourceCallResult::Void),

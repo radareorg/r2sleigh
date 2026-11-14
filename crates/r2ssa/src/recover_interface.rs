@@ -3993,26 +3993,15 @@ pub fn mint_recovered_call_site_interface(
         );
         return None;
     }
-    let spent = callee.return_mechanism().map_or(0, |mechanism| {
-        i64::from(mechanism.stack_pointer_delta_bytes())
-    });
-    let arguments = callee.parameters().iter().map(|parameter| {
-        let location = match parameter.location() {
-            SourceParameterLocation::Register(storage) => {
-                SourceParameterLocation::Register(storage)
-            }
-            SourceParameterLocation::Stack {
-                offset,
-                size_bytes,
-                callee_offset,
-            } => SourceParameterLocation::Stack {
-                offset: offset.saturating_sub(spent),
-                size_bytes,
-                callee_offset: callee_offset.saturating_sub(spent),
-            },
-        };
-        SourceCallArgumentSpec::with_location(parameter.index(), location)
-    });
+    let arguments = (callee.parameters().iter())
+        .map(|parameter| {
+            let location = callee.at_call_site(parameter.location())?;
+            Some(SourceCallArgumentSpec::with_location(
+                parameter.index(),
+                location,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
     // One result per callee at every call (D62): a call that does not read the high half of a pair
     // reads the low half; an unproven result with one carrier is that register.
     let result = match callee.return_kind() {

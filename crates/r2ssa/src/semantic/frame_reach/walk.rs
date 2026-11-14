@@ -537,9 +537,7 @@ impl StackArguments {
         let site = Site {
             func,
             machine,
-            spent: machine.return_mechanism().map_or(0, |mechanism| {
-                i64::from(mechanism.stack_pointer_delta_bytes())
-            }),
+            spent: r2source::SourceReturnMechanism::spent(machine.return_mechanism()),
             stack_pointer,
         };
         let mut calls = Vec::new();
@@ -557,12 +555,11 @@ impl StackArguments {
             steps.extend(children.iter().rev().map(|child| (*child, pointer)));
         }
         let address = i64::from(machine.memory_model().default_address_bits() / 8);
-        let spent = machine
-            .return_mechanism()
-            .map_or((0, address), |mechanism| {
-                let spent = i64::from(mechanism.stack_pointer_delta_bytes());
-                (spent, spent)
-            });
+        // An unstated mechanism spends nothing or one address.
+        let spent = (machine.return_mechanism()).map_or((0, address), |mechanism| {
+            let spent = r2source::SourceReturnMechanism::spent(Some(mechanism));
+            (spent, spent)
+        });
         Self { calls, spent }
     }
 

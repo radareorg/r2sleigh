@@ -79,27 +79,14 @@ impl CallReads {
     }
 
     /// The locations a callee whose body proves its arity reads: each parameter, a hole left out,
-    /// at the call's stack pointer (`CalleeStatement`). O(parameters).
+    /// at the call's stack pointer (`CalleeStatement`); none where one is past the address space.
+    /// O(parameters).
     pub(crate) fn callee_locations(
         callee: &r2source::SourceFunctionInterface,
-    ) -> Vec<SourceParameterLocation> {
-        let spent = callee.return_mechanism().map_or(0, |mechanism| {
-            i64::from(mechanism.stack_pointer_delta_bytes())
-        });
+    ) -> Option<Vec<SourceParameterLocation>> {
         (callee.parameters().iter())
             .filter(|parameter| !parameter.is_hole())
-            .map(|parameter| match parameter.location() {
-                SourceParameterLocation::Stack {
-                    offset,
-                    size_bytes,
-                    callee_offset,
-                } => SourceParameterLocation::Stack {
-                    offset: offset.saturating_sub(spent),
-                    size_bytes,
-                    callee_offset,
-                },
-                register => register,
-            })
+            .map(|parameter| callee.at_call_site(parameter.location()))
             .collect()
     }
 

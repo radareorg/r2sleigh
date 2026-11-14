@@ -6829,6 +6829,36 @@ fn an_aarch64_place_a_tail_callee_writes_stays_a_load() {
     assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
 }
 
+/// `f: mov qword [rsp + 8], 0x2a; jmp g`, where `g` returns its first stack parameter: the tail
+/// hands `g` the pointer it found, so the argument sits at `g`'s own entry offset.
+const TAIL_PASSING_A_STACK_ARGUMENT: &[u8] = &[
+    0x48, 0xc7, 0x44, 0x24, 0x08, 0x2a, 0x00, 0x00, 0x00, // 1000 mov qword [rsp + 8], 0x2a
+    0xe9, 0x12, 0x00, 0x00, 0x00, // 1009 jmp 0x1020
+    0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
+    0x90, 0x90, // 100e
+    0x48, 0x8b, 0x44, 0x24, 0x08, // 1020 g: mov rax, [rsp + 8]
+    0x48, 0x01, 0xf8, 0x48, 0x01, 0xf0, 0x48, 0x01, 0xd0, // 1025 add rax, rdi; rsi; rdx
+    0x48, 0x01, 0xc8, 0x4c, 0x01, 0xc0, 0x4c, 0x01, 0xc8, // 102e add rax, rcx; r8; r9
+    0xc3, // 1037 ret
+];
+
+/// A minted call site keeps the callee's own coordinate of each stack argument: a tail transfer,
+/// which records no restore, reads the 42 at `g`'s entry + 8, never its return address (D386).
+#[test]
+fn a_tail_transfer_reads_a_stack_argument_at_the_callees_own_offset() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let text = rendered_entered(
+        &machine,
+        TAIL_PASSING_A_STACK_ARGUMENT,
+        &[0x1020],
+        "tail_arg",
+    );
+    assert!(
+        text.contains("fcn_1020(arg0, arg1, arg2, arg3, arg4, arg5, 42)"),
+        "{text}"
+    );
+}
+
 /// `mov dword [rsp + 8], 5; call rec; mov eax, [rsp + 8]`, where `rec` writes `[rsp + 0x18]`
 /// after calling itself one address lower: only the recursion reaches the caller's slot.
 const READ_BACK_PAST_A_RECURSIVE_WRITER: &[u8] = &[

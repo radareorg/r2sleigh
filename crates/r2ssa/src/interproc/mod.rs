@@ -1064,16 +1064,17 @@ fn require_trusted_root_for_helper_scope(
 fn incoming_writes(prepared: &SsaArtifact) -> Option<Box<[(i64, i64)]>> {
     let context = prepared.machine_context();
     let spans = prepared.function().frame_points()?.incoming_writes()?;
+    let address = i64::from(context.memory_model().default_address_bits() / 8);
     let (least, most) = match context.return_mechanism() {
-        Some(mechanism) => (
-            mechanism.stack_pointer_delta_bytes(),
-            mechanism.stack_pointer_delta_bytes(),
-        ),
-        None => (0, context.memory_model().default_address_bits() / 8),
+        Some(mechanism) => {
+            let spent = r2source::SourceReturnMechanism::spent(Some(mechanism));
+            (spent, spent)
+        }
+        None => (0, address),
     };
     let spans = spans
         .iter()
-        .map(|(low, high)| ((low - i64::from(most)).max(0), high - i64::from(least)));
+        .map(|(low, high)| ((low - most).max(0), high - least));
     Some(spans.filter(|(low, high)| low < high).collect())
 }
 
