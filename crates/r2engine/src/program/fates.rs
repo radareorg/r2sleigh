@@ -333,9 +333,10 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
         }
     }
     let view = View::new(db, true);
-    let own = lanes_at(&view, callee);
-    // A caller under other lanes states its sites' fates in its own: none is read here (D385).
-    let alike = |caller: u64| own.is_some() && lanes_at(&view, caller) == own;
+    // A caller under another convention states its sites' fates in its lanes: none is read (D385).
+    let convention = |entry: u64| view.convention_at(entry).ok().map(|ruled| ruled.id);
+    let own = convention(callee);
+    let alike = |caller: u64| own.is_some() && convention(caller) == own;
     for &caller in survey.callers_of(callee) {
         let Some(Ok(thumb)) = survey.walked_in(caller) else {
             unread = true;
@@ -1351,13 +1352,6 @@ fn own_target<'p, S: Source + 'static>(
     target.convention.refused.is_none().then_some(target)
 }
 
-/// The result lanes of the function at `entry` under its own convention: a site's fates and a row's
-/// lane bytes are in these coordinates, so another function's lanes read them only where they agree.
-fn lanes_at<S: Source + 'static>(view: &View<'_, S>, entry: u64) -> Option<ResultLanes> {
-    let target = own_target(view, entry, view.thumb_at(entry))?;
-    Some(lanes_of(&target, &target.convention))
-}
-
 /// The convention's result lanes: the typed three, then the rest of its return set.
 fn lanes_of(target: &NativeTarget<'_>, slots: &ConventionModel) -> ResultLanes {
     let results = (target.convention.results.iter())
@@ -1847,15 +1841,14 @@ mod tests {
         }
     }
 
-    /// Go 1.18: `g` compiled (ABIInternal) and `h` assembly (ABI0), each `mov rax, rbx; ret`.
+    /// Go 1.18: `g` compiled (ABIInternal), `mov rax, rbx; ret`, and `h` assembly (ABI0), `call g; ret`.
     fn go_bodies() -> crate::program::OpenProgram<crate::program::reads::tests::Image> {
         use crate::program::{Arch, Container, Endian, Section, SectionRole, Segment, Symbol};
         use crate::program::{Languages, Permissions, SourceLanguage, SymbolKind};
         const BASE: u64 = 0x1000;
         let mut bytes = vec![0xcc; 0x20];
-        for at in [0, 0x10] {
-            bytes[at..at + 4].copy_from_slice(&[0x48, 0x89, 0xd8, 0xc3]);
-        }
+        bytes[..4].copy_from_slice(&[0x48, 0x89, 0xd8, 0xc3]);
+        bytes[0x10..0x16].copy_from_slice(&[0xe8, 0xeb, 0xff, 0xff, 0xff, 0xc3]);
         let function = |name: &str, vaddr| Symbol {
             name: name.into(),
             vaddr,
@@ -1909,7 +1902,8 @@ mod tests {
 
     /// Each Go body's register effect is in its own convention's lanes, never the program default's:
     /// `g`'s row takes the lane RBX holds under ABIInternal (SysV has no such lane), and `h`'s ABI0
-    /// row is in no lanes `g`'s callers read (D385).
+    /// row is in other lanes (D385). Default-deny: `h`'s call to `g` is no read of `g`'s lanes, and
+    /// `h`'s refused row holds no lanes and states no site model.
     #[test]
     fn a_go_body_s_register_effect_is_in_its_own_convention_s_lanes() {
         use super::RegisterEffects;
@@ -1933,6 +1927,12 @@ mod tests {
         let at = at.expect("ABIInternal returns in rbx");
         assert!(g.takes.touches(at), "{:?}", g.takes);
         assert_ne!(h.lanes, g.lanes);
+        let direct = db.get::<super::DirectSites>(&0x1000).expect("held");
+        let direct = (*direct).clone().expect("g's calls are joined");
+        assert!(direct.unread, "{direct:?}");
+        assert!(super::held_lanes(db, 0x1010).is_none());
+        let view = crate::program::View::new(db, true);
+        assert!(crate::native::Program::site_convention_at(&view, 0x1010).is_none());
         let any = db
             .get::<crate::program::AnyCall>(&ConventionId::SysVAmd64)
             .expect("held");
