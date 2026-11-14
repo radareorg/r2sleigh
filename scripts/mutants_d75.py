@@ -192,10 +192,13 @@ MUTANTS = [
     (f"{reader}-reads-{what}", reader_unless(reader, dict(CONTENT)[what]), [ARCH, R2DEC])
     for reader, *_ in READERS for what in READ_CONTENT
 ] + [
-    # The site read off a call only when the call's arguments allow it.
+    # The site read off a call only when the call's arguments, or the site's own value, allow it.
     ("site-of-reads-args",
      [(SHAPE, EXTRACT, EXTRACT.replace("{ func, site, .. })", "{ func, site, args, .. }) if args.len() < 21"))],
-     [ARCH, R2DEC])
+     [ARCH, R2DEC]),
+    ("site-of-reads-site",
+     [(SHAPE, EXTRACT, EXTRACT.replace("{ func, site, .. })", "{ func, site, .. }) if site.is_none_or(|s| s.0 < 64)"))],
+     [ARCH, R2DEC, ENGINE])
 ] + [
     # The role reading whether the stage selected anything, in place of the call.
     ("role-when-nothing-selected",
