@@ -1920,3 +1920,106 @@ fn a_main_musls_libc_start_main_takes_returns_its_int() {
         "{premises:?}"
     );
 }
+
+/// `_start` hands `a` to a slot (`lea rdi`/`lea rcx`, `call __libc_start_main`); `a`, `b` and `c`
+/// each return a constant or branch to the next (`test; je 1f; jmp next; 1: mov eax, k; ret`).
+fn slotted_cycle(start: &[u8]) -> Literal {
+    let mut code = vec![0xcc; 0xa0];
+    code[..start.len()].copy_from_slice(start);
+    let member = |test: [u8; 2], next: u32, k: u8| {
+        let mut body = vec![test[0], test[1], 0x74, 0x05, 0xe9];
+        body.extend(next.to_le_bytes());
+        body.extend([0xb8, k, 0x00, 0x00, 0x00, 0xc3]);
+        body
+    };
+    code[0x10..0x1f].copy_from_slice(&member([0x85, 0xff], 0x17, 1)); // a: jmp 0x1030
+    code[0x30..0x3f].copy_from_slice(&member([0x85, 0xf6], 0x17, 2)); // b: jmp 0x1050
+    code[0x50..0x5f].copy_from_slice(&member([0x85, 0xd2], 0xffff_ffb7, 3)); // c: jmp 0x1010
+    code[0x90..0x96].copy_from_slice(&[0xff, 0x25, 0x02, 0x00, 0x00, 0x00]); // jmp [rip + 2]
+    code[0x98..0xa0].fill(0);
+    let functions = [
+        ("_start", BASE, 0x0d),
+        ("a", BASE + 0x10, 0x0f),
+        ("b", BASE + 0x30, 0x0f),
+        ("c", BASE + 0x50, 0x0f),
+    ];
+    Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
+        .importing("__libc_start_main")
+        .running_on(common::GLIBC)
+}
+
+/// Each member's text under `aa`.
+fn slotted_cycle_rendered(start: &[u8]) -> Vec<String> {
+    let mut open = OpenProgram::of(slotted_cycle(start));
+    open.analyse_program().expect("it surveys");
+    let texts = [BASE + 0x10, BASE + 0x30, BASE + 0x50].map(|at| {
+        let rendered = open.rendered(at).expect("it renders");
+        rendered.response.output.into_text()
+    });
+    assert_eq!(open.analysis_stats().defects, 0);
+    texts.into()
+}
+
+/// D408: `main`'s cited `int` slot takes `a`, the first of a three-member forwarding cycle, so
+/// every member returns a word the slot reads; none decides `ForwardCycle` (red on the parent:
+/// `c`'s tail branch into `a` was a way in no take states, so the slot's read never joined).
+#[test]
+fn a_three_member_forwarding_cycle_a_cited_slot_reads_returns_its_int() {
+    for text in slotted_cycle_rendered(STARTS_HANDLER) {
+        assert!(text.starts_with("r2sleigh_word_u"), "{text}");
+        assert!(
+            text.contains("a call reads the result (assuming closed-world, ub-free)"),
+            "{text}"
+        );
+    }
+}
+
+/// [`TAKES_HANDLER`] padded to `wrapper` at 0x1020: `jmp handler`, the format's entry point, so its
+/// own ways in are unknown and its tail branch forwards `handler`'s result to them.
+fn branched_into_by_an_entry(import: &str) -> Literal {
+    let mut text = TAKES_HANDLER.to_vec();
+    text.resize(0x20, 0xcc);
+    text.extend([0xe9, 0xeb, 0xff, 0xff, 0xff]); // 1020 jmp 0x1010
+    let text: &'static [u8] = Box::leak(text.into_boxed_slice());
+    at_exit(text, import).entering(BASE + 0x20, r2abi::statement::EntryKind::Main)
+}
+
+/// D408's exemption is a tail branch's, never its jumper's: `handler`, taken into `atexit`'s void
+/// slot, is also branched into by an entry point that may read its result, so it is never void.
+#[test]
+fn a_handler_an_entry_point_branches_into_is_never_declared_void() {
+    let text = handler_rendered(branched_into_by_an_entry("atexit"), true);
+    assert!(!text.contains("void handler("), "{text}");
+    assert!(!text.contains("no call reads the result"), "{text}");
+}
+
+/// `f` (0x1010, `ret`, handing back RAX) is called once by `main`, which drops it, and branched
+/// into by an entry point (0x1020): its tail caller's ways in are unknown, so `f` is never void.
+#[test]
+fn a_callee_an_entry_point_branches_into_is_never_void() {
+    let mut code = vec![0xcc; 0x30];
+    code[..8].copy_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00, 0x31, 0xc0, 0xc3]); // call f; xor; ret
+    code[0x10] = 0xc3; // f: ret
+    code[0x20..0x25].copy_from_slice(&[0xe9, 0xeb, 0xff, 0xff, 0xff]); // c: jmp 0x1010
+    let functions = [
+        ("main", BASE, 8),
+        ("f", BASE + 0x10, 1),
+        ("c", BASE + 0x20, 5),
+    ];
+    let literal = Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
+        .entering(BASE + 0x20, r2abi::statement::EntryKind::Main)
+        .running_on(common::GLIBC);
+    let mut open = OpenProgram::of(literal);
+    open.analyse_program().expect("it surveys");
+    let text = open.rendered(BASE + 0x10).expect("it renders");
+    let text = text.response.output.into_text();
+    assert!(!text.starts_with("void f("), "{text}");
+}
+
+/// `init`'s slot states no return: the same cycle taken there decides no read (default-deny).
+#[test]
+fn a_three_member_forwarding_cycle_a_slot_stating_no_return_takes_stays_unproven() {
+    for text in slotted_cycle_rendered(STARTS_HANDLER_AS_INIT) {
+        assert!(!text.contains("reads the result"), "{text}");
+    }
+}

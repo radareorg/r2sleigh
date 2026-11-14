@@ -203,10 +203,15 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
             }
             // A jump inside a function to its own entry is a loop, no way in.
             let looping = fact.role == Role::Jump && claimant.owners.contains(&fact.to);
+            // A walked body's tail branch is a way in `DirectSites` joins, as a call is (D227, D408).
+            let tails = survey.tail_callers_of(fact.to);
+            let tail = fact.role == Role::Jump
+                && !claimant.owners.is_empty()
+                && (claimant.owners.iter()).all(|owner| tails.binary_search(owner).is_ok());
             // A PIE's slot is a loader write: the reference is the slot's own word.
             let slot =
                 claimant.owners.is_empty() && slots.binary_search(&(fact.from, fact.to)).is_ok();
-            if fact.role != Role::Call && !looping && !slot {
+            if fact.role != Role::Call && !looping && !tail && !slot {
                 escaped.push(fact.to);
             }
         }
