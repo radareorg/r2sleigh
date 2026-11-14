@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """D75's mutation target: each mutant of the noreturn guard and of the `never_returns` predicate's readers is applied to
 the tree, the tests that should kill it run, and the file is restored (doc/adr-structure-dominator-tree.md, "the
-noreturn guard"). The predicate takes the callee alone, so a mutant of it reading a call's arguments must not build.
+noreturn guard"). The predicate takes the call's site alone (D384), so a mutant of it reading a call's arguments must
+not build.
 
   mutants_d75.py [--check] [NAME...]    run (or only --check that every edit applies once) the named mutants, else all
 
@@ -25,22 +26,23 @@ TAILS = "crates/r2dec/src/structure/tails.rs"
 GUARD = "crates/r2dec/src/structure/guard.rs"
 RENDER = "crates/r2dec/src/render/mod.rs"
 
-# The predicate's lookup, over the callee alone.
-LOOKUP = "callee.is_some_and(|callee| self.never_return.contains(callee))"
+# The predicate's lookup, over the call's site alone (D384).
+LOOKUP = "site.is_some_and(|site| self.never_return.contains(site))"
 
-# The one place a call's callee is read off a statement.
-EXTRACT = "CStmt::Expr(CExpr::Call { func, .. }) => match &**func {"
+# The one place a call's site is read off a statement.
+EXTRACT = "CStmt::Expr(CExpr::Call { func, site, .. }) => match &**func {"
+NAMED = "CExpr::External { .. } => *site,\n            _ => None,"
 
 # Every reader of the predicate: the file, its text, and that text reading `{call}` as the predicate's verdict.
 READERS = [
-    ("tail-run", TAILS, "CStmt::Expr(_) if ev.never_returns(callee_of(stmt)) => Some(Ended::Terminal),",
+    ("tail-run", TAILS, "CStmt::Expr(_) if ev.never_returns(site_of(stmt)) => Some(Ended::Terminal),",
      "CStmt::Expr(_) if {call} => Some(Ended::Terminal),"),
-    ("completes", TAILS, "CStmt::Expr(_) => !ev.never_returns(callee_of(stmt)),", "CStmt::Expr(_) => !({call}),"),
-    ("falling-ends", TAILS, "CStmt::Expr(_) => Some(usize::from(!ev.never_returns(callee_of(stmt)))),",
+    ("completes", TAILS, "CStmt::Expr(_) => !ev.never_returns(site_of(stmt)),", "CStmt::Expr(_) => !({call}),"),
+    ("falling-ends", TAILS, "CStmt::Expr(_) => Some(usize::from(!ev.never_returns(site_of(stmt)))),",
      "CStmt::Expr(_) => Some(usize::from(!({call}))),"),
-    ("arm-end", GUARD, "CStmt::Expr(_) => return ev.never_returns(callee_of(stmt)),",
+    ("arm-end", GUARD, "CStmt::Expr(_) => return ev.never_returns(site_of(stmt)),",
      "CStmt::Expr(_) => return {call},"),
-    ("role", RENDER, "false => (traps(stmt) || evidence.never_returns(callee_of(stmt))).into(),",
+    ("role", RENDER, "false => (traps(stmt) || evidence.never_returns(site_of(stmt))).into(),",
      "false => (traps(stmt) || {call}).into(),"),
 ]
 
@@ -52,14 +54,9 @@ def counted(reader, cut):
     """`reader` ignoring a call with `cut` or more arguments."""
     name, path, old, new = next(r for r in READERS if r[0] == reader)
     ev = "evidence" if path == RENDER else "ev"
-    verdict = (f"{ev}.never_returns(callee_of(stmt)) && !matches!(stmt, crate::ast::CStmt::Expr(crate::ast::CExpr::Call"
+    verdict = (f"{ev}.never_returns(site_of(stmt)) && !matches!(stmt, crate::ast::CStmt::Expr(crate::ast::CExpr::Call"
                f" {{ args, .. }}) if args.len() >= {cut})")
     return (f"{name}-ignores-{cut}-args", [(path, old, new.replace("{call}", verdict))])
-
-
-def name_as(spelled):
-    """The predicate reading the name as `spelled` (a Rust expression over `callee`) before the lookup."""
-    return (SHAPE, LOOKUP, f"callee.is_some_and(|callee| self.never_return.contains({spelled}))")
 
 
 # One pattern per `CExpr` form an argument may take (crates/r2dec/src/ast.rs).
@@ -90,7 +87,7 @@ def reader_unless(reader, condition):
     """`reader` reading a call whose `args` meet `condition` as returning."""
     _, path, old, new = next(r for r in READERS if r[0] == reader)
     ev = "evidence" if path == RENDER else "ev"
-    verdict = (f"{ev}.never_returns(callee_of(stmt)) && !matches!(stmt, crate::ast::CStmt::Expr({E}::Call {{ args, .. }})"
+    verdict = (f"{ev}.never_returns(site_of(stmt)) && !matches!(stmt, crate::ast::CStmt::Expr({E}::Call {{ args, .. }})"
                f" if {condition})")
     return [(path, old, new.replace("{call}", verdict))]
 
@@ -148,7 +145,7 @@ CONTENT = [(what, f"args.iter().any(|a| {cond})") for what, cond in ARGUMENT] + 
 # The readers' share: one value, one nested form, the depth, a second symbol, a site.
 READ_CONTENT = ("int0", "cast-binary", "depth3", "var-not-first", "stmt-sited")
 
-ROLE = "false => (traps(stmt) || evidence.never_returns(callee_of(stmt))).into(),"
+ROLE = "false => (traps(stmt) || evidence.never_returns(site_of(stmt))).into(),"
 
 # The build a predicate mutant must fail, and the error naming a value out of the predicate's scope.
 UNBUILT = ("cargo build -p r2dec --lib --all-features 2>&1", "error[E0425]")
@@ -162,18 +159,16 @@ MUTANTS = [
      [ENGINE, R2DEC]),
     ("freed-after-sequence", [(GUARD, FREED, "stmts.push(stmt);\n            todo.splice(0..0, freed.into_iter().flatten());")],
      [ENGINE, R2DEC]),
-    # A name read through a cut, a trim or a digit strip.
-    ("name-cut-at-dot", [name_as("callee.split('.').next().unwrap_or(callee)")], [R2DEC]),
-    ("name-cut-at-at", [name_as("callee.split('@').next().unwrap_or(callee)")], [R2DEC]),
-    ("name-cut-at-dollar", [name_as("callee.split('$').next().unwrap_or(callee)")], [R2DEC]),
-    ("name-trimmed", [name_as("callee.trim()")], [R2DEC]),
-    ("name-cut-at-colon", [name_as("callee.split(':').next().unwrap_or(callee)")], [R2DEC]),
-    ("name-digits-stripped", [name_as("callee.trim_end_matches(|c: char| c.is_ascii_digit())")], [R2DEC]),
-    ("name-after-last-colon", [name_as("callee.rsplit(':').next().unwrap_or(callee)")], [R2DEC]),
-    ("name-by-prefix",
-     [(SHAPE, LOOKUP, "callee.is_some_and(|callee| self.never_return.iter().any(|n| callee.starts_with(n.as_str())))")],
+    # The site read loosely: any proven site, an unsited call, a neighbouring instruction (D384 replaced the name key,
+    # whose nine name-cut mutants have no text to edit).
+    ("site-any-proven", [(SHAPE, LOOKUP, "site.is_some() && !self.never_return.is_empty()")], [R2DEC]),
+    ("site-unsited-ends", [(SHAPE, LOOKUP, "site.is_none_or(|site| self.never_return.contains(site))")], [R2DEC]),
+    ("site-neighbour",
+     [(SHAPE, LOOKUP, LOOKUP.replace("contains(site))",
+                                     "contains(site) || self.never_return.contains(r2ssa::InstId(site.0.saturating_sub(1))))"))],
      [R2DEC]),
-    ("name-lowercased", [name_as("&callee.to_lowercase()")], [R2DEC]),
+    # A call through a pointer read as a named callee's site.
+    ("site-of-any-callee", [(SHAPE, NAMED, "_ => *site,")], [R2DEC]),
 ] + [
     # The predicate cut at an argument count, reading an argument's form, the order `err(value, fmt)` passes them in,
     # or what a call passes: no call is in its scope, so none builds.
@@ -197,19 +192,19 @@ MUTANTS = [
     (f"{reader}-reads-{what}", reader_unless(reader, dict(CONTENT)[what]), [ARCH, R2DEC])
     for reader, *_ in READERS for what in READ_CONTENT
 ] + [
-    # The callee read off a call only when the call's arguments or site allow it.
-    (f"callee-of-reads-{what}", [(SHAPE, EXTRACT, EXTRACT.replace("{ func, .. })", f"{{ func, {bind}, .. }}) if {cond}"))],
+    # The site read off a call only when the call's arguments allow it.
+    ("site-of-reads-args",
+     [(SHAPE, EXTRACT, EXTRACT.replace("{ func, site, .. })", "{ func, site, args, .. }) if args.len() < 21"))],
      [ARCH, R2DEC])
-    for what, bind, cond in [("args", "args", "args.len() < 21"), ("site", "site", "site.is_none_or(|s| s.0 < 64)")]
 ] + [
     # The role reading whether the stage selected anything, in place of the call.
     ("role-when-nothing-selected",
      [(RENDER, ROLE,
-       "false => (traps(stmt) || (selections.is_empty() && evidence.never_returns(callee_of(stmt)))).into(),")],
+       "false => (traps(stmt) || (selections.is_empty() && evidence.never_returns(site_of(stmt)))).into(),")],
      [R2DEC, ENGINE]),
     ("role-when-anything-selected",
      [(RENDER, ROLE,
-       "false => (traps(stmt) || !selections.is_empty() || evidence.never_returns(callee_of(stmt))).into(),")],
+       "false => (traps(stmt) || !selections.is_empty() || evidence.never_returns(site_of(stmt))).into(),")],
      [R2DEC, ENGINE]),
 ]
 

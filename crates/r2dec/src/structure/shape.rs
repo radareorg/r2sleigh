@@ -748,6 +748,13 @@ mod tests {
         }
         assert!(!ends(&call("exit")));
         assert!(!ends(&CStmt::Expr(CExpr::IntLit(1))));
+        // A call through a pointer at a proven site names no callee, so it ends nothing here.
+        let through = CStmt::Expr(CExpr::Call {
+            func: Box::new(CExpr::IntLit(0x1000)),
+            args: Vec::new(),
+            site: Some(proven),
+        });
+        assert!(!ends(&through));
     }
 
     /// Markers 0 and 1, for blocks 0x10 and 0x20 and their instructions 0x11 and 0x21.
