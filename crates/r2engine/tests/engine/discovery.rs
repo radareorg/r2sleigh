@@ -619,6 +619,18 @@ fn a_switch_arm_that_calls_a_cited_noreturn_names_its_exit() {
     assert!(!text.contains("unproven)"), "{text}");
 }
 
+/// GCC's cxxabi.h and bits/functexcept.h state these never return, so each arm names its exit as
+/// `exit`'s does (D406); before they were cited, each was a bound.
+#[test]
+fn a_switch_arm_that_calls_a_cited_cxx_noreturn_names_its_exit() {
+    for import in ["__cxa_rethrow", "_ZSt17__throw_bad_allocv", "_Unwind_Resume"] {
+        let text = switch_rendered_importing(common::STUB, import);
+        assert!(text.contains("r2sleigh_result_u32 pick("), "{import}: {text}");
+        assert!(!text.contains("<< 32"), "{import}: {text}");
+        assert!(!text.contains("unproven)"), "{import}: {text}");
+    }
+}
+
 /// radare2's uncited row states `xalloc_die` noreturn; no cited source does, so the arm's call is a
 /// bound: no `noreturn` to C and no named exit (D395).
 #[test]

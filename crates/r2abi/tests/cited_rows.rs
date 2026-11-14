@@ -4,14 +4,15 @@
 use r2abi::{CLibrary, Dll, Halt, Handle, LibraryId, LibraryRows, Tail};
 
 /// Each cited table and the fewest rows it holds.
-const CITED: [(&str, usize); 7] = [
+const CITED: [(&str, usize); 8] = [
     ("types-posix.sdb.txt", 515),
     ("types-glibc.sdb.txt", 85),
     ("types-bionic.sdb.txt", 100),
     ("types-musl.sdb.txt", 3),
     ("types-kernel32.sdb.txt", 50),
     ("types-ucrt.sdb.txt", 1),
-    ("types-cxx-cited.sdb.txt", 1),
+    ("types-cxx-cited.sdb.txt", 30),
+    ("types-darwin-cited.sdb.txt", 4),
 ];
 const UNCITED: [&str; 6] = [
     "types.sdb.txt",
@@ -86,6 +87,8 @@ fn every_row_cites_its_header() {
             let header = header.unwrap_or_else(|| panic!("{file}: `{name}` names no header"));
             assert!(
                 header.ends_with(".h")
+                    // libstdc++ declares `std::terminate` in <exception>, a header with no suffix.
+                    || (file == "types-cxx-cited.sdb.txt" && header == "exception")
                     || header.starts_with("LSB: LSB-Core-generic 5.0, ")
                     || (header.starts_with("musl: src/")
                         && comment.contains("no header declares it")),
@@ -104,10 +107,10 @@ fn every_row_cites_its_header() {
 /// Each uncited table's rows, with the most `uncited-rows.txt` may list for it: each only falls
 /// (ROADMAP D242, D395).
 const UNCITED_CAPS: [(&str, usize); 6] = [
-    ("types.sdb.txt", 99),
+    ("types.sdb.txt", 98),
     ("types-linux.sdb.txt", 13),
-    ("types-cxx.sdb.txt", 73),
-    ("types-darwin.sdb.txt", 42),
+    ("types-cxx.sdb.txt", 44),
+    ("types-darwin.sdb.txt", 39),
     ("types-android.sdb.txt", 2),
     ("types-objc.sdb.txt", 7),
 ];
@@ -173,9 +176,15 @@ fn an_uncited_noreturn_row_is_not_cited() {
     let uncited = rows.rows().filter(|row| row.noreturn && !row.cited());
     let names = uncited.map(|row| &*row.linked_name).collect::<Vec<_>>();
     assert!(names.contains(&"xalloc_die"), "{names:?}");
-    assert!(names.contains(&"__cxa_throw"), "{names:?}");
-    let exit = rows.rows().find(|row| &*row.linked_name == "exit");
-    assert!(exit.is_some_and(|row| row.noreturn && row.cited()));
+    assert!(names.contains(&"__cxa_call_unexpected"), "{names:?}");
+    let cited = |name: &str| rows.rows().find(|row| &*row.linked_name == name);
+    // GCC's cxxabi.h and bits/functexcept.h state these never return (D406).
+    for name in ["exit", "__cxa_throw", "_ZSt9terminatev", "_Unwind_Resume"] {
+        assert!(
+            cited(name).is_some_and(|row| row.noreturn && row.cited()),
+            "{name}"
+        );
+    }
 }
 
 /// An uncited table states no tail: its rows are radare2's, `Unstated` until cited.
@@ -213,6 +222,15 @@ fn a_cited_row_is_declared_in_no_other_table() {
     let musl = names("types-musl.sdb.txt");
     let both = musl.intersection(&posix).collect::<Vec<_>>();
     assert!(both.is_empty(), "musl's cited rows also portable: {both:?}");
+    for (cited, own) in [
+        ("types-cxx-cited.sdb.txt", "types-cxx.sdb.txt"),
+        ("types-darwin-cited.sdb.txt", "types-darwin.sdb.txt"),
+        ("types-darwin-cited.sdb.txt", "types.sdb.txt"),
+    ] {
+        let (cited, own) = (names(cited), names(own));
+        let both = cited.intersection(&own).collect::<Vec<_>>();
+        assert!(both.is_empty(), "declared cited and uncited: {both:?}");
+    }
     let bionic = names("types-bionic.sdb.txt");
     let android = names("types-android.sdb.txt");
     for table in [&android, &posix] {
