@@ -1864,8 +1864,14 @@ impl Walked {
     /// The same walk cut to the blocks an unresolved indirect branch is reachable from: a value there is built
     /// from the paths that arrive at it, and a kept block's edge to a cut one leaves the function. O(blocks + edges).
     fn reaching_unresolved(&self) -> Self {
-        let stops = self.indirect_stops().filter_map(|stop| self.held(stop));
-        let (keep, _) = self.reaching(stops.collect(), None);
+        self.reaching(self.indirect_stops())
+    }
+
+    /// The blocks on a path from the entry to one of the instructions `at`; the whole body where
+    /// none is held. O(blocks + edges).
+    fn reaching(&self, at: impl Iterator<Item = u64>) -> Self {
+        let stops = at.filter_map(|stop| self.held(stop));
+        let (keep, _) = self.reaching_blocks(stops.collect(), None);
         match keep.contains(&true) {
             true => self.cut(self.body.entry, &keep),
             false => self.clone(),
@@ -1877,7 +1883,7 @@ impl Walked {
     fn region_after(&self, dispatch: u64, stops: &BTreeSet<u64>) -> Option<Self> {
         let at = self.held(dispatch)?;
         let stops = stops.iter().filter_map(|stop| self.held(*stop));
-        let (keep, preceding) = self.reaching(stops.clone().collect(), Some(at));
+        let (keep, preceding) = self.reaching_blocks(stops.clone().collect(), Some(at));
         let keep = closed_under_entry(keep, &preceding, at);
         let mut kept = stops.filter(|block| keep[*block]);
         kept.next()
@@ -1900,7 +1906,11 @@ impl Walked {
 
     /// Each block that reaches one of the `stops` blocks and, given `from`, is reachable from it; and
     /// each block's predecessors.
-    fn reaching(&self, stops: Vec<usize>, from: Option<usize>) -> (Vec<bool>, Vec<Vec<usize>>) {
+    fn reaching_blocks(
+        &self,
+        stops: Vec<usize>,
+        from: Option<usize>,
+    ) -> (Vec<bool>, Vec<Vec<usize>>) {
         let blocks = &self.body.blocks;
         let block_at = |address: u64| {
             blocks
@@ -2314,15 +2324,24 @@ impl<'a> Native<'a> {
         read.unwrap_or_else(|panicked| Err(panicked.into()))
     }
 
-    /// Whether the whole body walked through `tables` reads each of them as its round did: a later
-    /// round can add an edge into a region any earlier round sealed, the first included. One seal.
+    /// Whether the body walked through `tables` reads each as its round did: the whole body captures,
+    /// and one seal of the blocks on a path to a tabled dispatch, no other block being on one, reads them (D367).
     fn rounds_hold(
         &self,
         whole: &Walked,
         tables: &[NativePointerTable],
         restatement: Restatement,
     ) -> Result<bool, NativeRefusal> {
-        let reads = self.table_reads(whole, tables, restatement)?;
+        let capture = Capture {
+            extra_literals: Vec::new(),
+            restatement: restatement.clone(),
+            tables,
+            calls: &[],
+            closed_result: None,
+        };
+        drop(self.snapshot(whole, call_sites(&whole.body, self.program), capture)?);
+        let cut = whole.reaching(tables.iter().map(|table| table.instruction));
+        let reads = self.table_reads(&cut, tables, restatement)?;
         let same = |table: &NativePointerTable, read: &r2ssa::indirect::DispatchTableRead| {
             read.instruction == Some(table.instruction)
                 && !read.call
@@ -2718,6 +2737,23 @@ impl<'a> Native<'a> {
         callees: &Callees,
         capture: Capture<'_>,
     ) -> Result<(r2sleigh_lift::TrustedLiftedFunction, r2ssa::CalleeEvidence), NativeRefusal> {
+        let calls = call_sites(&walked.body, self.program);
+        let library = library_evidence(self.program, &calls);
+        let reentering = reentering_calls(&calls);
+        let snapshot = self.snapshot(walked, calls, capture)?;
+        let lifted = Disassembler::lift_owned_function(snapshot)
+            .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
+        let exits = walked.body.exits.clone();
+        Ok((lifted, callees.evidence(library, reentering, exits)))
+    }
+
+    /// One walked body captured against what is stated about it: the function image r2source admits.
+    fn snapshot(
+        &self,
+        walked: &Walked,
+        calls: Vec<NativeCall>,
+        capture: Capture<'_>,
+    ) -> Result<r2source::OwnedFunctionSnapshot, NativeRefusal> {
         // A body the walk cut at its budget is no function's whole body: analysis refuses it, named.
         let cut = (walked.body.unresolved.iter())
             .any(|stop| stop.reason == crate::body::UnresolvedReason::Budget);
@@ -2776,10 +2812,6 @@ impl<'a> Native<'a> {
             let slots = interface.stack_slots().to_vec();
             restate(&interface, slots, identity.to_vec())
         });
-        let calls = call_sites(&walked.body, self.program);
-        let library = library_evidence(self.program, &calls);
-        let reentering = reentering_calls(&calls);
-        let exits = walked.body.exits.clone();
         let (data_symbols, data_types) = self.data_symbols(&walked.body);
         let function = NativeFunction {
             address: walked.body.entry,
@@ -2820,11 +2852,7 @@ impl<'a> Native<'a> {
             member_calls,
         };
 
-        let snapshot =
-            r2source::native::capture(&self.machine, function).map_err(NativeRefusal::Capture)?;
-        let lifted = Disassembler::lift_owned_function(snapshot)
-            .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
-        Ok((lifted, callees.evidence(library, reentering, exits)))
+        r2source::native::capture(&self.machine, function).map_err(NativeRefusal::Capture)
     }
 }
 
