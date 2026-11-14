@@ -384,16 +384,45 @@ fn windows_type(name: &str) -> Option<&'static str> {
     })
 }
 
-/// The tag a C library's header gives a handle typedef, and none where no header read states
-/// one (data/README.md, "Handles").
+const HANDLES: &str = include_str!("../data/handles.txt");
+
+/// One `data/handles.txt` row: the tag `library`'s header gives the typedef `name`.
+struct Handle {
+    library: CLibrary,
+    name: &'static str,
+    tag: &'static str,
+}
+
+/// The handle rows, in file order; a line naming no `.h` header is no row (the test counts them).
+fn handles() -> impl Iterator<Item = Handle> {
+    HANDLES.lines().filter_map(|line| {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            return None;
+        }
+        let [library, name, tag, header] = line.split('|').map(str::trim).collect::<Vec<_>>()[..]
+        else {
+            return None;
+        };
+        let library = match library {
+            "glibc" => CLibrary::Glibc,
+            "bionic" => CLibrary::Bionic,
+            "musl" => CLibrary::Musl,
+            "libsystem" => CLibrary::LibSystem,
+            "ucrt" => CLibrary::Ucrt,
+            _ => return None,
+        };
+        header
+            .ends_with(".h")
+            .then_some(Handle { library, name, tag })
+    })
+}
+
+/// The tag a handle row states for `name` under `library`; none where no row does. O(rows), 5.
 fn handle_tag(name: &str, library: CLibrary) -> Option<&'static str> {
-    match (library, name) {
-        (CLibrary::Glibc, "FILE") => Some("_IO_FILE"),
-        (CLibrary::Glibc, "DIR") => Some("__dirstream"),
-        (CLibrary::LibSystem | CLibrary::Bionic, "FILE") => Some("__sFILE"),
-        (CLibrary::Bionic, "DIR") => Some("DIR"),
-        _ => None,
-    }
+    handles()
+        .find(|row| row.library == library && row.name == name)
+        .map(|row| row.tag)
 }
 
 #[cfg(test)]
@@ -454,6 +483,19 @@ mod tests {
             graph.spelled(file).map(|s| s.declared).as_deref(),
             Some("FILE *")
         );
+    }
+
+    /// Every handle row parses and cites its header (D391); no handle tag is stated in code.
+    #[test]
+    fn every_handle_row_parses_and_names_its_header() {
+        let rows = HANDLES
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim().starts_with('#'))
+            .count();
+        assert_eq!(handles().count(), rows);
+        assert_eq!(handle_tag("DIR", CLibrary::LibSystem), None);
+        assert_eq!(handle_tag("FILE", CLibrary::Musl), None);
+        assert_eq!(handle_tag("FILE", CLibrary::Bionic), Some("__sFILE"));
     }
 
     #[test]
