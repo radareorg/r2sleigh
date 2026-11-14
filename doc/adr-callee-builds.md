@@ -76,6 +76,9 @@ A call's stack writes are their own fact, `CallReads::writes`, beside its reads 
 | A walked body with a statement | `PreparedCalleeSummary::incoming_writes`: the frame walk's stores at or above the entry pointer and its calls' write areas, moved past what the transfer spends (one address or none where no return mechanism is stated) |
 | The body itself (a recursive call) | the least fixpoint, from none, of those incoming writes; rounds only grow and shift down |
 | Anything else, or a body whose frame address escapes, whose opaque access may write, or with an unplaced call | any byte up to the caller's entry pointer |
+| A body with a tail transfer (D381) | its tail callee's statement at the transfer's pointer, as a call there would be; no bound where the target states none, the source names no site (a conditional or register jump out), or a self call's fixpoint moves up past what the transfer spends |
+
+A tail transfer hands its callee every register: a frame address one holds where the transfer runs escapes. A body that never reads its stack pointer still has its transfers at the entry pointer.
 
 `BuildKey` holds each call's read and written areas. A kept build compares them only over what they decide: a read area over the places holding an address (`handed`), a written area over the places only `rewritten` keeps (slot promotion records them) and the bytes above the entry pointer; a call at an unplaced base reads and writes the whole frame either way. `by_area` is deleted: every x86-64 return load met it, so a restated function was compared on every area.
 

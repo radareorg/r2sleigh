@@ -377,9 +377,11 @@ pub(crate) fn walk(
     let entry_sp = (0..func.values().len())
         .map(VarId::from_index)
         .find(|id| func.var(*id).version == 0 && func.storage_of(*id) == Some(stack_pointer));
-    // No entry stack pointer value: no frame address exists, so nothing writes the stack.
+    // No entry stack pointer value: no frame address exists, and every transfer is at entry (D381).
     let Some(entry_sp) = entry_sp else {
-        let incoming = Some(Vec::new());
+        let arguments = StackArguments::of(func, machine, stack_pointer, None);
+        let values = IdMap::new(func.values().len());
+        let incoming = arguments.incoming(&values, &Accesses::new(), None);
         return refused(FramePoints {
             incoming,
             ..FramePoints::default()
@@ -441,6 +443,8 @@ struct Sinks<'a> {
     /// whether the callee reaches only upward through it.
     upward_at: Box<dyn Fn(u64, usize, crate::CanonicalStorageId) -> Option<ReachAsk> + 'a>,
     stack_arguments: StackArguments,
+    /// The stack and frame pointers: the frame's own bases, not addresses handed on.
+    bases: [Option<crate::CanonicalStorageId>; 2],
 }
 
 impl<'a> Sinks<'a> {
@@ -485,9 +489,10 @@ impl<'a> Sinks<'a> {
         };
         Self {
             calls_refund_stack,
+            bases,
             read_by_calls: Box::new(read_by_calls),
             upward_at: Box::new(upward_at),
-            stack_arguments: StackArguments::of(func, machine, stack_pointer, entry_sp),
+            stack_arguments: StackArguments::of(func, machine, stack_pointer, Some(entry_sp)),
         }
     }
 }
@@ -500,12 +505,13 @@ struct StackArguments {
     spent: (i64, i64),
 }
 
-/// One call's argument area, from the stack pointer it is measured at.
+/// One call's or tail transfer's argument area, from the stack pointer it is measured at.
 struct CallArguments {
     op: OpId,
     /// The block the call is in and its index there.
     at: (u64, usize),
-    pointer: VarId,
+    /// The stack pointer reaching it; none where the body never reads one, the entry pointer.
+    pointer: Option<VarId>,
     /// What the transfer spends where no restore records the pointer entering it.
     shift: i64,
     /// `CallReads::stack` of the call; none reads every place from the pointer to entry.
@@ -514,6 +520,9 @@ struct CallArguments {
     writes: Option<Vec<(i64, i64)>>,
     /// A direct call to the body itself that nothing else states.
     own: bool,
+    /// A transfer that leaves the body: its callee's writes above the entry pointer are the
+    /// body's, and nothing after it in the body sees them (D381).
+    tail: bool,
     instruction: Option<u64>,
 }
 
@@ -523,7 +532,7 @@ impl StackArguments {
         func: &SSAFunction,
         machine: &SourceMachineContext,
         stack_pointer: crate::CanonicalStorageId,
-        entry_sp: VarId,
+        entry_sp: Option<VarId>,
     ) -> Self {
         let site = Site {
             func,
@@ -541,7 +550,7 @@ impl StackArguments {
                 continue;
             };
             if let Some((_, phi)) = block.sited_phis().find(|(_, phi)| site.is_pointer(phi.dst)) {
-                pointer = phi.dst;
+                pointer = Some(phi.dst);
             }
             pointer = site.calls((address, block), pointer, &mut calls);
             let children = func.domtree().children(address);
@@ -621,7 +630,7 @@ impl StackArguments {
     ) -> (BTreeSet<i64>, BTreeSet<u64>) {
         // Each call's area as entry-relative spans, by block and index; an unplaced call covers all.
         let mut in_block = BTreeMap::<u64, Vec<CallSpans>>::new();
-        for call in &self.calls {
+        for call in self.calls.iter().filter(|call| !call.tail) {
             let spans = match (call.base(values), Self::writes_of(call, own)) {
                 (None, _) => vec![(i64::MIN, i64::MAX)],
                 (Some(base), Some(area)) => merged(
@@ -652,7 +661,7 @@ impl StackArguments {
             rewritten_in_block(list, calls, live, &mut rewritten);
         }
         let asked = (self.calls.iter())
-            .filter(|call| Self::writes_of(call, own).is_none())
+            .filter(|call| !call.tail && Self::writes_of(call, own).is_none())
             .filter_map(|call| Some((call.instruction?, call.base(values)?)))
             .filter(|(_, base)| rewritten.range(*base..0).next().is_some())
             .map(|(instruction, _)| instruction)
@@ -661,7 +670,8 @@ impl StackArguments {
     }
 
     /// The spans at or above the entry pointer a store or a call's area covers; `None` where a call
-    /// is at an unplaced pointer. An unbounded area ends at the entry pointer. O(accesses + calls).
+    /// is at an unplaced pointer, or a tail transfer or self call writes what nothing bounds. A
+    /// call's unbounded area ends at the entry pointer. O(accesses + calls).
     fn incoming(
         &self,
         values: &IdMap<VarId, Value>,
@@ -675,7 +685,11 @@ impl StackArguments {
         let mut spans = stores.collect::<Vec<_>>();
         for call in &self.calls {
             let base = call.base(values)?;
-            let area = Self::writes_of(call, own).into_iter().flatten();
+            let writes = Self::writes_of(call, own);
+            if writes.is_none() && (call.tail || call.own) {
+                return None;
+            }
+            let area = writes.into_iter().flatten();
             spans.extend(
                 area.map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high))),
             );
@@ -700,8 +714,8 @@ impl StackArguments {
                     base.wrapping_add(*low) < place.saturating_add(i64::from(width))
                         && place < base.wrapping_add(*high)
                 }),
-                // Unbounded, it is still this frame's: it ends at the entry pointer.
-                None => place.saturating_add(i64::from(width)) > base && place < 0,
+                // Unbounded, a call's still ends at the entry pointer; a tail transfer's does not.
+                None => place.saturating_add(i64::from(width)) > base && (call.tail || place < 0),
             };
             read.extend(
                 (stored.iter())
@@ -716,7 +730,10 @@ impl StackArguments {
 impl CallArguments {
     /// The entry offset the call's area is measured from, where an offset places its pointer.
     fn base(&self, values: &IdMap<VarId, Value>) -> Option<i64> {
-        let base = values.get(self.pointer)?.exact()?;
+        let base = match self.pointer {
+            Some(pointer) => values.get(pointer)?.exact()?,
+            None => 0,
+        };
         Some(base.wrapping_add(self.shift))
     }
 }
@@ -734,23 +751,75 @@ impl Site<'_> {
         self.func.storage_of(var) == Some(self.stack_pointer)
     }
 
-    /// Each call of a block, entered at the stack `pointer`; the pointer leaving it.
+    /// Each call and tail transfer of a block, entered at the stack `pointer`; the pointer leaving it.
     fn calls(
         &self,
         (address, block): (u64, &crate::block::SSABlock<VarId>),
-        mut pointer: VarId,
+        mut pointer: Option<VarId>,
         out: &mut Vec<CallArguments>,
-    ) -> VarId {
+    ) -> Option<VarId> {
         let ops = block.ops();
         for (index, (id, op)) in block.sited().enumerate() {
-            out.extend(self.call((id, (address, index)), &ops[index..], pointer));
+            let at = (id, (address, index));
+            let call = self.call(at, &ops[index..], pointer);
+            out.extend(call.or_else(|| self.tail(at, op, pointer)));
             pointer = op
                 .dst()
                 .copied()
                 .filter(|dst| self.is_pointer(*dst))
-                .unwrap_or(pointer);
+                .or(pointer);
         }
         pointer
+    }
+
+    /// A transfer leaving the body at the stack `pointer`, as a call its callee returns from
+    /// would be: a source-correlated tail with its callee's statement; any other, a branch to code
+    /// the body does not hold or a register jump nothing follows, reads and writes all (D381).
+    fn tail(
+        &self,
+        (op, at): (OpId, (u64, usize)),
+        ssa: &SSAOp<VarId>,
+        pointer: Option<VarId>,
+    ) -> Option<CallArguments> {
+        let transfer = ssa.transfer().filter(|transfer| !transfer.call)?;
+        let identified = (transfer.instruction)
+            .and_then(|instruction| self.machine.raw_call_site_at(instruction))
+            .filter(|identity| self.machine.is_tail_call_site(*identity));
+        let leaves = identified.is_some()
+            || match transfer.direct {
+                true => self
+                    .func
+                    .storage_of(*transfer.target)
+                    .is_some_and(|target| {
+                        target.space == crate::CanonicalStorageSpace::Ram
+                            && self.func.get_block(target.offset).is_none()
+                    }),
+                false => {
+                    self.func.successors(at.0).is_empty()
+                        || (self.func.cfg().get_block(at.0)).is_some_and(|block| {
+                            matches!(
+                                block.terminator,
+                                crate::cfg::BlockTerminator::ConditionalExit { .. }
+                            )
+                        })
+                }
+            };
+        if !leaves {
+            return None;
+        }
+        let reads = identified.and_then(|_| self.machine.call_reads(transfer.instruction));
+        let (area, writes) = reads.map_or((None, None), |reads| (reads.stack, reads.writes));
+        Some(CallArguments {
+            op,
+            at,
+            pointer,
+            shift: self.spent,
+            area,
+            writes,
+            own: false,
+            tail: true,
+            instruction: transfer.instruction,
+        })
     }
 
     /// The call `ops` starts with, in the boundary's coordinates: the pointer a restore records
@@ -759,7 +828,7 @@ impl Site<'_> {
         &self,
         (op, at): (OpId, (u64, usize)),
         ops: &[SSAOp<VarId>],
-        pointer: VarId,
+        pointer: Option<VarId>,
     ) -> Option<CallArguments> {
         let call = ops.first()?.call()?;
         let entering = (ops[1..].iter())
@@ -768,7 +837,7 @@ impl Site<'_> {
                 SSAOp::CallRestore { dst, src } if self.is_pointer(*dst) => Some(*src),
                 _ => None,
             });
-        let (pointer, shift) = entering.map_or((pointer, self.spent), |src| (src, 0));
+        let (pointer, shift) = entering.map_or((pointer, self.spent), |src| (Some(src), 0));
         let reads = self.machine.call_reads(call.instruction);
         let target = (call
             .instruction
@@ -780,6 +849,7 @@ impl Site<'_> {
         let writes = reads.as_ref().and_then(|reads| reads.writes.clone());
         Some(CallArguments {
             own: entry && writes.is_none(),
+            tail: false,
             op,
             at,
             pointer,
@@ -1174,6 +1244,34 @@ impl<'a> Walker<'a> {
         partial
     }
 
+    /// A tail transfer hands its callee every register: an address one holds where the transfer
+    /// runs escapes (D381). `O(addressed values x tails)` dominance tests.
+    fn hand_to_tails(&mut self, arguments: &StackArguments) {
+        let tails = (arguments.calls.iter())
+            .filter(|call| call.tail)
+            .map(|call| call.op)
+            .collect::<Vec<_>>();
+        if tails.is_empty() {
+            return;
+        }
+        let handed = (self.values.iter())
+            .filter(|(var, _)| *var != self.entry_sp)
+            .filter(|(var, _)| {
+                self.func.storage_of(*var).is_some_and(|storage| {
+                    storage.space == crate::CanonicalStorageSpace::Register
+                        && !self.sinks.bases.contains(&Some(storage))
+                })
+            })
+            .filter(|(var, _)| {
+                (tails.iter()).any(|tail| self.defs.defined_before(self.func, *var, *tail))
+            })
+            .map(|(_, value)| value.clone())
+            .collect::<Vec<_>>();
+        for value in &handed {
+            self.escape(value);
+        }
+    }
+
     fn finish(mut self) -> Walked {
         for (val, addr) in std::mem::take(&mut self.deferred) {
             if self.values.get(addr).is_none()
@@ -1192,6 +1290,7 @@ impl<'a> Walker<'a> {
             })
             .collect();
         let arguments = &self.sinks.stack_arguments;
+        self.hand_to_tails(arguments);
         let handed = arguments.read(&self.values, &widths);
         self.points.held_places.clone_from(&widths);
         for place in &handed {
