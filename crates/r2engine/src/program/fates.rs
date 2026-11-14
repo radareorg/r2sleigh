@@ -557,6 +557,45 @@ impl DenseId for Member {
 /// Each lane can move this often: four flags, 128 byte bits and two width steps.
 const LANE_HEIGHT: usize = 4 + 128 + 2;
 
+/// Which members' reads rest on a callback slot: their own, or a caller's whose result returns
+/// theirs, outside or inside the component, to a fixpoint. Each member turns once: `O(V + E)`.
+fn slotted(
+    component: &Component<'_>,
+    outside: &impl Fn(u64) -> Option<Option<Forwarding>>,
+) -> Vec<bool> {
+    let count = component.members.len();
+    let mut slotted = vec![false; count];
+    let mut returned_to = vec![Vec::new(); count];
+    let mut pending = Vec::new();
+    for (at, direct) in component.directs.iter().enumerate() {
+        let Some(direct) = direct else { continue };
+        let mut own = direct.slot_read;
+        for returned in &direct.returned {
+            match component.member(returned.caller) {
+                Some(inside) => returned_to[inside.index()].push(at),
+                None => {
+                    own |= outside(returned.caller)
+                        .flatten()
+                        .is_some_and(|theirs| theirs.slot_read)
+                }
+            }
+        }
+        if own {
+            slotted[at] = true;
+            pending.push(at);
+        }
+    }
+    while let Some(caller) = pending.pop() {
+        for callee in std::mem::take(&mut returned_to[caller]) {
+            if !slotted[callee] {
+                slotted[callee] = true;
+                pending.push(callee);
+            }
+        }
+    }
+    slotted
+}
+
 /// One component's members solved together: the least fixpoint of the reads a lane forwarded inside
 /// the component takes, then each inside edge that reaches no read is a cycle, never dead.
 fn solve<S: Source + 'static>(
@@ -603,6 +642,7 @@ fn solve<S: Source + 'static>(
     let Ok(cells) = cells else {
         return members.iter().map(|member| (*member, None)).collect();
     };
+    let slotted = slotted(&component, &outside);
     let solved = (0..members.len()).map(|at| {
         let direct = component.directs[at].as_ref()?;
         let member = Member::from_index(at);
@@ -613,20 +653,7 @@ fn solve<S: Source + 'static>(
                 join(&mut lanes[lane], Some(Forwarded::Cycle));
             }
         }
-        // A read forwarded from a caller whose read rests on a slot rests on it too.
-        let slotted = |caller: u64| match component.member(caller) {
-            Some(inside) => {
-                (component.directs[inside.index()].as_ref()).is_some_and(|d| d.slot_read)
-            }
-            None => outside(caller)
-                .flatten()
-                .is_some_and(|theirs| theirs.slot_read),
-        };
-        let slot_read = direct.slot_read
-            || direct
-                .returned
-                .iter()
-                .any(|returned| slotted(returned.caller));
+        let slot_read = slotted[at];
         Some(Forwarding {
             lanes,
             calls: direct.calls,
