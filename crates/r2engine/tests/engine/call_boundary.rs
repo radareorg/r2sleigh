@@ -909,8 +909,16 @@ fn printing(held: u32, format: &[u8]) -> String {
 
 /// [`printing`], the format's bytes mapped writable where `writable`.
 fn printing_from(held: u32, format: &[u8], writable: bool) -> String {
-    let code = aarch64_with_printf(&[
-        (F, 0xd65f_03c0),                              // ret
+    printing_after(held, format, (writable, false))
+}
+
+/// [`printing_from`]; `f` clears the held register before it returns where `clears`.
+fn printing_after(held: u32, format: &[u8], (writable, clears): (bool, bool)) -> String {
+    let mut words = vec![(F, 0xd65f_03c0)]; // ret
+    if clears {
+        words = vec![(F, 0xaa1f_03e0 | held), (F + 4, 0xd65f_03c0)]; // mov xN, xzr; ret
+    }
+    words.extend([
         (BASE + 0x10, 0xa9bf_7bfd),                    // stp x29, x30, [sp, #-16]!
         (BASE + 0x14, 0x9000_0000 | held),             // adrp xN, 0x1000
         (BASE + 0x18, 0x9102_8000 | held << 5 | held), // add xN, xN, #0xa0
@@ -921,7 +929,9 @@ fn printing_from(held: u32, format: &[u8], writable: bool) -> String {
         (BASE + 0x2c, 0xa8c1_7bfd),                    // ldp x29, x30, [sp], #16
         (BASE + 0x30, 0xd65f_03c0),                    // ret
     ]);
-    let program = Literal::of_code(code, &[("f", F, 0x04), ("caller", BASE + 0x10, 0x24)])
+    let code = aarch64_with_printf(&words);
+    let size = if clears { 0x08 } else { 0x04 };
+    let program = Literal::of_code(code, &[("f", F, size), ("caller", BASE + 0x10, 0x24)])
         .in_aarch64()
         .with_data()
         .importing("printf");
@@ -965,6 +975,33 @@ fn printing_spilled(format: &[u8], handed: bool) -> String {
     rendered.response.output.into_text()
 }
 
+/// D377: `printf` passes its format in x0 and nothing on the stack, so the call writes no byte of
+/// `caller`'s frame: the 5 stored at `[sp, #16]` is read back as 5. Before, a variadic call wrote any.
+#[test]
+fn a_local_read_back_past_a_variadic_declaration_is_its_store() {
+    let code = aarch64_with_printf(&[
+        (BASE + 0x10, 0xa9be_7bfd), // stp x29, x30, [sp, #-32]!
+        (BASE + 0x14, 0x5280_00a8), // mov w8, #5
+        (BASE + 0x18, 0xb900_13e8), // str w8, [sp, #16]
+        (BASE + 0x1c, 0x9000_0000), // adrp x0, 0x1000
+        (BASE + 0x20, 0x9102_8000), // add x0, x0, #0xa0
+        (BASE + 0x24, 0x9400_001b), // bl printf
+        (BASE + 0x28, 0xb940_13e0), // ldr w0, [sp, #16]
+        (BASE + 0x2c, 0xa8c2_7bfd), // ldp x29, x30, [sp], #32
+        (BASE + 0x30, 0xd65f_03c0), // ret
+    ]);
+    let program = Literal::of_code(code, &[("caller", BASE + 0x10, 0x24)])
+        .in_aarch64()
+        .with_data()
+        .importing("printf");
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(common::TEXT, b"%d\n\0");
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    let text = rendered.response.output.into_text();
+    assert!(text.contains("printf("), "{text}");
+    assert!(!text.contains("r2sleigh_load_u32"), "{text}");
+}
+
 /// Gb: `f` (`ret`) reads no argument, so the reload is the spill and q0 to q3 die at `printf`.
 /// Fails (D376): `f`'s statement never reaches its caller's build, so the call is unstated (D369).
 #[test]
@@ -996,12 +1033,20 @@ fn an_aarch64_printf_whose_format_has_a_float_keeps_q0_read() {
     assert!(!text.starts_with("void f("), "{text}");
 }
 
-/// x9 is caller-saved: the call to `f` may change it, so the format at `printf` is unknown and the
-/// call may read every vector argument register.
+/// x9 is caller-saved and `f` clears it: the format at `printf` is unknown and the call may read
+/// every vector argument register.
 #[test]
 fn an_aarch64_printf_whose_format_a_call_may_change_reads_every_vector_register() {
-    let text = printing(9, b"%d\n\0");
+    let text = printing_after(9, b"%d\n\0", (false, true));
     assert!(!text.starts_with("void f("), "{text}");
+}
+
+/// D376: the frame record `caller` reloads after `bl f` asks `f` (`ret`) to state itself, and its
+/// body keeps x9: the format is the literal and q0 to q3 die at `printf`. Unstated, it may change x9.
+#[test]
+fn an_aarch64_printf_whose_format_a_stated_call_keeps_reads_no_vector_register() {
+    let text = printing(9, b"%d\n\0");
+    assert!(text.starts_with("void f("), "{text}");
 }
 
 /// A format in writable data may change before the call (Codex review of #363): the call may read

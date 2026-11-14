@@ -2288,6 +2288,7 @@ fn touch_reach(prepared: &SsaArtifact) -> BTreeMap<usize, ArgumentReach> {
         blocks: Vec::new(),
         local: collect_source_owned_summary_facts(prepared, &abi),
         library: BTreeMap::new(),
+        incoming_writes: None,
     }
     .argument_touch_reach()
 }

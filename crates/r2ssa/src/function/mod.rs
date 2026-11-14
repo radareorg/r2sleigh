@@ -492,6 +492,12 @@ impl TrustedSeal {
         &self.machine_context
     }
 
+    /// The direct callees of unstated calls whose writes kept a place loaded after them in memory:
+    /// each is asked to state its own (D376). O(asked x log sites).
+    pub fn unstated_rewriting_callees(&self) -> BTreeSet<u64> {
+        rewriting_callees(self.sealed.function(), &self.machine_context)
+    }
+
     /// Every constant a sealed value folds to with what preparation admitted, in value order.
     pub fn folded_values(&self) -> impl Iterator<Item = u64> + '_ {
         let folded = self.sealed.folded().prepared.iter();
@@ -618,9 +624,39 @@ impl Prior {
         };
         let unread = !self.function.argument_areas_read() && !below(&self.key) && !below(key);
         let areas = unread || self.key.argument_areas == key.argument_areas;
+        let written = (self.function.frame_points()).map_or_else(
+            || self.key.written_areas == key.written_areas,
+            |points| same_where_loaded(points, &self.key.written_areas, &key.written_areas),
+        );
+        let areas = areas && written;
         let reach = same_where_asked(self.function.asked_reach(), &self.key.upward, &key.upward);
         areas && reach && self.key.without_areas() == key.without_areas()
     }
+}
+
+/// The direct targets of the calls `function`'s frame walk found unstated and rewriting (D376).
+fn rewriting_callees(function: &SSAFunction, context: &SourceMachineContext) -> BTreeSet<u64> {
+    let points = function.frame_points();
+    let asked = points
+        .into_iter()
+        .flat_map(|points| points.unstated_rewriting());
+    let sites = asked.filter_map(|instruction| context.raw_call_site_at(*instruction));
+    let targets = sites.map(r2source::SourceCallSiteIdentity::target);
+    let targets = targets.filter(|target| target.space == r2source::CanonicalStorageSpace::Ram);
+    targets.map(|target| target.offset).collect()
+}
+
+/// Whether two keys' written areas cover the same loaded places and incoming bytes at every call,
+/// both listed by instruction from one lift (D377). `O(calls x spans x log loaded)`.
+fn same_where_loaded(
+    points: &crate::semantic::FramePoints,
+    built: &[(u64, crate::call_reads::StackArea)],
+    now: &[(u64, crate::call_reads::StackArea)],
+) -> bool {
+    built.len() == now.len()
+        && (built.iter().zip(now)).all(|((at, one), (other_at, other))| {
+            at == other_at && points.writes_alike(*at, one.as_deref(), other.as_deref())
+        })
 }
 
 /// Whether two keys' upward positions agree at every (callee, position) promotion asked: a
@@ -666,6 +702,8 @@ struct BuildKey {
     narrow_results: crate::lanes::CallResults,
     /// The argument area each call's complete interface states, by its instruction.
     argument_areas: Vec<(u64, Vec<(i64, i64)>)>,
+    /// The stack each call may write, by its instruction; none where nothing bounds it (D377).
+    written_areas: Vec<(u64, crate::call_reads::StackArea)>,
     reentering: BTreeSet<u64>,
     unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
     conventions: SiteConventions,
@@ -743,7 +781,9 @@ impl BuildKey {
             "result width".to_owned()
         } else if self.without_areas() != other.without_areas() {
             "premise or import".to_owned()
-        } else if self.argument_areas != other.argument_areas {
+        } else if self.argument_areas != other.argument_areas
+            || self.written_areas != other.written_areas
+        {
             "argument area".to_owned()
         } else {
             "argument reach".to_owned()
@@ -777,6 +817,10 @@ impl BuildKey {
         let areas = context.raw_call_sites().keys().filter_map(|instruction| {
             Some((*instruction, context.call_reads(Some(*instruction))?.stack?))
         });
+        let written = context.raw_call_sites().keys().map(|instruction| {
+            let reads = context.call_reads(Some(*instruction));
+            (*instruction, reads.and_then(|reads| reads.writes))
+        });
         Self {
             clobbered: clobbered.into(),
             kept: kept.collect(),
@@ -785,6 +829,7 @@ impl BuildKey {
             security_checks: callees.security_checks.clone(),
             narrow_results: crate::lanes::CallResults::of(context),
             argument_areas: areas.collect(),
+            written_areas: written.collect(),
             reentering: evidence.reentering.clone(),
             unstated_imports: evidence.unstated_imports.clone(),
             conventions: callees.conventions.clone(),
@@ -1424,6 +1469,12 @@ impl SsaArtifact {
 
     pub fn function(&self) -> &SSAFunction {
         self.sealed.function()
+    }
+
+    /// The direct callees of unstated calls whose writes kept a place loaded after them in memory:
+    /// each is asked to state its own (D376). O(asked x log sites).
+    pub fn unstated_rewriting_callees(&self) -> BTreeSet<u64> {
+        rewriting_callees(self.sealed.function(), &self.machine_context)
     }
 
     /// The decompiler-prep facts, collected once when the function was
@@ -2730,6 +2781,7 @@ impl TrustedSsaArtifact {
             interfaces: callee_interfaces,
             preserved: callee_preserved_carriers,
             reach: callee_argument_reach,
+            writes: callee_writes,
             library,
             reentering,
             exits,
@@ -2879,6 +2931,7 @@ impl TrustedSsaArtifact {
                 // Promotion's frame walk reads what each callee reaches, by the site's model.
                 provisional_machine_context
                     .set_callee_argument_reach(callee_argument_reach.clone());
+                provisional_machine_context.set_callee_writes(callee_writes.clone());
                 provisional_machine_context.set_site_conventions(site_conventions.clone());
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
@@ -3034,6 +3087,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_linkages(correlated_call_sites.callee_linkages);
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
+        machine_context.set_callee_writes(callee_writes.clone());
         machine_context.set_site_conventions(site_conventions.clone());
         machine_context.set_callee_library(library.clone());
         machine_context.set_reentering_callees(reentering.clone());
@@ -4039,6 +4093,8 @@ pub struct CalleeEvidence {
     pub preserved: CalleePreservedCarriers,
     /// How far each callee reaches through each pointer it is handed.
     pub reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+    /// What each stated callee may write of its caller's stack; a callee absent writes any (D377).
+    pub writes: BTreeMap<u64, crate::call_reads::StackWrites>,
     /// The model of each imported library routine called, from r2abi.
     pub library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The callees a runtime model says re-enter their caller at its entry (Go's stack growth).

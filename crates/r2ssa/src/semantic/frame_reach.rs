@@ -542,9 +542,13 @@ fn call_reaches(
             .op(call)
             .and_then(|op| op.call())
             .map(|call| call.instruction);
+        // What the call may read or write; nothing bounds it where either is unbounded (D377).
         let area = machine_context
             .zip(instruction)
-            .and_then(|(context, instruction)| context.call_reads(instruction)?.stack);
+            .and_then(|(context, instruction)| {
+                let reads = context.call_reads(instruction)?;
+                Some([reads.stack?, reads.writes?].concat())
+            });
         if let Some(area) = area {
             let area = (area.iter())
                 .map(|(low, high)| (base.saturating_add(*low), base.saturating_add(*high)))

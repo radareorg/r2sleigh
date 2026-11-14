@@ -87,7 +87,8 @@ fn every_row_cites_its_header() {
             assert!(
                 header.ends_with(".h")
                     || header.starts_with("LSB: LSB-Core-generic 5.0, ")
-                    || header.starts_with("musl: src/"),
+                    || (header.starts_with("musl: src/")
+                        && comment.contains("no header declares it")),
                 "{file}: `{name}` includes `{header}`"
             );
             assert!(

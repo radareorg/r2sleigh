@@ -436,6 +436,8 @@ pub struct SourceMachineContext {
     /// before the interprocedural solve exists, so the fact arrives with the
     /// bodies the capture took rather than from that solve.
     callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
+    /// What each stated callee may write of its caller's stack, by entry (D377).
+    callee_writes: BTreeMap<u64, crate::call_reads::StackWrites>,
     /// The convention each stated callee runs under, by entry; any other call runs under `calls`.
     site_conventions: crate::SiteConventions,
     /// The library models of the imports this body calls, by entry.
@@ -816,6 +818,7 @@ impl SourceMachineContext {
             member_call_sites: BTreeSet::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
+            callee_writes: BTreeMap::new(),
             site_conventions: crate::SiteConventions::new(),
             callee_library: BTreeMap::new(),
             reentering_callees: BTreeSet::new(),
@@ -1146,6 +1149,13 @@ impl SourceMachineContext {
         self.callee_argument_reach = callee_argument_reach;
     }
 
+    pub(crate) fn set_callee_writes(
+        &mut self,
+        writes: BTreeMap<u64, crate::call_reads::StackWrites>,
+    ) {
+        self.callee_writes = writes;
+    }
+
     pub(crate) fn set_site_conventions(&mut self, conventions: crate::SiteConventions) {
         self.site_conventions = conventions;
     }
@@ -1304,25 +1314,42 @@ impl SourceMachineContext {
     /// interface, else every location; none where the machine names no convention.
     pub fn call_reads(&self, instruction: Option<u64>) -> Option<crate::call_reads::CallReads> {
         let identity = instruction.and_then(|instruction| self.raw_call_site_at(instruction));
-        let interface = (identity.and_then(|identity| self.call_site_interface(identity)))
-            .filter(|interface| interface.is_complete() && !interface.is_variadic());
-        if let Some(interface) = interface {
-            return Some(crate::call_reads::CallReads::exact(interface, self.calls()));
-        }
-        // A walked callee that mints no contract still states its reads where its arity is exact.
         let target = identity
             .map(SourceCallSiteIdentity::target)
             .filter(|target| target.space == CanonicalStorageSpace::Ram);
+        // A direct callee writes the stack its entry states; a typed indirect call, its arguments.
+        let writes = match target {
+            Some(target) => self.callee_writes.get(&target.offset),
+            None => Some(&crate::call_reads::StackWrites::Arguments),
+        };
+        let declared = (identity.and_then(|identity| self.call_site_interface(identity)))
+            .filter(|interface| interface.is_complete());
+        if let Some(interface) = declared.filter(|interface| !interface.is_variadic()) {
+            let reads = crate::call_reads::CallReads::exact(interface, self.calls());
+            return Some(reads.writing(writes));
+        }
+        // A variadic declaration writes the area of the arguments its site passes; va_arg reads.
+        let passed = (declared
+            .filter(|_| writes == Some(&crate::call_reads::StackWrites::Arguments)))
+        .map(|interface| crate::call_reads::CallReads::exact(interface, self.calls()).writes);
+        // A walked callee that mints no contract still states its reads where its arity is exact.
         let stated = target
             .and_then(|target| self.callee_statement(target.offset))
             .and_then(|statement| statement.reads.as_deref());
-        match stated {
+        let reads = match stated {
             Some(read) => Some(crate::call_reads::CallReads::of_locations(
                 read.iter().copied(),
                 self.calls(),
             )),
             None => (self.calls()).map(crate::call_reads::CallReads::every_location),
-        }
+        };
+        reads.map(|reads| match passed {
+            Some(passed) => crate::call_reads::CallReads {
+                writes: passed,
+                ..reads
+            },
+            None => reads.writing(writes),
+        })
     }
 
     pub fn call_site_interface(

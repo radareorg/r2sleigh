@@ -121,7 +121,7 @@ r2sleigh_word_u64 _main(void)
 
     uint64_t x0_2;
 
-    /* r2dec proof: no individual construct is marked; 20 source obligations: 9 rendered, 11 elided, 0 refused; 2 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 14 source obligations: 9 rendered, 5 elided, 0 refused; 2 statements rendered; a call reads the result (assuming closed-world) */
     {
         x0_2 = _table_dispatch(3, 5);
         return (uint64_t)x0_2;

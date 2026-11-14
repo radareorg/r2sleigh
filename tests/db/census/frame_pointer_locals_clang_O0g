@@ -142,7 +142,7 @@ r2sleigh_result_u64 __do_global_dtors_aux(void)
     uint64_t tmp_10ee_0_1;
     uint64_t rdi_1;
 
-    /* r2dec proof: 4 constructs are marked below; 43 source obligations: 16 rendered, 18 elided, 0 refused, 9 residual; 9 statements rendered; 1 never assigned, read as residuals (RAX_2); 2 data object types refused; 1 callee prototype supplied by the source; the parameters are a floor: at least 0 (a register past them reaches the call to 0x1070); the result is unproven (Written): 0 unproven-return carried, 2 unproven-return residual */
+    /* r2dec proof: 4 constructs are marked below; 42 source obligations: 16 rendered, 17 elided, 0 refused, 9 residual; 9 statements rendered; 1 never assigned, read as residuals (RAX_2); 2 data object types refused; 1 callee prototype supplied by the source; the parameters are a floor: at least 0 (a register past them reaches the call to 0x1070); the result is unproven (Written): 0 unproven-return carried, 2 unproven-return residual */
     {
         tmp_10e4_0_1 = r2sleigh_load_u8((void*)&__TMC_END__);
         if ((uint8_t)((uint8_t)tmp_10e4_0_1 != (uint8_t)0U)) {

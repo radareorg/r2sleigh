@@ -137,6 +137,16 @@ pub trait Program: crate::body::Program {
     ) -> Arc<CalleeRead> {
         Arc::new(read())
     }
+
+    /// One callee read alone, against its imports (`CalleeReads`): the statement a caller build
+    /// asks for a call nothing else states, which never reads another statement (D376).
+    fn callee_statement(
+        &self,
+        _address: u64,
+        read: &mut dyn FnMut() -> CalleeRead,
+    ) -> Arc<CalleeRead> {
+        Arc::new(read())
+    }
 }
 
 /// What reading one callee's body gave a caller.
@@ -845,7 +855,47 @@ pub(crate) fn convention_seal_of(
     );
     let restatement = native.restatement(body.entry);
     // Sealed through the tables the walk followed, as Ge's whole-body seal reads them (D285).
-    native.convention_seal(&walked.root, &imports, restatement, &walked.tables)
+    let seal =
+        native.convention_seal(&walked.root, &imports, restatement.clone(), &walked.tables)?;
+    let asked = seal.unstated_rewriting_callees();
+    match state_asked(
+        (&native, target, ptr_bits),
+        (body.entry, asked),
+        &mut imports,
+    ) {
+        true => native.convention_seal(&walked.root, &imports, restatement, &walked.tables),
+        false => Ok(seal),
+    }
+}
+
+/// States each callee nothing states whose call's writes kept a loaded place in memory, from its
+/// alone read: depth one, since an alone read asks none (D376). Whether any did. O(asked) reads.
+fn state_asked(
+    (native, target, ptr_bits): (&Native<'_>, &NativeTarget<'_>, u32),
+    (entry, asked): (u64, BTreeSet<u64>),
+    callees: &mut Callees,
+) -> bool {
+    let program = native.program;
+    let asked = (asked.into_iter())
+        .filter(|address| *address != entry && !callees.interfaces.contains_key(address))
+        .filter(|address| !callees.writes.contains_key(address))
+        .filter(|address| program.import_at(*address).is_none())
+        .filter(|address| crate::stated::sealed_import(program, *address).is_none())
+        .collect::<Vec<_>>();
+    let mut stated = false;
+    for address in asked {
+        let read = program.callee_statement(address, &mut || {
+            read_callee(native, target, address, ptr_bits)
+        });
+        if let Some(interface) = &read.interface {
+            callees.interfaces.insert(address, interface.clone());
+        }
+        if let Ok(facts) = &read.facts {
+            callees.record(address, facts, program);
+            stated = true;
+        }
+    }
+    stated
 }
 
 /// Where each dispatch goes, by the instruction making it.
@@ -1252,6 +1302,8 @@ fn declare_imports(
             signatures.push(declaration);
         }
         callees.interfaces.insert(*address, interface);
+        // A declaration states its arguments, the area the convention gives the callee.
+        (callees.writes).insert(*address, r2ssa::call_reads::StackWrites::Arguments);
     }
     signatures
 }
@@ -1311,6 +1363,9 @@ pub(crate) struct Stated<'a> {
     pub(crate) assumed: &'a [(u64, r2source::SourceFunctionInterface)],
     /// Under `aa` a callee's result is its closed-world `CallBoundary`'s, as the root's is.
     pub(crate) world: crate::program::World,
+    /// Whether the build asks each callee its walk finds unstated and rewriting to state itself
+    /// (D376); an alone read (`CalleeReads`) asks none, so a statement reads no statement.
+    pub(crate) asks: bool,
 }
 
 /// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md).
@@ -1331,7 +1386,15 @@ fn resolved_alone(
     for (member, interface) in stated.assumed {
         imports.interfaces.insert(*member, interface.clone());
     }
-    let resolved = native.resolve(address, walked, &imports, stated.world);
+    let mut resolved = native.resolve(address, walked, &imports, stated.world);
+    if let Ok(artifact) = resolved.as_ref()
+        && stated.asks
+    {
+        let asked = artifact.shared_artifact().unstated_rewriting_callees();
+        if state_asked((native, target, ptr_bits), (address, asked), &mut imports) {
+            resolved = native.resolve(address, walked, &imports, stated.world);
+        }
+    }
     resolved.map_err(|refusal| match refusal.stopped() {
         true => Unreadable::Stopped,
         false => Unreadable::NotPrepared,
@@ -1742,6 +1805,8 @@ struct Callees {
     /// What each callee reaches through each pointer it is handed, which is
     /// what makes the bytes one callee covers one object in the caller.
     reach: BTreeMap<u64, BTreeMap<usize, ArgumentReach>>,
+    /// What each stated callee may write of its caller's stack; one absent may write any (D377).
+    writes: BTreeMap<u64, r2ssa::call_reads::StackWrites>,
     /// The imports whose declaration states no interface: they have no body to read one off.
     unstated: BTreeMap<u64, r2ssa::UnstatedImport>,
     /// The convention each call runs under where the program states it (`site_convention`).
@@ -1760,6 +1825,7 @@ impl Callees {
             interfaces: self.interfaces.clone(),
             preserved: self.preserved.clone(),
             reach: self.reach.clone(),
+            writes: self.writes.clone(),
             library,
             reentering,
             exits,
@@ -1786,6 +1852,13 @@ impl Callees {
         // arguments is described, and a callee with no entry is one nothing
         // describes.
         self.reach.insert(address, facts.argument_touch_reach());
+        match facts.summary().incoming_writes() {
+            Some(spans) => {
+                let within = r2ssa::call_reads::StackWrites::Within(spans.into());
+                self.writes.insert(address, within);
+            }
+            None => _ = self.writes.remove(&address),
+        }
     }
 }
 

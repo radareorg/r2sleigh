@@ -1059,6 +1059,24 @@ fn require_trusted_root_for_helper_scope(
     Ok(())
 }
 
+/// The frame walk's writes at or above the entry pointer, moved past what the transfer spends; an
+/// unstated return mechanism spends nothing or one address, so both. `None` with no walk. O(spans).
+fn incoming_writes(prepared: &SsaArtifact) -> Option<Box<[(i64, i64)]>> {
+    let context = prepared.machine_context();
+    let spans = prepared.function().frame_points()?.incoming_writes()?;
+    let (least, most) = match context.return_mechanism() {
+        Some(mechanism) => (
+            mechanism.stack_pointer_delta_bytes(),
+            mechanism.stack_pointer_delta_bytes(),
+        ),
+        None => (0, context.memory_model().default_address_bits() / 8),
+    };
+    let spans = spans
+        .iter()
+        .map(|(low, high)| ((low - i64::from(most)).max(0), high - i64::from(least)));
+    Some(spans.filter(|(low, high)| low < high).collect())
+}
+
 /// Solve interprocedural evidence owned by one exact prepared SSA root.
 ///
 /// Exactly one input must identify the root by function id, entry, and
@@ -1083,6 +1101,8 @@ pub struct PreparedCalleeSummary {
     /// Names of the bodiless callees this body reaches: a PLT stub's slot.
     /// The library model of each import this body calls directly.
     library: BTreeMap<u64, FunctionSemanticSummary>,
+    /// The caller's stack a call to this body may write, from the call's pointer (D377).
+    incoming_writes: Option<Box<[(i64, i64)]>>,
 }
 
 impl PreparedCalleeSummary {
@@ -1121,7 +1141,14 @@ impl PreparedCalleeSummary {
                 .collect(),
             local,
             library,
+            incoming_writes: incoming_writes(prepared),
         })
+    }
+
+    /// The caller's stack bytes a call to this body may write, as ranges from the stack pointer
+    /// before the transfer; `None` where nothing bounds them (D377).
+    pub fn incoming_writes(&self) -> Option<&[(i64, i64)]> {
+        self.incoming_writes.as_deref()
     }
 
     pub const fn id(&self) -> InterprocFunctionId {

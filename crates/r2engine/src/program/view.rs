@@ -380,6 +380,16 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         std::sync::Arc::clone(&read.0)
     }
 
+    fn callee_statement(
+        &self,
+        address: u64,
+        _read: &mut dyn FnMut() -> crate::native::CalleeRead,
+    ) -> std::sync::Arc<crate::native::CalleeRead> {
+        let key = (address, self.thumb_at(address));
+        let read = self.db.get::<super::analysis::CalleeReads>(&key);
+        std::sync::Arc::clone(&read.expect("a statement asks for no other root").0)
+    }
+
     fn name_at(&self, vaddr: u64) -> Option<String> {
         // The plain name: it keys the prototype table; a slot the loader fills is asked separately.
         self.names

@@ -44,7 +44,12 @@ pub(crate) enum Origin {
 pub(crate) struct OpaqueAccess {
     pub(crate) op: OpId,
     pub(crate) origin: Origin,
+    /// Whether it may write: only a load is known not to.
+    pub(crate) writes: bool,
 }
+
+/// A call's written area as spans from its pointer; `None` where nothing bounds it.
+type Area<'a> = Option<&'a [(i64, i64)]>;
 
 /// What the frame's addresses do, by entry offset (D290). `None` on a function means `whole`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -68,6 +73,16 @@ pub struct FramePoints {
     pub(crate) asked_reach: BTreeSet<(u64, usize)>,
     /// The first instruction that moves the stack pointer by an amount no constant states (D355).
     pub(crate) dynamic: Option<DynamicFrame>,
+    /// Entry-relative spans at or above the entry pointer its stores and calls may write; `None`
+    /// where an unplaced call base leaves them unbounded (D377).
+    pub(crate) incoming: Option<Vec<(i64, i64)>>,
+    /// The places a load reads, with the widest load, and each call's base by its instruction:
+    /// what a kept build compares written areas over (D377).
+    pub(crate) loaded: BTreeMap<i64, u32>,
+    pub(crate) written_bases: BTreeMap<u64, Option<i64>>,
+    /// The calls nothing states whose area covers a place loaded after a call, by instruction:
+    /// the callees a caller build asks to state (D376).
+    pub(crate) unstated_rewriting: BTreeSet<u64>,
 }
 
 /// A frame no offset places past one instruction: `sub rsp, rax` after `__chkstk`, an `alloca`
@@ -105,9 +120,56 @@ impl FramePoints {
         self.opaque.dedup();
         self.handed.extend(other.handed);
         self.rewritten.extend(other.rewritten);
+        self.unstated_rewriting.extend(other.unstated_rewriting);
         self.by_area |= other.by_area;
         self.asked_reach.extend(other.asked_reach);
         self.dynamic = self.dynamic.into_iter().chain(other.dynamic).min();
+        self.incoming = (self.incoming.take().zip(other.incoming))
+            .map(|(mine, theirs)| mine.into_iter().chain(theirs).collect());
+        for (place, width) in other.loaded {
+            let widest = self.loaded.entry(place).or_insert(width);
+            *widest = (*widest).max(width);
+        }
+        for (instruction, base) in other.written_bases {
+            let known = self.written_bases.entry(instruction).or_insert(base);
+            *known = (*known)
+                .zip(base)
+                .filter(|(mine, theirs)| mine == theirs)
+                .map(|(mine, _)| mine);
+        }
+    }
+
+    /// Whether two written areas of the call at `instruction` cover the same loaded places and the
+    /// same bytes at or above the entry pointer, so the build reads them alike. O(spans x log loaded).
+    pub(crate) fn writes_alike(&self, instruction: u64, one: Area<'_>, other: Area<'_>) -> bool {
+        let Some(Some(base)) = self.written_bases.get(&instruction).copied() else {
+            return one == other;
+        };
+        let at = |area: Option<&[(i64, i64)]>| match area {
+            Some(area) => merged(
+                area.iter()
+                    .map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high))),
+            ),
+            None => merged([(base, 0)].into_iter()),
+        };
+        let widest = i64::from(self.loaded.values().copied().max().unwrap_or(1));
+        differing(&at(one), &at(other))
+            .into_iter()
+            .all(|(low, high)| {
+                let near = self.loaded.range(low.saturating_sub(widest)..high);
+                high <= 0
+                    && !near
+                        .into_iter()
+                        .any(|(place, width)| place + i64::from(*width) > low)
+            })
+    }
+
+    /// The incoming stack bytes the body may write, from its entry pointer: `None` where a frame
+    /// address escapes or an access through one no offset places may write (D377).
+    pub fn incoming_writes(&self) -> Option<&[(i64, i64)]> {
+        let writing = self.opaque.iter().any(|access| access.writes);
+        let opaque = self.whole || !self.escaped.is_empty() || writing;
+        self.incoming.as_deref().filter(|_| !opaque)
     }
 
     /// The frame's typed refusal, where the stack pointer moves by an unstated amount (D355).
@@ -165,6 +227,11 @@ impl FramePoints {
 
     pub(crate) const fn asked_reach(&self) -> &BTreeSet<(u64, usize)> {
         &self.asked_reach
+    }
+
+    /// The calls nothing states whose writes kept a loaded place in memory, by instruction (D376).
+    pub const fn unstated_rewriting(&self) -> &BTreeSet<u64> {
+        &self.unstated_rewriting
     }
 }
 
@@ -303,9 +370,13 @@ pub(crate) fn walk(
     let entry_sp = (0..func.values().len())
         .map(VarId::from_index)
         .find(|id| func.var(*id).version == 0 && func.storage_of(*id) == Some(stack_pointer));
-    // No entry stack pointer value: no frame address exists.
+    // No entry stack pointer value: no frame address exists, so nothing writes the stack.
     let Some(entry_sp) = entry_sp else {
-        return refused(FramePoints::default());
+        let incoming = Some(Vec::new());
+        return refused(FramePoints {
+            incoming,
+            ..FramePoints::default()
+        });
     };
     if defs.exhausted().is_some() {
         return refused(FramePoints::whole_frame());
@@ -430,6 +501,9 @@ struct CallArguments {
     shift: i64,
     /// `CallReads::stack` of the call; none reads every place from the pointer to entry.
     area: Option<Vec<(i64, i64)>>,
+    /// `CallReads::writes` of the call; none writes every place from the pointer to entry.
+    writes: Option<Vec<(i64, i64)>>,
+    instruction: Option<u64>,
 }
 
 impl StackArguments {
@@ -488,75 +562,110 @@ impl StackArguments {
         })
     }
 
-    /// The places a call's area covers that a load reads after it, since a callee may write its
-    /// area (D369). One closure per distinct area: `O(calls log + areas x (B + E + accesses))`.
+    /// Places a call's written area covers that a load reads after it (D369), and the unstated calls
+    /// covering one (D376). A union dataflow; sets only grow: `O((B + E) x K log K + A log A)`.
     fn rewritten(
         &self,
         func: &SSAFunction,
         values: &IdMap<VarId, Value>,
         accesses: &Accesses,
-    ) -> BTreeSet<i64> {
-        // Each call's area as entry-relative spans; a call no offset places covers the frame.
-        let mut groups = BTreeMap::<Vec<(i64, i64)>, Vec<(u64, usize)>>::new();
+    ) -> (BTreeSet<i64>, BTreeSet<u64>) {
+        // Each call's area as entry-relative spans, by block and index; an unplaced call covers all.
+        let mut in_block = BTreeMap::<u64, Vec<(usize, Vec<(i64, i64)>)>>::new();
         for call in &self.calls {
-            let spans = match (call.base(values), &call.area) {
+            let spans = match (call.base(values), &call.writes) {
                 (None, _) => vec![(i64::MIN, i64::MAX)],
-                (Some(base), Some(area)) => (area.iter())
-                    .map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high)))
-                    .filter(|(low, high)| low < high)
-                    .collect(),
+                (Some(base), Some(area)) => merged(
+                    area.iter()
+                        .map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high))),
+                ),
                 // Unbounded, it is still this frame's: it ends at the entry pointer.
-                (Some(base), None) => vec![(base, 0)].into_iter().filter(|(l, h)| l < h).collect(),
+                (Some(base), None) => merged([(base, 0)].into_iter()),
             };
-            if !spans.is_empty() {
-                groups.entry(spans).or_default().push(call.at);
-            }
+            in_block
+                .entry(call.at.0)
+                .or_default()
+                .push((call.at.1, spans));
         }
-        let loaded = |place: &i64| {
-            (accesses.get(place).into_iter().flatten()).filter(|access| !access.store)
+        let gen_of = |calls: &[(usize, Vec<(i64, i64)>)]| {
+            merged(calls.iter().flat_map(|(_, spans)| spans.iter().copied()))
         };
-        let mut rewritten = BTreeSet::new();
-        for (spans, calls) in &groups {
-            let covers = |place: i64, width: u32| {
-                let end = place.saturating_add(i64::from(width));
-                spans.iter().any(|(low, high)| *low < end && place < *high)
-            };
-            let covered = (accesses.iter())
-                .filter(|(place, list)| {
-                    let widest = list.iter().map(|access| access.width).max();
-                    !rewritten.contains(*place)
-                        && covers(**place, widest.unwrap_or(1))
-                        && loaded(place).next().is_some()
-                })
-                .map(|(place, _)| *place)
-                .collect::<Vec<_>>();
-            if covered.is_empty() {
-                continue;
-            }
-            // The group's first call in each block, and every block the calls' successors reach.
-            let mut first = BTreeMap::<u64, usize>::new();
-            for (block, index) in calls {
-                let known = first.entry(*block).or_insert(*index);
-                *known = (*known).min(*index);
-            }
-            let mut reached = BTreeSet::new();
-            let mut pending = (first.keys())
-                .flat_map(|block| func.successors(*block))
-                .collect::<Vec<_>>();
-            while let Some(block) = pending.pop() {
-                if reached.insert(block) {
-                    pending.extend(func.successors(block));
+        // What reaches each block's entry: the union of what leaves its predecessors.
+        let mut entering = BTreeMap::<u64, Vec<(i64, i64)>>::new();
+        let mut pending = in_block.keys().copied().collect::<Vec<_>>();
+        while let Some(block) = pending.pop() {
+            let calls = in_block.get(&block).map_or(&[][..], Vec::as_slice);
+            let entry = entering.get(&block).map_or(&[][..], Vec::as_slice);
+            let leaving = merged(entry.iter().copied().chain(gen_of(calls)));
+            for next in func.successors(block) {
+                let known = entering.entry(next).or_default();
+                let grown = merged(known.iter().copied().chain(leaving.iter().copied()));
+                if grown != *known {
+                    *known = grown;
+                    pending.push(next);
                 }
             }
-            let after = |access: &Access| {
-                reached.contains(&access.block)
-                    || first
-                        .get(&access.block)
-                        .is_some_and(|call| *call < access.index)
-            };
-            rewritten.extend(covered.into_iter().filter(|place| loaded(place).any(after)));
         }
-        rewritten
+        // Each load against what reaches it: the block's entry and the calls before it there.
+        let mut loads = (accesses.iter())
+            .flat_map(|(place, list)| list.iter().map(move |access| (*place, access)))
+            .filter(|(_, access)| !access.store)
+            .map(|(place, access)| (access.block, access.index, place, access.width))
+            .collect::<Vec<_>>();
+        loads.sort_unstable();
+        let mut rewritten = BTreeSet::new();
+        for list in loads.chunk_by(|one, other| one.0 == other.0) {
+            let block = list[0].0;
+            let mut calls = in_block.get(&block).cloned().unwrap_or_default();
+            calls.sort_unstable_by_key(|(index, _)| *index);
+            let mut calls = calls.into_iter().peekable();
+            let mut live = entering.get(&block).cloned().unwrap_or_default();
+            for (_, index, place, width) in list {
+                let mut added = Vec::new();
+                while let Some((_, spans)) = calls.next_if(|(call, _)| call < index) {
+                    added.extend(spans);
+                }
+                if !added.is_empty() {
+                    live = merged(live.into_iter().chain(added));
+                }
+                if overlaps(&live, *place, place.saturating_add(i64::from(*width))) {
+                    rewritten.insert(*place);
+                }
+            }
+        }
+        let asked = (self.calls.iter())
+            .filter(|call| call.writes.is_none())
+            .filter_map(|call| Some((call.instruction?, call.base(values)?)))
+            .filter(|(_, base)| rewritten.range(*base..0).next().is_some())
+            .map(|(instruction, _)| instruction)
+            .collect();
+        (rewritten, asked)
+    }
+
+    /// The spans at or above the entry pointer a store or a call's area covers; `None` where a call
+    /// is at an unplaced pointer. An unbounded area ends at the entry pointer. O(accesses + calls).
+    fn incoming(
+        &self,
+        values: &IdMap<VarId, Value>,
+        accesses: &Accesses,
+    ) -> Option<Vec<(i64, i64)>> {
+        let stores = (accesses.iter()).flat_map(|(place, list)| {
+            let stored = list.iter().filter(|access| access.store);
+            stored.map(|access| (*place, place.saturating_add(i64::from(access.width))))
+        });
+        let mut spans = stores.collect::<Vec<_>>();
+        for call in &self.calls {
+            let base = call.base(values)?;
+            let area = call.writes.iter().flatten();
+            spans.extend(
+                area.map(|(low, high)| (base.wrapping_add(*low), base.wrapping_add(*high))),
+            );
+        }
+        spans.retain(|(_, high)| *high > 0);
+        spans.iter_mut().for_each(|span| span.0 = span.0.max(0));
+        spans.sort_unstable();
+        spans.dedup();
+        Some(spans)
     }
 
     /// Whether some place of `places` ends above the lowest placed call base: an unplaced call
@@ -656,12 +765,15 @@ impl Site<'_> {
                 _ => None,
             });
         let (pointer, shift) = entering.map_or((pointer, self.spent), |src| (src, 0));
+        let reads = self.machine.call_reads(call.instruction);
         Some(CallArguments {
             op,
             at,
             pointer,
             shift,
-            area: (self.machine.call_reads(call.instruction)).and_then(|reads| reads.stack),
+            writes: reads.as_ref().and_then(|reads| reads.writes.clone()),
+            instruction: call.instruction,
+            area: reads.and_then(|reads| reads.stack),
         })
     }
 }
@@ -803,14 +915,14 @@ impl<'a> Walker<'a> {
         }
     }
 
-    fn opaque(&mut self, op: OpId, value: &Value) {
+    fn opaque(&mut self, op: OpId, value: &Value, writes: bool) {
         let origin = match value {
             Value::Points(points) => {
                 Origin::Points(points.iter().map(|point| point.frame_point()).collect())
             }
             Value::Top => Origin::Unplaced,
         };
-        self.points.opaque.push(OpaqueAccess { op, origin });
+        self.points.opaque.push(OpaqueAccess { op, origin, writes });
     }
 
     /// Everything `var`'s value reaches: the merges it feeds and each operation reading it.
@@ -888,7 +1000,7 @@ impl<'a> Walker<'a> {
                         }
                         self.access(place, id, block, index, width, false);
                     }
-                    None => self.opaque(id, value),
+                    None => self.opaque(id, value, false),
                 }
             }
             SSAOp::Store { addr, val, .. } => {
@@ -899,7 +1011,7 @@ impl<'a> Walker<'a> {
                     let width = self.func.var(*val).size;
                     match value.exact() {
                         Some(place) => self.access(place, id, block, index, width, true),
-                        None => self.opaque(id, value),
+                        None => self.opaque(id, value, true),
                     }
                 }
             }
@@ -937,7 +1049,7 @@ impl<'a> Walker<'a> {
             _ if memory_addresses(op).is_some() => {
                 let addresses = memory_addresses(op).unwrap_or_default();
                 if addresses.contains(&var) {
-                    self.opaque(id, value);
+                    self.opaque(id, value, true);
                 }
                 let handed = (op.sources().iter())
                     .any(|source| **source == var && !addresses.contains(*source));
@@ -1086,7 +1198,13 @@ impl<'a> Walker<'a> {
             })
             .collect();
         self.points.by_area |= arguments.reaches_placed_area(&self.values, &loaded);
-        self.points.rewritten = arguments.rewritten(self.func, &self.values, &self.accesses);
+        (self.points.rewritten, self.points.unstated_rewriting) =
+            arguments.rewritten(self.func, &self.values, &self.accesses);
+        self.points.incoming = arguments.incoming(&self.values, &self.accesses);
+        self.points.written_bases = (arguments.calls.iter())
+            .filter_map(|call| Some((call.instruction?, call.base(&self.values))))
+            .collect();
+        self.points.loaded = loaded;
         self.points.call_bases = arguments.by_call(&self.values);
         Walked {
             points: self.points,
@@ -1149,6 +1267,45 @@ fn non_negative(func: &SSAFunction, defs: &Definitions, var: VarId) -> bool {
     }
 }
 
+/// Whether merged `spans` share a byte with `[low, high)`. O(log n).
+fn overlaps(spans: &[(i64, i64)], low: i64, high: i64) -> bool {
+    let after = spans.partition_point(|(start, _)| *start < high);
+    after
+        .checked_sub(1)
+        .is_some_and(|index| spans[index].1 > low)
+}
+
+/// Spans sorted with overlapping and touching ones joined. O(n log n).
+fn merged(spans: impl Iterator<Item = (i64, i64)>) -> Vec<(i64, i64)> {
+    let mut spans = spans.filter(|(low, high)| low < high).collect::<Vec<_>>();
+    spans.sort_unstable();
+    let mut out: Vec<(i64, i64)> = Vec::with_capacity(spans.len());
+    for (low, high) in spans {
+        match out.last_mut() {
+            Some(last) if low <= last.1 => last.1 = last.1.max(high),
+            _ => out.push((low, high)),
+        }
+    }
+    out
+}
+
+/// The bytes exactly one of two merged span lists covers. O(n + m).
+fn differing(one: &[(i64, i64)], other: &[(i64, i64)]) -> Vec<(i64, i64)> {
+    let mut edges = (one.iter().chain(other))
+        .flat_map(|(low, high)| [*low, *high])
+        .collect::<Vec<_>>();
+    edges.sort_unstable();
+    edges.dedup();
+    let covers = |spans: &[(i64, i64)], at: i64| {
+        let after = spans.partition_point(|(low, _)| *low <= at);
+        after
+            .checked_sub(1)
+            .is_some_and(|index| at < spans[index].1)
+    };
+    let pieces = edges.windows(2).map(|pair| (pair[0], pair[1]));
+    merged(pieces.filter(|(low, _)| covers(one, *low) != covers(other, *low)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1187,6 +1344,25 @@ mod tests {
 
     /// Default deny: a derived point, an unplaced access or the whole frame reach every place.
     #[test]
+    fn written_areas_differ_only_where_a_loaded_place_or_an_incoming_byte_lies() {
+        assert_eq!(differing(&[(-32, 0)], &[]), vec![(-32, 0)]);
+        assert_eq!(
+            differing(&[(-32, -8)], &[(-16, 8)]),
+            vec![(-32, -16), (-8, 8)]
+        );
+        let points = FramePoints {
+            loaded: BTreeMap::from([(-24, 8)]),
+            written_bases: BTreeMap::from([(0x10, Some(-32))]),
+            ..FramePoints::default()
+        };
+        // From the base at -32: unbounded covers the loaded [-24, -16), `(0, 4)` does not.
+        assert!(!points.writes_alike(0x10, None, Some(&[(0, 4)])));
+        assert!(points.writes_alike(0x10, Some(&[(0, 4)]), Some(&[])));
+        // `(0, 40)` reaches past the entry pointer, which the body's own statement reads.
+        assert!(!points.writes_alike(0x10, Some(&[]), Some(&[(0, 40)])));
+    }
+
+    #[test]
     fn a_derived_or_unplaced_point_reaches_every_place() {
         let none = BTreeSet::new();
         assert!(escaped(&[(-40, Extent::Derived)]).reaches(-200, &none));
@@ -1195,6 +1371,7 @@ mod tests {
             opaque: vec![OpaqueAccess {
                 op: OpId::from_index(0),
                 origin: Origin::Unplaced,
+                writes: true,
             }],
             ..FramePoints::default()
         };

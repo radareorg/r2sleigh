@@ -212,7 +212,7 @@ r2sleigh_result_u64 __do_global_dtors_aux(void)
     uint8_t tmp_401144_0_1;
     uint64_t rax_1;
 
-    /* r2dec proof: 1 construct is marked below; 27 source obligations: 12 rendered, 13 elided, 0 refused, 2 residual; 6 statements rendered; 1 data object type refused; the parameters are a floor: at least 0 (a register past them reaches the call to 0x4010d0); the result is unproven (Written): 1 unproven-return carried, 1 unproven-return residual */
+    /* r2dec proof: 1 construct is marked below; 26 source obligations: 12 rendered, 12 elided, 0 refused, 2 residual; 6 statements rendered; 1 data object type refused; the parameters are a floor: at least 0 (a register past them reaches the call to 0x4010d0); the result is unproven (Written): 1 unproven-return carried, 1 unproven-return residual */
     {
         tmp_401144_0_1 = r2sleigh_load_u8((void*)&__TMC_END__);
         if ((uint8_t)((uint8_t)tmp_401144_0_1 != (uint8_t)0U)) {
@@ -460,24 +460,74 @@ r2sleigh_word_u64 shape_variadic_local(r2sleigh_word_u64 arg0, r2sleigh_word_u64
 {
     r2sleigh_word_u64 vfold(uint32_t, ...);
 
+    uint64_t tmp_401532_8_1;
+    uint64_t tmp_401543_8_1;
     uint64_t rax_6;
-    uint64_t rax_7;
+    uint64_t tmp_401560_8_1;
+    uint64_t tmp_401571_8_1;
+    uint64_t tmp_401575_8_1;
     uint64_t rax_13;
-    uint64_t rax_14;
+    uint64_t tmp_401592_8_1;
+    uint64_t tmp_4015a3_8_1;
+    uint64_t tmp_4015a7_8_1;
+    uint64_t rax_19;
+    uint64_t tmp_4015ae_8_1;
+    uint64_t tmp_4015b2_8_1;
     uint64_t rax_22;
-    uint64_t rax_23;
+    uint64_t tmp_4015cf_8_1;
+    uint64_t tmp_4015e0_8_1;
+    uint64_t tmp_4015e4_8_1;
+    uint64_t rax_28;
+    uint64_t tmp_4015eb_8_1;
+    uint64_t tmp_4015ef_8_1;
+    uint64_t tmp_4015f3_8_1;
+    uint64_t tmp_4015f7_8_1;
+    uint64_t tmp_4015fb_8_1;
+    uint64_t rax_31;
+    uint64_t tmp_401602_8_1;
+    uint64_t tmp_401606_8_1;
     uint64_t rax_34;
+    uint64_t tmp_401629_8_1;
+    _Alignas(16) uint8_t frame[72];
 
-    /* r2dec proof: no individual construct is marked; 83 source obligations: 62 rendered, 21 elided, 0 refused; 8 statements rendered; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 156 source obligations: 108 rendered, 48 elided, 0 refused; 36 statements rendered; a call reads the result (assuming closed-world) */
     {
-        rax_6 = vfold(1, arg0);
-        rax_7 = rax_6;
-        rax_13 = vfold(2, arg0, arg1);
-        rax_14 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_7 * (uint64_t)8U) + (uint64_t)rax_13) - (uint64_t)rax_7);
-        rax_22 = vfold(3, arg0, arg1, (uint64_t)((uint64_t)arg0 ^ (uint64_t)arg1));
-        rax_23 = (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_14 * (uint64_t)8U) + (uint64_t)rax_22) - (uint64_t)rax_14);
-        rax_34 = vfold(5, arg0, arg1, (uint64_t)((uint64_t)arg0 ^ (uint64_t)arg1), (uint64_t)((uint64_t)arg0 + (uint64_t)arg1), (uint64_t)((uint64_t)arg0 | (uint64_t)arg1));
-        return (uint64_t)((uint64_t)((uint64_t)((uint64_t)rax_23 * (uint64_t)8U) + (uint64_t)rax_34) - (uint64_t)rax_23);
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)arg0);
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)arg1);
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)0U);
+        tmp_401532_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
+        tmp_401543_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        rax_6 = vfold(1, tmp_401543_8_1);
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)((uint64_t)((uint64_t)((uint64_t)tmp_401532_8_1 * (uint64_t)8U) + (uint64_t)rax_6) - (uint64_t)tmp_401532_8_1));
+        tmp_401560_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
+        tmp_401571_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        tmp_401575_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        rax_13 = vfold(2, tmp_401575_8_1, tmp_401571_8_1);
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)((uint64_t)((uint64_t)((uint64_t)tmp_401560_8_1 * (uint64_t)8U) + (uint64_t)rax_13) - (uint64_t)tmp_401560_8_1));
+        tmp_401592_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
+        tmp_4015a3_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_4015a7_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_19 = (uint64_t)((uint64_t)tmp_4015a3_8_1 ^ (uint64_t)tmp_4015a7_8_1);
+        tmp_4015ae_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        tmp_4015b2_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        rax_22 = vfold(3, tmp_4015b2_8_1, tmp_4015ae_8_1, rax_19);
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)((uint64_t)((uint64_t)((uint64_t)tmp_401592_8_1 * (uint64_t)8U) + (uint64_t)rax_22) - (uint64_t)tmp_401592_8_1));
+        tmp_4015cf_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
+        tmp_4015e0_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_4015e4_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_28 = (uint64_t)((uint64_t)tmp_4015e0_8_1 | (uint64_t)tmp_4015e4_8_1);
+        tmp_4015eb_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_4015ef_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        tmp_4015f3_8_1 = (uint64_t)((uint64_t)tmp_4015eb_8_1 + (uint64_t)tmp_4015ef_8_1);
+        tmp_4015f7_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_4015fb_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_31 = (uint64_t)((uint64_t)tmp_4015f7_8_1 ^ (uint64_t)tmp_4015fb_8_1);
+        tmp_401602_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        tmp_401606_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        rax_34 = vfold(5, tmp_401606_8_1, tmp_401602_8_1, rax_31, tmp_4015f3_8_1, rax_28);
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 40U), (uint64_t)((uint64_t)((uint64_t)((uint64_t)tmp_4015cf_8_1 * (uint64_t)8U) + (uint64_t)rax_34) - (uint64_t)tmp_4015cf_8_1));
+        tmp_401629_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 40U));
+        return (uint64_t)tmp_401629_8_1;
     }
 }
 
@@ -1486,51 +1536,110 @@ r2sleigh_word_u32 fcn_402206(void)
     r2sleigh_word_u64 shape_variadic(r2sleigh_word_u64, r2sleigh_word_u64);
     r2sleigh_word_u64 shape_variadic_local(r2sleigh_word_u64, r2sleigh_word_u64);
 
+    uint64_t tmp_40222e_8_1;
+    uint64_t tmp_402232_8_1;
     uint64_t rax_4;
+    uint64_t tmp_402253_8_1;
+    uint64_t tmp_402257_8_1;
     uint64_t rax_8;
+    uint64_t tmp_402278_8_1;
+    uint64_t tmp_40227c_8_1;
     uint64_t rax_12;
+    uint64_t tmp_40229d_8_1;
+    uint64_t tmp_4022a1_8_1;
     uint64_t rax_16;
+    uint64_t tmp_4022c2_8_1;
+    uint64_t tmp_4022c6_8_1;
     uint64_t rax_20;
+    uint64_t tmp_4022e7_8_1;
+    uint64_t tmp_4022eb_8_1;
     uint64_t rax_24;
+    uint64_t tmp_40230c_8_1;
+    uint64_t tmp_402310_8_1;
     uint64_t rax_28;
+    uint64_t tmp_402331_8_1;
+    uint64_t tmp_402335_8_1;
     uint64_t rax_32;
+    uint64_t tmp_402356_8_1;
+    uint64_t tmp_40235a_8_1;
     uint64_t rax_36;
+    uint64_t tmp_40237b_8_1;
+    uint64_t tmp_40237f_8_1;
     uint64_t rax_40;
+    uint64_t tmp_4023a0_8_1;
+    uint64_t tmp_4023a4_8_1;
     uint64_t rax_44;
+    uint64_t tmp_4023c5_8_1;
+    uint64_t tmp_4023c9_8_1;
     uint64_t rax_48;
+    uint64_t tmp_4023ea_8_1;
+    uint64_t tmp_4023ee_8_1;
     uint64_t rax_52;
+    uint64_t tmp_40240f_8_1;
+    uint64_t tmp_402413_8_1;
     uint64_t rax_56;
+    _Alignas(16) uint8_t frame[40];
 
-    /* r2dec proof: no individual construct is marked; 318 source obligations: 227 rendered, 91 elided, 0 refused; 29 statements rendered; 14 callee prototypes supplied by the source; a call reads the result (assuming closed-world) */
+    /* r2dec proof: no individual construct is marked; 378 source obligations: 257 rendered, 121 elided, 0 refused; 59 statements rendered; 14 callee prototypes supplied by the source; a call reads the result (assuming closed-world, ub-free) */
     /* symbol `main`; C allows that name no other prototype */
     {
-        rax_4 = shape_variadic((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 16U), (uint64_t)0x123456789abcdefU);
+        r2sleigh_store_u64((void*)(uint64_t)(frame + 24U), (uint64_t)0xfedcba9876543210U);
+        tmp_40222e_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_402232_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_4 = shape_variadic(tmp_402232_8_1, tmp_40222e_8_1);
         printf("%016llx\n", rax_4);
-        rax_8 = shape_variadic_local((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        tmp_402253_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_402257_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_8 = shape_variadic_local(tmp_402257_8_1, tmp_402253_8_1);
         printf("%016llx\n", rax_8);
-        rax_12 = shape_call_chain((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        tmp_402278_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_40227c_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_12 = shape_call_chain(tmp_40227c_8_1, tmp_402278_8_1);
         printf("%016llx\n", rax_12);
-        rax_16 = shape_struct_pointer((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        tmp_40229d_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_4022a1_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_16 = shape_struct_pointer(tmp_4022a1_8_1, tmp_40229d_8_1);
         printf("%016llx\n", rax_16);
-        rax_20 = shape_struct_value((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        tmp_4022c2_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_4022c6_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_20 = shape_struct_value(tmp_4022c6_8_1, tmp_4022c2_8_1);
         printf("%016llx\n", rax_20);
-        rax_24 = shape_struct_array((uint32_t)0x123456789abcdefU, (uint32_t)0xfedcba9876543210U);
+        tmp_4022e7_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_4022eb_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_24 = shape_struct_array((uint32_t)tmp_4022eb_8_1, (uint32_t)tmp_4022e7_8_1);
         printf("%016llx\n", rax_24);
-        rax_28 = shape_stack_buffer((uint64_t)0x123456789abcdefU, (uint8_t)0xfedcba9876543210U);
+        tmp_40230c_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_402310_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_28 = shape_stack_buffer(tmp_402310_8_1, (uint8_t)tmp_40230c_8_1);
         printf("%016llx\n", rax_28);
-        rax_32 = shape_recurse_direct((uint32_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        tmp_402331_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_402335_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_32 = shape_recurse_direct((uint32_t)tmp_402335_8_1, tmp_402331_8_1);
         printf("%016llx\n", rax_32);
-        rax_36 = shape_recurse_mutual((uint32_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        tmp_402356_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_40235a_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_36 = shape_recurse_mutual((uint32_t)tmp_40235a_8_1, tmp_402356_8_1);
         printf("%016llx\n", rax_36);
-        rax_40 = shape_signed_divmod((uint64_t)0x123456789abcdefU, (int64_t)0xfedcba9876543210U);
+        tmp_40237b_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_40237f_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_40 = shape_signed_divmod(tmp_40237f_8_1, (int64_t)tmp_40237b_8_1);
         printf("%016llx\n", rax_40);
-        rax_44 = shape_multiword_return((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        tmp_4023a0_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_4023a4_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_44 = shape_multiword_return(tmp_4023a4_8_1, tmp_4023a0_8_1);
         printf("%016llx\n", rax_44);
-        rax_48 = shape_pointer_to_pointer((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        tmp_4023c5_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_4023c9_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_48 = shape_pointer_to_pointer(tmp_4023c9_8_1, tmp_4023c5_8_1);
         printf("%016llx\n", rax_48);
-        rax_52 = shape_function_pointer((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        tmp_4023ea_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_4023ee_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_52 = shape_function_pointer(tmp_4023ee_8_1, tmp_4023ea_8_1);
         printf("%016llx\n", rax_52);
-        rax_56 = shape_bool_caller((uint64_t)0x123456789abcdefU, (uint64_t)0xfedcba9876543210U);
+        tmp_40240f_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 24U));
+        tmp_402413_8_1 = r2sleigh_load_u64((void*)(uint64_t)(frame + 16U));
+        rax_56 = shape_bool_caller(tmp_402413_8_1, tmp_40240f_8_1);
         printf("%016llx\n", rax_56);
         return 0;
     }

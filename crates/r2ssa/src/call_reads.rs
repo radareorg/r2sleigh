@@ -16,6 +16,19 @@ pub struct FormatTail {
     pub floats: Vec<CanonicalStorageId>,
 }
 
+/// Stack ranges from a call's pointer; `None` where nothing bounds them.
+pub type StackArea = Option<Vec<(i64, i64)>>;
+
+/// What a call to one callee may write of its caller's stack beside its reads (D377); a callee
+/// with no entry may write any of it up to the caller's entry pointer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StackWrites {
+    /// A declaration's: only its argument area, which the convention gives the callee.
+    Arguments,
+    /// A walked body's: these ranges from the call's stack pointer.
+    Within(Box<[(i64, i64)]>),
+}
+
 /// The argument locations a call may read: an upper bound only where `stated`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallReads {
@@ -28,6 +41,8 @@ pub struct CallReads {
     /// The stack it may read, as ranges from the stack pointer before the transfer; none where
     /// nothing bounds it.
     pub stack: Option<Vec<(i64, i64)>>,
+    /// The stack it may write, from the same pointer; none where nothing bounds it (D377).
+    pub writes: Option<Vec<(i64, i64)>>,
     /// Whether the callee's statement bounds the registers; the every-location default does not.
     pub stated: bool,
 }
@@ -44,6 +59,7 @@ impl CallReads {
             count_register: model.forms.count_register,
             format: None,
             stack: None,
+            writes: None,
             stated: false,
         }
     }
@@ -108,9 +124,22 @@ impl CallReads {
             registers,
             count_register: None,
             format: None,
+            writes: Some(stack.clone()),
             stack: Some(stack),
             stated: true,
         }
+    }
+
+    /// These reads with what the callee may write of the stack: a declaration its argument area,
+    /// a body what it states, any where nothing states it (D377). O(ranges).
+    #[must_use]
+    pub fn writing(mut self, writes: Option<&StackWrites>) -> Self {
+        self.writes = match writes {
+            Some(StackWrites::Arguments) => self.writes,
+            Some(StackWrites::Within(spans)) => Some(spans.to_vec()),
+            None => None,
+        };
+        self
     }
 
     /// A placed library row (r2engine `Placement::reads`): `stated` where its citation fixes the
@@ -126,6 +155,7 @@ impl CallReads {
             count_register,
             format,
             stack: None,
+            writes: None,
             stated,
         }
     }

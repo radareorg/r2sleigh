@@ -430,6 +430,7 @@ fn outside_resolved<S: Source + 'static>(
         owners: &resolved,
         assumed: &[],
         world: world_of(demand),
+        asks: true,
     };
     Shared(Arc::new(callee_read(db, node, stated)))
 }
@@ -460,6 +461,7 @@ fn closed_alone<S: Source + 'static>(
         owners: &[],
         assumed: &[],
         world: super::World::Closed,
+        asks: true,
     };
     Shared(Arc::new(callee_read(db, node, stated)))
 }
@@ -733,6 +735,7 @@ impl<'m> Cycle<'m> {
             owners: &self.outside[at],
             assumed: &stated,
             world: world_of(self.demand),
+            asks: true,
         };
         let read = callee_read(db, self.members[at], stated);
         if stopped(&read) {
