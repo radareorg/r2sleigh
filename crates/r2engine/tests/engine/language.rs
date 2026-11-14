@@ -153,3 +153,28 @@ fn a_refused_convention_keeps_the_walks_facts() {
     assert!(info.convention.is_none() && info.arguments.is_empty() && info.locals.is_empty());
     assert!(info.returns.is_none() && info.calls.is_empty());
 }
+
+/// C `keeps`: `push rbx; mov ebx, 7; call rsi; mov eax, ebx; pop rbx; ret`.
+const KEEPS_RBX: &[u8] = &[
+    0x53, // 0x00 push rbx
+    0xbb, 0x07, 0x00, 0x00, 0x00, // 0x01 mov ebx, 7
+    0xff, 0xd6, // 0x06 call rsi
+    0x89, 0xd8, // 0x08 mov eax, ebx
+    0x5b, // 0x0a pop rbx
+    0xc3, // 0x0b ret
+];
+
+/// A call through a value from C in a Go program may enter Go code, which keeps no rbx: the
+/// unstated callee's model joins Go's, so rbx past the call is no 7 (D385, default-deny).
+#[test]
+fn a_c_call_through_a_value_in_a_go_program_keeps_no_rbx() {
+    let keeps = || Literal::of_code(KEEPS_RBX, &[("keeps", BASE, 0x0c)]);
+    let c = rendered(keeps()).expect("C renders");
+    assert!(c.contains("_u32(7);"), "{c}");
+    let c_range = BASE..BASE + 0x0c;
+    let in_go = keeps()
+        .in_go(Some((1, 18)), Some(&[]))
+        .with_language_at(c_range, r2engine::program::SourceLanguage::C);
+    let go = rendered(in_go).expect("a C function in a Go program renders");
+    assert!(!go.contains("_u32(7);"), "{go}");
+}

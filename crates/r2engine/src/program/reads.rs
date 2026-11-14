@@ -492,15 +492,15 @@ fn in_slot(slots: &[u64], at: u64, pointer: u64) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::{Words, every_call_read, stored_words};
     use crate::program::{Arch, Container, Endian, Segment, Source};
 
     /// A 64-bit image of one segment at `vaddr` holding `bytes`.
-    struct Image {
-        vaddr: u64,
-        bytes: Vec<u8>,
-        container: Container,
+    pub(in crate::program) struct Image {
+        pub(in crate::program) vaddr: u64,
+        pub(in crate::program) bytes: Vec<u8>,
+        pub(in crate::program) container: Container,
     }
 
     impl Source for Image {

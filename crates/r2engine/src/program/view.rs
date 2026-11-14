@@ -164,13 +164,27 @@ impl<'a, S: Source + 'static> View<'a, S> {
         machine: &'a Machine,
         entry: u64,
     ) -> Result<NativeTarget<'a>, crate::native::NativeRefusal> {
-        let chosen = self.db.inputs().assembled_at(entry);
-        let chosen = chosen.map_err(NativeRefusal::Unassembled)?;
-        let mut target = self.target_under(machine, chosen.assembled)?;
-        if let Some(program) = chosen.program {
+        let inputs = self.db.inputs();
+        let ruled = self
+            .convention_at(entry)
+            .map_err(NativeRefusal::Unassembled)?;
+        let assembled = inputs.assembled_of(ruled.id);
+        let mut target =
+            self.target_under(machine, assembled.map_err(NativeRefusal::Unassembled)?)?;
+        // A function under another convention than the program's places its imports under the program's.
+        if let Some(program) = inputs.assembled().filter(|it| it.convention != ruled.id) {
             target.program = Some(self.convention_of(program)?);
         }
         Ok(target)
+    }
+
+    /// The convention the function at `entry` runs under: its held `CalleeConvention`.
+    pub(super) fn convention_at(
+        &self,
+        entry: u64,
+    ) -> Result<super::Ruled, crate::native::Unassembled> {
+        let ruled = self.db.get::<super::CalleeConvention>(&entry);
+        (*ruled.expect("the convention asks for nothing")).clone()
     }
 
     /// A decoder under the program's default convention, for a walk that reads no boundary.
@@ -474,14 +488,18 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
                 machines.imports.bound(&name).then_some(())?;
                 inputs.assembled()?.convention
             }
+            // A body takes its own model where it is stated; one under a refused row runs under the join.
             None => {
-                let container = self.source().container();
-                let declared = container.declarations.function_at(callee)?;
-                let (arch, bits) = (&container.arch.name, container.arch.bits);
-                super::stated_convention(arch, bits, declared.convention).ok()??
+                (self.convention_at(callee).ok())
+                    .filter(|ruled| ruled.stated)?
+                    .id
             }
         };
         let model = self.db.get::<super::Convention>(&id).ok()?;
-        (*model).as_ref().ok().cloned()
+        (*model)
+            .as_ref()
+            .ok()
+            .filter(|model| model.refused.is_none())
+            .cloned()
     }
 }
