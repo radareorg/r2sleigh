@@ -148,10 +148,12 @@ fn eligible(
         // A save read back stays in memory: the frame round-trip certificate answers for it.
         let is_save = saves.contains(offset) && list.iter().any(|access| !access.store);
         let handed = points.handed().contains(offset);
-        if overlaps || is_save || is_declared || handed || reachable(*offset) {
+        // A call may rewrite its own argument area, so a load after it reads memory (D369).
+        let rewritten = points.rewritten().contains(offset);
+        if overlaps || is_save || is_declared || handed || rewritten || reachable(*offset) {
             r2il::refusal_evidence!(
                 "promote-stack-slot",
-                "{:#x}: slot at {offset} stays in memory: overlap {overlaps}, save {is_save}, declared {is_declared}, handed {handed}, reached {}",
+                "{:#x}: slot at {offset} stays in memory: overlap {overlaps}, save {is_save}, declared {is_declared}, handed {handed}, rewritten {rewritten}, reached {}",
                 func.entry,
                 reachable(*offset)
             );

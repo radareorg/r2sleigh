@@ -6528,6 +6528,31 @@ fn a_scratch_registers_entry_value_ends_no_escape_run() {
     assert!(text.contains("(uint32_t)5U);"), "{text}");
 }
 
+/// `mov dword [rsp + 8], 5; call rdi; mov eax, [rsp + 8]`: an indirect call states no arity.
+const READ_BACK_PAST_AN_INDIRECT_CALL: &[u8] = &[
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xff, 0xd7, // 100c call rdi
+    0x8b, 0x44, 0x24, 0x08, // 100e mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 1012 add rsp, 0x18
+    0xc3, // 1016 ret
+];
+
+/// A call nothing states may take its arguments on the stack up to the entry pointer and write
+/// them, so the local read after it is memory (D369, default-deny).
+#[test]
+fn a_place_an_unstated_call_may_rewrite_stays_a_load() {
+    let machine = Machine::on("x86-64", "x86-64", 64, Platform::Linux);
+    let program = Fixture {
+        bytes: READ_BACK_PAST_AN_INDIRECT_CALL.to_vec(),
+        name: "read_back_past_an_indirect_call",
+    };
+    let response = decompile(&machine.target(), &program, BASE).expect("decompile");
+    let text = response.output.text();
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(!text.contains("r2sleigh_carrier_u32(5)"), "{text}");
+}
+
 /// A body that returns and stores the guard without checking it is no prologue the bytes prove.
 #[test]
 fn an_unchecked_canary_in_a_function_that_returns_stays() {
