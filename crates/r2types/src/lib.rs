@@ -53,17 +53,16 @@ pub use facts::{
 };
 pub(crate) use function_facts::exact_source_return_type;
 pub use function_facts::{
-    AggregateDefinition, ArrayAccessRenderFact, BranchPredicateFact, CallArgumentValueFact,
-    CallResultFact, CallsiteArgumentFacts, CallsiteRenderDisposition, CallsiteRenderFact,
-    CertifiedEntity, ControlBlockAssumptionFact, DecompileRouteFacts, DecompileRouteKind,
-    FunctionCallRenderFacts, FunctionCallResultFacts, FunctionCallsiteFacts, FunctionControlFacts,
-    FunctionFacts, FunctionInputQualityFacts, FunctionRenderFacts, ImportStub,
-    InterprocSummaryView, MemoryAccessRenderFact, PredicateComparisonFact,
+    AggregateDefinition, AggregateDefinitions, ArrayAccessRenderFact, BranchPredicateFact,
+    CallArgumentValueFact, CallResultFact, CallsiteArgumentFacts, CallsiteRenderDisposition,
+    CallsiteRenderFact, CertifiedEntity, ControlBlockAssumptionFact, DecompileRouteFacts,
+    DecompileRouteKind, FunctionCallRenderFacts, FunctionCallResultFacts, FunctionCallsiteFacts,
+    FunctionControlFacts, FunctionFacts, FunctionInputQualityFacts, FunctionRenderFacts,
+    ImportStub, InterprocSummaryView, MemoryAccessRenderFact, PredicateComparisonFact,
     RegisterCallArgumentLocationFact, ReturnTypeEvidence, ReturnTypeFact, ReturnTypeRefusal,
     ReturnValueRenderFact, SourceOwnedCalleeSignature, SourceOwnedFunctionFacts,
     StackCallArgumentLocationFact, UnprovenCause, admissible_declaration_type,
-    admit_declaration_type, aggregate_is_definable, aggregate_members, declaration_type_width_bits,
-    unread_slot,
+    admit_declaration_type, declaration_type_width_bits, unread_slot,
 };
 pub use parameter_types::{
     IntegerDecl, ParameterType, ParameterTypes, PointerRefusal, SignFact, SlotType, UNSTATED_WORD,
