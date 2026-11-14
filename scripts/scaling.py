@@ -34,6 +34,10 @@ OPEN = {}
 SCAN_OPEN = {name: "D422" for name in ("calls_in_one_block", "unproven_returns",
                                          "struct_parameter_accesses", "halting_calls",
                                          "escaped_locals")}
+# The files whose superlinear sites each open row owns; a site elsewhere fails in any dimension.
+OPEN_SITES = {"D422": ("crates/r2ssa/src/function/mod.rs",
+                       "crates/r2ssa/src/semantic/certificates/mod.rs",
+                       "crates/r2ssa/src/semantic/certificates/returns.rs")}
 START = "_start:\n    call f\n    mov $60, %eax\n    xor %edi, %edi\n    syscall\n"
 
 
@@ -133,8 +137,15 @@ def superlinear(n, fixed, one, two):
         at_n = one.get(site, 0) - fixed.get(site, 0)
         at_2n = two.get(site, 0) - fixed.get(site, 0)
         if at_n >= n and at_2n > SITE_GROWTH * at_n:
-            grown.append(f"{site} {at_n:,} to {at_2n:,} ({at_2n / at_n:.2f}x)")
+            grown.append((site, f"{site} {at_n:,} to {at_2n:,} ({at_2n / at_n:.2f}x)"))
     return grown
+
+
+def unowned(name, grown, open_rows=SCAN_OPEN, sites=OPEN_SITES):
+    """Why each superlinear site of `name` fails: no open row of the dimension owns its file."""
+    owned = sites.get(open_rows.get(name), ())
+    return [f"{name}: {shown}; no open row owns it" for site, shown in grown
+            if site.rsplit(":", 1)[0] not in owned]
 
 
 def growth(fixed, one, two):
@@ -197,8 +208,9 @@ def main():
                 shown = "n/a" if ratio is None else f"{ratio:.3f}"
                 print(f"| {name} | {label} | {counts[0]:,} | {counts[1]:,} | {counts[2]:,} | {shown} |",
                       flush=True)
-                for site in grown:
-                    print(f"{name}: {site}", file=sys.stderr)
+                for _, shown in grown:
+                    print(f"{name}: {shown}", file=sys.stderr)
+                failed.extend(f"{label}: {reason}" for reason in unowned(name, grown))
                 if reason := verdict(name, ratio, budget, open_rows):
                     failed.append(f"{label}: {reason}")
     for line in failed:

@@ -66,7 +66,7 @@ fn report_stats(stats: r2engine::query::AnalysisStats) {
     eprintln!("r2s: stats: rebuilt {}", stats.rebuilt);
     eprintln!("r2s: stats: frames_built {}", stats.frames_built);
     eprintln!("r2s: stats: table_seals {}", stats.table_seals);
-    if let Some(scans) = stats.scans {
+    if let Some(scans) = r2engine::query::scans() {
         eprintln!("r2s: stats: scans {scans}");
         for (site, count) in r2engine::query::scan_sites() {
             eprintln!("r2s: scans at {site} {count}");

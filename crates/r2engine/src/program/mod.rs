@@ -622,7 +622,6 @@ impl<S: Source + 'static> OpenProgram<S> {
             rebuilt: self.db.stats().rebuilt,
             frames_built: self.db.stats().frames_built + self.control().frames_built(),
             table_seals: self.db.stats().table_seals + self.control().table_seals(),
-            scans: r2ssa::dense::element_visits(),
         }
     }
 

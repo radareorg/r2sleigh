@@ -1,7 +1,7 @@
 //! Per-item passes over function-scale sets (ROADMAP D416): `SCAN_IN_LOOP`, and the block-address
 //! half of `ENTITY_KEYED_MAP`. Both read types and loop shape; neither sees a cross-crate callee.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap};
 
 use clippy_utils::diagnostics::{span_lint, span_lint_hir};
 use clippy_utils::higher::{ForLoop, Range};
@@ -106,127 +106,323 @@ const KEY_METHODS: &[&str] = &[
     "remove",
 ];
 
-/// The hits standing when D416 landed, by item path, unaudited: each goes when its item is
-/// rewritten or its bound is stated in `allow(scan_in_loop, reason = ...)` beside it. An entry
-/// that no longer fires fails the build, so the list only shrinks.
-const STANDING_SCANS: &[&str] = &[
-    "r2dec::render::values::Values::<'a>::copies",
-    "r2ssa::edge_fold::narrows",
-    "r2ssa::function::body_proven_format_parameter",
-    "r2ssa::function::caller_stack_slots::caller_stack_slots",
-    "r2ssa::function::forward::resolve_chains",
-    "r2ssa::function::forwarded_parameter_index",
-    "r2ssa::function::rewrite::<impl function::SSAFunction>::mint_entry_lane_projections",
-    "r2ssa::function::rewrite::<impl function::SSAFunction>::zero_scratch_insert_roots",
-    "r2ssa::graph::SsaGraph::from_function_with_storage",
-    "r2ssa::interproc::address_candidates",
-    "r2ssa::interproc::dependence::FormalDependence::of",
-    "r2ssa::interproc::dependence::FormalDependence::passed_to_call",
-    "r2ssa::interproc::dependence::FrameTraffic::of",
-    "r2ssa::interproc::solve_prepared_interproc_summary_set",
-    "r2ssa::liveness::ValueLiveness::compute_with_relocations",
-    "r2ssa::obligation::SemanticObligationInventory::collect",
-    "r2ssa::obligation::ValueReaders::of",
-    "r2ssa::recover_interface::body_proven_result",
-    "r2ssa::recover_interface::homed_in_its_home",
-    "r2ssa::recover_interface::left_by_calls",
-    "r2ssa::recover_interface::observed_entry_read_storages",
-    "r2ssa::recover_interface::passed_through_entry_storages",
-    "r2ssa::recover_interface::recover_interface_inner",
-    "r2ssa::recover_interface::recovered_result_over",
-    "r2ssa::recover_interface::restored_from_its_save",
-    "r2ssa::recover_interface::result_calls",
-    "r2ssa::recover_interface::written_bytes",
-    "r2ssa::save_area::homed_tail",
-    "r2ssa::save_area::register_save_area",
-    "r2ssa::security_cookie::Context::<'_>::computed_bytes",
-    "r2ssa::semantic::assumptions::collect_prepared_assumption_usage",
-    "r2ssa::semantic::boundaries::collect_source_boundary_facts",
-    "r2ssa::semantic::boundaries::convention_call_boundary",
-    "r2ssa::semantic::certificates::collect_prepared_function_certificates",
-    "r2ssa::semantic::certificates::returns::collect_machine_return_control_certificates",
-    "r2ssa::semantic::certificates::stack::accessed_object_storage",
-    "r2ssa::semantic::certificates::stack::collect_callee_stack_allocation_certificates",
-    "r2ssa::semantic::certificates::stack::collect_stack_frame_round_trip_certificates",
-    "r2ssa::semantic::frame_reach::walk::Walker::<'a>::read",
-    "r2ssa::semantic::loops::collect_structured_loop_facts",
-    "r2ssa::tail_count::Prover::<'_>::bound",
-    "r2types::evidence::EvidenceBuilder::<'a>::scalar_memory_cells",
-    "r2types::function_facts::prepared::prepared_guarded_phi_render_fact",
-    "r2types::prepare::recover_signature_params_from_prepared_ssa",
-    "r2types::signature_infer::certified_parameter_home_aliases",
+/// The scans standing when D416 landed, by item, scan and count, unaudited: each goes when its
+/// item is rewritten or its bound is stated in `allow(scan_in_loop, reason = ...)` beside it. A
+/// new scan, or one more of a listed one, fires; a count that falls fails until it is lowered.
+const STANDING_SCANS: &[(&str, &str, usize)] = &[
+    (
+        "r2dec::render::values::Values::<'a>::copies",
+        ".contains()",
+        1,
+    ),
+    ("r2dec::render::values::Values::<'a>::copies", ".iter()", 1),
+    ("r2ssa::edge_fold::narrows", "block_fold", 1),
+    (
+        "r2ssa::function::body_proven_format_parameter",
+        "forwarded_parameter_index",
+        1,
+    ),
+    (
+        "r2ssa::function::caller_stack_slots::caller_stack_slots",
+        ".iter()",
+        1,
+    ),
+    ("r2ssa::function::forward::resolve_chains", ".iter()", 1),
+    (
+        "r2ssa::function::forwarded_parameter_index",
+        "forwarded_parameter_index",
+        1,
+    ),
+    (
+        "r2ssa::function::rewrite::<impl function::SSAFunction>::mint_entry_lane_projections",
+        ".into_iter()",
+        1,
+    ),
+    (
+        "r2ssa::function::rewrite::<impl function::SSAFunction>::zero_scratch_insert_roots",
+        ".into_iter()",
+        1,
+    ),
+    (
+        "r2ssa::graph::SsaGraph::from_function_with_storage",
+        ".iter()",
+        2,
+    ),
+    ("r2ssa::interproc::address_candidates", ".contains()", 1),
+    (
+        "r2ssa::interproc::dependence::FormalDependence::of",
+        ".values()",
+        1,
+    ),
+    (
+        "r2ssa::interproc::dependence::FormalDependence::passed_to_call",
+        "entry_bits",
+        3,
+    ),
+    (
+        "r2ssa::interproc::dependence::FrameTraffic::of",
+        ".clone()",
+        1,
+    ),
+    (
+        "r2ssa::interproc::solve_prepared_interproc_summary_set",
+        "derive",
+        1,
+    ),
+    (
+        "r2ssa::liveness::ValueLiveness::compute_with_relocations",
+        "for",
+        1,
+    ),
+    (
+        "r2ssa::obligation::SemanticObligationInventory::collect",
+        ".values()",
+        1,
+    ),
+    ("r2ssa::obligation::ValueReaders::of", ".iter()", 1),
+    ("r2ssa::recover_interface::body_proven_result", "compute", 1),
+    (
+        "r2ssa::recover_interface::body_proven_result",
+        "restored_from_its_save",
+        1,
+    ),
+    (
+        "r2ssa::recover_interface::homed_in_its_home",
+        ".contains()",
+        1,
+    ),
+    (
+        "r2ssa::recover_interface::homed_in_its_home",
+        "read_only_by",
+        1,
+    ),
+    (
+        "r2ssa::recover_interface::left_by_calls",
+        "returned_by_call",
+        1,
+    ),
+    (
+        "r2ssa::recover_interface::observed_entry_read_storages",
+        "lane",
+        1,
+    ),
+    (
+        "r2ssa::recover_interface::passed_through_entry_storages",
+        ".contains()",
+        1,
+    ),
+    (
+        "r2ssa::recover_interface::recover_interface_inner",
+        "unproven_calls_reached",
+        2,
+    ),
+    (
+        "r2ssa::recover_interface::recovered_result_over",
+        "returned_by_call",
+        1,
+    ),
+    (
+        "r2ssa::recover_interface::recovered_result_over",
+        "written_bytes",
+        1,
+    ),
+    (
+        "r2ssa::recover_interface::restored_from_its_save",
+        ".values()",
+        2,
+    ),
+    ("r2ssa::recover_interface::result_calls", "compute", 1),
+    (
+        "r2ssa::recover_interface::result_calls",
+        "returned_by_call",
+        1,
+    ),
+    (
+        "r2ssa::recover_interface::written_bytes",
+        "written_bytes",
+        2,
+    ),
+    ("r2ssa::save_area::homed_tail", "read_only_by", 1),
+    ("r2ssa::save_area::register_save_area", "new", 2),
+    ("r2ssa::save_area::register_save_area", "offset_stored", 1),
+    ("r2ssa::save_area::register_save_area", "read_only_by", 1),
+    (
+        "r2ssa::security_cookie::Context::<'_>::computed_bytes",
+        ".contains()",
+        1,
+    ),
+    (
+        "r2ssa::semantic::assumptions::collect_prepared_assumption_usage",
+        ".iter()",
+        2,
+    ),
+    (
+        "r2ssa::semantic::boundaries::collect_source_boundary_facts",
+        ".contains()",
+        2,
+    ),
+    (
+        "r2ssa::semantic::boundaries::collect_source_boundary_facts",
+        "of",
+        1,
+    ),
+    (
+        "r2ssa::semantic::boundaries::convention_call_boundary",
+        "body_writes",
+        1,
+    ),
+    (
+        "r2ssa::semantic::certificates::collect_prepared_function_certificates",
+        ".values()",
+        2,
+    ),
+    (
+        "r2ssa::semantic::certificates::collect_prepared_function_certificates",
+        "dispatch_operations",
+        1,
+    ),
+    (
+        "r2ssa::semantic::certificates::returns::collect_machine_return_control_certificates",
+        ".values()",
+        1,
+    ),
+    (
+        "r2ssa::semantic::certificates::stack::accessed_object_storage",
+        ".iter()",
+        1,
+    ),
+    (
+        "r2ssa::semantic::certificates::stack::collect_callee_stack_allocation_certificates",
+        ".values()",
+        2,
+    ),
+    (
+        "r2ssa::semantic::certificates::stack::collect_stack_frame_round_trip_certificates",
+        ".values()",
+        3,
+    ),
+    (
+        "r2ssa::semantic::frame_reach::walk::Walker::<'a>::read",
+        ".contains()",
+        1,
+    ),
+    (
+        "r2ssa::semantic::loops::collect_structured_loop_facts",
+        "loop_carrier_facts",
+        1,
+    ),
+    ("r2ssa::tail_count::Prover::<'_>::bound", "stepped", 2),
+    (
+        "r2types::evidence::EvidenceBuilder::<'a>::scalar_memory_cells",
+        "object_has_single_address_identity",
+        1,
+    ),
+    (
+        "r2types::function_facts::prepared::prepared_guarded_phi_render_fact",
+        "for",
+        1,
+    ),
+    (
+        "r2types::prepare::recover_signature_params_from_prepared_ssa",
+        "source_parameter_has_certified_memory_use",
+        1,
+    ),
+    (
+        "r2types::signature_infer::certified_parameter_home_aliases",
+        ".values()",
+        1,
+    ),
 ];
-/// The block-address maps standing when D416 landed (owner: F2.1's dense block numbering).
-const STANDING_BLOCK_KEYS: &[&str] = &[
-    "r2dec::<structure::certify::CfgMachine<'_> as structure::condition::Machine>::entered_from_outside",
-    "r2dec::structure::certify::certify",
-    "r2dec::structure::certify::statement_violations",
-    "r2dec::structure::place::closed_subtrees",
-    "r2dec::structure::place::Placement::<'f>::compute",
-    "r2dec::structure::place::Placement::labelled",
-    "r2dec::structure::place::Placement::loops_of",
-    "r2dec::structure::place::Placement::merge",
-    "r2sleigh_lift::disasm::validate_genuine_function_cfg",
-    "r2ssa::address::AddressCollector::<'a>::collect",
-    "r2ssa::address::AddressCollector::stack_out",
-    "r2ssa::cfg::CFG::addr_to_node",
-    "r2ssa::cfg::CFG::dfs_back_edges",
-    "r2ssa::cfg::DeclaredSuccessors::by_block",
-    "r2ssa::cfg::DeclaredSuccessors::unresolved",
-    "r2ssa::demand::exits_are_named_beside",
-    "r2ssa::domtree::DomTree::frontier",
-    "r2ssa::domtree::DomTree::iterated_frontier_with_control",
-    "r2ssa::domtree::DomTree::number",
-    "r2ssa::domtree::DomTree::of_graph",
-    "r2ssa::domtree::frontiers",
-    "r2ssa::fixpoint::forward_on_edges",
-    "r2ssa::fixpoint::Solution::entry",
-    "r2ssa::fixpoint::Solution::exit",
-    "r2ssa::frame_address::Definitions::reach_of",
-    "r2ssa::frame_address::Reach::above",
-    "r2ssa::frame_address::Reach::last",
-    "r2ssa::function::blocks::Blocks::<V>::reorder",
-    "r2ssa::function::blocks::Blocks::apply",
-    "r2ssa::function::edit::EditPlan::by_block",
-    "r2ssa::integrity::validate_ssa_function",
-    "r2ssa::natural_loops::NaturalLoop::body",
-    "r2ssa::natural_loops::NaturalLoops::compute",
-    "r2ssa::optimize::apply_sccp_results",
-    "r2ssa::optimize::fuse_compare_chains_in_function",
-    "r2ssa::phi::live_in_by_block",
-    "r2ssa::phi::LiveIn::position",
-    "r2ssa::phi::PhiPlacement::phis",
-    "r2ssa::recover_interface::direct_return_result",
-    "r2ssa::semantic::control_domains::collect_control_domain_facts",
-    "r2ssa::semantic::facts::PredicateFacts::block_assumptions",
-    "r2ssa::semantic::frame_reach::walk::reaching_writes",
-    "r2ssa::semantic::frame_reach::walk::StackArguments::rewritten",
-    "r2ssa::semantic::loops::header_carriers",
-    "r2ssa::semantic::loops::LoopExits::of",
-    "r2ssa::semantic::predicates::collect_predicate_facts",
-    "r2ssa::semantic::reaching::ReachingStorage::<'a>::entry",
-    "r2ssa::semantic::reaching::ReachingStorage::entries",
-    "r2ssa::semantic::reaching::ReachingStorage::scanned",
-    "r2ssa::semantic::shared::loop_carrier_peer_candidates",
-    "r2ssa::semantic::structured::collect_unstructured_cycle_blocks",
-    "r2ssa::semantic::trips::TripCounter::<'a>::defined_in",
-    "r2ssa::slot_promotion::index_accesses",
-    "r2ssa::slot_promotion::live_in",
-    "r2ssa::slot_promotion::merge_blocks",
-    "r2ssa::slot_promotion::walk_versions",
-    "r2ssa::stack_bound::remove_failing_blocks",
-    "r2ssa::stack_protector::decide",
-    "r2ssa::values::narrow_where_defined",
+/// The block-address maps standing when D416 landed, by item and count (owner: F2.1's dense
+/// block numbering).
+const STANDING_BLOCK_KEYS: &[(&str, usize)] = &[
+    (
+        "r2dec::<structure::certify::CfgMachine<'_> as structure::condition::Machine>::entered_from_outside",
+        1,
+    ),
+    ("r2dec::structure::certify::certify", 2),
+    ("r2dec::structure::certify::statement_violations", 1),
+    ("r2dec::structure::place::Placement::<'f>::compute", 2),
+    ("r2dec::structure::place::Placement::labelled", 1),
+    ("r2dec::structure::place::Placement::loops_of", 1),
+    ("r2dec::structure::place::Placement::merge", 1),
+    ("r2dec::structure::place::closed_subtrees", 1),
+    ("r2sleigh_lift::disasm::validate_genuine_function_cfg", 3),
+    ("r2ssa::address::AddressCollector::<'a>::collect", 1),
+    ("r2ssa::address::AddressCollector::stack_out", 1),
+    ("r2ssa::cfg::CFG::addr_to_node", 1),
+    ("r2ssa::cfg::CFG::dfs_back_edges", 2),
+    ("r2ssa::cfg::DeclaredSuccessors::by_block", 1),
+    ("r2ssa::cfg::DeclaredSuccessors::unresolved", 1),
+    ("r2ssa::demand::exits_are_named_beside", 1),
+    ("r2ssa::domtree::DomTree::frontier", 1),
+    ("r2ssa::domtree::DomTree::iterated_frontier_with_control", 2),
+    ("r2ssa::domtree::DomTree::number", 1),
+    ("r2ssa::domtree::DomTree::of_graph", 1),
+    ("r2ssa::domtree::frontiers", 2),
+    ("r2ssa::fixpoint::Solution::entry", 1),
+    ("r2ssa::fixpoint::Solution::exit", 1),
+    ("r2ssa::fixpoint::forward_on_edges", 3),
+    ("r2ssa::frame_address::Definitions::reach_of", 2),
+    ("r2ssa::frame_address::Reach::above", 1),
+    ("r2ssa::frame_address::Reach::last", 1),
+    ("r2ssa::function::blocks::Blocks::<V>::reorder", 1),
+    ("r2ssa::function::blocks::Blocks::apply", 1),
+    ("r2ssa::function::edit::EditPlan::by_block", 1),
+    ("r2ssa::integrity::validate_ssa_function", 3),
+    ("r2ssa::natural_loops::NaturalLoop::body", 1),
+    ("r2ssa::natural_loops::NaturalLoops::compute", 1),
+    ("r2ssa::optimize::apply_sccp_results", 3),
+    ("r2ssa::optimize::fuse_compare_chains_in_function", 1),
+    ("r2ssa::phi::LiveIn::position", 1),
+    ("r2ssa::phi::PhiPlacement::phis", 1),
+    ("r2ssa::phi::live_in_by_block", 1),
+    ("r2ssa::recover_interface::direct_return_result", 1),
+    (
+        "r2ssa::semantic::control_domains::collect_control_domain_facts",
+        4,
+    ),
+    (
+        "r2ssa::semantic::facts::PredicateFacts::block_assumptions",
+        1,
+    ),
+    (
+        "r2ssa::semantic::frame_reach::walk::StackArguments::rewritten",
+        2,
+    ),
+    ("r2ssa::semantic::frame_reach::walk::reaching_writes", 2),
+    ("r2ssa::semantic::loops::LoopExits::of", 1),
+    ("r2ssa::semantic::loops::header_carriers", 1),
+    ("r2ssa::semantic::predicates::collect_predicate_facts", 1),
+    ("r2ssa::semantic::reaching::ReachingStorage::<'a>::entry", 3),
+    ("r2ssa::semantic::reaching::ReachingStorage::entries", 1),
+    ("r2ssa::semantic::reaching::ReachingStorage::scanned", 1),
+    ("r2ssa::semantic::shared::loop_carrier_peer_candidates", 1),
+    (
+        "r2ssa::semantic::structured::collect_unstructured_cycle_blocks",
+        1,
+    ),
+    ("r2ssa::semantic::trips::TripCounter::<'a>::defined_in", 1),
+    ("r2ssa::slot_promotion::index_accesses", 1),
+    ("r2ssa::slot_promotion::live_in", 2),
+    ("r2ssa::slot_promotion::merge_blocks", 1),
+    ("r2ssa::slot_promotion::walk_versions", 3),
+    ("r2ssa::stack_bound::remove_failing_blocks", 1),
+    ("r2ssa::stack_protector::decide", 1),
+    ("r2ssa::values::narrow_where_defined", 1),
 ];
+
+/// One finding, held until the crate's end compares its count with the standing list.
+type Hit = (HirId, Span, String);
 
 #[derive(Default)]
 pub struct FunctionScale {
     /// Whether each function of the crate makes a whole pass over a function-owned table.
     scanning: HashMap<LocalDefId, bool>,
-    /// Block-address maps already reported, by declaration.
-    keyed: HashSet<HirId>,
-    /// Standing entries this crate hit.
-    standing: HashSet<String>,
+    /// Each scan in a loop, by item and scan.
+    scans: BTreeMap<(String, String), Vec<Hit>>,
+    /// Each block-address map, by the item that declares it.
+    keyed: BTreeMap<String, Vec<Hit>>,
 }
 
 rustc_lint::impl_lint_pass!(FunctionScale => [SCAN_IN_LOOP]);
@@ -235,20 +431,64 @@ impl<'tcx> LateLintPass<'tcx> for FunctionScale {
     fn check_crate_post(&mut self, cx: &LateContext<'tcx>) {
         let krate = cx.tcx.crate_name(rustc_span::def_id::LOCAL_CRATE);
         let prefix = format!("{krate}::");
+        let found = self.scans.iter().map(|((item, scan), hits)| {
+            let listed = STANDING_SCANS
+                .iter()
+                .find(|(i, s, _)| i == item && s == scan);
+            (
+                format!("`{item}` `{scan}`"),
+                hits,
+                listed.map_or(0, |entry| entry.2),
+            )
+        });
+        let keyed = self.keyed.iter().map(|(item, hits)| {
+            let listed = STANDING_BLOCK_KEYS.iter().find(|(i, _)| i == item);
+            (format!("`{item}`"), hits, listed.map_or(0, |entry| entry.1))
+        });
+        let stale_scans = (STANDING_SCANS.iter())
+            .filter(|(item, scan, _)| {
+                item.starts_with(&prefix)
+                    && !self
+                        .scans
+                        .contains_key(&((*item).to_owned(), (*scan).to_owned()))
+            })
+            .map(|(item, scan, listed)| (format!("`{item}` `{scan}`"), *listed));
+        let stale_keys = (STANDING_BLOCK_KEYS.iter())
+            .filter(|(item, _)| item.starts_with(&prefix) && !self.keyed.contains_key(*item))
+            .map(|(item, listed)| (format!("`{item}`"), *listed));
         let span = cx.tcx.def_span(rustc_span::def_id::CRATE_DEF_ID);
-        for (lint, list) in [
-            (SCAN_IN_LOOP, STANDING_SCANS),
-            (crate::ENTITY_KEYED_MAP, STANDING_BLOCK_KEYS),
+        for (lint, counted, stale) in [
+            (
+                SCAN_IN_LOOP,
+                found.collect::<Vec<_>>(),
+                stale_scans.collect::<Vec<_>>(),
+            ),
+            (
+                crate::ENTITY_KEYED_MAP,
+                keyed.collect(),
+                stale_keys.collect(),
+            ),
         ] {
-            for entry in list.iter().filter(|entry| entry.starts_with(&prefix)) {
-                if !self.standing.contains(*entry) {
-                    span_lint(
-                        cx,
-                        lint,
-                        span,
-                        format!("`{entry}` no longer fires; delete its standing entry"),
+            for (entry, hits, listed) in counted {
+                if hits.len() > listed {
+                    for (hir_id, at, message) in hits {
+                        span_lint_hir(cx, lint, *hir_id, *at, message.clone());
+                    }
+                } else if hits.len() < listed {
+                    let fell = format!(
+                        "{entry} fires {} times where {listed} stand; lower its entry",
+                        hits.len()
                     );
+                    span_lint(cx, lint, span, fell);
                 }
+            }
+            for (entry, listed) in stale {
+                span_lint(
+                    cx,
+                    lint,
+                    span,
+                    format!("{entry} no longer fires where {listed} stand; delete its entry"),
+                );
             }
         }
     }
@@ -279,18 +519,12 @@ impl<'tcx> LateLintPass<'tcx> for FunctionScale {
                 cx,
                 cx.tcx.hir_get_parent_item(expr.hir_id).def_id.to_def_id(),
             );
-            if STANDING_SCANS.contains(&item.as_str()) {
-                self.standing.insert(item);
-                return;
-            }
-            span_lint(
-                cx,
-                SCAN_IN_LOOP,
-                expr.span.source_callsite(),
-                format!(
-                    "{what} once per item of the loop at {per}, in `{item}`; index it once outside"
-                ),
+            let scan = what.split('`').nth(1).unwrap_or_default().to_owned();
+            let message = format!(
+                "{what} once per item of the loop at {per}, in `{item}`; index it once outside"
             );
+            let hits = self.scans.entry((item, scan)).or_default();
+            hits.push((expr.hir_id, expr.span.source_callsite(), message));
         }
     }
 }
@@ -507,20 +741,12 @@ impl FunctionScale {
         let Some((declared, span, item)) = declaration(cx, receiver) else {
             return;
         };
-        if STANDING_BLOCK_KEYS.contains(&item.as_str()) {
-            self.standing.insert(item);
-            return;
-        }
-        if self.keyed.insert(declared) {
-            span_lint_hir(
-                cx,
-                crate::ENTITY_KEYED_MAP,
-                declared,
-                span,
-                format!(
-                    "`{item}` is keyed by a block address; use an index over dense block ids (r2ssa::dense)"
-                ),
-            );
+        let message = format!(
+            "`{item}` is keyed by a block address; use an index over dense block ids (r2ssa::dense)"
+        );
+        let hits = self.keyed.entry(item).or_default();
+        if !hits.iter().any(|(at, ..)| *at == declared) {
+            hits.push((declared, span, message));
         }
     }
 }
