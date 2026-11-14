@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::arena::OpId;
 use crate::call_reads::StackArea;
 use crate::control::SsaWorkControl;
-use crate::dense::{DenseId, IdMap};
+use crate::dense::{Csr, DenseId, IdMap, IdVec, Node};
 use crate::frame_address::Definitions;
 use crate::function::SSAFunction;
 use crate::machine_context::SourceMachineContext;
@@ -529,8 +529,21 @@ struct WalkSite {
     reentered: bool,
     /// What a transfer spends at least and at most.
     spent: (i64, i64),
-    /// The lifted graph's successors, read by the writes reaching each block.
-    successors: BTreeMap<u64, Vec<u64>>,
+    /// The lifted graph's blocks ascending, a [`Node`] indexing them, and each one's successors:
+    /// read by the writes reaching each block.
+    blocks: Vec<u64>,
+    successors: Csr<Node, Node>,
+}
+
+impl WalkSite {
+    /// The node of the block at `addr`, by binary search: `O(log B)`.
+    fn node(&self, addr: u64) -> Option<Node> {
+        node_of(&self.blocks, addr)
+    }
+}
+
+fn node_of(blocks: &[u64], addr: u64) -> Option<Node> {
+    blocks.binary_search(&addr).ok().map(Node::from_index)
 }
 
 /// One round as walked and decided: what a restatement decides again and compares.
@@ -782,13 +795,22 @@ pub(crate) fn walk<C: SsaWorkControl + ?Sized>(
     let evidence = Evidence::of(machine);
     let (mut walk_steps, mut steps) = (0, 0);
     let arguments = StackArguments::of(func, machine, stack_pointer, entry_sp);
+    let mut blocks = func.block_addrs().to_vec();
+    blocks.sort_unstable();
+    // O(E log B): each edge placed by binary search; an edge out of the lifted blocks is dropped.
+    let mut edges = Vec::new();
+    for (at, block) in blocks.iter().enumerate() {
+        for next in func.successors(*block) {
+            edges.extend(node_of(&blocks, next).map(|to| (Node::from_index(at), to)));
+        }
+    }
+    let successors = Csr::from_pairs(blocks.len(), edges);
     let site = WalkSite {
         entry: func.entry,
         reentered: func.cfg().has_entry_edge(),
         spent: spent(machine),
-        successors: (func.block_addrs().iter())
-            .map(|block| (*block, func.successors(*block)))
-            .collect(),
+        blocks,
+        successors,
         calls: arguments.calls,
     };
     // No entry stack pointer value: no frame address exists, and every transfer is at entry (D381).
@@ -1040,7 +1062,7 @@ fn rewritten(
     accesses: &Accesses,
 ) -> BTreeSet<i64> {
     // Each call's area as entry-relative spans, by block and index; an unplaced call covers all.
-    let mut in_block = BTreeMap::<u64, Vec<CallSpans>>::new();
+    let mut in_block = IdVec::from_fn(site.blocks.len(), |_: Node| Vec::<CallSpans>::new());
     let calls = (site.calls.iter()).zip(bases).zip(writes);
     for ((call, base), area) in calls.filter(|((call, _), _)| !call.tail) {
         let spans = match (base, area) {
@@ -1052,10 +1074,10 @@ fn rewritten(
             // Unbounded, it is still this frame's: it ends at the entry pointer.
             (Some(base), None) => merged([(*base, 0)].into_iter()),
         };
-        in_block
-            .entry(call.at.0)
-            .or_default()
-            .push((call.at.1, spans));
+        // A call outside the lifted blocks reaches no block and no load.
+        if let Some(node) = site.node(call.at.0) {
+            in_block[node].push((call.at.1, spans));
+        }
     }
     let entering = reaching_writes(&site.successors, &in_block);
     // Each load against what reaches it: the block's entry and the calls before it there.
@@ -1068,8 +1090,9 @@ fn rewritten(
     let mut rewritten = BTreeSet::new();
     for list in loads.chunk_by(|one, other| one.0 == other.0) {
         let block = list[0].0;
-        let calls = in_block.get(&block).cloned().unwrap_or_default();
-        let live = entering.get(&block).cloned().unwrap_or_default();
+        let (calls, live) = (site.node(block))
+            .map(|node| (in_block[node].clone(), entering[node].clone()))
+            .unwrap_or_default();
         rewritten_in_block(list, calls, live, &mut rewritten);
     }
     rewritten
@@ -1753,18 +1776,21 @@ type CallSpans = (usize, Vec<(i64, i64)>);
 /// The merged write spans reaching each block's entry. A worklist whose sets only grow, each at most
 /// K times (K the calls' spans): `O(K x (B + E) x K log K)` worst, one round where they nest.
 fn reaching_writes(
-    successors: &BTreeMap<u64, Vec<u64>>,
-    in_block: &BTreeMap<u64, Vec<CallSpans>>,
-) -> BTreeMap<u64, Vec<(i64, i64)>> {
-    let mut entering = BTreeMap::<u64, Vec<(i64, i64)>>::new();
-    let mut pending = in_block.keys().copied().collect::<Vec<_>>();
+    successors: &Csr<Node, Node>,
+    in_block: &IdVec<Node, Vec<CallSpans>>,
+) -> IdVec<Node, Vec<(i64, i64)>> {
+    let mut entering = IdVec::from_fn(in_block.len(), |_: Node| Vec::<(i64, i64)>::new());
+    let mut pending = (in_block.iter())
+        .filter(|(_, calls)| !calls.is_empty())
+        .map(|(block, _)| block)
+        .collect::<Vec<_>>();
     while let Some(block) = pending.pop() {
-        let calls = in_block.get(&block).map_or(&[][..], Vec::as_slice);
-        let made = calls.iter().flat_map(|(_, spans)| spans.iter().copied());
-        let entry = entering.get(&block).map_or(&[][..], Vec::as_slice);
-        let leaving = merged(entry.iter().copied().chain(made));
-        for next in successors.get(&block).into_iter().flatten().copied() {
-            if grow(entering.entry(next).or_default(), &leaving) {
+        let made = in_block[block]
+            .iter()
+            .flat_map(|(_, spans)| spans.iter().copied());
+        let leaving = merged(entering[block].iter().copied().chain(made));
+        for &next in successors.get(block) {
+            if grow(&mut entering[next], &leaving) {
                 pending.push(next);
             }
         }

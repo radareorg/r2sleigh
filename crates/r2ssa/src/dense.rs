@@ -1186,13 +1186,13 @@ pub fn element_visits_by_site() -> Vec<(String, u64)> {
 
 #[cfg(feature = "work-meter")]
 mod meter {
-    use std::collections::HashMap;
+    use rustc_hash::FxHashMap;
     use std::panic::Location;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     pub(super) static VISITS: AtomicU64 = AtomicU64::new(0);
-    static SITES: Mutex<Option<HashMap<&'static Location<'static>, u64>>> = Mutex::new(None);
+    static SITES: Mutex<Option<FxHashMap<&'static Location<'static>, u64>>> = Mutex::new(None);
 
     pub(super) fn by_site() -> Vec<(String, u64)> {
         let sites = SITES
@@ -1231,7 +1231,7 @@ mod meter {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 *sites
-                    .get_or_insert_with(HashMap::new)
+                    .get_or_insert_with(FxHashMap::default)
                     .entry(self.at)
                     .or_default() += self.count;
             }

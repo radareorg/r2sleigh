@@ -386,11 +386,6 @@ const STANDING_BLOCK_KEYS: &[(&str, usize)] = &[
         "r2ssa::semantic::facts::PredicateFacts::block_assumptions",
         1,
     ),
-    (
-        "r2ssa::semantic::frame_reach::walk::StackArguments::rewritten",
-        2,
-    ),
-    ("r2ssa::semantic::frame_reach::walk::reaching_writes", 2),
     ("r2ssa::semantic::loops::LoopExits::of", 1),
     ("r2ssa::semantic::loops::header_carriers", 1),
     ("r2ssa::semantic::predicates::collect_predicate_facts", 1),
