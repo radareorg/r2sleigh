@@ -1354,12 +1354,12 @@ impl SourceMachineContext {
             let reads = crate::call_reads::CallReads::exact(interface, model);
             return Some(reads.writing(writes).importing(import));
         }
-        // A printf's stack is its fixed parameters and the operands its own format counts (D409).
+        // A printf reads its fixed parameters, the operands its own format counts and the count
+        // register, in registers and on the stack (D409, D433).
         let counted = (interface.zip(model))
             .zip(instruction.and_then(|at| self.format_tails.get(&at)))
-            .and_then(|((interface, model), tail)| counted_stack(interface, model, tail));
-        if let (Some(stack), Some(model)) = (counted, model) {
-            let reads = crate::call_reads::CallReads::every_location(model).on_stack(stack);
+            .and_then(|((interface, model), tail)| counted_reads(interface, model, tail));
+        if let Some(reads) = counted {
             return Some(reads.writing(writes).importing(import));
         }
         // A walked callee that mints no contract still states its reads where its arity is exact.
@@ -1701,13 +1701,14 @@ pub fn loaded_target_slot(block: &R2ILBlock, op_index: usize) -> Option<Canonica
         .loaded_slot()
 }
 
-/// The stack a variadic call reads from its stack pointer: the fixed parameters and one promoted
-/// pointer-wide slot per `tail` operand (C17 6.5.2.2p7); refusals in adr-call-boundary "D409 as built".
-fn counted_stack(
+/// What a counted printf reads: its fixed parameters and one promoted pointer-wide slot per
+/// `tail` operand (C17 6.5.2.2p7), placed, and the count register (D433); refusals in
+/// adr-call-boundary "D409 as built".
+fn counted_reads(
     interface: &SourceCallSiteInterface,
     model: &r2source::ConventionModel,
     tail: &r2abi::format::PrintfConsumedArguments,
-) -> Option<Vec<(i64, i64)>> {
+) -> Option<crate::call_reads::CallReads> {
     use r2source::convention::SlotClass;
     let callee = interface.exact_callee_interface()?;
     let integers = model.arguments(SlotClass::Integer);
@@ -1754,7 +1755,8 @@ fn counted_stack(
     }
     let at_call = (placement.locations.into_iter()).map(|location| callee.at_call_site(location));
     let at_call = at_call.collect::<Option<Vec<_>>>()?;
-    crate::call_reads::CallReads::of_locations(at_call.into_iter(), Some(model)).stack
+    let reads = crate::call_reads::CallReads::of_locations(at_call.into_iter(), Some(model));
+    Some(reads.counting(model.forms.count_register))
 }
 
 #[cfg(test)]

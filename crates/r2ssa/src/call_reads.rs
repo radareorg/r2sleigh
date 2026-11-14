@@ -73,8 +73,8 @@ impl StackWrites {
     }
 }
 
-/// Why a call's listed registers are all it may read (D411): a cited declaration, or a callee whose
-/// arity r2ssa holds exact. The every-location default has none.
+/// Why a call's listed registers are all it may read (D411): a cited declaration, a callee whose
+/// arity r2ssa holds exact, or a printf its format counts (D433). The every-location default has none.
 #[doc = "```compile_fail,E0423\nlet forged = r2ssa::call_reads::ReadBound(());\n```"]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadBound(Bounded);
@@ -83,6 +83,7 @@ pub struct ReadBound(Bounded);
 enum Bounded {
     Cited,
     Arity,
+    Counted,
 }
 
 impl r2source::Negative for ReadBound {
@@ -105,6 +106,12 @@ impl ReadBound {
     /// A complete fixed site interface, or a callee statement whose arity is exact.
     pub(crate) const fn arity() -> Self {
         Self(Bounded::Arity)
+    }
+
+    /// A cited printf whose read-only format counts its operands (D433): ISO C17 7.21.6.1p2, "If
+    /// the format is exhausted while arguments remain, the excess arguments are ... ignored".
+    pub(crate) const fn counted() -> Self {
+        Self(Bounded::Counted)
     }
 }
 
@@ -325,10 +332,11 @@ impl CallReads {
         }
     }
 
-    /// These reads with their stack read and written bounded by `stack` (a counted printf, D409).
+    /// These placed reads as a counted printf's, which also reads `count` (D409, D433).
     #[must_use]
-    pub(crate) fn on_stack(mut self, stack: Vec<(i64, i64)>) -> Self {
-        (self.stack, self.writes) = (Some(stack.clone()), Some(stack));
+    pub(crate) const fn counting(mut self, count: Option<CanonicalStorageId>) -> Self {
+        self.count_register = count;
+        self.bound = Some(ReadBound::counted());
         self
     }
 

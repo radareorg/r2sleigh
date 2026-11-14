@@ -1477,3 +1477,12 @@ An import's call reads RAX at AL's width.
 - r2engine `declared::import_call` mints r2ssa `ImportCall` from the program's own convention row, for every direct import target `declare_imports` sees, declared or not. `CalleeEvidence::imports` carries it to both machine contexts and `BuildKey`.
 - `CallReads::count_read` answers the count register's bytes for a carrier whose low lane it is, where no argument register overlaps the carrier; `register_read_bytes` reads it after a walked callee's lane row.
 - Excluded: an indirect call (its target may be a local function, 3.2), a call through an import slot, a walked body (its lane row, D413). Tests (`result_lanes`): `an_import_call_reads_the_count_register_alone_of_its_register` (uncited row, unstated import, variadic), red on the parent; `an_indirect_call_reads_its_count_register_whole`.
+
+## D433 as built (2026-11-15, rd6-reads)
+
+A counted printf states its registers as D409 states its stack.
+
+- `counted_reads` (was `counted_stack`) keeps D409's one placement: the fixed parameters and one promoted pointer-wide slot per operand the read-only format counts. Its registers, the count register and its stack are the call's reads; `ReadBound::counted()` bounds them.
+- Citation, D409's (`types-posix.sdb.txt`, stdio.h): ISO C17 7.21.6.1p2, "If the format is exhausted while arguments remain, the excess arguments are evaluated (as always) but are otherwise ignored"; too few arguments is undefined behaviour. Premise and refusals are D409's.
+- The count register stays read, so D431's import witness bounds RAX at AL's byte on this path too.
+- Test (`call_boundary`): `a_counted_printf_reads_only_its_placed_registers`, `error(0, 0, "%s", x)` past an untouched entry R8, red on the parent ("the parameters are a floor: at least 4").
