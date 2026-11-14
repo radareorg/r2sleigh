@@ -342,16 +342,6 @@ impl SummaryArgEffect {
         *self != before
     }
 
-    /// Whether anything is proven done through the argument: positive evidence it is an address.
-    pub const fn proven(&self) -> bool {
-        self.read || self.write || self.escape || self.free
-    }
-
-    /// Whether the argument may be written through: proven, or handed where nothing describes it.
-    pub const fn may_write(&self) -> bool {
-        self.write || self.assumed
-    }
-
     fn mark_read(&mut self) {
         self.read = true;
     }

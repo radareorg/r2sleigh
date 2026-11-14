@@ -150,28 +150,6 @@ pub(crate) fn interproc_out_param_source(
     }
 }
 
-pub(crate) fn summary_suggests_pointer_param(
-    summary: &FunctionSemanticSummary,
-    idx: usize,
-) -> bool {
-    summary
-        .arg_effects
-        .get(&idx)
-        .is_some_and(|effect| effect.read || effect.write || effect.escape || effect.free)
-        || summary.memory_effects.iter().any(|effect| {
-            matches!(effect.location.region, SummaryMemoryRegion::Arg { index } if index == idx)
-        })
-        || summary.transfer_effects.iter().any(|effect| {
-            matches!(effect.dst.region, r2ssa::SummaryMemoryRegion::Arg { index } if index == idx)
-                || matches!(effect.src.region, r2ssa::SummaryMemoryRegion::Arg { index } if index == idx)
-        })
-        || summary
-            .lifetime_effects
-            .iter()
-            .any(|effect| effect.arg == idx)
-        || summary.sync_effects.iter().any(|effect| effect.arg == idx)
-}
-
 /// An inferred type with C's own integer names kept as names, so a declared
 /// `int` or `size_t` is not mistaken for a width the body can refine.
 pub(crate) fn preserving_c_typedefs(ty: &CTypeLike) -> CTypeLike {

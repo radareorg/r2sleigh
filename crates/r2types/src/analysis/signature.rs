@@ -2,11 +2,6 @@
 
 use super::*;
 
-/// A heap block's address, which no declared type names: a summary's `HeapAlloc` return.
-pub(crate) fn heap_allocation_return_type() -> CTypeLike {
-    CTypeLike::typedef("allocation_ptr")
-}
-
 /// A typed C name that is no plain word: `bool`, an enum, a typedef that resolves.
 fn type_is_authoritative_named_scalar_role(ty: &CTypeLike) -> bool {
     match ty {

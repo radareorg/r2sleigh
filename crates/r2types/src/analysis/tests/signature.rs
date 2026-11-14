@@ -228,7 +228,7 @@ fn a_returned_arg_summary_does_not_retype_the_return() {
                     has_unknown_calls: false,
                     arg_effects: BTreeMap::from([(
                         0,
-                        SummaryArgEffect {
+                        r2ssa::SummaryArgEffect {
                             read: true,
                             write: false,
                             escape: false,
@@ -277,7 +277,6 @@ fn a_returned_arg_summary_does_not_retype_the_return() {
         .get(&helper.0)
         .expect("helper callee fact");
     assert_eq!(callee.name.as_deref(), Some("sym.helper"));
-    assert!(callee.arg_effects.get(&0).is_some_and(|effect| effect.read));
     assert_eq!(callee.return_relation, CalleeReturnRelation::Arg(0));
 }
 
@@ -1344,18 +1343,6 @@ fn interproc_returned_arg_summary_exports_callee_facts() {
         .get(&helper.0)
         .expect("helper callee fact");
     assert_eq!(helper_fact.return_relation, CalleeReturnRelation::Arg(0));
-    assert!(
-        helper_fact
-            .arg_effects
-            .get(&0)
-            .is_some_and(|effect| effect.write && effect.escape)
-    );
-    assert!(
-        helper_fact
-            .arg_effects
-            .get(&1)
-            .is_some_and(|effect| effect.read && !effect.write)
-    );
     assert!(helper_fact.memory_effects.iter().any(|effect| {
         matches!(
             effect,
@@ -1396,90 +1383,6 @@ fn interproc_returned_arg_summary_exports_callee_facts() {
     );
 }
 
-#[test]
-fn interproc_summary_name_does_not_export_role_callee_type_facts() {
-    let root = r2ssa::InterprocFunctionId(0x402000);
-    let helper = r2ssa::InterprocFunctionId(0x402080);
-    let mut root_summary =
-        r2ssa::FunctionSemanticSummary::unknown(root, Some("sym.sort_driver".to_string()));
-    root_summary.direct_callees.insert(helper.0);
-    let mut helper_summary =
-        r2ssa::FunctionSemanticSummary::unknown(helper, Some("dbg.open_input_files".to_string()));
-    helper_summary.arg_count_hint = Some(3);
-    helper_summary.arg_effects.insert(
-        2,
-        SummaryArgEffect {
-            write: true,
-            ..SummaryArgEffect::default()
-        },
-    );
-    let summary_set = r2ssa::InterprocSummarySet {
-        schema_version: r2ssa::interproc::INTERPROC_SUMMARY_SCHEMA_VERSION,
-        root: Some(root),
-        summaries: BTreeMap::from([(root, root_summary), (helper, helper_summary)]),
-        diagnostics: Default::default(),
-    };
-
-    let analysis = build_type_analysis(TypeAnalysisInput {
-        ptr_bits: 64,
-        inferred_signature: InferredSignature {
-            function_name: "sym.sort_driver".to_string(),
-            ret_type: Some(parse_test_type("void", 64)),
-            params: Vec::new(),
-        },
-        parsed_context: ParsedExternalContext::default(),
-        local_structs: LocalStructArtifacts::default(),
-        interproc_summary_set: Some(summary_set),
-        diagnostics: TypeAnalysisDiagnostics::default(),
-    });
-
-    let helper_fact = analysis
-        .type_facts
-        .callee_facts
-        .get(&helper.0)
-        .expect("helper callee fact");
-    assert_eq!(helper_fact.return_type_hint, None);
-    assert_eq!(helper_fact.param_type_hints.get(&0), None);
-    assert_eq!(
-        helper_fact.param_type_hints.get(&2),
-        Some(&void_pointer_type())
-    );
-    assert!(
-        helper_fact
-            .arg_effects
-            .get(&2)
-            .is_some_and(|effect| effect.write && !effect.free)
-    );
-}
-
-#[test]
-fn interproc_summary_name_does_not_fabricate_callee_out_param_writes() {
-    let helper = r2ssa::InterprocFunctionId(0x402080);
-    let mut helper_summary =
-        r2ssa::FunctionSemanticSummary::unknown(helper, Some("dbg.open_input_files".to_string()));
-    helper_summary.arg_count_hint = Some(3);
-    helper_summary.arg_effects.insert(
-        2,
-        r2ssa::SummaryArgEffect {
-            read: true,
-            ..r2ssa::SummaryArgEffect::default()
-        },
-    );
-
-    let helper_fact = summary_to_callee_fact(&helper_summary);
-
-    assert_eq!(
-        helper_fact.param_type_hints.get(&2),
-        Some(&void_pointer_type())
-    );
-    assert!(
-        !helper_fact
-            .arg_effects
-            .get(&2)
-            .is_some_and(|effect| effect.write)
-    );
-}
-
 /// A summary's memory effect through a parameter retypes no parameter: the body's evidence types
 /// a dereferenced one, and the summary is a second owner of that fact (D382).
 #[test]
@@ -1501,7 +1404,7 @@ fn a_memory_effect_summary_does_not_retype_a_parameter() {
                 has_unknown_calls: false,
                 arg_effects: BTreeMap::from([(
                     0,
-                    SummaryArgEffect {
+                    r2ssa::SummaryArgEffect {
                         read: true,
                         write: true,
                         escape: false,

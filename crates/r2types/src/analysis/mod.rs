@@ -13,18 +13,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use r2ssa::{
-    FunctionSemanticSummary, InterprocSummarySet, SsaArtifact, SummaryArgEffect,
-    SummaryMemoryEffect, SummaryMemoryEffectKind, SummaryMemoryRegion, SummaryReturnRelation,
+    FunctionSemanticSummary, InterprocSummarySet, SsaArtifact, SummaryMemoryEffect,
+    SummaryMemoryEffectKind, SummaryMemoryRegion, SummaryReturnRelation,
 };
 
 use crate::context::{ParsedExternalContext, is_generic_arg_name};
 use crate::convert::CTypeLike;
 use crate::facts::{
-    ArrayIndexBase, ArrayIndexCertificate, CalleeAllocationEffect, CalleeArgEffect,
-    CalleeAtomicEffect, CalleeAtomicOp, CalleeAtomicOrdering, CalleeFact, CalleeLifetimeEffect,
-    CalleeLifetimeOp, CalleeMemoryEffect, CalleeMemoryEffectKind, CalleeMemoryLocation,
-    CalleeMemoryRange, CalleeMemoryRegion, CalleeModelPolicyEvidence, CalleeReturnRelation,
-    CalleeSyncEffect, CalleeSyncOp, CalleeTransferEffect, CalleeTransferLength, FunctionParamSpec,
+    ArrayIndexBase, ArrayIndexCertificate, CalleeAllocationEffect, CalleeAtomicEffect,
+    CalleeAtomicOp, CalleeAtomicOrdering, CalleeFact, CalleeLifetimeEffect, CalleeLifetimeOp,
+    CalleeMemoryEffect, CalleeMemoryEffectKind, CalleeMemoryLocation, CalleeMemoryRange,
+    CalleeMemoryRegion, CalleeModelPolicyEvidence, CalleeReturnRelation, CalleeSyncEffect,
+    CalleeSyncOp, CalleeTransferEffect, CalleeTransferLength, FunctionParamSpec,
     FunctionSignatureSpec, FunctionTypeFactInputs, FunctionTypeFacts, InterprocFactDiagnostics,
     OutParamCertificate, OutParamCertificateEvidence, OutParamCertificateSource,
     ScalarArrayRenderCandidate, SignatureCertificate, SignatureCertificateSource,
@@ -312,15 +312,6 @@ struct DerivedTypeAnalysisInput {
 #[cfg(test)]
 type TypeAnalysisInput = DerivedTypeAnalysisInput;
 
-fn summary_arg_effect_to_callee(effect: &SummaryArgEffect) -> CalleeArgEffect {
-    CalleeArgEffect {
-        read: effect.read,
-        write: effect.write,
-        escape: effect.escape,
-        free: effect.free,
-    }
-}
-
 fn summary_return_relation_to_callee(relation: &SummaryReturnRelation) -> CalleeReturnRelation {
     match relation {
         SummaryReturnRelation::Unknown => CalleeReturnRelation::Unknown,
@@ -440,33 +431,6 @@ fn summary_atomic_effect_to_callee(effect: &r2ssa::SummaryAtomicEffect) -> Calle
     }
 }
 
-fn summary_observed_param_count(summary: &FunctionSemanticSummary) -> usize {
-    let mut max_idx = summary.arg_effects.keys().copied().max();
-    for effect in &summary.memory_effects {
-        if let SummaryMemoryRegion::Arg { index } = effect.location.region {
-            max_idx = Some(max_idx.unwrap_or(0).max(index));
-        }
-    }
-    for effect in &summary.transfer_effects {
-        if let r2ssa::SummaryMemoryRegion::Arg { index } = effect.dst.region {
-            max_idx = Some(max_idx.unwrap_or(0).max(index));
-        }
-        if let r2ssa::SummaryMemoryRegion::Arg { index } = effect.src.region {
-            max_idx = Some(max_idx.unwrap_or(0).max(index));
-        }
-        if let r2ssa::SummaryTransferLength::Arg(index) = effect.len {
-            max_idx = Some(max_idx.unwrap_or(0).max(index));
-        }
-    }
-    for effect in &summary.lifetime_effects {
-        max_idx = Some(max_idx.unwrap_or(0).max(effect.arg));
-    }
-    for effect in &summary.sync_effects {
-        max_idx = Some(max_idx.unwrap_or(0).max(effect.arg));
-    }
-    max_idx.map_or(0, |idx| idx + 1)
-}
-
 fn summary_linkage_to_callee_linkage(
     linkage: r2ssa::FunctionSemanticLinkage,
 ) -> crate::CalleeLinkage {
@@ -477,41 +441,7 @@ fn summary_linkage_to_callee_linkage(
     }
 }
 
-/// Pointer hints the interprocedural summary itself proves for a callee's
-/// parameters.
-fn summary_param_type_hints(summary: &FunctionSemanticSummary) -> BTreeMap<usize, CTypeLike> {
-    let pointer_ty = CTypeLike::Pointer(Box::new(CTypeLike::Void));
-    let mut hints = BTreeMap::new();
-    let max_idx = summary_observed_param_count(summary);
-    for idx in 0..max_idx {
-        if summary_suggests_pointer_param(summary, idx) {
-            hints.entry(idx).or_insert_with(|| pointer_ty.clone());
-        }
-    }
-    hints
-}
-
-/// The return type the summary's own return relation gives, or nothing.
-fn summary_return_type_hint(
-    summary: &FunctionSemanticSummary,
-    param_type_hints: &BTreeMap<usize, CTypeLike>,
-) -> Option<CTypeLike> {
-    match summary.return_relation {
-        SummaryReturnRelation::Void => Some(CTypeLike::Void),
-        SummaryReturnRelation::HeapAlloc => Some(heap_allocation_return_type()),
-        SummaryReturnRelation::Arg(idx) => param_type_hints.get(&idx).cloned(),
-        _ => None,
-    }
-}
-
 fn summary_to_callee_fact(summary: &FunctionSemanticSummary) -> CalleeFact {
-    let param_type_hints = summary_param_type_hints(summary);
-    let return_type_hint = summary_return_type_hint(summary, &param_type_hints);
-    let arg_effects = summary
-        .arg_effects
-        .iter()
-        .map(|(idx, effect)| (*idx, summary_arg_effect_to_callee(effect)))
-        .collect::<BTreeMap<_, _>>();
     CalleeFact {
         function_id: summary.id.0,
         name: summary.name.clone(),
@@ -522,7 +452,6 @@ fn summary_to_callee_fact(summary: &FunctionSemanticSummary) -> CalleeFact {
         direct_callees: summary.direct_callees.iter().copied().collect(),
         callsite_count: summary.callsite_count,
         has_unknown_calls: summary.has_unknown_calls,
-        arg_effects,
         memory_effects: summary
             .memory_effects
             .iter()
@@ -553,8 +482,6 @@ fn summary_to_callee_fact(summary: &FunctionSemanticSummary) -> CalleeFact {
             .iter()
             .map(summary_atomic_effect_to_callee)
             .collect(),
-        param_type_hints,
-        return_type_hint,
         return_relation: summary_return_relation_to_callee(&summary.return_relation),
         reads_global_memory: summary.reads_global_memory,
         writes_global_memory: summary.writes_global_memory,
@@ -585,9 +512,6 @@ fn merge_callee_fact(existing: &mut CalleeFact, incoming: CalleeFact) {
     }
     existing.callsite_count = existing.callsite_count.max(incoming.callsite_count);
     existing.has_unknown_calls |= incoming.has_unknown_calls;
-    if existing.arg_effects.is_empty() {
-        existing.arg_effects = incoming.arg_effects;
-    }
     if existing.memory_effects.is_empty() {
         existing.memory_effects = incoming.memory_effects;
     }
@@ -605,12 +529,6 @@ fn merge_callee_fact(existing: &mut CalleeFact, incoming: CalleeFact) {
     }
     if existing.atomic_effects.is_empty() {
         existing.atomic_effects = incoming.atomic_effects;
-    }
-    if existing.param_type_hints.is_empty() {
-        existing.param_type_hints = incoming.param_type_hints;
-    }
-    if existing.return_type_hint.is_none() {
-        existing.return_type_hint = incoming.return_type_hint;
     }
     if matches!(
         existing.return_relation,
@@ -778,11 +696,6 @@ fn signed_int_type(bits: u32) -> CTypeLike {
         bits,
         signedness: Signedness::Signed,
     }
-}
-
-#[cfg(test)]
-fn void_pointer_type() -> CTypeLike {
-    CTypeLike::Pointer(Box::new(CTypeLike::Void))
 }
 
 pub fn build_source_owned_type_analysis(
