@@ -478,11 +478,14 @@ impl<'a> Sinks<'a> {
                 SSAOp::CallUse { .. } => None,
                 op => Some(op.call().filter(|call| call.direct)),
             });
-            let target = (call.flatten().and_then(|call| call.instruction))
-                .and_then(|instruction| machine.raw_call_site_at(instruction))
-                .and_then(crate::semantic::direct_target_from_raw_identity);
-            let target = target?;
-            let position = machine.site_position(target, storage)?;
+            let instruction = call.flatten().and_then(|call| call.instruction);
+            let target = (instruction
+                .and_then(|instruction| machine.raw_call_site_at(instruction)))
+            .and_then(crate::semantic::direct_target_from_raw_identity)?;
+            let position = (machine
+                .site_integer_arguments(instruction, Some(target))
+                .iter())
+            .position(|slot| slot.space == storage.space && slot.offset == storage.offset)?;
             let upward = (machine.callee_reach_at(target, position))
                 .is_some_and(crate::interproc::ArgumentReach::is_upward);
             Some(((target, position), upward))

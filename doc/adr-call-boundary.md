@@ -1258,6 +1258,7 @@ The views and strings are gone; one `ConventionModel` pair is the carrier (D275,
 
 - D274: r2engine `native::duties` drops a preserved lane the platform's reserved runs cover. Go's arm64 `unaffected` names x18; r2abi's Darwin row reserves it (Apple, "Writing ARM64 code for Apple platforms"). Both say the value survives a call, so x18 is reserved alone and the six Darwin Go effects build. A partial overlap still refuses (`Contradictory`).
 - D364: r2ssa `CallBoundaryConfig::callee_boundary(op, instruction)`. A `CallSlot` site, by the instruction of its correlated `slot_targets`, takes the slot's model from `convention_by_target`, which `Program::site_convention_at` keys by the slot address. Rename and phi placement ask the same question. Only the model is set; the slot's result and kept set are not read.
+- D390: one map, `r2ssa::SiteModels`, held by `CalleeBoundaries` (rename) and `SourceMachineContext` (one `Arc`), answers `stated(instruction, direct)`: a direct target's model, else a `CallSlot` site's slot's. `call_reads` reads the site's model, not the calls' join: a stated model is the program's statement of where that callee's arguments lie (a Microsoft x64 site's home area, a Go site's registers), and an unstated site still reads every location of the calls' model.
 - D252's allow side: a SysV caller keeps rsi across a direct call to a callee stated `ms_abi` whose body writes rsi; unstated, it does not.
 - D363: a call on a returning path keeps what its callee keeps (doc/adr-result-side.md, section 5 as amended).
 
