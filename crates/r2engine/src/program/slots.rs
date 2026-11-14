@@ -108,54 +108,89 @@ fn taken_into_slots<S: Source + 'static>(
     take: &super::reads::Take,
     target: u64,
 ) -> Option<SlotProof> {
-    let (owner, from) = (take.owner, take.from);
-    let thumb = View::new(db, true).thumb_at(owner);
-    super::fates::read_body(db, (owner, thumb), |read| {
-        let blocks = &read.body.blocks;
-        let held = blocks.partition_point(|block| block.lifted.addr <= from);
-        let block = held.checked_sub(1)?;
-        let lifted = &blocks[block].lifted;
-        let ops = (0..lifted.ops.len()).filter(|op| lifted.instruction_of(*op) == Some(from));
-        let ops = ops.collect::<Vec<_>>();
-        let last = *ops.last()?;
-        let mut written = (ops.iter())
-            .filter_map(|op| lifted.ops[*op].output())
-            .filter(|output| output.space == r2il::SpaceId::Register)
-            .map(CanonicalStorageId::from_varnode)
-            .collect::<Vec<_>>();
-        // A narrow write the instruction widens (`mov edi, imm` zero-extends into RDI) is one write.
-        let widest = written.iter().copied().max_by_key(|written| written.size);
-        let within = |inner: &CanonicalStorageId, outer: &CanonicalStorageId| {
-            outer.offset <= inner.offset
-                && inner.offset + u64::from(inner.size) <= outer.offset + u64::from(outer.size)
+    let thumb = View::new(db, true).thumb_at(take.owner);
+    let fates = db.get::<OwnerTakes>(&(take.owner, thumb)).ok()?;
+    let fates = (*fates).as_ref()?;
+    let at = (fates.binary_search_by_key(&(take.from, target), |(at, _)| *at)).ok()?;
+    into_slots(db, fates[at].1.clone()?)
+}
+
+/// The fate of the register each take of one owner leaves its target's address in, by
+/// (instruction, target): the owner's walk, flow and transfers read once for all its takes (D400).
+pub(super) struct OwnerTakes;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for OwnerTakes {
+    type Key = (u64, bool);
+    type Value = Option<Box<[((u64, u64), Option<RegisterFate>)]>>;
+    const NAME: &'static str = "owner-takes";
+    const RETENTION: Retention = Retention::Held;
+
+    /// Work: one walk, flow and `SiteReads` of the owner, `O(ops)`, and one walk of one register per
+    /// take, `O(B + E)`; held is `O(takes)`.
+    fn compute(db: &Db<ProgramInputs<S>>, &(owner, thumb): &(u64, bool)) -> Self::Value {
+        let escapes = db.get::<Escapes>(&()).ok()?;
+        let ways = escapes.as_ref().as_ref()?;
+        super::fates::read_body(db, (owner, thumb), |read| {
+            let reads = SiteReads::of(db, read);
+            let fate = |take: &super::reads::Take| take_fate(read, &reads, take);
+            let fates = ways
+                .takes_from(owner)
+                .map(|take| ((take.from, take.target), fate(take)));
+            fates.collect()
+        })
+    }
+}
+
+/// The fate of the one register `take`'s instruction leaves its target's address in; `None` where
+/// no one register holds it.
+fn take_fate<S: Source + 'static>(
+    read: &BodyRead<'_, S>,
+    reads: &SiteReads<'_>,
+    take: &super::reads::Take,
+) -> Option<RegisterFate> {
+    let (from, target) = (take.from, take.target);
+    let blocks = &read.body.blocks;
+    let held = blocks.partition_point(|block| block.lifted.addr <= from);
+    let block = held.checked_sub(1)?;
+    let lifted = &blocks[block].lifted;
+    let ops = (0..lifted.ops.len()).filter(|op| lifted.instruction_of(*op) == Some(from));
+    let ops = ops.collect::<Vec<_>>();
+    let last = *ops.last()?;
+    let mut written = (ops.iter())
+        .filter_map(|op| lifted.ops[*op].output())
+        .filter(|output| output.space == r2il::SpaceId::Register)
+        .map(CanonicalStorageId::from_varnode)
+        .collect::<Vec<_>>();
+    // A narrow write the instruction widens (`mov edi, imm` zero-extends into RDI) is one write.
+    let widest = written.iter().copied().max_by_key(|written| written.size);
+    let within = |inner: &CanonicalStorageId, outer: &CanonicalStorageId| {
+        outer.offset <= inner.offset
+            && inner.offset + u64::from(inner.size) <= outer.offset + u64::from(outer.size)
+    };
+    if let Some(widest) = widest {
+        written.retain(|written| !within(written, &widest) || *written == widest);
+    }
+    written.sort_unstable();
+    written.dedup();
+    // An instruction writing flags beside (`add x0, x0, #lo` on AArch64) leaves the address in
+    // the one register the block's constants fold to it: `O(ops in the block)`.
+    if written.len() > 1 {
+        let mut origins = r2ssa::origin::BlockOrigins::default();
+        lifted.ops[..=last].iter().for_each(|op| origins.step(op));
+        let holds = |register: &CanonicalStorageId| {
+            let varnode =
+                r2il::Varnode::new(r2il::SpaceId::Register, register.offset, register.size);
+            origins.of(&varnode).and_then(|origin| origin.constant()) == Some(target)
         };
-        if let Some(widest) = widest {
-            written.retain(|written| !within(written, &widest) || *written == widest);
-        }
-        written.sort_unstable();
-        written.dedup();
-        // An instruction writing flags beside (`add x0, x0, #lo` on AArch64) leaves the address in
-        // the one register the block's constants fold to it: `O(ops in the block)`.
-        if written.len() > 1 {
-            let mut origins = r2ssa::origin::BlockOrigins::default();
-            lifted.ops[..=last].iter().for_each(|op| origins.step(op));
-            let holds = |register: &CanonicalStorageId| {
-                let varnode =
-                    r2il::Varnode::new(r2il::SpaceId::Register, register.offset, register.size);
-                origins.of(&varnode).and_then(|origin| origin.constant()) == Some(target)
-            };
-            written.retain(holds);
-        }
-        let [register] = written.as_slice() else {
-            r2il::refusal_evidence!("declared-slot", "{from:#x}: writes {written:?}");
-            return None;
-        };
-        let reads = SiteReads::of(db, read);
-        let fate = read.flow.fate_after(block, last, *register, &reads);
-        r2il::refusal_evidence!("declared-slot", "{from:#x}: {register:?} {fate:?}");
-        into_slots(db, fate)
-    })
-    .flatten()
+        written.retain(holds);
+    }
+    let [register] = written.as_slice() else {
+        r2il::refusal_evidence!("declared-slot", "{from:#x}: writes {written:?}");
+        return None;
+    };
+    let fate = read.flow.fate_after(block, last, *register, reads);
+    r2il::refusal_evidence!("declared-slot", "{from:#x}: {register:?} {fate:?}");
+    Some(fate)
 }
 
 /// The slots a fate hands its register into, where every handoff is into a cited slot: an

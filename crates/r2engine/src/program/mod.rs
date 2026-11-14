@@ -617,6 +617,7 @@ impl<S: Source + 'static> OpenProgram<S> {
             call_boundaries: self.db.query_stats::<fates::CallBoundary>(),
             direct_sites: self.db.query_stats::<fates::DirectSites>(),
             walked: self.db.query_stats::<analysis::Walked>(),
+            owner_takes: self.db.query_stats::<slots::OwnerTakes>(),
             defects: self.db.stats().defects,
             rebuilt: self.db.stats().rebuilt,
         }

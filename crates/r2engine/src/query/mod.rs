@@ -39,6 +39,8 @@ pub struct AnalysisStats {
     pub direct_sites: db::QueryStats,
     /// Bodies walked, a body lifted again counted again (D354).
     pub walked: db::QueryStats,
+    /// Take owners read for their takes' fates, each once for all its takes (D400).
+    pub owner_takes: db::QueryStats,
     /// Dependencies the query graph forbids that a computation reached; zero in a sound engine.
     pub defects: u64,
     /// Builds made anew against their owners' statements (D365).
