@@ -1425,3 +1425,14 @@ What this changes in the sections above, and the owner of each rule:
 - `NeverProof::Composed`: a body no return reaches whose every end is proven (a halting transfer, or a wait on a declared or composed callee), with no trap and at least one end; a least fixpoint over the wait edges. `proves_never` stays declared-only, since S31b's register effect reads no other body.
 - The closed decision's premises are one fact: r2source `SourceClosedDecision { result, through_slot }::premises`. r2ssa records them at the seal and r2dec spells them on the proof line.
 - A direct branch into a function returns its held lanes to the branching body (`Survey::tail_callers_of`); `Escapes` still counts the branch as a way in.
+
+## rd4-never as built (2026-11-14)
+
+One "never comes back" fact, with its proof, from `ComesBack` to the C (D379, D380, D384, D395; RULING 1.4).
+
+- r2source. `Never { proof, premises }` and `NeverProof { Declared, Composed, Uncited, NoReturnReached }` live beside `Premise`; `proves()` holds for `Declared` and `Composed` only. The four `noreturn` channels nothing set are deleted.
+- r2engine. `declared_return` grades an uncited row's noreturn `Uncited`; `composed` counts only a proving callee. The walk records each closed call's `Never` and whether it is the callee's or only the site's (a halting argument, an `int 0x29`); `Program::exit_through` replaces `returns_through`. `assemble` places each still-closed call in its block, `O(c log b)`.
+- r2ssa. `AssumedExits.sites` is the one list; `assumed()`, `bounded_by(proof)` and `premises()` derive the ledger's counts. `SourceCallBoundaryFact.never` is the site's entry where the call is its block's last. `exits_are_named` names a closed call's exit only for a proven site.
+- r2dec. `CallPlan.ends` (the site's proof) ends control; `CallPlan.noreturn` (the callee's proof) is the declaration's attribute. Structuring reads a set of proven call instructions, never a callee's name.
+- `afi` prints `noreturn: true` only for a proof and spells a bound as `noreturn: unproven (…)`.
+

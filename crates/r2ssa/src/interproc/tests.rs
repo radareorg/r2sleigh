@@ -291,7 +291,6 @@ fn exact_untyped_artifact(
                             convention,
                             call_arguments(),
                             false,
-                            false,
                             crate::SourceCallResult::Void,
                         )
                         .expect("exact untyped callsite interface"),
@@ -595,7 +594,6 @@ fn prepared_summary_set_models_missing_direct_callee_as_unknown() {
         true,
         r2source::ConventionId::SysVAmd64,
         [crate::SourceCallArgumentSpec::new(0, storage(8))],
-        false,
         false,
         crate::SourceCallResult::register(storage(0)),
     )
@@ -2022,7 +2020,6 @@ fn call_return_relation_requires_complete_nonvoid_result_carrier() {
             r2source::ConventionId::SysVAmd64,
             [],
             false,
-            false,
             result,
         )
         .expect("callsite interface");
@@ -2236,7 +2233,6 @@ fn source_owned_call_observer_requires_exact_complete_call_carriers() {
             complete,
             r2source::ConventionId::Win64,
             [crate::SourceCallArgumentSpec::new(0, storage(32))],
-            false,
             false,
             crate::SourceCallResult::Void,
         )

@@ -2,7 +2,7 @@
 //! the arms the other way round `if (!c) { f(); } rest`: `doc/adr-structure-dominator-tree.md`, "the noreturn guard".
 
 use super::condition::{Marks, as_atoms, negated};
-use super::shape::{Evidence, callee_of};
+use super::shape::{Evidence, site_of};
 use crate::ast::{CExpr, CStmt};
 
 /// A place the pass has still to visit, borrowed from the tree.
@@ -165,7 +165,7 @@ fn ends_in_never_return(mut stmt: &CStmt, ev: &Evidence<'_>) -> bool {
                     None => return false,
                 }
             }
-            CStmt::Expr(_) => return ev.never_returns(callee_of(stmt)),
+            CStmt::Expr(_) => return ev.never_returns(site_of(stmt)),
             _ => return false,
         }
     }
@@ -182,9 +182,8 @@ mod tests {
     };
     use r2ssa::cfg::{BlockTerminator, CFG};
     use r2ssa::domtree::DomTree;
-    use std::collections::BTreeSet;
 
-    fn guarded(body: &mut CStmt, declared: &BTreeSet<String>) -> usize {
+    fn guarded(body: &mut CStmt, declared: &r2ssa::dense::IdSet<r2ssa::InstId>) -> usize {
         guard(body, &Evidence::new(declared, &|_| false), &mut Fixture)
     }
 
@@ -354,7 +353,7 @@ mod tests {
             vec![at(0x30, expr()), at(0x40, ret())],
         )]);
         let kept = body.clone();
-        assert_eq!(guarded(&mut body, &BTreeSet::new()), 0);
+        assert_eq!(guarded(&mut body, &r2ssa::dense::IdSet::new(0)), 0);
         assert_eq!(body, kept);
     }
 
@@ -492,14 +491,20 @@ mod tests {
                 name: "halt".to_owned(),
                 kind: crate::symbol::ExternalKind::Function,
             };
-            CStmt::Expr(CExpr::call(callee, Vec::new()))
+            CStmt::Expr(CExpr::Call {
+                func: Box::new(callee),
+                args: Vec::new(),
+                site: Some(r2ssa::InstId(3)),
+            })
         };
         let mut body = CStmt::Block(vec![
             branching(CStmt::Block(vec![at(0x20, call())]), vec![at(0x30, expr())]),
             at(0x40, ret()),
         ]);
         assert!(certified(&body, &cfg));
-        assert_eq!(guarded(&mut body, &BTreeSet::from(["halt".to_owned()])), 1);
+        let mut halts = r2ssa::dense::IdSet::new(0);
+        halts.insert(r2ssa::InstId(3));
+        assert_eq!(guarded(&mut body, &halts), 1);
         assert!(!certified(&body, &cfg));
     }
 
@@ -1052,7 +1057,11 @@ mod tests {
             name: "exit".to_owned(),
             kind: crate::symbol::ExternalKind::Function,
         };
-        CStmt::Expr(CExpr::call(callee, vec![CExpr::IntLit(code)]))
+        CStmt::Expr(CExpr::Call {
+            func: Box::new(callee),
+            args: vec![CExpr::IntLit(code)],
+            site: Some(crate::structure::support::EXIT_SITE),
+        })
     }
 
     /// A test's value: its number's bit of the assignment, through the `!` and `||`/`&&` a guard writes.

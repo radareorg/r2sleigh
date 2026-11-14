@@ -702,7 +702,6 @@ mod tests {
             name: Some(name.to_string()),
             linkage,
             signature: None,
-            signature_noreturn: false,
             model_policy_evidence: BTreeSet::new(),
             direct_callees: Vec::new(),
             callsite_count: 0,

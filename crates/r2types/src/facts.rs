@@ -397,7 +397,6 @@ pub struct CalleeFact {
     pub name: Option<String>,
     pub linkage: CalleeLinkage,
     pub signature: Option<FunctionType>,
-    pub signature_noreturn: bool,
     pub model_policy_evidence: BTreeSet<CalleeModelPolicyEvidence>,
     pub direct_callees: Vec<u64>,
     pub callsite_count: usize,
@@ -429,7 +428,6 @@ impl CalleeFact {
             name,
             linkage,
             signature: None,
-            signature_noreturn: false,
             model_policy_evidence: BTreeSet::new(),
             direct_callees: Vec::new(),
             callsite_count: 0,
@@ -476,7 +474,6 @@ pub struct FunctionTypeFacts {
     /// Each parameter that points to an inferred structure: its tag, and the member at each
     /// accessed offset (doc/adr-aggregates.md).
     pub parameter_structures: BTreeMap<usize, ParameterStructure>,
-    pub noreturn: bool,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub program_data_objects: crate::ProgramDataObjectTypeFacts,
@@ -497,7 +494,6 @@ pub struct FunctionTypeFactInputs {
     /// Each parameter that points to an inferred structure: its tag, and the member at each
     /// accessed offset (doc/adr-aggregates.md).
     pub parameter_structures: BTreeMap<usize, ParameterStructure>,
-    pub noreturn: bool,
     pub register_params: Vec<ExternalRegisterParamSpec>,
     pub callee_facts: BTreeMap<u64, CalleeFact>,
     pub program_data_objects: crate::ProgramDataObjectTypeFacts,
@@ -518,7 +514,6 @@ pub struct FunctionTypeFactsBuilder {
 impl FunctionTypeFacts {
     pub fn is_empty(&self) -> bool {
         self.merged_signature.is_none()
-            && !self.noreturn
             && self.register_params.is_empty()
             && self.callee_facts.is_empty()
             && self.program_data_objects == crate::ProgramDataObjectTypeFacts::default()
@@ -537,7 +532,6 @@ impl FunctionTypeFacts {
             parameter_types: self.parameter_types,
             inferred_aggregates: self.inferred_aggregates,
             parameter_structures: self.parameter_structures,
-            noreturn: self.noreturn,
             register_params: self.register_params,
             callee_facts: self.callee_facts,
             program_data_objects: self.program_data_objects,
@@ -941,7 +935,6 @@ impl FunctionTypeFactsBuilder {
             parameter_types,
             inferred_aggregates,
             parameter_structures,
-            noreturn,
             mut register_params,
             callee_facts,
             program_data_objects,
@@ -965,7 +958,6 @@ impl FunctionTypeFactsBuilder {
             parameter_types,
             inferred_aggregates,
             parameter_structures,
-            noreturn,
             register_params,
             callee_facts,
             program_data_objects,

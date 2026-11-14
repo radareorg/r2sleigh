@@ -48,6 +48,18 @@ fn proof_columns(
             ", {unproven} {calls} where no return was reached (unproven)"
         );
     }
+    let uncited = ledger.uncited_exits();
+    if uncited > 0 {
+        let calls = if uncited == 1 {
+            "call ends"
+        } else {
+            "calls end"
+        };
+        let _ = write!(
+            &mut line,
+            ", {uncited} {calls} where only an uncited row says it never returns (unproven)"
+        );
+    }
     if closure.assumed > 0 {
         let _ = write!(
             &mut line,

@@ -2897,7 +2897,7 @@ mod tests {
     }
 
     #[test]
-    fn callsite_interface_rejects_bad_order_overlap_and_noreturn_result() {
+    fn callsite_interface_rejects_bad_order_and_overlap() {
         let identity = SourceCallSiteIdentity::new(
             0x1000,
             CanonicalStorageId {
@@ -2914,7 +2914,6 @@ mod tests {
                 r2source::ConventionId::SysVAmd64,
                 [SourceCallArgumentSpec::new(1, register_storage(0, 8))],
                 false,
-                false,
                 SourceCallResult::Void,
             ),
             Err(SourceCallSiteInterfaceError::InvalidArgumentOrder)
@@ -2930,23 +2929,9 @@ mod tests {
                     SourceCallArgumentSpec::new(1, register_storage(4, 8)),
                 ],
                 false,
-                false,
                 SourceCallResult::Void,
             ),
             Err(SourceCallSiteInterfaceError::OverlappingRegisterStorages)
-        );
-        assert_eq!(
-            SourceCallSiteInterface::new(
-                b"call-revision".to_vec(),
-                identity,
-                true,
-                r2source::ConventionId::SysVAmd64,
-                [],
-                false,
-                true,
-                SourceCallResult::register(register_storage(0, 8)),
-            ),
-            Err(SourceCallSiteInterfaceError::NoreturnWithResult)
         );
     }
 

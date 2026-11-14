@@ -650,8 +650,8 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         crate::body::Program::exit(&self.view(), callee, foreign)
     }
 
-    fn returns_through(&self, slot: u64) -> bool {
-        self.view().returns_through(slot)
+    fn exit_through(&self, slot: u64) -> Option<crate::discovery::Never> {
+        self.view().exit_through(slot)
     }
 
     fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
@@ -956,7 +956,9 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for HaltingStubs {
         let target = walker.target(false);
         let imports = db.get::<Imports>(&()).expect("the imports ask for nothing");
         let halting = imports.stubs.iter().filter_map(|(at, stub)| {
-            let (index, halt) = target.imports.row(&stub.symbol)?.halts_on?;
+            // Only a cited row halts a call (D395).
+            let row = target.imports.row(&stub.symbol).filter(|row| row.cited())?;
+            let (index, halt) = row.halts_on?;
             let register = target
                 .convention
                 .argument(r2abi::SlotClass::Integer, index.into());

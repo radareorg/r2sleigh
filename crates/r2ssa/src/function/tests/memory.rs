@@ -776,7 +776,6 @@ fn a_declared_stack_argument_is_the_store_the_call_finds_above_its_stack_pointer
         r2source::ConventionId::SysVAmd64,
         [SourceCallArgumentSpec::on_stack(0, 0, 8)],
         false,
-        false,
         SourceCallResult::Void,
     )
     .expect("callsite interface");

@@ -91,8 +91,8 @@ impl crate::body::Program for Knowing<'_> {
         (self.returns)(callee, self.thumb != foreign)
     }
 
-    fn returns_through(&self, slot: u64) -> bool {
-        self.program.returns_through(slot)
+    fn exit_through(&self, slot: u64) -> Option<crate::discovery::Never> {
+        self.program.exit_through(slot)
     }
 
     fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {

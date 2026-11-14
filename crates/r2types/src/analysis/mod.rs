@@ -518,7 +518,6 @@ fn summary_to_callee_fact(summary: &FunctionSemanticSummary) -> CalleeFact {
         name: summary.name.clone(),
         linkage: summary_linkage_to_callee_linkage(summary.linkage),
         signature: None,
-        signature_noreturn: false,
         model_policy_evidence: BTreeSet::from([CalleeModelPolicyEvidence::InterprocSummary]),
         direct_callees: summary.direct_callees.iter().copied().collect(),
         callsite_count: summary.callsite_count,
@@ -749,7 +748,6 @@ fn build_type_analysis_inner(
         // Enrichment states these from the solve, beside the exact signature.
         inferred_aggregates: BTreeMap::new(),
         parameter_structures: BTreeMap::new(),
-        noreturn: input.parsed_context.noreturn,
         register_params: input.parsed_context.register_params.clone(),
         callee_facts,
         program_data_objects: input.parsed_context.program_data_objects.clone(),

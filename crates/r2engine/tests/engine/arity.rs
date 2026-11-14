@@ -241,6 +241,38 @@ fn a_call_through_a_writable_noreturn_slot_comes_back_and_a_sealed_one_does_not(
     assert!(!sealed.contains('7'), "{sealed}");
 }
 
+/// A sealed slot bound to `xalloc_die`, which only radare2's uncited row says never returns: the call
+/// stays closed, but the bound proves nothing, so the body is no `Composed` "never" and the call
+/// declares no `noreturn` (D395).
+#[test]
+fn a_call_through_a_sealed_slot_to_an_uncited_noreturn_composes_nothing() {
+    let slot = BASE + 0x20;
+    let literal = Literal::of_code(
+        CALL_THROUGH_A_SLOT_THEN_RETURN_SEVEN,
+        &[("caller", BASE, 0xc)],
+    )
+    .running_on(&[PlatformEvidence::Interpreter(Libc::Glibc)])
+    .writable_data_after(slot)
+    .loader_written(common::import_write(slot, 8, "xalloc_die"))
+    .relocated(common::import_slot(slot, "xalloc_die"))
+    .sealed(slot..slot + 8);
+    let mut open = OpenProgram::of(literal);
+    let info = open.function_info(BASE).expect("it is described");
+    let proof = info.noreturn.map(|never| never.proof);
+    assert_eq!(
+        proof,
+        Some(r2engine::discovery::NeverProof::NoReturnReached)
+    );
+    let text = open
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(text.contains("xalloc_die("), "{text}");
+    assert!(!text.contains("noreturn"), "{text}");
+}
+
 /// ld.so's `call [__rtld_malloc]`: a sealed slot no relocation fills holds 0 in the file, and
 /// start-up code may write it before the seal, so the call goes through memory, never to `fcn_0`.
 #[test]

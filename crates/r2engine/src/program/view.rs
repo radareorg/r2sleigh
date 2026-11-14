@@ -310,16 +310,18 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
     }
 
     /// A call through a slot that is not a kept loader binding is opaque, so it comes back.
-    fn returns_through(&self, slot: u64) -> bool {
-        crate::stated::sealed_import(self, slot).is_none()
-            || super::returns::Walking::new(self.clone(), false)
-                .ok()
-                .and_then(|walker| crate::discovery::Walker::declared(&walker, slot))
-                .is_none_or(|answer| answer.comes())
+    fn exit_through(&self, slot: u64) -> Option<crate::discovery::Never> {
+        crate::stated::sealed_import(self, slot)?;
+        let walker = super::returns::Walking::new(self.clone(), false).ok()?;
+        match crate::discovery::Walker::declared(&walker, slot)? {
+            crate::discovery::Return::Never(never) => Some(never),
+            crate::discovery::Return::Comes => None,
+        }
     }
 
     fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
-        let ((index, halt), model) = self.import_through(slot, |row| row.halts_on)?;
+        let cited = |row: &r2abi::LibraryRow| row.halts_on.filter(|_| row.cited());
+        let ((index, halt), model) = self.import_through(slot, cited)?;
         let register = model.argument(r2abi::SlotClass::Integer, index.into());
         register.map(|register| (register, halt))
     }

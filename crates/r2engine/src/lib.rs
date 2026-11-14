@@ -764,7 +764,7 @@ pub struct EngineAnalyzeFunctionRequestInput {
 /// from the declared interface's graph (ADR call-boundary, Types on the wire).
 fn trusted_source_signature(
     trusted: &r2ssa::TrustedSsaArtifact,
-) -> Option<(r2types::FunctionSignatureSpec, bool)> {
+) -> Option<r2types::FunctionSignatureSpec> {
     let signature = trusted.source().presentation().signature()?;
     let interface =
         (trusted.source().function_interface()).filter(|interface| interface.types_are_declared());
@@ -788,7 +788,7 @@ fn trusted_source_signature(
         _ => typed(interface.and_then(r2ssa::SourceFunctionInterface::return_logical_value)),
     };
     let spec = r2types::FunctionSignatureSpec { ret_type, params };
-    Some((spec, signature.noreturn()))
+    Some(spec)
 }
 
 /// Everything one callee contributes to a caller's request.
@@ -866,9 +866,8 @@ fn trusted_parsed_context(trusted: &r2ssa::TrustedSsaArtifact) -> r2types::Parse
         (image.data_symbols().iter()).map(|object| (object.address(), object.type_id())),
     );
     r2types::ParsedExternalContext {
-        noreturn: signature.as_ref().is_some_and(|(_, noreturn)| *noreturn),
-        current_signature: signature.as_ref().map(|(spec, _)| spec.clone()),
-        merged_signature: signature.map(|(spec, _)| spec),
+        current_signature: signature.clone(),
+        merged_signature: signature,
         program_data_objects,
         assumptions: trusted.artifact().facts().assumptions.clone(),
         ..r2types::ParsedExternalContext::default()

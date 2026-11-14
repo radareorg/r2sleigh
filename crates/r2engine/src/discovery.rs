@@ -27,31 +27,13 @@ use crate::native::Program;
 ///
 /// `r2source`'s, the one type every derived fact states its trust in; the
 /// engine's answers carry it, so the shell reads it from here.
-pub use r2source::confidence::{Basis, Confidence, Fact, Grade, Premise};
+pub use r2source::confidence::{Basis, Confidence, Fact, Grade, Never, NeverProof, Premise};
 
 /// Whether control comes back from a call to a function, and why a "never" is believed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Return {
     Comes,
     Never(Never),
-}
-
-/// A call that never comes back: what states it, and what it takes for granted.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Never {
-    pub proof: NeverProof,
-    pub premises: BTreeSet<Premise>,
-}
-
-/// What a "never" rests on (doc/adr-call-boundary.md, "S30 as built"; RULING 1.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum NeverProof {
-    /// A cited row, a runtime model or the binary's debug information states it.
-    Declared,
-    /// Every end of the body is a transfer a statement or a `Composed` callee proves halts (D229).
-    Composed,
-    /// No walk of the body reached a return: a lower bound on what it does, never proof.
-    NoReturnReached,
 }
 
 impl Return {
@@ -447,7 +429,8 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
         let mut proven = Vec::new();
         for (callee, waiters) in &self.waiting {
             let settled = self.settled(*callee);
-            let declared = matches!(settled, Some(Return::Never(never)) if never.proof != NeverProof::NoReturnReached);
+            // A bound composes nothing: only a declared or composed "never" does (D395).
+            let declared = matches!(settled, Some(Return::Never(never)) if never.proves());
             for (caller, _) in waiters.iter().filter(|(caller, _)| candidate(*caller)) {
                 *open.entry(*caller).or_default() += usize::from(!declared);
             }

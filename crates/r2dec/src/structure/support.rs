@@ -68,16 +68,24 @@ pub(crate) fn cond_branch(true_target: u64, false_target: u64) -> BlockTerminato
     }
 }
 
-/// The callee every test declares never returns.
+/// The callee every test's call that never comes back is to.
 pub(crate) const EXIT: &str = "exit";
 
-/// A call to the function `name`.
+/// The instruction of every test's call to [`EXIT`], which [`declared`] says never comes back.
+pub(crate) const EXIT_SITE: r2ssa::InstId = r2ssa::InstId(1000);
+
+/// A call to the function `name`; a call to [`EXIT`] is at [`EXIT_SITE`].
 pub(crate) fn call_to(name: &str) -> CStmt {
     let callee = CExpr::External {
         name: name.to_owned(),
         kind: ExternalKind::Function,
     };
-    CStmt::Expr(CExpr::call(callee, Vec::new()))
+    let site = (name == EXIT).then_some(EXIT_SITE);
+    CStmt::Expr(CExpr::Call {
+        func: Box::new(callee),
+        args: Vec::new(),
+        site,
+    })
 }
 
 /// A call to `exit`.
@@ -187,7 +195,7 @@ fn composites(x: &CExpr) -> Vec<CExpr> {
 }
 
 /// Calls to `exit`: each top-level form at each position of none to sixteen arguments, every ordered pair of forms,
-/// and [`Draw`]'s calls, which vary values, symbols, sites, the callee's kind and nesting to depth eight.
+/// and [`Draw`]'s calls, which vary values, symbols, nested sites, the callee's kind and nesting to depth eight.
 pub(crate) fn exit_calls() -> impl Iterator<Item = CStmt> {
     let forms = arguments();
     let call = |args: Vec<CExpr>| {
@@ -195,7 +203,11 @@ pub(crate) fn exit_calls() -> impl Iterator<Item = CStmt> {
             name: EXIT.to_owned(),
             kind: ExternalKind::Function,
         };
-        CStmt::Expr(CExpr::call(callee, args))
+        CStmt::Expr(CExpr::Call {
+            func: Box::new(callee),
+            args,
+            site: Some(EXIT_SITE),
+        })
     };
     let len = forms.len();
     let rotated = (0..len).flat_map(move |start| {
@@ -243,7 +255,7 @@ impl Draw {
             kind,
         };
         let args = (0..self.below(21)).map(|_| self.tree(8)).collect();
-        let site = self.site();
+        let site = Some(EXIT_SITE);
         CStmt::Expr(CExpr::Call {
             func: Box::new(callee),
             args,
@@ -379,14 +391,16 @@ impl Draw {
     }
 }
 
-/// The callees the tests' evidence declares never to return: `exit`.
-pub(crate) fn declared() -> std::collections::BTreeSet<String> {
-    std::collections::BTreeSet::from([EXIT.to_owned()])
+/// The calls the tests' evidence says never come back: those at [`EXIT_SITE`].
+pub(crate) fn declared() -> r2ssa::dense::IdSet<r2ssa::InstId> {
+    let mut sites = r2ssa::dense::IdSet::new(0);
+    sites.insert(EXIT_SITE);
+    sites
 }
 
-/// Whether a statement is a call to `exit`, which is what [`declared`] says.
+/// Whether a statement is a call at [`EXIT_SITE`], which is what [`declared`] says.
 pub(crate) fn never_returns(stmt: &CStmt) -> bool {
-    super::shape::callee_of(stmt) == Some(EXIT)
+    super::shape::site_of(stmt) == Some(EXIT_SITE)
 }
 
 /// Markers whose block is their index; the copy of marker `n` is marker `1000 + n`.
@@ -453,7 +467,7 @@ fn depth(expr: &CExpr) -> usize {
 }
 
 #[test]
-fn the_drawn_calls_reach_twenty_arguments_depth_eight_and_both_sites() {
+fn the_drawn_calls_reach_twenty_arguments_and_depth_eight_at_the_exit_site() {
     let mut draw = Draw(0x9e37_79b9_7f4a_7c15);
     let calls = (0..2048).map(|_| draw.call()).collect::<Vec<_>>();
     let (mut most, mut deepest, mut sites) = (0, 0, BTreeSet::new());
@@ -463,7 +477,8 @@ fn the_drawn_calls_reach_twenty_arguments_depth_eight_and_both_sites() {
         };
         most = most.max(args.len());
         deepest = deepest.max(args.iter().map(depth).max().unwrap_or(0));
-        sites.insert(site.is_some());
+        sites.insert(*site);
     }
-    assert_eq!((most, deepest, sites.len()), (20, 8, 2));
+    assert_eq!((most, deepest), (20, 8));
+    assert_eq!(sites, BTreeSet::from([Some(EXIT_SITE)]));
 }

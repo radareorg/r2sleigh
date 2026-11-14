@@ -1484,7 +1484,7 @@ pub(crate) fn collect_source_boundary_facts(
             at: call_site.at,
             convention: None,
             variadic: None,
-            noreturn: None,
+            never: closed_site(function, graph, call_site.at),
             result_kind: None,
             unstated_lanes: Box::default(),
             unstated_carrier: None,
@@ -1511,7 +1511,6 @@ pub(crate) fn collect_source_boundary_facts(
         }) {
             boundary.convention = Some(interface.convention());
             boundary.variadic = Some(interface.is_variadic());
-            boundary.noreturn = Some(interface.is_noreturn());
             boundary.result_kind = Some(interface.result());
             boundary.unstated_lanes = unproven_lanes(machine_context, call_site, interface);
             // The contract states no result: none here, and every killed lane unstated (D330).
@@ -2019,6 +2018,16 @@ pub(crate) fn collect_source_boundary_facts(
         }
     }
     facts
+}
+
+/// The walk's closed call ending the block of the call at `at`, where it is that block's last call.
+/// `O(log sites)`, then one scan of a closed block.
+fn closed_site(function: &SSAFunction, graph: &SsaGraph, at: InstId) -> Option<crate::ExitSite> {
+    let block = graph.block(graph.inst(at)?.block)?;
+    let site = function.assumed_exits().site(block.addr)?;
+    let is_call = |id: &InstId| graph.op(*id).is_some_and(SSAOp::is_call);
+    let last = block.insts.iter().rev().find(|id| is_call(id))?;
+    (*last == at).then(|| site.clone())
 }
 
 #[cfg(test)]

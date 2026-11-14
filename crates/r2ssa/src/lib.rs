@@ -119,12 +119,12 @@ pub use defuse::{DefUseInfo, def_use};
 pub use demand::DemandedBytes;
 pub use function::{
     AssumedExits, CFGRiskSummary, CalleeEvidence, CalleePreservedCarriers, DecompileInputs,
-    DecompilePrepFacts, DefRef, DefSite, GenuineNativeInstructionSpan, Lifted, NamedBlockMut,
-    PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot, RegisterIdentityCensus,
-    RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction, Sealed, SiteConventions,
-    SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind,
-    StackAddressBase, StackAddressRoot, TrustedConstruction, TrustedSeal, TrustedSsaArtifact,
-    def_use_graph,
+    DecompilePrepFacts, DefRef, DefSite, ExitSite, GenuineNativeInstructionSpan, Lifted,
+    NamedBlockMut, PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot,
+    RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction, Sealed,
+    SiteConventions, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,
+    SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot, TrustedConstruction,
+    TrustedSeal, TrustedSsaArtifact, def_use_graph,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,

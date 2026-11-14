@@ -24,7 +24,7 @@ use crate::codegen::{
 use crate::control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
 use crate::ledger::{ObligationLedger, Outcome};
 use crate::structure::certify::StatementRole;
-use crate::structure::shape::{Evidence, Occurrences, callee_of};
+use crate::structure::shape::{Evidence, Occurrences, site_of};
 
 /// One function the staged pipeline rendered, and what became of each obligation.
 pub struct Rendered {
@@ -373,7 +373,7 @@ fn statement_role(
         .any(|id| selections.contains(id))
     {
         true => StatementRole::Selects,
-        false => (traps(stmt) || evidence.never_returns(callee_of(stmt))).into(),
+        false => (traps(stmt) || evidence.never_returns(site_of(stmt))).into(),
     }
 }
 
@@ -561,9 +561,9 @@ mod tests {
     }
 
     #[test]
-    fn a_call_ends_control_by_its_callee_s_declaration_whatever_it_passes() {
+    fn a_call_ends_control_by_its_site_s_proof_whatever_it_passes() {
         let declared = crate::structure::support::declared();
-        let none = BTreeSet::new();
+        let none = r2ssa::dense::IdSet::new(0);
         for (set, role) in [
             (&declared, StatementRole::Ends),
             (&none, StatementRole::Plain),

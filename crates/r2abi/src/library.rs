@@ -186,6 +186,13 @@ pub struct LibraryRow {
     pub citation: Box<str>,
 }
 
+impl LibraryRow {
+    /// Whether a cited source states the row; radare2's tables state the rest, which prove nothing (D395).
+    pub fn cited(&self) -> bool {
+        !self.citation.is_empty()
+    }
+}
+
 /// Whether a row states its function's result (doc/adr-result-side.md, "Imports with an unstated result").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RowResult {

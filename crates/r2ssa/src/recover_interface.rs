@@ -4046,7 +4046,6 @@ pub fn mint_recovered_call_site_interface(
         callee.convention(),
         arguments,
         callee.is_variadic(),
-        false,
         result,
     )
     .and_then(|interface| interface.with_exact_callee_interface(callee.clone()))
@@ -4250,7 +4249,7 @@ mod tests {
                 at: crate::graph::InstId(0),
                 convention: None,
                 variadic: None,
-                noreturn: None,
+                never: None,
                 result_kind: None,
                 unstated_lanes: Box::default(),
                 unstated_carrier: None,
@@ -4358,7 +4357,6 @@ mod tests {
             true,
             AAPCS64,
             [SourceCallArgumentSpec::new(0, register(0, 8))],
-            false,
             false,
             SourceCallResult::register(register(0, 8)),
         )
@@ -4523,7 +4521,6 @@ mod tests {
             true,
             AAPCS64,
             [],
-            false,
             false,
             SourceCallResult::Void,
         )
@@ -4720,7 +4717,6 @@ mod tests {
             true,
             AAPCS64,
             [SourceCallArgumentSpec::new(0, register(0, 8))],
-            false,
             false,
             SourceCallResult::register(register(0, 8)),
         )
