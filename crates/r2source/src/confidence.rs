@@ -181,6 +181,10 @@ impl Premise {
 
 /// A source that states a fact, minted only from its owner's statement (D410): a cited library
 /// row, the binary's debug information, a kernel's document or a runtime model.
+///
+/// ```compile_fail,E0423
+/// let forged = r2source::Citation(());
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Citation(Cited);
 
@@ -209,7 +213,8 @@ impl Citation {
         r2abi::syscalls::interrupt_never_returns(kernel, arch, vector).map(|_| Self(Cited::Kernel))
     }
 
-    /// The Go runtime model naming `name` among the routines its compiler ends a block at.
+    /// The Go runtime model naming `name` among the routines its compiler ends a block at; what it
+    /// states holds under [`Premise::GoRuntime`].
     pub fn runtime(name: &str) -> Option<Self> {
         r2abi::runtime::exits(name).then_some(Self(Cited::Runtime))
     }
@@ -256,11 +261,15 @@ pub struct Never {
 }
 
 impl Never {
-    /// What `citation` states, assuming nothing.
-    pub const fn cited(_citation: Citation) -> Self {
+    /// What `citation` states, assuming what its source does: the runtime model its contract.
+    pub fn cited(citation: Citation) -> Self {
+        let premises = match citation.0 {
+            Cited::Runtime => BTreeSet::from([Premise::GoRuntime]),
+            Cited::Row | Cited::DebugInfo | Cited::Kernel => BTreeSet::new(),
+        };
         Self {
             proof: NeverProof::Declared,
-            premises: BTreeSet::new(),
+            premises,
         }
     }
 
@@ -528,6 +537,28 @@ mod tests {
                 .assuming(Premise::ClosedWorld)
                 .to_string(),
             "handed+closed-world+ub-free"
+        );
+    }
+}
+
+#[cfg(test)]
+mod never_tests {
+    use super::{Citation, Never, NeverProof, Premise};
+
+    /// A composition proves only from proving ends, at least one, assuming what each does (D410).
+    #[test]
+    fn a_composition_needs_an_end_and_proves_only_from_proofs() {
+        let go = Never::cited(Citation::runtime("runtime.gopanic").expect("the model names it"));
+        assert_eq!(go.premises(), &[Premise::GoRuntime].into());
+        assert_eq!(Never::composed([]), None);
+        assert_eq!(Never::composed([&go, &Never::uncited()]), None);
+        assert_eq!(Never::composed([&Never::unreached()]), None);
+        let composed = Never::composed([&go, &go]).expect("every end proves");
+        assert_eq!(composed.proof(), NeverProof::Composed);
+        assert_eq!(composed.proves(), Some(&[Premise::GoRuntime].into()));
+        assert_eq!(
+            Never::unreached().assuming([Premise::ClosedWorld]).proves(),
+            None
         );
     }
 }

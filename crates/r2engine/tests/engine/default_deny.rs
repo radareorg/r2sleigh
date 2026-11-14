@@ -240,14 +240,22 @@ fn an_unknown_callee_types_no_argument_a_pointer() {
         cell(row.name(), "pointer", || {
             let before = [0x53, 0x48, 0x89, 0xfb]; // push rbx; mov rbx, rdi
             let text = rendered(row.around(&before, &[0x48, 0x89, 0xd8, 0x5b, 0xc3]));
-            // An import's own declaration (`void* xmalloc(uint64_t);`) types no argument here.
-            let declaration = |line: &&str| {
-                let line = line.trim();
-                let head = line.split('(').next().unwrap_or_default();
+            // A declaration's return type (`void* xmalloc(uint64_t);`) is no argument: only the
+            // text past its first `(` is read.
+            let argued = |line: &str| {
+                let trimmed = line.trim();
+                let head = trimmed.split('(').next().unwrap_or_default();
                 let typed = head.contains(' ') || head.contains('*');
-                line.ends_with(");") && typed && !line.contains('=') && !head.starts_with("return")
+                let declaration = trimmed.ends_with(");") && typed && !trimmed.contains('=');
+                match declaration && !head.starts_with("return") {
+                    true => trimmed
+                        .split_once('(')
+                        .map_or("", |(_, rest)| rest)
+                        .to_owned(),
+                    false => line.to_owned(),
+                }
             };
-            let mut lines = text.lines().filter(|line| !declaration(line));
+            let mut lines = text.lines().map(argued);
             match lines.any(|line| line.contains("void *") || line.contains("void*")) {
                 true => Err(text),
                 false => Ok(()),

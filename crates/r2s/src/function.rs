@@ -208,7 +208,7 @@ pub fn blocks(session: &mut Session, argument: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use r2engine::discovery::{Citation, Never, Premise};
+    use r2engine::discovery::{Citation, Never};
 
     fn spelled(never: &Never) -> Option<String> {
         super::noreturn(Some(never))
@@ -217,12 +217,15 @@ mod tests {
     /// `afi` says `noreturn: true` only for a proof; a bound is spelled as one (D380).
     #[test]
     fn a_bound_is_never_spelled_noreturn_true() {
-        let cited =
-            Never::cited(Citation::runtime("runtime.gopanic").expect("the model names gopanic"));
+        let rows = r2abi::LibraryRows::embedded(r2abi::CLibrary::Glibc);
+        let exit = rows
+            .find(r2abi::CLibrary::Glibc.scope(), "exit")
+            .expect("exit");
+        let cited = Never::cited(Citation::of(exit).expect("exit's row is cited"));
         assert_eq!(spelled(&cited).as_deref(), Some("noreturn: true"));
-        let assumed = cited.assuming([Premise::GoRuntime]);
+        let go = Never::cited(Citation::runtime("runtime.gopanic").expect("the model names it"));
         assert_eq!(
-            spelled(&Never::composed([&assumed]).expect("a proving end")).as_deref(),
+            spelled(&Never::composed([&go]).expect("a proving end")).as_deref(),
             Some("noreturn: true (assuming go-runtime)")
         );
         assert_eq!(

@@ -867,7 +867,7 @@ mod tests {
     /// The Go runtime model's `gopanic`, under its premise.
     fn model_exit() -> Return {
         let citation = Citation::runtime("runtime.gopanic").expect("the model names gopanic");
-        Return::Never(Never::cited(citation).assuming([Premise::GoRuntime]))
+        Return::Never(Never::cited(citation))
     }
 
     fn never() -> Return {

@@ -1175,7 +1175,7 @@ pub(crate) fn declared_return(
             .then(|| program.name_at(address))
             .flatten()
             .and_then(|name| Citation::runtime(&name))
-            .map(|citation| Return::Never(Never::cited(citation).assuming([premise])));
+            .map(|citation| Return::Never(Never::cited(citation)));
     };
     // Only a cited row proves a "never"; radare2's uncited one is a bound (D395).
     Some(match target.imports.row(&name) {
