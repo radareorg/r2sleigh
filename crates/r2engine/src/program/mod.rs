@@ -654,8 +654,16 @@ impl<S: Source + 'static> crate::body::Program for OpenProgram<S> {
         self.view().returns_through(slot)
     }
 
-    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
         self.view().halts_on_through(slot)
+    }
+
+    fn halts_on(&self, callee: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
+        crate::body::Program::halts_on(&self.view(), callee)
+    }
+
+    fn holds_values(&self) -> bool {
+        crate::body::Program::holds_values(&self.view())
     }
 
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
@@ -927,6 +935,34 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Imports {
         };
         let machine = &machines.machine;
         naming::imports(&Recorded { db }, &machine.disasm, machine.arch.alignment)
+    }
+}
+
+/// Each import stub whose row halts on a value in an argument register, by stub address: the
+/// register and the value (D211). One pass over the stubs, `O(stubs log rows)`.
+pub(super) struct HaltingStubs;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for HaltingStubs {
+    type Key = ();
+    type Value = BTreeMap<u64, (r2source::CanonicalStorageId, r2abi::Halt)>;
+    const NAME: &'static str = "halting-stubs";
+    const RETENTION: Retention = Retention::Held;
+
+    fn compute(db: &Db<ProgramInputs<S>>, (): &()) -> Self::Value {
+        let view = View::new(db, false);
+        let Ok(walker) = returns::Walking::new(view.clone(), false) else {
+            return BTreeMap::new();
+        };
+        let target = walker.target(false);
+        let imports = db.get::<Imports>(&()).expect("the imports ask for nothing");
+        let halting = imports.stubs.iter().filter_map(|(at, stub)| {
+            let (index, halt) = target.imports.row(&stub.symbol)?.halts_on?;
+            let register = target
+                .convention
+                .argument(r2abi::SlotClass::Integer, index.into());
+            Some((*at, (register?, halt)))
+        });
+        halting.collect()
     }
 }
 

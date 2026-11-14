@@ -97,8 +97,8 @@ pub struct BoundaryResult {
     pub lanes: [LaneDecision; LANES],
     /// What the seal applies as a stated input; none where the calls decide nothing.
     pub result: Option<SourceClosedResult>,
-    /// What the decision assumes.
-    pub premises: Box<[r2source::Premise]>,
+    /// Whether a way in is a cited slot, which the decision's premises read (`SourceClosedDecision`).
+    pub through_slot: bool,
     /// The sources the authority order overrules: refusal evidence, never a decision.
     pub disputes: Box<[Dispute]>,
 }
@@ -349,6 +349,16 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
             calls = calls.saturating_add(1);
             join_site(&mut lanes, caller, &site.boundary, &mut returned);
         }
+    }
+    // A body that leaves for `callee` by a branch returns what `callee` returns: each held lane is
+    // its own result, read as its callers read it (D227, `__wrap_main`'s `b main`).
+    for &caller in survey.tail_callers_of(callee) {
+        let held = (lanes.iter().enumerate()).filter(|(_, lane)| lane.held);
+        returned.extend(held.map(|(at, _)| Returned {
+            caller,
+            at,
+            bytes: ByteMask(u128::MAX),
+        }));
     }
     let loader_calls = loader_reads(db.inputs().source.container(), callee, &mut lanes);
     let slot_read = slot_reads(db, callee, &mut lanes);
@@ -603,11 +613,25 @@ fn solve<S: Source + 'static>(
                 join(&mut lanes[lane], Some(Forwarded::Cycle));
             }
         }
+        // A read forwarded from a caller whose read rests on a slot rests on it too.
+        let slotted = |caller: u64| match component.member(caller) {
+            Some(inside) => {
+                (component.directs[inside.index()].as_ref()).is_some_and(|d| d.slot_read)
+            }
+            None => outside(caller)
+                .flatten()
+                .is_some_and(|theirs| theirs.slot_read),
+        };
+        let slot_read = direct.slot_read
+            || direct
+                .returned
+                .iter()
+                .any(|returned| slotted(returned.caller));
         Some(Forwarding {
             lanes,
             calls: direct.calls,
             loader_calls: direct.loader_calls,
-            slot_read: direct.slot_read,
+            slot_read,
             unread: direct.unread,
             forwarders: std::mem::take(&mut forwarders[at]).into_iter().collect(),
         })
@@ -872,22 +896,22 @@ impl BoundaryResult {
             lane if lane.dead && dead => LaneDecision::Dead,
             _ => LaneDecision::Open,
         });
-        // A slot's declared return is how every caller calls, given no undefined call (C17 6.3.2.3p8).
-        let slotted = matches!(result, Some(SourceClosedResult::DeclaredVoid(_)))
-            || (result.is_some() && forwarding.slot_read);
-        let premises = match result {
-            Some(_) if slotted => vec![
-                r2source::Premise::ClosedWorld,
-                r2source::Premise::UbFreeSource,
-            ],
-            Some(_) => vec![r2source::Premise::ClosedWorld],
-            None => Vec::new(),
-        };
         Self {
             lanes: decisions,
             result,
-            premises: premises.into(),
+            through_slot: result.is_some() && forwarding.slot_read,
             disputes: disputes.into(),
+        }
+    }
+
+    /// The decision the seal applies, with what it assumes.
+    pub const fn decision(&self) -> Option<r2source::SourceClosedDecision> {
+        match self.result {
+            Some(result) => Some(r2source::SourceClosedDecision {
+                result,
+                through_slot: self.through_slot,
+            }),
+            None => None,
         }
     }
 }

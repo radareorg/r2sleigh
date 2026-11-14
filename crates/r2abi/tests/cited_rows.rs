@@ -1,14 +1,14 @@
 //! Each cited row names its header on `.include=`, sits under a comment naming its standard, and
 //! states its tail where it spells `...` (doc/adr-call-boundary.md, S8).
 
-use r2abi::{CLibrary, Dll, Handle, LibraryId, LibraryRows, Tail};
+use r2abi::{CLibrary, Dll, Halt, Handle, LibraryId, LibraryRows, Tail};
 
 /// Each cited table and the fewest rows it holds.
 const CITED: [(&str, usize); 7] = [
     ("types-posix.sdb.txt", 515),
     ("types-glibc.sdb.txt", 85),
     ("types-bionic.sdb.txt", 100),
-    ("types-musl.sdb.txt", 2),
+    ("types-musl.sdb.txt", 3),
     ("types-kernel32.sdb.txt", 50),
     ("types-ucrt.sdb.txt", 1),
     ("types-cxx-cited.sdb.txt", 1),
@@ -62,6 +62,16 @@ fn rows(text: &str) -> Vec<(String, String, Option<String>)> {
             && row.1.contains("binary standard only")
         {
             row.2 = Some(format!("LSB: {}", page.trim()));
+        } else if let Some((key, page)) = line.split_once('=')
+            && let Some(name) = key
+                .strip_prefix("func.")
+                .and_then(|rest| rest.strip_suffix(".cite"))
+            && let Some(row) = rows.iter_mut().find(|row| row.0 == name && row.2.is_none())
+            && row.1.contains("musl src/")
+            && row.1.contains("no header declares it")
+        {
+            // A musl interface no header declares cites the source file that defines it.
+            row.2 = Some(format!("musl: {}", page.trim()));
         }
     }
     rows
@@ -75,7 +85,9 @@ fn every_row_cites_its_header() {
         for (name, comment, header) in rows {
             let header = header.unwrap_or_else(|| panic!("{file}: `{name}` names no header"));
             assert!(
-                header.ends_with(".h") || header.starts_with("LSB: LSB-Core-generic 5.0, "),
+                header.ends_with(".h")
+                    || header.starts_with("LSB: LSB-Core-generic 5.0, ")
+                    || header.starts_with("musl: src/"),
                 "{file}: `{name}` includes `{header}`"
             );
             assert!(
@@ -189,7 +201,10 @@ fn a_microsoft_row_cites_its_page() {
     let kernel32 = |name| rows.row(LibraryId::Dll(Dll::Kernel32), name).expect(name);
     let terminate = kernel32("TerminateProcess");
     assert!(!terminate.noreturn);
-    assert_eq!(terminate.halts_on, Some((0, Handle::CurrentProcess)));
+    assert_eq!(
+        terminate.halts_on,
+        Some((0, Halt::Handle(Handle::CurrentProcess)))
+    );
     assert_eq!(
         kernel32("GetCurrentProcess").yields,
         Some(Handle::CurrentProcess)
@@ -318,6 +333,12 @@ fn a_row_is_keyed_by_the_name_a_program_links() {
     assert!(assert_fail.noreturn);
     assert_eq!(assert_fail.tail, Tail::None);
     assert!(glibc.row(LibraryId::Glibc, "__errno_location").is_some());
+    // error(3) exits on a nonzero status and returns on zero, so neither row is noreturn (D211).
+    for name in ["error", "error_at_line"] {
+        let row = glibc.row(LibraryId::Glibc, name).expect(name);
+        assert!(!row.noreturn, "{name}");
+        assert_eq!(row.halts_on, Some((0, Halt::NonZero)), "{name}");
+    }
     // D151's last two: libio's `__overflow` and glibc's `wcwidth` are cited, fixed prototypes.
     for (name, parameters) in [("__overflow", 2), ("wcwidth", 1)] {
         let row = glibc.row(LibraryId::Glibc, name).expect(name);
@@ -427,4 +448,12 @@ fn a_cited_slot_returning_int_reads_its_integer_bytes() {
     let atexit = rows.row(LibraryId::Portable, "atexit").expect("cited");
     let handler = rows.prototype(atexit).parameters[0].code_result(graph);
     assert_eq!(handler, Some(r2abi::ResultRead::Nothing));
+    // musl's `libc_start_main_stage2` runs `exit(main(argc, argv, envp))` (D227).
+    let musl = LibraryRows::embedded(CLibrary::Musl);
+    let row = musl
+        .row(LibraryId::Musl, "__libc_start_main")
+        .expect("cited");
+    assert!(row.citation.contains("musl"), "{}", row.citation);
+    let main = musl.prototype(row).parameters[0].code_result(musl.graph());
+    assert_eq!(main, Some(r2abi::ResultRead::Integer { bytes: 4 }));
 }

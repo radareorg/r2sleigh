@@ -71,7 +71,7 @@ impl MachineProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FunctionIdentity {
     address: u64,
-    closed_result: Option<SourceClosedResult>,
+    closed: Option<SourceClosedDecision>,
 }
 
 impl FunctionIdentity {
@@ -81,7 +81,36 @@ impl FunctionIdentity {
 
     /// What the closed world decides of this function's result, where r2engine decided it.
     pub const fn closed_result(&self) -> Option<SourceClosedResult> {
-        self.closed_result
+        match self.closed {
+            Some(decision) => Some(decision.result),
+            None => None,
+        }
+    }
+
+    /// The closed world's decision and what it assumes, where r2engine decided it.
+    pub const fn closed_decision(&self) -> Option<SourceClosedDecision> {
+        self.closed
+    }
+}
+
+/// What the closed world decides of a function's result, and whether a way in is a cited slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SourceClosedDecision {
+    pub result: SourceClosedResult,
+    /// A way in is a cited slot whose declared type is how every caller calls (C17 6.3.2.3p8).
+    pub through_slot: bool,
+}
+
+impl SourceClosedDecision {
+    /// What the decision takes for granted: every call the image shows, and a slot's type only
+    /// where no call is undefined.
+    pub const fn premises(self) -> &'static [Premise] {
+        let slotted =
+            self.through_slot || matches!(self.result, SourceClosedResult::DeclaredVoid(_));
+        match slotted {
+            true => &[Premise::ClosedWorld, Premise::UbFreeSource],
+            false => &[Premise::ClosedWorld],
+        }
     }
 }
 
@@ -1185,7 +1214,7 @@ mod tests {
             },
             FunctionIdentity {
                 address: 0x1000,
-                closed_result: None,
+                closed: None,
             },
             FunctionPresentation {
                 display_name: "fixture".into(),
@@ -1311,7 +1340,7 @@ mod tests {
                 valid.machine().clone(),
                 FunctionIdentity {
                     address: 0x2000,
-                    closed_result: None,
+                    closed: None,
                 },
                 valid.presentation().clone(),
                 valid.image().clone(),

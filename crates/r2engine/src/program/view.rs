@@ -318,10 +318,20 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
                 .is_none_or(|answer| answer.comes())
     }
 
-    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
-        let ((index, handle), model) = self.import_through(slot, |row| row.halts_on)?;
+    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
+        let ((index, halt), model) = self.import_through(slot, |row| row.halts_on)?;
         let register = model.argument(r2abi::SlotClass::Integer, index.into());
-        register.map(|register| (register, handle))
+        register.map(|register| (register, halt))
+    }
+
+    fn halts_on(&self, callee: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Halt)> {
+        let halting = self.db.get::<super::HaltingStubs>(&()).ok()?;
+        halting.get(&callee).copied()
+    }
+
+    fn holds_values(&self) -> bool {
+        let halting = self.db.get::<super::HaltingStubs>(&()).ok();
+        self.binds_handles() || halting.is_some_and(|halting| !halting.is_empty())
     }
 
     fn binds_handles(&self) -> bool {
@@ -392,12 +402,12 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
 
     /// The result `CallBoundary` decided for the function at `entry` from its open read's supply
     /// (doc/adr-result-side.md, section 3; D317).
-    fn closed_result(&self, entry: u64) -> Option<r2source::SourceClosedResult> {
+    fn closed_result(&self, entry: u64) -> Option<r2source::SourceClosedDecision> {
         use super::fates::{CallBoundary, CalleeKey, World};
         let key = (CalleeKey::Entry(entry), World::Closed);
         let boundary = self.db.get::<CallBoundary>(&key).ok()?;
         match boundary.as_ref() {
-            Some(CallBoundary::Sites { result, .. }) => result.result,
+            Some(CallBoundary::Sites { result, .. }) => result.decision(),
             _ => None,
         }
     }

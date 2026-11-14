@@ -1453,8 +1453,17 @@ fn handler_answer(
 /// under the closed world, though its RAX is written; cold, it stays unproven (S30, D205).
 #[test]
 fn a_handler_only_atexit_takes_is_void_under_the_closed_world() {
-    let closed = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), true);
+    let (closed, premises) = handler_answer(at_exit(TAKES_HANDLER, "atexit"), true);
     assert!(closed.contains("void handler(void)"), "{closed}");
+    // The slot's type is how every caller calls only where no call is undefined (D227).
+    assert!(
+        closed.contains("no call reads the result (assuming closed-world, ub-free)"),
+        "{closed}"
+    );
+    assert!(
+        premises.contains(&r2source::Premise::UbFreeSource),
+        "{premises:?}"
+    );
     let cold = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), false);
     assert!(!cold.contains("void handler("), "{cold}");
 }
@@ -1546,8 +1555,12 @@ fn a_main_only_libc_start_main_takes_returns_its_int_under_the_closed_world() {
         "{closed}"
     );
     assert!(
-        closed.contains("reads the result (assuming closed-world)"),
+        closed.contains("reads the result (assuming closed-world, ub-free)"),
         "{closed}"
+    );
+    assert!(
+        premises.contains(&r2source::Premise::UbFreeSource),
+        "{premises:?}"
     );
     let cold = handler_rendered(at_exit(STARTS_HANDLER, "__libc_start_main"), false);
     assert!(cold.contains("the result is unproven"), "{cold}");
@@ -1601,4 +1614,78 @@ fn a_caller_that_calls_another_caller_is_read_after_it() {
     let walked = stats.walked.computed - before;
     // `x` for its own render and for its register effect, `p2` and `p1` once each.
     assert_eq!(walked, 4, "walks during the request");
+}
+
+/// glibc AArch64's `_start` hands `__wrap_main` (`nop; b main`) to `__libc_start_main`:
+/// `adrp x0; add x0, x0, #0x20; bl the stub`, `wrap` at 0x1020, `main` at 0x1040 returning
+/// `helper`'s `w0`, and the stub `ldr x16, slot; br x16` at 0x1080.
+fn wrapped_main() -> Literal {
+    let mut code = vec![0u8; 0x98];
+    let words: [(usize, u32); 13] = [
+        (0x00, 0x9000_0000), // adrp x0, 0x1000
+        (0x04, 0x9100_8000), // add x0, x0, #0x20
+        (0x08, 0x9400_001e), // bl 0x1080
+        (0x0c, 0x9400_001d), // bl 0x1080, as `bl abort`
+        (0x20, 0xd503_201f), // nop
+        (0x24, 0x1400_0007), // b 0x1040
+        (0x40, 0xa9bf_7bfd), // stp x29, x30, [sp, #-16]!
+        (0x44, 0x9400_0007), // bl 0x1060
+        (0x48, 0xa8c1_7bfd), // ldp x29, x30, [sp], #16
+        (0x4c, 0xd65f_03c0), // ret
+        (0x60, 0x5280_0020), // mov w0, #1
+        (0x80, 0x5800_0090), // ldr x16, 0x1090
+        (0x84, 0xd61f_0200), // br x16
+    ];
+    for (at, word) in words {
+        code[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    code[0x64..0x68].copy_from_slice(&0xd65f_03c0_u32.to_le_bytes()); // ret
+    let functions = [
+        ("_start", BASE, 0x10),
+        ("wrap", BASE + 0x20, 0x08),
+        ("main", BASE + 0x40, 0x10),
+        ("helper", BASE + 0x60, 0x08),
+    ];
+    Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
+        .in_aarch64()
+        .importing_through(BASE + 0x80..BASE + 0x88, BASE + 0x90, "__libc_start_main")
+        .running_on(common::GLIBC)
+}
+
+/// `main` reached only by `__wrap_main`'s tail branch returns what `__wrap_main` returns, which
+/// the cited slot reads as an `int` (D227): the branch forwards the read.
+#[test]
+fn a_main_a_wrapper_branches_to_returns_the_int_the_slot_reads() {
+    let mut open = OpenProgram::of(wrapped_main());
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(BASE + 0x40).expect("it renders");
+    let text = rendered.response.output.into_text();
+    // A word, no residual: the decision is `Read(Integer)` (cold, the result is unproven).
+    assert!(
+        text.starts_with("r2sleigh_word_u64 fcn_1040(void)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("reads the result (assuming closed-world, ub-free)"),
+        "{text}"
+    );
+}
+
+/// musl's `__libc_start_main` runs `exit(main(argc, argv, envp))` (its cited row): the same take
+/// decides `main`'s `int` on musl as on glibc (D227).
+#[test]
+fn a_main_musls_libc_start_main_takes_returns_its_int() {
+    let musl = [r2abi::statement::PlatformEvidence::Interpreter(
+        r2engine::program::Libc::Musl,
+    )];
+    let literal = at_exit(STARTS_HANDLER, "__libc_start_main").running_on(&musl);
+    let (closed, premises) = handler_answer(literal, true);
+    assert!(
+        closed.contains("r2sleigh_word_u32 handler(void)"),
+        "{closed}"
+    );
+    assert!(
+        premises.contains(&r2source::Premise::UbFreeSource),
+        "{premises:?}"
+    );
 }

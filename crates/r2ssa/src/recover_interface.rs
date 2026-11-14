@@ -212,8 +212,8 @@ pub struct RecoveredInterface {
     variadic: bool,
     /// The parameter a tail-consuming loop is bounded by, where the body proves one (`tail_count`).
     tail_count: Option<r2source::SourceTailCount>,
-    /// What the closed world decided and this recovery applied, which rests on `Premise::ClosedWorld`.
-    closed: Option<r2source::SourceClosedResult>,
+    /// What the closed world decided and this recovery applied, with the premises it rests on.
+    closed: Option<r2source::SourceClosedDecision>,
     /// Whether some return hands back a parameter through a merge: an entry input, spelled.
     result_holds_input: bool,
     /// No return path is reached, so the `Void` result states what a call leaves, never a type.
@@ -225,9 +225,12 @@ pub struct RecoveredInterface {
 }
 
 impl RecoveredInterface {
-    /// Whether the result rests on `Premise::ClosedWorld`: decided by every call the image shows.
-    pub const fn assumes_closed_world(&self) -> bool {
-        self.closed.is_some()
+    /// What the result's closed-world decision takes for granted; none where none was applied.
+    pub const fn closed_premises(&self) -> &'static [r2source::Premise] {
+        match self.closed {
+            Some(decision) => decision.premises(),
+            None => &[],
+        }
     }
 
     /// Why the result is unproven, where it is.
@@ -1705,10 +1708,7 @@ pub(crate) fn recover_interface(
     func: &SSAFunction,
     slots: &ConventionModel,
 ) -> Option<RecoveredInterface> {
-    let stated = Stated {
-        closed: None,
-        unseen: false,
-    };
+    let stated = Stated::default();
     recover_interface_inner(func, None, slots, None, stated).expect("a test function settles")
 }
 
@@ -1716,6 +1716,8 @@ pub(crate) fn recover_interface(
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Stated {
     closed: Option<r2source::SourceClosedResult>,
+    /// Whether that decision rests on a cited slot (`SourceClosedDecision::premises`).
+    through_slot: bool,
     /// Whether the walk left a transfer it did not follow: code no read sees may take more arguments.
     unseen: bool,
 }
@@ -1725,6 +1727,7 @@ impl Stated {
         let function = source.function();
         Self {
             closed: function.closed_result(),
+            through_slot: (function.closed_decision()).is_some_and(|decided| decided.through_slot),
             unseen: (source.image().blocks().iter()).any(|block| block.transfer_unresolved()),
         }
     }
@@ -1752,7 +1755,11 @@ fn recover_interface_inner(
     provisional: Option<&crate::function::Provisional>,
     slots: &ConventionModel,
     machine_context: Option<&crate::SourceMachineContext>,
-    Stated { closed, unseen }: Stated,
+    Stated {
+        closed,
+        through_slot,
+        unseen,
+    }: Stated,
 ) -> Result<Option<RecoveredInterface>, crate::fixpoint::Exhausted> {
     // A convention with no argument registers still places its arguments: x86
     // cdecl puts every one on the stack. Only a convention that states neither
@@ -2623,7 +2630,10 @@ fn recover_interface_inner(
         arity_floor,
         variadic: save_area.is_some(),
         tail_count,
-        closed: applied,
+        closed: applied.map(|result| r2source::SourceClosedDecision {
+            result,
+            through_slot,
+        }),
         result_holds_input,
         unreached: unreached && result == RecoveredFunctionResult::Void,
         boundary,
@@ -4148,7 +4158,7 @@ mod tests {
             closed: Some(r2source::SourceClosedResult::Read(
                 r2source::SourceReadLanes::Pair,
             )),
-            unseen: false,
+            ..Stated::default()
         };
         let recovered = recover_interface_inner(&func, None, &slots, None, stated)
             .expect("settles")
