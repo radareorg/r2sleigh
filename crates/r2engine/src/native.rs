@@ -61,6 +61,9 @@ pub trait Program: crate::body::Program {
         crate::EngineExecutionControl::default()
     }
 
+    /// Count a build its callees' statements moved, so it was built anew (D365, D399).
+    fn note_rebuilt(&self) {}
+
     /// Whether static data can live here: a section the program declares
     /// holds this address and answers
     /// [`holds_static_data`](crate::program::Section::holds_static_data).
@@ -854,18 +857,25 @@ pub(crate) fn convention_seal_of(
         &mut imports,
     );
     let restatement = native.restatement(body.entry);
-    // Sealed through the tables the walk followed, as Ge's whole-body seal reads them (D285).
-    let seal =
-        native.convention_seal(&walked.root, &imports, restatement.clone(), &walked.tables)?;
-    let asked = seal.unstated_rewriting_callees();
-    match state_asked(
+    // Built through the tables the walk followed, as Ge's whole-body seal reads them (D285).
+    let construction =
+        native.construct_convention(&walked.root, &imports, restatement, &walked.tables)?;
+    let asked = construction.unstated_rewriting_callees();
+    let stated = state_asked(
         (&native, target, ptr_bits),
         (body.entry, asked),
         &mut imports,
-    ) {
-        true => native.convention_seal(&walked.root, &imports, restatement, &walked.tables),
-        false => Ok(seal),
-    }
+    );
+    let construction = match stated {
+        true => {
+            let premises = accepted_premises();
+            native.restate_against(&walked.root, construction, (&imports, &premises))?
+        }
+        false => construction,
+    };
+    construction
+        .seal(&native.control)
+        .map_err(NativeRefusal::of_preparation)
 }
 
 /// States each callee nothing states whose call's writes kept a loaded place in memory, from its
@@ -1381,7 +1391,8 @@ pub(crate) struct Stated<'a> {
     pub(crate) asks: bool,
 }
 
-/// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md).
+/// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md):
+/// built once, restated where a callee it asks states itself (D376), then sealed.
 fn resolved_alone(
     native: &Native<'_>,
     target: &NativeTarget<'_>,
@@ -1403,19 +1414,32 @@ fn resolved_alone(
         }
         imports.interfaces.insert(*member, interface.clone());
     }
-    let mut resolved = native.resolve(address, walked, &imports, stated.world);
-    if let Ok(artifact) = resolved.as_ref()
-        && stated.asks
-    {
-        let asked = artifact.shared_artifact().unstated_rewriting_callees();
-        if state_asked((native, target, ptr_bits), (address, asked), &mut imports) {
-            resolved = native.resolve(address, walked, &imports, stated.world);
-        }
-    }
-    resolved.map_err(|refusal| match refusal.stopped() {
+    let unreadable = |refusal: NativeRefusal| match refusal.stopped() {
         true => Unreadable::Stopped,
         false => Unreadable::NotPrepared,
-    })
+    };
+    let declared_root = native.declaration(address);
+    let mut construction =
+        (native.construct_first(walked, &imports, &declared_root)).map_err(unreadable)?;
+    if stated.asks {
+        let asked = construction.unstated_rewriting_callees();
+        if state_asked((native, target, ptr_bits), (address, asked), &mut imports) {
+            let premises = premises_reading(false);
+            let restated =
+                native.restate_against(&walked.root, construction, (&imports, &premises));
+            construction = restated.map_err(unreadable)?;
+        }
+    }
+    let seal = construction.seal(&native.control);
+    let first = First {
+        entry: address,
+        declared_root,
+        seal: seal.map_err(|why| unreadable(NativeRefusal::of_preparation(why)))?,
+    };
+    let finished = native.finish(walked, &imports, stated.world, first);
+    finished
+        .map(|(resolution, _)| resolution)
+        .map_err(unreadable)
 }
 
 /// What a callee's own body proves about its parameters, prepared as every caller prepares it.
@@ -1551,8 +1575,6 @@ pub(crate) struct BuiltRead {
     pub(crate) read: CalleeRead,
     /// Its answer is another seal than that build's.
     pub(crate) again: bool,
-    /// The statements moved what the build read, so it was built anew (`BuildKey`, D365).
-    pub(crate) rebuilt: bool,
 }
 
 pub(crate) fn built_read(
@@ -1569,18 +1591,15 @@ pub(crate) fn built_read(
                 facts: Err(Unreadable::NotPrepared),
             },
             again: false,
-            rebuilt: false,
         };
     };
     let resolved = crate::isolation::isolated(|| native.resolve_built(walked, built, owners));
     let resolved = resolved.map(|resolved| resolved.map_err(|refusal| unreadable(&refusal)));
     let resolved = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)));
-    let (again, rebuilt) =
-        (resolved.as_ref()).map_or((false, false), |(_, again, rebuilt)| (*again, *rebuilt));
+    let again = (resolved.as_ref()).is_ok_and(|(_, again)| *again);
     BuiltRead {
-        read: read_of(&native, resolved.map(|(artifact, ..)| artifact)),
+        read: read_of(&native, resolved.map(|(artifact, _)| artifact)),
         again,
-        rebuilt,
     }
 }
 
@@ -2149,29 +2168,17 @@ impl<'a> Native<'a> {
         walk: &Walk,
         built: Built,
         owners: &[(u64, Arc<CalleeRead>)],
-    ) -> Result<(Resolution, bool, bool), NativeRefusal> {
+    ) -> Result<(Resolution, bool), NativeRefusal> {
         let Built {
             address,
             mut construction,
             mut imports,
             declared_root,
         } = built;
-        let mut rebuilt = false;
         if !owners.is_empty() {
             imports.state(owners, self.program);
-            let evidence = self.evidence(&walk.root, &imports);
-            let arch = Some(self.target.arch);
-            let restated =
-                construction.restated(arch, &self.control, &evidence, &premises_reading(false));
-            let (restated, kept) = restated.map_err(NativeRefusal::of_preparation)?;
-            r2il::refusal_evidence!(
-                "restated",
-                "{address:#x}: build {} against {} owners",
-                if kept { "kept" } else { "rebuilt" },
-                owners.len()
-            );
-            construction = restated;
-            rebuilt = !kept;
+            let premises = premises_reading(false);
+            construction = self.restate_against(&walk.root, construction, (&imports, &premises))?;
         }
         let seal = construction.seal(&self.control);
         let first = First {
@@ -2179,9 +2186,31 @@ impl<'a> Native<'a> {
             declared_root,
             seal: seal.map_err(NativeRefusal::of_preparation)?,
         };
-        let (resolution, again) =
-            self.finish(walk, &imports, crate::program::World::Open, first)?;
-        Ok((resolution, again, rebuilt))
+        self.finish(walk, &imports, crate::program::World::Open, first)
+    }
+
+    /// A construction against `callees`' statements: its build kept where they state what it read
+    /// the same (`BuildKey`), else built anew from the same lift and counted (D365, D399).
+    fn restate_against(
+        &self,
+        walked: &Walked,
+        construction: r2ssa::TrustedConstruction,
+        (callees, premises): (&Callees, &BTreeSet<r2source::Premise>),
+    ) -> Result<r2ssa::TrustedConstruction, NativeRefusal> {
+        let evidence = self.evidence(walked, callees);
+        let arch = Some(self.target.arch);
+        let restated = construction.restated(arch, &self.control, &evidence, premises);
+        let (restated, kept) = restated.map_err(NativeRefusal::of_preparation)?;
+        r2il::refusal_evidence!(
+            "restated",
+            "{:#x}: build {}",
+            walked.body.entry,
+            if kept { "kept" } else { "rebuilt" }
+        );
+        if !kept {
+            self.program.note_rebuilt();
+        }
+        Ok(restated)
     }
 
     /// What a body's first build captures: its declaration where it states an interface or the
@@ -2791,6 +2820,32 @@ impl<'a> Native<'a> {
         artifact
             .map(Arc::new)
             .map_err(NativeRefusal::of_preparation)
+    }
+
+    /// One body captured through `tables` and built against the convention alone, before its seal.
+    fn construct_convention(
+        &self,
+        walked: &Walked,
+        callees: &Callees,
+        restatement: Restatement,
+        tables: &[NativePointerTable],
+    ) -> Result<r2ssa::TrustedConstruction, NativeRefusal> {
+        let capture = Capture {
+            extra_literals: Vec::new(),
+            restatement,
+            tables,
+            calls: &[],
+            closed_result: None,
+        };
+        let (lifted, evidence) = self.lifted(walked, callees, capture)?;
+        TrustedSsaArtifact::construct_against_convention(
+            lifted,
+            Some(self.target.arch),
+            &self.control,
+            &evidence,
+            &accepted_premises(),
+        )
+        .map_err(NativeRefusal::of_preparation)
     }
 
     /// One body captured through `tables`, built against the convention alone and sealed: what

@@ -808,6 +808,16 @@ impl Literal {
         self
     }
 
+    /// The same program, the function at `range` stated as written in `language`.
+    pub fn with_language_at(
+        mut self,
+        range: Range<u64>,
+        language: r2engine::program::SourceLanguage,
+    ) -> Self {
+        self.container.languages.ranges = vec![(range, language)];
+        self
+    }
+
     /// The same program, stated as written in `language`.
     pub fn in_language(mut self, language: r2engine::program::SourceLanguage) -> Self {
         self.container.languages.program = language;

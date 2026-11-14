@@ -492,12 +492,6 @@ impl TrustedSeal {
         &self.machine_context
     }
 
-    /// The direct callees of unstated calls whose writes kept a place loaded after them in memory:
-    /// each is asked to state its own (D376). O(asked x log sites).
-    pub fn unstated_rewriting_callees(&self) -> BTreeSet<u64> {
-        rewriting_callees(self.sealed.function(), &self.machine_context)
-    }
-
     /// Every constant a sealed value folds to with what preparation admitted, in value order.
     pub fn folded_values(&self) -> impl Iterator<Item = u64> + '_ {
         let folded = self.sealed.folded().prepared.iter();
@@ -913,6 +907,7 @@ impl Constructed {
 pub struct TrustedConstruction {
     constructed: Constructed,
     lifted: TrustedLiftedFunction,
+    recovery: Recovery,
 }
 
 impl TrustedConstruction {
@@ -935,9 +930,21 @@ impl TrustedConstruction {
         let Self {
             constructed,
             lifted,
+            recovery: _,
         } = self;
         drop(lifted);
         constructed.seal(control)
+    }
+
+    /// The direct callees of unstated calls whose writes kept a place loaded after them in memory,
+    /// as the build reads them: each is asked to state its own (D376). O(asked x log sites).
+    pub fn unstated_rewriting_callees(&self) -> BTreeSet<u64> {
+        let Constructed {
+            function,
+            machine_context,
+            ..
+        } = &self.constructed;
+        rewriting_callees(function.function(), machine_context)
     }
 
     /// This construction against other callee statements, and whether its build was kept
@@ -952,6 +959,7 @@ impl TrustedConstruction {
         let Self {
             constructed,
             lifted,
+            recovery,
         } = self;
         let Constructed {
             function, reuse, ..
@@ -961,7 +969,6 @@ impl TrustedConstruction {
             function,
             provisional,
         });
-        let recovery = Recovery::Recover;
         let constructed = TrustedSsaArtifact::construct(
             &lifted, arch, control, evidence, premises, recovery, prior,
         )?;
@@ -982,6 +989,7 @@ impl TrustedConstruction {
             Self {
                 constructed,
                 lifted,
+                recovery,
             },
             kept,
         ))
@@ -1470,12 +1478,6 @@ impl SsaArtifact {
 
     pub fn function(&self) -> &SSAFunction {
         self.sealed.function()
-    }
-
-    /// The direct callees of unstated calls whose writes kept a place loaded after them in memory:
-    /// each is asked to state its own (D376). O(asked x log sites).
-    pub fn unstated_rewriting_callees(&self) -> BTreeSet<u64> {
-        rewriting_callees(self.sealed.function(), &self.machine_context)
     }
 
     /// The decompiler-prep facts, collected once when the function was
@@ -2741,12 +2743,46 @@ impl TrustedSsaArtifact {
         evidence: &CalleeEvidence,
         premises: &BTreeSet<r2source::Premise>,
     ) -> Result<TrustedConstruction, SsaPrepareError> {
-        let recovery = Recovery::Recover;
+        Self::constructed(
+            lifted,
+            arch,
+            control,
+            (evidence, premises),
+            Recovery::Recover,
+        )
+    }
+
+    /// Build against the convention alone, recovering nothing, and stop before the seal: a
+    /// restatement of the callees updates it as it does a recovered build.
+    pub fn construct_against_convention<C: SsaWorkControl + ?Sized>(
+        lifted: TrustedLiftedFunction,
+        arch: Option<&crate::Arch>,
+        control: &C,
+        evidence: &CalleeEvidence,
+        premises: &BTreeSet<r2source::Premise>,
+    ) -> Result<TrustedConstruction, SsaPrepareError> {
+        Self::constructed(
+            lifted,
+            arch,
+            control,
+            (evidence, premises),
+            Recovery::Convention,
+        )
+    }
+
+    fn constructed<C: SsaWorkControl + ?Sized>(
+        lifted: TrustedLiftedFunction,
+        arch: Option<&crate::Arch>,
+        control: &C,
+        (evidence, premises): (&CalleeEvidence, &BTreeSet<r2source::Premise>),
+        recovery: Recovery,
+    ) -> Result<TrustedConstruction, SsaPrepareError> {
         let constructed =
             Self::construct(&lifted, arch, control, evidence, premises, recovery, None)?;
         Ok(TrustedConstruction {
             constructed,
             lifted,
+            recovery,
         })
     }
 

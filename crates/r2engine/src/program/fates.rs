@@ -332,11 +332,20 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
             let _ = db.get::<SiteFates>(&(caller, thumb));
         }
     }
+    let view = View::new(db, true);
+    // A caller under another convention states its sites' fates in its lanes: none is read (D385).
+    let convention = |entry: u64| view.convention_at(entry).ok().map(|ruled| ruled.id);
+    let own = convention(callee);
+    let alike = |caller: u64| own.is_some() && convention(caller) == own;
     for &caller in survey.callers_of(callee) {
         let Some(Ok(thumb)) = survey.walked_in(caller) else {
             unread = true;
             continue;
         };
+        if !alike(caller) {
+            unread = true;
+            continue;
+        }
         let Some(sites) = (db.get::<SiteFates>(&(caller, thumb)).ok()).and_then(|f| (*f).clone())
         else {
             unread = true;
@@ -353,6 +362,10 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
     // A body that leaves for `callee` by a branch returns what `callee` returns: each held lane is
     // its own result, read as its callers read it (D227, `__wrap_main`'s `b main`).
     for &caller in survey.tail_callers_of(callee) {
+        if !alike(caller) {
+            unread = true;
+            continue;
+        }
         let held = (lanes.iter().enumerate()).filter(|(_, lane)| lane.held);
         returned.extend(held.map(|(at, _)| Returned {
             caller,
@@ -800,12 +813,9 @@ fn held_lanes<S: Source + 'static>(
     callee: u64,
 ) -> Option<([bool; LANES], Option<usize>)> {
     let view = View::new(db, true);
-    let walker = super::returns::Walking::new(view.clone(), true).ok()?;
-    let thumb = view.thumb_at(callee);
-    let stated = stated_target(&view, &walker, callee, thumb);
-    let target = stated.as_ref().unwrap_or(walker.target(thumb));
+    let target = own_target(&view, callee, view.thumb_at(callee))?;
     let slots = &*target.convention;
-    let slots_of = lanes_of(target, slots).slots();
+    let slots_of = lanes_of(&target, slots).slots();
     let arguments = argument_registers(slots);
     let input = |lane: &CanonicalStorageId| {
         arguments.iter().any(|argument| {
@@ -814,7 +824,7 @@ fn held_lanes<S: Source + 'static>(
                 && lane.offset < argument.offset + u64::from(argument.size)
         })
     };
-    let lanes = lanes_of(target, slots);
+    let lanes = lanes_of(&target, slots);
     let second = (lanes.after_float(&target.convention.results)).map(|(_, id)| id);
     let held = std::array::from_fn(|at| slots_of[at].is_some_and(|lane| at < 3 || input(&lane)));
     Some((held, second))
@@ -1240,8 +1250,7 @@ pub(super) fn read_body<S: Source + 'static, R>(
 ) -> Option<R> {
     let view = View::new(db, true);
     let walker = super::returns::Walking::new(view.clone(), true).ok()?;
-    let stated = stated_target(&view, &walker, entry, thumb);
-    let target = stated.as_ref().unwrap_or(walker.target(thumb));
+    let target = &view.target_of(walker.machine(thumb)?, entry).ok()?;
     let slots = &*target.convention;
     let walking = db.get::<Walked>(&(entry, thumb)).ok()?;
     let body = walking.0.as_ref().ok()?.body();
@@ -1332,16 +1341,15 @@ fn effect_on_flow<S: Source + 'static>(
     effect
 }
 
-/// The function's own target where its debug information states a convention other than the
-/// program's (S20); `None` keeps the walker's. O(log functions).
-fn stated_target<'p, S: Source + 'static>(
+/// The function's target under its own `CalleeConvention`; none under a row that refuses its
+/// boundary (Go ABI0's stack results), whose lanes state nothing (D385, default-deny).
+fn own_target<'p, S: Source + 'static>(
     view: &View<'p, S>,
-    walker: &super::returns::Walking<'p, S>,
     entry: u64,
     thumb: bool,
 ) -> Option<NativeTarget<'p>> {
-    let target = view.target_of(walker.machine(thumb)?, entry).ok()?;
-    target.program.is_some().then_some(target)
+    let target = view.target_of(view.machine_in(thumb)?, entry).ok()?;
+    target.convention.refused.is_none().then_some(target)
 }
 
 /// The convention's result lanes: the typed three, then the rest of its return set.
@@ -1592,7 +1600,9 @@ impl<S: Source + 'static> Reading<'_, S> {
         let row = (self.depth == Depth::Deep)
             .then(|| self.db.get::<RegisterEffects>(&key))
             .and_then(Result::ok);
-        let effect = match row.as_deref().and_then(Option::as_ref) {
+        // A row's lane bytes are in its body's lanes; another convention's lanes read none (D385).
+        let row = row.as_deref().and_then(Option::as_ref);
+        let effect = match row.filter(|row| row.lanes == self.lanes) {
             Some(row) => CallEffect {
                 takes: row.takes,
                 counted: None,
@@ -1829,5 +1839,104 @@ mod tests {
         for at in [3, 4] {
             assert!(lanes[at].unknown && !lanes[at].dead, "{:?}", lanes[at]);
         }
+    }
+
+    /// Go 1.18: `g` compiled (ABIInternal), `mov rax, rbx; ret`, and `h` assembly (ABI0), `call g; ret`.
+    fn go_bodies() -> crate::program::OpenProgram<crate::program::reads::tests::Image> {
+        use crate::program::{Arch, Container, Endian, Section, SectionRole, Segment, Symbol};
+        use crate::program::{Languages, Permissions, SourceLanguage, SymbolKind};
+        const BASE: u64 = 0x1000;
+        let mut bytes = vec![0xcc; 0x20];
+        bytes[..4].copy_from_slice(&[0x48, 0x89, 0xd8, 0xc3]);
+        bytes[0x10..0x16].copy_from_slice(&[0xe8, 0xeb, 0xff, 0xff, 0xff, 0xc3]);
+        let function = |name: &str, vaddr| Symbol {
+            name: name.into(),
+            vaddr,
+            size: 4,
+            kind: SymbolKind::Function,
+            defined: true,
+            ..Symbol::default()
+        };
+        let container = Container {
+            arch: Arch {
+                name: "x86-64".to_owned(),
+                bits: 64,
+                endian: Endian::Little,
+                instructions: None,
+            },
+            segments: vec![Segment {
+                vaddr: BASE,
+                vsize: 0x20,
+                file_size: 0x20,
+                permissions: Permissions {
+                    read: true,
+                    write: false,
+                    execute: true,
+                },
+                ..Segment::default()
+            }],
+            sections: vec![Section {
+                name: ".text".to_owned(),
+                vaddr: BASE,
+                vsize: 0x20,
+                role: SectionRole::Code,
+                loaded: true,
+                ..Section::default()
+            }],
+            symbols: vec![function("main.g", BASE), function("main.h", BASE + 0x10)],
+            languages: Languages {
+                program: SourceLanguage::Go,
+                ranges: Vec::new(),
+                go_version: Some((1, 18)),
+                go_assembly: Some(std::iter::once(BASE + 0x10).collect()),
+            },
+            ..Container::default()
+        };
+        let image = crate::program::reads::tests::Image {
+            vaddr: BASE,
+            bytes,
+            container,
+        };
+        crate::program::OpenProgram::of(image)
+    }
+
+    /// Each Go body's register effect is in its own convention's lanes, never the program default's:
+    /// `g`'s row takes the lane RBX holds under ABIInternal (SysV has no such lane), and `h`'s ABI0
+    /// row is in other lanes (D385). Default-deny: `h`'s call to `g` is no read of `g`'s lanes, and
+    /// `h`'s refused row holds no lanes and states no site model.
+    #[test]
+    fn a_go_body_s_register_effect_is_in_its_own_convention_s_lanes() {
+        use super::RegisterEffects;
+        use crate::program::CalleeConvention;
+        let open = go_bodies();
+        let db = &open.db;
+        let ruled = |entry| (*db.get::<CalleeConvention>(&entry).expect("held")).clone();
+        assert_eq!(ruled(0x1000).map(|it| it.id), Ok(ConventionId::GoAmd64));
+        assert_eq!(ruled(0x1010).map(|it| it.id), Ok(ConventionId::GoAmd64Abi0));
+        let row = |entry| {
+            let row = db.get::<RegisterEffects>(&(entry, false)).expect("held");
+            (*row).clone().expect("a walked body has a row")
+        };
+        let (g, h) = (row(0x1000), row(0x1010));
+        let rbx = r2source::CanonicalStorageId {
+            space: r2source::CanonicalStorageSpace::Register,
+            offset: 0x18,
+            size: 8,
+        };
+        let at = g.lanes.slots().iter().position(|slot| *slot == Some(rbx));
+        let at = at.expect("ABIInternal returns in rbx");
+        assert!(g.takes.touches(at), "{:?}", g.takes);
+        assert_ne!(h.lanes, g.lanes);
+        let direct = db.get::<super::DirectSites>(&0x1000).expect("held");
+        let direct = (*direct).clone().expect("g's calls are joined");
+        assert!(direct.unread, "{direct:?}");
+        assert!(super::held_lanes(db, 0x1010).is_none());
+        let view = crate::program::View::new(db, true);
+        assert!(crate::native::Program::site_convention_at(&view, 0x1010).is_none());
+        let any = db
+            .get::<crate::program::AnyCall>(&ConventionId::SysVAmd64)
+            .expect("held");
+        let any = (*any).clone().expect("joined");
+        assert!(any.clobbers(rbx));
     }
 }

@@ -390,9 +390,6 @@ pub(super) fn built_read<S: Source + 'static>(
     match (target, walked.resolved()) {
         (Some(Ok(target)), Ok(walked)) => {
             let built = crate::native::built_read(&target, &view, walked, built, owners);
-            if built.rebuilt {
-                db.note_rebuilt();
-            }
             (built.read, built.again)
         }
         _ => {

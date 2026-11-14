@@ -79,6 +79,8 @@ pub(super) struct WaysIn {
     escaped: Box<[u64]>,
     /// Each instruction that forms a function's address in a body (`Role::Value`), by target.
     takes: Box<[Take]>,
+    /// `takes` by owner, then instruction: indices into it.
+    by_owner: Box<[u32]>,
 }
 
 /// One instruction of `owner` forming `target`'s address (S30).
@@ -100,6 +102,14 @@ impl WaysIn {
     /// Whether `entry` escapes other than by a take.
     pub(super) fn escaped(&self, entry: u64) -> bool {
         self.escaped.binary_search(&entry).is_ok()
+    }
+
+    /// The takes `owner`'s instructions make, by instruction. `O(log n)`.
+    pub(super) fn takes_from(&self, owner: u64) -> impl Iterator<Item = &Take> {
+        let owner_of = |at: &u32| self.takes[*at as usize].owner;
+        let start = self.by_owner.partition_point(|at| owner_of(at) < owner);
+        let end = self.by_owner.partition_point(|at| owner_of(at) <= owner);
+        (self.by_owner[start..end].iter()).map(|at| &self.takes[*at as usize])
     }
 
     /// The takes of `entry`. `O(log n)`.
@@ -228,9 +238,17 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for Escapes {
         stored_words(source, &survey.entries(), &words, &mut escaped);
         escaped.sort_unstable();
         escaped.dedup();
+        let mut by_owner = (0..takes.len())
+            .map(|at| u32::try_from(at).expect("fewer than 2^32 takes"))
+            .collect::<Vec<_>>();
+        by_owner.sort_unstable_by_key(|at| {
+            let take = &takes[*at as usize];
+            (take.owner, take.from, take.target)
+        });
         Some(Arc::new(WaysIn {
             escaped: escaped.into(),
             takes: takes.into(),
+            by_owner: by_owner.into(),
         }))
     }
 }
@@ -492,15 +510,15 @@ fn in_slot(slots: &[u64], at: u64, pointer: u64) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::{Words, every_call_read, stored_words};
     use crate::program::{Arch, Container, Endian, Segment, Source};
 
     /// A 64-bit image of one segment at `vaddr` holding `bytes`.
-    struct Image {
-        vaddr: u64,
-        bytes: Vec<u8>,
-        container: Container,
+    pub(in crate::program) struct Image {
+        pub(in crate::program) vaddr: u64,
+        pub(in crate::program) bytes: Vec<u8>,
+        pub(in crate::program) container: Container,
     }
 
     impl Source for Image {

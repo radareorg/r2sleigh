@@ -88,8 +88,9 @@ pub(super) struct Values<'a> {
     unplanned: r2ssa::dense::IdMap<InstId, CallGap>,
     /// The values a described call's statement assigns.
     results: r2ssa::dense::IdSet<ValueId>,
-    /// One declaration per callee, the first call's in address order, which every call must state.
-    prototypes: BTreeMap<String, CExternDecl>,
+    /// Each named callee's one declaration where every call stating one states it; `None` where
+    /// two disagree, so every call to it refuses (D350).
+    prototypes: BTreeMap<String, Option<CExternDecl>>,
     /// The declarations of the calls written, which the function declares.
     externs: RefCell<BTreeMap<String, CExternDecl>>,
     /// The text the capture proves at each address, which a passed constant address is.
@@ -1929,29 +1930,10 @@ impl<'a> Values<'a> {
         Ok(extern_decl(plan, types, ret_type))
     }
 
-    /// Each named callee's declaration: its first call's in address order (block, then place in
-    /// the block) among the calls that state one, so no write order changes it. O(calls log callees).
-    fn decide_prototypes(&self) -> BTreeMap<String, CExternDecl> {
-        let mut first = BTreeMap::<String, ((u64, usize), CExternDecl)>::new();
-        for (inst, plan) in self.calls.iter() {
-            let (Some(at), Ok(Some(declaration))) =
-                (self.graph.inst(inst), self.declaration(inst, plan))
-            else {
-                continue;
-            };
-            let place = (
-                self.graph.block_addr_of(inst).unwrap_or(u64::MAX),
-                at.ordinal,
-            );
-            let name = declaration.name.clone();
-            if first.get(&name).is_none_or(|(held, _)| place < *held) {
-                first.insert(name, (place, declaration));
-            }
-        }
-        first
-            .into_iter()
-            .map(|(name, (_, declaration))| (name, declaration))
-            .collect()
+    /// Each named callee's declaration, joined over the calls that state one (D350).
+    fn decide_prototypes(&self) -> BTreeMap<String, Option<CExternDecl>> {
+        let stated = self.calls.iter();
+        joined(stated.filter_map(|(inst, plan)| self.declaration(inst, plan).ok().flatten()))
     }
 
     /// The call's expression: a named callee is declared as `prototypes` has it, one reached
@@ -2003,7 +1985,7 @@ impl<'a> Values<'a> {
         // One declaration describes every call to a callee, so calls that disagree cannot both be C.
         let declaration = extern_decl(plan, types, ret_type);
         match (declaration, self.prototypes.get(name)) {
-            (Some(declaration), Some(decided)) if declaration == *decided => {
+            (Some(declaration), Some(Some(decided))) if declaration == *decided => {
                 self.externs
                     .borrow_mut()
                     .entry(name.clone())
@@ -3165,6 +3147,25 @@ fn variable_or_residual(
     }
 }
 
+/// Each name's declaration over `stated`: a join over none, one and disagreeing in which
+/// disagreeing absorbs, so no call order chooses one (D350). O(calls log callees).
+fn joined(stated: impl IntoIterator<Item = CExternDecl>) -> BTreeMap<String, Option<CExternDecl>> {
+    let mut decided = BTreeMap::<String, Option<CExternDecl>>::new();
+    for declaration in stated {
+        match decided.get_mut(&declaration.name) {
+            None => {
+                decided.insert(declaration.name.clone(), Some(declaration));
+            }
+            Some(held) => {
+                if held.as_ref().is_some_and(|held| *held != declaration) {
+                    *held = None;
+                }
+            }
+        }
+    }
+    decided
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::proof::UnassignedCause;
@@ -3194,5 +3195,29 @@ mod tests {
         for name in ["double", "char", "__x", "_Value", "r2sleigh_load_u8", "2x"] {
             assert!(!super::spells_an_identifier(name), "{name}");
         }
+    }
+
+    /// Two calls stating different declarations of one callee leave it none in either order, and
+    /// every call to it refuses; calls that agree declare it (D350).
+    #[test]
+    fn disagreeing_declarations_decide_none_in_any_order() {
+        use crate::ast::{CExternDecl, CType};
+        let declared = |ret: CType| CExternDecl {
+            name: "f".to_owned(),
+            ret_type: ret,
+            params: Some(Vec::new()),
+            variadic: false,
+            noreturn: false,
+            address: Some(0x1000),
+        };
+        let (void, word) = (declared(CType::Void), declared(CType::uint(64)));
+        for order in [[void.clone(), word.clone()], [word.clone(), void.clone()]] {
+            assert_eq!(super::joined(order).get("f"), Some(&None));
+        }
+        let agreed = super::joined([word.clone(), word.clone()]);
+        assert_eq!(agreed.get("f"), Some(&Some(word)));
+        // A third call that agrees with either one does not undo the disagreement.
+        let three = super::joined([void.clone(), declared(CType::uint(64)), void]);
+        assert_eq!(three.get("f"), Some(&None));
     }
 }

@@ -379,6 +379,8 @@ pub struct RegisterEffect {
     pub overwrites: LaneBytes,
     /// The result bytes some path reads, forwards in a tail transfer or loses before writing them.
     pub takes: LaneBytes,
+    /// The lanes `overwrites` and `takes` index: the body's own convention's.
+    pub lanes: ResultLanes,
     /// The machine whose outermost registers `kept` indexes.
     machine: Arch,
 }
@@ -884,6 +886,7 @@ impl<'a, B: Lifted> CallerFlow<'a, B> {
             pending,
             overwrites,
             takes,
+            lanes,
             machine: kept.machine.clone(),
         })
     }
