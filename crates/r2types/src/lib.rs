@@ -36,8 +36,7 @@ pub(crate) use signature_infer::{infer_signature_from_prepared_ssa, render_signa
 pub use solver::{SolvedTypes, solve_constraints};
 
 pub use context::{
-    ExternalStackBase, ParsedExternalContext, ProgramExtents, StackSlotKey, is_generic_arg_name,
-    sanitize_c_identifier,
+    ParsedExternalContext, ProgramExtents, is_generic_arg_name, sanitize_c_identifier,
 };
 pub use convert::{
     CTypeLike, bit_vector_tag, c_object_declaration, source_type_like, spellable_c_type_like,

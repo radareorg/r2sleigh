@@ -17,7 +17,7 @@ use r2ssa::{
     SummaryMemoryEffect, SummaryMemoryEffectKind, SummaryMemoryRegion, SummaryReturnRelation,
 };
 
-use crate::context::{ParsedExternalContext, apply_main_signature_override, is_generic_arg_name};
+use crate::context::{ParsedExternalContext, is_generic_arg_name};
 use crate::convert::CTypeLike;
 use crate::facts::{
     ArrayIndexBase, ArrayIndexCertificate, CalleeAllocationEffect, CalleeArgEffect,
@@ -300,8 +300,7 @@ struct DerivedTypeAnalysis {
     type_facts: FunctionTypeFacts,
 }
 
-struct DerivedTypeAnalysisInput<'a> {
-    function_name: &'a str,
+struct DerivedTypeAnalysisInput {
     ptr_bits: u32,
     inferred_signature: InferredSignature,
     parsed_context: ParsedExternalContext,
@@ -311,7 +310,7 @@ struct DerivedTypeAnalysisInput<'a> {
 }
 
 #[cfg(test)]
-type TypeAnalysisInput<'a> = DerivedTypeAnalysisInput<'a>;
+type TypeAnalysisInput = DerivedTypeAnalysisInput;
 
 fn summary_arg_effect_to_callee(effect: &SummaryArgEffect) -> CalleeArgEffect {
     CalleeArgEffect {
@@ -649,7 +648,7 @@ fn merged_context_and_summary_callee_facts(
 }
 
 fn build_type_analysis_inner(
-    mut input: DerivedTypeAnalysisInput<'_>,
+    mut input: DerivedTypeAnalysisInput,
     callee_facts: BTreeMap<u64, CalleeFact>,
 ) -> DerivedTypeAnalysis {
     // This inner projection builder is also used by detached report-only
@@ -687,7 +686,6 @@ fn build_type_analysis_inner(
         input.parsed_context.merged_signature.clone(),
         inferred_signature_spec,
     );
-    apply_main_signature_override(input.function_name, &mut merged_signature);
     let before_interproc_signature = merged_signature.clone();
     apply_interproc_summary_to_signature(
         &mut merged_signature,
@@ -783,7 +781,7 @@ fn build_type_analysis_inner(
 }
 
 #[cfg(test)]
-fn build_type_analysis(input: DerivedTypeAnalysisInput<'_>) -> DerivedTypeAnalysis {
+fn build_type_analysis(input: DerivedTypeAnalysisInput) -> DerivedTypeAnalysis {
     let callee_facts = merged_context_and_summary_callee_facts(
         &input.parsed_context.callee_facts,
         input.interproc_summary_set.as_ref(),
@@ -824,11 +822,6 @@ pub fn build_source_owned_type_analysis(
     if ptr_bits == 0 {
         return Err(TypeAnalysisError::MissingMachinePointerWidth);
     }
-    let function_name = source
-        .function()
-        .name
-        .clone()
-        .unwrap_or_else(|| r2source::unnamed_function(source.function().entry));
     let interproc_report = interproc_summary
         .as_ref()
         .map(|summary| summary.report().clone());
@@ -849,7 +842,6 @@ pub fn build_source_owned_type_analysis(
     let diagnostics = TypeAnalysisDiagnostics::default();
     let local_structs = infer_local_struct_artifacts_from_prepared_ssa(source.as_ref());
     let derived_input = DerivedTypeAnalysisInput {
-        function_name: &function_name,
         ptr_bits,
         inferred_signature,
         parsed_context,
