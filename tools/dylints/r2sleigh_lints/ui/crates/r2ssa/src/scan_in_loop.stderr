@@ -1,0 +1,42 @@
+warning: `.iter()` over a function-scale set once per item of the loop at line 32, in `scan_in_loop::per_call`; index it once outside
+  --> $DIR/scan_in_loop.rs:33:18
+   |
+LL |         total += graph.insts.iter().filter(|inst| inst.id == *call).count();
+   |                  ^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(scan_in_loop)]` on by default
+
+warning: `from_elem` sized by a function-scale `len()` once per item of the loop at line 32, in `scan_in_loop::per_call`; index it once outside
+  --> $DIR/scan_in_loop.rs:34:20
+   |
+LL |         let seen = vec![false; graph.insts.len()];
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `position_of` scans a function-owned table once per item of the loop at line 37, in `scan_in_loop::per_call`; index it once outside
+  --> $DIR/scan_in_loop.rs:37:37
+   |
+LL |     total + calls.iter().map(|call| position_of(graph, *call)).sum::<usize>()
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `.iter()` over a function-scale set once per item of the loop at line 55, in `scan_in_loop::handed_to_tails`; index it once outside
+  --> $DIR/scan_in_loop.rs:55:24
+   |
+LL |         .filter(|inst| (tails.iter()).any(|tail| *tail == inst.id))
+   |                        ^^^^^^^^^^^^^^
+
+warning: `.iter()` over a function-scale set once per item of the loop at line 66, in `scan_in_loop::handed_through_opaque`; index it once outside
+  --> $DIR/scan_in_loop.rs:66:28
+   |
+LL |     ids(graph).filter(|id| (tails.iter()).any(|tail| tail == id)).count()
+   |                            ^^^^^^^^^^^^^^
+
+warning: `scan_in_loop::keyed` is keyed by a block address; use an index over dense block ids (r2ssa::dense)
+  --> $DIR/scan_in_loop.rs:70:9
+   |
+LL |     let mut last = BTreeMap::<u64, usize>::new();
+   |         ^^^^^^^^
+   |
+   = note: `#[warn(entity_keyed_map)]` on by default
+
+warning: 6 warnings emitted
+

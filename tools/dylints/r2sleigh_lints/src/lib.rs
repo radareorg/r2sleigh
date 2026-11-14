@@ -16,6 +16,7 @@ use rustc_lint::{LateContext, LateLintPass, LintContext};
 
 dylint_linting::dylint_library!();
 
+mod function_scale;
 
 rustc_lint::declare_lint!(
     /// ### What it does
@@ -2332,8 +2333,12 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
         SSA_CALL_CLASS_OUTSIDE_OP,
         EXHAUSTED_READ_THROUGH_SEALED_STAGE,
         TYPE_SPELLING_REPARSED,
+        function_scale::SCAN_IN_LOOP,
     ]);
     lint_store.register_late_lint_pass(Box::new(|_| Box::new(R2sleighLintPass)));
+    lint_store.register_late_lint_pass(Box::new(|_| {
+        Box::<function_scale::FunctionScale>::default()
+    }));
 }
 
 impl<'tcx> LateLintPass<'tcx> for R2sleighLintPass {
@@ -4962,10 +4967,7 @@ fn r2dec_direct_type_facts_mutator_impl_item(cx: &LateContext<'_>, item: &ImplIt
     let name = item.ident.name.as_str();
     if !matches!(
         name,
-        "type_facts_mut"
-            | "with_type_facts"
-            | "set_type_facts"
-            | "set_known_function_signatures"
+        "type_facts_mut" | "with_type_facts" | "set_type_facts" | "set_known_function_signatures"
     ) {
         return false;
     }

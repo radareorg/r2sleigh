@@ -4,6 +4,7 @@
 //! (`structure`), the values and terms (`render`), and the certified emitter
 //! (`codegen`); every obligation is answered in a `ledger`.
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(scan_in_loop))]
 
 pub mod ast;
 pub mod bitvector;
