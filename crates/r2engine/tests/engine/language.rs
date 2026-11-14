@@ -117,18 +117,18 @@ fn a_go_runtime_panic_ends_its_caller_under_the_runtime_s_contract() {
     );
     let mut program = OpenProgram::of(throws().in_go(Some((1, 21)), Some(&[])).running_on(GLIBC));
     // `runtime.throw` is the model's word; `main.f` composes it (D380).
-    let assumed = |proof| {
-        Some(r2engine::discovery::Never {
-            proof,
-            premises: std::collections::BTreeSet::from([r2engine::discovery::Premise::GoRuntime]),
-        })
-    };
+    let go = std::collections::BTreeSet::from([r2engine::discovery::Premise::GoRuntime]);
     for (entry, proof) in [
         (BASE, r2engine::discovery::NeverProof::Composed),
         (BASE + 0x40, r2engine::discovery::NeverProof::Declared),
     ] {
         let info = program.function_info(entry).expect("described");
-        assert_eq!(info.noreturn, assumed(proof), "{entry:#x}");
+        let never = info.noreturn.expect("never returns");
+        assert_eq!(
+            (never.proof(), never.proves()),
+            (proof, Some(&go)),
+            "{entry:#x}"
+        );
     }
     let c = rendered(throws()).expect("C renders");
     assert!(!c.contains("never return"), "{c}");
@@ -138,10 +138,7 @@ fn a_go_runtime_panic_ends_its_caller_under_the_runtime_s_contract() {
         |c: &mut OpenProgram<Literal>, entry| c.function_info(entry).expect("described").noreturn;
     assert_eq!(
         noreturn(&mut c, BASE),
-        Some(r2engine::discovery::Never {
-            proof: r2engine::discovery::NeverProof::NoReturnReached,
-            premises: std::collections::BTreeSet::new(),
-        })
+        Some(r2engine::discovery::Never::unreached())
     );
     assert_eq!(noreturn(&mut c, BASE + 0x40), None);
 }

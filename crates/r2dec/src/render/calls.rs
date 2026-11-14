@@ -532,7 +532,7 @@ fn planned(
     // bound ends no C (D379).
     let never = (artifact.facts().boundaries.calls.get(site))
         .and_then(|boundary| boundary.never.as_ref())
-        .filter(|closed| closed.never.proves());
+        .filter(|closed| closed.never.proves().is_some());
     Ok(CallPlan {
         holes,
         callee,

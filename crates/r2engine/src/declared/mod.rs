@@ -320,7 +320,9 @@ impl<'a> Placement<'a> {
                 tail,
                 r2abi::Tail::Variadic | r2abi::Tail::Format { .. } | r2abi::Tail::Flagged { .. }
             );
-        if placed_whole && (tail == r2abi::Tail::None || on_stack) {
+        // Only a cited row's fixed list bounds the reads; radare2's is a lower bound (D395, D410).
+        let cited = declared.row.and_then(r2source::Citation::of).is_some();
+        if cited && placed_whole && (tail == r2abi::Tail::None || on_stack) {
             return r2ssa::call_reads::CallReads::placed(registers, None, None, true);
         }
         let overlaps = |a: &CanonicalStorageId, b: &CanonicalStorageId| {

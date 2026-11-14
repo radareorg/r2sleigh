@@ -4249,21 +4249,21 @@ impl AssumedExits {
     /// What every "never" here takes for granted.
     pub fn premises(&self) -> BTreeSet<r2source::Premise> {
         (self.sites.iter())
-            .flat_map(|site| site.never.premises.iter().copied())
+            .flat_map(|site| site.never.premises().iter().copied())
             .collect()
     }
 
     /// How many calls end the body on a proof that takes a premise: a model's word.
     pub fn assumed(&self) -> usize {
         (self.sites.iter())
-            .filter(|site| site.never.proves() && !site.never.premises.is_empty())
+            .filter(|site| (site.never.proves()).is_some_and(|premises| !premises.is_empty()))
             .count()
     }
 
     /// How many calls end the body on the bound `proof`, a "never" no statement proves (D255, D395).
     pub fn bounded_by(&self, proof: r2source::NeverProof) -> usize {
         (self.sites.iter())
-            .filter(|site| site.never.proof == proof)
+            .filter(|site| site.never.proof() == proof)
             .count()
     }
 }

@@ -16,7 +16,7 @@ pub mod confidence;
 pub mod convention;
 pub mod display_names;
 pub mod native;
-pub use confidence::{Basis, Confidence, Fact, Grade, Never, NeverProof, Premise};
+pub use confidence::{Basis, Citation, Confidence, Fact, Grade, Never, NeverProof, Premise};
 pub use convention::{CallRegisterEffect, ConventionId, ConventionModel, Conventions};
 pub use display_names::{
     DisplayNames, positional_parameter_name, unnamed_function, unnamed_identifier,

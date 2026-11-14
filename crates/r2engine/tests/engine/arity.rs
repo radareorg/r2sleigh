@@ -257,7 +257,7 @@ fn a_call_through_a_sealed_slot_to_an_uncited_noreturn_composes_nothing() {
     .sealed(slot..slot + 8);
     let mut open = OpenProgram::of(literal);
     let info = open.function_info(BASE).expect("it is described");
-    let proof = info.noreturn.map(|never| never.proof);
+    let proof = info.noreturn.map(|never| never.proof());
     assert_eq!(
         proof,
         Some(r2engine::discovery::NeverProof::NoReturnReached)

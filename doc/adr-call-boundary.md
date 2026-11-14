@@ -1437,3 +1437,12 @@ One "never comes back" fact, with its proof, from `ComesBack` to the C (D379, D3
 - r2dec. `CallPlan.ends` (the site's proof) ends control; `CallPlan.noreturn` (the callee's proof) is the declaration's attribute. Structuring reads a set of proven call instructions, never a callee's name.
 - `afi` prints `noreturn: true` only for a proof and spells a bound as `noreturn: unproven (…)`.
 
+## rd5-proof as built (2026-11-14)
+
+A proving "never" carries its witness (D410, designs/foundation proof-typed).
+
+- r2source. `Citation` has a private field and four mints, each from its owner's statement: `of(&LibraryRow)` (a cited row), `debug_info(&Declarations, entry)` (an uncontested DWARF declaration), `interrupt(kernel, arch, vector)` (r2abi's interrupt document) and `runtime(name)` (the Go model). `Never`'s fields are private. `cited(Citation)` and `composed(ends)` prove; `uncited()` and `unreached()` are bounds; `assuming` only adds premises. A struct literal outside r2source fails to compile (doctest `E0451`).
+- One predicate: `Never::proves() -> Option<&premises>`. `Return::declared` and `Return::proves_never` are deleted; S31b's register effect, which carries no premise, demands an empty set.
+- `composed(ends)` is `None` for no end or a bound end. Discovery builds each composed body callee first inside its fixpoint, from its callees' `Never`s and the walk's proving halts (`Walker::ends` returns them), `O(V + E)`. A halting tail branch now records its `Never` (`Closer::Branch`), which names no exit site.
+- The walk's halting argument and interrupt carry the row's or the document's `Citation` (`body::Halting`, `Program::interrupt_halts`); the three hand `.cited()` checks are gone. `Placement::reads` states a bound only for a cited row.
+
