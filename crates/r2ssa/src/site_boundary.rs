@@ -397,6 +397,25 @@ impl RegisterEffect {
             .map(|(_, storage)| *storage)
     }
 
+    /// The greatest the body can keep: `unwritten`, before any pending callee is asked (D413).
+    pub fn unwritten_kept(&self) -> Kept {
+        Kept {
+            set: self.unwritten.clone(),
+            machine: self.machine.clone(),
+        }
+    }
+
+    /// Each result register with the low bytes the body may read of it before writing them: one
+    /// past the highest byte `takes` holds, 0 where it takes none (D372). `O(LANES)`.
+    pub fn register_reads(&self) -> Vec<(CanonicalStorageId, u32)> {
+        let slots = self.lanes.slots();
+        let read = (slots.iter().zip(self.takes.0)).filter_map(|(slot, taken)| {
+            let slot = (*slot)?;
+            Some((slot, (128 - taken.leading_zeros()).min(slot.size)))
+        });
+        read.collect()
+    }
+
     /// What the body keeps once every pending callee keeps it, as `kept` answers each (none keeps
     /// nothing); asked in order until nothing is left. `O(p × r / 64)` plus the asks.
     pub fn closed(&self, mut kept: impl FnMut(u64) -> Option<Kept>) -> Kept {

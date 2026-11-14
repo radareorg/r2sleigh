@@ -156,6 +156,12 @@ pub struct DbStats {
     pub table_seals: u64,
     /// Nodes entered plus edges followed by program-graph condensations (D412).
     pub condensed: u64,
+    /// Site fates `DirectSites` computed itself: 0 where the callers-first read held `N ⊆ N⁺` (D354).
+    pub site_fates_in_direct_sites: u64,
+    /// Site fates the callers-first read asked that no `DirectSites` joined: `|A⁺ \ A|` (D354).
+    pub site_fates_never_joined: u64,
+    /// Site fates the callers-first read asked of a body a deep read had lifted first (D354).
+    pub site_fates_relifted: u64,
 }
 
 /// A held answer found good, with what it depends on.
@@ -341,6 +347,21 @@ impl<I: Inputs + 'static> Db<I> {
         self.stats.borrow_mut().condensed += visits;
     }
 
+    /// Count site fates `DirectSites` computed where the callers-first read had not (D354).
+    pub fn note_site_fates_in_direct_sites(&self) {
+        self.stats.borrow_mut().site_fates_in_direct_sites += 1;
+    }
+
+    /// Count site fates the callers-first read asked that no `DirectSites` joined (D354).
+    pub fn note_site_fates_never_joined(&self, count: u64) {
+        self.stats.borrow_mut().site_fates_never_joined += count;
+    }
+
+    /// Count site fates asked of a body a deep read had lifted first (D354).
+    pub fn note_site_fates_relifted(&self) {
+        self.stats.borrow_mut().site_fates_relifted += 1;
+    }
+
     /// Add an ended request's frame builds and table seals (D403).
     pub fn note_request(&self, control: &crate::EngineExecutionControl) {
         let mut stats = self.stats.borrow_mut();
@@ -409,6 +430,16 @@ impl<I: Inputs + 'static> Db<I> {
             key: Rc::clone(&key),
         });
         Some(key)
+    }
+
+    /// Whether `Q` has an entry at `key`, good or not; records nothing.
+    pub fn holds<Q: Query<I>>(&self, key: &Q::Key) -> bool {
+        let table = self.table::<Q>();
+        let typed = table
+            .as_any()
+            .downcast_ref::<Table<Q, I>>()
+            .expect("a table is registered under its own query's type");
+        typed.entries.borrow().contains_key(key)
     }
 
     /// `Q`'s answer at `key` where held and good; never computes, and records the answer's own dependencies, so no cycle closes.

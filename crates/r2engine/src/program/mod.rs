@@ -11,6 +11,7 @@ mod fates;
 pub mod info;
 pub mod naming;
 mod pointers;
+mod ranks;
 mod reads;
 mod requests;
 mod resolved;
@@ -627,6 +628,9 @@ impl<S: Source + 'static> OpenProgram<S> {
                 + self.control().frame_decision_steps(),
             table_seals: self.db.stats().table_seals + self.control().table_seals(),
             condensed: self.db.stats().condensed,
+            site_fates_in_direct_sites: self.db.stats().site_fates_in_direct_sites,
+            site_fates_never_joined: self.db.stats().site_fates_never_joined,
+            site_fates_relifted: self.db.stats().site_fates_relifted,
         }
     }
 
@@ -760,6 +764,10 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
 
     fn kept_at(&self, entry: u64) -> Option<std::collections::BTreeSet<r2ssa::CanonicalStorageId>> {
         crate::native::Program::kept_at(&self.view(), entry)
+    }
+
+    fn reads_at(&self, entry: u64) -> Option<Box<[(r2ssa::CanonicalStorageId, u32)]>> {
+        crate::native::Program::reads_at(&self.view(), entry)
     }
 }
 

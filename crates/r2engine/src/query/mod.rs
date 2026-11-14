@@ -57,6 +57,12 @@ pub struct AnalysisStats {
     pub table_seals: u64,
     /// Nodes entered plus edges followed by the program's condensations, `V + E` each (D412).
     pub condensed: u64,
+    /// Site fates `DirectSites` computed itself; 0 where the callers-first read held `N ⊆ N⁺` (D354).
+    pub site_fates_in_direct_sites: u64,
+    /// Site fates the callers-first read asked that no `DirectSites` joined, `|A⁺ \ A|` (D354).
+    pub site_fates_never_joined: u64,
+    /// Site fates the callers-first read asked of a body a deep read had lifted first (D354).
+    pub site_fates_relifted: u64,
 }
 pub use proved::Proved;
 pub use r2ssa::InductionStep;

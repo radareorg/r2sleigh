@@ -678,6 +678,8 @@ struct BuildKey {
     reentering: BTreeSet<u64>,
     unstated_imports: BTreeMap<u64, crate::UnstatedImport>,
     conventions: SiteConventions,
+    /// What each walked callee may read of the result registers, which bounds a call's reads (D372).
+    lane_reads: CalleeLaneReads,
     /// The argument positions through which each callee reaches only upward: all the frame walk
     /// reads of its reach, which its decision reads again where it moves (D365).
     upward: BTreeMap<u64, BTreeSet<usize>>,
@@ -732,7 +734,7 @@ impl BuildKey {
             &self.return_addresses,
             (&self.security_checks, &self.narrow_results),
             (&self.reentering, &self.unstated_imports, &self.premises),
-            &self.conventions,
+            (&self.conventions, &self.lane_reads),
         )
     }
 
@@ -751,6 +753,8 @@ impl BuildKey {
             "security check".to_owned()
         } else if self.narrow_results != other.narrow_results {
             "result width".to_owned()
+        } else if self.lane_reads != other.lane_reads {
+            "result register reads".to_owned()
         } else if self.without_areas() != other.without_areas() {
             "premise or import".to_owned()
         } else if self.areas != other.areas {
@@ -800,6 +804,7 @@ impl BuildKey {
             reentering: evidence.reentering.clone(),
             unstated_imports: evidence.unstated_imports.clone(),
             conventions: callees.sites.by_target().clone(),
+            lane_reads: evidence.lane_reads.clone(),
             upward: (evidence.reach.iter())
                 .map(|(target, reach)| {
                     let upward = reach.iter().filter(|(_, reach)| reach.is_upward());
@@ -2804,6 +2809,7 @@ impl TrustedSsaArtifact {
             preserved: callee_preserved_carriers,
             reach: callee_argument_reach,
             writes: callee_writes,
+            lane_reads: callee_lane_reads,
             library,
             reentering,
             exits,
@@ -2960,6 +2966,7 @@ impl TrustedSsaArtifact {
                 provisional_machine_context
                     .set_callee_argument_reach(callee_argument_reach.clone());
                 provisional_machine_context.set_callee_writes(callee_writes.clone());
+                provisional_machine_context.set_callee_lane_reads(callee_lane_reads.clone());
                 provisional_machine_context.set_site_models(Arc::clone(&sites));
                 // The preliminary build may be the one sealed, so it decides under the same premises.
                 provisional_machine_context.set_accepted_premises(premises.clone());
@@ -3131,6 +3138,7 @@ impl TrustedSsaArtifact {
         machine_context.set_callee_names(correlated_call_sites.callee_names);
         machine_context.set_callee_argument_reach(callee_argument_reach.clone());
         machine_context.set_callee_writes(callee_writes.clone());
+        machine_context.set_callee_lane_reads(callee_lane_reads.clone());
         machine_context.set_site_models(sites);
         machine_context.set_callee_library(library.clone());
         machine_context.set_reentering_callees(reentering.clone());
@@ -4155,6 +4163,9 @@ pub struct DefRef<'a, V = SSAVar> {
 /// happened.
 pub type CalleePreservedCarriers = BTreeMap<u64, BTreeSet<CanonicalStorageId>>;
 
+/// Each walked callee's result registers with the low bytes its body may read of each, by entry.
+pub type CalleeLaneReads = BTreeMap<u64, Box<[(CanonicalStorageId, u32)]>>;
+
 /// What the engine knows of the functions a body calls, by entry address.
 #[derive(Debug, Clone, Default)]
 pub struct CalleeEvidence {
@@ -4166,6 +4177,8 @@ pub struct CalleeEvidence {
     pub reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
     /// What each stated callee may write of its caller's stack; a callee absent writes any (D377).
     pub writes: BTreeMap<u64, crate::call_reads::StackWrites>,
+    /// The low bytes each walked callee may read of each result register; one absent reads any (D372).
+    pub lane_reads: CalleeLaneReads,
     /// The model of each imported library routine called, from r2abi.
     pub library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The callees a runtime model says re-enter their caller at its entry (Go's stack growth).

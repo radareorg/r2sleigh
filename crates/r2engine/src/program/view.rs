@@ -481,8 +481,16 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
 
     fn kept_at(&self, entry: u64) -> Option<std::collections::BTreeSet<r2ssa::CanonicalStorageId>> {
         let key = (entry, self.thumb_at(entry));
-        let kept = self.db.get::<super::fates::KeptAcross>(&key).ok()?;
-        (*kept).as_ref().map(|kept| kept.kept_registers().collect())
+        let summary = self.db.get::<super::fates::Summary>(&key).ok()?;
+        (*summary)
+            .as_ref()
+            .map(|summary| summary.kept.kept_registers().collect())
+    }
+
+    fn reads_at(&self, entry: u64) -> Option<Box<[(r2ssa::CanonicalStorageId, u32)]>> {
+        let key = (entry, self.thumb_at(entry));
+        let summary = self.db.get::<super::fates::Summary>(&key).ok()?;
+        (*summary).as_ref().map(|summary| summary.reads.clone())
     }
 
     fn site_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {

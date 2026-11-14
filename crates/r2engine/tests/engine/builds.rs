@@ -128,17 +128,19 @@ const RECURSES: &[u8] = &[
     0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // 1018 padding
 ];
 
-/// `rec` writes no rsi, but its returning path calls itself: a cycle keeps nothing, so the
-/// caller's rsi past the call stays a residual (D363, default-deny).
+/// `rec` writes neither rsi nor rax, and its returning path calls only itself: the greatest
+/// fixpoint keeps both (D413; a returning call has finite depth), so the caller stores through its
+/// own rsi the rax it was entered with. The parent kept nothing across a cycle: rsi was a residual.
 #[test]
-fn a_callee_that_calls_itself_on_a_returning_path_keeps_nothing() {
+fn a_callee_that_calls_itself_on_a_returning_path_keeps_what_it_never_writes() {
     let functions = [("rec", BASE, 0x0a), ("root", BASE + 0x10, 0x08)];
     let mut open = OpenProgram::of(Literal::of_code(RECURSES, &functions));
     let text = rendered(&mut open, BASE + 0x10);
     assert!(
-        text.contains("never assigned, read as residuals (RSI"),
+        text.contains("r2sleigh_store_u32((void*)(uint64_t)arg1,"),
         "{text}"
     );
+    assert!(text.contains("read as residuals (RAX_0)"), "{text}");
     assert_eq!(open.analysis_stats().defects, 0);
 }
 
