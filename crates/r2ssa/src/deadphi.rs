@@ -111,8 +111,13 @@ impl ProvenProgramObservations {
                 crate::bytes::closure_of(graph, roots_masked.map(|(value, mask, _)| (value, mask)))
             }
         };
-        // What an unmodelled instruction reads, and what those values depend on. O(V + E).
+        // What an unmodelled instruction, or a call nothing bounds, reads, and what those values
+        // depend on (D434). O(V + E).
+        let unbounded = (facts.boundaries.calls.values())
+            .filter(|boundary| boundary.may_read_unlisted())
+            .flat_map(|boundary| graph.call_boundary_reads(boundary.at));
         let unmodelled = (facts.obligations.unmodelled().iter())
+            .chain(unbounded)
             .flat_map(|inst| graph.inputs(inst).iter().copied())
             .collect::<Vec<_>>();
         let unmodelled = match unmodelled.is_empty() {
