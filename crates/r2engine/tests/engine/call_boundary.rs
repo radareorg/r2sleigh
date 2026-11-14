@@ -1073,7 +1073,7 @@ fn a_build_a_callee_s_statement_moves_is_counted_rebuilt() {
         .into_text();
     assert!(text.starts_with("void f("), "{text}");
     let stats = open.analysis_stats();
-    assert!(stats.rebuilt >= 1, "{stats:?}");
+    assert_eq!(stats.rebuilt, 1, "{stats:?}");
 }
 
 /// A format in writable data may change before the call (Codex review of #363): the call may read
