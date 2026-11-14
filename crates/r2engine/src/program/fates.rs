@@ -8,7 +8,7 @@ use r2il::R2ILOp;
 use r2source::{
     CanonicalStorageId, ConventionModel, SourceClosedResult, SourceReadLanes, SourceResultCause,
 };
-use r2ssa::dense::{Csr, DenseId, IdMap};
+use r2ssa::dense::{Csr, DenseId, IdMap, Reached};
 use r2ssa::site_boundary::{
     ByteMask, CallEffect, CallEffects, CallerFlow, Counted, LANES, LaneBytes, LaneFate, LaneId,
     Overwrites, RegisterEffect, ResultLanes, SiteBoundary, argument_registers,
@@ -513,19 +513,22 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ComponentForwarding {
     const NAME: &'static str = "forwarded";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: Tarjan's search over the callers a lane is returned to, `O(V + E)` over what it
-    /// reaches, then each component's fixpoint, `O(V + E × height)`; every member is deposited.
+    /// Work: r2ssa's one condensation of the callers a lane is returned to, `O(V + E)` over what
+    /// it reaches, then each component's fixpoint, `O(V + E × height)`; every member is deposited.
     fn compute(db: &Db<ProgramInputs<S>>, &root: &u64) -> Self::Value {
         let solved = |node: u64| {
             (db.held::<ComponentForwarding>(&node).ok().flatten()).filter(|_| node != root)
         };
-        let mut search = super::resolved::Search::default();
-        search.run(root, |node| match solved(node) {
+        let reached = Reached::from(root, |node| match solved(node) {
             Some(_) => Vec::new(),
             None => callers_returned_to(db, node),
         });
+        let condensation = reached.condensation();
+        db.note_condensed(condensation.visits());
         let mut answers = BTreeMap::new();
-        for members in &search.closed {
+        for (_, members) in condensation.components() {
+            let members = members.iter().map(|node| reached.key(*node));
+            let members = members.collect::<Vec<_>>();
             if members.iter().all(|member| solved(*member).is_some()) {
                 continue;
             }
@@ -533,7 +536,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ComponentForwarding {
                 Some(answer) => Some(Option::clone(answer)),
                 None => solved(caller).map(|held| (*held).clone()),
             };
-            for (member, answer) in solve(db, members, outside) {
+            for (member, answer) in solve(db, &members, outside) {
                 answers.insert(member, answer);
             }
         }

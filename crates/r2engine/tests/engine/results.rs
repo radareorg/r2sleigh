@@ -495,3 +495,27 @@ fn a_tail_jump_to_signal_returns_the_previous_handler() {
     );
     assert!(rendered.contains("return "), "{rendered}");
 }
+
+/// One condensation answers the whole pair (D412): `even ⇄ odd`, the owners of `caller`'s result,
+/// is two nodes and two edges, and every member's component is deposited, so asking each member
+/// after adds no visit. Under `aa` the forwarder graph adds `even → {odd, caller}`, `odd → even`.
+#[test]
+fn one_condensation_answers_every_member_of_a_cycle() {
+    let mut open = OpenProgram::of(Literal::of_code(MUTUAL_U64, &U64));
+    open.rendered(U64[2].1).expect("it renders");
+    assert_eq!(open.analysis_stats().condensed, 2 + 2);
+    for (_, at, _) in U64 {
+        open.rendered(at).expect("it renders");
+    }
+    let stats = open.analysis_stats();
+    assert_eq!(stats.condensed, 2 + 2, "{stats:?}");
+    assert_eq!(stats.defects, 0, "{stats:?}");
+    let mut open = OpenProgram::of(Literal::of_code(MUTUAL_U64, &U64));
+    open.analyse_program().expect("it surveys");
+    for (_, at, _) in U64 {
+        open.rendered(at).expect("it renders");
+    }
+    let stats = open.analysis_stats();
+    assert_eq!(stats.condensed, (2 + 2) + (3 + 3), "{stats:?}");
+    assert_eq!(stats.defects, 0, "{stats:?}");
+}
