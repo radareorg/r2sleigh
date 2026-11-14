@@ -370,6 +370,62 @@ fn a_recursive_callee_with_a_call_naming_no_callee_keeps_nothing() {
     assert!(!text.starts_with("double f("), "{text}");
 }
 
+/// `a` (0x1000) and `b` (0x1010) call each other; `a` writes edi, `b` ecx, neither XMM0. `f`
+/// (0x1020) writes XMM0; `caller` (0x1030) calls `f`, then `a`, then stores XMM0.
+const KEPT_ACROSS_A_PAIR: &[u8] = &[
+    0x85, 0xff, // 1000 test edi, edi
+    0x74, 0x07, // 1002 je 0x100b
+    0xff, 0xcf, // 1004 dec edi
+    0xe8, 0x05, 0x00, 0x00, 0x00, // 1006 call 0x1010
+    0xc3, // 100b ret
+    0xcc, 0xcc, 0xcc, 0xcc, //
+    0x85, 0xff, // 1010 test edi, edi
+    0x74, 0x07, // 1012 je 0x101b
+    0x31, 0xc9, // 1014 xor ecx, ecx
+    0xe8, 0xe5, 0xff, 0xff, 0xff, // 1016 call 0x1000
+    0xc3, // 101b ret
+    0xcc, 0xcc, 0xcc, 0xcc, //
+    0x66, 0x0f, 0xef, 0xc0, // 1020 pxor xmm0, xmm0
+    0xf2, 0x0f, 0x58, 0xc1, // 1024 addsd xmm0, xmm1
+    0xc3, // 1028 ret
+    0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, //
+    0xe8, 0xeb, 0xff, 0xff, 0xff, // 1030 call 0x1020
+    0xe8, 0xc6, 0xff, 0xff, 0xff, // 1035 call 0x1000
+    0xf2, 0x0f, 0x11, 0x07, // 103a movsd qword ptr [rdi], xmm0
+    0xc3, // 103e ret
+    0xcc,
+];
+
+/// The pair's kept sets differ (`a` writes edi, `b` ecx), and each member's `Summary` is the one
+/// greatest fixpoint whichever is asked first: every order renders every function alike (D413).
+#[test]
+fn a_cycles_kept_registers_are_one_answer_whichever_member_is_asked_first() {
+    let functions = [
+        ("a", BASE, 0x0c),
+        ("b", BASE + 0x10, 0x0c),
+        ("f", BASE + 0x20, 0x09),
+        ("caller", BASE + 0x30, 0x0f),
+    ];
+    let rendered = |order: [u64; 4]| {
+        let mut open = OpenProgram::of(Literal::of_code(KEPT_ACROSS_A_PAIR, &functions));
+        open.analyse_program().expect("it surveys");
+        let mut texts = order.map(|at| {
+            let rendered = open.rendered(at).expect("it renders");
+            (at, rendered.response.output.into_text())
+        });
+        assert_eq!(open.analysis_stats().defects, 0);
+        texts.sort();
+        texts
+    };
+    let first = rendered([BASE, BASE + 0x10, BASE + 0x20, BASE + 0x30]);
+    let second = rendered([BASE + 0x10, BASE + 0x30, BASE, BASE + 0x20]);
+    let third = rendered([BASE + 0x30, BASE + 0x20, BASE + 0x10, BASE]);
+    assert_eq!(first, second);
+    assert_eq!(first, third);
+    let f = &first[2].1;
+    assert!(f.starts_with("double f("), "{f}");
+}
+
 /// `narrow` (0x1000) leaves RAX above EAX unwritten on one path; `g` (0x1010, `body`) makes an
 /// indirect call, so its parameters are a floor and its call reads every location; `caller`
 /// (0x1020) calls `narrow`, then `g` on one path, and stores EAX on the other.

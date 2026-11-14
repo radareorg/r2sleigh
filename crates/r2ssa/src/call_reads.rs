@@ -69,10 +69,16 @@ impl CallReads {
         }
     }
 
-    /// These reads bounded on the result registers by a walked callee's register effect (D372).
+    /// These reads bounded on the result registers by a walked callee's register effect (D372):
+    /// only those no argument register overlaps, whose width the callee's lanes own. O(lanes × r).
     #[must_use]
     pub fn reading_lanes(mut self, lanes: Option<&[(CanonicalStorageId, u32)]>) -> Self {
-        self.lanes = lanes.map(Box::from);
+        let argument = |slot: &CanonicalStorageId| {
+            (self.registers.iter())
+                .any(|register| crate::semantic::register_storages_overlap(*register, *slot))
+        };
+        let lanes = lanes.map(|lanes| lanes.iter().filter(|(slot, _)| !argument(slot)));
+        self.lanes = lanes.map(|lanes| lanes.copied().collect());
         self
     }
 
@@ -216,5 +222,26 @@ mod tests {
         assert_eq!(reads.stack, None);
         assert!(reads.takes(lanes, true).touches(0));
         assert!(!reads.takes(lanes, false).touches(0));
+    }
+
+    /// A register effect bounds a result register no argument overlaps (RAX beside the count
+    /// register AL); an argument register's width stays its interface's (D372).
+    #[test]
+    fn a_register_effect_bounds_only_result_registers_that_are_no_argument() {
+        let register = |offset, size| CanonicalStorageId {
+            space: r2source::CanonicalStorageSpace::Register,
+            offset,
+            size,
+        };
+        let (rax, al, rdx, rdi) = (
+            register(0, 8),
+            register(0, 1),
+            register(16, 8),
+            register(56, 8),
+        );
+        let every = CallReads::placed(vec![rdi, rdx], Some(al), None, false);
+        let reads = every.reading_lanes(Some(&[(rax, 0), (rdx, 0)]));
+        assert_eq!(reads.lane_read(rax), Some(0));
+        assert_eq!(reads.lane_read(rdx), None);
     }
 }
