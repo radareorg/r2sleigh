@@ -590,14 +590,15 @@ impl Placement<'_> {
             );
         })
         .ok()?;
-        let floor = r2source::SourceArityFloor::of(
-            (placement.floor.map(r2source::SourceFloorCause::Unplaced))
-                .into_iter()
-                .chain(uncited.then_some(r2source::SourceFloorCause::Uncited)),
-        );
-        match floor {
+        let interface = match uncited {
+            true => interface.with_unbounded_reads(r2source::SourceUnboundedReads::UncitedRow),
+            false => interface,
+        };
+        match placement.floor {
             None => Some(interface),
-            Some(floor) => Some(interface.with_arity_floor(floor)),
+            Some(class) => Some(interface.with_arity_floor(r2source::SourceArityFloor::of([
+                r2source::SourceFloorCause::Unplaced(class),
+            ])?)),
         }
     }
 

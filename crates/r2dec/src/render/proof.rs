@@ -331,7 +331,6 @@ fn floor_cause(cause: &r2source::SourceFloorCause) -> String {
             format!("a register past them reaches the call to {at:#x}")
         }
         C::Unplaced(_) => "a declared parameter has no location".into(),
-        C::Uncited => "no header cites the declaration".into(),
     }
 }
 

@@ -343,6 +343,74 @@ fn a_frame_address_handed_to_a_tail_is_written_through() {
     hold(vec![failure]);
 }
 
+/// The bound of the call `before` and a call to `import` make, by the boundary fact.
+fn import_bound(import: &str, before: &[u8]) -> bool {
+    let plt = common::plt_then::<0x20>(&[]);
+    let after_call = PLT_CALLER + (before.len() + 5) as u64;
+    let rel = (common::PLT_STUB as i64 - after_call as i64) as i32;
+    let call = [&[0xe8][..], &rel.to_le_bytes()].concat();
+    let code = [&plt[..], before, &call, &[0xc3]].concat();
+    let literal = Literal::plt_wrapped(import, Box::leak(code.into()));
+    let prepared = OpenProgram::of(literal)
+        .prepared(PLT_CALLER)
+        .expect("it prepares");
+    let artifact = prepared.artifact().shared_artifact();
+    let call = artifact
+        .facts()
+        .boundaries
+        .calls
+        .values()
+        .next()
+        .expect("a call");
+    call.reads_bound.is_some()
+}
+
+/// The positive side of the read bound (D411): a cited fixed row bounds its call's reads, and an
+/// uncited one does not.
+#[test]
+fn a_cited_row_bounds_its_reads_and_an_uncited_one_does_not() {
+    assert!(import_bound("puts", &[0x48, 0x89, 0xf7]));
+    assert!(!import_bound(UNCITED, &[0x48, 0x89, 0xf7]));
+}
+
+/// `main: sub rsp, 0x18; mov qword [rsp+8], 5; mov edi, 1; mov esi, 7; call f; mov rax, [rsp+8];
+/// add rsp, 0x18; ret`, `f: mov eax, edi; ret`: the walked callee writes none of main's stack and
+/// reads only RDI, so the slot keeps the 5 and the call's reads are bounded (D411's witnesses).
+#[test]
+fn a_walked_callee_bounds_its_reads_and_its_stack_writes() {
+    const CODE: &[u8] = &[
+        0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+        0x48, 0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov qword [rsp+8], 5
+        0xbf, 0x01, 0x00, 0x00, 0x00, // 100d mov edi, 1
+        0xbe, 0x07, 0x00, 0x00, 0x00, // 1012 mov esi, 7
+        0xe8, 0x0f, 0x00, 0x00, 0x00, // 1017 call 0x102b
+        0x48, 0x8b, 0x44, 0x24, 0x08, // 101c mov rax, [rsp+8]
+        0x48, 0x83, 0xc4, 0x18, // 1021 add rsp, 0x18
+        0xc3, // 1025 ret
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, // padding to 0x102b
+        0x89, 0xf8, // 102b mov eax, edi
+        0xc3, // 102d ret
+    ];
+    let functions = [("main", BASE, 0x26), ("f", BASE + 0x2b, 3)];
+    let text = rendered((Literal::of_code(CODE, &functions), BASE));
+    assert!(
+        returns(&text).iter().any(|line| line.contains('5')),
+        "{text}"
+    );
+    let prepared = OpenProgram::of(Literal::of_code(CODE, &functions))
+        .prepared(BASE)
+        .expect("it prepares");
+    let artifact = prepared.artifact().shared_artifact();
+    let call = artifact
+        .facts()
+        .boundaries
+        .calls
+        .values()
+        .next()
+        .expect("a call");
+    assert!(call.reads_bound.is_some(), "{}", artifact.dump());
+}
+
 /// Each column's test, by a match with no wildcard arm: a new [`NegativeFact`] does not compile
 /// until it has one (D411).
 fn column(fact: NegativeFact) -> fn() {

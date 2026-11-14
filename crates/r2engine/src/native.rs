@@ -1389,7 +1389,7 @@ type Resolution = Arc<TrustedSsaArtifact>;
 pub(crate) type AssumedMember = (
     u64,
     r2source::SourceFunctionInterface,
-    Option<Vec<(i64, i64)>>,
+    Option<r2ssa::call_reads::StackWrites>,
 );
 
 /// What a body is resolved against beside its imports: its owners resolved, and the arities a
@@ -1423,8 +1423,7 @@ fn resolved_alone(
     // An assumed member states its interface and what it writes: nothing it preserves or reaches.
     for (member, interface, writes) in stated.assumed {
         if let Some(writes) = writes {
-            let assumed = r2ssa::call_reads::StackWrites::assumed(writes);
-            imports.writes.insert(*member, assumed);
+            imports.writes.insert(*member, writes.clone());
         }
         imports.interfaces.insert(*member, interface.clone());
     }

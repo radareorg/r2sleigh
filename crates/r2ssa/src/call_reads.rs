@@ -35,8 +35,8 @@ enum Writes {
     Arguments,
     /// A walked body's: these ranges from the call's stack pointer.
     Within(Box<[(i64, i64)]>),
-    /// A cycle member's assumption, which its solve accepts only where its read states the same.
-    Assumed(Box<[(i64, i64)]>),
+    /// A cycle member's first assumption, which its solve accepts only where its read states the same.
+    Assumed(Vec<(i64, i64)>),
 }
 
 /// The frame walk saw every operation of the body through [`crate::SSAOp::transfer`], whose match
@@ -61,17 +61,18 @@ impl StackWrites {
         Self(Writes::Within(spans.into()))
     }
 
-    /// A cycle member's assumed spans (r2engine `resolved`): its solve keeps it only where the
-    /// member's own read states the same spans.
-    pub fn assumed(spans: &[(i64, i64)]) -> Self {
-        Self(Writes::Assumed(spans.into()))
+    /// A cycle member's first assumption (r2engine `resolved`): no write of its caller's stack. Its
+    /// solve keeps it only where the member's own read states the same.
+    pub const fn cycle_seed() -> Self {
+        Self(Writes::Assumed(Vec::new()))
     }
 
     /// The spans from the call's stack pointer; `None` for the argument area.
     pub fn spans(&self) -> Option<&[(i64, i64)]> {
         match &self.0 {
             Writes::Arguments => None,
-            Writes::Within(spans) | Writes::Assumed(spans) => Some(spans),
+            Writes::Within(spans) => Some(spans),
+            Writes::Assumed(spans) => Some(spans),
         }
     }
 }
@@ -150,8 +151,25 @@ impl CallReads {
     }
 
     /// A complete, fixed interface: its arguments, the slots its callee's body proves unread left
-    /// out (`is_hole`). O(arguments).
+    /// out (`is_hole`); every location where the callee states its reads unbounded (an uncited
+    /// row, D411). O(arguments).
     pub fn exact(interface: &SourceCallSiteInterface, model: Option<&ConventionModel>) -> Self {
+        let unbounded = (interface.exact_callee_interface())
+            .is_some_and(|callee| callee.unbounded_reads().is_some());
+        match (unbounded, model) {
+            (false, _) => Self::exact_listed(interface, model),
+            (true, Some(model)) => Self::every_location(model),
+            (true, None) => Self {
+                bound: None,
+                stack: None,
+                writes: None,
+                ..Self::exact_listed(interface, None)
+            },
+        }
+    }
+
+    /// The listed arguments of a complete fixed interface, holes left out. O(arguments).
+    fn exact_listed(interface: &SourceCallSiteInterface, model: Option<&ConventionModel>) -> Self {
         let holes = (interface.exact_callee_interface().into_iter())
             .flat_map(|callee| callee.parameters())
             .filter(|parameter| parameter.is_hole())

@@ -1451,8 +1451,8 @@ A proving "never" carries its witness (D410, designs/foundation proof-typed).
 Every negative fact on the call boundary is a type its owner mints (designs/foundation proof-typed).
 
 - r2ssa `ReadBound`: why a call's listed registers are all it reads. Minted by `cited(Citation)` (r2engine's cited row) or r2ssa's exact arity (a complete fixed site interface, a callee statement of exact arity). `CallReads` fields are private; `cited`, `unbounded` and `every_location` build it, `reads_none_of` needs `bound()`. `SourceCallBoundaryFact::reads_bound` carries the same witness.
-- An uncited row states a lower bound: r2engine `declared` adds `SourceFloorCause::Uncited`. Recovery mints no exact site contract from a floor, and the callee statement reads every location.
-- `StackWrites` is opaque. `within(spans, Transfers)` takes the frame walk's witness that each operation of each reached block went through `SSAOp::transfer`, a match with no wildcard arm. r2engine hands the minted value on, and a cycle's held assumption is `assumed(spans)`.
+- An uncited row's reads are unbounded: r2engine `declared` states `SourceUnboundedReads::UncitedRow` on its interface. The call keeps the declared contract; `CallReads::exact` and the callee statement read every location. An arity floor was rejected: it dropped the site contract, so an uncited variadic call lost its count gap.
+- `StackWrites` is opaque. `within(spans, Transfers)` takes the frame walk's witness that each operation of each reached block went through `SSAOp::transfer`, a match with no wildcard arm. r2engine hands the minted value on. A cycle member's first assumption is `cycle_seed()` (no write); a risen one is its read's minted value.
 - r2il `Reads` and `Cancelled` have private fields; `reads_of` alone mints them.
 - `SummaryArgEffect.assumed` is gone: an argument handed to an undescribed call keeps an empty entry, which counts toward arity and proves no effect.
 - The matrix's columns are `r2source::NegativeFact`, each carried by a `Negative` type; Dylint `UNPROVEN_NEGATIVE` denies a new public negative bool.

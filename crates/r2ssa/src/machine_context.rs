@@ -3334,7 +3334,8 @@ impl CalleeStatement {
                 *address,
                 Self {
                     reads: (matches!(arity, crate::SourceArity::Exact(_))
-                        && !interface.is_variadic())
+                        && !interface.is_variadic()
+                        && interface.unbounded_reads().is_none())
                     .then(|| crate::call_reads::CallReads::callee_locations(interface))
                     .flatten(),
                     arity,

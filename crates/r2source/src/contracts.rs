@@ -352,8 +352,13 @@ pub enum SourceFloorCause {
     HandedOn(SourceUnprovenCall),
     /// A declared parameter of a class the convention places nowhere here; it and the rest drop.
     Unplaced(SourceUnplacedClass),
-    /// The declaration is a library row no header cites: its parameters are a lower bound (D411).
-    Uncited,
+}
+
+/// Why a call may read argument locations past the parameters its contract lists (D411).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum SourceUnboundedReads {
+    /// The declaration is a library row no header cites: radare2's parameter list is a lower bound.
+    UncitedRow,
 }
 
 /// A declared class no location takes here (doc/adr-call-boundary.md, Refusals).
@@ -1197,6 +1202,8 @@ pub struct SourceFunctionInterface {
     security_check: bool,
     /// Why the parameters are a floor, where a slot past them may be read or handed on.
     arity_floor: Option<SourceArityFloor>,
+    /// Why a call may read past the listed parameters, which still render as its contract.
+    unbounded_reads: Option<SourceUnboundedReads>,
     /// Why the result is unproven, where recovery states it.
     unproven_result: Option<SourceUnprovenResult>,
     /// Where the result is unproven, the registers it may be in: each call takes the one its
@@ -1687,6 +1694,7 @@ impl SourceFunctionInterface {
             result_above: SourceAbove::Undefined,
             security_check: false,
             arity_floor: None,
+            unbounded_reads: None,
             unproven_result: None,
             result_carriers: None,
             closed_result: None,
@@ -1751,6 +1759,7 @@ impl SourceFunctionInterface {
             result_above: self.result_above,
             security_check: self.security_check,
             arity_floor: self.arity_floor.clone(),
+            unbounded_reads: self.unbounded_reads,
             unproven_result: self.unproven_result.clone(),
             result_carriers: self.result_carriers,
             closed_result: self.closed_result,
@@ -1963,6 +1972,18 @@ impl SourceFunctionInterface {
     pub fn with_arity_floor(mut self, floor: SourceArityFloor) -> Self {
         self.arity_floor = Some(floor);
         self
+    }
+
+    /// The same interface, its calls reading past its parameters for `why`.
+    #[must_use]
+    pub const fn with_unbounded_reads(mut self, why: SourceUnboundedReads) -> Self {
+        self.unbounded_reads = Some(why);
+        self
+    }
+
+    /// Why a call may read past the parameters; `None` where they bound its reads.
+    pub const fn unbounded_reads(&self) -> Option<SourceUnboundedReads> {
+        self.unbounded_reads
     }
 
     /// Why the parameters are a floor, where a slot past them may be read or handed on.
