@@ -46,6 +46,9 @@ pub struct CallReads {
     pub writes: Option<Vec<(i64, i64)>>,
     /// Whether the callee's statement bounds the registers; the every-location default does not.
     pub stated: bool,
+    /// Each result register with the low bytes a walked callee's body may read of it before writing
+    /// it, from its register effect (D372); none where no row states them.
+    pub lanes: Option<Box<[(CanonicalStorageId, u32)]>>,
 }
 
 impl CallReads {
@@ -62,7 +65,27 @@ impl CallReads {
             stack: None,
             writes: None,
             stated: false,
+            lanes: None,
         }
+    }
+
+    /// These reads bounded on the result registers by a walked callee's register effect (D372).
+    #[must_use]
+    pub fn reading_lanes(mut self, lanes: Option<&[(CanonicalStorageId, u32)]>) -> Self {
+        self.lanes = lanes.map(Box::from);
+        self
+    }
+
+    /// The low bytes of `carrier` the callee may read, where its register effect states a result
+    /// register starting at it; `O(LANES)`.
+    pub fn lane_read(&self, carrier: CanonicalStorageId) -> Option<u32> {
+        let lanes = self.lanes.as_deref()?;
+        let (_, bytes) = lanes.iter().find(|(slot, _)| {
+            slot.space == carrier.space
+                && slot.offset == carrier.offset
+                && carrier.size <= slot.size
+        })?;
+        Some((*bytes).min(carrier.size))
     }
 
     /// A complete, fixed interface: its arguments, the slots its callee's body proves unread left
@@ -114,6 +137,7 @@ impl CallReads {
             writes: Some(stack.clone()),
             stack: Some(stack),
             stated: true,
+            lanes: None,
         }
     }
 
@@ -144,6 +168,7 @@ impl CallReads {
             stack: None,
             writes: None,
             stated,
+            lanes: None,
         }
     }
 

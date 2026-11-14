@@ -765,6 +765,10 @@ impl<S: Source + 'static> crate::native::Program for OpenProgram<S> {
     fn kept_at(&self, entry: u64) -> Option<std::collections::BTreeSet<r2ssa::CanonicalStorageId>> {
         crate::native::Program::kept_at(&self.view(), entry)
     }
+
+    fn reads_at(&self, entry: u64) -> Option<Box<[(r2ssa::CanonicalStorageId, u32)]>> {
+        crate::native::Program::reads_at(&self.view(), entry)
+    }
 }
 
 /// The C library a program runs against, as its container states it.

@@ -598,6 +598,25 @@ component proves. Components: Tarjan, O(V + E) over the owner edges.
   sets are shown equal over the AArch64 census and a gzdoom sample. Next,
   measured first.
 
+### The lift grade as built (D413, 2026-11-14)
+
+r2engine `Summary`, keyed `(entry, thumb)` and `Held`, is the lift grade of `Summary(f)`. It holds what a caller reads of a body from its lift alone. Its two facts come from the body's `RegisterEffects` row:
+
+- `kept` is the registers a call to the body leaves as found. It is the greatest fixpoint of `kept(f) = unwritten(f) ∩ ⋂ kept(p)` over the pending callees `p`. A callee with no row, a stub or another machine keeps nothing. Soundness: a returning call has finite depth, so by induction on that depth each path keeps what no operation on it writes. The fixpoint is unique, so the order members are asked changes nothing.
+- `reads` lists each result register with the low bytes the body may read before writing it. It is the row's `takes` (D318, inner calls read shallowly). D372's recovered half reads it.
+
+Algorithm:
+
+- D412's condensation runs over the pending callees `Summary(f)` reaches. A body's callees stop at the one that empties `unwritten`, since past it nothing more can be kept. Each component is solved callee first.
+- Each member starts at `unwritten`. It is closed again only when a pending callee inside its component shrinks. A set shrinks at most `r` times for `r` registers, so a component costs `O(k + E × r)` closings. Every member is deposited, and none is entry-dependent.
+- `KeptAcross` is deleted. Its readers, the deep `CallEffect.kept` in `fates.rs` and `Program::kept_at`, read `Summary.kept`.
+
+The cost is what `KeptAcross` lifted. Measured walks: pumasim `aa; pdd @ 0x3b6b20` stays 375, output identical; cold `pdd @ 0x23fdf0` goes 216 to 217, and one residual obligation leaves its proof line.
+
+`reads` reaches a build only through the root's `read_callees`, which reads every direct callee in one round. A statement round (`state_asked`, the owners' `state`) adds none. A bound added in round two would move `BuildKey`'s `lane_reads` and rebuild a kept build. In r2ssa, a call that falls to `CallReads::every_location` at a walked direct callee takes that callee's bound (`CallReads::lanes`). `register_read_bytes` then reads only those low bytes of the result register. With no row, an indirect call or an import, the register is read whole.
+
+Deviation from the callee-summaries design: the summary is r2engine's `LiftSummary`, not an extension of `PreparedCalleeSummary`. That type is built from a sealed SSA artifact (build grade), so carrying the lift grade on it would build every callee. `reads` is the shallow row's `takes`, not a least fixpoint over callee reads. A deeper `reads` needs r2ssa to state, at each call, the lane bytes still held from entry.
+
 ### Calls through a table (ROADMAP P5)
 
 A call is not a branch: its targets are callees, not successors, so a fetched call table never reaches

@@ -438,6 +438,8 @@ pub struct SourceMachineContext {
     callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
     /// What each stated callee may write of its caller's stack, by entry (D377).
     callee_writes: BTreeMap<u64, crate::call_reads::StackWrites>,
+    /// The low bytes each walked callee may read of each result register, by entry (D372).
+    callee_lane_reads: crate::function::CalleeLaneReads,
     /// The convention each call runs under (D390); any other call runs under `calls`.
     sites: std::sync::Arc<crate::function::SiteModels>,
     /// The library models of the imports this body calls, by entry.
@@ -822,6 +824,7 @@ impl SourceMachineContext {
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
             callee_writes: BTreeMap::new(),
+            callee_lane_reads: BTreeMap::new(),
             sites: std::sync::Arc::default(),
             callee_library: BTreeMap::new(),
             reentering_callees: BTreeSet::new(),
@@ -1160,6 +1163,10 @@ impl SourceMachineContext {
         self.callee_writes = writes;
     }
 
+    pub(crate) fn set_callee_lane_reads(&mut self, reads: crate::function::CalleeLaneReads) {
+        self.callee_lane_reads = reads;
+    }
+
     pub(crate) fn set_site_models(&mut self, sites: std::sync::Arc<crate::function::SiteModels>) {
         self.sites = sites;
     }
@@ -1349,12 +1356,16 @@ impl SourceMachineContext {
         let stated = target
             .and_then(|target| self.callee_statement(target.offset))
             .and_then(|statement| statement.reads.as_deref());
+        // A walked callee's register effect bounds its result registers; any other reads them whole.
+        let lanes = target.and_then(|target| self.callee_lane_reads.get(&target.offset));
         let reads = match stated {
             Some(read) => Some(crate::call_reads::CallReads::of_locations(
                 read.iter().copied(),
                 model,
             )),
-            None => model.map(crate::call_reads::CallReads::every_location),
+            None => model
+                .map(crate::call_reads::CallReads::every_location)
+                .map(|reads| reads.reading_lanes(lanes.map(|lanes| &lanes[..]))),
         };
         reads.map(|reads| reads.writing(writes))
     }

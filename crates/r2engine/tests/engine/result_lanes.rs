@@ -319,6 +319,113 @@ fn a_read_past_a_callee_that_keeps_the_lane_is_the_earlier_calls_read() {
     assert_eq!(open.analysis_stats().defects, 0);
 }
 
+/// `rec` (0x1000) runs `step`, then calls itself until `edi` is 0, and never writes XMM0; `f`
+/// writes XMM0; `caller` calls `f`, then `rec`, then stores XMM0. `f`'s rendering under `aa`.
+fn kept_across_recursion(step: [u8; 2]) -> String {
+    let code: &[u8] = &[
+        0x85, 0xff, // 1000 test edi, edi
+        0x74, 0x07, // 1002 je 0x100b
+        step[0], step[1], // 1004 step
+        0xe8, 0xf5, 0xff, 0xff, 0xff, // 1006 call 0x1000
+        0xc3, // 100b ret
+        0xcc, 0xcc, 0xcc, 0xcc, //
+        0x66, 0x0f, 0xef, 0xc0, // 1010 pxor xmm0, xmm0
+        0xf2, 0x0f, 0x58, 0xc1, // 1014 addsd xmm0, xmm1
+        0xc3, // 1018 ret
+        0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, //
+        0xe8, 0xeb, 0xff, 0xff, 0xff, // 1020 call 0x1010
+        0xe8, 0xd6, 0xff, 0xff, 0xff, // 1025 call 0x1000
+        0xf2, 0x0f, 0x11, 0x07, // 102a movsd qword ptr [rdi], xmm0
+        0xc3, // 102e ret
+        0xcc,
+    ];
+    let functions = [
+        ("rec", BASE, 0x0c),
+        ("f", BASE + 0x10, 0x09),
+        ("caller", BASE + 0x20, 0x0f),
+    ];
+    let code = Box::leak(code.to_vec().into_boxed_slice());
+    let mut open = OpenProgram::of(Literal::of_code(code, &functions));
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    assert_eq!(open.analysis_stats().defects, 0);
+    rendered.response.output.into_text()
+}
+
+/// A recursive callee keeps what no operation of it writes (D413, the greatest fixpoint): `rec`
+/// keeps XMM0 across its own call, so the store reads `f`'s double. A cycle kept nothing before.
+#[test]
+fn a_read_past_a_recursive_callee_that_keeps_the_lane_is_the_earlier_calls_read() {
+    // dec edi
+    let text = kept_across_recursion([0xff, 0xcf]);
+    assert!(text.starts_with("double f("), "{text}");
+}
+
+/// A call naming no callee on `rec`'s path to its return keeps nothing, so neither does the cycle:
+/// the store may read what that call left, and `f`'s result is not decided (default-deny).
+#[test]
+fn a_recursive_callee_with_a_call_naming_no_callee_keeps_nothing() {
+    // call rcx
+    let text = kept_across_recursion([0xff, 0xd1]);
+    assert!(!text.starts_with("double f("), "{text}");
+}
+
+/// `narrow` (0x1000) leaves RAX above EAX unwritten on one path; `g` (0x1010, `body`) makes an
+/// indirect call, so its parameters are a floor and its call reads every location; `caller`
+/// (0x1020) calls `narrow`, then `g` on one path, and stores EAX on the other.
+fn read_by_a_walked_callee(body: &[u8]) -> String {
+    let mut code = vec![0xcc_u8; 0x40];
+    let narrow: &[u8] = &[
+        0x85, 0xff, // 1000 test edi, edi
+        0x74, 0x04, // 1002 je 0x1008
+        0x8d, 0x04, 0x7f, // 1004 lea eax, [rdi + rdi*2]
+        0xc3, // 1007 ret
+        0xc3, // 1008 ret
+    ];
+    let caller: &[u8] = &[
+        0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+        0x85, 0xff, // 1025 test edi, edi
+        0x74, 0x07, // 1027 je 0x1030
+        0xe8, 0xe2, 0xff, 0xff, 0xff, // 1029 call 0x1010
+        0xeb, 0x02, // 102e jmp 0x1032
+        0x89, 0x06, // 1030 mov dword ptr [rsi], eax
+        0xb8, 0x01, 0x00, 0x00, 0x00, // 1032 mov eax, 0x1
+        0xc3, // 1037 ret
+    ];
+    code[..narrow.len()].copy_from_slice(narrow);
+    code[0x10..0x10 + body.len()].copy_from_slice(body);
+    code[0x20..0x20 + caller.len()].copy_from_slice(caller);
+    let functions = [
+        ("narrow", BASE, 0x09),
+        ("g", BASE + 0x10, body.len() as u64),
+        ("caller", BASE + 0x20, 0x18),
+    ];
+    let code = Box::leak(code.into_boxed_slice());
+    let mut open = OpenProgram::of(Literal::of_code(code, &functions));
+    let rendered = open.rendered(BASE + 0x20).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// `g` writes RAX before it reads it, so its register effect takes no byte of the integer result
+/// register and the call reads none of it: no byte above `narrow`'s 32-bit result is a residual
+/// (D372, the recovered half). The parent read RAX whole at a callee whose parameters are a floor.
+#[test]
+fn a_walked_callee_that_writes_the_result_register_first_reads_no_bits_above_a_narrow_result() {
+    // mov rax, rdi; call rax; ret
+    let text = read_by_a_walked_callee(&[0x48, 0x89, 0xf8, 0xff, 0xd0, 0xc3]);
+    assert!(!text.contains("<< 32"), "{text}");
+    assert!(text.contains("narrow((uint32_t)arg0);"), "{text}");
+}
+
+/// `g` copies RAX before it writes it, so its register effect takes every byte: the call reads
+/// RAX whole and the bytes above `narrow`'s result stay a residual (default-deny).
+#[test]
+fn a_walked_callee_that_reads_the_result_register_reads_the_bits_above_a_narrow_result() {
+    // mov rdx, rax; mov rax, rdi; call rax; ret
+    let text = read_by_a_walked_callee(&[0x48, 0x89, 0xc2, 0x48, 0x89, 0xf8, 0xff, 0xd0, 0xc3]);
+    assert!(text.contains("| r2sleigh_residual_u64(1) << 32"), "{text}");
+}
+
 /// `caller`'s register effect is deposited by its own site fates where `f` is decided first, and
 /// asked directly where `top` is: each order renders every function alike (ADR, "S31b as built").
 #[test]

@@ -118,9 +118,9 @@ pub use control::{
 pub use defuse::{DefUseInfo, def_use};
 pub use demand::DemandedBytes;
 pub use function::{
-    AssumedExits, CFGRiskSummary, CalleeEvidence, CalleePreservedCarriers, DecompileInputs,
-    DecompilePrepFacts, DefRef, DefSite, ExitSite, GenuineNativeInstructionSpan, Lifted,
-    NamedBlockMut, PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot,
+    AssumedExits, CFGRiskSummary, CalleeEvidence, CalleeLaneReads, CalleePreservedCarriers,
+    DecompileInputs, DecompilePrepFacts, DefRef, DefSite, ExitSite, GenuineNativeInstructionSpan,
+    Lifted, NamedBlockMut, PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot,
     RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction, Sealed,
     SiteConventions, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,
     SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot, TrustedConstruction,

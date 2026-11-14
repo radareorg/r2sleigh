@@ -101,6 +101,12 @@ pub trait Program: crate::body::Program {
         None
     }
 
+    /// Each result register with the low bytes the body at `entry` may read of it before writing
+    /// it, from its held register effect (D372); `None` where no row states them.
+    fn reads_at(&self, _entry: u64) -> Option<Box<[(CanonicalStorageId, u32)]>> {
+        None
+    }
+
     /// The model a call to `callee` runs under where the program states it: a bound import's
     /// program default, a declared body's own; `None` runs it under `AnyCall` (RULING 1.6, 2.6).
     fn site_convention_at(&self, _callee: u64) -> Option<Arc<ConventionModel>> {
@@ -1713,6 +1719,10 @@ fn read_callees(
         match &read.facts {
             Ok(derived) => {
                 callees.record(*address, derived, native.program);
+                // The root reads every callee in one round, so the bound moves no kept build (D372).
+                if let Some(reads) = native.program.reads_at(*address) {
+                    callees.lane_reads.insert(*address, reads);
+                }
                 facts.push(derived.clone());
             }
             Err(reason) => unread.push(Unread {
@@ -1857,6 +1867,8 @@ struct Callees {
     reach: BTreeMap<u64, BTreeMap<usize, ArgumentReach>>,
     /// What each stated callee may write of its caller's stack; one absent may write any (D377).
     writes: BTreeMap<u64, r2ssa::call_reads::StackWrites>,
+    /// What each walked callee may read of the result registers; one absent reads any (D372).
+    lane_reads: r2ssa::CalleeLaneReads,
     /// The imports whose declaration states no interface: they have no body to read one off.
     unstated: BTreeMap<u64, r2ssa::UnstatedImport>,
     /// The convention each call runs under where the program states it (`site_convention`).
@@ -1876,6 +1888,7 @@ impl Callees {
             preserved: self.preserved.clone(),
             reach: self.reach.clone(),
             writes: self.writes.clone(),
+            lane_reads: self.lane_reads.clone(),
             library,
             reentering,
             exits,

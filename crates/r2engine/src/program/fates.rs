@@ -1297,7 +1297,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SiteFates {
     const RETENTION: Retention = Retention::Held;
 
     /// Work: the body's own register effect, deposited, then one backward pass over the body,
-    /// `O((B + E) × lanes)` within its budget, and one held effect and `KeptAcross` per callee.
+    /// `O((B + E) × lanes)` within its budget, and one held effect and `Summary` per callee.
     fn compute(db: &Db<ProgramInputs<S>>, &(caller, thumb): &(u64, bool)) -> Self::Value {
         read_body(db, (caller, thumb), |read| {
             // Deposited before any deep read, so the row depends on what a computed row reads (ADR).
@@ -1348,27 +1348,123 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for RegisterEffects {
     }
 }
 
-/// What a call to a body keeps: its register effect closed over each pending callee's own answer
-/// (D363). A cycle, a callee with no row or another machine keeps nothing. `O(p × r / 64)` per row.
-pub(super) struct KeptAcross;
+/// What a caller reads of a body at the lift grade (doc/adr-resolved-bodies.md, "Summaries"; D413).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct LiftSummary {
+    /// What a call to it leaves as found: the greatest fixpoint over its pending callees.
+    pub(super) kept: r2ssa::site_boundary::Kept,
+    /// Each result register with the low bytes the body may read of it before writing it (D372).
+    pub(super) reads: Box<[(CanonicalStorageId, u32)]>,
+}
 
-impl<S: Source + 'static> Query<ProgramInputs<S>> for KeptAcross {
+/// One body's lift-grade summary, solved with every member of its component of the pending-callee
+/// graph and each member deposited. A callee with no row or another machine keeps nothing.
+pub(super) struct Summary;
+
+impl<S: Source + 'static> Query<ProgramInputs<S>> for Summary {
     type Key = (u64, bool);
-    type Value = Option<r2ssa::site_boundary::Kept>;
-    const NAME: &'static str = "kept-across";
+    type Value = Option<LiftSummary>;
+    const NAME: &'static str = "summary";
     const RETENTION: Retention = Retention::Held;
 
-    /// Work: one row, then each pending callee's answer until nothing is left; worst case the
-    /// bodies a return path reaches, each lifted once.
-    fn compute(db: &Db<ProgramInputs<S>>, &(entry, thumb): &(u64, bool)) -> Self::Value {
-        let effect = db.get::<RegisterEffects>(&(entry, thumb)).ok()?;
-        let effect = (*effect).as_ref()?;
+    /// Work: r2ssa's one condensation of the pending callees reached while a register may still be
+    /// kept, `O(V + E)` and one row each; then each component descends from `unwritten`, `O(E × r)`.
+    fn compute(db: &Db<ProgramInputs<S>>, &root: &(u64, bool)) -> Self::Value {
         let view = View::new(db, true);
-        Some(effect.closed(|callee| {
-            let key = (callee, view.thumb_at(callee));
-            (*db.get::<KeptAcross>(&key).ok()?).clone()
-        }))
+        let row = |key: (u64, bool)| {
+            (db.get::<RegisterEffects>(&key).ok()).and_then(|row| (*row).clone())
+        };
+        let key_of = |callee: u64| (callee, view.thumb_at(callee));
+        let held =
+            |key: (u64, bool)| (db.held::<Summary>(&key).ok().flatten()).filter(|_| key != root);
+        // A body's callees past the one that empties the bound keep nothing it could keep.
+        let pending = |key: (u64, bool)| -> Vec<(u64, bool)> {
+            let Some(effect) = row(key) else {
+                return Vec::new();
+            };
+            let mut asked = Vec::new();
+            effect.closed(|callee| {
+                asked.push(key_of(callee));
+                row(key_of(callee)).map(|callee| callee.unwritten_kept())
+            });
+            asked
+        };
+        let reached = Reached::from(root, |node| match held(node) {
+            Some(_) => Vec::new(),
+            None => pending(node),
+        });
+        let condensation = reached.condensation();
+        db.note_condensed(condensation.visits());
+        let mut answers = BTreeMap::new();
+        for (_, members) in condensation.components() {
+            let members = members.iter().map(|node| reached.key(*node));
+            let members = members.collect::<Vec<_>>();
+            if members.iter().all(|member| held(*member).is_some()) {
+                continue;
+            }
+            let outside = |callee: (u64, bool)| match answers.get(&callee) {
+                Some(answer) => Option::clone(answer),
+                None => held(callee).and_then(|held| (*held).clone()),
+            };
+            let solved = greatest_kept(&members, &row, &key_of, outside);
+            answers.extend(solved);
+        }
+        let own = answers.remove(&root).flatten();
+        db.deposit::<Summary>(answers);
+        own
     }
+}
+
+/// One component's members, ascending, each kept set descended from `unwritten` to the greatest
+/// fixpoint: a member is closed again only when a pending callee inside shrinks, and a set shrinks
+/// at most `r` times, so `O(k + E × r)` closings. Sound since a returning call has finite depth.
+fn greatest_kept(
+    members: &[(u64, bool)],
+    row: &impl Fn((u64, bool)) -> Option<RegisterEffect>,
+    key_of: &impl Fn(u64) -> (u64, bool),
+    outside: impl Fn((u64, bool)) -> Option<LiftSummary>,
+) -> Vec<((u64, bool), Option<LiftSummary>)> {
+    let rows = members
+        .iter()
+        .map(|member| row(*member))
+        .collect::<Vec<_>>();
+    let inside = |callee: u64| members.binary_search(&key_of(callee)).ok();
+    let mut kept = (rows.iter())
+        .map(|row| row.as_ref().map(RegisterEffect::unwritten_kept))
+        .collect::<Vec<_>>();
+    let mut readers = vec![Vec::new(); members.len()];
+    for (at, row) in rows.iter().enumerate() {
+        let pending = row.iter().flat_map(|row| row.pending.iter());
+        for callee in pending.filter_map(|callee| inside(*callee)) {
+            readers[callee].push(at);
+        }
+    }
+    let mut queued = vec![true; members.len()];
+    let mut queue = (0..members.len()).rev().collect::<Vec<_>>();
+    while let Some(at) = queue.pop() {
+        queued[at] = false;
+        let Some(row) = &rows[at] else { continue };
+        let next = row.closed(|callee| match inside(callee) {
+            Some(member) => kept[member].clone(),
+            None => outside(key_of(callee)).map(|summary| summary.kept),
+        });
+        if kept[at].as_ref() == Some(&next) {
+            continue;
+        }
+        kept[at] = Some(next);
+        for &reader in &readers[at] {
+            if !std::mem::replace(&mut queued[reader], true) {
+                queue.push(reader);
+            }
+        }
+    }
+    let summaries = (rows.iter().zip(kept)).map(|(row, kept)| {
+        Some(LiftSummary {
+            kept: kept?,
+            reads: row.as_ref()?.register_reads().into(),
+        })
+    });
+    members.iter().copied().zip(summaries).collect()
 }
 
 /// One walked body as the site fates and the register effect read it: the one prefix both share.
@@ -1750,8 +1846,8 @@ impl<S: Source + 'static> Reading<'_, S> {
                 takes: row.takes,
                 counted: None,
                 overwrites: Overwrites::Bytes(row.overwrites),
-                kept: (self.db.get::<KeptAcross>(&key).ok())
-                    .and_then(|kept| (*kept).as_ref().map(|kept| kept.kept_lanes(self.lanes)))
+                kept: (self.db.get::<Summary>(&key).ok())
+                    .and_then(|summary| (*summary).as_ref().map(|s| s.kept.kept_lanes(self.lanes)))
                     .unwrap_or_default(),
                 reads: LaneBytes::default(),
             },

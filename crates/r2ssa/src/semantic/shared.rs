@@ -1011,6 +1011,10 @@ pub(crate) fn register_read_bytes(
     if (machine_context.calls()).is_some_and(|model| reads.reads_none_of(model, carrier)) {
         return Some(0);
     }
+    // A walked callee's register effect bounds what it reads of a result register (D372).
+    if let Some(bytes) = reads.lane_read(carrier) {
+        return Some(bytes);
+    }
     let stated = |storage: &CanonicalStorageId| register_storages_overlap(*storage, carrier);
     let interface = interface?;
     let mut lanes = (interface.arguments().iter())
