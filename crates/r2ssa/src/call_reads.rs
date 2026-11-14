@@ -150,10 +150,15 @@ impl CallReads {
     /// Whether the call reads none of `carrier`: an argument or count register of `model` this
     /// stated list leaves out (D283). Any other register may be read: x8, a static chain.
     pub fn reads_none_of(&self, model: &ConventionModel, carrier: CanonicalStorageId) -> bool {
+        self.reads_none_within(&Self::every_location(model), carrier)
+    }
+
+    /// [`Self::reads_none_of`] against `every`, the model's [`Self::every_location`], built once
+    /// per call by a caller asking for several carriers.
+    pub fn reads_none_within(&self, every: &Self, carrier: CanonicalStorageId) -> bool {
         let overlaps = |storage: &CanonicalStorageId| {
             crate::semantic::register_storages_overlap(*storage, carrier)
         };
-        let every = Self::every_location(model);
         let located = (every.registers.iter().chain(&every.count_register)).any(overlaps);
         let listed = (self.registers.iter().chain(&self.count_register)).any(overlaps);
         self.stated && located && !listed

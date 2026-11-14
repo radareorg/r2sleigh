@@ -1,3 +1,3 @@
 # A counted rise past its budget (census.py `time` allocations, `count` instructions) stands only
-# on one line here for that exact base count: metric | case | base count | head ceiling | Dnnn | cause.
+# on one line for its base count (instructions within 1e-6): metric | case | base | head ceiling | Dnnn | cause.
 # The base count binds the line to one parent, so it excuses no later rise (ROADMAP D401).

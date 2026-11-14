@@ -75,7 +75,7 @@
 0pack pdd @ 0x0062ecf0 | direct_sites.computed | 0
 0pack pdd @ 0x0062ecf0 | direct_sites.recomputed | 0
 0pack pdd @ 0x0062ecf0 | direct_sites.reused | 0
-0pack pdd @ 0x0062ecf0 | frames_built | 24
+0pack pdd @ 0x0062ecf0 | frames_built | 28
 0pack pdd @ 0x0062ecf0 | rebuilt | 2
 0pack pdd @ 0x0062ecf0 | references.computed | 0
 0pack pdd @ 0x0062ecf0 | references.recomputed | 0
@@ -90,9 +90,9 @@
 0pack pdd @ 0x0062ecf0 | sealed.recomputed | 0
 0pack pdd @ 0x0062ecf0 | sealed.reused | 0
 0pack pdd @ 0x0062ecf0 | table_seals | 0
-0pack pdd @ 0x0062ecf0 | walked.computed | 39
+0pack pdd @ 0x0062ecf0 | walked.computed | 41
 0pack pdd @ 0x0062ecf0 | walked.recomputed | 0
-0pack pdd @ 0x0062ecf0 | walked.reused | 34
+0pack pdd @ 0x0062ecf0 | walked.reused | 36
 bash aa; pdd @ 0x2e630 | analysed.computed | 1
 bash aa; pdd @ 0x2e630 | analysed.recomputed | 0
 bash aa; pdd @ 0x2e630 | analysed.reused | 1
@@ -199,7 +199,7 @@ pumasim pdd @ 0x0023fdf0 | defects | 0
 pumasim pdd @ 0x0023fdf0 | direct_sites.computed | 0
 pumasim pdd @ 0x0023fdf0 | direct_sites.recomputed | 0
 pumasim pdd @ 0x0023fdf0 | direct_sites.reused | 0
-pumasim pdd @ 0x0023fdf0 | frames_built | 108
+pumasim pdd @ 0x0023fdf0 | frames_built | 145
 pumasim pdd @ 0x0023fdf0 | rebuilt | 10
 pumasim pdd @ 0x0023fdf0 | references.computed | 0
 pumasim pdd @ 0x0023fdf0 | references.recomputed | 0
@@ -214,9 +214,9 @@ pumasim pdd @ 0x0023fdf0 | sealed.computed | 1
 pumasim pdd @ 0x0023fdf0 | sealed.recomputed | 0
 pumasim pdd @ 0x0023fdf0 | sealed.reused | 0
 pumasim pdd @ 0x0023fdf0 | table_seals | 9
-pumasim pdd @ 0x0023fdf0 | walked.computed | 216
+pumasim pdd @ 0x0023fdf0 | walked.computed | 224
 pumasim pdd @ 0x0023fdf0 | walked.recomputed | 0
-pumasim pdd @ 0x0023fdf0 | walked.reused | 105
+pumasim pdd @ 0x0023fdf0 | walked.reused | 134
 pumasim pdd @ 0x004baf30 | analysed.computed | 1
 pumasim pdd @ 0x004baf30 | analysed.recomputed | 0
 pumasim pdd @ 0x004baf30 | analysed.reused | 1
@@ -230,7 +230,7 @@ pumasim pdd @ 0x004baf30 | defects | 0
 pumasim pdd @ 0x004baf30 | direct_sites.computed | 0
 pumasim pdd @ 0x004baf30 | direct_sites.recomputed | 0
 pumasim pdd @ 0x004baf30 | direct_sites.reused | 0
-pumasim pdd @ 0x004baf30 | frames_built | 123
+pumasim pdd @ 0x004baf30 | frames_built | 149
 pumasim pdd @ 0x004baf30 | rebuilt | 10
 pumasim pdd @ 0x004baf30 | references.computed | 0
 pumasim pdd @ 0x004baf30 | references.recomputed | 0
@@ -245,9 +245,9 @@ pumasim pdd @ 0x004baf30 | sealed.computed | 1
 pumasim pdd @ 0x004baf30 | sealed.recomputed | 0
 pumasim pdd @ 0x004baf30 | sealed.reused | 0
 pumasim pdd @ 0x004baf30 | table_seals | 3
-pumasim pdd @ 0x004baf30 | walked.computed | 214
+pumasim pdd @ 0x004baf30 | walked.computed | 219
 pumasim pdd @ 0x004baf30 | walked.recomputed | 0
-pumasim pdd @ 0x004baf30 | walked.reused | 172
+pumasim pdd @ 0x004baf30 | walked.reused | 193
 pumasim session: pdd of 50 functions | analysed.computed | 50
 pumasim session: pdd of 50 functions | analysed.recomputed | 0
 pumasim session: pdd of 50 functions | analysed.reused | 50
@@ -261,7 +261,7 @@ pumasim session: pdd of 50 functions | defects | 0
 pumasim session: pdd of 50 functions | direct_sites.computed | 0
 pumasim session: pdd of 50 functions | direct_sites.recomputed | 0
 pumasim session: pdd of 50 functions | direct_sites.reused | 0
-pumasim session: pdd of 50 functions | frames_built | 702
+pumasim session: pdd of 50 functions | frames_built | 842
 pumasim session: pdd of 50 functions | rebuilt | 48
 pumasim session: pdd of 50 functions | references.computed | 0
 pumasim session: pdd of 50 functions | references.recomputed | 0
@@ -276,6 +276,6 @@ pumasim session: pdd of 50 functions | sealed.computed | 50
 pumasim session: pdd of 50 functions | sealed.recomputed | 0
 pumasim session: pdd of 50 functions | sealed.reused | 0
 pumasim session: pdd of 50 functions | table_seals | 34
-pumasim session: pdd of 50 functions | walked.computed | 1062
+pumasim session: pdd of 50 functions | walked.computed | 1089
 pumasim session: pdd of 50 functions | walked.recomputed | 0
-pumasim session: pdd of 50 functions | walked.reused | 982
+pumasim session: pdd of 50 functions | walked.reused | 1095
