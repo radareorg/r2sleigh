@@ -1811,6 +1811,43 @@ fn a_caller_that_calls_another_caller_is_read_after_it() {
     assert_eq!(walked, 4, "walks during the request");
 }
 
+/// `a` (0x1000) and `b` (0x1010) return `r`'s (0x1040) result; `c1` (0x1020) calls `a`, `d`
+/// (0x1050, `ret`) and `c2`, so its read of `a`'s result lifts `c2` (0x1030) and then `d`; `c2`
+/// calls `b`. `c2` is no caller of `a`, so no order over `a`'s callers names it.
+const A_CALLER_OF_ANOTHER_CALLEE: &[u8] = &[
+    0xe8, 0x3b, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xe8, 0x2b, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xe8, 0xdb, 0xff, 0xff, 0xff, 0xe8, 0x26, 0x00, 0x00, 0x00, 0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3,
+    0xe8, 0xdb, 0xff, 0xff, 0xff, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xc3,
+];
+
+#[test]
+fn a_caller_of_another_callee_is_read_before_the_caller_calling_it() {
+    let functions = [
+        ("a", BASE, 6),
+        ("b", BASE + 0x10, 6),
+        ("c1", BASE + 0x20, 16),
+        ("c2", BASE + 0x30, 6),
+        ("r", BASE + 0x40, 6),
+        ("d", BASE + 0x50, 1),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(A_CALLER_OF_ANOTHER_CALLEE, &functions));
+    open.analyse_program().expect("it surveys");
+    let before = open.analysis_stats();
+    open.rendered(BASE + 0x40).expect("it renders");
+    let stats = open.analysis_stats();
+    assert_eq!(stats.defects, 0);
+    // `r` for its render and its effect, then `a`, `b`, `c2`, `c1` and `d` once each.
+    let walked = stats.walked.computed - before.walked.computed;
+    assert_eq!(walked, 7, "walks during the request");
+    assert_eq!(stats.site_fates_relifted, 0, "{stats:?}");
+    // Every caller `DirectSites` joins was asked first, and every one asked is joined.
+    assert_eq!(stats.site_fates_in_direct_sites, 0, "{stats:?}");
+    assert_eq!(stats.site_fates_never_joined, 0, "{stats:?}");
+}
+
 /// glibc AArch64's `_start` hands `__wrap_main` (`nop; b main`, 0x1020) to `__libc_start_main`'s
 /// stub (0x1080); `main` (0x1040) returns `helper`'s `w0`.
 fn wrapped_main() -> Literal {

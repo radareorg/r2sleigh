@@ -237,6 +237,12 @@ impl Survey {
         self.tail_callers.get(&callee).map_or(&[], Vec::as_slice)
     }
 
+    /// Every direct call and tail branch between walked bodies, as caller and callee.
+    pub(super) fn call_edges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        let edges = self.callers.iter().chain(&self.tail_callers);
+        edges.flat_map(|(callee, callers)| callers.iter().map(move |caller| (*caller, *callee)))
+    }
+
     /// Every range a walked body holds, in address order.
     pub(super) fn held(&self) -> impl Iterator<Item = std::ops::Range<u64>> + '_ {
         self.holders.ranges()

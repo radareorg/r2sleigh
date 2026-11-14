@@ -8,13 +8,14 @@ use r2il::R2ILOp;
 use r2source::{
     CanonicalStorageId, ConventionModel, SourceClosedResult, SourceReadLanes, SourceResultCause,
 };
-use r2ssa::dense::{Csr, DenseId, IdMap, Reached};
+use r2ssa::dense::{Csr, DenseId, IdMap, IdSet, Node, Reached};
 use r2ssa::site_boundary::{
     ByteMask, CallEffect, CallEffects, CallerFlow, Counted, LANES, LaneBytes, LaneFate, LaneId,
     Overwrites, RegisterEffect, ResultLanes, SiteBoundary, argument_registers,
 };
 
 use super::analysis::Walked;
+use super::ranks::Ranks;
 use super::requests::SurveyQuery;
 use super::{ProgramInputs, Source, View};
 use crate::body::{Body, BodyBlock, UnresolvedReason};
@@ -326,12 +327,6 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
     // A call two bodies hold (one walk enters the other's tail) is one call, read once.
     let mut seen = BTreeSet::new();
     let mut returned = BTreeSet::new();
-    // A caller's site fates deposit its register effect, so a caller calling it reads it held (D354).
-    for caller in callee_first(&survey, survey.callers_of(callee)) {
-        if let Some(Ok(thumb)) = survey.walked_in(caller) {
-            let _ = db.get::<SiteFates>(&(caller, thumb));
-        }
-    }
     let view = View::new(db, true);
     // A caller under another convention states its sites' fates in its lanes: none is read (D385).
     let convention = |entry: u64| view.convention_at(entry).ok().map(|ruled| ruled.id);
@@ -345,6 +340,10 @@ fn direct_sites<S: Source + 'static>(db: &Db<ProgramInputs<S>>, callee: u64) -> 
         if !alike(caller) {
             unread = true;
             continue;
+        }
+        // The callers-first read asked each caller already where `N` stays inside `N⁺` (D354).
+        if !db.holds::<SiteFates>(&(caller, thumb)) {
+            db.note_site_fates_in_direct_sites();
         }
         let Some(sites) = (db.get::<SiteFates>(&(caller, thumb)).ok()).and_then(|f| (*f).clone())
         else {
@@ -414,44 +413,6 @@ fn slot_reads<S: Source + 'static>(
     true
 }
 
-/// `callers` (ascending) ordered so each comes after every other one it calls, a cycle broken where
-/// the search enters it: a post-order over the calls among them, `O(E log k)` for `E` calls into them.
-fn callee_first(survey: &super::requests::Survey, callers: &[u64]) -> Vec<u64> {
-    let mut calls = vec![Vec::new(); callers.len()];
-    for (to, called) in callers.iter().enumerate() {
-        for caller in survey.callers_of(*called) {
-            if let Ok(from) = callers.binary_search(caller)
-                && from != to
-            {
-                calls[from].push(to);
-            }
-        }
-    }
-    let mut seen = vec![false; callers.len()];
-    let mut order = Vec::with_capacity(callers.len());
-    // Each caller enters the stack once, and each of its calls is stepped past once.
-    for root in 0..callers.len() {
-        if std::mem::replace(&mut seen[root], true) {
-            continue;
-        }
-        let mut stack = vec![(root, 0usize)];
-        while let Some((at, next)) = stack.last_mut() {
-            match calls[*at].get(*next).copied() {
-                Some(to) => {
-                    *next += 1;
-                    let fresh = !std::mem::replace(&mut seen[to], true);
-                    stack.extend(fresh.then_some((to, 0)));
-                }
-                None => {
-                    order.push(callers[*at]);
-                    stack.pop();
-                }
-            }
-        }
-    }
-    order
-}
-
 /// The loader's calls to `callee` a cited row states, each read joined into `lanes` (D237, D240):
 /// `O(entries)`.
 fn loader_reads(container: &super::Container, callee: u64, lanes: &mut [JoinedLane; LANES]) -> u32 {
@@ -519,12 +480,18 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ComponentForwarding {
         let solved = |node: u64| {
             (db.held::<ComponentForwarding>(&node).ok().flatten()).filter(|_| node != root)
         };
+        let asked = CallersFirst::read(db, root);
         let reached = Reached::from(root, |node| match solved(node) {
             Some(_) => Vec::new(),
             None => callers_returned_to(db, node),
         });
         let condensation = reached.condensation();
         db.note_condensed(condensation.visits());
+        if let Some(asked) = asked {
+            let joined = (condensation.components())
+                .flat_map(|(_, members)| members.iter().map(|node| reached.key(*node)));
+            db.note_site_fates_never_joined(asked.never_joined(joined));
+        }
         let mut answers = BTreeMap::new();
         for (_, members) in condensation.components() {
             let members = members.iter().map(|node| reached.key(*node));
@@ -543,6 +510,177 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for ComponentForwarding {
         let own = answers.remove(&root).flatten();
         db.deposit::<ComponentForwarding>(answers);
         own
+    }
+}
+
+/// The callers `ComponentForwarding(root)` joins, their site fates asked in `CallRanks` order
+/// (component, finish, address) before `DirectSites` joins them, so a deep read finds a lower-ranked
+/// caller's register effect deposited (doc/adr-result-side.md, "Relift order"). A body's callers are
+/// pushed only once `DirectSites` forwards it a lane, asked when every caller of its callee is popped.
+struct CallersFirst<'a> {
+    ranks: &'a Ranks,
+    survey: &'a super::requests::Survey,
+    root: u64,
+    /// `N`: the bodies a lane is returned to, or the root.
+    admitted: IdSet<Node>,
+    pushed: IdSet<Node>,
+    popped: IdSet<Node>,
+    /// Each admitted body's callers not yet popped.
+    pending: IdMap<Node, u32>,
+    /// Each pushed body's admitted callees still counting it.
+    waiting: IdMap<Node, Vec<u64>>,
+    /// Admitted bodies whose callers are all popped, for `DirectSites` to join.
+    ready: Vec<u64>,
+    heap: std::collections::BinaryHeap<std::cmp::Reverse<(u32, u32, u64)>>,
+}
+
+impl CallersFirst<'_> {
+    /// The bodies asked, or none where the survey has no ranks. Work: `O(|A| log |A| + Σ deg)`: each
+    /// body is pushed, popped and admitted once, and each admission asks one held `DirectSites`.
+    fn read<S: Source + 'static>(db: &Db<ProgramInputs<S>>, root: u64) -> Option<Asked> {
+        let ranks = (*db.get::<super::ranks::CallRanks>(&()).ok()?).clone()?;
+        let survey = db.get::<SurveyQuery>(&()).ok()?;
+        let survey = Arc::clone(&survey.as_ref().as_ref().ok()?.0);
+        let mut read = CallersFirst {
+            ranks: &ranks,
+            survey: &survey,
+            root,
+            admitted: IdSet::new(ranks.len()),
+            pushed: IdSet::new(ranks.len()),
+            popped: IdSet::new(ranks.len()),
+            pending: IdMap::new(ranks.len()),
+            waiting: IdMap::new(ranks.len()),
+            ready: Vec::new(),
+            heap: std::collections::BinaryHeap::new(),
+        };
+        read.admit(db, root);
+        read.resolve(db);
+        // Each body enters the heap once (`pushed`), so the loop ends after `|A|` pops.
+        while let Some(std::cmp::Reverse((_, _, body))) = read.heap.pop() {
+            read.pop(db, body);
+            read.resolve(db);
+        }
+        let asked = read.popped.iter().collect();
+        Some(Asked {
+            asked,
+            ranks: Arc::clone(&ranks),
+            survey: Arc::clone(&survey),
+        })
+    }
+
+    /// `body`'s site fates asked (a lift where a deep read lifted it first), then each admitted
+    /// callee whose last caller it was resolved.
+    fn pop<S: Source + 'static>(&mut self, db: &Db<ProgramInputs<S>>, body: u64) {
+        let Some(node) = self.ranks.node(body) else {
+            return;
+        };
+        self.popped.insert(node);
+        if let Some(Ok(thumb)) = self.survey.walked_in(body) {
+            if db.holds::<RegisterEffects>(&(body, thumb)) && !db.holds::<SiteFates>(&(body, thumb))
+            {
+                db.note_site_fates_relifted();
+            }
+            let _ = db.get::<SiteFates>(&(body, thumb));
+        }
+        for callee in self.waiting.remove(node).unwrap_or_default() {
+            let Some(at) = self.ranks.node(callee) else {
+                continue;
+            };
+            let left = self.pending.get_or_insert_with(at, || 0);
+            *left = left.saturating_sub(1);
+            if *left == 0 {
+                self.ready.push(callee);
+            }
+        }
+    }
+
+    /// Each ready body's `DirectSites` joins its callers' held fates, and each caller it returns a
+    /// lane to is admitted; ends since a body is admitted, so made ready, once.
+    fn resolve<S: Source + 'static>(&mut self, db: &Db<ProgramInputs<S>>) {
+        while let Some(callee) = self.ready.pop() {
+            let direct = db.get::<DirectSites>(&callee).ok();
+            let Some(direct) = direct.as_deref().and_then(Option::as_ref) else {
+                continue;
+            };
+            let callers = direct.returned.iter().map(|returned| returned.caller);
+            for caller in callers.collect::<BTreeSet<_>>() {
+                self.admit(db, caller);
+            }
+        }
+    }
+
+    /// `entry` admitted and its callers `DirectSites` reads pushed; one whose forwarding is held
+    /// stops, as the condensation does.
+    fn admit<S: Source + 'static>(&mut self, db: &Db<ProgramInputs<S>>, entry: u64) {
+        let Some(node) = self.ranks.node(entry) else {
+            return;
+        };
+        if !self.admitted.insert(node) {
+            return;
+        }
+        if entry != self.root
+            && db
+                .held::<ComponentForwarding>(&entry)
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            return;
+        }
+        let view = View::new(db, true);
+        let convention = |entry: u64| view.convention_at(entry).ok().map(|ruled| ruled.id);
+        // `DirectSites` reads only a walked caller under the callee's convention (D385).
+        let own = convention(entry);
+        let read = |caller: &u64| {
+            matches!(self.survey.walked_in(*caller), Some(Ok(_)))
+                && own.is_some()
+                && convention(*caller) == own
+        };
+        let mut left = 0u32;
+        for &caller in self
+            .survey
+            .callers_of(entry)
+            .iter()
+            .filter(|caller| read(caller))
+        {
+            let Some(at) = self.ranks.node(caller) else {
+                continue;
+            };
+            if self.popped.contains(at) {
+                continue;
+            }
+            left += 1;
+            self.waiting.get_or_insert_with(at, Vec::new).push(entry);
+            if self.pushed.insert(at) {
+                self.heap.push(std::cmp::Reverse(self.ranks.order(at)));
+            }
+        }
+        self.pending.insert(node, left);
+        if left == 0 {
+            self.ready.push(entry);
+        }
+    }
+}
+
+/// The bodies one callers-first read asked.
+struct Asked {
+    ranks: Arc<Ranks>,
+    survey: Arc<super::requests::Survey>,
+    asked: Vec<Node>,
+}
+
+impl Asked {
+    /// How many asked bodies call none of `joined`: `|A⁺ \ A|`, the speculation's waste. `O(Σ deg)`.
+    fn never_joined(&self, joined: impl Iterator<Item = u64>) -> u64 {
+        let mut callers = IdSet::new(self.ranks.len());
+        for member in joined {
+            let nodes = self.survey.callers_of(member).iter();
+            for node in nodes.filter_map(|caller| self.ranks.node(*caller)) {
+                callers.insert(node);
+            }
+        }
+        let never = self.asked.iter().filter(|node| !callers.contains(**node));
+        never.count() as u64
     }
 }
 

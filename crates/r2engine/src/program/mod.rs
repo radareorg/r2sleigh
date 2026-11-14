@@ -11,6 +11,7 @@ mod fates;
 pub mod info;
 pub mod naming;
 mod pointers;
+mod ranks;
 mod reads;
 mod requests;
 mod resolved;
@@ -627,6 +628,9 @@ impl<S: Source + 'static> OpenProgram<S> {
                 + self.control().frame_decision_steps(),
             table_seals: self.db.stats().table_seals + self.control().table_seals(),
             condensed: self.db.stats().condensed,
+            site_fates_in_direct_sites: self.db.stats().site_fates_in_direct_sites,
+            site_fates_never_joined: self.db.stats().site_fates_never_joined,
+            site_fates_relifted: self.db.stats().site_fates_relifted,
         }
     }
 

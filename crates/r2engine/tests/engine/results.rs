@@ -498,7 +498,8 @@ fn a_tail_jump_to_signal_returns_the_previous_handler() {
 
 /// One condensation answers the whole pair (D412): `even ⇄ odd`, the owners of `caller`'s result,
 /// is two nodes and two edges, and every member's component is deposited, so asking each member
-/// after adds no visit. Under `aa` the forwarder graph from the pair adds three nodes, three edges.
+/// after adds no visit. Under `aa` the forwarder graph from the pair adds three nodes, three edges,
+/// and `CallRanks`' one condensation of the survey's three bodies and three calls as many (D354).
 #[test]
 fn one_condensation_answers_every_member_of_a_cycle() {
     let mut open = OpenProgram::of(Literal::of_code(MUTUAL_U64, &U64));
@@ -516,6 +517,6 @@ fn one_condensation_answers_every_member_of_a_cycle() {
         open.rendered(at).expect("it renders");
     }
     let stats = open.analysis_stats();
-    assert_eq!(stats.condensed, (2 + 2) + (3 + 3), "{stats:?}");
+    assert_eq!(stats.condensed, (2 + 2) + (3 + 3) + (3 + 3), "{stats:?}");
     assert_eq!(stats.defects, 0, "{stats:?}");
 }
