@@ -261,32 +261,6 @@ class CountedInstructions(unittest.TestCase):
         self.assertIn("1.0673x", rise)
 
 
-class CountedSpread(unittest.TestCase):
-    """D343: one cause line holds two CI runs of the same pair, whose qemu counts moved by
-    hundreds of instructions (43574739669, 43579827833 on rebuild-design-4)."""
-
-    CASE = "pumasim pdd @ 0x0023fdf0"
-    LINE = {("instructions", CASE, 36_156_969_404): (36_686_716_718, "D381", "x")}
-
-    def rise(self, base, head, entries=None):
-        return census.counted_rise("instructions", self.CASE, base, head, 1.01,
-                                   self.LINE if entries is None else entries)
-
-    def test_both_runs_stand_on_one_line(self) -> None:
-        self.assertIsNone(self.rise(36_156_969_404, 36_686_716_718))
-        self.assertIsNone(self.rise(36_156_968_947, 36_686_716_130))
-
-    def test_a_far_base_and_a_higher_head_still_fail(self) -> None:
-        self.assertIsNotNone(self.rise(36_100_000_000, 36_686_716_130))
-        self.assertIsNotNone(self.rise(36_156_968_947, 36_700_000_000))
-        self.assertIsNotNone(self.rise(36_156_968_947, 36_686_716_130, {}))
-
-    def test_allocations_keep_the_exact_key(self) -> None:
-        entries = {("allocations", "pumasim afl", 99_622_591): (108_961_709, "D367", "x")}
-        self.assertIsNotNone(census.counted_rise("allocations", "pumasim afl", 99_622_592,
-                                                 108_961_709, 1.02, entries))
-
-
 class TimedCases(unittest.TestCase):
     """D402: the chain's analysed cases are timed, and a missing binary fails the run."""
 

@@ -262,21 +262,14 @@ def causes(path=CAUSES):
     return entries
 
 
-# A qemu count moves by a few thousand instructions between runs of one binary (hashing seeds,
-# the environment): a cause line binds its base and ceiling within this fraction (D343).
-SPREAD = {"allocations": 0.0, "instructions": 1e-6}
-
-
 def counted_rise(metric, case, base, head, budget, entries):
     """Why HEAD's count fails against BASE's, or None: above budget x BASE with no cause line for
-    this base count, within the metric's spread, whose ceiling holds HEAD."""
+    this base count whose ceiling holds HEAD."""
     ratio = head / base
     if ratio <= budget:
         return None
-    spread = SPREAD[metric]
-    lines = (ceiling for (m, c, held), (ceiling, *_) in entries.items()
-             if m == metric and c == case and abs(held - base) <= spread * base)
-    if any(head <= ceiling * (1 + spread) for ceiling in lines):
+    ceiling, *_ = entries.get((metric, case, base), (0,))
+    if head <= ceiling:
         return None
     return (f"{case}: {metric} {base:,} -> {head:,} ({ratio:.4f}x, budget {budget}); a rise stands only "
             f"on a line in {CAUSES.relative_to(ROOT)}: `{metric} | {case} | {base} | {head} | Dnnn | <cause>`")
