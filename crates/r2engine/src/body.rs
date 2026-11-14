@@ -441,11 +441,9 @@ impl Handles {
                 }
                 r2il::R2ILOp::IntZExt { src, .. } => {
                     let src = r2source::CanonicalStorageId::from_varnode(src);
-                    (self.held.iter())
-                        .find(|held| {
-                            held.storage == src && matches!(held.value, Holding::Constant(_))
-                        })
-                        .copied()
+                    let constant = |held: &&Held| matches!(held.value, Holding::Constant(_));
+                    let held = self.held.iter().filter(constant);
+                    held.into_iter().find(|held| held.storage == src).copied()
                 }
                 _ => None,
             };

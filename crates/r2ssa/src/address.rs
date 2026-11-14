@@ -586,21 +586,26 @@ impl<'a> AddressCollector<'a> {
             .flat_map(move |block| block.insts.iter().filter_map(move |inst| graph.inst(*inst)))
     }
 
+    /// A store's effect on the slots, where `payload` is one.
+    fn stored(&mut self, payload: &InstPayload, stack: &mut Spills) {
+        if let InstPayload::Op(
+            SSAOp::Store { space, addr, val }
+            | SSAOp::StoreGuarded {
+                space, addr, val, ..
+            },
+        ) = *payload
+        {
+            self.store(space, addr, val, stack);
+        }
+    }
+
     /// Derive one block's values and its slots, in program order, from the
     /// slots it is entered with; returns the values whose cell moved.
     fn transfer_ops(&mut self, block_addr: u64, stack: &mut Spills) -> Vec<ValueId> {
         let mut moved = Vec::new();
         for inst in self.block_insts(block_addr) {
             let Some(dst) = inst.output else {
-                if let InstPayload::Op(
-                    SSAOp::Store { space, addr, val }
-                    | SSAOp::StoreGuarded {
-                        space, addr, val, ..
-                    },
-                ) = inst.payload
-                {
-                    self.store(space, addr, val, stack);
-                }
+                self.stored(&inst.payload, stack);
                 continue;
             };
             let derived = match &inst.payload {

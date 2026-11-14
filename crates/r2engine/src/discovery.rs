@@ -427,6 +427,13 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             .collect()
     }
 
+    /// One wait of `caller` met: the caller, once none is left.
+    fn settle_wait(open: &mut BTreeMap<u64, usize>, caller: u64) -> Option<u64> {
+        let waits = open.get_mut(&caller).filter(|waits| **waits > 0)?;
+        *waits -= 1;
+        (*waits == 0).then_some(caller)
+    }
+
     /// Bodies whose every end halts or waits on a callee declared or composed never; a trap or a
     /// wait cycle stays a bound. A least fixpoint over the wait edges, `O(V + E)`.
     fn composed(&self) -> BTreeSet<u64> {
@@ -461,15 +468,9 @@ impl<'w, W: Walker> Fixpoint<'w, W> {
             if !composed.insert(callee) {
                 continue;
             }
-            for (caller, _) in self.waiting.get(&callee).into_iter().flatten() {
-                if let Some(waits) = open.get_mut(caller)
-                    && *waits > 0
-                {
-                    *waits -= 1;
-                    if *waits == 0 {
-                        proven.push(*caller);
-                    }
-                }
+            let callers = self.waiting.get(&callee).into_iter().flatten();
+            for (caller, _) in callers {
+                proven.extend(Self::settle_wait(&mut open, *caller));
             }
         }
         composed

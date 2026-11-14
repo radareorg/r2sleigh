@@ -256,24 +256,25 @@ fn scalar_leaf(
                     return None;
                 }
                 // The variable term steps this array where its stride is the element (D360).
-                match variable.filter(|term| term.stride_bytes.checked_mul(8) == Some(element)) {
-                    Some(term) => {
-                        let last = index.checked_add(term.upper?)?;
-                        if last >= count {
-                            return None;
-                        }
-                        leaf.path.push(PathStep::Indexed {
+                let stepped =
+                    variable.filter(|term| term.stride_bytes.checked_mul(8) == Some(element));
+                let last = stepped.map_or(Some(index), |term| index.checked_add(term.upper?))?;
+                if last >= count {
+                    return None;
+                }
+                let (step, name) = match stepped {
+                    Some(term) => (
+                        PathStep::Indexed {
                             index: term.value,
                             first: index,
-                        });
-                        leaf.name.push_str("[]");
-                        variable = None;
-                    }
-                    None => {
-                        leaf.path.push(PathStep::Element(index));
-                        leaf.name.push_str(&format!("[{index}]"));
-                    }
-                }
+                        },
+                        "[]".to_owned(),
+                    ),
+                    None => (PathStep::Element(index), format!("[{index}]")),
+                };
+                variable = variable.filter(|_| stepped.is_none());
+                leaf.path.push(step);
+                leaf.name.push_str(&name);
                 offset_bits -= index * element;
                 leaf.type_id = element_type_id;
             }

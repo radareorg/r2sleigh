@@ -139,9 +139,8 @@ impl FramePoints {
         }
     }
 
-    /// Whether two reads and two written areas of the call at `instruction` cover the same places
-    /// holding an address, loaded places and incoming bytes, so the build reads them alike (D377).
-    /// `O(spans x log places)`.
+    /// Whether two read and two written areas of one call cover the same address-holding places,
+    /// rewrite-decided places and incoming bytes (D377). `O(spans x log places)`.
     pub(crate) fn areas_alike(
         &self,
         instruction: u64,
@@ -565,7 +564,7 @@ impl StackArguments {
         accesses: &Accesses,
     ) -> (BTreeSet<i64>, BTreeSet<u64>) {
         // Each call's area as entry-relative spans, by block and index; an unplaced call covers all.
-        let mut in_block = BTreeMap::<u64, Vec<(usize, Vec<(i64, i64)>)>>::new();
+        let mut in_block = BTreeMap::<u64, Vec<CallSpans>>::new();
         for call in &self.calls {
             let spans = match (call.base(values), &call.writes) {
                 (None, _) => vec![(i64::MIN, i64::MAX)],
@@ -581,25 +580,7 @@ impl StackArguments {
                 .or_default()
                 .push((call.at.1, spans));
         }
-        let gen_of = |calls: &[(usize, Vec<(i64, i64)>)]| {
-            merged(calls.iter().flat_map(|(_, spans)| spans.iter().copied()))
-        };
-        // What reaches each block's entry: the union of what leaves its predecessors.
-        let mut entering = BTreeMap::<u64, Vec<(i64, i64)>>::new();
-        let mut pending = in_block.keys().copied().collect::<Vec<_>>();
-        while let Some(block) = pending.pop() {
-            let calls = in_block.get(&block).map_or(&[][..], Vec::as_slice);
-            let entry = entering.get(&block).map_or(&[][..], Vec::as_slice);
-            let leaving = merged(entry.iter().copied().chain(gen_of(calls)));
-            for next in func.successors(block) {
-                let known = entering.entry(next).or_default();
-                let grown = merged(known.iter().copied().chain(leaving.iter().copied()));
-                if grown != *known {
-                    *known = grown;
-                    pending.push(next);
-                }
-            }
-        }
+        let entering = reaching_writes(func, &in_block);
         // Each load against what reaches it: the block's entry and the calls before it there.
         let mut loads = (accesses.iter())
             .flat_map(|(place, list)| list.iter().map(move |access| (*place, access)))
@@ -610,22 +591,9 @@ impl StackArguments {
         let mut rewritten = BTreeSet::new();
         for list in loads.chunk_by(|one, other| one.0 == other.0) {
             let block = list[0].0;
-            let mut calls = in_block.get(&block).cloned().unwrap_or_default();
-            calls.sort_unstable_by_key(|(index, _)| *index);
-            let mut calls = calls.into_iter().peekable();
-            let mut live = entering.get(&block).cloned().unwrap_or_default();
-            for (_, index, place, width) in list {
-                let mut added = Vec::new();
-                while let Some((_, spans)) = calls.next_if(|(call, _)| call < index) {
-                    added.extend(spans);
-                }
-                if !added.is_empty() {
-                    live = merged(live.into_iter().chain(added));
-                }
-                if overlaps(&live, *place, place.saturating_add(i64::from(*width))) {
-                    rewritten.insert(*place);
-                }
-            }
+            let calls = in_block.get(&block).cloned().unwrap_or_default();
+            let live = entering.get(&block).cloned().unwrap_or_default();
+            rewritten_in_block(list, calls, live, &mut rewritten);
         }
         let asked = (self.calls.iter())
             .filter(|call| call.writes.is_none())
@@ -1231,6 +1199,62 @@ fn non_negative(func: &SSAFunction, defs: &Definitions, var: VarId) -> bool {
             .var(var)
             .constant_bits()
             .is_some_and(|bits| width >= 1 && bits >> (width - 1) & 1 == 0),
+    }
+}
+
+/// A call's index in its block and the entry-relative spans it may write.
+type CallSpans = (usize, Vec<(i64, i64)>);
+
+/// The merged write spans reaching each block's entry: what leaves its predecessors. A worklist
+/// whose sets only grow, each to at most the spans' edges. `O((B + E) x K log K)`.
+fn reaching_writes(
+    func: &SSAFunction,
+    in_block: &BTreeMap<u64, Vec<CallSpans>>,
+) -> BTreeMap<u64, Vec<(i64, i64)>> {
+    let mut entering = BTreeMap::<u64, Vec<(i64, i64)>>::new();
+    let mut pending = in_block.keys().copied().collect::<Vec<_>>();
+    while let Some(block) = pending.pop() {
+        let calls = in_block.get(&block).map_or(&[][..], Vec::as_slice);
+        let made = calls.iter().flat_map(|(_, spans)| spans.iter().copied());
+        let entry = entering.get(&block).map_or(&[][..], Vec::as_slice);
+        let leaving = merged(entry.iter().copied().chain(made));
+        for next in func.successors(block) {
+            if grow(entering.entry(next).or_default(), &leaving) {
+                pending.push(next);
+            }
+        }
+    }
+    entering
+}
+
+/// `known` joined with `more`; whether it grew.
+fn grow(known: &mut Vec<(i64, i64)>, more: &[(i64, i64)]) -> bool {
+    let grown = merged(known.iter().chain(more).copied());
+    let changed = grown != *known;
+    *known = grown;
+    changed
+}
+
+/// The loaded places of one block's `loads` (by index) that `live` or an earlier call there covers.
+fn rewritten_in_block(
+    loads: &[(u64, usize, i64, u32)],
+    mut calls: Vec<CallSpans>,
+    mut live: Vec<(i64, i64)>,
+    rewritten: &mut BTreeSet<i64>,
+) {
+    calls.sort_unstable_by_key(|(index, _)| *index);
+    let mut calls = calls.into_iter().peekable();
+    for (_, index, place, width) in loads {
+        let mut added = Vec::new();
+        while let Some((_, spans)) = calls.next_if(|(call, _)| call < index) {
+            added.extend(spans);
+        }
+        if !added.is_empty() {
+            grow(&mut live, &added);
+        }
+        if overlaps(&live, *place, place.saturating_add(i64::from(*width))) {
+            rewritten.insert(*place);
+        }
     }
 }
 
