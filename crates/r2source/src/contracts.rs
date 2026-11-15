@@ -2182,9 +2182,27 @@ impl SourceFunctionInterface {
     /// What the closed world decided of the result, where a `CallBoundary` decided it.
     pub const fn closed_result(&self) -> Option<crate::SourceClosedResult> {
         match self.closed_result {
-            Some(decision) => Some(decision.result),
+            Some(decision) => decision.result,
             None => None,
         }
+    }
+
+    /// Whether no call reads the integer result register's bytes under the closed world: the
+    /// seal keeps the fact only where the result is in that register (D440).
+    pub const fn integer_result_unread(&self) -> bool {
+        match self.closed_result {
+            Some(decision) => decision.integer_unread,
+            None => false,
+        }
+    }
+
+    /// Whether only the integer lane is decided unread: the result itself is not (D440).
+    pub const fn only_integer_lane_unread(&self) -> bool {
+        self.integer_result_unread()
+            && !matches!(
+                self.closed_result(),
+                Some(crate::SourceClosedResult::Unread | crate::SourceClosedResult::Void)
+            )
     }
 
     /// What the applied closed-world decision takes for granted; none where none was applied.

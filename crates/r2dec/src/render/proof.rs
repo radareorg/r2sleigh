@@ -89,7 +89,7 @@ fn proof_columns(
 /// structures laid out, and the tags stated as two kinds.
 type Clauses<'a> = (
     &'a [UnassignedRead],
-    (bool, &'a [Disputed]),
+    ((bool, bool), &'a [Disputed]),
     usize,
     &'a [String],
 );
@@ -102,7 +102,9 @@ pub(crate) fn note_unproven_constructs(
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
-    (unassigned, (open_second_result, disputed), laid_out, conflicting): Clauses<'_>,
+    (unassigned, ((open_second_result, integer_lane), disputed), laid_out, conflicting): Clauses<
+        '_,
+    >,
     unproven: Option<Option<r2types::UnprovenCause>>,
     floor: Option<(usize, &r2source::SourceArityFloor)>,
 ) {
@@ -200,7 +202,7 @@ pub(crate) fn note_unproven_constructs(
         let _ = write!(
             &mut detail,
             "{} (assuming {assumed})",
-            closed_world(func, unproven)
+            closed_world(func, unproven, integer_lane)
         );
     }
     if open_second_result {
@@ -249,19 +251,24 @@ pub(crate) fn note_unproven_constructs(
     func.body.insert(0, CStmt::comment(text));
 }
 
-/// A premise is its own clause: what the closed world decided of the result (D166, D234).
+/// A premise is its own clause: what the closed world decided of the result (D166, D234), or of
+/// the integer result register alone, which says nothing of the result (D440).
 fn closed_world(
     func: &CFunction,
     unproven: Option<Option<r2types::UnprovenCause>>,
-) -> &'static str {
-    match unproven {
+    integer_lane: bool,
+) -> String {
+    let result = match unproven {
         Some(Some(r2types::UnprovenCause::ForwardCycle)) => {
-            "; a call returns the result on through a cycle"
+            Some("; a call returns the result on through a cycle")
         }
+        _ if integer_lane => None,
         // A value no body proves, decided only by its reading calls.
-        None if func.ret_type != crate::ast::CType::Void => "; a call reads the result",
-        _ => "; no call reads the result",
-    }
+        None if func.ret_type != crate::ast::CType::Void => Some("; a call reads the result"),
+        _ => Some("; no call reads the result"),
+    };
+    let lane = integer_lane.then_some("; no call reads the integer result register");
+    result.into_iter().chain(lane).collect()
 }
 
 /// A result lane where the body's returns contradict the declaration, and what they leave there.

@@ -135,6 +135,13 @@ impl<'a> RenderInput<'a> {
             .is_some_and(|carriers| carriers.second.is_some())
     }
 
+    /// Whether the closed world decides the integer result register unread and the result itself
+    /// not: the proof line names the lane, never the result (D440).
+    pub fn integer_lane_unread_only(&self) -> bool {
+        (self.artifact().machine_context().function_interface())
+            .is_some_and(r2source::SourceFunctionInterface::only_integer_lane_unread)
+    }
+
     /// The result lanes where the body's returns contradict the declaration, which is kept (D331).
     pub fn body_disputed_lanes(
         &self,
