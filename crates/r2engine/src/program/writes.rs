@@ -68,19 +68,19 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for IncomingWrites {
             if let [only] = members
                 && let Some(known) = held(db, keys[only.index()], root)
             {
-                answers[only.index()] = known.writes.clone();
+                answers[only.index()].clone_from(&known.writes);
                 continue;
             }
-            let mut bounds = Vec::with_capacity(members.len());
-            for member in members {
-                match alone(db, keys[member.index()]) {
-                    Alone::Bound(bound) => bounds.push(bound),
+            let bounds = members
+                .iter()
+                .map(|member| match alone(db, keys[member.index()]) {
+                    Alone::Bound(bound) => bound,
                     Alone::Unheld(why) => {
                         kept = kept.max(why);
-                        bounds.push(None);
+                        None
                     }
-                }
-            }
+                });
+            let bounds = bounds.collect::<Vec<_>>();
             let cyclic = condensation.is_cyclic(component);
             let computed = solved_component(&view, (&keys, &answers), members, &bounds, cyclic);
             for (member, writes) in members.iter().zip(computed) {
