@@ -29,8 +29,21 @@ pub(super) struct Spell<'a> {
     pub(super) return_address: Option<(ObjectId, u32)>,
     /// A read at the start of a caller's stack slot nothing here writes, which C cannot read.
     pub(super) caller: &'a dyn Fn(ObjectId, &MachineType) -> Option<CExpr>,
-    /// The address of the structure member a cell is, `&arg0->f_2` (doc/adr-aggregates.md).
-    pub(super) member: &'a dyn Fn(TermId) -> Option<CExpr>,
+    /// The structure member a cell is, `&arg0->f_2` (doc/adr-aggregates.md).
+    pub(super) member: &'a dyn Fn(TermId) -> Option<MemberCell>,
+}
+
+/// The member a cell reads: a finished address, or a member of the struct the word `result` points
+/// at, which the root load `word` read, as the projection states it (D359, D394).
+#[derive(Debug, Clone)]
+pub(super) enum MemberCell {
+    At(CExpr),
+    Through {
+        pointer: CType,
+        member: String,
+        result: ValueId,
+        word: TermId,
+    },
 }
 
 /// A frame object's address in the frame array and its extent.
@@ -801,6 +814,26 @@ impl Spell<'_> {
         }
     }
 
+    /// The address of the member cell `id` is: a member through a loaded word is that word cast to
+    /// the projected struct pointer.
+    pub(super) fn member_address(&self, id: TermId) -> Option<CExpr> {
+        let (pointer, member, result, word) = match (self.member)(id)? {
+            MemberCell::At(at) => return Some(at),
+            MemberCell::Through {
+                pointer,
+                member,
+                result,
+                word,
+            } => (pointer, member, result, word),
+        };
+        // Only the variable holding the word spells it: the load again could read a later store.
+        let base = cast(pointer, (self.bound)(result, &self.arena.term(word).ty)?);
+        Some(CExpr::addr_of(CExpr::PtrMember {
+            base: Box::new(base),
+            member,
+        }))
+    }
+
     /// A machine expression a term reads at `ty`: the projection may hold the same bits at the
     /// other class than the term reads them.
     fn leaf(&self, expr: MachineExprId, ty: &MachineType) -> Option<CExpr> {
@@ -824,13 +857,14 @@ impl Spell<'_> {
                 Some(cast(integer(bits)?, (self.object)(object)?.base))
             }
             // A member is read by a byte copy at its address, as any cell is: no type is asserted.
-            TermKind::Load { .. } | TermKind::Subscript { .. } if (self.member)(id).is_some() => {
-                self.load(&ty, (self.member)(id)?)
-            }
-            TermKind::Load { object, address } => self.load_of(&ty, object, address),
-            TermKind::Subscript { base, index } => {
-                self.load(&ty, self.subscript((base, index), bits / 8, None)?)
-            }
+            TermKind::Load { object, address } => match self.member_address(id) {
+                Some(at) => self.load(&ty, at),
+                None => self.load_of(&ty, object, address),
+            },
+            TermKind::Subscript { base, index } => match self.member_address(id) {
+                Some(at) => self.load(&ty, at),
+                None => self.load(&ty, self.subscript((base, index), bits / 8, None)?),
+            },
             TermKind::Arithmetic { op, left, right } => {
                 wrapping(arithmetic(op), bits, child(left)?, child(right)?)
             }

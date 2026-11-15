@@ -398,6 +398,82 @@ pub enum MachineRegisterGeometryState {
     Malformed,
 }
 
+/// The process's call-read work, in a `work-meter` build (D436, D432).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallReadsMeter {
+    /// `CallReads` built for the column.
+    pub built: u64,
+    /// Raw call sites stated by contexts made, and one unsited row each.
+    pub rows: u64,
+    /// Rows built for a reloaded format.
+    pub reloaded: u64,
+    /// What `reloaded` may reach: each walk round's reloads and each settle's formats.
+    pub reload_bound: u64,
+}
+
+/// The process's [`CallReadsMeter`]; `None` outside a `work-meter` build.
+pub fn call_reads_built() -> Option<CallReadsMeter> {
+    #[cfg(feature = "work-meter")]
+    return Some(meter::counts());
+    #[cfg(not(feature = "work-meter"))]
+    None
+}
+
+pub(crate) mod meter {
+    #[cfg(feature = "work-meter")]
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[cfg(feature = "work-meter")]
+    static BUILT: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "work-meter")]
+    static SITES: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "work-meter")]
+    static RELOADED: AtomicU64 = AtomicU64::new(0);
+    #[cfg(feature = "work-meter")]
+    static RELOAD_BOUND: AtomicU64 = AtomicU64::new(0);
+
+    /// Each meter read after the one it bounds, so a concurrent build never reads past its bound.
+    #[cfg(feature = "work-meter")]
+    pub(super) fn counts() -> super::CallReadsMeter {
+        let count = |meter: &AtomicU64| meter.load(Ordering::SeqCst);
+        let (built, reloaded) = (count(&BUILT), count(&RELOADED));
+        let (rows, reload_bound) = (count(&SITES), count(&RELOAD_BOUND));
+        super::CallReadsMeter {
+            built,
+            rows,
+            reloaded,
+            reload_bound,
+        }
+    }
+
+    /// `reloads` more rows a walk round or a settle may build for reloaded formats, counted first.
+    #[inline]
+    pub(crate) fn reloads_allowed(_reloads: usize) {
+        #[cfg(feature = "work-meter")]
+        RELOAD_BOUND.fetch_add(_reloads as u64, Ordering::SeqCst);
+    }
+
+    /// A row stated for a reloaded format: one per reload a walk round decides, one per settle.
+    #[inline]
+    pub(super) fn reloaded() {
+        #[cfg(feature = "work-meter")]
+        RELOADED.fetch_add(1, Ordering::SeqCst);
+    }
+
+    #[inline]
+    pub(super) fn built() {
+        #[cfg(feature = "work-meter")]
+        BUILT.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// A context's rows: each raw call site and the unsited one.
+    #[inline]
+    pub(super) fn made(_sites: usize) {
+        #[cfg(feature = "work-meter")]
+        SITES.fetch_add(_sites as u64 + 1, Ordering::SeqCst);
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceMachineContext {
     schema_version: u32,
@@ -420,7 +496,7 @@ pub struct SourceMachineContext {
     observed_projections: Box<[RegisterProjection]>,
     /// Every call site the raw lifted input has, by the instruction it was
     /// lifted from.
-    raw_call_sites: BTreeMap<u64, SourceCallSiteIdentity>,
+    raw_call_sites: BTreeMap<u64, RawCallSite>,
     tail_call_sites: BTreeSet<SourceCallSiteIdentity>,
     /// Who each raw call site calls, where the source knew.
     callee_linkages: BTreeMap<SourceCallSiteIdentity, r2source::AdvisoryCalleeLinkage>,
@@ -436,8 +512,14 @@ pub struct SourceMachineContext {
     /// before the interprocedural solve exists, so the fact arrives with the
     /// bodies the capture took rather than from that solve.
     callee_argument_reach: BTreeMap<u64, BTreeMap<usize, crate::interproc::ArgumentReach>>,
-    /// The convention each stated callee runs under, by entry; any other call runs under `calls`.
-    site_conventions: crate::SiteConventions,
+    /// What each stated callee may write of its caller's stack, by entry (D377).
+    callee_writes: BTreeMap<u64, crate::call_reads::StackWrites>,
+    /// The low bytes each walked callee may read of each result register, by entry (D372).
+    callee_lane_reads: crate::function::CalleeLaneReads,
+    /// The imports this body calls directly, each with its witness, by entry (D431).
+    callee_imports: crate::function::CalleeImports,
+    /// The convention each call runs under (D390); any other call runs under `calls`.
+    sites: std::sync::Arc<crate::function::SiteModels>,
     /// The library models of the imports this body calls, by entry.
     callee_library: BTreeMap<u64, crate::interproc::FunctionSemanticSummary>,
     /// The callees a runtime model says re-enter their caller at its entry.
@@ -463,8 +545,34 @@ pub struct SourceMachineContext {
     source_string_literals: BTreeMap<u64, String>,
     /// Bytes the program never writes, by the address a body loads from: what a load there reads.
     read_only: BTreeMap<u64, Box<[u8]>>,
+    /// What the read-only format each printf call's own block passes consumes, by the call's
+    /// instruction (D409).
+    format_tails: BTreeMap<u64, r2abi::format::PrintfConsumedArguments>,
+    /// The literal addresses the program never writes, ascending: a format there is read-only.
+    immutable_literals: Box<[u64]>,
     /// The image's data objects whose type is a laid-out struct, with that graph (D348).
     data_structs: Option<std::sync::Arc<DataStructs>>,
+    /// What each raw call site reads, stated once the facts it reads are bound (D436).
+    call_reads: CallReadsColumn,
+}
+
+/// One call's reads, and the index of its model's every-location row.
+type CallReadsRow = (Option<crate::call_reads::CallReads>, Option<usize>);
+
+/// Each raw call site's `CallReads` and the index of its model's every-location row (D436).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+struct CallReadsColumn {
+    /// By instruction, ascending.
+    sites: Box<[(u64, CallReadsRow)]>,
+    /// What a call at no raw site reads, under the calls' model.
+    unsited: CallReadsRow,
+    /// Every location of each distinct model a site runs under.
+    every: Box<[crate::call_reads::CallReads]>,
+    /// The calls' model's row in `every`.
+    calls: Option<usize>,
+    bound: bool,
+    /// The rows of the sites whose reloaded format the frame walk bound are restated (D432).
+    settled: bool,
 }
 
 /// Data objects the image graph types as a struct of known size, by address.
@@ -528,6 +636,9 @@ fn clobbered_by_a_call(
         .collect()
 }
 
+/// What a typed indirect call writes: its argument area.
+static ARGUMENT_AREA: crate::call_reads::StackWrites = crate::call_reads::StackWrites::arguments();
+
 impl SourceMachineContext {
     pub(crate) fn from_blocks(blocks: &[R2ILBlock], arch: Option<&Arch>) -> Self {
         Self::from_blocks_with_interfaces(
@@ -568,7 +679,7 @@ impl SourceMachineContext {
         call_site_interfaces: Vec<SourceCallSiteInterface>,
         tail_call_identities: Vec<SourceCallSiteIdentity>,
     ) -> Self {
-        Self::from_blocks_with_interfaces_tail_calls_and_terminals(
+        let mut context = Self::from_blocks_with_interfaces_tail_calls_and_terminals(
             blocks,
             arch,
             function_interface,
@@ -577,13 +688,13 @@ impl SourceMachineContext {
             call_site_interfaces,
             tail_call_identities,
             &BTreeSet::new(),
-        )
+        );
+        context.bind_call_reads();
+        context
     }
 
-    /// `terminal_blocks` are the blocks the source's own block graph declares
-    /// to have no successor. A transfer at the end of one of them leaves the
-    /// function whatever it transfers through, which is what makes an
-    /// indirect jump there a tail call rather than an unresolved dispatch.
+    /// Unbound until [`Self::bind_call_reads`] (D436). A transfer ending a `terminal_blocks` block
+    /// (no successor, as the source states) is a tail call, whatever it transfers through.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn from_blocks_with_interfaces_tail_calls_and_terminals(
         blocks: &[R2ILBlock],
@@ -771,7 +882,9 @@ impl SourceMachineContext {
             let schema_ok = interface.schema_version() == SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION;
             let revision_ok =
                 expected_call_site_revision.as_deref() == Some(interface.revision_identity());
-            let site_known = raw_call_sites.get(&identity.instruction()) == Some(&identity);
+            let site_known = raw_call_sites
+                .get(&identity.instruction())
+                .is_some_and(|site| site.identity == identity);
             let site_unclaimed = claimed_sites.insert(site);
             if !schema_ok || !revision_ok || !site_known || !site_unclaimed || !carriers_exist {
                 r2il::refusal_evidence!(
@@ -797,6 +910,7 @@ impl SourceMachineContext {
                 call_site_interfaces_by_identity.remove(&identity);
             }
         }
+        meter::made(raw_call_sites.len());
         Self {
             schema_version: MACHINE_CONTEXT_SCHEMA_VERSION,
             arch: arch.cloned(),
@@ -816,7 +930,10 @@ impl SourceMachineContext {
             member_call_sites: BTreeSet::new(),
             callee_names: BTreeMap::new(),
             callee_argument_reach: BTreeMap::new(),
-            site_conventions: crate::SiteConventions::new(),
+            callee_writes: BTreeMap::new(),
+            callee_lane_reads: BTreeMap::new(),
+            callee_imports: BTreeMap::new(),
+            sites: std::sync::Arc::default(),
             callee_library: BTreeMap::new(),
             reentering_callees: BTreeSet::new(),
             unstated_imports: BTreeMap::new(),
@@ -827,7 +944,10 @@ impl SourceMachineContext {
             call_site_interfaces: call_site_interfaces_by_identity,
             source_string_literals: BTreeMap::new(),
             read_only: BTreeMap::new(),
+            format_tails: BTreeMap::new(),
+            immutable_literals: Box::default(),
             data_structs: None,
+            call_reads: CallReadsColumn::default(),
         }
     }
 
@@ -975,6 +1095,7 @@ impl SourceMachineContext {
     }
 
     pub(crate) fn set_callee_statements(&mut self, statements: &BTreeMap<u64, CalleeStatement>) {
+        self.feeding_call_reads();
         self.callee_statements.clone_from(statements);
     }
 
@@ -1072,13 +1193,15 @@ impl SourceMachineContext {
     }
 
     /// Every call site of the raw lifted input, by instruction.
-    pub const fn raw_call_sites(&self) -> &BTreeMap<u64, SourceCallSiteIdentity> {
+    pub(crate) const fn raw_call_sites(&self) -> &BTreeMap<u64, RawCallSite> {
         &self.raw_call_sites
     }
 
     /// The call site lifted from `instruction`, if that instruction is one.
     pub fn raw_call_site_at(&self, instruction: u64) -> Option<SourceCallSiteIdentity> {
-        self.raw_call_sites.get(&instruction).copied()
+        self.raw_call_sites
+            .get(&instruction)
+            .map(|site| site.identity)
     }
 
     pub fn is_tail_call_site(&self, identity: SourceCallSiteIdentity) -> bool {
@@ -1146,27 +1269,48 @@ impl SourceMachineContext {
         self.callee_argument_reach = callee_argument_reach;
     }
 
-    pub(crate) fn set_site_conventions(&mut self, conventions: crate::SiteConventions) {
-        self.site_conventions = conventions;
+    pub(crate) fn set_callee_writes(
+        &mut self,
+        writes: BTreeMap<u64, crate::call_reads::StackWrites>,
+    ) {
+        self.feeding_call_reads();
+        self.callee_writes = writes;
     }
 
-    /// What a call to `target` runs under: the callee's stated model, else `calls`.
-    pub fn site_model(&self, target: u64) -> Option<&r2source::ConventionModel> {
-        (self.site_conventions.get(&target)).map_or_else(|| self.calls(), |model| Some(&**model))
+    pub(crate) fn set_callee_lane_reads(&mut self, reads: crate::function::CalleeLaneReads) {
+        self.feeding_call_reads();
+        self.callee_lane_reads = reads;
     }
 
-    /// The integer argument registers a call to `target` hands, in the order the callee's own
-    /// summary numbers its reach (D365); none where no model states them.
-    pub fn site_integer_arguments(&self, target: u64) -> &[CanonicalStorageId] {
-        self.site_model(target)
+    pub(crate) fn set_callee_imports(&mut self, imports: crate::function::CalleeImports) {
+        self.feeding_call_reads();
+        self.callee_imports = imports;
+    }
+
+    pub(crate) fn set_site_models(&mut self, sites: std::sync::Arc<crate::function::SiteModels>) {
+        self.feeding_call_reads();
+        self.sites = sites;
+    }
+
+    /// What the call at `instruction` to `direct` runs under: its stated model, else `calls`.
+    pub fn site_model(
+        &self,
+        instruction: Option<u64>,
+        direct: Option<u64>,
+    ) -> Option<&r2source::ConventionModel> {
+        (self.sites.stated(instruction, direct)).or_else(|| self.calls())
+    }
+
+    /// The integer argument registers the call at `instruction` to `direct` hands, in the order
+    /// the callee's own summary numbers its reach (D365); none where no model states them.
+    pub fn site_integer_arguments(
+        &self,
+        instruction: Option<u64>,
+        direct: Option<u64>,
+    ) -> &[CanonicalStorageId] {
+        self.site_model(instruction, direct)
             .map(|model| model.arguments(r2source::convention::SlotClass::Integer))
             .unwrap_or_default()
-    }
-
-    /// The argument position `storage` holds in a call to `target`, by the site's model.
-    pub fn site_position(&self, target: u64, storage: CanonicalStorageId) -> Option<usize> {
-        (self.site_integer_arguments(target).iter())
-            .position(|slot| slot.space == storage.space && slot.offset == storage.offset)
     }
 
     /// How far `target` reaches through what it is handed at `position`.
@@ -1300,17 +1444,181 @@ impl SourceMachineContext {
         &self.call_site_interfaces
     }
 
+    /// A fact `call_reads` reads changes only before the column is bound (D436).
+    fn feeding_call_reads(&self) {
+        debug_assert!(
+            !self.call_reads.bound,
+            "a call-read fact set after the bind"
+        );
+    }
+
+    /// State each raw call site's reads once, after the last fact they read (D436). O(C x R) for C
+    /// sites of R locations, plus every location once per distinct model.
+    pub(crate) fn bind_call_reads(&mut self) {
+        let (mut models, mut every) = (Vec::<*const r2source::ConventionModel>::new(), Vec::new());
+        let mut row = |model: Option<&r2source::ConventionModel>| {
+            let model = model?;
+            let seen = models.iter().position(|seen| std::ptr::eq(*seen, model));
+            Some(seen.unwrap_or_else(|| {
+                models.push(model);
+                every.push(crate::call_reads::CallReads::every_location(model));
+                models.len() - 1
+            }))
+        };
+        let sites = (self.raw_call_sites.iter()).map(|(instruction, site)| {
+            let direct = crate::semantic::direct_target_from_raw_identity(site.identity);
+            let model = row(self.site_model(Some(*instruction), direct));
+            let reads = self.stated_call_reads(Some(*instruction));
+            (*instruction, (reads, model))
+        });
+        let sites = sites.collect();
+        let unsited = (
+            self.stated_call_reads(None),
+            row(self.site_model(None, None)),
+        );
+        let calls = row(self.calls());
+        self.call_reads = CallReadsColumn {
+            sites,
+            unsited,
+            every: every.into(),
+            calls,
+            bound: true,
+            settled: false,
+        };
+    }
+
+    /// Whether the rows of reloaded formats are restated: no frame walk reads them after (D432).
+    pub(crate) const fn reloads_settled(&self) -> bool {
+        self.call_reads.settled
+    }
+
+    /// Bind each site's format the frame walk proved its reloaded place holds, and restate those
+    /// rows (D432). O(R x (log C + reads)) for R reloads.
+    pub(crate) fn settle_reloaded_formats(&mut self, formats: &BTreeMap<u64, u64>) {
+        debug_assert!(
+            self.call_reads.bound && !self.call_reads.settled,
+            "reloads settled before the bind or twice"
+        );
+        self.call_reads.settled = true;
+        meter::reloads_allowed(formats.len());
+        for (instruction, literal) in formats {
+            let Some(tail) = self.literal_tail(*literal) else {
+                continue;
+            };
+            let column = &self.call_reads.sites;
+            let at = column.binary_search_by_key(instruction, |row| row.0);
+            meter::reloaded();
+            let reads = self.stated_call_reads_with(Some(*instruction), Some(&tail));
+            self.format_tails.insert(*instruction, tail);
+            if let Ok(at) = at {
+                self.call_reads.sites[at].1.0 = reads;
+            }
+        }
+    }
+
+    /// The column's row of the call at `instruction`; the unsited row for no raw site. O(log C).
+    fn call_reads_row(
+        &self,
+        instruction: Option<u64>,
+    ) -> (Option<&crate::call_reads::CallReads>, Option<usize>) {
+        debug_assert!(
+            self.call_reads.bound,
+            "a call's reads asked before the bind"
+        );
+        let column = &self.call_reads;
+        let at =
+            instruction.and_then(|at| column.sites.binary_search_by_key(&at, |row| row.0).ok());
+        let (reads, every) = at.map_or(&column.unsited, |at| &column.sites[at].1);
+        (reads.as_ref(), *every)
+    }
+
+    /// What the call at `instruction` may read, as the bind stated it (D436). O(log C).
+    pub fn call_reads(&self, instruction: Option<u64>) -> Option<&crate::call_reads::CallReads> {
+        self.call_reads_row(instruction).0
+    }
+
+    /// Every location a call at `instruction` may read under its own model (D390). O(log C).
+    pub fn every_location_at(
+        &self,
+        instruction: Option<u64>,
+    ) -> Option<&crate::call_reads::CallReads> {
+        let at = self.call_reads_row(instruction).1?;
+        self.call_reads.every.get(at)
+    }
+
+    /// Every location a call may read under the calls' model. O(1).
+    pub fn every_location(&self) -> Option<&crate::call_reads::CallReads> {
+        self.call_reads.every.get(self.call_reads.calls?)
+    }
+
     /// What the call at `instruction` may read (`CallReads`): the locations of its complete, fixed
     /// interface, else every location; none where the machine names no convention.
-    pub fn call_reads(&self, instruction: Option<u64>) -> Option<crate::call_reads::CallReads> {
-        let interface = instruction
-            .and_then(|instruction| self.raw_call_site_at(instruction))
-            .and_then(|identity| self.call_site_interface(identity))
-            .filter(|interface| interface.is_complete() && !interface.is_variadic());
-        match interface {
-            Some(interface) => Some(crate::call_reads::CallReads::exact(interface, self.calls())),
-            None => (self.calls()).map(crate::call_reads::CallReads::every_location),
+    fn stated_call_reads(&self, instruction: Option<u64>) -> Option<crate::call_reads::CallReads> {
+        meter::built();
+        let tail = instruction.and_then(|at| self.format_tails.get(&at));
+        self.stated_call_reads_with(instruction, tail)
+    }
+
+    /// What the call at `instruction` reads were its printf format the literal at `literal` (D432):
+    /// the row `settle_reloaded_formats` states. O(reads).
+    pub(crate) fn reloaded_call_reads(
+        &self,
+        instruction: u64,
+        literal: u64,
+    ) -> Option<crate::call_reads::CallReads> {
+        meter::reloaded();
+        let tail = self.literal_tail(literal)?;
+        self.stated_call_reads_with(Some(instruction), Some(&tail))
+    }
+
+    /// [`Self::stated_call_reads`] under the printf format `tail` consumes.
+    fn stated_call_reads_with(
+        &self,
+        instruction: Option<u64>,
+        tail: Option<&r2abi::format::PrintfConsumedArguments>,
+    ) -> Option<crate::call_reads::CallReads> {
+        let identity = instruction.and_then(|instruction| self.raw_call_site_at(instruction));
+        let target = identity
+            .map(SourceCallSiteIdentity::target)
+            .filter(|target| target.space == CanonicalStorageSpace::Ram);
+        // A direct callee writes the stack its entry states; a typed indirect call, its arguments.
+        let writes = match target {
+            Some(target) => self.callee_writes.get(&target.offset),
+            None => Some(&ARGUMENT_AREA),
+        };
+        let interface = (identity.and_then(|identity| self.call_site_interface(identity)))
+            .filter(|interface| interface.is_complete());
+        // The site's own model, by the one lookup rename and the frame walk ask (D390).
+        let model = self.site_model(instruction, target.map(|target| target.offset));
+        let import = target.and_then(|target| self.callee_imports.get(&target.offset).copied());
+        if let Some(interface) = interface.filter(|interface| !interface.is_variadic()) {
+            let reads = crate::call_reads::CallReads::exact(interface, model);
+            return Some(reads.writing(writes).importing(import));
         }
+        // A printf reads its fixed parameters, the operands its own format counts and the count
+        // register, in registers and on the stack (D409, D433).
+        let counted = (interface.zip(model))
+            .zip(tail)
+            .and_then(|((interface, model), tail)| counted_reads(interface, model, tail));
+        if let Some(reads) = counted {
+            return Some(reads.writing(writes).importing(import));
+        }
+        // A walked callee that mints no contract still states its reads where its arity is exact.
+        let stated = target
+            .and_then(|target| self.callee_statement(target.offset))
+            .and_then(|statement| statement.reads.as_deref());
+        // A walked callee's register effect bounds its result registers; any other reads them whole.
+        let lanes = target.and_then(|target| self.callee_lane_reads.get(&target.offset));
+        let reads = match stated {
+            Some(read) => Some(crate::call_reads::CallReads::of_locations(
+                read.iter().copied(),
+                model,
+            )),
+            None => model
+                .map(crate::call_reads::CallReads::every_location)
+                .map(|reads| reads.reading_lanes(lanes)),
+        };
+        reads.map(|reads| reads.writing(writes).importing(import))
     }
 
     pub fn call_site_interface(
@@ -1410,6 +1718,92 @@ impl SourceMachineContext {
         }
     }
 
+    /// The arguments the read-only format a call at `instruction` passes consumes, where its
+    /// format register holds a literal no write reaches.
+    fn folded_format_tail(
+        &self,
+        instruction: u64,
+        origins: &BlockOrigins,
+    ) -> Option<r2abi::format::PrintfConsumedArguments> {
+        let register = self.format_register(instruction)?;
+        let varnode = r2il::Varnode::register(register.offset, register.size);
+        self.literal_tail(origins.of(&varnode)?.constant()?)
+    }
+
+    /// What the format at `at` consumes, where the program never writes it. O(log L + format).
+    fn literal_tail(&self, at: u64) -> Option<r2abi::format::PrintfConsumedArguments> {
+        self.immutable_literals.binary_search(&at).ok()?;
+        let text = self.source_string_literal(at)?;
+        r2abi::format::printf_consumed_arguments(text).ok()
+    }
+
+    /// The register a cited printf at `instruction` takes its format in, where its own block folds
+    /// no literal there: the frame walk's reload candidate (D432). O(log sites).
+    pub(crate) fn reloaded_format_register(&self, instruction: u64) -> Option<CanonicalStorageId> {
+        (!self.format_tails.contains_key(&instruction))
+            .then(|| self.format_register(instruction))
+            .flatten()
+    }
+
+    /// Fold each cited printf's format in its own block and keep what a read-only one consumes (D409),
+    /// stepping a block only up to its last site: O(C log C + those operations) (D437).
+    pub(crate) fn bind_format_tails(&mut self, blocks: &[R2ILBlock], immutable: &[u64]) {
+        self.feeding_call_reads();
+        self.immutable_literals = immutable.into();
+        let mut sites = (self.raw_call_sites.iter())
+            .filter(|(instruction, _)| self.format_register(**instruction).is_some())
+            .map(|(instruction, site)| (site.block, site.op, *instruction))
+            .collect::<Vec<_>>();
+        sites.sort_unstable();
+        let mut tails = BTreeMap::new();
+        for in_block in sites.chunk_by(|left, right| left.0 == right.0) {
+            let Some(block) = blocks.get(in_block[0].0 as usize) else {
+                continue;
+            };
+            let (mut origins, mut folded) = (BlockOrigins::default(), 0);
+            for &(_, at, instruction) in in_block {
+                let at = at as usize;
+                fold_format_origins(&mut origins, block.ops.get(folded..at).unwrap_or_default());
+                folded = folded.max(at);
+                // A site is the one call its instruction lifts to (`collect_raw_call_site_identities`).
+                let call = block.ops.get(at).is_some_and(R2ILOp::is_call)
+                    && block.instruction_of(at) == Some(instruction);
+                let consumed = || self.folded_format_tail(instruction, &origins);
+                tails.extend(
+                    call.then(consumed)
+                        .flatten()
+                        .map(|tail| (instruction, tail)),
+                );
+            }
+        }
+        self.format_tails = tails;
+    }
+
+    /// What the read-only format the call at `instruction` passes consumes, where its block folds it.
+    pub(crate) fn format_tail(
+        &self,
+        instruction: u64,
+    ) -> Option<&r2abi::format::PrintfConsumedArguments> {
+        self.format_tails.get(&instruction)
+    }
+
+    /// The register a call at `instruction` passes a cited printf `...`'s format in: the
+    /// declaration's format of a variadic site (a body-proven one is no citation). O(log sites).
+    fn format_register(&self, instruction: u64) -> Option<CanonicalStorageId> {
+        let interface = self.call_site_interface(self.raw_call_site_at(instruction)?)?;
+        let index = match interface.format_parameter_rule()? {
+            r2source::SourceFormatParameterRule::Radare2FormatString { parameter_index } => {
+                parameter_index
+            }
+            r2source::SourceFormatParameterRule::BodyProvenFormatString { .. } => return None,
+        };
+        let argument = interface.arguments().get(usize::try_from(index).ok()?)?;
+        match (interface.is_variadic(), argument.location()) {
+            (true, SourceParameterLocation::Register(storage)) => Some(storage),
+            _ => None,
+        }
+    }
+
     pub fn source_string_literal(&self, address: u64) -> Option<&str> {
         self.source_string_literals
             .get(&address)
@@ -1437,17 +1831,14 @@ fn collect_raw_call_site_identities(
     blocks: &[R2ILBlock],
     tail_call_identities: &[SourceCallSiteIdentity],
     terminal_blocks: &BTreeSet<u64>,
-) -> (
-    BTreeMap<u64, SourceCallSiteIdentity>,
-    BTreeSet<SourceCallSiteIdentity>,
-) {
+) -> (BTreeMap<u64, RawCallSite>, BTreeSet<SourceCallSiteIdentity>) {
     let authorized_tail_calls = tail_call_identities
         .iter()
         .copied()
         .collect::<BTreeSet<_>>();
-    let mut by_instruction: BTreeMap<u64, Option<SourceCallSiteIdentity>> = BTreeMap::new();
+    let mut by_instruction: BTreeMap<u64, Option<RawCallSite>> = BTreeMap::new();
     let mut tails = BTreeSet::new();
-    for block in blocks {
+    for (block_index, block) in blocks.iter().enumerate() {
         for (op_index, op) in block.ops.iter().enumerate() {
             let Some(instruction) = block.instruction_of(op_index) else {
                 continue;
@@ -1523,9 +1914,14 @@ fn collect_raw_call_site_identities(
                 }
                 _ => continue,
             };
+            let site = RawCallSite {
+                identity,
+                block: u32::try_from(block_index).expect("fewer than 2^32 blocks"),
+                op: u32::try_from(op_index).expect("fewer than 2^32 operations in a block"),
+            };
             match by_instruction.entry(instruction) {
                 std::collections::btree_map::Entry::Vacant(slot) => {
-                    slot.insert(Some(identity));
+                    slot.insert(Some(site));
                 }
                 std::collections::btree_map::Entry::Occupied(mut slot) => {
                     r2il::refusal_evidence!(
@@ -1539,10 +1935,36 @@ fn collect_raw_call_site_identities(
     }
     let by_instruction = by_instruction
         .into_iter()
-        .filter_map(|(instruction, identity)| identity.map(|identity| (instruction, identity)))
+        .filter_map(|(instruction, site)| site.map(|site| (instruction, site)))
         .collect::<BTreeMap<_, _>>();
-    tails.retain(|identity| by_instruction.get(&identity.instruction()) == Some(identity));
+    tails.retain(|identity| {
+        (by_instruction.get(&identity.instruction())).is_some_and(|site| site.identity == *identity)
+    });
     (by_instruction, tails)
+}
+
+/// A raw call site and where it was lifted: the one transfer its instruction lifts to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RawCallSite {
+    pub(crate) identity: SourceCallSiteIdentity,
+    /// Index of the block in the lifted input, and of the transfer in its operations.
+    pub(crate) block: u32,
+    pub(crate) op: u32,
+}
+
+/// Step a block's origins over `ops`, the operations before its next format site (D437).
+fn fold_format_origins(origins: &mut BlockOrigins, ops: &[R2ILOp]) {
+    for op in ops {
+        #[cfg(test)]
+        FORMAT_FOLD_STEPS.with(|steps| steps.set(steps.get() + 1));
+        origins.step(op);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many operations `bind_format_tails` folded on this thread (D437).
+    pub(crate) static FORMAT_FOLD_STEPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The canonical RAM slot whose loaded value a terminal indirect branch reads.
@@ -1575,6 +1997,63 @@ pub fn loaded_target_slot(block: &R2ILBlock, op_index: usize) -> Option<Canonica
     BlockOrigins::upto(block, op_index)
         .of(target)?
         .loaded_slot()
+}
+
+/// What a counted printf reads: its fixed parameters, a promoted slot per `tail` operand (C17
+/// 6.5.2.2p7) and the count register (D433); refusals in adr-call-boundary "D409 as built".
+fn counted_reads(
+    interface: &SourceCallSiteInterface,
+    model: &r2source::ConventionModel,
+    tail: &r2abi::format::PrintfConsumedArguments,
+) -> Option<crate::call_reads::CallReads> {
+    use r2source::convention::SlotClass;
+    let callee = interface.exact_callee_interface()?;
+    let integers = model.arguments(SlotClass::Integer);
+    let wide = integers.first().is_some_and(|first| first.size == 8);
+    let unclassed = tail.long_double || tail.gapped || tail.count > 64;
+    if !wide || model.forms.variadic_on_stack || unclassed {
+        return None;
+    }
+    let floats = model.arguments(SlotClass::Float);
+    let fixed = (callee.parameters().iter()).map(|parameter| match parameter.location() {
+        SourceParameterLocation::Register(storage)
+            if floats
+                .iter()
+                .any(|float| crate::semantic::register_storages_overlap(*float, storage)) =>
+        {
+            Some(crate::place::ParamClass::Float(
+                u8::try_from(storage.size).ok()?,
+            ))
+        }
+        SourceParameterLocation::Register(storage) => Some(crate::place::ParamClass::Integer(
+            u8::try_from(storage.size).ok()?,
+        )),
+        SourceParameterLocation::Stack { size_bytes, .. } => Some(
+            crate::place::ParamClass::Integer(u8::try_from(size_bytes).ok()?),
+        ),
+    });
+    let operands = (0..tail.count).map(|at| match (tail.floating >> at) & 1 {
+        1 => Some(crate::place::ParamClass::Float(8)),
+        _ => Some(crate::place::ParamClass::Integer(8)),
+    });
+    let classes = fixed.chain(operands).collect::<Option<Vec<_>>>()?;
+    let placement = crate::place::place(model, &classes);
+    let declared = callee
+        .parameters()
+        .iter()
+        .map(|parameter| parameter.location());
+    let placed_as_declared = placement
+        .locations
+        .iter()
+        .copied()
+        .take(callee.parameters().len());
+    if !placement.is_whole() || !placed_as_declared.eq(declared) {
+        return None;
+    }
+    let at_call = (placement.locations.into_iter()).map(|location| callee.at_call_site(location));
+    let at_call = at_call.collect::<Option<Vec<_>>>()?;
+    let reads = crate::call_reads::CallReads::of_locations(at_call.into_iter(), Some(model));
+    Some(reads.counting(model.forms.count_register))
 }
 
 #[cfg(test)]
@@ -2868,7 +3347,7 @@ mod tests {
     }
 
     #[test]
-    fn callsite_interface_rejects_bad_order_overlap_and_noreturn_result() {
+    fn callsite_interface_rejects_bad_order_and_overlap() {
         let identity = SourceCallSiteIdentity::new(
             0x1000,
             CanonicalStorageId {
@@ -2885,7 +3364,6 @@ mod tests {
                 r2source::ConventionId::SysVAmd64,
                 [SourceCallArgumentSpec::new(1, register_storage(0, 8))],
                 false,
-                false,
                 SourceCallResult::Void,
             ),
             Err(SourceCallSiteInterfaceError::InvalidArgumentOrder)
@@ -2901,23 +3379,9 @@ mod tests {
                     SourceCallArgumentSpec::new(1, register_storage(4, 8)),
                 ],
                 false,
-                false,
                 SourceCallResult::Void,
             ),
             Err(SourceCallSiteInterfaceError::OverlappingRegisterStorages)
-        );
-        assert_eq!(
-            SourceCallSiteInterface::new(
-                b"call-revision".to_vec(),
-                identity,
-                true,
-                r2source::ConventionId::SysVAmd64,
-                [],
-                false,
-                true,
-                SourceCallResult::register(register_storage(0, 8)),
-            ),
-            Err(SourceCallSiteInterfaceError::NoreturnWithResult)
         );
     }
 
@@ -3150,10 +3614,107 @@ mod tests {
             Some(64)
         );
     }
+
+    /// Blocks `0x1000` (a call to no printf, then a copy) and `0x1010` (rsi = format, a printf
+    /// at `0x1014` when `cited`, then two copies). Returns the context and the blocks.
+    fn format_fold_body(cited: bool) -> (SourceMachineContext, Vec<R2ILBlock>) {
+        let mut arch = ArchSpec::new("x86-64");
+        arch.addr_size = 8;
+        for (index, name) in ["rdi", "rsi", "rdx", "rcx"].iter().enumerate() {
+            arch.add_register(RegisterDef::new(*name, index as u64 * 8, 8));
+        }
+        let slot = |index: u64| register_storage(index * 8, 8);
+        let copy = |register: u64, value: u64| R2ILOp::Copy {
+            dst: Varnode::register(register * 8, 8),
+            src: Varnode::constant(value, 8),
+        };
+        let mut other = R2ILBlock::new(0x1000, 8);
+        let target = Varnode::constant(0x2100, 8);
+        other.push(R2ILOp::Call { target });
+        other.stamp_instruction(0, 0x1000);
+        other.push(copy(0, 1));
+        other.stamp_instruction(1, 0x1004);
+        let mut site = R2ILBlock::new(0x1010, 12);
+        let target = Varnode::constant(0x2000, 8);
+        for (at, (op, instruction)) in [
+            (copy(1, 0x3000), 0x1010),
+            (R2ILOp::Call { target }, 0x1014),
+            (copy(0, 0), 0x1018),
+            (copy(2, 0), 0x1018),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            site.push(op);
+            site.stamp_instruction(at, instruction);
+        }
+        let printf = CanonicalStorageId {
+            space: CanonicalStorageSpace::Constant,
+            offset: 0x2000,
+            size: 8,
+        };
+        let interface = SourceCallSiteInterface::new(
+            b"format-fold".to_vec(),
+            SourceCallSiteIdentity::new(0x1014, printf),
+            true,
+            r2source::ConventionId::SysVAmd64,
+            [
+                SourceCallArgumentSpec::new(0, slot(0)),
+                SourceCallArgumentSpec::new(1, slot(1)),
+            ],
+            true,
+            SourceCallResult::Void,
+        )
+        .expect("exact callsite interface")
+        .with_radare2_format_parameter(1)
+        .expect("format parameter belongs to the fixed prefix");
+        let convention = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
+            .arguments(r2source::convention::SlotClass::Integer, (0..4).map(slot));
+        let blocks = vec![other, site];
+        // Unbound, as the function builders fold formats before `bind_call_reads` (D436).
+        let mut context =
+            SourceMachineContext::from_blocks_with_interfaces_tail_calls_and_terminals(
+                &blocks,
+                Some(&crate::Arch::from(arch)),
+                None,
+                SourceMachineRoles::default(),
+                Some(convention.killed((0..4).map(slot)).conventions()),
+                cited.then_some(interface).into_iter().collect(),
+                Vec::new(),
+                &BTreeSet::new(),
+            );
+        context.bind_source_string_literals(&[(0x3000, "%d\n".to_string())]);
+        (context, blocks)
+    }
+
+    fn format_fold_steps(context: &mut SourceMachineContext, blocks: &[R2ILBlock]) -> usize {
+        FORMAT_FOLD_STEPS.with(|steps| steps.set(0));
+        context.bind_format_tails(blocks, &[0x3000]);
+        FORMAT_FOLD_STEPS.with(std::cell::Cell::get)
+    }
+
+    /// D437: a body with no cited printf site folds no operation.
+    #[test]
+    fn a_body_with_no_format_site_folds_no_operation() {
+        let (mut context, blocks) = format_fold_body(false);
+        assert_eq!(format_fold_steps(&mut context, &blocks), 0);
+        assert_eq!(context.format_tail(0x1014), None);
+    }
+
+    /// D437: only the site's block is folded, up to the site, and the site's format is still bound.
+    #[test]
+    fn the_format_fold_stops_at_the_last_site_of_its_block() {
+        let (mut context, blocks) = format_fold_body(true);
+        assert_eq!(format_fold_steps(&mut context, &blocks), 1);
+        let tail = context
+            .format_tail(0x1014)
+            .expect("the literal format is folded");
+        assert_eq!(tail.count, 1);
+    }
 }
 
 /// What a callee's body states when it mints no call contract (doc/adr-resolved-bodies.md).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct CalleeStatement {
     /// The arguments its body proves it takes, a floor where a slot past them may be read.
     pub(crate) arity: crate::SourceArity,
@@ -3163,6 +3724,8 @@ pub(crate) struct CalleeStatement {
     pub(crate) seed: Option<r2source::SourceResultSeed>,
     /// The typed lanes its body writes a result byte in, where its result is unproven.
     pub(crate) carriers: Option<r2source::SourceResultCarriers>,
+    /// What a call reads where the arity is exact and fixed: its parameters' locations (D283).
+    pub(crate) reads: Option<Vec<crate::SourceParameterLocation>>,
 }
 
 impl CalleeStatement {
@@ -3176,21 +3739,27 @@ impl CalleeStatement {
                 || !interface.arity().is_exact()
         });
         let statements = unproven.map(|(address, interface)| {
+            // A statement counts no call's variadic tail, so its parameters are only a floor.
+            let arity = match interface.is_variadic() {
+                true => crate::SourceArity::AtLeast(interface.parameters().len()),
+                false
+                    if !interface
+                        .arity_floor()
+                        .is_some_and(|floor| floor.reads_past()) =>
+                {
+                    crate::SourceArity::Exact(interface.parameters().len())
+                }
+                false => interface.arity(),
+            };
             (
                 *address,
                 Self {
-                    // A statement counts no call's variadic tail, so its parameters are only a floor.
-                    arity: match interface.is_variadic() {
-                        true => crate::SourceArity::AtLeast(interface.parameters().len()),
-                        false
-                            if !interface
-                                .arity_floor()
-                                .is_some_and(|floor| floor.reads_past()) =>
-                        {
-                            crate::SourceArity::Exact(interface.parameters().len())
-                        }
-                        false => interface.arity(),
-                    },
+                    reads: (matches!(arity, crate::SourceArity::Exact(_))
+                        && !interface.is_variadic()
+                        && interface.unbounded_reads().is_none())
+                    .then(|| crate::call_reads::CallReads::callee_locations(interface))
+                    .flatten(),
+                    arity,
                     result: match interface.return_kind() {
                         crate::SourceFunctionReturn::Void => Some(crate::SourceCallResult::Void),
                         crate::SourceFunctionReturn::Register { storage } => {

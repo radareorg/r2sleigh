@@ -533,6 +533,15 @@ fn a_call_to_a_never_no_statement_makes_leaves_its_exit_unnamed() {
         derived.contains("1 call ends where no return was reached (unproven)"),
         "{derived}"
     );
+    // A bound states no `noreturn` to C (D379), and `afi` names it a bound (D380).
+    assert!(!derived.contains("noreturn"), "{derived}");
+    let mut open = OpenProgram::of(Literal::of_code(GUARDED_TRAP, &functions));
+    let info = open.function_info(BASE).expect("it is described");
+    let proof = info.noreturn.map(|never| never.proof());
+    assert_eq!(
+        proof,
+        Some(r2engine::discovery::NeverProof::NoReturnReached)
+    );
     assert!(
         declared.contains("__attribute__((noreturn)) void trap"),
         "{declared}"
@@ -583,13 +592,17 @@ fn switch_ending_at(ends: u64) -> &'static [u8] {
 }
 
 fn switch_rendered(ends: u64) -> String {
+    switch_rendered_importing(ends, "exit")
+}
+
+fn switch_rendered_importing(ends: u64, import: &str) -> String {
     let functions = [
         ("pick", BASE, 0x30),
         ("g", BASE + 0x30, 6),
         ("trap", BASE + 0x36, 2),
     ];
     let literal = Literal::of_code(switch_ending_at(ends), &functions)
-        .importing("exit")
+        .importing(import)
         .running_on(GLIBC);
     let mut open = OpenProgram::of(literal);
     let rendered = open.rendered(BASE).expect("it renders");
@@ -606,6 +619,92 @@ fn a_switch_arm_that_calls_a_cited_noreturn_names_its_exit() {
     assert!(!text.contains("unproven)"), "{text}");
 }
 
+/// GCC's cxxabi.h and bits/functexcept.h state these never return, so each arm names its exit as
+/// `exit`'s does (D406); before they were cited, each was a bound.
+#[test]
+fn a_switch_arm_that_calls_a_cited_cxx_noreturn_names_its_exit() {
+    for import in [
+        "__cxa_rethrow",
+        "_ZSt17__throw_bad_allocv",
+        "_Unwind_Resume",
+    ] {
+        let text = switch_rendered_importing(common::STUB, import);
+        assert!(
+            text.contains("r2sleigh_result_u32 pick("),
+            "{import}: {text}"
+        );
+        assert!(!text.contains("<< 32"), "{import}: {text}");
+        assert!(!text.contains("unproven)"), "{import}: {text}");
+    }
+}
+
+/// radare2's uncited row states `xalloc_die` noreturn; no cited source does, so the arm's call is a
+/// bound: no `noreturn` to C and no named exit (D395).
+#[test]
+fn a_switch_arm_that_calls_an_uncited_noreturn_names_no_exit() {
+    let text = switch_rendered_importing(common::STUB, "xalloc_die");
+    assert!(text.contains("xalloc_die("), "{text}");
+    assert!(!text.contains("noreturn"), "{text}");
+    assert!(
+        text.contains("1 call ends where only an uncited row says it never returns (unproven)"),
+        "{text}"
+    );
+}
+
+/// The switch of [`switch_ending_at`] whose default arm jumps to `arm` at 0x1060 (then `int3`s),
+/// with `body` at 0x1036, and the import `error` at the stub.
+fn switch_arm(arm: &[u8], body: &[u8]) -> OpenProgram<Literal> {
+    let mut code = switch_ending_at(common::STUB).to_vec();
+    code[0x20..0x28].copy_from_slice(&[0xeb, 0x3e, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc]);
+    code[0x60..0x60 + arm.len()].copy_from_slice(arm);
+    code[0x36..0x36 + body.len()].copy_from_slice(body);
+    let functions = [
+        ("pick", BASE, 0x30),
+        ("g", BASE + 0x30, 6),
+        ("wrap", BASE + 0x36, 10),
+    ];
+    let literal = Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
+        .importing("error")
+        .running_on(GLIBC);
+    OpenProgram::of(literal)
+}
+
+fn switch_arm_rendered(arm: &[u8], body: &[u8]) -> String {
+    let rendered = switch_arm(arm, body).rendered(BASE).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// glibc's `error` exits on a nonzero status (error(3)), so `mov edi, 2; call error` ends the
+/// walk at the call (D211); a status of 0, or one from a register, comes back into the `int3`.
+#[test]
+fn a_call_to_error_with_a_nonzero_status_ends_its_block() {
+    // `call` from 0x1065 to the stub at 0x1090, which ends at 0x106a.
+    let arm = |status: &[u8]| [status, &[0xe8, 0x26, 0, 0, 0][..]].concat();
+    let mut halts = switch_arm(&arm(&[0xbf, 2, 0, 0, 0]), &[]);
+    assert_eq!(extent(&mut halts, BASE).0, BASE + 0x6a);
+    for status in [
+        [0x31, 0xff, 0x90, 0x90, 0x90],
+        [0x89, 0xdf, 0x90, 0x90, 0x90],
+    ] {
+        let mut returns = switch_arm(&arm(&status), &[]);
+        assert_eq!(extent(&mut returns, BASE).0, BASE + 0x6b);
+    }
+}
+
+/// A body whose one end is `error(1, ...)` never returns by a composed proof (D229), so an arm
+/// calling it names its exit as an arm calling `exit` does; a `ud2` body stays a bound.
+#[test]
+fn a_call_to_a_body_that_ends_only_in_a_halting_call_names_its_exit() {
+    // `wrap: mov edi, 1; call error` at 0x1036; the arm `xor edi, edi; call wrap` at 0x1060.
+    let wrap = [0xbf, 1, 0, 0, 0, 0xe8, 0x50, 0, 0, 0];
+    let arm = [0x31, 0xff, 0xe8, 0xcf, 0xff, 0xff, 0xff];
+    assert_eq!(extent(&mut switch_arm(&arm, &wrap), BASE).0, BASE + 0x67);
+    let text = switch_arm_rendered(&arm, &wrap);
+    assert!(text.contains("r2sleigh_result_u32 pick("), "{text}");
+    assert!(!text.contains("unproven)"), "{text}");
+    assert!(!text.contains("<< 32"), "{text}");
+}
+
 /// The same arm ending at a body only the walk finds reaching no return names no exit: the "never"
 /// is a bound, and the proof line counts the call as unproven (S23 D255; RULING 1.4).
 #[test]
@@ -615,5 +714,6 @@ fn a_block_ended_at_an_unstated_call_names_no_exit() {
         text.contains("1 call ends where no return was reached (unproven)"),
         "{text}"
     );
+    assert!(!text.contains("noreturn"), "{text}");
     assert!(text.contains("r2sleigh_result_u32 pick("), "{text}");
 }

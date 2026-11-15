@@ -580,7 +580,7 @@
     "branchy_x64_O0::sym._inverted_void": 1,
     "branchy_x64_O0::sym._main": 22,
     "branchy_x64_O1::sym._inverted_void": 1,
-    "branchy_x64_O1::sym._main": 32,
+    "branchy_x64_O1::sym._main": 33,
     "branchy_x64_O2::sym._inverted_void": 1,
     "branchy_x64_O2::sym._main": 82,
     "hashes_arm64_O0::sym._crc32_init": 2,

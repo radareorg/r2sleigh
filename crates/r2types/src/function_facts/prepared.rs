@@ -75,11 +75,6 @@ pub(crate) fn type_like_size_bytes(ty: &CTypeLike, ptr_bits: u32) -> Option<u64>
     }
 }
 
-/// Whether a rendering can emit a definition for this aggregate: [`aggregate_members`] lays it out.
-pub fn aggregate_is_definable(graph: &r2ssa::SourceTypeGraph, name: &str) -> bool {
-    aggregate_members(graph, name).is_some()
-}
-
 /// A definition of one aggregate: its kind and its members in layout order, each at its type.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregateDefinition {
@@ -87,16 +82,61 @@ pub struct AggregateDefinition {
     pub members: Vec<(CTypeLike, String)>,
 }
 
-/// The definition of aggregate `name`, where C's natural layout of its members reproduces every
-/// stated offset and the stated size; a bit field, a packed layout or two layouts of one name refuse.
-pub fn aggregate_members(
+/// Each aggregate of one graph whose stated offsets and size C's layout at `ptr_bits` reproduces; a
+/// bit field, a packed layout or two differing layouts of one name leave it out (D387).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AggregateDefinitions(BTreeMap<String, AggregateDefinition>);
+
+impl AggregateDefinitions {
+    /// One pass over the graph's layouts, grouped by name: O(members + layouts log layouts).
+    pub fn of(graph: &r2ssa::SourceTypeGraph, ptr_bits: u32) -> Self {
+        let mut by_name = BTreeMap::<&str, Vec<&r2ssa::SourceAggregateLayout>>::new();
+        for layout in graph.aggregates() {
+            by_name.entry(layout.name()).or_default().push(layout);
+        }
+        Self(
+            (by_name.into_iter())
+                .filter_map(|(name, layouts)| {
+                    let definition = agreeing(graph, layouts.into_iter(), ptr_bits)?;
+                    Some((name.to_owned(), definition))
+                })
+                .collect(),
+        )
+    }
+
+    pub fn get(&self, name: &str) -> Option<&AggregateDefinition> {
+        self.0.get(name)
+    }
+
+    /// `name`'s entry of [`Self::of`] alone, laying out only its layouts: O(layouts + its members).
+    pub fn one(
+        graph: &r2ssa::SourceTypeGraph,
+        name: &str,
+        ptr_bits: u32,
+    ) -> Option<AggregateDefinition> {
+        let layouts = (graph.aggregates().iter()).filter(|layout| layout.name() == name);
+        agreeing(graph, layouts, ptr_bits)
+    }
+}
+
+impl IntoIterator for AggregateDefinitions {
+    type Item = (String, AggregateDefinition);
+    type IntoIter = std::collections::btree_map::IntoIter<String, AggregateDefinition>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+/// The one natural definition every layout of a name has; none where one refuses or two differ.
+fn agreeing<'g>(
     graph: &r2ssa::SourceTypeGraph,
-    name: &str,
+    mut layouts: impl Iterator<Item = &'g r2ssa::SourceAggregateLayout>,
+    ptr_bits: u32,
 ) -> Option<AggregateDefinition> {
-    let mut layouts = (graph.aggregates().iter()).filter(|aggregate| aggregate.name() == name);
-    let definition = natural_definition(graph, layouts.next()?)?;
+    let definition = natural_definition(graph, layouts.next()?, ptr_bits)?;
     layouts
-        .all(|other| natural_definition(graph, other).as_ref() == Some(&definition))
+        .all(|other| natural_definition(graph, other, ptr_bits).as_ref() == Some(&definition))
         .then_some(definition)
 }
 
@@ -105,6 +145,7 @@ pub fn aggregate_members(
 fn natural_definition(
     graph: &r2ssa::SourceTypeGraph,
     layout: &r2ssa::SourceAggregateLayout,
+    ptr_bits: u32,
 ) -> Option<AggregateDefinition> {
     let is_union = match graph
         .types()
@@ -117,7 +158,7 @@ fn natural_definition(
     };
     let (mut end, mut align, mut members) = (0u64, 1u64, Vec::new());
     for member in layout.members() {
-        let (ty, bytes, member_align) = natural_member(graph, member)?;
+        let (ty, bytes, member_align) = natural_member(graph, member, ptr_bits)?;
         let at = if is_union {
             0
         } else {
@@ -139,10 +180,11 @@ fn natural_definition(
 fn natural_member(
     graph: &r2ssa::SourceTypeGraph,
     member: &r2ssa::SourceAggregateMember,
+    ptr_bits: u32,
 ) -> Option<(CTypeLike, u64, u64)> {
     let ty = crate::convert::source_type_like(graph, member.type_id())?;
-    let width = u64::from(declaration_type_width_bits(&ty, 64)?);
-    let align = natural_alignment(&ty)?;
+    let width = u64::from(declaration_type_width_bits(&ty, ptr_bits)?);
+    let align = natural_alignment(&ty, ptr_bits)?;
     let ty = match member.size_bits() {
         size if size == width => ty,
         size if width > 0 && size % width == 0 => {
@@ -157,12 +199,14 @@ fn natural_member(
 }
 
 /// The alignment in bytes C gives a scalar of a power-of-two byte width, or an array of one.
-fn natural_alignment(ty: &CTypeLike) -> Option<u64> {
+fn natural_alignment(ty: &CTypeLike, ptr_bits: u32) -> Option<u64> {
     match ty {
-        CTypeLike::Array(element, _) | CTypeLike::Const(element) => natural_alignment(element),
-        CTypeLike::Typedef { ty, .. } => natural_alignment(ty),
+        CTypeLike::Array(element, _) | CTypeLike::Const(element) => {
+            natural_alignment(element, ptr_bits)
+        }
+        CTypeLike::Typedef { ty, .. } => natural_alignment(ty, ptr_bits),
         CTypeLike::BitVector(_) => None,
-        ty => declaration_type_width_bits(ty, 64)
+        ty => declaration_type_width_bits(ty, ptr_bits)
             .map(|bits| u64::from(bits) / 8)
             .filter(|bytes| matches!(bytes, 1 | 2 | 4 | 8 | 16)),
     }

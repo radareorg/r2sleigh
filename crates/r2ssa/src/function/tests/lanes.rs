@@ -158,7 +158,6 @@ fn sealed_lane_call(lane_in_the_merge: bool) -> Result<SsaArtifact, crate::SsaPr
         r2source::ConventionId::SysVAmd64,
         [SourceCallArgumentSpec::new(0, storage(VECTOR, 4))],
         false,
-        false,
         SourceCallResult::Void,
     )
     .expect("a call interface");
@@ -290,7 +289,7 @@ fn call_forgeries(lane: ValueId, carrier: ValueId) -> Vec<(&'static str, Forge)>
         (
             "call target",
             Box::new(move |f| {
-                f.call_sites
+                std::sync::Arc::make_mut(&mut f.call_sites)
                     .by_id
                     .values_mut()
                     .for_each(|site| site.target = lane)
@@ -347,7 +346,7 @@ fn branch_forgeries(lane: ValueId) -> Vec<(&'static str, Forge)> {
         (
             "branch condition",
             Box::new(move |f| {
-                f.predicates
+                std::sync::Arc::make_mut(&mut f.predicates)
                     .predicates
                     .values_mut()
                     .for_each(|p| p.condition = lane)
@@ -362,7 +361,9 @@ fn branch_forgeries(lane: ValueId) -> Vec<(&'static str, Forge)> {
                     cases: Vec::new(),
                     default: None,
                 };
-                f.predicates.switches.insert(MERGE, switch);
+                std::sync::Arc::make_mut(&mut f.predicates)
+                    .switches
+                    .insert(MERGE, switch);
             }),
         ),
     ]

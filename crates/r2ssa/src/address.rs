@@ -27,10 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::graph::InstPayload;
 use crate::view::ValueViews;
-use crate::{
-    CanonicalStorageId, SSAFunction, SSAOp, SSAVar, SourceMachineContext, SsaGraph,
-    StackAddressRoot, ValueId,
-};
+use crate::{CanonicalStorageId, SSAOp, SSAVar, SsaGraph, StackAddressRoot, ValueId};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AffineAddressTerm {
@@ -93,6 +90,15 @@ pub struct AddressProvenanceFacts {
     /// latter keeps its meaning: a parameter expression is directly
     /// parameter-relative, a pointee expression never is.
     pub pointee_expressions: crate::dense::IdMap<ValueId, PointeeAddressExpression>,
+    /// Each memory address the entry stack pointer roots, through register arithmetic only (D362).
+    pub frame_expressions: crate::dense::IdMap<ValueId, FrameAddressExpression>,
+}
+
+/// A memory address as the entry stack pointer plus an affine form; a spilled address has none.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FrameAddressExpression {
+    pub terms: Vec<AffineAddressTerm>,
+    pub offset: i64,
 }
 
 impl AddressProvenanceFacts {
@@ -102,6 +108,10 @@ impl AddressProvenanceFacts {
 
     pub fn pointee_expression(&self, value: ValueId) -> Option<&PointeeAddressExpression> {
         self.pointee_expressions.get(value)
+    }
+
+    pub fn frame_expression(&self, value: ValueId) -> Option<&FrameAddressExpression> {
+        self.frame_expressions.get(value)
     }
 }
 
@@ -254,7 +264,7 @@ impl AffineScalar {
 }
 
 struct AddressCollector<'a> {
-    function: &'a SSAFunction,
+    function: crate::semantic::BuildFacts<'a>,
     /// The function's prep facts, where it was prepared.
     prep: Option<&'a crate::DecompilePrepFacts>,
     graph: &'a SsaGraph,
@@ -274,6 +284,8 @@ struct AddressCollector<'a> {
     /// The number of loads in the function: the most dereferences any chain
     /// can take, and so the bound on a pointee path.
     load_count: usize,
+    /// The stack pointer's storage, whose entry value roots a frame expression.
+    stack_pointer: Option<CanonicalStorageId>,
 }
 
 /// A value's settled expression: one, or none.
@@ -303,10 +315,9 @@ type Spills = BTreeMap<SpillSlotKey, Held>;
 
 impl<'a> AddressCollector<'a> {
     fn new(
-        function: &'a SSAFunction,
+        function: crate::semantic::BuildFacts<'a>,
         prep: Option<&'a crate::DecompilePrepFacts>,
         graph: &'a SsaGraph,
-        _machine_context: Option<&SourceMachineContext>,
     ) -> Self {
         let mut expressions = crate::dense::IdMap::default();
         if let Some(prep) = prep {
@@ -359,6 +370,7 @@ impl<'a> AddressCollector<'a> {
             scalar_visiting: crate::dense::IdSet::default(),
             stack_out: BTreeMap::new(),
             load_count,
+            stack_pointer: function.stack_pointer_carrier(),
         }
     }
 
@@ -417,7 +429,7 @@ impl<'a> AddressCollector<'a> {
                 r2il::refusal_evidence!(
                     "address-provenance",
                     "{:#x}: did not settle within {budget} block visits",
-                    self.function.entry
+                    self.function.entry()
                 );
                 return AddressProvenanceFacts::default();
             }
@@ -442,7 +454,10 @@ impl<'a> AddressCollector<'a> {
                 );
             }
         }
-        let mut facts = AddressProvenanceFacts::default();
+        let mut facts = AddressProvenanceFacts {
+            frame_expressions: self.frame_expressions(),
+            ..AddressProvenanceFacts::default()
+        };
         for (value, cell) in self.expressions {
             let Cell::Expr(expression) = cell else {
                 continue;
@@ -478,6 +493,55 @@ impl<'a> AddressCollector<'a> {
             }
         }
         facts
+    }
+
+    /// Each RAM address's affine form where the entry stack pointer is one term of coefficient 1.
+    /// O(memory ops + values): the scalar forms are memoized.
+    fn frame_expressions(&mut self) -> crate::dense::IdMap<ValueId, FrameAddressExpression> {
+        let mut frames = crate::dense::IdMap::default();
+        let Some(stack_pointer) = self.stack_pointer else {
+            return frames;
+        };
+        let graph = self.graph;
+        let addresses =
+            graph.insts.iter().filter_map(|inst| match inst.payload {
+                InstPayload::Op(
+                    SSAOp::Load { space, addr, .. } | SSAOp::Store { space, addr, .. },
+                ) if space == SpaceId::Ram => Some(addr),
+                _ => None,
+            });
+        for address in addresses {
+            if frames.get(address).is_some() {
+                continue;
+            }
+            let Some(form) = self.scalar_for_value(address) else {
+                continue;
+            };
+            let entry = |value: &ValueId| {
+                graph.def_inst(*value).is_none()
+                    && graph.value(*value).is_some_and(|held| {
+                        held.var.version == 0 && held.canonical_storage == Some(stack_pointer)
+                    })
+            };
+            let mut roots = form.terms.iter().filter(|(value, _)| entry(value));
+            let (Some((root, &1)), None) = (roots.next(), roots.next()) else {
+                continue;
+            };
+            let root = *root;
+            let terms = (form.terms.iter())
+                .filter(|(value, _)| **value != root)
+                .map(|(value, coefficient)| {
+                    Some(AffineAddressTerm {
+                        value: *value,
+                        coefficient: i64::try_from(*coefficient).ok()?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>();
+            if let (Some(terms), Ok(offset)) = (terms, i64::try_from(form.constant)) {
+                frames.insert(address, FrameAddressExpression { terms, offset });
+            }
+        }
+        frames
     }
 
     /// The spill slots a block is entered with: what every reached
@@ -518,21 +582,26 @@ impl<'a> AddressCollector<'a> {
             .flat_map(move |block| block.insts.iter().filter_map(move |inst| graph.inst(*inst)))
     }
 
+    /// A store's effect on the slots, where `payload` is one.
+    fn stored(&mut self, payload: &InstPayload, stack: &mut Spills) {
+        if let InstPayload::Op(
+            SSAOp::Store { space, addr, val }
+            | SSAOp::StoreGuarded {
+                space, addr, val, ..
+            },
+        ) = *payload
+        {
+            self.store(space, addr, val, stack);
+        }
+    }
+
     /// Derive one block's values and its slots, in program order, from the
     /// slots it is entered with; returns the values whose cell moved.
     fn transfer_ops(&mut self, block_addr: u64, stack: &mut Spills) -> Vec<ValueId> {
         let mut moved = Vec::new();
         for inst in self.block_insts(block_addr) {
             let Some(dst) = inst.output else {
-                if let InstPayload::Op(
-                    SSAOp::Store { space, addr, val }
-                    | SSAOp::StoreGuarded {
-                        space, addr, val, ..
-                    },
-                ) = inst.payload
-                {
-                    self.store(space, addr, val, stack);
-                }
+                self.stored(&inst.payload, stack);
                 continue;
             };
             let derived = match &inst.payload {
@@ -828,12 +897,11 @@ fn signed_constant(var: &SSAVar) -> Option<i64> {
 }
 
 pub(crate) fn collect_address_provenance(
-    function: &SSAFunction,
+    build: crate::semantic::BuildFacts<'_>,
     prep: Option<&crate::DecompilePrepFacts>,
     graph: &SsaGraph,
-    machine_context: Option<&SourceMachineContext>,
 ) -> AddressProvenanceFacts {
-    AddressCollector::new(function, prep, graph, machine_context).collect()
+    AddressCollector::new(build, prep, graph).collect()
 }
 
 #[cfg(test)]

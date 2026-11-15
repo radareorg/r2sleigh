@@ -322,7 +322,11 @@ impl<'a> TripCounter<'a> {
         assumptions
             .flatten()
             .filter(|assumption| {
-                crate::values::edge_dominates(function, assumption.predecessor, block)
+                crate::values::edge_dominates(
+                    (function.cfg(), function.domtree()),
+                    assumption.predecessor,
+                    block,
+                )
             })
             .find(|assumption| {
                 let Some(fact) = predicates.predicates.get(&assumption.predicate) else {

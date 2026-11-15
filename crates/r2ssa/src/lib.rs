@@ -19,6 +19,7 @@
 // their dense ids (doc/adr-one-ir.md, ROADMAP D11). The exceptions say why
 // at the item that keeps one.
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(scan_in_loop))]
 
 pub(crate) mod abi;
 pub(crate) mod address;
@@ -57,6 +58,7 @@ pub(crate) mod machine;
 pub mod site_boundary;
 pub use arch::Arch;
 pub(crate) mod machine_context;
+pub use machine_context::{CallReadsMeter, call_reads_built};
 pub(crate) mod mirror;
 pub mod name;
 mod naming;
@@ -68,7 +70,6 @@ pub(crate) mod optimize;
 pub mod origin;
 pub(crate) mod phi;
 pub mod place;
-pub mod printf;
 pub(crate) mod reaching_rules;
 pub(crate) mod read_only;
 pub mod recover_interface;
@@ -96,7 +97,7 @@ pub mod view;
 
 pub use abi::Formals;
 pub use address::{
-    AddressProvenanceFacts, AffineAddressTerm, ParameterAddressExpression,
+    AddressProvenanceFacts, AffineAddressTerm, FrameAddressExpression, ParameterAddressExpression,
     PointeeAddressExpression, PointeeStep,
 };
 pub use aggregate_access::{
@@ -118,13 +119,13 @@ pub use control::{
 pub use defuse::{DefUseInfo, def_use};
 pub use demand::DemandedBytes;
 pub use function::{
-    AssumedExits, CFGRiskSummary, CalleeEvidence, CalleePreservedCarriers, DecompileInputs,
-    DecompilePrepFacts, DefRef, DefSite, GenuineNativeInstructionSpan, Lifted, NamedBlockMut,
-    PhiNode, Prepared, RegisterFamilyInfo, RegisterFamilySlot, RegisterIdentityCensus,
-    RewrittenFunction, SSABlock as FunctionSSABlock, SSAFunction, Sealed, SiteConventions,
-    SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority, SsaArtifactProvenanceKind,
-    StackAddressBase, StackAddressRoot, TrustedConstruction, TrustedSeal, TrustedSsaArtifact,
-    def_use_graph,
+    AssumedExits, CFGRiskSummary, CalleeEvidence, CalleeImports, CalleeLaneReads,
+    CalleePreservedCarriers, DecompileInputs, DecompilePrepFacts, DefRef, DefSite, ExitSite,
+    GenuineNativeInstructionSpan, Lifted, NamedBlockMut, PhiNode, Prepared, RegisterFamilyInfo,
+    RegisterFamilySlot, RegisterIdentityCensus, RewrittenFunction, SSABlock as FunctionSSABlock,
+    SSAFunction, Sealed, SiteConventions, SourceRef, SourceSite, SsaArtifact, SsaArtifactAuthority,
+    SsaArtifactProvenanceKind, StackAddressBase, StackAddressRoot, TrustedConstruction,
+    TrustedSeal, TrustedSsaArtifact, def_use_graph,
 };
 pub use graph::{
     BlockId, GraphBlock, GraphInst, GraphValue, InstId, InstPayload, SsaGraph, UseSite, ValueId,
@@ -197,14 +198,14 @@ pub use semantic::{
     CallResultCertificate, CallResultValueRelation, CallSiteFact, CallSiteFacts, CallSiteId,
     CallSiteTransfer, CalleeStackAllocationCertificate, CallerSlotSupply,
     CallerStackSlotCertificate, CallsiteCertificate, CompareKind, CompareProvenance, ControlDomain,
-    ControlDomainFacts, ControlDomainId, ControlGuard, EntryAffineForm, ExtentAssumption,
-    ForLoopCertificate, FormalHome, FrameReach, GlobalObjectKey, InductionFact, InductionStep,
-    LoopCarrierEdgeValue, LoopCarrierFact, LoopCarrierMemberFact, LoopCarrierMemberRole,
-    LoopCarrierUpdateFact, LoopCertificate, LoopId, LoopTrips, MachineReturnControlCertificate,
-    MemberRunPlace, MemberRunSource, MemberRunStoreCertificate, MemberRunStoreMember,
-    MemoryAccessCertificate, MemoryDefFact, MemoryLocation, MemoryObjectKey, MemoryPhiFact,
-    MemorySSAFacts, MemoryUseFact, MemoryVersion, ObjectFact, ObjectId, ObjectKind, ObjectModel,
-    ObjectSpaceId, ParameterFieldAccess, ParameterFieldRefusal, ParameterFields,
+    ControlDomainFacts, ControlDomainId, ControlGuard, DynamicFrame, EntryAffineForm,
+    ExtentAssumption, ForLoopCertificate, FormalHome, FrameReach, GlobalObjectKey, InductionFact,
+    InductionStep, LoopCarrierEdgeValue, LoopCarrierFact, LoopCarrierMemberFact,
+    LoopCarrierMemberRole, LoopCarrierUpdateFact, LoopCertificate, LoopId, LoopTrips,
+    MachineReturnControlCertificate, MemberRunPlace, MemberRunSource, MemberRunStoreCertificate,
+    MemberRunStoreMember, MemoryAccessCertificate, MemoryDefFact, MemoryLocation, MemoryObjectKey,
+    MemoryPhiFact, MemorySSAFacts, MemoryUseFact, MemoryVersion, ObjectFact, ObjectId, ObjectKind,
+    ObjectModel, ObjectSpaceId, ParameterFieldAccess, ParameterFieldRefusal, ParameterFields,
     ParameterObjectKey, PredicateFact, PredicateFacts, PredicateId, PreparedAssumptionBinding,
     PreparedAssumptionBindingKind, PreparedFunctionCertificates, PreparedFunctionFacts,
     ProofNodeId, RelativeMemoryAddress, ReturnCarrier, ReturnValueCertificate, SemanticId,

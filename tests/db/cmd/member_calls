@@ -123,6 +123,9 @@ int64_t ops_make(struct ops* o, int32_t n)
 }
 
 struct ops;
+struct vtable {
+    void (*call)(void*);
+};
 
 int32_t ops_virtual(struct ops* o)
 {
@@ -134,7 +137,7 @@ int32_t ops_virtual(struct ops* o)
     {
         tmp_401488_0_1 = r2sleigh_load_u64((void*)(uint64_t)o);
         tmp_40148b_8_1 = r2sleigh_load_u64((void*)((uint64_t)o + (uint64_t)8U * 8U));
-        tmp_40148f_0_1 = r2sleigh_load_u64((void*)tmp_40148b_8_1);
+        tmp_40148f_0_1 = r2sleigh_load_u64((void*)&((struct vtable*)tmp_40148b_8_1)->call);
         ((void(*)(uint64_t))(uint64_t)tmp_40148f_0_1)(tmp_401488_0_1);
         return (int32_t)r2sleigh_load_u32((void*)((uint64_t)o + (uint64_t)18U * 4U));
     }

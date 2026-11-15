@@ -1,4 +1,5 @@
-//! Deterministic argument accounting for printf-family format literals.
+//! The operands a printf-family format consumes past its fixed parameters (ISO C17 7.21.6.1, the
+//! fprintf conversion specification; POSIX.1-2017 fprintf for `%n$` operands; glibc `%m`).
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrintfFormatRefusal {
@@ -89,6 +90,18 @@ struct Classes {
 }
 
 impl Classes {
+    /// Whether an operand below `count` has no class; past 64 operands nothing is known.
+    fn gapped(&self, count: usize) -> bool {
+        let read = self.floating | self.integer;
+        match u32::try_from(count)
+            .ok()
+            .and_then(|count| 1u64.checked_shl(count))
+        {
+            Some(bit) => read != bit - 1,
+            None => count != 64 || read != u64::MAX,
+        }
+    }
+
     fn note(&mut self, index: usize, floating: bool) -> Result<(), PrintfFormatRefusal> {
         self.any_floating |= floating;
         let Some(bit) = u32::try_from(index).ok().and_then(|i| 1u64.checked_shl(i)) else {
@@ -106,12 +119,6 @@ impl Classes {
     }
 }
 
-/// Count the arguments consumed by a complete printf-family format literal.
-///
-/// Escaped `%%` consumes nothing; `*` width and precision each consume one;
-/// flags, widths, precisions, and length modifiers remain part of one
-/// conversion. POSIX positional operands are accepted only when every
-/// consuming operand is positional.
 /// What a printf-family format says about the arguments it consumes: how many, and which are a
 /// floating conversion's, whose operand travels in the convention's floating sequence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,8 +127,16 @@ pub struct PrintfConsumedArguments {
     pub any_floating: bool,
     /// Bit `i` is set where tail operand `i` is floating; an operand past 63 sets only `any_floating`.
     pub floating: u64,
+    /// Whether a floating conversion reads a `long double`: `L` (7.21.6.1p7), or glibc's `ll` and
+    /// `q` (printf(3)), which no 8-byte slot holds.
+    pub long_double: bool,
+    /// Whether a positional format leaves an operand below `count` that no conversion reads, so
+    /// nothing states its class.
+    pub gapped: bool,
 }
 
+/// Count the arguments a complete format consumes: `%%` none, a `*` width or precision one, and
+/// a conversion one; positional operands only where every consuming operand is positional.
 pub fn printf_consumed_arguments(
     format: &str,
 ) -> Result<PrintfConsumedArguments, PrintfFormatRefusal> {
@@ -131,6 +146,7 @@ pub fn printf_consumed_arguments(
     let mut sequential_count = 0usize;
     let mut largest_position = None;
     let mut classes = Classes::default();
+    let mut long_double = false;
 
     while cursor < bytes.len() {
         if bytes[cursor] != b'%' {
@@ -182,6 +198,9 @@ pub fn printf_consumed_arguments(
             }
         }
 
+        let long = bytes.get(cursor) == Some(&b'L')
+            || bytes.get(cursor) == Some(&b'q')
+            || bytes.get(cursor..cursor.saturating_add(2)) == Some(b"ll");
         if matches!(
             bytes.get(cursor..cursor.saturating_add(2)),
             Some(b"hh" | b"ll")
@@ -213,6 +232,7 @@ pub fn printf_consumed_arguments(
                     &mut largest_position,
                 )?;
                 classes.note(index, floating)?;
+                long_double |= long && floating;
             }
             // GNU printf's strerror conversion consumes no operand.
             b'm' if conversion_position.is_none() => {}
@@ -230,6 +250,8 @@ pub fn printf_consumed_arguments(
         count,
         any_floating: classes.any_floating,
         floating: classes.floating,
+        long_double,
+        gapped: classes.gapped(count),
     })
 }
 
@@ -261,6 +283,26 @@ mod tests {
             assert_eq!(consumed.floating, floating, "floating for {format:?}");
             assert_eq!(consumed.any_floating, floating != 0, "any for {format:?}");
         }
+    }
+
+    /// An `L` floating conversion is a `long double`, which an integer `L` is not.
+    #[test]
+    fn a_long_double_conversion_is_named() {
+        assert!(printf_consumed_arguments("%Lf").unwrap().long_double);
+        assert!(printf_consumed_arguments("%llf %qe").unwrap().long_double);
+        assert!(
+            !printf_consumed_arguments("%f %Ld %lld")
+                .unwrap()
+                .long_double
+        );
+    }
+
+    /// A positional format that skips an operand states nothing of its class.
+    #[test]
+    fn a_skipped_positional_operand_is_named() {
+        assert!(printf_consumed_arguments("%2$d").unwrap().gapped);
+        assert!(!printf_consumed_arguments("%2$d %1$s").unwrap().gapped);
+        assert!(!printf_consumed_arguments("%d %s").unwrap().gapped);
     }
 
     /// A positional operand two conversions read as different classes has no one carrier.

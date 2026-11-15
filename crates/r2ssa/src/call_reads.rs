@@ -16,20 +16,156 @@ pub struct FormatTail {
     pub floats: Vec<CanonicalStorageId>,
 }
 
-/// The argument locations a call may read: an upper bound only where `stated`.
+/// Stack ranges from a call's pointer; `None` where nothing bounds them.
+pub type StackArea = Option<Vec<(i64, i64)>>;
+
+/// What a call may write of its caller's stack (D377, D411): spans only the frame walk that
+/// classified every transfer of the callee mints; no entry writes up to the caller's entry pointer.
+#[doc = "```compile_fail,E0423\nlet forged = r2ssa::call_reads::StackWrites(());\n```"]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StackWrites(Writes);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Writes {
+    /// A declaration's: only its argument area, which the convention gives the callee.
+    Arguments,
+    /// A walked body's: these ranges from the call's stack pointer.
+    Within(Box<[(i64, i64)]>),
+    /// A cycle member's first assumption, which its solve accepts only where its read states the same.
+    Assumed(Vec<(i64, i64)>),
+}
+
+/// A walked body's incoming writes before the direct calls nothing states are stated (D441):
+/// its own stores and stated calls' spans, each blocking call by its base and target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WritesBound {
+    /// What a transfer spends: the least and most the pointer moves at a return.
+    pub(crate) spent: (i64, i64),
+    /// Its own incoming stores and each stated call's spans shifted by its base.
+    pub(crate) fixed: Vec<(i64, i64)>,
+    pub(crate) own_bases: Vec<i64>,
+    pub(crate) blocking: Vec<(i64, u64)>,
+    pub(crate) transfers: Transfers,
+}
+
+/// The frame walk saw every operation of the body through [`crate::SSAOp::transfer`], whose match
+/// has no wildcard arm, so its calls and tail transfers are every transfer (D381, D411).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) struct Transfers(());
+
+impl Transfers {
+    pub(crate) const fn classified() -> Self {
+        Self(())
+    }
+}
+
+impl StackWrites {
+    /// A declaration's: the convention gives the callee its argument area and nothing else.
+    pub const fn arguments() -> Self {
+        Self(Writes::Arguments)
+    }
+
+    /// A walked body's spans, from a walk that classified every transfer.
+    pub(crate) fn within(spans: Vec<(i64, i64)>, _: Transfers) -> Self {
+        Self(Writes::Within(spans.into()))
+    }
+
+    /// A cycle member's first assumption (r2engine `resolved`): no write of its caller's stack. Its
+    /// solve keeps it only where the member's own read states the same.
+    pub const fn cycle_seed() -> Self {
+        Self(Writes::Assumed(Vec::new()))
+    }
+
+    /// The spans from the call's stack pointer; `None` for the argument area.
+    pub fn spans(&self) -> Option<&[(i64, i64)]> {
+        match &self.0 {
+            Writes::Arguments => None,
+            Writes::Within(spans) => Some(spans),
+            Writes::Assumed(spans) => Some(spans),
+        }
+    }
+}
+
+/// Why a call's listed registers are all it may read (D411): a cited declaration, a callee whose
+/// arity r2ssa holds exact, or a printf its format counts (D433). The every-location default has none.
+#[doc = "```compile_fail,E0423\nlet forged = r2ssa::call_reads::ReadBound(());\n```"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadBound(Bounded);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Bounded {
+    Cited,
+    Arity,
+    Counted,
+}
+
+impl r2source::Negative for ReadBound {
+    const FACTS: &'static [r2source::NegativeFact] = &[
+        r2source::NegativeFact::IgnoredReads,
+        r2source::NegativeFact::CallReadBytes,
+    ];
+}
+
+impl r2source::Negative for StackWrites {
+    const FACTS: &'static [r2source::NegativeFact] = &[r2source::NegativeFact::IncomingWrites];
+}
+
+impl ReadBound {
+    /// A row or document that cites the declaration.
+    pub const fn cited(_: r2source::Citation) -> Self {
+        Self(Bounded::Cited)
+    }
+
+    /// A complete fixed site interface, or a callee statement whose arity is exact.
+    pub(crate) const fn arity() -> Self {
+        Self(Bounded::Arity)
+    }
+
+    /// A cited printf whose read-only format counts its operands (D433): ISO C17 7.21.6.1p2, "If
+    /// the format is exhausted while arguments remain, the excess arguments are ... ignored".
+    pub(crate) const fn counted() -> Self {
+        Self(Bounded::Counted)
+    }
+}
+
+/// A direct call to an import, which reads only the count register's bytes of the register holding
+/// it (D431; [`r2abi::CountRegister`] cites why). Minted by r2engine `declared`.
+#[doc = "```compile_fail,E0423\nlet forged = r2ssa::call_reads::ImportCall(());\n```"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImportCall(());
+
+impl ImportCall {
+    /// A call to an import under the row whose count register `count` is.
+    pub const fn cited(_: &r2abi::CountRegister) -> Self {
+        Self(())
+    }
+}
+
+impl r2source::Negative for ImportCall {
+    const FACTS: &'static [r2source::NegativeFact] = &[r2source::NegativeFact::CallReadBytes];
+}
+
+/// The argument locations a call may read: an upper bound only where `bound` holds a witness.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallReads {
     /// Each argument register it may read: the stated ones first, then the convention's in order.
-    pub registers: Vec<CanonicalStorageId>,
+    pub(crate) registers: Vec<CanonicalStorageId>,
     /// The variadic count register, read with a tail and bounding the vector registers it counts.
-    pub count_register: Option<CanonicalStorageId>,
+    pub(crate) count_register: Option<CanonicalStorageId>,
     /// A printf format in registers with no count register (AAPCS64): what bounds its vector reads.
-    pub format: Option<FormatTail>,
+    pub(crate) format: Option<FormatTail>,
     /// The stack it may read, as ranges from the stack pointer before the transfer; none where
     /// nothing bounds it.
-    pub stack: Option<Vec<(i64, i64)>>,
-    /// Whether the callee's statement bounds the registers; the every-location default does not.
-    pub stated: bool,
+    pub(crate) stack: Option<Vec<(i64, i64)>>,
+    /// The stack it may write, from the same pointer; none where nothing bounds it (D377).
+    pub(crate) writes: Option<Vec<(i64, i64)>>,
+    /// What bounds the registers to `registers`; none for the every-location default.
+    pub(crate) bound: Option<ReadBound>,
+    /// Each result register with the low bytes a walked callee's body may read of it before writing
+    /// it, from its register effect (D372); none where no row states them.
+    pub(crate) lanes: Option<crate::site_boundary::LaneReads>,
+    /// That the callee is an import, which reads only the count register's bytes of its register.
+    pub(crate) import: Option<ImportCall>,
 }
 
 impl CallReads {
@@ -44,19 +180,106 @@ impl CallReads {
             count_register: model.forms.count_register,
             format: None,
             stack: None,
-            stated: false,
+            writes: None,
+            bound: None,
+            lanes: None,
+            import: None,
         }
     }
 
-    /// A complete, fixed interface: its register arguments, the stack the convention reserves for
-    /// the callee and each stack slot it places. O(arguments).
+    /// These reads bounded on the result registers by a walked callee's register effect (D372):
+    /// only those no argument register overlaps, whose width the callee's lanes own. O(lanes × r).
+    #[must_use]
+    pub(crate) fn reading_lanes(mut self, lanes: Option<&crate::site_boundary::LaneReads>) -> Self {
+        let argument = |slot: &CanonicalStorageId| {
+            (self.registers.iter())
+                .any(|register| crate::semantic::register_storages_overlap(*register, *slot))
+        };
+        self.lanes = lanes.map(|lanes| lanes.without(argument));
+        self
+    }
+
+    /// These reads as a call to an import's (D431).
+    #[must_use]
+    pub(crate) const fn importing(mut self, import: Option<ImportCall>) -> Self {
+        self.import = import;
+        self
+    }
+
+    /// The low bytes of `carrier` an import's call reads: the count register's, where it is the
+    /// carrier's low lane and no argument register overlaps the carrier (D431). O(registers).
+    pub fn count_read(&self, carrier: CanonicalStorageId) -> Option<u32> {
+        let count = self.count_register.filter(|_| self.import.is_some())?;
+        let argument = (self.registers.iter())
+            .any(|register| crate::semantic::register_storages_overlap(*register, carrier));
+        let low = count.space == carrier.space && count.offset == carrier.offset;
+        (low && !argument).then_some(count.size.min(carrier.size))
+    }
+
+    /// The low bytes of `carrier` the callee may read, where its register effect states a result
+    /// register starting at it; `O(LANES)`.
+    pub fn lane_read(&self, carrier: CanonicalStorageId) -> Option<u32> {
+        let lanes = self.lanes.as_ref()?;
+        let (_, bytes) = lanes.pairs().iter().find(|(slot, _)| {
+            slot.space == carrier.space
+                && slot.offset == carrier.offset
+                && carrier.size <= slot.size
+        })?;
+        Some((*bytes).min(carrier.size))
+    }
+
+    /// A complete, fixed interface's arguments less its proven holes, O(arguments); every location
+    /// where the callee states its reads unbounded (an uncited row, D411).
     pub fn exact(interface: &SourceCallSiteInterface, model: Option<&ConventionModel>) -> Self {
+        let unbounded = (interface.exact_callee_interface())
+            .is_some_and(|callee| callee.unbounded_reads().is_some());
+        match (unbounded, model) {
+            (false, _) => Self::exact_listed(interface, model),
+            (true, Some(model)) => Self::every_location(model),
+            (true, None) => Self {
+                bound: None,
+                stack: None,
+                writes: None,
+                ..Self::exact_listed(interface, None)
+            },
+        }
+    }
+
+    /// The listed arguments of a complete fixed interface, holes left out. O(arguments).
+    fn exact_listed(interface: &SourceCallSiteInterface, model: Option<&ConventionModel>) -> Self {
+        let holes = (interface.exact_callee_interface().into_iter())
+            .flat_map(|callee| callee.parameters())
+            .filter(|parameter| parameter.is_hole())
+            .map(r2source::SourceAbiParameterSpec::index)
+            .collect::<Vec<_>>();
+        let read = (interface.arguments().iter())
+            .filter(|argument| !holes.contains(&argument.index()))
+            .map(|argument| argument.location());
+        Self::of_locations(read, model)
+    }
+
+    /// Each parameter a body-proven callee reads, holes left out, at the call's stack pointer; none
+    /// where one is past the address space. O(parameters).
+    pub(crate) fn callee_locations(
+        callee: &r2source::SourceFunctionInterface,
+    ) -> Option<Vec<SourceParameterLocation>> {
+        (callee.parameters().iter())
+            .filter(|parameter| !parameter.is_hole())
+            .map(|parameter| callee.at_call_site(parameter.location()))
+            .collect()
+    }
+
+    /// The registers and stack slots read, with the stack the convention reserves for the callee.
+    pub(crate) fn of_locations(
+        read: impl Iterator<Item = SourceParameterLocation>,
+        model: Option<&ConventionModel>,
+    ) -> Self {
         let reserved = model
             .and_then(|model| model.stack_arguments())
             .map_or(0, |placement| placement.first_offset().max(0));
         let (mut registers, mut stack) = (Vec::new(), vec![(0, reserved)]);
-        for argument in interface.arguments() {
-            match argument.location() {
+        for location in read {
+            match location {
                 SourceParameterLocation::Register(storage) => registers.push(storage),
                 SourceParameterLocation::Stack {
                     offset, size_bytes, ..
@@ -67,26 +290,113 @@ impl CallReads {
             registers,
             count_register: None,
             format: None,
+            writes: Some(stack.clone()),
             stack: Some(stack),
-            stated: true,
+            bound: Some(ReadBound::arity()),
+            lanes: None,
+            import: None,
         }
     }
 
-    /// A placed library row (r2engine `Placement::reads`): `stated` where its citation fixes the
-    /// parameters, else the fixed registers and every other one. The stack is not bounded here.
-    pub fn placed(
+    /// These reads with what the callee may write of the stack: a declaration its argument area,
+    /// a body what it states, any where nothing states it (D377). O(ranges).
+    #[must_use]
+    pub fn writing(mut self, writes: Option<&StackWrites>) -> Self {
+        self.writes = match writes.map(StackWrites::spans) {
+            Some(None) => self.writes,
+            Some(Some(spans)) => Some(spans.to_vec()),
+            None => None,
+        };
+        self
+    }
+
+    /// A placed library row (r2engine `Placement::reads`) whose citation fixes the parameters: only
+    /// those registers. The stack is not bounded here.
+    pub fn cited(registers: Vec<CanonicalStorageId>, citation: r2source::Citation) -> Self {
+        Self {
+            registers,
+            count_register: None,
+            format: None,
+            stack: None,
+            writes: None,
+            bound: Some(ReadBound::cited(citation)),
+            lanes: None,
+            import: None,
+        }
+    }
+
+    /// A placed library row nothing bounds: its fixed registers and every other one. The stack is
+    /// not bounded here.
+    pub fn unbounded(
         registers: Vec<CanonicalStorageId>,
         count_register: Option<CanonicalStorageId>,
         format: Option<FormatTail>,
-        stated: bool,
     ) -> Self {
         Self {
             registers,
             count_register,
             format,
             stack: None,
-            stated,
+            writes: None,
+            bound: None,
+            lanes: None,
+            import: None,
         }
+    }
+
+    /// These placed reads as a counted printf's, which also reads `count` (D409, D433).
+    #[must_use]
+    pub(crate) const fn counting(mut self, count: Option<CanonicalStorageId>) -> Self {
+        self.count_register = count;
+        self.bound = Some(ReadBound::counted());
+        self
+    }
+
+    /// These reads where the format's literal converts no floating operand: its tail's vector
+    /// registers left out.
+    #[must_use]
+    pub fn without_format_floats(&self) -> Self {
+        let mut reads = self.clone();
+        if let Some(format) = &self.format {
+            reads.registers.retain(|read| !format.floats.contains(read));
+        }
+        reads
+    }
+
+    pub fn registers(&self) -> &[CanonicalStorageId] {
+        &self.registers
+    }
+
+    pub const fn count_register(&self) -> Option<CanonicalStorageId> {
+        self.count_register
+    }
+
+    pub const fn format(&self) -> Option<&FormatTail> {
+        self.format.as_ref()
+    }
+
+    pub fn stack(&self) -> Option<&[(i64, i64)]> {
+        self.stack.as_deref()
+    }
+
+    pub fn writes(&self) -> Option<&[(i64, i64)]> {
+        self.writes.as_deref()
+    }
+
+    /// What bounds the reads to [`Self::registers`]; `None` where any argument register may be read.
+    pub const fn bound(&self) -> Option<ReadBound> {
+        self.bound
+    }
+
+    /// Whether the call reads none of `carrier`: a register of `every` (a model's every location)
+    /// this bounded list leaves out (D283). Any other register may be read: x8, a static chain.
+    pub fn reads_none_within(&self, every: &Self, carrier: CanonicalStorageId) -> bool {
+        let overlaps = |storage: &CanonicalStorageId| {
+            crate::semantic::register_storages_overlap(*storage, carrier)
+        };
+        let located = (every.registers.iter().chain(&every.count_register)).any(overlaps);
+        let listed = (self.registers.iter().chain(&self.count_register)).any(overlaps);
+        self.bound.is_some() && located && !listed
     }
 
     /// The bytes of the result registers these registers cover, with the count register's where
@@ -112,9 +422,31 @@ mod tests {
             integer: Some(register(0)),
             ..ResultLanes::default()
         };
-        let reads = CallReads::placed(vec![register(56)], Some(register(0)), None, false);
+        let reads = CallReads::unbounded(vec![register(56)], Some(register(0)), None);
         assert_eq!(reads.stack, None);
         assert!(reads.takes(lanes, true).touches(0));
         assert!(!reads.takes(lanes, false).touches(0));
+    }
+
+    /// A register effect bounds a result register no argument overlaps (RAX beside the count
+    /// register AL); an argument register's width stays its interface's (D372).
+    #[test]
+    fn a_register_effect_bounds_only_result_registers_that_are_no_argument() {
+        let register = |offset, size| CanonicalStorageId {
+            space: r2source::CanonicalStorageSpace::Register,
+            offset,
+            size,
+        };
+        let (rax, al, rdx, rdi) = (
+            register(0, 8),
+            register(0, 1),
+            register(16, 8),
+            register(56, 8),
+        );
+        let every = CallReads::unbounded(vec![rdi, rdx], Some(al), None);
+        let walked = crate::site_boundary::LaneReads::walked(&[(rax, 0), (rdx, 0)]);
+        let reads = every.reading_lanes(Some(&walked));
+        assert_eq!(reads.lane_read(rax), Some(0));
+        assert_eq!(reads.lane_read(rdx), None);
     }
 }

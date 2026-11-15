@@ -16,11 +16,13 @@ pub mod confidence;
 pub mod convention;
 pub mod display_names;
 pub mod native;
-pub use confidence::{Basis, Confidence, Fact, Grade, Premise};
+pub mod negative;
+pub use confidence::{Basis, Citation, Confidence, Fact, Grade, Never, NeverProof, Premise};
 pub use convention::{CallRegisterEffect, ConventionId, ConventionModel, Conventions};
 pub use display_names::{
     DisplayNames, positional_parameter_name, unnamed_function, unnamed_identifier,
 };
+pub use negative::{Negative, NegativeFact};
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -71,7 +73,7 @@ impl MachineProfile {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FunctionIdentity {
     address: u64,
-    closed_result: Option<SourceClosedResult>,
+    closed: Option<SourceClosedDecision>,
 }
 
 impl FunctionIdentity {
@@ -81,7 +83,41 @@ impl FunctionIdentity {
 
     /// What the closed world decides of this function's result, where r2engine decided it.
     pub const fn closed_result(&self) -> Option<SourceClosedResult> {
-        self.closed_result
+        match self.closed {
+            Some(decision) => decision.result,
+            None => None,
+        }
+    }
+
+    /// The closed world's decision and what it assumes, where r2engine decided it.
+    pub const fn closed_decision(&self) -> Option<SourceClosedDecision> {
+        self.closed
+    }
+}
+
+/// What the closed world decides of a function's result and of its integer lane, and whether a way
+/// in is a cited slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SourceClosedDecision {
+    /// The function's result; none where only the integer lane is decided.
+    pub result: Option<SourceClosedResult>,
+    /// No executed instruction reads the integer result register after a return: it is dead at
+    /// every way in, whatever the other lanes do (doc/adr-result-side.md, "D440 as built").
+    pub integer_unread: bool,
+    /// A way in is a cited slot whose declared type is how every caller calls (C17 6.3.2.3p8).
+    pub through_slot: bool,
+}
+
+impl SourceClosedDecision {
+    /// What the decision takes for granted: every call the image shows, and a slot's type only
+    /// where no call is undefined.
+    pub const fn premises(self) -> &'static [Premise] {
+        let slotted =
+            self.through_slot || matches!(self.result, Some(SourceClosedResult::DeclaredVoid(_)));
+        match slotted {
+            true => &[Premise::ClosedWorld, Premise::UbFreeSource],
+            false => &[Premise::ClosedWorld],
+        }
     }
 }
 
@@ -157,23 +193,14 @@ impl FunctionPresentation {
 /// Types travel on the interface's `SourceTypeGraph` (ADR call-boundary, Types on the wire).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSignaturePresentation {
-    noreturn: bool,
     parameters: Box<[SourceSignatureParameter]>,
 }
 
 impl SourceSignaturePresentation {
-    pub fn new(
-        noreturn: bool,
-        parameters: impl IntoIterator<Item = SourceSignatureParameter>,
-    ) -> Self {
+    pub fn new(parameters: impl IntoIterator<Item = SourceSignatureParameter>) -> Self {
         Self {
-            noreturn,
             parameters: parameters.into_iter().collect(),
         }
-    }
-
-    pub const fn noreturn(&self) -> bool {
-        self.noreturn
     }
 
     pub fn parameters(&self) -> &[SourceSignatureParameter] {
@@ -338,6 +365,9 @@ pub struct OwnedFunctionImage {
     /// Display data: it tells a renderer what to print where a constant points
     /// at text, and carries no claim about behaviour.
     string_literals: Box<[(u64, String)]>,
+    /// The addresses of `string_literals` whose text and terminator no write reaches for the
+    /// whole run, ascending: semantic evidence, since a call reads such a format as the file holds it.
+    immutable_literals: Box<[u64]>,
     /// Bytes the container states read-only and the loader leaves alone, at each address the
     /// function loads from: semantic evidence, since a load there reads them (ROADMAP P5).
     read_only: Box<[(u64, Vec<u8>)]>,
@@ -472,6 +502,10 @@ impl OwnedFunctionImage {
 
     pub fn string_literals(&self) -> &[(u64, String)] {
         &self.string_literals
+    }
+
+    pub fn immutable_literals(&self) -> &[u64] {
+        &self.immutable_literals
     }
 
     pub fn read_only(&self) -> &[(u64, Vec<u8>)] {
@@ -1185,7 +1219,7 @@ mod tests {
             },
             FunctionIdentity {
                 address: 0x1000,
-                closed_result: None,
+                closed: None,
             },
             FunctionPresentation {
                 display_name: "fixture".into(),
@@ -1195,6 +1229,7 @@ mod tests {
             },
             OwnedFunctionImage {
                 string_literals: Box::new([]),
+                immutable_literals: Box::new([]),
                 read_only: Box::new([]),
                 data_symbols: Box::new([]),
                 data_types: None,
@@ -1311,7 +1346,7 @@ mod tests {
                 valid.machine().clone(),
                 FunctionIdentity {
                     address: 0x2000,
-                    closed_result: None,
+                    closed: None,
                 },
                 valid.presentation().clone(),
                 valid.image().clone(),

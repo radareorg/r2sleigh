@@ -48,7 +48,6 @@ fn tail_slot_is_a_terminal_callsite_through_either_ssa_shape() {
             r2source::ConventionId::SysVAmd64,
             [],
             false,
-            false,
             SourceCallResult::Void,
         )
         .expect("tail slot interface");
@@ -611,7 +610,6 @@ fn an_apple_arm64_variadic_tail_is_read_from_the_stack() {
         r2source::ConventionId::Aapcs64,
         [SourceCallArgumentSpec::new(0, slot(0))],
         true,
-        false,
         SourceCallResult::Void,
     )
     .expect("exact callsite interface")

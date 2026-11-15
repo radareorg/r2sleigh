@@ -516,10 +516,11 @@ fn malformed_shift_graph_reports_instruction_width_mismatch() {
             size: 4,
             predecessors: Vec::new(),
             successors: Vec::new(),
-            insts: vec![inst.id],
-        }],
-        insts: vec![inst],
-        values: values.clone(),
+            insts: vec![inst.id].into(),
+        }]
+        .into(),
+        insts: vec![inst].into(),
+        values: values.clone().into(),
         def_of: vec![None, None, None],
         inputs: crate::dense::Csr::from_pairs(
             1,

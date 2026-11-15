@@ -1,17 +1,15 @@
 //! Dense containers over a sealed function's ids (doc/adr-one-ir.md, F2.0).
 //!
-//! A sealed function's operations, instructions, values and blocks are
-//! numbered densely from zero. A fact about them is therefore a vector
-//! indexed by id, not a tree or a hash keyed by one: a lookup is one index,
-//! iteration is in id order and so deterministic, and two passes that need
-//! the same relation can share it.
+//! Ids are dense from zero, so a fact is a vector indexed by id: one index per lookup, id order.
 //!
-//! - [`IdVec`]: a value for every id.
-//! - [`IdMap`]: a value for some ids.
+//! - [`IdVec`]: a value for every id; [`IdMap`]: for some ids.
 //! - [`SparseMap`]: a value for a few ids, sized by its entries: a dataflow state copied per block.
 //! - [`IdSet`]: a set of ids, as a bitset.
 //! - [`Csr`]: for each id, a slice of related items (def-use, predecessors),
 //!   in compressed sparse row form.
+//! - [`Condensation`]: a `Csr` graph's strongly connected components, the one
+//!   Tarjan's search; [`Reached`] numbers a graph stated on demand for it.
+//! - [`Metered`]: a function-scale table whose whole iterations the work meter counts (D417).
 
 use std::marker::PhantomData;
 
@@ -80,9 +78,9 @@ impl<I: DenseId, T> IdVec<I, T> {
     }
 
     /// Every id with its cell, in id order.
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn iter(&self) -> impl Iterator<Item = (I, &T)> {
-        self.cells
-            .iter()
+        visits(self.cells.iter())
             .enumerate()
             .map(|(index, cell)| (I::from_index(index), cell))
     }
@@ -212,22 +210,26 @@ impl<I: DenseId, T> IdMap<I, T> {
     }
 
     /// Every id with a value, in id order.
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn iter(&self) -> impl Iterator<Item = (I, &T)> {
         self.present
             .iter()
             .map(|id| (id, &self.entries[self.slots[id.index()] as usize].1))
     }
 
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn keys(&self) -> impl Iterator<Item = I> + '_ {
         self.present.iter()
     }
 
     /// Each value, to update in place, in no stated order: the updates must not depend on one
     /// another (removal swaps entries, so neither id nor insertion order holds).
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut T> {
-        self.entries.iter_mut().map(|(_, value)| value)
+        visits(self.entries.iter_mut()).map(|(_, value)| value)
     }
 
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn values(&self) -> impl Iterator<Item = &T> {
         self.iter().map(|(_, value)| value)
     }
@@ -237,6 +239,7 @@ impl<'a, I: DenseId, T> IntoIterator for &'a IdMap<I, T> {
     type Item = (I, &'a T);
     type IntoIter = Box<dyn Iterator<Item = (I, &'a T)> + 'a>;
 
+    #[cfg_attr(feature = "work-meter", track_caller)]
     fn into_iter(self) -> Self::IntoIter {
         Box::new(self.iter())
     }
@@ -266,6 +269,7 @@ impl<I: DenseId, T> IntoIterator for IdMap<I, T> {
     type Item = (I, T);
     type IntoIter = std::vec::IntoIter<(I, T)>;
 
+    #[cfg_attr(feature = "work-meter", track_caller)]
     fn into_iter(self) -> Self::IntoIter {
         let mut entries = self.entries;
         entries.sort_unstable_by_key(|(id, _)| id.index());
@@ -393,8 +397,9 @@ impl<I: DenseId> IdSet<I> {
     }
 
     /// The members, in id order.
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn iter(&self) -> impl Iterator<Item = I> + '_ {
-        self.words.iter().enumerate().flat_map(|(at, word)| {
+        visits(self.words.iter().enumerate().flat_map(|(at, word)| {
             let mut bits = *word;
             std::iter::from_fn(move || {
                 (bits != 0).then(|| {
@@ -403,7 +408,7 @@ impl<I: DenseId> IdSet<I> {
                     I::from_index(at * 64 + bit)
                 })
             })
-        })
+        }))
     }
 }
 
@@ -449,6 +454,7 @@ impl<I: DenseId> IntoIterator for IdSet<I> {
     type Item = I;
     type IntoIter = std::vec::IntoIter<I>;
 
+    #[cfg_attr(feature = "work-meter", track_caller)]
     fn into_iter(self) -> Self::IntoIter {
         self.iter().collect::<Vec<_>>().into_iter()
     }
@@ -458,6 +464,7 @@ impl<'a, I: DenseId> IntoIterator for &'a IdSet<I> {
     type Item = I;
     type IntoIter = Box<dyn Iterator<Item = I> + 'a>;
 
+    #[cfg_attr(feature = "work-meter", track_caller)]
     fn into_iter(self) -> Self::IntoIter {
         Box::new(self.iter())
     }
@@ -751,13 +758,587 @@ impl<I: DenseId, T> SparseMap<I, T> {
     }
 
     /// Every id with a value, in id order.
+    #[cfg_attr(feature = "work-meter", track_caller)]
     pub fn iter(&self) -> impl Iterator<Item = (I, &T)> {
-        self.entries.iter().map(|(id, value)| (*id, value))
+        visits(self.entries.iter()).map(|(id, value)| (*id, value))
     }
+}
+
+/// A node of a graph numbered for one search: a function of a call graph, a block, a view.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Node(pub u32);
+dense_id!(Node);
+
+/// A strongly connected component, numbered in the order its search closed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Component(pub u32);
+dense_id!(Component);
+
+/// Not yet entered by the search.
+const UNVISITED: u32 = u32::MAX;
+
+/// A graph's strongly connected components by Tarjan's search, O(V + E): an edge `u → v` has
+/// `component(v) <= component(u)` (doc/adr-one-ir.md, "Condensation").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Condensation<I> {
+    component: IdVec<I, Component>,
+    finish: IdVec<I, u32>,
+    members: Csr<Component, I>,
+    cyclic: IdSet<Component>,
+    visits: u64,
+}
+
+impl<I: DenseId> Condensation<I> {
+    /// The search enters each of `starts`, then each node left in id order, and takes a node's
+    /// successors in row order: those two fix every component and finish index.
+    pub fn of(successors: &Csr<I, I>, starts: impl IntoIterator<Item = I>) -> Self {
+        let count = successors.len();
+        let mut search = Tarjan {
+            successors,
+            order: vec![UNVISITED; count],
+            low: vec![0; count],
+            on_stack: vec![false; count],
+            self_edge: vec![false; count],
+            stack: Vec::new(),
+            frames: Vec::new(),
+            component: vec![Component(UNVISITED); count],
+            finish: vec![0; count],
+            members: Csr::with_capacity(count, count),
+            cyclic: IdSet::new(count),
+            entered: 0,
+            finished: 0,
+            visits: 0,
+        };
+        let starts = starts.into_iter();
+        for start in starts.chain((0..count).map(I::from_index)) {
+            search.run(start);
+        }
+        Self {
+            component: IdVec::from_fn(count, |node: I| search.component[node.index()]),
+            finish: IdVec::from_fn(count, |node: I| search.finish[node.index()]),
+            members: search.members,
+            cyclic: search.cyclic,
+            visits: search.visits,
+        }
+    }
+
+    /// The component `node` is in.
+    pub fn component(&self, node: I) -> Component {
+        self.component[node]
+    }
+
+    /// When the search finished `node`: its depth-first postorder index.
+    pub fn finish(&self, node: I) -> u32 {
+        self.finish[node]
+    }
+
+    /// A component's members, ascending.
+    pub fn members(&self, component: Component) -> &[I] {
+        self.members.get(component)
+    }
+
+    /// Every component in the order it closed, each after every component it reaches.
+    pub fn components(&self) -> impl Iterator<Item = (Component, &[I])> + '_ {
+        (0..self.len())
+            .map(Component::from_index)
+            .map(|id| (id, self.members(id)))
+    }
+
+    /// Whether a component holds a cycle: several members, or one that is its own successor.
+    pub fn is_cyclic(&self, component: Component) -> bool {
+        self.cyclic.contains(component)
+    }
+
+    pub fn len(&self) -> usize {
+        self.members.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.members.is_empty()
+    }
+
+    /// Nodes entered plus edges followed: `V + E` for every search (the bound, metered).
+    pub fn visits(&self) -> u64 {
+        self.visits
+    }
+}
+
+/// One condensation's search state, indexed by node.
+struct Tarjan<'a, I> {
+    successors: &'a Csr<I, I>,
+    order: Vec<u32>,
+    low: Vec<u32>,
+    on_stack: Vec<bool>,
+    self_edge: Vec<bool>,
+    stack: Vec<I>,
+    /// The depth-first path: each node with the index of its next successor.
+    frames: Vec<(I, u32)>,
+    component: Vec<Component>,
+    finish: Vec<u32>,
+    members: Csr<Component, I>,
+    cyclic: IdSet<Component>,
+    entered: u32,
+    finished: u32,
+    visits: u64,
+}
+
+impl<I: DenseId> Tarjan<'_, I> {
+    /// One depth-first walk from `start`; it ends since each node is entered once and each frame
+    /// moves past finitely many successors.
+    fn run(&mut self, start: I) {
+        if self.order[start.index()] != UNVISITED {
+            return;
+        }
+        self.enter(start);
+        while let Some(&mut (node, ref mut edge)) = self.frames.last_mut() {
+            let Some(&successor) = self.successors.get(node).get(*edge as usize) else {
+                self.frames.pop();
+                self.leave(node);
+                continue;
+            };
+            *edge += 1;
+            self.visits += 1;
+            self.self_edge[node.index()] |= successor == node;
+            let at = successor.index();
+            if self.order[at] == UNVISITED {
+                self.enter(successor);
+            } else if self.on_stack[at] {
+                self.low[node.index()] = self.low[node.index()].min(self.order[at]);
+            }
+        }
+    }
+
+    fn enter(&mut self, node: I) {
+        let at = node.index();
+        self.order[at] = self.entered;
+        self.low[at] = self.entered;
+        self.entered += 1;
+        self.visits += 1;
+        self.on_stack[at] = true;
+        self.stack.push(node);
+        self.frames.push((node, 0));
+    }
+
+    /// Finish `node`: its parent takes its low link, and it closes a component where it is the
+    /// root of one.
+    fn leave(&mut self, node: I) {
+        let at = node.index();
+        self.finish[at] = self.finished;
+        self.finished += 1;
+        if let Some(&(parent, _)) = self.frames.last() {
+            let low = self.low[at];
+            let parent = &mut self.low[parent.index()];
+            *parent = (*parent).min(low);
+        }
+        if self.low[at] != self.order[at] {
+            return;
+        }
+        let root = (self.stack.iter())
+            .rposition(|held| *held == node)
+            .expect("an entered node is on the stack until its component closes");
+        let mut members = self.stack.split_off(root);
+        members.sort_unstable();
+        let id = Component::from_index(self.members.len());
+        for member in &members {
+            self.on_stack[member.index()] = false;
+            self.component[member.index()] = id;
+        }
+        if members.len() > 1 || self.self_edge[at] {
+            self.cyclic.insert(id);
+        }
+        self.members.push_row(members);
+    }
+}
+
+/// The nodes a graph stated on demand reaches from a root, numbered by ascending key, with their
+/// edges: the call graphs the engine discovers as it asks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Reached<K> {
+    keys: Vec<K>,
+    root: Node,
+    successors: Csr<Node, Node>,
+}
+
+impl<K: Copy + Ord + std::hash::Hash> Reached<K> {
+    /// `successors` is asked once per node (a key enters `seen` once, so the walk ends), in the
+    /// preorder Tarjan's search from `root` takes. O(V + E) probes, O(V log V) to number by key.
+    pub fn from(root: K, mut successors: impl FnMut(K) -> Vec<K>) -> Self {
+        let mut seen = rustc_hash::FxHashSet::default();
+        seen.insert(root);
+        let mut rows = vec![(root, successors(root))];
+        let mut frames = vec![(0usize, 0usize)];
+        while let Some((row, next)) = frames.last_mut() {
+            let Some(&to) = rows[*row].1.get(*next) else {
+                frames.pop();
+                continue;
+            };
+            *next += 1;
+            if seen.insert(to) {
+                rows.push((to, successors(to)));
+                frames.push((rows.len() - 1, 0));
+            }
+        }
+        let mut keys = rows.iter().map(|(key, _)| *key).collect::<Vec<_>>();
+        keys.sort_unstable();
+        let index = (keys.iter().enumerate())
+            .map(|(at, key)| (*key, Node::from_index(at)))
+            .collect::<rustc_hash::FxHashMap<_, _>>();
+        let index = &index;
+        let edges = rows.iter().flat_map(|(from, to)| {
+            let from = index[from];
+            to.iter().map(move |to| (from, index[to]))
+        });
+        let successors = Csr::from_pairs(keys.len(), edges.collect::<Vec<_>>());
+        Self {
+            root: index[&root],
+            keys,
+            successors,
+        }
+    }
+
+    pub fn root(&self) -> Node {
+        self.root
+    }
+
+    /// The key a node stands for.
+    pub fn key(&self, node: Node) -> K {
+        self.keys[node.index()]
+    }
+
+    pub fn successors(&self) -> &Csr<Node, Node> {
+        &self.successors
+    }
+
+    /// The condensation of what the root reaches, searched from the root.
+    pub fn condensation(&self) -> Condensation<Node> {
+        Condensation::of(&self.successors, [self.root])
+    }
+}
+
+/// A function-scale table whose whole iterations (`iter`, `values`, `keys`, `for`) count their
+/// element visits in a `work-meter` build (D417); indexing and `len` pass through `Deref`.
+#[derive(Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Metered<C>(C);
+
+impl<C> Metered<C> {
+    pub fn into_inner(self) -> C {
+        self.0
+    }
+}
+
+impl<C> From<C> for Metered<C> {
+    fn from(table: C) -> Self {
+        Self(table)
+    }
+}
+
+impl<C> std::ops::Deref for Metered<C> {
+    type Target = C;
+
+    fn deref(&self) -> &C {
+        &self.0
+    }
+}
+
+impl<C> std::ops::DerefMut for Metered<C> {
+    fn deref_mut(&mut self) -> &mut C {
+        &mut self.0
+    }
+}
+
+impl<C: std::fmt::Debug> std::fmt::Debug for Metered<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl<T> Metered<Vec<T>> {
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn iter(&self) -> Visits<std::slice::Iter<'_, T>> {
+        visits(self.0.iter())
+    }
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn iter_mut(&mut self) -> Visits<std::slice::IterMut<'_, T>> {
+        visits(self.0.iter_mut())
+    }
+}
+
+impl<T> FromIterator<T> for Metered<Vec<T>> {
+    fn from_iter<A: IntoIterator<Item = T>>(items: A) -> Self {
+        Self(items.into_iter().collect())
+    }
+}
+
+impl<'a, T> IntoIterator for &'a Metered<Vec<T>> {
+    type Item = &'a T;
+    type IntoIter = Visits<std::slice::Iter<'a, T>>;
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut Metered<Vec<T>> {
+    type Item = &'a mut T;
+    type IntoIter = Visits<std::slice::IterMut<'a, T>>;
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter_mut()
+    }
+}
+
+impl<T> IntoIterator for Metered<Vec<T>> {
+    type Item = T;
+    type IntoIter = Visits<std::vec::IntoIter<T>>;
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    fn into_iter(self) -> Self::IntoIter {
+        visits(self.0.into_iter())
+    }
+}
+
+impl<K, V> Metered<std::collections::BTreeMap<K, V>> {
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn iter(&self) -> Visits<std::collections::btree_map::Iter<'_, K, V>> {
+        visits(self.0.iter())
+    }
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn values(&self) -> Visits<std::collections::btree_map::Values<'_, K, V>> {
+        visits(self.0.values())
+    }
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn keys(&self) -> Visits<std::collections::btree_map::Keys<'_, K, V>> {
+        visits(self.0.keys())
+    }
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    pub fn values_mut(&mut self) -> Visits<std::collections::btree_map::ValuesMut<'_, K, V>> {
+        visits(self.0.values_mut())
+    }
+}
+
+impl<K: Ord, V> FromIterator<(K, V)> for Metered<std::collections::BTreeMap<K, V>> {
+    fn from_iter<A: IntoIterator<Item = (K, V)>>(items: A) -> Self {
+        Self(items.into_iter().collect())
+    }
+}
+
+impl<'a, K, V> IntoIterator for &'a Metered<std::collections::BTreeMap<K, V>> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = Visits<std::collections::btree_map::Iter<'a, K, V>>;
+
+    #[cfg_attr(feature = "work-meter", track_caller)]
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+/// The element visits counted since the process began, in a `work-meter` build; `None` in any
+/// other build, never a zero that would claim no work was done.
+pub fn element_visits() -> Option<u64> {
+    #[cfg(feature = "work-meter")]
+    return Some(meter::VISITS.load(std::sync::atomic::Ordering::Relaxed));
+    #[cfg(not(feature = "work-meter"))]
+    None
+}
+
+/// An iterator over a function-scale table: itself unless the build meters work.
+#[cfg(not(feature = "work-meter"))]
+pub type Visits<I> = I;
+#[cfg(feature = "work-meter")]
+pub type Visits<I> = meter::Counted<I>;
+
+#[cfg(not(feature = "work-meter"))]
+#[inline(always)]
+fn visits<I: Iterator>(iter: I) -> Visits<I> {
+    iter
+}
+
+#[cfg(feature = "work-meter")]
+#[track_caller]
+fn visits<I: Iterator>(iter: I) -> Visits<I> {
+    meter::Counted {
+        iter,
+        at: std::panic::Location::caller(),
+        count: 0,
+        metered: meter::PAUSED.with(|paused| paused.get() == 0),
+    }
+}
+
+/// Runs `work` with this thread's iterations uncounted: a debug oracle's rebuild is no work of the
+/// request, so a `work-meter` build counts the same with and without debug assertions.
+pub fn unmetered<R>(work: impl FnOnce() -> R) -> R {
+    #[cfg(feature = "work-meter")]
+    let _paused = meter::Paused::new();
+    work()
+}
+
+/// The element visits counted at each call site, most first, in a `work-meter` build.
+pub fn element_visits_by_site() -> Vec<(String, u64)> {
+    #[cfg(feature = "work-meter")]
+    return meter::by_site();
+    #[cfg(not(feature = "work-meter"))]
+    Vec::new()
+}
+
+#[cfg(feature = "work-meter")]
+mod meter {
+    use rustc_hash::FxHashMap;
+    use std::panic::Location;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    pub(super) static VISITS: AtomicU64 = AtomicU64::new(0);
+    thread_local! {
+        pub(super) static PAUSED: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    }
+
+    /// Holds this thread's meter paused until dropped, a panic included.
+    pub(super) struct Paused;
+
+    impl Paused {
+        pub(super) fn new() -> Self {
+            PAUSED.with(|paused| paused.set(paused.get() + 1));
+            Self
+        }
+    }
+
+    impl Drop for Paused {
+        fn drop(&mut self) {
+            PAUSED.with(|paused| paused.set(paused.get() - 1));
+        }
+    }
+    static SITES: Mutex<Option<FxHashMap<&'static Location<'static>, u64>>> = Mutex::new(None);
+
+    pub(super) fn by_site() -> Vec<(String, u64)> {
+        let sites = SITES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut sites = (sites.iter().flatten())
+            .map(|(at, count)| (format!("{}:{}", at.file(), at.line()), *count))
+            .collect::<Vec<_>>();
+        sites.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        sites
+    }
+
+    /// Counts each element it hands out, against the site that asked for the iteration.
+    #[derive(Debug)]
+    pub struct Counted<I> {
+        pub(super) iter: I,
+        pub(super) at: &'static Location<'static>,
+        pub(super) count: u64,
+        /// False for an iteration begun under [`super::unmetered`].
+        pub(super) metered: bool,
+    }
+
+    /// A copy counts only what it hands out itself.
+    impl<I: Clone> Clone for Counted<I> {
+        fn clone(&self) -> Self {
+            Self {
+                iter: self.iter.clone(),
+                at: self.at,
+                count: 0,
+                metered: self.metered,
+            }
+        }
+    }
+
+    impl<I> Drop for Counted<I> {
+        fn drop(&mut self) {
+            if self.count > 0 {
+                let mut sites = SITES
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                *sites
+                    .get_or_insert_with(FxHashMap::default)
+                    .entry(self.at)
+                    .or_default() += self.count;
+            }
+        }
+    }
+
+    impl<I: Iterator> Iterator for Counted<I> {
+        type Item = I::Item;
+
+        fn next(&mut self) -> Option<I::Item> {
+            let item = self.iter.next()?;
+            if self.metered {
+                self.count += 1;
+                VISITS.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(item)
+        }
+
+        fn size_hint(&self) -> (usize, Option<usize>) {
+            self.iter.size_hint()
+        }
+    }
+
+    impl<I: DoubleEndedIterator> DoubleEndedIterator for Counted<I> {
+        fn next_back(&mut self) -> Option<I::Item> {
+            let item = self.iter.next_back()?;
+            if self.metered {
+                self.count += 1;
+                VISITS.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(item)
+        }
+    }
+
+    impl<I: ExactSizeIterator> ExactSizeIterator for Counted<I> {}
+
+    impl<I: std::iter::FusedIterator> std::iter::FusedIterator for Counted<I> {}
 }
 
 #[cfg(test)]
 mod tests {
+    /// A whole pass over a metered table counts each element it hands out once, at its call site;
+    /// an early stop counts only what it read (D417).
+    #[cfg(feature = "work-meter")]
+    #[test]
+    fn the_meter_counts_each_element_a_pass_hands_out() {
+        let table = super::Metered::from(vec![1u32, 2, 3, 4]);
+        let mut whole = table.iter();
+        assert_eq!(whole.by_ref().count(), 4);
+        assert_eq!(whole.count, 4);
+        let mut early = table.iter();
+        assert_eq!(early.by_ref().position(|x| *x == 2), Some(1));
+        assert_eq!(early.count, 2);
+        let set = (0..130)
+            .map(crate::graph::InstId)
+            .collect::<super::IdSet<_>>();
+        let mut members = set.iter();
+        assert_eq!(members.by_ref().count(), 130);
+        drop(members);
+        let here = format!("{}:", file!());
+        assert!(
+            super::element_visits_by_site()
+                .iter()
+                .any(|(at, _)| at.starts_with(&here))
+        );
+        assert!(super::element_visits().is_some_and(|visits| visits >= 136));
+    }
+
+    /// An iteration begun under `unmetered` counts nothing at its site, so a debug oracle's
+    /// rebuild adds no visit to what the scaling bench grades.
+    #[cfg(feature = "work-meter")]
+    #[test]
+    fn an_unmetered_pass_counts_no_visit() {
+        let table = super::Metered::from(vec![1u32, 2, 3, 4]);
+        let mut hidden = super::unmetered(|| table.iter());
+        assert_eq!(hidden.by_ref().count(), 4);
+        assert_eq!(hidden.count, 0);
+        let mut counted = table.iter();
+        assert_eq!(counted.by_ref().count(), 4);
+        assert_eq!(counted.count, 4);
+    }
+
     /// An index finds each row it was given, through growth and with colliding hashes.
     #[test]
     fn a_hash_index_finds_every_row_through_growth() {
@@ -963,5 +1544,126 @@ mod tests {
             let (same, _) = build(320, &first);
             proptest::prop_assert!(same == left);
         }
+    }
+
+    /// A graph's condensation by its edges over `count` nodes.
+    fn condensed(count: usize, edges: &[(u32, u32)]) -> (Csr<Node, Node>, Condensation<Node>) {
+        let pairs = edges.iter().map(|(from, to)| (Node(*from), Node(*to)));
+        let successors = Csr::from_pairs(count, pairs);
+        let condensation = Condensation::of(&successors, []);
+        (successors, condensation)
+    }
+
+    use super::{Condensation, Csr, DenseId, Node};
+
+    /// Against mutual reachability on random graphs: the partition, callee-first order, ascending
+    /// members, the cyclic flag, and one visit per node and per edge.
+    #[test]
+    fn a_condensation_matches_mutual_reachability() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed % bound
+        };
+        for _ in 0..400 {
+            let count = 1 + next(12) as usize;
+            let edges = (0..next(3 * count as u64))
+                .map(|_| (next(count as u64) as u32, next(count as u64) as u32))
+                .collect::<Vec<_>>();
+            let (successors, condensation) = condensed(count, &edges);
+            let reach = (0..count)
+                .map(|from| reached_from(&successors, from))
+                .collect::<Vec<_>>();
+            let of = |at: usize| condensation.component(Node::from_index(at));
+            let pairs = (0..count).flat_map(|a| (0..count).map(move |b| (a, b)));
+            for (a, b) in pairs {
+                let mutual = a == b || (reach[a][b] && reach[b][a]);
+                assert_eq!(of(a) == of(b), mutual, "{edges:?}");
+            }
+            for (from, to) in &edges {
+                assert!(of(*to as usize) <= of(*from as usize), "{edges:?}");
+            }
+            for (component, members) in condensation.components() {
+                assert!(members.windows(2).all(|pair| pair[0] < pair[1]));
+                let cyclic = members.len() > 1 || reach[members[0].index()][members[0].index()];
+                assert_eq!(condensation.is_cyclic(component), cyclic, "{edges:?}");
+            }
+            assert_eq!(condensation.visits(), (count + edges.len()) as u64);
+            let finish = |at: u32| condensation.finish(Node(at));
+            let mut order = (0..count as u32).map(finish).collect::<Vec<_>>();
+            order.sort_unstable();
+            assert!(order.iter().copied().eq(0..count as u32), "{edges:?}");
+            let crossing = edges
+                .iter()
+                .filter(|(from, to)| of(*to as usize) != of(*from as usize));
+            for (from, to) in crossing {
+                assert!(finish(*to) < finish(*from), "{edges:?}");
+            }
+        }
+    }
+
+    /// The nodes a path of one edge or more reaches from `from`.
+    fn reached_from(successors: &super::Csr<Node, Node>, from: usize) -> Vec<bool> {
+        let mut row = vec![false; successors.len()];
+        let mut stack = vec![from];
+        while let Some(at) = stack.pop() {
+            let next = successors.get(Node::from_index(at)).iter();
+            let fresh = next.filter(|to| !std::mem::replace(&mut row[to.index()], true));
+            stack.extend(fresh.map(|to| to.index()).collect::<Vec<_>>());
+        }
+        row
+    }
+
+    /// A chain deeper than any thread's stack closes callee first with one visit per node and
+    /// edge; finish indices are the depth-first postorder.
+    #[test]
+    fn a_deep_chain_condenses_in_linear_visits() {
+        const COUNT: u32 = 200_000;
+        let edges = (1..COUNT).map(|at| (at - 1, at)).collect::<Vec<_>>();
+        let (_, condensation) = condensed(COUNT as usize, &edges);
+        assert_eq!(condensation.len(), COUNT as usize);
+        assert_eq!(condensation.visits(), u64::from(2 * COUNT - 1));
+        assert_eq!(condensation.component(Node(COUNT - 1)).0, 0);
+        assert_eq!(condensation.finish(Node(0)), COUNT - 1);
+        // Closing the cycle makes one component, still visited once per node and edge.
+        let mut cycle = edges;
+        cycle.push((COUNT - 1, 0));
+        let (_, condensation) = condensed(COUNT as usize, &cycle);
+        assert_eq!(condensation.len(), 1);
+        assert!(condensation.is_cyclic(condensation.component(Node(0))));
+        assert_eq!(condensation.visits(), u64::from(2 * COUNT));
+    }
+
+    /// A graph stated on demand is asked once per node in the search's preorder and numbered by
+    /// ascending key.
+    #[test]
+    fn a_reached_graph_asks_each_node_once_in_preorder() {
+        use super::Reached;
+        let edges = [(9u64, 4u64), (9, 7), (4, 7), (7, 4), (4, 9), (7, 1)];
+        let mut asked = Vec::new();
+        let reached = Reached::from(9, |at| {
+            asked.push(at);
+            edges
+                .iter()
+                .filter(|(from, _)| *from == at)
+                .map(|(_, to)| *to)
+                .collect()
+        });
+        assert_eq!(asked, [9, 4, 7, 1]);
+        let keys = (0..4).map(|at| reached.key(Node(at))).collect::<Vec<_>>();
+        assert_eq!(keys, [1, 4, 7, 9]);
+        let condensation = reached.condensation();
+        let closed = (condensation.components())
+            .map(|(_, members)| {
+                members
+                    .iter()
+                    .map(|at| reached.key(*at))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(closed, [vec![1], vec![4, 7, 9]]);
+        assert_eq!(condensation.visits(), 4 + 6);
     }
 }

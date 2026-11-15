@@ -231,6 +231,26 @@ impl StridedInterval {
         Self::strided(self.width_bits, stride, low, high)
     }
 
+    /// Narrowing after `widen`: take `next`'s bound only where this one is the width's extreme on
+    /// its stride, as `widen` leaves it. `next` lies within `self`, so each bound moves once.
+    pub fn refine(&self, next: &Self) -> Self {
+        debug_assert_eq!(self.width_bits, next.width_bits);
+        let (Some(old), Some(new)) = (self.body, next.body) else {
+            return *next;
+        };
+        let mask = Self::mask_for(self.width_bits);
+        let stride = old.stride.max(1);
+        let low = match old.low < stride {
+            true => new.low,
+            false => old.low,
+        };
+        let high = match mask - old.high < stride {
+            true => new.high,
+            false => old.high,
+        };
+        self.meet(&Self::interval(self.width_bits, low, high))
+    }
+
     /// Addition at this width, wrapping where the machine would.
     ///
     /// A range that wraps past the width's end is not describable by one
@@ -679,6 +699,10 @@ mod tests {
             assert_eq!(described(&widened) & both, both, "{left:?} widen {right:?}");
             // Two progressions meet in a progression, so the meet is exact.
             let met = left.meet(right);
+            if left == right {
+                assert_eq!(met, *left, "{left:?} meet itself");
+                assert_eq!(left.refine(left), *left, "{left:?} refine itself");
+            }
             assert_eq!(
                 described(&met),
                 left_set & right_set,
@@ -745,6 +769,8 @@ mod tests {
                 (left.widen(&right), Some(b)),
                 (left.meet(&right), right.contains(a).then_some(a)),
             ];
+            prop_assert_eq!(left.meet(&left), left);
+            prop_assert_eq!(left.refine(&left), left);
             for (result, value) in checks {
                 if let Some(value) = value {
                     prop_assert!(result.contains(value), "{:?} {:?} -> {:?} misses {}", left, right, result, value);
@@ -851,6 +877,29 @@ mod kani_proofs {
             element,
             u64::from(low) + u64::from(stride) * u64::from(pick),
         )
+    }
+
+    /// An eight-bit element, bottom included.
+    fn any_eight_bit() -> StridedInterval {
+        match kani::any() {
+            true => StridedInterval::bottom(8),
+            false => any_element().0,
+        }
+    }
+
+    /// The descent skips a cell whose slot equals what its inputs compute (doc/adr-fixpoint.md, "Semi-naive descent").
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn eight_bit_meet_with_itself_is_itself() {
+        let element = any_eight_bit();
+        assert!(element.meet(&element) == element);
+    }
+
+    #[kani::proof]
+    #[kani::unwind(20)]
+    fn eight_bit_refine_by_itself_is_itself() {
+        let element = any_eight_bit();
+        assert!(element.refine(&element) == element);
     }
 
     #[kani::proof]

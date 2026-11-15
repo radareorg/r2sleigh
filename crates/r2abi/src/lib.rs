@@ -6,6 +6,8 @@
 pub mod convention;
 pub mod data_model;
 pub mod declarations;
+pub mod effects;
+pub mod format;
 pub mod frames;
 pub mod library;
 pub mod loader;
@@ -19,20 +21,22 @@ pub mod syscalls;
 pub mod types;
 
 pub use convention::{
-    ConventionId, ConventionRow, Cspec, Extension, HomeArea, RegName, ResultSet, Side, SlotClass,
-    SpecOverride, Toolchain,
+    ConventionId, ConventionRow, CountRegister, Cspec, Extension, HomeArea, RegName, ResultSet,
+    Side, SlotClass, SpecOverride, Toolchain,
 };
 pub use data_model::{CDataModel, KERNEL_MODE_CITATION};
 pub use declarations::{DataObject, Declarations};
+pub use effects::{Effect, Effects, Extent};
 pub use library::{
-    CLibrary, Dll, FlagBits, FlagTest, FormatKind, Handle, Kernel, LibraryId, LibraryRow,
+    CLibrary, Dll, FlagBits, FlagTest, FormatKind, Halt, Handle, Kernel, LibraryId, LibraryRow,
     LibraryRows, PrototypeId, RowResult, Tail,
 };
 pub use loader::{LoaderCall, ResultRead, loader_call};
 pub use mangled::Passing;
 pub use platform::{
-    EntryStack, GuardRow, LinkedGuard, PlatformRegister, RegisterDuty, RegisterSaveArea,
-    SaveAreaAnchor, StackGuard, architecture_registers, guard_row, platform_registers,
+    CookieCheck, EntryStack, GuardRow, LinkedGuard, PlatformRegister, RegisterDuty,
+    RegisterSaveArea, SaveAreaAnchor, StackGuard, architecture_registers, guard_row,
+    platform_registers,
 };
 pub use prototypes::{Arrival, FrameBase, Local, Parameter, Prototype, Spelled, StatedConvention};
 pub use syscalls::Syscalls;

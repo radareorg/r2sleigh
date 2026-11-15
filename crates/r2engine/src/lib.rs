@@ -7,6 +7,7 @@
 //! source snapshot request.
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(cache_outside_query_database))]
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(scan_in_loop))]
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]
@@ -441,6 +442,10 @@ pub struct EngineExecutionControl {
     /// Work this request has done, counted rather than timed, so the size of
     /// the thing the deadline stands in for can be measured.
     meter: Arc<r2ssa::SsaWorkMeter>,
+    /// Convention seals this request made to read a body's dispatch tables, every round (D403).
+    table_seals: Arc<std::sync::atomic::AtomicU64>,
+    /// Lifts a later dispatch round copied out of its walk to seal a region (D367).
+    round_lifts: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl EngineExecutionControl {
@@ -450,12 +455,53 @@ impl EngineExecutionControl {
             cancellation,
             deadline,
             meter: Arc::new(r2ssa::SsaWorkMeter::default()),
+            table_seals: Arc::default(),
+            round_lifts: Arc::default(),
         }
     }
 
     /// Work counted for this request so far.
     pub fn work_spent(&self) -> u64 {
         self.meter.spent()
+    }
+
+    /// Frame object models this request built.
+    pub fn frames_built(&self) -> u64 {
+        self.meter.frames_built()
+    }
+
+    /// Static prefixes this request collected, one per build recovery read (D289).
+    pub fn static_prefixes(&self) -> u64 {
+        self.meter.static_prefixes()
+    }
+
+    /// Value visits this request's frame walks propagated (D365).
+    pub fn frame_walk_steps(&self) -> u64 {
+        self.meter.frame_walk_steps()
+    }
+
+    /// Sink points and candidate places this request's frame walk decisions read (D365).
+    pub fn frame_decision_steps(&self) -> u64 {
+        self.meter.frame_decision_steps()
+    }
+
+    /// Convention seals this request made to read dispatch tables.
+    pub fn table_seals(&self) -> u64 {
+        self.table_seals.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_table_seal(&self) {
+        (self.table_seals).fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Instruction lifts later dispatch rounds copied out of their walks to seal regions.
+    pub fn round_lifts(&self) -> u64 {
+        self.round_lifts.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_round_lifts(&self, lifts: usize) {
+        let lifts = u64::try_from(lifts).unwrap_or(u64::MAX);
+        (self.round_lifts).fetch_add(lifts, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn with_cancellation_and_deadline(
@@ -764,7 +810,7 @@ pub struct EngineAnalyzeFunctionRequestInput {
 /// from the declared interface's graph (ADR call-boundary, Types on the wire).
 fn trusted_source_signature(
     trusted: &r2ssa::TrustedSsaArtifact,
-) -> Option<(r2types::FunctionSignatureSpec, bool)> {
+) -> Option<r2types::FunctionSignatureSpec> {
     let signature = trusted.source().presentation().signature()?;
     let interface =
         (trusted.source().function_interface()).filter(|interface| interface.types_are_declared());
@@ -788,7 +834,7 @@ fn trusted_source_signature(
         _ => typed(interface.and_then(r2ssa::SourceFunctionInterface::return_logical_value)),
     };
     let spec = r2types::FunctionSignatureSpec { ret_type, params };
-    Some((spec, signature.noreturn()))
+    Some(spec)
 }
 
 /// Everything one callee contributes to a caller's request.
@@ -866,9 +912,8 @@ fn trusted_parsed_context(trusted: &r2ssa::TrustedSsaArtifact) -> r2types::Parse
         (image.data_symbols().iter()).map(|object| (object.address(), object.type_id())),
     );
     r2types::ParsedExternalContext {
-        noreturn: signature.as_ref().is_some_and(|(_, noreturn)| *noreturn),
-        current_signature: signature.as_ref().map(|(spec, _)| spec.clone()),
-        merged_signature: signature.map(|(spec, _)| spec),
+        current_signature: signature.clone(),
+        merged_signature: signature,
         program_data_objects,
         assumptions: trusted.artifact().facts().assumptions.clone(),
         ..r2types::ParsedExternalContext::default()
@@ -1780,6 +1825,10 @@ impl EngineSession {
             && let Some(reason) =
                 effect_obligation_refusal_reason(effect_obligations_of(obligation_ledger.as_ref()))
         {
+            // The frame model's typed refusal names the owner where the frame is dynamic (D355).
+            let dynamic = (sealed.trusted_ssa.as_ref())
+                .and_then(|ssa| ssa.artifact().function().frame_points()?.dynamic_frame());
+            let reason = dynamic.map_or(reason.clone(), |frame| format!("{frame}; {reason}"));
             metrics.record_phase(
                 EnginePhase::Rendering,
                 EnginePhaseStatus::Refused,

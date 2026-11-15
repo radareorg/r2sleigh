@@ -106,6 +106,15 @@ fn model_of(target: &NativeTarget<'_>) -> CDataModel {
     )))
 }
 
+/// The witness a direct call to an import carries (D431): an import runs under the program's own
+/// convention, and its row cites what the call reads of the count register's register.
+pub(crate) fn import_call(target: &NativeTarget<'_>) -> Option<r2ssa::call_reads::ImportCall> {
+    let program =
+        (target.program.as_ref()).map_or(&target.convention, |program| &program.convention);
+    let count = program.id.row().count_register.as_ref()?;
+    Some(r2ssa::call_reads::ImportCall::cited(count))
+}
+
 /// Debug information's types for data objects, as one graph and a node per object.
 pub(crate) fn object_types(
     target: &NativeTarget<'_>,
@@ -320,8 +329,13 @@ impl<'a> Placement<'a> {
                 tail,
                 r2abi::Tail::Variadic | r2abi::Tail::Format { .. } | r2abi::Tail::Flagged { .. }
             );
-        if placed_whole && (tail == r2abi::Tail::None || on_stack) {
-            return r2ssa::call_reads::CallReads::placed(registers, None, None, true);
+        // Only a cited row's fixed list bounds the reads; radare2's is a lower bound (D395, D410).
+        let cited = declared.row.and_then(r2source::Citation::of);
+        if let Some(citation) = cited
+            && placed_whole
+            && (tail == r2abi::Tail::None || on_stack)
+        {
+            return r2ssa::call_reads::CallReads::cited(registers, citation);
         }
         let overlaps = |a: &CanonicalStorageId, b: &CanonicalStorageId| {
             a.space == b.space
@@ -365,7 +379,7 @@ impl<'a> Placement<'a> {
             }
             _ => None,
         };
-        r2ssa::call_reads::CallReads::placed(registers, forms.count_register, format, false)
+        r2ssa::call_reads::CallReads::unbounded(registers, forms.count_register, format)
     }
 
     /// Where a declaration says it takes a pointer.
@@ -495,7 +509,9 @@ impl Placement<'_> {
     ) -> Option<r2source::SourceFunctionInterface> {
         let name = &declared.prototype.name;
         let convention = self.machine.conventions.own.id;
-        let interface = self.typed(name, convention, placement, typed)?;
+        // An uncited row's parameters are radare2's, a lower bound (D395, D411).
+        let uncited = (declared.row).is_some_and(|row| r2source::Citation::of(row).is_none());
+        let interface = self.typed((name, uncited), convention, placement, typed)?;
         // Typed first: a declared format parameter is believed on what the
         // declaration's types are.
         let interface = formatted(
@@ -550,7 +566,7 @@ impl Placement<'_> {
     /// has no location.
     fn typed(
         &self,
-        name: &str,
+        (name, uncited): (&str, bool),
         convention: r2source::ConventionId,
         placement: &r2ssa::place::Placement,
         typed: Typed,
@@ -583,6 +599,10 @@ impl Placement<'_> {
             );
         })
         .ok()?;
+        let interface = match uncited {
+            true => interface.with_unbounded_reads(r2source::SourceUnboundedReads::UncitedRow),
+            false => interface,
+        };
         match placement.floor {
             None => Some(interface),
             Some(class) => Some(interface.with_arity_floor(r2source::SourceArityFloor::of([
@@ -752,5 +772,5 @@ fn presentation(prototype: &Prototype, placed: usize) -> r2source::SourceSignatu
         .map(|parameter| r2source::SourceSignatureParameter::new(parameter.name.clone()));
     let ellipsis =
         (prototype.variadic).then(|| r2source::SourceSignatureParameter::new(Some("...")));
-    r2source::SourceSignaturePresentation::new(false, parameters.chain(ellipsis))
+    r2source::SourceSignaturePresentation::new(parameters.chain(ellipsis))
 }

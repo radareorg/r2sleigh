@@ -108,8 +108,8 @@ fn control_writes_only_what_was_spelled_and_the_spelling_reads_no_placement() {
     );
 }
 
-/// Whether a call never returns is a fact of its callee alone (ROADMAP D75): a function deciding it
-/// names no expression and nothing a call carries, and `callee_of` binds the call's `func` alone.
+/// Whether a call never returns is a fact of its site's proven `Never` (ROADMAP D75, D384): a function
+/// deciding it names no expression and nothing a call carries; `site_of` binds `func` and `site` alone.
 #[test]
 fn a_noreturn_decision_reads_the_callee_and_nothing_the_call_passes() {
     let source_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -126,7 +126,7 @@ fn a_noreturn_decision_reads_the_callee_and_nothing_the_call_passes() {
             .join("\n");
         let code = code_of(&production);
         let decides = |(name, body): &(&str, &str)| {
-            *name == "callee_of" || (*name != "never_returns" && body.contains(".never_returns("))
+            *name == "site_of" || (*name != "never_returns" && body.contains(".never_returns("))
         };
         for (name, body) in functions(&code).into_iter().filter(decides) {
             deciders += 1;
@@ -145,19 +145,19 @@ fn a_noreturn_decision_reads_the_callee_and_nothing_the_call_passes() {
     );
 }
 
-/// What a noreturn decision's `body` reads past the callee: `callee_of` binds a call's `func` alone,
-/// and a reader binds no expression, so a statement reaches it only through `callee_of`.
+/// What a noreturn decision's `body` reads past the site: `site_of` binds a call's `func` and `site`
+/// alone, and a reader binds no expression, so a statement reaches it only through `site_of`.
 fn past_the_callee(name: &str, body: &str) -> Option<String> {
-    let extracts = name == "callee_of";
-    let mut words = vec!["args", "site", "format", "Debug"];
+    let extracts = name == "site_of";
+    let mut words = vec!["args", "format", "Debug"];
     if !extracts {
-        words.extend(["CExpr", "Call"]);
+        words.extend(["site", "CExpr", "Call"]);
     }
     let read = (words.into_iter())
         .filter(|word| mentions(body, word))
         .collect::<Vec<_>>();
     let binds = !extracts && body.replace("Expr(_)", "").contains("Expr(");
-    let func_alone = !extracts || body.contains("Call { func, .. }");
+    let func_alone = !extracts || body.contains("Call { func, site, .. }");
     (!read.is_empty() || binds || !func_alone)
         .then(|| format!("reads {read:?}, binds an expression {binds}, func alone {func_alone}"))
 }

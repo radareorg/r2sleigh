@@ -14,6 +14,10 @@ use std::time::Instant;
 #[derive(Debug, Default)]
 pub struct SsaWorkMeter {
     polls: AtomicU64,
+    frames: AtomicU64,
+    prefixes: AtomicU64,
+    walk_steps: AtomicU64,
+    decision_steps: AtomicU64,
 }
 
 impl SsaWorkMeter {
@@ -25,6 +29,26 @@ impl SsaWorkMeter {
     /// Work counted so far.
     pub fn spent(&self) -> u64 {
         self.polls.load(Ordering::Relaxed)
+    }
+
+    /// Frame object models built so far, one `FrameReach` each (ROADMAP D403).
+    pub fn frames_built(&self) -> u64 {
+        self.frames.load(Ordering::Relaxed)
+    }
+
+    /// Static prefixes collected so far, one per build recovery read (D289).
+    pub fn static_prefixes(&self) -> u64 {
+        self.prefixes.load(Ordering::Relaxed)
+    }
+
+    /// Value visits the frame walks propagated, every round (D365).
+    pub fn frame_walk_steps(&self) -> u64 {
+        self.walk_steps.load(Ordering::Relaxed)
+    }
+
+    /// Sink points and candidate places the frame walks' decisions read, fresh or restated (D365).
+    pub fn frame_decision_steps(&self) -> u64 {
+        self.decision_steps.load(Ordering::Relaxed)
     }
 }
 
@@ -116,6 +140,18 @@ impl From<SsaExecutionStopReason> for SsaPrepareError {
 /// thread, timer callback, or allocation at each poll.
 pub trait SsaWorkControl {
     fn poll(&self) -> Result<(), SsaExecutionStopReason>;
+
+    /// One frame object model and its `FrameReach` built; a metered control counts it (D403).
+    fn frame_built(&self) {}
+
+    /// One build's static prefix collected; a metered control counts it (D289).
+    fn static_prefix_built(&self) {}
+
+    /// One frame walk propagated, `steps` value visits over its rounds (D365).
+    fn frame_walked(&self, _steps: u64) {}
+
+    /// One frame walk decided against the callees, `steps` sink points and candidates (D365).
+    fn frame_decided(&self, _steps: u64) {}
 }
 
 /// Cloneable cancellation/deadline control for SSA preparation.
@@ -172,6 +208,30 @@ impl SsaWorkControl for SsaExecutionControl {
             meter.spend();
         }
         self.stop_reason().map_or(Ok(()), Err)
+    }
+
+    fn frame_built(&self) {
+        if let Some(meter) = &self.meter {
+            meter.frames.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn static_prefix_built(&self) {
+        if let Some(meter) = &self.meter {
+            meter.prefixes.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn frame_walked(&self, steps: u64) {
+        if let Some(meter) = &self.meter {
+            meter.walk_steps.fetch_add(steps, Ordering::Relaxed);
+        }
+    }
+
+    fn frame_decided(&self, steps: u64) {
+        if let Some(meter) = &self.meter {
+            meter.decision_steps.fetch_add(steps, Ordering::Relaxed);
+        }
     }
 }
 

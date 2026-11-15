@@ -24,7 +24,7 @@ use crate::codegen::{
 use crate::control::{DecompileExecutionStop, DecompileWorkControl, DecompileWorkPhase};
 use crate::ledger::{ObligationLedger, Outcome};
 use crate::structure::certify::StatementRole;
-use crate::structure::shape::{Evidence, Occurrences, callee_of};
+use crate::structure::shape::{Evidence, Occurrences, site_of};
 
 /// One function the staged pipeline rendered, and what became of each obligation.
 pub struct Rendered {
@@ -128,7 +128,10 @@ pub fn render(
         0,
         (
             unassigned.as_deref().unwrap_or_default(),
-            (input.open_second_result(), &input.body_disputed_lanes()),
+            (
+                (input.open_second_result(), input.integer_lane_unread_only()),
+                &input.body_disputed_lanes(),
+            ),
             input.inferred_aggregates().len(),
             &tags.conflicting(),
         ),
@@ -373,7 +376,7 @@ fn statement_role(
         .any(|id| selections.contains(id))
     {
         true => StatementRole::Selects,
-        false => (traps(stmt) || evidence.never_returns(callee_of(stmt))).into(),
+        false => (traps(stmt) || evidence.never_returns(site_of(stmt))).into(),
     }
 }
 
@@ -392,6 +395,10 @@ fn drop_unmentioned_locals(c: &mut CFunction) {
 fn close_ledger(input: &RenderInput<'_>, values: Option<&values::Values<'_>>) -> ObligationLedger {
     let mut ledger = ObligationLedger::open(input.obligations(), input.graph())
         .with_premises(input.function().premises().clone())
+        .with_result_premises(
+            (input.artifact().machine_context().function_interface())
+                .map_or(&[], r2source::SourceFunctionInterface::closed_premises),
+        )
         .with_exits(input.function().assumed_exits());
     match values {
         Some(values) => values.close(&mut ledger),
@@ -557,9 +564,9 @@ mod tests {
     }
 
     #[test]
-    fn a_call_ends_control_by_its_callee_s_declaration_whatever_it_passes() {
+    fn a_call_ends_control_by_its_site_s_proof_whatever_it_passes() {
         let declared = crate::structure::support::declared();
-        let none = BTreeSet::new();
+        let none = r2ssa::dense::IdSet::new(0);
         for (set, role) in [
             (&declared, StatementRole::Ends),
             (&none, StatementRole::Plain),

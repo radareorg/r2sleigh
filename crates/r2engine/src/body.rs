@@ -26,6 +26,8 @@ use r2il::R2ILBlock;
 use r2sleigh_lift::{Continuation, Disassembler};
 use r2source::AdvisorySuccessorKind;
 
+use crate::discovery::Never;
+
 use r2ssa::cfg::{BasicBlock, BlockTerminator};
 
 /// Longest instruction any supported architecture encodes, and the window
@@ -90,31 +92,36 @@ pub trait Program {
         None
     }
 
-    /// Whether control comes back from a call through the pointer held at
-    /// `slot` -- `call [slot]` -- where the program says what the slot holds:
-    /// an import the loader binds there, declared as never returning.
-    /// Unproven, it does.
-    fn returns_through(&self, _slot: u64) -> bool {
-        true
+    /// Why `call [slot]` never comes back: the program binds a never-returning import in `slot`.
+    /// `None` where nothing says so, and the call comes back.
+    fn exit_through(&self, _slot: u64) -> Option<crate::discovery::Never> {
+        None
     }
 
-    /// Whether control comes back from interrupt `vector` on `arch`: false only where the kernel's
-    /// row states it never does (D229).
-    fn interrupt_returns(&self, _arch: &str, _vector: u64) -> bool {
-        true
+    /// The document stating interrupt `vector` on `arch` never comes back (D229); `None` where
+    /// none does, and it comes back.
+    fn interrupt_halts(&self, _arch: &str, _vector: u64) -> Option<r2source::Citation> {
+        None
     }
 
-    /// The argument register that, holding `Handle`, makes a transfer through `slot` not return,
-    /// where the import the loader binds there states one.
-    fn halts_on_through(
-        &self,
-        _slot: u64,
-    ) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+    /// The argument register that, holding the `Halt`, makes a transfer through `slot` not return,
+    /// where the cited row of the import the loader binds there states one.
+    fn halts_on_through(&self, _slot: u64) -> Option<Halting> {
+        None
+    }
+
+    /// The same for a direct call to `callee`, where the program states it is an import's stub.
+    fn halts_on(&self, _callee: u64) -> Option<Halting> {
         None
     }
 
     /// Whether an import row of this program may yield a handle: only a PE's KERNEL32 rows do.
     fn binds_handles(&self) -> bool {
+        false
+    }
+
+    /// Whether a walk holds register values at all: a row yields a handle or halts on a value.
+    fn holds_values(&self) -> bool {
         false
     }
 
@@ -333,8 +340,8 @@ struct Instruction {
     terminator: BlockTerminator,
     /// The decode window and context, where the walk keeps its decodes.
     decode: Option<Box<(Vec<u8>, Continuation)>>,
-    /// An `int n` whose vector the kernel's row states never comes back (D229).
-    halts: bool,
+    /// The document stating this `int n`'s vector never comes back (D229).
+    halts: Option<r2source::Citation>,
 }
 
 impl Instruction {
@@ -342,19 +349,49 @@ impl Instruction {
     fn end(&self) -> u64 {
         self.lifted.addr + self.lifted.size as u64
     }
+
+    /// A copy of the lift, no decode window: what a block of a cut holds.
+    fn copied(&self) -> Self {
+        Self {
+            lifted: self.lifted.clone(),
+            bytes: self.bytes.clone(),
+            terminator: self.terminator.clone(),
+            decode: None,
+            halts: self.halts,
+        }
+    }
 }
 
 /// Whether control leaves an instruction ending this way for somewhere other than the next one, which ends a basic block.
-/// A register holding a handle an import yielded, and the call that yielded it.
+/// A register holding a handle an import yielded or a constant, and the instruction that put it there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Held {
     storage: r2source::CanonicalStorageId,
-    handle: r2abi::Handle,
+    value: Holding,
     from: u64,
 }
 
-/// The handles one straight run holds, read forward: a copy hands one on, any other write or a
-/// call ends it. `O(ops * held)`.
+/// What a held register is known to hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Holding {
+    Handle(r2abi::Handle),
+    Constant(u64),
+}
+
+impl Holding {
+    /// Whether a call's argument holding this meets a row's `Halt`.
+    fn halts(self, halt: r2abi::Halt) -> bool {
+        match (self, halt) {
+            (Self::Handle(held), r2abi::Halt::Handle(handle)) => held == handle,
+            // A nonzero low byte is a nonzero integer at any width the row's parameter has.
+            (Self::Constant(value), r2abi::Halt::NonZero) => value & 0xff != 0,
+            _ => false,
+        }
+    }
+}
+
+/// The handles and constants one straight run holds, read forward: a copy or a zero extension hands
+/// one on, any other write or a call ends it. `O(ops * held)`.
 #[derive(Debug, Clone, Default)]
 struct Handles {
     at: Option<u64>,
@@ -368,21 +405,29 @@ impl Handles {
                 && a.offset < b.offset + u64::from(b.size)
                 && b.offset < a.offset + u64::from(a.size)
         };
+        let mut conditional = false;
         for (index, op) in lifted.ops.iter().enumerate() {
             // An unstated operation stands for writes the lift dropped.
             if matches!(op, r2il::R2ILOp::Unimplemented) {
                 self.held.clear();
                 continue;
             }
+            // A value written past a branch inside the instruction is conditional (`moveq r0, #1`).
+            if op.is_control_flow() && !op.is_call() {
+                self.held.clear();
+                conditional = true;
+                continue;
+            }
             if op.is_call() {
                 self.held.clear();
                 let slot = r2ssa::loaded_target_slot(lifted, index).map(|slot| slot.offset);
+                let slot = slot.filter(|_| program.binds_handles());
                 let yielded = slot
                     .filter(|slot| crate::stated::sealed_import(program, *slot).is_some())
                     .and_then(|slot| program.yields_through(slot));
                 self.held.extend(yielded.map(|(storage, handle)| Held {
                     storage,
-                    handle,
+                    value: Holding::Handle(handle),
                     from: lifted.addr,
                 }));
                 continue;
@@ -392,19 +437,60 @@ impl Handles {
             };
             let written = r2source::CanonicalStorageId::from_varnode(output);
             let copied = match op {
+                r2il::R2ILOp::Copy { src, .. } | r2il::R2ILOp::IntZExt { src, .. }
+                    if src.is_const() =>
+                {
+                    Some(Held {
+                        storage: written,
+                        value: Holding::Constant(src.offset),
+                        from: lifted.addr,
+                    })
+                }
                 r2il::R2ILOp::Copy { src, .. } => {
                     let src = r2source::CanonicalStorageId::from_varnode(src);
                     self.held.iter().find(|held| held.storage == src).copied()
                 }
+                r2il::R2ILOp::IntZExt { src, .. } => {
+                    let src = r2source::CanonicalStorageId::from_varnode(src);
+                    let constant = |held: &&Held| matches!(held.value, Holding::Constant(_));
+                    let held = self.held.iter().filter(constant);
+                    held.into_iter().find(|held| held.storage == src).copied()
+                }
                 _ => None,
             };
             self.held.retain(|held| !overlaps(held.storage, written));
-            self.held.extend(copied.map(|held| Held {
-                storage: written,
-                ..held
-            }));
+            self.held
+                .extend(copied.filter(|_| !conditional).map(|held| Held {
+                    storage: written,
+                    ..held
+                }));
         }
     }
+}
+
+/// Whose "never" closes a transfer: the callee's own, only this call's (a halting argument or an
+/// interrupt), or a tail branch's, which closes no call (D384).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Closer {
+    Callee,
+    Site,
+    Branch,
+}
+
+/// The argument register whose value makes a call not return, the value, and the cited row that
+/// states it (D211, D410).
+pub(crate) type Halting = (
+    r2source::CanonicalStorageId,
+    r2abi::Halt,
+    r2source::Citation,
+);
+
+/// The instruction that put the value a row halts on in its argument register, where one did, and
+/// the "never" the row's citation states.
+fn holding(held: &[Held], (argument, halt, citation): Halting) -> Option<(u64, Never)> {
+    (held.iter())
+        .find(|held| held.storage == argument && held.value.halts(halt))
+        .map(|held| (held.from, Never::cited(citation)))
 }
 
 fn ends_block(terminator: &BlockTerminator) -> bool {
@@ -463,9 +549,15 @@ impl Lifting {
         self.0.follow(arms, disasm, program);
     }
 
-    /// The body walked so far. O(instructions), no decode.
-    pub fn body(&self) -> Body {
-        self.0.body()
+    /// The blocks walked so far by place, no lift copied. O(instructions).
+    pub fn shape(&self) -> Shape {
+        self.0.shape()
+    }
+
+    /// The blocks of `shape`, this walk's as it stands, that `keep` holds, entered at `entry`, and
+    /// how many lifts were copied: only theirs. O(instructions + kept operations).
+    pub fn cut(&self, shape: &Shape, entry: u64, keep: &[bool]) -> (Body, usize) {
+        self.0.cut(shape, entry, keep)
     }
 
     /// The body walked, the walk ended.
@@ -537,6 +629,20 @@ impl Trace {
     /// Every address a load reads that its lift states as a constant.
     pub const fn loads(&self) -> &BTreeSet<u64> {
         &self.0.loads
+    }
+
+    /// The "never" of each of the walk's ends a statement proves halts (a halting transfer), and
+    /// how many none does (a trap, or a call through a slot whose "never" is a bound, D395).
+    pub fn ends(&self) -> (Vec<&Never>, usize) {
+        let walk = &self.0;
+        let never = |at| (walk.nevers.get(at)).map(|(never, _)| never);
+        let (proven, bound): (Vec<_>, Vec<_>) = (walk.halting.iter())
+            .map(never)
+            .partition(|never| never.is_some_and(|never| never.proves().is_some()));
+        (
+            proven.into_iter().flatten().collect(),
+            walk.ends_unproven + bound.len(),
+        )
     }
 
     /// The address after each call the walk ended a block at because its callee never comes back.
@@ -653,16 +759,21 @@ struct Walk {
     halting: BTreeSet<u64>,
     /// The registers holding a handle an import yielded, valid at the run's next address.
     handles: Handles,
-    /// Each tail jump proven not to return from a handle, and the instruction that yielded it.
-    proven: Vec<(u64, u64)>,
+    /// Each transfer proven not to return from a held value: the instruction that put it there,
+    /// the transfer, and where a direct call goes on where that proof fails.
+    proven: Vec<(u64, u64, Option<u64>)>,
+    /// Ends no statement proves: a trap, or a call with no next instruction.
+    ends_unproven: usize,
+    /// Whether the program's rows read a held register value (`Program::holds_values`).
+    holds_values: bool,
     falls_into: BTreeSet<u64>,
     /// Whether each address the lift states context for decodes in another context than this walk's.
     target_contexts: BTreeMap<u64, bool>,
     unresolved: Vec<Unresolved>,
     /// Calls not known to return, by callee: each call instruction and the address after it.
     gated: BTreeMap<u64, Vec<(u64, u64)>>,
-    /// What each gated callee's "never returns" takes for granted, where it is a model's word.
-    assumed: BTreeMap<u64, crate::discovery::Never>,
+    /// Each closed transfer, by instruction: what says it never comes back, and whose "never" it is.
+    nevers: BTreeMap<u64, (Never, Closer)>,
     /// The instructions that enter the supervisor, as the language's own
     /// user-operation table says.
     supervisor: BTreeSet<u64>,
@@ -703,11 +814,13 @@ impl Walk {
             halting: BTreeSet::new(),
             handles: Handles::default(),
             proven: Vec::new(),
+            ends_unproven: 0,
+            holds_values: program.holds_values(),
             falls_into: BTreeSet::new(),
             target_contexts: BTreeMap::new(),
             unresolved: Vec::new(),
             gated: BTreeMap::new(),
-            assumed: BTreeMap::new(),
+            nevers: BTreeMap::new(),
             supervisor: BTreeSet::new(),
             context: None,
             reached: Reached::default(),
@@ -899,7 +1012,7 @@ impl Walk {
         let decode = self.decodes.then(|| Box::new((fetch, one.continuation)));
         let arch = disasm.arch_spec();
         let halts = interrupt_vector(&lifted.ops, arch)
-            .is_some_and(|vector| !program.interrupt_returns(&arch.name, vector));
+            .and_then(|vector| program.interrupt_halts(&arch.name, vector));
         Some(Instruction {
             lifted,
             bytes,
@@ -952,14 +1065,18 @@ impl Walk {
         }
         self.leaders.insert(target);
         successors.push(target);
-        // A branch into a proven run reaches the tail jump with a handle nothing proved.
+        // A branch into a proven run reaches the transfer with a value nothing proved.
         let (entered, kept) = std::mem::take(&mut self.proven)
             .into_iter()
-            .partition::<Vec<_>, _>(|(from, at)| *from < target && target <= *at);
+            .partition::<Vec<_>, _>(|(from, at, _)| *from < target && target <= *at);
         self.proven = kept;
-        for (_, at) in entered {
+        for (_, at, after) in entered {
             self.halting.remove(&at);
-            self.stop(at, UnresolvedReason::IndirectBranch);
+            self.nevers.remove(&at);
+            match after {
+                Some(after) => self.continues(Some(after), successors, program),
+                None => _ = self.stop(at, UnresolvedReason::IndirectBranch),
+            }
         }
     }
 
@@ -1018,7 +1135,7 @@ impl Walk {
             self.handles = Handles::default();
         }
         let handles_before = self.handles.held.clone();
-        if program.binds_handles() {
+        if self.holds_values {
             self.handles.step(&instruction.lifted, program);
             self.handles.at = Some(next);
         }
@@ -1058,27 +1175,35 @@ impl Walk {
                 // A predicated call reaches the next instruction when its predicate fails, whatever the callee does.
                 let predicated = r2il::predicated_call(&instruction.lifted.ops, next);
                 let foreign = self.target_contexts.get(&target).copied().unwrap_or(false);
+                // A call to an import stub whose row halts on the argument it is handed (D211).
+                let halts = (!predicated)
+                    .then(|| program.halts_on(target))
+                    .flatten()
+                    .and_then(|halt| holding(&handles_before, halt));
                 match (predicated || program.returns(target, foreign), fallthrough) {
+                    _ if let Some((from, never)) = halts => {
+                        self.halting.insert(addr);
+                        self.proven.push((from, addr, fallthrough));
+                        self.nevers.insert(addr, (never, Closer::Site));
+                    }
                     (true, _) => self.continues(fallthrough, &mut successors, program),
                     // The bytes after a call not known to return may be the next function's.
                     (false, Some(after)) => {
-                        // A "never" no statement makes is a bound, so its exit stays unnamed (D255).
-                        if let Some(never) = program.exit(target, foreign)
-                            && (never.proof, never.premises.is_empty())
-                                != (crate::discovery::NeverProof::Declared, true)
-                        {
-                            self.assumed.insert(target, never);
+                        if let Some(never) = program.exit(target, foreign) {
+                            self.nevers.insert(addr, (never, Closer::Callee));
                         }
                         self.gate(target, addr, after);
                     }
-                    (false, None) => {}
+                    (false, None) => self.ends_unproven += 1,
                 }
             }
             // A call through a register is opaque, so it is assumed to come
             // back -- unless it calls through a slot whose pointer the
             // program states, and what it states there never returns.
-            BlockTerminator::IndirectCall { .. } if instruction.halts => {
+            BlockTerminator::IndirectCall { .. } if let Some(citation) = instruction.halts => {
                 self.halting.insert(addr);
+                self.nevers
+                    .insert(addr, (Never::cited(citation), Closer::Site));
             }
             BlockTerminator::IndirectCall { fallthrough } => {
                 let ops = &instruction.lifted.ops;
@@ -1093,14 +1218,19 @@ impl Walk {
                     self.slot_calls.insert(addr, slot);
                 }
                 let halts = self.halts_through(&instruction, &handles_before, program);
-                if let Some(from) = halts {
+                let exit = through.and_then(|slot| program.exit_through(slot));
+                if let Some((from, never)) = halts {
                     // A call that terminates the current process (D229), as S17's tail jump.
                     self.halting.insert(addr);
-                    self.proven.extend(from.map(|from| (from, addr)));
-                } else if through.is_none_or(|slot| program.returns_through(slot)) {
-                    self.continues(fallthrough, &mut successors, program)
-                } else {
+                    self.proven.extend(from.map(|from| (from, addr, None)));
+                    // Through a slot whose import never returns, the "never" is the callee's.
+                    let closer = from.map_or(Closer::Callee, |_| Closer::Site);
+                    self.nevers.insert(addr, (never, closer));
+                } else if let Some(never) = exit {
                     self.halting.insert(addr);
+                    self.nevers.insert(addr, (never, Closer::Callee));
+                } else {
+                    self.continues(fallthrough, &mut successors, program)
                 }
             }
             // A switch is an indirect branch through a table, so it is one
@@ -1108,16 +1238,17 @@ impl Walk {
             // the dispatch reads, and both stop where nothing did.
             BlockTerminator::IndirectBranch | BlockTerminator::Switch { .. } => {
                 match self.halts_through(&instruction, &handles_before, program) {
-                    Some(from) => {
+                    Some((from, never)) => {
                         self.halting.insert(addr);
-                        self.proven.extend(from.map(|from| (from, addr)));
+                        self.proven.extend(from.map(|from| (from, addr, None)));
+                        self.nevers.insert(addr, (never, Closer::Branch));
                     }
                     None => self.dispatch(addr, next, &mut successors, program),
                 }
             }
             BlockTerminator::Return => self.leaving = true,
-            // A trap has nowhere to go.
-            BlockTerminator::None => {}
+            // A trap has nowhere to go, and no statement says the process ends there.
+            BlockTerminator::None => self.ends_unproven += 1,
         }
 
         if ends_block(&instruction.terminator) {
@@ -1179,27 +1310,25 @@ impl Walk {
         origins.of(target)?.constant()
     }
 
-    /// Whether a tail jump through an import slot never returns: `Some(None)` where the import
-    /// never does, `Some(Some(from))` where a handle the call at `from` yielded makes it not.
+    /// Whether a tail jump through an import slot never returns: `None` where the import never
+    /// does, `Some(from)` where a handle the call at `from` yielded makes it not.
     fn halts_through(
         &self,
         instruction: &Instruction,
         held: &[Held],
         program: &dyn Program,
-    ) -> Option<Option<u64>> {
+    ) -> Option<(Option<u64>, Never)> {
         let ops = &instruction.lifted.ops;
         // An indirect branch or call: r2il's transfer names no direct target.
         let transfer = |op: &r2il::R2ILOp| op.transfer().is_some_and(|transfer| !transfer.direct);
         let at = ops.iter().rposition(transfer)?;
         let slot = r2ssa::loaded_target_slot(&instruction.lifted, at)?.offset;
         crate::stated::sealed_import(program, slot)?;
-        if !program.returns_through(slot) {
-            return Some(None);
+        // Only a proven "never" halts a transfer; a bound's call stays closed, and its tail goes on.
+        if let Some(never) = (program.exit_through(slot)).filter(|never| never.proves().is_some()) {
+            return Some((None, never));
         }
-        let (argument, handle) = program.halts_on_through(slot)?;
-        (held.iter())
-            .find(|held| held.storage == argument && held.handle == handle)
-            .map(|held| Some(held.from))
+        holding(held, program.halts_on_through(slot)?).map(|(from, never)| (Some(from), never))
     }
 
     /// Follow an indirect branch to the arms a previous pass read, or on past it where it is a call; stop where neither.
@@ -1236,94 +1365,176 @@ impl Walk {
 
     /// Gather the decoded instructions into blocks, each ending where control leaves, a leader begins, a hole opens or a fallthrough is closed.
     fn into_body(mut self) -> (Body, Vec<Decoded>) {
+        let closed = self.closed();
         let lifted = self.lifted.take().unwrap_or_default();
-        self.assemble(lifted.into_iter())
-    }
-
-    /// The body walked so far, each lift cloned; the walk goes on. O(instructions), no decode.
-    fn body(&self) -> Body {
-        let lifted = self.lifted.iter().flatten();
-        self.assemble(lifted.map(|(addr, instruction)| (*addr, instruction.clone())))
-            .0
-    }
-
-    fn assemble(&self, lifted: impl Iterator<Item = (u64, Instruction)>) -> (Body, Vec<Decoded>) {
-        let closed = (self.gated.values().flatten())
-            .map(|(call, _)| *call)
-            .chain(self.halting.iter().copied())
-            .collect::<BTreeSet<_>>();
-        let link = self.link.as_ref();
-        let mut blocks: Vec<BodyBlock> = Vec::new();
-        let mut parts: Vec<Instruction> = Vec::new();
-        let mut decodes = Vec::new();
-
-        let ending = Ending {
-            link,
-            dispatched: &self.dispatched,
-            tail_calls: &self.tail_calls,
-            slot_calls: &self.slot_calls,
-        };
-        for (addr, mut instruction) in lifted {
-            if let Some(decode) = instruction.decode.take() {
-                let (window, continuation) = *decode;
+        let spans = self.spans(lifted.iter().map(|(addr, lift)| (*addr, lift)), &closed);
+        let ending = self.ending();
+        let (mut lifted, mut decodes) = (lifted.into_values(), Vec::new());
+        let mut blocks = Vec::with_capacity(spans.len());
+        for span in &spans {
+            let mut parts = lifted.by_ref().take(span.len).collect::<Vec<_>>();
+            decodes.extend(parts.iter_mut().filter_map(|instruction| {
+                let (window, continuation) = *instruction.decode.take()?;
                 let lift = instruction.lifted.clone();
-                decodes.push(Decoded {
+                Some(Decoded {
                     lift,
                     window,
                     continuation,
+                })
+            }));
+            blocks.push(finish(&mut parts, &ending, span.closed));
+        }
+        (self.body_of(self.entry, blocks, &spans, &closed), decodes)
+    }
+
+    /// The blocks walked so far by place, no lift copied. O(instructions).
+    fn shape(&self) -> Shape {
+        let closed = self.closed();
+        let lifts = (self.lifted.iter().flatten()).collect::<Vec<_>>();
+        let spans = self.spans(lifts.iter().map(|(addr, lift)| (**addr, *lift)), &closed);
+        let ending = self.ending();
+        let blocks = spans.iter().map(|span| {
+            let parts = lifts[span.first..span.first + span.len]
+                .iter()
+                .map(|(_, lift)| *lift);
+            let parts = parts.collect::<Vec<_>>();
+            let successors = successors_after(&parts, &ending, span.closed);
+            (
+                span.start,
+                successors.into_iter().map(|(_, to)| to).collect(),
+            )
+        });
+        Shape {
+            blocks: blocks.collect(),
+            spans,
+        }
+    }
+
+    /// The blocks of `shape` that `keep` holds, entered at `entry`: only their lifts are copied, and
+    /// the body's calls, stops and exits are the whole walk's. O(instructions + kept operations).
+    fn cut(&self, shape: &Shape, entry: u64, keep: &[bool]) -> (Body, usize) {
+        let closed = self.closed();
+        let lifts = (self.lifted.iter().flatten()).collect::<Vec<_>>();
+        let ending = self.ending();
+        let (mut blocks, mut copied) = (Vec::new(), 0);
+        for (span, _) in (shape.spans.iter().zip(keep)).filter(|(_, kept)| **kept) {
+            let parts = lifts[span.first..span.first + span.len].iter();
+            let mut parts = parts.map(|(_, lift)| lift.copied()).collect::<Vec<_>>();
+            copied += parts.len();
+            blocks.push(finish(&mut parts, &ending, span.closed));
+        }
+        (self.body_of(entry, blocks, &shape.spans, &closed), copied)
+    }
+
+    /// The calls that end their block closed: gated on a callee not known to return, or halting.
+    fn closed(&self) -> BTreeSet<u64> {
+        (self.gated.values().flatten())
+            .map(|(call, _)| *call)
+            .chain(self.halting.iter().copied())
+            .collect()
+    }
+
+    fn ending(&self) -> Ending<'_> {
+        Ending {
+            link: self.link.as_ref(),
+            dispatched: &self.dispatched,
+            tail_calls: &self.tail_calls,
+            slot_calls: &self.slot_calls,
+        }
+    }
+
+    /// Where each block of `lifted` (in address order) starts and how many instructions it holds:
+    /// a block ends where control leaves, a leader begins, a hole opens or a call is `closed`. O(instructions).
+    fn spans<'a>(
+        &self,
+        lifted: impl Iterator<Item = (u64, &'a Instruction)>,
+        closed: &BTreeSet<u64>,
+    ) -> Vec<Span> {
+        let (mut spans, mut open) = (Vec::new(), None::<(Span, u64)>);
+        for (index, (addr, instruction)) in lifted.enumerate() {
+            let broken = open.is_some_and(|(_, end)| end != addr || self.leaders.contains(&addr));
+            if broken {
+                spans.extend(open.take().map(|(span, _)| span));
+            }
+            let (mut span, _) = open.unwrap_or((
+                Span {
+                    first: index,
+                    len: 0,
+                    start: addr,
+                    closed: false,
+                },
+                addr,
+            ));
+            span.len += 1;
+            let ends = closed.contains(&addr);
+            open = Some((span, instruction.end()));
+            if ends || ends_block(&instruction.terminator) {
+                span.closed = ends;
+                spans.push(span);
+                open = None;
+            }
+        }
+        spans.extend(open.map(|(span, _)| span));
+        spans
+    }
+
+    /// The body of `blocks`, each call still closed ending its block with what says it never comes
+    /// back (D384), placed among `spans` by binary search: `O(c log b)`.
+    fn body_of(
+        &self,
+        entry: u64,
+        blocks: Vec<BodyBlock>,
+        spans: &[Span],
+        closed: &BTreeSet<u64>,
+    ) -> Body {
+        let block_of = |call: u64| {
+            let after = spans.partition_point(|span| span.start <= call);
+            Some(spans.get(after.checked_sub(1)?)?.start)
+        };
+        let mut exits = r2ssa::AssumedExits::default();
+        for (call, (never, closer)) in &self.nevers {
+            let callee = match closer {
+                Closer::Callee => true,
+                Closer::Site => false,
+                Closer::Branch => continue,
+            };
+            if let Some(block) = block_of(*call).filter(|_| closed.contains(call)) {
+                exits.sites.push(r2ssa::ExitSite {
+                    block,
+                    never: never.clone(),
+                    callee,
                 });
             }
-            let broken = parts
-                .last()
-                .is_some_and(|last| last.end() != addr || self.leaders.contains(&addr));
-            if broken {
-                blocks.push(finish(&mut parts, &ending, false));
-            }
-            let ends = closed.contains(&addr);
-            let ends_block = ends || ends_block(&instruction.terminator);
-            parts.push(instruction);
-            if ends_block {
-                blocks.push(finish(&mut parts, &ending, ends));
-            }
         }
-        if !parts.is_empty() {
-            blocks.push(finish(&mut parts, &ending, false));
-        }
-
-        // A call still closed ends its block; one a model closed takes the model's premises.
-        // A call to a "never" only a walk derived ends a block that names no exit (D255).
-        let mut exits = r2ssa::AssumedExits::default();
-        for (callee, never) in &self.assumed {
-            let calls = self
-                .gated
-                .get(callee)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            if !calls.is_empty() {
-                exits.premises.extend(never.premises.iter().copied());
-            }
-            if never.proof == crate::discovery::NeverProof::NoReturnReached {
-                let held = |(call, _): &(u64, u64)| {
-                    let after = blocks.partition_point(|block| block.lifted.addr <= *call);
-                    Some(blocks.get(after.checked_sub(1)?)?.lifted.addr)
-                };
-                exits.unproven.extend(calls.iter().filter_map(held));
-            } else {
-                exits.calls += calls.len();
-            }
-        }
-        exits.unproven.sort_unstable();
-        exits.unproven.dedup();
-        let body = Body {
-            entry: self.entry,
+        exits.sites.sort_unstable_by_key(|site| site.block);
+        exits.sites.dedup_by_key(|site| site.block);
+        Body {
+            entry,
             blocks,
             calls: self.calls.iter().copied().collect(),
             tail_calls: self.tail_calls.iter().copied().collect(),
             unresolved: self.unresolved.clone(),
             exits,
-        };
-        (body, decodes)
+        }
     }
+}
+
+/// One block among a walk's lifts in address order: `len` instructions from the `first`th, the
+/// first at `start`, and whether a closed call ends it.
+#[derive(Debug, Clone, Copy)]
+struct Span {
+    first: usize,
+    len: usize,
+    start: u64,
+    closed: bool,
+}
+
+/// A walk's blocks by place, no lift copied (D367): what a round indexes its regions over.
+#[derive(Debug)]
+pub struct Shape {
+    spans: Vec<Span>,
+    /// Each block's start and the addresses control goes to from it, in address order.
+    pub blocks: Vec<(u64, Vec<u64>)>,
 }
 
 /// Every address a load reads that the operations state as a constant.
@@ -1412,31 +1623,43 @@ fn transfer_of(
 }
 
 /// One block from the instructions collected for it, with its last instruction's successors, or none where that call is `closed`.
-fn finish(parts: &mut Vec<Instruction>, ending: &Ending<'_>, closed: bool) -> BodyBlock {
+/// Where control goes after the block of `parts`, `closed` where a call ends it closed.
+fn successors_after<P: std::borrow::Borrow<Instruction>>(
+    parts: &[P],
+    ending: &Ending<'_>,
+    closed: bool,
+) -> Vec<(AdvisorySuccessorKind, u64)> {
     let (link, dispatched) = (ending.link, ending.dispatched);
-    let start = parts[0].lifted.addr;
     let last = parts
         .last()
-        .expect("a block holds at least one instruction");
+        .expect("a block holds at least one instruction")
+        .borrow();
     let end = last.end();
     // A transfer the block returns from continues after it, whatever the
     // opcode was: the link register holding the address after the block is
     // what says so, and the walk followed it for the same reason.
     let returns = matches!(last.terminator, BlockTerminator::IndirectBranch)
         && link.is_some_and(|link| {
-            parts
-                .iter()
-                .any(|part| r2il::returns_to(&part.lifted.ops, end, link))
+            (parts.iter()).any(|part| r2il::returns_to(&part.borrow().lifted.ops, end, link))
         });
     let arms = dispatched
         .get(&last.lifted.addr)
         .map(Vec::as_slice)
         .unwrap_or_default();
-    let successors = match (closed, returns) {
+    match (closed, returns) {
         (true, _) => Vec::new(),
         (false, true) => vec![(AdvisorySuccessorKind::Fallthrough, end)],
         (false, false) => successors_of(&last.terminator, end, arms),
-    };
+    }
+}
+
+fn finish(parts: &mut Vec<Instruction>, ending: &Ending<'_>, closed: bool) -> BodyBlock {
+    let start = parts[0].lifted.addr;
+    let end = parts
+        .last()
+        .expect("a block holds at least one instruction")
+        .end();
+    let successors = successors_after(parts, ending, closed);
     let size = u32::try_from(end - start).unwrap_or(u32::MAX);
     let mut bytes = Vec::with_capacity(size as usize);
     for part in parts.iter() {
@@ -1514,6 +1737,47 @@ fn successors_of(
 mod transfer_tests {
     use super::*;
 
+    struct Nothing;
+
+    impl Program for Nothing {
+        fn read(&self, _vaddr: u64, _max: usize) -> Option<Vec<u8>> {
+            None
+        }
+        fn region(&self, _vaddr: u64) -> Option<Region> {
+            None
+        }
+        fn is_entry(&self, _vaddr: u64) -> bool {
+            false
+        }
+    }
+
+    /// `mov edi, 2` holds a constant a halting row reads; ARM's `moveq r0, #1` writes it only past
+    /// the instruction's own branch, so it holds nothing (D211).
+    #[test]
+    fn a_constant_written_past_a_branch_inside_the_instruction_is_not_held() {
+        let rdi = r2il::Varnode::register(0x38, 8);
+        let plain = |lifted: &mut R2ILBlock| {
+            lifted.push(r2il::R2ILOp::Copy {
+                dst: rdi.clone(),
+                src: r2il::Varnode::constant(2, 8),
+            });
+        };
+        let mut unconditional = R2ILBlock::new(0x1000, 5);
+        plain(&mut unconditional);
+        let mut handles = Handles::default();
+        handles.step(&unconditional, &Nothing);
+        assert_eq!(handles.held.len(), 1);
+        let mut predicated = R2ILBlock::new(0x1000, 4);
+        predicated.push(r2il::R2ILOp::CBranch {
+            target: r2il::Varnode::constant(0x1004, 8),
+            cond: r2il::Varnode::unique(0x10, 1),
+        });
+        plain(&mut predicated);
+        let mut handles = Handles::default();
+        handles.step(&predicated, &Nothing);
+        assert!(handles.held.is_empty(), "{:?}", handles.held);
+    }
+
     /// A conditional branch whose arm is another function's entry (`jne g`, ARM's `bne g`) is a
     /// tail jump at the operation naming that arm.
     #[test]
@@ -1533,7 +1797,7 @@ mod transfer_tests {
             lifted,
             bytes: Vec::new(),
             decode: None,
-            halts: false,
+            halts: None,
             terminator: BlockTerminator::ConditionalBranch {
                 true_target: 0x2000,
                 false_target: 0x1006,

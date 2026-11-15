@@ -387,7 +387,6 @@ fn source_declared_entry_parameter_flows_into_an_implicit_call_read() {
         r2source::ConventionId::Aapcs64,
         [SourceCallArgumentSpec::new(0, argument_storage)],
         false,
-        false,
         SourceCallResult::register(argument_storage),
     )
     .expect("exact callsite interface");
@@ -510,7 +509,6 @@ fn prepared_certificates_index_call_args_memory_and_returns() {
         true,
         r2source::ConventionId::Aapcs64,
         [SourceCallArgumentSpec::new(0, argument_storage)],
-        false,
         false,
         SourceCallResult::Void,
     )

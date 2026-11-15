@@ -1,0 +1,28 @@
+error: this hands out the function or its context, whose callee statements a kept build does not read again; expose the one fact a static phase needs
+  --> $DIR/build_facts.rs:75:5
+   |
+LL |     fn function(&self) -> &'a SSAFunction {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[deny(build_facts_reads_a_callee_fact)]` on by default
+
+error: `BuildFacts` reads `call_passes`, which no build's shape or source call site states; a callee's statement would reach a static phase (D289)
+  --> $DIR/build_facts.rs:60:9
+   |
+LL |         self.function.call_passes()
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: `BuildFacts` reads `call_reads`, which no build's shape or source call site states; a callee's statement would reach a static phase (D289)
+  --> $DIR/build_facts.rs:64:9
+   |
+LL |         self.context.call_reads(instruction)
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: `BuildFacts` reads `function_interface`, which no build's shape or source call site states; a callee's statement would reach a static phase (D289)
+  --> $DIR/build_facts.rs:68:37
+   |
+LL |         Some(self.context).and_then(SourceMachineContext::function_interface)
+   |                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: aborting due to 4 previous errors
+

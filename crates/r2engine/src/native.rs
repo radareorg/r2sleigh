@@ -61,6 +61,9 @@ pub trait Program: crate::body::Program {
         crate::EngineExecutionControl::default()
     }
 
+    /// Count a build its callees' statements moved, so it was built anew (D365, D399).
+    fn note_rebuilt(&self) {}
+
     /// Whether static data can live here: a section the program declares
     /// holds this address and answers
     /// [`holds_static_data`](crate::program::Section::holds_static_data).
@@ -98,6 +101,12 @@ pub trait Program: crate::body::Program {
         None
     }
 
+    /// Each result register with the low bytes the body at `entry` may read of it before writing
+    /// it, from its held register effect (D372); `None` where no row states them.
+    fn reads_at(&self, _entry: u64) -> Option<r2ssa::site_boundary::LaneReads> {
+        None
+    }
+
     /// The model a call to `callee` runs under where the program states it: a bound import's
     /// program default, a declared body's own; `None` runs it under `AnyCall` (RULING 1.6, 2.6).
     fn site_convention_at(&self, _callee: u64) -> Option<Arc<ConventionModel>> {
@@ -118,7 +127,7 @@ pub trait Program: crate::body::Program {
 
     /// What the closed world's `CallBoundary` decided of the result of the function at `entry`, from
     /// its open read's supply; none outside `aa` (doc/adr-result-side.md, section 3; D317).
-    fn closed_result(&self, _entry: u64) -> Option<r2source::SourceClosedResult> {
+    fn closed_result(&self, _entry: u64) -> Option<r2source::SourceClosedDecision> {
         None
     }
 
@@ -136,6 +145,22 @@ pub trait Program: crate::body::Program {
         read: &mut dyn FnMut() -> CalleeRead,
     ) -> Arc<CalleeRead> {
         Arc::new(read())
+    }
+
+    /// One callee read alone, against its imports (`CalleeReads`): the statement a caller build
+    /// asks for a call nothing else states, which never reads another statement (D376).
+    fn callee_statement(
+        &self,
+        _address: u64,
+        read: &mut dyn FnMut() -> CalleeRead,
+    ) -> Arc<CalleeRead> {
+        Arc::new(read())
+    }
+
+    /// What a call to the asked callee may write of its caller's stack, composed over the calls its
+    /// alone read leaves unstated (`IncomingWrites`, D441); none where no database holds them.
+    fn callee_writes(&self, _address: u64) -> Option<r2ssa::call_reads::StackWrites> {
+        None
     }
 }
 
@@ -735,6 +760,30 @@ pub(crate) fn dispatch_tables(
     tables
 }
 
+/// Each region's tables, read against what earlier rounds and regions read; a region the
+/// convention cannot seal leaves its dispatches unresolved, and a stopped refusal ends the rounds.
+fn read_regions(
+    native: &Native<'_>,
+    regions: impl Iterator<Item = Walked>,
+    held: &[NativePointerTable],
+) -> Result<Vec<NativePointerTable>, Tables> {
+    let mut fresh = Vec::new();
+    for region in regions {
+        let held = held.iter().chain(&fresh).cloned().collect::<Vec<_>>();
+        let read = native.read_tables(&region, &held, Restatement::default());
+        match &read.refusal {
+            Some(refusal) if refusal.stopped() => return Err(read),
+            Some(refusal) => r2il::refusal_evidence!(
+                "dispatch-table",
+                "{:#x}: a round's region: {refusal:?}",
+                region.body.entry
+            ),
+            None => fresh.extend(read.read),
+        }
+    }
+    Ok(fresh)
+}
+
 /// Every round of the body's tables past `first` (D285): one lifting walk continued through each
 /// round's tables, so a round lifts only what its arms newly reach (D367).
 pub(crate) fn later_tables(
@@ -754,6 +803,7 @@ pub(crate) fn later_tables(
         return first.clone();
     };
     let restatement = native.restatement(entry);
+    let name = native.name_of(entry);
     let mut tables = Tables {
         whole: true,
         ..first.clone()
@@ -772,25 +822,27 @@ pub(crate) fn later_tables(
             break;
         }
         stopped.extend(&new);
-        let through = native.walked(walk.body());
-        let mut fresh = Vec::new();
-        for region in (last.iter()).filter_map(|dispatch| through.region_after(*dispatch, &new)) {
-            let held = (tables.read.iter())
-                .chain(&fresh)
-                .cloned()
-                .collect::<Vec<_>>();
-            let read = native.read_tables(&region, &held, Restatement::default());
-            match &read.refusal {
-                Some(refusal) if refusal.stopped() => return read,
-                // A region the convention cannot seal leaves its dispatches unresolved.
-                Some(refusal) => r2il::refusal_evidence!(
-                    "dispatch-table",
-                    "{:#x}: a round's region: {refusal:?}",
-                    region.body.entry
-                ),
-                None => fresh.extend(read.read),
-            }
-        }
+        // One index of the round's blocks; each region copies only its own blocks' lifts.
+        let shape = walk.shape();
+        let index = Adjacency::of(
+            shape
+                .blocks
+                .iter()
+                .map(|(start, to)| (*start, to.iter().copied())),
+        );
+        let regions = last.iter().filter_map(|dispatch| {
+            let (at, keep) = index.region_after(*dispatch, &new)?;
+            let (body, copied) = walk.cut(&shape, at, &keep);
+            native.program.control().note_round_lifts(copied);
+            Some(Walked {
+                name: name.clone(),
+                body,
+            })
+        });
+        let fresh = match read_regions(&native, regions, &tables.read) {
+            Ok(fresh) => fresh,
+            Err(stopped) => return stopped,
+        };
         last = fresh.iter().map(|table| table.instruction).collect();
         tables.read.extend(fresh);
     }
@@ -844,8 +896,59 @@ pub(crate) fn convention_seal_of(
         &mut imports,
     );
     let restatement = native.restatement(body.entry);
-    // Sealed through the tables the walk followed, as Ge's whole-body seal reads them (D285).
-    native.convention_seal(&walked.root, &imports, restatement, &walked.tables)
+    // Built through the tables the walk followed, as Ge's whole-body seal reads them (D285).
+    let construction =
+        native.construct_convention(&walked.root, &imports, restatement, &walked.tables)?;
+    let asked = construction.unstated_rewriting_callees();
+    let stated = state_asked(
+        (&native, target, ptr_bits),
+        (body.entry, asked),
+        &mut imports,
+    );
+    let construction = match stated {
+        true => {
+            let premises = accepted_premises();
+            native.restate_against(&walked.root, construction, (&imports, &premises))?
+        }
+        false => construction,
+    };
+    construction
+        .seal(&native.control)
+        .map_err(NativeRefusal::of_preparation)
+}
+
+/// States each unstated callee whose writes kept a loaded place: reads alone (D376), writes composed
+/// (D441). Whether any did. O(asked) reads.
+fn state_asked(
+    (native, target, ptr_bits): (&Native<'_>, &NativeTarget<'_>, u32),
+    (entry, asked): (u64, BTreeSet<u64>),
+    callees: &mut Callees,
+) -> bool {
+    let program = native.program;
+    let asked = (asked.into_iter())
+        .filter(|address| *address != entry && !callees.interfaces.contains_key(address))
+        .filter(|address| !callees.writes.contains_key(address))
+        .filter(|address| program.import_at(*address).is_none())
+        .filter(|address| crate::stated::sealed_import(program, *address).is_none())
+        .collect::<Vec<_>>();
+    let mut stated = false;
+    for address in asked {
+        let read = program.callee_statement(address, &mut || {
+            read_callee(native, target, address, ptr_bits)
+        });
+        if let Some(interface) = &read.interface {
+            callees.interfaces.insert(address, interface.clone());
+        }
+        if let Ok(facts) = &read.facts {
+            callees.record_reads(address, facts, program);
+            stated = true;
+        }
+        if let Some(writes) = program.callee_writes(address) {
+            callees.writes.insert(address, writes);
+            stated = true;
+        }
+    }
+    stated
 }
 
 /// Where each dispatch goes, by the instruction making it.
@@ -1100,12 +1203,12 @@ pub(crate) fn declared_return(
     program: &dyn Program,
     address: u64,
 ) -> Option<crate::discovery::Return> {
-    use crate::discovery::Return;
+    use crate::discovery::{Citation, Never, Return};
     let declarations = target.declarations;
     // `DW_AT_noreturn` is a declaration with no premise (D255); folded bodies declared apart state none.
     let stated = (declarations.function_at(address)).is_some_and(|prototype| prototype.noreturn);
-    if stated && !declarations.is_contested(address) {
-        return Some(Return::declared(std::collections::BTreeSet::new()));
+    if let Some(citation) = Citation::debug_info(declarations, address).filter(|_| stated) {
+        return Some(Return::Never(Never::cited(citation)));
     }
     let Some(name) = program.import_at(address) else {
         // A Go function the runtime model says never returns, under the runtime's contract.
@@ -1114,13 +1217,16 @@ pub(crate) fn declared_return(
         return (go && accepted_premises().contains(&premise))
             .then(|| program.name_at(address))
             .flatten()
-            .filter(|name| r2abi::runtime::exits(name))
-            .map(|_| Return::declared(std::collections::BTreeSet::from([premise])));
+            .and_then(|name| Citation::runtime(&name))
+            .map(|citation| Return::Never(Never::cited(citation)));
     };
-    let row = target.imports.row(&name);
-    Some(match row.is_some_and(|row| row.noreturn) {
-        true => Return::declared(std::collections::BTreeSet::new()),
-        false => Return::Comes,
+    // Only a cited row proves a "never"; radare2's uncited one is a bound (D395).
+    Some(match target.imports.row(&name) {
+        Some(row) if row.noreturn => Return::Never(match Citation::of(row) {
+            Some(citation) => Never::cited(citation),
+            None => Never::uncited(),
+        }),
+        _ => Return::Comes,
     })
 }
 
@@ -1223,6 +1329,9 @@ fn declare_imports(
         let Some(name) = native.program.import_at(*address) else {
             continue;
         };
+        if let Some(import) = crate::declared::import_call(target) {
+            callees.imports.insert(*address, import);
+        }
         let Some(declared) = Declared::import(target, &name) else {
             callees
                 .unstated
@@ -1252,6 +1361,8 @@ fn declare_imports(
             signatures.push(declaration);
         }
         callees.interfaces.insert(*address, interface);
+        // A declaration states its arguments, the area the convention gives the callee.
+        (callees.writes).insert(*address, r2ssa::call_reads::StackWrites::arguments());
     }
     signatures
 }
@@ -1303,17 +1414,28 @@ fn prepare_callee(
 /// A resolved body, and the callees whose statement could prove what it leaves open.
 type Resolution = Arc<TrustedSsaArtifact>;
 
+/// A cycle member as its fixpoint assumes it: its interface, and the stack it writes (D377).
+pub(crate) type AssumedMember = (
+    u64,
+    r2source::SourceFunctionInterface,
+    Option<r2ssa::call_reads::StackWrites>,
+);
+
 /// What a body is resolved against beside its imports: its owners resolved, and the arities a
 /// cycle's least fixpoint assumes of its members (doc/adr-resolved-bodies.md, "Arity").
 #[derive(Clone, Copy, Default)]
 pub(crate) struct Stated<'a> {
     pub(crate) owners: &'a [(u64, Arc<CalleeRead>)],
-    pub(crate) assumed: &'a [(u64, r2source::SourceFunctionInterface)],
+    pub(crate) assumed: &'a [AssumedMember],
     /// Under `aa` a callee's result is its closed-world `CallBoundary`'s, as the root's is.
     pub(crate) world: crate::program::World,
+    /// Whether the build asks each callee its walk finds unstated and rewriting to state itself
+    /// (D376); an alone read (`CalleeReads`) asks none, so a statement reads no statement.
+    pub(crate) asks: bool,
 }
 
-/// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md).
+/// A callee resolved as a root is, against its imports' declarations alone (doc/adr-resolved-bodies.md):
+/// built once, restated where a callee it asks states itself (D376), then sealed.
 fn resolved_alone(
     native: &Native<'_>,
     target: &NativeTarget<'_>,
@@ -1327,15 +1449,40 @@ fn resolved_alone(
     declare_imports(native, target, &targets, ptr_bits, &mut imports);
     // Each resolved owner of its result or arity, read as any callee's statement.
     imports.state(stated.owners, native.program);
-    // An assumed member states its interface alone: nothing it preserves or reaches.
-    for (member, interface) in stated.assumed {
+    // An assumed member states its interface and what it writes: nothing it preserves or reaches.
+    for (member, interface, writes) in stated.assumed {
+        if let Some(writes) = writes {
+            imports.writes.insert(*member, writes.clone());
+        }
         imports.interfaces.insert(*member, interface.clone());
     }
-    let resolved = native.resolve(address, walked, &imports, stated.world);
-    resolved.map_err(|refusal| match refusal.stopped() {
+    let unreadable = |refusal: NativeRefusal| match refusal.stopped() {
         true => Unreadable::Stopped,
         false => Unreadable::NotPrepared,
-    })
+    };
+    let declared_root = native.declaration(address);
+    let mut construction =
+        (native.construct_first(walked, &imports, &declared_root)).map_err(unreadable)?;
+    if stated.asks {
+        let asked = construction.unstated_rewriting_callees();
+        if state_asked((native, target, ptr_bits), (address, asked), &mut imports) {
+            let premises = premises_reading(false);
+            let restated =
+                native.restate_against(&walked.root, construction, (&imports, &premises));
+            construction = restated.map_err(unreadable)?;
+        }
+    }
+    let seal = construction.seal(&native.control);
+    let first = First {
+        entry: address,
+        declared_root,
+        seal: seal.map_err(|why| unreadable(NativeRefusal::of_preparation(why)))?,
+        asked: None,
+    };
+    let finished = native.finish(walked, &imports, stated.world, first);
+    finished
+        .map(|(resolution, _)| resolution)
+        .map_err(unreadable)
 }
 
 /// What a callee's own body proves about its parameters, prepared as every caller prepares it.
@@ -1410,11 +1557,13 @@ pub(crate) struct Built {
     declared_root: Restatement,
 }
 
-/// A body's first seal, by its entry, and the declaration it was captured under.
+/// A body's first seal, by its entry, and the declaration and closed decision it was captured
+/// under; `asked` is `None` where the decision was not asked before the seal.
 struct First {
     entry: u64,
     declared_root: Restatement,
     seal: r2ssa::TrustedSeal,
+    asked: Option<Option<r2source::SourceClosedDecision>>,
 }
 
 impl Built {
@@ -1466,30 +1615,37 @@ fn unreadable(refusal: &NativeRefusal) -> Unreadable {
     }
 }
 
-/// `callee_read` against `owners` from a build their statements update, and whether its answer
-/// is another seal than that build's (doc/adr-callee-builds.md).
+/// `callee_read` against `owners` from a build their statements update (doc/adr-callee-builds.md).
+pub(crate) struct BuiltRead {
+    pub(crate) read: CalleeRead,
+    /// Its answer is another seal than that build's.
+    pub(crate) again: bool,
+}
+
 pub(crate) fn built_read(
     target: &NativeTarget<'_>,
     program: &dyn Program,
     walked: &Walk,
     built: Built,
     owners: &[(u64, Arc<CalleeRead>)],
-) -> (CalleeRead, bool) {
+) -> BuiltRead {
     let Ok(native) = Native::over(target, program) else {
-        let unread = CalleeRead {
-            interface: None,
-            facts: Err(Unreadable::NotPrepared),
+        return BuiltRead {
+            read: CalleeRead {
+                interface: None,
+                facts: Err(Unreadable::NotPrepared),
+            },
+            again: false,
         };
-        return (unread, false);
     };
     let resolved = crate::isolation::isolated(|| native.resolve_built(walked, built, owners));
     let resolved = resolved.map(|resolved| resolved.map_err(|refusal| unreadable(&refusal)));
     let resolved = resolved.unwrap_or_else(|panicked| Err(Unreadable::Panicked(panicked)));
-    let again = resolved.as_ref().is_ok_and(|(_, again)| *again);
-    (
-        read_of(&native, resolved.map(|(artifact, _)| artifact)),
+    let again = (resolved.as_ref()).is_ok_and(|(_, again)| *again);
+    BuiltRead {
+        read: read_of(&native, resolved.map(|(artifact, _)| artifact)),
         again,
-    )
+    }
 }
 
 /// The declarations of the imports a resolved body calls directly. O(call sites x log rows).
@@ -1588,6 +1744,17 @@ fn read_callees(
         match &read.facts {
             Ok(derived) => {
                 callees.record(*address, derived, native.program);
+                // Under `aa` a callee whose read bounds no write states them composed (D441).
+                if own
+                    && !callees.writes.contains_key(address)
+                    && let Some(writes) = native.program.callee_writes(*address)
+                {
+                    callees.writes.insert(*address, writes);
+                }
+                // The root reads every callee in one round, so the bound moves no kept build (D372).
+                if let Some(reads) = native.program.reads_at(*address) {
+                    callees.lane_reads.insert(*address, reads);
+                }
                 facts.push(derived.clone());
             }
             Err(reason) => unread.push(Unread {
@@ -1730,8 +1897,14 @@ struct Callees {
     /// What each callee reaches through each pointer it is handed, which is
     /// what makes the bytes one callee covers one object in the caller.
     reach: BTreeMap<u64, BTreeMap<usize, ArgumentReach>>,
+    /// What each stated callee may write of its caller's stack; one absent may write any (D377).
+    writes: BTreeMap<u64, r2ssa::call_reads::StackWrites>,
+    /// What each walked callee may read of the result registers; one absent reads any (D372).
+    lane_reads: r2ssa::CalleeLaneReads,
     /// The imports whose declaration states no interface: they have no body to read one off.
     unstated: BTreeMap<u64, r2ssa::UnstatedImport>,
+    /// The imports called, each a global function its convention's calling sequence binds (D431).
+    imports: r2ssa::CalleeImports,
     /// The convention each call runs under where the program states it (`site_convention`).
     conventions: r2ssa::SiteConventions,
 }
@@ -1748,10 +1921,13 @@ impl Callees {
             interfaces: self.interfaces.clone(),
             preserved: self.preserved.clone(),
             reach: self.reach.clone(),
+            writes: self.writes.clone(),
+            lane_reads: self.lane_reads.clone(),
             library,
             reentering,
             exits,
             unstated_imports: self.unstated.clone(),
+            imports: self.imports.clone(),
             conventions: self.conventions.clone(),
         }
     }
@@ -1767,6 +1943,15 @@ impl Callees {
 
     /// One callee's statement; what it keeps is its register effect's, the one owner (D320).
     fn record(&mut self, address: u64, facts: &CalleeFacts, program: &dyn Program) {
+        self.record_reads(address, facts, program);
+        match facts.summary().incoming_writes() {
+            Some(writes) => _ = self.writes.insert(address, writes.clone()),
+            None => _ = self.writes.remove(&address),
+        }
+    }
+
+    /// One callee's statement but its writes, which an asked callee's `IncomingWrites` states.
+    fn record_reads(&mut self, address: u64, facts: &CalleeFacts, program: &dyn Program) {
         self.interfaces.insert(address, facts.interface().clone());
         self.preserved
             .insert(address, program.kept_at(address).unwrap_or_default());
@@ -1852,31 +2037,23 @@ impl Walked {
     /// The same walk cut to the blocks an unresolved indirect branch is reachable from: a value there is built
     /// from the paths that arrive at it, and a kept block's edge to a cut one leaves the function. O(blocks + edges).
     fn reaching_unresolved(&self) -> Self {
-        let stops = self.indirect_stops().filter_map(|stop| self.held(stop));
-        let (keep, _) = self.reaching(stops.collect(), None);
+        self.reaching(self.indirect_stops())
+    }
+
+    /// The blocks on a path from the entry to one of the instructions `at`; the whole body where
+    /// none is held. O(blocks + edges).
+    fn reaching(&self, at: impl Iterator<Item = u64>) -> Self {
+        let blocks = self.body.blocks.iter().map(|block| {
+            let successors = block.successors.iter().map(|(_, to)| *to);
+            (block.lifted.addr, successors)
+        });
+        let index = Adjacency::of(blocks);
+        let stops = at.filter_map(|stop| index.held(stop));
+        let keep = index.reaching(stops.collect(), None);
         match keep.contains(&true) {
             true => self.cut(self.body.entry, &keep),
             false => self.clone(),
         }
-    }
-
-    /// The region after the dispatch at `dispatch` (D285): the blocks it reaches that reach one of
-    /// `stops`, less any block entered from outside, entered at the dispatch's block. O(blocks + edges).
-    fn region_after(&self, dispatch: u64, stops: &BTreeSet<u64>) -> Option<Self> {
-        let at = self.held(dispatch)?;
-        let stops = stops.iter().filter_map(|stop| self.held(*stop));
-        let (keep, preceding) = self.reaching(stops.clone().collect(), Some(at));
-        let keep = closed_under_entry(keep, &preceding, at);
-        let mut kept = stops.filter(|block| keep[*block]);
-        kept.next()
-            .map(|_| self.cut(self.body.blocks[at].lifted.addr, &keep))
-    }
-
-    /// The block holding `address`.
-    fn held(&self, address: u64) -> Option<usize> {
-        let blocks = &self.body.blocks;
-        let after = blocks.partition_point(|block| block.lifted.addr <= address);
-        after.checked_sub(1)
     }
 
     fn indirect_stops(&self) -> impl Iterator<Item = u64> + '_ {
@@ -1884,45 +2061,6 @@ impl Walked {
         let indirect =
             indirect.filter(|stop| stop.reason == crate::body::UnresolvedReason::IndirectBranch);
         indirect.map(|stop| stop.addr)
-    }
-
-    /// Each block that reaches one of the `stops` blocks and, given `from`, is reachable from it; and
-    /// each block's predecessors.
-    fn reaching(&self, stops: Vec<usize>, from: Option<usize>) -> (Vec<bool>, Vec<Vec<usize>>) {
-        let blocks = &self.body.blocks;
-        let block_at = |address: u64| {
-            blocks
-                .binary_search_by_key(&address, |block| block.lifted.addr)
-                .ok()
-        };
-        let succeeding = (blocks.iter())
-            .map(|block| (block.successors.iter()).filter_map(|(_, target)| block_at(*target)))
-            .map(Iterator::collect)
-            .collect::<Vec<Vec<usize>>>();
-        let mut preceding = vec![Vec::new(); blocks.len()];
-        for (from, targets) in succeeding.iter().enumerate() {
-            for to in targets {
-                preceding[*to].push(from);
-            }
-        }
-        let visit = |starts: Vec<usize>, next: &[Vec<usize>]| {
-            let mut seen = vec![false; blocks.len()];
-            let mut pending = starts;
-            while let Some(at) = pending.pop() {
-                if !std::mem::replace(&mut seen[at], true) {
-                    pending.extend(next[at].iter().copied());
-                }
-            }
-            seen
-        };
-        let mut keep = visit(stops, &preceding);
-        if let Some(from) = from {
-            let reached = visit(vec![from], &succeeding);
-            keep.iter_mut()
-                .zip(reached)
-                .for_each(|(keep, reached)| *keep &= reached);
-        }
-        (keep, preceding)
     }
 
     /// The same walk holding only the `keep` blocks, entered at `entry`.
@@ -1945,27 +2083,91 @@ impl Walked {
     }
 }
 
-/// `keep` less every block but `entry` entered from outside it, and what those reach, since the
-/// seal never sees such a path's values. A removal-only worklist: O(blocks + edges).
-fn closed_under_entry(mut keep: Vec<bool>, preceding: &[Vec<usize>], entry: usize) -> Vec<bool> {
-    let mut succeeding = vec![Vec::new(); keep.len()];
-    for (to, from) in preceding.iter().enumerate() {
-        for from in from {
-            succeeding[*from].push(to);
+/// A walk's blocks by start, in address order, with each one's successors and predecessors:
+/// indexed once per walk or round, so each reach over it is O(blocks + edges) (D367).
+struct Adjacency {
+    starts: Vec<u64>,
+    succeeding: Vec<Vec<usize>>,
+    preceding: Vec<Vec<usize>>,
+}
+
+impl Adjacency {
+    /// Each block's start, ascending, and the addresses control goes to from it; an address that
+    /// starts no block is no edge. O((blocks + edges) log blocks).
+    fn of<T: Iterator<Item = u64>>(blocks: impl Iterator<Item = (u64, T)>) -> Self {
+        let (starts, targets): (Vec<u64>, Vec<T>) = blocks.unzip();
+        let block_at = |address: u64| starts.binary_search(&address).ok();
+        let succeeding = (targets.into_iter())
+            .map(|to| to.filter_map(block_at).collect())
+            .collect::<Vec<Vec<usize>>>();
+        let mut preceding = vec![Vec::new(); starts.len()];
+        for (from, targets) in succeeding.iter().enumerate() {
+            for to in targets {
+                preceding[*to].push(from);
+            }
+        }
+        Self {
+            starts,
+            succeeding,
+            preceding,
         }
     }
-    let entered = |keep: &[bool], at: usize| preceding[at].iter().any(|from| !keep[*from]);
-    let mut pending = (0..keep.len())
-        .filter(|at| keep[*at] && *at != entry && entered(&keep, *at))
-        .collect::<Vec<_>>();
-    while let Some(at) = pending.pop() {
-        if !std::mem::replace(&mut keep[at], false) {
-            continue;
-        }
-        let next = succeeding[at].iter().copied();
-        pending.extend(next.filter(|to| keep[*to] && *to != entry));
+
+    /// The block holding `address`.
+    fn held(&self, address: u64) -> Option<usize> {
+        let after = self.starts.partition_point(|start| *start <= address);
+        after.checked_sub(1)
     }
-    keep
+
+    /// Each block that reaches one of the `stops` blocks and, given `from`, is reachable from it.
+    fn reaching(&self, stops: Vec<usize>, from: Option<usize>) -> Vec<bool> {
+        let visit = |starts: Vec<usize>, next: &[Vec<usize>]| {
+            let mut seen = vec![false; self.starts.len()];
+            let mut pending = starts;
+            while let Some(at) = pending.pop() {
+                if !std::mem::replace(&mut seen[at], true) {
+                    pending.extend(next[at].iter().copied());
+                }
+            }
+            seen
+        };
+        let mut keep = visit(stops, &self.preceding);
+        if let Some(from) = from {
+            let reached = visit(vec![from], &self.succeeding);
+            keep.iter_mut()
+                .zip(reached)
+                .for_each(|(keep, reached)| *keep &= reached);
+        }
+        keep
+    }
+
+    /// The region after `dispatch` (D285): its entry and the blocks it reaches that reach one of
+    /// `stops`, less any entered from outside. O(blocks + edges).
+    fn region_after(&self, dispatch: u64, stops: &BTreeSet<u64>) -> Option<(u64, Vec<bool>)> {
+        let at = self.held(dispatch)?;
+        let stops = stops.iter().filter_map(|stop| self.held(*stop));
+        let keep = self.reaching(stops.clone().collect(), Some(at));
+        let keep = self.closed_under_entry(keep, at);
+        let mut kept = stops.filter(|block| keep[*block]);
+        kept.next().map(|_| (self.starts[at], keep))
+    }
+
+    /// `keep` less every block but `entry` entered from outside it, and what those reach, since the
+    /// seal never sees such a path's values. A removal-only worklist: O(blocks + edges).
+    fn closed_under_entry(&self, mut keep: Vec<bool>, entry: usize) -> Vec<bool> {
+        let entered = |keep: &[bool], at: usize| self.preceding[at].iter().any(|from| !keep[*from]);
+        let mut pending = (0..keep.len())
+            .filter(|at| keep[*at] && *at != entry && entered(&keep, *at))
+            .collect::<Vec<_>>();
+        while let Some(at) = pending.pop() {
+            if !std::mem::replace(&mut keep[at], false) {
+                continue;
+            }
+            let next = self.succeeding[at].iter().copied();
+            pending.extend(next.filter(|to| keep[*to] && *to != entry));
+        }
+        keep
+    }
 }
 
 /// The parameter of import `name` placed at `storage` whose cited row types it a pointer to code,
@@ -2021,11 +2223,15 @@ impl<'a> Native<'a> {
         world: crate::program::World,
     ) -> Result<Resolution, NativeRefusal> {
         let declared_root = self.declaration(entry);
-        let seal = self.seal_first(walk, callees, &declared_root, None)?;
+        // The decision is asked before the first seal, so a decided body seals once (D442).
+        let asked =
+            (world == crate::program::World::Closed).then(|| self.program.closed_result(entry));
+        let seal = self.seal_first(walk, callees, &declared_root, asked.flatten())?;
         let first = First {
             entry,
             declared_root,
             seal,
+            asked,
         };
         Ok(self.finish(walk, callees, world, first)?.0)
     }
@@ -2046,26 +2252,41 @@ impl<'a> Native<'a> {
         } = built;
         if !owners.is_empty() {
             imports.state(owners, self.program);
-            let evidence = self.evidence(&walk.root, &imports);
-            let arch = Some(self.target.arch);
-            let restated =
-                construction.restated(arch, &self.control, &evidence, &premises_reading(false));
-            let (restated, kept) = restated.map_err(NativeRefusal::of_preparation)?;
-            r2il::refusal_evidence!(
-                "restated",
-                "{address:#x}: build {} against {} owners",
-                if kept { "kept" } else { "rebuilt" },
-                owners.len()
-            );
-            construction = restated;
+            let premises = premises_reading(false);
+            construction = self.restate_against(&walk.root, construction, (&imports, &premises))?;
         }
         let seal = construction.seal(&self.control);
         let first = First {
             entry: address,
             declared_root,
             seal: seal.map_err(NativeRefusal::of_preparation)?,
+            asked: None,
         };
         self.finish(walk, &imports, crate::program::World::Open, first)
+    }
+
+    /// A construction against `callees`' statements: its build kept where they state what it read
+    /// the same (`BuildKey`), else built anew from the same lift and counted (D365, D399).
+    fn restate_against(
+        &self,
+        walked: &Walked,
+        construction: r2ssa::TrustedConstruction,
+        (callees, premises): (&Callees, &BTreeSet<r2source::Premise>),
+    ) -> Result<r2ssa::TrustedConstruction, NativeRefusal> {
+        let evidence = self.evidence(walked, callees);
+        let arch = Some(self.target.arch);
+        let restated = construction.restated(arch, &self.control, &evidence, premises);
+        let (restated, kept) = restated.map_err(NativeRefusal::of_preparation)?;
+        r2il::refusal_evidence!(
+            "restated",
+            "{:#x}: build {}",
+            walked.body.entry,
+            if kept { "kept" } else { "rebuilt" }
+        );
+        if !kept {
+            self.program.note_rebuilt();
+        }
+        Ok(restated)
     }
 
     /// What a body's first build captures: its declaration where it states an interface or the
@@ -2073,7 +2294,7 @@ impl<'a> Native<'a> {
     fn first_capture<'t>(
         walk: &'t Walk,
         declared_root: &Restatement,
-        closed_result: Option<r2source::SourceClosedResult>,
+        closed_result: Option<r2source::SourceClosedDecision>,
     ) -> Capture<'t> {
         let (tables, calls) = (&walk.tables[..], &walk.calls[..]);
         let (restatement, tables) = match (declared_root.interface.is_some(), tables.is_empty()) {
@@ -2095,7 +2316,7 @@ impl<'a> Native<'a> {
         walk: &Walk,
         callees: &Callees,
         declared_root: &Restatement,
-        reads: Option<r2source::SourceClosedResult>,
+        reads: Option<r2source::SourceClosedDecision>,
     ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Self::first_capture(walk, declared_root, reads);
         self.seal_captured(&walk.root, callees, capture)
@@ -2124,7 +2345,7 @@ impl<'a> Native<'a> {
     /// The callees' evidence as a capture of this body states it.
     fn evidence(&self, walked: &Walked, callees: &Callees) -> r2ssa::CalleeEvidence {
         let calls = call_sites(&walked.body, self.program);
-        let library = library_evidence(self.program, &calls);
+        let library = library_evidence(self.program, self.target.imports, &calls);
         callees.evidence(library, reentering_calls(&calls), walked.body.exits.clone())
     }
 
@@ -2141,17 +2362,19 @@ impl<'a> Native<'a> {
             entry,
             declared_root,
             seal: mut first,
+            asked,
         } = first;
         let (root, tables, calls) = (&walk.root, &walk.tables[..], &walk.calls[..]);
         // The binary's debug information declares the body as a library declares an import.
         let declared_prototype =
             Declared::body(self.target, entry).map(|declared| declared.prototype);
         // The closed world's held decision, from the open read's supply (doc/adr-result-side.md, D317).
+        // A body with no open interface takes none; a seal under another decision is built again.
         let open = first.machine_context().function_interface().is_some();
         let reads = (world == crate::program::World::Closed && open)
-            .then(|| self.program.closed_result(entry))
+            .then(|| asked.unwrap_or_else(|| self.program.closed_result(entry)))
             .flatten();
-        if reads.is_some() {
+        if reads != asked.flatten() {
             drop(first);
             first = self.seal_first(walk, callees, &declared_root, reads)?;
         }
@@ -2291,6 +2514,7 @@ impl<'a> Native<'a> {
             ptr_bits,
             &mut imports,
         );
+        self.program.control().note_table_seal();
         let read = crate::isolation::isolated(|| {
             let seal = self.convention_seal(region, &imports, restatement, held)?;
             Ok(seal.dispatch_table_reads())
@@ -2298,15 +2522,24 @@ impl<'a> Native<'a> {
         read.unwrap_or_else(|panicked| Err(panicked.into()))
     }
 
-    /// Whether the whole body walked through `tables` reads each of them as its round did: a later
-    /// round can add an edge into a region any earlier round sealed, the first included. One seal.
+    /// Whether the body walked through `tables` reads each as its round did: the whole body captures,
+    /// and one seal of the blocks on a path to a tabled dispatch, no other block being on one, reads them (D367).
     fn rounds_hold(
         &self,
         whole: &Walked,
         tables: &[NativePointerTable],
         restatement: Restatement,
     ) -> Result<bool, NativeRefusal> {
-        let reads = self.table_reads(whole, tables, restatement)?;
+        let capture = Capture {
+            extra_literals: Vec::new(),
+            restatement: restatement.clone(),
+            tables,
+            calls: &[],
+            closed_result: None,
+        };
+        drop(self.snapshot(whole, call_sites(&whole.body, self.program), capture)?);
+        let cut = whole.reaching(tables.iter().map(|table| table.instruction));
+        let reads = self.table_reads(&cut, tables, restatement)?;
         let same = |table: &NativePointerTable, read: &r2ssa::indirect::DispatchTableRead| {
             read.instruction == Some(table.instruction)
                 && !read.call
@@ -2345,12 +2578,14 @@ impl<'a> Native<'a> {
     /// One walked body, with what the program calls it.
     fn walked(&self, body: crate::body::Body) -> Walked {
         Walked {
-            name: self
-                .program
-                .name_at(body.entry)
-                .unwrap_or_else(|| r2source::unnamed_function(body.entry)),
+            name: self.name_of(body.entry),
             body,
         }
+    }
+
+    /// What the program calls the function at `entry`.
+    fn name_of(&self, entry: u64) -> String {
+        (self.program.name_at(entry)).unwrap_or_else(|| r2source::unnamed_function(entry))
     }
 
     /// The tables the dispatches in a prepared body read, fetched.
@@ -2626,7 +2861,7 @@ impl<'a> Native<'a> {
         extra_literals: Vec<(u64, String)>,
         restatement: Restatement,
         (tables, calls): (&[NativePointerTable], &[NativePointerTable]),
-        closed_result: Option<r2source::SourceClosedResult>,
+        closed_result: Option<r2source::SourceClosedDecision>,
     ) -> Result<r2ssa::TrustedSeal, NativeRefusal> {
         let capture = Capture {
             extra_literals,
@@ -2668,6 +2903,32 @@ impl<'a> Native<'a> {
             .map_err(NativeRefusal::of_preparation)
     }
 
+    /// One body captured through `tables` and built against the convention alone, before its seal.
+    fn construct_convention(
+        &self,
+        walked: &Walked,
+        callees: &Callees,
+        restatement: Restatement,
+        tables: &[NativePointerTable],
+    ) -> Result<r2ssa::TrustedConstruction, NativeRefusal> {
+        let capture = Capture {
+            extra_literals: Vec::new(),
+            restatement,
+            tables,
+            calls: &[],
+            closed_result: None,
+        };
+        let (lifted, evidence) = self.lifted(walked, callees, capture)?;
+        TrustedSsaArtifact::construct_against_convention(
+            lifted,
+            Some(self.target.arch),
+            &self.control,
+            &evidence,
+            &accepted_premises(),
+        )
+        .map_err(NativeRefusal::of_preparation)
+    }
+
     /// One body captured through `tables`, built against the convention alone and sealed: what
     /// values inside it read, which no interface decides.
     fn convention_seal(
@@ -2702,6 +2963,23 @@ impl<'a> Native<'a> {
         callees: &Callees,
         capture: Capture<'_>,
     ) -> Result<(r2sleigh_lift::TrustedLiftedFunction, r2ssa::CalleeEvidence), NativeRefusal> {
+        let calls = call_sites(&walked.body, self.program);
+        let library = library_evidence(self.program, self.target.imports, &calls);
+        let reentering = reentering_calls(&calls);
+        let snapshot = self.snapshot(walked, calls, capture)?;
+        let lifted = Disassembler::lift_owned_function(snapshot)
+            .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
+        let exits = walked.body.exits.clone();
+        Ok((lifted, callees.evidence(library, reentering, exits)))
+    }
+
+    /// One walked body captured against what is stated about it: the function image r2source admits.
+    fn snapshot(
+        &self,
+        walked: &Walked,
+        calls: Vec<NativeCall>,
+        capture: Capture<'_>,
+    ) -> Result<r2source::OwnedFunctionSnapshot, NativeRefusal> {
         // A body the walk cut at its budget is no function's whole body: analysis refuses it, named.
         let cut = (walked.body.unresolved.iter())
             .any(|stop| stop.reason == crate::body::UnresolvedReason::Budget);
@@ -2760,24 +3038,22 @@ impl<'a> Native<'a> {
             let slots = interface.stack_slots().to_vec();
             restate(&interface, slots, identity.to_vec())
         });
-        let calls = call_sites(&walked.body, self.program);
-        let library = library_evidence(self.program, &calls);
-        let reentering = reentering_calls(&calls);
-        let exits = walked.body.exits.clone();
         let (data_symbols, data_types) = self.data_symbols(&walked.body);
+        let mut string_literals = self.literals(&walked.body);
+        string_literals.extend(extra_literals);
+        string_literals.sort_by_key(|(address, _)| *address);
+        string_literals.dedup_by_key(|(address, _)| *address);
+        let (loads, stores) = literal_accesses(&walked.body);
+        let written = written_ranges(stores);
+        let immutable_literals = self.immutable_literals(&string_literals, &written);
         let function = NativeFunction {
             address: walked.body.entry,
             name: walked.name.clone(),
             blocks,
             calls,
-            string_literals: {
-                let mut literals = self.literals(&walked.body);
-                literals.extend(extra_literals);
-                literals.sort_by_key(|(address, _)| *address);
-                literals.dedup_by_key(|(address, _)| *address);
-                literals
-            },
-            read_only: self.read_only(&walked.body),
+            string_literals,
+            immutable_literals,
+            read_only: self.read_only(loads, &written),
             data_symbols,
             data_types,
             code_pointer_tables: (tables.iter().chain(call_tables))
@@ -2804,11 +3080,7 @@ impl<'a> Native<'a> {
             member_calls,
         };
 
-        let snapshot =
-            r2source::native::capture(&self.machine, function).map_err(NativeRefusal::Capture)?;
-        let lifted = Disassembler::lift_owned_function(snapshot)
-            .map_err(|error| NativeRefusal::Lift(error.to_string()))?;
-        Ok((lifted, callees.evidence(library, reentering, exits)))
+        r2source::native::capture(&self.machine, function).map_err(NativeRefusal::Capture)
     }
 }
 
@@ -2819,7 +3091,7 @@ struct Capture<'t> {
     restatement: Restatement,
     tables: &'t [NativePointerTable],
     calls: &'t [NativePointerTable],
-    closed_result: Option<r2source::SourceClosedResult>,
+    closed_result: Option<r2source::SourceClosedDecision>,
 }
 
 /// Every function this body reaches by a call, tail jump, loaded slot or folded target, each once
@@ -2862,10 +3134,11 @@ fn call_sites(body: &crate::body::Body, program: &dyn Program) -> Vec<NativeCall
     sites
 }
 
-/// The library model of each import a body calls, by the name the container
-/// binds it with; a local function is described by its body, not its name.
+/// The summary each import a body calls states through the row it binds (D383); an unbound import,
+/// or one whose row states no effects, has none.
 fn library_evidence(
     program: &dyn Program,
+    imports: &crate::imports::Imports,
     calls: &[NativeCall],
 ) -> BTreeMap<u64, r2ssa::interproc::FunctionSemanticSummary> {
     calls
@@ -2873,10 +3146,8 @@ fn library_evidence(
         .filter(|call| call.linkage == r2source::AdvisoryCalleeLinkage::Imported)
         .filter_map(|call| {
             let name = program.import_at(call.target)?;
-            Some((
-                call.target,
-                crate::library::import_summary(call.target, &name)?,
-            ))
+            let summary = crate::library::import_summary(call.target, &name, imports)?;
+            Some((call.target, summary))
         })
         .collect()
 }
@@ -2911,23 +3182,38 @@ impl Native<'_> {
 
     /// The bytes at each literal address the body loads from, where the program never writes
     /// them and the loader does not (`TableBytes::ReadOnly`): what every such load reads (P5).
-    fn read_only(&self, body: &crate::body::Body) -> Vec<(u64, Vec<u8>)> {
-        let (loads, stores) = literal_accesses(body);
+    fn read_only(
+        &self,
+        loads: BTreeMap<u64, usize>,
+        written: &[std::ops::Range<u64>],
+    ) -> Vec<(u64, Vec<u8>)> {
         loads
             .into_iter()
             .filter_map(|(address, size)| {
                 let bytes = self.program.read(address, size)?;
                 let range = address..address.checked_add(bytes.len() as u64)?;
                 // A body that stores there says the container's statement is not this run's.
-                let stored = stores
-                    .iter()
-                    .any(|written| written.start < range.end && range.start < written.end);
                 (bytes.len() == size
-                    && !stored
+                    && !stored(written, &range)
                     && TableBytes::of(self.program, range) == TableBytes::ReadOnly)
                     .then_some((address, bytes))
             })
             .collect()
+    }
+
+    /// Each of `literals` whose text and terminator are mapped read-only, untouched by the loader
+    /// and by the body's own stores: a format a call reads as the file holds it (D409). Ascending.
+    fn immutable_literals(
+        &self,
+        literals: &[(u64, String)],
+        written: &[std::ops::Range<u64>],
+    ) -> Vec<u64> {
+        let immutable = literals.iter().filter(|(address, text)| {
+            let end = address.saturating_add(text.len() as u64 + 1);
+            !stored(written, &(*address..end))
+                && immutable_text_at(self.program, *address).as_ref() == Some(text)
+        });
+        immutable.map(|(address, _)| *address).collect()
     }
 
     /// The named program data this body points at, each with the type the
@@ -3128,6 +3414,26 @@ fn literal_accesses(body: &crate::body::Body) -> (BTreeMap<u64, usize>, Vec<std:
         }
     }
     (loads, stores)
+}
+
+/// The body's literal stores as disjoint ranges ascending, touching ones joined: O(S log S) (D437).
+fn written_ranges(mut stores: Vec<std::ops::Range<u64>>) -> Vec<std::ops::Range<u64>> {
+    stores.sort_unstable_by_key(|range| range.start);
+    let mut written: Vec<std::ops::Range<u64>> = Vec::with_capacity(stores.len());
+    for range in stores {
+        match written.last_mut() {
+            Some(last) if range.start <= last.end => last.end = last.end.max(range.end),
+            _ => written.push(range),
+        }
+    }
+    written
+}
+
+/// Whether a store in `written` (from `written_ranges`) meets `range`: the last range starting
+/// before `range` ends has the greatest end among them. O(log S).
+fn stored(written: &[std::ops::Range<u64>], range: &std::ops::Range<u64>) -> bool {
+    let before = written.partition_point(|store| store.start < range.end);
+    before > 0 && written[before - 1].end > range.start
 }
 
 /// State the machine from the compiler specification and the function's convention model.
@@ -3617,7 +3923,7 @@ fn forms(
             offset_width: area.offset_width,
             stack_field: area.stack_field,
         }),
-        count_register: row.count_register.and_then(|name| at.resolve(name.0)),
+        count_register: (row.count_register).and_then(|count| at.resolve(count.register.0)),
         entry_stack: row.entry_stack.map(|stack| r2source::SourceEntryStack {
             alignment: stack.alignment,
             residue: stack.residue,
@@ -3628,14 +3934,18 @@ fn forms(
             _ => None,
         }),
         stack_bound: guard(row.stack_bound.as_ref()),
-        // The row says the C library checks a load-config cookie; the container says where.
-        security_cookie: matches!(guard_row, Some(r2abi::GuardRow::LoadConfigCookie))
-            .then_some(guards.cookie)
-            .flatten()
-            .map(|address| r2source::SourceSecurityCookie {
-                address,
-                width: bits / 8,
-            }),
+        // The row says the C library checks a load-config cookie in a register; the container says where.
+        security_cookie: match guard_row {
+            Some(r2abi::GuardRow::LoadConfigCookie(check)) => {
+                guards.cookie.zip(at.resolve(check.argument.0))
+            }
+            _ => None,
+        }
+        .map(|(address, argument)| r2source::SourceSecurityCookie {
+            address,
+            width: bits / 8,
+            argument,
+        }),
         // The row names the library's global; only the container's binding places it.
         linked_guard: matches!(guard_row, Some(r2abi::GuardRow::LinkedGlobal(_)))
             .then_some(guards.linked)

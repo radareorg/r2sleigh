@@ -148,8 +148,19 @@ pub struct RecoveredStackParameter {
     offset: i64,
     slot_bytes: u32,
     observed_bytes: u32,
-    /// Unread below a read slot: a parameter by the convention's order alone.
-    hole: bool,
+    read: StackSlotRead,
+}
+
+/// What the body proves about the reads of one argument-area slot below the highest observed one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StackSlotRead {
+    /// A read of it reaches a program observation.
+    Observed,
+    /// A read at its exact place may reach an operation no rule proves, such as a call of unproven
+    /// arity: neither observed nor proven unread (D434).
+    Unproven,
+    /// No read reaches it: a parameter by the convention's order alone.
+    Unread,
 }
 
 impl RecoveredStackParameter {
@@ -171,14 +182,19 @@ impl RecoveredStackParameter {
 
     /// Whether no read reaches the slot: a hole below the highest one read.
     pub const fn is_hole(self) -> bool {
-        self.hole
+        matches!(self.read, StackSlotRead::Unread)
+    }
+
+    /// What the body proves about the slot's reads.
+    pub const fn read(self) -> StackSlotRead {
+        self.read
     }
 
     /// `Convention` for a hole, else `Decoded`.
     pub const fn basis(self) -> r2source::Basis {
-        match self.hole {
-            true => r2source::Basis::Convention,
-            false => r2source::Basis::Decoded,
+        match self.read {
+            StackSlotRead::Unread => r2source::Basis::Convention,
+            StackSlotRead::Observed | StackSlotRead::Unproven => r2source::Basis::Decoded,
         }
     }
 }
@@ -212,8 +228,8 @@ pub struct RecoveredInterface {
     variadic: bool,
     /// The parameter a tail-consuming loop is bounded by, where the body proves one (`tail_count`).
     tail_count: Option<r2source::SourceTailCount>,
-    /// What the closed world decided and this recovery applied, which rests on `Premise::ClosedWorld`.
-    closed: Option<r2source::SourceClosedResult>,
+    /// What the closed world decided and this recovery applied, with the premises it rests on.
+    closed: Option<r2source::SourceClosedDecision>,
     /// Whether some return hands back a parameter through a merge: an entry input, spelled.
     result_holds_input: bool,
     /// No return path is reached, so the `Void` result states what a call leaves, never a type.
@@ -225,9 +241,12 @@ pub struct RecoveredInterface {
 }
 
 impl RecoveredInterface {
-    /// Whether the result rests on `Premise::ClosedWorld`: decided by every call the image shows.
-    pub const fn assumes_closed_world(&self) -> bool {
-        self.closed.is_some()
+    /// What the result's closed-world decision takes for granted; none where none was applied.
+    pub const fn closed_premises(&self) -> &'static [r2source::Premise] {
+        match self.closed {
+            Some(decision) => decision.premises(),
+            None => &[],
+        }
     }
 
     /// Why the result is unproven, where it is.
@@ -440,19 +459,22 @@ fn recovered_stack_parameters(
         .flat_map(|certificate| certificate.insts.iter().copied())
         .collect::<crate::dense::IdSet<_>>();
     let mut observed: BTreeMap<u64, Option<u32>> = BTreeMap::new();
+    let mut unproven: BTreeMap<u64, Option<u32>> = BTreeMap::new();
     let mut unknown = false;
     for access in facts.structured.memory_accesses.values() {
         if access.is_write || access.space != SpaceId::Ram || control.contains(access.id.inst) {
             continue;
         }
-        let (value, relative) = match area_read((facts, prep), observations, access, first_offset) {
-            AreaRead::Placed { value, relative } => (value, relative),
-            AreaRead::Unplaced => {
-                unknown = true;
-                continue;
-            }
-            AreaRead::Elsewhere => continue,
-        };
+        let (value, relative, reads) =
+            match area_read((facts, prep), observations, access, first_offset) {
+                AreaRead::Placed { value, relative } => (value, relative, &mut observed),
+                AreaRead::Unproven { value, relative } => (value, relative, &mut unproven),
+                AreaRead::Unplaced => {
+                    unknown = true;
+                    continue;
+                }
+                AreaRead::Elsewhere => continue,
+            };
         let Some(relative) = relative
             .checked_sub(first_offset)
             .and_then(|relative| u64::try_from(relative).ok())
@@ -472,13 +494,25 @@ fn recovered_stack_parameters(
             ),
             access.width
         );
-        let entry = observed.entry(slot).or_insert(Some(0));
+        let entry = reads.entry(slot).or_insert(Some(0));
         match entry {
             Some(bytes) if end <= slot_bytes => *bytes = (*bytes).max(end),
             _ => *entry = None,
         }
     }
-    let mut area = argument_area_slots(&observed, first_offset, slot_bytes);
+    // An unproven read places a slot only below an observed one; above, or across two, it bounds
+    // nothing, as an unplaced read.
+    let highest = observed.keys().next_back().copied();
+    let mut below = BTreeMap::new();
+    for (slot, bytes) in unproven {
+        match bytes {
+            Some(bytes) if highest.is_some_and(|highest| slot < highest) => {
+                below.insert(slot, bytes);
+            }
+            _ => unknown = true,
+        }
+    }
+    let mut area = argument_area_slots((&observed, &below), first_offset, slot_bytes);
     area.unknown |= unknown;
     area
 }
@@ -487,6 +521,11 @@ fn recovered_stack_parameters(
 enum AreaRead {
     /// An observed value read at one entry offset.
     Placed {
+        value: crate::ValueId,
+        relative: i64,
+    },
+    /// A value read at one entry offset that is neither observed nor proven unread.
+    Unproven {
         value: crate::ValueId,
         relative: i64,
     },
@@ -534,9 +573,11 @@ fn area_read(
     let exact = (access.provenance_complete && !indexed)
         .then(|| start?.checked_add(access.object_offset?))
         .flatten();
-    let value = access.value.filter(|value| observations.contains(*value));
-    if let Some((value, relative)) = value.zip(exact) {
-        return AreaRead::Placed { value, relative };
+    if let Some((value, relative)) = access.value.zip(exact) {
+        return match observations.contains(value) {
+            true => AreaRead::Placed { value, relative },
+            false => AreaRead::Unproven { value, relative },
+        };
     }
     // A place the model did not pin to one byte may still lie in the area.
     let annotated = |location: &crate::semantic::MemoryLocation| {
@@ -589,10 +630,10 @@ struct ArgumentArea {
     unknown: bool,
 }
 
-/// The slots below the highest read, each `observed` its widest read (`None` crossing two), are
-/// parameters (rule 4). Work: `O(reads + HOLE_BUDGET)`, whatever offset a read names.
+/// The slots below the highest read are parameters (rule 4), each `observed` its widest read, an
+/// `unproven` read no hole. Work: `O(reads + HOLE_BUDGET)`, whatever offset a read names.
 fn argument_area_slots(
-    observed: &BTreeMap<u64, Option<u32>>,
+    (observed, unproven): (&BTreeMap<u64, Option<u32>>, &BTreeMap<u64, u32>),
     first_offset: i64,
     slot_bytes: u32,
 ) -> ArgumentArea {
@@ -612,9 +653,10 @@ fn argument_area_slots(
             }
             holes += 1;
         }
-        let Some(observed_bytes) = observed.get(&slot).map_or(Some(None), |bytes| {
-            bytes.map(|bytes| Some(bytes.next_power_of_two().min(slot_bytes)))
-        }) else {
+        let rounded = |bytes: u32| bytes.next_power_of_two().min(slot_bytes);
+        let Some(observed_bytes) = (observed.get(&slot))
+            .map_or(Some(None), |bytes| bytes.map(|bytes| Some(rounded(bytes))))
+        else {
             // A read crossing into the next slot places no parameter: the slots below stand.
             r2il::refusal_evidence!(
                 "interface-recovery",
@@ -630,11 +672,20 @@ fn argument_area_slots(
         else {
             break;
         };
+        // An unproven read past the observed bytes leaves those bytes' use unknown (default deny).
+        let (observed_bytes, read) = match (observed_bytes, unproven.get(&slot)) {
+            (Some(bytes), Some(wider)) if rounded(*wider) > bytes => {
+                (rounded(*wider), StackSlotRead::Unproven)
+            }
+            (Some(bytes), _) => (bytes, StackSlotRead::Observed),
+            (None, Some(bytes)) => (rounded(*bytes), StackSlotRead::Unproven),
+            (None, None) => (slot_bytes, StackSlotRead::Unread),
+        };
         parameters.push(RecoveredStackParameter {
             offset,
             slot_bytes,
-            observed_bytes: observed_bytes.unwrap_or(slot_bytes),
-            hole: observed_bytes.is_none(),
+            observed_bytes,
+            read,
         });
     }
     area
@@ -1705,10 +1756,7 @@ pub(crate) fn recover_interface(
     func: &SSAFunction,
     slots: &ConventionModel,
 ) -> Option<RecoveredInterface> {
-    let stated = Stated {
-        closed: None,
-        unseen: false,
-    };
+    let stated = Stated::default();
     recover_interface_inner(func, None, slots, None, stated).expect("a test function settles")
 }
 
@@ -1716,6 +1764,10 @@ pub(crate) fn recover_interface(
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Stated {
     closed: Option<r2source::SourceClosedResult>,
+    /// Whether no call reads the integer result register (`SourceClosedDecision::integer_unread`).
+    integer_unread: bool,
+    /// Whether that decision rests on a cited slot (`SourceClosedDecision::premises`).
+    through_slot: bool,
     /// Whether the walk left a transfer it did not follow: code no read sees may take more arguments.
     unseen: bool,
 }
@@ -1723,8 +1775,11 @@ pub(crate) struct Stated {
 impl Stated {
     pub(crate) fn of(source: &r2source::OwnedFunctionSnapshot) -> Self {
         let function = source.function();
+        let decided = function.closed_decision();
         Self {
             closed: function.closed_result(),
+            integer_unread: decided.is_some_and(|decided| decided.integer_unread),
+            through_slot: decided.is_some_and(|decided| decided.through_slot),
             unseen: (source.image().blocks().iter()).any(|block| block.transfer_unresolved()),
         }
     }
@@ -1739,20 +1794,32 @@ impl Stated {
 /// `prep` is the prep facts of `func`, which is prepared and never sealed.
 pub(crate) fn recover_interface_with_context(
     func: &SSAFunction,
-    prep: &crate::function::Provisional,
+    (prep, prefix): (
+        &crate::function::Provisional,
+        &crate::semantic::StaticPrefix,
+    ),
     slots: &ConventionModel,
     machine_context: &crate::SourceMachineContext,
     stated: Stated,
 ) -> Result<Option<RecoveredInterface>, crate::fixpoint::Exhausted> {
-    recover_interface_inner(func, Some(prep), slots, Some(machine_context), stated)
+    let held = Some((prep, prefix));
+    recover_interface_inner(func, held, slots, Some(machine_context), stated)
 }
 
 fn recover_interface_inner(
     func: &SSAFunction,
-    provisional: Option<&crate::function::Provisional>,
+    provisional: Option<(
+        &crate::function::Provisional,
+        &crate::semantic::StaticPrefix,
+    )>,
     slots: &ConventionModel,
     machine_context: Option<&crate::SourceMachineContext>,
-    Stated { closed, unseen }: Stated,
+    Stated {
+        closed,
+        integer_unread,
+        through_slot,
+        unseen,
+    }: Stated,
 ) -> Result<Option<RecoveredInterface>, crate::fixpoint::Exhausted> {
     // A convention with no argument registers still places its arguments: x86
     // cdecl puts every one on the stack. Only a convention that states neither
@@ -1771,19 +1838,19 @@ fn recover_interface_inner(
     // scan cannot distinguish program inputs from preserved machine state.
     // The graph the prep facts were read off, or one built here when none came with them.
     let built;
-    let (graph, prep) = match provisional {
-        Some(provisional) => (&provisional.graph, Some(&provisional.facts)),
+    let (graph, prep, prefix) = match provisional {
+        Some((provisional, prefix)) => (&provisional.graph, Some(&provisional.facts), Some(prefix)),
         None => {
             built = SsaGraph::from_function(func);
-            (&built, None)
+            (&built, None, None)
         }
     };
     let facts = if let Some(machine_context) = machine_context {
         crate::semantic::PreparedFunctionFacts::collect_for_recovery(
             func,
-            prep,
-            graph,
+            (prep, graph),
             machine_context,
+            prefix,
         )?
     } else {
         crate::semantic::PreparedFunctionFacts::collect(func, graph)?
@@ -2176,6 +2243,12 @@ fn recover_interface_inner(
         }
         None => {}
     }
+    // The integer lane's decision is a fact of a result held in the integer register (D440).
+    let integer_unread = integer_unread
+        && matches!(
+            result,
+            RecoveredFunctionResult::Register(RecoveredResult { float: false, .. })
+        );
     r2il::refusal_evidence!(
         "interface-recovery",
         "observation roots: live_out={} unresolved_blocks={} positive obligations={}",
@@ -2260,15 +2333,13 @@ fn recover_interface_inner(
         observed = observed_reads(None);
     }
     // A call's read of a register its certified boundary does not pass is no read (`liveness`).
-    let ignored_reads = crate::function::unpassed_call_reads(graph, &facts.boundaries);
-    // The call of unproven arity a `CallUse` at `inst` reads for: the first after it in its block.
+    let ignored_reads = crate::function::unpassed_call_reads(graph, machine_context);
+    // The call of unproven arity a `CallUse` at `inst` reads for, by the one link; a call with no
+    // boundary (a `/GS` check) is no other call's.
     let handed_to = |inst: crate::InstId| {
-        let used = graph.inst(inst)?;
-        let call = (facts.boundaries.calls.values())
-            .filter_map(|boundary| Some((boundary, graph.inst(boundary.at)?)))
-            .filter(|(_, at)| at.block == used.block && at.ordinal > used.ordinal)
-            .min_by_key(|(_, at)| at.ordinal)?
-            .0;
+        let at = graph.call_reading(inst)?;
+        let call = facts.call_sites.by_inst.get(at)?;
+        let call = facts.boundaries.calls.get(call)?;
         (call.may_read_unlisted()).then(|| unproven_call(&facts, machine_context, call.call_site))
     };
     // Each register's entry values and the lanes minted for them, found in one pass. O(V log V).
@@ -2584,12 +2655,18 @@ fn recover_interface_inner(
             let at = crate::dense::DenseId::index(id);
             match uses.get(at) {
                 Some(used) => used.clone(),
-                None => match stack_parameters[at - uses.len()] {
-                    parameter if parameter.is_hole() => SlotUse::Unread,
-                    parameter => SlotUse::Read {
-                        bytes: low_bytes(parameter.observed_bytes()),
-                    },
-                },
+                None => {
+                    let parameter = stack_parameters[at - uses.len()];
+                    match parameter.read() {
+                        StackSlotRead::Unread => SlotUse::Unread,
+                        StackSlotRead::Unproven => {
+                            SlotUse::Unknown(SourceFloorCause::ArgumentAreaRead)
+                        }
+                        StackSlotRead::Observed => SlotUse::Read {
+                            bytes: low_bytes(parameter.observed_bytes()),
+                        },
+                    }
+                }
             }
         }),
         floor: arity_floor.clone(),
@@ -2623,7 +2700,11 @@ fn recover_interface_inner(
         arity_floor,
         variadic: save_area.is_some(),
         tail_count,
-        closed: applied,
+        closed: (applied.is_some() || integer_unread).then_some(r2source::SourceClosedDecision {
+            result: applied,
+            integer_unread,
+            through_slot,
+        }),
         result_holds_input,
         unreached: unreached && result == RecoveredFunctionResult::Void,
         boundary,
@@ -3983,26 +4064,15 @@ pub fn mint_recovered_call_site_interface(
         );
         return None;
     }
-    let spent = callee.return_mechanism().map_or(0, |mechanism| {
-        i64::from(mechanism.stack_pointer_delta_bytes())
-    });
-    let arguments = callee.parameters().iter().map(|parameter| {
-        let location = match parameter.location() {
-            SourceParameterLocation::Register(storage) => {
-                SourceParameterLocation::Register(storage)
-            }
-            SourceParameterLocation::Stack {
-                offset,
-                size_bytes,
-                callee_offset,
-            } => SourceParameterLocation::Stack {
-                offset: offset.saturating_sub(spent),
-                size_bytes,
-                callee_offset: callee_offset.saturating_sub(spent),
-            },
-        };
-        SourceCallArgumentSpec::with_location(parameter.index(), location)
-    });
+    let arguments = (callee.parameters().iter())
+        .map(|parameter| {
+            let location = callee.at_call_site(parameter.location())?;
+            Some(SourceCallArgumentSpec::with_location(
+                parameter.index(),
+                location,
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?;
     // One result per callee at every call (D62): a call that does not read the high half of a pair
     // reads the low half; an unproven result with one carrier is that register.
     let result = match callee.return_kind() {
@@ -4036,7 +4106,6 @@ pub fn mint_recovered_call_site_interface(
         callee.convention(),
         arguments,
         callee.is_variadic(),
-        false,
         result,
     )
     .and_then(|interface| interface.with_exact_callee_interface(callee.clone()))
@@ -4090,9 +4159,17 @@ mod tests {
         function: &SSAFunction,
         context: &crate::SourceMachineContext,
     ) -> Option<RecoveredInterface> {
+        let provisional = function.prep_facts_for_test();
+        let prefix = crate::semantic::StaticPrefix::collect(
+            function,
+            Some(context),
+            (Some(&provisional.facts), &provisional.graph),
+            &crate::control::UncheckedSsaWorkControl,
+        )
+        .expect("an unchecked control never stops");
         recover_interface_with_context(
             function,
-            &function.prep_facts_for_test(),
+            (&provisional, &prefix),
             &candidates(),
             context,
             Stated::default(),
@@ -4148,7 +4225,7 @@ mod tests {
             closed: Some(r2source::SourceClosedResult::Read(
                 r2source::SourceReadLanes::Pair,
             )),
-            unseen: false,
+            ..Stated::default()
         };
         let recovered = recover_interface_inner(&func, None, &slots, None, stated)
             .expect("settles")
@@ -4240,12 +4317,13 @@ mod tests {
                 at: crate::graph::InstId(0),
                 convention: None,
                 variadic: None,
-                noreturn: None,
+                never: None,
                 result_kind: None,
                 unstated_lanes: Box::default(),
                 unstated_carrier: None,
                 fixed_argument_count: Some(arguments.len()),
                 ignored: Box::default(),
+                reads_bound: Some(crate::call_reads::ReadBound::arity()),
                 variadic_argument_count_evidence: None,
                 variadic_argument_count_refusal: None,
                 arguments,
@@ -4347,7 +4425,6 @@ mod tests {
             true,
             AAPCS64,
             [SourceCallArgumentSpec::new(0, register(0, 8))],
-            false,
             false,
             SourceCallResult::register(register(0, 8)),
         )
@@ -4513,7 +4590,6 @@ mod tests {
             AAPCS64,
             [],
             false,
-            false,
             SourceCallResult::Void,
         )
         .expect("physically valid void callsite")
@@ -4574,6 +4650,25 @@ mod tests {
             interface.boundary().slots[crate::body_boundary::SlotId(1)],
             SlotUse::Unread
         );
+    }
+
+    /// A slot read one byte to an observation and eight bytes to a call nothing bounds keeps the
+    /// unproven use of its other seven bytes (PR #401 review).
+    #[test]
+    fn an_unproven_read_wider_than_the_observed_one_keeps_the_slot_unknown() {
+        let observed = BTreeMap::from([(0, Some(1)), (1, Some(8))]);
+        let unproven = BTreeMap::from([(0, 8)]);
+        let area = argument_area_slots((&observed, &unproven), 8, 8);
+        assert_eq!(area.slots[0].read(), StackSlotRead::Unproven);
+        assert_eq!(area.slots[0].observed_bytes(), 8);
+        let narrow = BTreeMap::from([(0, 1)]);
+        let area = argument_area_slots(
+            (&BTreeMap::from([(0, Some(4)), (1, Some(8))]), &narrow),
+            8,
+            8,
+        );
+        assert_eq!(area.slots[0].read(), StackSlotRead::Observed);
+        assert_eq!(area.slots[0].observed_bytes(), 4);
     }
 
     #[test]
@@ -4709,7 +4804,6 @@ mod tests {
             true,
             AAPCS64,
             [SourceCallArgumentSpec::new(0, register(0, 8))],
-            false,
             false,
             SourceCallResult::register(register(0, 8)),
         )

@@ -23,3 +23,18 @@ func.openat.arg.3=,...
 func.openat.ret=int
 func.openat.include=fcntl.h
 func.openat.tail=variadic
+
+# musl src/env/__libc_start_main.c: no header declares it. `int __libc_start_main(int (*main)(int,
+# char **,char **), int argc, char **argv, void (*init_dummy)(), void(*fini_dummy)(), void(*ldso_dummy)())`,
+# and `libc_start_main_stage2` runs `exit(main(argc, argv, envp));`: the slot reads main's int.
+__libc_start_main=func
+func.__libc_start_main.args=6
+func.__libc_start_main.arg.0=int (*)(int, char **, char **),main
+func.__libc_start_main.arg.1=int,argc
+func.__libc_start_main.arg.2=char **,argv
+func.__libc_start_main.arg.3=func,init_dummy
+func.__libc_start_main.arg.4=func,fini_dummy
+func.__libc_start_main.arg.5=func,ldso_dummy
+func.__libc_start_main.noreturn=true
+func.__libc_start_main.ret=int
+func.__libc_start_main.cite=src/env/__libc_start_main.c: int __libc_start_main(int (*main)(int,char **,char **), int argc, char **argv, void (*init_dummy)(), void(*fini_dummy)(), void(*ldso_dummy)())

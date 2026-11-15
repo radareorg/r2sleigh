@@ -101,12 +101,15 @@ An element is a width, a stride and two inclusive unsigned bounds.
 
 ### Termination
 
-The solver widens at the phis of `W`, the back-edge targets of a depth-first
-walk from the entry. Every transfer reads values defined at a dominator of the
-reader (for a phi input, of the edge's source); dominators are DFS ancestors,
-so a cycle of reads passes a phi in `W` on any graph, reducible or not, and a
-widened phi moves at most once per stride change per bound. The criterion is
-structural, not a visit count. A value wider than sixty-four bits is described
+The solver runs on `fixpoint::wto_sparse` over the blocks' weak topological
+order (doc/adr-fixpoint.md, "Weak topological order"), keyed by block address:
+the ranges are a function of the program, not of its instruction or block
+numbering. Every head phi widens; a component repeats until no cell of its
+head block waits, then a descent repeats the order with `meet` and refines a
+head phi's bound only where widening left it at the width's extreme
+(`StridedInterval::refine`), once per bound. A head phi moves at most 67 times
+ascending (off bottom, each bound once, the stride through at most 64
+divisors) and twice descending. A value wider than sixty-four bits is described
 at sixty-four, where top means unknown, never "below `2^64`".
 
 ### Branch assumptions
@@ -117,15 +120,22 @@ predecessor. It is then inherited by every block `B` dominates, which sees
 the instance of `v` tested on the last traversal of `P -> B` whenever `def(v)`
 dominates `P`.
 
+Each such edge is one environment, a cell of the solve evaluated at the start
+of `B`: its parent's environment narrowed by the edge's tests, a range per
+copy class. Every operand a block reads meets its environment, in the ascent,
+so a guard bounds a loop it dominates as the loop climbs. The environment reads
+only values that dominate `B` (the compared sides and the lane a compared value
+is the low bytes of); a zero extension written after the guard is narrowed by
+class, and its reader meets its own range. `ValueRanges::range_at(v, B)` is
+`v`'s range under `B`'s environment.
+
 A merge reads each input under its own edge (D244). The phi at `B` takes input
 `v_i` on `P_i -> B`, where `def(v_i)` dominates `P_i`, so on that edge `v_i`
 satisfies what `P_i` assumes and what the edge's own branch tests, whether or
-not the edge dominates `B`. The phi's range is the join of its inputs read that
-way. Only the phi narrows: a value `B` reads directly is under no edge's test.
-Each phi is read once, from the ascent's ranges, before the carry forward, which
-still never queues a phi and so still walks a DAG. gzip `main` reaches its
-dispatch at `0x3b9a` from `ja` at `0x3b98` and `jbe` at `0x3c15`, each testing
-its own index against `0xd3`: the merged index reads 212 entries.
+not the edge dominates `B`; an edge that tests something and does not dominate
+`B` has its own environment. gzip `main` reaches its dispatch at `0x3b9a` from
+`ja` at `0x3b98` and `jbe` at `0x3c15`, each testing its own index against
+`0xd3`: the merged index reads 212 entries.
 
 ### Loop trip counts
 

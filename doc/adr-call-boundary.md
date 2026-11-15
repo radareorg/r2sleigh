@@ -824,7 +824,7 @@ What the code said that this ADR did not, and the owner chosen:
 
 - D213: `fates::decide` needs dead at every call only the lanes a body may hand back. r2ssa states on the carriers that no return defines a byte of the integer register (`SourceResultCarriers::integer_undefined`, scratch-result case 1 to 3). That register, and the second one, which holds a result only beside it (SysV psABI 3.2.3, AAPCS64), are then no result: a call reading them after the call reads its own bytes (`-fipa-ra` keeps RAX and RDX live across a callee that leaves them alone).
 - Every-way-in is asked lazily, by the decision that rests on it (`fates::every_way_in`). A lane a caller returns on, dead at every call to that caller, is `DeadIfEveryWayIn`: the caller joins `Sites::forwarders`, and its own calls must be every way in too. Each function is answered once per question (`every_way_in_from`), so the walk ends; the database cuts a cycle of boundaries first, and no fixture builds a ring of forwarders.
-- A function nothing calls is `Sites { calls: 0 }`. It is decided only where it hands back an input (void); a written result nothing calls is not asked, since its `Unread` moves no C and asking builds the reference index.
+- A function nothing calls is `Sites { calls: 0 }`. It is decided only where it hands back an input (void); a written result nothing calls is not asked: no call states a demand, and asking builds the reference index. A written result's `Unread`, or its integer lane's alone, moves C since D440 (doc/adr-result-side.md, "D440 as built"): the return then reads no byte of that register.
 - Escapes reads `hlt` (a direct branch to itself) and a multi-byte `nop` (a temporary only) as padding. Before, the `hlt` after `_start`'s call, or the `nop` after a canary's `__stack_chk_fail`, refused the closed world in each of the 12 binaries probed (`branchy.c`, `shapes.c`, `atomics.c`, gcc and clang, O1 and O2). "S7 cost" refuses on such code before the index; with padding read, the index is built there, at the cost measured below.
 - An import with an uncited row reads every argument location, so a canary's `__stack_chk_fail` kept XMM0 open in every caller with a stack protector. `exit` and `abort` (ISO C17, `types-posix`), `_exit` (POSIX, `types-glibc`) and `__stack_chk_fail` (LSB 5.0 Core, binary-only: its section on `.cite=`, admitted by `tests/cited_rows.rs` for an LSB row whose comment says so) are cited, `Tail::None`.
 - `Dispute { lane, kept, lost }`, `Authority { Declared, Body, Calls }`: a callee stated void by its declaration or body, and a call reading a lane the callee overwrites on every path (its entry summary), is a dispute the calls lose. It leaves `call-boundary-dispute` evidence and decides nothing. A lane the callee leaves alone disputes nothing.
@@ -1258,6 +1258,7 @@ The views and strings are gone; one `ConventionModel` pair is the carrier (D275,
 
 - D274: r2engine `native::duties` drops a preserved lane the platform's reserved runs cover. Go's arm64 `unaffected` names x18; r2abi's Darwin row reserves it (Apple, "Writing ARM64 code for Apple platforms"). Both say the value survives a call, so x18 is reserved alone and the six Darwin Go effects build. A partial overlap still refuses (`Contradictory`).
 - D364: r2ssa `CallBoundaryConfig::callee_boundary(op, instruction)`. A `CallSlot` site, by the instruction of its correlated `slot_targets`, takes the slot's model from `convention_by_target`, which `Program::site_convention_at` keys by the slot address. Rename and phi placement ask the same question. Only the model is set; the slot's result and kept set are not read.
+- D390: one map, `r2ssa::SiteModels`, held by `CalleeBoundaries` (rename) and `SourceMachineContext` (one `Arc`), answers `stated(instruction, direct)`: a direct target's model, else a `CallSlot` site's slot's. `call_reads` reads the site's model, not the calls' join: a stated model is the program's statement of where that callee's arguments lie (a Microsoft x64 site's home area, a Go site's registers), and an unstated site still reads every location of the calls' model.
 - D252's allow side: a SysV caller keeps rsi across a direct call to a callee stated `ms_abi` whose body writes rsi; unstated, it does not.
 - D363: a call on a returning path keeps what its callee keeps (doc/adr-result-side.md, section 5 as amended).
 
@@ -1415,3 +1416,83 @@ A function every take hands only into cited code-pointer slots, one of which ret
 - `Escapes`. The stored-word scan read the immediate of a non-PIE `_start`'s `mov rdi, main` as a stored word, so `main` escaped. A `Take` records its instruction's end; a word inside a take's own bytes naming its target is that take (`Words::known`, `O(log takes)` per matching word). A take writing a narrow register the instruction widens (`mov edi, imm`) is one write of the wide one.
 - Measured by hand: member_call gcc x64 O2 `aa; s 0x401050; pdd` prints `r2sleigh_word_u32 fcn_401050(int32_t arg0)`, `closed world decides Some(Read(Integer))`.
 - Open: glibc AArch64's `_start` takes `__wrap_main` (`nop; b main`); `main` is then reached by a tail jump, which `Escapes` counts as a way in. musl has no cited row.
+
+## rd3-returns3 as built (2026-11-14)
+
+What this changes in the sections above, and the owner of each rule:
+
+- S2's tail rule: a tail whose boundary is complete with fixed arguments names its exit for every stated result. A narrower result reads the lane's logical bytes as S2 built. A `void` or whole-width result need not write a byte, so the tail reads what reaches our own result registers in the bytes a caller reads; nothing where our return reads no register (D340). A variadic, incomplete or unstated tail stays unnamed (D373). Owner r2ssa `tail_reads`.
+- A cited row may halt on a value: r2abi `Halt::{Handle, NonZero}`; glibc `error` and `error_at_line` cite error(3). The walk holds constants beside handles only where some row reads one (r2engine `HaltingStubs`, a held query), and drops a value written past a branch inside its instruction.
+- `NeverProof::Composed`: a body no return reaches whose every end is proven (a halting transfer, or a wait on a declared or composed callee), with no trap and at least one end; a least fixpoint over the wait edges. `proves_never` stays declared-only, since S31b's register effect reads no other body.
+- The closed decision's premises are one fact: r2source `SourceClosedDecision { result, through_slot }::premises`. r2ssa records them at the seal and r2dec spells them on the proof line.
+- A direct branch into a function returns its held lanes to the branching body (`Survey::tail_callers_of`); `Escapes` still counts the branch as a way in.
+
+## rd4-never as built (2026-11-14)
+
+One "never comes back" fact, with its proof, from `ComesBack` to the C (D379, D380, D384, D395; RULING 1.4).
+
+- r2source. `Never { proof, premises }` and `NeverProof { Declared, Composed, Uncited, NoReturnReached }` live beside `Premise`; `proves()` holds for `Declared` and `Composed` only. The four `noreturn` channels nothing set are deleted.
+- r2engine. `declared_return` grades an uncited row's noreturn `Uncited`; `composed` counts only a proving callee. The walk records each closed call's `Never` and whether it is the callee's or only the site's (a halting argument, an `int 0x29`); `Program::exit_through` replaces `returns_through`. `assemble` places each still-closed call in its block, `O(c log b)`.
+- r2ssa. `AssumedExits.sites` is the one list; `assumed()`, `bounded_by(proof)` and `premises()` derive the ledger's counts. `SourceCallBoundaryFact.never` is the site's entry where the call is its block's last. `exits_are_named` names a closed call's exit only for a proven site.
+- r2dec. `CallPlan.ends` (the site's proof) ends control; `CallPlan.noreturn` (the callee's proof) is the declaration's attribute. Structuring reads a set of proven call instructions, never a callee's name.
+- `afi` prints `noreturn: true` only for a proof and spells a bound as `noreturn: unproven (…)`.
+
+## rd5-proof as built (2026-11-14)
+
+A proving "never" carries its witness (D410, designs/foundation proof-typed).
+
+- r2source. `Citation` has a private field and four mints, each from its owner's statement: `of(&LibraryRow)` (a cited row), `debug_info(&Declarations, entry)` (an uncontested DWARF declaration), `interrupt(kernel, arch, vector)` (r2abi's interrupt document) and `runtime(name)` (the Go model). `Never`'s fields are private. `cited(Citation)` (the Go model's carrying `GoRuntime`) and `composed(ends)` prove; `uncited()` and `unreached()` are bounds; `assuming` only adds premises. A struct literal outside r2source fails to compile (doctest `E0451`).
+- One predicate: `Never::proves() -> Option<&premises>`. `Return::declared` and `Return::proves_never` are deleted; S31b's register effect, which carries no premise, demands an empty set.
+- `composed(ends)` is `None` for no end or a bound end. Discovery builds each composed body callee first inside its fixpoint, from its callees' `Never`s and the walk's proving halts (`Walker::ends` returns them), `O(V + E)`. A halting tail branch now records its `Never` (`Closer::Branch`), which names no exit site.
+- The walk's halting argument and interrupt carry the row's or the document's `Citation` (`body::Halting`, `Program::interrupt_halts`); the three hand `.cited()` checks are gone. `Placement::reads` states a bound only for a cited row.
+
+## rd5-deny as built (2026-11-14, D411)
+
+Every negative fact on the call boundary is a type its owner mints (designs/foundation proof-typed).
+
+- r2ssa `ReadBound`: why a call's listed registers are all it reads. Minted by `cited(Citation)` (r2engine's cited row) or r2ssa's exact arity (a complete fixed site interface, a callee statement of exact arity). `CallReads` fields are private; `cited`, `unbounded` and `every_location` build it, `reads_none_of` needs `bound()`. `SourceCallBoundaryFact::reads_bound` carries the same witness.
+- An uncited row's reads are unbounded: r2engine `declared` states `SourceUnboundedReads::UncitedRow` on its interface. The call keeps the declared contract; `CallReads::exact` and the callee statement read every location. An arity floor was rejected: it dropped the site contract, so an uncited variadic call lost its count gap.
+- `StackWrites` is opaque. `within(spans, Transfers)` takes the frame walk's witness that each operation of each reached block went through `SSAOp::transfer`, a match with no wildcard arm. r2engine hands the minted value on. A cycle member's first assumption is `cycle_seed()` (no write); a risen one is its read's minted value.
+- r2il `Reads` and `Cancelled` have private fields; `reads_of` alone mints them.
+- `SummaryArgEffect.assumed` is gone: an argument handed to an undescribed call keeps an empty entry, which counts toward arity and proves no effect.
+- The matrix's columns are `r2source::NegativeFact`, each carried by a `Negative` type; Dylint `UNPROVEN_NEGATIVE` denies a new public negative bool.
+
+## D409 as built (2026-11-14, rd5-dispatch)
+
+A cited printf `...` call bounds its stack by the operands its own format counts.
+
+- r2abi `format` owns the format model (C17 7.21.6.1, POSIX `%n$`, glibc `%m`), moved from r2ssa `printf.rs`. It also names a `long double` operand (`L`, glibc `ll` and `q` on a floating conversion) and a positional gap (`gapped`).
+- r2source `OwnedFunctionImage::immutable_literals` states which captured literals no write reaches. r2engine lists each one whose text and terminator are mapped read-only, untouched by the loader (`immutable_text_at`) and by the body's own stores.
+- r2ssa `SourceMachineContext::bind_format_tails` folds, per block in one forward pass (`BlockOrigins`), the format register of each variadic site whose format rule is the declaration's. A cited `Tail::Format { Printf }` row is the only source of that rule. The site keeps what its read-only literal consumes. `call_reads` places the fixed parameters and one pointer-wide slot per operand (C17 6.5.2.2p7) with `place::place`, and bounds `stack` and `writes` to that area. `registers` and `stated` stay the every-location default.
+- Refused, so the stack stays unbounded: a body-proven format, a format not in a register, a fold through a merge or another block, writable text, an unparsed conversion, `long double`, a positional gap, more than 64 operands, a 32-bit target, Apple arm64's stacked tail, and fixed parameters `place` does not put where the declaration does.
+- Open (D421): r2engine `fates::formatted_sites` folds the same site's format again, with the convention's call effect and a seal fallback.
+- Tests (`call_boundary`): `a_printf_whose_format_counts_its_tail_leaves_the_callers_slot_alone` (aarch64 clang -O0 spill, values.c `main`) and `a_printf_whose_format_counts_its_tail_leaves_a_pushed_slot_alone` (x86-64 `push rax`, hashes `main`) fail on the parent. Writable text, `%Lf` and a ten-operand tail over the slot keep the reload, as does Apple's stacked tail (`apple::a_mach_o_printf_s_stacked_tail_bounds_no_stack_by_its_format`, which another rule also keeps). The late count in `boundaries.rs` debug-asserts that it agrees with the block's fold.
+
+## D431 as built (2026-11-15, rd6-reads)
+
+An import's call reads RAX at AL's width.
+
+- Citation, on r2abi's SysV row (`CountRegister`), checked against psABI 1.0 (x86-psABIs/x86-64-ABI `74b6f30f`, the "Version 1.0 is not a draft" commit): section 3.2 limits the standard calling sequence to global functions; section 3.2.3 makes `%al` the hidden argument, and its footnote says "the rest of %rax is undefined, only the contents of %al is defined"; Figure 3.4 makes `%rax` a temporary that also carries the count. The row cited the hidden-argument words to section 3.5.7, which is "Variable Argument Lists" in Coding Examples; they are 3.2.3's.
+- Premise: the container states the callee an import, a global function. No name or prototype takes part.
+- r2engine `declared::import_call` mints r2ssa `ImportCall` from the program's own convention row, for every direct import target `declare_imports` sees, declared or not. `CalleeEvidence::imports` carries it to both machine contexts and `BuildKey`.
+- `CallReads::count_read` answers the count register's bytes for a carrier whose low lane it is, where no argument register overlaps the carrier; `register_read_bytes` reads it after a walked callee's lane row.
+- Excluded: an indirect call (its target may be a local function, 3.2), a call through an import slot, a walked body (its lane row, D413). Tests (`result_lanes`): `an_import_call_reads_the_count_register_alone_of_its_register` (uncited row, unstated import, variadic), red on the parent; `an_indirect_call_reads_its_count_register_whole`.
+
+## D433 as built (2026-11-15, rd6-reads)
+
+A counted printf states its registers as D409 states its stack.
+
+- `counted_reads` (was `counted_stack`) keeps D409's one placement: the fixed parameters and one promoted pointer-wide slot per operand the read-only format counts. Its registers, the count register and its stack are the call's reads; `ReadBound::counted()` bounds them.
+- Citation, D409's (`types-posix.sdb.txt`, stdio.h): ISO C17 7.21.6.1p2, "If the format is exhausted while arguments remain, the excess arguments are evaluated (as always) but are otherwise ignored"; too few arguments is undefined behaviour. Premise and refusals are D409's.
+- The count register stays read, so D431's import witness bounds RAX at AL's byte on this path too.
+- Test (`call_boundary`): `a_counted_printf_reads_only_its_placed_registers`, `error(0, 0, "%s", x)` past an untouched entry R8, red on the parent ("the parameters are a floor: at least 4").
+
+## D436 as built (2026-11-15, rd6-reads)
+
+`CallReads` is a dense column of `SourceMachineContext` over its raw call sites.
+
+- Quantity: `CallReads` values built per context. Before, `call_reads` built one per question: once per `CallUse` in each demand pass (`call_read_bytes`), again per argument area, frame walk and tail, and `reads_none_of` built `every_location` once more per question. Bound now: C + 1 per context (C raw call sites and one row for a call at no site), each O(R) for R locations, plus `every_location` once per distinct site model.
+- Algorithm: `bind_call_reads` runs once after the last fact the rows read (callee writes, statements, lane reads, imports, site models, format tails). The two preparation sequences build with the unbound constructor and bind at their end; every other constructor binds at once. A setter of those facts after the bind is a debug assertion; a read before it answers `None`, the default-deny row.
+- Lookup: `call_reads`, `every_location_at` (the site's model, D390) and `every_location` (the calls' model) are a binary search over the sorted rows, O(log C), and hand out references; no question clones a row.
+- Equivalence: a row is `stated_call_reads(instruction)`, the old `call_reads` body unchanged, a pure function of fields that no longer change after the bind. `reads_none_of(model, carrier)` was `reads_none_within(&every_location(model), carrier)`; its readers now pass the held row.
+- Meter: in a `work-meter` build `r2ssa::call_reads_built()` counts rows built against rows the contexts made; `result_lanes::a_context_builds_each_call_sites_reads_once` asserts built ≤ made, red on the parent.

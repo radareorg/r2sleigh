@@ -1,0 +1,11 @@
+# The tag a C library's header gives a handle typedef (ISO C17 7.21.1: `FILE` is an object type).
+# A library or name with no row keeps the name as an opaque typedef: libSystem's `DIR` is a
+# typedef of an anonymous struct, and musl's tags are not read here.
+#
+# library | typedef | struct tag | header that states it
+
+glibc | FILE | _IO_FILE | bits/types/FILE.h
+glibc | DIR | __dirstream | dirent.h
+libsystem | FILE | __sFILE | _stdio.h
+bionic | FILE | __sFILE | stdio.h
+bionic | DIR | DIR | dirent.h

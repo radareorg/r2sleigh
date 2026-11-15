@@ -220,6 +220,8 @@ pub(super) struct Survey {
     holders: crate::discovery::Holders,
     /// Each function's direct callers among the walked bodies, in address order.
     callers: BTreeMap<u64, Vec<u64>>,
+    /// The walked bodies that leave for each function by a direct branch, in address order.
+    tail_callers: BTreeMap<u64, Vec<u64>>,
     /// The address after each call a walk ended at because its callee never comes back, ascending.
     after_exits: Vec<u64>,
 }
@@ -228,6 +230,17 @@ impl Survey {
     /// The walked bodies that call `callee` directly, in address order.
     pub(super) fn callers_of(&self, callee: u64) -> &[u64] {
         self.callers.get(&callee).map_or(&[], Vec::as_slice)
+    }
+
+    /// The walked bodies that leave for `callee` by a direct branch, in address order.
+    pub(super) fn tail_callers_of(&self, callee: u64) -> &[u64] {
+        self.tail_callers.get(&callee).map_or(&[], Vec::as_slice)
+    }
+
+    /// Every direct call and tail branch between walked bodies, as caller and callee.
+    pub(super) fn call_edges(&self) -> impl Iterator<Item = (u64, u64)> + '_ {
+        let edges = self.callers.iter().chain(&self.tail_callers);
+        edges.flat_map(|(callee, callers)| callers.iter().map(move |caller| (*caller, *callee)))
     }
 
     /// Every range a walked body holds, in address order.
@@ -385,7 +398,7 @@ impl<S: Source + 'static> OpenProgram<S> {
     pub fn function_info(&mut self, entry: u64) -> Result<super::info::FunctionInfo, String> {
         self.start_request();
         let view = self.view();
-        let noreturn = (view.exit(entry, view.thumb_at(entry))).map(|never| never.premises);
+        let noreturn = view.exit(entry, view.thumb_at(entry));
         let prepared = match self.analysed(entry) {
             Ok(prepared) => prepared,
             // A stop is the request's, and an address nothing maps names no function.
@@ -946,6 +959,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
                 supervisor: BTreeMap::new(),
                 holders: crate::discovery::Holders::default(),
                 callers: BTreeMap::new(),
+                tail_callers: BTreeMap::new(),
                 after_exits: Vec::new(),
             })));
         }
@@ -972,9 +986,13 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             .collect();
         // O(call edges): each walked body's direct call targets, inverted.
         let mut callers = BTreeMap::<u64, Vec<u64>>::new();
+        let mut tail_callers = BTreeMap::<u64, Vec<u64>>::new();
         for (entry, walk) in &found.walks {
             for &callee in walk.as_ref().map(|walk| walk.calls()).into_iter().flatten() {
                 callers.entry(callee).or_default().push(*entry);
+            }
+            for callee in walk.as_ref().into_iter().flat_map(|walk| walk.tail_calls()) {
+                tail_callers.entry(callee).or_default().push(*entry);
             }
         }
         let mut after_exits = (found.walks.values())
@@ -1001,6 +1019,7 @@ impl<S: Source + 'static> Query<ProgramInputs<S>> for SurveyQuery {
             supervisor,
             holders,
             callers,
+            tail_callers,
             after_exits,
         })))
     }

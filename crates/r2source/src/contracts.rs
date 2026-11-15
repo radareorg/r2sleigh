@@ -97,7 +97,7 @@ pub enum StackAddressBase {
 }
 
 pub const SOURCE_FUNCTION_INTERFACE_SCHEMA_VERSION: u32 = 12;
-pub const SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION: u32 = 3;
+pub const SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION: u32 = 4;
 
 /// Where one parameter or argument lives at a call boundary.
 ///
@@ -145,6 +145,19 @@ impl SourceParameterLocation {
         match self {
             Self::Register(storage) => storage.size,
             Self::Stack { size_bytes, .. } => size_bytes,
+        }
+    }
+
+    /// A call-site slot `offset` bytes above the stack pointer before a transfer spending `spent`,
+    /// with the coordinate the callee finds it at; none on overflow (D386).
+    pub const fn before_transfer(offset: i64, size_bytes: u32, spent: i64) -> Option<Self> {
+        match offset.checked_add(spent) {
+            Some(callee_offset) => Some(Self::Stack {
+                offset,
+                size_bytes,
+                callee_offset,
+            }),
+            None => None,
         }
     }
 
@@ -339,6 +352,13 @@ pub enum SourceFloorCause {
     HandedOn(SourceUnprovenCall),
     /// A declared parameter of a class the convention places nowhere here; it and the rest drop.
     Unplaced(SourceUnplacedClass),
+}
+
+/// Why a call may read argument locations past the parameters its contract lists (D411).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+pub enum SourceUnboundedReads {
+    /// The declaration is a library row no header cites: radare2's parameter list is a lower bound.
+    UncitedRow,
 }
 
 /// A declared class no location takes here (doc/adr-call-boundary.md, Refusals).
@@ -691,6 +711,14 @@ impl SourceStackAllocationContract {
 }
 
 impl SourceReturnMechanism {
+    /// What a transfer spends of the stack pointer under `mechanism`: its return-address slot, or
+    /// nothing where the address travels in a register or no mechanism is stated (D386).
+    pub fn spent(mechanism: Option<Self>) -> i64 {
+        mechanism.map_or(0, |mechanism| {
+            i64::from(mechanism.stack_pointer_delta_bytes())
+        })
+    }
+
     pub const fn stack_offset(self) -> i64 {
         match self {
             Self::Stacked { stack_offset, .. } => stack_offset,
@@ -1174,13 +1202,15 @@ pub struct SourceFunctionInterface {
     security_check: bool,
     /// Why the parameters are a floor, where a slot past them may be read or handed on.
     arity_floor: Option<SourceArityFloor>,
+    /// Why a call may read past the listed parameters, which still render as its contract.
+    unbounded_reads: Option<SourceUnboundedReads>,
     /// Why the result is unproven, where recovery states it.
     unproven_result: Option<SourceUnprovenResult>,
     /// Where the result is unproven, the registers it may be in: each call takes the one its
     /// caller reads.
     result_carriers: Option<SourceResultCarriers>,
     /// What the closed world decided of the result (doc/adr-call-boundary.md, D166).
-    closed_result: Option<crate::SourceClosedResult>,
+    closed_result: Option<crate::SourceClosedDecision>,
     /// Whether a return hands back a parameter through a merge: its cause is an entry input.
     result_holds_input: bool,
     /// The body reaches no return: its `Void` states what a call leaves, and no type (S24).
@@ -1664,6 +1694,7 @@ impl SourceFunctionInterface {
             result_above: SourceAbove::Undefined,
             security_check: false,
             arity_floor: None,
+            unbounded_reads: None,
             unproven_result: None,
             result_carriers: None,
             closed_result: None,
@@ -1728,6 +1759,7 @@ impl SourceFunctionInterface {
             result_above: self.result_above,
             security_check: self.security_check,
             arity_floor: self.arity_floor.clone(),
+            unbounded_reads: self.unbounded_reads,
             unproven_result: self.unproven_result.clone(),
             result_carriers: self.result_carriers,
             closed_result: self.closed_result,
@@ -1778,12 +1810,30 @@ impl SourceFunctionInterface {
                     ..
                 },
             ) => {
-                let spent = self.return_mechanism.map_or(0, |mechanism| {
-                    i64::from(mechanism.stack_pointer_delta_bytes())
-                });
+                let spent = SourceReturnMechanism::spent(self.return_mechanism);
                 call_size == entry_size && call_offset.checked_add(spent) == Some(entry_offset)
             }
             _ => false,
+        }
+    }
+
+    /// `location`, a parameter named from the entry pointer, named from the call's pointer before the
+    /// transfer: the one translation of the return-address spend; none on overflow (D386).
+    pub fn at_call_site(
+        &self,
+        location: SourceParameterLocation,
+    ) -> Option<SourceParameterLocation> {
+        match location {
+            SourceParameterLocation::Stack {
+                offset,
+                size_bytes,
+                callee_offset,
+            } => Some(SourceParameterLocation::Stack {
+                offset: offset.checked_sub(SourceReturnMechanism::spent(self.return_mechanism))?,
+                size_bytes,
+                callee_offset,
+            }),
+            register => Some(register),
         }
     }
 
@@ -1924,6 +1974,18 @@ impl SourceFunctionInterface {
         self
     }
 
+    /// The same interface, its calls reading past its parameters for `why`.
+    #[must_use]
+    pub const fn with_unbounded_reads(mut self, why: SourceUnboundedReads) -> Self {
+        self.unbounded_reads = Some(why);
+        self
+    }
+
+    /// Why a call may read past the parameters; `None` where they bound its reads.
+    pub const fn unbounded_reads(&self) -> Option<SourceUnboundedReads> {
+        self.unbounded_reads
+    }
+
     /// Why the parameters are a floor, where a slot past them may be read or handed on.
     pub const fn arity_floor(&self) -> Option<&SourceArityFloor> {
         self.arity_floor.as_ref()
@@ -2057,7 +2119,7 @@ impl SourceFunctionInterface {
 
     /// Record what r2engine's closed-world boundary decided of the result.
     #[must_use]
-    pub const fn with_closed_result(mut self, closed: crate::SourceClosedResult) -> Self {
+    pub const fn with_closed_result(mut self, closed: crate::SourceClosedDecision) -> Self {
         self.closed_result = Some(closed);
         self
     }
@@ -2119,13 +2181,42 @@ impl SourceFunctionInterface {
 
     /// What the closed world decided of the result, where a `CallBoundary` decided it.
     pub const fn closed_result(&self) -> Option<crate::SourceClosedResult> {
-        self.closed_result
+        match self.closed_result {
+            Some(decision) => decision.result,
+            None => None,
+        }
+    }
+
+    /// Whether no call reads the integer result register's bytes under the closed world: the
+    /// seal keeps the fact only where the result is in that register (D440).
+    pub const fn integer_result_unread(&self) -> bool {
+        match self.closed_result {
+            Some(decision) => decision.integer_unread,
+            None => false,
+        }
+    }
+
+    /// Whether only the integer lane is decided unread: the result itself is not (D440).
+    pub const fn only_integer_lane_unread(&self) -> bool {
+        self.integer_result_unread()
+            && !matches!(
+                self.closed_result(),
+                Some(crate::SourceClosedResult::Unread | crate::SourceClosedResult::Void)
+            )
+    }
+
+    /// What the applied closed-world decision takes for granted; none where none was applied.
+    pub const fn closed_premises(&self) -> &'static [crate::Premise] {
+        match self.closed_result {
+            Some(decision) => decision.premises(),
+            None => &[],
+        }
     }
 
     /// Why a written result is unproven: the cause the closed world's decision names, else a
     /// handed-back input or a written value (doc/adr-result-side.md, section 3).
     pub const fn written_cause(&self) -> crate::SourceResultCause {
-        match (self.closed_result, self.result_holds_input) {
+        match (self.closed_result(), self.result_holds_input) {
             (Some(crate::SourceClosedResult::Unread), _) => crate::SourceResultCause::Unread,
             (Some(crate::SourceClosedResult::ForwardCycle), _) => {
                 crate::SourceResultCause::ForwardCycle
@@ -2138,7 +2229,10 @@ impl SourceFunctionInterface {
     /// Whether a closed-world call reads the result: a value at `Solved`, where the body alone
     /// proves only a written one (doc/adr-scratch-result.md, "Rendering of Unproven").
     pub const fn result_read_by_callers(&self) -> bool {
-        matches!(self.closed_result, Some(crate::SourceClosedResult::Read(_)))
+        matches!(
+            self.closed_result(),
+            Some(crate::SourceClosedResult::Read(_))
+        )
     }
 
     /// Whether arguments continue past the fixed ones, which `arity` does not count.
@@ -2818,7 +2912,6 @@ pub struct SourceCallSiteInterface {
     /// Set when this call's target hands back one of its own arguments as a
     /// format string, so a caller can count from the msgid it passed.
     format_forwarding: Option<SourceFormatForwardingRule>,
-    noreturn: bool,
     result: SourceCallResult,
     /// Exact callee-owned interface recovered from a body in the same capture.
     ///
@@ -2838,7 +2931,6 @@ pub enum SourceCallSiteInterfaceError {
     InvalidRegisterStorage,
     OverlappingRegisterStorages,
     InvalidFormatParameterIndex,
-    NoreturnWithResult,
     IncompatibleCalleeInterface,
 }
 
@@ -2851,7 +2943,6 @@ impl std::fmt::Display for SourceCallSiteInterfaceError {
             Self::InvalidRegisterStorage => "a register it names is not a register storage",
             Self::OverlappingRegisterStorages => "two of its registers overlap",
             Self::InvalidFormatParameterIndex => "its format argument is not one of its arguments",
-            Self::NoreturnWithResult => "a call that never returns states a result",
             Self::IncompatibleCalleeInterface => "the callee's own interface disagrees with it",
         };
         write!(f, "invalid source callsite interface: {why}")
@@ -2869,7 +2960,6 @@ impl SourceCallSiteInterface {
         convention: ConventionId,
         arguments: impl IntoIterator<Item = SourceCallArgumentSpec>,
         variadic: bool,
-        noreturn: bool,
         result: SourceCallResult,
     ) -> Result<Self, SourceCallSiteInterfaceError> {
         let revision_identity = revision_identity.into();
@@ -2903,9 +2993,6 @@ impl SourceCallSiteInterface {
         }) {
             return Err(SourceCallSiteInterfaceError::OverlappingRegisterStorages);
         }
-        if noreturn && !matches!(result, SourceCallResult::Void) {
-            return Err(SourceCallSiteInterfaceError::NoreturnWithResult);
-        }
         Ok(Self {
             schema_version: SOURCE_CALL_SITE_INTERFACE_SCHEMA_VERSION,
             revision_identity: revision_identity.into_boxed_slice(),
@@ -2916,7 +3003,6 @@ impl SourceCallSiteInterface {
             variadic,
             format_parameter_rule: None,
             format_forwarding: None,
-            noreturn,
             result,
             exact_callee_interface: None,
         })
@@ -2988,7 +3074,6 @@ impl SourceCallSiteInterface {
             }
         };
         let carriers_match = self.complete
-            && !self.noreturn
             && self.convention == callee.convention()
             && self.result == expected_result
             && self.arguments.len() == callee.parameters().len()
@@ -3105,10 +3190,6 @@ impl SourceCallSiteInterface {
         self.format_parameter_rule
     }
 
-    pub const fn is_noreturn(&self) -> bool {
-        self.noreturn
-    }
-
     pub const fn result(&self) -> SourceCallResult {
         self.result
     }
@@ -3171,7 +3252,6 @@ mod tests {
             convention,
             [],
             false,
-            false,
             SourceCallResult::Void,
         )
         .expect("test callsite")
@@ -3216,7 +3296,6 @@ mod tests {
             crate::ConventionId::SysVAmd64,
             arguments,
             true,
-            false,
             SourceCallResult::Void,
         )
         .expect("variadic interface")
@@ -3237,7 +3316,6 @@ mod tests {
             true,
             crate::ConventionId::SysVAmd64,
             arguments,
-            false,
             false,
             SourceCallResult::Void,
         )
@@ -3309,7 +3387,6 @@ mod tests {
                 crate::ConventionId::SysVAmd64,
                 arguments,
                 true,
-                false,
                 SourceCallResult::Void,
             )
             .expect("variadic interface")
@@ -3440,6 +3517,46 @@ mod tests {
                 )],
             ),
             Err(SourceFunctionInterfaceError::InvalidStackSlot)
+        );
+    }
+
+    /// A call site names an entry slot below by what the transfer spends and keeps the callee's
+    /// coordinate; an offset past the address space is no location (D386).
+    #[test]
+    fn a_parameter_at_a_call_site_is_below_its_entry_offset_by_the_spend() {
+        let stack_pointer = register_storage(72, 8);
+        let slots = [SourceStackSlotSpec::new_local(
+            StackAddressBase::StackPointer,
+            stack_pointer,
+            -8,
+            8,
+        )];
+        let stacked = exact_return_interface(b"spend", ConventionId::SysVAmd64, slots)
+            .with_exact_stacked_return(0, 8, 8, 8)
+            .expect("exact stacked return");
+        let entry = |offset| SourceParameterLocation::Stack {
+            offset,
+            size_bytes: 8,
+            callee_offset: offset,
+        };
+        let at = stacked.at_call_site(entry(8)).expect("in range");
+        assert_eq!(
+            at,
+            SourceParameterLocation::before_transfer(0, 8, 8).expect("in range")
+        );
+        assert_eq!(
+            at,
+            SourceParameterLocation::Stack {
+                offset: 0,
+                size_bytes: 8,
+                callee_offset: 8
+            }
+        );
+        assert!(stacked.argument_location_matches_parameter(at, entry(8)));
+        assert_eq!(stacked.at_call_site(entry(i64::MIN)), None);
+        assert_eq!(
+            SourceParameterLocation::before_transfer(i64::MAX, 8, 8),
+            None
         );
     }
 
@@ -4041,6 +4158,8 @@ impl SourceCallPreservedCarriers {
 pub struct SourceSecurityCookie {
     pub address: u64,
     pub width: u32,
+    /// The register the check takes the saved word in (`r2abi::CookieCheck`).
+    pub argument: CanonicalStorageId,
 }
 
 /// A stack protector's global word where the container binds it (`r2abi::GuardRow::LinkedGlobal`).

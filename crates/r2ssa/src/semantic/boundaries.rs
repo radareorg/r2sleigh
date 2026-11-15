@@ -94,8 +94,14 @@ pub(crate) fn variadic_callsite_argument_count(
             );
             VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral
         })?;
-    let consumed = crate::printf::printf_consumed_arguments(format)
+    let consumed = r2abi::format::printf_consumed_arguments(format)
         .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
+    // The block's fold that bounds the call's stack read the same format (D409).
+    debug_assert!(
+        (machine_context.format_tail(interface.identity().instruction()))
+            .is_none_or(|early| *early == consumed),
+        "the call's block and its values fold its format to different texts"
+    );
     // A floating operand travels in the floating sequence, which this recovery walks only where
     // it shares positions with the integer one (Microsoft x64) or the tail is on the stack.
     if consumed.any_floating && !floating_tail_placed(machine_context) {
@@ -419,7 +425,7 @@ pub(crate) fn merged_format_literal_argument_count(
             );
             return Err(VariadicCallsiteArgumentCountRefusal::FormatArgumentNotLiteral);
         };
-        let consumed = crate::printf::printf_consumed_arguments(format)
+        let consumed = r2abi::format::printf_consumed_arguments(format)
             .map_err(|_| VariadicCallsiteArgumentCountRefusal::InvalidFormatString)?;
         if consumed.any_floating && !floating_tail_placed(machine_context) {
             r2il::refusal_evidence!(
@@ -545,8 +551,10 @@ pub(crate) fn variadic_callsite_arguments(
         if let Some(stack_index) = stack_index_of(position) {
             let placement = stack_placement
                 .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
-            let offset = placement
-                .offset_of(stack_index)
+            let spent =
+                r2source::SourceReturnMechanism::spent(recovery.machine_context.return_mechanism());
+            let argument = (placement.offset_of(stack_index))
+                .and_then(|offset| StackArgument::of(offset, placement.stride_bytes(), spent))
                 .ok_or(VariadicCallsiteArgumentCountRefusal::ArgumentCountOverflow)?;
             let (value, entry_offset) = reaching_stack_argument_before_call(
                 CallPosition {
@@ -556,11 +564,7 @@ pub(crate) fn variadic_callsite_arguments(
                     block_addr: recovery.block_addr,
                     op_index: recovery.op_index,
                 },
-                StackArgument {
-                    offset,
-                    callee_offset: offset,
-                    size_bytes: placement.stride_bytes(),
-                },
+                argument,
                 stack_pointer.as_deref_mut(),
             )
             .ok_or(VariadicCallsiteArgumentCountRefusal::UnresolvedArgumentCarrier)?;
@@ -715,6 +719,25 @@ pub(crate) struct StackArgument {
     pub(crate) size_bytes: u32,
 }
 
+impl StackArgument {
+    /// A convention's slot `offset` above the pointer before a transfer spending `spent`, in
+    /// r2source's one coordinate rule (D386); none on overflow.
+    fn of(offset: i64, size_bytes: u32, spent: i64) -> Option<Self> {
+        match r2source::SourceParameterLocation::before_transfer(offset, size_bytes, spent)? {
+            r2source::SourceParameterLocation::Stack {
+                offset,
+                size_bytes,
+                callee_offset,
+            } => Some(Self {
+                offset,
+                callee_offset,
+                size_bytes,
+            }),
+            r2source::SourceParameterLocation::Register(_) => None,
+        }
+    }
+}
+
 pub(crate) fn reaching_stack_argument_before_call(
     at: CallPosition<'_>,
     argument: StackArgument,
@@ -749,14 +772,10 @@ pub(crate) fn reaching_stack_argument_before_call(
     };
     let entry_offset = entering.offset.checked_add(offset)?;
     let slot_name = crate::naming::frame_slot_name(entry_offset);
-    // Promotion named the slot's variable after its entry coordinate; the
-    // graph has such a value exactly when the slot left memory. The name
-    // carries no frame, so only the entry frame may be asked for one.
+    // Promotion records the places it took out of memory by entry offset (D389); the name carries
+    // no frame, so only the entry frame may be asked for one.
     let promoted = entering.base == StackAddressBase::StackPointer
-        && graph
-            .values
-            .iter()
-            .any(|value| value.var.name() == slot_name);
+        && (function.frame_points()).is_some_and(|points| points.promoted(entry_offset));
     let mut visited = BTreeSet::new();
     reaching_stack_slot_value(
         function,
@@ -1196,13 +1215,11 @@ pub(crate) fn convention_call_boundary(
             );
             return Err(CallBoundaryRefusal::ArgumentAreaUnseen);
         }
-        // The callee names the same slot from the pointer it is entered with,
-        // below the caller's by what the transfer spends on the return address.
-        let spent = machine_context.return_mechanism().map_or(0, |mechanism| {
-            i64::from(mechanism.stack_pointer_delta_bytes())
-        });
+        let spent = r2source::SourceReturnMechanism::spent(machine_context.return_mechanism());
         for position in 0.. {
-            let Some(offset) = placement.offset_of(position) else {
+            let Some(argument) = (placement.offset_of(position))
+                .and_then(|offset| StackArgument::of(offset, placement.stride_bytes(), spent))
+            else {
                 break;
             };
             let Some((value, entry_offset)) = reaching_stack_argument_before_call(
@@ -1213,11 +1230,7 @@ pub(crate) fn convention_call_boundary(
                     block_addr,
                     op_index,
                 },
-                StackArgument {
-                    offset,
-                    callee_offset: offset.saturating_add(spent),
-                    size_bytes: placement.stride_bytes(),
-                },
+                argument,
                 stack_pointer.as_deref_mut(),
             ) else {
                 break;
@@ -1312,17 +1325,12 @@ fn stated_call_arguments(
     let Some(placement) = convention.stack_arguments() else {
         return (arguments, false);
     };
-    let spent = machine_context.return_mechanism().map_or(0, |mechanism| {
-        i64::from(mechanism.stack_pointer_delta_bytes())
-    });
+    let spent = r2source::SourceReturnMechanism::spent(machine_context.return_mechanism());
     for position in 0..stacked {
-        let Some(offset) = placement.offset_of(position) else {
+        let Some(argument) = (placement.offset_of(position))
+            .and_then(|offset| StackArgument::of(offset, placement.stride_bytes(), spent))
+        else {
             return (arguments, false);
-        };
-        let argument = StackArgument {
-            offset,
-            callee_offset: offset.saturating_add(spent),
-            size_bytes: placement.stride_bytes(),
         };
         let Some((value, entry_offset)) =
             reaching_stack_argument_before_call(at, argument, stack_pointer.as_deref_mut())
@@ -1484,12 +1492,13 @@ pub(crate) fn collect_source_boundary_facts(
             at: call_site.at,
             convention: None,
             variadic: None,
-            noreturn: None,
+            never: closed_site(function, graph, call_site.at),
             result_kind: None,
             unstated_lanes: Box::default(),
             unstated_carrier: None,
             arguments: Vec::new(),
             ignored: Box::default(),
+            reads_bound: None,
             fixed_argument_count: None,
             variadic_argument_count_evidence: None,
             variadic_argument_count_refusal: None,
@@ -1510,7 +1519,6 @@ pub(crate) fn collect_source_boundary_facts(
         }) {
             boundary.convention = Some(interface.convention());
             boundary.variadic = Some(interface.is_variadic());
-            boundary.noreturn = Some(interface.is_noreturn());
             boundary.result_kind = Some(interface.result());
             boundary.unstated_lanes = unproven_lanes(machine_context, call_site, interface);
             // The contract states no result: none here, and every killed lane unstated (D330).
@@ -1861,6 +1869,9 @@ pub(crate) fn collect_source_boundary_facts(
             boundary.complete && boundary.arguments_proven,
             "{boundary:?}"
         );
+        boundary.reads_bound = (machine_context.zip(call_site.raw_identity))
+            .and_then(|(context, identity)| context.call_reads(Some(identity.instruction())))
+            .and_then(|reads| reads.bound);
         facts.calls.insert(call_site.id, boundary);
     }
 
@@ -2017,24 +2028,88 @@ pub(crate) fn collect_source_boundary_facts(
     facts
 }
 
+/// The walk's closed call ending the block of the call at `at`, where it is that block's last call.
+/// `O(log sites)`, then one scan of a closed block.
+fn closed_site(function: &SSAFunction, graph: &SsaGraph, at: InstId) -> Option<crate::ExitSite> {
+    let block = graph.block(graph.inst(at)?.block)?;
+    let site = function.assumed_exits().site(block.addr)?;
+    let is_call = |id: &InstId| graph.op(*id).is_some_and(SSAOp::is_call);
+    let last = block.insts.iter().rev().find(|id| is_call(id))?;
+    (*last == at).then(|| site.clone())
+}
+
 #[cfg(test)]
 thread_local! {
     /// How many register walks this thread built: one per function with an unproven machine return.
     pub(crate) static REGISTER_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// The register classes the walks visited, one per class a block is walked through.
+    pub(crate) static REGISTER_CLASS_VISITS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+    /// The buffers the walks allocated for instructions' written classes: one per walk.
+    pub(crate) static REGISTER_CLASS_LISTS: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
 }
 
-/// The register bytes a function writes, the machine-state carriers left out, and one per-block
-/// table of the bytes walked through, built once for every unproven machine return (D254).
+/// A register byte no instruction writes, or a carrier the walk leaves out.
+const UNWRITTEN: u32 = u32::MAX;
+
+/// Split off a new class for each covered class a write leaves bytes of.
+fn split(size: &mut Vec<u32>, moved: &mut [(u32, u32, u32)]) {
+    for entry in moved.iter_mut() {
+        if entry.2 < size[entry.0 as usize] {
+            entry.1 = u32::try_from(size.len()).unwrap_or(u32::MAX);
+            size[entry.0 as usize] -= entry.2;
+            size.push(entry.2);
+        }
+    }
+}
+
+/// The set bits of a word, lowest first.
+struct BitsSet(u64);
+
+impl Iterator for BitsSet {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<u32> {
+        let bit = (self.0 != 0).then(|| self.0.trailing_zeros())?;
+        self.0 &= self.0 - 1;
+        Some(bit)
+    }
+}
+
+/// A set of register classes, one bit each.
+type Classes = Vec<u64>;
+
+/// `id` writes `class` in a block: its last writer there, where no later one was seen.
+fn first_write((written, last): (&mut Classes, &mut Vec<(u32, InstId)>), class: u32, id: InstId) {
+    let (word, bit) = (class as usize / 64, 1u64 << (class % 64));
+    if written[word] & bit == 0 {
+        written[word] |= bit;
+        last.push((class, id));
+    }
+}
+
+/// A function's written register bytes cut into classes no instruction splits, each block's last
+/// writer per class (D254; doc/adr-one-ir.md, "Register classes").
 struct RegisterWalk<'g> {
     graph: &'g SsaGraph,
     call_results: &'g crate::dense::IdSet<ValueId>,
-    all: BTreeSet<u64>,
-    walked: Vec<BTreeSet<u64>>,
+    /// Each register byte's class, indexed from the lowest written byte `base`.
+    base: u64,
+    class_of: Vec<u32>,
+    classes: usize,
+    /// Each instruction's written classes, each once: one buffer, dense over `InstId`.
+    writes: crate::dense::Csr<InstId, u32>,
+    /// Per block: the classes it writes, and each one's last writer there, by class.
+    written: Vec<Classes>,
+    last: Vec<Vec<(u32, InstId)>>,
+    walked: Vec<Classes>,
     touched: Vec<usize>,
 }
 
 impl<'g> RegisterWalk<'g> {
-    /// One pass over the instructions: `O(I + R)` for `R` register bytes.
+    /// Passes over the instructions to place bytes, cut classes, list each one's classes and find
+    /// each block's last writers: `O(I x w + span)` for writes of at most `w` bytes.
     fn of<'a>(
         graph: &'g SsaGraph,
         call_results: &'g crate::dense::IdSet<ValueId>,
@@ -2042,103 +2117,228 @@ impl<'g> RegisterWalk<'g> {
     ) -> Self {
         #[cfg(test)]
         REGISTER_WALKS.with(|walks| walks.set(walks.get() + 1));
-        let mut all = (graph.insts.iter())
-            .filter_map(|inst| register_bytes(graph, inst))
-            .flatten()
-            .collect::<BTreeSet<u64>>();
-        for carrier in state {
-            let carried = carrier.offset..carrier.offset + u64::from(carrier.size);
-            all.retain(|byte| !carried.contains(byte));
+        let ranges = || (graph.insts.iter()).filter_map(|inst| register_bytes(graph, inst));
+        let base = ranges().map(|range| range.start).min().unwrap_or(0);
+        let end = ranges().map(|range| range.end).max().unwrap_or(0);
+        let mut class_of = vec![UNWRITTEN; usize::try_from(end - base).unwrap_or(0)];
+        for range in ranges() {
+            class_of[(range.start - base) as usize..(range.end - base) as usize].fill(0);
         }
-        let walked = vec![BTreeSet::new(); graph.blocks.len()];
-        Self {
+        for carrier in state {
+            let (low, high) = (carrier.offset, carrier.offset + u64::from(carrier.size));
+            let (low, high) = (low.clamp(base, end), high.clamp(base, end));
+            class_of[(low - base) as usize..(high - base) as usize].fill(UNWRITTEN);
+        }
+        let mut walk = Self {
             graph,
             call_results,
-            all,
-            walked,
+            base,
+            class_of,
+            classes: 0,
+            writes: crate::dense::Csr::with_capacity(0, 0),
+            written: Vec::new(),
+            last: Vec::new(),
+            walked: Vec::new(),
             touched: Vec::new(),
+        };
+        walk.refine();
+        walk.list_writes();
+        let words = walk.classes.div_ceil(64);
+        walk.written = vec![vec![0; words]; graph.blocks.len()];
+        walk.last = vec![Vec::new(); graph.blocks.len()];
+        walk.walked = vec![vec![0; words]; graph.blocks.len()];
+        for (at, block) in graph.blocks.iter().enumerate() {
+            let (written, last) = (&mut walk.written[at], &mut walk.last[at]);
+            let writes = (block.insts.iter().rev())
+                .flat_map(|id| walk.writes.get(*id).iter().map(move |class| (*class, *id)));
+            writes.for_each(|(class, id)| first_write((written, last), class, id));
+            last.sort_unstable();
+        }
+        walk
+    }
+
+    /// Cut the bytes into classes, one write at a time, each costing its width; classes are then
+    /// numbered by their first byte.
+    fn refine(&mut self) {
+        let placed = self
+            .class_of
+            .iter()
+            .filter(|class| **class != UNWRITTEN)
+            .count();
+        if placed == 0 {
+            return;
+        }
+        let mut size = vec![u32::try_from(placed).unwrap_or(u32::MAX)];
+        let mut moved: Vec<(u32, u32, u32)> = Vec::new();
+        for inst in self.graph.insts.iter() {
+            let range = self.span(inst.id);
+            moved.clear();
+            for class in self.class_of[range.clone()]
+                .iter()
+                .filter(|c| **c != UNWRITTEN)
+            {
+                match moved.iter_mut().find(|(from, _, _)| from == class) {
+                    Some(entry) => entry.2 += 1,
+                    None => moved.push((*class, u32::MAX, 1)),
+                }
+            }
+            split(&mut size, &mut moved);
+            for class in self.class_of[range].iter_mut().filter(|c| **c != UNWRITTEN) {
+                let to = moved.iter().find(|(from, _, _)| from == class);
+                *class = (to.filter(|(_, to, _)| *to != u32::MAX)).map_or(*class, |(_, to, _)| *to);
+            }
+        }
+        let mut number = vec![u32::MAX; size.len()];
+        for class in self.class_of.iter_mut().filter(|c| **c != UNWRITTEN) {
+            if number[*class as usize] == u32::MAX {
+                number[*class as usize] = u32::try_from(self.classes).unwrap_or(u32::MAX);
+                self.classes += 1;
+            }
+            *class = number[*class as usize];
         }
     }
 
-    /// Every register definition that may reach `at`, a call's clobber left out; only the blocks
-    /// a walk marked are cleared after it: `O(R · (B_r + I_r))` over what this return reaches.
+    /// Each instruction's classes, each once, in one buffer: `O(I x w)`.
+    fn list_writes(&mut self) {
+        #[cfg(test)]
+        REGISTER_CLASS_LISTS.with(|lists| lists.set(lists.get() + 1));
+        let insts = self.graph.insts.len();
+        let room = (self.graph.insts.iter())
+            .map(|inst| self.span(inst.id).len())
+            .sum();
+        let mut writes = crate::dense::Csr::<InstId, u32>::with_capacity(insts, room);
+        // The last instruction that listed each class.
+        let mut listed = vec![u32::MAX; self.classes];
+        for inst in self.graph.insts.iter() {
+            let classes = self.class_of[self.span(inst.id)].iter();
+            writes.push_row(
+                classes
+                    .filter(|class| **class != UNWRITTEN)
+                    .filter(|class| {
+                        let fresh = listed[**class as usize] != inst.id.0;
+                        listed[**class as usize] = inst.id.0;
+                        fresh
+                    })
+                    .copied(),
+            );
+        }
+        self.writes = writes;
+    }
+
+    /// The bytes an instruction writes, as a span of `class_of`; empty where it writes none.
+    fn span(&self, id: InstId) -> std::ops::Range<usize> {
+        let held = self
+            .graph
+            .inst(id)
+            .and_then(|inst| register_bytes(self.graph, inst));
+        held.map_or(0..0, |range| {
+            (range.start - self.base) as usize..(range.end - self.base) as usize
+        })
+    }
+
+    /// Every register definition that may reach `at`, a call's clobber left out:
+    /// `O(E x R' x R'/64 + |live| log R')` for `R'` classes (doc/adr-one-ir.md, "Register classes").
     fn reaching(&mut self, at: InstId) -> Vec<ValueId> {
         let Some(exit) = self.graph.inst(at) else {
             return Vec::new();
         };
         let mut live = Vec::new();
-        let mut work = vec![(exit.block, Some(at), self.all.clone())];
-        while let Some((block, before, pending)) = work.pop() {
-            let Some(held) = self.graph.block(block) else {
-                continue;
-            };
-            let pending = self.scan(held, before, pending, &mut live);
-            self.spread(held, &pending, &mut work);
+        let mut pending = vec![0u64; self.classes.div_ceil(64)];
+        for class in 0..self.classes {
+            pending[class / 64] |= 1 << (class % 64);
+        }
+        // The exit's own block is scanned back from the return.
+        let held = self.graph.block(exit.block);
+        let insts = held.map_or(&[][..], |held| &held.insts[..]);
+        let end = (insts.iter().position(|inst| *inst == at)).unwrap_or(insts.len());
+        for id in insts[..end].iter().rev() {
+            let wrote = (self.writes.get(*id).iter()).fold(false, |wrote, class| {
+                let (word, bit) = (*class as usize / 64, 1u64 << (class % 64));
+                let pending_bit = pending[word] & bit != 0;
+                pending[word] &= !bit;
+                wrote | pending_bit
+            });
+            if wrote && !self.killed(*id) {
+                live.extend(self.graph.inst(*id).and_then(|inst| inst.output));
+            }
+        }
+        let mut work = Vec::new();
+        self.spread(exit.block, &pending, &mut work);
+        while let Some((block, fresh)) = work.pop() {
+            let at = block.0 as usize;
+            #[cfg(test)]
+            REGISTER_CLASS_VISITS.with(|visits| {
+                let classes = fresh
+                    .iter()
+                    .map(|word| word.count_ones() as usize)
+                    .sum::<usize>();
+                visits.set(visits.get() + classes);
+            });
+            let pass = self.through(at, &fresh, &mut live);
+            self.spread(block, &pass, &mut work);
         }
         for at in self.touched.drain(..) {
-            self.walked[at].clear();
+            self.walked[at].fill(0);
         }
         live.sort_unstable();
         live.dedup();
         live
     }
 
-    /// Walk `held` back from `before`, keeping each definition of a pending byte; what is pending at
-    /// its head.
-    fn scan(
-        &self,
-        held: &crate::graph::GraphBlock,
-        before: Option<InstId>,
-        mut pending: BTreeSet<u64>,
-        live: &mut Vec<ValueId>,
-    ) -> BTreeSet<u64> {
-        let end = before
-            .and_then(|at| held.insts.iter().position(|inst| *inst == at))
-            .unwrap_or(held.insts.len());
-        let insts = held.insts[..end].iter().rev();
-        for inst in insts.filter_map(|id| self.graph.inst(*id)) {
-            let Some(bytes) = register_bytes(self.graph, inst) else {
-                continue;
-            };
-            let before = pending.len();
-            bytes.for_each(|byte| _ = pending.remove(&byte));
-            if pending.len() < before && !self.killed(inst) {
-                live.extend(inst.output);
-            }
-            if pending.is_empty() {
-                break;
-            }
+    /// The classes of `fresh` block `at` does not write, its last writer of each other one live.
+    fn through(&self, at: usize, fresh: &Classes, live: &mut Vec<ValueId>) -> Classes {
+        let mut pass = fresh.clone();
+        for (word, bits) in fresh.iter().enumerate() {
+            let hit = bits & self.written[at][word];
+            pass[word] &= !self.written[at][word];
+            let classes = BitsSet(hit).map(|bit| (word * 64) as u32 + bit);
+            let last = &self.last[at];
+            let found = classes
+                .filter_map(|class| last.binary_search_by_key(&class, |(class, _)| *class).ok());
+            let writers = found
+                .map(|found| last[found].1)
+                .filter(|id| !self.killed(*id));
+            live.extend(writers.filter_map(|id| self.graph.inst(id).and_then(|inst| inst.output)));
         }
-        pending
+        pass
     }
 
     /// Whether `inst` is a call's clobber: a `CallDefine` no boundary states as a result.
-    fn killed(&self, inst: &crate::graph::GraphInst) -> bool {
-        matches!(inst.payload, InstPayload::Op(SSAOp::CallDefine { .. }))
-            && inst
-                .output
-                .is_none_or(|value| !self.call_results.contains(value))
+    fn killed(&self, id: InstId) -> bool {
+        self.graph.inst(id).is_some_and(|inst| {
+            matches!(inst.payload, InstPayload::Op(SSAOp::CallDefine { .. }))
+                && inst
+                    .output
+                    .is_none_or(|value| !self.call_results.contains(value))
+        })
     }
 
-    /// Hand each predecessor of `held` the pending bytes not yet walked through it.
+    /// Hand each predecessor of `block` the pending classes not yet walked through it.
     fn spread(
         &mut self,
-        held: &crate::graph::GraphBlock,
-        pending: &BTreeSet<u64>,
-        work: &mut Vec<(crate::graph::BlockId, Option<InstId>, BTreeSet<u64>)>,
+        block: crate::graph::BlockId,
+        pending: &Classes,
+        work: &mut Vec<(crate::graph::BlockId, Classes)>,
     ) {
+        let Some(held) = self.graph.block(block) else {
+            return;
+        };
         for predecessor in &held.predecessors {
             let at = predecessor.0 as usize;
             let seen = &mut self.walked[at];
-            let fresh = pending.difference(seen).copied().collect::<BTreeSet<_>>();
-            if fresh.is_empty() {
+            let fresh = (pending.iter().zip(seen.iter()))
+                .map(|(pending, seen)| pending & !seen)
+                .collect::<Classes>();
+            if fresh.iter().all(|word| *word == 0) {
                 continue;
             }
-            if seen.is_empty() {
+            if seen.iter().all(|word| *word == 0) {
                 self.touched.push(at);
             }
-            seen.extend(fresh.iter().copied());
-            work.push((*predecessor, None, fresh));
+            for (seen, fresh) in seen.iter_mut().zip(&fresh) {
+                *seen |= fresh;
+            }
+            work.push((*predecessor, fresh));
         }
     }
 }
@@ -2581,7 +2781,7 @@ pub(crate) fn reaching_source_return_register_in_block(
 }
 
 /// Whether the body sets the convention's vector count for the call at `(block_addr, op_index)` and
-/// for nothing else: a constant at most 8 only that call reads (psABI 3.5.7, ADR "Variadic tail").
+/// for nothing else: a constant at most 8 only that call reads (psABI 3.2.3, ADR "Variadic tail").
 fn count_register_set(at: CallPosition<'_>, machine_context: &SourceMachineContext) -> bool {
     let CallPosition {
         prep,

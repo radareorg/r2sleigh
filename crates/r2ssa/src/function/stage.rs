@@ -137,6 +137,11 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    /// The function as built, before its seal.
+    pub(crate) const fn function(&self) -> &SSAFunction {
+        &self.ir
+    }
+
     /// The function, given back as an IR with no stage: whatever is done to
     /// it next starts again from [`Lifted`].
     pub fn into_function(self) -> SSAFunction {
@@ -157,6 +162,11 @@ impl Prepared {
     }
 
     /// State what each direct callee leaves as found, for a build kept against other statements.
+    /// The frame walk decided again against a restatement's callees (D365): the build stands.
+    pub(crate) fn restate_frame_points(&mut self, points: crate::semantic::FramePoints) {
+        self.ir.restate_frame_points(points);
+    }
+
     pub(crate) fn set_callee_passes(&mut self, preserved: &super::CalleePreservedCarriers) {
         self.ir.set_callee_passes(preserved);
     }
@@ -361,6 +371,7 @@ impl Sealed {
                     machine_context: Some(&machine_context),
                     site: "prepare",
                     certified: crate::semantic::Certified::Whole,
+                    prefix: None,
                 },
                 control,
             )?;
@@ -395,6 +406,8 @@ impl Sealed {
                 accesses: &facts.structured.memory_accesses,
                 stack_slots: &facts.certificates.stack_slots,
                 machine_context: &machine_context,
+                values: &facts.values,
+                objects: &facts.objects,
             },
         );
         let member_calls = crate::member_call::collect_member_calls(

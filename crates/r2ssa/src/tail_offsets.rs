@@ -285,7 +285,11 @@ impl Prover<'_> {
         cursor: ValueId,
         (addr, assumption): (u64, &BlockAssumption),
     ) -> Option<Reach> {
-        let edge = crate::values::edge_dominates(self.function, assumption.predecessor, addr);
+        let edge = crate::values::edge_dominates(
+            (self.function.cfg(), self.function.domtree()),
+            assumption.predecessor,
+            addr,
+        );
         let fact = predicates
             .predicates
             .get(&assumption.predicate)

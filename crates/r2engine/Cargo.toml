@@ -23,6 +23,8 @@ x86 = ["r2sleigh-lift/x86"]
 arm = ["r2sleigh-lift/arm"]
 riscv = ["r2sleigh-lift/riscv"]
 placement_mutants = ["r2dec/placement_mutants"]
+# Count element visits of function-scale tables (`AnalysisStats::scans`, ROADMAP D417).
+work-meter = ["r2ssa/work-meter"]
 
 [dev-dependencies]
 r2source = { path = "../r2source", features = ["testing"] }

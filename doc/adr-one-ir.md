@@ -124,3 +124,145 @@ Exit: one encoding of each operation live after the seal, the census
 byte-identical at each step, about 10 to 14 MB of 0pack's peak (5 to 8%).
 Bound: each step re-keys in `O(n)`. Stop rule: past 40 files or any semantic
 change beyond the three named above, stop and report.
+
+## Condensation (D412, 2026-11-14)
+
+One Tarjan search owns every strongly connected component in the workspace:
+`r2ssa::dense::Condensation` over a `Csr<I, I>`. It returns each node's
+component, numbered in close order (an edge `u → v` has
+`component(v) <= component(u)`), each node's depth-first finish index, each
+component's members ascending, and whether a component is cyclic (several
+members or a self edge). The start order and the row order of the successors
+fix every index, so two runs on one graph agree.
+
+`dense::Reached` numbers a graph the engine states on demand (owner edges,
+forwarders): it asks each node's successors once, in the preorder the search
+from the root takes, so the query asks run in the order the deleted
+`resolved::Search` asked them; nodes are numbered by ascending key, so members
+come out in address order.
+
+Cost: `O(V + E)` visits, metered (`Condensation::visits`, and
+`AnalysisStats::condensed` for the program graphs). `Reached` adds `O(V + E)`
+hash probes and `O(V log V)` to number. The engine search it replaced kept
+`BTreeMap`s, `O((V + E) log V)`.
+
+Deleted: `view::strongly_connected_components` (value views and unstructured
+cycle blocks read the condensation), `resolved::Search` (resolved components
+and component forwarding), and interproc's Kosaraju (`compute_summary_sccs`).
+Readers to come: relift order (component and finish rank), callee summaries,
+the WTO (D415) and the rescans' no-kill union (R3).
+
+## Register classes (rescans R4, 2026-11-14)
+
+`boundaries::RegisterWalk` answers every unproven machine return's reaching
+register definitions (D254). The register bytes a function writes, the
+machine-state carriers left out, are cut into classes: two bytes share a class
+where no instruction writes one without the other, so they have the same
+writers and the same reaching definitions everywhere. `refine` cuts one write
+at a time: the bytes a write covers of a class it covers in part leave for a
+new class. Each write costs its width; classes are then numbered by their
+first byte.
+
+Each block keeps the last writer of each class it writes and one walked set,
+built once for every return. A (block, class) pair is walked once per return,
+and a visit costs its set's words and the classes the block writes of it:
+`O(E x R' x R'/64 + |live| log R')` per return for `R'` classes. Only the
+blocks a walk marked are cleared after it. The test `register_class_visits`
+grows `2^depth` leaves, each writing the result and a register across its top
+byte, and the class visits grow as `T log T`.
+
+D438 (2026-11-15) builds the walk without a search or a list per instruction:
+`class_of` is indexed by register offset from the lowest written byte, a carrier
+or unwritten byte `UNWRITTEN`, so a write's bytes are a slice found in `O(1)`;
+after refinement each instruction's classes are listed once, deduplicated by a
+last-lister stamp per class, into one `Csr` dense over `InstId`, which the
+block pass and the exit scan read. A write's set of placed bytes, and so every
+class, is the one `partition_point` over the sorted bytes gave; a row holds the
+same classes in first-byte order, and both readers ignore order. Build
+`O(I x w + span)`, one buffer per walk (`REGISTER_CLASS_LISTS`).
+
+## Reaching frame writes (D365, 2026-11-14; D427, 2026-11-15)
+
+`frame_reach::walk`'s `rewritten` names the loaded places a call may write
+before the load reads them. Invariant: a load of place `p` at width `w` reads a
+call's write iff some path runs from a non-tail call whose spans overlap
+`[p, p + w)` to the load with no exact store of `p` at its one width between.
+A place loaded or stored at two widths has no killing store.
+
+- Keys: one per loaded `(place, width)`, sorted; `P` keys, `P / 64` words.
+- Gen: a call's spans, each found by binary search and filled by word:
+  `O(S (log P + P / 64 + W))` per call for `W` keys starting below a span.
+  Every non-tail call also writes `[i64::MIN, base)`: its return address and
+  its callee's frame lie below its pointer, so a place there never folds
+  across it (`mov [rsp-16], 5; call rdi; mov eax, [rsp-16]`).
+- Kill: an exact store of a one-width place clears its key.
+- Solve: `out = (in & !kill) | gen` on `fixpoint::sparse` over the walk's
+  nodes in reverse postorder, the successors as readers. The transfer is
+  monotone and a cell only gains bits, so it moves at most `P` times; the
+  driver refuses past that and the walk denies every place. A pass costs
+  `O((B + E) P / 64)`; reverse postorder settles in `d + 2` passes for loop
+  depth `d`.
+- Replay: each block once from the join of its predecessors' outs, in index
+  order, reading each load's bit: `O((B + E) P / 64 + A log A)`.
+
+Equivalence: with no kill the solution is the old path union per key, so the
+new set is a subset of D365's. A place in the difference has every load
+reached only by a store executed after the last covering call, so no load
+reads a callee's write, and promotion's reaching store for each load is
+unchanged. The union's one-pass condensation (D426 R3) was exact only for a
+transfer that kills nothing, and is deleted with its tests. The tests
+`reaching_rewrites_is_the_kill_aware_union_over_every_path` (200 random graphs
+against a path search) and `reaching_rewrites_grows_linearly_in_the_blocks`
+(a chain and a cycle) replace them.
+
+### D432 as built: a reloaded format is its stored literal (2026-11-15)
+
+Fact F (round-6 ruling, section 2): a cited printf site whose format register
+is a load of frame place `q` takes literal `L` when every store to `q` stores
+the constant `L` at `q`'s one width, a store reaches the load on every path
+from entry, `q` is eligible apart from `rewritten`, and no covering call write
+reaches the load.
+
+- Candidates (`reloads`, per round, body facts only): a non-tail call whose
+  site the machine context names as a cited printf its own block folds no
+  literal for (`reloaded_format_register`); the `CallUse` of that register
+  before the call; the load defining it (`Definitions::load`) in the call's
+  block; every store to its place a constant (`Definitions::constant`) and one
+  constant. `O(C x u + A log C)`.
+- Gate (`conditional`): the place is a candidate no overlap, save,
+  declaration, handed address or escape keeps (`kept`, shared with
+  `eligible`), the entry is not re-entered, and the context states the call's
+  counted row for `L` (`reloaded_call_reads`: `L` immutable, its text a
+  literal, `counted_reads` places it). `handed` keeps the pre-verdict read
+  area, a superset.
+- Keys: `P` loaded keys, then one unset key per gated place. The root enters
+  with every unset key set; a write covering `q` sets it; an exact store of
+  `q` clears it. Unset bit clear at the load is "a store reached on every path
+  and no covering write after it".
+- Conditional gen: the call writes `bounded | (unset at its load ? extra : 0)`,
+  `extra` its every-location spans less `bounded`. Monotone: more set bits
+  give more written bits. A block holding such a call is evaluated event by
+  event; every other block keeps its `(gen, kill)` pair.
+- Solve: the same `fixpoint::sparse` from 0, so the least fixpoint. Height
+  `P + Q`; a pass costs `O((B + E)(P + Q) / 64 + R (P + Q) / 64)` for `R`
+  conditional calls. Soundness of the least fixpoint is the ruling's
+  induction: the first bounded site that writes past its counted area read
+  its unset bit clear, so every earlier call kept `q` and the register held
+  `L`.
+- Verdicts: `FramePoints::formats` (instruction to `L`). `FrameWalk::restate`
+  refuses a restatement whose verdicts move. The builder settles them into the
+  context (`settle_reloaded_formats`) after the preliminary build and after
+  the final one: the site's `format_tails` entry and its column row restated
+  through the same `stated_call_reads`. Nothing between the walk and the
+  settle reads a row (`fold_loads`, the three decisions and `prepare` read
+  none); a walk after the settle is a debug assertion.
+- Meter: a reloaded row (one per gated reload per decided round, one per
+  settle) counts as `reloaded` in `call_reads_built`, apart from the column's
+  one build per site that D436's gate holds. `reload_bound` counts each
+  decided round's reloads and each settle's formats before their rows;
+  `a_reloaded_format_builds_one_row_per_reload_a_round_decides` asserts
+  `reloaded <= reload_bound` (16 of 16 on its fixture; a row restated at every
+  site, every round, reads 52 of 16).
+- Test: `reaching_rewrites_with_reloads_is_their_least_path_solution`, 300
+  random graphs with a seed and reloads, against the path search iterated from
+  no unset reload to its fixpoint.

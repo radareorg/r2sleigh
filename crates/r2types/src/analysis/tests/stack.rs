@@ -6,7 +6,6 @@ use super::*;
 #[test]
 fn interproc_summary_name_does_not_prune_generated_surplus_slots() {
     let analysis = build_type_analysis(TypeAnalysisInput {
-        function_name: "dbg.or",
         ptr_bits: 64,
         inferred_signature: InferredSignature {
             function_name: "dbg.or".to_string(),

@@ -44,7 +44,7 @@ class Baseline(unittest.TestCase):
 
     def red(self, answer):
         sh = Shell([("git diff", (0, "")), ("--no-run", (0, "")), ("cargo test", answer)])
-        result, printed = quiet(lambda: mutants_d75.main(["name-trimmed", "name-lowercased"], sh))
+        result, printed = quiet(lambda: mutants_d75.main(["site-any-proven", "site-neighbour"], sh))
         self.assertTrue(result, "a red baseline must exit nonzero")
         self.assertIn("fails on the unmutated tree", result)
         self.assertEqual(printed, "", "no mutant ran")

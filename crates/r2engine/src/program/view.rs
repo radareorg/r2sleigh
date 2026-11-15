@@ -164,13 +164,27 @@ impl<'a, S: Source + 'static> View<'a, S> {
         machine: &'a Machine,
         entry: u64,
     ) -> Result<NativeTarget<'a>, crate::native::NativeRefusal> {
-        let chosen = self.db.inputs().assembled_at(entry);
-        let chosen = chosen.map_err(NativeRefusal::Unassembled)?;
-        let mut target = self.target_under(machine, chosen.assembled)?;
-        if let Some(program) = chosen.program {
+        let inputs = self.db.inputs();
+        let ruled = self
+            .convention_at(entry)
+            .map_err(NativeRefusal::Unassembled)?;
+        let assembled = inputs.assembled_of(ruled.id);
+        let mut target =
+            self.target_under(machine, assembled.map_err(NativeRefusal::Unassembled)?)?;
+        // A function under another convention than the program's places its imports under the program's.
+        if let Some(program) = inputs.assembled().filter(|it| it.convention != ruled.id) {
             target.program = Some(self.convention_of(program)?);
         }
         Ok(target)
+    }
+
+    /// The convention the function at `entry` runs under: its held `CalleeConvention`.
+    pub(super) fn convention_at(
+        &self,
+        entry: u64,
+    ) -> Result<super::Ruled, crate::native::Unassembled> {
+        let ruled = self.db.get::<super::CalleeConvention>(&entry);
+        (*ruled.expect("the convention asks for nothing")).clone()
     }
 
     /// A decoder under the program's default convention, for a walk that reads no boundary.
@@ -310,27 +324,38 @@ impl<S: Source + 'static> crate::body::Program for View<'_, S> {
     }
 
     /// A call through a slot that is not a kept loader binding is opaque, so it comes back.
-    fn returns_through(&self, slot: u64) -> bool {
-        crate::stated::sealed_import(self, slot).is_none()
-            || super::returns::Walking::new(self.clone(), false)
-                .ok()
-                .and_then(|walker| crate::discovery::Walker::declared(&walker, slot))
-                .is_none_or(|answer| answer.comes())
+    fn exit_through(&self, slot: u64) -> Option<crate::discovery::Never> {
+        crate::stated::sealed_import(self, slot)?;
+        let walker = super::returns::Walking::new(self.clone(), false).ok()?;
+        match crate::discovery::Walker::declared(&walker, slot)? {
+            crate::discovery::Return::Never(never) => Some(never),
+            crate::discovery::Return::Comes => None,
+        }
     }
 
-    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
-        let ((index, handle), model) = self.import_through(slot, |row| row.halts_on)?;
+    fn halts_on_through(&self, slot: u64) -> Option<crate::body::Halting> {
+        let cited = |row: &r2abi::LibraryRow| Some((row.halts_on?, r2source::Citation::of(row)?));
+        let (((index, halt), citation), model) = self.import_through(slot, cited)?;
         let register = model.argument(r2abi::SlotClass::Integer, index.into());
-        register.map(|register| (register, handle))
+        register.map(|register| (register, halt, citation))
+    }
+
+    fn halts_on(&self, callee: u64) -> Option<crate::body::Halting> {
+        let halting = self.db.get::<super::HaltingStubs>(&()).ok()?;
+        halting.get(&callee).copied()
+    }
+
+    fn holds_values(&self) -> bool {
+        let halting = self.db.get::<super::HaltingStubs>(&()).ok();
+        self.binds_handles() || halting.is_some_and(|halting| !halting.is_empty())
     }
 
     fn binds_handles(&self) -> bool {
         self.source().container().format == r2abi::statement::Format::Pe
     }
 
-    fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
-        let kernel = super::kernel(self.source().container());
-        r2abi::syscalls::interrupt_never_returns(kernel, arch, vector).is_none()
+    fn interrupt_halts(&self, arch: &str, vector: u64) -> Option<r2source::Citation> {
+        r2source::Citation::interrupt(super::kernel(self.source().container()), arch, vector)
     }
 
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
@@ -351,6 +376,10 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         self.db.inputs().control.clone()
     }
 
+    fn note_rebuilt(&self) {
+        self.db.note_rebuilt();
+    }
+
     /// A callee resolved against its result's owners; under `aa`, against its arity's too.
     fn read_callee(
         &self,
@@ -368,6 +397,22 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
             .get::<super::resolved::Resolved>(&((address, thumb), demand));
         let read = read.expect("a callee's read asks for no other root");
         std::sync::Arc::clone(&read.0)
+    }
+
+    fn callee_statement(
+        &self,
+        address: u64,
+        _read: &mut dyn FnMut() -> crate::native::CalleeRead,
+    ) -> std::sync::Arc<crate::native::CalleeRead> {
+        let key = (address, self.thumb_at(address));
+        let read = self.db.get::<super::analysis::CalleeReads>(&key);
+        std::sync::Arc::clone(&read.expect("a statement asks for no other root").0)
+    }
+
+    fn callee_writes(&self, address: u64) -> Option<r2ssa::call_reads::StackWrites> {
+        let key = (address, self.thumb_at(address));
+        let composed = self.db.get::<super::writes::IncomingWrites>(&key).ok()?;
+        composed.writes.clone()
     }
 
     fn name_at(&self, vaddr: u64) -> Option<String> {
@@ -392,12 +437,12 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
 
     /// The result `CallBoundary` decided for the function at `entry` from its open read's supply
     /// (doc/adr-result-side.md, section 3; D317).
-    fn closed_result(&self, entry: u64) -> Option<r2source::SourceClosedResult> {
+    fn closed_result(&self, entry: u64) -> Option<r2source::SourceClosedDecision> {
         use super::fates::{CallBoundary, CalleeKey, World};
         let key = (CalleeKey::Entry(entry), World::Closed);
         let boundary = self.db.get::<CallBoundary>(&key).ok()?;
         match boundary.as_ref() {
-            Some(CallBoundary::Sites { result, .. }) => result.result,
+            Some(CallBoundary::Sites { result, .. }) => result.decision(),
             _ => None,
         }
     }
@@ -442,8 +487,16 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
 
     fn kept_at(&self, entry: u64) -> Option<std::collections::BTreeSet<r2ssa::CanonicalStorageId>> {
         let key = (entry, self.thumb_at(entry));
-        let kept = self.db.get::<super::fates::KeptAcross>(&key).ok()?;
-        (*kept).as_ref().map(|kept| kept.kept_registers().collect())
+        let summary = self.db.get::<super::fates::Summary>(&key).ok()?;
+        (*summary)
+            .as_ref()
+            .map(|summary| summary.kept.kept_registers().collect())
+    }
+
+    fn reads_at(&self, entry: u64) -> Option<r2ssa::site_boundary::LaneReads> {
+        let key = (entry, self.thumb_at(entry));
+        let summary = self.db.get::<super::fates::Summary>(&key).ok()?;
+        (*summary).as_ref().map(|summary| summary.reads.clone())
     }
 
     fn site_convention_at(&self, callee: u64) -> Option<std::sync::Arc<r2ssa::ConventionModel>> {
@@ -454,14 +507,18 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
                 machines.imports.bound(&name).then_some(())?;
                 inputs.assembled()?.convention
             }
+            // A body takes its own model where it is stated; one under a refused row runs under the join.
             None => {
-                let container = self.source().container();
-                let declared = container.declarations.function_at(callee)?;
-                let (arch, bits) = (&container.arch.name, container.arch.bits);
-                super::stated_convention(arch, bits, declared.convention).ok()??
+                (self.convention_at(callee).ok())
+                    .filter(|ruled| ruled.stated)?
+                    .id
             }
         };
         let model = self.db.get::<super::Convention>(&id).ok()?;
-        (*model).as_ref().ok().cloned()
+        (*model)
+            .as_ref()
+            .ok()
+            .filter(|model| model.refused.is_none())
+            .cloned()
     }
 }

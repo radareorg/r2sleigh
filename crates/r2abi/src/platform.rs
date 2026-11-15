@@ -152,7 +152,14 @@ pub enum GuardRow {
     LinkedGlobal(LinkedGuard),
     /// The word the PE load configuration's `SecurityCookie` names (Microsoft PE format,
     /// "Load Configuration Layout"); its address is the container's.
-    LoadConfigCookie,
+    LoadConfigCookie(CookieCheck),
+}
+
+/// The register `__security_check_cookie` takes the saved cookie in, as the CRT source states.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CookieCheck {
+    pub argument: RegName,
+    pub citation: &'static str,
 }
 
 /// A stack protector's global word, by the symbol a C library defines it under.
@@ -202,7 +209,17 @@ const I386_BIONIC_GUARD: GuardRow = GuardRow::ThreadSlot(StackGuard {
     citation: BIONIC_GUARD_CITATION,
     ..I386_LINUX_GUARD
 });
-const UCRT_GUARD: GuardRow = GuardRow::LoadConfigCookie;
+const UCRT_X86_64_GUARD: GuardRow = GuardRow::LoadConfigCookie(CookieCheck {
+    argument: RegName("rcx"),
+    citation: "MSVC's x64 `__security_check_cookie` as linked into radare2 \
+        test/bins/pe/hello_gs_x64.exe 0x140011c90: `cmp rcx, [__security_cookie]; jne; rol rcx, 0x10`",
+});
+const UCRT_I386_GUARD: GuardRow = GuardRow::LoadConfigCookie(CookieCheck {
+    argument: RegName("ecx"),
+    citation: "MSVC's i386 `__security_check_cookie` as linked into radare2 \
+        test/bins/pe/hello_gs_x86.exe 0x401ab2: `cmp ecx, [__security_cookie]; jne; ret; \
+        jmp __report_gsfailure`; its callers load ecx and push no argument",
+});
 
 /// The C library's guard row for an architecture; a library no row cites states none.
 pub fn guard_row(arch: &str, bits: u32, library: CLibrary) -> Option<&'static GuardRow> {
@@ -211,7 +228,8 @@ pub fn guard_row(arch: &str, bits: u32, library: CLibrary) -> Option<&'static Gu
         (Some("x86"), 32, CLibrary::Glibc) => Some(&I386_GLIBC_GUARD),
         (Some("x86"), 64, CLibrary::Bionic) => Some(&X86_64_BIONIC_GUARD),
         (Some("x86"), 32, CLibrary::Bionic) => Some(&I386_BIONIC_GUARD),
-        (Some("x86"), 64, CLibrary::Ucrt) => Some(&UCRT_GUARD),
+        (Some("x86"), 64, CLibrary::Ucrt) => Some(&UCRT_X86_64_GUARD),
+        (Some("x86"), 32, CLibrary::Ucrt) => Some(&UCRT_I386_GUARD),
         (Some("arm"), 64, CLibrary::Glibc) => Some(&AARCH64_GLIBC_GUARD),
         (Some("arm"), 64, CLibrary::Musl) => Some(&AARCH64_MUSL_GUARD),
         (Some("arm"), 64, CLibrary::Bionic) => Some(&AARCH64_BIONIC_GUARD),

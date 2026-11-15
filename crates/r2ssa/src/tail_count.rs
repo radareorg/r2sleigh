@@ -390,8 +390,11 @@ impl Prover<'_> {
             return Err("no cursor steps".into());
         }
         let header = self.innermost(&cursors)?;
-        let predicates =
-            crate::semantic::collect_predicate_facts(self.function, Some(self.prep), self.graph);
+        let predicates = crate::semantic::collect_predicate_facts(
+            crate::semantic::BuildFacts::bare(self.function),
+            Some(self.prep),
+            self.graph,
+        );
         let counting = self.counting(header, &predicates)?;
         let bound = match &counting {
             Counting::Memory(bound) => Some(bound),

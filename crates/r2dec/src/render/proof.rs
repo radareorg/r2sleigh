@@ -48,6 +48,18 @@ fn proof_columns(
             ", {unproven} {calls} where no return was reached (unproven)"
         );
     }
+    let uncited = ledger.uncited_exits();
+    if uncited > 0 {
+        let calls = if uncited == 1 {
+            "call ends"
+        } else {
+            "calls end"
+        };
+        let _ = write!(
+            &mut line,
+            ", {uncited} {calls} where only an uncited row says it never returns (unproven)"
+        );
+    }
     if closure.assumed > 0 {
         let _ = write!(
             &mut line,
@@ -77,7 +89,7 @@ fn proof_columns(
 /// structures laid out, and the tags stated as two kinds.
 type Clauses<'a> = (
     &'a [UnassignedRead],
-    (bool, &'a [Disputed]),
+    ((bool, bool), &'a [Disputed]),
     usize,
     &'a [String],
 );
@@ -90,7 +102,9 @@ pub(crate) fn note_unproven_constructs(
     radare2_variadic_format_counts: usize,
     radare2_prototypes: usize,
     radare2_local_names: usize,
-    (unassigned, (open_second_result, disputed), laid_out, conflicting): Clauses<'_>,
+    (unassigned, ((open_second_result, integer_lane), disputed), laid_out, conflicting): Clauses<
+        '_,
+    >,
     unproven: Option<Option<r2types::UnprovenCause>>,
     floor: Option<(usize, &r2source::SourceArityFloor)>,
 ) {
@@ -180,8 +194,16 @@ pub(crate) fn note_unproven_constructs(
         );
     }
     note_floor(&mut detail, floor);
-    if ledger.is_some_and(|ledger| ledger.premises().contains(&r2source::Premise::ClosedWorld)) {
-        detail.push_str(closed_world(func, unproven));
+    if let Some(premises) = ledger.map(crate::ledger::ObligationLedger::result_premises)
+        && !premises.is_empty()
+    {
+        let assumed = premises.iter().map(|premise| premise.spelled());
+        let assumed = assumed.collect::<Vec<_>>().join(", ");
+        let _ = write!(
+            &mut detail,
+            "{} (assuming {assumed})",
+            closed_world(func, unproven, integer_lane)
+        );
     }
     if open_second_result {
         detail.push_str("; the result's second register is open: no call read decides it");
@@ -229,21 +251,24 @@ pub(crate) fn note_unproven_constructs(
     func.body.insert(0, CStmt::comment(text));
 }
 
-/// A premise is its own clause: what the closed world decided of the result (D166, D234).
+/// A premise is its own clause: what the closed world decided of the result (D166, D234), or of
+/// the integer result register alone, which says nothing of the result (D440).
 fn closed_world(
     func: &CFunction,
     unproven: Option<Option<r2types::UnprovenCause>>,
-) -> &'static str {
-    match unproven {
+    integer_lane: bool,
+) -> String {
+    let result = match unproven {
         Some(Some(r2types::UnprovenCause::ForwardCycle)) => {
-            "; a call returns the result on through a cycle (assuming closed-world)"
+            Some("; a call returns the result on through a cycle")
         }
         // A value no body proves, decided only by its reading calls.
-        None if func.ret_type != crate::ast::CType::Void => {
-            "; a call reads the result (assuming closed-world)"
-        }
-        _ => "; no call reads the result (assuming closed-world)",
-    }
+        None if func.ret_type != crate::ast::CType::Void => Some("; a call reads the result"),
+        _ if integer_lane => None,
+        _ => Some("; no call reads the result"),
+    };
+    let lane = integer_lane.then_some("; no call reads the integer result register");
+    result.into_iter().chain(lane).collect()
 }
 
 /// A result lane where the body's returns contradict the declaration, and what they leave there.

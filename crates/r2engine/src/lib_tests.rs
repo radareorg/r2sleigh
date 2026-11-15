@@ -143,7 +143,6 @@ fn source_snapshot_call_interface(
         r2source::ConventionId::SysVAmd64,
         Vec::<r2ssa::SourceCallArgumentSpec>::new(),
         false,
-        false,
         r2ssa::SourceCallResult::Void,
     )
     .expect("source callsite interface")

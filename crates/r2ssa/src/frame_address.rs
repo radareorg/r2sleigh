@@ -4,6 +4,8 @@
 //! check, slot promotion): through copies, constant adds and subtracts, and merges whose every
 //! source points at the same place. `O(definitions)` to build, `O(chain)` per question.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use crate::arena::OpId;
 use crate::dense::{Csr, DenseId, IdMap};
 use crate::function::SSAFunction;
@@ -21,6 +23,8 @@ pub(crate) struct Definitions {
     phis: IdMap<VarId, Vec<VarId>>,
     /// Where each operation sits: its block and its index there.
     positions: IdMap<OpId, (u64, usize)>,
+    /// The block each merge heads.
+    phi_blocks: IdMap<VarId, u64>,
     /// A bound on any definition chain: every step moves to an operand defined earlier.
     values: usize,
     /// Where each merge points, where its sources agree (`Merge::Place`).
@@ -29,6 +33,20 @@ pub(crate) struct Definitions {
     chains: IdMap<VarId, Affine>,
     /// The merge solve moved a state past its height; whoever built these refuses the function.
     exhausted: Option<crate::fixpoint::Exhausted>,
+}
+
+/// Where a set of operations sits, for [`Definitions::defined_before_some`].
+pub(crate) struct Reach {
+    /// Each block holding one of the operations, with the last one's index.
+    last: BTreeMap<u64, usize>,
+    /// Each block strictly dominating a block in `last`.
+    above: BTreeSet<u64>,
+}
+
+impl Reach {
+    pub(crate) fn is_empty(&self) -> bool {
+        self.last.is_empty()
+    }
 }
 
 /// What a merge of addresses is, solved once over every merge of the function.
@@ -56,11 +74,13 @@ impl Definitions {
         let mut defs = IdMap::new(values);
         let mut phis = IdMap::new(values);
         let mut positions = IdMap::new(func.id_limit());
+        let mut phi_blocks = IdMap::new(values);
         for addr in func.block_addrs() {
             let Some(block) = func.get_block(*addr) else {
                 continue;
             };
             for (_, phi) in block.sited_phis() {
+                phi_blocks.insert(phi.dst, *addr);
                 phis.insert(
                     phi.dst,
                     phi.sources.iter().map(|(_, source)| *source).collect(),
@@ -77,6 +97,7 @@ impl Definitions {
             defs,
             phis,
             positions,
+            phi_blocks,
             values,
             merges: IdMap::new(values),
             chains: IdMap::new(values),
@@ -244,6 +265,44 @@ impl Definitions {
         match (self.position(a), self.position(b)) {
             (Some((block_a, at)), Some((block_b, bt))) if block_a == block_b => at < bt,
             (Some((block_a, _)), Some((block_b, _))) => func.dominates(block_a, block_b),
+            _ => false,
+        }
+    }
+
+    /// The blocks `ops` sit in, each with its last index, and every block strictly dominating one:
+    /// each idom chain is walked until it meets a marked block, so `O(ops + blocks)` inserts.
+    pub(crate) fn reach_of(
+        &self,
+        func: &SSAFunction,
+        ops: impl IntoIterator<Item = OpId>,
+    ) -> Reach {
+        let mut last = BTreeMap::new();
+        for (block, at) in ops.into_iter().filter_map(|op| self.position(op)) {
+            let held = last.entry(block).or_insert(at);
+            *held = (*held).max(at);
+        }
+        let mut above = BTreeSet::new();
+        for block in last.keys() {
+            let mut up = func.idom(*block);
+            while let Some(dominator) = up.filter(|dominator| above.insert(*dominator)) {
+                up = func.idom(dominator);
+            }
+        }
+        Reach { last, above }
+    }
+
+    /// Whether `var`'s definition, an operation or a merge, runs before some operation of `reach` on
+    /// every path to it. `O(log blocks)`.
+    pub(crate) fn defined_before_some(&self, var: VarId, reach: &Reach) -> bool {
+        let reaches = |block: u64, at: Option<usize>| {
+            reach.above.contains(&block)
+                || (reach.last.get(&block)).is_some_and(|last| at.is_none_or(|at| at < *last))
+        };
+        match (self.defs.get(var), self.phi_blocks.get(var)) {
+            (Some((def, _)), _) => {
+                (self.position(*def)).is_some_and(|(block, at)| reaches(block, Some(at)))
+            }
+            (None, Some(head)) => reaches(*head, None),
             _ => false,
         }
     }

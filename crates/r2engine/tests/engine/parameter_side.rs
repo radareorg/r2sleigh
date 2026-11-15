@@ -192,3 +192,41 @@ fn a_floor_callee_s_extern_result_is_its_header_s() {
         "{caller}\n{callee}"
     );
 }
+
+/// The six registers summed with `[rsp + 0x10]` and stored, then `mov rcx, [rsp + 8]` handed to a
+/// call through memory: no statement bounds what that call reads.
+const SLOT_HANDED_TO_AN_UNBOUNDED_CALL: [u8; 0x60] = padded([
+    0x48, 0x89, 0xf8, 0x48, 0x01, 0xf0, 0x48, 0x01, 0xd0, 0x48, 0x01, 0xc8, 0x4c, 0x01, 0xc0, 0x4c,
+    0x01, 0xc8, // 1000 the six summed
+    0x48, 0x03, 0x44, 0x24, 0x10, // 1012 add rax, [rsp + 0x10]
+    0x48, 0x89, 0x05, 0x2a, 0x00, 0x00, 0x00, // 1017 mov [rip + 0x2a], rax
+    0x48, 0x8b, 0x4c, 0x24, 0x08, // 101e mov rcx, [rsp + 8]
+    0xff, 0x15, 0x27, 0x00, 0x00, 0x00, // 1023 call [rip + 0x27]
+    0xc3, // 1029 ret
+]);
+
+/// A slot whose read reaches only a call of unproven arity is no hole: the use is unknown, the
+/// parameter decoded, never `r2sleigh_unread_` (D434; diff3 O2-noinline `fcn_58d0` `arg6`).
+#[test]
+fn a_stack_slot_handed_to_a_call_nothing_bounds_is_not_unread() {
+    let literal = || {
+        Literal::of_code(&SLOT_HANDED_TO_AN_UNBOUNDED_CALL, &[("f", BASE, 0x2a)])
+            .writable_data_after(BASE + 0x40)
+    };
+    let uses = slot_uses(literal());
+    let stack = &uses[uses.len() - 2..];
+    assert_eq!(
+        stack[0],
+        SlotUse::Unknown(SourceFloorCause::ArgumentAreaRead),
+        "{uses:?}"
+    );
+    assert!(matches!(stack[1], SlotUse::Read { .. }), "{uses:?}");
+    let mut open = OpenProgram::of(literal());
+    let text = open
+        .rendered(BASE)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(!text.contains("r2sleigh_unread_"), "{text}");
+}

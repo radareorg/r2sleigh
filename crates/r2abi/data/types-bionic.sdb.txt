@@ -43,6 +43,7 @@ func.__strlen_chk.arg.0=const char *,s
 func.__strlen_chk.arg.1=size_t,n
 func.__strlen_chk.ret=size_t
 func.__strlen_chk.include=string.h
+func.__strlen_chk.effects=reads(0, str)
 
 stpcpy=func
 func.stpcpy.args=2

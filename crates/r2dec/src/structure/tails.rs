@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::shape::{Evidence, Occurrences, callee_of};
+use super::shape::{Evidence, Occurrences, site_of};
 use crate::ast::CStmt;
 
 /// The most statements a block may have to be read as a tail.
@@ -180,7 +180,7 @@ pub(super) fn copyable(stmt: &CStmt) -> bool {
 fn plain(stmt: &CStmt, ev: &Evidence<'_>) -> Option<Ended> {
     match stmt {
         _ if !copyable(stmt) => None,
-        CStmt::Expr(_) if ev.never_returns(callee_of(stmt)) => Some(Ended::Terminal),
+        CStmt::Expr(_) if ev.never_returns(site_of(stmt)) => Some(Ended::Terminal),
         CStmt::Expr(_) | CStmt::Empty => Some(Ended::On),
         CStmt::Return(_) => Some(Ended::Terminal),
         _ => None,
@@ -373,7 +373,7 @@ fn completes(stmt: &CStmt, ev: &Evidence<'_>) -> bool {
                     .is_none_or(|else_body| completes(else_body, ev))
         }
         CStmt::Goto(_) | CStmt::Return(_) | CStmt::Break | CStmt::Continue => false,
-        CStmt::Expr(_) => !ev.never_returns(callee_of(stmt)),
+        CStmt::Expr(_) => !ev.never_returns(site_of(stmt)),
         CStmt::For {
             cond: None, body, ..
         } => breaks_out(body),
@@ -468,7 +468,7 @@ fn falling_ends(stmt: &CStmt, ev: &Evidence<'_>) -> Option<usize> {
             Some(then_ends + else_ends)
         }
         CStmt::Goto(_) | CStmt::Return(_) | CStmt::Break | CStmt::Continue => Some(0),
-        CStmt::Expr(_) => Some(usize::from(!ev.never_returns(callee_of(stmt)))),
+        CStmt::Expr(_) => Some(usize::from(!ev.never_returns(site_of(stmt)))),
         CStmt::Empty | CStmt::Comment(_) => Some(1),
         _ => None,
     }

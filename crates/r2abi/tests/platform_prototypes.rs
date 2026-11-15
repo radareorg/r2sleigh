@@ -78,8 +78,14 @@ fn libsystem_declares_the_imports_ls_calls() {
     let scope = CLibrary::LibSystem.scope();
     assert!(
         rows.find(scope, "__assert_rtn")
-            .is_some_and(|row| row.noreturn)
+            .is_some_and(|row| row.noreturn && row.cited())
     );
+    // The SDK's unistd.h and stdlib.h state `__dead2` (D406); no other library's row is read.
+    for name in ["_exit", "_Exit", "errc"] {
+        let row = rows.find(scope, name);
+        assert!(row.is_some_and(|row| row.noreturn && row.cited()), "{name}");
+    }
+    assert!(!declares(CLibrary::Glibc, "errc"));
     assert_eq!(declared("__maskrune").map(|types| types.len()), Some(2));
     assert_eq!(declared("__error"), Some(vec![]));
     assert_eq!(

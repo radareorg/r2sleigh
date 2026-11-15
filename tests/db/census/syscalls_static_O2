@@ -77,7 +77,7 @@ CMDS=aa; pdd @ 0x00401050
 EXPECT=<<EOF
 r2sleigh_result_u32 fcn_401050(void)
 {
-    /* r2dec proof: no individual construct is marked; 7 source obligations: 3 rendered, 4 elided, 0 refused; 1 statements rendered; the result is unproven (Written): 1 unproven-return carried */
+    /* r2dec proof: no individual construct is marked; 7 source obligations: 3 rendered, 4 elided, 0 refused; 1 statements rendered; no call reads the integer result register (assuming closed-world); the result is unproven (Written): 1 unproven-return carried */
     {
         return r2sleigh_carrier_u32(0x50f);
     }

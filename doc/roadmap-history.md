@@ -577,3 +577,68 @@ Rows whose done work left [ROADMAP.md](../ROADMAP.md) later, kept verbatim with 
 ### P7's Left, as it stood before the gap table (2026-11-13, `origin/rebuild-design` `eada8041a`)
 
 the cost P7 took, measured: a cold `pdd` does not demand arity (it took 0pack 0x62ecf0 from 20.0 to 36.5 G), so a call to a callee whose arity is a floor is a residual (pumasim 0x23fdf0 74 to 1,009 call gaps: 610 floors, 330 counted off registers alone, 347 of them indirect; pumasim +2.9%, gzdoom +4.8% as it renders 1,000 more calls); next, import arity from a declaration and never from the PLT stub's body, with cited Itanium C++ ABI and runtime rows (293 of pumasim's floors are `_Znwm`, 98 of 0pack's 103 gaps are imports; under way); then an indirect call's slot named in its gap, the "`aa` may resolve it" hint once a floor states whether it has owners, demanding arity on a cold `pdd` only where the root writes past a floor (SM; measured there: where `aa` demands it, it closes 9 of pumasim `0x23fdf0`'s 317 floors, so it waits on LP's `may-hand-on` and indirect arity), a cycle's results are their least fixpoint (D37: an unproven result states its causes, `Returned`, `Tailed`, `TailsDisagree`, `NoReturn`, `Clobbered`, `HandedBack`, `Ambiguous`, `Undefined`; a member is result-open where every cause is a call to a named callee and one is a member; it is seeded at the convention's carrier at the width the paths of its own write, assumed to its partners, and kept only where its own read states what was assumed, else `cycle-fixpoint` refusal evidence and each keeps what it had; it runs on every request's result demand, not under `aa`): gcc -O1 `shape_mutual_even` and `shape_mutual_odd` render `return rax_6` of the partner's call instead of a trap, a member with no path of its own, one handing back the caller's register or returning an indirect call stays a residual; release `aa; pdd`: 0pack `0x62ecf0` 69.21 to 69.34 G (+0.2%), `0x58e3d0` 81.18 to 81.29 G (+0.15%), pumasim `0x23fdf0` 67.11 to 67.17 G (+0.1%), `pdd` 0pack 20.29 to 20.28 G, pumasim 19.15 to 19.17 G, outputs byte-identical, peak RSS within 6%; census 430 unmoved, `aa; pdd` of 4,000 functions (2,000 each of 0pack and pumasim) byte-identical to the base build; equivalence cells at risk, graded on contabo: `shape_mutual_even` and `shape_mutual_odd` at gcc-O1 on x86-64 and aarch64 (trap expected to become equal) and their callers `shape_recurse_mutual` and `main`; the width of a call-defined value is still the carrier's (`recovered_result` reads a `CallDefine` as all data), so a pair over `int` renders `uint64_t`, which needs the callee's logical width on the call fact (next); `result_ambiguous` is set at four sites and the `Ambiguous` cause at one: the other three leave the result void, proven or `HandedBack`, and ask the callers, so the bool is wider than the cause; state that ask on the interface, then `native.rs`'s one reader reads it and the bool goes (next); `result_calls` and `seed_result` each recompute the result slot's live-out that recovery computed, up to three scans on the unproven path, flat in timing (next)), AArch64 `bl g; bl f` with g's x0 ending the count; general demangling scoped as `AtLeast(explicit)` plus variadic only (mangling states neither `this` nor the return, and legacy Rust mangling with no bare-function-type states no arity); `mbr_identifier_translate` declared once a cited source exists (deferred: only a private Libinfo header states it); the 41 "disagrees with its declaration" gaps, conditional; i386 stack parameters placed and a call clobbering the outgoing area (W9); a message send's fixed count from its selector's method type encoding, stated by r2image from the Mach-O ObjC metadata (W10's rest: hello-objc's six sends are residuals until then); float parameters and results recovered, no invented `(void)` (W11); the parameter prefix past an unread slot (W12); W14's rest: the count-driven tail where clang -O0 reaches the `va_list` through a stored address and where x86-64 clang -O2 unrolls the loop (nine of twelve shapes.c builds prove it; ADR "Count-driven tail"), AArch64's register-counted call to an unread variadic callee, a variadic tail jump's gap spelled by its refusal; a proven syscall named (M16); noreturn facts: `__`-prefixed keys, `DW_AT_noreturn`, `rt_sigreturn`, `longjmp`, `_Unwind_Resume`, `__cxa_rethrow` (W24); one case-preserving callee identity on address and typed linkage (D10); `crc32_init`/`fill` and aarch64 gcc-O1 `mixed_touch`; the closed world's x1 (`result_register_written`) aligned with pairs (`written_on_every_return`); conditional on P7 and P9 closing: `afs`, `afts` and `afc` print the signature and the cited convention `pdd` proves (command-gap rank 4), never a second inference; the float path owning XMM0 before `body_proven_result` excludes it; printf's stack tail on x86-64; a conditional tail jump as an exit; conditional: lld's `int3` padding under the closed world, and `__libc_start_main`'s `main` as `int (*)(int, char**, char**)`; hand audit 3.5 to 3.7, in order: the callee's logical result width (149 DecBench functions return `\| residual(n) << 32`) before D72; W12's parameter prefix (203 functions); a parameter handed on untouched (`_exit()` drops `exit`'s status, wrong C); W11's floats without DWARF (0 of 8 builds); indirect calls through structure fields (145 functions) and C++ virtual calls (0pack 3,667 sites)
+
+Rows removed on 2026-11-15
+--------------------------
+
+The rewrite of ROADMAP.md (branch `roadmap-rewrite`, on `rebuild-design-6` f011873c0) removed the closed rows below.
+Code and docs still cite them by number. Each row's full text is in `git show f011873c0:ROADMAP.md`.
+
+| Row | Fact | Commit |
+|-----|------|--------|
+| D2 | Stable identity before more facts | 4255a254a |
+| D3 | Stages are types | 7ca3ae995 |
+| D7 | The visual mode never calls the engine while drawing | none |
+| D8 | The observation journal is replaced by D, not kept | none |
+| D9 | Location SSA is superseded | none |
+| D20 | The decompiler is rewritten, not refactored | none |
+| D34 | A lift pass over one instruction's ops edits through one plan whose applier keeps every instruction-relative label on its op, and (cut) | 050434e3b, 35657f480 |
+| D37 | r2ssa states why an arity is a floor, one typed variant per floor branch (an unresolved transfer, a supervisor entry, an argument area (cut) | 8a6e99f45 |
+| D58 | A rendering decision depends on facts, not on the order placement writes blocks | 13769b53c |
+| D59 | A condition chain whose exit is a `continue` to its own head is certified | 135aaba14 |
+| D60 | The structurer's data guards each have an end to end engine test and the certificate reads what a copy says | 39a1edad0 |
+| D62 | A callee's result presence is one fact per callee, stated by r2ssa and joined by r2engine's `CallBoundary` (D166) and projected by r2types, (cut) | f2256c1aa |
+| D72 | A function is declared with a value because its body leaves the carrier, though no caller reads it | a037e4c2a |
+| D77 | `crates/r2s/tests/commands.rs` `a_pipe_closed_between_prompts_ends_the_shell_at_the_prompt` failed about 1 run in 4 under load on macOS (cut) | 445b4c45a |
+| D100 | A header whose parameters are only a floor says so (D71's second review | 8859e701a |
+| D106 | A declared prototype that reads fewer registers than an undeclared call left a producer with no owner in r2dec's ledger, and the function (cut) | 865a4bfe6 |
+| D150 | A dead flag write in the block that ends at a table jump is accounted, so the switch renders | 45a20491a (D253) |
+| D151 | A library row is keyed by the name a program links and a platform is read from what the container states | e616a0b87 |
+| D153 | `pdd` after `aa` costs only what the function needs | e953c1269 |
+| D154 | The Win64 frame boundary is the ABI's | cae55e25f, 5a7d42b63 |
+| D155 | The ELF frame-boundary forms are the ABI's | 85e6c4532 |
+| D160 | The call boundary has one owner chain | ab93d6950, e7f542ebc |
+| D161 | A call-defined value has the callee's width | 23bfb8832 |
+| D162 | D153's design, from the profile ([call-boundary](adr-call-boundary.md), "S3 as built") | 8a8f77220 |
+| D163 | One placement rule in r2ssa for declared, recovered and import parameters, with stack locations, the DWARF arrival check and `DW_CC_nocall` (cut) | feed8ef82 |
+| D164 | Stack parameters are formals (`FormalHome::Frame` in r2ssa formal facts | 1134e3d2d |
+| D165 | Parameters by section | 8859e701a |
+| D166 | One `CallBoundary` per `(CalleeKey, World)` in r2engine | 658927d90 |
+| D167 | D151's design | 34ce81b97 |
+| D168 | Types reach r2types as `SourceTypeGraph` and `TypeId` through one converter | 1b6d0256c |
+| D169 | D154's design | cae55e25f |
+| D170 | D155's design | 9361be1f5 |
+| D172 | The "`_exit` is `AtLeast(1)`" gate is dropped | 1bf5c694c |
+| D200 | A result lane holds a value only where a C expression of the function defines a byte that a return leaves | ed78febf2 |
+| D201 | `Unproven` renders without claiming a result | 45dd6419d |
+| D202 | The closed world proves a written result unread, never void | d0be1b46c |
+| D208 | Decision | none (decided 2026-11-10) |
+| D209 | The target's C data model has one owner | e32c632c8 |
+| D210 | Call-boundary S13 | cf8b0dfd6 |
+| D214 | A select whose arm is dead under its own condition reads nothing | dd52d2a59 |
+| D215 | `/GS` from the load configuration | 5a7d42b63 |
+| D217 | Slot promotion promotes a frame address held in an outgoing stack-argument slot | d8487d42d |
+| D218 | A variadic import's vector reads at one call come from its format | 8cc30d289 |
+| D219 | A lane forwarded through a caller whose own result is read is never `Dead` | 8cc30d289 |
+| D220 | Microsoft x64 floating varargs and a home `va_list`'s count | 5a7d42b63 |
+| D221 | A format spilled to the frame is still the call's format | 4ed8bbf7c |
+| D225 | Callees whose parameters are a floor mint no call contract, so a caller's extern comes from the call's own classes (`uint64_t (cut) | 628c264f3 |
+| D228 | The hand-off `Read` for a cited fixed parameter (`sqrt(avg())` decides `double`) | 27d20ec95 |
+| D250 | A call in a program that states a second convention may run under either | 9b1494a16 |
+| D251 | An import binds the library its container identity names, never a bare name (design review finding 6) | 9b1494a16 |
+| D253 | The obligation inventory owns who reads a value, a switch dispatch owns what only it reads, and every obligation says why it was seeded (S23 | 45a20491a |
+| D255 | A walk names a call's exit only where the callee's noreturn is declared (S23 | 9725d9a82 |
+| D256 | A member pointing to an opaque name is `void *`, so the structure stays (S23 | 10453c109 |
+| D268 | The inferred signature is typed (D168 rest, RULING 1.3) | 6213b0cda |
+| D305 | The lane set | f57e1cb57 |
+| D309 | No new production reader of the convention views and strings S34 deletes ([call-boundary](adr-call-boundary.md), "The joined model") | c611eea2d |

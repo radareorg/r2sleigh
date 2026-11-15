@@ -664,11 +664,25 @@ fn a_loop_bounded_by_a_named_count_passes_exactly_that_many_tail_arguments() {
         local.contains("local(r2sleigh_word_u64 arg0, r2sleigh_word_u64 arg1)"),
         "{local}"
     );
-    assert!(local.contains("vfold(1, arg0)"), "{local}");
-    assert!(local.contains("vfold(2, arg0, arg1)"), "{local}");
-    assert!(local.contains("vfold(3, arg0, arg1, "), "{local}");
-    assert!(local.contains("vfold(5, arg0, arg1, "), "{local}");
+    // The homes are reloads past the earlier calls, which may rewrite them (D369).
+    assert_eq!(tails(&local), [1, 2, 3, 5], "{local}");
     assert!(!local.contains("argument count unproven"), "{local}");
+}
+
+/// Each `vfold` call's count and how many arguments follow it, in text order.
+fn tails(text: &str) -> Vec<usize> {
+    (text.lines())
+        .filter(|line| line.contains("= vfold("))
+        .filter_map(|line| common::call_arguments(&format!("\n{line}"), "vfold"))
+        .map(|arguments| {
+            assert_eq!(
+                arguments[0].parse::<usize>().ok(),
+                Some(arguments.len() - 1),
+                "{arguments:?}"
+            );
+            arguments.len() - 1
+        })
+        .collect()
 }
 
 /// A count the caller does not fix states no tail: the call stays the counted residual, with the
@@ -751,5 +765,5 @@ fn a_count_register_rewritten_before_the_call_is_no_constant() {
     let local = rendered(&mut open, BASE + 0x2f0);
     assert!(local.contains("count_argument_not_constant"), "{local}");
     assert!(!local.contains("vfold(1, arg0)"), "{local}");
-    assert!(local.contains("vfold(2, arg0, arg1)"), "{local}");
+    assert_eq!(tails(&local).first(), Some(&2), "{local}");
 }

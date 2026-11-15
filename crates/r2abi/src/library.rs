@@ -178,12 +178,21 @@ pub struct LibraryRow {
     /// Whether the row states what the function returns.
     pub result: RowResult,
     pub noreturn: bool,
-    /// A parameter that, holding this handle, makes the call not return.
-    pub halts_on: Option<(u8, Handle)>,
+    /// A parameter that, holding this value, makes the call not return.
+    pub halts_on: Option<(u8, Halt)>,
     /// The handle the result always is.
     pub yields: Option<Handle>,
     /// The standard and header the row is read from; empty for a row radare2's tables state.
     pub citation: Box<str>,
+    /// What the function does through its parameters, where a cited row states it (D383).
+    pub effects: Option<crate::Effects>,
+}
+
+impl LibraryRow {
+    /// Whether a cited source states the row; radare2's tables state the rest, which prove nothing (D395).
+    pub fn cited(&self) -> bool {
+        !self.citation.is_empty()
+    }
 }
 
 /// Whether a row states its function's result (doc/adr-result-side.md, "Imports with an unstated result").
@@ -208,10 +217,29 @@ impl Handle {
     }
 }
 
+/// The value of a row's argument that makes its call not return.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Halt {
+    /// The handle named.
+    Handle(Handle),
+    /// Any nonzero integer, as glibc's `error(3)` exits on a nonzero status.
+    NonZero,
+}
+
+impl Halt {
+    fn read(text: &str) -> Option<Self> {
+        match text {
+            "nonzero" => Some(Self::NonZero),
+            _ => Handle::read(text).map(Self::Handle),
+        }
+    }
+}
+
 /// Every row one C library's program reads, and the graph their types are nodes of.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LibraryRows {
-    library: CLibrary,
+    /// The C library, and its handle tags read once for every spelling of every table (D391).
+    reading: crate::spelling::Reading,
     graph: TypeGraph,
     prototypes: Vec<Prototype>,
     rows: BTreeMap<LibraryId, BTreeMap<Box<str>, LibraryRow>>,
@@ -228,6 +256,7 @@ const BIONIC: &str = include_str!("../data/types-android.sdb.txt");
 const BIONIC_CITED: &str = include_str!("../data/types-bionic.sdb.txt");
 const MUSL_CITED: &str = include_str!("../data/types-musl.sdb.txt");
 const LIBSYSTEM: &str = include_str!("../data/types-darwin.sdb.txt");
+const LIBSYSTEM_CITED: &str = include_str!("../data/types-darwin-cited.sdb.txt");
 const OBJC: &str = include_str!("../data/types-objc.sdb.txt");
 const KERNEL32: &str = include_str!("../data/types-kernel32.sdb.txt");
 const UCRT: &str = include_str!("../data/types-ucrt.sdb.txt");
@@ -250,7 +279,7 @@ const fn table(library: LibraryId, cited: bool, text: &'static str) -> Embedded 
 }
 
 /// The sources a cited row's comment may name.
-pub const SOURCES: [&str; 11] = [
+pub const SOURCES: [&str; 12] = [
     "ISO C17",
     "POSIX.1-2017",
     "POSIX.1-2024",
@@ -262,6 +291,7 @@ pub const SOURCES: [&str; 11] = [
     "musl",
     "Microsoft",
     "Itanium C++ ABI",
+    "macOS SDK",
 ];
 
 /// What a row read from a mangled name cites.
@@ -284,7 +314,7 @@ impl CLibrary {
 impl Default for LibraryRows {
     fn default() -> Self {
         Self {
-            library: CLibrary::Unknown,
+            reading: crate::spelling::Reading::of(CLibrary::Unknown),
             graph: TypeGraph::default(),
             prototypes: Vec::new(),
             rows: BTreeMap::new(),
@@ -304,6 +334,7 @@ impl LibraryRows {
             ],
             CLibrary::LibSystem => &[
                 table(LibSystem, false, LIBSYSTEM),
+                table(LibSystem, true, LIBSYSTEM_CITED),
                 table(LibraryId::Objc, false, OBJC),
             ],
             CLibrary::Ucrt => &[
@@ -320,11 +351,11 @@ impl LibraryRows {
             table(CxxRuntime, true, CXX_CITED),
         ];
         let mut rows = Self {
-            library,
+            reading: crate::spelling::Reading::of(library),
             ..Self::default()
         };
         for embedded in shared.iter().chain(own) {
-            rows.read(embedded, library);
+            rows.read_text(embedded, embedded.text);
         }
         rows
     }
@@ -337,7 +368,7 @@ impl LibraryRows {
             cited: false,
             text: "",
         };
-        rows.read_text(&embedded, text, CLibrary::Unknown);
+        rows.read_text(&embedded, text);
         rows
     }
 
@@ -366,7 +397,6 @@ impl LibraryRows {
                 (takes.then_some(this), format!("{MANGLING}; {header}"))
             }
         };
-        let library = self.library;
         let object = this.map(|this| (this, Some("this")));
         let explicit = mangled
             .parameters
@@ -375,7 +405,7 @@ impl LibraryRows {
         let parameters = object.into_iter().chain(explicit);
         let parameters = parameters
             .map(|(spelling, called)| {
-                let ty = crate::spelling::read(&spelling, &mut self.graph, library);
+                let ty = crate::spelling::read(&spelling, &mut self.graph, &self.reading);
                 Parameter::new(ty, spelling, called)
             })
             .collect();
@@ -405,29 +435,21 @@ impl LibraryRows {
             halts_on: None,
             yields: None,
             citation: citation.into(),
+            effects: None,
         })
     }
 
-    fn read(&mut self, embedded: &Embedded, library: CLibrary) {
-        self.read_text(embedded, embedded.text, library);
-    }
-
-    fn read_text(&mut self, embedded: &Embedded, text: &str, library: CLibrary) {
+    fn read_text(&mut self, embedded: &Embedded, text: &str) {
         for (name, declared) in Table::read(text).functions {
-            let row = self.typed(&name, declared, embedded, library);
+            let row = self.typed(&name, declared, embedded);
             (self.rows.entry(embedded.library).or_default()).insert(name.into(), row);
         }
     }
 
     /// One row's spellings, read into this table's graph.
-    fn typed(
-        &mut self,
-        name: &str,
-        declared: Declared,
-        embedded: &Embedded,
-        library: CLibrary,
-    ) -> LibraryRow {
-        let mut read = |spelling: &str| crate::spelling::read(spelling, &mut self.graph, library);
+    fn typed(&mut self, name: &str, declared: Declared, embedded: &Embedded) -> LibraryRow {
+        let reading = &self.reading;
+        let mut read = |spelling: &str| crate::spelling::read(spelling, &mut self.graph, reading);
         let returns = declared.returns.unwrap_or_else(|| "void".to_owned());
         let return_type = read(&returns);
         let mut parameters = Vec::new();
@@ -482,6 +504,10 @@ impl LibraryRows {
             halts_on: declared.halts_on,
             yields: declared.yields,
             citation: citation.into(),
+            // An uncited table states no effects: its rows cite nothing to bound them by.
+            effects: (declared.effects.as_deref())
+                .filter(|_| embedded.cited)
+                .and_then(crate::Effects::read),
         }
     }
 
@@ -592,12 +618,13 @@ struct Declared {
     parameters: BTreeMap<usize, (String, Option<String>)>,
     returns: Option<String>,
     noreturn: bool,
-    halts_on: Option<(u8, Handle)>,
+    halts_on: Option<(u8, Halt)>,
     yields: Option<Handle>,
     include: Option<String>,
     /// The reference page and minimum version a Microsoft row cites.
     cite: Option<String>,
     tail: Option<String>,
+    effects: Option<String>,
     /// The first source the comment above the row names.
     source: Option<&'static str>,
 }
@@ -701,12 +728,13 @@ impl Table {
             "yields" => declared.yields = Handle::read(value),
             "halts_on" => {
                 declared.halts_on = value.split_once(',').and_then(|(index, handle)| {
-                    Some((index.trim().parse().ok()?, Handle::read(handle.trim())?))
+                    Some((index.trim().parse().ok()?, Halt::read(handle.trim())?))
                 });
             }
             "include" => declared.include = Some(value.to_owned()),
             "cite" => declared.cite = Some(value.to_owned()),
             "tail" => declared.tail = Some(value.to_owned()),
+            "effects" => declared.effects = Some(value.to_owned()),
             _ => {}
         }
     }
@@ -719,6 +747,50 @@ impl Table {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// D383: every `effects` key reads, on a cited row with no tail; a typo or an uncited row would
+    /// drop a model silently.
+    #[test]
+    fn every_effects_key_reads_on_a_cited_row_with_no_tail() {
+        let tables = [
+            (PORTABLE, false),
+            (PORTABLE_CITED, true),
+            (CXX, false),
+            (CXX_CITED, true),
+            (GLIBC, false),
+            (GLIBC_CITED, true),
+            (BIONIC, false),
+            (BIONIC_CITED, true),
+            (MUSL_CITED, true),
+            (LIBSYSTEM, false),
+            (OBJC, false),
+            (KERNEL32, true),
+            (UCRT, true),
+        ];
+        let mut stated = 0;
+        for (text, cited) in tables {
+            for (name, declared) in Table::read(text).functions {
+                let Some(effects) = declared.effects else {
+                    continue;
+                };
+                stated += 1;
+                assert!(cited, "{name}: an uncited row states effects");
+                assert!(
+                    crate::Effects::read(&effects).is_some(),
+                    "{name}: {effects}"
+                );
+                let ellipsis = declared
+                    .parameters
+                    .values()
+                    .any(|(spelling, _)| spelling.is_empty());
+                assert!(
+                    declared.tail.is_none() && !ellipsis,
+                    "{name}: a row with a tail"
+                );
+            }
+        }
+        assert_eq!(stated, 12);
+    }
 
     #[test]
     fn a_tail_reads_as_its_citation_spells_it() {
@@ -889,16 +961,14 @@ mod tests {
         assert!(!row("__cxa_begin_catch").noreturn);
         let format = rows.prototype(row("_ZSt24__throw_out_of_range_fmtPKcz"));
         assert_eq!((format.parameters.len(), format.variadic), (1, true));
-        let cxx = LibraryRows::parse(LibraryId::CxxRuntime, CXX);
-        assert!(cxx.len() > 70, "{}", cxx.len());
-        for row in cxx.rows() {
-            for parameter in &cxx.prototype(row).parameters {
-                let ty = cxx.graph().get(parameter.ty);
-                assert!(
-                    !matches!(ty, Some(crate::Type::Refused(_))),
-                    "{}",
-                    row.linked_name
-                );
+        let tables = [CXX, CXX_CITED].map(|text| LibraryRows::parse(LibraryId::CxxRuntime, text));
+        assert!(tables.iter().map(LibraryRows::len).sum::<usize>() > 70);
+        for cxx in &tables {
+            for row in cxx.rows() {
+                let parameters = cxx.prototype(row).parameters.iter();
+                let mut types = parameters.map(|parameter| cxx.graph().get(parameter.ty));
+                let refused = types.any(|ty| matches!(ty, Some(crate::Type::Refused(_))));
+                assert!(!refused, "{}", row.linked_name);
             }
         }
     }

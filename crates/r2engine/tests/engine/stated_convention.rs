@@ -183,7 +183,7 @@ fn an_import_called_under_ms_abi_is_placed_under_the_program_s_convention() {
     let open = program(StatedConvention::LlvmWin64);
     let target = r2engine::native::Program::target_at(&open, BASE).expect("a machine");
     let reads = r2engine::native::import_reads(&target, "puts").expect("puts binds");
-    let names = (reads.registers.iter().take(1))
+    let names = (reads.registers().iter().take(1))
         .filter_map(|storage| {
             (target.arch.registers.iter())
                 .find(|it| it.offset == storage.offset && it.size == storage.size)
@@ -547,4 +547,36 @@ fn a_frame_address_handed_to_an_ms_abi_callee_escapes_by_the_callees_order() {
     let text = below(HAND_BELOW);
     assert!(text.contains("hand("), "{text}");
     assert!(text.contains("r2sleigh_load_u64"), "{text}");
+}
+
+/// `KEEPS_ACROSS_THE_SLOT`'s program with `keeps` storing 5 at `[rsp + 8]`, calling through the
+/// import's slot and reading the 5 back: the slot sits in Microsoft x64's home area.
+const fn reading_back_across_the_slot() -> [u8; 0xa0] {
+    let mut code = keeping([0x90; 6]);
+    let keeps: &[u8] = &[
+        0x48, 0x83, 0xec, 0x28, // 1010 sub rsp, 0x28
+        0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1014 mov dword [rsp + 8], 5
+        0xff, 0x15, 0x76, 0x00, 0x00, 0x00, // 101c call [rip + 0x76], the slot at 0x1098
+        0x8b, 0x44, 0x24, 0x08, // 1022 mov eax, [rsp + 8]
+        0x48, 0x83, 0xc4, 0x28, // 1026 add rsp, 0x28
+        0xc3, // 102a ret
+    ];
+    let mut at = 0;
+    while at < keeps.len() {
+        code[0x10 + at] = keeps[at];
+        at += 1;
+    }
+    code
+}
+
+const READS_BACK_ACROSS_THE_SLOT: [u8; 0xa0] = reading_back_across_the_slot();
+
+/// A call through a bound import's slot runs under the import's model, Microsoft x64, whose
+/// callee owns the 32-byte home area: the 5 stored there is read back as memory (D390).
+#[test]
+fn a_call_through_a_bound_import_s_slot_may_write_its_home_area() {
+    let mut bound = importing_pe_through(&READS_BACK_ACROSS_THE_SLOT, "KERNEL32.dll");
+    let text = rendered(&mut bound, TWICE);
+    assert!(!text.contains("return 5"), "{text}");
+    assert!(!text.contains("carrier_u32(5)"), "{text}");
 }

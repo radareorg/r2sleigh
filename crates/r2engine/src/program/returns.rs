@@ -47,6 +47,11 @@ impl BodyWalk {
         self.trace.calls()
     }
 
+    /// Every function entry the walk leaves for by a direct branch.
+    pub(super) fn tail_calls(&self) -> impl Iterator<Item = u64> + '_ {
+        self.trace.tail_calls().iter().copied()
+    }
+
     /// The bytes the walk decoded as this body's instructions.
     pub(super) fn spans(&self) -> Vec<std::ops::Range<u64>> {
         self.trace.spans()
@@ -86,16 +91,24 @@ impl crate::body::Program for Knowing<'_> {
         (self.returns)(callee, self.thumb != foreign)
     }
 
-    fn returns_through(&self, slot: u64) -> bool {
-        self.program.returns_through(slot)
+    fn exit_through(&self, slot: u64) -> Option<crate::discovery::Never> {
+        self.program.exit_through(slot)
     }
 
-    fn halts_on_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
+    fn halts_on_through(&self, slot: u64) -> Option<crate::body::Halting> {
         self.program.halts_on_through(slot)
     }
 
-    fn interrupt_returns(&self, arch: &str, vector: u64) -> bool {
-        self.program.interrupt_returns(arch, vector)
+    fn halts_on(&self, callee: u64) -> Option<crate::body::Halting> {
+        self.program.halts_on(callee)
+    }
+
+    fn holds_values(&self) -> bool {
+        self.program.holds_values()
+    }
+
+    fn interrupt_halts(&self, arch: &str, vector: u64) -> Option<r2source::Citation> {
+        self.program.interrupt_halts(arch, vector)
     }
 
     fn yields_through(&self, slot: u64) -> Option<(r2source::CanonicalStorageId, r2abi::Handle)> {
@@ -303,6 +316,10 @@ impl<S: Source + 'static> Walker for Walking<'_, S> {
 
     fn declared(&self, address: u64) -> Option<crate::discovery::Return> {
         crate::native::declared_return(&self.primary, &self.program, address)
+    }
+
+    fn ends<'a>(&self, walk: &'a BodyWalk) -> (Vec<&'a crate::discovery::Never>, usize) {
+        walk.trace.ends()
     }
 }
 

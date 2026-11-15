@@ -610,6 +610,17 @@ impl Literal {
         self
     }
 
+    /// The same bytes as 32-bit x86.
+    pub fn in_i386(mut self) -> Self {
+        self.container.arch = Arch {
+            name: "x86".to_owned(),
+            bits: 32,
+            endian: Endian::Little,
+            instructions: None,
+        };
+        self
+    }
+
     /// The same bytes as little-endian 32-bit ARM.
     pub fn in_arm(mut self) -> Self {
         self.container.arch = Arch {
@@ -794,6 +805,16 @@ impl Literal {
             go_version: version,
             go_assembly: assembly.map(|entries| entries.iter().copied().collect()),
         };
+        self
+    }
+
+    /// The same program, the function at `range` stated as written in `language`.
+    pub fn with_language_at(
+        mut self,
+        range: Range<u64>,
+        language: r2engine::program::SourceLanguage,
+    ) -> Self {
+        self.container.languages.ranges = vec![(range, language)];
         self
     }
 

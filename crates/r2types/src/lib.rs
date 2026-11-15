@@ -2,6 +2,7 @@
 // their dense ids (doc/adr-one-ir.md, ROADMAP D11). The exceptions say why
 // at the item that keeps one.
 #![cfg_attr(dylint_lib = "r2sleigh_lints", deny(entity_keyed_map))]
+#![cfg_attr(dylint_lib = "r2sleigh_lints", deny(scan_in_loop))]
 
 pub(crate) mod aggregates;
 pub(crate) mod analysis;
@@ -20,10 +21,8 @@ mod signedness;
 pub(crate) mod solver;
 
 pub(crate) use facts::{
-    SignatureCertificate, is_generic_signature_type, signature_hint_can_replace_existing,
-    signature_param_count_is_authoritative, signature_param_name_is_weak,
-    signature_projection_is_exact, signature_return_hint_can_replace_existing,
-    summary_hint_can_replace_weak_existing,
+    SignatureCertificate, is_generic_signature_type, signature_param_count_is_authoritative,
+    signature_param_name_is_weak, signature_projection_is_exact,
 };
 
 pub use callee::{
@@ -36,8 +35,7 @@ pub(crate) use signature_infer::{infer_signature_from_prepared_ssa, render_signa
 pub use solver::{SolvedTypes, solve_constraints};
 
 pub use context::{
-    ExternalStackBase, ParsedExternalContext, ProgramExtents, StackSlotKey, is_generic_arg_name,
-    sanitize_c_identifier,
+    ParsedExternalContext, ProgramExtents, is_generic_arg_name, sanitize_c_identifier,
 };
 pub use convert::{
     CTypeLike, bit_vector_tag, c_object_declaration, source_type_like, spellable_c_type_like,
@@ -54,17 +52,16 @@ pub use facts::{
 };
 pub(crate) use function_facts::exact_source_return_type;
 pub use function_facts::{
-    AggregateDefinition, ArrayAccessRenderFact, BranchPredicateFact, CallArgumentValueFact,
-    CallResultFact, CallsiteArgumentFacts, CallsiteRenderDisposition, CallsiteRenderFact,
-    CertifiedEntity, ControlBlockAssumptionFact, DecompileRouteFacts, DecompileRouteKind,
-    FunctionCallRenderFacts, FunctionCallResultFacts, FunctionCallsiteFacts, FunctionControlFacts,
-    FunctionFacts, FunctionInputQualityFacts, FunctionRenderFacts, ImportStub,
-    InterprocSummaryView, MemoryAccessRenderFact, PredicateComparisonFact,
+    AggregateDefinition, AggregateDefinitions, ArrayAccessRenderFact, BranchPredicateFact,
+    CallArgumentValueFact, CallResultFact, CallsiteArgumentFacts, CallsiteRenderDisposition,
+    CallsiteRenderFact, CertifiedEntity, ControlBlockAssumptionFact, DecompileRouteFacts,
+    DecompileRouteKind, FunctionCallRenderFacts, FunctionCallResultFacts, FunctionCallsiteFacts,
+    FunctionControlFacts, FunctionFacts, FunctionInputQualityFacts, FunctionRenderFacts,
+    ImportStub, InterprocSummaryView, MemoryAccessRenderFact, PredicateComparisonFact,
     RegisterCallArgumentLocationFact, ReturnTypeEvidence, ReturnTypeFact, ReturnTypeRefusal,
     ReturnValueRenderFact, SourceOwnedCalleeSignature, SourceOwnedFunctionFacts,
     StackCallArgumentLocationFact, UnprovenCause, admissible_declaration_type,
-    admit_declaration_type, aggregate_is_definable, aggregate_members, declaration_type_width_bits,
-    unread_slot,
+    admit_declaration_type, declaration_type_width_bits, unread_slot,
 };
 pub use parameter_types::{
     IntegerDecl, ParameterType, ParameterTypes, PointerRefusal, SignFact, SlotType, UNSTATED_WORD,

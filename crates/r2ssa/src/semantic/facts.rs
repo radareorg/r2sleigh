@@ -290,9 +290,9 @@ pub struct ObjectModel {
     pub indexed_displacements: crate::dense::IdMap<ValueId, i64>,
     /// How many bytes a callee is proven to write into each object from its base.
     pub callee_write_reach: BTreeMap<ObjectId, u32>,
-    /// Canary stores inside a declared slot or a write span: no compiler slot, for the escape
-    /// runs and the seal alike (doc/adr-frame-model.md, "Escape spans").
-    pub interior_canaries: crate::dense::IdSet<ValueId>,
+    /// The stores into frame slots the compiler owns, an interior canary left out: the barriers
+    /// of the escape runs and the seal alike (doc/adr-frame-model.md, "Escape spans").
+    pub compiler_slots: Vec<ValueId>,
     /// Which frame objects outside code can touch: those whose address
     /// escapes, and each call's argument area (`frame_reach`).
     pub frame_reach: FrameReach,
@@ -769,7 +769,8 @@ pub struct SourceCallBoundaryFact {
     pub at: InstId,
     pub convention: Option<r2source::ConventionId>,
     pub variadic: Option<bool>,
-    pub noreturn: Option<bool>,
+    /// The walk's closed call this is, with what says it never comes back (D384).
+    pub never: Option<crate::ExitSite>,
     pub result_kind: Option<SourceCallResult>,
     /// Result lanes the call may change that no contract states (S36), or that a minted contract leaves
     /// `Unproven` (D212): what the call leaves there is a result no one states, never no value.
@@ -781,6 +782,8 @@ pub struct SourceCallBoundaryFact {
     /// The argument positions the callee's interface states it ignores (holes, D165): each is
     /// passed as a typed residual, so the value reaching it is no read and holds nothing live.
     pub ignored: Box<[u32]>,
+    /// What bounds its `CallReads` to the listed registers (D283, D411); none where any may be read.
+    pub reads_bound: Option<crate::call_reads::ReadBound>,
     /// How many leading entries of `arguments` the callee's prototype names.
     ///
     /// The rest are the tail a variadic call passes and no prototype can
@@ -816,7 +819,7 @@ impl SourceCallBoundaryFact {
     /// Whether the call may read an argument location its listed arguments do not name: no
     /// statement of its callee bounds what it reads (`CallReads`), or a stated one is unreached.
     pub const fn may_read_unlisted(&self) -> bool {
-        !self.arguments_proven
+        self.reads_bound.is_none() || !self.arguments_proven
     }
 
     /// Whether `argument` is a slot the callee ignores (`ignored`).
@@ -1530,7 +1533,8 @@ pub struct StructuredDataflowFacts {
     pub inductions: crate::dense::IdMap<ValueId, InductionFact>,
     /// Cyclic CFG blocks not represented by a structured loop fact.
     pub unstructured_cycle_blocks: BTreeSet<u64>,
-    pub memory_accesses: BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>,
+    pub memory_accesses:
+        crate::dense::Metered<BTreeMap<StructuredAccessId, StructuredMemoryAccessFact>>,
     /// Wide constant stores written out one declared member at a time.
     pub member_run_stores: crate::dense::IdMap<InstId, MemberRunStoreCertificate>,
     pub recursive_calls: BTreeMap<CallSiteId, StructuredRecursiveCallFact>,
@@ -1661,7 +1665,7 @@ pub(crate) struct ObjectModelBuilder<'a> {
     pub(crate) evidenced_absorbing: BTreeSet<StackAddressRoot>,
     /// How far a callee writes from each root it is handed.
     pub(crate) callee_write_spans: BTreeMap<StackAddressRoot, i64>,
-    pub(crate) interior_canaries: crate::dense::IdSet<ValueId>,
+    pub(crate) compiler_slots: Vec<ValueId>,
     /// The positions no frame object extends across.
     pub(crate) frame_boundaries: FrameBoundaries,
     /// What every value can be, for an index's lower bound.
@@ -1728,7 +1732,7 @@ impl<'a> ObjectModelBuilder<'a> {
             covering: super::covering::CoveringSpans::default(),
             evidenced_absorbing: BTreeSet::new(),
             callee_write_spans: BTreeMap::new(),
-            interior_canaries: crate::dense::IdSet::default(),
+            compiler_slots: Vec::new(),
             frame_boundaries: FrameBoundaries::default(),
             values: empty_value_ranges(),
             resolving: crate::dense::IdSet::default(),
@@ -1781,7 +1785,7 @@ impl<'a> ObjectModelBuilder<'a> {
                 let known = reach.entry(*root).or_insert(end);
                 *known = (*known).max(end);
             }
-            self.interior_canaries = super::frame_reach::interior_canaries(
+            self.compiler_slots = super::frame_reach::compiler_slot_addresses(
                 (function, graph, facts),
                 self.declared_slots,
                 &reach,
@@ -1790,7 +1794,7 @@ impl<'a> ObjectModelBuilder<'a> {
             let escapes = super::frame_reach::escape_spans(
                 (function, graph, facts),
                 self.declared_slots,
-                &self.interior_canaries,
+                &self.compiler_slots,
                 self.machine_context,
             );
             for (start, end) in escapes {
@@ -1926,7 +1930,7 @@ impl<'a> ObjectModelBuilder<'a> {
             .collect();
         ObjectModel {
             callee_write_reach,
-            interior_canaries: self.interior_canaries,
+            compiler_slots: self.compiler_slots,
             frame_reach: FrameReach::default(),
             frame_ceilings,
             objects: self.objects,

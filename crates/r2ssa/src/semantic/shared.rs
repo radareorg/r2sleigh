@@ -982,8 +982,7 @@ fn read_width(
     }
 }
 
-/// The low bytes of a `CallUse`'s carrier its call takes: none for an argument register a stated
-/// `CallReads` leaves out, else the callee's widest held lane (D266 rule 2); `None`: whole.
+/// The low bytes of a `CallUse`'s carrier its call takes (`register_read_bytes`); `None`: whole.
 pub(crate) fn call_read_bytes(
     graph: &SsaGraph,
     machine_context: &SourceMachineContext,
@@ -997,23 +996,37 @@ pub(crate) fn call_read_bytes(
     };
     let (instruction, interface) = call_after(graph, read, machine_context)?;
     let reads = machine_context.call_reads(Some(instruction))?;
-    let stated = |storage: &CanonicalStorageId| register_storages_overlap(*storage, *carrier);
-    // Only the convention's argument registers: a hidden-result pointer (x8) is no argument.
-    let argument = (machine_context.calls()).is_some_and(|model| {
-        crate::call_reads::CallReads::every_location(model)
-            .registers
-            .iter()
-            .any(stated)
-    });
-    if argument && reads.stated && !reads.registers.iter().any(stated) {
+    register_read_bytes(reads, machine_context, interface, *carrier)
+}
+
+/// The low bytes of `carrier` a call reads (D283): none where a stated `CallReads` leaves it out,
+/// else the callee's widest held lane (D266 rule 2); `None`: the whole register.
+pub(crate) fn register_read_bytes(
+    reads: &crate::call_reads::CallReads,
+    machine_context: &SourceMachineContext,
+    interface: Option<&crate::SourceCallSiteInterface>,
+    carrier: CanonicalStorageId,
+) -> Option<u32> {
+    if (machine_context.every_location())
+        .is_some_and(|every| reads.reads_none_within(every, carrier))
+    {
         return Some(0);
     }
+    // A walked callee's register effect bounds what it reads of a result register (D372).
+    if let Some(bytes) = reads.lane_read(carrier) {
+        return Some(bytes);
+    }
+    // An import's call reads only the count register's bytes of the register holding it (D431).
+    if let Some(bytes) = reads.count_read(carrier) {
+        return Some(bytes);
+    }
+    let stated = |storage: &CanonicalStorageId| register_storages_overlap(*storage, carrier);
     let interface = interface?;
     let mut lanes = (interface.arguments().iter())
         .filter(|argument| argument.register_storage().as_ref().is_some_and(stated))
         .map(|argument| {
             let storage = argument.register_storage()?;
-            (storage == *carrier).then(|| callee_held_lane(interface, argument.index(), storage))?
+            (storage == carrier).then(|| callee_held_lane(interface, argument.index(), storage))?
         })
         .map(|lane| lane.map(|lane| lane.size));
     let first = lanes.next()??;
@@ -1026,11 +1039,8 @@ fn call_after<'a>(
     read: crate::graph::InstId,
     machine_context: &'a SourceMachineContext,
 ) -> Option<(u64, Option<&'a crate::SourceCallSiteInterface>)> {
-    let inst = graph.inst(read)?;
-    let block = graph.block(inst.block)?;
-    let instruction = (block.insts.get(inst.ordinal..)?.iter())
-        .find_map(|inst| graph.op(*inst)?.transfer().filter(|flow| flow.call))?
-        .instruction?;
+    let call = graph.call_reading(read)?;
+    let instruction = graph.op(call)?.call()?.instruction?;
     let identity = machine_context.raw_call_site_at(instruction);
     Some((
         instruction,
@@ -1507,11 +1517,6 @@ pub(crate) fn callee_write_spans(
     let Some(machine_context) = machine_context else {
         return CalleeSpans::default();
     };
-    // What a call is handed in each position is what the site's convention puts there (D365),
-    // whatever this function itself takes.
-    let calls = (machine_context.calls())
-        .map(|model| model.arguments(r2source::convention::SlotClass::Integer))
-        .unwrap_or_default();
     let mut reaching = BTreeMap::<CanonicalStorageId, ReachingStorage<'_>>::new();
     let mut spans = Vec::new();
     let mut unbounded = BTreeSet::new();
@@ -1537,9 +1542,9 @@ pub(crate) fn callee_write_spans(
                 .unwrap_or("");
             let target =
                 target.and_then(|target| resolve_graph_literal_value(graph, Some(facts), *target));
-            let registers = target.map_or(calls, |target| {
-                machine_context.site_integer_arguments(target)
-            });
+            // What a call is handed in each position is what the site's convention puts there
+            // (D365), whatever this function itself takes.
+            let registers = machine_context.site_integer_arguments(Some(*instruction), target);
             let mut argument = |index: usize| -> Option<ValueId> {
                 let storage = *registers.get(index)?;
                 let states = reaching

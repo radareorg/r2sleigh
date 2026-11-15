@@ -909,8 +909,28 @@ fn printing(held: u32, format: &[u8]) -> String {
 
 /// [`printing`], the format's bytes mapped writable where `writable`.
 fn printing_from(held: u32, format: &[u8], writable: bool) -> String {
-    let code = aarch64_with_printf(&[
-        (F, 0xd65f_03c0),                              // ret
+    printing_after(held, format, (writable, false))
+}
+
+/// [`printing_from`]; `f` clears the held register before it returns where `clears`.
+fn printing_after(held: u32, format: &[u8], flags: (bool, bool)) -> String {
+    let mut open = printing_open(held, format, flags);
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(F).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// The program [`printing_after`] renders, opened and its format written.
+fn printing_open(
+    held: u32,
+    format: &[u8],
+    (writable, clears): (bool, bool),
+) -> OpenProgram<Literal> {
+    let mut words = vec![(F, 0xd65f_03c0)]; // ret
+    if clears {
+        words = vec![(F, 0xaa1f_03e0 | held), (F + 4, 0xd65f_03c0)]; // mov xN, xzr; ret
+    }
+    words.extend([
         (BASE + 0x10, 0xa9bf_7bfd),                    // stp x29, x30, [sp, #-16]!
         (BASE + 0x14, 0x9000_0000 | held),             // adrp xN, 0x1000
         (BASE + 0x18, 0x9102_8000 | held << 5 | held), // add xN, xN, #0xa0
@@ -921,7 +941,9 @@ fn printing_from(held: u32, format: &[u8], writable: bool) -> String {
         (BASE + 0x2c, 0xa8c1_7bfd),                    // ldp x29, x30, [sp], #16
         (BASE + 0x30, 0xd65f_03c0),                    // ret
     ]);
-    let program = Literal::of_code(code, &[("f", F, 0x04), ("caller", BASE + 0x10, 0x24)])
+    let code = aarch64_with_printf(&words);
+    let size = if clears { 0x08 } else { 0x04 };
+    let program = Literal::of_code(code, &[("f", F, size), ("caller", BASE + 0x10, 0x24)])
         .in_aarch64()
         .with_data()
         .importing("printf");
@@ -931,9 +953,7 @@ fn printing_from(held: u32, format: &[u8], writable: bool) -> String {
     };
     let mut open = OpenProgram::of(program);
     open.source_mut().write(common::TEXT, format);
-    open.analyse_program().expect("it surveys");
-    let rendered = open.rendered(F).expect("it renders");
-    rendered.response.output.into_text()
+    open
 }
 
 /// clang -O0's shape (D221, Gb): `caller` spills the format to `[sp, #16]`, calls `f`, and reloads
@@ -965,8 +985,264 @@ fn printing_spilled(format: &[u8], handed: bool) -> String {
     rendered.response.output.into_text()
 }
 
-/// Gb: the reload equals the spill, since no call may write a slot whose address stays in the
-/// function, so the format folds and `f`'s q0 to q3 die at `printf`.
+/// clang -O0's shape (values.c `main`, D409): `caller` spills the format at `BASE + 0xb0` to
+/// `[sp, #16]`, calls `printf(format, 7)` with it, then reloads it for `printf(format, 8)`.
+fn printing_twice(format: &[u8], writable: bool) -> String {
+    const FORMAT: u64 = BASE + 0xb0;
+    let mut code = vec![0u8; 0x100];
+    let words: [(u64, u32); 14] = [
+        (BASE + 0x10, 0xa9be_7bfd), // stp x29, x30, [sp, #-32]!
+        (BASE + 0x14, 0x9000_0008), // adrp x8, 0x1000
+        (BASE + 0x18, 0x9102_c108), // add x8, x8, #0xb0
+        (BASE + 0x1c, 0xf900_0be8), // str x8, [sp, #16]
+        (BASE + 0x20, 0xaa08_03e0), // mov x0, x8
+        (BASE + 0x24, 0x5280_00e1), // mov w1, #7
+        (BASE + 0x28, 0x9400_001a), // bl printf
+        (BASE + 0x2c, 0xf940_0be0), // ldr x0, [sp, #16]
+        (BASE + 0x30, 0x5280_0101), // mov w1, #8
+        (BASE + 0x34, 0x9400_0017), // bl printf
+        (BASE + 0x38, 0xa8c2_7bfd), // ldp x29, x30, [sp], #32
+        (BASE + 0x3c, 0xd65f_03c0), // ret
+        (BASE + 0x90, 0x5800_0050), // printf: ldr x16, #8
+        (BASE + 0x94, 0xd61f_0200), // br x16
+    ];
+    for (at, word) in words {
+        let at = (at - BASE) as usize;
+        code[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("caller", BASE + 0x10, 0x30)])
+        .in_aarch64()
+        .with_data_after(FORMAT)
+        .importing("printf");
+    let program = match writable {
+        true => program.writable_data_after(FORMAT),
+        false => program,
+    };
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(FORMAT, format);
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// The spill of [`printing_reloaded`]: `adrp x8, 0x1000; add x8, x8, #0xb0; str x8, [sp, #16]`.
+const SPILL: [u32; 3] = [0x9000_0008, 0x9102_c108, 0xf900_0be8];
+
+/// values.c clang -O0 `main`'s shape (D432): `caller` runs `prologue` (four words, a spill of the
+/// format at `BASE + 0xb0` to `[sp, #16]` among them), then reloads it for each printf.
+fn printing_reloaded(prologue: [u32; 4]) -> String {
+    const FORMAT: u64 = BASE + 0xb0;
+    let mut code = vec![0u8; 0x100];
+    let words: [(u64, u32); 17] = [
+        (F, 0xd65f_03c0),           // f: ret
+        (BASE + 0x10, 0xa9be_7bfd), // stp x29, x30, [sp, #-32]!
+        (BASE + 0x14, prologue[0]),
+        (BASE + 0x18, prologue[1]),
+        (BASE + 0x1c, prologue[2]),
+        (BASE + 0x20, prologue[3]),
+        (BASE + 0x24, 0xf940_0be0), // ldr x0, [sp, #16]
+        (BASE + 0x28, 0x5280_00e1), // mov w1, #7
+        (BASE + 0x2c, 0x9400_0019), // bl printf
+        (BASE + 0x30, 0xf940_0be0), // ldr x0, [sp, #16]
+        (BASE + 0x34, 0x5280_0101), // mov w1, #8
+        (BASE + 0x38, 0x9400_0016), // bl printf
+        (BASE + 0x3c, 0xa8c2_7bfd), // ldp x29, x30, [sp], #32
+        (BASE + 0x40, 0xd65f_03c0), // ret
+        (BASE + 0x90, 0x5800_0050), // printf: ldr x16, #8
+        (BASE + 0x94, 0xd61f_0200), // br x16
+        (BASE + 0x98, 0x0000_0000), // the stub's slot
+    ];
+    for (at, word) in words {
+        let at = (at - BASE) as usize;
+        code[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("f", F, 0x04), ("caller", BASE + 0x10, 0x34)])
+        .in_aarch64()
+        .with_data_after(FORMAT)
+        .importing("printf");
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(FORMAT, b"%d\n\0");
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// D432: every store to the slot is the immutable format and one reaches each reload past `f`
+/// and the first printf, both bounded: both calls count their tails and the slot is promoted.
+#[test]
+fn a_format_reloaded_from_a_clean_slot_is_its_stored_literal() {
+    let text = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0x97ff_fffa]); // bl f
+    assert!(text.contains(r#"printf("%d\n", (uint64_t)7U);"#), "{text}");
+    assert!(text.contains(r#"printf("%d\n", (uint64_t)8U);"#), "{text}");
+    assert!(!text.contains("format_argument_not_literal"), "{text}");
+    assert!(!text.contains("frame + 16U"), "{text}");
+}
+
+/// A reloaded format's row is built at most once per reload a walk round decides and once per
+/// settled format (D432): a `work-meter` build counts both, process-wide, beside the rows.
+#[cfg(feature = "work-meter")]
+#[test]
+fn a_reloaded_format_builds_one_row_per_reload_a_round_decides() {
+    let _ = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0x97ff_fffa]); // bl f
+    let meter = r2engine::query::call_reads_built().expect("a work-meter build");
+    assert!(meter.reloaded > 0, "{meter:?}");
+    assert!(meter.reloaded <= meter.reload_bound, "{meter:?}");
+}
+
+/// An unstated call between the spill and the reloads may write the slot: it stays in memory.
+#[test]
+fn a_format_reloaded_past_an_unstated_call_stays_in_memory() {
+    let text = printing_reloaded([SPILL[0], SPILL[1], SPILL[2], 0xd63f_0120]); // blr x9
+    assert!(text.contains("format_argument_not_literal"), "{text}");
+    assert!(text.contains("frame + 16U"), "{text}");
+}
+
+/// `cbz x0` skips the spill: no store reaches the reload on that path, so the format is no
+/// literal and `printf` may write `[sp, #28]`, which `caller` returns (D432's unset key at entry).
+#[test]
+fn a_format_spilled_on_one_path_only_bounds_no_write() {
+    const FORMAT: u64 = BASE + 0xb0;
+    let mut code = vec![0u8; 0x100];
+    let words: [(u64, u32); 16] = [
+        (BASE + 0x10, 0xa9be_7bfd), // stp x29, x30, [sp, #-32]!
+        (BASE + 0x14, 0x5280_00a9), // mov w9, #5
+        (BASE + 0x18, 0xb900_1fe9), // str w9, [sp, #28]
+        (BASE + 0x1c, 0xb400_0080), // cbz x0, 0x102c
+        (BASE + 0x20, SPILL[0]),    // adrp x8, 0x1000
+        (BASE + 0x24, SPILL[1]),    // add x8, x8, #0xb0
+        (BASE + 0x28, SPILL[2]),    // str x8, [sp, #16]
+        (BASE + 0x2c, 0xf940_0be0), // ldr x0, [sp, #16]
+        (BASE + 0x30, 0x5280_00e1), // mov w1, #7
+        (BASE + 0x34, 0x9400_0017), // bl printf
+        (BASE + 0x38, 0xb940_1fe0), // ldr w0, [sp, #28]
+        (BASE + 0x3c, 0xa8c2_7bfd), // ldp x29, x30, [sp], #32
+        (BASE + 0x40, 0xd65f_03c0), // ret
+        (BASE + 0x90, 0x5800_0050), // printf: ldr x16, #8
+        (BASE + 0x94, 0xd61f_0200), // br x16
+        (BASE + 0x98, 0x0000_0000), // the stub's slot
+    ];
+    for (at, word) in words {
+        let at = (at - BASE) as usize;
+        code[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("caller", BASE + 0x10, 0x34)])
+        .in_aarch64()
+        .with_data_after(FORMAT)
+        .importing("printf");
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(FORMAT, b"%d\n\0");
+    let rendered = open.rendered(BASE + 0x10).expect("it renders");
+    let text = rendered.response.output.into_text();
+    assert!(text.contains("format_argument_not_literal"), "{text}");
+    assert!(text.contains("frame + 28U"), "{text}");
+}
+
+/// hashes clang -O1 `main`'s shape (D409): `push rax` aligns the stack, `printf("%d\n", 7)` runs,
+/// and the pushed slot is read back as the next `printf`'s operand.
+fn printing_after_a_push() -> String {
+    let mut code = vec![0x90u8; 0xb0];
+    code[..0x28].copy_from_slice(&[
+        0x50, // 1000 push rax
+        0x48, 0x8d, 0x3d, 0x98, 0x00, 0x00, 0x00, // 1001 lea rdi, [rip + 0x98]: 0x10a0
+        0xbe, 0x07, 0x00, 0x00, 0x00, // 1008 mov esi, 7
+        0x31, 0xc0, // 100d xor eax, eax
+        0xe8, 0x7c, 0x00, 0x00, 0x00, // 100f call 0x1090
+        0x48, 0x8b, 0x34, 0x24, // 1014 mov rsi, [rsp]
+        0x48, 0x8d, 0x3d, 0x81, 0x00, 0x00, 0x00, // 1018 lea rdi, [rip + 0x81]: 0x10a0
+        0x31, 0xc0, // 101f xor eax, eax
+        0xe8, 0x6a, 0x00, 0x00, 0x00, // 1021 call 0x1090
+        0x59, // 1026 pop rcx
+        0xc3, // 1027 ret
+    ]);
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("caller", BASE, 0x28)])
+        .with_data()
+        .importing("printf");
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(common::TEXT, b"%d\n\0");
+    let rendered = open.rendered(BASE).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// D409 on x86-64: the format counts one operand, in RSI, so `printf` reads and writes none of
+/// the caller's stack and the pushed slot still holds the entry RAX.
+#[test]
+fn a_printf_whose_format_counts_its_tail_leaves_a_pushed_slot_alone() {
+    let text = printing_after_a_push();
+    assert!(
+        text.contains("held from entry, read as residuals (RAX_0)"),
+        "{text}"
+    );
+    assert!(!text.contains("r2sleigh_load_u64("), "{text}");
+}
+
+/// D409: the first call's own format counts one operand, all in registers, so the call reads and
+/// writes no caller stack: the spill stays the format and the second call counts its tail too.
+#[test]
+fn a_printf_whose_format_counts_its_tail_leaves_the_callers_slot_alone() {
+    let text = printing_twice(b"%d\n\0", false);
+    assert!(text.contains(r#"printf("%d\n", (uint64_t)8U);"#), "{text}");
+}
+
+/// `error(0, 0, "%s", x)` with `x` the entry RCX, the entry R8 left alone (D433).
+fn erroring_past_r8() -> String {
+    let mut code = vec![0x90u8; 0xb0];
+    code[..0x15].copy_from_slice(&[
+        0x31, 0xff, // 1000 xor edi, edi
+        0x31, 0xf6, // 1002 xor esi, esi
+        0x48, 0x8d, 0x15, 0x95, 0x00, 0x00, 0x00, // 1004 lea rdx, [rip + 0x95]: 0x10a0
+        0x31, 0xc0, // 100b xor eax, eax
+        0xe8, 0x7e, 0x00, 0x00, 0x00, // 100d call 0x1090
+        0x31, 0xc0, // 1012 xor eax, eax
+        0xc3, // 1014 ret
+    ]);
+    code[0x90..0x96].copy_from_slice(&common::JUMP_STUB);
+    let code = Box::leak(code.into_boxed_slice());
+    let program = Literal::of_code(code, &[("caller", BASE, 0x15)])
+        .with_data()
+        .importing("error")
+        .running_on(common::GLIBC);
+    let mut open = OpenProgram::of(program);
+    open.source_mut().write(common::TEXT, b"%s\0");
+    let rendered = open.rendered(BASE).expect("it renders");
+    rendered.response.output.into_text()
+}
+
+/// D433: the format counts one operand, so `error` reads RDI, RSI, RDX, RCX and AL (C17
+/// 7.21.6.1p2): the entry R8 reaches no read, and the parameters are no floor.
+#[test]
+fn a_counted_printf_reads_only_its_placed_registers() {
+    let text = erroring_past_r8();
+    assert!(!text.contains("the parameters are a floor"), "{text}");
+    assert!(text.contains("error(0, 0, \"%s\""), "{text}");
+}
+
+/// A format the program may write counts nothing for the whole run: the reload stays memory.
+#[test]
+fn a_printf_whose_format_the_program_may_write_bounds_no_stack() {
+    let text = printing_twice(b"%d\n\0", true);
+    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+}
+
+/// A `long double` operand takes no 8-byte slot this rule places: the reload stays memory.
+#[test]
+fn a_printf_whose_format_reads_a_long_double_bounds_no_stack() {
+    let text = printing_twice(b"%Lf\n\0", false);
+    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+}
+
+/// Ten operands put three on the stack, the third at the slot: the reload stays memory.
+#[test]
+fn a_printf_whose_counted_tail_covers_the_slot_keeps_it_a_load() {
+    let text = printing_twice(b"%d%d%d%d%d%d%d%d%d%d\0", false);
+    assert!(text.contains("(format_argument_not_literal)"), "{text}");
+}
+
+/// Gb: `f` (`ret`) reads no argument, so the reload is the spill and q0 to q3 die at `printf`.
+/// Fails (D376): `f`'s statement never reaches its caller's build, so the call is unstated (D369).
 #[test]
 fn a_spilled_format_reloaded_in_another_block_reads_no_vector_register() {
     let text = printing_spilled(b"%d\n\0", false);
@@ -996,12 +1272,37 @@ fn an_aarch64_printf_whose_format_has_a_float_keeps_q0_read() {
     assert!(!text.starts_with("void f("), "{text}");
 }
 
-/// x9 is caller-saved: the call to `f` may change it, so the format at `printf` is unknown and the
-/// call may read every vector argument register.
+/// x9 is caller-saved and `f` clears it: the format at `printf` is unknown and the call may read
+/// every vector argument register.
 #[test]
 fn an_aarch64_printf_whose_format_a_call_may_change_reads_every_vector_register() {
-    let text = printing(9, b"%d\n\0");
+    let text = printing_after(9, b"%d\n\0", (false, true));
     assert!(!text.starts_with("void f("), "{text}");
+}
+
+/// D376: the frame record `caller` reloads after `bl f` asks `f` (`ret`) to state itself, and its
+/// body keeps x9: the format is the literal and q0 to q3 die at `printf`. Unstated, it may change x9.
+#[test]
+fn an_aarch64_printf_whose_format_a_stated_call_keeps_reads_no_vector_register() {
+    let text = printing(9, b"%d\n\0");
+    assert!(text.starts_with("void f("), "{text}");
+}
+
+/// D399: `caller`'s build asks `f` to state itself (D376) and is restated against it, the build
+/// it read moved: counted as rebuilt, as every rebuild is.
+#[test]
+fn a_build_a_callee_s_statement_moves_is_counted_rebuilt() {
+    let mut open = printing_open(9, b"%d\n\0", (false, false));
+    open.analyse_program().expect("it surveys");
+    let text = open
+        .rendered(F)
+        .expect("it renders")
+        .response
+        .output
+        .into_text();
+    assert!(text.starts_with("void f("), "{text}");
+    let stats = open.analysis_stats();
+    assert_eq!(stats.rebuilt, 1, "{stats:?}");
 }
 
 /// A format in writable data may change before the call (Codex review of #363): the call may read
@@ -1453,8 +1754,17 @@ fn handler_answer(
 /// under the closed world, though its RAX is written; cold, it stays unproven (S30, D205).
 #[test]
 fn a_handler_only_atexit_takes_is_void_under_the_closed_world() {
-    let closed = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), true);
+    let (closed, premises) = handler_answer(at_exit(TAKES_HANDLER, "atexit"), true);
     assert!(closed.contains("void handler(void)"), "{closed}");
+    // The slot's type is how every caller calls only where no call is undefined (D227).
+    assert!(
+        closed.contains("no call reads the result (assuming closed-world, ub-free)"),
+        "{closed}"
+    );
+    assert!(
+        premises.contains(&r2source::Premise::UbFreeSource),
+        "{premises:?}"
+    );
     let cold = handler_rendered(at_exit(TAKES_HANDLER, "atexit"), false);
     assert!(!cold.contains("void handler("), "{cold}");
 }
@@ -1508,6 +1818,47 @@ fn wrappers_forwarding_to_each_other_prove_no_slot() {
     assert_eq!(open.analysis_stats().defects, 0);
 }
 
+/// `main`: `lea rdi, [h1]; call atexit; lea rdi, [h2]; call atexit; xor eax, eax; ret`, then
+/// `h1` (`mov eax, 1; ret`) at 0x1030 and `h2` (`mov eax, 2; ret`) at 0x1040.
+const TAKES_TWO: &[u8] = &[
+    0x48, 0x8d, 0x3d, 0x29, 0x00, 0x00, 0x00, // 1000 lea rdi, [rip + 0x29]: h1
+    0xe8, 0x84, 0x00, 0x00, 0x00, // 1007 call the stub
+    0x48, 0x8d, 0x3d, 0x2d, 0x00, 0x00, 0x00, // 100c lea rdi, [rip + 0x2d]: h2
+    0xe8, 0x78, 0x00, 0x00, 0x00, // 1013 call the stub
+    0x31, 0xc0, 0xc3, // 1018 xor eax, eax; ret
+];
+
+/// Two takes in one owner read the owner once for both: each handler is void under the closed
+/// world, and the owner's walk, flow and transfers are built once (D400).
+#[test]
+fn two_takes_in_one_owner_read_the_owner_once() {
+    let mut code = vec![0xcc; 0xa0];
+    code[..TAKES_TWO.len()].copy_from_slice(TAKES_TWO);
+    code[0x30..0x36].copy_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
+    code[0x40..0x46].copy_from_slice(&[0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3]);
+    code[0x90..0x96].copy_from_slice(&[0xff, 0x25, 0x02, 0x00, 0x00, 0x00]); // jmp [rip + 2]
+    code[0x98..0xa0].fill(0);
+    let code: &'static [u8] = Box::leak(code.into_boxed_slice());
+    let functions = [
+        ("main", BASE, 0x1b),
+        ("h1", BASE + 0x30, 6),
+        ("h2", BASE + 0x40, 6),
+    ];
+    let literal = Literal::of_code(code, &functions)
+        .importing("atexit")
+        .running_on(common::GLIBC);
+    let mut open = OpenProgram::of(literal);
+    open.analyse_program().expect("it surveys");
+    for (name, at) in [("h1", BASE + 0x30), ("h2", BASE + 0x40)] {
+        let text = open.rendered(at).expect("it renders");
+        let text = text.response.output.into_text();
+        assert!(text.contains(&format!("void {name}(")), "{text}");
+    }
+    let stats = open.analysis_stats();
+    assert_eq!(stats.owner_takes.computed, 1, "{stats:?}");
+    assert_eq!(stats.defects, 0, "{stats:?}");
+}
+
 /// `main`'s extern for `atexit` spells the cited slot's code pointer.
 #[test]
 fn the_atexit_extern_spells_its_slot() {
@@ -1546,8 +1897,12 @@ fn a_main_only_libc_start_main_takes_returns_its_int_under_the_closed_world() {
         "{closed}"
     );
     assert!(
-        closed.contains("reads the result (assuming closed-world)"),
+        closed.contains("reads the result (assuming closed-world, ub-free)"),
         "{closed}"
+    );
+    assert!(
+        premises.contains(&r2source::Premise::UbFreeSource),
+        "{premises:?}"
     );
     let cold = handler_rendered(at_exit(STARTS_HANDLER, "__libc_start_main"), false);
     assert!(cold.contains("the result is unproven"), "{cold}");
@@ -1601,4 +1956,215 @@ fn a_caller_that_calls_another_caller_is_read_after_it() {
     let walked = stats.walked.computed - before;
     // `x` for its own render and for its register effect, `p2` and `p1` once each.
     assert_eq!(walked, 4, "walks during the request");
+}
+
+/// `a` (0x1000), `b` (0x1010) return `r`'s (0x1040); `c1` (0x1020) calls `a`, `d` (0x1050) and `c2`
+/// (0x1030), which calls `b`: `c2` is no caller of `a`, so no order over `a`'s callers names it.
+const A_CALLER_OF_ANOTHER_CALLEE: &[u8] = &[
+    0xe8, 0x3b, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xe8, 0x2b, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xe8, 0xdb, 0xff, 0xff, 0xff, 0xe8, 0x26, 0x00, 0x00, 0x00, 0xe8, 0x01, 0x00, 0x00, 0x00, 0xc3,
+    0xe8, 0xdb, 0xff, 0xff, 0xff, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc,
+    0xc3,
+];
+
+#[test]
+fn a_caller_of_another_callee_is_read_before_the_caller_calling_it() {
+    let functions = [
+        ("a", BASE, 6),
+        ("b", BASE + 0x10, 6),
+        ("c1", BASE + 0x20, 16),
+        ("c2", BASE + 0x30, 6),
+        ("r", BASE + 0x40, 6),
+        ("d", BASE + 0x50, 1),
+    ];
+    let mut open = OpenProgram::of(Literal::of_code(A_CALLER_OF_ANOTHER_CALLEE, &functions));
+    open.analyse_program().expect("it surveys");
+    let before = open.analysis_stats();
+    open.rendered(BASE + 0x40).expect("it renders");
+    let stats = open.analysis_stats();
+    assert_eq!(stats.defects, 0);
+    // `r` for its render and its effect, then `a`, `b`, `c2`, `c1` and `d` once each.
+    let walked = stats.walked.computed - before.walked.computed;
+    assert_eq!(walked, 7, "walks during the request");
+    assert_eq!(stats.site_fates_relifted, 0, "{stats:?}");
+    // Every caller `DirectSites` joins was asked first, and every one asked is joined.
+    assert_eq!(stats.site_fates_in_direct_sites, 0, "{stats:?}");
+    assert_eq!(stats.site_fates_never_joined, 0, "{stats:?}");
+}
+
+/// glibc AArch64's `_start` hands `__wrap_main` (`nop; b main`, 0x1020) to `__libc_start_main`'s
+/// stub (0x1080); `main` (0x1040) returns `helper`'s `w0`.
+fn wrapped_main() -> Literal {
+    let mut code = vec![0u8; 0x98];
+    let words: [(usize, u32); 13] = [
+        (0x00, 0x9000_0000), // adrp x0, 0x1000
+        (0x04, 0x9100_8000), // add x0, x0, #0x20
+        (0x08, 0x9400_001e), // bl 0x1080
+        (0x0c, 0x9400_001d), // bl 0x1080, as `bl abort`
+        (0x20, 0xd503_201f), // nop
+        (0x24, 0x1400_0007), // b 0x1040
+        (0x40, 0xa9bf_7bfd), // stp x29, x30, [sp, #-16]!
+        (0x44, 0x9400_0007), // bl 0x1060
+        (0x48, 0xa8c1_7bfd), // ldp x29, x30, [sp], #16
+        (0x4c, 0xd65f_03c0), // ret
+        (0x60, 0x5280_0020), // mov w0, #1
+        (0x80, 0x5800_0090), // ldr x16, 0x1090
+        (0x84, 0xd61f_0200), // br x16
+    ];
+    for (at, word) in words {
+        code[at..at + 4].copy_from_slice(&word.to_le_bytes());
+    }
+    code[0x64..0x68].copy_from_slice(&0xd65f_03c0_u32.to_le_bytes()); // ret
+    let functions = [
+        ("_start", BASE, 0x10),
+        ("wrap", BASE + 0x20, 0x08),
+        ("main", BASE + 0x40, 0x10),
+        ("helper", BASE + 0x60, 0x08),
+    ];
+    Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
+        .in_aarch64()
+        .importing_through(BASE + 0x80..BASE + 0x88, BASE + 0x90, "__libc_start_main")
+        .running_on(common::GLIBC)
+}
+
+/// `main` reached only by `__wrap_main`'s tail branch returns what `__wrap_main` returns, which
+/// the cited slot reads as an `int` (D227): the branch forwards the read.
+#[test]
+fn a_main_a_wrapper_branches_to_returns_the_int_the_slot_reads() {
+    let mut open = OpenProgram::of(wrapped_main());
+    open.analyse_program().expect("it surveys");
+    let rendered = open.rendered(BASE + 0x40).expect("it renders");
+    let text = rendered.response.output.into_text();
+    // A word, no residual: the decision is `Read(Integer)` (cold, the result is unproven).
+    assert!(
+        text.starts_with("r2sleigh_word_u64 fcn_1040(void)"),
+        "{text}"
+    );
+    assert!(
+        text.contains("reads the result (assuming closed-world, ub-free)"),
+        "{text}"
+    );
+}
+
+/// musl's `__libc_start_main` runs `exit(main(argc, argv, envp))` (its cited row): the same take
+/// decides `main`'s `int` on musl as on glibc (D227).
+#[test]
+fn a_main_musls_libc_start_main_takes_returns_its_int() {
+    let musl = [r2abi::statement::PlatformEvidence::Interpreter(
+        r2engine::program::Libc::Musl,
+    )];
+    let literal = at_exit(STARTS_HANDLER, "__libc_start_main").running_on(&musl);
+    let (closed, premises) = handler_answer(literal, true);
+    assert!(
+        closed.contains("r2sleigh_word_u32 handler(void)"),
+        "{closed}"
+    );
+    assert!(
+        premises.contains(&r2source::Premise::UbFreeSource),
+        "{premises:?}"
+    );
+}
+
+/// `_start` hands `a` to a slot (`lea rdi`/`lea rcx`, `call __libc_start_main`); `a`, `b` and `c`
+/// each return a constant or branch to the next (`test; je 1f; jmp next; 1: mov eax, k; ret`).
+fn slotted_cycle(start: &[u8]) -> Literal {
+    let mut code = vec![0xcc; 0xa0];
+    code[..start.len()].copy_from_slice(start);
+    let member = |test: [u8; 2], next: u32, k: u8| {
+        let mut body = vec![test[0], test[1], 0x74, 0x05, 0xe9];
+        body.extend(next.to_le_bytes());
+        body.extend([0xb8, k, 0x00, 0x00, 0x00, 0xc3]);
+        body
+    };
+    code[0x10..0x1f].copy_from_slice(&member([0x85, 0xff], 0x17, 1)); // a: jmp 0x1030
+    code[0x30..0x3f].copy_from_slice(&member([0x85, 0xf6], 0x17, 2)); // b: jmp 0x1050
+    code[0x50..0x5f].copy_from_slice(&member([0x85, 0xd2], 0xffff_ffb7, 3)); // c: jmp 0x1010
+    code[0x90..0x96].copy_from_slice(&[0xff, 0x25, 0x02, 0x00, 0x00, 0x00]); // jmp [rip + 2]
+    code[0x98..0xa0].fill(0);
+    let functions = [
+        ("_start", BASE, 0x0d),
+        ("a", BASE + 0x10, 0x0f),
+        ("b", BASE + 0x30, 0x0f),
+        ("c", BASE + 0x50, 0x0f),
+    ];
+    Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
+        .importing("__libc_start_main")
+        .running_on(common::GLIBC)
+}
+
+/// Each member's text under `aa`.
+fn slotted_cycle_rendered(start: &[u8]) -> Vec<String> {
+    let mut open = OpenProgram::of(slotted_cycle(start));
+    open.analyse_program().expect("it surveys");
+    let texts = [BASE + 0x10, BASE + 0x30, BASE + 0x50].map(|at| {
+        let rendered = open.rendered(at).expect("it renders");
+        rendered.response.output.into_text()
+    });
+    assert_eq!(open.analysis_stats().defects, 0);
+    texts.into()
+}
+
+/// D408: `main`'s cited `int` slot takes `a` of a three-member forwarding cycle, so no member decides
+/// `ForwardCycle`; red on the parent, where `c`'s tail branch into `a` was no way in.
+#[test]
+fn a_three_member_forwarding_cycle_a_cited_slot_reads_returns_its_int() {
+    for text in slotted_cycle_rendered(STARTS_HANDLER) {
+        assert!(text.starts_with("r2sleigh_word_u"), "{text}");
+        assert!(
+            text.contains("a call reads the result (assuming closed-world, ub-free)"),
+            "{text}"
+        );
+    }
+}
+
+/// [`TAKES_HANDLER`] padded to `wrapper` at 0x1020: `jmp handler`, the format's entry point, so its
+/// own ways in are unknown and its tail branch forwards `handler`'s result to them.
+fn branched_into_by_an_entry(import: &str) -> Literal {
+    let mut text = TAKES_HANDLER.to_vec();
+    text.resize(0x20, 0xcc);
+    text.extend([0xe9, 0xeb, 0xff, 0xff, 0xff]); // 1020 jmp 0x1010
+    let text: &'static [u8] = Box::leak(text.into_boxed_slice());
+    at_exit(text, import).entering(BASE + 0x20, r2abi::statement::EntryKind::Main)
+}
+
+/// D408's exemption is a tail branch's, never its jumper's: `handler`, taken into `atexit`'s void
+/// slot, is also branched into by an entry point that may read its result, so it is never void.
+#[test]
+fn a_handler_an_entry_point_branches_into_is_never_declared_void() {
+    let text = handler_rendered(branched_into_by_an_entry("atexit"), true);
+    assert!(!text.contains("void handler("), "{text}");
+    assert!(!text.contains("no call reads the result"), "{text}");
+}
+
+/// `f` (0x1010, `ret`, handing back RAX) is called once by `main`, which drops it, and branched
+/// into by an entry point (0x1020): its tail caller's ways in are unknown, so `f` is never void.
+#[test]
+fn a_callee_an_entry_point_branches_into_is_never_void() {
+    let mut code = vec![0xcc; 0x30];
+    code[..8].copy_from_slice(&[0xe8, 0x0b, 0x00, 0x00, 0x00, 0x31, 0xc0, 0xc3]); // call f; xor; ret
+    code[0x10] = 0xc3; // f: ret
+    code[0x20..0x25].copy_from_slice(&[0xe9, 0xeb, 0xff, 0xff, 0xff]); // c: jmp 0x1010
+    let functions = [
+        ("main", BASE, 8),
+        ("f", BASE + 0x10, 1),
+        ("c", BASE + 0x20, 5),
+    ];
+    let literal = Literal::of_code(Box::leak(code.into_boxed_slice()), &functions)
+        .entering(BASE + 0x20, r2abi::statement::EntryKind::Main)
+        .running_on(common::GLIBC);
+    let mut open = OpenProgram::of(literal);
+    open.analyse_program().expect("it surveys");
+    let text = open.rendered(BASE + 0x10).expect("it renders");
+    let text = text.response.output.into_text();
+    assert!(!text.starts_with("void f("), "{text}");
+}
+
+/// `init`'s slot states no return: the same cycle taken there decides no read (default-deny).
+#[test]
+fn a_three_member_forwarding_cycle_a_slot_stating_no_return_takes_stays_unproven() {
+    for text in slotted_cycle_rendered(STARTS_HANDLER_AS_INIT) {
+        assert!(!text.contains("reads the result"), "{text}");
+    }
 }

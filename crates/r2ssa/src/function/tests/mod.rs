@@ -32,7 +32,12 @@ fn advisory_call_site(
 fn test_switch_selector(function: &SSAFunction, block_addr: u64) -> String {
     let graph = crate::graph::SsaGraph::from_function(function);
     let predicates = crate::semantic::collect_predicate_facts_for_test(function, &graph);
-    let values = crate::values::solve_value_ranges(&graph, function, None, &predicates);
+    let values = crate::values::solve_value_ranges(
+        &graph,
+        crate::semantic::BuildFacts::bare(function),
+        None,
+        &predicates,
+    );
     let selector = crate::indirect::dispatch_selectors(&graph, &values)
         .remove(&block_addr)
         .expect("the analysis names a selector");
@@ -62,7 +67,6 @@ fn tail_jump_is_a_terminal_callsite_without_call_clobbers() {
         true,
         r2source::ConventionId::Aapcs64,
         [],
-        false,
         false,
         SourceCallResult::Void,
     )
@@ -1077,7 +1081,6 @@ fn variadic_format_call_artifact_formed(
             SourceCallArgumentSpec::new(1, slot(1)),
         ],
         variadic,
-        false,
         SourceCallResult::Void,
     )
     .expect("exact callsite interface");
@@ -1206,7 +1209,6 @@ fn merged_format_call(first: &str, second: &str) -> CallsiteCertificate {
             SourceCallArgumentSpec::new(1, slot(1)),
         ],
         true,
-        false,
         SourceCallResult::Void,
     )
     .expect("exact callsite interface")
@@ -1372,7 +1374,6 @@ fn two_calls_to_one_variadic_callee_may_pass_different_counts() {
                 SourceCallArgumentSpec::new(1, slot(1)),
             ],
             true,
-            false,
             SourceCallResult::Void,
         )
         .and_then(|interface| interface.with_radare2_format_parameter(1))

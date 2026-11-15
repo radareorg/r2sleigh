@@ -118,29 +118,32 @@ pub(crate) fn exits_are_named_beside(
     live_out: &FunctionLiveOut,
     tails: &BTreeSet<u64>,
 ) -> bool {
-    if let Some(block) = live_out.unresolved_blocks().next() {
+    // Every unnamed exit is reported, so the evidence lists each cause (O(blocks)).
+    let mut named = true;
+    for block in live_out.unresolved_blocks() {
         r2il::refusal_evidence!(
             "exits-unnamed",
             "{:#x}: return {block:#x} is unresolved",
             function.entry
         );
-        return false;
+        named = false;
     }
     let cfg = function.cfg();
-    cfg.blocks().all(|block| {
+    cfg.blocks().fold(named, |all, block| {
         let successors = block.successors();
         let leaves =
             successors.is_empty() || successors.iter().any(|next| cfg.get_block(*next).is_none());
         if tails.contains(&block.addr) {
-            return true;
+            return all;
         }
         let named = match &block.terminator {
             BlockTerminator::Return => true,
             BlockTerminator::ConditionalExit { .. } => false,
-            // A call ending on a "never" no statement makes may come back (D255).
+            // A closed call ends the body only where a statement proves its "never" (D255, D384).
             BlockTerminator::Call { .. } | BlockTerminator::IndirectCall { .. } => {
-                let unproven = &function.assumed_exits().unproven;
-                (successors.is_empty() && unproven.binary_search(&block.addr).is_err()) || !leaves
+                let site = function.assumed_exits().site(block.addr);
+                (successors.is_empty() && site.is_some_and(|site| site.never.proves().is_some()))
+                    || !leaves
             }
             _ => !leaves,
         };
@@ -153,7 +156,7 @@ pub(crate) fn exits_are_named_beside(
                 block.terminator
             );
         }
-        named
+        all && named
     })
 }
 
@@ -370,7 +373,8 @@ mod tests {
         }));
     }
 
-    /// A call that ends the body names its exit only where no walk alone derived its "never" (D255).
+    /// A call that ends the body names its exit only where a statement proves its "never": none,
+    /// or one only a walk derived, names none (D255, D384).
     #[test]
     fn a_call_ending_on_an_unproven_never_names_no_exit() {
         let block = R2ILBlock {
@@ -395,12 +399,22 @@ mod tests {
         let mut function = built.expect("ssa");
         let graph = SsaGraph::from_function(&function);
         let live_out = FunctionLiveOut::compute(&function, &graph, &[]);
-        assert!(exits_are_named(&function, &live_out));
-        function.record_assumed_exits(&crate::AssumedExits {
-            unproven: vec![0x1000],
-            ..crate::AssumedExits::default()
-        });
         assert!(!exits_are_named(&function, &live_out));
+        let closed = |never: &r2source::Never| crate::AssumedExits {
+            sites: vec![crate::ExitSite {
+                block: 0x1000,
+                never: never.clone(),
+                callee: true,
+            }],
+        };
+        let cited =
+            r2source::Citation::runtime("runtime.gopanic").expect("the model names gopanic");
+        function.record_assumed_exits(&closed(&r2source::Never::cited(cited)));
+        assert!(exits_are_named(&function, &live_out));
+        for bound in [r2source::Never::unreached(), r2source::Never::uncited()] {
+            function.record_assumed_exits(&closed(&bound));
+            assert!(!exits_are_named(&function, &live_out));
+        }
     }
 
     /// The target of a jump out of the body may take RDX as an argument, and
