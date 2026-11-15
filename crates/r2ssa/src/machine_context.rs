@@ -3557,14 +3557,18 @@ mod tests {
         let convention = r2source::convention::testing::model(r2source::ConventionId::SysVAmd64)
             .arguments(r2source::convention::SlotClass::Integer, (0..4).map(slot));
         let blocks = vec![other, site];
-        let mut context = SourceMachineContext::from_blocks_with_interfaces(
-            &blocks,
-            Some(&crate::Arch::from(arch)),
-            None,
-            SourceMachineRoles::default(),
-            Some(convention.killed((0..4).map(slot)).conventions()),
-            cited.then_some(interface).into_iter().collect(),
-        );
+        // Unbound, as the function builders fold formats before `bind_call_reads` (D436).
+        let mut context =
+            SourceMachineContext::from_blocks_with_interfaces_tail_calls_and_terminals(
+                &blocks,
+                Some(&crate::Arch::from(arch)),
+                None,
+                SourceMachineRoles::default(),
+                Some(convention.killed((0..4).map(slot)).conventions()),
+                cited.then_some(interface).into_iter().collect(),
+                Vec::new(),
+                &BTreeSet::new(),
+            );
         context.bind_source_string_literals(&[(0x3000, "%d\n".to_string())]);
         (context, blocks)
     }
