@@ -223,40 +223,58 @@ impl FramePoints {
         }
     }
 
-    /// What a call to this body may write of its caller's stack, from the call's pointer; a self call
-    /// in two rounds (doc/adr-callee-builds.md, D377, D381). `O(calls x spans)`.
-    pub fn call_writes(
+    /// What a call to this body may write of its caller's stack before its blocking calls (direct
+    /// calls and correlated tails nothing states) are stated (D377, D381, D441). `O(calls x spans)`.
+    pub fn incoming_bound(
         &self,
         context: &SourceMachineContext,
-    ) -> Option<crate::call_reads::StackWrites> {
+    ) -> Option<crate::call_reads::WritesBound> {
         let transfers = self.transfers?;
         // A tail transfer writes what its source-correlated callee states; any other, all.
-        let stated = |_: usize, call: &CallBase, instruction: u64| {
-            let stated = (!call.tail)
+        let correlated = |call: &CallBase, instruction: u64| {
+            (!call.tail)
                 || (context.raw_call_site_at(instruction))
-                    .is_some_and(|identity| context.is_tail_call_site(identity));
-            stated
+                    .is_some_and(|identity| context.is_tail_call_site(identity))
+        };
+        let stated = |_: usize, call: &CallBase, instruction: u64| {
+            correlated(call, instruction)
                 .then(|| context.call_reads(Some(instruction)))
                 .flatten()?
                 .writes
                 .clone()
         };
-        let spans = self.writes_bound(spent(context), stated)?;
-        Some(crate::call_reads::StackWrites::within(spans, transfers))
+        let blocking = |call: &CallBase, instruction: u64| {
+            let site = correlated(call, instruction)
+                .then(|| context.raw_call_site_at(instruction))
+                .flatten()?;
+            let target = site.target();
+            (target.space == r2source::CanonicalStorageSpace::Ram).then_some(target.offset)
+        };
+        let (fixed, own_bases, blocking) = self.writes_bound(spent(context), stated, blocking)?;
+        Some(crate::call_reads::WritesBound {
+            spent: spent(context),
+            fixed,
+            own_bases,
+            blocking,
+            transfers,
+        })
     }
 
-    /// `call_writes` with each call's statement from `stated`, and what a transfer spends.
+    /// Each call's statement from `stated`, else its target from `blocking`: the fixed spans, the
+    /// self calls' bases and the blocking calls'. `None` where neither answers.
+    #[allow(clippy::type_complexity)]
     fn writes_bound(
         &self,
-        (least, most): (i64, i64),
+        (least, _): (i64, i64),
         stated: impl Fn(usize, &CallBase, u64) -> Option<Vec<(i64, i64)>>,
-    ) -> Option<Vec<(i64, i64)>> {
+        blocking: impl Fn(&CallBase, u64) -> Option<u64>,
+    ) -> Option<(Vec<(i64, i64)>, Vec<i64>, Vec<(i64, u64)>)> {
         let writing = self.opaque.iter().any(|access| access.writes);
         if self.whole || !self.escaped.is_empty() || writing {
             return None;
         }
         let mut fixed = self.incoming_stores.clone();
-        let mut own_bases = Vec::new();
+        let (mut own_bases, mut blocked) = (Vec::new(), Vec::new());
         for (index, call) in self.call_bases.iter().enumerate() {
             // A call above what its transfer spends could move a cycle's spans up each round.
             let base = call.base.filter(|base| *base <= least)?;
@@ -265,24 +283,14 @@ impl FramePoints {
                 own_bases.push(base);
                 continue;
             }
-            let writes = stated(index, call, instruction)?;
-            fixed.extend(writes.iter().map(|(low, high)| (base + low, base + high)));
+            match stated(index, call, instruction) {
+                Some(writes) => {
+                    fixed.extend(writes.iter().map(|(low, high)| (base + low, base + high)));
+                }
+                None => blocked.push((base, blocking(call, instruction)?)),
+            }
         }
-        // Two rounds: a call to itself whose writes move the spans again bounds nothing (D377).
-        let round = |own: &[(i64, i64)]| {
-            let shifted = own_bases
-                .iter()
-                .flat_map(|base| own.iter().map(move |(low, high)| (base + low, base + high)));
-            let incoming = fixed
-                .iter()
-                .copied()
-                .chain(shifted)
-                .filter(|(_, high)| *high > 0);
-            merged(incoming.map(|(low, high)| ((low.max(0) - most).max(0), high - least)))
-        };
-        let first = round(&[]);
-        let second = round(&first);
-        (own_bases.is_empty() || second == first).then_some(first)
+        Some((fixed, own_bases, blocked))
     }
 
     /// Whether slot promotion took the place at entry offset `place` out of memory. O(log).
@@ -355,6 +363,62 @@ impl FramePoints {
             .filter(|call| !call.tail)
             .filter_map(|call| Some((call.instruction?, call.base?)));
         bases.filter(|(_, base)| *base < 0 && self.rewritten.range(*base..0).next().is_some())
+    }
+}
+
+/// A self call in two rounds: one whose writes move the spans again bounds nothing (D377).
+/// `O(own x spans log spans)`.
+fn own_rounds(
+    (least, most): (i64, i64),
+    fixed: &[(i64, i64)],
+    own_bases: &[i64],
+) -> Option<Vec<(i64, i64)>> {
+    let round = |own: &[(i64, i64)]| {
+        let shifted = own_bases
+            .iter()
+            .flat_map(|base| own.iter().map(move |(low, high)| (base + low, base + high)));
+        let incoming = fixed
+            .iter()
+            .copied()
+            .chain(shifted)
+            .filter(|(_, high)| *high > 0);
+        merged(incoming.map(|(low, high)| ((low.max(0) - most).max(0), high - least)))
+    };
+    let first = round(&[]);
+    let second = round(&first);
+    (own_bases.is_empty() || second == first).then_some(first)
+}
+
+impl crate::call_reads::WritesBound {
+    /// The direct targets whose statements this bound waits on, ascending, each once.
+    pub fn blocking(&self) -> BTreeSet<u64> {
+        self.blocking.iter().map(|(_, target)| *target).collect()
+    }
+
+    /// The writes with each blocking call's `stated` spans at its base; `None` where one states none
+    /// or reaches the entry pointer, past the area the points assumed (D441). `O(calls x spans)`.
+    pub fn solve<'s>(
+        &self,
+        stated: impl Fn(u64) -> Option<&'s [(i64, i64)]>,
+    ) -> Option<crate::call_reads::StackWrites> {
+        let mut fixed = self.fixed.clone();
+        for (base, target) in &self.blocking {
+            let writes = stated(*target)?;
+            if writes.iter().any(|(_, high)| base + high > 0) {
+                return None;
+            }
+            fixed.extend(writes.iter().map(|(low, high)| (base + low, base + high)));
+        }
+        let spans = own_rounds(self.spent, &fixed, &self.own_bases)?;
+        Some(crate::call_reads::StackWrites::within(
+            spans,
+            self.transfers,
+        ))
+    }
+
+    /// The writes where no call blocks them: the bound alone, as every caller build reads it.
+    pub fn closed(&self) -> Option<crate::call_reads::StackWrites> {
+        self.solve(|_| None)
     }
 }
 
@@ -790,8 +854,9 @@ fn decide_points(
         areas[order[index]].1.clone()
     };
     let own_writes = (!points.own_calls.is_empty())
-        .then(|| points.writes_bound(site.spent, stated))
-        .flatten();
+        .then(|| points.writes_bound(site.spent, stated, |_, _| None))
+        .flatten()
+        .and_then(|(fixed, own, _)| own_rounds(site.spent, &fixed, &own));
     let writes = calls()
         .map(|pair| match own(pair) {
             true => own_writes.as_deref(),

@@ -35,6 +35,19 @@ enum Writes {
     Assumed(Vec<(i64, i64)>),
 }
 
+/// A walked body's incoming writes before the direct calls nothing states are stated (D441):
+/// its own stores and stated calls' spans, each blocking call by its base and target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WritesBound {
+    /// What a transfer spends: the least and most the pointer moves at a return.
+    pub(crate) spent: (i64, i64),
+    /// Its own incoming stores and each stated call's spans shifted by its base.
+    pub(crate) fixed: Vec<(i64, i64)>,
+    pub(crate) own_bases: Vec<i64>,
+    pub(crate) blocking: Vec<(i64, u64)>,
+    pub(crate) transfers: Transfers,
+}
+
 /// The frame walk saw every operation of the body through [`crate::SSAOp::transfer`], whose match
 /// has no wildcard arm, so its calls and tail transfers are every transfer (D381, D411).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

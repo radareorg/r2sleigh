@@ -409,6 +409,12 @@ impl<S: Source + 'static> crate::native::Program for View<'_, S> {
         std::sync::Arc::clone(&read.expect("a statement asks for no other root").0)
     }
 
+    fn callee_writes(&self, address: u64) -> Option<r2ssa::call_reads::StackWrites> {
+        let key = (address, self.thumb_at(address));
+        let composed = self.db.get::<super::writes::IncomingWrites>(&key).ok()?;
+        composed.writes.clone()
+    }
+
     fn name_at(&self, vaddr: u64) -> Option<String> {
         // The plain name: it keys the prototype table; a slot the loader fills is asked separately.
         self.names
