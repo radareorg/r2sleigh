@@ -685,12 +685,15 @@ pub(crate) fn returns_no_register(interface: &r2source::SourceFunctionInterface)
     )
 }
 
-/// The bytes of its result register a function's caller reads: the low bytes the declared type
-/// occupies where the interface places one there (an `int` in RAX), else the whole register.
+/// The bytes of its result register a function's caller reads: none where no call reads the integer
+/// register (D440), the low bytes the declared type occupies there (an `int` in RAX), else all.
 pub fn returned_bytes(interface: &r2source::SourceFunctionInterface) -> Option<CanonicalStorageId> {
     let r2source::SourceFunctionReturn::Register { storage } = interface.return_kind() else {
         return None;
     };
+    if interface.integer_result_unread() {
+        return Some(CanonicalStorageId { size: 0, ..storage });
+    }
     let declared = (interface.return_logical_value())
         .map(|value| value.carrier())
         .filter(|carrier| carrier.offset_bits() == 0 && carrier.size_bits() % 8 == 0)

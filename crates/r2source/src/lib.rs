@@ -84,7 +84,7 @@ impl FunctionIdentity {
     /// What the closed world decides of this function's result, where r2engine decided it.
     pub const fn closed_result(&self) -> Option<SourceClosedResult> {
         match self.closed {
-            Some(decision) => Some(decision.result),
+            Some(decision) => decision.result,
             None => None,
         }
     }
@@ -95,10 +95,15 @@ impl FunctionIdentity {
     }
 }
 
-/// What the closed world decides of a function's result, and whether a way in is a cited slot.
+/// What the closed world decides of a function's result and of its integer lane, and whether a way
+/// in is a cited slot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SourceClosedDecision {
-    pub result: SourceClosedResult,
+    /// The function's result; none where only the integer lane is decided.
+    pub result: Option<SourceClosedResult>,
+    /// No executed instruction reads the integer result register after a return: it is dead at
+    /// every way in, whatever the other lanes do (doc/adr-result-side.md, "D440 as built").
+    pub integer_unread: bool,
     /// A way in is a cited slot whose declared type is how every caller calls (C17 6.3.2.3p8).
     pub through_slot: bool,
 }
@@ -108,7 +113,7 @@ impl SourceClosedDecision {
     /// where no call is undefined.
     pub const fn premises(self) -> &'static [Premise] {
         let slotted =
-            self.through_slot || matches!(self.result, SourceClosedResult::DeclaredVoid(_));
+            self.through_slot || matches!(self.result, Some(SourceClosedResult::DeclaredVoid(_)));
         match slotted {
             true => &[Premise::ClosedWorld, Premise::UbFreeSource],
             false => &[Premise::ClosedWorld],

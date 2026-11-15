@@ -163,7 +163,7 @@ r2ssa
 | D54 | A cap that keeps a partial result is an error: item **K** widens to the optimiser round budget, address provenance, the r2rewrite term budget, `COPIES = 8` and the lift's atomic `DEPTH`; the name interner is held per function; `Held` tables get a byte budget | D11's Dylints at deny with a shrinking allowlist | open |
 | D157 | `UnsupportedInstruction` prints over ordinary code with no reason (testapp 209 sites, hello_gs 212, pumasim 256): each site names the instruction and why, or decodes (hand audit 3.11) | the three counts fall to named reasons | open |
 | D171 | An indirect call through a DWARF member of function-pointer type is placed by the declaration's rule; its parameter roots by S32, the rest by D348 | `member_calls` golden | built 64a99401c |
-| D211 | `residual_u64(n) << 32` in 36 of 2,621 DecBench functions (31 own-result, 5 others); 26 expected after D440 | at most 5 | open |
+| D211 | `residual_u64(n) << 32` in 26 of 2,621 DecBench functions, 37 sites, on rebuild-design-7's merged head (`s2count.py`; D440 took 10 RAX return roots, 0 new hits) | at most 5 | open |
 | D226 | A cold `pdd` prepares a function once where an owner's statement moves its result; D286 to D288 built it, D289 the second recovery | `builds.rs` | built 033e1b76a |
 | D231 | A result carried across an elided `/GS` call stays a residual: `op_ends_reaching_walk` ends the return walk at any call, so the return boundary and liveout learn the exemption together | `a_call_to_a_proven_check_of_the_load_config_cookie_is_elided` returns `r2sleigh_carrier_u64(7)`; hello_gs's 11 elisions hold | open |
 | D232 | A Microsoft x64 variadic call with five or more arguments passes four (the Win64 target's 3 `ub` records, `shape_variadic` O0 to O2) | those 3 records leave `ub` | open |
@@ -237,13 +237,14 @@ r2ssa
 | D426 | Rescans R2 to R5 bounded; R4 virtual phis dropped (the R3 solver went with D427) | R3 against the path union on 200 random graphs; no D417 meter replay, and R3's and R4's counters pass on the parent too: gate open | built 5b39265a8 |
 | D427 | `rewritten` kills at an exact whole-width store; every non-tail call writes `(i64::MIN, base)` | `a_place_stored_again_after_an_unstated_call_folds` | built a1d1be599 |
 | D429 | `vfold`'s escaped incoming area bounds its writes (kind V) | a cost and a dry run | rejected: not costed (rounds 6 and 7) |
-| D432 | A printf format reloaded from a clean frame place is its stored literal: one least fixpoint in D427's `fixpoint::sparse`. Open: shapes aarch64 clang-O0 `main` still keeps the slot through E, O and D callees (D378, D414) | aarch64 equal 748 to 749; `a_format_reloaded_from_a_clean_slot_is_its_stored_literal`; `reloaded <= reload_bound` | built on `rd7-format` fae7a854a; Codex P1 at `walk.rs:1581` fixed in fae7a854a; landing open: condition 3 (`cargo dylint` and `structure-report.sh` counts at head still owed, `ENTITY_KEYED_MAP` not rising) and 4 (#402's full-ci: Timing vs Base and aarch64 clang-O2 shapes running at 15:40) |
+| D432 | A printf format reloaded from a clean frame place is its stored literal: one least fixpoint in D427's `fixpoint::sparse`. Open: shapes aarch64 clang-O0 `main` still keeps the slot through E, O and D callees (D378, D414) | aarch64 equal 748 to 749; `a_format_reloaded_from_a_clean_slot_is_its_stored_literal`; `reloaded <= reload_bound` | built efd0ae118; open part |
 | D433 | A counted printf reads only its fixed parameters, counted operands and AL. Unverified: `counted_reads` checks no `Citation`, so an uncited printf-family row may reach it | `a_counted_printf_reads_only_its_placed_registers`; floors 940 to 873 | built 59ef32c49; open part |
 | D434 | A slot the body reads is not `Unread` | `a_stack_slot_handed_to_a_call_nothing_bounds_is_not_unread` | built de1cef64d |
 | D435 | Semi-naive descent from W' | Kani `meet(x,x)=x`, `refine(x,x)=x` | built bc0741289 |
 | D436 | `CallReads` is a dense column per machine context | `a_context_builds_each_call_sites_reads_once`. Open, unruled: the demand pass runs twice per body | built ac851af97; open part |
 | D437 | The format fold steps only blocks with a cited printf site | `a_body_with_no_format_site_folds_no_operation` | built 28ae1efd2 |
 | D438 | Register-walk class lookup by one direct table and one CSR | `a_register_walk_allocates_its_written_classes_once` | built 700f64c8b |
+| D443 | One seal of a body of n compare-and-return arms grows superlinearly (Scaling Bench `unproven_returns`): D422's four scans (`function/mod.rs:1824`, `:1967`, `semantic/certificates/returns.rs:131`, `semantic/certificates/mod.rs:533`) grow 4x per input doubling in `scripts/scaling.py`; callgrind at N = 64 and 128 adds `fuse_compare_chains_in_function` 3.99x, `collect_control_domain_facts` 4.21x, `FunctionLiveOut::collect_reaching` 3.79x, `recover_interface_inner` 2.99x, r2dec `CStmt::clone` 4.09x and `emit_stmt` 6.2x (an else-if chain nested n deep). Owner r2ssa optimize, control domains, liveout; r2dec render | `scaling.py` `unproven_returns` linear | open |
 
 r2source
 --------
@@ -328,7 +329,7 @@ r2engine
 | D361 | A data-object root for a member whose object start the body never references | `layouts` tests | built e65b14f36 |
 | D367 | Dispatch rounds cost 8.6% of pumasim `aa; pdd @ 0x3b6b20`. Stage A is built; 1.74 G stays open, and the next lever is D374 | within 2% of 70.75 G; `a_later_round_in_a_loop_copies_its_region_once` | open |
 | D375 | libc-2.32.so `0x160ad4`: round 1's table at `0x160bc7` sends an arm to `0x16e6bc` inside a decoded block, so capture refuses the body | the body captures, or the table refuses with its cause | open |
-| D376 | A walked callee states its reads and incoming stack writes to every caller build. Tier 2 asks through `state_asked` and `callee_statement`; on `rd7-writes` the writes come from D441 under `aa`. Open: cold builds ask nothing; entry is the cold write-blocking reach on pumasim `0x23fdf0` and 0pack `0x62ecf0` and a lift-grade write cost | `a_spilled_format_reloaded_in_another_block_reads_no_vector_register` | open (built in part dc96ad6a8) |
+| D376 | A walked callee states its reads and incoming stack writes to every caller build. Tier 2 asks through `state_asked` and `callee_statement`; the writes come from D441 under `aa`. Open: cold builds ask nothing; entry is the cold write-blocking reach on pumasim `0x23fdf0` and 0pack `0x62ecf0` and a lift-grade write cost | `a_spilled_format_reloaded_in_another_block_reads_no_vector_register` | open (built in part dc96ad6a8) |
 | D384 | One per-site `Never` carries its proof | `crates/r2dec/tests/architecture.rs` | built f78e5f11e |
 | D385 | One held callee convention per callee | engine test | built a3c1ac812 |
 | D399 | One restatement path, counted once | `builds.rs` | built 3af7b8489 |
@@ -339,8 +340,9 @@ r2engine
 | D418 | Statement firewall: structural equality of `CalleeReads`, `Resolved`, `Summarised`; `revision_identity` leaves `SourceFunctionInterface`; one frame per owner. Lands after D413 and the build key; V6 needs it | none set | deferred (foundation ruling 5) |
 | D419 | `later_tables` decodes G(empty) again after `DispatchTables`; continuing round 1 needs a `Newest` or merged query, which the no-cache rule leaves open | G(empty) decoded once per body | open |
 | D424 | Cross-root relifts: a deep read under one `ComponentForwarding` root lifts a body a later root's `DirectSites` asks (30 of D354's 50) | walks at or under 344 | open: needs a ruling on a multi-root seed |
-| D440 | Where `ClosedWorld` holds, every way in is joined and the integer lane is `Dead` at every site, no instruction reads f's RAX after return; `returned_bytes` and r2dec's tail return read it | `a_result_whose_integer_lane_every_call_overwrites_reads_no_bits_above_a_narrow_callee`; x86-64 744 and aarch64 749 held; D211 36 to 26 | building on `rd7-int-lane-dead` b095add8c |
-| D441 | A callee's incoming writes compose over its write-blocking calls: `WritesBound::solve` is the one composition, and the held `IncomingWrites` query solves each write-dependence component once, callee first, accepting a cycle only where every member computes its seed; `aa` only | `a_place_past_a_mutual_recursion_that_writes_nothing_folds`; goldens differing from master 28 to 24, 0 away; floors 873 | built on `rd7-writes` 34e2d421b; landing open: cost unrecorded, equivalence unstated, DecBench loads 39,426 to 39,354 and stores 24,107 to 24,059 in 25 functions to judge |
+| D440 | Where `ClosedWorld` holds, every way in is joined and the integer lane is `Dead` at every site, no instruction reads f's RAX after return; `returned_bytes` and r2dec's tail return read it. Open: callers of an undecided callee read weaker parameter types than its own signature (`closed_alone`); the four guard mutants were run by hand and are in no script | `a_result_whose_integer_lane_every_call_overwrites_reads_no_bits_above_a_narrow_callee`; D211 36 to 26 functions, 53 to 37 sites; equivalence held | built 6eed238f3; open part |
+| D441 | A callee's incoming writes compose over its write-blocking calls: `WritesBound::solve` is the one composition, and the held `IncomingWrites` query solves each write-dependence component once, callee first, accepting a cycle only where every member computes its seed; `aa` only. Measured: DecBench loads 39,426 to 39,354, stores 24,107 to 24,059; pumasim `aa; pdd @ 0x23fdf0` +1.81% (81 bodies read alone to compose), outputs identical | `a_place_past_a_mutual_recursion_that_writes_nothing_folds`; `a_result_cycle_and_a_write_cycle_state_one_answer`; goldens differing from master 28 to 24, 0 away; floors 873 | built 41003ea2e |
+| D442 | A body the closed world decides seals once: `Native::resolve` asks the decision before the first seal and captures under it. Open: `resolved_alone`, the build path asking callees (`native.rs:1476`), captures with nothing asked, so `finish` still seals a decided body twice under `aa` | `result_lanes::a_body_the_closed_world_decides_seals_once`; Scaling Bench `unproven_returns` | built 94bc163ec; open part |
 
 r2dec
 -----
@@ -451,15 +453,14 @@ Order
 | #399 | `rebuild-design-4` | the design-fit audit: D379 to D407 | open |
 | #400 | `rebuild-design-5` | the foundation ranking and round 5: D410 to D426 | open |
 | #401 | `rebuild-design-6` | round 6: D427, D431, D433 to D439 | open |
-| #402 | `rd7-format` fae7a854a | D432 | open: landing conditions 3 and 4 |
-| none | `rd7-int-lane-dead` | D440 | building; the branch adds no row, this file holds it |
-| none | `rd7-writes` | D441, notes on D376 and D378 | built; cost, equivalence and 25 DecBench functions to judge |
+| #402 | `rd7-format` | D432 | closed: superseded by #403 |
+| #403 | `rebuild-design-7` 94bc163ec | round 7: D432, D440, D441, D442, D443 | open |
+| next | `roadmap-rewrite` | this rewrite: rows by owner, standing gates, history index | open |
 
-Round 7 stacks in the order D432, D440, D441, and goldens are blessed once per step. This
-rewrite merges after the three stack. On each merge the rewrite's row text wins and the branch's
-old-layout edits to D376, D378, D432 and D441 drop. Defects in those edits: rd7-format's D432
-puts `bounded | (unset ? extra : 0)` in backticks, whose `|` splits the cell (escape it `\|` if kept);
-rd7-writes' D441 ends in a literal `COSTS` placeholder, to fill or drop.
+Round 7's exit, on rebuild-design-7: D211 26 functions and 37 sites (gate 5); floor callees 873;
+DecBench loads 39,354 and stores 24,059 over 2,621 functions; 25 golden records differ from
+master; equivalence equal x86-64 745 and aarch64 749. The x86-64 745th is `review.c` clang-O2
+`fact`, graded by time and not blessed.
 
 ### Next rounds, from the rulings
 
@@ -468,7 +469,7 @@ rd7-writes' D441 ends in a literal `COSTS` placeholder, to fill or drop.
 3. D376's cold ask. Entry: the cold write-blocking reach on pumasim `0x23fdf0` and 0pack `0x62ecf0`, and a lift-grade write cost.
 4. D378's kinds V, I and F. V needs D429 costed; I needs a cited premise for indirect callees (psABI line 410 exempts local functions).
 5. D414 stays held until a build grade fits D23's 2%.
-6. Cost: D367 then D374, D419, D420, D422, D344, D285's (2) and (3), D375. D424 needs a ruling before D354's gate can close.
+6. Cost: D442's open part and D443 (with D422's index), then D367, D374, D419, D420, D344, D285's (2) and (3), D375. D424 needs a ruling before D354's gate can close.
 7. Witnesses: D425, D433's citation check, D350's upstream declaration, D421's one folder.
 8. D415's gates; D418 after D413 and the build key.
 9. Then the open rows and items by owner above, the lift and container first.
@@ -478,7 +479,7 @@ rd7-writes' D441 ends in a literal `COSTS` placeholder, to fill or drop.
 | # | Hack | State | Rows |
 |---|------|-------|------|
 | 1 | `Placement::reads` passed `stated = true` with no citation check | closed by D410 (3926b190b) and D411 (97e57ed19, a00158681) | the same class stays open in D425; D433's `counted_reads` checks no `Citation` (unverified) |
-| 2 | The two-round rule in `walk.rs` accepts a self call's writes only if round 2 equals round 1 | open | D414 holds its deletion and is no-go on D23. On `rd7-writes` a write cycle has three owners: `own_rounds`, D441's seed check and `Assumed::writes`; round 7 requires a test that the last two agree. Proposal, no row: a self call as a one-member `IncomingWrites` component, deleting `own_rounds` |
+| 2 | The two-round rule in `walk.rs` accepts a self call's writes only if round 2 equals round 1 | open | D414 holds its deletion and is no-go on D23. A write cycle has three owners: `own_rounds`, D441's seed check and `Assumed::writes`; `a_result_cycle_and_a_write_cycle_state_one_answer` holds the last two equal. Proposal, no row: a self call as a one-member `IncomingWrites` component, deleting `own_rounds` |
 | 3 | 5 uncited noreturn rows stay bounds, so callers name no exit | open | D406 |
 | 4 | The six default-deny violations of the call-boundary ruling, section 2 | closed | D276, D264 (twice), D265, D240, D252, each with its test |
 
@@ -651,4 +652,4 @@ Open questions
 - AGENTS.md's Validation Bar still names the `rebuild` exemption (D27), which ended when `rebuild` merged as #142.
 - Item rows' open clauses (I, P4, P7, SD, T) and unknown-shaped clauses (D158 `elf_stripped`, D76 chain4500) are not yet checked against code.
 
-Next free row: D442. Unused: D292 to D304 and D334 to D337. D291 was minted in this rewrite for 71afcd35d.
+Next free row: D444. Unused: D292 to D304 and D334 to D337. D291 was minted in this rewrite for 71afcd35d.

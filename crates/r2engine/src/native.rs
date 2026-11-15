@@ -156,6 +156,12 @@ pub trait Program: crate::body::Program {
     ) -> Arc<CalleeRead> {
         Arc::new(read())
     }
+
+    /// What a call to the asked callee may write of its caller's stack, composed over the calls its
+    /// alone read leaves unstated (`IncomingWrites`, D441); none where no database holds them.
+    fn callee_writes(&self, _address: u64) -> Option<r2ssa::call_reads::StackWrites> {
+        None
+    }
 }
 
 /// What reading one callee's body gave a caller.
@@ -911,8 +917,8 @@ pub(crate) fn convention_seal_of(
         .map_err(NativeRefusal::of_preparation)
 }
 
-/// States each callee nothing states whose call's writes kept a loaded place in memory, from its
-/// alone read: depth one, since an alone read asks none (D376). Whether any did. O(asked) reads.
+/// States each unstated callee whose writes kept a loaded place: reads alone (D376), writes composed
+/// (D441). Whether any did. O(asked) reads.
 fn state_asked(
     (native, target, ptr_bits): (&Native<'_>, &NativeTarget<'_>, u32),
     (entry, asked): (u64, BTreeSet<u64>),
@@ -934,7 +940,11 @@ fn state_asked(
             callees.interfaces.insert(address, interface.clone());
         }
         if let Ok(facts) = &read.facts {
-            callees.record(address, facts, program);
+            callees.record_reads(address, facts, program);
+            stated = true;
+        }
+        if let Some(writes) = program.callee_writes(address) {
+            callees.writes.insert(address, writes);
             stated = true;
         }
     }
@@ -1467,6 +1477,7 @@ fn resolved_alone(
         entry: address,
         declared_root,
         seal: seal.map_err(|why| unreadable(NativeRefusal::of_preparation(why)))?,
+        asked: None,
     };
     let finished = native.finish(walked, &imports, stated.world, first);
     finished
@@ -1546,11 +1557,13 @@ pub(crate) struct Built {
     declared_root: Restatement,
 }
 
-/// A body's first seal, by its entry, and the declaration it was captured under.
+/// A body's first seal, by its entry, and the declaration and closed decision it was captured
+/// under; `asked` is `None` where the decision was not asked before the seal.
 struct First {
     entry: u64,
     declared_root: Restatement,
     seal: r2ssa::TrustedSeal,
+    asked: Option<Option<r2source::SourceClosedDecision>>,
 }
 
 impl Built {
@@ -1731,6 +1744,13 @@ fn read_callees(
         match &read.facts {
             Ok(derived) => {
                 callees.record(*address, derived, native.program);
+                // Under `aa` a callee whose read bounds no write states them composed (D441).
+                if own
+                    && !callees.writes.contains_key(address)
+                    && let Some(writes) = native.program.callee_writes(*address)
+                {
+                    callees.writes.insert(*address, writes);
+                }
                 // The root reads every callee in one round, so the bound moves no kept build (D372).
                 if let Some(reads) = native.program.reads_at(*address) {
                     callees.lane_reads.insert(*address, reads);
@@ -1923,6 +1943,15 @@ impl Callees {
 
     /// One callee's statement; what it keeps is its register effect's, the one owner (D320).
     fn record(&mut self, address: u64, facts: &CalleeFacts, program: &dyn Program) {
+        self.record_reads(address, facts, program);
+        match facts.summary().incoming_writes() {
+            Some(writes) => _ = self.writes.insert(address, writes.clone()),
+            None => _ = self.writes.remove(&address),
+        }
+    }
+
+    /// One callee's statement but its writes, which an asked callee's `IncomingWrites` states.
+    fn record_reads(&mut self, address: u64, facts: &CalleeFacts, program: &dyn Program) {
         self.interfaces.insert(address, facts.interface().clone());
         self.preserved
             .insert(address, program.kept_at(address).unwrap_or_default());
@@ -1930,10 +1959,6 @@ impl Callees {
         // arguments is described, and a callee with no entry is one nothing
         // describes.
         self.reach.insert(address, facts.argument_touch_reach());
-        match facts.summary().incoming_writes() {
-            Some(writes) => _ = self.writes.insert(address, writes.clone()),
-            None => _ = self.writes.remove(&address),
-        }
     }
 }
 
@@ -2198,11 +2223,15 @@ impl<'a> Native<'a> {
         world: crate::program::World,
     ) -> Result<Resolution, NativeRefusal> {
         let declared_root = self.declaration(entry);
-        let seal = self.seal_first(walk, callees, &declared_root, None)?;
+        // The decision is asked before the first seal, so a decided body seals once (D442).
+        let asked =
+            (world == crate::program::World::Closed).then(|| self.program.closed_result(entry));
+        let seal = self.seal_first(walk, callees, &declared_root, asked.flatten())?;
         let first = First {
             entry,
             declared_root,
             seal,
+            asked,
         };
         Ok(self.finish(walk, callees, world, first)?.0)
     }
@@ -2231,6 +2260,7 @@ impl<'a> Native<'a> {
             entry: address,
             declared_root,
             seal: seal.map_err(NativeRefusal::of_preparation)?,
+            asked: None,
         };
         self.finish(walk, &imports, crate::program::World::Open, first)
     }
@@ -2332,17 +2362,19 @@ impl<'a> Native<'a> {
             entry,
             declared_root,
             seal: mut first,
+            asked,
         } = first;
         let (root, tables, calls) = (&walk.root, &walk.tables[..], &walk.calls[..]);
         // The binary's debug information declares the body as a library declares an import.
         let declared_prototype =
             Declared::body(self.target, entry).map(|declared| declared.prototype);
         // The closed world's held decision, from the open read's supply (doc/adr-result-side.md, D317).
+        // A body with no open interface takes none; a seal under another decision is built again.
         let open = first.machine_context().function_interface().is_some();
         let reads = (world == crate::program::World::Closed && open)
-            .then(|| self.program.closed_result(entry))
+            .then(|| asked.unwrap_or_else(|| self.program.closed_result(entry)))
             .flatten();
-        if reads.is_some() {
+        if reads != asked.flatten() {
             drop(first);
             first = self.seal_first(walk, callees, &declared_root, reads)?;
         }

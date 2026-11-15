@@ -9691,3 +9691,326 @@ fn an_unstated_indirect_call_reads_every_register_it_names() {
         );
     }
 }
+
+/// `root: sub rsp, 0x18; mov dword [rsp + 8], 5; mov edi, 3; call even; mov eax, [rsp + 8]`.
+const WRITE_CYCLE_ROOT: [u8; 0x20] = [
+    0x48, 0x83, 0xec, 0x18, // 1000 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xbf, 0x03, 0x00, 0x00, 0x00, // 100c mov edi, 3
+    0xe8, 0x0a, 0x00, 0x00, 0x00, // 1011 call 0x1020
+    0x8b, 0x44, 0x24, 0x08, // 1016 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 101a add rsp, 0x18
+    0xc3, 0x90, // 101e ret
+];
+
+/// Every other argument register set before a call, reading none, so no call hands on a
+/// parameter and the caller's arity owns no callee: `mov esi, 0` to `mov r9d, 0`.
+const NOTHING_HANDED_ON: [u8; 27] = [
+    0xbe, 0x00, 0x00, 0x00, 0x00, 0xba, 0x00, 0x00, 0x00, 0x00, 0xb9, 0x00, 0x00, 0x00, 0x00, 0x41,
+    0xb8, 0x00, 0x00, 0x00, 0x00, 0x41, 0xb9, 0x00, 0x00, 0x00, 0x00,
+];
+
+/// How a write-cycle member leaves for the other.
+#[derive(Clone, Copy)]
+enum Leaves {
+    Call,
+    /// `jmp`: a tail the source correlates with a site.
+    Tail,
+    /// `jne`: a transfer to another entry the source names no site for.
+    Branch,
+}
+
+/// One member at `at`: `before`, the registers cleared, the transfer to `to`, `after`, then
+/// `xor eax, eax; ret`, so its result is no member's.
+fn member(at: u64, (before, after): (&[u8], &[u8]), leaves: Leaves, to: u64) -> Vec<u8> {
+    let mut code = before.to_vec();
+    code.extend(NOTHING_HANDED_ON);
+    let opcode: &[u8] = match leaves {
+        Leaves::Call => &[0xe8],
+        Leaves::Tail => &[0xe9],
+        // test r11d, r11d: flags no constant decides.
+        Leaves::Branch => &[0x45, 0x85, 0xdb, 0x0f, 0x85],
+    };
+    code.extend(opcode);
+    let next = at + code.len() as u64 + 4;
+    code.extend(((to as i64 - next as i64) as i32).to_le_bytes());
+    code.extend(after);
+    code.extend([0x31, 0xc0, 0xc3]);
+    code
+}
+
+/// `root`; `even` at 0x1020 (`push rbp`, `call odd` unless `edi` is 0, `pop rbp`: a reload that
+/// asks `odd`); `odd` at 0x1060 (`before`, `mov edi, 0`); each body 0x40 bytes.
+fn write_cycle(odd: (&[u8], &[u8]), leaves: Leaves, more: &[u8]) -> &'static [u8] {
+    let mut code = WRITE_CYCLE_ROOT.to_vec();
+    let mut even = vec![0x55, 0x85, 0xff, 0x74, 0x00, 0xff, 0xcf];
+    even.extend(member(
+        BASE + 0x27,
+        (&[], &[0x5d]),
+        Leaves::Call,
+        BASE + 0x60,
+    ));
+    // je to the `pop rbp`, three bytes before the end.
+    even[4] = (even.len() - 3 - 5) as u8;
+    let before = [odd.0, &[0xbf, 0x00, 0x00, 0x00, 0x00]].concat();
+    let odd = member(BASE + 0x60, (&before, odd.1), leaves, BASE + 0x20);
+    for body in [even, odd] {
+        assert!(body.len() <= 0x40, "{body:x?}");
+        let padded = code.len() + 0x40;
+        code.extend(body);
+        code.resize(padded, 0x90);
+    }
+    code.extend(more);
+    Vec::leak(code)
+}
+
+/// The fixtures' functions, as far as `code` holds them.
+fn surveyed_cycle(code: &'static [u8], first: Option<u64>, root: u64) -> String {
+    let functions = [
+        ("root", BASE, 0x20),
+        ("even", BASE + 0x20, 0x40),
+        ("odd", BASE + 0x60, 0x40),
+        ("other", BASE + 0xa0, 0x20),
+    ];
+    let functions = functions
+        .iter()
+        .filter(|(_, at, _)| *at < BASE + code.len() as u64);
+    let functions = functions.copied().collect::<Vec<_>>();
+    let mut open = r2engine::program::OpenProgram::of(common::Literal::of_code(code, &functions));
+    open.analyse_program().expect("it surveys");
+    let mut render = |at: u64| {
+        open.rendered(at)
+            .expect("it renders")
+            .response
+            .output
+            .into_text()
+    };
+    if let Some(first) = first {
+        render(first);
+    }
+    render(root)
+}
+
+/// D441: `even` and `odd` call each other, own neither's result nor arity and write nothing of
+/// their callers' stack: the component's seed holds, so `root`'s slot past `call even` is its 5.
+#[test]
+fn a_place_past_a_mutual_recursion_that_writes_nothing_folds() {
+    let text = surveyed_cycle(write_cycle((&[], &[]), Leaves::Call, &[]), None, BASE);
+    assert!(!text.contains("r2sleigh_load_u32("), "{text}");
+    assert!(text.contains("return r2sleigh_carrier_u32(5);"), "{text}");
+}
+
+/// D441, default-deny: `odd` stores `[rsp + 0x18]` on its entry pointer, the slot `root` reloads
+/// (`even` calls it at its own entry pointer): the seed fails and the place stays a load.
+#[test]
+fn a_place_a_write_cycle_member_stores_stays_a_load() {
+    let store = [0xc7, 0x44, 0x24, 0x18, 0x00, 0x00, 0x00, 0x00];
+    let text = surveyed_cycle(write_cycle((&store, &[]), Leaves::Call, &[]), None, BASE);
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+}
+
+/// D441, default-deny: `odd` writes `[rsp + 0x7f]`, above the slot `root` reloads: the component
+/// computes other writes than its seed, so it states none and the place stays a load.
+#[test]
+fn a_write_cycle_whose_writes_differ_from_its_seed_bounds_nothing() {
+    let store = [0xc6, 0x44, 0x24, 0x7f, 0x00];
+    let text = surveyed_cycle(write_cycle((&store, &[]), Leaves::Call, &[]), None, BASE);
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+}
+
+/// D441, default-deny: `odd` also calls through `rsi`, which states no write.
+#[test]
+fn a_write_cycle_member_with_an_indirect_call_bounds_nothing() {
+    let text = surveyed_cycle(
+        write_cycle((&[0xff, 0xd6], &[]), Leaves::Call, &[]),
+        None,
+        BASE,
+    );
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+}
+
+/// D441, default-deny: `odd` calls `even` with its pointer 0x10 above its entry pointer, above
+/// what a transfer spends, where a cycle's spans could move up each round.
+#[test]
+fn a_write_cycle_call_above_the_entry_pointer_bounds_nothing() {
+    let around = ([0x48, 0x83, 0xc4, 0x10], [0x48, 0x83, 0xec, 0x10]);
+    let text = surveyed_cycle(
+        write_cycle((&around.0, &around.1), Leaves::Call, &[]),
+        None,
+        BASE,
+    );
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+}
+
+/// D441: `odd` leaves through `jmp even`, a tail the source correlates, whose spans it states.
+#[test]
+fn a_write_cycle_through_a_correlated_tail_folds() {
+    let text = surveyed_cycle(write_cycle((&[], &[]), Leaves::Tail, &[]), None, BASE);
+    assert!(text.contains("return r2sleigh_carrier_u32(5);"), "{text}");
+}
+
+/// `root` calling `a` (`mov edi, 0` and the other registers set, then `leaves` to `b`), and `b`
+/// at 0x1060 (`xor eax, eax; ret`), which writes nothing.
+fn leaving_for_a_leaf(leaves: Leaves) -> &'static [u8] {
+    let mut code = WRITE_CYCLE_ROOT.to_vec();
+    code.extend(member(
+        BASE + 0x20,
+        (&[0xbf, 0, 0, 0, 0], &[]),
+        leaves,
+        BASE + 0x60,
+    ));
+    code.resize(0x60, 0x90);
+    code.extend([0x31, 0xc0, 0xc3]);
+    Vec::leak(code)
+}
+
+/// D441: `a` calls `b`, and `a`'s closed world decides nothing, so no ask runs at `a`: the `aa`
+/// root states `a`'s writes composed over `b`'s, none, and its slot folds.
+#[test]
+fn a_place_past_a_callee_whose_callee_writes_nothing_folds() {
+    let text = surveyed_cycle(leaving_for_a_leaf(Leaves::Call), None, BASE);
+    assert!(text.contains("return r2sleigh_carrier_u32(5);"), "{text}");
+}
+
+/// D441: `a` leaves for `b` through `jmp`, a tail the source correlates: `b`'s statement (no
+/// write) is `a`'s, so `root`'s slot folds.
+#[test]
+fn a_place_past_a_correlated_tail_to_a_leaf_folds() {
+    let text = surveyed_cycle(leaving_for_a_leaf(Leaves::Tail), None, BASE);
+    assert!(text.contains("return r2sleigh_carrier_u32(5);"), "{text}");
+}
+
+/// D441, default-deny: `a` leaves for `b` through `jne`, a transfer no source site names: the
+/// tail is uncorrelated, so `a` states no write and the slot stays a load.
+#[test]
+fn a_place_past_an_uncorrelated_tail_to_a_leaf_stays_a_load() {
+    let text = surveyed_cycle(leaving_for_a_leaf(Leaves::Branch), None, BASE);
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+}
+
+/// `other` at 0x10a0: `sub rsp, 0x18; mov dword [rsp + 8], 7; mov edi, 4; call odd; mov eax,
+/// [rsp + 8]`.
+const WRITE_CYCLE_OTHER_ROOT: [u8; 0x20] = [
+    0x48, 0x83, 0xec, 0x18, // 10a0 sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x07, 0x00, 0x00, 0x00, // 10a4 mov dword [rsp + 8], 7
+    0xbf, 0x04, 0x00, 0x00, 0x00, // 10ac mov edi, 4
+    0xe8, 0xaa, 0xff, 0xff, 0xff, // 10b1 call 0x1060
+    0x8b, 0x44, 0x24, 0x08, // 10b6 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 10ba add rsp, 0x18
+    0xc3, 0x90, // 10be ret
+];
+
+/// D441: `odd` also reloads `rbp` past its call, so `root` asks the component at `odd` and
+/// `other` at `even`; asked from either root first, it states one summary.
+#[test]
+fn a_write_cycle_asked_from_either_root_first_states_one_summary() {
+    let code = write_cycle((&[0x55], &[0x5d]), Leaves::Call, &WRITE_CYCLE_OTHER_ROOT);
+    let (root, other) = (BASE, BASE + 0xa0);
+    let alone = (
+        surveyed_cycle(code, None, root),
+        surveyed_cycle(code, None, other),
+    );
+    assert_eq!(surveyed_cycle(code, Some(other), root), alone.0);
+    assert_eq!(surveyed_cycle(code, Some(root), other), alone.1);
+    assert!(
+        alone.0.contains("return r2sleigh_carrier_u32(5);"),
+        "{}",
+        alone.0
+    );
+    assert!(
+        alone.1.contains("return r2sleigh_carrier_u32(7);"),
+        "{}",
+        alone.1
+    );
+}
+
+/// `rootA` reads `even`'s writes through its result cycle with `odd` (`Resolved`); `rootB` through
+/// `mid`, which owns nothing of `even` and asks its writes (`IncomingWrites`).
+const READ_BACK_PAST_A_RESULT_AND_WRITE_CYCLE: [u8; 0xa6] = [
+    0x48, 0x83, 0xec, 0x18, // 1000 rootA: sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x05, 0x00, 0x00, 0x00, // 1004 mov dword [rsp + 8], 5
+    0xbf, 0x03, 0x00, 0x00, 0x00, // 100c mov edi, 3
+    0xe8, 0x2a, 0x00, 0x00, 0x00, // 1011 call even
+    0x8b, 0x44, 0x24, 0x08, // 1016 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 101a add rsp, 0x18
+    0xc3, 0x90, // 101e ret
+    0x48, 0x83, 0xec, 0x18, // 1020 rootB: sub rsp, 0x18
+    0xc7, 0x44, 0x24, 0x08, 0x07, 0x00, 0x00, 0x00, // 1024 mov dword [rsp + 8], 7
+    0xbf, 0x03, 0x00, 0x00, 0x00, // 102c mov edi, 3
+    0xe8, 0x3a, 0x00, 0x00, 0x00, // 1031 call mid
+    0x8b, 0x44, 0x24, 0x08, // 1036 mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 103a add rsp, 0x18
+    0xc3, 0x90, // 103e ret
+    0x85, 0xff, // 1040 even: test edi, edi
+    0x74, 0x09, // 1042 je 0x104d
+    0xff, 0xcf, // 1044 dec edi
+    0xe8, 0x0d, 0x00, 0x00, 0x00, // 1046 call odd
+    0xc3, 0x90, // 104b ret
+    0xb8, 0x01, 0x00, 0x00, 0x00, // 104d mov eax, 1
+    0xc3, 0x90, 0x90, 0x90, 0x90, 0x90, // 1052 ret
+    0x85, 0xff, // 1058 odd: test edi, edi
+    0x74, 0x09, // 105a je 0x1065
+    0xff, 0xcf, // 105c dec edi
+    0xe8, 0xdd, 0xff, 0xff, 0xff, // 105e call even
+    0xc3, 0x90, // 1063 ret
+    0xb8, 0x00, 0x00, 0x00, 0x00, // 1065 mov eax, 0
+    0xc3, 0x90, 0x90, 0x90, 0x90, 0x90, // 106a ret
+    0x48, 0x83, 0xec, 0x18, // 1070 mid: sub rsp, 0x18
+    0x89, 0x7c, 0x24, 0x08, // 1074 mov [rsp + 8], edi
+    0xbf, 0x00, 0x00, 0x00, 0x00, // 1078 mov edi, 0
+    0xbe, 0x00, 0x00, 0x00, 0x00, 0xba, 0x00, 0x00, 0x00, 0x00, // 107d mov esi, 0; mov edx, 0
+    0xb9, 0x00, 0x00, 0x00, 0x00, 0x41, 0xb8, 0x00, 0x00, 0x00,
+    0x00, // 1087 mov ecx, 0; mov r8d, 0
+    0x41, 0xb9, 0x00, 0x00, 0x00, 0x00, // 1092 mov r9d, 0
+    0xe8, 0xa3, 0xff, 0xff, 0xff, // 1098 call even
+    0x8b, 0x44, 0x24, 0x08, // 109d mov eax, [rsp + 8]
+    0x48, 0x83, 0xc4, 0x18, // 10a1 add rsp, 0x18
+    0xc3, // 10a5 ret
+];
+
+/// D441: `even` in a result cycle and a write cycle states one answer on both paths: both slots
+/// fold (doc/adr-callee-builds.md, "D441 as built", names each reader's path).
+#[test]
+fn a_result_cycle_and_a_write_cycle_state_one_answer() {
+    let functions = [
+        ("rootA", BASE, 0x20),
+        ("rootB", BASE + 0x20, 0x20),
+        ("even", BASE + 0x40, 0x18),
+        ("odd", BASE + 0x58, 0x18),
+        ("mid", BASE + 0x70, 0x36),
+    ];
+    let code = &READ_BACK_PAST_A_RESULT_AND_WRITE_CYCLE;
+    let mut open = r2engine::program::OpenProgram::of(common::Literal::of_code(code, &functions));
+    open.analyse_program().expect("it surveys");
+    let mut render = |at: u64| {
+        open.rendered(at)
+            .expect("it renders")
+            .response
+            .output
+            .into_text()
+    };
+    let (a, b) = (render(BASE), render(BASE + 0x20));
+    assert!(a.contains("return r2sleigh_carrier_u32(5);"), "{a}");
+    assert!(b.contains("return r2sleigh_carrier_u32(7);"), "{b}");
+}
+
+/// D441, default-deny: `root` calls `a`, which calls `b`, and `b` writes `[rsp + 0x10]`, above `a`'s
+/// entry pointer, where `a`'s points assumed no write: the composed span bounds nothing.
+#[test]
+fn a_composed_write_past_the_entry_pointer_bounds_nothing() {
+    let mut code = WRITE_CYCLE_ROOT.to_vec();
+    let a = member(
+        BASE + 0x20,
+        (&[0xbf, 0, 0, 0, 0], &[]),
+        Leaves::Call,
+        BASE + 0x60,
+    );
+    code.extend(a);
+    code.resize(0x60, 0x90);
+    // 1060 b: mov dword [rsp + 0x10], 0; xor eax, eax; ret
+    code.extend([
+        0xc7, 0x44, 0x24, 0x10, 0x00, 0x00, 0x00, 0x00, 0x31, 0xc0, 0xc3,
+    ]);
+    let text = surveyed_cycle(Vec::leak(code), None, BASE);
+    assert!(text.contains("r2sleigh_load_u32("), "{text}");
+}
