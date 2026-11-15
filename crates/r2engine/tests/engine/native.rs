@@ -9637,8 +9637,8 @@ fn an_import_reads_past_its_fixed_parameters_unless_its_citation_fixes_them() {
     let (error, count) = names(&sysv, &sysv.target(), "error");
     assert_eq!(error.len(), 6 + 8, "{error:?}");
     assert_eq!(count.as_deref(), Some("al"));
-    // radare2's `dcgettext` row is uncited, so a call may read past it; `puts` cites ISO C17.
-    assert_eq!(names(&sysv, &sysv.target(), "dcgettext").0.len(), 6 + 8);
+    // radare2's `user_from_uid` row is uncited, so a call may read past it; `puts` cites ISO C17.
+    assert_eq!(names(&sysv, &sysv.target(), "user_from_uid").0.len(), 6 + 8);
     assert_eq!(
         names(&sysv, &sysv.target(), "puts").0,
         vec!["rdi".to_owned()]

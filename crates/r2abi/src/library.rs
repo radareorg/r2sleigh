@@ -844,8 +844,9 @@ mod tests {
     #[test]
     fn only_a_cited_row_states_its_tail() {
         let glibc = LibraryRows::embedded(CLibrary::Glibc);
-        let gettext = (glibc.row(LibraryId::Portable, "dcgettext")).expect("dcgettext");
-        assert_eq!((gettext.tail, &*gettext.citation), (Tail::Unstated, ""));
+        let uncited = glibc.row(LibraryId::Portable, "user_from_uid");
+        let uncited = uncited.expect("user_from_uid, which spells `.include=pwd.h`");
+        assert_eq!((uncited.tail, &*uncited.citation), (Tail::Unstated, ""));
         let puts = glibc.row(LibraryId::Portable, "puts").expect("puts");
         assert_eq!(puts.tail, Tail::None);
         assert!(puts.citation.contains("ISO C17"), "{}", puts.citation);
