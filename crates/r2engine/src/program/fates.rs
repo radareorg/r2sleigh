@@ -1724,13 +1724,16 @@ impl<S: Source + 'static> Reading<'_, S> {
                 formatted.insert(callee, format);
             }
         }
+        // An indirect target may be a local function, which may read every result byte (psABI 3.2,
+        // line 410; D446): at a caller and inside a row alike.
+        let every = self.lanes.slots().into_iter().flatten().collect::<Vec<_>>();
         let mut effects = Effects {
             body,
             by_callee,
             folded,
             by_site: BTreeMap::new(),
             indirect: CallEffect {
-                takes: self.unknown(),
+                takes: LaneBytes::covered_by(self.lanes, &every),
                 counted: None,
                 overwrites: Overwrites::All,
                 kept: LaneBytes::default(),
@@ -1933,7 +1936,7 @@ struct Effects<'b> {
     folded: BTreeMap<(usize, usize), u64>,
     /// The calls whose own format states what they take, by block and operation.
     by_site: BTreeMap<(usize, usize), CallEffect>,
-    /// A call whose callee the walk did not read: it may take the arguments and clobbers the lot.
+    /// A call whose callee the walk did not read: it may take every result byte and clobbers the lot.
     indirect: CallEffect,
 }
 

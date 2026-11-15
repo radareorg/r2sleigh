@@ -920,3 +920,38 @@ fn an_integer_lane_decision_is_no_claim_about_the_result() {
     assert!(!text.contains("unproven (Unread)"), "{text}");
     assert!(text.contains("integer result register"), "{text}");
 }
+
+/// `call f; call *%rbx; ret`: RAX as `f` left it reaches an indirect call.
+const CALLS_RBX: &[u8] = &[
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0xff, 0xd3, // 1025 call rbx
+    0xc3, // 1027 ret
+];
+
+/// `call f; call g; ret`, `g` at 0x1040.
+const CALLS_F_THEN_G: &[u8] = &[
+    0xe8, 0xdb, 0xff, 0xff, 0xff, // 1020 call 0x1000
+    0xe8, 0x16, 0x00, 0x00, 0x00, // 1025 call 0x1040
+    0xc3, // 102a ret
+];
+
+/// `g`: `call *%rbx; ret`, which hands RAX on unwritten to an indirect call.
+const G_CALLS_RBX: &[u8] = &[0xff, 0xd3, 0xc3];
+
+/// An indirect target may be a local function, which the psABI does not bind (3.2, line 410), so it
+/// may read RAX whole: at the caller, and inside a walked callee's row, `f`'s residual stays (D446).
+#[test]
+fn a_result_left_to_an_indirect_call_keeps_the_bits_above_a_narrow_callee() {
+    let cases: [(&str, Bodies); 2] = [
+        ("at the caller", vec![(0x20, CALLS_RBX)]),
+        (
+            "inside a walked callee",
+            vec![(0x20, CALLS_F_THEN_G), (0x40, G_CALLS_RBX)],
+        ),
+    ];
+    for (case, bodies) in cases {
+        let text = narrow_result_under_aa(RETURNS_A_NARROW_CALL, &bodies);
+        assert!(text.contains("r2sleigh_residual_u64("), "{case}: {text}");
+        assert!(!text.contains("integer result register"), "{case}: {text}");
+    }
+}
