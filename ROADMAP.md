@@ -72,11 +72,12 @@ Each rule is enforced by the script or Dylint named beside it. "Review" means no
 | D417 | Element visits are metered per call site | `work-meter` build, `scaling.py --meter` against 2.05 at N = 512 |
 | D439 | Timing is read against the chain base: a rise past the budget names a cause line keyed by the base commit with a ratio ceiling | `scripts/cost_causes.txt`, `census.py --base-commit` |
 
-Three rules hold without a row:
+Four rules hold without a row:
 
 - Optimize by bound and algorithm. Derive the bound first, then pick the algorithm (SCC order, semi-naive fixpoint, sparse SSA). A cache or a cap that hides a slow pass is a defect (D11, D22).
 - Each head's instruction counts compare with the stack's base commit. A rise over 2% needs a named cause before it merges (D439).
 - Structure counts fall only at an item's exit. `scripts/structure-report.sh` fails a rise, and its baseline is blessed only downward.
+- A golden that moves away from master is blessed when its new output is proven and states at least what master proved. It then leaves the regression count and is listed under Judged golden moves. A move toward plausible unproven C is never blessed.
 
 r2image
 -------
@@ -482,6 +483,18 @@ master; equivalence equal x86-64 745 and aarch64 749. The x86-64 745th is `revie
 | 2 | The two-round rule in `walk.rs` accepts a self call's writes only if round 2 equals round 1 | open | D414 holds its deletion and is no-go on D23. A write cycle has three owners: `own_rounds`, D441's seed check and `Assumed::writes`; `a_result_cycle_and_a_write_cycle_state_one_answer` holds the last two equal. Proposal, no row: a self call as a one-member `IncomingWrites` component, deleting `own_rounds` |
 | 3 | 5 uncited noreturn rows stay bounds, so callers name no exit | open | D406 |
 | 4 | The six default-deny violations of the call-boundary ruling, section 2 | closed | D276, D264 (twice), D265, D240, D252, each with its test |
+
+### Judged golden moves
+
+These records differ from master and are correct; they are not regressions. Judged 2026-11-15 from the round-8 trace, each bisected to its bless commit.
+
+| Records | Kind | Why the new output is right | Commit |
+|---------|------|-----------------------------|--------|
+| branchy 0x401764 `main`; hashes O2 and stripped 0x401050 `main`; rv_O0g_stripped 0x1549, rv_O2 0x10c0 `main` | P | D227's closed-world decision rests on `UbFreeSource`; the proof line now names it, master's omitted it | e508c86bb |
+| syscalls_static_O2 0x401050 | G | D440's integer lane states a proven result master did not | 7d5ba5984 |
+| cmd `member_calls` | G | D359 names the DWARF member call master printed bare | e508c86bb |
+
+The regression count is 18 at rebuild-design-7: 8 X, 5 X with C, 3 I, 1 V, and shapes 0x402206 `main`, whose proof line is a P move but whose C waits on V, I, E and O (D378). In each, master printed C resting on a call it could not bound, so the move is sound, but the fact that restores master's output is owed.
 
 ### Rejected, no row
 
